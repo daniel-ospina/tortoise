@@ -456,26 +456,44 @@ _APPROVED_ROW = re.compile(r"^\|\s*(\d+)\s*\|\s*`([a-z_][a-z0-9_]*)`\s*\|.*\|\s*
 # whole thing) — the same false `refuted` (#8930 review, round 4):
 #   * the fragment was spelled with NO PIPE (`… annotate_operator, |` ⏎ blank ⏎
 #     `mitigate_operator`), which a PIPE-BOUND test passes straight through. The test is
-#     therefore a FRAGMENT test, not a pipe test: the line — with trailing commas and
-#     whitespace stripped — is also a fragment when it is a comma-separated list whose
-#     every token is a name this doc absorbs (`_is_member_list`). That is the `Absorbs`
-#     cell's own spelling, and a real sentence cannot take that shape, because it carries
-#     at least one token that is not such a name — which is what keeps the doc's own
-#     post-table paragraphs green.
+#     therefore a FRAGMENT test, not a pipe test: an `Absorbs` remainder is a name list, so
+#     the line — with its decoration stripped — is a fragment when it is a comma-separated
+#     list of names (`_is_member_list`).
 #   * the fragment was not the FIRST non-blank line after the close (a prose line landing
 #     between the blank and the fragment), and the row was consumed on first use, so the
 #     fragment was never inspected. The scan now runs to the next TABLE instead
 #     (`_starts_a_table`), so any number of intervening prose lines is fine.
 #
-# What is caught is stated exactly, because an over-claim here is what let round 3 read as
-# complete: every wrap whose remainder stays TABLE SYNTAX (row-shaped, pipe-bounded,
-# separator-shaped) or is a bare `Absorbs` member list fails the build. The one shape it
-# does NOT catch is a remainder that reflowed into an ORDINARY SENTENCE (`… and the
-# duplicate name is dropped`): that is indistinguishable from the doc's own post-table
-# prose, so reporting it would refuse real paragraphs. A row whose cell continued is not
-# therefore "unrepresentable however it is spelled" — it cannot be expressed by WIDENING
-# the row parse, because the orphan is the datum, and the prose-shaped spelling is a known,
-# recorded gap rather than a closed one.
+# ⛔ Round 5: round 4's predicate stripped only trailing commas/whitespace before demanding
+# every token be a known name — i.e. it enumerated SPELLINGS, which is unbounded. A leading
+# comma, a trailing period, `**emphasis**`, an inline `*(…)` annotation and a break landing
+# INSIDE a name each defeated it. Measured on the real doc at row 21, over every single
+# break position in that cell (52 of them): 48 built GREEN, wrote the artifact, and asserted
+# `mitigate_operator` was "*(no approved row names it)*" / refuted — partition 5/7/0 →
+# 4/7/1; only the 4 whitespace-boundary breaks were caught. The predicate now NORMALISES
+# rather than enumerates (`_normalise_member_token`): per-token separators, trailing
+# punctuation and emphasis are stripped, a trailing `*(…)` / `**…**` annotation is dropped,
+# empty tokens are discarded — and the NORMALISED tokens are what is tested. A member list
+# is certain when every token is a name this doc absorbs; it fails CLOSED when every token is
+# a bare identifier, because a name broken across the wrap is exactly that (`ate_operator`,
+# `perator`, `action`). Re-measured on the same 52 positions: 52 fail closed, 0 written.
+#
+# What is caught, stated exactly, because an over-claim here is what let round 3 read as
+# complete: every wrap whose remainder stays TABLE SYNTAX (pipe-bounded, separator-shaped, or
+# row-shaped while REUSING the row's number or name — `_row_identity_error`) or is a MEMBER
+# LIST, in any decoration, fails the build. TWO shapes it does NOT catch, both recorded gaps
+# and not closed ones:
+#   * a remainder that reflowed into an ORDINARY SENTENCE (`… and the duplicate name is
+#     dropped`). Its commas separate words, not names, so it is indistinguishable from the
+#     doc's own post-table prose and reporting it would refuse real paragraphs.
+#   * a ROW-SHAPED remainder that states a NEW number AND a NEW name (`| 24 | `totally_new`
+#     | mitigate_operator |`). Nothing marks it as a phantom: the row loop sees a first
+#     sighting of both identity fields and the count guard is a floor, so it builds green
+#     with 24 rows and fabricates `totally_new` as the approved home. Closing it needs a way
+#     to tell a real row from a fragment after the table has CLOSED, which this parse does
+#     not have — so it is stated here rather than claimed as caught.
+# A row whose cell continued is therefore not "unrepresentable however it is spelled": it
+# cannot be expressed by WIDENING the row parse, because the orphan is the datum.
 _APPROVED_HEADER = re.compile(r"^\|\s*#\s*\|\s*Tool\s*\|\s*Absorbs\s*\|\s*$")
 _APPROVED_SEPARATOR = re.compile(r"^\|[\s:|-]+\|\s*$")
 # The same prefix on its own, so an INCOMPLETE row is REPORTED instead of skipped: a line
@@ -657,27 +675,76 @@ def _row_identity_error(
     )
 
 
+# One token of a member list, after NORMALISATION: a bare lower-case name and nothing
+# else. This is the shape a member list has and a sentence does not, and it is what makes
+# the fail-closed branch of `_is_member_list` safe — a line whose every comma-token is one
+# of these is a name list, however its names are spelled, because a sentence's tokens carry
+# spaces and sentence punctuation.
+_MEMBER_TOKEN = re.compile(r"[a-z_][a-z0-9_]*")
+# The cell's own separator. `,` is what the `Absorbs` cell uses; `;` is the same relation
+# spelled differently, and a reflow can leave either at the edge of a line.
+_MEMBER_SEP = re.compile(r"[,;]")
+# A trailing INLINE ANNOTATION attached to the last name — row 12's real cell qualifies its
+# names exactly this way (`… *(operator-only)*`), so a remainder carrying one is still the
+# cell's own text. The `(?<=\S)` is load-bearing: without it the `**…**` arm would swallow a
+# token that is ENTIRELY emphasis (`**mitigate_operator**`) and leave nothing behind, which
+# would turn the very spelling this is meant to catch into `False`.
+_TRAILING_ANNOTATION = re.compile(r"(?<=\S)\s*(?:\*\([^)]*\)\*|\*\*[^*]+\*\*)\s*$")
+# Trailing punctuation and emphasis a reflow can leave on a name: a cell's separator kept at
+# the end of a line, a sentence period, markdown emphasis, a code backtick.
+_TOKEN_TRAILING = ".,;*_`"
+
+
+def _normalise_member_token(token: str) -> str:
+    """One member-list token with the DECORATION a reflow can leave on it removed.
+
+    Written as a NORMALISATION because enumerating the ways a wrap can be spelled is
+    unbounded, and four rounds of doing that left the predicate answering `False` for shapes
+    a paste or a soft reflow produces routinely: a leading separator, a trailing period,
+    `**emphasis**`, an inline `*(…)` annotation, a break landing INSIDE a name. Measured on
+    the real doc, row 21 — 48 of the 52 single-break positions built GREEN with the false
+    refutation in the artifact (#8930 review, round 5, P2).
+    """
+    token = token.strip()
+    token = token.strip("`*").strip()  # markdown quotes/emphasis around the whole token
+    # Drop a trailing annotation BEFORE the trailing-punctuation pass, so the `*` and `)`
+    # that end `*(operator-only)*` cannot be half-stripped into an unreadable token.
+    token = _TRAILING_ANNOTATION.sub("", token)
+    return token.rstrip(_TOKEN_TRAILING).strip()
+
+
 def _is_member_list(stripped: str, known: set[str]) -> bool:
     """Whether `stripped` is a bare `Absorbs` MEMBER LIST — the pipe-less fragment shape.
 
     An `Absorbs` cell is a comma-separated list of names, so the remainder of a cell that
     reflowed onto its own line is that list too: `mitigate_operator`, or
-    `` `mitigate_operator`, `annotate_operator` ``. Trailing commas and whitespace are
-    stripped first, because a wrap keeps the cell's own separator on the line it left.
+    `` `mitigate_operator`, `annotate_operator` ``. The tokens are NORMALISED first
+    (`_normalise_member_token`) — leading separators, a trailing period, emphasis, an inline
+    `*(…)` annotation and a token that normalises to nothing are all just decoration a wrap
+    can carry — and the normalised tokens are what get tested.
 
-    EVERY token must be a name this doc can absorb. That is what keeps genuine prose green:
-    the doc's own paragraphs follow both of its tables, and a real sentence carries at
-    least one token that is not a name — a word, a punctuation run, a backticked
-    identifier that is not on the surface — so it cannot take this shape. Measured on the
-    real doc: every line of both post-table gaps (9 after the WRITE table, 1 after the READ
-    table) is not a member list, and neither is any heading, bullet or blockquote there
-    (`test_the_real_approved_doc_parses_every_row_with_no_row_error`).
+    Then TWO tests, and the second is what makes the guard survive a break landing inside a
+    NAME (46 of the 52 positions in row 21's cell, the largest green slice):
+
+      * every normalised token is a name this doc can absorb — a certain member list;
+      * else every normalised token is a bare identifier (`_MEMBER_TOKEN`) — a name list by
+        SHAPE, carrying at least one name this doc does not have. A name broken across the
+        wrap is exactly that (`ate_operator`, `perator`, `action`), so it fails CLOSED.
+
+    What keeps genuine prose green is the SHAPE, not a word list: a sentence's tokens carry
+    spaces and sentence punctuation, so they are never bare identifiers. Measured on the
+    real doc — every line of both post-table gaps (9 after the WRITE table, 1 after the READ
+    table), and every heading, bullet and blockquote there, answers `False`
+    (`test_the_real_approved_doc_parses_every_row_with_no_row_error`,
+    `test_the_normalised_member_list_test_still_leaves_real_prose_green`).
     """
-    body = stripped.rstrip(", \t")
-    if not body:
+    body = _TRAILING_ANNOTATION.sub("", stripped.strip())
+    tokens = [t for t in (_normalise_member_token(x) for x in _MEMBER_SEP.split(body)) if t]
+    if not tokens:
         return False
-    tokens = [t.strip().strip("`").strip() for t in body.split(",")]
-    return all(tokens) and all(t in known for t in tokens)
+    if all(t in known for t in tokens):
+        return True
+    return all(_MEMBER_TOKEN.fullmatch(t) for t in tokens)
 
 
 def _is_table_fragment(stripped: str, known: set[str]) -> bool:
@@ -728,14 +795,18 @@ def _body_error(
 
     Three ways a line inside the table is NOT legitimate, each measured green on the real
     doc with the artifact written and `mitigate_operator` falsely refuted (#8930 review,
-    rounds 3-4, P2):
+    rounds 3-5, P2):
 
       * a non-blank line after the body closes on a BLANK line, when it is
-        table-fragment-shaped: PIPE-BOUNDED (starts OR ends with `|`), or a bare
-        comma-separated MEMBER LIST whose every token is a name this doc absorbs. The wrap
-        straddles the blank that ends the table, so the orphan belongs to no body at all
-        and no in-body rule can see it. Prose is NOT reported: real paragraphs follow both
-        of the doc's tables, and a sentence cannot be a member list.
+        table-fragment-shaped: PIPE-BOUNDED (starts OR ends with `|`), or a MEMBER LIST —
+        a comma-separated run whose every token is a bare NAME once the cell's own
+        decoration is normalised away (separators, a trailing period, emphasis, an inline
+        `*(…)`), INCLUDING one carrying a name this doc does not have, which is what a break
+        landing inside a name produces. The wrap straddles the blank that ends the table, so
+        the orphan belongs to no body at all and no in-body rule can see it. Prose is NOT
+        reported: real paragraphs follow both of the doc's tables, and a sentence's tokens
+        carry spaces and sentence punctuation, so no sentence can take a name list's shape
+        (`_is_member_list`).
       * a SEPARATOR after any row has started. The header's own separator comes BEFORE every
         row (`owner is None`), so a later one is a row's continuation reflowed into a
         `|---|` line — table syntax that silently swallowed the member.
@@ -753,8 +824,11 @@ def _body_error(
         return (
             f"approved table in {APPROVED_DOC.name} has an ORPHANED continuation line "
             f"after row {owner[0]} (`{owner[1]}`), on the far side of a BLANK line: "
-            f"{stripped!r} is table-fragment-shaped — it is pipe-bounded, or it is a "
-            "comma-separated list whose every token is a name this doc absorbs — and it "
+            f"{stripped!r} is table-fragment-shaped — it is pipe-bounded, or its every "
+            "comma-separated token is a bare name once the cell's own decoration "
+            "(separators, a trailing period, emphasis, an inline `*(…)`) is normalised "
+            "away, including a name this doc does not have, which is what a break landing "
+            "inside a name leaves — and it "
             "appears between the blank that ends the table and the next table, so a row's "
             "cells have REFLOWED across that blank — the row still parses with the members "
             "on this fragment missing, which renders as a false 'no approved row absorbs "
