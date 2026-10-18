@@ -1167,8 +1167,10 @@ def reconcile_subscriptions(sdk=None, *, limit: int | None = None,
       report an unexamined org as verified-clean, which is exactly the
       read-only-reconciler failure the ``unrepaired`` guard exists to catch.
       Decided from the LADDER, not from the presence of an identity: a customer
-      binding at the unpaid tier is an abandoned checkout, not a symptom, and
-      lands in ``skipped``.
+      binding at the unpaid tier USUALLY means an abandoned checkout, but not
+      always — the customer LIST may have failed, in which case the org was left
+      alone rather than proven clean. So the bucket name states what was
+      ESTABLISHED (nothing to verify), never why.
       Deliberately NOT auto-downgraded — deciding that a stored-paid org with
       no active Stripe subscription loses its tier is a billing decision, not
       a reconcile detail.

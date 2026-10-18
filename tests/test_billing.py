@@ -557,6 +557,80 @@ class TestApplyLimitsAndReconcile:
             "a failed customer lookup is not a verdict, so this branch must "
             f"leave the org alone instead of failing the pass — got {outcome}")
 
+    def test_failed_customer_list_at_unpaid_tier_is_skipped_not_failed(
+            self, monkeypatch, stripe_env, billing_sdk, caplog):
+        """#8904 review P2: the ``skipped`` line must not assert a CAUSE.
+
+        ``skipped`` now covers two states an operator cannot tell apart: a
+        proven abandoned checkout, and an unpaid-tier org whose customer LIST
+        failed (left alone, NOT proven clean). The log line is what an operator
+        reads, so it may report what was ESTABLISHED and hedge the cause —
+        asserting "abandoned checkout" is the same
+        asserting-a-cause-nobody-measured fault the wording fix exists to
+        remove, one bucket over. Without this test the hedge can be deleted
+        with the suite green.
+        """
+        import logging  # noqa: I001
+        from tortoise import billing as bl
+        sdk = billing_sdk
+        team = sdk.org_create("customer-list-failure-unpaid")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_8895skip', "
+            "t.tier='free'",
+            params={"id": team["id"]},
+        )
+        monkeypatch.setattr(
+            bl.StripeClient, "list_subscriptions",
+            lambda self, cid: (_ for _ in ()).throw(
+                bl.StripeAPIError("upstream 503")))
+        with caplog.at_level(logging.INFO):
+            summary = bl.reconcile_subscriptions(sdk, notifier=False)
+        assert summary["failed"] == [], (
+            "a provider error is not a verdict, so it must not fail the pass "
+            f"and page — got {summary}")
+        assert summary["skipped"] == 1, summary
+        text = "\n".join(r.getMessage() for r in caplog.records)
+        assert "could be established" in text, (
+            "the line must report that no subscription could be ESTABLISHED "
+            f"(true for both causes) — got {text!r}")
+        assert "Stripe named no active" not in text, (
+            "the line may not claim Stripe ANSWERED when the lookup itself "
+            f"failed — got {text!r}")
+
+    def test_failed_customer_list_at_paid_tier_is_unverified_not_downgraded(
+            self, monkeypatch, stripe_env, billing_sdk, caplog):
+        """#8904 review P2: the PAID arm of the same guard, end to end.
+
+        A paying org whose customer LIST failed is counted ``unverified``
+        (something to look at) and physically left alone: a provider error is
+        never a downgrade and never a ``repaired``/``drift``.
+        """
+        import logging  # noqa: I001
+        from tortoise import billing as bl
+        sdk = billing_sdk
+        team = sdk.org_create("customer-list-failure-paid")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_8895paid', "
+            "t.tier='pro', t.subscription_status='active'",
+            params={"id": team["id"]},
+        )
+        monkeypatch.setattr(
+            bl.StripeClient, "list_subscriptions",
+            lambda self, cid: (_ for _ in ()).throw(
+                bl.StripeAPIError("upstream 503")))
+        with caplog.at_level(logging.INFO):
+            summary = bl.reconcile_subscriptions(sdk, notifier=False)
+        assert summary["unverified"] == 1, summary
+        assert summary["failed"] == [] and summary["repaired"] == 0
+        assert summary["drift"] == [], (
+            "a failed lookup must never be reported as a repair/drift")
+        t = sdk.org_get(team["id"])
+        assert t["tier"] == "pro", (
+            "a provider error is not a licence to downgrade a paying org")
+        text = "\n".join(r.getMessage() for r in caplog.records)
+        assert "could be established" in text, (
+            f"the warning must not assert Stripe ANSWERED — got {text!r}")
+
     def test_reconcile_past_due_pointer_still_follows_the_newer_active_sub(
             self, monkeypatch, stripe_env, billing_sdk):
         """#8895 review P2: ``past_due`` keeps the TIER (enforcement) but is NOT
