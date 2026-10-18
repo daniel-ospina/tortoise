@@ -132,6 +132,7 @@ from tortoise.graph_key_restore import (
     SERVED,
     RestoreObservation,
     restore_graph_key,
+    restore_graph_key_safe,
     tcp_is_listening,
 )
 
@@ -559,6 +560,151 @@ def test_graph_key_restore_of_an_indexed_graph_is_bounded_and_keeps_serving(
     # so "keeps serving other graphs THROUGHOUT" is not assertable-green here.
     assert _scalar(raw, indexed_graph.bystander, "MATCH (n) RETURN count(n)") == 1, (
         "the bystander graph did not survive the restore of its sibling"
+    )
+
+
+def _safe_restore_seams(raw, graph, *, witness, index_at_create):
+    """Real engine seams for ``restore_graph_key_safe`` — plus the load-bearing probe.
+
+    ``index_at_create`` is filled with the index status observed ON THE ENGINE at the
+    moment the re-create step runs. It is the deterministic detector for the mutation
+    this test exists to catch: **skip the index drop** and the payload carries the index,
+    the ``RESTORE`` rebuilds it on the serving thread, and the re-create step then finds
+    an index already present. A duration assertion could not catch that — at this file's
+    default 3 000 nodes the indexed rebuild is ~0.4 s, far inside any bound generous
+    enough not to false-red a slower engine — so the sequence is asserted instead of
+    inferring it from timing.
+    """
+
+    def _create(definition):
+        # Sampled BEFORE the CREATE: with the drop skipped, this is where the defect shows
+        # up, and an engine `Attribute ... is already indexed` raised by the CREATE would
+        # bury it under a message that names the symptom instead of the cause.
+        status = _index_status(raw, graph)
+        index_at_create.append(status)
+        assert status == "NO_INDEX", (
+            f"the DROP before the DUMP did not take: the graph already carries an index "
+            f"({status}) when it is being re-created, so the DUMPed payload carried the "
+            f"index and the RESTORE rebuilt it on the serving thread — the #7846 block "
+            f"this path exists to avoid"
+        )
+        raw.execute_command("GRAPH.QUERY", graph, definition.create_cypher())
+
+    return {
+        "dump": lambda: raw.execute_command("DUMP", graph),
+        "delete": lambda: raw.execute_command("DEL", graph),
+        "restore": lambda payload: raw.execute_command(
+            "RESTORE", graph, 0, payload, "REPLACE"
+        ),
+        "ping": witness.ping,
+        "list_indexes": lambda: _rows(raw, graph, "CALL db.indexes()"),
+        "drop_index": lambda definition: raw.execute_command(
+            "GRAPH.QUERY", graph, definition.drop_cypher()
+        ),
+        "create_index": _create,
+    }
+
+
+def test_the_safe_path_restores_an_indexed_graph_without_the_index_in_the_payload(
+    indexed_graph,
+):
+    """#7846 — the safe path: index dropped BEFORE the DUMP, restored, re-created.
+
+    This is the shape the fix ships: a graph-key ``RESTORE`` of an index-bearing graph is
+    only safe if the index is not in the payload, because the engine rebuilds it INSIDE
+    the RESTORE on its serving thread (measured: 0.17 s index-free vs 2.62 s indexed at
+    30 000 nodes, worst bystander PING == the restore duration).
+
+    The four assertions the issue asks for, plus the one that makes the guard
+    LOAD-BEARING: the index must be ABSENT on the engine when the re-create step runs. Skip
+    the drop and that fails at any graph size, whereas a duration assertion would pass —
+    at 3 000 nodes the indexed rebuild is ~0.4 s, well inside any bound that does not
+    false-red a slow runner.
+    """
+    raw = indexed_graph.raw
+    graph = indexed_graph.graph
+    dim = indexed_graph.dim
+    witness = _redis(timeout=_WITNESS_TIMEOUT_S)
+    index_at_create: list[str] = []
+    seams = _safe_restore_seams(
+        raw, graph, witness=witness, index_at_create=index_at_create
+    )
+
+    try:
+        safe = restore_graph_key_safe(
+            graph=graph,
+            dump=seams["dump"],
+            delete=seams["delete"],
+            restore=seams["restore"],
+            ping=seams["ping"],
+            list_indexes=seams["list_indexes"],
+            drop_index=seams["drop_index"],
+            create_index=seams["create_index"],
+            index_ready=lambda: _index_status(raw, graph) == "OPERATIONAL",
+            index_ready_bound_s=_INDEX_READY_BOUND_S,
+            bound_s=_RESTORE_BOUND_S,
+            poll_interval_s=_WITNESS_POLL_S,
+            listening=lambda: tcp_is_listening(
+                _TARGET[0], _TARGET[1], timeout_s=_WITNESS_TIMEOUT_S
+            ),
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            witness.close()
+
+    observation = safe.observation
+    report = safe.indexes
+
+    # 1. The restore returned inside the bound (the socket timeout stays above it —
+    #    `test_7846_restore_doc_and_bounds.py` pins that ordering).
+    assert observation.restore_s < _RESTORE_BOUND_S, (
+        f"the RESTORE step took {observation.restore_s:.1f}s under a "
+        f"{_RESTORE_BOUND_S:.0f}s bound — it should have raised instead"
+    )
+    assert observation.restore_returned is True
+    assert observation.status in (SERVED, BLOCKED), (
+        f"a completed safe restore reported status={observation.status!r}"
+    )
+
+    # 2. The index was read off the catalogue, dropped before the DUMP, re-created
+    #    after the RESTORE, and the re-created definition matches the read one.
+    assert report.dropped is True, "the safe path did not report dropping the index"
+    assert report.recreated is True, "the safe path did not re-create the index"
+    assert report.verified is True, (
+        "the re-created index does not match the definition read before the drop"
+    )
+    assert report.definitions, "no definition was read off the catalogue"
+    assert report.definitions[0].dimension == dim, (
+        f"the definition's dimension is {report.definitions[0].dimension}, the graph's "
+        f"vectors are {dim}-wide"
+    )
+    assert report.definitions[0].similarity_function == "cosine", (
+        f"the definition's metric was not read faithfully: "
+        f"{report.definitions[0].similarity_function!r}"
+    )
+
+    # 3. THE LOAD-BEARING ASSERTION: no index was on the graph when it was re-created,
+    #    i.e. the payload carried none and the RESTORE had no index to rebuild.
+    assert index_at_create == ["NO_INDEX"], (
+        f"the re-create step found the index already on the graph ({index_at_create}) — "
+        f"the DROP before the DUMP did not happen, so the RESTORE carried an index and "
+        f"rebuilt it on the serving thread (the #7846 block)"
+    )
+
+    # 4. The graph's data came back.
+    assert _scalar(raw, graph, "MATCH (n) RETURN count(n)") == indexed_graph.nodes, (
+        "the restored graph is missing nodes — the restore did not carry the graph"
+    )
+
+    # 5. The index is QUERYABLE afterwards — the acceptance criterion. `verified` only
+    #    proves the definition round-tripped; this proves the rebuilt index answers.
+    status = _index_status(raw, graph)
+    assert status == "OPERATIONAL", (
+        f"the index is {status} ({report.index_ready=}) after the safe restore"
+    )
+    assert _knn_rows(raw, graph, dim) == K, (
+        "the re-created vector index returns no neighbours — the restored graph would "
+        "answer vector search with an empty result"
     )
 
 
