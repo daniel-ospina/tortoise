@@ -12590,8 +12590,8 @@ class FalkorProjection(
             # each endpoint is resolved by an id-anchored per-label sweep and
             # the edge query is anchored on the label that resolved it — a
             # hardcoded :Point match would silently drop every Object↔Object
-            # direct edge (the same defect the repoint leg's direct branch still
-            # carries).
+            # direct edge — the SAME defect the repoint leg's direct branch
+            # carried until #8622 widened it with this identical sweep.
             for ev in direct_edge_created_events:
                 etype = ev.get("edge_type")
                 src, tgt = ev.get("src"), ev.get("tgt")
@@ -12957,11 +12957,39 @@ class FalkorProjection(
                         # earlier descriptor's endpoints onto each other. Never
                         # recreate a self-edge (E2E-11.6 no-self contract).
                         continue
+                    # #8622: label-agnostic endpoints (#7902) — the SAME
+                    # id-anchored per-label sweep the ``DirectEdgeCreated``
+                    # fold above runs, for the SAME reason: a direct IMPL/NAND
+                    # may connect ANY two of
+                    # :Point/:Subject/:Object/:Event (owner ruling #7813), so a
+                    # hardcoded ``:Point`` on the far endpoint matched zero
+                    # rows and the MERGE below silently no-opped — the
+                    # transferred edge vanished from the rebuilt graph (the
+                    # defect this leg's comment at the creation fold named).
+                    # The sweep resolves each FINAL endpoint and the queries
+                    # anchor on the label that resolved it (index-preserving).
+                    epi_labels: dict[str, str] = {}
+                    for _label in EPISTEMIC_LABELS:
+                        rows = self.g.query(
+                            f"MATCH (p:{_label}) WHERE p.id IN $ids "
+                            f"RETURN p.id",
+                            params={"ids": [src_f, tgt_f]},
+                        ).result_set
+                        for r in rows:
+                            epi_labels.setdefault(r[0], _label)
+                    if src_f not in epi_labels or tgt_f not in epi_labels:
+                        # Endpoint absent at replay (hard-deleted live, or an
+                        # unjournaled producer). SKIP — this leg mirrors a live
+                        # transfer and never mints an endpoint node: inventing
+                        # one would fabricate a node the live graph does not
+                        # have (the same rule the creation fold applies).
+                        continue
                     # Two-step MERGE (mirror create_direct_edge / supersede
                     # 2a-DIRECT — never creates duplicate nodes; collapses to
                     # one edge) then last-writer-wins attr SET.
                     self.g.query(
-                        f"MATCH (a:Point {{id:$a}}), (b:Point {{id:$b}}) "
+                        f"MATCH (a:{epi_labels[src_f]} {{id:$a}}), "
+                        f"(b:{epi_labels[tgt_f]} {{id:$b}}) "
                         f"MERGE (a)-[:{etype}]->(b)",
                         params={"a": src_f, "b": tgt_f},
                     )
@@ -12970,8 +12998,8 @@ class FalkorProjection(
                               "label", "batch_id") if k in ev}
                     if attrs:
                         self.g.query(
-                            f"MATCH (a:Point {{id:$a}})-[r:{etype}]->"
-                            f"(b:Point {{id:$b}}) SET r += $attrs",
+                            f"MATCH (a:{epi_labels[src_f]} {{id:$a}})-[r:{etype}]->"
+                            f"(b:{epi_labels[tgt_f]} {{id:$b}}) SET r += $attrs",
                             params={"a": src_f, "b": tgt_f, "attrs": attrs},
                         )
 
@@ -15312,8 +15340,8 @@ class FalkorProjection(
             # doubles keep intercepting.
             if not skip_embedding:
                 try:
-                    from tortoise.embeddings import encode_for_store
-                    emb = (encode_for_store(
+                    from tortoise.embeddings import encode_for_row
+                    emb = (encode_for_row(
                         new_content, self.required_embedding_dim)
                         if new_content else None)
                     params["embedding"] = emb  # None = wipe stale embedding for empty content

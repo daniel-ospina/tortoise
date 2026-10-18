@@ -52,10 +52,13 @@ from tortoise.extractor_v2 import (
 from tortoise.pack_state import (
     _ATTRIBUTABLE_BARE_KIND_KEYS,
     _KIND_PROP_KEYS,
+    approved_kind_alternatives,
     bare_event_kind_owners,
     graph_installed_namespaces,
     graph_kind_namespaces,
     kind_namespace_is_approved,
+    kind_named_packs,
+    unapproved_kind_pack,
 )
 from tortoise.sdk import TortoiseSDK
 from tortoise.value_extractor import compile_value_brief
@@ -1121,3 +1124,503 @@ class TestBareEventKindAttribution:
         assert not ambiguous, (
             "two packs declare the same bare event kind — #5184's attribution "
             f"cannot recover either one from bare data: {ambiguous}")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# F. #5475 residual — the SDK/MCP WRITE-DOOR chokepoint
+# ══════════════════════════════════════════════════════════════════════════
+#
+# #8380 gated the two REST doors (``POST /v1/objects`` / ``POST /v1/subjects``).
+# The verification comment on the issue (2026-10-18) reproduced the SAME defect
+# on the four SDK entity doors, which is what this section pins:
+#
+#     door=object   APPROVED before ['dev'] -> ACCEPTED -> after ['dev','marketing']
+#     door=subject  APPROVED before ['dev'] -> ACCEPTED -> after ['dev','marketing']
+#     door=event    APPROVED before ['dev'] -> ACCEPTED -> after ['agent-ops','dev']
+#     door=entity   APPROVED before ['dev'] -> ACCEPTED -> after ['dev','marketing']
+#
+# The fix is ONE input constraint at the funnel all of them share
+# (``sdk._create_entity``, plus the point door's own funnel) — see
+# ``TortoiseSDK._refuse_unapproved_kind``. These tests are written per DOOR, not
+# per implementation site, so a future door that bypasses the funnel reds.
+
+#: A kind per door that names a pack this graph does NOT have, and one that
+#: names the pack it DOES have. Real catalog spellings on purpose: a made-up
+#: namespace would pass for the wrong reason (nothing declares it) and could
+#: never exercise the approved-direction control.
+UNAPPROVED = {
+    "object": ("objectKind", "marketing:campaign", "marketing"),
+    "subject": ("subjectKind", "marketing:persona", "marketing"),
+    "event": ("eventKind", "agent-ops:ruleRevised", "agent-ops"),
+    "entity": ("objectKind", "marketing:campaign", "marketing"),
+    "point": ("pointKind", "marketing:contentPerformance", "marketing"),
+}
+APPROVED = {
+    "object": ("objectKind", "dev:epic", "dev"),
+    "subject": ("subjectKind", "dev:person", "dev"),
+    "event": ("eventKind", "dev:deployment", "dev"),
+    "entity": ("objectKind", "dev:epic", "dev"),
+    "point": ("pointKind", "dev:technicalDebt", "dev"),
+}
+#: The anti-paralysis half of the owner ruling: the general kind for each door
+#: is a CORE spelling, so a writer is never blocked from classifying.
+GENERAL = {
+    "object": ("objectKind", "other"),
+    "subject": ("subjectKind", "other"),
+    "event": ("eventKind", "occurrence"),
+    "entity": ("objectKind", "other"),
+    "point": ("pointKind", "statement"),
+}
+
+
+def _drive_door(sdk, door: str, prop: str, value: str) -> dict:
+    """Drive ONE write door with ``prop=value``; return the created node.
+
+    The point door takes its kind positionally; every entity door takes the
+    labelled keyword. ``entity`` is driven through ``create_entity`` itself so
+    the FOURTH mandated door is exercised directly and not only via an alias.
+    """
+    if door == "point":
+        return sdk.create_point(value, "point for the #5475 door probe")
+    if door == "entity":
+        return sdk.create_entity("object", f"probe-{value}", **{prop: value})["node"]
+    return getattr(sdk, f"create_{door}")(f"probe-{value}", **{prop: value})
+
+
+class TestSdkWriteDoorsRefuseUnapprovedPacks5475:
+    """#5475: no SDK/MCP write door may name a pack the graph has not approved.
+
+    Every test here answers the doctrine's two questions inline: *what fails it*
+    (``FAIL-ON``) and *is that value reachable in this fixture* (``REACHABLE``).
+    """
+
+    @pytest.mark.parametrize("door", ["object", "subject", "event", "entity",
+                                      "point"])
+    def test_door_refuses_an_unapproved_namespace(self, sdk, door):
+        """The four mandated doors (+ the point door, which widened too).
+
+        FAIL-ON (pre-fix, measured at HEAD): the write is ACCEPTED and
+        ``graph_installed_namespaces`` goes ``['dev']`` → ``['dev', <pack>]``
+        — the door installs the pack it is supposed to be gated by.
+        REACHABLE: the fixture seeds ONE ``dev`` ``:PackInstall`` record and the
+        kind is a real catalog spelling from another pack, so the widening
+        really is observable (asserted BEFORE the write, not assumed).
+        """
+        _seed_install(sdk, DEV)
+        prop, kind, pack_ns = UNAPPROVED[door]
+        before = graph_installed_namespaces(sdk)
+        assert before == frozenset({DEV}), "fixture: a dev-only graph"
+
+        with pytest.raises(ValueError) as excinfo:
+            _drive_door(sdk, door, prop, kind)
+
+        from tortoise.mcp_server import _scrub_error
+        message = str(excinfo.value)
+        assert _scrub_error(message) == message, (
+            "the refusal is mangled by the MCP error scrubber; the next "
+            "wording must be re-checked against its regex")
+        # Option A (the owner ruling, 2026-10-17): WHAT happened…
+        assert kind in message and pack_ns in message, message
+        assert "NOT stored" in message, message
+        # …WHY (namespace/kind ballooning)…
+        assert "balloon" in message, message
+        # …and WHAT TO DO (core/approved packs, add a pack with user approval,
+        # or the general kind), so the writer is never simply stonewalled.
+        assert "core vocabulary" in message, message
+        # the approved-set clause, not a 3-character substring match
+        assert "HAS approved (dev)" in message, message
+        assert "Next steps:" in message, message
+        # ⛔ and the message must SURVIVE the MCP layer's error scrubber, whose
+        # rule (``(host=|at |to )[\w.-]+``, no word boundary) silently rewrites
+        # any ``at ``/``to `` SUBSTRING — "Wh**at **next", "th**at **pack" — on
+        # the transport this issue names. Asserted on the RAW exception text:
+        # re-scrubbing an already-scrubbed string is a no-op and would prove
+        # nothing.
+        assert "PUT /v1/graphs/{graph_id}/packs" in message, message
+        assert "always writes" in message, message
+
+        # The durable half: a refused write leaves NO row for the data leg to
+        # mine back into the approval set.
+        assert graph_installed_namespaces(sdk) == before, (
+            "a refused write must not widen the approval set")
+
+    @pytest.mark.parametrize("door", ["object", "subject", "event", "entity",
+                                      "point"])
+    def test_door_still_writes_an_approved_namespace(self, sdk, door):
+        """A guard that always refuses is worthless — the legitimate case passes.
+
+        FAIL-ON: a fix that refuses by NAMESPACE PREFIX (or by "any namespaced
+        kind") instead of by membership in the approval set.
+        REACHABLE: ``dev`` is a seeded record, so the kind is genuinely
+        namespaced AND genuinely approved — not a bare kind sneaking through the
+        bare-kind exemption. This test PASSES pre-fix by design: it is the
+        non-vacuity control for the refusals above.
+        """
+        _seed_install(sdk, DEV)
+        prop, kind, pack_ns = APPROVED[door]
+        assert ":" in kind and pack_ns == DEV
+        node = _drive_door(sdk, door, prop, kind)
+        assert node, f"{door} door returned no node for an approved kind"
+        assert graph_installed_namespaces(sdk) == frozenset({DEV})
+
+    @pytest.mark.parametrize("door", ["object", "subject", "event", "entity",
+                                      "point"])
+    def test_door_still_writes_the_general_kind(self, sdk, door):
+        """The anti-paralysis half of the ruling: a writer is never stuck.
+
+        FAIL-ON: a fix that refuses EVERY write on a graph with pack records,
+        or that treats the general core kind as an uninstalled pack namespace.
+        REACHABLE: the graph is genuinely gated (one ``dev`` record), so a
+        blanket refusal would red here. PASSES pre-fix by design — it is the
+        control that keeps the gate from becoming paralyzing bureaucracy.
+        """
+        _seed_install(sdk, DEV)
+        prop, kind = GENERAL[door]
+        node = _drive_door(sdk, door, prop, kind)
+        assert node, f"{door} door refused the general kind {kind!r}"
+        assert graph_installed_namespaces(sdk) == frozenset({DEV})
+
+    def test_core_spelling_is_admitted_because_it_names_no_pack(self, sdk):
+        """``core:<kind>`` is the engine's own spelling, not an ontology pack.
+
+        The extractor emits ``core:Project`` / ``core:meeting`` (and
+        ``compile_value_brief`` emits the same form), the hosted commit door
+        persists ``entities[].kind`` through ``create_entity``, and
+        ``pack_registry._resolve_kind_ref`` treats ``core:`` as the bare kind.
+        Refusing it would have broken every capture on any graph with pack
+        records — the one regression this gate must not cause.
+
+        FAIL-ON: the gate compares the raw prefix and refuses ``core``,
+        because no ``:PackInstall`` record is ever named ``core``.
+        REACHABLE: the graph HAS a record (so the gate is live, not skipped by
+        the no-records back-compat arm) and the spelling is a real persisted
+        form. PASSES pre-fix by design (pre-fix nothing was gated).
+        """
+        _seed_install(sdk, DEV)
+        node = _drive_door(sdk, "object", "objectKind", "core:Project")
+        assert node, "the extractor's core:Project spelling must keep writing"
+        node = _drive_door(sdk, "event", "eventKind", "core:meeting")
+        assert node, "the extractor's core:meeting spelling must keep writing"
+        assert graph_installed_namespaces(sdk) == frozenset({DEV, "core"}), (
+            "a core: write may only add the non-pack `core` namespace")
+
+    def test_no_records_graph_keeps_writing_any_pack_kind(self, sdk):
+        """#2714 indicator 3 back-compat: no ``:PackInstall`` records ⇒ no gate.
+
+        Every pre-#318 graph, every self-hosted graph and every graph restored
+        without pack state is in this class; gating them would break them while
+        the new tests still passed.
+
+        FAIL-ON: the gate treats ``None`` (no records) as an empty approval set.
+        REACHABLE: the fixture genuinely has zero records (asserted).
+        """
+        assert graph_installed_namespaces(sdk) is None
+        assert _drive_door(sdk, "object", "objectKind", MARKETING_OBJECT)
+        assert _drive_door(sdk, "point", "pointKind", MARKETING_POINT)
+
+    def test_historical_data_namespace_stays_writable(self, sdk):
+        """#2714 indicator 2 at the SDK doors: mined data keeps a pack writable.
+
+        FAIL-ON: the gate reads the RECORDS only, so a namespace the graph's own
+        data already carries is refused (old data becomes un-updatable).
+        REACHABLE: the marketing row is a real node in the same graph the
+        resolver scans, and the seeded record is ``dev`` only.
+        """
+        _seed_install(sdk, DEV)
+        sdk._get_proj().g.query(
+            "MERGE (n:Object {id: 'l7-sdk-historical'}) "
+            "SET n.objectKind = 'marketing:campaign'")
+        assert graph_installed_namespaces(sdk) == frozenset({DEV, MARKETING})
+        assert _drive_door(sdk, "object", "objectKind", MARKETING_OBJECT)
+
+    def test_document_door_is_covered_by_the_same_chokepoint(self, sdk):
+        """``create_document`` reaches ``_create_entity`` DIRECTLY (no alias).
+
+        The point of gating the funnel rather than ``create_entity`` is exactly
+        this door: it is not a relay, so a check placed in ``create_entity``
+        would leave ``documentKind`` widening the approval set.
+
+        FAIL-ON (pre-fix): the document write is accepted and ``legal`` joins
+        the approval set.
+        REACHABLE: ``legal`` is a real catalog pack namespace, absent from the
+        seeded records.
+        """
+        _seed_install(sdk, DEV)
+        before = graph_installed_namespaces(sdk)
+        with pytest.raises(ValueError, match="documentKind"):
+            sdk.create_document("a contract", "legal:contract")
+        assert graph_installed_namespaces(sdk) == before
+
+    def test_bare_attributable_event_kind_is_constrained_too(self, sdk):
+        """BOTH spellings — the bare one widened as well (#5184, comment
+        2026-10-13: "a fix for the door must constrain BOTH spellings").
+
+        ``graph_kind_namespaces`` attributes a BARE ``eventKind`` back to the
+        one catalog pack that declares it, so ``eventKind='ruleRevised'`` adds
+        ``agent-ops`` to the approval set on a ``dev``-only graph even though
+        the value carries no prefix at all.
+
+        FAIL-ON (pre-fix, measured): the bare write is accepted and the set
+        becomes ``['agent-ops', 'dev']``.
+        REACHABLE: ``ruleRevised`` IS a live catalog event kind of exactly one
+        pack (asserted through ``bare_event_kind_owners``, not assumed).
+        """
+        owners = bare_event_kind_owners().get("ruleRevised") or frozenset()
+        assert owners == frozenset({"agent-ops"}), (
+            "fixture: ruleRevised must be declared by exactly one pack")
+        _seed_install(sdk, DEV)
+        before = graph_installed_namespaces(sdk)
+        with pytest.raises(ValueError) as excinfo:
+            sdk.create_event("bare rule", "ruleRevised")
+        assert "agent-ops" in str(excinfo.value)
+        assert graph_installed_namespaces(sdk) == before, (
+            "the bare spelling must not attribute a pack into the set either")
+
+    def test_bare_attributable_event_kind_writes_when_its_pack_is_approved(self, sdk):
+        """The other direction for the bare leg — this is not a ban on bare events.
+
+        FAIL-ON: a fix that refuses every bare event kind once the gate is live
+        (which would break #1933 FIX-A's whole stripping design).
+        REACHABLE: the attributable pack IS installed here, so the same write
+        that is refused above is admitted — the difference is the approval set,
+        not the spelling. PASSES pre-fix by design.
+        """
+        owners = bare_event_kind_owners().get("ruleRevised") or frozenset()
+        assert owners == frozenset({"agent-ops"})
+        _seed_install(sdk, DEV)
+        _seed_install(sdk, "agent-ops")
+        assert sdk.create_event("bare rule ok", "ruleRevised")
+
+
+class TestMCPEntityDoors5475:
+    """The MCP tools are the transport the issue names, and they were the hole.
+
+    ``tortoise_create_object`` / ``-subject`` / ``-event`` relay to the SDK
+    methods, so the funnel gate closes them without touching the tool registry
+    (which needs owner approval to change at all). Pinned here so a future tool
+    that bypasses the SDK relay reds.
+    """
+
+    @pytest.fixture
+    def mcp_sdk(self, monkeypatch, tmp_path):
+        """An embedded, pack-seeded SDK wired into the MCP boundary.
+
+        Mirrors ``tests/test_source_version_window_3644.py::mcp_sdk``: ``_safe``
+        fail-CLOSES on an unset transport mode, so stdio must be set even though
+        ``_get_org_sdk`` is patched.
+        """
+        from tortoise import mcp_server
+        from tortoise.mcp_auth import (
+            _current_org_id,
+            _current_org_limits,
+            _transport_mode,
+        )
+        sdk = TortoiseSDK(db_path=str(tmp_path / "mcp_5475.db"),
+                          namespace=f"test_l7_mcp_{uuid.uuid4().hex[:8]}")
+        _seed_install(sdk, DEV)
+        monkeypatch.setattr("tortoise.mcp_server._get_org_sdk", lambda: sdk)
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        # All three context vars are RESTORED to their prior values: a leaked
+        # ``stdio`` transport would silently un-gate every later MCP test in
+        # this process (``_safe`` fail-CLOSES on an unset mode).
+        tokens = [(_transport_mode, _transport_mode.set("stdio")),
+                  (_current_org_id, _current_org_id.set(None)),
+                  (_current_org_limits, _current_org_limits.set(None))]
+        try:
+            yield mcp_server, sdk
+        finally:
+            for var, token in reversed(tokens):
+                var.reset(token)
+            sdk.close()
+
+    @pytest.mark.parametrize("tool,prop,kind,sdk_method", [
+        ("tortoise_create_object", "objectKind", "marketing:campaign",
+         "create_object"),
+        ("tortoise_create_subject", "subjectKind", "marketing:persona",
+         "create_subject"),
+        ("tortoise_create_event", "eventKind", "agent-ops:ruleRevised",
+         "create_event"),
+    ])
+    def test_mcp_entity_tool_refuses_and_does_not_widen(self, mcp_sdk, tool,
+                                                        prop, kind,
+                                                        sdk_method):
+        """FAIL-ON (pre-fix): the tool returns a created node and the approval
+        set gains the pack — the exact widening the issue measured through the
+        MCP surface. REACHABLE: the tool is called through the real MCP wrapper
+        (``_safe``/``_quota_gated``/server-managed-prop boundary included) over
+        a graph seeded with ONE ``dev`` record.
+        """
+        mcp_server, sdk = mcp_sdk
+        before = graph_installed_namespaces(sdk)
+        assert before == frozenset({DEV})
+        kwargs = {"name": "mcp probe", prop: kind}
+        out = getattr(mcp_server, tool)(**kwargs)
+        assert isinstance(out, dict) and out.get("error"), (
+            f"{tool} accepted an unapproved kind: {out!r}")
+        # The refusal must arrive at an MCP client INTACT. `_safe` runs every
+        # exception message through `_scrub_error`, whose rule rewrites any
+        # ``at ``/``to `` SUBSTRING — which silently ate the remedy heading and
+        # the pack clause when the message was worded naively (review finding).
+        # The assertion is EQUALITY with the refusal the SDK raises for the same
+        # write, so a scrubbed word cannot pass: re-scrubbing ``out["error"]``
+        # would prove nothing (it is already scrubbed).
+        with pytest.raises(ValueError) as excinfo:
+            getattr(sdk, sdk_method)("raw refusal probe", **{prop: kind})
+        raw = str(excinfo.value)
+        assert out["error"] == raw, (
+            "the MCP transport altered the refusal text")
+        assert "Next steps:" in out["error"], out["error"]   # WHAT TO DO
+        assert "balloon" in out["error"], out["error"]       # WHY
+        assert "always writes" in out["error"], out["error"]
+        assert graph_installed_namespaces(sdk) == before
+
+    def test_mcp_entity_tool_still_writes_an_approved_kind(self, mcp_sdk):
+        """The MCP control: the same tool writes an APPROVED pack kind.
+
+        FAIL-ON: an over-broad gate (or one wired into the MCP boundary as a
+        refusal of all namespaced kinds). REACHABLE: ``dev`` is installed.
+        PASSES pre-fix by design.
+        """
+        mcp_server, sdk = mcp_sdk
+        out = mcp_server.tortoise_create_object(
+            name="mcp approved", objectKind="dev:epic")
+        assert out and not out.get("error"), out
+        assert graph_installed_namespaces(sdk) == frozenset({DEV})
+
+
+class TestKindPackReading5475:
+    """The pure reading the doors share — one home, so they cannot disagree."""
+
+    def test_namespaced_spelling_names_its_pack(self):
+        assert kind_named_packs("marketing:campaign") == ("marketing",)
+
+    def test_bare_spelling_names_no_pack_by_default(self):
+        """Only the attributable keys opt into the #5184 attribution leg."""
+        assert kind_named_packs("ruleRevised") == ()
+        assert kind_named_packs("ruleRevised", attribute_bare=True) == (
+            "agent-ops",)
+
+    def test_core_spelling_names_no_pack(self):
+        assert kind_named_packs("core:Project") == ()
+
+    def test_empty_namespace_names_no_pack(self):
+        assert kind_named_packs(":kind") == ()
+
+    def test_core_namespace_is_admitted_by_the_shared_predicate(self):
+        """The core leg, stated on the predicate the REST doors also use — a
+        second copy of this rule would be the drift #5475 keeps producing."""
+        assert kind_namespace_is_approved("core:Project", frozenset({"dev"}))
+        assert not kind_namespace_is_approved("marketing:campaign",
+                                             frozenset({"dev"}))
+
+    def test_unapproved_kind_pack_names_the_offending_namespace(self):
+        assert unapproved_kind_pack("marketing:x", frozenset({"dev"})) == (
+            "marketing")
+        assert unapproved_kind_pack("dev:x", frozenset({"dev"})) is None
+        assert unapproved_kind_pack("marketing:x", None) is None
+
+    def test_alternatives_only_offer_spellings_the_graph_may_write(self):
+        """The "normalize" half of the ruling, offered rather than applied.
+
+        FAIL-ON: the suggestion names a pack the graph has NOT approved (the
+        caller would be told to make the same refused write again).
+        REACHABLE: ``issue`` is declared by ``dev`` in the live catalog, so the
+        approved alternative exists; ``marketing:issue`` is the refused spelling.
+        """
+        assert ("dev:issue" in
+                approved_kind_alternatives("marketing:issue",
+                                           frozenset({"dev"}),
+                                           prop="objectKind"))
+        assert approved_kind_alternatives("marketing:issue",
+                                          frozenset(), prop="objectKind") == []
+        # No catalog bucket to suggest from (subjectKind) ⇒ no suggestion.
+        assert approved_kind_alternatives("marketing:issue",
+                                          frozenset({"dev"}),
+                                          prop="subjectKind") == []
+
+
+class TestSdkKindLegsTheDoorsDoNotName5475:
+    """The kind legs a door carries WITHOUT naming them as a kind.
+
+    Review of the first cut of this change found two: the point door's props
+    passthrough (``objectKind=`` handed to ``create_point``) and the Event
+    fold's ``uses[].kind`` (an Object stub's ``objectKind``). Both were measured
+    widening a ``dev``-only graph with the gate in place on every NAMED kind
+    property, which is why the funnel reads the whole mined key set plus the
+    fold's own leg rather than a per-door list.
+    """
+
+    def test_point_door_props_passthrough_is_gated(self, sdk):
+        """``create_point(..., objectKind='<unapproved>:x')``.
+
+        FAIL-ON (measured pre-fix): accepted, set ``{dev}`` → ``{dev, marketing}``.
+        REACHABLE: the prop is persisted on the Point (the same passthrough the
+        capture path uses) and ``graph_kind_namespaces`` mines every node's
+        ``objectKind``.
+        """
+        _seed_install(sdk, DEV)
+        before = graph_installed_namespaces(sdk)
+        with pytest.raises(ValueError, match="objectKind"):
+            sdk.create_point("statement", "point carrying a foreign objectKind",
+                             objectKind=MARKETING_OBJECT)
+        assert graph_installed_namespaces(sdk) == before
+
+    def test_event_uses_stub_is_gated(self, sdk):
+        """``create_event(..., uses=[{'name': ..., 'kind': '<unapproved>:x'}])``.
+
+        The fold (``projection._upsert_event``) MERGEs an ``:Object`` stub per
+        use item with ``objectKind = item['kind']`` — an objectKind write the
+        door never sees as a kind property.
+
+        FAIL-ON (measured pre-fix): accepted, an ``:Object {objectKind:
+        'marketing:campaign'}`` stub landed and the set went ``{dev}`` →
+        ``{dev, marketing}``.
+        REACHABLE: the stub is a real node in the same graph the resolver
+        scans (asserted absent after the refusal, not just "no widening").
+        """
+        _seed_install(sdk, DEV)
+        before = graph_installed_namespaces(sdk)
+        with pytest.raises(ValueError, match="objectKind"):
+            sdk.create_event("ev with uses", "dev:deployment",
+                             uses=[{"name": "campaignX",
+                                    "kind": MARKETING_OBJECT}])
+        assert graph_installed_namespaces(sdk) == before
+        assert sdk._get_proj().g.query(
+            "MATCH (o:Object) RETURN o.name").result_set == []
+
+    def test_event_uses_with_an_approved_kind_still_writes(self, sdk):
+        """The control for the leg above: an APPROVED use kind keeps working.
+
+        FAIL-ON: a gate that refuses every ``uses[]`` item (the capture and
+        ingest paths write them constantly).
+        REACHABLE: ``dev`` is installed. PASSES pre-fix by design.
+        """
+        _seed_install(sdk, DEV)
+        assert sdk.create_event("ev ok", "dev:deployment",
+                                uses=[{"name": "epicOne", "kind": "dev:epic"}])
+
+    def test_no_catalog_pack_namespace_is_core(self):
+        """The ``core:`` admission is safe only while ``core`` names no pack.
+
+        ``core:<kind>`` is admitted because it names no ontology pack (it is the
+        engine's own spelling); that reasoning collapses if a manifest ever
+        declares ``namespace: core`` — a ``core:`` write would then grant it.
+        This turns that into a red test for the lane that adds such a pack.
+        """
+        from tortoise.pack_registry import PackRegistry, default_packs_dir
+        registry = PackRegistry(default_packs_dir())
+        registry.load_all()
+        assert registry.packs, "fixture: the catalog loaded"
+        assert "core" not in registry.packs, (
+            "a pack may not claim the `core` namespace: `core:` kinds are "
+            "admitted ungated as the engine's own spelling (#5475)")
+
+    def test_refusal_is_a_named_type_for_transport_boundaries(self):
+        """The refusal is a NAMED ``ValueError`` (#5363 precedent).
+
+        The hosted commit door maps it to an actionable 422; a transport that
+        had to parse prose to tell this deterministic refusal from a transient
+        failure would be one reworded message away from a retry-advising 500.
+        """
+        from tortoise.sdk import UnapprovedKindNamespace
+        assert issubclass(UnapprovedKindNamespace, ValueError)
