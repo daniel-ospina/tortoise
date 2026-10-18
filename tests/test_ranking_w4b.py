@@ -144,9 +144,9 @@ def test_conflict_subset_is_not_decided_by_row_order_under_a_collision():
 
         def query(self, cypher, params=None):
             rows = [
-                ("p1", "shared-claim", 1001, "an unrelated weather note", 1.0, 1.0),
-                ("p1", "shared-claim", 1002, "another unrelated note", 1.0, 1.0),
-                ("p1", "shared-claim", 1003, "the cache rollback is safer", 1.0, 1.0),
+                ("p1", "shared-claim", 1001, "the cache rollback is safer", 1.0, 1.0),
+                ("p1", "shared-claim", 1002, "an unrelated weather note", 1.0, 1.0),
+                ("p1", "shared-claim", 1003, "another unrelated note", 1.0, 1.0),
             ]
             if self.order == "reversed":
                 rows = list(reversed(rows))
@@ -157,6 +157,43 @@ def test_conflict_subset_is_not_decided_by_row_order_under_a_collision():
     assert fwd == rev, (
         "the boost depends on ROW ORDER — the subset is not deterministic: "
         f"forward={fwd} reversed={rev}")
+
+
+def test_shared_claim_key_merges_commutatively():
+    """Two ROWS may describe one node (a shared ``src`` with two different
+    NANDers: the alpha/beta chain falls through to the operator's when the
+    source stores no EP).
+
+    A last-wins dict write let Cypher ROW ORDER decide the survivor — the same
+    `{}` / `{'p1': 0.05}` flip the tiebreak fix removed one level up. The merge
+    is commutative: the higher-mean row survives whoever comes last.
+    """
+    from tortoise.ranking import resolve_contested_relevance
+
+    class _SharedKey:
+        def __init__(self, order):
+            self.order = order
+            self.g = self
+
+        class _Rows:
+            def __init__(self, rows):
+                self.result_set = rows
+
+        def query(self, cypher, params=None):
+            # One node id, two rows: the HIT carries the higher mean.
+            rows = [
+                ("p1", "shared", 1001, "the cache rollback is safer", 9.0, 1.0),
+                ("p1", "shared", 1001, "an unrelated weather note", 1.0, 1.0),
+            ]
+            if self.order == "reversed":
+                rows = list(reversed(rows))
+            return self._Rows(rows)
+
+    fwd = resolve_contested_relevance(_SharedKey("forward"), ["p1"], "cache rollback")
+    rev = resolve_contested_relevance(_SharedKey("reversed"), ["p1"], "cache rollback")
+    assert fwd == rev == {"p1": 0.05}, (
+        "the merged survivor depends on ROW ORDER (last-wins, not a "
+        f"commutative merge): forward={fwd} reversed={rev}")
 
 
 # ── Unit: batch relevance resolution (S8 N+1 guard) ────────────────────────

@@ -1201,3 +1201,71 @@ def test_legacy_repair_refuses_when_its_pattern_is_ambiguous(sdk):
         assert matched == 1, (
             "an emitted repair is ambiguous — it would rewrite an edge the "
             f"issue does not describe: {issue.fix!r} (matches {matched})")
+
+
+def test_legacy_repair_is_refused_for_an_operator_without_an_id(sdk):
+    """The OPERATOR side is verified too, not just the endpoint.
+
+    An id-less operator rendered ``(op:Point {id:'None'})`` — a phantom identity
+    that both named the wrong node and collided with a real operator whose id is
+    the string ``"None"``: measured, two distinct edges produced byte-identical
+    repairs, and running both repaired the ``"None"`` operator's edge while
+    leaving the reported one in place.
+    """
+    proj = sdk._get_proj()
+    proj.g.query("CREATE (op:Point {is_operator:true, status:'live'})")
+    proj.g.query("CREATE (m:Subject {id:'noid-target', name:'t', "
+                 "subjectKind:'concept', status:'live'})")
+    proj.g.query(
+        "MATCH (op:Point), (m:Subject {id:'noid-target'}) "
+        "WHERE op.is_operator = true "
+        "MERGE (op)-[:mitigates]->(m)")
+
+    legacy = [i for i in audit_graph(proj).issues
+              if i.issue_type == "legacy_mitigates_edge"]
+    assert legacy, "fixture broken: the edge from the id-less operator was not seen"
+    for issue in legacy:
+        assert issue.fix == "", (
+            f"a statement was emitted for an unaddressable operator: {issue.fix!r}")
+        assert "None" not in issue.node_id, (
+            f"the report mints a phantom identity: {issue.node_id!r}")
+        assert "operator carries no `id`" in issue.detail, (
+            f"the refusal does not name its cause: {issue.detail!r}")
+
+
+def test_legacy_repair_refuses_a_statement_that_misses_its_own_edge(sdk):
+    """Verification is of the EDGE, between the row's own nodes.
+
+    Counting matching NODES was both too weak and too strong: too weak when an
+    id-only endpoint's pattern also matched a two-key twin (measured: the
+    statement repaired the twin's edge), too strong when an unrelated node of
+    another label shared the id (an exact repair was REFUSED). The read-back now
+    asks the edge pattern for its endpoint INTERNAL ids.
+    """
+    proj = sdk._get_proj()
+    proj.g.query("CREATE (op:Point {id:'edge-op', is_operator:true, "
+                 "status:'live', pointKind:'operator'})")
+    # The reported endpoint (id-keyed) and another label merely SHARING its id.
+    proj.g.query("CREATE (p:Point {id:'edge-x', content:'the claim', "
+                 "status:'live', pointKind:'statement'})")
+    proj.g.query("CREATE (s:Source {id:'edge-x', url:'https://example.test'})")
+    proj.g.query(
+        "MATCH (op:Point {id:'edge-op'}), (p:Point {id:'edge-x'}) "
+        "MERGE (op)-[:mitigates]->(p)")
+
+    legacy = [i for i in audit_graph(proj).issues
+              if i.issue_type == "legacy_mitigates_edge"
+              and i.node_id == "edge-op"]
+    assert legacy, "fixture broken: the legacy edge was not reported"
+    # An unrelated node sharing the id must NOT block an exact repair.
+    assert any(i.fix for i in legacy), (
+        "an exactly-one-edge repair was refused because an unrelated node of "
+        f"another label shares the id: {[i.detail for i in legacy]}")
+    for issue in legacy:
+        if not issue.fix:
+            continue
+        proj.g.query(issue.fix)
+    remaining = proj.g.query(
+        "MATCH (:Point {id:'edge-op'})-[r:mitigates]->() RETURN count(r)"
+    ).result_set[0][0]
+    assert remaining == 0

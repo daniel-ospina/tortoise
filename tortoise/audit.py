@@ -34,6 +34,7 @@ so consumers never read it as an exact total (#1258 conf 58).
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 
@@ -52,6 +53,8 @@ from tortoise.live import (  # #7927: traversal-position widening + the ONE
 # computed dynamically so runtime register_source_kind_default() mappings are
 # honored (SOURCE_KIND_DEFAULTS non-None entries are exactly T0-T4 by default).
 from tortoise.source_credibility import SOURCE_KIND_DEFAULTS, TIER_PRIORS
+
+_log = logging.getLogger(__name__)
 
 # Cypher list literal of canonical tier forms, e.g. ['T0', 'T1', 'T2', 'T3', 'T4'].
 _TIER_LIT = str(sorted(TIER_PRIORS))
@@ -229,39 +232,26 @@ def _count(proj, query: str, params: dict | None = None) -> int:
     return r.result_set[0][0] if r.result_set else 0
 
 
-def _node_pattern(proj, alias: str, keys: dict[str, object]) -> str | None:
-    """``(m {id:…, eventId:…})`` — a pattern naming EXACTLY ONE node, or None.
+def _node_pattern(alias: str, keys: dict[str, object]) -> str | None:
+    """``(m {id:…, eventId:…})`` — every key the node carries, or None.
 
-    Rendering every key the node carries is necessary but NOT sufficient: a
-    property pattern with FEWER keys matches a SUPERSET of nodes, and the
-    common case is exactly that — every ``:Point``/``:Subject``/``:Object`` is
-    id-only, so ``(m {id:'shared'})`` also matches an ``:Event`` that happens to
-    carry the same ``id`` value. Measured: a Point and an Event sharing one id,
-    both targets of one legacy edge — the Point's repair deleted BOTH edges and
-    minted a ``mitigated_by`` for a pair the issue does not describe.
+    Rendering EVERY present key is necessary but not sufficient: a pattern with
+    FEWER keys matches a SUPERSET, and the common case is exactly that (every
+    ``:Point``/``:Subject``/``:Object`` is id-only). Two nodes may also share
+    every key value, and an int id renders byte-identically to the string id
+    beside it — so no property pattern can prove "this is that node".
 
-    Two nodes with IDENTICAL property maps are indistinguishable to any property
-    pattern, so the "names one node" property cannot be derived from the shape
-    of the keys — it has to be READ BACK. The pattern is verified against the
-    graph and the repair is REFUSED unless it resolves to exactly one node: the
-    alternative (anchoring on ``id(n)``) is exact but internal ids do not
-    survive ``GRAPH.COPY``/rebuild, so a stale one emits a silent no-op — the
-    failure this module's repairs exist to remove.
-
-    ``None`` when the node carries no key at all, or when the rendered pattern
-    is ambiguous. The caller refuses rather than widening.
+    The proof therefore belongs to the CALLER, against the edge it is about to
+    rewrite, using internal node ids (see ``audit_graph``'s
+    ``_legacy_repair``): a pattern verified only by counting matching NODES was
+    both too weak (emitted a statement for a twin) and too strong (refused an
+    exact repair because an unrelated node of another label shared the id).
     """
     present = {k: v for k, v in keys.items() if v is not None}
     if not present:
         return None
     rendered = ", ".join(f"{k}:{_quoted(v)}" for k, v in present.items())
-    pattern = f"({alias} {{{rendered}}})"
-    try:
-        rows = proj.g.query(
-            f"MATCH {pattern} RETURN count({alias})").result_set
-    except Exception:  # an unverifiable repair is a refused one
-        return None
-    return pattern if rows and rows[0][0] == 1 else None
+    return f"({alias} {{{rendered}}})"
 
 
 def _quoted(value: object) -> str:
@@ -748,60 +738,90 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # DIFFERENT properties, so the repair could also address an unrelated
         # node that happens to carry ``X`` under the other key (a reachable
         # shape — ``consistency._graph_view`` models ``:Event {eventId:'X'}``
-        # alongside ``:Event {id:'X'}``, #8879), i.e. a repair wider than the
-        # issue it accompanies.
+        # alongside ``:Event {id:'X'}``, #8879).
+        #
+        # The INTERNAL node ids come along for the verification below: they are
+        # the only thing that says "this is the row's node" (a property value
+        # cannot — two nodes may share every key value, and an int id and a
+        # string id render identically through ``_quoted``).
         "RETURN DISTINCT op.id, m.id, m.eventId, "
-        "coalesce(m.content, m.name, m.title, '') "
+        "coalesce(m.content, m.name, m.title, ''), id(op), id(m) "
         f"LIMIT {SAMPLE_LIMIT}",
         params=params,
     )
 
-    def _legacy_repair(op_id, m_id, m_eid) -> tuple[str, str]:
+    def _legacy_repair(op_id, m_id, m_eid, op_nid, m_nid) -> tuple[str, str]:
         """``(fix, detail_suffix)`` addressing EXACTLY the edge the issue names.
 
-        Key-specific on purpose: the node's own key (``id`` first, ``eventId``
-        for a keyless legacy :Event) pins the blast radius to one endpoint.
+        A repair is EMITTED ONLY IF it can be verified to touch one edge, and
+        it is verified by its own edge pattern — not by counting nodes: a
+        property pattern matches a SUPERSET when a node carries fewer keys than
+        its twin (every ``:Point`` is id-only), two nodes may share every key
+        value, and an int id renders byte-identically to the string id beside
+        it. Measured failures of the shape-only check: one issue's statement
+        repairing a different edge (twin ops, int/string twins, id-only vs
+        two-key), and exact repairs REFUSED because an unrelated node of another
+        label shared the id.
 
-        An endpoint carrying NEITHER key has no addressable identity, and a
-        repair is REFUSED rather than widened: ``(m)`` alone would rewrite every
-        legacy ``mitigates`` edge from this operator — measured, one operator
-        with two unkeyed endpoints emitted the SAME statement for both issues and
-        running either repaired all of them, including ones it does not
-        describe. A statement whose stated subject is narrower than its effect
-        is the defect this whole shape exists to remove, so the honest answer is
-        "cannot be emitted" (#7927 review round 7).
+        So the read-back asks the only question that matters — does this
+        statement resolve to the row's ONE edge, between the row's two nodes —
+        and the answer must be ``count(r) == 1`` with both endpoint internal ids
+        equal to the row's. Internal ids are used for the CHECK, never written
+        into the repair: they do not survive ``GRAPH.COPY``/rebuild, so an
+        emitted one could stop matching later.
 
         ``MERGE``, not ``CREATE``: this check reports a state a PARTIALLY
         applied migration leaves behind (both edges present on the same pair),
         and two parallel direct edges between one pair share a single message
         slot (``ep._affected_factors``) — the repair must not mint the second.
         """
-        target = _node_pattern(proj, "m", {"id": m_id, "eventId": m_eid})
+        if op_id is None:
+            return "", (" — the operator carries no `id`, so the edge cannot be "
+                        "named; repair by hand")
+        target = _node_pattern("m", {"id": m_id, "eventId": m_eid})
         if target is None:
             return "", (" — the endpoint carries neither `id` nor `eventId`, so "
                         "no statement can address it; repair by hand")
-        return (f"MATCH (op:Point {{id:{_quoted(op_id)}}})-[r:mitigates]->"
-                f"{target} DELETE r MERGE (op)-[:mitigated_by]->(m)"), ""
+        statement = (f"MATCH (op:Point {{id:{_quoted(op_id)}}})-[r:mitigates]->"
+                     f"{target}")
+        try:
+            rows = proj.g.query(
+                f"{statement} RETURN count(r), collect(id(op)), collect(id(m))"
+            ).result_set
+        except Exception as exc:  # an unverifiable repair is a refused one
+            _log.warning(
+                "legacy_mitigates_edge: repair verification failed for %r: %s",
+                statement, exc)
+            return "", (" — the repair could not be verified against the graph; "
+                        "repair by hand")
+        if not rows or rows[0][0] != 1:
+            return "", (" — the repair matches more than the one edge this "
+                        "issue describes; repair by hand")
+        op_ids, m_ids = rows[0][1], rows[0][2]
+        if op_ids != [op_nid] or m_ids != [m_nid]:
+            return "", (" — the repair resolves to a DIFFERENT node pair than "
+                        "this edge (a key value is shared with another node); "
+                        "repair by hand")
+        return f"{statement} DELETE r MERGE (op)-[:mitigated_by]->(m)", ""
 
-    def _legacy_issue(op_id, m_id, m_eid, m_content) -> AuditIssue:
-        fix, suffix = _legacy_repair(op_id, m_id, m_eid)
+    def _legacy_issue(op_id, m_id, m_eid, m_content, op_nid, m_nid) -> AuditIssue:
+        fix, suffix = _legacy_repair(op_id, m_id, m_eid, op_nid, m_nid)
+        shown_op = op_id if op_id is not None else "<no id>"
         return AuditIssue(
             issue_type="legacy_mitigates_edge",
             severity="low",
-            node_id=str(op_id),
-            detail=(f"Legacy mitigates edge {op_id} -[:mitigates]-> "
+            # A None id must never be rendered as the literal "None": that is a
+            # phantom identity that can address a real node whose id is "None".
+            node_id=str(shown_op),
+            detail=(f"Legacy mitigates edge {shown_op} -[:mitigates]-> "
                     f"'{m_content}' — migrate to mitigated_by{suffix}"),
-            # #7927: ``m`` is unlabeled in the FIX too — it may now be a
-            # :Subject/:Object/:Event, and a ``(m:Point {id:…})`` pattern would
-            # match nothing, making the suggested repair a silent no-op that
-            # leaves the very edge this issue reports.
             fix=fix,
             legacy=True,
         )
 
     _record("legacy_mitigates_edge", [
-        _legacy_issue(op_id, m_id, m_eid, m_content)
-        for op_id, m_id, m_eid, m_content in rows6b
+        _legacy_issue(op_id, m_id, m_eid, m_content, op_nid, m_nid)
+        for op_id, m_id, m_eid, m_content, op_nid, m_nid in rows6b
     ], count6b, legacy=True)
 
     # ── 7. missing_sourceKind_source (medium, #1158) ──────────────

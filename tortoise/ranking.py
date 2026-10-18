@@ -282,12 +282,24 @@ def resolve_contested_relevance(
             mean = (a_f / s) if s > 0 else 0.5
             # Keyed on the INTERNAL node id, so two distinct counter-claims that
             # coalesce to one identity do not overwrite each other.
-            pending.setdefault(pid, {})[claim_nid] = {
+            # COMMUTATIVE merge, not last-wins. Two rows can share one
+            # ``claim_nid`` with DIFFERENT mean/content: when ``src`` carries no
+            # stored EP, the alpha/beta fall through to the NANDer ``c``'s, so
+            # two NANDers over one source disagree. A plain assignment let Cypher
+            # row order pick the survivor — measured: `{}` one way and
+            # `{'p1': 0.05}` the other, the identical signature this read was
+            # already fixed for once.
+            slot = pending.setdefault(pid, {})
+            candidate = {
                 "content": str(content or ""),
                 "mean": mean,
                 "claim_id": claim_id,
                 "nid": claim_nid,
             }
+            previous = slot.get(claim_nid)
+            if previous is None or (candidate["mean"], candidate["content"]) > (
+                    previous["mean"], previous["content"]):
+                slot[claim_nid] = candidate
         boosts: dict[str, float] = {}
         for pid, claims in pending.items():
             chosen = sorted(
