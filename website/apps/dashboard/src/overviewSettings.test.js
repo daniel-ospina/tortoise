@@ -261,10 +261,14 @@ test('DE2E-2/#3513: MemorySources is the SINGLE source-list presentation — Set
   // #3513: the unchanged invariant is "no source list on the Overview". The
   // CHANGE is that the live render sites are now TWO mounts of ONE component —
   // Settings and the wizard's Data-sources step — both spreading the same
-  // `memorySourcesProps` bundle (one order, one output), so the grid (not a
-  // competing toggle list) is the single presentation at both. The archived
-  // block stays dead. (review P2: the `surface` prop these assertions used to
-  // pin was never read by the component — it was dropped, so it is not pinned.)
+  // `memorySourcesProps` bundle (one order, one STATUS model), so the grid (not
+  // a competing toggle list) is the single presentation at both. The two mounts
+  // deliberately render DIFFERENT output on top of that bundle: `surface` IS
+  // read by the component (#3513 §2 — the wizard renders status + the pointer,
+  // the Settings mount adds the collapsed manual-install disclosure), and it is
+  // pinned at the mount sites by `integrationsGridRender.test.js` and by
+  // `harnessDisclosureTripwire.test.js` — NOT here, which is why only the two
+  // spread sites are counted below. The archived block stays dead.
   assert.equal((src.match(/<MemorySources\s*\{\.\.\.memorySourcesProps\}/g) || []).length, 2,
     'exactly two live mounts, both spreading the shared prop bundle')
   for (const pos of sites) {

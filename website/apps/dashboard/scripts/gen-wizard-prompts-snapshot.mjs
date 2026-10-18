@@ -21,8 +21,13 @@
 //     live toggle (main.jsx:7349/7356/7371), so pinning only `included` left half
 //     of what the wizard shows unguarded;
 //   * HARNESS_INTRO / HARNESS_STEPS — rendered live (main.jsx:7365, :7833);
-//   * HARNESS_CAPTURE_INSTALL and PI_CAPTURE_INSTALL — rendered live
-//     (main.jsx:10025 and the Pi capture row).
+//   * HARNESS_CAPTURE_INSTALL — rendered live in the SETTINGS mount's collapsed
+//     manual-install disclosure (`harnessStatusCard.jsx`). It is pinned because it
+//     is still shipped copy a user can open; `main.jsx` has ZERO reads of it since
+//     #3513 §2 moved the recipe out of the shared capture row, which now renders
+//     `CAPTURE_INSTALL_POINTER` on every surface;
+//   * PI_CAPTURE_INSTALL — the shared Pi recipe (`HARNESS_CAPTURE_INSTALL.pi`, and
+//     the Pi leg of `HARNESS_INSTALL.pi`), pinned for the same reason.
 // HARNESS_SKILLS is DELIBERATELY absent: its only consumers are inside
 // LEGACY_WIZARD_ARCHIVED (main.jsx:7857/7864, flag=false), so pinning it would
 // red the gate for an edit to dead code.

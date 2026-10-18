@@ -63,6 +63,8 @@ from .live import (
     _terminal_excluded,
     _terminal_expression,
     _alive_flag,
+    epistemic_disjunction,  # #6976: the traversal-position widening
+    epistemic_label_queries,  # #6976: the id-anchored per-label sweep
     is_terminal_status,
 )
 
@@ -2744,35 +2746,236 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
 
 
 def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
-    """Fetch operator-edge relationships for a batch of Point IDs.
+    """Fetch the epistemic relationships of a batch of Point IDs.
 
-    Single Cypher query — NOT N+1. Returns dict mapping point_id → list of
-    relationship dicts with {predicate, mechanism, related_id, related_kind,
-    related_content, direction, operator_id}.
+    One id-anchored statement per epistemic label (NOT N+1 — the batch rides
+    ``$ids``). Returns dict mapping point_id → list of relationship dicts with
+    {predicate, mechanism, related_id, related_kind, related_content,
+    direction, operator_id}.
 
-    Points with no operator edges get an empty list.
+    Points with no epistemic relationship get an empty list.
+
+    Two LIMBS, and #6976 is the story of each being invisible in turn:
+
+    * **operator-less DIRECT edges** (``sdk.create_direct_edge`` — ONTOLOGY
+      v3.5 §8 calls plain IMPL/NAND connections direct edges, "NO operator
+      node", and ``tortoise_list_batch`` reports them as ``direct_edge``). The
+      read used to require an operator hop, so a graph written the way the
+      ontology says plain connections ARE read as having no relationships at
+      all — from BOTH endpoints. Leg 2 below is that half; a direct edge's own
+      ``label`` becomes ``predicate`` and there is no operator to name
+      (``operator_id`` is ``""``).
+    * **operator-MEDIATED** relationships (the ``OperatorAdded`` shape): the
+      point and its co-endpoints, reached through an operator node.
+
+    **Every endpoint is an epistemic node, not necessarily a ``:Point``.**
+    ONTOLOGY §5 / the #7813 owner ruling let a claim's endpoints carry any of
+    the four labels (``:Point`` / ``:Subject`` / ``:Object`` / ``:Event``) —
+    only an OPERATOR stays ``:Point`` — and the #8882 re-typing migration moves
+    exactly those nodes onto their own layer. This read used to hard-code
+    ``:Point`` on the anchor AND on the peer, so a hub whose edges run to
+    re-typed nodes matched nothing, the seeds below were never filled, and
+    ``sdk.expand_relationships`` returned the empty seed verbatim: a dense node
+    read as isolated. The three predicates are therefore the sanctioned
+    widening, not a loosening of WHAT is counted:
+
+    * the ANCHOR is swept per label (``live.epistemic_label_queries``) rather
+      than filtered in a WHERE, because the anchor is id-anchored and each
+      label keeps its own ``(label, id)`` range index (#7853) — three of them
+      do: ``:Point``/``:Subject``/``:Object`` carry an ``id`` RANGE index while
+      ``:Event`` carries one on ``eventId`` only, so an Event addressed by
+      ``id`` is an unindexed label scan under EITHER shape (``live.py``'s
+      recorded #7853 caveat). The sweep is still the right shape; the cost of
+      the ``:Event`` leg is the price of not reading that layer as isolated,
+      and it is bounded by ``LIMIT``-free id-anchored use only when the batch
+      is small — see R1 on #8996.
+    * the PEER is widened by traversal (``live.epistemic_disjunction``) — it is
+      reached from the operator, so no index applies — and its non-operator
+      test admits an ABSENT ``is_operator`` (a ``:Object``/``:Event`` carries
+      no such property; the ``= false`` spelling excluded every one of them).
+      ``_is_claim`` is that non-operator test PLUS ``op_type IS NULL`` — the
+      strict form ``sdk._operator_scope_clauses`` calls the CANONICAL
+      non-operator predicate. A node carrying ``op_type`` is therefore an
+      OPERATOR on both legs, and operator→operator is R4 on #8996, the same
+      undecided question an operator anchor raises.
+      The dedupe site diverges narrowly and deliberately:
+      ``sdk._find_point_by_content`` documents a HYBRID that EXPLICITLY declares
+      ``is_operator = false`` AND carries ``op_type`` (a shape nothing rejects on
+      write) and keeps it a claim, because a dedupe must not drop a node it was
+      asked about. An ABSENT ``is_operator`` hybrid is excluded by BOTH of those
+      sites — that helper's second clause ``op_type IS NULL OR is_operator =
+      false`` evaluates NULL there — so the two agree on that arm. The three
+      sites therefore differ in three ways, and none of it is resolved here:
+      this read admits NO hybrid, ``_find_point_by_content`` admits the
+      explicit-false one, and ``_reachable_claim_count`` admits both.
+    * the OPERATOR keeps its ``:Point`` label (ONTOLOGY §5 — a re-typing plan
+      that moves an operator is refused) but is identified by
+      ``is_operator = true OR op_type IS NOT NULL``, the #943 parity every other
+      operator read uses, so an operator written without the flag is not
+      invisible here alone.
+
+    A node's own layer kind and text live under that layer's property
+    (``pointKind``/``content`` for a Point, ``objectKind``/``name`` for an
+    Object, …), so ``related_kind`` and ``related_content`` coalesce the four —
+    otherwise the peers this widening admits come back with an empty kind and
+    empty content, which is the same defect one layer down.
+
+    Of the two limbs, the DIRECT-EDGE one is the reporter's (#6976's live repro
+    is a ``direct_edge``); the non-``:Point`` endpoint limb is the latent one
+    the earlier predicate-barrier fixes could not reach. The reporter's own
+    ``INPUT × 209`` hub was not re-tested against their production graph — if it
+    still reads empty, the candidate is a chain of single-endpoint operators
+    (R4 on #8996), which is a decision about WHICH relation this read promises,
+    not a further predicate.
     """
     if not point_ids:
         return {}
 
     rels: dict[str, list[dict]] = {pid: [] for pid in point_ids}
 
+    # #6976: `WITH n` is LOAD-BEARING, not style. On FalkorDB 6.x a `WHERE` on
+    # `n.id IN $ids` followed by a plain MATCH that re-binds `n` (or carries a
+    # relationship pattern) is planned as a WHOLE-GRAPH read — the rows come
+    # back for FOREIGN points or with a NULL `n`, every one of them is dropped
+    # by the `if pid in rels` guard below, and the caller reads a densely
+    # connected node as isolated. Same barrier as the other id-anchored readers
+    # in this tree (`tests/test_id_predicate_barrier_6976.py`, #7162).
+    #
+    # The operator predicate rides the SECOND WHERE (after both MATCHes) so no
+    # WHERE here is followed by a MATCH that re-binds what it constrains — the
+    # `WITH n` is the only barrier this shape needs (each UNION branch carries
+    # its own `WITH n`, and a UNION boundary ends the scope anyway).
+    #
+    # #6976 has TWO limbs, and they are two legs of one statement:
+    #
+    #   leg 1 — OPERATOR-MEDIATED (the ``OperatorAdded`` shape): the point and
+    #           its co-endpoints, reached through an operator node;
+    #   leg 2 — OPERATOR-LESS DIRECT (``sdk.create_direct_edge``, ONTOLOGY v3.5
+    #           §8: "plain IMPL/NAND connections are direct edges … NO operator
+    #           node"). Leg 1 structurally requires an operator hop, so a graph
+    #           written the way the ontology says plain connections ARE — the
+    #           shape ``tortoise_list_batch`` reports as ``direct_edge`` — read
+    #           as having NO relationships at all, from both endpoints.
+    #
+    # `_is_claim` is the STRICT "is a claim" predicate — the form
+    # `sdk._operator_scope_clauses` calls CANONICAL, carried by
+    # `_window_closure`'s direct-edge hop. The siblings differ, and none of it
+    # is resolved here: `_reachable_claim_count` (its anchor scan AND its edged
+    # scan) is lenient on BOTH arms, admitting an `op_type` node whether the
+    # flag is explicitly false or ABSENT; `sdk._dedup_match_clauses` /
+    # `_find_point_by_content` is lenient ONLY on the explicit-false hybrid —
+    # its second clause `op_type IS NULL OR is_operator = false` evaluates NULL
+    # for an ABSENT flag, so it agrees with this read on that arm (its docstring
+    # says the same: the `op_type` disjunct "excludes LEGACY operators"). This
+    # read takes the strict form because an operator is not a peer, and an
+    # operator's own typed edge `(op)-[:IMPL]->(claim)` would otherwise be
+    # reported as a relationship between claims.
+    #
+    # It is applied to THREE positions, and the third is a NARROWING, not a
+    # refactor:
+    #
+    #   leg 1 `other`  — a co-endpoint of the operator must not itself be an
+    #                    operator. Before this, leg 1 tested only the
+    #                    `is_operator` half, so a peer carrying `op_type` with
+    #                    `is_operator` absent/false — the HYBRID shape
+    #                    `sdk._dedup_match_clauses` documents as real and
+    #                    nothing refuses on write — was reported as a peer.
+    #                    Operator→operator is a CHAIN of single-endpoint
+    #                    operators, which is R4 on #8996, not a peer relation.
+    #                    So this read takes the STRICT answer to "is a hybrid a
+    #                    claim?" while `_find_point_by_content` takes the lenient
+    #                    one for the EXPLICIT-false shape only (they agree on the
+    #                    ABSENT-flag one); the divergence is deliberate (dedupe
+    #                    must not drop a node it was asked about) and pinned per
+    #                    leg in `tests/test_expand_relationships_6976.py`.
+    #   leg 2 `other`  — the direct-edge peer half (above).
+    #   leg 2 `n`      — the ANCHOR half, so what leg 2 reports really are
+    #                    OPERATOR-LESS edges: otherwise, asked about an operator,
+    #                    it would report that operator's own typed edge and
+    #                    claim `operator_id: ''` for a relationship that has one
+    #                    (the operator itself). An operator anchor is therefore
+    #                    still the one shape this read does not express; it is
+    #                    R4 on #8996, a decision about WHICH relation
+    #                    `expand_relationships` promises.
+    _is_claim = (
+        "({a}.is_operator IS NULL OR {a}.is_operator = false) "
+        "AND {a}.op_type IS NULL"
+    )
+    _related_kind = (
+        "coalesce(other.pointKind, other.objectKind, other.subjectKind, "
+        "         other.eventKind)"
+    )
+    template = (
+        "MATCH (n:{label}) WHERE n.id IN $ids "
+        "WITH n "
+        "MATCH (n)-[r:IMPL|NAND|hasPart]-(op:Point) "
+        "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other) "
+        "WHERE (op.is_operator = true OR op.op_type IS NOT NULL) "
+        f"  AND {epistemic_disjunction('other')} "
+        "  AND other.id <> n.id "
+        f"  AND {_is_claim.format(a='other')} "
+        "RETURN n.id, op.op_type AS mechanism, "
+        "  coalesce(op.label, '') AS predicate, "
+        "  op.id AS operator_id, other.id AS related_id, "
+        f"  {_related_kind} AS related_kind, "
+        "  coalesce(other.content, other.name) AS related_content, "
+        "  r.idx AS n_idx, r2.idx AS other_idx "
+        "UNION ALL "
+        "MATCH (n:{label}) WHERE n.id IN $ids "
+        "WITH n "
+        "MATCH (n)-[d:IMPL|NAND]-(other) "
+        f"WHERE {epistemic_disjunction('other')} "
+        "  AND other.id <> n.id "
+        f"  AND {_is_claim.format(a='other')} "
+        f"  AND {_is_claim.format(a='n')} "
+        "RETURN n.id, type(d) AS mechanism, "
+        "  coalesce(d.label, '') AS predicate, "
+        "  '' AS operator_id, other.id AS related_id, "
+        f"  {_related_kind} AS related_kind, "
+        "  coalesce(other.content, other.name) AS related_content, "
+        "  CASE WHEN startNode(d).id = n.id THEN 0 ELSE 1 END AS n_idx, "
+        "  0 AS other_idx"
+    )
+
     try:
-        cypher = (
-            "MATCH (n:Point) WHERE n.id IN $ids "
-            "WITH n "
-            "MATCH (n)-[r:IMPL|NAND|hasPart]-(op:Point {is_operator:true}) "
-            "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point) "
-            "WHERE other.id <> n.id "
-            "  AND other.is_operator = false "
-            "RETURN n.id, op.op_type AS mechanism, "
-            "  coalesce(op.label, '') AS predicate, "
-            "  op.id AS operator_id, other.id AS related_id, "
-            "  other.pointKind AS related_kind, "
-            "  other.content AS related_content, "
-            "  r.idx AS n_idx, r2.idx AS other_idx"
-        )
-        rows = graph.query(cypher, params={"ids": point_ids}).result_set
+        rows: list = []
+        # A MULTI-labelled anchor (`:Point:Object`) IS returned once per
+        # matching label — `dream.py` records it ("the per-label sweep returns
+        # a multi-labelled node once per matching label"). Both legs project
+        # label-independent columns, so such an anchor's rows are identical and
+        # `seen` collapses them: the set is load-bearing, not belt-and-braces
+        # for a misbehaving mock.
+        #
+        # The key is TOTAL: `mechanism`/`predicate` are graph-authored free-form
+        # properties (`op.op_type`, `*.label`), so a replayed-JSONL diagnostic
+        # can make them lists, and an unhashable key raises straight into the
+        # `except` below — emptying the WHOLE batch (#6971's failure-reads-as-
+        # emptiness class, on the read path #6976 exists for). Non-scalars are
+        # rendered with `repr` rather than skipped: the row still counts.
+        seen: set[tuple] = set()
+        for cypher in epistemic_label_queries(template):
+            try:
+                batch = graph.query(
+                    cypher, params={"ids": point_ids}).result_set
+            except Exception:
+                # ONE label raising must not discard the rows the others
+                # returned. The sweep exists to WIDEN the read, so it is
+                # monotone: a leg that fails can only fail to add. (Labelling
+                # the failure instead of swallowing it is R1 on #8996.)
+                logger.warning(
+                    "Relationship query failed for one epistemic label — "
+                    "the other labels' rows are kept", exc_info=True)
+                continue
+            for row in batch:
+                key = tuple(
+                    v if isinstance(v, (str, int, float, type(None))) else repr(v)
+                    for v in (row[0], row[1], row[2], row[3], row[4],
+                              row[7] if len(row) > 7 else None,
+                              row[8] if len(row) > 8 else None))
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(row)
 
         for row in rows:
             pid = row[0]
@@ -2782,6 +2985,19 @@ def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
             related_id = row[4]
             related_kind = row[5] or ""
             related_content = row[6] or ""
+            if not isinstance(related_content, str):
+                # A replayed-JSONL diagnostic can leave a non-string here — the
+                # same class the dedupe key above is made total for. FalkorDB
+                # stores a NUMBER as a property (arrays slice fine; a map is
+                # refused on write), and `42[:200]` raises TypeError. That is
+                # WORSE than the key's failure, not equal to it: the key raises
+                # during collection (nothing appended yet → an empty answer),
+                # but this raises during PROCESSING, so the rows before it are
+                # kept and every row after it is lost — for every point in the
+                # batch. A silent PARTIAL read, which reads as "this peer has no
+                # relationship" rather than as a failure (#6971's class, in its
+                # harder shape). Render it; do not drop the row.
+                related_content = str(related_content)
             n_idx = row[7] if len(row) > 7 else None
             other_idx = row[8] if len(row) > 8 else None  # noqa: F841
 
@@ -2895,8 +3111,13 @@ def get_relationships_bounded(
     `_beta_variance`/TortoiseEP), so contested is cap-exempt with no sampling.
     NAND, terminal-status, mitigated and CORRECTS classes are always complete.
 
-    get_relationships() is intentionally UNTOUCHED (D12) — topic_summarization
-    needs full NAND completeness for disputed-pair detection.
+    get_relationships() keeps the D12 intent below — it is UNBOUNDED (no
+    per-point cap, no global budget, no `expand_top_k`), because
+    topic_summarization needs full NAND completeness for disputed-pair
+    detection. #6976 widened its SELECTION (epistemic-label endpoints and
+    operator-less direct edges, see its own docstring) without bounding it — so
+    the D12 property holds, and now over more of the graph than it did: a direct
+    `NAND` edge is a disputed pair whatever writes it.
 
     Returns a ``RelationshipDecoration`` mapping (requested id → entries).
     #6971: when the query body raises, the mapping is RESET to the all-empty

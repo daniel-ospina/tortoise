@@ -165,6 +165,10 @@ def migrate(force: bool = False) -> dict:
         events_dir = os.path.join(os.path.dirname(source), "events")
         if not os.path.isdir(events_dir):
             events_dir = _find_events_dir()
+        # #5612: bound only on the JSONL rebuild route below (the RDB-copy
+        # fallback replays nothing, so it has no salvage tally). Bound here so
+        # the returned counts can carry it on EVERY route without a NameError.
+        rebuild_counts: dict | None = None
         if not events_dir:
             # No JSONL available: copy the RDB snapshot (documented fallback —
             # NOT the binary-copy path for the primary flow; this is the
@@ -223,6 +227,19 @@ def migrate(force: bool = False) -> dict:
                     "pre-preservation/UNKNOWN"
                     if rebuild_counts.get("team_meta_state_unknown")
                     else "restore gap")
+            # #5612: the journal read is a SALVAGE read, so a damaged mid-file
+            # line no longer raises out of the rebuild — it is skipped and
+            # counted. This route then writes the migration MARKER, i.e. it is
+            # the most terminal "looks fine" surface there is: without this
+            # line a lossy migration charges itself as complete and no later
+            # open re-tries it. Before #5612 the strict read raised here.
+            if rebuild_counts.get("corrupt_lines"):
+                logger.warning(
+                    "rebuild: the migrated graph is MISSING records — %s "
+                    "corrupt mid-file journal line(s) were SKIPPED, so the "
+                    "journal needs repair and this migration marker is "
+                    "already written (#5612)",
+                    rebuild_counts["corrupt_lines"])
 
         # Integrity verification (node-ID-set equality vs source) before marker
         target_nodes = _count_nodes(target)
@@ -237,7 +254,14 @@ def migrate(force: bool = False) -> dict:
         # Marker AFTER successful rebuild + verify
         with open(marker, "w") as fh:
             fh.write(time.strftime("%Y-%m-%dT%H:%M:%SZ"))
-        return {"status": "migrated", "nodes": target_nodes, "backup": backup_path}
+        return {"status": "migrated", "nodes": target_nodes,
+                "backup": backup_path,
+                # #5612: additive — 0 on a clean journal; a non-zero
+                # count means the migrated graph is missing records the
+                # journal held, which a caller must not read as a lossless
+                # migration (the rebuild warns; this carries the number).
+                "corrupt_lines": int((rebuild_counts or {}).get(
+                    "corrupt_lines") or 0)}
     finally:
         lock.release()
 

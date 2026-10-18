@@ -1,0 +1,189 @@
+# Deployed-CSP + edge-beacon monitor (#4762).
+#
+# WHAT THIS EXISTS TO CATCH
+#   `tests/e2e/audit_prod_csp.py` is the ONLY artifact in this repo that can see
+#   what Cloudflare's edge injects at response time — a plain `curl` sends
+#   `Accept: */*` and misses the tag, and a local `wrangler pages dev` is not the
+#   edge, so EVERY local check is blind to the class. Before this workflow,
+#   nothing ran it: no workflow referenced it, and its `audit_*.py` name does not
+#   match pytest's collection (`python_files = test_*.py *_test.py`), so even
+#   `pytest tests/e2e/` skipped it.
+#
+#   The regression it guards (#4638 → #3525) was *"no local check could see what
+#   the platform injects"*. A NEW edge-injected origin (Rocket Loader, a zone
+#   feature, a changed injection format, "Enable with JS Snippet installation")
+#   would be blocked in production while every repo gate stayed green — the same
+#   failure a second time. The `securityHeaders` guard pins the origins it already
+#   knows; it cannot discover one it does not.
+#
+# WHY SCHEDULED, NOT PER-PR (#1008's reason, `welcome-e2e-monitor.yml`)
+#   This probe drives PRODUCTION in a real browser. On the per-PR path it would
+#   make every PR depend on production being reachable and non-flaky, and it
+#   would compete with real traffic for prod rate buckets. A scheduled run +
+#   `workflow_dispatch` + a run ordered after the DEPLOY (never a run racing it,
+#   see the `workflow_run` block) is the shape that observes edge-only behaviour
+#   without that cost. The auto-filed issue (below) IS the monitor's signal; a
+#   red cron run never blocks a merge.
+#
+# SCOPE — the ANONYMOUS surfaces only, by design. `/admin` needs an authenticated
+# session and is covered statically by `website/apps/dashboard/src/securityHeaders.test.js`.
+# The beacon is injected on the anonymous HTML surfaces, which is what the audit
+# visits.
+name: prod-csp-monitor
+
+on:
+  schedule:
+    # Daily. The beacon contract moves only with a zone setting or a policy
+    # change, so daily is the useful resolution; the deploy trigger below covers
+    # the "we just changed a policy" case within minutes of the change being LIVE.
+    - cron: '23 6 * * *'
+  # ⛔ ORDERED AFTER THE DEPLOYMENT — NEVER RACING IT.
+  # A policy change is the one event that can break a deployed surface and the
+  # one a human just made, so it must be checked on main immediately — but it
+  # must be checked against the deployment that CONTAINS it. `Deploy Landing
+  # Pages` fires on the same event a `push:` trigger here would (`push` → main →
+  # `website/**`) and is what actually publishes the new policy: a 2-project
+  # build + wrangler deploy + post-deploy probes, ~2-3 min. A `push:` trigger
+  # starts CONCURRENTLY with it, spends its own ~2-3 min on `pip install` +
+  # `playwright install`, and usually wins that race — probing the PREVIOUS
+  # deployment. A policy that blocks the beacon then reported GREEN (correctly
+  # describing the OLD artifact, so even a red is not trustworthy) and was only
+  # observed by the next daily cron, up to ~24h later: precisely the window
+  # #4762 exists to close, for its highest-risk event. `concurrency` does not
+  # help — it serialises this workflow against itself, not against the deploy.
+  # `workflow_run` is the only trigger ordered after the artifact it audits.
+  # It fires for ANY completed deploy on main, including a FAILED one; the probe
+  # then describes the last PUBLISHED deployment, which is what actually serves
+  # traffic, so the reading stays true. `branches` keys on the TRIGGERING run's
+  # branch. (It also only takes effect from the default branch, since that is the
+  # copy GitHub executes for a `workflow_run` trigger.)
+  workflow_run:
+    workflows: ['Deploy Landing Pages']
+    types: [completed]
+    branches: [main]
+  # A change to the PROBE ITSELF still gets an immediate live run: neither file
+  # below changes the deployed artifact, so there is nothing to wait for and the
+  # reading is of the current deployment either way. `website/**` is deliberately
+  # NOT in this filter — it is the DEPLOYMENT's input, and a push-triggered probe
+  # of it is the coin-flip described above.
+  push:
+    branches: [main]
+    paths:
+      - 'tests/e2e/audit_prod_csp.py'
+      - '.github/workflows/prod-csp-monitor.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: prod-csp-monitor
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # #2140: the auto-file step POSTs to the issues API with GITHUB_TOKEN, and the
+    # org's restricted default token has no write scope — without `issues: write`
+    # it 403s and the monitor goes DEAF (a filed finding that looks filed). The
+    # shared substrate (#3907) also REQUIRES the Actions token specifically: its
+    # dedupe search keys on `author:app/github-actions`, so a PAT would file a
+    # duplicate on every run.
+    permissions:
+      contents: read
+      issues: write
+    env:
+      # ONE string, used by BOTH the file and the resolve step: it is the issue
+      # title AND the dedupe key, so it must be identical in both and must not
+      # embed a run id, a timestamp or a count (#2706 — a volatile title filed 59
+      # duplicate issues). Changing it starts a new ledger; that is deliberate.
+      PROD_CSP_MONITOR_TITLE: 'prod-csp-monitor: a deployed surface refuses a platform-injected origin or its same-origin RUM payload'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
+
+      - name: Audit the deployed surfaces (CSP violations + beacon contract)
+        id: audit
+        # NO `env`-less run: the script refuses an https target without
+        # ALLOW_PROD=1 (it exits 2 instead of probing), matching its sibling e2e
+        # suites — so the job supplies the opt-in, UNGATED (a conditional variant
+        # would silently degrade every run to exit 2 and the monitor would never
+        # probe anything).
+        env:
+          ALLOW_PROD: '1'
+        run: |
+          # `set -o pipefail` IS the detector. GitHub's default shell is
+          # `bash -e {0}`, and `-e` does NOT imply pipefail: with a bare
+          # `python … | tee`, the pipeline's status is `tee`'s, so a detector
+          # that exited 1 would read GREEN. That is the #4638 class inside the
+          # thing that exists to catch it.
+          set -o pipefail
+          python tests/e2e/audit_prod_csp.py | tee "$RUNNER_TEMP/prod-csp-audit.log"
+
+      - name: Compose the finding body
+        if: failure()
+        run: |
+          # The issue body is written ONCE, at first filing (#3907): later
+          # occurrences arrive as `Recurrence #N` comments carrying the run link,
+          # so the body is the FINDING and the comments are the occurrences.
+          {
+            echo 'The scheduled deployed-CSP monitor reported a finding against the'
+            echo 'anonymous production surfaces.'
+            echo
+            echo '`tests/e2e/audit_prod_csp.py` drives the deployed surfaces in a real'
+            echo 'Chromium, so it observes what the edge INJECTS — a plain `curl` and a'
+            echo 'local `wrangler pages dev` both see the un-injected document and are'
+            echo 'blind to this class. A failure here means one of:'
+            echo
+            echo '- a CSP violation on a deployed surface (a policy omitted an origin'
+            echo '  the edge now injects — the #4638/#3525 failure),'
+            echo '- a request to the MANUAL-embed beacon host `cloudflareinsights.com`'
+            echo '  (which no policy admits since #8334 — the tag fell back to the'
+            echo '  cross-origin default), or'
+            echo '- a beacon that LOADED and then reported nowhere (no same-origin'
+            echo '  `POST /cdn-cgi/rum` observed: analytics lost with no console'
+            echo '  error).'
+            echo
+            echo 'Run log (tail):'
+            echo
+            echo '```'
+            tail -n 120 "$RUNNER_TEMP/prod-csp-audit.log" 2>/dev/null \
+              || echo '(no log captured — the audit step died before writing one)'
+            echo '```'
+            echo
+            echo 'Reproduce locally:'
+            echo
+            echo '```bash'
+            echo 'ALLOW_PROD=1 .venv/bin/python tests/e2e/audit_prod_csp.py'
+            echo '```'
+          } > "$RUNNER_TEMP/prod-csp-issue.md"
+
+      - name: Auto-file issue on failure (the monitor signal — never blocks merges)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # ONE issue per failing streak: the shared #3907 substrate searches for an
+        # exact machine-authored title and COMMENTS a recurrence instead of filing
+        # again, and a FAILED dedupe search refuses to file (the red run IS the
+        # alert) rather than risk a duplicate. `resolve` below is the other half.
+        run: |
+          bash .github/scripts/auto-file-issue.sh file \
+            --title "$PROD_CSP_MONITOR_TITLE" \
+            --body-file "$RUNNER_TEMP/prod-csp-issue.md" \
+            --label bug
+
+      - name: Close the ledger when the monitor is green (#8841)
+        if: success()
+        # The ledger may only GROW without this: measured on #7634, a recovered
+        # fault left its issue OPEN through 21 green runs. `continue-on-error`
+        # because bookkeeping must never red a healthy probe — a failed close
+        # leaves the ledger open, which the next green run retries.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash .github/scripts/auto-file-issue.sh resolve \
+            --title "$PROD_CSP_MONITOR_TITLE" \
+            --why 'The scheduled deployed-CSP monitor ran green: every surface it MEASURED reported no CSP violation and no beacon-contract finding (no request to the MANUAL-embed apex, and no beacon that loaded and then reported nowhere). `no-tag` is green BY DESIGN — the edge injecting no beacon is a zone setting (#4706 is open) — so this close does NOT assert that every surface loaded the beacon: read the run log for the `no-tag` and `not-measured` counts.'

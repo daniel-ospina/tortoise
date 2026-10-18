@@ -1081,6 +1081,11 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  # #5612: concurrent journal appends are serialised and the recovery read
+  # salvages a damaged mid-file line. `tortoise/log.py` matches no
+  # SOURCE_PATTERN, so a change to it falls through to `core` — registering the
+  # guard HERE is what makes the file selected for the code it holds.
+  - test_5612_journal_append_serialization.py
   # #7983 (§17.4.4/§17.4.6): the read ledger — the instrument the hot fraction
   # `f` never had. `core` is the right arm: neither tortoise/read_ledger.py (a NEW
   # file, so it matches no SOURCE_PATTERN) nor tortoise/sdk.py selects anything
@@ -1159,6 +1164,16 @@ surfaces:
   # `backup.py`-only change (the #7767 registration above is the same shape and
   # the same reason).
   - test_7935_restore_destination_lock.py
+  # #4762: the deployed-CSP beacon detector (`tests/e2e/audit_prod_csp.py`) is
+  # only observable through production, so the thing under test is a WORKFLOW
+  # (`.github/workflows/prod-csp-monitor.yml`) plus the detector's beacon
+  # contract. Both subjects select `core`: a `.github/workflows/*` edit
+  # falls through to the full matrix, and the detector (under `tests/e2e/`,
+  # which the manifest does not classify) selects `core` alone — so without this
+  # entry the wiring guard would not run on the very diff that can unwire it
+  # (the #1349/#2938 silent-drop class). Registered in `core` rather than a
+  # narrower surface on purpose: there is no source path for "the schedule".
+  - test_prod_csp_monitor.py
   # #7856: half this file's subject is the `goalState` declaration in
   # `tortoise/projection/entities.py` (`_POINT_DECLARED_PROPS` — it suppresses
   # the replay passthrough's false drift warning). An `entities.py`-only change
@@ -2451,6 +2466,16 @@ surfaces:
   # code diffs (`tortoise/pack_registry.py`, `tortoise/value_extractor.py` — each
   # selects `core`) that can reverse the refusal the brief now states.
   - test_entity_attachment_brief_claims.py
+  # #2008 review (P1+P2): the capstone verification report's OWN claims guard — the
+  # cross-head licence must be the test-file check it can actually prove (it is not),
+  # the shared-hub tree state at measurement time must be recorded as un-recorded,
+  # indicator 2 must carry the anchor limit, the report's stated size for batches A/B
+  # must equal its own batch table's rows, and every `test_*` CITATION must resolve —
+  # bare symbol, `module.py`, `module.py::Class::test`, path, glob or brace set (the
+  # pre-fix extractor saw only the bare form: 15 of 55 citations). Dual-registered
+  # (`core` + `tier1`) for the same docs-only reason as the doc guards above: a
+  # `docs/`-only diff takes `select()`'s early return, so `tier1` is where it must live.
+  - test_capstone_1976_report_claims.py
   - test_falkordb_compat.py
   # #7076: the degraded-fallback snapshot's OWN guard. test_fallback_snapshot.py
   # was registered only under `api`, while the module it guards
@@ -2768,6 +2793,11 @@ surfaces:
   # match REPLACES the `core` fallback. Hermetic (embedded DB per test, no URI).
   - test_references_boundary_5213.py
   - test_relationships_bounded.py
+  # #6976: `expand_relationships` / `get_relationships` select their rows — the
+  # mandated READ path must not read a connected node as isolated. Drives
+  # `tortoise/search_engine.py` (core fallback) + `tortoise/sdk.py`; embedded DB
+  # per test, so it belongs with its sibling test_relationships_bounded.py.
+  - test_expand_relationships_6976.py
   - test_remove_context_migration.py
   - test_render.py
   - test_retired_tools.py  # #3883: a retired MCP name resolves and WARNS (16 names retired, #3863)
@@ -3049,6 +3079,18 @@ surfaces:
   # + the `vet_enabled` fold in `extractor_v2.py`. Registered beside its
   # sibling `test_vet_gate_5005.py` because it guards the same seam.
   - test_value_gate_4899.py
+  # #5008: the S5 EMBED gate — `tortoise/embed_gate.py` (the predicate, whose
+  # rule set IS `tortoise/value_gate.py`'s: one rule set, two questions,
+  # `STORAGE-ARCHITECTURE.md` §12.2a) plus its submission seam
+  # `encode_for_row` and the graph writers in `tortoise/projection/entities.py`
+  # that call it. Registered beside its sibling `test_value_gate_4899.py`
+  # because it guards the same seam from the other side. DUAL with `eval`
+  # (below): `tortoise/embeddings.py` is an `eval` SOURCE_PATTERN that REPLACES
+  # the `core` fallback, so an embeddings-only diff would otherwise never run
+  # this file (#1349/#2938 silent-drop class). NOT carve_out-registered — it
+  # builds its store by path (the `test_update_point_content_embedding_4208.py`
+  # pattern), which runs on any lane.
+  - test_embed_gate_5008.py
   # #5049: the verdict contract (`tests/_verdict.py`) — condition-vs-deadline
   # waits, INCONCLUSIVE-on-expiry, the measured `Deadline`, the host-capability
   # gate, and the per-test process-global reset. Registered here (core) AND its
@@ -4001,6 +4043,7 @@ surfaces:
   # the normalization & width guards), which this surface owns.
   - test_journal_embedding_5004.py
   - test_update_point_content_embedding_4208.py  # #4208: dual with `core` — the fix routes through `tortoise/embeddings.py`'s `encode_for_store`, which this surface owns
+  - test_embed_gate_5008.py  # #5008: dual with `core` — `encode_for_row` (the EMBED gate's submission seam) lives in `tortoise/embeddings.py`, which this surface owns; without this arm an embeddings.py-only diff would leave the gate unguarded
   - test_env_truthy.py
   - bench/test_bench_core.py
   - bench/test_degradation_chain.py
@@ -4227,9 +4270,13 @@ tier1:
 # different cause: the packer was right, its input wrong.
 #
 # The two clauses are worth separating, because they recompute from different
-# things: the 23.42m/1.76:1 pair is the PRE-FIX reading above; on the map this
-# change COMMITS, the same two leg SETS weigh 21.36m / 13.30m (1.61:1), and the
-# split then takes that to 17.33m each.
+# things: the 23.42m/1.76:1 pair is the PRE-FIX reading above, measured on the
+# tree before this change; on the map this change COMMITS, those same two leg
+# SETS weigh 21.50m / 13.30m (1.62:1), and the split then takes them to
+# 17.53m / 17.47m. (The PRE-FIX leg sets are recomputed against the COMMITTED
+# map, so they also carry main's later re-valuations of two files that sit in
+# that leg — test_extractor_v2 and test_relationships_bounded — which is why the
+# b-side reads 21.50 and not 23.42.)
 #
 # WHAT WAS MEASURED, HOW, AND WHEN. Every file of both committed legs, one file
 # at a time, 2026-10-18 on the `ci-critical-path` worktree host: one private
@@ -4282,12 +4329,18 @@ tier1:
 #   test_battery_setup        106.8  [98.8]
 #   test_index_directory       66.0  [8.4]     — 7.9x understated
 #
-# THE SPLIT is the LPT pack of that map into two legs of 17.33m each (it was
+# THE SPLIT is the LPT pack of that map into two legs of 17.53m / 17.47m (it was
 # 23.42m / 13.30m). `test_slow_leg_bounds_clear_the_committed_work` re-derives
-# the 40m watchdog's headroom from it (2.31x the heavier leg, against the 2.0x
+# the 40m watchdog's headroom from it (2.28x the heavier leg, against the 2.0x
 # floor) and the workflow's drift guard pins the union to
 # `slow_files - carve_out`. NOTHING was deleted, moved off the pre-merge gate, or
-# re-marked: all 64 files still run on a PR, with the same nodeids.
+# re-marked: all 65 files still run on a PR, with the same nodeids. (The pool was
+# 64 when this was measured; main added `test_expand_relationships_6976` while
+# the change was in review, and the re-cut above packs it like any other row.)
+# #2008 review: the epic-1976 capstone report's claim guard (`core` above) — doc-text
+# and section scans plus three source-file reads, no DB, so a docs-only PR must run it
+# here.
+- test_capstone_1976_report_claims.py
 slow_files:
 - test_3311_multilabel_status_vocab.py
 - test_about_edges.py
@@ -4442,6 +4495,7 @@ slow_files:
 - test_operator_idempotency_4971.py
 - test_platform_seams.py
 - test_relationships_bounded.py
+- test_expand_relationships_6976.py  # #6976: embedded per test, same family as its sibling above
 - test_skip_guard.py
 - test_surface_manifest.py
 - test_unjournaled_mutation_class.py
@@ -4933,6 +4987,9 @@ durations:
   test_invites_http.py: 13.6
   test_relationships_bounded.py: 16.8  # #9017: was 17.6 (measured 2026-10-18)
   test_extractor_v2.py: 10.1  # #9017: was 17.2 (measured 2026-10-18)
+  test_relationships_bounded.py: 17.6
+  test_expand_relationships_6976.py: 12.0  # unmeasured estimate (#6976); re-measure from the next junit sweep
+  test_extractor_v2.py: 17.2
   test_prior_bound_4509.py: 22.0
   test_fly_machines_guard.py: 4.6
   test_fly_machine_env.py: 28.2
@@ -5400,6 +5457,7 @@ durations:
   test_extractor_v4_failure_policy.py: 0.1  # #8495: §4.4 doc-text scan + two module reads; same no-DB shape as the three guards above
   test_extractor_v4_redaction_reconciliation.py: 0.3  # #8496: one section read + a marker/idempotence check; the `tortoise.sdk` import (~0.12s) is the only cost
   test_entity_attachment_brief_claims.py: 0.1  # #8639 review P1: doc-text scan + three regex block reads; same no-DB shape as the extractor-v4 guards above
+  test_capstone_1976_report_claims.py: 1.0  # #2008 review: four doc-text/section reads + three source-file reads, plus one `tests/**` def/class index for the citation resolver (now covering module/path/glob citations, not only bare symbols) and one batch-table parse; no DB
   test_doc_affiliation_frontmatter.py: 0.1  # #8738 review P2: six frontmatter-block reads + one directory glob; same no-DB shape as the doc guards above
   test_file_indexer.py: 0.7
   test_open_kinds.py: 0.3
@@ -5477,6 +5535,7 @@ durations:
   test_security.py: 0.4
   test_session_key.py: 0.1
   test_probe_reset_inflight_4608.py: 36.0
+  test_prod_csp_monitor.py: 2.0  # unmeasured — new in #4762; no sweep has collected it, so it carries the flat default for an unmeasured file (same convention as test_workflow_gh_token.py / test_venture_pack.py). Do NOT substitute a local timing: this file's own call time is ~2.6s on this box, but the map is a SHARD-LAYOUT input modelling CI, and a locally measured weight that does not model CI must not decide what runs together.
   test_sparse.py: 0.6
   test_subgraph_pure.py: 0.6
   test_supplementary.py: 0.2
@@ -5571,6 +5630,7 @@ durations:
   test_lint_config.py: 0.1
   test_lint_tripwire.py: 0.1
   test_log.py: 0.3
+  test_5612_journal_append_serialization.py: 3.2
   test_5917_torn_tail_seal.py: 2.0
   test_longmem_costing.py: 0.2
   test_longmem_errors.py: 0.1
@@ -5671,6 +5731,7 @@ durations:
   test_dream_noop_3139.py: 4.0
   test_durability_posture.py: 1.1
   test_embed_metering.py: 12.0  # unmeasured — #4488: locally measured (58 tests, embedded lane: 10.9–16.0s across runs, ~12s under fleet load); no source leg of the sweep collected it — refresh from CI junit.
+  test_embed_gate_5008.py: 6.0  # unmeasured — #5008 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). Locally measured this turn on the embedded lane: 37 tests in 5.6s (`TORTOISE_TEST_CARVE_OUT=1`); declared at 6.0s so a cold leg cannot under-pack. Refresh from the first post-merge run.
   test_embedder_provision.py: 6.0
   test_entity_delete_rebuild.py: 1.9
   test_env_truthy.py: 14.6

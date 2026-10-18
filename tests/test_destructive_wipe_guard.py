@@ -690,11 +690,14 @@ def test_embedded_rebuild_single_log_with_token(tmp_path, monkeypatch):
 
 
 def test_rebuild_parses_before_wipe(tmp_path):
-    """A log that cannot be read must raise BEFORE the wipe (no data loss).
+    """A log that cannot be TRUSTED must refuse BEFORE the wipe (no data loss).
 
-    `rebuild()` mirrors `rebuild_all()`'s WIPE-AFTER-PARSE ordering: a corrupt
-    MID-FILE line raises out of `read_all()` while the graph is still intact.
-    Parsing after the wipe would leave a wiped, empty graph behind."""
+    `rebuild()` mirrors `rebuild_all()`'s WIPE-AFTER-PARSE ordering. #5612: the
+    journal read is a SALVAGE read, so a damaged MID-FILE line no longer raises
+    out of `read_all()` — it is skipped and counted — and the #3316 classifier
+    then refuses the replay (this line has no legible type, so it cannot be
+    proven harmless). The refusal still lands while the graph is intact;
+    parsing (or wiping) first would leave a wiped, empty graph behind."""
     proj = _bare_projection(graph_name="tortoise", embedded=True)
     log = EventLog(tmp_path / "corrupt.jsonl")
     log.append({"type": "PointAdded",
@@ -710,7 +713,7 @@ def test_rebuild_parses_before_wipe(tmp_path):
         fh.write(json.dumps({"type": "PointAdded",
                              "point": {"id": "second", "content": "z",
                                        "context": "t"}}) + "\n")
-    with pytest.raises(ValueError, match="mid-file corruption"):
+    with pytest.raises(RuntimeError, match="proven harmless"):
         proj.rebuild(log, confirm_destructive=True)
     assert proj.g.wipes() == [], "no wipe may run when the log cannot be read"
 
