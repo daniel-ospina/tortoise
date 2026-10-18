@@ -902,10 +902,21 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> dict:
       the higher tier until that period ends; replacing it there would revoke
       an entitlement already paid for, silently (only drift UP notifies).
       ⛔ That guard holds when the rank CANNOT be read too (a price rotated out
-      of ``STRIPE_PRICE_IDS``, an unreadable ladder): the still-in-force one is
-      kept, and because an unrankable subscription raises inside
-      ``mirror_subscription`` before any write, the org is a FAILED row with
-      its stored tier intact and the run reds — never a downgrade.
+      of ``STRIPE_PRICE_IDS``, an unreadable ladder), and WHERE the row lands
+      depends on WHICH side is unreadable. When it is the STILL-IN-FORCE sub's
+      own cap, that sub is kept and cannot be mirrored — the raise happens
+      inside ``mirror_subscription`` before any write — so the org is a FAILED
+      row with its stored tier intact and the run reds: loud, never a
+      downgrade. When only the NEWER candidate's cap cannot be read, the
+      still-in-force one is kept and mirrors normally: nothing changed, so the
+      row is ``unchanged`` on a GREEN run, and the unpriceable candidate is
+      held for a later pass rather than applied or reported.
+      ⛔ This is the CADENCE's guarantee, not the whole system's. The
+      ``customer.subscription.updated`` webhook writes provider truth for the
+      subscription its event NAMES — a new, cheaper one included, and the
+      stored pointer with it — before this comparison ever runs, so an already
+      delivered event can still revoke a paid-through period (#8942 tracks the
+      rank guard that path lacks).
       ⛔ If the LIST itself FAILS, none of that applies: the org is returned as
       ``action: "noop"`` and left alone (a provider error is not a verdict —
       mirroring the stored one there would re-cap a paying org, which is the

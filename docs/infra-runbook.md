@@ -478,15 +478,28 @@ within the live ones a newer, not-ending subscription replaces an ENDING one
 row reports. A subscription with `cancel_at_period_end` is still **in force** —
 the customer has paid it through `current_period_end`, and cancelling is not a
 refund — so an org that adds a cheaper subscription inside that window keeps
-the higher tier until the period ends, and only then drops. When either cap
-**cannot be read** (a price rotated out of `STRIPE_PRICE_IDS`, an unreadable
-ladder) the still-in-force one is kept for the same reason — and because an
-unpriceable subscription cannot be mirrored at all, that org lands in `failed`
-with its stored tier untouched and the run reds: loud, never a silent
-downgrade. A **genuine** cancellation still downgrades the moment Stripe says
-so: with no live subscription at the customer there is nothing to prefer and
-the stored one is mirrored. A customer lookup that **fails** is neither — the
-org is left alone and counted `unverified` (paid tier) or `skipped` (unpaid).
+the higher tier until the period ends, and only then drops. When the
+still-in-force sub's own cap **cannot be read** (a price rotated out of
+`STRIPE_PRICE_IDS`, an unreadable ladder) that sub is kept for the same reason
+— and because an unpriceable subscription cannot be mirrored at all, the org
+lands in `failed` with its stored tier untouched and the run reds: loud, never
+a silent downgrade. The remedy is the catalog, never the tier: a red run whose
+`failed` rows name `unknown price id` means a price that a LIVE subscription
+still sits on is missing from `STRIPE_PRICE_IDS` — restore the id (a retired
+price stays valid on an existing subscription) and the next pass mirrors it.
+The same row appears when this arm **withholds an upgrade**, because a newer,
+pricier subscription is not applied over an unpriceable still-in-force one.
+When instead only the **newer** sub's cap cannot be read, the still-in-force one
+is mirrored normally and the row stays green: that candidate is held for a
+later pass, not applied, and nothing is written about it. All of this is the
+**cadence's** guarantee, not the system's: the `customer.subscription.updated`
+webhook applies provider truth for the subscription its event names — a new,
+cheaper one included — before any pass runs, and that path does not yet carry
+the rank guard (#8942). A **genuine** cancellation still downgrades the moment
+Stripe says so: with no live subscription at the customer there is nothing to
+prefer and the stored one is mirrored. A customer lookup that **fails** is
+neither — the org is left alone and counted `unverified` (paid tier) or
+`skipped` (unpaid).
 
 A pass returns `checked` / `repaired` / `unchanged` / `unverified` / `skipped` /
 `alerted` / `failed` / `unrepaired` and one `drift` row per repaired org, each

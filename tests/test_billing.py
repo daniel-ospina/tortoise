@@ -609,6 +609,74 @@ class TestApplyLimitsAndReconcile:
         assert "unknown price" in summary["failed"][0]["error"], (
             f"the row must name the real cause — got {summary['failed']}")
 
+    def test_reconcile_an_unreadable_ladder_fails_the_row_with_no_write(
+            self, monkeypatch, stripe_env, billing_sdk):
+        """The docstrings name TWO unreadable shapes; only one was executed.
+
+        ``_subscription_rank`` returns ``None`` for a price the catalog does not
+        know (pinned by the test above) AND for a pricing ladder that cannot be
+        READ at all (``_paid_tier_floor`` catching ``tier_limits``). Both put an
+        ENDING, still-in-force sub on the ``kept is None`` arm, and both
+        docstrings claim the same outcome — the org is a FAILED row with its
+        stored tier and pointer intact. The second leg raises one call LATER
+        (``apply_limits`` -> ``tier_limits``, after ``subscription_plan``
+        succeeded), so it is pinned here: a raise that landed after the
+        control-plane write would leave the org holding a tier nobody proved.
+
+        Honest scope: this does NOT discriminate the pre-fix arm (with the
+        ladder unreadable the mirror raises on either selection, so the
+        pre-fix tree also ends FAILED with the stored tier intact). It pins the
+        INVARIANT the docstrings state — no write precedes the raise — not the
+        selection order.
+        """
+        import tortoise.pricing as pricing
+
+        sdk = billing_sdk
+        team = sdk.org_create("ending-unreadable-ladder")
+        # ⛔ The stored tier is ``pro`` while Stripe's still-in-force sub is
+        # Team: that is the only arrangement in which "the raise precedes the
+        # write" is OBSERVABLE. A store already holding ``team`` would look
+        # identical after a write-before-raise.
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_team', "
+            "t.stripe_customer_id='cus_1', t.tier='pro', "
+            "t.subscription_status='active'",
+            params={"id": team["id"]},
+        )
+        ending = {"id": "sub_team", "status": "active",
+                  "cancel_at_period_end": True, "current_period_end": 19999,
+                  "items": {"data": [{"price": {"id": "price_300teamM"}}]}}
+        cheaper = {"id": "sub_solo", "status": "active",
+                   "cancel_at_period_end": False, "current_period_end": 29999,
+                   "items": {"data": [{"price": {"id": "price_100soloM"}}]}}
+        monkeypatch.setattr(billing.StripeClient, "get_subscription",
+                            lambda self, sid: dict(ending))
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [cheaper, ending])
+
+        def _unreadable_ladder(tier):
+            raise KeyError("pricing.json is unreadable (ladder fault)")
+
+        monkeypatch.setattr(pricing, "tier_limits", _unreadable_ladder)
+        summary = billing.reconcile_subscriptions(sdk, notifier=False)
+        t = sdk.org_get(team["id"])
+        assert t["tier"] == "pro", (
+            "the ladder could not be read, so no tier may be written — the "
+            "raise must precede the control-plane write; a pre-write would "
+            f"have stored 'team' here — got {t['tier']!r}")
+        assert t["subscription_id"] == "sub_team", (
+            f"the still-in-force pointer must survive the raise — got {t}")
+        assert summary["repaired"] == 0 and summary["drift"] == [], (
+            f"nothing may be reported as repaired — got {summary}")
+        assert len(summary["failed"]) == 1, (
+            "an unreadable ladder cannot be mirrored, so the org is a FAILED "
+            f"row and the run reds — got {summary}")
+        assert "unreadable" in summary["failed"][0]["error"], (
+            "the row must name the LADDER, not a price — got "
+            f"{summary['failed']}")
+        assert "unknown price" not in summary["failed"][0]["error"], (
+            f"the ladder leg must not be reported as a price fault — got {summary}")
+
     def test_reconcile_customer_only_keeps_a_paid_ending_sub_over_a_cheaper_newer(
             self, monkeypatch, stripe_env, billing_sdk):
         """The SAME rank guard on the customer-only LIST site.
