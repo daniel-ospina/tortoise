@@ -1200,6 +1200,14 @@ def test_a_rebuild_abort_on_the_create_document_link_source_is_retried(tmp_path)
 # graph (measured: a lane asked the owner to authorise a destructive rebuild on
 # the strength of it). These tests pin the appended diagnosis, its allow-list,
 # and — the safety half — that a DELETION is never told a retry is safe.
+#
+# What the diagnosis may CLAIM is bounded by its evidence, which is one
+# `EXISTS <name>`: PRESENCE, not identity and not integrity. So the note says
+# the key was not left deleted and that a re-issue cannot duplicate — it never
+# reassures the caller about its data (a rebuild REPLACES the contents, and it
+# is one of the causes the same sentence names), and it never settles WHY an
+# absent key is absent (a deletion and a rebuild inside its delete window both
+# read 0). The pre-fix wording broke all three; the assertions below fail on it.
 
 
 def _explain(exc, present):
@@ -1225,6 +1233,20 @@ def test_the_swap_diagnosis_keeps_the_engine_sentence_first_and_classifiable():
     assert "graph key is still present" in explained, (
         "the note must say the graph was not deleted")
     assert "retrying is safe" in explained
+
+    # PRESENCE is not IDENTITY and not INTEGRITY: `EXISTS 1` is exactly what a
+    # completed deletion + recreate (a rebuild) produces, and a rebuild is one
+    # of the mechanisms this very sentence lists — so the note must not infer
+    # "nothing was deleted" (the #7357 overclaim, sign flipped), and must warn
+    # that the contents may have been replaced instead of reassuring the caller
+    # about its data.
+    assert "nothing was deleted" not in explained, (
+        "EXISTS proves the key, not the contents — do not claim nothing was "
+        "deleted when a rebuild REPLACES the graph")
+    assert "REPLACES" in explained and "verify, do not assume" in explained, (
+        "a rebuild is one of the named causes, so the data may be gone")
+    assert "presence is not writability" in explained.lower(), (
+        "a retry can still be refused — presence does not make it succeed")
 
     again = redis_exc.ResponseError(explained)
     assert graph_abort_family(again) is True, (
@@ -1267,10 +1289,25 @@ def test_the_swap_diagnosis_never_promises_a_safe_retry_on_a_gone_or_unknown_gra
     assert "retrying is safe" not in absent, (
         "a deleted graph must never be advertised as safe to retry")
     assert "Restore the graph" in absent
+    # An absence is a deletion OR a slower rebuild still inside its delete
+    # window (retryable_aborted_write says so itself), and the probe cannot
+    # tell them apart — so the note must not settle which, and its action must
+    # fit both.
+    assert "rather than a replacement" not in absent, (
+        "absence does not prove a deletion; a rebuild inside its delete "
+        "window reads 0 too")
+    assert "delete window" in absent and "replaying" in absent, (
+        "name the rebuild case and an action that fits it")
 
     unknown = _explain(redis_exc.ResponseError(_DELETED_OR_REPLACED), None)
     assert unknown is not None
-    assert "UNKNOWN" in unknown and "not answering" in unknown
+    assert "UNKNOWN" in unknown, "an unanswerable probe must not become a guess"
+    # `None` covers no-projection / no-graph-name / a raising probe alike, so
+    # naming "the instance is not answering" sends the reader to a healthy
+    # server — the cause must stay neutral.
+    assert "not answering" not in unknown, (
+        "_graph_presence answers None for a wiring gap too")
+    assert "could not be probed" in unknown
     assert "retrying is safe" not in unknown
     assert "restore" not in unknown.lower()
 
@@ -1309,10 +1346,14 @@ def test_an_exhausted_swap_surfaces_the_legible_diagnosis_with_the_same_type(
         assert proxy.matching >= 3, (
             "the diagnosis belongs to the EXHAUSTED arm, after re-issues")
         # The suffix must not move the error's CLASS: `_classify_db_failure`
-        # buckets by TYPE, and an exhausted write is still a db failure.
+        # buckets by TYPE, so the surfaced error must still be EXACTLY the
+        # engine's `ResponseError` — `pytest.raises` above would also accept a
+        # subclass wrapping the diagnosis, which is the shape this guards.
+        assert type(caught.value) is redis_exc.ResponseError, (
+            "the diagnosis must ride the SAME exception object, never a "
+            "wrapper type")
         from tortoise.sdk import _classify_db_failure
-        assert _classify_db_failure(caught.value) == "db", (
-            "the appended diagnosis must not re-bucket an exhausted write")
+        assert _classify_db_failure(caught.value) == "db"
     finally:
         with contextlib.suppress(Exception):
             sdk.close()

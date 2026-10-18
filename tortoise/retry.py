@@ -384,20 +384,37 @@ def explain_graph_abort(
     ``EXISTS`` discriminator the retry itself trusts, because the sentence
     alone cannot tell a replacement from a deletion:
 
-    - ``graph_present is True`` — the key is still there, so nothing was
-      deleted; retrying is safe. This is the case the raw sentence
-      misdescribes, and the one the measured outages hit.
-    - ``graph_present is False`` — the key is gone: a DELETION. Never told
-      "retry": a re-issue lands in a graph FalkorDB auto-creates EMPTY, the
-      #6666 silent-success class.
-    - ``graph_present is None`` — the presence probe could not answer (the
-      instance is not responding), so the message says the state is UNKNOWN
-      rather than guessing either way.
+    - ``graph_present is True`` — the key is still there, so the graph was
+      not left DELETED and a retry reaches the caller's graph rather than a
+      freshly auto-created EMPTY one; a re-issue is therefore safe from
+      DUPLICATION. It does NOT say the contents survived: a rebuild REPLACES
+      them, which is one of the mechanisms the same sentence names, so the
+      note tells the caller to verify rather than assume. Nor does presence
+      imply WRITABILITY: a graph that refuses every write (the measured
+      write-locked state ``tools/graph_write_repair.py`` documents — key
+      present, reads fine, every write refused) still refuses the retry.
+      This is the case the raw sentence misdescribes, and the one the measured
+      outages hit.
+    - ``graph_present is False`` — the key is gone. Never told "retry": a
+      re-issue lands in a graph FalkorDB auto-creates EMPTY, the #6666
+      silent-success class. The note does NOT settle WHY it is gone: an
+      absence is a plain deletion OR a rebuild still inside its delete window
+      (``retryable_aborted_write``'s own wording), and the probe cannot tell
+      those apart — so it names both and gives an action that fits both,
+      instead of asserting a deletion the evidence does not establish.
+    - ``graph_present is None`` — the presence probe could not answer, so the
+      message says the state is UNKNOWN rather than guessing either way. It
+      stays CAUSE-NEUTRAL: ``None`` covers an unresponsive instance, a missing
+      projection and an unresolved graph name alike (``_graph_presence``),
+      and naming one of them sends the reader to check a healthy server.
 
     It does NOT say which of restart / rebuild / eviction happened: the engine
     exposes no identity token for the graph, the same limitation ``#7685``
     escalated. It also cannot make the write succeed — it makes the refusal
-    legible.
+    legible. **Every clause is scoped to what ``EXISTS`` proves**: presence is
+    not identity (see ``_graph_presence``) and it is not integrity either, so
+    the note never reassures a caller about its DATA — that overclaim is the
+    mirror of the defect this function exists to fix (#7357).
 
     **Contract preserved.** The returned message KEEPS the engine sentence at
     position 0, so the ``\\A``-anchored ``_GRAPH_ABORT_RE`` still classifies it
@@ -416,27 +433,31 @@ def explain_graph_abort(
     calls = max(1, int(attempts))
     if graph_present is True:
         explains = (
-            "the graph key is still present, so nothing was deleted: the "
-            "instance swapped the graph under the running query (a "
-            "restart/reload, a rebuild, or the engine evicting it from its "
-            "cache). This statement did not land, and the engine aborts "
-            "before mutating, so retrying is safe — "
-            f"{calls} attempt(s) were made in this call."
+            "the graph key is still present, so the graph was not left "
+            "deleted: the instance swapped the graph under the running "
+            "query (a restart/reload, a rebuild, or the engine evicting it "
+            "from its cache). A rebuild REPLACES the graph's contents, so "
+            "data written before the swap may be gone — verify, do not "
+            "assume. This statement did not land, and the engine aborts "
+            "before mutating, so retrying is safe — though presence is not "
+            "writability, so a graph that refuses every write still refuses "
+            f"it. {calls} attempt(s) were made in this call."
         )
     elif graph_present is False:
         explains = (
-            "the graph key is ABSENT, so this was a deletion rather than a "
-            "replacement — a retry would write into a fresh EMPTY graph, "
-            "which is why it is refused. "
-            f"{calls} attempt(s) were made in this call. Restore the graph "
+            "the graph key is ABSENT — either a deletion, or a rebuild still "
+            "inside its delete window; the probe cannot tell those apart — "
+            "so a retry would write into a fresh EMPTY graph, which is why "
+            f"it is refused. {calls} attempt(s) were made in this call. "
+            "Restore the graph, or wait for a rebuild to finish replaying, "
             "before writing."
         )
     else:
         explains = (
-            "the graph key could not be probed (the instance is not "
-            "answering), so whether the graph survived is UNKNOWN — "
-            f"{calls} attempt(s) were made in this call. Check the instance "
-            "before retrying."
+            "the graph key could not be probed, so whether the graph "
+            f"survived is UNKNOWN — {calls} attempt(s) were made in this "
+            "call. Check that the instance is answering and that the graph "
+            "name resolved, before retrying."
         )
     return text + _LEGIBLE_OPENER + explains
 
