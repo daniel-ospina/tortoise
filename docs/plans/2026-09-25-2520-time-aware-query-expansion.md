@@ -133,6 +133,39 @@ would collide on the word `recency` (a window there, a freshness preference here
   > `_valid_time_rerank=False` so its sealed arm's page composition is unchanged). What is still
   > open is **#8487 scope 1** — a read-side temporal parameter (`as_of`) on the canonical MCP/SDK
   > target surface, which needs the owner's surface approval and is NOT part of this change.
+  >
+  > **AMENDED 2026-10-18, after code review (head `3705b4cb`).** Five corrections to step 5e, all
+  > recorded here because they change what the shipped path promises:
+  >
+  > 1. **The cached state map is reused only when COMPLETE.** `fetch_point_epistemic_state` never
+  >    raises (it swallows the failure and returns `{}`), and `{} is not None`, so caching on
+  >    `is not None` let a failed read stand in for the page's state: step 7.6 skipped its own read
+  >    and the whole page lost `status` / `superseded_by` / the window — a superseded claim served
+  >    as current, on the leg added to be the audit trail. Step 5e now publishes the map only when
+  >    it covers every id it asked for, and a short/empty map records
+  >    `valid_time: degraded=True, reason="state_read_incomplete"` instead of a clean selection.
+  > 2. **Intent is evaluated BEFORE the read.** It lived inside `prefer_latest_ids`, i.e. after it,
+  >    so every topical point/relevance read paid a pool-width state read and discarded it.
+  > 3. **The read is pool-width, stated as such.** Reuse by 7.6 is over the pre-truncation pool
+  >    (up to `pool_size`, default 120) under the unchanged 200 ms decoration budget — not the
+  >    page's `limit`. The docstring said "one batch state read", which was true of the count and
+  >    false of the size.
+  > 4. **Lanes that RE-OWN the order opt out.** `recall_state` / `recall_gaps` (StateRanker /
+  >    GapsRanker re-sort the pool before the cut) and `issue_insight` / `suggest_entry_points`
+  >    (`_issue_insight_rank`, an RRF-derived confidence band) pass `_valid_time_rerank=False`, as
+  >    do `tools/fusion_formula_ab.py` (its two arms must differ in the fusion arithmetic only, and
+  >    its numbers are compared to a recorded baseline) and `tools/ask_pool_admission_probe.py`
+  >    (a pool-size diff must not conflate two movers). The **ask lane and its mirrors**
+  >    (`tools/ask_recall_bench.py`, `tools/gen_ask_transcripts.py`) deliberately keep it ON: they
+  >    measure/replay the shipped reader, so a number recorded before #8487 is not comparable to one
+  >    measured after it on a prefer-latest question — re-baseline, do not opt out.
+  > 5. **"Never a filter" means the POOL, not the page.** `limit` still applies after the selection,
+  >    so a demoted row leaves the returned page when a full page of current rows precedes it. The
+  >    ask lane (which reads `include_terminal=True` for the `[SUPERSEDED BY]` marker) therefore sees
+  >    the marker on surviving rows — not a guarantee that every demoted row is returned.
+  >    `tortoise/time_aware.py`'s "no clock" publication contract was also amended: it was false the
+  >    moment `resolve_question_date` landed (one wall-clock read, `today=`-injectable), and the
+  >    consequence is that result order depends on the wall-clock date unless `query_date` is pinned.
 
 **D4 — `time_aware` is applied for NON-TR questions only (TR no-regression).** The eval resolves
 the arm once and passes the query-side anchor only when `not is_tr`; TR keeps its R5 stack

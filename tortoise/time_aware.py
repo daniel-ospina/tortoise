@@ -22,8 +22,24 @@ distinct causes, all fixed here or by the callers of this module:
    :func:`prefer_latest_ids` (the SDK read path, #8487).
 
 Publication surface: pure functions + one frozen dataclass. No DB access,
-no I/O, no LLM calls, no random, no clock — the same inputs always give the
-same output. The eval lane (:mod:`tools.longmem_eval.retrieve`) and the SDK
+no I/O, no LLM calls, no random — the same inputs always give the same
+output, with TWO declared exceptions to that purity claim, both of which take
+their nondeterministic input INJECTABLE so a test can pin it:
+
+* :func:`resolve_question_date` reads the WALL CLOCK
+  (``datetime.now(UTC)``) when the caller injects neither ``query_date`` nor
+  ``today=`` — a ``prefer-latest`` read has to answer "current as of when?",
+  and the honest default is today. Consequence a caller must know: result
+  order depends on the wall-clock DATE (the same graph + the same query
+  reorders across a ``validTo`` boundary). Pass ``query_date`` to pin it.
+* :func:`prefer_latest_enabled` reads ``os.environ`` (the #4097 kill-switch
+  vocabulary); ``raw=`` injects the value.
+
+The two predicates the read path branches on (:func:`prefer_latest_ids`,
+:func:`is_not_yet_effective`) remain deterministic given their
+``question_date``, which is why the read path resolves the date once and
+threads it. Everything else here stays clock-, env- and I/O-free. The eval
+lane (:mod:`tools.longmem_eval.retrieve`) and the SDK
 (:meth:`tortoise.sdk.TortoiseSDK.tortoise_fts_query`) are thin callers —
 the eval lane has called :func:`prefer_latest_order` since #2520, and the
 SDK's rank-time half was wired by **#8487** (:func:`prefer_latest_ids`,
@@ -453,9 +469,12 @@ def resolve_question_date(query_date: str | None = None, *,
     * today's UTC date — "is this true NOW" is precisely the question a
       ``prefer-latest`` query asks.
 
-    ``today`` is injectable so the function stays clock-free under test.
-    An unparseable ``query_date`` falls through to ``today`` (never raises,
-    never invents a bound).
+    ``today`` is injectable so the function's own clock read can be pinned by
+    a test. An unparseable ``query_date`` falls through to ``today`` (never
+    raises, never invents a bound). The clock read is this module's ONE
+    nondeterministic input on the rules side (declared in the module
+    docstring); the read path resolves it ONCE per read and threads the
+    result, so the selection it feeds is deterministic.
     """
     named = _as_date(query_date) if query_date else None
     if named:

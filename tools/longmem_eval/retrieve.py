@@ -1030,8 +1030,11 @@ def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
     mechanism (default OFF there too).
     """
     # C6 (#2520, #2513): the query-side date anchor rides the ON path only
-    # (the off path passes NO new kwarg — byte-identical, and hermetic
+    # (the off path passes no ANCHOR kwarg — byte-identical, and hermetic
     # `tortoise_fts_query` stubs with strict signatures stay compatible).
+    # #8487: the valid-time selection is the ONE kwarg passed on BOTH paths
+    # (see `_valid_time_rerank=False` in the call below) — it is an opt-OUT, an
+    # internal test surface can only be kept honest by pinning it explicitly.
     _sdk_kwargs: dict = {}
     if time_aware:
         _sdk_kwargs["time_aware"] = True

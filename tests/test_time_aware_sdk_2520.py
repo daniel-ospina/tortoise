@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import sys
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -212,8 +213,17 @@ _PLAIN_QUERY = "production database billing ledger Postgres"
 _PRESENT_QUERY = "what production database do we use for the billing ledger now?"
 
 
-@pytest.fixture()
-def ku_graph(recording_embedder):
+#: The same claim, phrased so it OUTRANKS the current one on relevance (it
+#: carries the query's own "we use … now" words). Needed by the one test that
+#: must observe the not-yet-effective demotion: in the default fixture that
+#: claim already ranks last, so its demotion is invisible (see
+#: ``test_not_yet_effective_claim_is_not_served_as_current``).
+_FUTURE_OUTRANKING = (
+    "We use the production database now for the billing ledger: Postgres 17")
+
+
+@contextmanager
+def _ku_sdk(future_text: str = _FUTURE):
     """The knowledge-update shape: ended + current + not-yet-effective.
 
     Windows are stamped with the SAME properties the real writers write
@@ -230,7 +240,7 @@ def ku_graph(recording_embedder):
     try:
         ids = {}
         for name, text in (("ended", _ENDED), ("current", _CURRENT),
-                           ("future", _FUTURE)):
+                           ("future", future_text)):
             ids[name] = sdk.create_point("statement", text, status="live")["id"]
         g = sdk._get_proj().g
         g.query("MATCH (n:Point {id:$id}) "
@@ -251,8 +261,34 @@ def ku_graph(recording_embedder):
             os.environ.pop("TORTOISE_DB_URI", None)
 
 
-def _order(sdk, query, **kwargs) -> list[str]:
-    return [h["id"] for h in sdk.tortoise_fts_query(query, limit=10, **kwargs)]
+@pytest.fixture()
+def ku_graph(recording_embedder):
+    with _ku_sdk() as pair:
+        yield pair
+
+
+@pytest.fixture()
+def ku_graph_future_first(recording_embedder):
+    """Same shape, but the not-yet-effective claim leads relevance.
+
+    The default fixture's relevance order already ends with the future claim,
+    so no assertion about ITS position can distinguish a selection from none.
+    This variant puts it FIRST, which is the only shape in which "the future
+    claim is not served as current" is a claim the read path has to earn.
+    """
+    with _ku_sdk(_FUTURE_OUTRANKING) as pair:
+        yield pair
+
+
+def _order(sdk, query, *, limit=10, **kwargs) -> list[str]:
+    return [h["id"] for h in sdk.tortoise_fts_query(query, limit=limit,
+                                                    **kwargs)]
+
+
+def _hit(hits, pid) -> dict:
+    found = [h for h in hits if h["id"] == pid]
+    assert len(found) == 1, f"expected exactly one hit for {pid}"
+    return found[0]
 
 
 def _valid_time_entry(trace) -> dict:
@@ -279,13 +315,25 @@ def test_present_tense_query_demotes_the_ended_claim(ku_graph):
 
 
 @_DOCKER_ONLY
-def test_not_yet_effective_claim_is_not_served_as_current(ku_graph):
-    """FAIL VALUE: a 2099-dated claim ranked ahead of the current one on a
-    "what do we use NOW" question. Reachable: without the selection the
-    future claim can outrank the current one on lexical grounds."""
-    sdk, ids = ku_graph
+def test_not_yet_effective_claim_is_not_served_as_current(ku_graph_future_first):
+    """FAIL VALUE: a 2099-dated claim served ahead of the current one on a
+    "what do we use NOW" question.
+
+    Reachable, and PROVEN non-vacuous: the fixture is built so that claim
+    OUTRANKS the current one on relevance, and the OFF baseline below pins that
+    fact. Without both halves the assertion would hold on pure relevance order
+    and prove nothing (the finding the review made against the first cut of
+    this test)."""
+    sdk, ids = ku_graph_future_first
+    off = _order(sdk, _PRESENT_QUERY, _valid_time_rerank=False)
+    # The precondition the assertion needs: relevance alone puts the
+    # not-yet-effective claim FIRST, i.e. it IS served as current pre-#8487.
+    assert off.index(ids["future"]) < off.index(ids["current"]), (
+        f"fixture precondition broken: {off}")
     on = _order(sdk, _PRESENT_QUERY)
+    assert sorted(on) == sorted(off)          # membership preserved: no filter
     assert on.index(ids["current"]) < on.index(ids["future"])
+    assert on[0] == ids["current"]
 
 
 @_DOCKER_ONLY
@@ -331,11 +379,213 @@ def test_terminal_inclusion_still_gets_the_selection(ku_graph):
     """The ask lane reads with ``include_terminal=True`` by design (the reader
     discounts by marker), so terminal exclusion cannot be what orders these
     rows. FAIL VALUE: the selection skipped on that read shape. Reachable:
-    ``include_terminal=True`` is exactly the ask lane's call."""
+    ``include_terminal=True`` is exactly the ask lane's call. STRICT: ``>``, not
+    ``>=`` — a non-strict compare also passes when nothing moved."""
     sdk, ids = ku_graph
     on = _order(sdk, _PRESENT_QUERY, include_terminal=True)
     off = _order(sdk, _PRESENT_QUERY, include_terminal=True,
                  _valid_time_rerank=False)
     assert sorted(on) == sorted(off)          # still a reorder, never a filter
-    assert on.index(ids["ended"]) >= off.index(ids["ended"])
+    assert off.index(ids["ended"]) < off.index(ids["current"]), (
+        f"fixture precondition broken: {off}")
+    assert on.index(ids["ended"]) > off.index(ids["ended"])
     assert on[0] == ids["current"]
+
+
+@_DOCKER_ONLY
+def test_the_selection_runs_before_the_limit_cut(ku_graph):
+    """THE headline property (#8487): the selection happens on the
+    pre-truncation fused pool, so ``limit`` counts SELECTED candidates.
+
+    FAIL VALUE: the selection applied AFTER ``result_ids = result_ids[:limit]``
+    — the one placement the change exists for and, before this test, the one
+    placement no test could see (every other wiring test uses ``limit=10`` on a
+    3-point graph, where the cut is a no-op).
+
+    Reachable: at ``limit=1`` the pool (3 ids) exceeds the page, relevance puts
+    the ENDED claim first — so a post-cut reorder can only ever return that
+    same 1 row, while a pre-cut reorder returns the current claim.
+    """
+    sdk, ids = ku_graph
+    off = _order(sdk, _PRESENT_QUERY, limit=1, _valid_time_rerank=False)
+    assert off == [ids["ended"]], (
+        f"fixture precondition broken: relevance must lead with the ended "
+        f"claim at limit=1, got {off}")
+    on = _order(sdk, _PRESENT_QUERY, limit=1)
+    assert on == [ids["current"]], (
+        "the current claim must win the single page slot — a selection applied "
+        "after the cut cannot put it there")
+
+
+@_DOCKER_ONLY
+def test_a_failed_state_read_does_not_strip_the_page_decoration(ku_graph,
+                                                              monkeypatch):
+    """FAIL VALUE: an EMPTY state map from step 5e replayed as the page's
+    epistemic decoration (#8487 review P1).
+
+    ``fetch_point_epistemic_state`` never raises — it swallows the failure and
+    returns ``{}`` — and ``{} is not None``, so caching on ``is not None`` left
+    step 7.6 with nothing to do: every hit lost ``status`` / ``valid_from`` /
+    ``valid_to`` / ``end_state``, which means a superseded claim was rendered
+    WITHOUT its ``[SUPERSEDED BY]`` marker and window, while the audit leg
+    still recorded a clean selection.
+
+    Reachable: the first state read of the query is made to fail; the page-wide
+    read that step 7.6 falls back to is the real one.
+    """
+    sdk, ids = ku_graph
+    import tortoise.search_engine as _se
+    real = _se.fetch_point_epistemic_state
+    calls: list[int] = []
+
+    def _first_read_fails(graph, point_ids):
+        calls.append(len(point_ids))
+        return {} if len(calls) == 1 else real(graph, point_ids)
+
+    monkeypatch.setattr(_se, "fetch_point_epistemic_state", _first_read_fails)
+    trace: list[dict] = []
+    hits = sdk.tortoise_fts_query(_PRESENT_QUERY, limit=10, leg_trace=trace)
+    ended = _hit(hits, ids["ended"])
+    assert ended["status"] == "live", "the point's status decoration was lost"
+    assert ended["valid_from"] == "2021-01-01"
+    assert ended["valid_to"] == "2023-06-01", (
+        "the closed window is what renders [SUPERSEDED BY]; an empty cached map "
+        "serves the ended claim as current")
+    assert ended["end_state"] == "known"
+    assert len(calls) >= 2, (
+        "step 7.6 must fetch its own page state when 5e's map is unusable")
+    entry = _valid_time_entry(trace)
+    assert entry["degraded"] is True, (
+        "a failed validity read must not be recorded as a clean selection")
+    assert entry["reason"] == "state_read_incomplete"
+
+
+@_DOCKER_ONLY
+def test_a_topical_query_pays_no_pool_width_state_read(ku_graph, monkeypatch):
+    """FAIL VALUE: the pool-width epistemic-state read issued for a query with
+    NO temporal intent (#8487 review P2).
+
+    The intent gate lives inside ``prefer_latest_ids``, i.e. after the read, so
+    the read fired on every point/relevance read and its result was discarded.
+    The observation is the ID SET the read is asked for: the pool (3 ids) when
+    the gate runs late, the page (``limit``=2 ids) when it runs first.
+    """
+    sdk, _ = ku_graph
+    import tortoise.search_engine as _se
+    real = _se.fetch_point_epistemic_state
+    seen: list[int] = []
+
+    def _counting(graph, point_ids):
+        seen.append(len(point_ids))
+        return real(graph, point_ids)
+
+    monkeypatch.setattr(_se, "fetch_point_epistemic_state", _counting)
+    sdk.tortoise_fts_query(_PLAIN_QUERY, limit=2)
+    assert seen == [2], (
+        "a topical query must only pay the PAGE-width state read that step 7.6 "
+        f"always did; saw reads over {seen} ids")
+
+
+# ── the internal lanes that RE-OWN the order downstream (#8487 review) ─────
+#
+# The selection's *ordering* reaches only a caller that keeps it. A lane that
+# re-sorts the pool itself (StateRanker / GapsRanker / _issue_insight_rank / a
+# confidence band) discards the ordering while still inheriting its other half
+# — the pre-cut demotion, i.e. which ids survive the pool — so leaving the
+# selection on there is an unmeasured behaviour change to a product surface.
+# The eval lane's opt-out (`tools/longmem_eval/retrieve.py`) is the precedent;
+# these lanes must carry the same flag.
+
+_RE_OWNING_LANES = (
+    # (label, method name, args, kwargs)
+    ("recall_state", "recall_state", (_PLAIN_QUERY,), {}),
+    ("issue_insight", "issue_insight", ("billing ledger", "the database"), {}),
+    ("suggest_entry_points", "suggest_entry_points", ("billing ledger",), {}),
+    ("recall_gaps", "recall_gaps", (_PLAIN_QUERY,), {}),
+)
+
+
+@_DOCKER_ONLY
+def test_internal_pool_reads_opt_out_of_the_selection(sdk, monkeypatch):
+    """FAIL VALUE: a re-owned-order pool read still paying the SDK-side
+    selection (#8487 review P2).
+
+    Reachable: the product methods are called for real with the retrieval call
+    replaced by a recording stub, so the kwargs they pass are exactly the ones
+    a live call would pass. The stub returns [] — every lane tolerates an empty
+    pool, so the call reaches the retrieval site either way.
+    """
+    seen: list[tuple[str, dict]] = []
+
+    def _record(*args, **kwargs):
+        seen.append((args[0] if args else "", kwargs))
+        return []
+
+    monkeypatch.setattr(sdk, "tortoise_fts_query", _record)
+    failures = []
+    for label, method, args, kwargs in _RE_OWNING_LANES:
+        seen.clear()
+        getattr(sdk, method)(*args, **kwargs)
+        if not seen:
+            failures.append(f"{label}: never reached tortoise_fts_query")
+            continue
+        for _q, kw in seen:
+            if kw.get("_valid_time_rerank") is not False:
+                failures.append(
+                    f"{label}: pool read without _valid_time_rerank=False "
+                    f"(kwargs: {sorted(kw)})")
+    assert not failures, "\n".join(failures)
+
+
+def test_the_measurement_lanes_declare_their_valid_time_choice():
+    """FAIL VALUE: a `tools/` lane that grades retrieval ORDER silently moving
+    with the #8487 selection (or a mirror lane silently opting out and so
+    measuring a reader the product does not run).
+
+    Reachable: an AST pass over the four lanes, which asserts the DECLARED
+    choice per lane rather than a general rule — each file's reason is recorded
+    at its own call site or in its own docstring. Only `sdk.tortoise_fts_query`
+    call sites are inspected, so unrelated calls cannot satisfy it.
+    """
+    import ast
+
+    root = Path(__file__).resolve().parent.parent
+    # lane -> expected value of `_valid_time_rerank` (None = must NOT be passed)
+    expected: dict[str, bool | None] = {
+        # Re-own the order / must stay comparable to recorded numbers:
+        "tools/fusion_formula_ab.py": False,
+        "tools/ask_pool_admission_probe.py": False,
+        "tools/longmem_eval/retrieve.py": False,
+        # Mirror the ask lane: must measure/replay the shipped reader.
+        "tools/ask_recall_bench.py": None,
+        "tools/gen_ask_transcripts.py": None,
+    }
+
+    def _declared(path: Path) -> list[bool | None]:
+        tree = ast.parse(path.read_text())
+        out: list[bool | None] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            name = getattr(fn, "attr", getattr(fn, "id", ""))
+            if name != "tortoise_fts_query":
+                continue
+            kw = {k.arg: k.value for k in node.keywords if k.arg}
+            value = kw.get("_valid_time_rerank")
+            if value is None:
+                out.append(None)
+            elif isinstance(value, ast.Constant):
+                out.append(value.value)
+            else:
+                out.append("unexpected-expression")  # type: ignore[arg-type]
+        return out
+
+    problems = []
+    for rel, want in expected.items():
+        declared = _declared(root / rel)
+        assert declared, f"{rel}: no sdk.tortoise_fts_query call site found"
+        for got in declared:
+            if got != want:
+                problems.append(f"{rel}: _valid_time_rerank={got!r}, want {want!r}")
+    assert not problems, "\n".join(problems)

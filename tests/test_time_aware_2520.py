@@ -581,8 +581,11 @@ def test_selection_date_uses_the_named_date_else_today():
     assert resolve_question_date("2024-01-02T10:00:00Z") == "2024-01-02"
     assert resolve_question_date(None, today="2026-10-18") == "2026-10-18"
     assert resolve_question_date("not-a-date", today="2026-10-18") == "2026-10-18"
-    # No injection → the real UTC date (the only clock read, and it is the
-    # caller's, not the rules module's).
+    # No injection → the real UTC date. This IS a clock read, and it is the
+    # rules module's own (declared in ``time_aware``'s module docstring as one
+    # of its two exceptions to the purity claim) — which is exactly why the
+    # SDK resolves the date once per read and threads it, and why every caller
+    # that needs a fixed instant injects ``today=``.
     assert len(resolve_question_date()) == 10
 
 
