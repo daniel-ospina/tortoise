@@ -38,6 +38,7 @@ from .search_engine import (  # noqa: E402, RUF100
 )
 from .live import (  # #2490: terminal rows are never contested; #2598: the draft predicate
     epistemic_disjunction,  # #7927: traversal-position widening
+    epistemic_labels_of,  # #7927: present-label resolution (resolved ONCE per rerank)
     epistemic_sweep,  # #7927: id-anchored present-label sweep
     is_draft_status,
     is_terminal_status,
@@ -1060,13 +1061,27 @@ class GapsRanker:
         if self.projection is not None:
             ids = [r.get("id") for r in results if r.get("id")]
             try:
+                # #7927: resolve the PRESENT labels ONCE for the whole rerank.
+                # The three signal reads below are anchored on the SAME id set,
+                # so resolving inside each one paid the resolution three times
+                # — measured: 6 round-trips for a Point-only rerank where the
+                # pre-widening path took 3, three of them the byte-identical
+                # ``MATCH (n:Point) WHERE n.id IN $ids RETURN n.id``. That is
+                # the exact cost ``epistemic_labels_of`` exists to avoid, so it
+                # is paid once here and threaded down. Fail-open: a resolution
+                # error leaves ``None`` and each read re-resolves as before.
+                try:
+                    _labels = epistemic_labels_of(self.projection.g, ids)
+                except Exception as e:  # pragma: no cover — defensive
+                    logger.warning("GapsRanker label resolution failed: %s", e)
+                    _labels = None
                 # Per-signal dicts carry per-id sub-dicts — merge the FIELDS
                 # (dict.update would REPLACE the whole value for an id,
                 # dropping earlier signals).
                 for part in (
-                    self._fetch_load_signals(ids),
-                    self._fetch_support_signals(ids),
-                    self._fetch_confidence_signals(ids),
+                    self._fetch_load_signals(ids, labels=_labels),
+                    self._fetch_support_signals(ids, labels=_labels),
+                    self._fetch_confidence_signals(ids, labels=_labels),
                 ):
                     for pid, fields in part.items():
                         signals.setdefault(pid, {}).update(fields)
@@ -1170,12 +1185,17 @@ class GapsRanker:
             return float(embedded), result.get("gaps_confidence_source", "posterior")
         return NEUTRAL_CONFIDENCE, "neutral"
 
-    def _fetch_load_signals(self, ids: list[str]) -> dict[str, dict]:
+    def _fetch_load_signals(self, ids: list[str], *,
+                            labels: list[str] | None = None) -> dict[str, dict]:
         """Outgoing epistemic load: IMPL/NAND edges where the claim is the
         SOURCE — operator-mediated (idx=0) or direct to a non-operator Point.
         Operator and direct edges are counted in SEPARATE columns (chained
         OPTIONAL MATCHes cross-product; a single per-row CASE over both
-        patterns would drop one of two same-type edges — P0 fix)."""
+        patterns would drop one of two same-type edges — P0 fix).
+
+        ``labels`` is the caller's already-resolved present-label set —
+        ``GapsRanker.rerank`` resolves once and threads it through its three
+        reads, so the resolution is not paid per read."""
         if not ids:
             return {}
         rows = epistemic_sweep(
@@ -1199,6 +1219,7 @@ class GapsRanker:
             "  count(DISTINCT CASE WHEN type(r2) = 'IMPL' THEN r2 END) AS direct_load_impl, "
             "  count(DISTINCT CASE WHEN type(r2) = 'NAND' THEN r2 END) AS direct_load_nand",
             {"ids": ids},
+            labels=labels,
         )
         return {
             row[0]: {
@@ -1208,11 +1229,15 @@ class GapsRanker:
             for row in rows
         }
 
-    def _fetch_support_signals(self, ids: list[str]) -> dict[str, dict]:
+    def _fetch_support_signals(self, ids: list[str], *,
+                               labels: list[str] | None = None) -> dict[str, dict]:
         """Incoming epistemic support: IMPL edges where the claim is a TARGET
         (operator-mediated idx>=1, or direct from a non-operator Point/Event),
         plus extractedFrom→Source count. Incoming NAND is counted separately
-        (contention — never support)."""
+        (contention — never support).
+
+        ``labels`` is the caller's already-resolved present-label set — see
+        ``_fetch_load_signals``."""
         if not ids:
             return {}
         rows = epistemic_sweep(
@@ -1241,6 +1266,7 @@ class GapsRanker:
             "  count(DISTINCT r6) AS op_nand, "
             "  count(DISTINCT r7) AS direct_nand",
             {"ids": ids},
+            labels=labels,
         )
         return {
             row[0]: {
@@ -1253,8 +1279,12 @@ class GapsRanker:
             for row in rows
         }
 
-    def _fetch_confidence_signals(self, ids: list[str]) -> dict[str, dict]:
-        """EP posterior mean + contested — same read as StateRanker."""
+    def _fetch_confidence_signals(self, ids: list[str], *,
+                                  labels: list[str] | None = None) -> dict[str, dict]:
+        """EP posterior mean + contested — same read as StateRanker.
+
+        ``labels`` is the caller's already-resolved present-label set — see
+        ``_fetch_load_signals``."""
         if not ids:
             return {}
         rows = epistemic_sweep(
@@ -1266,6 +1296,7 @@ class GapsRanker:
             f"  {ep_measured_cypher('n')} AS has_ep, "
             "  n.status, coalesce(n.outdated, false)",
             {"ids": ids},
+            labels=labels,
         )
         out = {}
         for row in rows:

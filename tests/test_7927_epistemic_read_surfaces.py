@@ -175,6 +175,30 @@ def test_ranker_read_costs_one_anchored_query_for_point_ids(sdk):
     assert len(counter.queries) == 2, counter.queries
 
 
+def test_gaps_rerank_resolves_labels_once_for_all_three_sweeps(sdk):
+    """The #395 latency contract is about the WHOLE rerank, not one sweep.
+
+    ``GapsRanker.rerank`` issues three id-anchored sweeps over the SAME id set,
+    so resolving the present labels inside each one paid the resolution three
+    times — measured: 6 round-trips for a Point-only rerank where the
+    pre-widening path took 3, three of them the byte-identical
+    ``MATCH (n:Point) WHERE n.id IN $ids RETURN n.id``.
+
+    ONE resolution (1) + three anchored reads (3) = 4. Pinned as a TOTAL,
+    because a per-sweep assertion structurally cannot see the multiplication
+    this test exists to catch.
+    """
+    p = _point(sdk)
+    counter = _CountingProjection(sdk._get_proj())
+    GapsRanker(projection=counter).rerank([{"id": p, "content": "a claim"}])
+    resolutions = [q for q in counter.queries
+                   if q.strip().endswith("WHERE n.id IN $ids RETURN n.id")]
+    assert len(resolutions) == 1, (
+        f"the present-label resolution ran {len(resolutions)} times for one "
+        f"rerank: {resolutions}")
+    assert len(counter.queries) == 4, counter.queries
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # 1. BFS subgraph selection — analyze._bfs_select_operators
 # ═══════════════════════════════════════════════════════════════════════
@@ -221,13 +245,52 @@ def test_bfs_walks_direct_edge_touching_non_point_endpoints(sdk, label):
 def test_bfs_draft_filter_sees_a_draft_non_point_anchor(sdk):
     """The live-only draft probe is id-anchored — a draft :Subject anchor must
     be excluded exactly like a draft Point anchor (otherwise the filter is a
-    silent no-op for the three labels it cannot see)."""
+    silent no-op for the three labels it cannot see).
+
+    CARRIES ITS OWN CONTRAST, deliberately. ``assert ops == set()`` ALONE IS
+    VACUOUS — it holds in all three states, so it pins nothing:
+
+    * on the pre-widening code every leg is ``:Point``-anchored, so the
+      ``:Subject`` anchor reaches no row at all;
+    * with the probe REVERTED it is empty again for a second reason —
+      ``_derived_live_operators`` needs >= 2 LIVE connected points and counts a
+      draft neighbour as 0, so the operator is EP-inert;
+    * as shipped, empty for both reasons.
+
+    Two re-assertions supply the contrast: a LIVE ``:Subject`` anchor with the
+    same fixture must SELECT the operator (that is what fails on the
+    pre-widening code, and what makes an empty set mean "excluded AS DRAFT"),
+    and the probe must actually LOOK at the anchor's own label, read off the
+    issued Cypher — an exclusion produced by never asking cannot be told apart
+    from one the filter produced.
+
+    ``include_draft=True`` is deliberately NOT asserted: derived-liveness
+    ignores the draft escape hatch by design, so a draft-anchored operator
+    stays EP-inert even with drafts admitted. The label sweep is the only
+    honest discriminator.
+    """
+    # Live control: the identical fixture, live, must be selectable.
+    p_live = _point(sdk, "live control claim")
+    n_live = _node(sdk, "Subject", "live-anchor", status="live")
+    sdk.create_operator("IMPL", p_live, [n_live])
+    live_ops, _ = _bfs_select_operators(sdk._get_proj(), [n_live], max_hops=1)
+    assert live_ops, ("the live control itself is unreachable — the assertion "
+                      "below would be vacuous")
+
+    # Draft form: the probe must SEE a draft :Subject (it sweeps the labels
+    # present in the anchor set) and the anchor must be excluded.
     p = _point(sdk)
     n = _node(sdk, "Subject", "draft-anchor", status="draft")
     sdk.create_operator("IMPL", p, [n])
 
-    ops, _ = _bfs_select_operators(sdk._get_proj(), [n], max_hops=1)
+    counter = _CountingProjection(sdk._get_proj())
+    ops, _ = _bfs_select_operators(counter, [n], max_hops=1)
     assert ops == set(), "a draft :Subject anchor was treated as live"
+    probe = [q for q in counter.queries
+             if "n.status = 'draft'" in q and "n.id IN $ids" in q]
+    assert any("(n:Subject)" in q for q in probe), (
+        "the draft probe never looked at the anchor's own label — the "
+        f"exclusion came from not asking, not from the filter: {probe!r}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -603,3 +666,33 @@ def test_audit_records_its_split_scope_in_reachable_code():
     assert "STAYS ``:Point``-ONLY" in src
     assert "WIDENED (#7927)" in src
     assert "false positive" in src and "false CLEAN" in src
+
+
+def test_why_layer_records_its_residual_where_it_will_be_edited():
+    """The why layer is STILL ``:Point``-only, deliberately — and the note has
+    to live where the next widening will actually be attempted, or it reads as
+    an accident of history and gets "harmonized" one query at a time.
+
+    ``audit.py`` got exactly this treatment (a decision block inside
+    ``audit_graph``'s body plus the pin above); the divergence-side surface is
+    the one MORE likely to be half-widened, because ``ranking`` was widened and
+    ``why`` was not. The pin names the two facts a partial fix would miss: that
+    the scope is deliberate, and that ``_EP_CYPHER`` is the EXISTENCE ANCHOR, so
+    widening a dependent read alone is a no-op.
+    """
+    import tortoise.why as why_mod
+    src = inspect.getsource(why_mod)
+    marker = src.index("#7927 RESIDUAL")
+    conflicts = src.index("_CONFLICTS_CYPHER = (")
+    assert marker < conflicts, "the residual note must sit above the query it governs"
+    region = src[marker:conflicts]
+    assert "DELIBERATE" in region
+    assert "_EP_CYPHER" in region, (
+        "the note must name the existence anchor — without it a reader widens "
+        "the conflict read, sees no change, and widens more")
+    # And the narrow scope the note describes must still be true, or the note
+    # is stale prose claiming a residual that no longer exists.
+    assert src.count("MATCH (n:Point) WHERE n.id IN $ids") >= 5, (
+        "the why layer now has fewer Point-anchored reads than the note "
+        "describes — either it was widened (update the note and this pin) or "
+        "a read was dropped")

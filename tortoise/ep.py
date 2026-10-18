@@ -1831,17 +1831,32 @@ class TortoiseEP:
         # ``= false`` drops every non-Point belief by NULL rather than by the
         # predicate it states.
         #
-        # PER-LABEL MEASURED GATE (review, P1). The "unmeasured live claim MUST
-        # list" rule (the :169 pin) is the CLAIM rule and stays exactly as it
-        # was for ``:Point``. Entity labels are different: ``create_entity``
-        # rejects belief props, so an entity has NO persisted prior unless EP
-        # measured it through a factor, and its Beta(1,1) fallback sits at the
-        # MAXIMUM possible variance (1/12 = 0.0833). Listing those would make
-        # every Subject/Object/Event on the graph permanently "contested" at
-        # the top of the ordering — the report would stop discriminating — and
-        # nothing would ever measure them (`_stale_first_claims` and
-        # ``_affected_claims`` reach claims, not structurally-only entities).
-        # So an entity lists only once EP has ACTUALLY measured it.
+        # PER-LABEL PERSISTED-POSTERIOR GATE (review round 1; rationale
+        # CORRECTED in round 2 — re-measure before trusting any sentence here).
+        # The "unmeasured live claim MUST list" rule (the :169 pin) is the CLAIM
+        # rule and stays exactly as it was for ``:Point``. Entity labels differ
+        # in ONE respect: ``create_entity`` rejects belief props, so a
+        # STRUCTURALLY-ONLY entity has no persisted prior at all and its
+        # Beta(1,1) fallback sits at the MAXIMUM possible variance
+        # (1/12 = 0.0833) — every such node on the graph would list, forever, at
+        # the top of a variance-descending report. So an entity lists only once
+        # SOME posterior was persisted on it.
+        #
+        # WHAT THIS GATE IS, STATED BECAUSE AN EARLIER VERSION OF THIS COMMENT
+        # OVERCLAIMED IT: it separates "wired into at least one factor" from
+        # "structurally orphaned" — NOT "informative" from "uninformative".
+        # The claim that "nothing would ever measure them" is FALSE since #7902
+        # widened ``_affected_claims``/``_affected_factors`` to resolve a seed's
+        # label and expand a non-Point seed (this PR's own
+        # ``test_7902_write_path_label_widening`` asserts it). A
+        # measured-but-evidence-free entity reaches a SYMMETRIC posterior
+        # (α=β, measured 1.26/1.26 → variance 0.071), which is over the 0.04 bar
+        # and DOES list — consistent with every other surface, which reads such
+        # a node as measured-with-a-wide-posterior rather than unmeasured.
+        # Narrowing further would mean gating on posterior ASYMMETRY or on a
+        # persisted measurement marker: a semantic change to this report's
+        # contract that would silently reclassify ``:Point`` rows too, so it is
+        # deliberately NOT taken inside a read-widening change.
         #
         # RECORDED ENTITY DIVERGENCES (so the "agreement" claimed above is not
         # read as covering them). A MEASURED :Subject/:Object/:Event belief
