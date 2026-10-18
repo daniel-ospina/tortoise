@@ -31,17 +31,31 @@ URL = "https://example.test/8870-version-anchor"
 
 
 def _live_proj() -> FalkorProjection:
-    """A per-test graph on the live (server) engine — never the embedded one."""
-    if not _live_utils.legacy_reachable():
+    """A per-test graph on the live (server) engine — never the embedded one.
+
+    Targets the PASSWORDED docker test lane (`docker_uri`, 6379), NOT
+    `legacy_uri`: the legacy default resolves to the canonical fleet store, and
+    minting a graph there is exactly what the #7357 guard exists to stop — it
+    holds ~374 graphs against FalkorDB's default `CACHE_SIZE=25`, so one more
+    test graph raises the eviction churn that aborts fleet writes with `graph
+    was deleted or replaced`. The `test_projection.py::live_proj` fixture still
+    uses the legacy default; that pre-existing divergence belongs on #7357, not
+    here.
+    """
+    # Gate on the engine we are ABOUT to use, not on a fixed port: a lane may
+    # point `TORTOISE_DB_URI` at a private container (tools/test_lane.py, #5084)
+    # while the legacy port is closed, and skipping there told the operator to
+    # "start a live FalkorDB" that was in fact up and addressed (#8870 review).
+    uri = os.environ.get("TORTOISE_DB_URI")
+    if not uri and not _live_utils.docker_reachable():
         pytest.skip(
             "#8870: this pin NEEDS the server engine — the embedded one does "
             "not apply SET items left-to-right, so it cannot observe the "
             "write-order defect at all. Start the live FalkorDB to run it."
         )
-    uri = os.environ.get("TORTOISE_DB_URI") or _live_utils.legacy_uri(
-        "tortoise_test_8870")
     proj = FalkorProjection.from_uri(
-        uri, graph_name=f"test_8870_{os.urandom(4).hex()}")
+        uri or _live_utils.docker_uri("tortoise_test_8870"),
+        graph_name=f"test_8870_{os.urandom(4).hex()}")
     proj.g.query("MATCH (n) DETACH DELETE n")
     return proj
 
@@ -49,12 +63,13 @@ def _live_proj() -> FalkorProjection:
 def _props(proj: FalkorProjection, url: str) -> dict:
     rows = proj.g.query(
         f"MATCH (s:Source {{url:'{url}'}}) "
-        "RETURN s.contentHash, s.version, s.title, s.updatedAt, s.validFrom"
+        "RETURN s.contentHash, s.version, s.title, s.updatedAt, s.validFrom, "
+        "       s._searchText"
     ).result_set
     assert rows, f"no :Source at {url}"
     return dict(zip(
-        ("contentHash", "version", "title", "updatedAt", "validFrom"), rows[0],
-        strict=False))
+        ("contentHash", "version", "title", "updatedAt", "validFrom",
+         "_searchText"), rows[0], strict=False))
 
 
 def test_the_connector_writer_advances_the_ordinal_on_the_server_engine():
@@ -84,12 +99,14 @@ def test_the_connector_writer_advances_the_ordinal_on_the_server_engine():
 
 def test_upsert_source_advances_every_guarded_field_on_the_server_engine():
     """`_upsert_source`'s ON MATCH: EVERY field guarded on the hash diff must
-    move with it — the ordinal, the title, and both recorded instants.
+    move with it — the ordinal, the title, both recorded instants, and
+    `_searchText`.
 
     FAILS IF `s.contentHash` is written anywhere before the fields that test it:
     the hash lands, each guard reads "unchanged", and the whole version-anchor
-    block is skipped while the hash silently moves on. The `_searchText` field
-    shares that guard and is covered by the same clause.
+    block is skipped while the hash silently moves on. `_searchText` is the LAST
+    guard in the clause and therefore the one a partial re-ordering leaves
+    behind, which is why it gets its own assertion rather than a mention.
     """
     proj = _live_proj()
     v1 = {
@@ -116,3 +133,10 @@ def test_upsert_source_advances_every_guarded_field_on_the_server_engine():
         "updatedAt must move with the hash")
     assert second["validFrom"] == "2026-02-02T00:00:00Z", (
         "validFrom must move with the hash")
+    # `_searchText` is the LAST hash guard in the clause, so a partial
+    # re-ordering that moves the hash write to just before it leaves this one
+    # guard poisoned while every other assertion above still passes (#8870
+    # review). `$st` derives from the title, so v2 must read `title-v2`.
+    assert second["_searchText"] == "title-v2", (
+        f"_searchText must move with the hash and derive from the NEW title, "
+        f"got {second['_searchText']!r}")

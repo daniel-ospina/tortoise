@@ -5101,10 +5101,12 @@ durations:
   test_sdk_rename_table.py: 6.1
   test_sdk_surface.py: 2.0
   test_connector_source_version_5214.py: 20.0  # #5214: 13 tests; embedded lane (like test_connector_sources.py). Local wall time ~135s of which ~110s is the ONE-OFF embedding-model load on a cold cache (this machine cannot fetch it — the hermetic egress guard blocks HF), so ~20s is the steady-state figure; locally measured, not a junit sweep
-  # #8870: unmeasured — local wall reading on the live (server) FalkorDB lane,
-  # not a junit sweep. 2 tests, ~135s on a cold embedding cache (~70s steady
-  # state); carries forward the #4602/#5275 shape until the next sweep has a row.
-  test_8870_version_anchor_write_order.py: 70.0
+  # #8870: measured on this host, not a junit sweep — 129.6 s wall of which
+  # ~117 s is the SAME one-off HF model-load attempt the sibling row above
+  # excludes (the hermetic egress guard blocks it), so the steady-state figure
+  # is 12.5 s (measured with HF_HUB_OFFLINE=1: 12.46 s). Carries the #4602/#5275
+  # shape: a real local reading, to be replaced by the first sweep with a row.
+  test_8870_version_anchor_write_order.py: 12.5
   test_connector_sources.py: 1.7
   test_e2e9_point_in_time.py: 2.6
   test_file_human_approval.py: 2.4
