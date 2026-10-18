@@ -336,6 +336,14 @@ class TestPaginatedQuery:
 class TestGetPoint:
     def test_existing(self, sdk):
         p = _make_point(sdk)
+        # #8171: the claim door reports a WRITE-TIME advisory ("a claim created
+        # with no source") on a COPY of the snapshot, and the journaled point
+        # plus every later `get_point` are deliberately free of it — see the
+        # ADVISORY ONLY note on `create_point`. Pin both halves: the advisory
+        # reached THIS writer, and it did not leak into what was stored.
+        adv = p.pop("advisories")
+        assert [a["code"] for a in adv] == ["no_source"]
+        assert adv[0]["node_id"] == p["id"], "advisory not about THIS node"
         assert sdk.get_point(p["id"]) == p
 
     def test_nonexistent(self, sdk):
