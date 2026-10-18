@@ -264,14 +264,17 @@ def mask_embedder():
 # adding a dump step is a workflow change (#8746 review r3 P2).
 GRAPH_DELETE_EVENTS: list[dict[str, object]] = []
 
-# The MINT SHAPE this tree actually produces: a per-run graph is
-# ``f"test_…_{os.urandom(4).hex()}"``, so the name ends in ``_<8 lowercase
-# hex>``. The prefix family is NOT sufficient on its own — it also contains
-# SHARED, fixed-name fixture graphs (``tortoise_test_integration_search``,
+# The MINT SHAPE this tree produces: a per-run graph name ends in a random hex
+# suffix, minted as ``f"test_…_{os.urandom(4).hex()}"`` (8) — or, at the site
+# #8936 adopts next, ``f"test_subj1423_{uuid.uuid4().hex[:10]}"`` (10). So the
+# floor is 8 hex characters, not exactly 8: the width is a CHOICE (wide enough
+# that no fixed spelling reaches it), not a measurement of every mint. The
+# prefix family is NOT sufficient on its own — it also contains SHARED,
+# fixed-name fixture graphs (``tortoise_test_integration_search``,
 # ``tortoise_test_fts125``, ``tortoise_test_3301``, ``tortoise_test_proj125``),
 # and those belong to the whole job or to another suite. See the third arm in
 # `drop_test_graph`.
-_PER_RUN_GRAPH_NAME_RE = re.compile(r"^[a-z0-9_]*_[0-9a-f]{8}$")
+_PER_RUN_GRAPH_NAME_RE = re.compile(r"^[a-z0-9_]*_[0-9a-f]{8,}$")
 
 
 def graph_delete_events() -> list[dict[str, object]]:
@@ -352,7 +355,8 @@ def drop_test_graph(proj, *, name: str | None = None) -> bool:
        (``tests/_embedded.py::_wipe_or``'s ``scope.discard(default)``,
        ``wipe_server``'s per-test ``g == default_graph`` arm); only the
        session-end sweep owns it;
-    3. the per-run MINT SHAPE (``_PER_RUN_GRAPH_NAME_RE``). Arm 2 alone was
+    3. the per-run MINT SHAPE (``_PER_RUN_GRAPH_NAME_RE``: a ``_<8+ lowercase
+       hex>`` suffix). Arm 2 alone was
        inert on the URI-less lane — ``_uri_default_graph_name()`` returns
        ``None`` when ``TORTOISE_DB_URI`` is unset, and ``live_proj`` runs there
        too (it skips on a TCP probe, not on the URI) — while the family also
@@ -361,13 +365,16 @@ def drop_test_graph(proj, *, name: str | None = None) -> bool:
        ``tortoise_test_3301``, …), none of them per-run. A fixed/shared name is
        now REFUSED AND RECORDED rather than deleted; the cost is an observable
        non-delete, the alternative is an irreversible delete of another suite's
-       graph.
+       graph. The width floor is 8, not exactly 8: this tree mints 8
+       (``os.urandom(4).hex()``) and 10 (``uuid4().hex[:10]``) hex characters,
+       and the arm must not refuse a mint it was written to protect — a refusal
+       here is a silent leak, the defect #8746 exists to remove.
 
     Residual, stated honestly: the shape arm has no PROVENANCE. It admits any
-    family name ending in ``_<8 lowercase hex>``, so it cannot tell this run's
+    family name ending in ``_<8+ lowercase hex>``, so it cannot tell this run's
     mint from another run's — it only excludes the fixed/shared spellings. The
-    real callers are what make it exact: every one in this tree mints
-    ``f"test_…_{os.urandom(4).hex()}"`` and passes THAT name (see
+    real callers are what make it exact: every one in this tree mints a random
+    hex suffix and passes THAT name (see
     ``tests/test_projection.py::live_proj`` — ``test_proj125_<8 hex>`` is a
     minted per-run name, not a shared one — and
     ``test_add_document_journals_the_anchor_and_replays_identically``).
@@ -383,9 +390,9 @@ def drop_test_graph(proj, *, name: str | None = None) -> bool:
         reason = ("the SHARED URI-default graph — the whole job writes to it; "
                   "only the session-end sweep may drop it")
     elif not _PER_RUN_GRAPH_NAME_RE.match(gname):
-        reason = ("not a per-run mint shape (_<8 hex>) — the family also holds "
-                  "SHARED fixed-name fixture graphs, and this helper may delete "
-                  "only the graph its own run minted")
+        reason = ("not a per-run mint shape (_<8+ hex> suffix) — the family "
+                  "also holds SHARED fixed-name fixture graphs, and this helper "
+                  "may delete only the graph its own run minted")
     if reason is not None:
         logger.warning(
             "[#8746] refusing to GRAPH.DELETE %r — %s; left untouched",

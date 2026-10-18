@@ -2164,8 +2164,10 @@ def test_drop_test_graph_refuses_the_shared_uri_default_graph(monkeypatch):
     The URI-DEFAULT arm is lane-gated by construction (``_uri_default_graph_name()``
     answers ``None`` with no URI set), and ``live_proj`` runs on the URI-LESS
     lane too — it skips on a TCP probe, not on the URI. So the class is closed
-    by the MINT-SHAPE arm instead: a family name that is not ``…_<8 hex>`` is
-    refused whether or not a URI is set. The last block asserts that directly.
+    by the MINT-SHAPE arm instead: a family name that is not ``…_<8+ hex>`` is
+    refused whether or not a URI is set. The last block asserts that directly —
+    and pins the WIDTH as a floor, since a mint that is one character wider
+    must still be deleted (a refusal is a silent leak).
     """
     # #6673: build the URI through tests/_live_utils — the docker lane's
     # service port is EPHEMERAL, so a hand-written :6379 would prove the arm
@@ -2201,6 +2203,15 @@ def test_drop_test_graph_refuses_the_shared_uri_default_graph(monkeypatch):
         assert fresh.db.calls, (
             "a per-run name was refused on the URI-less lane too — the shape "
             "arm is over-broad and the shared-graph refusal above is vacuous")
+        # The width is a FLOOR, not the 8 this file happens to mint: the site
+        # tortoise#8936 adopts next mints TEN hex (`uuid4().hex[:10]`), and a
+        # refusal there would be a silent leak — the exact defect #8746 exists
+        # to remove. Pinned here so narrowing the width reds a test.
+        wide = _FakeProj("test_subj1423_0123456789")
+        assert _live_utils.drop_test_graph(wide) is False
+        assert wide.db.calls, (
+            "a 10-hex mint was refused by the shape arm — the width floor is "
+            "too narrow for the mints this tree produces")
     finally:
         _live_utils._restore_graph_delete_events(snapshot)
 
