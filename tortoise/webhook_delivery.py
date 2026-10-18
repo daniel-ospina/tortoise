@@ -794,23 +794,25 @@ def event_head_seq(graph) -> int:
     needs the repair story must measure the counter node:
 
     * ``next_seq`` REFUSES a non-number, a ``bool``, a negative counter and one
-      at/above ``MAX_SEQ`` (which ``_as_seq`` below accepts deliberately) and
+      at/above ``event_store.MAX_SEQ`` (which ``_as_seq`` below accepts deliberately) and
       leaves it unchanged — a negative or exhausted counter fails its
       ``prev >= 0 AND prev < $max`` grant test — so a graph holding one stops
       emitting until someone repairs the node. Only a non-integral float is
       BUMPED (``2.9`` → ``3.9``, re-issuing a seq an existing ``:GraphEvent``
       already holds — the #4653 class; the ``int()`` coercion below is recorded
       on #9059).
-    * a rebuild's behaviour is a THIRD thing, neither repair nor refusal. Its
-      pre-wipe ``capture_watermark`` reads through ``int()``, so a numeric string
-      or a ``bool`` is COERCED (``'5'`` → ``5``, ``True`` → ``1``) and the
-      rebuild proceeds — and a ``True`` counter comes back as a TRUSTED ``1`` on
-      a graph that had already issued seqs 1..3, so the next emit RE-ISSUES an
-      already-issued seq (the #4653 class). Note the compared quantity:
-      ``:GraphEvent`` rows are not replayed after a rebuild (#4664), so that ``1``
-      is below the seqs the graph HAD issued, not below any surviving row. A
-      non-numeric string or an out-of-domain counter makes that read RAISE, so the
-      rebuild aborts and the counter is left untouched.
+    * a rebuild is NOT a repair path — it does both, by branch. Its pre-wipe
+      ``capture_watermark`` reads through ``int()``, so a numeric string or a
+      ``bool`` is COERCED (``'5'`` → ``5``, ``True`` → ``1``) and the rebuild
+      proceeds, which does not make the counter trustworthy: a ``True`` counter
+      comes back as a TRUSTED ``1`` on a graph that had already issued seqs 1..3,
+      so the next emit RE-ISSUES an already-issued seq (the #4653 class). Note the
+      compared quantity: ``:GraphEvent`` rows are not replayed after a rebuild
+      (#4664), so that ``1`` is below the seqs the graph HAD issued, not below any
+      surviving row. And a non-numeric string or an out-of-domain counter makes
+      that read RAISE, so the rebuild REFUSES: it aborts BEFORE the wipe and the
+      counter is left untouched — the one outcome ``next_seq`` also gives, but
+      reached by aborting a whole rebuild rather than by declining one seq.
 
     ⛔ THE ONE CASE THIS FIX'S OVER-ADMISSION IS NOT A CHEAP NO-OP. Every
     unbounded admission ``_BEHIND_PREDICATE`` enumerates costs one SDK open and
