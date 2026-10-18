@@ -115,7 +115,13 @@ def _set_lists(statement: str):
     two arms of a ``MERGE … ON CREATE SET … ON MATCH SET …`` are checked
     SEPARATELY — an ``ON CREATE`` arm may legitimately write ``contentHash``
     with no reader in front of it (nothing exists to read).
+
+    Quoted spans are blanked FIRST: a clause keyword inside a string literal
+    (``s.n = 'see MATCH here'``) would otherwise truncate the body and leave
+    everything after it unscanned — a string-literal hole in the boundary scan
+    even though the read scan already strips literals.
     """
+    statement = _strip_literals(statement)
     for opened in _SET_OPEN.finditer(statement):
         start = opened.end()
         ends = [closer.start() for closer in _SET_CLOSE.finditer(statement, start)]
@@ -177,9 +183,11 @@ def _order_violations(statement: str) -> list[str]:
 #: a comparison inside another item's CASE (``s.x = ''``, ``s.x <> $v``) is never
 #: mistaken for an assignment.
 _ITEM_ASSIGN = re.compile(r"\s*s\.(\w+)\s*=(?!=)")
-#: A map update — ``SET s = s {.*, title: $t}`` — assigns EVERY property, so it
-#: must be recorded as such or every later read of any property is missed.
-_ITEM_MAP_ASSIGN = re.compile(r"\s*s\s*=\s*s\s*\{")
+#: A map update — ``SET s = s {.*, title: $t}``, or the parameter form
+#: ``SET s += $props`` this repo also uses (`sdk.py`, `commit_ops.py`) — assigns
+#: properties the item never names, so it must be recorded as a wildcard or every
+#: later read of any property is missed.
+_ITEM_MAP_ASSIGN = re.compile(r"\s*s\s*(?:=|\+=)\s*(?:s\s*\{|\$|\{)")
 #: Quoted spans, stripped before the read scan: a property name inside a string
 #: literal (``s.b = 's.a'``) is text, not a read.
 _STR_LIT = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
@@ -216,10 +224,6 @@ def _same_clause_violations(
         for i, (_s, _e, raw) in enumerate(items):
             text = _strip_literals(raw)
             assign = _ITEM_ASSIGN.match(text)
-            if _ITEM_MAP_ASSIGN.match(text):
-                # `s = s {.*, title: $t}` writes every property, so any later
-                # read of any `s.<p>` is a read-after-write.
-                wildcard = i if wildcard is None else wildcard
             for read in re.finditer(r"\bs\.(\w+)\b", text):
                 prop = read.group(1)
                 if only is not None and prop != only:
@@ -240,6 +244,12 @@ def _same_clause_violations(
                 break
             if assign:
                 written.setdefault(assign.group(1), i)
+            if _ITEM_MAP_ASSIGN.match(text):
+                # Recorded AFTER the read scan: the item's own right-hand side
+                # may legitimately read a property it is about to write, and the
+                # wildcard must not make that item look like it reads its own
+                # output.
+                wildcard = i if wildcard is None else wildcard
     return violations
 
 
@@ -556,3 +566,40 @@ def test_the_detector_ignores_a_property_name_inside_a_string_literal():
     assert len(_same_clause_violations(
         "MERGE (s:Source {url:$u}) SET s.a = 1, s.b = 'x', s.c = s.a"
     )) == 1
+
+
+def test_the_detector_scans_past_a_clause_keyword_inside_a_string_literal():
+    """A literal must not truncate the SET list before the real violation.
+
+    `_set_lists` located clause boundaries on the RAW statement, so a keyword
+    inside a string (`'see MATCH here'`) ended the body early and everything
+    after it went unscanned — the string-literal hole, half-closed.
+    """
+    violations = _same_clause_violations(
+        "MERGE (s:Source {url:$u}) SET s.n = 'see MATCH here', s.a = 1, s.b = s.a"
+    )
+    assert len(violations) == 1, violations
+
+
+def test_the_detector_does_not_flag_a_map_update_reading_its_own_input():
+    """`SET s = s {.*, title: coalesce($t, s.title)}` reads what it is writing.
+
+    The wildcard was recorded before the item's own read scan, so the item looked
+    like it read its own output — a false positive against the detector's own
+    documented rule.
+    """
+    assert _same_clause_violations(
+        "MERGE (s:Source {url:$u}) SET s = s {.*, title: coalesce($t, s.title)}"
+    ) == []
+
+
+def test_the_detector_treats_the_parameter_map_form_as_writing_everything():
+    """`SET s += $props` (used in `sdk.py` / `commit_ops.py`) writes every property.
+
+    Only the `s = s {` form was recognised, so the parameter form was invisible
+    and a later read of a property it wrote passed clean.
+    """
+    violations = _same_clause_violations(
+        "MATCH (s:Source {url:$u}) SET s.a = 1, s += $props, s.c = s.b"
+    )
+    assert len(violations) == 1, violations
