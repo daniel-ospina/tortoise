@@ -53,20 +53,33 @@ warns when a claude registration would make the reflex fire twice per turn.
 |---|---------|-----------|--------------------|-----------------|---------------|
 | #2126 | Claude Code / Desktop | `UserPromptSubmit` | `.claude/settings.json` `hooks` | `hookSpecificOutput.additionalContext` | shipped (`install claude`); MCP priming in `mcp_server.py` |
 | #2123 | Codex | `UserPromptSubmit` | `<repo>/.codex/hooks.json` (also `~/.codex/hooks.json`) | `hookSpecificOutput.additionalContext` (stdin JSON has `prompt`) | shipped (`install codex`) |
-| #2124* | Cline | `UserPromptSubmit` | `.cline/hooks/UserPromptSubmit` (project) or `~/.cline/hooks` (global; enable Hooks in settings) | `contextModification.context` | shipped (`install cline`) |
+| #2124* | Cline | `UserPromptSubmit` | `.cline/hooks/UserPromptSubmit` (project) or `~/.cline/hooks` (global; enable Hooks in settings) | `contextModification.context` | shipped (`install cline`) — but the contract can no longer be re-verified from Cline's docs (2026-10-18: the Hooks page is a stub, and the SDK-plugin hook list has no `UserPromptSubmit`); graded by our tests only, delivery unverified — see the correction log |
 | #2124* | Devin | `UserPromptSubmit` | `.devin/hooks.v1.json` (also `~/.config/devin/config.json` `hooks`) | `hookSpecificOutput.additionalContext` | shipped (`install devin`); primary docs re-fetched 2026-10-11 — file IS the hooks object (no `"hooks"` wrapper), stdin carries `prompt`; `matcher` omitted (tool-events only) |
 | #2119 | Pi (pi-coding-agent) | session lifecycle only (no per-turn prompt hook in the extension API today) | `~/.pi/agent/extensions/` TS extension | n/a — per-turn injection not reachable via extension API | MCP pull + session-start digest (existing) + documented limitation |
 | #2122 | Cursor | `sessionStart` → `additional_context`; per-turn `beforeSubmitPrompt` is observe/block ONLY | `~/.cursor/hooks.json` (flat script entries, absolute command; project `.cursor/hooks.json` is workspace-trust-gated) | `{"additional_context": …}` (snake_case) on `sessionStart` | **shipped** — `tortoise install cursor` registers the `sessionStart` cold-context hook (contract v4) *plus* the `sessionEnd` capture hook; per-turn push stays Cursor-blocked (watch item) |
 | #2120 | OpenClaw | **native plugin** — per-turn hook `before_prompt_build` → `{prependContext}` (in-process; OpenClaw has NO shell-hook surface) | `~/.openclaw/extensions/tortoise/` (plugin dir; `openclaw.plugin.json` + entry `index.mjs`) → `before_prompt_build`; capture via the `llm_output` hook → `$OPENCLAW_STATE_DIR/tortoise/turns/<session>.jsonl` (one file per session) → `tortoise sessions import --harness openclaw <file>` | `PluginHookBeforePromptBuildResult.prependContext` | **shipped** — `tortoise install openclaw` writes the plugin + `plugins.entries.tortoise.enabled`; injection graded by `tortoise/openclaw-plugin/index.test.mjs`, install by `tests/test_openclaw_seam.py` |
 | #2121 | Hermes | `pre_llm_call` (directory plugin: `register(ctx)` + `ctx.register_hook`) | `<dir>/.hermes/plugins/tortoise-volunteer/` (`plugin.yaml` + `__init__.py`, written by `tortoise install hermes`) | the callback RETURNS `{"context": "<block>"}`, injected into the current turn's user message | written by `install hermes`, but **INERT until two opt-ins** (`HERMES_ENABLE_PROJECT_PLUGINS=1` + `hermes plugins enable tortoise-volunteer`) — the installer prints both; ingestion: `tortoise sessions import --harness hermes --file <state.db>` (reads `$HERMES_HOME/state.db` read-only) |
-| #2124* | Gemini CLI / OpenCode / other Claude-hooks-compatibles | `UserPromptSubmit`/equivalent | harness-specific | harness-specific | shared script's default emits the bare block (harmless where unsupported) |
+| #2124* | Gemini CLI | **`BeforeAgent`** ("after user submits prompt, before planning") — the model hook `BeforeModel`/`llm_request` also exists, but it fires per LLM CALL | `.gemini/settings.json` (project) > `~/.gemini/settings.json` (user) > `/etc/gemini-cli/settings.json` (system) > extensions, under `hooks` — the SAME matcher-group shape codex/claude/devin use; `timeout` is MILLISECONDS (default 60000) | `hookSpecificOutput.additionalContext` (the Claude field) | **NOT built — demand-gated.** A thin registration, not an unbuilt adapter (re-measured 2026-10-18 — see the correction log); `tortoise install gemini` does not exist yet |
+| #2124* | OpenCode | plugin `chat.message` (`output.parts` → append a Part) / `experimental.chat.system.transform` (`output.system`) | `.opencode/plugins/*.ts` (project) or `~/.config/opencode/plugins/` (global) — a TS plugin module like OpenClaw's, NOT a shell registration | none published in prose; the hook exists in the published TYPE definitions | **NOT built — demand-gated.** `chat.message` is absent from OpenCode's docs hook list and present in `@opencode-ai/plugin@1.19.3` types (measured 2026-10-18) |
 | #2125 | Frameworks (SDK-level middleware: Google ADK / LangGraph / Semantic Kernel) | ADK `before_model_callback`; LangGraph pre-model node; SK Prompt Render Filter | project code imports `tortoise/framework.py` and registers the returned hook | the reflex `block` appended to the prompt (ADK: request instructions; LangGraph: one appended message; SK: `rendered_prompt` prefix) | shipped, **opt-in** — `tortoise/framework.py` + the `#2125` seam grade |
 
-\* #2124 (harness adapters) is demand-gated per the issue — shared script
-coverage + the per-harness READ registration land first (codex / claude /
-cline / devin shipped); session-store PARSERS for the newly-added harnesses
-and the remaining registration files (gemini, opencode) follow demand. Do not
-build a speculative parser for a platform with unproven distribution.
+\* #2124 (harness adapters) is **demand-gated by a recorded decision on the
+issue** — "do not build speculative parsers for platforms with unproven
+distribution … a full adapter is built when a user/team actually runs that
+harness against Tortoise". Shipped: the shared reflex script plus the per-turn
+READ registration for **codex / claude / cline / devin**. The two remaining
+harnesses are **measured but deliberately unbuilt**: Gemini CLI's `BeforeAgent`
+(its `BeforeModel`/`llm_request` model hook is real too — `BeforeAgent` is the
+per-turn seam, so it is the one to register) and OpenCode's plugin hooks are
+thin registrations on a real surface (see the correction log), so when demand
+arrives the work is a REGISTRATION, not a research pass — their session-store
+parsers stay deferred with them, and a parser target is recorded only where it
+was VERIFIED (Gemini CLI's is, in the correction log; OpenCode's is not, and
+stays unrecorded). The sentence that stood here — "the shared script's default
+emits the bare block (harmless where unsupported)" — is **retracted**: at
+Gemini CLI a bare-text emission is not an injection at all (non-JSON stdout →
+`systemMessage`, shown to the user, never the model's context; see the
+correction log).
 
 > **#2125 framework-name drift (recorded 2026-10-15):** this row previously
 > listed *Vercel AI SDK / LangChain / Mastra / OpenAI Agents SDK*. Issue #2125's
@@ -76,6 +89,63 @@ build a speculative parser for a platform with unproven distribution.
 > list was a sketch written before the issue was filed; the issue wins.
 
 ## Correction log
+
+### #2124's Gemini / OpenCode / Cline rows (re-measured 2026-10-18)
+
+Three sibling lanes (#2120, #2121, #2122) each found this matrix's per-row
+status optimistic — a row describing a contract nobody had built. This pass
+re-measured #2124's remaining rows against PRIMARY sources *before* a lane
+builds on them. The issue's demand gate still holds (neither adapter is built
+here); what changed is what a future lane would have to build, and which
+claims were wrong.
+
+| Claim | Re-measurement |
+|---|---|
+| Gemini CLI: *"`BeforeModel` mutates `llm_request.messages`"* (issue #2124 body) | **The seam is real; the CHOICE of seam was wrong.** `BeforeModel` / `llm_request` DOES exist in Gemini CLI — re-fetched 2026-10-18 from `docs/hooks/reference.md` (`google-gemini/gemini-cli` @ main), the same page `platform-landscape.md:192-193` records it from: *"Fires before sending a request to the LLM. Operates on a stable, SDK-agnostic request format"*, input `llm_request` {model, messages, config}, output `hookSpecificOutput.llm_request` *"overrides parts of the outgoing request (for example, changing models or temperature)"*. What #2124's row got wrong is the SEAM it named: `BeforeModel` is a **per-LLM-CALL model hook**, while Gemini CLI ships a first-class **per-turn AGENT hook**, `BeforeAgent` — *"Fires after a user submits a prompt, but before the agent begins planning"* — whose output carries **`hookSpecificOutput.additionalContext`**, *"Text that is appended to the prompt for this turn only"*, the same field Claude/Codex/Devin use, and no message rewriting to construct. Gemini CLI's hooks system (`docs/hooks/index.md` + `docs/hooks/reference.md`, `google-gemini/gemini-cli` @ main) is 11 events, **including BOTH** `BeforeAgent` and `BeforeModel`. `llm_request` is also Google ADK's parameter name (#2125's `before_model_callback(callback_context, llm_request)`): the name collides across two different harnesses, which is how this row was misread once already — the collision is not identity in either direction. Config layers: `.gemini/settings.json` (project) > `~/.gemini/settings.json` (user) > `/etc/gemini-cli/settings.json` (system) > extensions, in the same `{"hooks": {Event: [{matcher, hooks: [{type, command, timeout}]}]}}` matcher-group shape. Two traps for the next lane: Gemini's `timeout` is **milliseconds** (default 60000), and matchers are REGEX for tool events but EXACT STRINGS for lifecycle events. |
+| *"shared script's default emits the bare block (harmless where unsupported)"* | **Retracted for Gemini CLI — it is not an injection there.** Gemini's stdio rule is strict JSON: *"If stdout contains non-JSON text, parsing will fail. The CLI will default to 'Allow' and treat the entire output as a `systemMessage`"*, and its reference defines `systemMessage` as *"Displayed immediately to the user in the terminal"*. A bare block therefore reaches the TERMINAL, not the model's context — a silent non-injection that must not be read as the fail-open posture. The shared script's `claude` arm already emits the right FIELD; it carries `hookEventName: "UserPromptSubmit"` rather than `"BeforeAgent"`, so a `gemini` arm is a small addition once demand arrives. |
+| OpenCode: *"(`chat.message` plugin hooks)"*, session store *"`.opencode/sessions` JSONL"* | **The hook is real; the store claim is unsupported.** `@opencode-ai/plugin@1.19.3` `dist/index.d.ts` declares `"chat.message"` (`output: {message, parts}` — mutable, so a plugin can append a Part), `"experimental.chat.system.transform"` (`output.system: string[]`) and `"experimental.session.compacting"` (`output.context: string[]`). The DOCS page (`opencode.ai/docs/plugins`) documents plugin loading (`.opencode/plugins/`, `~/.config/opencode/plugins/`) and the `event` subscription list — it does NOT list `chat.message`, so the per-turn surface is TYPED but undocumented in prose. The `.opencode/sessions` JSONL store is **not verified**: nothing in this pass corroborates that path, so the parser target is left UNRECORDED rather than recorded wrong. |
+| Cline: shipped seam, *"`UserPromptSubmit` → `contextModification.context`"* | Injection seam is shipped and graded (`tests/test_platform_seams.py::test_install_cline_writes_hook_file`, `::test_volunteer_turn_hook_cline_contract`), but the CONTRACT is no longer re-verifiable from Cline's docs (2026-10-18): `docs.cline.bot/customization/hooks.md` is now a stub — *"See details under SDK Plugins page"* — and that page documents `hooks: {beforeRun, afterRun, beforeModel, afterModel, beforeTool, afterTool, onEvent}` with writing-plugins guidance to *"use lifecycle hooks for observation …, not for modifying agent behavior"*. Neither `UserPromptSubmit` nor `contextModification` appears in the current index (`docs.cline.bot/llms.txt`). The seam is graded by OUR tests only; indicator 2 of #2124 (primary-source verification) stays OPEN for Cline until the docs are re-fetched or the contract is re-grounded. |
+| Devin CLI registration, *"pending a primary-doc re-fetch"* (the wave-1 comment) | **Shipped** (#8108), re-fetched 2026-10-11. No action. |
+
+**Reconciliation with the sibling record.** This correction does not supersede
+`docs/research/2026-09-01-gbrain-learnings/platform-landscape.md` (`:47`, `:85`,
+`:111`, `:192-194`, `:239` — the live Gemini CLI record, most recently
+maintained by #8110): the two now say the SAME thing, **because the sibling's
+Gemini rows were corrected in this same pass (2026-10-18)**. Before that edit it
+recommended the seam this correction retracts — `:47` "`BeforeModel` … → per-turn
+injection", `:111` "mutable `llm_request.messages` → append pointer block … Real
+per-turn seam", `:193` "→ per-turn injection by mutating
+`llm_request.messages`", `:239` "`BeforeModel` message mutation" — so a reader
+arriving from the sibling doc still got the wrong seam. What both records now
+say: Gemini CLI's `BeforeModel` hook takes `llm_request` (per LLM CALL), AND
+`BeforeAgent` → `hookSpecificOutput.additionalContext` is the per-turn seam to
+register, because `#2125`'s ADK callback independently names its own parameter
+`llm_request`. An earlier draft of this row concluded from that shared
+parameter name that the seam belonged to a different harness; that reading was
+WRONG, is corrected in the row above, and is not carried forward. The agreement
+is pinned per LINE, not by symbol presence
+(`tests/test_platform_seams.py::test_seam_matrix_pins_the_measured_gemini_contract`)
+— symbol presence passes on the contradicting text, because the lines that
+carried the wrong recommendation also contained the two symbol names. If either
+doc is re-measured and they diverge again, fix BOTH here in one pass.
+
+Two facts a future Gemini adapter needs for its INGESTION half (measured
+2026-10-18 in `packages/core/src/services/chatRecordingService.ts` and
+`packages/core/src/config/storage.ts`): the transcript is
+`<projectTempDir>/chats/session-<timestamp>-<shortId>.jsonl` (older `.json`
+files are normalized to `.jsonl`), subagent sessions nest under
+`chats/<parentSessionId>/`, and the project directory is a **slug** resolved
+through the `projects.json` registry under the global runtime dir — the legacy
+per-project HASH directory is migrated away, so a parser that hashes the
+project root would read a directory Gemini no longer writes.
+
+Sources (fetched 2026-10-18): `google-gemini/gemini-cli@main`
+`docs/hooks/index.md`, `docs/hooks/reference.md`,
+`packages/core/src/services/chatRecordingService.ts`,
+`packages/core/src/config/storage.ts`; the `@opencode-ai/plugin@1.19.3`
+tarball's `dist/index.d.ts`; `opencode.ai/docs/plugins`;
+`docs.cline.bot/llms.txt`, `customization/hooks.md`, `sdk/plugins.md`,
+`sdk/guides/writing-plugins.md`.
 
 ### #2122's Cursor row (re-measured 2026-10-11)
 

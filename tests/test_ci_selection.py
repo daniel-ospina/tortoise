@@ -1956,6 +1956,36 @@ def test_drift_guard_tool_change_selects_core_not_tier1():
     assert set(r["test_files"]) != _tier1()
 
 
+def test_surface_tools_change_selects_core_not_tier1():
+    # PR #8986 review (P1/P2, four independent reviews): the lockstep net for
+    # the served-identity helpers is
+    # tests/test_surface_manifest.py::test_the_two_drivers_agree_on_the_served_identity_helpers
+    # — *"a change applied to ONE copy reds there"*. That suite is
+    # `core`-registered AND a `slow_files` member, so it only runs on the
+    # `test-slow` leg; `tools/` is a flat NON_PYTHON_PREFIXES entry matching no
+    # SOURCE_PATTERNS row, so before the CORE_ALSO entries a driver-only diff
+    # came back with `changed == []`, took the docs-only early return and
+    # returned `surfaces=[]`, `slow_run=False` — the net was ASLEEP on the exact
+    # diff class it exists to catch (the #1349/#3332/#3616 silent-drop class).
+    # The required `surface-guard` job cannot backstop it: it overwrites
+    # `tools/surface-guard.py` with the base ref's copy before running, so a
+    # PR-side edit to that copy is never measured.
+    # Mutation check: removing either CORE_ALSO entry fails every assert below
+    # (measured before the entries: surfaces [], full False, 46 tier-1 files,
+    # `test_surface_manifest.py` absent from `slow_selected`).
+    for changed in ("tools/surface-guard.py", "tools/surface_manifest.py"):
+        r = _sel([changed])
+        assert r["full"] is False, (changed, r)
+        assert r["surfaces"] == ["core"], (changed, r)
+        # The parity suite is a slow_files member, so the assertion that matters
+        # is the SLOW leg (`slow_run` is what un-skips the `test-slow` job).
+        assert r["slow_run"] is True, (changed, r)
+        assert "test_surface_manifest.py" in r["slow_selected"], (changed, r)
+        # …and the sibling pin is registered in the fast `core` set.
+        assert "test_surface_guard_pin_4606.py" in r["test_files"], (changed, r)
+        assert set(r["test_files"]) != _tier1(), (changed, r)
+
+
 def test_collision_preflight_tool_change_fails_closed_to_full():
     # #3261: tools/collision_preflight.py owns tests/test_collision_preflight.py.
     # Before its TOOL_CARVEOUTS entry the flat "tools/" prefix swallowed the

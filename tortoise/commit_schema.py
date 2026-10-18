@@ -202,11 +202,18 @@ def compile_vocab(packs_dir: Path | str | None = None,
     ``sources[].sourceKind``. It does **not** gate ``entities[].kind``, which
     the hosted door persists verbatim (``hosted_api``:
     ``objectKind=er.entity.kind``) — an off-vocabulary object kind is still
-    written (#5202). Separately, the approval set this gate is handed is
-    itself writable through the unvalidated ``objectKind`` field on
-    ``POST /v1/objects`` (#5475), so it is not (yet) an authorization
-    boundary. This function gates the vocab it is GIVEN; it does not make the
-    write path's object kinds closed-vocab.
+    written (#5202, still open).
+
+    The approval set this gate is handed is no longer writable by the DOORS it
+    gates: #8380 gated ``POST /v1/objects`` / ``POST /v1/subjects`` and #5475
+    gated the SDK/entity + point funnels (``sdk._create_entity``,
+    ``sdk.create_point``) plus this door's own ``entities[].kind`` leg
+    (pre-write). ⛔ That is NOT the whole write path — do not read it as one:
+    the journal-first seam (``api.EventAPI`` → ``projection._upsert_*``, used by
+    the v1 extractor, ingest and docs_miner) still persists kinds ungated
+    (#8982), the update doors still widen (#8968), and ``entities[].kind`` has
+    no Layer-1 membership test (#5202). This function still gates the vocab it
+    is GIVEN; it does not make the write path's object kinds closed-vocab.
 
     Memoized per gate (#5163 review, P1). ``compile_vocab`` runs
     ``PackRegistry.load_all()`` — a filesystem walk + YAML parse of every
