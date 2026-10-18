@@ -301,8 +301,10 @@ $ uv run pytest tests/test_record_schema_placement.py -q
 26 passed in 2.87s                                        (s5-s6-unit-tests.log)
 ```
 
-**Denominators:** the placement table enumerates **216 property names** across the seven labels
-(187 PRIMARY / 29 DERIVED-VOLATILE / 0 UNRESOLVED, `#7955`); the original live-graph sample was
+**Denominators:** the placement table enumerates **221 property names** across the seven labels
+(192 PRIMARY / 29 DERIVED-VOLATILE / 0 UNRESOLVED) — `216` as measured at the `#7955` pass, plus
+`#2782`'s five PRIMARY money rows annotated on top rather than folded into that pass's numbers;
+the original live-graph sample was
 **9 of 87 property names on a 10,000-`Point` sample**, itself truncated by FalkorDB's silent
 10,000-row cap. The `#7969` clause asserts the record stores **no EP scalar** over the **39-record**
 journal fixture.

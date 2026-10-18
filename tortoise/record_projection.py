@@ -96,6 +96,11 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # must see it, or the record projection would emit a props tail the
     # constraint refuses and hand a caller a crash instead of a drop.
     "20261014000001_record_subject_props_no_derived.sql",
+    # A FORWARD migration adding COLUMNS (`ALTER TABLE public.point ADD COLUMN`,
+    # #2782's money value). Same reason: without it `table_columns()` reports
+    # the pre-ALTER schema, so `_split_properties` would leave an amount in the
+    # `props` tail and `cache_projection` would not project it.
+    "20261018000001_record_point_money_value_2782.sql",
 )
 
 #: The record's own tables (the procedural layer is views over these).
@@ -654,6 +659,20 @@ _ALTER_DERIVED_CHECK_RE = re.compile(
     r"\s*ARRAY\[(.*?)\]\s*::text\[\]\s*\)\s*\)",
     re.S,
 )
+#: A FORWARD migration that ADDS a COLUMN: `ALTER TABLE public.<t> ADD COLUMN
+#: [IF NOT EXISTS] <col> <type>, …;`. Append-only history means a landed
+#: `CREATE TABLE` can only ever GAIN a column this way (#2782: the money value),
+#: so a schema read that understands only `CREATE TABLE` reports the record
+#: poorer than it is — `_split_properties` would push the value into the `props`
+#: tail and `cache_projection` would drop it as unplaced, while §17.5's pin
+#: reports the PRIMARY property as MISSING COLUMN.
+_ALTER_ADD_COLUMN_RE = re.compile(
+    r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?public\.([a-z_]+)\b([^;]*?);", re.S
+)
+_ADDED_COLUMN_RE = re.compile(
+    r"ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?\"?([a-z_][a-z0-9_]*)\"?",
+    re.I,
+)
 
 
 def _migrations_dir() -> Path:
@@ -680,14 +699,39 @@ def _parse_record_tables(sql: str) -> dict[str, frozenset[str]]:
     return tables
 
 
+def _parse_added_columns(sql: str) -> dict[str, frozenset[str]]:
+    """`{table: {column}}` from forward `ALTER TABLE … ADD COLUMN` migrations.
+
+    The same forward-migration rule `refused_props_names()` follows for a
+    re-declared refusal (#8263), applied to the column set: a landed migration
+    is never edited, so a column added after the fact arrives as an ALTER and
+    the schema read must see it (#2782's five money columns).
+    """
+    added: dict[str, set[str]] = {}
+    for table, body in _ALTER_ADD_COLUMN_RE.findall(sql):
+        if table not in THE_RECORD_TABLES:
+            continue
+        for column in _ADDED_COLUMN_RE.findall(body):
+            added.setdefault(table, set()).add(column)
+    return {table: frozenset(cols) for table, cols in added.items()}
+
+
 def table_columns(migrations_dir: Path | None = None) -> dict[str, frozenset[str]]:
     """`{table: {column}}` for the record's tables, parsed from the migrations.
 
     Parsed rather than restated: a hand-copied column list is a second
     declaration of the schema, and the second declaration is the one that goes
     stale. `#7968`'s own pin does the same thing for the placement table.
+
+    A `CREATE TABLE` is the base; a FORWARD `ALTER TABLE … ADD COLUMN` is
+    unioned over it, because append-only history means a landed table can only
+    gain a column that way (#2782, the same rule as `refused_props_names`).
     """
-    tables = _parse_record_tables(_read_migrations(migrations_dir))
+    sql = _read_migrations(migrations_dir)
+    tables = _parse_record_tables(sql)
+    for table, added in _parse_added_columns(sql).items():
+        if table in tables:
+            tables[table] = tables[table] | added
     missing = [t for t in THE_RECORD_TABLES if t not in tables]
     if missing:
         raise RecordProjectionError(
