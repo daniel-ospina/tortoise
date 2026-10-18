@@ -1601,7 +1601,8 @@ _ENTITY_CREATION_LABELS: frozenset[str] = _REFERENCE_FOLD_ENTITY_LABELS
 #: therefore COLLAPSES the node onto the LAST id, and a state op naming the
 #: collapsed-away id folds 0 rows there (`MATCH (n:$label {id:$rid})`). An
 #: id-keyed label (`Event`) never collapses, so it is absent. This is the
-#: DECLARATION for the state-op guard below, which is its only reader —
+#: DECLARATION for the name-resolution leg, the state-op guard below, and the
+#: emitted `name_keyed`/`identity` bounds —
 #: `journal_object_surviving_keys` is deliberately Object-only (it models
 #: `_upsert_object` alone) and `_graph_entities` indexes EVERY label, so
 #: neither can share this constant without changing what it means.
@@ -1610,11 +1611,11 @@ _NAME_MERGE_LABELS: frozenset[str] = frozenset({"Object", "Subject"})
 #: The labels whose ``status`` the COMPARISON decides. ``Event`` carries
 #: ``eventStatus`` under a different name and its lifecycle has no such fold, so the
 #: status leg stays bounded to the families that model the field. ONE home (#8859
-#: follow-up review round 2, P3): `_compare_entities` spells the pair at the two
-#: sites that USE it, and `entity_parity_bounds["status_compared"]` used to re-type
-#: it a third time with nothing pinning the two together — a widened status leg
+#: follow-up review round 2, P3): the status comparison in `_compare_entities` reads
+#: this, and `entity_parity_bounds["status_compared"]` emits it — the set used to be
+#: re-typed at both, with nothing pinning them together, so a widened status leg
 #: would have left the emitted bound telling a reader the check does not decide what
-#: it does decide, which is the round-1 dismissal-by-out-of-scope path.
+#: it does decide (the round-1 dismissal-by-out-of-scope path).
 _STATUS_COMPARED_LABELS: frozenset[str] = frozenset({"Object", "Subject"})
 
 #: #7936 — the belief properties the entity leg COMPARES, read from the
@@ -2332,10 +2333,21 @@ def _compare_entities(journal_entities, graph_entities, graph_names,
         if ambiguous_status:
             excluded_ambiguous.append((label, eid, rec.get("name")))
         g = graph_entities.get(key)
-        if g is None and label in _STATUS_COMPARED_LABELS:
+        if g is None and label in _NAME_MERGE_LABELS:
             # The graph MERGEs these labels by NAME, so a second registration
             # of the same name under a fresh id is ONE node carrying the LAST
             # id — resolve by name before declaring a burial (#3585 review).
+            #
+            # This is the PRESENCE leg's name resolution, not the STATUS leg, so it
+            # reads `_NAME_MERGE_LABELS` — the home whose declared meaning is exactly
+            # the sentence above. Round 2 hoisted the status pair and pointed BOTH
+            # `_compare_entities` sites at it; the two constants coincide in value
+            # today, which is why the mis-wiring was invisible. When a reference-fold
+            # label becomes name-MERGE'd (forced into `_NAME_MERGE_LABELS` by
+            # `test_the_name_merge_label_sets_have_one_home`) while the status set
+            # stays Object/Subject, this site would miss the name resolution and
+            # report `absent-from-graph` on a FAITHFUL graph — measured. There is no
+            # live verdict change today (#8859 follow-up review round 3, P2).
             g = graph_names.get((label, rec.get("name")))
         if g is None:
             count += 1
