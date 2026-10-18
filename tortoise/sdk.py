@@ -3186,12 +3186,13 @@ class _WriteNotLanded(Exception):
     re-issuing cannot duplicate), and on budget exhaustion the ORIGINAL abort
     is re-raised with its TYPE unchanged, so the caller's ``except`` clause
     still catches it and ``_classify_db_failure`` still buckets it as ``db``.
-    Its MESSAGE is NOT guaranteed untouched: the graph-swap family gains the
-    #7357 legibility suffix (``retry.explain_graph_abort``) when the probe
-    finds the graph key still present, so an assertion on ``str(exc)`` must
-    allow for that suffix. A test that pins the engine's BARE sentence belongs
-    to the deletion arm instead, which the predicate refuses before this arm is
-    reached.
+    Its MESSAGE is NOT guaranteed untouched: on exhaustion the graph-swap
+    family gains the #7357 legibility suffix (``retry.explain_graph_abort``)
+    WHICHEVER way the graph-presence probe answers (present / absent /
+    unprobeable), so an assertion on ``str(exc)`` must allow for that suffix. A
+    test that pins the engine's BARE sentence belongs to the deletion arm
+    instead: a deletion the predicate sees at classification time is refused
+    before this arm is reached, so nothing is appended there.
 
     A zero-row FIRST attempt is untouched: it never reaches this class, so
     ``update_point``'s historical ``{}``-for-a-missing-id contract is safe.
