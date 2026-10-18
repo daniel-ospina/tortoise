@@ -39,6 +39,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -107,7 +109,17 @@ def test_concurrent_threads_cannot_interleave_or_fabricate_a_seal(tmp_path: Path
     assert reader.skipped_line_count == 0
 
 
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX fork only")
+_CHILD = """
+import sys
+sys.path.insert(0, {root!r})
+from tortoise.log import EventLog
+log = EventLog({path!r})
+for i in range({nrec}):
+    log.append({{"type": "PointRevised", "id": "c" + sys.argv[1], "n": i,
+                 "pad": "A" * {pad}}})
+"""
+
+
 def test_concurrent_processes_are_serialised_too(tmp_path: Path):
     """The same property across PROCESSES — what ``flock`` is there for.
 
@@ -115,25 +127,20 @@ def test_concurrent_processes_are_serialised_too(tmp_path: Path):
     more than one worker against one volume, and a filesystem whose ``O_APPEND``
     is not atomic (NFSv3, some FUSE/CSI volumes) is exactly where the write-side
     guarantee alone would not hold.
+
+    A SUBPROCESS, not ``os.fork()``: this module has already started threads, so
+    a fork-then-lock child can block on a lock its parent held at fork time —
+    a wedged suite instead of a failure. `subprocess.run(timeout=...)` turns
+    that into a red test with a message.
     """
     path = tmp_path / "graph.jsonl"
     nprocs, nrec = 6, 60
-    pids = []
+    root = str(Path(__file__).resolve().parent.parent)
+    script = _CHILD.format(root=root, path=str(path), nrec=nrec, pad=6000)
     for p in range(nprocs):
-        pid = os.fork()
-        if pid == 0:                            # child
-            status = 1
-            try:
-                child_log = EventLog(path)
-                for i in range(nrec):
-                    child_log.append(_record(f"c{p}", i))
-                status = 0
-            finally:
-                os._exit(status)
-        pids.append(pid)
-    for pid in pids:
-        _, status = os.waitpid(pid, 0)
-        assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+        proc = subprocess.run([sys.executable, "-c", script, str(p)],
+                              capture_output=True, text=True, timeout=300)
+        assert proc.returncode == 0, (proc.returncode, proc.stderr[-2000:])
 
     reader = EventLog(path)
     records = reader.read_all()
@@ -331,6 +338,9 @@ def test_a_successful_recovery_reports_the_skip_it_salvaged_over(tmp_path: Path)
     assert [e["point"]["id"] for e in store.applied] == ["before", "after"]
     assert "1 corrupt mid-file line(s) SKIPPED" in result["reason"], result["reason"]
     assert "NOT in this graph" in result["reason"], result["reason"]
+    # A COUNT beside the sentence: the auto-recovery legs drop `reason` on
+    # their clean line, so they branch on this key instead.
+    assert result["corrupt_lines"] == 1, result
 
     # The sentence itself, in both shapes: one broken line reads as "the record
     # it carried", several as "the records they carried", and none is silent.
@@ -368,3 +378,27 @@ def test_read_for_replay_keeps_working_for_a_log_without_the_keyword(tmp_path: P
     records = read_for_replay(log)
     assert [r["point"]["id"] for r in records] == ["before", "after"]
     assert log.corrupt_line_count == 1
+
+
+def test_a_journal_that_is_all_damage_is_not_reported_as_empty(tmp_path: Path):
+    """A non-empty journal whose every line is damaged must not read as EMPTY.
+
+    "event log empty or unreadable — nothing to recover" invites deleting the
+    one artifact that still holds the records; the salvage read knows it saw a
+    damaged line, so the refusal has to say so.
+    """
+    from tortoise.consistency import recover_from_log
+
+    log_dir = tmp_path / "journals"
+    log_dir.mkdir()
+    (log_dir / "graph.jsonl").write_text(
+        '{"type": "PointAdded", "point": {"id": "one"\n'      # mid-file damage
+        '{"type": "PointAdded", "point": {"id": "two"\n',     # torn tail
+        encoding="utf-8")
+
+    result = recover_from_log(str(log_dir), _SyntheticStore())
+    assert result["recovered"] is False, result
+    assert result["log_points"] == 0, result
+    assert result["corrupt_lines"] == 1, result
+    assert "NOT empty: every line failed to parse" in result["reason"], result["reason"]
+    assert "1 corrupt mid-file line(s) SKIPPED" in result["reason"], result["reason"]

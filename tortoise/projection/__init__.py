@@ -8052,6 +8052,22 @@ class FalkorProjection(
                             "reason: %s",
                             events_dir, result.get("log_points"),
                             result.get("reason"))
+                    elif result.get("corrupt_lines"):
+                        # #5612: the third producer-signal leg on this surface,
+                        # for the same reason as the two above — the clean
+                        # "auto-recovered" line drops `reason`, and a replay
+                        # that SALVAGED over a damaged line is exactly the
+                        # success shape that must not hide a loss. The graph is
+                        # usable (not a refusal), but records the journal held
+                        # are not in it.
+                        logger.warning(
+                            "auto-recovered empty embedded DB from %s "
+                            "(%s events) BUT %s corrupt mid-file journal "
+                            "line(s) were SKIPPED — records the journal held "
+                            "are NOT in this graph; repair the journal "
+                            "(#5612). Recovery reason: %s",
+                            events_dir, result.get("log_points"),
+                            result["corrupt_lines"], result.get("reason"))
                     else:
                         logger.warning(
                             "auto-recovered empty embedded DB from %s "
@@ -8142,6 +8158,17 @@ class FalkorProjection(
                 "can re-mint it with the control plane's name; see the "
                 "rebuild ERROR log (#5353). Recovery reason: %s",
                 result.get("reason"))
+        if result.get("corrupt_lines"):
+            # #5612: this caller returns silently on success (its own caller
+            # logs only "auto-recovered embedded DB from ..."), so the salvage
+            # tally rides here or it is never seen on the unresponsive-graph
+            # path — the same reasoning as the two legs above.
+            logger.warning(
+                "recovery completed BUT %s corrupt mid-file journal line(s) "
+                "were SKIPPED — records the journal held are NOT in this "
+                "rebuilt graph; repair the journal (#5612). "
+                "Recovery reason: %s",
+                result["corrupt_lines"], result.get("reason"))
 
     @classmethod
     def from_uri(cls, uri: str, graph_name: str | None = None) -> "FalkorProjection":  # noqa: UP037

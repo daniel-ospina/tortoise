@@ -89,10 +89,19 @@ def _cmd_rebuild(args):
         # is read from the same result the numbers above came from, never
         # inferred from silence.
         _corrupt = int(counts.get("corrupt_lines") or 0)
-        if _corrupt:
-            print(f"Warning: {_corrupt} corrupt mid-file journal line(s) "
-                  f"SKIPPED — the records they carried are NOT in this graph "
-                  f"(#5612)", file=sys.stderr)
+        _torn = int(counts.get("torn_lines") or 0)
+        if _corrupt or _torn:
+            # Both classes, one line each, so this surface reports the same
+            # shape as the in-memory fallback (`skipped_line_count` = torn +
+            # corrupt) instead of naming only one of them.
+            if _corrupt:
+                print(f"Warning: {_corrupt} corrupt mid-file journal line(s) "
+                      f"SKIPPED — the records they carried are NOT in this "
+                      f"graph (#5612)", file=sys.stderr)
+            if _torn:
+                print(f"Warning: {_torn} torn journal line(s) skipped "
+                      f"(crash damage) — those records are NOT in this graph "
+                      f"(#5612)", file=sys.stderr)
         # #2814: the operator surface for the config third state. Without this a
         # SUCCESSFUL rebuild that staged the `config_reset` marker would print
         # `Done:` and say nothing — the marker would be written and never

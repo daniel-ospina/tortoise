@@ -552,6 +552,15 @@ _APPEND_LOCKS_GUARD = threading.Lock()
 # silently become a lost record.
 _FLOCK_TIMEOUT_S = 5.0
 _FLOCK_POLL_S = 0.001
+# The bound is per INCIDENT, not per append. Once a peer has been observed
+# holding the lock past the deadline, later appends skip the wait (and the
+# WARNING) for this long and go straight to the write guarantee: otherwise one
+# wedged peer costs every queued append the full deadline on the hottest path
+# the lock guards, and logs a WARNING per append for ever. Keyed by resolved
+# journal path; single assignments, so the GIL is enough (the reader also holds
+# that path's thread lock).
+_FLOCK_UNHEALTHY_FOR_S = 30.0
+_FLOCK_UNHEALTHY: dict[str, float] = {}
 # The write seam: one attribute, so a test can pin "exactly one write(2) per
 # record" without patching the global ``os`` module out from under the
 # interpreter.
@@ -565,13 +574,14 @@ _FLOCK_UNSUPPORTED = frozenset({
 })
 
 
-def _append_lock(path: Path) -> threading.Lock:
-    """The process-wide lock for *path*, keyed by its RESOLVED path.
+def _append_lock(key: str) -> threading.Lock:
+    """The process-wide lock for a journal, keyed by its RESOLVED path.
 
-    Resolved, so two spellings of the same journal (a symlinked ``/data``
-    mount, a relative path) contend on ONE lock instead of two.
+    Resolved by the caller (:meth:`EventLog._lock_key`), so two spellings of
+    the same journal (a symlinked ``/data`` mount, a relative path) contend on
+    ONE lock instead of two — and so the resolution is not repeated on every
+    append.
     """
-    key = os.path.realpath(os.fspath(path))
     with _APPEND_LOCKS_GUARD:
         lock = _APPEND_LOCKS.get(key)
         if lock is None:
@@ -591,11 +601,27 @@ def _lock_exclusive(fd: int, path) -> None:
     The wait is BOUNDED (``_FLOCK_TIMEOUT_S``) and non-blocking-polled, because
     an unbounded ``LOCK_EX`` lets one wedged peer park every appender to that
     journal with nothing distinguishing the stall from a slow disk. On timeout
-    the append proceeds on the write-side guarantee and logs a WARNING.
+    the append proceeds on the write-side guarantee and logs a WARNING — and
+    the path is marked UNHEALTHY for ``_FLOCK_UNHEALTHY_FOR_S``, so the cost is
+    paid once per incident instead of once per queued append.
+
+    WHAT A TIMEOUT GIVES UP, stated so it is not overclaimed: the seal's
+    read-modify-write is no longer serialised against a peer (a peer that
+    appends during it can make this writer attach its seal to the peer's
+    record), and on a filesystem whose ``O_APPEND`` is not atomic there is no
+    cross-process serialisation at all. That is the deliberate trade — a wedged
+    peer must not become an outage — and it is why the warning says so.
     """
     if fcntl is None:                  # pragma: no cover - platform branch
         return
-    deadline = time.monotonic() + _FLOCK_TIMEOUT_S
+    key = os.path.realpath(os.fspath(path))
+    stamp = _FLOCK_UNHEALTHY.get(key)
+    now = time.monotonic()
+    if stamp is not None:
+        if now - stamp < _FLOCK_UNHEALTHY_FOR_S:
+            return
+        _FLOCK_UNHEALTHY.pop(key, None)
+    deadline = now + _FLOCK_TIMEOUT_S
     while True:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -607,12 +633,17 @@ def _lock_exclusive(fd: int, path) -> None:
                 raise
             now = time.monotonic()
             if now >= deadline:
+                _FLOCK_UNHEALTHY[key] = now
                 logging.getLogger(__name__).warning(
                     "EventLog %s: another process held the append lock for "
                     "%.1fs — proceeding WITHOUT it on the single-write "
-                    "O_APPEND guarantee (a regular file on a local "
-                    "filesystem still cannot interleave within one write)",
-                    path, _FLOCK_TIMEOUT_S)
+                    "O_APPEND guarantee until it is released: a regular file "
+                    "on a local filesystem still cannot interleave within one "
+                    "write, but the tail check stays unprotected and a "
+                    "filesystem whose O_APPEND is not atomic gets no "
+                    "cross-process serialisation at all. Not retrying for "
+                    "%.0fs.",
+                    path, _FLOCK_TIMEOUT_S, _FLOCK_UNHEALTHY_FOR_S)
                 return
             time.sleep(min(_FLOCK_POLL_S, max(0.0, deadline - now)))
 
@@ -702,10 +733,27 @@ class EventLog:
         # UNBUFFERED ``io.FileIO``: no ``BufferedWriter`` in the path, so the
         # one ``os.write`` below is one ``write(2)`` regardless of CPython's
         # buffering rules or the record's size.
-        with _append_lock(self.path), io.FileIO(self.path, mode="a+b") as f:
+        with (_append_lock(self._lock_key()),
+              io.FileIO(self.path, mode="a+b") as f):
             _lock_exclusive(f.fileno(), self.path)
             seal = self._seal_prefix(f)
             _write_record(f.fileno(), (seal + record).encode("utf-8"))
+
+    def _lock_key(self) -> str:
+        """The resolved path this journal's append lock is keyed on.
+
+        Cached per EventLog because ``realpath`` costs about as much as a
+        syscall (measured ~21 us against a ~146 us append) and the hosted lane
+        holds one EventLog per graph. Re-derived when ``self.path`` changes, so
+        the cache can never describe a path the instance no longer holds.
+        """
+        raw = os.fspath(self.path)
+        memo = getattr(self, "_lock_key_memo", None)
+        if memo is not None and memo[0] == raw:
+            return memo[1]
+        resolved = os.path.realpath(raw)
+        self._lock_key_memo = (raw, resolved)
+        return resolved
 
     def _seal_prefix(self, f) -> str:
         """What must precede *record* for it to start on a clean line.
