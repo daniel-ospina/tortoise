@@ -100,15 +100,22 @@ def _measure_pools(sdk, query: str, *, limit: int, pools, repeats: int) -> dict:
     per: dict = {}
     for pool in pools:
         trace: list[dict] = []
+        # #8487: OFF on both the warm-up and the measured reads. This probe
+        # measures POOL ADMISSION ("does a bigger pool admit different ids?")
+        # off the returned id set, and the read path's valid-time selection is a
+        # separate pool mover that reorders before the ``limit`` cut — leaving it
+        # on would make the pool-size diff conflate two effects.
         sdk.tortoise_fts_query(query, limit=limit, pool_size=pool,
                                include_terminal=True, leg_trace=trace,
-                               keep_numeric=True, search_keys_prf=True)
+                               keep_numeric=True, search_keys_prf=True,
+                               _valid_time_rerank=False)
         lat: list[float] = []
         for _ in range(repeats):
             t0 = time.perf_counter()
             hits = sdk.tortoise_fts_query(
                 query, limit=limit, pool_size=pool, include_terminal=True,
-                keep_numeric=True, search_keys_prf=True)
+                keep_numeric=True, search_keys_prf=True,
+                _valid_time_rerank=False)
             lat.append((time.perf_counter() - t0) * 1000.0)
         per[pool] = {
             "n_returned": len(hits),

@@ -462,7 +462,15 @@ def measure_question(sdk, q: dict, *, alpha: float, primary: str,
             hits = sdk.tortoise_fts_query(
                 q["question"], limit=LIMIT, pool_size=LEG_DEPTH,
                 include_terminal=True, keep_numeric=True,
-                search_keys_prf=True, fusion_weights=None, fusion_k=60)
+                search_keys_prf=True, fusion_weights=None, fusion_k=60,
+                # #8487: OFF. This harness's whole claim is that "the two arms
+                # differ in exactly one thing, the fusion arithmetic", and its
+                # numbers are compared to the RECORDED baseline. The read-path
+                # valid-time selection is a second pool mover that sits AFTER
+                # fusion (it reorders before the ``limit`` cut, so it can change
+                # which ids are returned), which would both confound the arm
+                # comparison and break comparability with that baseline.
+                _valid_time_rerank=False)
             elapsed_ms = (time.monotonic() - t0) * 1000.0
         capture["elapsed_ms"] = round(elapsed_ms, 1)
         return _ids_of(hits), capture

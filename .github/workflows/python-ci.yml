@@ -1492,6 +1492,7 @@ jobs:
               test_mcp_route_challenge test_monitoring test_oauth_mcp
               test_operator_idempotency_4971 test_pack_shipping_wheel
               test_rebuild_parity_fail_loud_3585 test_relationships_bounded
+              test_expand_relationships_6976
               test_sdk test_search_engine_gaps test_surface_manifest
     name: test-slow (${{ matrix.half }})
     # #3239: OUTER cap, strictly above the in-step watchdog below — that kill

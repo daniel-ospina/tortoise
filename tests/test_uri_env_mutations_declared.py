@@ -433,6 +433,21 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # no lane flip can leak. DELIBERATE_URI.
     "test_engine_probe.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
                               r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #8939/#8870: the lane-gate unit pins for the version-anchor live file. The
+    # setenv is DELIBERATE_URI — a CONFIGURED docker URI is the test input, and
+    # the assertion is that `_live_uri()` uses it AS-IS instead of probing a
+    # second endpoint to decide whether to run (the pre-fix gate probed the
+    # legacy port and then dialled the URI). The two delenvs are
+    # DELIBERATE_EMBEDDED_LANE — the URI-less cases: the docker-test-lane
+    # fallback, and the no-endpoint-at-all skip that must route through
+    # `_live_utils.LIVE_URI_SKIP_REASON` rather than a hand-written reason.
+    # Every site is a function-scoped `monkeypatch` call, auto-undone by pytest
+    # at teardown, so no lane flip can leak into a later module.
+    # MIXED INTENT: DELIBERATE_URI + DELIBERATE_EMBEDDED_LANE.
+    "test_8870_version_anchor_write_order.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+        r'monkeypatch\.setenv\(\s*$',
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;

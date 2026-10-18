@@ -33,6 +33,13 @@ from tortoise.live import (
     epistemic_label_queries,  # #7853: id-anchored reads sweep labels, one query per label
 )
 
+# #2782: the money value's five declared sibling fields. `tortoise/money.py` is
+# a stdlib-only leaf, so this import cannot cycle — and declaring them from the
+# ONE constant keeps the projection's declared set from drifting away from the
+# shape `money_props` builds (a field added there is declared here by
+# construction).
+from tortoise.money import MONEY_VALUE_FIELDS
+
 # The store's NUMERIC domain (INT64 / non-finite reject) — a leaf module, so
 # this cannot cycle. `_annotator_value_ok` answers the shape + `#7369`
 # parameter-parse half; the numeric axis is added to BOTH questions (write and
@@ -1718,7 +1725,20 @@ class _EntityHandlers:
         # does not log a FALSE `"Point prop %r is not declared"` drift warning
         # on every rebuild.
         "baseline_system_default",
-    })
+    }) | frozenset(MONEY_VALUE_FIELDS)
+    # #2782 / WS-C design (`docs/plans/2026-09-10-ws-c-numeric-normalization.md`)
+    # §7.1, §7.2 step 2: a money value is a FLAT structural field
+    # (`money_props` in `tortoise/money.py`: amountMinor, currency,
+    # minorUnitExponent, verbatim, asOf), and the Point lane's declaration is
+    # what §7.1 calls "declaration, not permission" — the open-set passthrough
+    # already PERSISTS these keys (#2795), and it does so live and on every
+    # replay. Without the declaration a point that carries an amount logs a
+    # FALSE `"Point prop 'amountMinor' is not declared"` drift warning on the
+    # live write and again on every rebuild (measured at 180fe6fd3: all five
+    # keys warn), which is exactly the noise that hides a GENUINE undeclared
+    # prop. Declaration is warning-suppression only: it grants no new write
+    # door and widens no contract — the HTTP `Point` model stays
+    # `extra="forbid"` and the field remains server-written (§7.1/S3).
     # #2795 (D2 mechanic 1): list-valued props are persisted ONLY when their
     # key is declared here. Arrays are not fulltext-indexed and the canonical
     # form is the declared `flatten=list` STRING (`search_keys` -> space-joined
@@ -1967,9 +1987,10 @@ class _EntityHandlers:
         # #331 (review r4): only embed real content — an empty string
         # produced a junk vector in the HNSW index.
         elif not op and p.get("content"):
+        # #5008: through the EMBED gate — an identifier-only text earns no vector.
             try:
-                from tortoise.embeddings import encode_for_store
-                embedding = encode_for_store(
+                from tortoise.embeddings import encode_for_row
+                embedding = encode_for_row(
                     p.get("content", ""), self.required_embedding_dim)
             except Exception:
                 pass
@@ -3769,10 +3790,11 @@ class _EntityHandlers:
             _log_identity_skip("Subject", sid, "id (MERGE key)")
             return
         # Compute embedding for Subject name (#7845)
+        # #5008: through the EMBED gate — an identifier-only text earns no vector.
         embedding = None
         try:
-            from tortoise.embeddings import encode_for_store
-            embedding = encode_for_store(
+            from tortoise.embeddings import encode_for_row
+            embedding = encode_for_row(
                 name, self.required_embedding_dim)
         except Exception:
             pass
@@ -3920,10 +3942,11 @@ class _EntityHandlers:
         title = ev.get("title")  # None default — coalesce needs NULL, not ""
         ok = ev.get("object_kind")  # None default — same issue
         # Compute embedding from name (#7845)
+        # #5008: through the EMBED gate — an identifier-only text earns no vector.
         embedding = None
         try:
-            from tortoise.embeddings import encode_for_store
-            embedding = encode_for_store(
+            from tortoise.embeddings import encode_for_row
+            embedding = encode_for_row(
                 name, self.required_embedding_dim)
         except Exception:
             pass
@@ -4200,9 +4223,10 @@ class _EntityHandlers:
                 ev.get("content", ""),
             ]))
             if doc_content.strip():
+                # #5008: through the EMBED gate — an identifier-only text earns no vector.
                 try:
-                    from tortoise.embeddings import encode_for_store
-                    embedding = encode_for_store(
+                    from tortoise.embeddings import encode_for_row
+                    embedding = encode_for_row(
                         doc_content, self.required_embedding_dim)
                 except Exception:
                     pass
@@ -4246,6 +4270,16 @@ class _EntityHandlers:
         self.g.query(
             "MERGE (s:Source {url:$id}) " + clear_then_set_prefix("s") +
             "SET s.id=coalesce(s.id, $id), "
+            # ⛔ `_searchText` is written BEFORE `s.title` (#8870): its
+            # last-resort fallback READS `s.title`, and on the server engine a
+            # same-clause read observes the value an earlier item just wrote.
+            # With this item below the title write, a text-less re-emit fell
+            # back to the title THAT SAME WRITE had just installed
+            # (`'https://example.test/doc-title2'`) on the server engine while
+            # the embedded engine fell back to the stored `'stub title'` — one
+            # clause, two answers, decided by the backend. Above the title
+            # write, both engines use the stored title.
+            "    s._searchText=coalesce($st, s._searchText, s.title), "
             "    s.title=coalesce($title, s.title), "
             # #5082 (ONTOLOGY §4.6 + #5013 Q2): a document IS a `:Source`, and
             # §4.6 marks `sourceKind` REQUIRED (✅) on every `:Source` — it is
@@ -4280,17 +4314,41 @@ class _EntityHandlers:
             # and because the gate can only move the hash to a value it does
             # not already hold, running BOTH folds over one url cannot
             # double-bump (the second sees stored == $ch).
-            "    s.contentHash=CASE "
-            "        WHEN $ch IS NULL OR $ch = '' THEN s.contentHash "
-            "        WHEN s.contentHash IS NULL OR s.contentHash = '' "
-            "             OR s.contentHash <> $ch THEN $ch "
-            "        ELSE s.contentHash END, "
+            # ⛔ ORDER IS LOAD-BEARING (#8870, #7362 class). TWO ENGINES READ A
+            # `SET` LIST DIFFERENTLY and only ONE order is correct on BOTH:
+            #   * a SERVER engine (falkordb/falkordb:6.0.1 — the production
+            #     `TORTOISE_DB_URI` backend) applies the items LEFT TO RIGHT,
+            #     each item seeing what the EARLIER ones just wrote. Writing
+            #     `contentHash` first made this clause's own
+            #     `s.contentHash <> $ch` guard read the hash the clause had
+            #     just installed — always false — so the ordinal froze at its
+            #     first value (`['sha-v2', 1]`, measured).
+            #   * the EMBEDDED engine (falkordblite, the carve-out lane) and
+            #     falkordb-server v4.20.6 (the CI docker lane) evaluate every
+            #     right-hand side against the PRE-write record, so the order is
+            #     a no-op there — which is WHY a green CI lane was never
+            #     evidence about production. MEASURED 2026-10-18, same
+            #     statement + node: 6.0.1 gives `['sha2', 1]` (hash first) vs
+            #     `['sha2', 2]` (version first); v4.20.6 and embedded give 2
+            #     either way.
+            # `version` therefore goes FIRST — that one order is correct on
+            # both engines — and, generally, every SET item whose expression
+            # READS `s.contentHash` must precede the item that WRITES it
+            # (pinned order-only and engine-independently by
+            # `tests/test_source_version_set_order_7362.py`). Pinned
+            # behaviourally here by
+            # `test_document_version_counter_advances_with_the_hash`.
             "    s.version=CASE "
             "        WHEN $ch IS NULL OR $ch = '' THEN coalesce(s.version, 1) "
             "        WHEN s.contentHash IS NULL OR s.contentHash = '' "
             "             OR s.contentHash <> $ch "
             "             THEN coalesce(s.version, 0) + 1 "
             "        ELSE coalesce(s.version, 1) END, "
+            "    s.contentHash=CASE "
+            "        WHEN $ch IS NULL OR $ch = '' THEN s.contentHash "
+            "        WHEN s.contentHash IS NULL OR s.contentHash = '' "
+            "             OR s.contentHash <> $ch THEN $ch "
+            "        ELSE s.contentHash END, "
             # D10 B3 (adversarial): the three-argument coalesce gives a
             # document node a NON-NULL kind on CREATE. `$dk` is Cypher null
             # for an explicit `document_kind: null` (ingest's YAML `type:`
@@ -4312,7 +4370,6 @@ class _EntityHandlers:
             "    s.needs_extraction=coalesce($nx, s.needs_extraction, false), "
             "    s.sourcePath=coalesce($sp, s.sourcePath), "
             "    s.ingestedAt=coalesce(s.ingestedAt, $now), "
-            "    s._searchText=coalesce($st, s._searchText, s.title), "
             "    " + set_embedding_clause("s") + ", "
             "    s.updatedAt=$now "
             # D10 B6 (fourth door, review round 3): the retired fields must be
@@ -4454,9 +4511,10 @@ class _EntityHandlers:
                 inner.get("object", ""),
             ]))
             if event_content.strip():
+                # #5008: through the EMBED gate — an identifier-only text earns no vector.
                 try:
-                    from tortoise.embeddings import encode_for_store
-                    embedding = encode_for_store(
+                    from tortoise.embeddings import encode_for_row
+                    embedding = encode_for_row(
                         event_content, self.required_embedding_dim)
                 except Exception:
                     pass
@@ -4991,23 +5049,46 @@ class _EntityHandlers:
             # in the `SET`'s CASE pair: the WHERE is what makes an unchanged
             # re-poll a true no-op (nothing is written, nothing is dirtied), and
             # the CASE pair is what keeps the two columns moving together if the
-            # query is ever run without it. Both read the PRE-write
-            # `s.contentHash` — pinned by
-            # `test_a_content_changing_repoll_advances_the_hash_and_the_ordinal`.
+            # query is ever run without it. The two readers do NOT agree on
+            # WHEN they read, and that asymmetry is the whole defect:
+            #   * the `WHERE` is evaluated on the MATCH — always the PRE-write
+            #     `s.contentHash`, on every engine;
+            #   * the `SET`'s CASE pair is NOT, on a server engine. falkordb 6.x
+            #     (the production `TORTOISE_DB_URI` backend) applies the items
+            #     LEFT TO RIGHT and each sees the earlier writes, so a
+            #     `contentHash`-first list made this clause's own
+            #     `s.contentHash <> $ch` guard read the hash it had just
+            #     installed. The embedded engine (falkordblite) and
+            #     falkordb-server v4.20.6 (the CI docker lane) read PRE-write
+            #     values and are order-insensitive — which is why three green
+            #     pins sat on a broken production path (#8870).
+            #
+            # ⛔ ORDER IS LOAD-BEARING: `s.version` is computed BEFORE
+            # `s.contentHash` is written, so its guard still sees the STORED
+            # hash — the one order that is correct on BOTH engines. MEASURED
+            # 2026-10-18 on falkordb/falkordb:6.0.1: the `contentHash`-first
+            # order left the ordinal at 1 through EVERY content change
+            # (`['sha2', 1]`, expected 2); this order gives 2. Pinned
+            # behaviourally by
+            # `test_a_content_changing_repoll_advances_the_hash_and_the_ordinal`
+            # (on the live engine, and `tests/test_8870_version_anchor_write_
+            # order.py` pins it there explicitly) and order-only,
+            # engine-independently, by
+            # `tests/test_source_version_set_order_7362.py`.
             self.g.query(
                 "MATCH (s:Source {url: $url}) "
                 "WHERE s.sourceKind IN $ck "
                 "  AND (s.contentHash IS NULL OR s.contentHash = '' "
                 "       OR s.contentHash <> $ch) "
-                "SET s.contentHash=CASE "
-                "        WHEN s.contentHash IS NULL OR s.contentHash = '' "
-                "             OR s.contentHash <> $ch THEN $ch "
-                "        ELSE s.contentHash END, "
-                "    s.version=CASE "
+                "SET s.version=CASE "
                 "        WHEN s.contentHash IS NULL OR s.contentHash = '' "
                 "             OR s.contentHash <> $ch "
                 "             THEN coalesce(s.version, 0) + 1 "
-                "        ELSE coalesce(s.version, 1) END",
+                "        ELSE coalesce(s.version, 1) END, "
+                "    s.contentHash=CASE "
+                "        WHEN s.contentHash IS NULL OR s.contentHash = '' "
+                "             OR s.contentHash <> $ch THEN $ch "
+                "        ELSE s.contentHash END",
                 params={"url": key, "ch": ch,
                         "ck": list(_CONNECTOR_SOURCE_KINDS)},
             )
@@ -5336,10 +5417,31 @@ class _EntityHandlers:
             # contentHash/references survive, version unchanged). Stubs
             # (NULL stored hash) are still COMPLETED by a real $hash, and the
             # hash-diff bump is unchanged for callers that DO carry a hash.
-            "ON MATCH SET s.contentHash = CASE WHEN $hash IS NULL THEN s.contentHash "
-            "                          WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
-            "                          THEN $hash ELSE s.contentHash END, "
-            "           s.title = CASE WHEN $hash IS NULL THEN s.title "
+            # ⛔ THE GUARDED COLUMN IS WRITTEN LAST (#8870/#7362). On a SERVER
+            # engine (falkordb 6.x — the production `TORTOISE_DB_URI` backend)
+            # the `SET` items of one clause apply LEFT TO RIGHT and each item
+            # observes the values the earlier items just wrote; the EMBEDDED
+            # engine (falkordblite) and falkordb-server v4.20.6 (the CI docker
+            # lane) read PRE-write values instead. Every item below tests
+            # `s.contentHash` against `$hash` to decide "is this a NEW
+            # version?", so the hash must not be installed until ALL of them
+            # have read it — otherwise each comparison reads the hash this same
+            # clause just wrote, sees "unchanged", and `title`, `version`,
+            # `updatedAt`, `validFrom` and `_searchText` are silently skipped on
+            # the only engine that can see it: the #7362 class ("the hash
+            # advances, the counter does not") on the very writer §4.6's
+            # `stale`/`current` anchor reads. MEASURED 2026-10-18 on
+            # falkordb/falkordb:6.0.1, h1→h2: `contentHash`-first left
+            # `version=1, title='t1'`; last gives `version=2, title='T2'` — a
+            # content-changing repoll with the hash moving `bf64f552…` →
+            # `01c54ed4…` and `version` stuck at 1. Placed LAST rather than
+            # swapped forward so the next guarded field added here cannot
+            # reintroduce the defect. Pinned order-only, engine-independently,
+            # by `tests/test_source_version_set_order_7362.py`; behaviourally by
+            # `tests/test_8870_version_anchor_write_order.py` and
+            # `test_a_rebuild_reproduces_the_source_field_for_field`
+            # (`version == 6` on the server engine).
+            "ON MATCH SET s.title = CASE WHEN $hash IS NULL THEN s.title "
             "                   WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
             "                   THEN coalesce($title, s.title) ELSE s.title END, "
             # Lane L5 (#5097 review P1): the bump is GATED ON THE SAME
@@ -5443,7 +5545,12 @@ class _EntityHandlers:
             # D10 (§4.4/§9.5 Q3): `format` is a Source property now; a caller
             # supplying it must land on the node, overwriting an existing value
             # (parity with the old open-passthrough write it replaces).
-            "           s.format = coalesce($fmt, s.format) "
+            "           s.format = coalesce($fmt, s.format), "
+            # ⛔ LAST, and it must stay last — see the ORDER note at the head of
+            # this ON MATCH clause (#8870).
+            "           s.contentHash = CASE WHEN $hash IS NULL THEN s.contentHash "
+            "                             WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
+            "                             THEN $hash ELSE s.contentHash END "
             # #5024 P1-A: the atomic pre-write capture above rides the write's
             # own result. `null` (a create) is a REAL value here, not a
             # swallowed failure — the caller no longer has a pre-read that can

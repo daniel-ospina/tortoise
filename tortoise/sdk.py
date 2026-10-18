@@ -5252,6 +5252,31 @@ class InvertedSupersedeWindow(ValueError):
         self.predecessor_valid_from = predecessor_valid_from
 
 
+class UnapprovedKindNamespace(ValueError):
+    """#5475 — a kind write refused because it names a pack the graph lacks.
+
+    Subclasses ``ValueError`` because that is the contract every SDK write door
+    publishes (callers and tests catch ``ValueError``), but it is a NAMED type
+    so a transport boundary can tell this DETERMINISTIC payload refusal from a
+    transient graph failure WITHOUT parsing the message — which the MCP layer
+    rewrites (``_scrub_error``) and which the hosted commit door would
+    otherwise turn into a retry-advising 500 for a payload that will refuse
+    identically on every retry (the #5363 precedent, one class over).
+
+    The facts ride as attributes (the offending ``prop``/``kind``/``namespace``
+    and the graph's ``installed`` set) so a boundary that renders a
+    client-facing error does not have to re-derive them from the prose.
+    """
+
+    def __init__(self, message, *, prop: str, kind: str, namespace: str,
+                 installed: frozenset[str] | None):
+        super().__init__(message)
+        self.prop = prop
+        self.kind = kind
+        self.namespace = namespace
+        self.installed = installed
+
+
 def _refuse_inverted_point_window(g, props: dict, *,
                                   point_id: str | None = None) -> None:
     """#5359: refuse an INVERTED validity window at a Point write boundary.
@@ -6930,9 +6955,36 @@ class TortoiseSDK:
         word is persisted as the ``credibility`` Point property. Real sources
         attached later can carry the claim above the word through ordinary
         inheritance.
+
+        PROVENANCE ADVISORY (#8171): a fresh claim written with NO source and
+        NO provenance returns ``advisories: [{code: 'no_source', node_id,
+        message, advisory: true}]`` — a transient key on the write RESULT (never
+        a node property, never journaled), absent whenever the write is
+        sourced. It is ADVISORY ONLY: the Point has already landed, nothing is
+        refused, and stored state is unchanged. A claim is sourced here when it
+        carries a declared or ``session_id``-inferred ``extractedFrom`` (this
+        door materializes the ``:Source`` and the edge) or an authored
+        ``credibility`` word (which #398 rules IS a source). The message names
+        the cheap fix — ``extractedFrom='session:<id>'`` for an assertion the
+        writer itself originates.
         """
         self._validate_kind(kind)
+        # #5475: `pointKind` is one of the properties
+        # `pack_state.graph_kind_namespaces` mines the approval set from, so the
+        # point door widened it exactly as the entity doors did — measured at
+        # HEAD: `create_point("totally:madeUpKind", ...)` on a `dev`-only graph
+        # left `['dev', 'totally']` behind. `_validate_kind` above only WARNS,
+        # so it is not a gate. Same rule, same ONE home, same refusal message
+        # as the entity funnel (`_refuse_unapproved_kind`).
+        self._refuse_unapproved_kind("pointKind", kind)
         _coerce_props(props)
+        # The props passthrough accepts the OTHER mined key names too
+        # (`objectKind`, `eventKind`, ...), and each of those is persisted on
+        # the Point and mined back into the approval set — measured:
+        # `create_point("statement", "x", objectKind="marketing:campaign")`
+        # widened a `dev`-only graph. Gate the whole mined key set, exactly as
+        # the entity funnel does.
+        self._refuse_unapproved_kinds_in_props(props)
         # #329: server-managed fields rejected on the props passthrough
         # (the explicit-id path via props.pop("id") below is preserved for operators)
         props = _sanitize_props(props)
@@ -7388,8 +7440,8 @@ class TortoiseSDK:
         # self-consistent injected encoder is stored instead of silently NULLed.
         embedding = None
         try:
-            from .embeddings import encode_for_store
-            embedding = encode_for_store(
+            from .embeddings import encode_for_row
+            embedding = encode_for_row(
                 content, self._get_proj().required_embedding_dim)
         except Exception:
             pass  # Graceful — embedding is optional
@@ -7802,13 +7854,59 @@ class TortoiseSDK:
             from .exceptions import WriteNotLandedError
             raise WriteNotLandedError(pid, getattr(proj, "graph_name", None),
                                       record_committed=bool(_record_committed))
-        if _source_change_notices:
-            # #5516: the notice is TRANSIENT — it rides the write result the
+        # ── #8171: the write-time provenance advisory, CLAIM door ────────
+        # The ruling: an agent asserting something without research is a WEAK
+        # source, and the source is the agent-session transcript. `audit`'s
+        # `missing_sourceKind` check is the SAME predicate, evaluated POST HOC
+        # (it can never change what the writer does next), and #8171 wired it
+        # at write time on the entity doors — but the door that actually
+        # creates CLAIMS (Points) reported nothing, so "a claim created with
+        # no source and no provenance" was never told to its writer. MEASURED
+        # before this: `create_point('statement', text)` returned the plain
+        # snapshot with no `advisories` key at all.
+        #
+        # ADVISORY ONLY — it rides the write result on a COPY, exactly like the
+        # #5516 `source_change_notices` below: the journaled snapshot and every
+        # later `get_point` stay free of it, the write has already LANDED, and
+        # nothing here raises, refuses or changes what was stored.
+        #
+        # What counts as SOURCED, and why each silence is justified:
+        #   - `extractedFrom` (declared, or inferred from `session_id` by the
+        #     #3263 path above) — materialized by THIS door into a `:Source`
+        #     and an `extractedFrom` edge. That is the remedy the advisory
+        #     names, so it must silence the note.
+        #   - an authored WORD (`credibility=`) — #398 rules the author's word
+        #     IS a source (the weak evidence body `_stamp_authored_word`
+        #     records). Advising a writer who declared their basis would be
+        #     wrong, not merely noisy.
+        # A bare point-level `sourceKind` does NOT silence it: it is a legacy
+        # annotation with no link behind it (the same measured finding that
+        # removed the `sourceKind` bypass from `_provenance_advisory` —
+        # `extracted_from_inert` exists because a declared-but-unwired ref is
+        # worse than none), and `audit`'s own check treats "no sourceKind AND
+        # no extractedFrom edge" as the gap, so neither field is provenance on
+        # its own.
+        _provenance_notes: dict = {}
+        if not props.get("extractedFrom") and credibility is None:
+            # A `session_id` that could not name a Source is the one case where
+            # the plain message would be misleading: say why it did not help.
+            _point_sid_hint = (
+                " (A `session_id` was supplied but is not a non-empty string, "
+                "so no source could be derived from it — pass a string "
+                "`session_id`, or `extractedFrom='session:<session_id>'`.)"
+                if _session_id is not None else ""
+            )
+            _provenance_notes = self._no_source_advisory(
+                pid, hint=_point_sid_hint)
+        if _source_change_notices or _provenance_notes:
+            # #5516 / #8171: both are TRANSIENT — they ride the write result the
             # writer sees, on a COPY, so the journaled snapshot above and every
-            # later `get_point` stay free of it. Present only when a Source
-            # actually changed: an unchanged-source write's result is byte-
-            # identical to before this feature.
-            return {**_snapshot, "source_change_notices": _source_change_notices}
+            # later `get_point` stay free of them. A write that carries neither
+            # notice returns byte-identical to before these features.
+            _extra = dict(_provenance_notes)
+            if _source_change_notices:
+                _extra["source_change_notices"] = _source_change_notices
+            return {**_snapshot, **_extra}
         return _snapshot
 
     def create_or_update_point(self, kind: str, content: str, **props) -> dict:
@@ -10691,9 +10789,9 @@ class TortoiseSDK:
             # — a `None` new_content is "no content edit" there, so it must not
             # derive (or wipe) a vector either.
             try:
-                from .embeddings import encode_for_store
+                from .embeddings import encode_for_row
                 props["embedding"] = (
-                    encode_for_store(_new_content, proj.required_embedding_dim)
+                    encode_for_row(_new_content, proj.required_embedding_dim)
                     if _new_content else None)
             except Exception:
                 props["embedding"] = None
@@ -12126,13 +12224,35 @@ class TortoiseSDK:
         # emitted BEFORE the transfer (EMIT-BEFORE-TRANSFER, §4.4) so a
         # transfer×emission crash cannot leave the stale descriptor in the
         # JSONL while the live edge moves.
+        # #8622: the OTHER endpoint may carry ANY of the four epistemic
+        # labels (#7902 / owner ruling #7813 — a direct IMPL/NAND is explicitly
+        # allowed to connect any two of :Point/:Subject/:Object/:Event). The
+        # transfer legs therefore anchor each endpoint on the label that
+        # actually resolved it; a hardcoded ``:Point`` on the far endpoint
+        # matched NOTHING, so the MERGE was a constrained no-op and the
+        # delete-leg below removed the ORIGINAL edge — the transfer silently
+        # DESTROYED the edge live, and the replay (which received the same
+        # endpoint contract) dropped it too. ``labels(t)`` rides the same
+        # traversal, so no extra round trip is spent resolving the far node.
+        def _epistemic_label(node_id: str) -> str | None:
+            """Resolve one id's epistemic label, Point-first (#7853 sweep)."""
+            for _label in EPISTEMIC_LABELS:
+                found_row = proj.g.query(
+                    f"MATCH (n:{_label} {{id:$id}}) RETURN ID(n) LIMIT 1",
+                    params={"id": node_id},
+                ).result_set
+                if found_row:
+                    return _label
+            return None
+
+        new_label = _epistemic_label(new_id) if new_id else None
         for direction in ("out", "in"):
             if direction == "out":
                 dq = ("MATCH (old:Point {id:$old_id})-[r:IMPL|NAND]->(t) "
-                      "RETURN type(r), r, t.id, ID(r)")
+                      "RETURN type(r), r, t.id, ID(r), labels(t)")
             else:
                 dq = ("MATCH (t)-[r:IMPL|NAND]->(old:Point {id:$old_id}) "
-                      "RETURN type(r), r, t.id, ID(r)")
+                      "RETURN type(r), r, t.id, ID(r), labels(t)")
             rows = proj.g.query(dq, params={"old_id": old_id}).result_set
             # Filter: exclude edges whose OTHER endpoint is an operator Point
             # (REVIEW-FIX P2 — a mitigation-style (m)-[:IMPL]->(op) edge has
@@ -12153,6 +12273,14 @@ class TortoiseSDK:
             rows = plain
             for row in rows:
                 rtype, r, tid, rid = row[0], row[1], row[2], row[3]
+                # #8622: the label that ACTUALLY carries the far endpoint, in
+                # EPISTEMIC_LABELS order (Point-first) — the same first-wins
+                # order ``create_direct_edge``'s probe uses, so the write and
+                # the transfer can never disagree about a multi-labelled node.
+                _row_labels = set(row[4] or ()) if len(row) > 4 else set()
+                tid_label = next(
+                    (lbl for lbl in EPISTEMIC_LABELS if lbl in _row_labels),
+                    None)
                 # FalkorDB returns an Edge object — read its properties.
                 rdict = dict(r.properties) if hasattr(r, "properties") else {}
                 if tid == new_id:
@@ -12200,25 +12328,36 @@ class TortoiseSDK:
                 # Two-step MERGE (FalkorDB quirk — same as create_direct_edge):
                 # MATCH the existing nodes, then MERGE the edge between them
                 # (never creates duplicate nodes; collapses to one edge).
-                if direction == "out":
-                    mq = (f"MATCH (new:Point {{id:$new_id}}), "
-                          f"(t:Point {{id:$tid}}) "
-                          f"MERGE (new)-[nr:{rtype}]->(t)")
-                else:
-                    mq = (f"MATCH (t:Point {{id:$tid}}), "
-                          f"(new:Point {{id:$new_id}}) "
-                          f"MERGE (t)-[nr:{rtype}]->(new)")
-                proj.g.query(mq, params={"new_id": new_id, "tid": tid})
-                _keep = {k: v for k, v in rdict.items()
-                         if k in ("direction", "confidence", "weight",
-                                  "label", "batch_id")}
-                proj.g.query(
-                    f"MATCH (a:Point {{id:$a}})-[r:{rtype}]->"
-                    f"(b:Point {{id:$b}}) SET r += $attrs",
-                    params={"a": (tid if direction == "in" else new_id),
-                            "b": (new_id if direction == "in" else tid),
-                            "attrs": _keep},
-                )
+                # #8622: anchor BOTH endpoints on their resolved labels. An
+                # unresolvable label means the endpoint is not an epistemic
+                # node (a raw/legacy edge the write path itself refuses), so
+                # the transfer cannot be performed — the delete-leg below still
+                # runs, mirroring the pre-#7902 "no such endpoint" outcome
+                # WITHOUT the silent hope that a :Point match existed.
+                if new_label is not None and tid_label is not None:
+                    if direction == "out":
+                        mq = (f"MATCH (new:{new_label} {{id:$new_id}}), "
+                              f"(t:{tid_label} {{id:$tid}}) "
+                              f"MERGE (new)-[nr:{rtype}]->(t)")
+                    else:
+                        mq = (f"MATCH (t:{tid_label} {{id:$tid}}), "
+                              f"(new:{new_label} {{id:$new_id}}) "
+                              f"MERGE (t)-[nr:{rtype}]->(new)")
+                    proj.g.query(mq, params={"new_id": new_id, "tid": tid})
+                    _keep = {k: v for k, v in rdict.items()
+                             if k in ("direction", "confidence", "weight",
+                                      "label", "batch_id")}
+                    if direction == "out":
+                        _a_label, _b_label = new_label, tid_label
+                    else:
+                        _a_label, _b_label = tid_label, new_label
+                    proj.g.query(
+                        f"MATCH (a:{_a_label} {{id:$a}})-[r:{rtype}]->"
+                        f"(b:{_b_label} {{id:$b}}) SET r += $attrs",
+                        params={"a": (tid if direction == "in" else new_id),
+                                "b": (new_id if direction == "in" else tid),
+                                "attrs": _keep},
+                    )
                 # Delete the OLD edge by its internal id (precision),
                 # constrained to the old point's incident edges (REVIEW-FIX
                 # P2: never graph-wide — internal ids may be reused).
@@ -14008,20 +14147,20 @@ class TortoiseSDK:
                 # The healed legacy mitigation carries the recorded #2199
                 # default too (same birth fact `create_point` records).
                 self._stamp_authored_word(mid, system_default=True)
-            # The OPERATOR is the dirty root here, not the mitigation: EP reads
-            # the changed strength off the operator's factor, and only a
-            # seeded operator pulls its inputs into the affected set. The
-            # CREATE path below marks exactly this pair ([mid, id]); the
-            # update path must match it. Marking `[mid]` alone is no longer a
-            # dead end — `_reverse_bfs_neighbors` now matches the mitigation
-            # back-link direction too — but the pair is what this path is
-            # specified to mark, and it does not depend on that helper's
-            # shape. The in-process flow hides a missing mark behind the
-            # operator's own creation-time ep_dirty flag; `ep_dirty` is
+            # #7505: mark the MITIGATION only — NOT the operator. What the
+            # re-mitigation needs is the operator's INPUTS recomputed, and
+            # `_reverse_bfs_neighbors` already returns them as claims through
+            # the mitigation back-link branch `(m)-[:IMPL]->(op)` (#6599). The
+            # operator id itself is not a factor participant, so no converged
+            # pass can subtract it from `_dirty_roots` (that is #2422's class),
+            # and marking it pinned `_auto_dream_mode()` to 'local' forever on
+            # every mitigation. The in-process flow hid the missing mark behind
+            # the operator's own creation-time ep_dirty flag; `ep_dirty` is
             # deliberately NOT journaled (#5166), so a rebuilt/replayed graph
-            # has no such mask and a re-mitigation would silently not move
-            # confidence. (#5566 review P2.)
-            self._mark_dirty([mid, id])
+            # has no such mask — the INPUT marks are what carry the
+            # re-mitigation, and they are computed, not assumed (#5566 review
+            # P2).
+            self._mark_dirty([mid])
             return self.get_point(mid)
         # Create new mitigation Point
         mid = ulid()
@@ -14080,7 +14219,12 @@ class TortoiseSDK:
         else:
             self._stamp_authored_word(mid, system_default=True)
         # Dreaming (#85): new mitigation + IMPL edge change propagation.
-        self._mark_dirty([mid, id])
+        # #7505: `[mid]` only — same reasoning as the update path above. `mid`
+        # reaches the operator's inputs through the reverse-BFS back-link
+        # branch and is itself swept as a neutral link (it forms no factor);
+        # the OPERATOR is deliberately not marked, because an operator root is
+        # not sweepable and would pin the dream mode to 'local'.
+        self._mark_dirty([mid])
         # #548: emit events for rebuild parity
         self._emit_event("PointAdded", point=self.get_point(mid))
         # Emit OperatorAdded so the IMPL edge (mitigation → operator) is
@@ -18883,7 +19027,15 @@ class TortoiseSDK:
         try:
             results = self.tortoise_fts_query(
                 query_text, entity_type="point", limit=200,
-                _record_reads=False)  # #7983: a review pool, not a caller read
+                _record_reads=False,  # #7983: a review pool, not a caller read
+                # #8487 (review round 6, P2): this pool is consumed as a
+                # MEMBERSHIP filter — both ``review_add`` (orders the
+                # suggestions by SIMILARITY itself) and ``review_prune``
+                # discard the read order — so the only thing the valid-time
+                # selection could still do here is move which ids survive the
+                # ``limit`` cut: an unmeasured composition change on a product
+                # surface. Opt out, like ``recall_state``.
+                _valid_time_rerank=False)
         except Exception:  # noqa: BLE001, RUF100
             return {}
         scoped = {}
@@ -19532,17 +19684,28 @@ class TortoiseSDK:
         """Sweep a converged pass's affected claims from BOTH the in-memory
         dirty set and the graph flags (#1163).
 
+        The sweep set is the run's ``affected`` claims PLUS the roots no pass
+        can ever sweep (:meth:`_unsweepable_dirty_roots`, #7505). The second
+        term is not a retention relaxation: those roots are invisible to the
+        ``affected`` rule by CONSTRUCTION (they form no factor, so
+        ``_affected_claims`` can never admit them), so subtracting only
+        ``affected`` retains them for the life of the graph — the defect
+        #7505 records. Roots the pass did NOT reach for any other reason
+        (capped, truncated, non-converged — the W4 retention of #1243) are
+        still never swept.
+
         The graph sweep is epoch-guarded: a flag stamped at a NEWER epoch
         than ``run_ep`` (the pass's world-view snapshot) is never cleared —
         a concurrent process re-marked it dirty mid-run and its marking
         must survive. ``run_ep=None`` (single-process callers without a
         snapshot) clears unconditionally.
         """
-        self._dirty_roots -= affected
-        self._reset_retry_state(affected)
-        if not affected:
+        swept = set(affected) | self._unsweepable_dirty_roots(affected)
+        self._dirty_roots -= swept
+        self._reset_retry_state(swept)
+        if not swept:
             return
-        ids = list(affected)
+        ids = list(swept)
         if run_ep is None:
             self._get_proj().g.query(
                 "MATCH (n:Point) WHERE n.id IN $ids AND n.ep_dirty = true "
@@ -19556,6 +19719,120 @@ class TortoiseSDK:
                 "SET n.ep_dirty = null, n.ep_dirty_at = null",
                 params={"ids": ids, "run_ep": run_ep},
             )
+
+    def _unsweepable_dirty_roots(self, affected: set[str]) -> set[str]:
+        """Dirty roots that NO pass can ever clear: the NEUTRAL-LINK ones — a
+        node that has an ``IMPL|NAND`` edge but participates in no EP factor,
+        so ``_affected_claims`` can never admit it (#7505).
+
+        ``_sweep_dirty_roots``' only clearing rule is SUBTRACT the run's
+        ``affected`` set, and ``TortoiseEP._affected_claims`` admits exactly
+        two shapes: an operator's INPUT (``(op)-[:IMPL|NAND]->(c)`` — the
+        direction ``_affected_factors`` reads, #5566) and an endpoint of an
+        operator-less ``IMPL|NAND`` edge (#888 W5). A node that has an
+        ``IMPL|NAND`` edge but is neither can never appear in ``affected``, so
+        every converged pass retains it forever. That is the #2422
+        terminal-point class — `_mark_dirty` excludes terminal points from the
+        persist WHERE for precisely this reason — and this is the same
+        exclusion for the NEUTRAL-LINK class (#5025): an edge that forms no
+        factor must not make a node a dirty root.
+
+        MEASURED (#7505, head): after `mitigate_operator` the mitigation
+        point ``mid`` carries a persisted ``ep_dirty`` that no pass cleared —
+        its only edge is ``(m)-[:IMPL]->(op)``, a reverse-only IMPL that
+        #6599 correctly keeps out of ``affected``. ``_dirty_roots`` grew one
+        permanent entry per mitigation, ``dream_health_check()``'s
+        ``stale_backlog`` could not drain, and every mitigation pinned
+        ``_auto_dream_mode()`` to 'local'.
+
+        THREE CLASSES ARE DELIBERATELY EXEMPT — this is not "drop every root
+        the pass did not reach":
+
+        * AN OPERATOR. It does form a factor, so dropping it on convergence
+          is sound only if the pass provably ran that factor — and it may not
+          have: an explicit-k pass is truncated at the operator cap
+          (``op_cap``, #1241), and #6211 is exactly a converged pass that did
+          not cover every factor. Nor is ``affected`` a witness: stale-first
+          and full passes report the UNION of their per-batch affected sets,
+          so one operator's two inputs can sit in different batches without
+          its factor ever running. The only sound witness is the run's own
+          factor-operator set, which the sweep is not given. So
+          `mitigate_operator` stops MAKING the operator a root instead (its
+          inputs are already reached through the mitigation back-link branch
+          of `_reverse_bfs_neighbors`, #6599) — see that call site. A root an
+          operator still acquires from the `update_point` write family
+          (`invalidate_point` refuses operators) therefore remains a
+          permanently unsweepable root, exactly as it was before #7505; that
+          residual is tracked, not silently assumed away.
+        * A ROOT WITH **NO** ``IMPL|NAND`` EDGE AT ALL (an isolated claim).
+          Its pass computes nothing (the #3139 ``no_ep_factors`` legitimate
+          no-op), so sweeping its flag would be a no-op sweeping its own
+          backlog — the exact failure #3139 forbids. It is retained, as
+          before; that is a different decision (#6211 territory), not this
+          issue's.
+        * A NON-``:Point`` ROOT — the #7927 pinned gap: never graph-persisted,
+          never selected by the dream BFS. Left EXACTLY as it was, so this fix
+          neither widens nor silently tidies that boundary.
+
+        The residue is classified with three batched queries, and ONLY the
+        roots the ``affected`` subtraction did not clear are examined — a pass
+        whose every root was a claim issues none at all.
+        """
+        candidates = set(self._dirty_roots) - set(affected)
+        if not candidates:
+            return set()
+        proj = self._get_proj()
+        ids = sorted(candidates)
+        # The classification is :Point-only, exactly like the rest of the dirty
+        # lifecycle (`_mark_dirty`'s persist, `_hydrate_dirty_roots`,
+        # `_prune_nonexistent_dirty_roots` all anchor `MATCH (n:Point)`).
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids "
+            "RETURN n.id, (n.is_operator = true OR n.op_type IS NOT NULL)",
+            params={"ids": ids},
+        ).result_set
+        points = {r[0] for r in rows}
+        # An OPERATOR is retained (see above) — its factor can be recomputed by
+        # a later pass even though the operator itself is not an affected
+        # claim. `op_type` is the legacy operator marker (#2205/#3139 form).
+        participants = {r[0] for r in rows if r[1]}
+        # (1) an operator's INPUT. Direction is load-bearing: a mitigation
+        # points AT an operator (``(m)-[:IMPL]->(op)``), so it is the operator
+        # that would match here, never ``m``.
+        participants |= {r[0] for r in proj.g.query(
+            "MATCH (o:Point)-[:IMPL|NAND]->(n:Point) "
+            "WHERE n.id IN $ids "
+            "AND (o.is_operator = true OR o.op_type IS NOT NULL) "
+            "RETURN DISTINCT n.id",
+            params={"ids": ids},
+        ).result_set}
+        # (2) the two facts the remaining classes need from the edges, in ONE
+        # sweep: does the candidate have an IMPL|NAND edge at all (the class
+        # boundary — an isolated claim has none and is retained), and is that
+        # edge's far endpoint a PLAIN node (the operator-less direct-edge
+        # admission of #888 W5; a mitigation's far endpoint is the OPERATOR,
+        # which is what keeps it out of `affected` and is measured here).
+        # The far endpoint is ANY epistemic label, not `(d:Point)`: #7902/
+        # #7853 widened the direct-edge admission in `_affected_claims` and
+        # `_affected_factors` Batch 3 past Point->Point, so a `:Point` whose
+        # only plain neighbour is a `:Subject` is a factor participant and must
+        # not be classified unsweepable. The id-anchored half stays `:Point`
+        # because the candidate universe above is `:Point`-only.
+        edge_rows = proj.g.query(
+            "MATCH (n:Point)-[:IMPL|NAND]-(d) "
+            f"WHERE n.id IN $ids AND {epistemic_disjunction('d')} "
+            "RETURN DISTINCT n.id, "
+            "((d.is_operator IS NULL OR d.is_operator = false) "
+            "AND d.op_type IS NULL) AS d_plain",
+            params={"ids": ids},
+        ).result_set
+        edge_bearing = {r[0] for r in edge_rows}
+        # A direct-edge factor needs a plain FAR endpoint; the near endpoint's
+        # plainness is guaranteed for every non-operator candidate (an
+        # operator is already in `participants`). The #2205/#3139
+        # index-independent form is used for the far endpoint.
+        participants |= {r[0] for r in edge_rows if r[1]}
+        return (points & edge_bearing) - participants
 
     def _reverse_bfs_neighbors(self, proj, point_ids: list[str]
                                ) -> tuple[list[str], list[str]]:
@@ -19596,9 +19873,26 @@ class TortoiseSDK:
                 op_ids.append(r[0])
         claim_ids: list[str] = []
         if op_ids:
+            # #7505 (review P1): the operator's INPUTS are widened to ANY
+            # epistemic label, exactly as the READ half was (#7902/#7853:
+            # `_affected_claims`' op-seed query and `_affected_factors`
+            # Batch 2 both widen `c`). This query is the only path by which a
+            # mitigation write reaches the operator's factor — `(m)-[:IMPL]->
+            # (op)` is a neutral link, so `mid` alone admits nothing — and a
+            # `:Point`-only spelling silently drops every operator whose inputs
+            # are non-`:Point` labels: the pass becomes a clean no-op
+            # (`diagnostic='no_factors'`) and a mitigated strength stops moving
+            # belief. Measured on an `IMPL` from a `:Subject` to an `:Object`:
+            # a 0.5 mitigation left the target's posterior at 1.262738 instead
+            # of 1.140587. The operator side stays id-anchored, so the id index
+            # still anchors the traversal. Non-`:Point` ids this returns enter
+            # the in-memory mirror only (`_mark_dirty`'s persist/prune are
+            # `:Point`-anchored — the #7927 gap), which is the same shape
+            # `create_operator(inputs=[…:Subject…])` already has.
             rows = proj.g.query(
-                "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]->(c:Point) "
-                "WHERE op.id IN $oids RETURN DISTINCT c.id",
+                "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]->(c) "
+                f"WHERE op.id IN $oids AND {epistemic_disjunction('c')} "
+                "RETURN DISTINCT c.id",
                 params={"oids": op_ids},
             ).result_set
             claim_ids = [r[0] for r in rows]
@@ -19866,7 +20160,9 @@ class TortoiseSDK:
             local: {mode, iterations, converged, affected_claims,
                     budget_used, coverage} — converged retained for the
                     dirty-root logic (roots covered by the affected set are
-                    cleared; roots outside stay dirty for a later dream).
+                    cleared; roots outside stay dirty for a later dream —
+                    except a NEUTRAL-LINK root, which no pass can ever cover
+                    and is cleared instead, #7505).
             stale-first: {mode, batches, converged_all, converged,
                     affected_claims, budget_used, coverage} — converged =
                     this pass's window-level convergence (drives the
@@ -20145,8 +20441,11 @@ class TortoiseSDK:
 
         Dirty-root clearing keeps the #395-era retention semantics (roots in
         the affected set are cleared; roots OUTSIDE the dreamed subgraph
-        stay dirty for a later dream; an empty affected set subtracts
-        nothing) — the non-convergence divergence is owned by 903-C5.
+        stay dirty for a later dream) — the non-convergence divergence is
+        owned by 903-C5. The one addition is #7505: a NEUTRAL-LINK root (one
+        that has an ``IMPL|NAND`` edge but forms no EP factor, so no pass can
+        ever put it in an affected set) is cleared too, because retaining it
+        would retain it forever (:meth:`_unsweepable_dirty_roots`).
         """
         anchors = list(self._dirty_roots)
         if not anchors:
@@ -20208,9 +20507,10 @@ class TortoiseSDK:
         mirrors the pass's seed expansion and liveness predicates (#6597), so
         ``affected ⊆ closure``; a budget-bounded pass simply reports < 1.0.
         The dirty-root logic is driven from the window-level ``converged``
-        flag: a converged pass clears the affected roots; a failed pass clears
-        nothing (W4 retention — non-converged regions reselect via the window
-        union).
+        flag: a converged pass clears the affected roots (plus the
+        NEUTRAL-LINK roots no pass could ever reach — #7505, see
+        `_sweep_dirty_roots`); a failed pass clears nothing (W4 retention —
+        non-converged regions reselect via the window union).
         """
         result = dreamer.dream_window(budget=budget, max_hops=max_hops,
                                      warm_start=warm_start)
@@ -20268,8 +20568,9 @@ class TortoiseSDK:
         # P2-review (#1243): a CONVERGED full pass resolves every reachable
         # region — clear the affected roots' retry state so a later failed
         # window pass cannot surface an already-converged region as
-        # stale_unresolved, and prune deleted-point zombies. #1163: the
-        # guarded sweep stands down when the stale-run guard fired (a
+        # stale_unresolved (the shared sweep also clears the NEUTRAL-LINK roots
+        # no pass can reach — #7505), and prune deleted-point zombies. #1163:
+        # the guarded sweep stands down when the stale-run guard fired (a
         # concurrent process re-marked dirty mid-pass).
         if result.get("converged_all", False) and not getattr(
                 dreamer, "_last_flush_skipped", False):
@@ -22783,7 +23084,12 @@ class TortoiseSDK:
             # #7983: a CANDIDATE pool — the fallback's rows are re-scored, some
             # dropped by the max_rrf gate and the rest reranked below, so what
             # the caller receives is recorded at the return instead.
-            fts_results = self.tortoise_fts_query(q, limit=limit, _record_reads=False)
+            fts_results = self.tortoise_fts_query(
+                q, limit=limit, _record_reads=False,
+                # #8487: the fallback's rows are re-scored into a confidence
+                # band below, so this is another candidate pool whose order the
+                # caller re-owns.
+                _valid_time_rerank=False)
             results = []
             max_rrf = max(
                 (r.get("scores", {}).get("rrf", 0.0) for r in fts_results),
@@ -22911,9 +23217,14 @@ class TortoiseSDK:
             # Fetch a wider candidate pool than `limit` (review P3): the gate
             # below filters post-retrieval, so a relevant hit ranked just past
             # the limit would otherwise be invisible at small limits.
+            # #8487: a CANDIDATE pool — ``_issue_insight_rank(...)[:limit]``
+            # re-owns the order below, so the SDK-side validity selection could
+            # only move which ids survive that cut. Same shape as
+            # recall_state's opt-out.
             semantic_hits = self.tortoise_fts_query(
                 text, entity_type="point", limit=max(limit * 5, 20),
                 _record_reads=False,  # #7983: a candidate pool
+                _valid_time_rerank=False,  # #8487: caller re-owns the order
             )
             # c70: drop hits that clear neither the EP-confidence floor nor a
             # shared-token floor (TF-IDF fallback hits carry no EP annotation;
@@ -23321,6 +23632,53 @@ class TortoiseSDK:
         # up to 3-30k keys read and biases `f` HIGH — the direction that removes
         # the saving the instrument measures. Default True = product reads.
         _record_reads: bool = True,
+        # #8487: PRIVATE — the read-path VALID-TIME selection (valid time as a
+        # selection signal, not just decoration). Default True = the product
+        # behaviour below. Passed False by a caller that RE-OWNS the order of
+        # these rows downstream: its ordering is what the caller sees, so the
+        # only thing this selection can still do is move which ids survive the
+        # ``limit`` cut — an unmeasured composition change. The lanes that do
+        # that:
+        #   * ``tools/longmem_eval/retrieve.py`` (the evals' last order-owner);
+        #   * ``recall_state`` / ``recall_gaps`` (StateRanker / GapsRanker
+        #     re-sort the whole pool before the cut) and ``issue_insight`` /
+        #     ``suggest_entry_points`` (``_issue_insight_rank`` / an RRF-derived
+        #     confidence band, same shape) — each passes False at its own call
+        #     site with the reason recorded there;
+        #   * ``_review_pool`` / ``_resolve_subgraph_seed`` (#8487 review round
+        #     6, P2) — a review pool is consumed as a MEMBERSHIP filter and a
+        #     subgraph seed set as an expansion START set, so neither keeps the
+        #     order; only the pre-cut composition of their ids could move, which
+        #     is an unmeasured change to two product surfaces;
+        #   * ``tools/fusion_formula_ab.py`` / ``tools/ask_pool_admission_probe``
+        #     (a controlled measurement that must stay comparable to its own
+        #     recorded numbers);
+        #   * ``tortoise/extractor_v2.py::_fts_rows`` (#8487 review round 7, P2)
+        #     — S3's capture-time prior leg: ``search_graph`` accumulates the
+        #     rows into id-keyed dicts (order discarded) and link-before-create
+        #     / supersession resolution consumes them as a SET, at ``limit=3``.
+        #     A pre-cut composition change there is unmeasured and lands on the
+        #     WRITE path, so it opts out at its own call site.
+        # The ASK lane and its mirrors (``tools/ask_recall_bench.py``,
+        # ``tools/gen_ask_transcripts.py``) keep it ON: they measure/replay the
+        # shipped reader, so they must include the selection.
+        #
+        # OVERRIDES (#1745, recorded 2026-10-18 on #8487): this retrieval lever
+        # ships DEFAULT ON, where #1745's fail-safe convention keeps a new
+        # lever OFF until a measured delta adopts it (the convention
+        # ``entity_key_expansion`` and ``time_aware`` above follow). #8487 is
+        # OWNER-filed and requires the read path itself to consume valid time,
+        # so a default-OFF lever would ship the issue unimplemented. The delta
+        # is on the record rather than assumed: the shipped ask lane's context
+        # order moved on merge —
+        # ``tests/fixtures/ask_llm_transcripts/all-superseded-stale-evidence.json``
+        # was regenerated (the current session block now precedes the
+        # superseded one; ``user_message_hash`` c14618… → 495593…), and the
+        # three-claim measurement on the shipped read path is in the #8487
+        # plan-doc amendment (D3). The record lives here, in that plan doc, and
+        # on #8487 itself, so the next lane reading the #1745 convention finds
+        # why this lever is the exception.
+        _valid_time_rerank: bool = True,
         pool_size: int | None = None,
         leg_trace: list[dict] | None = None,
         # B6 (#3892): the read-path status sink — one of the four recorded terms
@@ -23343,9 +23701,13 @@ class TortoiseSDK:
         # C6 (#2520, #2513): time-aware query expansion — the query-side
         # date anchor. ``time_aware`` gates the C6 branch; ``query_date``
         # is the question's date (YYYY-MM-DD, or a timestamp truncated to
-        # it). Default OFF (the #1745 fail-safe decision, matching
-        # ``entity_key_expansion``): the branch is never entered and the
-        # output is byte-identical.
+        # it). TWO consumers, and only one of them is behind ``time_aware``:
+        # with ``time_aware=False`` the C6 dense-anchor branch is never
+        # entered, but ``query_date`` is STILL the reference instant of the
+        # #8487 rank-time valid-time selection (§5e), so passing it can change
+        # the returned order without ``time_aware`` (the ask lane does exactly
+        # that). ``query_date=None`` leaves both consumers on their default
+        # (the wall-clock date for §5e) and is the byte-identical path.
         query_date: str | None = None,
         time_aware: bool = False,
     ) -> list[dict]:
@@ -23368,8 +23730,17 @@ class TortoiseSDK:
         Precedence: pool_size > TORTOISE_POOL_FLOOR env > the baked floor
         (the product's DEFAULT_POOL_SIZE = 120, #1947/G2). pool_size/floor
         only raise the candidate window (str_limit); the RETURNED limit is
-        unchanged — truncation at result_ids[:limit] precedes EP
-        decoration, so a deeper pool has zero decoration cost. pool_size
+        unchanged — truncation at result_ids[:limit] precedes EP decoration,
+        so a deeper pool has zero cost for the RETURNED page's EP decoration.
+        ONE exception (#8487 review round 7, P3): a Point read with temporal
+        intent runs the valid-time SELECTION before that cut, so it reads
+        epistemic state over the pre-cut pool (up to pool_size) — one wider
+        ``OPTIONAL MATCH``-joined state read, capped by
+        ``search_engine._DECORATION_TIMEOUT_MS`` (200 ms). That read fails
+        OPEN: past the budget the selection is skipped and the leg records
+        ``reason="state_read_incomplete"`` with ``degraded=False``, so a very
+        deep pool on a temporal query can silently DECLINE the selection
+        rather than fail the read. pool_size
         is an EXACT override: a value below limit*2 LOWERS the pool to
         pool_size (the env floor only raises — max(limit*2, floor)).
         #1348. Resolution is the product's
@@ -23519,11 +23890,48 @@ class TortoiseSDK:
             structural legs keep the ORIGINAL query (date tokens would
             dilute the sparse OR-union). A DATE-PINNED query ("where did I
             live in 2024?") is deliberately NOT anchored and gets no fresh
-            bias (the invert-recency guard). Rank-time prefer-latest is a
-            caller concern (the eval applies it on its final pool — see
-            ``tools.longmem_eval.retrieve``): a stable reorder layered here
-            would be discarded by the eval's RRF re-sort. Default
-            ``time_aware=False`` → byte-identical, zero extra work.
+            bias (the invert-recency guard). Default ``time_aware=False`` →
+            byte-identical, zero extra work.
+
+            RANK-TIME VALID-TIME SELECTION (#8487) is NOT behind
+            ``time_aware``: a PREFER-LATEST query is answered from the
+            currently-valid versions whatever the anchor arm is set to.
+            Before the #8487 wiring the ranker was blind to validity — a
+            measured three-claim knowledge-update graph returned the ENDED
+            claim (``validTo`` past, ``status='live'``) and a
+            NOT-YET-EFFECTIVE claim inside the page as current facts, because
+            nothing in the read path consumed the window. On the
+            pre-truncation fused candidate set (the same seam as
+            ``exclude_status``, so ``limit`` applies AFTER the selection) the
+            page is stably reordered live-first via
+            ``tortoise.time_aware.prefer_latest_ids``: nothing is filtered
+            (a historical read keeps its evidence in the fused pool), order
+            within each group is stable, undated entries are never demoted, and
+            an all-stale pool is returned untouched. Pool membership is what is
+            preserved — ``limit`` still applies after the selection, so a
+            demoted row leaves the RETURNED PAGE when the page is already full
+            of current rows. The
+            reorder fires only when the fused page actually carries a
+            non-current entry, so an undated corpus reads byte-identically.
+            The decision is recorded on ``leg_trace`` as a ``valid_time``
+            entry (reason + demoted count) — that entry plus each hit's own
+            window (``valid_from``/``valid_to``/``end_state``/
+            ``superseded_by``) is the audit trail for "which version was
+            selected, and why". An UNUSABLE state read (short map, a raised
+            read, or the selection raising) records
+            ``reason="state_read_incomplete"`` / ``"state_read_failed"`` /
+            ``"selection_failed"`` with ``degraded=False``: the entry's
+            ``degraded`` flag is the memory layer's impairment signal, which
+            ``ask_lane``/``read_status`` fold into the caller-facing
+            degradation status, so an ORDERING impairment that step 7.6's
+            page-width re-read fully recovers must not claim it. When that
+            page-width read ITSELF comes back empty for a non-empty page, an
+            ``epistemic_state`` entry with ``degraded=True`` is recorded — a
+            read that did not run is a degradation, an order that could not be
+            improved is not.
+            ``TORTOISE_VALID_TIME_RERANK=0`` is the
+            operator kill switch; ``_valid_time_rerank=False`` is the
+            in-process opt-out.
         """
         from .search_engine import (  # noqa: I001
             classify_query, degradation_chain, rrf_fusion,
@@ -24211,6 +24619,151 @@ class TortoiseSDK:
                 _logger.warning(
                     "turn-echo exclusion failed — pass-through", exc_info=True)
 
+        # 5e. (#8487) VALID-TIME SELECTION — prefer the CURRENTLY-VALID version.
+        #     Runs at the SAME pre-truncation seam as ``exclude_status`` (#898)
+        #     so ``limit`` counts already-selected candidates: a stale claim
+        #     demoted AFTER the cut has already consumed the page slot a live
+        #     one deserved. Measured defect, re-measured 2026-10-18: a
+        #     three-claim knowledge-update graph (ended / current / not-yet-
+        #     effective) came back from this method in pure relevance order with
+        #     the ended claim INSIDE the page as a current fact (rank 0 in one
+        #     read shape, rank 1 in another), and on a present-tense query the
+        #     2099-dated claim ranked first. Nothing filtered it: a claim can be
+        #     ``live`` and carry a window (`hosted_api`'s create arm writes
+        #     ``validFrom`` on live points, `mining` stamps it from the session
+        #     date), so terminal-STATUS exclusion is orthogonal to valid TIME.
+        #     The mechanism is ``time_aware.prefer_latest_order``'s rules — #2520
+        #     wrote it and the eval lane applies it to its FINAL pool, but the
+        #     product read path never did; ``prefer_latest_ids`` is the id-level
+        #     adapter over the state map the decoration reads anyway.
+        #     Never a FILTER: membership of the fused pool is preserved and an
+        #     all-stale pool is left alone. Nothing is exempted from the
+        #     ``limit`` cut either, so a demoted row keeps its pool membership
+        #     but leaves the RETURNED PAGE when a full page of current rows
+        #     precedes it (the ask lane reads with ``include_terminal=True`` for
+        #     the ``[SUPERSEDED BY]`` marker, so it sees the marker on the rows
+        #     that survive — not a promise that every demoted row is returned).
+        #     Cost: one intent scan (two bounded regexes) evaluated BEFORE any
+        #     graph read, so a query with no PREFER-LATEST intent pays no state
+        #     read here at all; when the intent is present the read is
+        #     POOL-width (the pre-truncation set — up to ``pool_size``, default
+        #     120, not the page's ``limit``) because the selection must happen
+        #     before the cut, and that read is reused by step 7.6 when it is
+        #     complete (otherwise 7.6 does its own page-width read — the
+        #     pre-#8487 behaviour).
+        _valid_time_state: dict[str, dict] | None = None
+        if (query and _valid_time_rerank and result_ids
+                and entity_type == "point" and order_by == "relevance"):
+            from . import time_aware as _valid_time_rules
+            if _valid_time_rules.prefer_latest_enabled():
+                # INTENT FIRST (#8487 review P2). ``prefer_latest_ids`` gates on
+                # the intent internally, i.e. AFTER the state read, so the read
+                # used to fire on every topical query and be discarded. Two
+                # bounded regexes here decide whether the pool-width read is
+                # worth issuing at all.
+                _vt_intent = _valid_time_rules.detect_temporal_intent(query)
+                if _vt_intent.kind != _valid_time_rules.PREFER_LATEST:
+                    if status_trace is not None:
+                        status_trace.append(_trace_entry(
+                            "valid_time", ran=True, degraded=False,
+                            reason="no-prefer-latest-intent", count=0))
+                else:
+                    _vt_covered = False
+                    # The audit REASON for an unusable map, split by WHAT
+                    # failed (#8487 review round 5, P3): "state_read_failed"
+                    # when the state read raised, "state_read_incomplete" when
+                    # it came back short, and the selection's OWN
+                    # "selection_failed" when ``prefer_latest_ids`` raised. One
+                    # shared handler could not tell the first from the last.
+                    _vt_reason = "state_read_incomplete"
+                    _vt_stats = {"reason": "state_read_incomplete",
+                                 "demoted": []}
+                    try:
+                        _vt_state = fetch_point_epistemic_state(
+                            graph, result_ids)
+                    except Exception:
+                        # Belt on top of braces: the helper swallows its own
+                        # failures, so this is reachable only if the seam
+                        # changes — and then the leg must say WHICH read died.
+                        _logger.warning(
+                            "valid-time state read failed — pass-through",
+                            exc_info=True)
+                        _vt_state = {}
+                        _vt_reason = "state_read_failed"
+                    # COMPLETENESS, not presence (#8487 review P1).
+                    # ``fetch_point_epistemic_state`` NEVER raises — it
+                    # swallows every failure and returns what it has (in
+                    # practice ``{}``) — and ``{} is not None``, so
+                    # caching on ``is not None`` let a failed read stand in
+                    # for the page's state: step 7.6 skipped its own read
+                    # and every hit lost ``status`` / ``superseded_by`` /
+                    # the validity window, i.e. a superseded claim was
+                    # served WITHOUT its ``[SUPERSEDED BY]`` marker while
+                    # the trace below still reported a clean selection.
+                    # Publish the map for reuse only when it covers every
+                    # id it was asked for.
+                    _vt_covered = bool(_vt_state) and all(
+                        pid in _vt_state for pid in result_ids)
+                    if _vt_state:
+                        try:
+                            result_ids, _vt_stats = (
+                                _valid_time_rules.prefer_latest_ids(
+                                    result_ids, _vt_state, query=query,
+                                    question_date=(
+                                        _valid_time_rules.resolve_question_date(
+                                            query_date))))
+                            _valid_time_state = (
+                                _vt_state if _vt_covered else None)
+                        except Exception:
+                            # Fail-open, like every other decoration on this
+                            # path: a validity read must never fail a read.
+                            _logger.warning(
+                                "valid-time selection failed — pass-through",
+                                exc_info=True)
+                            _valid_time_state = None
+                            _vt_covered = False
+                            _vt_stats = {"reason": "selection_failed",
+                                         "demoted": []}
+                            _vt_reason = "selection_failed"
+                    if status_trace is not None:
+                        # TWO different facts, TWO different fields (#8487
+                        # review round 6, P2). ``count`` is what the selection
+                        # DID — and it is the same question whether or not the
+                        # map was complete enough to reuse at step 7.6: a
+                        # SHORT (non-empty) map still demotes every id it has
+                        # state for, so a `count=0` there would report "no
+                        # selection" on a read whose page order demonstrably
+                        # moved, and would discard ``demoted`` — the audit
+                        # trail this leg exists for (#8487 scope 3).
+                        # ``reason`` is WHY the leg ended where it did:
+                        # the selection's OWN reason when the map was complete
+                        # (``latest-first`` / ``already-latest-first`` /
+                        # ``no-stale-entries``), else the impairment that made
+                        # it unusable and which step 7.6's own page-width read
+                        # had to cover — ``state_read_incomplete`` (short map),
+                        # ``state_read_failed`` (it raised) or
+                        # ``selection_failed`` (``prefer_latest_ids`` raised).
+                        #
+                        # ``degraded`` is DELIBERATELY False (#8487 review
+                        # P1). In a leg trace that flag is not audit-only:
+                        # ``ask_lane`` folds ANY degraded leg into the
+                        # response's ``retrieval_degraded`` and
+                        # ``read_status.classify_leg_trace`` turns it into
+                        # STATUS_DEGRADED — and every other ``degraded=True``
+                        # entry in this trace means "a retrieval leg did not
+                        # run" (vector skipped, TF-IDF produced the rows).
+                        # Here nothing was degraded: the hits are complete and
+                        # step 7.6 re-reads the page state, so the hits keep
+                        # ``status`` / ``superseded_by`` / the window. Claiming
+                        # a degradation would redden a healthy read — for
+                        # temporal intent only, which no caller could
+                        # interpret. The REASON carries the impairment.
+                        status_trace.append(_trace_entry(
+                            "valid_time", ran=True, degraded=False,
+                            reason=(_vt_stats["reason"] if _vt_covered
+                                    else _vt_reason),
+                            count=len(_vt_stats["demoted"])))
+
         # Truncate AFTER filtering
         result_ids = result_ids[:limit]
 
@@ -24483,7 +25036,38 @@ class TortoiseSDK:
             if decoration_failed else ""
         )
         # 7.6. Promoted epistemic state (status/superseded_by/supersedes/subject) — #1353 D8/D10
-        point_state = fetch_point_epistemic_state(graph, result_ids) if entity_type == "point" else {}
+        #      #8487: reuse the read step 5e already made ONLY when that map is
+        #      known COMPLETE (step 5e leaves ``_valid_time_state`` None when
+        #      the map came back empty or short — a failed read). The page is a
+        #      SUBSET of the pool it read, so a complete map IS the page's map
+        #      (one batch read per query, not two); an incomplete one is not,
+        #      and the page then fetches its own state, exactly as it did before
+        #      #8487 — a validity read must never be able to strip a page's
+        #      epistemic decoration. When THIS read also comes back empty for a
+        #      non-empty page (the helper swallows the failure), the leg trace
+        #      says so (``epistemic_state``, ``degraded=True``): that entry means
+        #      "a read did not run", and it is the honest home for the impairment
+        #      the ordering leg must not claim (#8487 review round 5, P3).
+        if entity_type == "point" and _valid_time_state is not None:
+            point_state = _valid_time_state
+        elif entity_type == "point":
+            point_state = fetch_point_epistemic_state(graph, result_ids)
+            # #8487 review round 5 (P3): the impairment step 5e no longer
+            # claims lives HERE. ``fetch_point_epistemic_state`` swallows its
+            # failure and returns ``{}``, and every id on this page came from a
+            # Point match — so an empty map for a non-empty page means the
+            # decoration read did not run. The silence predates #8487, but 5e
+            # used to be its accidental witness; with the ordering leg
+            # honestly reporting ``degraded=False`` (an ordering impairment is
+            # not a degradation), the honest home for "the decoration did not
+            # run" is this read, where ``degraded`` means exactly that.
+            if (status_trace is not None and result_ids
+                    and not any(pid in point_state for pid in result_ids)):
+                status_trace.append(_trace_entry(
+                    "epistemic_state", ran=False, degraded=True,
+                    reason="state_read_failed", count=0))
+        else:
+            point_state = {}
 
         # 8. Build SearchResult objects, filter, and order
         results = []
@@ -24938,6 +25522,22 @@ class TortoiseSDK:
         on demand. Each entry gains `related_status` (the neighbor's point
         status — live/superseded/retracted/draft) so the full-fidelity view is
         not blind to terminal state (#689/#898 posture).
+
+        A neighbour is an epistemic node, so the status lookup sweeps all four
+        labels (#6976): with `MATCH (n:Point)` a peer that the #8882 re-typing
+        migration moved to `:Object`/`:Subject`/`:Event` came back with
+        `related_status: ""` — an advisory field that cannot tell "this peer has
+        no lifecycle state" from "this read never looked at its label".
+
+        The value is the PEER LAYER's own lifecycle status, so what it can carry
+        is layer-bound: `:Point` carries `status` (live / superseded /
+        retracted / draft / outdated / archived), `:Object` and `:Subject`
+        carry their own `status` families (which include `deprecated`), and an
+        `:Event` carries NO `status` at all — its lifecycle is `eventStatus`,
+        a different vocabulary this field deliberately does not mix in, so an
+        `:Event` peer reports `""`. `""` therefore means "this peer's layer
+        exposes no `status`", and it is now reached by LOOKING at the peer's
+        label rather than by never asking.
         """
         from .search_engine import get_relationships
         proj = self._get_proj()
@@ -24948,11 +25548,15 @@ class TortoiseSDK:
         statuses: dict[str, str] = {}
         if related_ids:
             try:
-                rows = proj.g.query(
-                    "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.status",
-                    params={"ids": related_ids},
-                    timeout=200,
-                ).result_set
+                rows: list = []
+                for _q in epistemic_label_queries(
+                        "MATCH (n:{label}) WHERE n.id IN $ids "
+                        "RETURN n.id, n.status"):
+                    rows.extend(proj.g.query(
+                        _q,
+                        params={"ids": related_ids},
+                        timeout=200,
+                    ).result_set)
                 statuses = {row[0]: row[1] or "" for row in rows}
             except Exception:
                 pass
@@ -25376,9 +25980,17 @@ class TortoiseSDK:
         if read_status_out is not None:
             _point_status = {}
             _object_status = {}
+        # #8487: this is a CANDIDATE pool whose order the caller RE-OWNS —
+        # StateRanker.rerank sorts the whole pool by relevance×confidence×
+        # centrality and only then applies ``[:limit]`` (see "1. Candidate
+        # pool" below). The SDK-side validity selection's ordering would
+        # therefore be discarded, leaving only its pool-composition effect,
+        # which is a behaviour change nothing measures. Same reasoning as the
+        # eval lane's opt-out (#8487 review; ``_valid_time_rerank`` docstring).
         point_results = self.tortoise_fts_query(
             query, kind=kind, entity_type="point", limit=pool,
             _record_reads=False,  # #7983: a CANDIDATE pool, not a caller read
+            _valid_time_rerank=False,  # #8487: caller re-owns the order
             exclude_status=exclude_status,
             include_terminal=include_superseded,
             # Sec-1 (code-review gate): the pool can reach ~30k ids — W4
@@ -25394,6 +26006,7 @@ class TortoiseSDK:
             self.tortoise_fts_query(
                 query, kind=kind, entity_type="object", limit=pool,
                 _record_reads=False,  # #7983: a CANDIDATE pool, not a caller read
+                _valid_time_rerank=False,  # #8487: caller re-owns the order
                 include_terminal=include_superseded,
                 leg_trace=leg_trace,
                 read_status_out=_object_status)
@@ -25858,7 +26471,11 @@ class TortoiseSDK:
                 query, kind=kind, entity_type="point", limit=pool,
                 exclude_status=exclude_status,
                 include_terminal=include_superseded,
-                _record_reads=False)  # #7983: a candidate pool
+                _record_reads=False,  # #7983: a candidate pool
+                # #8487: GapsRanker.rerank re-sorts the pool and ``[:limit]``
+                # is applied to THAT order, so this is the same
+                # re-owned-order shape as recall_state.
+                _valid_time_rerank=False)
             pool_ids = [r["id"] for r in results if r.get("id")]
             op_ids = {
                 row[0] for row in proj.g.query(
@@ -25988,7 +26605,13 @@ class TortoiseSDK:
         # the expansion pulls in the entities they touch).
         return [r["id"] for r in self.tortoise_fts_query(
             seed.strip(), entity_type="point", limit=5,
-            _record_reads=False)]  # #7983: a seed lookup, not a caller read
+            _record_reads=False,  # #7983: a seed lookup, not a caller read
+            # #8487 (review round 6, P2): these ids are an expansion SEED SET
+            # (``SubgraphExpander.expand``), never a page a caller reads in
+            # order, so the selection's ordering is discarded here and the only
+            # effect left is which ≤5 seeds survive the cut — an unmeasured
+            # change to the returned subgraph. Opt out, like ``recall_state``.
+            _valid_time_rerank=False)]
 
     # ── Multi-tenancy (#7001) ─────────────────────────────────
 
@@ -27551,6 +28174,199 @@ class TortoiseSDK:
                 kind, sorted(known_kinds("pointKind")), kind,
             )
 
+    #: #5475: the general kind a writer can always fall back to, per kind
+    #: property — all CORE spellings, i.e. the anti-paralysis half of the
+    #: owner's 2026-10-17 ruling ("an 'other' or more general kind … so we
+    #: don't completely block the writer in paralyzing bureaucracy").
+    #: ``objectKind``/``subjectKind`` = ``other`` (the SDK/REST default and a
+    #: declared canonical object kind); ``eventKind`` = ``occurrence`` and
+    #: ``pointKind`` = ``statement`` (the extractor's own fallbacks);
+    #: ``documentKind`` has no declared general kind, so it names none rather
+    #: than inventing one.
+    _KIND_GENERAL_FALLBACKS: ClassVar[dict[str, str]] = {
+        "objectKind": "other",
+        "subjectKind": "other",
+        "eventKind": "occurrence",
+        "pointKind": "statement",
+    }
+
+    def _refuse_unapproved_kind(self, prop: str, kind) -> None:
+        """#5475: the INPUT constraint — a write may not name an unapproved pack.
+
+        ``pack_state.graph_kind_namespaces`` MINES the graph's data for
+        ``ns:kind`` values and folds those namespaces into the graph's
+        APPROVAL set, so a write door that persisted an unvalidated kind value
+        WIDENED the very set that is supposed to gate it: on a ``dev``-only
+        graph, ``create_object(objectKind='marketing:contentBrief')`` made the
+        whole ``marketing`` pack writable (measured at HEAD on all four SDK
+        entity doors — object / subject / event / entity — plus the point
+        door). The graph then asserts that a pack nobody approved is
+        installed, which is a durable record that is WRONG, not merely a
+        permissive write.
+
+        This is called from the ONE funnel every entity write passes through
+        (``_create_entity``) and from the point door (``create_point``), not
+        per public method: ``create_object``/``create_subject``/``create_event``
+        relay to ``create_entity``, ``create_document`` and ``create_source``
+        reach ``_create_entity`` directly, and the hosted commit door
+        (``hosted_api._execute_commit_writes``) calls ``create_entity`` — so
+        the chokepoint is where the four mandated doors and every sibling door
+        MEET. A per-door check would leave the next door open (that was the
+        shape of the defect: the REST doors were gated and the SDK ones were
+        not).
+
+        REJECT, never silently normalise (#5475 owner ruling, Option A): a
+        rewrite would store a kind the caller did not write and the write
+        would be metered and audited under it. The message therefore states
+        what happened, why, and what to do — including the approved spellings
+        the graph WOULD accept and the general core kind, so the writer is
+        never paralysed (the ruling's other half).
+
+        A bare kind, an empty namespace, a ``core:`` spelling and a graph with
+        no ``:PackInstall`` records are all admitted by
+        ``pack_state.kind_named_packs``/``unapproved_kind_pack`` — this is not
+        a blanket ban on writes. The ``eventKind`` spelling is additionally
+        checked through the #5184 bare-kind attribution, because a BARE event
+        kind that one catalog pack declares is mined back into that pack's
+        namespace (comment 2026-10-13: a fix here must constrain BOTH
+        spellings).
+
+        ⚠️ COST — the gate read is a WHOLE-GRAPH scan
+        (``graph_installed_namespaces``: 8 property scans, ~6 ms at 300 nodes,
+        O(nodes)) and it runs ONCE PER WRITE that names a pack — NOT once per
+        capture: a capture that stores N pack-kinded entities pays N scans
+        (measured ~8–27 ms per call at 5k nodes), which is the price of a
+        correct closure at the write door. It is skipped entirely for a
+        spelling that names none (bare / empty / ``core:``), which is the
+        overwhelming majority of writes (every core kind, and every
+        ``core:Project``-spelled extraction result), so a capture pays nothing
+        for its core kinds. A batch-scoped cache of the resolved set (a
+        data-version signal feeding the plan, the optimization
+        ``pack_state.graph_kind_namespaces`` already names) is a follow-up, not
+        a property this gate may drop: a stale set can only over-refuse.
+        """
+        from .pack_state import _ATTRIBUTABLE_BARE_KIND_KEYS, kind_named_packs
+        if not kind_named_packs(
+                kind, attribute_bare=prop in _ATTRIBUTABLE_BARE_KIND_KEYS):
+            # Cheap pre-check FIRST: a spelling that names no pack cannot widen
+            # the approval set, so the whole-graph read is not paid for it. The
+            # attribution leg is a MEMOIZED catalog read, never a graph read.
+            return
+        exc = self._unapproved_kind_refusal(
+            prop, kind, _installed_namespaces_for_gate(self))
+        if exc is not None:
+            raise exc
+
+    def _unapproved_kind_refusal(self, prop: str, kind, approved):
+        """The ``UnapprovedKindNamespace`` covering this write, or ``None``.
+
+        Split out of ``_refuse_unapproved_kind`` so a caller that has ALREADY
+        read the approval set can reuse the decision AND its Option-A message
+        without paying a second whole-graph scan — the hosted commit door
+        resolves the set for Layer-1 before its write phase, and pre-validates
+        the payload's entity kinds with it (#5475 review: a refusal raised
+        mid-write leaves the commit `partial`, so it must be decided before the
+        first write).
+
+        Pure with respect to the graph: it decides from ``approved`` only.
+        """
+        from .pack_state import (
+            _ATTRIBUTABLE_BARE_KIND_KEYS,
+            approved_kind_alternatives,
+            unapproved_kind_pack,
+        )
+        # The attribution flag is DERIVED from pack_state's own declaration of
+        # which keys attribute a BARE value back to a pack (today:
+        # ``eventKind``), never re-spelled here: a second copy would stop
+        # constraining a key the mining leg starts attributing — the same
+        # widening under a new name.
+        pack_ns = unapproved_kind_pack(
+            kind, approved, attribute_bare=prop in _ATTRIBUTABLE_BARE_KIND_KEYS)
+        if pack_ns is None:
+            return None
+        approved_ns = ", ".join(sorted(approved or ())) or "none"
+        alternatives = approved_kind_alternatives(kind, approved, prop=prop)
+        # The remedy is a LIST of what the caller can do (the owner ruling's
+        # third element), so the punctuation cannot drift as clauses are added.
+        # ⛔ The wording ALSO has to survive the MCP layer's error scrubber
+        # (``mcp_server._scrub_error``): its rule is ``(host=|at |to )[\w.-]+``,
+        # which -- because the alternation has no word boundary -- bites any
+        # ``at ``/``to `` SUBSTRING, i.e. "Wh**at **next" and "th**at **pack".
+        # This message crosses that boundary on every MCP tool call, and a
+        # scrubbed remedy is the one half of Option A a writer acts on. Hence
+        # "Next steps:"/"install the pack"/"for this graph", never
+        # "What next"/"that pack"/"to this graph"/"What to do". The rule is
+        # mechanical, so it is PINNED: the door tests assert the raw message is
+        # a fixed point of ``_scrub_error``.
+        remedies = [
+            "write a kind from the core vocabulary, or from a pack this graph "
+            f"HAS approved ({approved_ns})",
+        ]
+        if alternatives:
+            more = "".join(f" (or {alt!r})" for alt in alternatives[1:])
+            remedies.append(
+                "the same kind IS declared by an approved pack — write "
+                f"{alternatives[0]!r}{more}")
+        remedies.append(
+            f"with user approval, add the {pack_ns!r} ontology pack for this "
+            "graph (PUT /v1/graphs/{graph_id}/packs)")
+        what_next = "; ".join(remedies)
+        general = self._KIND_GENERAL_FALLBACKS.get(prop)
+        fallback = (
+            f" A kind you cannot classify is never blocked: the bare general "
+            f"kind {general!r} names no pack and always writes."
+            if general else
+            " A kind you cannot classify is never blocked: a bare "
+            "(un-namespaced) kind names no pack and always writes.")
+        return UnapprovedKindNamespace(
+            f"refused {prop}={kind!r}: it names the ontology pack namespace "
+            f"{pack_ns!r}, which this graph has not approved — the write was "
+            "NOT stored. Why: kinds are namespaced by ontology pack, and this "
+            "graph's approved set is mined from the kind values it already "
+            "holds, so a write naming an unapproved namespace would install "
+            "the pack by writing it — any caller could grant itself any "
+            "pack, and the namespace/kind vocabulary would balloon until it "
+            f"no longer names anything. Next steps: pick one — {what_next}. "
+            f"{fallback.strip()}",
+            prop=prop, kind=kind if isinstance(kind, str) else str(kind),
+            namespace=pack_ns, installed=approved)
+
+    def _refuse_unapproved_kinds_in_props(self, props: dict) -> None:
+        """Run the #5475 gate over EVERY kind property a write is carrying.
+
+        The five public doors do not hand their kind in one shape: the entity
+        aliases use ``objectKind``/``subjectKind``/``eventKind``, the document
+        door ``documentKind``, ``create_source`` ``sourceKind``, ``create_point``
+        its positional ``kind`` PLUS a free-form props passthrough that accepts
+        any of the other mined key names. Every one of those values is persisted
+        on the node and mined back into the approval set by
+        ``pack_state.graph_kind_namespaces``, so the gate reads the same key set
+        it mines (``_KIND_PROP_KEYS``) rather than a per-door list — a door that
+        let one through would re-open the widening under a name the check did
+        not know.
+
+        ``uses[]`` is checked here too: the Event fold (``projection._upsert_event``)
+        MERGEs an ``:Object`` stub per use item with ``objectKind = item['kind']``
+        — a kind property written by a door that never names it as one (measured:
+        ``create_event(..., uses=[{'name': 'x', 'kind': 'marketing:campaign'}])``
+        widened a ``dev``-only graph before this check existed).
+        """
+        from .pack_state import _KIND_PROP_KEYS as _gated_kind_props
+        for kind_prop in _gated_kind_props:
+            if kind_prop in props:
+                self._refuse_unapproved_kind(kind_prop, props.get(kind_prop))
+        uses = props.get("uses")
+        if isinstance(uses, dict):
+            uses = [uses]
+        elif isinstance(uses, str):
+            uses = []  # a legacy bare-string use writes objectKind='other'
+        if isinstance(uses, (list, tuple)):
+            for item in uses:
+                if isinstance(item, dict):
+                    # The fold's own default is 'other' (a bare core kind), so
+                    # an absent 'kind' is the same write it will perform.
+                    self._refuse_unapproved_kind("objectKind", item.get("kind"))
+
 
     # ── Entity CRUD (ONTOLOGY v2.5 §3, all 7 types) ──────────────────
 
@@ -27587,6 +28403,17 @@ class TortoiseSDK:
         interleave — could swap each other's captured pre-write state and lose
         a real version transition.
         """
+        # ── #5475: the approved-pack gate — ONE site for every ENTITY write ──
+        # `create_entity` (subject/object/event/document) relays here,
+        # `create_document` and `create_source` reach this funnel directly, and
+        # the hosted commit door calls `create_entity` — so this is where all
+        # of them MEET. The check runs on exactly the properties
+        # `pack_state.graph_kind_namespaces` MINES the approval set from
+        # (`_KIND_PROP_KEYS`) plus the Event fold's `uses[].kind` leg, because
+        # a gate that skipped one of them would leave the widening leg it
+        # closes open under another name; and it runs BEFORE any write, so a
+        # refusal leaves the graph untouched.
+        self._refuse_unapproved_kinds_in_props(props)
         # #329: id + sourcePath/source_path are server-managed — reject.
         # is_episodic is ALSO server-managed (#1486, quota discriminator) —
         # NEVER popped here: the sanitizer's unconditional reject is the
@@ -29056,6 +29883,29 @@ class TortoiseSDK:
     # `session:<id>` ref for what the writer itself asserts).
     _ENTITY_SOURCE_LABELS: ClassVar[dict[str, str]] = {"document": "Source"}
 
+    #: The ONE `no_source` sentence — one home, so the entity doors and the
+    #: claim door cannot drift into advising different fixes (#8171).
+    _NO_SOURCE_MESSAGE: ClassVar[str] = (
+        "No source and no provenance on this write. If it is something YOU "
+        "are asserting, source it from the session that produced it with "
+        "extractedFrom='session:<session_id>' (registered as "
+        "sourceKind=agentSession) — an unsourced assertion carries whatever "
+        "credibility its wording implies."
+    )
+
+    def _no_source_advisory(self, node_id: str | None, *, hint: str = "") -> dict:
+        """The `no_source` advisory payload, with an optional door-specific hint.
+
+        ADVISORY ONLY — the caller adds it to a write RESULT; nothing here
+        raises, refuses or changes what was stored (#8171).
+        """
+        return {"advisories": [{
+            "code": "no_source",
+            "node_id": node_id,
+            "message": self._NO_SOURCE_MESSAGE + hint,
+            "advisory": True,
+        }]}
+
     def _provenance_advisory(self, node: dict, props: dict,
                              *, entity_type: str | None = None) -> dict:
         """Advisory for a provenance gap this door can report.
@@ -29169,19 +30019,7 @@ class TortoiseSDK:
         # unprovenanced write. There is now no branch here: only a materialized
         # `extractedFrom` counts.
         node_id = node.get("id") or node.get("eventId")
-        return {"advisories": [{
-            "code": "no_source",
-            "node_id": node_id,
-            "message": (
-                "No source and no provenance on this write. If it is "
-                "something YOU are asserting, source it from the session "
-                "that produced it with extractedFrom='session:<session_id>' "
-                "(registered as sourceKind=agentSession) — an unsourced "
-                "assertion carries whatever credibility its wording implies."
-                + _sid_hint
-            ),
-            "advisory": True,
-        }]}
+        return self._no_source_advisory(node_id, hint=_sid_hint)
 
     # ── Write nudges (epic #888 W2 — nudge, don't enforce) ───────────
 

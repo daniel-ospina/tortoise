@@ -36,6 +36,9 @@ Three facts, each falsifiable by a named mutation:
    (``audit``'s checks 1 and 7 are Point-only), and a sweep the writer never
    sees cannot change what they do next anyway. Doing it at
    write time is the only version that can change what the writer does next.
+   This applies on the CLAIM door too (``create_point``, below): the ruling's
+   sentence is about "a claim", and the door that creates Points had no
+   advisory at all — ``audit``'s post-hoc check was the only reporter.
 
 Embedded lane (no Docker): ``TORTOISE_TEST_CARVE_OUT=1``.
 """
@@ -56,6 +59,17 @@ def _sdk(tmp_path):
 def _scalar(proj, cypher, **params):
     rows = proj.query(cypher, **params).result_set
     return rows[0][0] if rows else None
+
+
+def _ep(sdk, point_id):
+    """The RESOLVED belief of a point after one inheritance pass.
+
+    ``recency_decay=1.0, recompute_interval=0`` makes the pass deterministic
+    and ungated, so the assertion reads the weight the sources actually
+    resolve to — not the registry key that fed it.
+    """
+    sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
+    return sdk.get_point(point_id)
 
 
 def _source_count(proj, url):
@@ -561,3 +575,174 @@ def test_alias_doors_deliver_the_advisory(tmp_path):
             "extracted_from_inert", (
                 f"{create.__name__}: the alias door dropped the advisory the "
                 "same write surfaces through create_entity")
+
+
+# ── the CLAIM door ─────────────────────────────────────────────────────
+#
+# The ruling's sentence is "when a CLAIM is created with no source and no
+# provenance, say so". `create_point` is the door that creates claims (Points;
+# `create_entity`'s types are Subject/Object/Event/Source — no claim type), and
+# it reported nothing: the advisory was wired to the entity doors only.
+#
+# Sourcing on this door is judged by what IT materializes, the same rule the
+# entity doors apply: a declared (or `session_id`-inferred, #3263)
+# `extractedFrom` becomes a `:Source` + `extractedFrom` edge, so it is sourced;
+# an authored word (`credibility=`) is a source under #398's ruling; a bare
+# legacy point-level `sourceKind` is NOT, because it is an annotation with no
+# link behind it.
+
+def test_an_unsourced_claim_is_advised_and_still_lands(tmp_path):
+    """No source, no provenance ⇒ written AND advised — never blocked.
+
+    MEASURED on origin/main before this change: `create_point('statement',
+    text)` returned `['content', 'content_hash', 'createdAt', 'ep_dirty',
+    'ep_dirty_at', 'id', 'is_operator', 'pointKind', 'status', 'updatedAt']`
+    — no `advisories` key at all, and 0 `extractedFrom` edges. So the only
+    reporter of this gap was `audit`'s POST-HOC `missing_sourceKind` check,
+    which cannot change what the writer does next.
+
+    Three things must hold at once, and a laxer test would miss two: the write
+    LANDED (an advisory that blocks is not an advisory), an advisory is
+    RETURNED, and it names the cheap fix rather than only the fault.
+
+    MUTATION THAT MUST RED: drop the `_provenance_notes` block from
+    `create_point`'s return — no `advisories` key appears. Make it raise
+    instead — the write-landed assertion fails.
+    """
+    sdk = _sdk(tmp_path)
+    proj = sdk._get_proj()
+
+    res = sdk.create_point("statement", "a claim nobody sourced")
+
+    # 1. The write HAPPENED, and it really is unsourced in the graph.
+    node_id = res["id"]
+    assert _scalar(proj, "MATCH (n:Point {id:$i}) RETURN count(n)", i=node_id) == 1, (
+        "the write must land — the ruling is advisory-only, never a block")
+    assert _scalar(
+        proj, "MATCH (n:Point {id:$i})-[:extractedFrom]->(s) RETURN count(*)", i=node_id
+    ) == 0, "fixture check: the gap must be real (nothing was materialized)"
+
+    # 2. The advisory is present, advisory-only, and 3. names the fix.
+    advisories = res.get("advisories") or []
+    assert advisories, "a CLAIM written with no source and no provenance must be advised"
+    assert advisories[0].get("code") == "no_source"
+    assert advisories[0].get("advisory") is True
+    assert advisories[0].get("node_id") == node_id
+    assert "session:" in advisories[0]["message"], (
+        "the advisory must name the cheap fix (extractedFrom='session:<id>')")
+
+
+def test_a_sourced_claim_carries_no_advisory(tmp_path):
+    """...and the other direction: a sourced claim is NOT advised.
+
+    Pairs with the test above the way the entity-door pair does — an
+    implementation that always advised would pass the first while turning the
+    advisory into noise, which is how an advisory stops changing behaviour.
+    Also re-pins the materialization on this door (the capability #3263 gave
+    it and #8171 must not perturb).
+
+    Passes on origin/main for the trivial reason that NO claim was ever
+    advised; it is the guard that makes the new behaviour two-directional
+    rather than a blanket note.
+    """
+    sdk = _sdk(tmp_path)
+    proj = sdk._get_proj()
+    url = "session:8171-sourced-claim"
+
+    res = sdk.create_point("statement", "a claim that declared its session",
+                           extractedFrom=url)
+
+    assert not (res.get("advisories") or []), (
+        "a claim that declared its source must not be advised")
+    assert _source_count(proj, url) == 1
+    assert _edge_count(proj, res["id"], url) == 1
+
+
+def test_a_session_id_inferred_source_silences_the_advisory(tmp_path):
+    """The #3263 inference IS materialization — so it counts as sourced.
+
+    A `session_id` on this door derives `session:<id>` and wires it through the
+    same `_link_source`, so advising it would be false (the opposite error to
+    the borrowed-capability bypass #8171's entity door removed: there the
+    inference did not exist on the door, here it does).
+
+    Passes on origin/main trivially (nothing was advised); it is the guard that
+    keeps the new note from firing on a write that IS sourced.
+    """
+    sdk = _sdk(tmp_path)
+    proj = sdk._get_proj()
+
+    res = sdk.create_point("statement", "an assertion from a live session",
+                           session_id="8171-claim-session")
+
+    assert not (res.get("advisories") or [])
+    assert res.get("extractedFrom") == "session:8171-claim-session"
+    assert _scalar(proj, "MATCH (s:Source {url:$u}) RETURN s.sourceKind",
+                   u="session:8171-claim-session") == "agentSession"
+
+
+def test_an_authored_word_is_a_source_not_a_provenance_gap(tmp_path):
+    """`credibility=` is a SOURCE under #398 — advising it would be wrong.
+
+    #398 (owner ruling 2026-10-12) makes the author's declared word one weak
+    evidence body, recorded by `_stamp_authored_word`. A writer who declared
+    their basis has a source, so the note must stay silent — this is a
+    correctness guard, not a noise guard.
+
+    Passes on origin/main trivially (nothing was advised); it fails the moment
+    the advisory is keyed on "no `extractedFrom`" instead of "no source".
+    """
+    sdk = _sdk(tmp_path)
+    res = sdk.create_point("statement", "a claim with a declared word",
+                           credibility="medium")
+    assert not (res.get("advisories") or [])
+
+
+def test_an_originating_session_resolves_to_the_WEAK_weight(tmp_path):
+    """Acceptance 3 — the RESOLVED weight, not the registry key.
+
+    `SOURCE_KIND_DEFAULTS['agentSession']` is NEUTRAL by #398's recorded
+    decision, so `resolve_tier(None, 'agentSession')` is `None` and asking
+    that function is NOT how a session's weight is decided: the belief path
+    routes an `agentSession` to the carrier rule BEFORE any tier is resolved
+    (`session_support_pc`). This test therefore asserts the OUTCOME:
+      - an ORIGINATING session is a weak body — ep_alpha 1.1 (pc 0.1, the T4
+        rung), mean 0.5238, i.e. real evidence ABOVE ignorance;
+      - a NEUTRAL source contributes NOTHING — ep_alpha stays unset, exactly
+        the state an originating session must not be left in.
+
+    The pair is the point: weak ≠ neutral. On a tree where the session
+    resolved neutral this test fails on the SECOND-to-last assertion (the
+    claim would keep `ep_alpha is None`); that is the pre-#398 behaviour the
+    body measured as "identical to no source at all".
+    """
+    from tortoise.source_credibility import (
+        AUTHOR_ASSERTION_WEAK_PC,
+        pc_base,
+        session_support_pc,
+    )
+
+    assert pytest.approx(pc_base("T4")) == AUTHOR_ASSERTION_WEAK_PC, (
+        "the weak rung is pinned to T4's pseudo-count, never re-invented")
+    assert session_support_pc(carries_attached_source=False) == pytest.approx(0.1)
+    assert session_support_pc(carries_attached_source=True) == 0.0
+
+    sdk = _sdk(tmp_path)
+    originating = sdk.create_point(
+        "statement", "an assertion the agent itself originates",
+        extractedFrom="session:8171-weight")
+    pt = _ep(sdk, originating["id"])
+    assert pt["ep_alpha"] == pytest.approx(1.1), (
+        f"an originating session must resolve WEAK (alpha 1.1), got {pt!r}")
+    assert pt["ep_beta"] == pytest.approx(1.0)
+    assert pt["baseline_source"] == "inherited-from-source"
+    mean = pt["ep_alpha"] / (pt["ep_alpha"] + pt["ep_beta"])
+    assert mean == pytest.approx(1.1 / 2.1)  # 0.5238 — above ignorance
+
+    # CONTROL: a neutral source is recorded and contributes nothing.
+    neutral = sdk.create_point(
+        "statement", "a claim backed only by an untiered document",
+        extractedFrom="corpus://notes/8171-neutral")
+    assert _ep(sdk, neutral["id"]).get("ep_alpha") is None, (
+        "a neutral source must leave the claim at no weight — that is exactly "
+        "the state the ruling says an agent's own assertion must NOT be in")

@@ -26,6 +26,13 @@ MIGRATIONS = [
     "20261012000003_record_epistemic.sql",
     "20261012000004_record_procedural.sql",
     "20261014000001_record_subject_props_no_derived.sql",
+    # FORWARD `ALTER TABLE public.point ADD COLUMN` (#2782's money value). The
+    # probe drives the SHIPPED projection, whose schema read comes from
+    # `record_projection.RECORD_MIGRATIONS` on DISK — omit a forward migration
+    # here and this Postgres is one migration behind the projection that writes
+    # to it (`UndefinedColumn` on the point INSERT). `tests/
+    # test_7950_capstone_probe.py` pins this list to `RECORD_MIGRATIONS`.
+    "20261018000001_record_point_money_value_2782.sql",
 ]
 DSN = "postgresql://postgres:cap@127.0.0.1:15499/capstone"
 

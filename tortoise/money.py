@@ -40,7 +40,11 @@ the issue's indicator (4) asks for, and it is the invariant this module holds:
 
 This module never touches the graph; the read surface that feeds it (and the
 write-path acceptance of the field on ``create_entity``) rides the ``#4282``
-surface migration, per design §7.1.
+surface migration, per design §7.1. The persistence half is declared, not
+re-invented here: the projection's Point property list takes its declared money
+keys from ``MONEY_VALUE_FIELDS`` (``projection/entities.py``), so a Point
+carrying a value replays under the same open-set passthrough as an Object/Event
+without logging a false "not declared" drift warning.
 """
 from __future__ import annotations
 

@@ -165,6 +165,7 @@ from tortoise.sdk import (
     REPORT_HOOK_URL,  # #2335 WI-2: the bug_report.yml report-hook target
     InvertedSupersedeWindow,  # #5363: the named #4021 refusal the commit path maps to 422
     TortoiseSDK,
+    UnapprovedKindNamespace,  # #5475: the named pack-approved refusal, mapped to 422 too
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
     _attach_source_change_notices,  # #5516: the ONE home for the capture receipt's source-change notice
     _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
@@ -15587,10 +15588,20 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     # the vocab in ONE offloaded unit through the graph pool.
     _require_scope(org, "graphs:write", "commit_session")
     sdk = await _data_sdk_offloaded(org)
-    _gate_vocab = await _graph_offload(
-        lambda: compile_vocab(
-            installed_namespaces=graph_installed_namespaces(sdk)),
-        op="commit_gate_vocab")
+
+    def _resolve_gate() -> tuple[frozenset[str] | None, dict]:
+        """The graph's approval SET and the vocab compiled from it, one read.
+
+        #5475: the set itself is kept (not just the compiled vocab) because the
+        entity-kind refusal below must be decided BEFORE the write phase and
+        with the SAME set Layer-1 used — a second ``graph_installed_namespaces``
+        call would be a second whole-graph scan AND a second answer.
+        """
+        installed = graph_installed_namespaces(sdk)
+        return installed, compile_vocab(installed_namespaces=installed)
+
+    _gate_ns, _gate_vocab = await _graph_offload(
+        _resolve_gate, op="commit_gate_vocab")
     result, payload = validate_payload_dict(raw, vocab=_gate_vocab)
     if result.code == "missing_required_fields":
         raise HTTPException(
@@ -15601,6 +15612,34 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         if result.code:
             detail["code"] = result.code
         raise HTTPException(status_code=422, detail=detail)
+
+    # ── #5475: the entity-kind refusal, decided BEFORE the write phase ────
+    # Layer-1 does not gate ``entities[].kind`` (#5202), and this door persists
+    # it through the now-gated ``sdk.create_entity``. Refusing there — step 6 of
+    # ``_execute_commit_writes`` — would land the 422 ON TOP OF a half-written
+    # commit (session, sources, points and earlier entities already stored, the
+    # :CommitRecord left `partial`), which is a different promise from every
+    # other 422 on this route (a pre-write Layer-1 rejection). So the same
+    # decision is taken here, on the same approval set, before the first write;
+    # the boundary clause below stays as the last resort for any kind leg this
+    # pre-check does not enumerate.
+    from tortoise.subject_binding import is_subject_kind as _is_subject_kind
+    for _entity in payload.entities:
+        _prop = ("subjectKind" if _is_subject_kind(_entity.kind)
+                 else "objectKind")
+        _refusal = sdk._unapproved_kind_refusal(_prop, _entity.kind, _gate_ns)
+        if _refusal is not None:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error_code": "KIND_NAMESPACE_NOT_INSTALLED",
+                    "message": str(_refusal),
+                    "kind": _refusal.kind,
+                    "property": _refusal.prop,
+                    "namespace": _refusal.namespace,
+                    "installed_namespaces": sorted(_refusal.installed or ()),
+                },
+            )
 
     # #405 Phase A/B: additive warnings[] ride the 200 (warn-first — the
     # write proceeds). Phase B (wired-but-inactive in prod — no production
@@ -15787,6 +15826,27 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
                     "supersedes_by": exc.new_id,
                     "successor_validFrom": exc.successor_start,
                     "predecessor_validFrom": exc.predecessor_valid_from,
+                },
+            )
+        except UnapprovedKindNamespace as exc:
+            # #5475: the SDK/entity funnel now refuses a kind naming a pack this
+            # graph has not approved, and this door reaches that funnel
+            # (`_execute_commit_writes` → `sdk.create_entity` /
+            # `create_source`). Same determinism as the supersede clause above:
+            # a same-payload retry refuses identically, so the retry-advising
+            # 500 is actively wrong — and it would DISCARD the Option-A message
+            # the refusal exists to deliver. Map it to the repo's validation
+            # posture (422) with the same shape the REST doors return
+            # (`KIND_NAMESPACE_NOT_INSTALLED`).
+            raise HTTPException(  # noqa: B904
+                status_code=422,
+                detail={
+                    "error_code": "KIND_NAMESPACE_NOT_INSTALLED",
+                    "message": str(exc),
+                    "kind": exc.kind,
+                    "property": exc.prop,
+                    "namespace": exc.namespace,
+                    "installed_namespaces": sorted(exc.installed or ()),
                 },
             )
         except Exception:
