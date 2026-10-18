@@ -448,9 +448,13 @@ for the pass to end or restart the process.
 # --max-time is required, not decoration: /v1/internal/ is prefix-exempt from
 # the 10s transport-wait bound (hosted_api.py, the exemption's own comment), so
 # without it this hangs with nothing printed — in exactly the situation you run
-# it. `-f` turns a 4xx/5xx into an error instead of printing the error body as
-# if it were a summary; the bound sizes the pass (N orgs x a Stripe round-trip).
-curl -sS -f --max-time 600 -X POST "$INTERNAL_API_URL/v1/internal/billing/reconcile" \
+# it. `--fail-with-body` (NOT bare `-f`) turns a 4xx/5xx into a non-zero exit
+# while STILL printing the body: this route answers TWO named 503s with
+# opposite remedies (`reconcile_stuck` = wait/restart; `enumeration_incomplete`
+# = read `reason`), and `-f` prints no body at all, so the operator's very first
+# 503 would not say which one they have. The bound sizes the pass
+# (N orgs x a Stripe round-trip).
+curl -sS --fail-with-body --max-time 600 -X POST "$INTERNAL_API_URL/v1/internal/billing/reconcile" \
   -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY" | jq .
 ```
 

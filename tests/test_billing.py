@@ -2854,6 +2854,93 @@ class TestReconcileSweep:
         assert "CERTIFIED complete" in r.json().get("reason", ""), r.text
 
 
+def test_cancelling_the_request_does_not_cancel_a_writing_pass(
+        monkeypatch):
+    """#8904 review round 3: the SDK and the lock belong to the PASS, not the request.
+
+    ``asyncio.to_thread`` cannot cancel its thread, so a cancelled request (the
+    driver's 600 s ceiling, a client disconnect) must NOT close the SDK or hand
+    the lock back: the worker is still writing through both, and closing it
+    mid-pass loses every repair not yet committed while the summary goes
+    nowhere — and a released lock lets a retry start a SECOND pass over the same
+    fleet. The close and the release ride the pass's own future; this pins that
+    cancelling the REQUEST leaves both in place until the pass finishes, then
+    closes exactly once and releases.
+    """
+    import asyncio
+    import threading
+    from contextlib import suppress
+
+    import httpx
+
+    import tortoise.supabase_control as sc
+    from tortoise import billing as bl
+    from tortoise import hosted_api as ha
+
+    monkeypatch.setenv("FASTAPI_INTERNAL_KEY", "internal-test-key")
+    started = threading.Event()
+    release = threading.Event()
+    closes: list[bool] = []
+
+    class _FakeSdk:
+        def close(self) -> None:
+            closes.append(True)
+
+    summary = {"checked": 0, "repaired": 0, "unchanged": 0,
+               "unverified": 0, "skipped": 0, "drift": [],
+               "unrepaired": [], "failed": []}
+
+    def _pass(_sdk):
+        started.set()
+        try:
+            release.wait(15)
+        finally:
+            pass
+        return dict(summary)
+
+    monkeypatch.setattr(bl, "reconcile_subscriptions", _pass)
+    monkeypatch.setattr(ha, "_registry_sdk", lambda: _FakeSdk())
+    monkeypatch.setattr(sc, "is_supabase_enabled", lambda: False)
+    # A FRESH lock/clock: the module-level pair may be bound to another test's
+    # event loop, and this test asserts on its state directly.
+    monkeypatch.setattr(ha, "_BILLING_RECONCILE_INFLIGHT", asyncio.Lock())
+    monkeypatch.setattr(ha, "_BILLING_RECONCILE_STARTED_AT", None)
+
+    async def _scenario() -> None:
+        transport = httpx.ASGITransport(app=ha.app)
+        async with httpx.AsyncClient(
+                transport=transport, base_url="http://test") as client:
+            req = asyncio.ensure_future(client.post(
+                "/v1/internal/billing/reconcile",
+                headers={"Authorization": "Bearer internal-test-key"}))
+            assert await asyncio.to_thread(started.wait, 15), (
+                "the pass never started — the test proves nothing")
+            assert ha._BILLING_RECONCILE_INFLIGHT.locked()
+
+            req.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await req
+
+            # The request is gone; the pass is still running.
+            assert ha._BILLING_RECONCILE_INFLIGHT.locked(), (
+                "cancelling the REQUEST released the pass lock — a retry could "
+                "start a second pass over the same fleet")
+            assert closes == [], (
+                "the SDK was closed under a pass that is still writing")
+
+            release.set()
+            for _ in range(500):
+                if not ha._BILLING_RECONCILE_INFLIGHT.locked():
+                    break
+                await asyncio.sleep(0.02)
+            assert not ha._BILLING_RECONCILE_INFLIGHT.locked(), (
+                "the pass finished but never handed the lock back")
+            assert closes == [True], (
+                f"the SDK must be closed exactly once, after the pass — {closes}")
+
+    asyncio.run(_scenario())
+
+
 class TestLifespanStartup:
     def test_lifespan_startup_returns_without_blocking(self, monkeypatch, tmp_path):
         """The lifespan's startup half is cheap and synchronous, so it must
