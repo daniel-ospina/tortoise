@@ -386,7 +386,7 @@ jobs:
                       "against an active Stripe subscription (Stripe named none, the "
                       "customer lookup failed, or pricing.json could not be read) - not "
                       "downgraded, review them; a broken pricing.json shows up "
-                      "here, usually with failed rows naming the ladder")
+                      "here and/or as failed rows naming the ladder")
           if data["checked"] == 0:
               # Loud, never fatal. The enumeration is CERTIFIED complete before
               # this point (an uncertifiable one raises and 500s), so 0 means a

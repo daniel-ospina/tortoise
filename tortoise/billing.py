@@ -1016,7 +1016,15 @@ def _paid_tier_floor(tier: str | None) -> int | None:
     from tortoise.pricing import tier_limits
     try:
         return tier_limits(tier or "free")["max_graph_nodes"]
-    except (KeyError, TypeError):
+    except (KeyError, TypeError, OSError, ValueError):
+        # ⛔ Every way an unreadable ladder can present itself, not just a bad
+        # key: a MALFORMED ``product/pricing.json`` raises ``JSONDecodeError``
+        # (a ``ValueError``) and a MISSING one raises ``FileNotFoundError`` (an
+        # ``OSError``). Letting those escape turned "unreadable ladder" into an
+        # unnamed 500 for the WHOLE pass — the first org that needs the ladder
+        # decision aborts the sweep mid-fleet, which is the partial pass this
+        # cadence exists to prevent, and the driver reports it as a control-plane
+        # outage. The documented behaviour is ``None`` → ``unverified``.
         return None
 
 

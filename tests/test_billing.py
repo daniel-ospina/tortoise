@@ -720,6 +720,51 @@ class TestApplyLimitsAndReconcile:
         assert "UNKNOWN" in text, (
             f"the operator must be told the answer is unknown — got {text!r}")
 
+    def test_a_MALFORMED_or_MISSING_pricing_file_does_not_abort_the_pass(
+            self, monkeypatch, stripe_env, billing_sdk):
+        """#8904 review P1: an unreadable ladder has THREE shapes, not one.
+
+        ``_paid_tier_floor`` caught only ``KeyError``/``TypeError`` (a loaded
+        tier missing a limit key). A malformed ``product/pricing.json`` raises
+        ``JSONDecodeError`` and a missing one ``FileNotFoundError`` — neither is
+        a subclass of those, so the exception escaped from OUTSIDE the per-org
+        ``try`` and aborted the WHOLE pass as an unnamed 500. The first org that
+        needed the ladder decision (an abandoned checkout — the majority
+        population) killed the sweep mid-fleet, which is the partial pass this
+        cadence exists to prevent, and the driver reports a 500 as a
+        control-plane outage. The documented outcome is ``unverified``.
+        """
+        import json
+
+        import tortoise.pricing as pr
+        from tortoise import billing as bl
+
+        sdk = billing_sdk
+        team = sdk.org_create("malformed-ladder")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_8895mf', "
+            "t.tier='pro', t.subscription_status='active'",
+            params={"id": team["id"]},
+        )
+        monkeypatch.setattr(
+            bl.StripeClient, "list_subscriptions", lambda self, cid: [])
+
+        # Both shapes must land the org in `unverified` and END the pass cleanly.
+        # (The org is created BEFORE the patch: `org_create` reads the ladder
+        # too, so patching first would fail in the fixture, not the code under
+        # test.)
+        for fault in (json.JSONDecodeError("Expecting value", "{bad", 0),
+                      FileNotFoundError("product/pricing.json")):
+            def _broken(tier, _fault=fault):
+                raise _fault
+
+            monkeypatch.setattr(pr, "tier_limits", _broken)
+            summary = bl.reconcile_subscriptions(sdk, notifier=False)  # no raise
+            assert summary["unverified"] == 1, (type(fault).__name__, summary)
+            assert summary["failed"] == [], (type(fault).__name__, summary)
+            assert sdk.org_get(team["id"])["tier"] == "pro", (
+                "an unread file is not a licence to downgrade")
+
     def test_reconcile_past_due_pointer_still_follows_the_newer_active_sub(
             self, monkeypatch, stripe_env, billing_sdk):
         """#8895 review P2: ``past_due`` keeps the TIER (enforcement) but is NOT
