@@ -25,23 +25,35 @@ Three properties are pinned here:
    a loss that could revive removed state still refuses the replay before any
    fold (#3316). The strict read is unchanged: that contract is pinned too.
 
-MUTATIONS THAT RED THESE (both verified):
+MUTATIONS THAT RED THESE (each verified against the pre-fix code):
   * revert ``append`` to ``with self.path.open("a+b") as f: f.write(...)`` ->
     ``test_concurrent_threads_cannot_interleave_or_fabricate_a_seal`` fails on
     the stray-seal assertion (the count/loss assertions still pass: CPython's
     buffered writer emits record-aligned appends, which is why the defect is
-    the fabricated tear and not a lost record on a local filesystem).
+    the fabricated tear and not a lost record on a local filesystem), and BOTH
+    cross-process tests fail — the concurrent one on "the append never took
+    the flock" (zero ``flock`` calls), the peer-holds-the-lock one because the
+    append completes while a peer process holds it.
   * drop the ``_OS_WRITE`` seam -> the one-syscall pin fails.
   * make ``read_all`` raise on mid-file damage again (``salvage=False`` on the
     replay engines) -> both recovery tests fail.
+  * treat a transient ``EINTR`` from ``flock`` as fatal -> the interruption pin
+    fails with the ``OSError`` (the failure mode the lock must not add).
+  * drop ``os.register_at_fork`` -> the forked child of the fork pin blocks on
+    a lock its parent's other thread held at fork() time (caught by SIGALRM).
+  * assume ``read(n)`` returns ``n`` bytes -> the short-read pin fabricates a
+    seal on a healthy journal.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -110,13 +122,55 @@ def test_concurrent_threads_cannot_interleave_or_fabricate_a_seal(tmp_path: Path
 
 
 _CHILD = """
-import sys
+import json, os, sys, time, types
 sys.path.insert(0, {root!r})
+import tortoise.log as L
 from tortoise.log import EventLog
-log = EventLog({path!r})
-for i in range({nrec}):
-    log.append({{"type": "PointRevised", "id": "c" + sys.argv[1], "n": i,
-                 "pad": "A" * {pad}}})
+
+ready_dir, cid = {ready_dir!r}, sys.argv[1]
+path, nrec, pad = {path!r}, {nrec}, {pad}
+calls = {{"flock": 0, "contended": 0}}
+real_flock = L.fcntl.flock
+
+def spy(fd, op):
+    # Count the lock the APPEND takes, so removing it cannot pass silently.
+    calls["flock"] += 1
+    try:
+        return real_flock(fd, op)
+    except OSError as exc:
+        if exc.errno in (errno.EACCES, errno.EAGAIN):
+            calls["contended"] += 1
+        raise
+
+import errno   # noqa: E402 - after the spy so the failure path can name it
+L.fcntl = types.SimpleNamespace(
+    flock=spy, LOCK_EX=L.fcntl.LOCK_EX, LOCK_NB=L.fcntl.LOCK_NB)
+
+open(os.path.join(ready_dir, "ready-" + cid), "w").close()
+deadline = time.monotonic() + 120
+while not os.path.exists(os.path.join(ready_dir, "go")):
+    if time.monotonic() > deadline:
+        sys.exit(10)          # the start barrier was never released
+    time.sleep(0.005)
+
+log = EventLog(path)
+for i in range(nrec):
+    log.append({{"type": "PointRevised", "id": "c" + cid, "n": i,
+                 "pad": "A" * pad}})
+
+# RENDEZVOUS: no child may exit until EVERY child has finished appending, so
+# the append windows all sit inside one interval in which all of them are
+# alive and appending. A driver that runs the children ONE AFTER ANOTHER (the
+# vacuous shape this test used to have) cannot get past this point: the first
+# child would block here and exit 11.
+open(os.path.join(ready_dir, "done-" + cid), "w").close()
+deadline = time.monotonic() + 120
+while len([n for n in os.listdir(ready_dir) if n.startswith("done-")]) < {nprocs}:
+    if time.monotonic() > deadline:
+        sys.exit(11)          # the children did NOT overlap
+    time.sleep(0.005)
+
+open(os.path.join(ready_dir, "counts-" + cid), "w").write(json.dumps(calls))
 """
 
 
@@ -128,19 +182,59 @@ def test_concurrent_processes_are_serialised_too(tmp_path: Path):
     is not atomic (NFSv3, some FUSE/CSI volumes) is exactly where the write-side
     guarantee alone would not hold.
 
+    The children must OVERLAP, which is asserted rather than assumed:
+
+    * every child waits on a ``go`` file, so all of them are running before any
+      of them appends;
+    * no child exits until every child has finished appending, so all six
+      append loops sit inside one common wall-clock window (a sequential driver
+      wedges the first child and exits 11 -> red, not green);
+    * each child REPORTS the ``flock`` calls its own appends made, so deleting
+      the cross-process arm reds this test deterministically instead of relying
+      on a race actually tearing a record.
+
     A SUBPROCESS, not ``os.fork()``: this module has already started threads, so
     a fork-then-lock child can block on a lock its parent held at fork time —
-    a wedged suite instead of a failure. `subprocess.run(timeout=...)` turns
-    that into a red test with a message.
+    a wedged suite instead of a failure. ``communicate(timeout=...)`` turns that
+    into a red test with a message.
     """
+    pytest.importorskip("fcntl")
     path = tmp_path / "graph.jsonl"
+    ready = tmp_path / "barrier"
+    ready.mkdir()
     nprocs, nrec = 6, 60
     root = str(Path(__file__).resolve().parent.parent)
-    script = _CHILD.format(root=root, path=str(path), nrec=nrec, pad=6000)
-    for p in range(nprocs):
-        proc = subprocess.run([sys.executable, "-c", script, str(p)],
-                              capture_output=True, text=True, timeout=300)
-        assert proc.returncode == 0, (proc.returncode, proc.stderr[-2000:])
+    script = _CHILD.format(root=root, path=str(path), ready_dir=str(ready),
+                           nrec=nrec, pad=6000, nprocs=nprocs)
+
+    procs = [subprocess.Popen([sys.executable, "-c", script, str(p)],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True)
+             for p in range(nprocs)]
+    try:
+        deadline = time.monotonic() + 120
+        while len(list(ready.glob("ready-*"))) < nprocs:
+            assert time.monotonic() < deadline, "a child never reached the barrier"
+            assert all(p.poll() is None for p in procs), (
+                "a child exited before the start barrier: "
+                f"{[p.returncode for p in procs]}")
+            time.sleep(0.005)
+        (ready / "go").write_text("")
+        outcomes = [(p.communicate(timeout=300), p.returncode) for p in procs]
+        outcomes = [(returncode, err) for (_, err), returncode in outcomes]
+    finally:
+        for p in procs:
+            if p.poll() is None:            # pragma: no cover - failure path
+                p.kill()
+    for returncode, stderr in outcomes:
+        assert returncode == 0, (returncode, stderr[-2000:])
+
+    counts = [json.loads((ready / f"counts-{p}").read_text())
+              for p in range(nprocs)]
+    locked = [c["flock"] for c in counts]
+    assert min(locked) >= nrec, (
+        f"flock calls per child = {locked} for {nrec} appends each: the append "
+        "did not take the cross-process lock")
 
     reader = EventLog(path)
     records = reader.read_all()
@@ -148,6 +242,247 @@ def test_concurrent_processes_are_serialised_too(tmp_path: Path):
     raw = path.read_bytes()
     assert SEAL_SENTINEL not in raw.decode("utf-8")
     assert reader.torn_trailing_count == 0 and reader.corrupt_line_count == 0
+
+
+_HOLDER = """
+import fcntl, os, sys, time
+fd = os.open({path!r}, os.O_CREAT | os.O_RDWR, 0o644)
+fcntl.flock(fd, fcntl.LOCK_EX)
+open({held!r}, "w").close()
+deadline = time.monotonic() + 60
+while not os.path.exists({release!r}):
+    if time.monotonic() > deadline:
+        sys.exit(12)
+    time.sleep(0.005)
+os.close(fd)
+"""
+
+
+def test_a_peer_process_holding_the_flock_blocks_the_append(tmp_path: Path):
+    """The cross-process arm, pinned WITHOUT depending on a race.
+
+    A peer process takes ``flock(LOCK_EX)`` on the journal and holds it while
+    this process appends. If ``append`` really serialises against other
+    processes, the append cannot complete in that window; if the ``flock`` arm
+    is a no-op (or gone), it completes immediately and the assertion below
+    fails. This is the discrimination the concurrent test would otherwise only
+    get statistically.
+    """
+    pytest.importorskip("fcntl")
+    path = tmp_path / "graph.jsonl"
+    path.write_text("")
+    held, release = tmp_path / "held", tmp_path / "release"
+    script = _HOLDER.format(path=str(path), held=str(held), release=str(release))
+    holder = subprocess.Popen([sys.executable, "-c", script])
+    log = EventLog(path)
+    done = threading.Event()
+    errors: list[BaseException] = []
+    started: list[bool] = []
+
+    def writer() -> None:
+        try:
+            log.append({"type": "PointAdded", "point": {"id": "p"}})
+        except BaseException as exc:            # reported below
+            errors.append(exc)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=writer)
+    try:
+        deadline = time.monotonic() + 60
+        while not held.exists():
+            assert holder.poll() is None, "the peer never took the lock"
+            assert time.monotonic() < deadline, "the peer never took the lock"
+            time.sleep(0.005)
+        thread.start()
+        started.append(True)
+        # The peer holds the flock for this whole window (the append's own wait
+        # is bounded at _FLOCK_TIMEOUT_S = 5s), so an append that takes the
+        # cross-process lock cannot have finished inside it.
+        assert not done.wait(0.5), (
+            "append completed while a peer process held the journal's flock — "
+            "the append did not take the cross-process lock")
+    finally:
+        release.write_text("")
+        if started:
+            thread.join(30)
+        holder.wait(30)
+    assert errors == [], errors
+    assert done.is_set()
+    assert len(EventLog(path).read_all()) == 1
+
+
+def test_an_interrupted_flock_is_retried_not_raised(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A signal during the lock wait must not turn into a lost append.
+
+    The wait polls ``flock(LOCK_NB)`` thousands of times exactly while a peer
+    holds the lock, and ``fcntl.flock`` is NOT in PEP 475's retry-on-EINTR set —
+    so any delivered signal can interrupt one. ``EINTR`` is transient: it is
+    retried, never propagated as an ``OSError`` out of ``append`` (pre-fix it
+    escaped, which is a failure class the lock itself introduced).
+    """
+    fcntl = pytest.importorskip("fcntl")
+    import types
+
+    import tortoise.log as log_mod
+
+    real_flock = fcntl.flock
+    interruptions = 3
+    calls: list[int] = []
+
+    def flaky(fd: int, op: int) -> None:
+        calls.append(op)
+        if len(calls) <= interruptions:
+            raise OSError(errno.EINTR, "Interrupted system call")
+        return real_flock(fd, op)
+
+    monkeypatch.setattr(log_mod, "fcntl", types.SimpleNamespace(
+        flock=flaky, LOCK_EX=fcntl.LOCK_EX, LOCK_NB=fcntl.LOCK_NB))
+
+    path = tmp_path / "graph.jsonl"
+    EventLog(path).append({"type": "PointAdded", "point": {"id": "p"}})
+
+    assert len(calls) == interruptions + 1, calls
+    assert [r["point"]["id"] for r in EventLog(path).read_all()] == ["p"]
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX fork only")
+def test_a_forked_child_does_not_inherit_a_held_append_lock(tmp_path: Path):
+    """``fork()`` while another thread appends must not wedge the child.
+
+    ``threading.Lock`` state is COPIED into a forked child. With a journal's
+    lock held by a sibling thread at ``fork()`` time, the child's copy has no
+    owner and never releases — so the child's first ``append`` (the
+    capture/delete path, and a prefork server's whole reason to exist) blocks
+    for ever. The module reinitialises that state ``after_in_child``; without
+    the hook this test hangs until the child's SIGALRM fires.
+    """
+    import tortoise.log as log_mod
+
+    path = tmp_path / "graph.jsonl"
+    log = EventLog(path)
+    log.append({"type": "PointAdded", "point": {"id": "parent"}})
+
+    held = log_mod._append_lock(log._lock_key())
+    acquired, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with held:
+            acquired.set()
+            release.wait(30)
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    assert acquired.wait(30), "the holder thread never took the lock"
+
+    pid = os.fork()
+    if pid == 0:                              # pragma: no cover - child process
+        status = 0
+        try:
+            signal.alarm(10)                  # wedged -> SIGALRM ends the child
+            log.append({"type": "PointAdded", "point": {"id": "child"}})
+        except BaseException:
+            status = 2
+        os._exit(status)
+
+    release.set()
+    holder.join(30)
+    _, wait_status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(wait_status) == 0, (
+        "the forked child could not append — it inherited a lock held by the "
+        "parent's other thread at fork() time")
+    # And the hook is REGISTERED on this platform, not merely implemented.
+    assert log_mod._FORK_HOOK_REGISTERED is hasattr(os, "register_at_fork")
+    assert {"parent", "child"} == {
+        r["point"]["id"] for r in EventLog(path).read_all()}
+
+
+class _ShortReader:
+    """An ``io.FileIO``-shaped reader that UNDER-returns from ``read(n)``.
+
+    ``io.FileIO.read(n)`` is one ``read(2)`` and ``RawIOBase`` promises nothing
+    about returning ``n`` bytes, so a short read is legal on any descriptor. The
+    tail scan must read its window EXACTLY: skipping the bytes it did not get
+    would silently drop the bytes that decide whether the tail is a fragment.
+    """
+
+    def __init__(self, handle, limit: int) -> None:
+        self._handle = handle
+        self._limit = limit
+
+    def seek(self, *args):
+        return self._handle.seek(*args)
+
+    def read(self, n: int = -1) -> bytes:
+        if n is None or n < 0:
+            n = self._limit
+        return self._handle.read(min(n, self._limit))
+
+
+def test_the_tail_scan_reads_each_window_exactly(tmp_path: Path):
+    """A short ``read(n)`` must not make the tail analysis mis-splice.
+
+    ``_seal_prefix`` decides on the LAST line's bytes; a short read that skips
+    the un-read remainder of the window hands it an interior fragment of the
+    line, which is exactly how it can fabricate a seal on a healthy journal (or
+    leave a real fragment unmarked) on the volumes this path is hardened for.
+    """
+    complete = json.dumps({"type": "PointAdded", "point": {"id": "a"}})
+    cases = {
+        "one terminated record": complete + "\n",
+        "several records": complete + "\n" + complete + "\n",
+        "torn tail": complete + "\n" + '{"type": "PointAdd',
+        "terminated malformed": complete + "\n" + "{not json}\n",
+    }
+    for label, text in cases.items():
+        path = tmp_path / f"graph-{label.replace(' ', '-')}.jsonl"
+        path.write_text(text, encoding="utf-8")
+        log = EventLog(path)
+        with path.open("rb") as handle:
+            expected = log._seal_prefix(handle)
+        with path.open("rb") as handle:
+            short = log._seal_prefix(_ShortReader(handle, 1))
+        assert short == expected, f"{label}: {short!r} != {expected!r}"
+    # The cases above are not vacuous: the torn tail and the terminated
+    # malformed line DO need a seal, the healthy ones do not.
+    several = tmp_path / "graph-several-records.jsonl"
+    with several.open("rb") as handle:
+        assert EventLog(several)._seal_prefix(handle) == ""
+
+
+def test_the_append_resolves_the_journal_path_once(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """``realpath`` is the measured cost the ``_lock_key`` memo exists for.
+
+    The resolved key is handed to BOTH locks, so N appends cost ONE resolution —
+    not one per lock per append (which is what the two locks did before the key
+    was passed in).
+    """
+    import types
+
+    import tortoise.log as log_mod
+
+    calls: list[str] = []
+    real_realpath = os.path.realpath
+
+    def spy(value, *args, **kwargs):
+        calls.append(os.fspath(value))
+        return real_realpath(value, *args, **kwargs)
+
+    monkeypatch.setattr(log_mod, "os", types.SimpleNamespace(
+        fspath=os.fspath, realpath=spy,
+        path=types.SimpleNamespace(realpath=spy)))
+
+    path = tmp_path / "graph.jsonl"
+    log = EventLog(path)
+    for i in range(5):
+        log.append({"type": "PointAdded", "point": {"id": f"p{i}"}})
+
+    assert len(calls) == 1, (
+        f"{len(calls)} realpath calls for 5 appends — the resolved key was "
+        "recomputed on the append path")
+    assert len(EventLog(path).read_all()) == 5
 
 
 def test_one_write_syscall_per_record_on_an_append_descriptor(

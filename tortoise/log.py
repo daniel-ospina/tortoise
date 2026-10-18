@@ -540,7 +540,10 @@ def _classifier_text(raw: bytes) -> str:
 # appends to (at most the live graphs), and is deliberately never pruned: a lock
 # a waiter already holds a reference to cannot be identified from the map, so
 # evicting one could hand two threads two different locks for one path and
-# silently drop the serialisation this block exists for.
+# silently drop the serialisation this block exists for. The state is
+# reinitialised in a FORKED CHILD (see ``_reinit_append_locks_after_fork``): a
+# lock held by another thread at ``fork()`` time has no owner on the other side,
+# so inheriting it would wedge the child on its first append for ever.
 _APPEND_LOCKS: dict[str, threading.Lock] = {}
 _APPEND_LOCKS_GUARD = threading.Lock()
 # BOUNDED cross-process wait. A peer that holds the lock and is wedged (SIGSTOP,
@@ -574,6 +577,31 @@ _FLOCK_UNSUPPORTED = frozenset({
 })
 
 
+def _reinit_append_locks_after_fork() -> None:
+    """Drop the INHERITED append-lock state in a forked child (#5612).
+
+    ``threading.Lock`` state is copied into a forked child. If any thread held
+    a journal's lock (or ``_APPEND_LOCKS_GUARD``) at the instant of ``fork()``,
+    the child's copy is permanently locked with no surviving owner, and the
+    child's first ``append`` — on the capture/delete path, and reachable from a
+    prefork server that warms up before forking — blocks FOREVER.
+
+    Clearing is safe in the child precisely because only the forking thread
+    survives: no peer can be holding one of these locks there. The same remedy
+    is already registered in ``tortoise/embedded_lifecycle.py``.
+    """
+    global _APPEND_LOCKS_GUARD
+    _APPEND_LOCKS.clear()
+    _FLOCK_UNHEALTHY.clear()
+    _APPEND_LOCKS_GUARD = threading.Lock()
+
+
+# POSIX only: Windows has no ``fork``, so there is nothing to reinitialise.
+_FORK_HOOK_REGISTERED = hasattr(os, "register_at_fork")
+if _FORK_HOOK_REGISTERED:                    # pragma: no branch - platform
+    os.register_at_fork(after_in_child=_reinit_append_locks_after_fork)
+
+
 def _append_lock(key: str) -> threading.Lock:
     """The process-wide lock for a journal, keyed by its RESOLVED path.
 
@@ -589,7 +617,7 @@ def _append_lock(key: str) -> threading.Lock:
         return lock
 
 
-def _lock_exclusive(fd: int, path) -> None:
+def _lock_exclusive(fd: int, key: str) -> None:
     """Serialise the append against OTHER PROCESSES, where the OS can.
 
     ``flock`` on the journal fd itself (released by ``os.close``). Two fds on
@@ -597,6 +625,11 @@ def _lock_exclusive(fd: int, path) -> None:
     fork; :func:`_append_lock` covers the threads. A filesystem without
     advisory locks is not an error — the single-``write`` ``O_APPEND``
     guarantee still holds there.
+
+    *key* is the ALREADY-RESOLVED journal path (:meth:`EventLog._lock_key`),
+    passed in rather than recomputed: the append path calls ``realpath`` once
+    per journal (memoised on the instance), which is the whole reason that memo
+    exists.
 
     The wait is BOUNDED (``_FLOCK_TIMEOUT_S``) and non-blocking-polled, because
     an unbounded ``LOCK_EX`` lets one wedged peer park every appender to that
@@ -614,7 +647,6 @@ def _lock_exclusive(fd: int, path) -> None:
     """
     if fcntl is None:                  # pragma: no cover - platform branch
         return
-    key = os.path.realpath(os.fspath(path))
     stamp = _FLOCK_UNHEALTHY.get(key)
     now = time.monotonic()
     if stamp is not None:
@@ -629,7 +661,15 @@ def _lock_exclusive(fd: int, path) -> None:
         except OSError as exc:
             if exc.errno in _FLOCK_UNSUPPORTED:
                 return
-            if exc.errno not in (errno.EACCES, errno.EAGAIN):
+            # ``EINTR`` is TRANSIENT here, not an append failure: the poll
+            # loop makes thousands of non-blocking ``flock`` calls exactly
+            # while a peer holds the lock, i.e. exactly when a signal (SIGCHLD
+            # from a reaped worker, a timer) can interrupt one. ``fcntl.flock``
+            # is NOT in PEP 475's retry-on-EINTR set, so an unhandled ``EINTR``
+            # would propagate out of ``append`` as a lost record — a failure
+            # class this lock introduced. Retrying costs nothing and does not
+            # consume the deadline meaningfully.
+            if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EINTR):
                 raise
             now = time.monotonic()
             if now >= deadline:
@@ -643,7 +683,7 @@ def _lock_exclusive(fd: int, path) -> None:
                     "filesystem whose O_APPEND is not atomic gets no "
                     "cross-process serialisation at all. Not retrying for "
                     "%.0fs.",
-                    path, _FLOCK_TIMEOUT_S, _FLOCK_UNHEALTHY_FOR_S)
+                    key, _FLOCK_TIMEOUT_S, _FLOCK_UNHEALTHY_FOR_S)
                 return
             time.sleep(min(_FLOCK_POLL_S, max(0.0, deadline - now)))
 
@@ -667,6 +707,28 @@ def _write_record(fd: int, payload: bytes) -> None:
             # would spin forever if it ever did.
             raise OSError(f"short write to the journal: {written} bytes")
         view = view[written:]
+
+
+def _read_exactly(f, want: int) -> bytes:
+    """Read *want* bytes, looping over short reads.
+
+    The journal fd is an UNBUFFERED ``io.FileIO``, whose ``read(n)`` is ONE
+    ``read(2)`` and may return FEWER than *n* bytes (``RawIOBase`` makes no
+    completeness promise). The tail scan below MUST NOT assume otherwise: a
+    short read would silently skip the bytes between the window edge and the
+    bytes actually returned — the very bytes that decide whether the tail is a
+    fragment — and could fabricate a seal or leave a real one unmarked on the
+    network/FUSE volumes this append path is hardened for.
+    """
+    parts: list[bytes] = []
+    got = 0
+    while got < want:
+        more = f.read(want - got)
+        if not more:                     # EOF: nothing left to consume
+            break
+        parts.append(more)
+        got += len(more)
+    return b"".join(parts)
 
 
 def read_for_replay(log) -> list[dict]:
@@ -728,14 +790,17 @@ class EventLog:
         """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         record = json.dumps(event, ensure_ascii=False) + "\n"
+        # Resolved ONCE per journal (memoised), then handed to both locks: the
+        # ``flock`` key must be the same resolved path the thread lock uses, or
+        # two spellings of one journal would contend on different flock keys.
+        key = self._lock_key()
         # ONE descriptor: the tail check and the write share it, so sealing
         # costs no second open/read on the write path.
         # UNBUFFERED ``io.FileIO``: no ``BufferedWriter`` in the path, so the
         # one ``os.write`` below is one ``write(2)`` regardless of CPython's
         # buffering rules or the record's size.
-        with (_append_lock(self._lock_key()),
-              io.FileIO(self.path, mode="a+b") as f):
-            _lock_exclusive(f.fileno(), self.path)
+        with (_append_lock(key), io.FileIO(self.path, mode="a+b") as f):
+            _lock_exclusive(f.fileno(), key)
             seal = self._seal_prefix(f)
             _write_record(f.fileno(), (seal + record).encode("utf-8"))
 
@@ -784,11 +849,15 @@ class EventLog:
         # universal newlines, so this scan must use the same line model or it
         # would annotate a fragment of a CR-separated journal that is actually
         # a complete record (measured).
-        # ``seek`` + ``read`` on an UNBUFFERED ``io.FileIO``: one read(2) per
-        # window step, at an absolute offset. Nothing else in this process
-        # shares the position (the append serialises on the path lock plus
-        # ``flock``), and the append's write is an ``os.write`` on an
-        # ``O_APPEND`` descriptor, which ignores the read position entirely.
+        # ``seek`` + ``read`` on an UNBUFFERED ``io.FileIO``, at an absolute
+        # offset. ``read(n)`` is ONE ``read(2)`` that may return fewer than
+        # ``n`` bytes, so the loop below reads EXACTLY the window
+        # (``_read_exactly``) — a short read must not skip the bytes between
+        # the window edge and what was actually returned.
+        # Nothing else in this process shares the position (the append
+        # serialises on the path lock plus ``flock``), and the append's write is
+        # an ``os.write`` on an ``O_APPEND`` descriptor, which ignores the read
+        # position entirely.
         f.seek(size - 1)
         final = f.read(1)
         terminated = final in (b"\n", b"\r")
@@ -810,7 +879,7 @@ class EventLog:
             # Chunks arrive newest-first, so the join is reversed.
             wstart = max(0, start - window)
             f.seek(wstart)
-            chunk = f.read(start - wstart)
+            chunk = _read_exactly(f, start - wstart)
             # A separator is a `\n` or a `\r` (read_all normalises universal
             # newlines, so CR ends a line here too), and the LAST of the two
             # in raw bytes is the last separator of the normalised text: for
