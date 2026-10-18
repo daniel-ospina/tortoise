@@ -135,6 +135,7 @@ fixed one.
 | an append that LANDS then raises is reported as unconfirmed | code | same (T8) | done |
 | the evidence probe measures each SDK's OWN graph | evidence | same (T9); `docs/evidence/7951-delete-point-outbox/probes/delete_order_probe.py` | done |
 | module-top KNOWN DEVIATIONS corrected | docs | `tortoise/sdk.py` module top | done |
+| the message names this door's own record, and the graph attaches to the cache clause | code | same (T10) | done |
 | test-file classification | config | `config/ci-surfaces.yml` — six-surface dual-registration + a `durations` row; `python tools/ci_selection.py --integrity` green | done |
 | executable demonstration | evidence | `docs/evidence/7951-delete-point-outbox/` (probe + verbatim log, exit 0; re-measured at this head — section 3 now prints the `record_committed=True` arm) | done |
 | MCP / public SDK surface | none | `tools/surface_manifest.py check` OK (82 rows); no tool or public method added/renamed | verified |

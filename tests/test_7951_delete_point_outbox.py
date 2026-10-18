@@ -511,3 +511,36 @@ def test_the_evidence_probe_rebinds_the_guarded_handle_per_instance(tmp_path):
     finally:
         a.close()
         b.close()
+
+
+# ── T10: the message names THIS door's record, and the graph is the cache's ─
+
+def test_the_message_names_the_doors_own_record_and_graph():
+    """`record` is derived from the door; the graph belongs to the cache clause.
+
+    #7951 review round 4. A caller that omits `record` used to get "The
+    PointAdded record WAS appended before the DETACH DELETE" — a record this
+    door never writes — and the unconfirmed arm said "the PointAdded record's
+    landing is UNCONFIRMED". Separately, `_where` (the CACHE graph) was
+    interpolated into the RECORD clause, so the sentence read "DESTROYED in the
+    record on graph X and not in the cache", pointing a debugging caller at the
+    store that does NOT hold the destruction.
+
+    MUTATION: restore `record: str = "PointAdded"` and the first two assertions
+    of each block fail; move `_where` back into the record clause and the
+    placement assertion fails.
+    """
+    from tortoise.exceptions import WriteNotLandedError
+
+    committed_msg = str(WriteNotLandedError(
+        "p_1", "cache_graph", record_committed=True, operation="delete_point"))
+    assert "EntityMutated op=delete" in committed_msg
+    assert "PointAdded" not in committed_msg
+    assert "in the record and not in the cache on graph 'cache_graph'" in committed_msg, (
+        "the graph name IS the cache graph; attaching it to the record clause "
+        "sends a caller debugging a divergence to the wrong store")
+
+    unconfirmed_msg = str(WriteNotLandedError(
+        "p_1", "cache_graph", operation="delete_point"))
+    assert "EntityMutated op=delete" in unconfirmed_msg
+    assert "PointAdded" not in unconfirmed_msg

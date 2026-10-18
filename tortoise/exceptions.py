@@ -496,11 +496,18 @@ class WriteNotLandedError(RuntimeError):
     def __init__(self, point_id: str, graph: str | None = None,
                  detail: str = "", *, record_committed: bool = False,
                  operation: str = "create_point",
-                 record: str = "PointAdded") -> None:
+                 record: str | None = None) -> None:
         self.point_id = point_id
         self.graph = graph
         self.operation = operation
-        self.record = record
+        # The default is derived from the DOOR, not hardcoded (#7951 review
+        # round 4): "The PointAdded record WAS appended before the DETACH
+        # DELETE", and "the PointAdded record's landing is UNCONFIRMED", both
+        # name a record this door never writes. A caller that omits `record`
+        # must still get the true noun.
+        self.record = record or (
+            "EntityMutated op=delete" if operation == "delete_point"
+            else "PointAdded")
         self.detail = detail
         self.record_committed = record_committed
         _where = f" on graph {graph!r}" if graph else ""
@@ -512,9 +519,13 @@ class WriteNotLandedError(RuntimeError):
                 # serves (#7951 review round 2). The create-shaped wording,
                 # verbatim, told an MCP caller "was not committed" about a
                 # destruction that IS committed.
+                # `_where` names the CACHE graph, so it attaches to the cache
+                # clause: "in the record on graph X" pointed a caller at the
+                # store that does NOT hold the destruction (#7951 review
+                # round 4).
                 _headline = (
-                    f"the Point {point_id!r} was DESTROYED in the record"
-                    f"{_where} and not in the cache"
+                    f"the Point {point_id!r} was DESTROYED in the record and "
+                    f"not in the cache{_where}"
                 )
                 _cause = (
                     "the journal append committed the destruction and the "
