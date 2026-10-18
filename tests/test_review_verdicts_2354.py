@@ -551,11 +551,11 @@ def test_keep_keeps_the_review_write_when_the_promote_LANDED_then_raised(
     docstring is the authoritative list of the six stages — so a raise from any of
     them leaves the node live. Rolling the stamps back there is the INVERSE of the
     #2354 limbo: a promotion that landed is put back to undecided, so the graph
-    contradicts its own ``DedupeRecorded`` and — because ``sweep()`` filters on the
-    stamp, not on status, while ``list_dedup_candidates`` still hides the live node —
-    it is offered back as though it had never been decided. Above the auto-accept
-    bar the sweep re-issues ``keep``, which journals a SECOND ``DedupeRecorded`` for
-    one logical merge.
+    contradicts its own ``DedupeRecorded`` and — this fixture is a temporal
+    candidate, where ``sweep()`` selects on the stamp rather than on status and
+    ``list_dedup_candidates`` hides a live node — it is offered back as though it
+    had never been decided. Above the auto-accept bar the sweep re-issues
+    ``keep``, which journals a SECOND ``DedupeRecorded`` for one logical merge.
 
     ``already_live`` is not the discriminator: ``promote_point`` RETURNS it for a
     node live before the CAS. In THIS single-node fixture, a raise with a live node
@@ -636,6 +636,7 @@ def _proxied_projection(sdk, monkeypatch, *, fail_on=None, worst_order=False,
 
     class _G:
         reordered = 0
+        widened = 0
         last_order = None
 
         def query(self, cypher, params=None, **kwargs):
@@ -649,16 +650,23 @@ def _proxied_projection(sdk, monkeypatch, *, fail_on=None, worst_order=False,
             rows = list(res.result_set)
             if row_width is not None:
                 rows = [_resize(row, row_width) for row in rows]
+                self.widened += 1
             if worst_order:
                 ordered = _live_in_the_middle(rows)
                 if ordered is not None:
                     self.reordered += 1
                     rows = ordered
-                    # Recorded from what is RETURNED, not from the intent above
-                    # it: a proxy that computes an order and forgets to apply
-                    # it must fail the self-check, not satisfy it.
-                    self.last_order = [row[1] for row in rows]
-            return types.SimpleNamespace(result_set=rows)
+            # The recorded values are read off the object that is RETURNED, not
+            # off the locals above it: a proxy that stops applying its own
+            # transform — or returns the raw result — must fail the calling
+            # test's self-check, not satisfy it.
+            out = types.SimpleNamespace(result_set=rows)
+            self.last_order = [row[1] for row in out.result_set]
+            # Deleting the un-transformed result makes it UNREACHABLE: a future
+            # `return res` here must raise, not silently hand the code under test
+            # an order the adversary never applied.
+            del res
+            return out
 
     class _P:
         def __init__(self):
@@ -731,7 +739,7 @@ def test_a_failed_rollback_logs_and_does_not_mask_the_promote_error(
 
 
 def test_the_landing_check_does_not_depend_on_which_duplicate_row_is_read(
-        sdk, monkeypatch):
+        sdk, monkeypatch, caplog):
     """A verdict read off ``rows[0]`` would be server-row-order dependent (#7822).
 
     Point ids are NOT unique — ``create_point(..., id=X)`` twice is a tested,
@@ -768,6 +776,10 @@ def test_the_landing_check_does_not_depend_on_which_duplicate_row_is_read(
     with pytest.raises(RuntimeError, match="post-CAS"):
         VerdictLayer(sdk).decide("rv-a", VERDICT_KEEP)
 
+    assert "review rollback skipped" not in caplog.text, (
+        "the classification read must have SUCCEEDED: a failed read is answered "
+        "as landed, which would make this pin vacuous however the rows are "
+        f"ordered (log: {caplog.text!r})")
     assert proxy.g.reordered == 1, (
         "the adversarial order must be applied to the fan-out read, or this "
         "test silently stops testing row-order independence")
@@ -803,10 +815,14 @@ def test_a_fanout_row_of_unexpected_width_does_not_replace_the_promote_error(
         raise ValueError(f"No point {point_id!r}")
 
     monkeypatch.setattr(sdk, "promote_point", refuse)
-    _proxied_projection(sdk, monkeypatch, row_width=width)
+    proxy = _proxied_projection(sdk, monkeypatch, row_width=width)
 
     with pytest.raises(ValueError, match="No point"):
         VerdictLayer(sdk).decide("rv-a", VERDICT_KEEP)
+
+    assert proxy.g.widened >= 1, (
+        "the adversarial width must be applied to the fan-out read, or this "
+        "test silently stops testing arity independence")
 
     props = _props(sdk, "rv-a")
     assert props.get("status") == "draft", (
