@@ -797,6 +797,7 @@ test('#4637 wiring: the graph-missing card renders the snippet only with the gat
           firstDataSnippet: JSON.stringify(SENTINEL),
           shownOrgName: "'Acme'",
           setTab: 'globalThis.__recordTab',
+          openResumeWizard: 'globalThis.__recordSetup',
         },
       })
       const html = String(rendered.html)
@@ -812,6 +813,20 @@ test('#4637 wiring: the graph-missing card renders the snippet only with the gat
         recordedTab = null
         dropToAction.props.onGoToKeys()
         assert.equal(recordedTab, 'keys', 'the card\u2019s API Keys route must open the API Keys tab')
+      }
+      // #4628: the action set is handed the ROLE and the resume door, and a member
+      // is never offered the owner-only tab. (The label/handler verdicts are the
+      // action module's own render tests; this asserts what the CARD wires into
+      // it, which is the half a source-text pin cannot see.)
+      const actionSet = findElementByName(rendered.value, 'GraphMissingEmptyStateActions')
+      assert.ok(actionSet, 'the card must render its action set')
+      assert.equal(actionSet.props.isOwnerAdmin === true, isOwnerAdmin === 'true',
+        'the action set must receive the role fact itself')
+      assert.equal(actionSet.props.onContinueSetup, globalThis.__recordSetup,
+        'the member arm\u2019s primary must be the #2005 resume door')
+      if (isOwnerAdmin === 'false') {
+        assert.ok(!html.includes('Go to API Keys'),
+          `a member must never be offered the owner-only tab — got ${html}`)
       }
       // the SNIPPET needs the gate's own plaintext (`existing` holds no plaintext
       // even though the Organization has a usable row — the two facts differ)
@@ -929,6 +944,10 @@ test('#4637 wiring: the re-entry card RENDERS the member lead-in its key state s
 // invoked on the rendered element and their destination recorded here.
 let recordedTab = null
 globalThis.__recordTab = (tab) => { recordedTab = tab }
+// #4628: the resume door (#2005) a member's primary action is handed. Identity,
+// not just "is a function": the probe binds this exact value as
+// `openResumeWizard`, so a card that passed some other handler would not match.
+globalThis.__recordSetup = () => {}
 
 test('#4637 wiring: the re-entry API Keys affordance RENDERS exactly the derivation’s verdict', async () => {
   // The WHOLE guard is compiled and rendered, not just the inner call: evaluating
@@ -957,14 +976,21 @@ test('#4637 wiring: the re-entry API Keys affordance RENDERS exactly the derivat
     for (const reveal of reveals) {
       const [rendered] = await evalExpressions(expression, {
         imports: MAIN_IMPORTS,
-        bindings: { snippetKey: reveal.source, connectGate: JSON.stringify(gate), setTab: 'globalThis.__recordTab' },
+        bindings: {
+          snippetKey: reveal.source,
+          connectGate: JSON.stringify(gate),
+          setTab: 'globalThis.__recordTab',
+          // the OWNER arm — the MINT clause this affordance serves is the owner
+          // clause; #4628's member arm is asserted in its own test below
+          isOwnerAdmin: 'true',
+        },
       })
       const html = String(rendered.html)
       const shown = html.includes('Go to API Keys →')
       // The WHOLE guard's verdict must be the derivation's verdict. This is what
       // catches an extra conjunct (`&& (false ? true : null) && (`) that keeps the
       // call's own truth table intact while withholding the button.
-      const expected = keyTabAffordance({ snippetKey: reveal.value, connectGate: gate })
+      const expected = keyTabAffordance({ snippetKey: reveal.value, connectGate: gate, isOwnerAdmin: true })
       assert.equal(shown, expected,
         `gate ${JSON.stringify(gate)} + snippetKey=${reveal.source}: the guard must render exactly the derivation's verdict — got ${html}`)
       if (shown) {
@@ -982,6 +1008,22 @@ test('#4637 wiring: the re-entry API Keys affordance RENDERS exactly the derivat
       if (!ownerKeyLive(gate.mode) && reveal.value === 'stale-reveal') {
         assert.ok(shown,
           `gate ${JSON.stringify(gate)}: the stale reveal must not withhold the affordance — got ${html}`)
+      }
+      // #4628: on the MEMBER arm the guard renders nothing, in EVERY cell of the
+      // same matrix — the tab's own copy refuses a member, so no gate state may
+      // resurrect the control for them.
+      for (const memberRole of ['false', 'undefined']) {
+        const [asMember] = await evalExpressions(expression, {
+          imports: MAIN_IMPORTS,
+          bindings: {
+            snippetKey: reveal.source,
+            connectGate: JSON.stringify(gate),
+            setTab: 'globalThis.__recordTab',
+            isOwnerAdmin: memberRole,
+          },
+        })
+        assert.ok(!String(asMember.html).includes('Go to API Keys'),
+          `gate ${JSON.stringify(gate)} + snippetKey=${reveal.source} + isOwnerAdmin=${memberRole}: a member must never be offered the owner-only tab — got ${asMember.html}`)
       }
     }
   }
@@ -1075,21 +1117,43 @@ test('#4637: keyTabAffordance is a function of the GATE, not the in-memory revea
   // deleted: `!ownerKeyLive(mode)` alone would take the keys-tab button away from
   // a returning owner (`snippetKey` falsy, the Organization holding a durable row
   // -> 'existing'), which is a reachable state (#2246: an authed session holds no
-  // apiKey, and `welcomeKey` is gone on return).
+  // apiKey, and `welcomeKey` is gone on return). The role is fixed to owner here:
+  // these are the arms that make these claims, and #4628's member arm is its own
+  // test below.
   for (const mode of [...GATE_MODES, 'nonsense', null]) {
     for (const snippetKey of [null, '', 'stale-reveal']) {
       const expected = !snippetKey || !ownerKeyLive(mode)
-      assert.equal(keyTabAffordance({ snippetKey, connectGate: { mode } }), expected,
+      assert.equal(keyTabAffordance({ snippetKey, connectGate: { mode }, isOwnerAdmin: true }), expected,
         `snippetKey=${JSON.stringify(snippetKey)} mode=${String(mode)}: the gate decides whenever a reveal is held, and a falsy reveal always keeps the affordance`)
     }
   }
   // the cells that carry the first disjunct, named:
   for (const mode of ['embed', 'existing']) {
-    assert.equal(keyTabAffordance({ snippetKey: null, connectGate: { mode } }), true,
+    assert.equal(keyTabAffordance({ snippetKey: null, connectGate: { mode }, isOwnerAdmin: true }), true,
       `mode ${mode}: a session holding no reveal keeps the keys-tab affordance even though the Organization has a usable key`)
-    assert.equal(keyTabAffordance({ snippetKey: 'stale-reveal', connectGate: { mode } }), false,
+    assert.equal(keyTabAffordance({ snippetKey: 'stale-reveal', connectGate: { mode }, isOwnerAdmin: true }), false,
       `mode ${mode}: a usable key needs no keys-tab detour`)
   }
+})
+
+// #4628: the ROLE conjunct. The API Keys tab is an owner/admin surface
+// (`_require_owner_admin`), and only the owner arms' copy names it — so no member
+// may be handed the control, in ANY gate mode or reveal state. Strict `=== true`:
+// an unstated role withholds the owner-only control rather than promising it.
+test('#4628: keyTabAffordance never offers the owner-only tab to a member', () => {
+  for (const mode of [...GATE_MODES, 'nonsense', null]) {
+    for (const snippetKey of [null, '', 'stale-reveal']) {
+      for (const isOwnerAdmin of [false, undefined, null, 'owner', 'member', 1]) {
+        assert.equal(keyTabAffordance({ snippetKey, connectGate: { mode }, isOwnerAdmin }), false,
+          `snippetKey=${JSON.stringify(snippetKey)} mode=${String(mode)} isOwnerAdmin=${JSON.stringify(isOwnerAdmin)}: a member (or an unstated role) must never be offered the owner-only tab`)
+      }
+    }
+  }
+  // the cell the role conjunct alone closes: a member whose Organization holds a
+  // usable key had the button through the first disjunct (`!snippetKey`), so this
+  // is not an accident of the gate
+  assert.equal(keyTabAffordance({ snippetKey: null, connectGate: { mode: 'existing' }, isOwnerAdmin: false }), false,
+    'a member holds no keys-tab affordance even when the Organization has a key to reuse')
 })
 
 test('#4637: ownerCardProps derives keyLive from the gate and nothing else', () => {
