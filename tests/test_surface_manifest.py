@@ -975,7 +975,10 @@ def test_the_guard_reds_when_the_live_surface_grows_past_the_high_water_pin(tmp_
     such check, so the run is green and this test fails — the check is non-vacuous.
     """
     doc = _manifest()
-    doc["high_water_counts"] = {"tools": 81, "sdk_public_methods": 150}
+    # The pin is set ONE BELOW the live count so the run must red: the property
+    # under test is "growth past the pin reds", not any particular number.
+    # (#3540 moved the live count 82 -> 81, so the pin moves with it.)
+    doc["high_water_counts"] = {"tools": 80, "sdk_public_methods": 150}
     result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
     assert result.returncode == 1, "growth past the frozen pin did not red the gate"
     assert "high-water pin" in result.stdout, result.stdout
@@ -2929,7 +2932,9 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     tc = _load_target_check()
     live = tc.live_surface()
     manifest = _manifest()
-    assert live["mcp"] == manifest["counts"]["tools"] == 82
+    # #3540 ruling B: 82 -> 81 (two per-source switches retired into ONE
+    # consolidated tool — the surface SHRANK, which is the ruling's point).
+    assert live["mcp"] == manifest["counts"]["tools"] == 81
     assert live["sdk"] == manifest["counts"]["sdk_public_methods"] == 150
 
 
@@ -2945,8 +2950,9 @@ def test_the_compliance_check_is_RED_on_todays_gap(capsys):
     # The owner's ruling is the invariant; the live numbers are MEASURED, not restated, so
     # the migration that closes the gap only needs this test's premise updated, not its
     # arithmetic (#4185 review finding).
-    assert (targets["mcp"], targets["sdk"]) == (26, 40)
-    assert (live["mcp"], live["sdk"]) != (26, 40), (
+    assert (targets["mcp"], targets["sdk"]) == (27, 40), (
+        "#3540 ruling B added the consolidated source-management tool: 26 -> 27")
+    assert (live["mcp"], live["sdk"]) != (27, 40), (
         "the gap has closed — update this test's premise (it exists to pin the RED)"
     )
     rc = tc.main(["surface-target-check.py"])
@@ -2980,7 +2986,7 @@ def test_a_surface_UNDER_the_target_is_labelled_UNDER_not_OVER(monkeypatch, caps
 def test_the_compliance_check_is_GREEN_when_the_live_surface_equals_the_target(
     monkeypatch, capsys
 ):
-    """The fixture is the migrated surface: 26 tools, 40 methods → exit 0.
+    """The fixture is the migrated surface: 27 tools, 40 methods → exit 0.
 
     `live_surface` is the seam, so the test does not have to delete 56 tools to prove
     the green path (which the task explicitly forbids anyway).
@@ -2989,7 +2995,7 @@ def test_the_compliance_check_is_GREEN_when_the_live_surface_equals_the_target(
     monkeypatch.setattr(
         tc,
         "live_surface",
-        lambda: {"mcp": 26, "sdk": 40, "tools": [], "sdk_methods": []},
+        lambda: {"mcp": 27, "sdk": 40, "tools": [], "sdk_methods": []},
     )
     rc = tc.main(["surface-target-check.py"])
     out = capsys.readouterr().out

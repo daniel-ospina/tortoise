@@ -331,13 +331,13 @@ _HANDLER_SERVED_NO_SDK_READ: dict[str, str] = {
     "tortoise_onboarding_seed": (
         "hosted-only (org context required): returns the no-team-context error on stdio."
     ),
-    "tortoise_onboarding_session_recording": (
+    # #3540: the two per-source switches were RETIRED into the consolidated
+    # operation below. The ledger follows the LIVE name — leaving the retired
+    # names here is what the import-time orphan gate exists to catch.
+    "tortoise_manage_sources": (
         "hosted-only (org context required): returns the no-team-context error on stdio."
     ),
     "tortoise_onboarding_github_connect": (
-        "hosted-only (org context required): returns the no-team-context error on stdio."
-    ),
-    "tortoise_onboarding_github_index": (
         "hosted-only (org context required): returns the no-team-context error on stdio."
     ),
     "tortoise_onboarding_github_status": (

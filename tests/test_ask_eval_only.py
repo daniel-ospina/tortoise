@@ -182,7 +182,11 @@ def test_n2_mcp_tools_list_serves_no_ask_tool(monkeypatch):
                           if ln.startswith("data: ")), r.text)
         names = [t["name"] for t in
                  json.loads(data_line).get("result", {}).get("tools", [])]
-    assert len(names) >= 75, f"default surface shrank to {len(names)}"
+    # The floor guards against SILENT shrinkage, so it moves only with a recorded
+    # reason: #3540 consolidated two per-source switches (github_index,
+    # session_recording) into `tortoise_manage_sources`, which is a net -1 on
+    # the LISTED surface (2 retired, 1 added) — 75 listed before, 74 now.
+    assert len(names) >= 74, f"default surface shrank to {len(names)}"
     assert _ASK_TOOL not in names
 
 

@@ -200,6 +200,11 @@ its edges), and a test pins that scope.
   fixing residual 6 first: give `_upsert_point_props` presence-gated `baseline_*` clauses).
 - **4** — the remaining raw-handle doors (`_sync_tags`, `_link_source`, deletes, `onboarding/state.py`,
   `onboarding/seed.py`, `hosted_api.py`, `__main__.py`, connectors), then gate the handle.
+  **LANDED SO FAR: the `delete_point` DOOR (increment 4a)** —
+  `docs/plans/2026-10-18-7951-delete-point-outbox.md`: the `EntityMutated` op=delete record is appended
+  BEFORE the `DETACH DELETE`, and a failed append refuses the delete (previously an unrecorded destroy
+  that the next replay UNDID). **STILL OPEN:** `delete_entity` (needs a per-label pre-read), and every
+  other door in this list.
 - **5** — wire `reconcile` as the S2 backstop (observed, not merely checkable).
 
 ## 8. Rejected alternatives
