@@ -7327,12 +7327,26 @@ function claimIntentInFlight() {
         // fires and tells the user a replacement exists whose value cannot be
         // shown. None does. Before #4355's single call this branch was
         // `setError(e.message)`, and that is exactly what a definite refusal
-        // should keep: the server's precise detail. No reload on this path —
-        // the refresh owns the same `error` slot and would overwrite the one
-        // message that says why the rotate was refused (the #8249 ordering
-        // hazard). Statuses that are NOT a 4xx reply — no status at all (a
-        // network failure: fetch never produced a response) or a 5xx — stay
+        // should keep: the server's precise detail.
+        //
+        // The refresh still belongs here (#4721 review). BOTH 409s say this
+        // row's state changed server-side — the lost claim revoked it, and the
+        // non-occupying refusal describes a row that is not live — so a branch
+        // that only sets the message leaves the table rendering the row as
+        // live directly above a banner that says otherwise. Refresh FIRST, then
+        // set the message: the same ordering the ambiguous branch below uses,
+        // and the reason the `error`-slot hazard does not bite here — `loadAll`
+        // touches that slot only on ITS OWN failure, so the last write is the
+        // server's detail. (`loadAll` does not rethrow today — the wrap is
+        // defence for the invariant above: a future throw inside the refresh
+        // must degrade to "no refresh", never to "the banner lost the reason".)
+        // Statuses that are NOT a 4xx reply — no status at all
+        // (a network failure: fetch never produced a response) or a 5xx — stay
         // genuinely ambiguous and keep the disclosure below.
+        try {
+          await loadAll('')
+        } catch { /* keep the server detail last — see above */ }
+        if (orgIdRef.current !== _teamAtCall) return
         setError(e.message)
       } else {
         // #4355: any other failure may be a LOST RESPONSE, not a lost

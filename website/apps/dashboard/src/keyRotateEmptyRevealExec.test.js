@@ -657,8 +657,8 @@ test('#4721: a rotate 409 (lost claim) surfaces the server detail, never a compl
   const surfaced = calls.error.filter(Boolean)
   assert.deepEqual(surfaced, [ROTATE_409_LOST_CLAIM],
     "a definite refusal keeps the server's own detail — it is the precise account of what happened")
-  assert.equal(calls.loadAll, 0,
-    'no re-read: a 4xx reply is not a lost response, and the refresh owns the `error` slot')
+  assert.equal(calls.loadAll, 1,
+    'the table must show what the refusal describes — the target row IS revoked server-side')
   assert.deepEqual(calls.rotateOutcomes, [],
     'a refusal can never latch a reveal — no plaintext was delivered')
   assertNoReplacementClaim(surfaced.join('\n'))
@@ -675,9 +675,31 @@ test('#4721: a rotate 409 (non-occupying row) surfaces the server detail and min
   const surfaced = calls.error.filter(Boolean)
   assert.deepEqual(surfaced, [ROTATE_409_NOT_OCCUPYING],
     "the server's refusal detail is the disclosure — that is the pre-#4355 behaviour this branch restores")
-  assert.equal(calls.loadAll, 0, 'a definite refusal needs no state re-read')
-  assert.deepEqual(calls.rotateOutcomes, [])
+  assert.equal(calls.loadAll, 1,
+    'the table still re-reads — a definite refusal says the row is not live, so the row must not render as live')
+  assert.deepEqual(calls.rotateOutcomes, [],
+    'and a refusal still latches no reveal — nothing was minted')
   assertNoReplacementClaim(surfaced.join('\n'))
+})
+
+test('#4721: the definite-4xx branch refreshes FIRST, so a failing refresh cannot clobber the server detail', async () => {
+  // The rejected alternative was "no reload: the refresh owns the same `error`
+  // slot and would overwrite the one message that says why the rotate was
+  // refused". `loadAll` DOES own that slot on its own failure — which is why
+  // the ORDER is the guarantee here: the refresh runs first and the server's
+  // detail is written last, so it is the last word. Reverse the two statements
+  // and this case fails on its final assertion (the network error wins), which
+  // is exactly the regression the ordering protects against.
+  const { calls, regenerateKey } = rotateEnv({
+    reject: Object.assign(new Error(ROTATE_409_LOST_CLAIM), { status: 409 }),
+    loadAll: (c) => { c.error.push('Failed to fetch') },
+  })
+  await regenerateKey('k-old')
+  assert.equal(calls.loadAll, 1, 'the definite branch still refreshes the table')
+  assert.deepEqual(calls.error.filter(Boolean), ['Failed to fetch', ROTATE_409_LOST_CLAIM],
+    'the refresh lands first and the server detail is written after it — it must survive a refresh failure')
+  assert.equal(calls.error.at(-1), ROTATE_409_LOST_CLAIM,
+    'the server detail is the LAST write to the shared error slot')
 })
 
 test('#4721: the 409/5xx split is decided by the STATUS, not by the reloaded row', async () => {
@@ -698,9 +720,8 @@ test('#4721: the 409/5xx split is decided by the STATUS, not by the reloaded row
   await ambiguous.regenerateKey('k-old')
   assert.deepEqual(definite.calls.error.filter(Boolean), [ROTATE_409_LOST_CLAIM],
     'a 4xx keeps the server detail verbatim')
-  assert.equal(definite.calls.loadAll, 0, 'and does not re-read')
-  const ambiguousMsg = ambiguous.calls.error.filter(Boolean).at(-1) || ''
   assert.equal(ambiguous.calls.loadAll, 1, 'a 5xx still re-reads the true state')
+  const ambiguousMsg = ambiguous.calls.error.filter(Boolean).at(-1) || ''
   assert.match(ambiguousMsg, /may have completed/,
     'a 5xx may have completed server-side — the disclosure must stay')
   assert.match(ambiguousMsg, /cannot be shown/)
@@ -718,7 +739,8 @@ test('#4721: every definite 4xx refusal keeps the server detail (not only 409)',
     await regenerateKey('k-old')
     assert.deepEqual(calls.error.filter(Boolean), [detail],
       `${status} must surface the server detail, not an inferred outcome`)
-    assert.equal(calls.loadAll, 0, `${status} must not trigger the ambiguous re-read`)
+    assert.equal(calls.loadAll, 1,
+      `${status} must still refresh the table — the message does not replace the truth`)
     assert.deepEqual(calls.rotateOutcomes, [], `${status}: no reveal`)
   }
 })

@@ -172,6 +172,26 @@ def _rotate(client, key_id, headers, body=None):
                        json=body or {})
 
 
+def _reraise_captured_skip(errors: list[BaseException]) -> None:
+    """Re-raise a `pytest.skip` that a RACE THREAD captured, in the main thread.
+
+    pytest honours a skip only when it is raised in the TEST's own frame. The
+    verdict seam (`tests/_verdict.py::verdict_client`) raises the #5049
+    INCONCLUSIVE skip at the point of the request, and in a threaded race that
+    point is inside the worker — so `except BaseException` captures it into
+    `errors` and a bare `assert not errors` then flattens a NON-ANSWER into a
+    hard FAIL. That is rule 1 of #5049 (`load must skip INCONCLUSIVE, never
+    red`) failing from the seam adopted to prevent it: a loaded box would
+    manufacture a red out of machine load.
+
+    Call this BEFORE `assert not errors`; every other captured exception stays
+    a genuine failure.
+    """
+    for e in errors:
+        if isinstance(e, pytest.skip.Exception):
+            raise e
+
+
 # ── T2: the cap proof + the spent-slot refusals ─────────────────────────────
 
 def test_at_cap_rotate_succeeds_and_plain_create_still_402s(client, fake):
@@ -768,6 +788,10 @@ def test_concurrent_rotate_of_one_row_admits_exactly_one(client, fake, monkeypat
         t.start()
     for t in threads:
         t.join(timeout=120)
+    # #5049: a load refusal reaches this race as a skip raised INSIDE the
+    # worker (verdict_client), so it must be re-raised here to count as a skip
+    # rather than be asserted into a red below.
+    _reraise_captured_skip(errors)
     assert not errors, errors
     assert not any(t.is_alive() for t in threads), (
         "a rotate thread never returned — the claim rendezvous deadlocked"
@@ -850,6 +874,48 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     assert "POST /v1/team/keys answered" in message
 
 
+def test_a_threaded_non_answer_is_re_raised_as_the_contracts_skip(monkeypatch):
+    """#5049 across a THREAD boundary — the exchange these races depend on.
+
+    ``verdict_client`` raises the INCONCLUSIVE skip at the point of the
+    REQUEST (``tests/_verdict.py::_answered``); in a threaded race that point
+    is inside the worker. pytest honours a skip only in the test's own frame,
+    so a worker's skip captured by ``except BaseException`` and then asserted
+    with a bare ``assert not errors`` becomes a RED — a NON-ANSWER reported as
+    a failure, i.e. #5049 rule 1 broken by the very seam adopted to obey it.
+
+    Non-vacuity in both directions: the pre-fix shape (``assert not errors``)
+    fails on the captured skip below, and the fix re-raises it as the
+    contract's skip. The bound is forced to 0 s, so the refusal comes from the
+    real ``WaitBoundMiddleware`` — no load and no wall-clock wait.
+    """
+    from tortoise import mcp_auth
+
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    errors: list[BaseException] = []
+    box: list = []
+
+    def _worker(tc) -> None:
+        try:
+            box.append(tc.post("/v1/team/keys", json={}))
+        except BaseException as e:  # mirrors the race workers above
+            errors.append(e)
+
+    with verdict_client(app) as tc:
+        t = threading.Thread(target=_worker, args=(tc,))
+        t.start()
+        t.join(timeout=60)
+    assert not t.is_alive(), "the worker never returned from its refused request"
+    assert not box, "the refusal must not produce a response"
+    assert errors and isinstance(errors[0], pytest.skip.Exception), errors
+    # The pre-fix shape: the skip is flattened into a hard FAIL.
+    with pytest.raises(AssertionError):
+        assert not errors, errors
+    # The fix: re-raised in the main thread, where pytest records the skip.
+    with pytest.raises(pytest.skip.Exception):
+        _reraise_captured_skip(errors)
+
+
 # ── T7, registry lane: the CYPHER twin's claim, raced ───────────────────────
 # `test_concurrent_rotate_of_one_row_admits_exactly_one` above races the
 # Supabase claim (`claim_api_key_revocation`, a conditional PATCH). The
@@ -889,7 +955,11 @@ def reg_client(_env, monkeypatch):
     NON-ANSWER, and the exact `sorted(statuses) == [200, 409]` assertion below
     cannot tell a 504 refusal from a real verdict — so a raw `TestClient` would
     turn load into a red. The seam converts that refusal into the contract's
-    INCONCLUSIVE skip (#5049).
+    INCONCLUSIVE skip (#5049) **provided the test re-raises it out of the
+    worker thread**, which pytest cannot do on its own: the requests here run
+    in threads, so the cases below call `_reraise_captured_skip(errors)` before
+    asserting on `errors` (see
+    `test_a_threaded_non_answer_is_re_raised_as_the_contracts_skip`).
     """
     import tempfile
 
@@ -1054,6 +1124,8 @@ def test_registry_lane_concurrent_rotate_of_one_row_admits_exactly_one(
             t.start()
         for t in threads:
             t.join(timeout=120)
+    # #5049: same seam, same reason — see the Supabase twin above.
+    _reraise_captured_skip(errors)
     assert not errors, errors
     assert not any(t.is_alive() for t in threads), (
         "a rotate thread never returned — the claim rendezvous deadlocked"
