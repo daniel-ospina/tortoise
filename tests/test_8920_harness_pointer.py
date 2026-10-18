@@ -45,10 +45,13 @@ WHAT THIS PINS
 NON-VACUITY: on the pre-fix head (`f0d5144`) check 1 reddens on the
 `hosted_api.py` pointer (`tests.test_export_delete` has no attribute
 `_quiesce_testclient_background_work`) and check 2 reddens on five stale
-`_quiesce...`/`_quiet...` occurrences plus seven `_purge_deleted_teams` ones,
-across `tortoise/hosted_api.py`, `tests/test_export_delete.py` and
+`_quiesce...`/`_quiet...` occurrences plus eight `_purge_deleted_teams` ones
+(seven in `_http_fixtures.py`, one in `test_export_delete.py`) across
+`tortoise/hosted_api.py`, `tests/test_export_delete.py` and
 `tests/_http_fixtures.py`. Verified by restoring those three files from
-`f0d5144` and re-running this module against it.
+`f0d5144` and re-running this module against it. Check 3 reddens with
+`test_writer_inventory.py` restored from the same head (`imported=False
+called=False`).
 
 Static: no network, no DB, no graph.
 """
@@ -92,17 +95,24 @@ STALE_NAMES = (
 
 SHARED_MODULE = "_http_fixtures"
 HELPER = "quiesce_testclient_background_work"
-#: Every fixture module that opens `TestClient(app)` on a shared store and
-#: therefore needs the quiesce. THREE today, not two: `test_writer_inventory.py`
-#: was excluded on a FALSE premise ("the boot sweep does not reach their
-#: fake"). It does — its `supabase_env` fixture monkeypatches
-#: `supabase_control.get_control_plane` to `FakeControlPlane`, and the sweep's
-#: metering step resolves that name at call time, so
-#: `metering_repair_period_bounds` landed in `fake.rpc_calls` there too; that
-#: module simply never noticed because every pin is name/filter-selected. The
-#: premise is the defect a future reader would trust before adding an index
-#: assertion to that module, so the module now applies the seam and this guard
-#: covers it.
+#: The fixture modules that APPLY this seam today. This is NOT a completeness
+#: claim, and the distinction is the point: MANY suites (`test_session_login`,
+#: `test_onboarding_email_http`, `test_free_team_entitlement`, …) open
+#: `TestClient(app)` under a monkeypatched fake control plane and let the boot
+#: sweep run; they tolerate it only because every pin in them is
+#: name/filter-selected. The criterion here is the stronger one — a module that
+#: keeps, or may legitimately add, an EXCLUSIVE pin (`rpc_calls` index,
+#: `len(rpc_calls)`, or exclusive ownership of a shared temp store) must
+#: quiesce instead of tolerating it.
+#:
+#: `test_writer_inventory.py` was excluded until the second review on a FALSE
+#: premise ("the boot sweep does not reach their fake"). It does — its
+#: `supabase_env` fixture monkeypatches `supabase_control.get_control_plane` to
+#: `FakeControlPlane` and its `client` fixture enters a real `TestClient(app)`,
+#: so the sweep's `metering_repair_period_bounds` landed in `fake.rpc_calls`
+#: there too; that module simply never had a pin that noticed. The premise is
+#: the defect a future reader would trust before adding an index assertion, so
+#: the module now applies the seam and this guard covers it.
 #: `test_supabase_control.py` is the one real exclusion: those tests drive
 #: `provision_org` / `_session_user_org` directly with no `TestClient`, so no
 #: lifespan, so no sweep.
@@ -199,13 +209,27 @@ def test_the_seam_is_defined_once_and_imported_by_its_consumers():
     missing: list[str] = []
     for consumer in CONSUMERS:
         source = (TESTS_DIR / consumer).read_text(encoding="utf-8")
+        tree = ast.parse(source)
         imported = any(
             isinstance(node, ast.ImportFrom)
             and node.module == f"tests.{SHARED_MODULE}"
             and any(alias.name == HELPER for alias in node.names)
-            for node in ast.walk(ast.parse(source))
+            for node in ast.walk(tree)
         )
-        called = f"{HELPER}(" in source
+        # AST, not a grep: a consumer that merely MENTIONS `<helper>(` in a
+        # comment or docstring (this file's own prose does) must not satisfy
+        # the "and applies it" half, or the guard passes on a fixture that
+        # imports the seam and never calls it — the exact inert-patch shape it
+        # exists to prevent.
+        called = any(
+            isinstance(node, ast.Call)
+            and (
+                (isinstance(node.func, ast.Name) and node.func.id == HELPER)
+                or (isinstance(node.func, ast.Attribute)
+                    and node.func.attr == HELPER)
+            )
+            for node in ast.walk(tree)
+        )
         if not imported or not called:
             missing.append(
                 f"{consumer}: imported={imported} called={called}"

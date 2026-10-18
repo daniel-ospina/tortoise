@@ -160,8 +160,9 @@ def quiesce_testclient_background_work(monkeypatch) -> None:
        exclusive ownership of a sweep production also runs. Every caller is
        therefore quiesced here.
 
-       The COMPLETE membership is the two tuples in `hosted_api.py` —
-       `_run_boot_sweeps` (six steps) and `_event_retention_loop` (those six
+       The COMPLETE membership is the two entry points in `hosted_api.py` —
+       `_run_boot_sweeps`'s six-step `for label, fn in (...)` tuple and
+       `_event_retention_loop`'s seven `_guarded_step` awaits (the same six
        plus `_refresh_cost_allocation`) — and this list exists so the next
        addition is visible, not to be re-derived here. It was INCOMPLETE until
        #4816: it named three of the six and omitted
@@ -178,7 +179,7 @@ def quiesce_testclient_background_work(monkeypatch) -> None:
        either entry point belongs here.
 
        The CALLEE is deliberately not stubbed: `tests/test_export_delete.py`
-       calls `ha_mod._purge_deleted_orgs()` directly and resolve it off the
+       calls `ha_mod._purge_deleted_orgs()` directly and resolves it off the
        module at call time, so a callee stub would silence the very call
        under test. `_run_boot_sweeps` is stubbed with an `async def` because
        `_lifespan` arms it with `create_task(...)` (see
@@ -207,8 +208,8 @@ def quiesce_testclient_background_work(monkeypatch) -> None:
        longer install their own,
 
        LANE SCOPE — the serialization is INERT on the lane CI runs these
-       suites on. Under a supported `TORTOISE_DB_URI` (the docker lane, both
-       suites' default) every construction from this module redirects to that server
+       suites on. Under a supported `TORTOISE_DB_URI` (the docker lane, these
+       consumers' default) every construction from this module redirects to that server
        (`tortoise/projection/__init__.py`, the #1647 D-1=A test redirect:
        `path` is nulled, so `_is_embedded` is False), so no redislite daemon
        exists and no double-start is possible. NONE of the callers

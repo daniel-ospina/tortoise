@@ -136,12 +136,12 @@ def client(monkeypatch, supabase_env, spy):
     # entry, and under `supabase_env` the monkeypatched control plane IS this
     # fixture's `FakeControlPlane` — so the sweep's metering step records
     # `metering_repair_period_bounds` in `fake.rpc_calls`, racing the request
-    # under test. The pins in this module are name/filter-selected and so
-    # tolerate it, but nothing here may ever add an index or `len(rpc_calls)`
-    # assertion while that noise exists. Quiesce it at the source instead
-    # (`tests._http_fixtures.quiesce_testclient_background_work`, the recorded
-    # seam — see `tortoise/hosted_api.py`), applied BEFORE the app is entered
-    # so the arming happens after the patch.
+    # under test. Every pin in this module is name/filter-selected, which is
+    # the only reason it never flaked; an index or `len(rpc_calls)` assertion
+    # needs that noise GONE, not filtered. So the seam is applied at the
+    # source (`tests._http_fixtures.quiesce_testclient_background_work` — the
+    # pattern `tortoise/hosted_api.py` records), BEFORE the app is entered so
+    # the arming happens after the patch.
     quiesce_testclient_background_work(monkeypatch)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "inv.db")
@@ -194,34 +194,32 @@ class TestBootSweepQuiesce:
     invisible — which is exactly the state in which someone adds an index or
     `len(rpc_calls)` assertion and reopens the #4816 flake.
 
-    NON-VACUITY: with the fixture's quiesce removed, `ha_mod._run_boot_sweeps`
-    is the real coroutine function and the sweep's
-    `metering_repair_period_bounds` really is recorded in this fixture's
-    `FakeControlPlane.rpc_calls` — measured on the docker lane by entering a
-    client on the pre-fix fixture shape and polling: the RPC is present within
-    the first second of app entry. So the first assertion reddens
-    deterministically, and the second one is the standing canary that the noise
-    cannot come back.
+    NON-VACUITY rests on the two IDENTITY assertions, and BOTH redden with the
+    fixture's quiesce removed: `_run_boot_sweeps` is then the real coroutine
+    function, and `event_retention_interval()` returns the production default
+    (3600.0, not the pinned 86400.0). A `rpc_calls` observation is deliberately
+    NOT asserted here: the sweep's RPC lands on a daemon thread roughly 1.5 s
+    after app entry (measured on the docker lane: `rpc_calls == []` at fixture
+    yield, `['metering_repair_period_bounds']` ~1.5 s later), so an instant
+    check of `rpc_calls` cannot tell a quiesced fixture from a just-entered
+    one — it would read RED on the pre-fix fixture only by luck and GREEN on a
+    regressed one.
     """
 
     def test_client_fixture_quiesces_boot_sweeps(self, client):
         import tortoise.hosted_api as ha_mod
         from tests._http_fixtures import quiet_boot_sweeps
 
-        _tc, fake, _spy = client
+        _tc, _fake, _spy = client
         assert ha_mod._run_boot_sweeps is quiet_boot_sweeps, (
             "the `client` fixture must patch ha_mod._run_boot_sweeps — the "
             "lifespan resolves it as a module global, so a patch anywhere "
             "else is inert and the sweep runs against this fake"
         )
-        assert ha_mod.event_retention_interval() >= 3600.0, (
-            "the retention loop must be pinned beyond any test's lifetime"
-        )
-        observed = [c[0] for c in fake.rpc_calls]
-        assert "metering_repair_period_bounds" not in observed, (
-            "the boot sweep's metering RPC reached this fake: the quiesce is "
-            "not in effect, so an index-based pin here would flake (#4816) — "
-            f"observed RPCs: {observed!r}"
+        assert ha_mod.event_retention_interval() == 86400.0, (
+            "the retention loop must be pinned beyond any test's lifetime; "
+            "the UNPATCHED default is 3600.0, so `>= 3600` would pass without "
+            f"the pin — got {ha_mod.event_retention_interval()!r}"
         )
 
 
