@@ -41,8 +41,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from tortoise.consistency import (
+    _ENTITY_ID_PROP,
+    _ENTITY_PARITY,
+    _GRAPH_VIEW_LABELS as _GRAPH_VIEW_LABELS_HOME,
+    _NAME_MERGE_LABELS,
     _PROJECTION_STATE_FORMAT,
     _PROJECTION_STATE_FORMAT_HISTORY,
+    _STATUS_COMPARED_LABELS,
     check_consistency,
     projection_state_path,
     record_projection_state,
@@ -442,6 +447,13 @@ def test_an_unjournalled_node_ADOPTED_by_the_rebuild_is_not_a_mutation(tmp_path)
     ``live`` creation default). Measured identically on ``459f22912`` with the
     re-key absent; filed as #8872 rather than absorbed here.
 
+    The ADOPTION ITSELF is asserted on both sides of the event, so this pin
+    cannot silently degrade into "the registration created the Object
+    directly" (which is what the pre-#8859 fixture actually exercised): a graph
+    built from the event-only PREFIX must show the marked stub under an id that
+    is NOT the registered one, and the full journal must then show ONE node
+    carrying the registered id with the marker cleared.
+
     That divergence is pinned EXACTLY (``{"content", {("Object",
     "status")}}``), not as "anything but ``unrecorded-mutation``" (review): an
     inequality against one class ABSORBS any NEW divergence the widening could
@@ -457,6 +469,25 @@ def test_an_unjournalled_node_ADOPTED_by_the_rebuild_is_not_a_mutation(tmp_path)
     inert: one graph-only belief write on the same adopted node must read
     ``unrecorded-mutation``.
     """
+    # Pre-adoption state, observed on a graph built from the Event alone: the
+    # reference really minted a MARKED stub, under an id that is NOT the one the
+    # later registration writes. Without this, the post-adoption assertions
+    # below are also satisfied by a direct creation.
+    stub_proj, _stub_log, _stub_events = _built(
+        tmp_path, tag="stub", records=_STUB_THEN_ADOPT_JOURNAL[:1])
+    try:
+        stub_rows = stub_proj.g.query(
+            "MATCH (o:Object {name:'rekey-object'}) RETURN o.id, o._stub"
+        ).result_set
+    finally:
+        stub_proj.close()
+    assert stub_rows, "the EventRecorded reference minted no Object stub"
+    assert stub_rows[0][1] is True, (
+        f"the minted stub is not marked `_stub=true` — adoption is not "
+        f"observable, so the digest equality below cannot discriminate "
+        f"(#7936): {stub_rows}")
+    assert stub_rows[0][0] != _OBJECT_ID, stub_rows
+
     events = _journal_dir(tmp_path, _STUB_THEN_ADOPT_JOURNAL)
     proj = FalkorProjection(path=str(tmp_path / "adopt.db"),
                             skip_health_check=True)
@@ -469,6 +500,11 @@ def test_an_unjournalled_node_ADOPTED_by_the_rebuild_is_not_a_mutation(tmp_path)
         # The stub WAS minted and WAS adopted: the canonical id landed and the
         # discriminator was cleared.
         assert rows and rows[0][0] == _OBJECT_ID, rows
+        # EXACTLY ONE node may carry the registered id (the docstring's "ONE
+        # node"): if the registration CREATED a second `:Object` instead of
+        # adopting the stub, `rows` holds two and inspecting `rows[0]` alone
+        # would make this verdict depend on store row order rather than pin it.
+        assert len(rows) == 1, rows
         assert rows[0][1] is None, rows
         first = _verdict(log_path, proj, record_state=True)
         assert first["ok"] is False, first
@@ -621,10 +657,70 @@ def test_the_reported_bounds_name_the_digest_coverage(tmp_path):
         proj.close()
 
     assert "(label, id)" in bounds["baseline_digest_covers"]
-    for label in ("Point", "Object", "Subject", "Event"):
+    # #8859 follow-up review P2: iterate the ONE home, not a re-listed literal.
+    # The literal (`"Point", "Object", "Subject", "Event"`) stayed green when a
+    # new creation row widened `_GRAPH_VIEW_LABELS` while
+    # `baseline_digest_covers` still named the old four — the drift this bounds
+    # text exists to disclose. Reading the home makes the pin red on a widening
+    # that the report has not followed.
+    for label in _GRAPH_VIEW_LABELS_HOME:
         assert label in bounds["baseline_digest_covers"], bounds
+    # The per-label loop alone is vacuous while the home is exactly
+    # `Point/Event/Object/Subject`: a re-listed `Point/Object/Subject/Event`
+    # contains every one of those names as a substring, so it passes -- and it
+    # is the SECOND HOME that has to be impossible, not merely the widening.
+    # Pinning the home's ORDER and SEPARATOR is what makes a re-list red today:
+    # the derivation emits `Point/Event/Object/Subject`, the retired literal was
+    # `Point/Object/Subject/Event`. Proved by re-inlining the literal: this line
+    # reds, the loop above does not.
+    assert "/".join(_GRAPH_VIEW_LABELS_HOME) in bounds["baseline_digest_covers"], bounds
+
+    # #8859 follow-up review round 2: the three SIBLING fields of this same dict were
+    # re-typed declarations, with nothing pinning them to their homes — the same
+    # dismissal-by-out-of-scope path, smaller blast radius. Each must be emitted from
+    # its home AND be pinned here, so a widening that moves a DECISION cannot leave the
+    # verdict describing the old one.
+    assert bounds["status_compared"] == sorted(_STATUS_COMPARED_LABELS), bounds
+    assert bounds["name_keyed"] == sorted(_NAME_MERGE_LABELS), bounds
+    assert bounds["identity"] == {
+        label: ("name" if label in _NAME_MERGE_LABELS else _ENTITY_ID_PROP[label])
+        for label, _ in _ENTITY_PARITY
+    }, bounds
     assert "name" in bounds["baseline_digest_does_not_cover"], bounds
+    # The residual shape the index deliberately does not reach, named so a
+    # reader does not infer a coverage the code does not have ("no
+    # `_ENTITY_ID_PROP` entry / property absent → the node is dropped"), plus
+    # the key-collision residual (#8879) the declared `Event`/`id` fallback
+    # makes reachable.
+    assert "no identity property" in bounds["baseline_digest_does_not_cover"], bounds
+    assert "eventId" in bounds["baseline_digest_does_not_cover"], bounds
     assert "POINT leg" in bounds["point_counts_cover"], bounds
+
+
+def test_the_entity_parity_table_follows_the_reference_fold(tmp_path):
+    """`_ENTITY_PARITY` must be DERIVED from the one home, never re-listed.
+
+    #8859 follow-up review round 2 (P2). It used to spell
+    `("Object", "Subject", "Event")` two lines above `_ENTITY_CREATION`, whose own
+    comment says a hand-copied second list is what this file's doctrine forbids.
+    Unlike the three surfaces a widening IS pin-forced into, no test referenced this
+    table at all: on a simulated fourth creation row `_entities_from_view` (which
+    builds its `id_prop` map from it) DROPPED the graph node and the check returned
+    `divergence="content"`, `ok=False` on a FAITHFUL graph, presecribing a replay
+    repair for a defect in its own label table.
+
+    FAILS IF: the literal comes back (the label set then stops tracking a widened
+    reference fold) — proved by re-inlining it with a label removed.
+    """
+    from tortoise.projection import _REFERENCE_FOLD_ENTITY_LABELS
+
+    assert {label for label, _ in _ENTITY_PARITY} == set(
+        _REFERENCE_FOLD_ENTITY_LABELS), (
+        "_ENTITY_PARITY no longer tracks _REFERENCE_FOLD_ENTITY_LABELS — a "
+        "widened reference fold would be DROPPED by `_entities_from_view` and "
+        "reported as a content divergence on a faithful graph")
+    for label, id_prop in _ENTITY_PARITY:
+        assert id_prop == _ENTITY_ID_PROP[label], label
 
 
 # ═══════════════════════════════════════════════════════════════════════

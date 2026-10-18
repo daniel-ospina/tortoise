@@ -1322,11 +1322,15 @@ surfaces:
   # the SAME mutation on a `:Point` was `unrecorded-mutation`. `core` alone: it
   # drives `tortoise/consistency.py` (no named SOURCE_PATTERN, so a
   # consistency-only change selects `core`) through `check_consistency`, and the
-  # `format_version` bump it pins lives in that same module. Its journal fixtures
-  # carry no Points, so `tortoise/projection/entities.py` and `tortoise/ids.py`
-  # are reached only for the name-stub half — the `sdk` registration of
-  # `test_7936_stable_stub_ids.py` (above) is the arm that covers an
-  # `ids.py`-only change.
+  # `format_version` bump it pins lives in that same module. It is NOT
+  # `core`-only because the fixtures are narrow: they carry a `Point` (the
+  # `log_points`/`db_points` pin counts it) and one test drives the whole
+  # `tortoise/sdk.py` + `ep.py` write path, so `projection/entities.py`,
+  # `tortoise/ids.py` and `live.py` are all exercised. That costs nothing:
+  # `sdk.py` and `projection/__init__.py` are SHARED_MODULEs (full matrix), and
+  # an `ids.py`-only change is covered by the `sdk` registration of
+  # `test_7936_stable_stub_ids.py` (above). `core` is therefore the correct
+  # FLOOR for a `live.py`/`consistency.py`-only diff, not a claim about reach.
   - test_7936_reference_fold_label_rekey.py
   # #4220: DB-free guards for the blog-residue cleanup script (prefix + created_by
   # guards, dry-run is non-destructive, delete verifies 0 remain) and the suite's
@@ -3158,6 +3162,16 @@ surfaces:
   # restore assertion bound must stay BELOW the client socket timeout so
   # "overran its bound" and "the socket timed out" remain distinguishable.
   - test_7846_restore_doc_and_bounds.py
+  # #7846 criterion 5 ("a wedged instance must not be silent"): HERMETIC guards for
+  # `tortoise/graph_key_restore.py`, the bounded + witnessed restore driver the live
+  # test above now uses. No server — a fake instance with a switchable "answering"
+  # state pins the three states that must stay distinguishable (served / blocked /
+  # dead), the measured silence, the caller-side bound, and the fact that an engine
+  # error keeps its own type. Also pins the VACUOUS-GREEN case: a block shorter than
+  # the witness's socket timeout must still read `blocked` through the slow answered
+  # PING, or a 3 000-node restore would report `served` while the instance was off the
+  # air for it. Runs on every `core` selection (no URI, no skip).
+  - test_7846_restore_is_not_silent.py
   # #3513 (epic #1714 R1): the integration grid's tile inventory is ONE
   # declaration asserted across the surfaces that must agree (the JS grid ↔
   # `tortoise/demand.py::DEMAND_DECLARED_TILES` ↔ every
@@ -4736,6 +4750,7 @@ durations:
   test_8474_ontology_record.py: 4.0  # #8474/#8736: locally measured (1 hermetic doc-read test — reads docs/ONTOLOGY.md only, no DB, no fixture; pytest session total 1.1s on an idle host, 3.1-4.2s on a loaded one, 2026-10-16 re-measure — the earlier 16.0 was taken on a private tools/test_lane.py container and included container lifecycle, not the pytest session). Needed here rather than left to the sweep because tools/ci_timing.py --refresh-durations samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time — the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Refresh from CI junit once this file has run on main.
   test_write_verb.py: 34.6
   test_index_restore.py: 2.7
+  test_7846_restore_is_not_silent.py: 14.0  # unmeasured — #7846 criterion 5: a file ADDED BY A PR can never have a CI duration at PR time (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only), so the >=90% coverage floor (#2876) would fail by construction for this test-adding PR. Measured on this host 2026-10-17: `uv run pytest tests/test_7846_restore_is_not_silent.py -q` → "10 passed in 4.32s"; re-measured after the #8827 review added eight guards and two hermetic probe arms → "20 passed in 7.15s"; re-measured again after the #8827 cycle-9 review added three behavioural guards (a refused port outranking the caller-stall inference, an answered-but-slow overrun, and the caller-held-time tail) → "23 passed in 10.50s", then re-measured again after the #8827 cycle-10 review added two guards (the completed-vs-overrun account arm and the module's caller-held ceiling) → "25 passed in 13.94s", URI-less as well (`TORTOISE_TEST_CARVE_OUT=1`). The file needs no server and takes no skip, and its cost is dominated by deliberate sub-second windows (a 0.3 s simulated block, a 0.1 s caller bound, a sample the witness never records, an abandoned worker), which is why the row is 14.0 rather than 5.0, so the reading is a function of the assertions rather than of host load. WHAT THE NUMBER IS: pytest's session total, NOT what the refresher computes — `--refresh-durations` reads the TEXTUAL `--durations=15` block out of the CI log, so a CI reading is a LOWER bound. Refresh from the first post-merge push run that includes it.
   test_capture_session.py: 53.9
   test_write_session_and_turns_3551.py: 2.1  # #3551 (10 tests, embedded carve-out lane; the hosted half drives POST /v1/sessions) — NOW CI-MEASURED from run 39040632415 (was 70.8 locally measured; the local figure counted container lifecycle, not the pytest session)
   test_session_schema_3554.py: 3.9  # #3554 (42 hermetic tests, no graph lane) — NOW CI-MEASURED from run 39040632415 (was 6.6 locally measured)
