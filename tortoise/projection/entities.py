@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 # registers, or a node's IDENTITY is not a pure function of the journal (a
 # random stub id moved on every replay) and the reference fold cannot model
 # the stub at all.
+from tortoise.entity_identity import all_name_holder_ids
 from tortoise.ids import content_hash as _content_hash
 from tortoise.ids import entity_name_id as _entity_name_id
 from tortoise.live import (
@@ -57,6 +58,52 @@ from tortoise.vector_write import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+#: ``_name_holder_count`` DELEGATES to ``entity_identity.all_name_holder_ids``
+#: — that module owns both the label vocabulary (it is what
+#: ``_require_identity_label`` refuses on) and the name-holder predicate
+#: (``_name_predicate``). A second hand-written query here is how the fold's
+#: MERGE-key decision silently stops following the shared predicate — if
+#: ``_name_predicate`` ever gains case-folding or a second name spelling, the
+#: count and the identity probes would disagree. The same #2901 drift lesson
+#: that keeps the label tuple shared applies to the count itself.
+#:
+#: See :func:`_name_holder_count` for why the count matters.
+def _name_holder_count(g, label: str, name: str) -> int:
+    """How many ``label`` nodes hold ``name`` — **any** status.
+
+    The two name-keyed labels MERGE by NAME (``MERGE (o:Object {name:$name})``,
+    #7369), so this count decides whether the name can serve as the MERGE key at
+    all. When it exceeds one, that pattern matches EVERY carrier and the
+    ``ON MATCH`` id write stamps ONE id onto ALL of them — duplicate-id
+    corruption (#8864): two distinct entities then answer every id-keyed read
+    (``MATCH (n {id:$x})``) as one.
+
+    ⛔ Count EVERY carrier, not only the LIVE ones. ``MERGE … {name:$name}``
+    matches terminal carriers too, so a ``status='superseded'`` twin is re-id'd
+    by the same ``ON MATCH`` clause — measured: one live + one superseded
+    carrier of a single name both come out carrying the incoming id. The
+    read-side predicate (``live._terminal_excluded``, as used by
+    ``entity_identity.resolve_entity_id``) is the WRONG count here precisely
+    because it excludes the terminal twin that participates in the corruption.
+    ``all_name_holder_ids`` is the ANY-status probe for exactly that reason.
+
+    Cost: one index seek — ``Object.name`` / ``Subject.name`` are range-indexed
+    (``_RANGE_INDEX_LABEL_PROPS``).
+
+    ⛔ This counts the GRAPH, and the graph has MORE carrier sources than the
+    journal models read (#8864 review P2): explicit-id writers, connector
+    writers, and the name-STUBs ``_event_plain_merge`` / ``_mint_subject_stub``
+    mint during replay. Those models now materialise the mention-stub half
+    (``projection._event_mentioned_name_stubs``) because an undercount there
+    puts them on the opposite MERGE-key branch and they bury an id the graph
+    keeps; ``edges._mint_subject_stub`` is still unmodelled (#8914). A future
+    carrier source must therefore be taught to the models as well — counting
+    the graph is right HERE (the MERGE sees every node), and the models are the
+    side that must catch up.
+    """
+    return len(all_name_holder_ids(g, label, name))
 
 
 # #6239: live's TWO ``PointPromoted`` emitters are both gated on the Point's
@@ -3619,12 +3666,14 @@ class _EntityHandlers:
     # ── Entity nodes ───────────────────────────────────────────────
 
     def _upsert_subject(self, ev: dict) -> None:
-        """MERGE Subject by name (content-hash dedup)."""
+        """MERGE Subject by name (content-hash dedup), or by id once the name is shared."""
         sid = ev.get("id")
         name = ev.get("name", "")
         # #7369: `name` is the MERGE KEY (`MERGE (s:Subject {name:$name})`), and
-        # a null/refused key aborts the replay. `sid` is only a property value,
-        # so it is left to the parameter boundary. Function-local import — the
+        # a null/refused key aborts the replay. `sid` is only a property value
+        # on the SINGLE-carrier path, so there it is left to the parameter
+        # boundary; on the shared-name path it becomes the MERGE key and is
+        # gated below (#8864 review P2). Function-local import — the
         # module-level cycle-avoidance pattern this file already uses.
         from tortoise.projection import _log_identity_skip, _writable_id
         # Split so the reporter names the identity that ACTUALLY failed: a
@@ -3636,6 +3685,24 @@ class _EntityHandlers:
             return
         if not _writable_id(name):
             _log_identity_skip("Subject", name, "name (MERGE key)")
+            return
+        # #8864: WHICH key identifies this record — see the long note at the
+        # MERGE below. Computed here, before the side effects, because the
+        # branch decides whether `sid` is a MERGE KEY (a merge key is never
+        # nulled by the parameter boundary, so it must be gated by the FOLD).
+        carriers = _name_holder_count(self.g, "Subject", name)
+        name_is_shared = carriers > 1
+        if name_is_shared and not _writable_id(sid):
+            # ⛔ The boundary deliberately FORWARDS a MERGE key untouched (a
+            # null key is its own abort: `Cannot merge node using null property
+            # value`), so an unwritable `sid` would reach the engine and raise
+            # `Failed to parse query parameter 'key' value` out of `apply()` /
+            # a replay pass that carries no per-event `try/except` — i.e. AFTER
+            # ``_wipe_all_nodes``. Pre-#8864 `$id` was only ever a property
+            # VALUE there (nulled by the boundary, so `coalesce` kept the
+            # stored id); promoting it to the key is what re-opens that class,
+            # so the FOLD must skip-and-report exactly as it does for `name`.
+            _log_identity_skip("Subject", sid, "id (MERGE key)")
             return
         # Compute embedding for Subject name (#7845)
         embedding = None
@@ -3670,13 +3737,47 @@ class _EntityHandlers:
         # first (the shape tests/test_precision_leak_4028.py documents;
         # atomicity is not required). Emitted ONLY when a new embedding is being
         # written, so the ``ELSE s.embedding`` preserve branch is untouched and
-        # a fresh MERGE has nothing to remove. Key is ``name`` — the SAME key
-        # the MERGE uses (not ``id``), or this misses its own node.
-        clear_embedding(self.g, "(s:Subject {name:$name})", "s", {"name": name}, embedding)
+        # a fresh MERGE has nothing to remove. The pattern carries the SAME key
+        # the MERGE below uses (``merge_key``), or this misses its own node.
+        #
+        # #8864: WHICH key that is — `name` while it identifies exactly ONE
+        # carrier (the #452 content-hash dedup and the stub adoption below both
+        # depend on name-keying), and `id` once two or more carriers hold it.
+        # A name held by N nodes makes `MERGE (s:Subject {name:$name})` match ALL
+        # of them and the `ON MATCH` id write stamp ONE id onto EVERY one of
+        # them: duplicate-id corruption, after which every id-keyed read folds
+        # two distinct entities into one result set. The record's id IS the
+        # identity (#3590 R1), so an ambiguous name never has to be resolved to
+        # fold the record — it just stops being the key. (`carriers` is read
+        # above, before the embedding work, because the branch also decides
+        # whether `sid` needs the `_writable_id` gate.)
+        #
+        # ⚠️ KNOWN GAP, recorded deliberately (#8902 review P3, filed as #8919):
+        # in the `id`-keyed branch the `ON MATCH` below writes the id and the
+        # adoption markers but NOT `s.name` (`name` is an ON CREATE write), so a
+        # registration can fold onto the node that already carries `sid` while
+        # that node is named something else — `add_subject(name)` then reports an
+        # id whose node is NOT named `name`. Narrower than the clobber this
+        # replaces (no id is corrupted), and closing it means writing the name on
+        # the id-keyed `ON MATCH` AND teaching the two read-side carrier models
+        # the same name move (`journal_epistemic_existence`,
+        # `journal_object_surviving_keys`; `_fold_journal_entities` already moves
+        # the id with its merge key), or they diverge in the fail-CLOSED
+        # direction — so it is its own change, not a rider on #8864.
+        if name_is_shared:
+            logger.warning(
+                "projection: %d Subject carriers already hold the name %r — "
+                "a shared name cannot serve as the MERGE key; folding by id "
+                "%r instead, so one id is never stamped onto every same-name "
+                "carrier (#8864)", carriers, name, sid)
+        merge_key = "id" if name_is_shared else "name"
+        merge_value = sid if name_is_shared else name
+        clear_embedding(self.g, f"(s:Subject {{{merge_key}:$key}})", "s",
+                        {"key": merge_value}, embedding)
         _set_emb = set_embedding_clause("s")
         self.g.query(
-            "MERGE (s:Subject {name:$name}) "
-            "ON CREATE SET s.id=$id, s.subjectKind=$sk, s.createdAt=coalesce($ca, $now), "
+            f"MERGE (s:Subject {{{merge_key}:$key}}) "
+            "ON CREATE SET s.id=$id, s.name=$name, s.subjectKind=$sk, s.createdAt=coalesce($ca, $now), "
             # #1423: status ON CREATE only — the Subject twin of the #1350
             # Object clause. Before this, `status` rode the extra-props lane
             # (`_SUBJECT_HANDLED` lacked it, #2295), which applies on MATCH as
@@ -3708,20 +3809,25 @@ class _EntityHandlers:
             # value under existing-wins (accepted divergence, #2295 plan).
             "            s.createdAt=coalesce(s.createdAt, $ca), "
             "            " + _set_emb,
-            params={"id": sid, "name": name,
+            params={"key": merge_value, "id": sid, "name": name,
                     "sk": ev.get("subject_kind", "other"),
                     "ca": ev.get("createdAt"), "now": _now_iso(),
                     "st": ev.get("status"),  # #1423: status ON CREATE only
                     "embedding": embedding},
         )
-        # #228: persist arbitrary caller-supplied props
+        # #228: persist arbitrary caller-supplied props. The anchor follows the
+        # MERGE key (#8864): a name-keyed MATCH would write the caller's props
+        # onto EVERY same-name carrier, which is the same over-reach as the id
+        # clobber.
         self._persist_extra_props(
-            "MATCH (n:Subject {name: $name})", {"name": name},
+            "MATCH (n:Subject {id: $id})" if name_is_shared
+            else "MATCH (n:Subject {name: $name})",
+            {"id": sid} if name_is_shared else {"name": name},
             ev, self._SUBJECT_HANDLED,
         )
 
     def _upsert_object(self, ev: dict) -> None:
-        """MERGE Object by name (content-hash dedup).
+        """MERGE Object by name (content-hash dedup), or by id once the name is shared.
 
         Objects are encoded via the Source→references→Object chain —
         embedding from name provides direct vector search capability
@@ -3737,6 +3843,15 @@ class _EntityHandlers:
             return
         if not _writable_id(name):
             _log_identity_skip("Object", name, "name (MERGE key)")
+            return
+        # #8864: which key identifies this record — see the note at the MERGE
+        # below. Computed here, before the side effects, because the branch
+        # decides whether `oid` is a MERGE KEY (never nulled by the parameter
+        # boundary, so the FOLD must gate it — see `_upsert_subject`).
+        carriers = _name_holder_count(self.g, "Object", name)
+        name_is_shared = carriers > 1
+        if name_is_shared and not _writable_id(oid):
+            _log_identity_skip("Object", oid, "id (MERGE key)")
             return
         title = ev.get("title")  # None default — coalesce needs NULL, not ""
         ok = ev.get("object_kind")  # None default — same issue
@@ -3764,12 +3879,43 @@ class _EntityHandlers:
         # #4524: as for Subject above — the embedded engine can silently
         # discard a ``vecf32`` overwrite, and this embedding sits inside
         # ON CREATE/ON MATCH, so PRE-REMOVE it in a separate query. Emitted
-        # only when a new vector is being written; key ``name``, the MERGE key.
-        clear_embedding(self.g, "(o:Object {name:$name})", "o", {"name": name}, embedding)
+        # only when a new vector is being written; key ``merge_key`` below — the
+        # SAME key the MERGE uses, or this misses its own node.
+        #
+        # #8864: WHICH key that is — `name` while exactly ONE carrier holds it
+        # (the #452 dedup and the stub adoption above depend on name-keying),
+        # `id` once two or more do. A shared name makes
+        # `MERGE (o:Object {name:$name})` match ALL the carriers and the
+        # `ON MATCH` id write stamp ONE id onto EVERY one of them, i.e.
+        # duplicate-id corruption: two distinct entities then answer every
+        # id-keyed read as one. See `_upsert_subject` for the shared rationale.
+        # (`carriers` is computed with the gates above so the branch can also
+        # decide whether `oid` needs the `_writable_id` gate.)
+        #
+        # ⚠️ KNOWN GAP, recorded deliberately (#8902 review P3, filed as #8919):
+        # in the `id`-keyed branch the `ON MATCH` below writes the id and the
+        # adoption markers but NOT `o.name` (`name` is an ON CREATE write), so a
+        # registration can fold onto the node that already carries `oid` while
+        # that node is named something else — `add_object(name)` then reports an
+        # id whose node is NOT named `name`, and a later name-keyed read resolves
+        # the OTHER carriers. Same disposition and same reason as `_upsert_subject`
+        # above: closing it means writing the name on the id-keyed `ON MATCH` AND
+        # teaching the two read-side carrier models the same name move, which is
+        # its own change (#8919), not a rider on #8864.
+        if name_is_shared:
+            logger.warning(
+                "projection: %d Object carriers already hold the name %r — "
+                "a shared name cannot serve as the MERGE key; folding by id "
+                "%r instead, so one id is never stamped onto every same-name "
+                "carrier (#8864)", carriers, name, oid)
+        merge_key = "id" if name_is_shared else "name"
+        merge_value = oid if name_is_shared else name
+        clear_embedding(self.g, f"(o:Object {{{merge_key}:$key}})", "o",
+                        {"key": merge_value}, embedding)
         _set_emb = set_embedding_clause("o")
         self.g.query(
-            "MERGE (o:Object {name:$name}) "
-            "ON CREATE SET o.id=$id, o.objectKind=coalesce($ok, 'other'), o.createdAt=coalesce($ca, $now), o.title=coalesce($title, ''), "
+            f"MERGE (o:Object {{{merge_key}:$key}}) "
+            "ON CREATE SET o.id=$id, o.name=$name, o.objectKind=coalesce($ok, 'other'), o.createdAt=coalesce($ca, $now), o.title=coalesce($title, ''), "
             "            o.status=coalesce($st, 'live'), "
             "            " + _set_emb + " "
             "ON MATCH SET o.id=coalesce($id, o.id), "
@@ -3780,7 +3926,7 @@ class _EntityHandlers:
             "            o.createdAt=coalesce(o.createdAt, $ca), "
             "            o.title=coalesce($title, o.title), "
             "            " + _set_emb,
-            params={"id": oid, "name": name,
+            params={"key": merge_value, "id": oid, "name": name,
                     "ok": ok,
                     "st": ev.get("status"),  # #1350: status ON CREATE only —
                     # ON MATCH never touches it (the clobber guard: a
@@ -3801,9 +3947,13 @@ class _EntityHandlers:
                     "title": title,
                     "embedding": embedding},
         )
-        # #228: persist arbitrary caller-supplied props
+        # #228: persist arbitrary caller-supplied props. The anchor follows the
+        # MERGE key (#8864) — a name-keyed MATCH would write the caller's props
+        # onto EVERY same-name carrier.
         self._persist_extra_props(
-            "MATCH (n:Object {name: $name})", {"name": name},
+            "MATCH (n:Object {id: $id})" if name_is_shared
+            else "MATCH (n:Object {name: $name})",
+            {"id": oid} if name_is_shared else {"name": name},
             ev, self._OBJECT_HANDLED,
         )
 

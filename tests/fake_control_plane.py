@@ -2131,3 +2131,26 @@ class ErrorControlPlane(FakeControlPlane):
     def rpc(self, fn: str, body: dict | None = None, *,
             representation: bool = False) -> object | None:
         raise self._exc
+
+
+def rpc_call_named(fake, name: str):
+    """The request's OWN RPC, selected by NAME — never by index.
+
+    Background boot-sweep RPCs share this fake and can land at ANY index:
+    ``_run_boot_sweeps`` is armed as a task at boot (#4241's
+    ``metering_repair_period_bounds`` is an ``rpc`` call, not a table read), and
+    it races the request the test makes. ``fake.rpc_calls[0]`` therefore reads
+    the SWEEP on some runs and the request's own call on others — a 1-in-N flake
+    that is indistinguishable from a real break at the point it matters
+    (#4816). Selecting by name also keeps the wrapper pin: a switch to a
+    different provision wrapper finds nothing and raises.
+
+    Returns the ``(fn, body)`` tuple, so callers keep their body assertions.
+    """
+    for call in fake.rpc_calls:
+        if call[0] == name:
+            return call
+    raise AssertionError(
+        f"{name!r} was never called; observed RPCs: "
+        f"{[c[0] for c in fake.rpc_calls]!r}"
+    )

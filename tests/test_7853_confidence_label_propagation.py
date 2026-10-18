@@ -29,6 +29,7 @@ import logging
 import pytest
 
 from tortoise.ep import TortoiseEP
+from tortoise.ids import entity_name_id as _entity_name_id
 from tortoise.live import (
     EPISTEMIC_LABELS,
     epistemic_disjunction,
@@ -957,6 +958,27 @@ def _m_point(nid: str = _MATRIX_ID, content: str = "matrix point") -> dict:
     return {"type": "PointAdded", "point": {"id": nid, "content": content}}
 
 
+def _m_mention(name: str, *, subject: bool = False) -> dict:
+    """An ``EventRecorded`` that MINTS a name-stub with NO registration record.
+
+    ``_event_plain_merge`` MERGEs an ``Object``/``Subject`` stub by NAME under
+    the deterministic #7936 id (``entity_name_id``) and writes that id
+    ``ON CREATE`` only — a real graph carrier that no registration-based model
+    of the carrier table would otherwise see.
+    """
+    inner = {"eventId": "matrix-mention", "eventKind": "mentioned"}
+    inner["subject" if subject else "object"] = name
+    return {"type": "EventRecorded", "eventId": "matrix-mention",
+            "event": inner}
+
+
+def _m_restatus(nid: str = _MATRIX_ID, status: str = "archived",
+                label: str = "Object") -> dict:
+    """A state op the graph folds by ID — the shape the carrier guard gates."""
+    return {"type": "EntityMutated", "op": "restatus", "label": label,
+            "id": nid, "state": {"status": status}}
+
+
 #: ``(row, events, refused?)`` — ``refused`` is the verdict BOTH folds must
 #: reach. A row is "refused" when the belief write cannot be reproduced:
 #: the reference fold records a `point-belief-miss` and `rebuild_all` raises
@@ -1024,30 +1046,34 @@ _BOUNDARY_MATRIX = [
     ("rename-into-a-reused-name-buries-the-earlier-id",
      [_m_object(), _m_rename(new_name="matrix-renamed"),
       _m_object("n-7936-matrix-2", "matrix-renamed"), _m_belief()], True),
-    # #7936 round-5 P1: `_upsert_object` MERGEs by NAME, so when MORE THAN ONE
-    # node already carries the MERGE key the MERGE matches EVERY one of them and
-    # `ON MATCH SET o.id=$id` re-ids them ALL. A 1:1 `(label,name) -> id`
-    # carrier modelled the graph as a bijection, answered EXISTS for the ids the
-    # graph had already re-id'd away, and exempted a belief `rebuild_all`
-    # refuses — the reported fail-open. The node table below must instead leave
-    # duplicated nodes as SEPARATE records and bury EVERY id that stops being
-    # carried. (Two ids here are re-id'd to `matrix-third`; the belief targets
-    # the first of them, which must be buried.)
+    # #7936 round-5 P1 → FLIPPED by #8864. When MORE THAN ONE node already
+    # carries the name-MERGE key, `_upsert_object` USED to match EVERY one of
+    # them and `ON MATCH SET o.id=$id` re-id'd them ALL, so a 1:1
+    # `(label,name) -> id` carrier answered EXISTS for the ids the graph had
+    # already re-id'd away — the reported fail-open. That collapse is FIXED
+    # (#8864): `_name_holder_count` makes a name held by 2+ carriers stop being
+    # the MERGE key, so this registration keys on its OWN id and `matrix-third`
+    # becomes a THIRD carrier instead of stamping its id onto the other two.
+    # `_MATRIX_ID` therefore SURVIVES and the belief folds — on the graph and
+    # on both reference folds, which is why this row is now ACCEPTED. The node
+    # table still leaves duplicated nodes as SEPARATE records; that half is
+    # unchanged and still pinned by `name-reuse-buries-the-earlier-id`, whose
+    # name has exactly ONE carrier at the registration.
     ("rename-collision-buries-every-dup-named-id",
      [_m_object(_MATRIX_ID, "matrix-collide"),
       _m_object("matrix-other", "matrix-other-name"),
       _m_rename("matrix-other", new_name="matrix-collide"),
       _m_object("matrix-third", "matrix-collide"),
-      _m_belief(_MATRIX_ID)], True),
-    # The :Subject twin: `_upsert_subject` MERGEs by name too, so the same
-    # multi-node collapse applies.
+      _m_belief(_MATRIX_ID)], False),
+    # The :Subject twin: `_upsert_subject` follows the same #8864 rule, so the
+    # multi-node name no longer collapses either.
     ("subject-rename-collision-buries-every-dup-named-id",
      [_m_subject(_MATRIX_ID, "matrix-sub-collide"),
       _m_subject("matrix-sub-other", "matrix-sub-other-name"),
       _m_rename("matrix-sub-other", new_name="matrix-sub-collide",
                 label="Subject"),
       _m_subject("matrix-sub-third", "matrix-sub-collide"),
-      _m_belief(_MATRIX_ID)], True),
+      _m_belief(_MATRIX_ID)], False),
     # A state op's `SET n += $state` lands the WHOLE map, so a `state.id` moves
     # IDENTITY: the node keeps existing as `(matrix-moved, name)` and the OLD
     # id is gone. The boundary must record that burial at the op's seq or it
@@ -1156,6 +1182,33 @@ _BOUNDARY_MATRIX = [
      [_m_subject(_MATRIX_ID, "matrix-sub-listname"),
       _m_rename(state={"name": ["matrix-moved"]}, label="Subject"),
       _m_subject("matrix-sub-third", "matrix-sub-listname"),
+      _m_belief(_MATRIX_ID)], False),
+    # ── #8864 review P1 (round 4): the mention-STUB carrier, third model ──
+    # The two rows below pin the AGREEMENT half: the graph folds this journal
+    # (both carriers kept, the state op applied), and so do `fold` and
+    # `_fold_journal`, which record no false refusal. The carrier-table fix
+    # itself lives in `consistency._fold_journal_entities` — the ENTITY leg
+    # `check_consistency` runs, which these two folders do NOT drive — and is
+    # non-vacuously pinned in
+    # `tests/test_8864_shared_name_merge_key.py::TestReplayModelsSeeTheMentionStubs::
+    # test_a_mention_stub_is_a_carrier_in_the_ENTITY_reference_fold` against the
+    # replayed graph.
+    ("mention-stub-keeps-a-shared-name-from-evicting-its-carrier",
+     [_m_mention("matrix-mention"),
+      _m_object(_MATRIX_ID, "matrix-other-name"),
+      _m_rename(_MATRIX_ID, new_name="matrix-mention"),
+      _m_object(_entity_name_id("Object", "matrix-mention"),"matrix-mention"),
+      _m_restatus(_MATRIX_ID),
+      _m_belief(_MATRIX_ID)], False),
+    # The :Subject twin (`_upsert_subject` follows the same #8864 rule, and the
+    # mention's `subject` mints a :Subject stub).
+    ("subject-mention-stub-keeps-a-shared-name-from-evicting-its-carrier",
+     [_m_mention("matrix-sub-mention", subject=True),
+      _m_subject(_MATRIX_ID, "matrix-sub-other-name"),
+      _m_rename(_MATRIX_ID, new_name="matrix-sub-mention", label="Subject"),
+      _m_subject(_entity_name_id("Subject", "matrix-sub-mention"),
+                 "matrix-sub-mention"),
+      _m_restatus(_MATRIX_ID, label="Subject"),
       _m_belief(_MATRIX_ID)], False),
 ]
 
@@ -1300,6 +1353,57 @@ def test_boundary_matrix_reference_and_graph_agree(
         assert graph_refused == refused, (
             f"[{row}] graph {engine}: refused={graph_refused}, "
             f"expected={refused}")
+
+
+def test_shared_name_keeps_every_carrier_in_the_surviving_map():
+    """#8864 read-side: a name carried by 2+ nodes keeps EVERY carrier.
+
+    `_upsert_object` keys the MERGE on `id` once a name has more than one
+    carrier (``_name_holder_count``), so registering another carrier of a
+    shared name no longer evicts the earlier ones. The journal-END map must
+    say the same thing, because `apply()` / `rebuild` / `recover_from_log` /
+    `backup.restore` refuse an `ObjectSuperseded` whose target it calls dead
+    while `rebuild_all`'s sweep folds it — the reference/graph divergence this
+    map exists to prevent (#3585).
+
+    FAILS IF the map collapses a name to ONE id (its pre-#8864 shape): `c`
+    would be reported dead, and the supersede below would be refused on the
+    chronological engines while the graph folds it.
+    """
+    import copy
+
+    from tortoise.consistency import _fold_journal
+    from tortoise.projection import journal_object_surviving_keys
+    from tortoise.projection.nonfolded import (
+        collect_non_folded,
+        refused_events,
+    )
+
+    events = [
+        _m_object("a", "X"),
+        _m_object("c", "Z"),
+        _m_rename("a", new_name="Y"),
+        _m_rename("c", new_name="Y"),
+        _m_object("b", "Y"),
+        # `c` survived the shared-name registration, so a supersede on it is
+        # resolvable at the sweep: every engine must ACCEPT it.
+        {"type": "ObjectSuperseded", "id": "c", "name": "Y",
+         "supersedes_by": "b"},
+    ]
+    ids, names = journal_object_surviving_keys(events)
+    assert ids == frozenset({"a", "b", "c"}), (
+        "a shared name must keep EVERY carrier — the graph keys on `id` once "
+        f"a name has 2+ carriers, so none is evicted (#8864); got {sorted(ids)}"
+    )
+    assert names == frozenset({"Y"})
+
+    with collect_non_folded() as entries:
+        _fold_journal(copy.deepcopy(events))
+    refused = [str(e) for e in refused_events(entries)]
+    assert refused == [], (
+        "the reference fold must not refuse a supersede on a carrier the "
+        f"graph keeps (#8864): {refused}"
+    )
 
 
 def test_boundary_matrix_non_point_labels_all_agree():
