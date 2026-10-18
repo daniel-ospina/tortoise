@@ -1117,7 +1117,9 @@ def test_the_delete_exemption_rests_on_the_committed_record(tmp_path):
         import json
         path = log_dir / "events.jsonl"
         kept = [line for line in path.read_text().splitlines()
-                if line.strip() and json.loads(line).get("type") != "EntityMutated"]
+                if line.strip() and not (
+                    json.loads(line).get("type") == "EntityMutated"
+                    and json.loads(line).get("op") == "delete")]
         assert kept, "fixture precondition: the creation record must survive"
         path.write_text("\n".join(kept) + "\n")
 
@@ -1244,9 +1246,9 @@ def test_a_rebuild_window_answers_absent_and_records_nothing_today(tmp_path):
     began raising on this path, or the rebuild began refusing, or the graph name
     began failing ``_assert_test_graph``, that sibling alone would still report
     the residual as "open" and the new regression would be invisible. Pinning
-    today's answers HERE — including the replay that undoes the delete — means a
-    crash or a behaviour change reds loudly, and the xfail below fails only for
-    the residual it names.
+    today's answers HERE — including the replay that makes the loss a loss —
+    means a crash or a behaviour change reds loudly, and the xfail below fails
+    only for the residual it names.
     """
     sdk, log_dir = _sdk_with_journal(tmp_path, "delprobetoday")
     try:
@@ -1274,15 +1276,16 @@ def test_a_rebuild_window_answers_absent_and_records_nothing_today(tmp_path):
             "carrier is the residual: the replay cannot know the destruction "
             "was asked for")
 
-        # The loss, end to end and OUTSIDE the xfail: the replay re-creates the
-        # Point the caller asked to destroy. It is asserted here so a
-        # ``rebuild_all`` that starts refusing or raising on this graph shape
-        # reds THIS test instead of being swallowed by the strict xfail below.
+        # The third fact, and the one that makes the loss a LOSS: the replay then
+        # re-creates the Point. Pinned here rather than left to the xfail below,
+        # so a rebuild that raised — or wiped without folding — reds in a plain
+        # test instead of reading as "the known residual".
         proj.rebuild_all(str(log_dir), confirm_destructive=True)
-        assert sdk.get_point(pid) != {}, (
-            "today's loss, pinned plainly: the skipped delete leaves no carrier, "
-            "so the replay restores the Point — if this ever ends absent the "
-            "residual is closed and the issue's paragraph must be revisited")
+        restored = sdk.get_point(pid)
+        assert restored and restored.get("status") == "live", (
+            "today the skipped delete is UNDONE by the replay and the Point "
+            "comes back LIVE — if this fails, the modelling in this file is "
+            "stale whether or not the residual is still open")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -1299,11 +1302,12 @@ def test_a_rebuild_window_must_not_lose_a_delete_at_the_existence_probe(tmp_path
 
     Measured today: ``delete_point`` answers ``False`` ("no such Point"), appends
     no destruction record, and the replay then re-creates the Point LIVE — the
-    plain test above pins those two facts. THIS test asserts only the DESIRED end
-    state, so it fails today with an ``AssertionError`` on ``get_point`` and
-    XPASSes the moment the residual is closed, which is when the issue's residual
-    paragraph must be revisited. Keep it assertion-only: anything that can raise
-    belongs in the plain half, or the strict xfail swallows it.
+    plain test above pins those three facts, including the replay. THIS test
+    asserts only the DESIRED end state, so it fails today with an
+    ``AssertionError`` on ``get_point`` and XPASSes the moment the residual is
+    closed, which is when the issue's residual paragraph must be revisited. Keep
+    it assertion-only: anything that can raise belongs in the plain half, or the
+    strict xfail swallows it.
     """
     sdk, log_dir = _sdk_with_journal(tmp_path, "delprobe")
     try:
