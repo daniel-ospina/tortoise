@@ -125,6 +125,34 @@ def test_a_capped_selection_is_distinguishable_in_the_result():
         sdk.close()
 
 
+def test_the_noarg_dirty_path_reports_its_dream_selections_cap():
+    """The no-arg path's priors come from a dream that caps at the same 200.
+
+    #6211 review round 3: ``compute_confidence()`` (no args) runs a bounded
+    fail-safe ``dream`` FIRST, over the same 200-operator default, and that
+    pass flushes its posteriors — which the exact pass then loads as priors. So
+    the result was certifying a capped derivation as complete with
+    ``truncated: False``, on the very path the issue measured. The dream's
+    selection report is folded into the result now.
+    """
+    sdk = _fresh_sdk()
+    try:
+        _hub(sdk, DEFAULT_OP_CAP + 60)
+        sdk._mark_dirty(["c0", "c1"])
+        assert sdk._dirty_roots, "precondition: the roots are dirty"
+        result = sdk.compute_confidence(require_calibration=False)
+        assert result["truncated"] is True, (
+            "the dream pass that shaped these priors selected "
+            f"{DEFAULT_OP_CAP} of >{DEFAULT_OP_CAP} operators; result was "
+            f"truncated={result['truncated']!r}, seen="
+            f"{result['operators_seen']!r}, used={result['operators_used']!r}"
+        )
+        assert result["operators_seen"] > DEFAULT_OP_CAP
+        assert result["operators_used"] == DEFAULT_OP_CAP
+    finally:
+        sdk.close()
+
+
 def test_an_uncapped_selection_reports_truncated_false():
     """#6211 A (other half): a complete selection says so, explicitly.
 
@@ -372,6 +400,32 @@ def test_every_seed_phase_query_is_typed_as_hop_zero(seed, fragment, phase):
         assert excinfo.value.hop == 0
         assert excinfo.value.phase == phase
         assert excinfo.value.frontier_size == 1
+    finally:
+        sdk.close()
+
+
+def test_a_draft_sweep_inside_the_hop_loop_names_that_hop():
+    """The loop's OWN draft sweep is hop-scoped, driven through the real caller.
+
+    #6211 review round 3: asserting the callee forwards a ``hop`` argument does
+    not prove the production caller SUPPLIES one — reverting
+    ``_filter_draft_ids(set(frontier), hop=hops)`` to a bare call kept every
+    test green while a hop-scoped timeout would be misreported as pass-level.
+    This drives the fault through ``_affected_claims`` itself.
+    """
+    sdk = _fresh_sdk()
+    try:
+        anchor, _other = _hub(sdk, 2)
+        faulty = _FaultyGraph(sdk._get_proj().g, "AND n.status = 'draft'",
+                              "Query timed out")
+        with pytest.raises(EPSubgraphHopError) as excinfo:
+            _ep_over(faulty)._affected_claims([anchor], 2)
+        assert excinfo.value.phase == "draft_filter"
+        assert excinfo.value.hop is not None and excinfo.value.hop >= 1, (
+            "the loop asked this sweep, so it must name its hop — reporting "
+            f"pass-level would hide which hop was unaffordable; got "
+            f"hop={excinfo.value.hop!r}"
+        )
     finally:
         sdk.close()
 

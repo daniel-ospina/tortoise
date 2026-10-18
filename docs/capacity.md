@@ -251,8 +251,15 @@ now visible to a programmatic caller instead of to a human reading stderr:
   expansion: the seed phase (`seed_lookup` / `seed_operators` /
   `seed_direct_edge` / `seed_neighbourhood`, hop 0), the loop's hops
   (`operator_bridge` / `direct_edge`), and the pass-level queries that walk the
-  finished affected set (`factor_extraction`, `draft_filter`, `claim_count`,
-  `ep_epoch`) — those report `hop: None`, because there is no hop to name. An
+  finished affected set (`factor_extraction`, `draft_filter`, `cache_load`,
+  `cache_flush`, `evidence_prewrite`, `claim_count`, `ep_epoch`) — those report
+  `hop: None`, because there is no hop to name. The cache phases are the
+  biggest statements a pass makes (16 load sweeps over the whole affected set,
+  plus the write-back), so an untyped one would keep the issue's symptom
+  reachable on the largest query of the pass; a `cache_flush` timeout is
+  reported as "this run's posteriors were NOT persisted", and `claim_count` /
+  `ep_epoch` say plainly that narrowing seeds or `max_hops` cannot help,
+  because those reads are not hop-scoped. An
   earlier revision typed only the expansions, which left the issue's own
   symptom reproducible on the largest query of the pass.
   Measured on a 3,353-claim / 160,000-edge graph with the engine's 1,000 ms

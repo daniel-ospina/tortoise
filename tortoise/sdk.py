@@ -20487,6 +20487,17 @@ class TortoiseSDK:
         result["coverage"] = coverage
         result["budget_used"] = getattr(
             dreamer, "_last_operator_count", 0) or 0
+        # #6211: the pass's operator selection can be CAPPED (the 200 default),
+        # and ``budget_used`` alone cannot say so — it is the post-cap size. A
+        # caller reading ``compute_confidence()``'s priors has to be able to
+        # tell a capped pass from a complete one, so the selector's own report
+        # travels on this result too. Additive keys; no existing key changes.
+        _stats = getattr(dreamer, "_last_selection_stats", None) or {}
+        result["truncated"] = bool(_stats.get("truncated", False))
+        result["operators_seen"] = int(
+            _stats.get("operators_seen", result["budget_used"]))
+        result["operators_used"] = int(
+            _stats.get("operators_used", result["budget_used"]))
         result["mode"] = "local"
         self._record_dream_metrics(result, "local")
         return result
@@ -20882,9 +20893,15 @@ class TortoiseSDK:
 
         ``operators_seen > operators_used`` names the operator cap specifically
         (the default cap is 200 — the value is not re-stated here because a
-        caller that owns a budget passes its own). Both are 0 on the no-arg
-        dirty-root path, which selects NO operators (its only bound is the
-        affected-claim guard, still reported through ``diagnostic``).
+        caller that owns a budget passes its own). Both are 0 only when no
+        selection ran at all (the explicit-``factors`` path and the early
+        returns). The NO-ARG dirty-root path does NOT select operators itself —
+        it runs ``ep.run`` over the roots — but its fail-safe ``dream`` pass
+        does, over the same 200 default, and that pass's posteriors become this
+        result's priors; the three fields therefore carry the DREAM's selection
+        there, and ``truncated`` is true when the dream's selection was capped.
+        Before #6211's review round 3 that path reported ``False`` while a
+        capped 200-of-260 selection had shaped the answer.
 
         The report is on every RESULT this method builds. One transport sibling
         builds its own dict and is therefore NOT covered: the MCP handler's
@@ -21052,9 +21069,21 @@ class TortoiseSDK:
             # #1315/#1314: propagate the caller's calibration posture — the
             # epic903 refactor re-added an unpropagated dream here (same
             # class as the #1315 fix; line 7050/7202 already propagate).
-            self.dream(dirty_only=True, stamp_dreamed_at=False,
-                       warm_start=False,
-                       require_calibration=require_calibration)
+            _dream = self.dream(dirty_only=True, stamp_dreamed_at=False,
+                                warm_start=False,
+                                require_calibration=require_calibration)
+            # #6211: the fail-safe dream runs its OWN operator selection (the
+            # same 200 default) and flushes its posteriors, which the exact
+            # pass below loads as priors — so a capped dream shapes THIS
+            # result. Folding its report in is what keeps `truncated` from
+            # certifying a capped derivation as complete on the very path the
+            # issue measured (the no-arg dirty-root pass).
+            if _dream.get("truncated"):
+                selection["truncated"] = True
+            selection["operators_seen"] = max(
+                selection["operators_seen"], int(_dream.get("operators_seen") or 0))
+            selection["operators_used"] = max(
+                selection["operators_used"], int(_dream.get("operators_used") or 0))
             iterations, converged = ep.run(roots, max_hops=None,
                                            evidence=run_evidence)
             if not ep._last_affected and not ep._last_truncated:

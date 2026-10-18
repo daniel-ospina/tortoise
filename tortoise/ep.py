@@ -112,8 +112,18 @@ class EPSubgraphHopError(_ResponseError):
                        pattern) or ``"direct_edge"`` (the operator-less
                        IMPL|NAND hop) for the BFS loop's hops; and
                        ``"factor_extraction"`` / ``"draft_filter"`` /
-                       ``"claim_count"`` / ``"ep_epoch"`` for pass-level
-                       queries.
+                       ``"claim_count"`` / ``"ep_epoch"`` / ``"cache_load"`` /
+                       ``"cache_flush"`` / ``"evidence_prewrite"`` for
+                       pass-level queries.
+
+                       A pass reads and writes the WHOLE affected set, not just
+                       its frontier: `_load_cache` sweeps 16 statements over it,
+                       `_flush_cache` writes it back, and `run` pre-writes the
+                       evidence priors over it. Every one of those is typed
+                       too — they are the largest queries of a pass, so an
+                       untyped one would keep the issue's symptom (a bare,
+                       hop-less ``Query timed out``) reachable on the biggest
+                       statement the pass makes.
         frontier_size: how many claim ids the failed query was scoped to.
                        For a hop this is the frontier being expanded FROM —
                        the quantity that drives the hop's cost, so the number
@@ -147,13 +157,47 @@ class EPSubgraphHopError(_ResponseError):
             )
         message = (
             f"{subject} — the graph engine aborted the query (query timed "
-            f"out). The affected-claim expansion is incomplete: narrow the "
-            f"pass (fewer seeds or fewer max_hops) or raise the engine's "
-            f"query TIMEOUT."
+            f"out). {_recovery_sentence(phase)}"
         )
         if detail:
             message = f"{message} [engine: {detail}]"
         super().__init__(message)
+
+
+def _recovery_sentence(phase: str) -> str:
+    """The remedy for a timed-out pass query, told per phase (#6211).
+
+    A remedy that cannot affect the failing query is worse than none: on the
+    epoch read and the claim count, narrowing the pass' seeds or ``max_hops``
+    does NOT make the query cheaper, so pointing an operator at those knobs
+    sends them to tune something unrelated. The cache phases are separated for
+    the same reason — a load failure means the pass never started, a flush
+    failure means the posteriors were dropped.
+    """
+    if phase in ("claim_count", "ep_epoch"):
+        return (
+            "This query is not hop-scoped — narrowing the pass (fewer seeds or "
+            "fewer max_hops) cannot make it cheaper. Raise the engine's query "
+            "TIMEOUT (the graph is large enough that a whole-graph read no "
+            "longer fits it); on the flush path the epoch re-read rejects the "
+            "write-back, so THIS RUN'S POSTERIORS WERE NOT PERSISTED."
+        )
+    if phase == "cache_load":
+        return (
+            "The pass could not load the affected set it had selected, so it "
+            "never ran: narrow the pass (fewer seeds or fewer max_hops) or "
+            "raise the engine's query TIMEOUT."
+        )
+    if phase == "cache_flush":
+        return (
+            "THIS RUN'S POSTERIORS WERE NOT PERSISTED: raise the engine's "
+            "query TIMEOUT, or narrow the pass so the write-back spans fewer "
+            "rows."
+        )
+    return (
+        "The affected-claim expansion is incomplete: narrow the pass (fewer "
+        "seeds or fewer max_hops) or raise the engine's query TIMEOUT."
+    )
 
 
 def _is_query_timeout(exc: BaseException) -> bool:
@@ -307,8 +351,10 @@ class TortoiseEP:
                 "RETURN n.id, coalesce(n.ep_alpha,1.0), coalesce(n.ep_beta,1.0), "
                 "       coalesce(n.baseline_set, false)"
             ):
-                rows.extend(self.g.query(
-                    _q, params={"ids": list(affected_claims)}).result_set)
+                rows.extend(self._hop_query(
+                    _q, {"ids": list(affected_claims)}, hop=None,
+                    phase="cache_load", frontier_size=len(affected_claims),
+                ))
             for cid, a, b, is_baseline in rows:
                 self._node_cache[cid] = (float(a), float(b))
                 # #844: explicit baselines (baseline_set=true) are IMMUTABLE
@@ -327,8 +373,10 @@ class TortoiseEP:
                 "WHERE c.id IN $ids "
                 "RETURN o.id, c.id, coalesce(r.msg_alpha,0.0), coalesce(r.msg_beta,0.0)"
             ):
-                rows.extend(self.g.query(
-                    _q, params={"ids": list(affected_claims)}).result_set)
+                rows.extend(self._hop_query(
+                    _q, {"ids": list(affected_claims)}, hop=None,
+                    phase="cache_load", frontier_size=len(affected_claims),
+                ))
             for oid, cid, ma, mb in rows:
                 self._msg_cache[(oid, cid, rel)] = (float(ma), float(mb))
 
@@ -350,8 +398,10 @@ class TortoiseEP:
                 "RETURN a.id, b.id, type(r), "
                 "       coalesce(r.back_msg_alpha,0.0), coalesce(r.back_msg_beta,0.0)"
             ):
-                back_rows.extend(self.g.query(
-                    _q, params={"ids": list(affected_claims)}).result_set)
+                back_rows.extend(self._hop_query(
+                    _q, {"ids": list(affected_claims)}, hop=None,
+                    phase="cache_load", frontier_size=len(affected_claims),
+                ))
             for src, tgt, rel, ma, mb in back_rows:
                 self._back_cache[(src, tgt, rel)] = (float(ma), float(mb))
 
@@ -409,8 +459,11 @@ class TortoiseEP:
                 "    n.ep_beta  = CASE WHEN p.keep_prior THEN n.ep_beta  ELSE p.b END "
                 "RETURN n.id"
             ):
-                result = self.g.query(_q, params={"params": params_list})
-                written.update(row[0] for row in result.result_set)
+                result = self._hop_query(
+                    _q, {"params": params_list}, hop=None,
+                    phase="cache_flush", frontier_size=len(params_list),
+                )
+                written.update(row[0] for row in result)
             # #2884 D3: journal EXACTLY what this statement committed — one
             # ConfidenceChanged per MATCHed node, once per flush (the cache
             # is the batched accumulator; emitting per EP iteration would
@@ -438,21 +491,22 @@ class TortoiseEP:
                     # #7853: o is id-anchored (the operator); drop the child's
                     # label and filter the traversal with the disjunction —
                     # no index is lost (the edge is reached FROM o).
-                    result = self.g.query(
+                    result = self._hop_query(
                         f"UNWIND $params AS p "
                         f"MATCH (o:Point {{id: p.oid}})-[r:{rel}]->(c) "
                         f"WHERE {epistemic_disjunction('c')} "
                         "AND c.id = p.cid "
                         "SET r.msg_alpha = p.a, r.msg_beta = p.b "
                         "RETURN p.oid, p.cid, p.a, p.b",
-                        params={"params": params_list},
+                        {"params": params_list}, hop=None,
+                        phase="cache_flush", frontier_size=len(params_list),
                     )
                     # #5380: journal EXACTLY the edges this statement
                     # committed. ``RETURN`` makes the journal set the committed
                     # set — a parameter whose edge vanished mid-run is NOT
                     # journaled as a write (the node arm's `RETURN n.id`
                     # discipline, above).
-                    for _oid, _cid, _a, _b in result.result_set:
+                    for _oid, _cid, _a, _b in result:
                         self._emit_edge_message(
                             _oid, _cid, rel, self.EDGE_MESSAGE_FWD_SLOTS,
                             (_a, _b))
@@ -477,10 +531,12 @@ class TortoiseEP:
                         "SET r.back_msg_alpha = p.a, r.back_msg_beta = p.b "
                         "RETURN p.src, p.tgt, p.a, p.b"
                     ):
-                        _res = self.g.query(
-                            _q, params={"params": params_list})
+                        _res = self._hop_query(
+                            _q, {"params": params_list}, hop=None,
+                            phase="cache_flush", frontier_size=len(params_list),
+                        )
                         # #5380: one record per committed edge, per label.
-                        for _s, _t, _a, _b in _res.result_set:
+                        for _s, _t, _a, _b in _res:
                             self._emit_edge_message(
                                 _s, _t, rel,
                                 self.EDGE_MESSAGE_BACK_SLOTS, (_a, _b))
@@ -1966,7 +2022,10 @@ class TortoiseEP:
                 "    n.posterior_beta  = CASE WHEN coalesce(n.baseline_set,false) "
                 "                           THEN n.posterior_beta  ELSE null END"
             ):
-                self.g.query(_q, params={"params": params_list})
+                self._hop_query(
+                    _q, {"params": params_list}, hop=None,
+                    phase="evidence_prewrite", frontier_size=len(params_list),
+                )
             # #2884 D3: this pre-write CLEARS the posterior of every
             # NON-baseline evidence claim (baseline'd claims keep theirs — the
             # CASE above), and it is a committed write whenever the run then
@@ -1986,13 +2045,15 @@ class TortoiseEP:
             if self._emit is not None:
                 # #7853: single disjunction query (not a per-label sweep) so a
                 # multi-labelled node is read — and journaled — exactly once.
-                rows = self.g.query(
+                rows = self._hop_query(
                     "MATCH (n) "
                     f"WHERE {epistemic_disjunction('n')} AND n.id IN $ids "
                     "AND coalesce(n.baseline_set, false) = false "
                     "RETURN n.id",
-                    params={"ids": list(run_evidence)},
-                ).result_set
+                    {"ids": list(run_evidence)}, hop=None,
+                    phase="evidence_prewrite",
+                    frontier_size=len(run_evidence),
+                )
                 for row in rows:
                     self._emit("ConfidenceChanged", id=row[0],
                                posterior_alpha=None, posterior_beta=None)

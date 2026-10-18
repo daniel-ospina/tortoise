@@ -4922,12 +4922,14 @@ durations:
   test_body_cap_sweep.py: 3.6
   test_agent_signup_idempotency.py: 3.5
   test_ep_local_395.py: 22.0
-  # #6211: locally measured on this host, docker lane, `--durations` sum of the
-  # file (shape: 10 tests / 7.6 s; scale: 4 tests / 10.7 s incl. the 3,353-claim
-  # fixture build). Both are PR-ADDED files, so the push-to-main sweep cannot
-  # have measured them yet — see the #3514 note above.
-  test_6211_ep_result_shape.py: 8.0
-  test_6211_ep_scale.py: 11.0
+  # #6211: locally measured on this host, docker lane, whole-file wall time over
+  # several runs (shape: 23 tests / 12-19 s; scale: 4 tests / 10-19 s incl. the
+  # 3,353-claim fixture build). The spread is host load, not test content, so
+  # the rows take the upper end — an UNDERstated weight skews the balancer in
+  # exactly the direction that hurts a PR-added file (#3514 note above). Both
+  # are PR-ADDED files, so the push-to-main sweep cannot have measured them yet.
+  test_6211_ep_result_shape.py: 19.0
+  test_6211_ep_scale.py: 19.0
   test_round_trip_parity.py: 0.8
   test_longmem_rerank.py: 6.3
   test_pack_manifest_store_extraction.py: 5.2
