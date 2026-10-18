@@ -2941,18 +2941,18 @@ async def _dispatch_webhooks(org_id: str, graph_namespace: str | None = None,
 # `next_seq` REFUSES a non-number, a `bool` and a negative and leaves them
 # unchanged, and only a non-integral float is bumped instead (`2.9` -> `3.9`,
 # re-issuing a seq: the #4653 class). The rebuild path is NOT a repair path: it
-# does not leave a corrupt counter alone and it does not fix one — it COERCES
-# anything `int()` accepts (a numeric string, a `bool`, a truncated `2.9`) and
-# proceeds (so a `True` counter comes back as a trusted `1` on a graph that had
+# COERCES anything `int()` accepts (a numeric string, a `bool`, a truncated `2.9`)
+# and proceeds (so a `True` counter comes back as a trusted `1` on a graph that had
 # already issued seqs 1..3 and the next emit RE-ISSUES an already-issued seq —
-# #4653; #9059), and it REFUSES by aborting the whole rebuild before the wipe on
-# a non-numeric string or an out-of-domain counter — so do not read the repair
-# story off this comment; see `webhook_delivery.event_head_seq`'s docstring. The
-# alternative reading of that counter (as 0) made every subscription look caught
-# up, so the graph was never dispatched again — silently. Over-admitting a broken
-# graph is the cheap side of that asymmetry; the ONE case where it is not a cheap
-# no-op (a fractional `:GraphEvent.seq` the cursor can never reach) is in that
-# docstring and tracked with the cursor write in #9032.
+# #4653; #9059), and it REFUSES what `int()` rejects or what falls outside
+# `0 .. MAX_SEQ` by aborting the whole rebuild before the wipe, LEAVING THE COUNTER
+# UNTOUCHED — so do not read the repair story off this comment; see
+# `webhook_delivery.event_head_seq`'s docstring. The alternative reading of that
+# counter (as 0) made every subscription look caught up, so the graph was never
+# dispatched again — silently. Over-admitting a broken graph is the cheap side of
+# that asymmetry; the ONE case where it is not a cheap no-op (a fractional
+# `:GraphEvent.seq` the cursor can never reach) is in that docstring and tracked
+# with the cursor write in #9032.
 #
 # ⛔ THE "answered yes" HALF IS THE WHOLE POINT (#8098 review F1/F3). The gate
 # is TWO clauses — due by TIME *and* behind the stream — because the temporal
