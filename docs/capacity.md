@@ -256,8 +256,9 @@ now visible to a programmatic caller instead of to a human reading stderr:
   `hop: None`, because there is no hop to name (`draft_filter` is the one phase
   that appears in BOTH shapes: hop-scoped when the loop asks it, `hop: None` on
   the final fail-safe strip). The cache phases are the
-  biggest statements a pass makes (16 load sweeps over the whole affected set,
-  plus the write-back), so an untyped one would keep the issue's symptom
+  WIDEST statements a pass makes (16 load sweeps over the whole affected set,
+  plus the write-back) — a different query from factor extraction's single
+  largest one, and untyped it would keep the issue's symptom
   reachable on the largest query of the pass; a `cache_flush` timeout is
   reported as "this run's posteriors were NOT persisted", and `claim_count` /
   `ep_epoch` say plainly that narrowing seeds or `max_hops` cannot help,

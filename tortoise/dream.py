@@ -220,8 +220,10 @@ class Dreamer:
         it. ``_last_operator_count`` is set to the selected operator-set
         size (after cap truncation) and ``_last_selection_stats`` to the
         selector's own report (``truncated`` / ``operators_seen`` /
-        ``operators_used``, #6211) — the SDK adapter reads them to report
-        ``budget_used`` in the I1 local key-set.
+        ``operators_used``, #6211) — read by ``compute_confidence``'s no-arg
+        fold and by nothing else. It is NOT part of the pinned I1 result
+        key-set: ``budget_used`` is the separate ``_last_operator_count``,
+        and the local result carries no ``truncated`` of its own.
         """
         if not anchors:
             self._last_operator_count = 0

@@ -1088,10 +1088,14 @@ surfaces:
   - test_read_ledger.py
   - test_5509_name_keyed_identity_reads.py
   - test_7925_route_parity.py
-  # #6211: `tortoise/ep.py` and `tortoise/sdk.py` match no SOURCE_PATTERN, so
-  # a change to either falls to `core` — and the cap being read out of
-  # `compute_confidence`'s result is an sdk.py contract. Dual-registered with
-  # `ep` (which owns the `tortoise/analyze.py` cap these tests assert against).
+  # #6211: `tortoise/ep.py` and `tortoise/sdk.py` are SHARED_MODULES, so a
+  # change to either selects the FULL matrix on its own; this `core` arm is
+  # belt-and-braces for a `config/ci-surfaces.yml`-only diff (which selects
+  # `core` and nothing else — measured: 561 files, both 6211 files included),
+  # and the cap being read out of `compute_confidence`'s result is an sdk.py
+  # contract. Dual-registered with `ep`, which owns the `tortoise/analyze.py`
+  # cap these tests assert against (a matched surface REPLACES the core
+  # fallback, so neither arm alone covers both edits — #2938 convention).
   - test_6211_ep_result_shape.py
   - test_6211_ep_scale.py
   # #8864: the shared-name MERGE-key guard — the write-side twin of #5509/#3633.
@@ -3375,9 +3379,9 @@ surfaces:
   # subgraph hop typed (`EPSubgraphHopError`). The cap lives in
   # `tortoise/analyze.py` (an `ep` SOURCE_PATTERN), so an analyze.py-only
   # change must run the guards that read the cap out of the result —
-  # dual-registered with `core`, which is where `tortoise/ep.py` and
-  # `tortoise/sdk.py` changes fall (the #2938 convention: a matched surface
-  # REPLACES the core fallback, so neither arm alone covers both edits).
+  # dual-registered with `core`, the arm a `config/ci-surfaces.yml`-only diff
+  # selects. `tortoise/ep.py` / `tortoise/sdk.py` need neither arm: they are
+  # SHARED_MODULES and select the FULL matrix on their own (measured).
   - test_6211_ep_result_shape.py
   - test_6211_ep_scale.py
   - test_ep_mitigation.py

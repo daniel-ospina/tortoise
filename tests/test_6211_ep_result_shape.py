@@ -191,8 +191,8 @@ def test_the_explicit_factors_path_reports_its_own_selection():
 def test_the_selector_stats_out_parameter_is_opt_in():
     """``_bfs_select_operators`` keeps its 2-tuple return contract.
 
-    Ten call sites (the Dreamer, the diagnostics scripts, the calibration
-    scope probe) destructure the tuple; the report is an opt-in dict, so no
+    Every call site (the Dreamer, the diagnostics scripts, the calibration
+    scope probe) destructures the tuple; the report is an opt-in dict, so no
     existing caller changes.
     """
     sdk = _fresh_sdk()

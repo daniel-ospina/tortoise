@@ -20451,6 +20451,11 @@ class TortoiseSDK:
             # #3139 (review P2): no beliefs written by THIS pass — see the
             # note in _dream_noop; a stale count would misdescribe the pass.
             self._dream_metrics["last_belief_write_count"] = 0
+            # #6211: same hazard for the selection report — no pass ran, so a
+            # report left over from an EARLIER pass must not describe this
+            # one (a stale ``truncated: True`` would tell a caller to distrust
+            # a topology nothing capped).
+            dreamer._last_selection_stats = {}
             return {"mode": "local", "iterations": 0, "converged": True,
                     "affected_claims": [], "budget_used": 0, "coverage": 0.0}
         result = dreamer.dream(
@@ -20880,7 +20885,9 @@ class TortoiseSDK:
             true`` and nothing in the result said a cap had been hit, so a
             confident number computed over a truncated factor set was
             indistinguishable from a full-graph ranking.
-          * ``operators_seen`` — operators the selection COLLECTED.
+          * ``operators_seen`` — operators the BFS selection COLLECTED. On the
+            explicit-``factors`` path no selection runs at all, so it equals
+            the caller's factor count (see below).
           * ``operators_used`` — operators the BFS selection RETURNED (what
             ``truncated`` is computed from). It is NOT the size of the run's
             seed set: the anchors path additionally seeds the direct-edge
@@ -20891,9 +20898,12 @@ class TortoiseSDK:
 
         ``operators_seen > operators_used`` names the operator cap specifically
         (the default cap is 200 — the value is not re-stated here because a
-        caller that owns a budget passes its own). Both are 0 only when no
-        selection ran at all (the explicit-``factors`` path and the early
-        returns). The NO-ARG dirty-root path does NOT select operators itself —
+        caller that owns a budget passes its own). The explicit-``factors``
+        path runs NO BFS selection, so the cap cannot bind there:
+        ``operators_seen == operators_used == len(factors)`` and ``truncated``
+        is False. Only the early returns (nothing to run) report 0 / 0 — they
+        are the paths with no factor set to count. The NO-ARG dirty-root path
+        does NOT select operators itself —
         it runs ``ep.run`` over the roots — but its fail-safe ``dream`` pass
         does, over the same 200 default, and that pass's posteriors become this
         result's priors; the three fields therefore carry the DREAM's selection
@@ -21067,9 +21077,18 @@ class TortoiseSDK:
             # #1315/#1314: propagate the caller's calibration posture — the
             # epic903 refactor re-added an unpropagated dream here (same
             # class as the #1315 fix; line 7050/7202 already propagate).
-            _dream = self.dream(dirty_only=True, stamp_dreamed_at=False,
-                                warm_start=False,
-                                require_calibration=require_calibration)
+            # #6211: the Dreamer is bound BEFORE the call, so the selection
+            # report read after it is provably the instance that ran THIS pass
+            # (``self._dreamer`` is non-None from here on, so a second caller
+            # cannot hand us a fresh, still-empty one).
+            dreamer = self._get_dreamer()
+            # The RESULT of this pass is deliberately not used here: the
+            # deterministic pass below owns the answer, and the dream's only
+            # contribution to it is its selection report, which lands on the
+            # bound ``dreamer``.
+            self.dream(dirty_only=True, stamp_dreamed_at=False,
+                       warm_start=False,
+                       require_calibration=require_calibration)
             # #6211: the fail-safe dream runs its OWN operator selection (the
             # same 200 default) and flushes its posteriors, which the exact
             # pass below loads as priors — so a capped dream shapes THIS
@@ -21077,10 +21096,10 @@ class TortoiseSDK:
             # certifying a capped derivation as complete on the very path the
             # issue measured (the no-arg dirty-root pass). Read from the
             # DREAMER's own report (``_last_selection_stats``), not from keys
-            # on ``_dream``: the I1 local key-set is pinned exact and does not
-            # carry them (#6211 — see ``_dream_local``).
+            # on the dream result: the I1 local key-set is pinned exact and
+            # does not carry them (#6211 — see ``_dream_local``).
             _dream_stats = getattr(
-                self._get_dreamer(), "_last_selection_stats", None) or {}
+                dreamer, "_last_selection_stats", None) or {}
             if _dream_stats.get("truncated"):
                 selection["truncated"] = True
             selection["operators_seen"] = max(
