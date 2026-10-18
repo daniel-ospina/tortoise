@@ -37,6 +37,32 @@ def _close_keepalive_anchors(anchors: dict) -> None:
                 pass
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_embedder(force_embedder_on):
+    """#8053: no test in this file may load the REAL embedding model.
+
+    ``POST /v1/sessions`` embeds the stored window, so the first capturing test
+    in this file used to trigger a cold ``SentenceTransformer`` load — on a
+    worker thread, from the capture path. Without the ``HF_HUB_OFFLINE`` /
+    ``TRANSFORMERS_OFFLINE`` pair in the environment (CI sets both; every local
+    and agent run does not) that load is NOT a cache hit: ``cached_file``
+    revalidates each file against huggingface.co, the suite's hermetic egress
+    guard turns every attempt into a ``ConnectError``, and ``http_backoff``
+    then RETRIES it — measured on this host at 17 hub downloads / ~120 s for
+    the one test, which is what carried the module past the 280 s
+    ``faulthandler_timeout`` and into pytest-timeout's budget.
+
+    The pin is conftest's ``force_embedder_on`` (#3223), not
+    ``force_sparse_tfidf``: the SHIPPED dense leg stays live so no assertion
+    here silently degrades to sparse, but no model is fetched, the vectors are
+    reproducible, and the ``torch`` import that load performed is not triggered
+    at all — that first concurrent torch import is the window the reported
+    ``RuntimeError: dictionary changed size during iteration`` (out of
+    ``inspect.getmodule``) came out of.
+    """
+    return force_embedder_on
+
+
 @pytest.fixture
 def client(tmp_path):
     """TestClient with a temp embedded DB + registry."""

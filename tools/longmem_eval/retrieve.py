@@ -1030,8 +1030,11 @@ def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
     mechanism (default OFF there too).
     """
     # C6 (#2520, #2513): the query-side date anchor rides the ON path only
-    # (the off path passes NO new kwarg — byte-identical, and hermetic
+    # (the off path passes no ANCHOR kwarg — byte-identical, and hermetic
     # `tortoise_fts_query` stubs with strict signatures stay compatible).
+    # #8487: the valid-time selection is the ONE kwarg passed on BOTH paths
+    # (see `_valid_time_rerank=False` in the call below) — it is an opt-OUT, an
+    # internal test surface can only be kept honest by pinning it explicitly.
     _sdk_kwargs: dict = {}
     if time_aware:
         _sdk_kwargs["time_aware"] = True
@@ -1052,6 +1055,16 @@ def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
             # #2518 (C2 #2513): the entity/fact-augmented key expansion
             # sparse-leg pass (default False — byte-identical when off).
             entity_key_expansion=entity_key_expansion,
+            # #8487: the SDK's rank-time valid-time selection is OFF here by
+            # design. This lane is the LAST order-owner of its measured
+            # surface (the C6 prefer-latest pass below runs on the FINAL
+            # pool, after every other pool-mover), and its re-merge sorts by
+            # RRF anyway — so the SDK-side reorder would be discarded while
+            # still moving which ids survive the ``limit`` cut. Leaving it on
+            # would perturb a sealed arm's page composition without any
+            # measurement of the product behaviour; the arm's own prefer-latest
+            # placement is unchanged.
+            _valid_time_rerank=False,
             **_sdk_kwargs,
         ):
             merged[h["id"]] = h

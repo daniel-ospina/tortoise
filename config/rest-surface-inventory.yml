@@ -7,9 +7,11 @@
 # every #3863 check stays green. Measured: 7 routes were added between #3875
 # being filed and being picked up, and nothing failed.
 #
-# The CHECK (tests/test_rest_surface_inventory.py) enumerates `@app.*` from
-# `tortoise/hosted_api.py` and `tortoise/selfhost_api.py` and fails closed in BOTH
-# directions: a live route absent here, and an entry here with no live route.
+# The CHECK (tests/test_rest_surface_inventory.py) enumerates the route
+# decorators of `tortoise/hosted_api.py` (`@app.<method>("/v1/…")`, full paths)
+# and `tortoise/selfhost_api.py` (`@router.<method>("/points")`, relative to its
+# `APIRouter(prefix="/v1")`) and fails closed in BOTH directions: a live route
+# absent here, and an entry here with no live route.
 # It reads the SOURCE, so the check cannot drift from the code — only the
 # declarations below are hand-maintained.
 #
