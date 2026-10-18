@@ -271,19 +271,26 @@ CI_TIMING_WORKFLOW = WORKFLOW_DIR / "ci-timing.yml"
 # span lines). Matched against the YAML-parsed run body — i.e. AFTER the block
 # scalar has stripped its indentation, exactly what the runner materialises.
 #
-# The inline form's closing quote is followed by whatever ends the command: `)`
-# (`$( … )`), `>>`/`|` (a redirect or a pipe), `}` — the closing brace of a bash
-# FUNCTION wrapping the call, which is how ai-review-gate.yml calls its diff
-# normalizer — a double-quoted ARGUMENT (`python3 -c '…' "$out"`, which
-# billing-reconcile-cron.yml passes as `sys.argv[1]`), or end-of-string.
-# Omitting `}` (#5107) made the non-greedy body backtrack past the real closing
-# quote to a later one, swallowing the quote and the brace into the "source"
-# (`unterminated string literal`); a trailing quoted argument did the same thing
-# again (#8904), landing on the closing quote of a LATER `tr -d '\n\r'`. The
-# workflow ran fine both times; only the extractor mis-read it.
+# The inline form ends at its OWN closing quote, and that quote is followed by
+# whitespace, end-of-string, or a control operator (`)`, `]`, `}`, `>`, `|`,
+# `&`, `;`) — never by a bare character, because a single-quoted payload cannot
+# contain `'` and the shell must therefore already be outside the quotes.
+#
+# The allow-list this used to be was wrong THREE times, and each time the
+# failure was the same: the non-greedy body backtracked past the real closing
+# quote to a later one, swallowing shell into the "source"
+# (`unterminated string literal`) against a workflow that ran fine.
+#   * `}` (#5107) — the closing brace of a bash FUNCTION wrapping the call;
+#   * `"$out"` (#8904) — a double-quoted ARGUMENT, `sys.argv[1]` in
+#     billing-reconcile-cron.yml;
+#   * and silently, the other way: a bare-word argument
+#     (mergify-guard-recut.yml) and a stderr redirect (python-ci.yml) were
+#     matched by NOTHING, so those payloads were never compiled at all and a
+#     genuinely mis-indented one would have passed. The
+#     `test_every_inline_c_payload_is_extracted` invariant is what pins that
+#     direction. Prose here is a liability; the allow-list is gone.
 _HEREDOC_RE = re.compile(r"python3?[^\n]*<<-?'?(\w+)'?\n(.*?)\n\s*\1\s*$", re.S | re.M)
-_INLINE_C_RE = re.compile(
-    r"""python3 -c '(.*?)'(?=\s*(?:\)|>>|\||\}|$|"))""", re.S)
+_INLINE_C_RE = re.compile(r"""python3 -c '(.*?)'(?=\s|$|[)\]}>|&;])""", re.S)
 
 
 def _run_blocks(workflow_path: Path) -> list[tuple[str, str]]:
@@ -449,6 +456,34 @@ def test_inline_c_extraction_ends_before_a_quoted_argument() -> None:
     assert sources[0].startswith("import json,sys"), sources[0]
     assert "tr -d" not in sources[0], sources[0]
     compile(sources[0], "<extracted>", "exec")
+
+
+def test_every_inline_c_payload_is_extracted() -> None:
+    """No `python3 -c '…'` in any workflow may be invisible to the guard.
+
+    The other direction of the same bug: an allow-list that matches nothing for
+    a closing quote followed by, say, a bare-word argument
+    (`…' docs/ci/required-contexts.json`) or a stderr redirect (`…' 2>/dev/null`)
+    yields NO payload, so `test_workflow_embedded_python_is_column_zero_after_
+    yaml_dedent` compiles nothing for that step and a genuinely mis-indented
+    payload passes green. Two live workflows sat in exactly that blind spot.
+
+    The invariant is counting, not compiling: the number of extraction matches
+    must equal the number of `python3 -c '` occurrences in the same run body.
+    """
+    missed: list[str] = []
+    for wf_path in sorted(WORKFLOW_DIR.glob("*.yml")):
+        for step_name, script in _run_blocks(wf_path):
+            occurrences = script.count("python3 -c '")
+            extracted = len(_INLINE_C_RE.findall(script))
+            if occurrences != extracted:
+                missed.append(f"{wf_path.name} :: {step_name}: "
+                              f"{occurrences} `python3 -c '` vs "
+                              f"{extracted} extracted")
+    assert missed == [], (
+        "an inline python payload is invisible to the compile guard:\n"
+        + "\n".join(missed)
+    )
 
 
 def test_inline_c_extraction_ends_at_the_shell_closing_quote() -> None:
