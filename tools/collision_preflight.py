@@ -3496,10 +3496,19 @@ def _read_board(slug: str | None, repo_root: str) -> tuple[dict | None, str, str
     # times, which pushed a pass into contention with the controller's own sweep; a contended surface
     # reads as UNQUERYABLE, which is not a verdict, so the backlog never filled and create activity
     # stopped. Paying it once per pass is honest; paying it once per candidate is waste.
-    board_key = f"partial_board|{slug}"
+    # ⛔ THE KEY CARRIES repo_root, not just the slug: two CLONES of one repo sharing a cache dir must
+    # not serve each other's board, whose holder attribution is computed against that clone's own
+    # local branches and worktrees (#4256 hazard).
+    board_key = f"partial_board|{slug}|{repo_root}"
     cached_board = _cache_get(board_key)
     if isinstance(cached_board, dict) and not _board_can_answer(cached_board) \
-            and _board_is_for_repo(cached_board, slug):
+            and _board_is_for_repo(cached_board, slug) \
+            and not fleet_state.state_freshness(cached_board)["stale"]:
+        # ⛔ AND THE BOARD'S OWN CLOCK BOUNDS THE HIT (review P2). The TTL alone would honour an aged
+        # board if an operator raised COLLISION_PREFLIGHT_CACHE_TTL past fleet_state.STATE_FRESH_S; a
+        # lane that began work after the cached build is invisible in it, which reads as "nobody is
+        # working this" about work that started minutes ago. The default TTL (300 s) is already
+        # stricter than the window; this makes a raised TTL unable to reopen the hole.
         return cached_board, "rebuilt-cache", ""
     try:
         rebuilt = fleet_state.build_state(
@@ -3536,7 +3545,7 @@ def _read_board(slug: str | None, repo_root: str) -> tuple[dict | None, str, str
     # fallback as if it were the board. A read-only gate must not do that. Paying
     # the rebuild on every pre-flight while the cache is stale is the honest
     # price; the board's own writer repairs it.
-    _cache_put(f"partial_board|{slug}", rebuilt)
+    _cache_put(board_key, rebuilt)
     return rebuilt, "rebuilt", ""
 
 

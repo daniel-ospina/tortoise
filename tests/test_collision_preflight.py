@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
 import re
 import shutil
 import stat
@@ -5606,6 +5607,27 @@ class HolderGateTests(unittest.TestCase):
         self.assertEqual(second_source, "rebuilt-cache")
         self.assertEqual(second_state, first_state)
         build.assert_called_once()          # ← the whole point: ONE rebuild for the pass
+
+    def test_a_raised_ttl_cannot_serve_an_aged_board(self):
+        # Review P2: the cache hit must be bounded by the BOARD'S OWN clock, not only by the TTL. With
+        # TTL raised past fleet_state.STATE_FRESH_S, an aged board would otherwise be served as
+        # `rebuilt-cache` — a lane that began work after the cached build is invisible in it, which
+        # reads as "nobody is working this" about work that started minutes ago.
+        fresh = _fleet_board_state()
+        with tempfile.TemporaryDirectory() as cache, \
+             mock.patch.dict(os.environ, {"COLLISION_PREFLIGHT_CACHE": cache,
+                                          "COLLISION_PREFLIGHT_CACHE_TTL": "86400"}), \
+             mock.patch.object(self.cp.fleet_state, "build_state", return_value=fresh) as build:
+            self.cp._read_board(SLUG, str(self.tmp))              # fills the cache
+            # age the CACHED BOARD itself past the freshness window
+            for f in pathlib.Path(cache).glob("*.json"):
+                payload = json.loads(f.read_text())
+                payload["generated_at"] = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+                f.write_text(json.dumps(payload))
+            _state, source, _why = self.cp._read_board(SLUG, str(self.tmp))
+        self.assertEqual(source, "rebuilt",
+                         "an aged cached board must be REBUILT, never served, whatever the TTL says")
+        self.assertEqual(build.call_count, 2)
 
     def test_without_the_env_the_cache_is_inert(self):
         # Default behaviour must be BYTE-IDENTICAL to before the change: no env, no caching.
