@@ -181,6 +181,24 @@ would collide on the word `recency` (a window there, a freshness preference here
   >    `epistemic_state: ran=False, degraded=True, reason="state_read_failed"`. So: an order that
   >    could not be improved is `degraded=False` with a reason; a decoration read that did not run
   >    is `degraded=True`.
+  > 7. **Default ON is a RECORDED override of the #1745 fail-safe convention** (round 8, P2).
+  >    #1745's convention — followed by ``entity_key_expansion`` and ``time_aware`` in the same
+  >    signature — is that a new retrieval lever ships **OFF** in the product until a measured
+  >    delta adopts it. This lever ships ON, and the reason is recorded rather than assumed:
+  >    #8487 is **owner-filed** and requires the read path ITSELF to consume valid time, so a
+  >    default-OFF lever would ship the issue unimplemented. The delta that #1745 asks for is on
+  >    the record: the shipped ask lane's context order moved on merge —
+  >    ``tests/fixtures/ask_llm_transcripts/all-superseded-stale-evidence.json`` was regenerated
+  >    (the current session block now precedes the superseded one, ``user_message_hash``
+  >    c14618… → 495593…), plus the three-claim read-path measurement above (an ended claim served
+  >    as current, a 2099-dated claim ranked first). The marker is repeated at the lever itself
+  >    (``tortoise/sdk.py``) and on #8487.
+  >
+  >    **OVERRIDES:** #1745's "a new retrieval lever ships default-OFF in the product until a
+  >    measured delta adopts it" — #8487 is owner-filed and requires the read path to select on
+  >    valid time, so the lever ships ON with its delta measured and recorded (regenerated ask
+  >    transcript + the three-claim read-path measurement), not deferred behind a flag the product
+  >    never sets.
 
 **D4 — `time_aware` is applied for NON-TR questions only (TR no-regression).** The eval resolves
 the arm once and passes the query-side anchor only when `not is_tr`; TR keeps its R5 stack

@@ -50,6 +50,11 @@ would measure a pipeline the product no longer runs. The lanes that DO opt out
 are the ones that re-own the order downstream (``tools/longmem_eval/
 retrieve.py``, ``tools/fusion_formula_ab.py``,
 ``tools/ask_pool_admission_probe.py``).
+  * EVERY read that GRADES or DEFINES an id set must pin ``query_date`` to the
+question's own date, including ``_scan_for_failures`` — its ``pool@120`` read
+DEFINES the long-haystack subset that ``_measure_question`` then measures, so
+an un-pinned scan admits (or drops) a question on one pool order and measures
+it on another (#8487 review round 8, P2).
 
 SEEDING PARITY (verifier-fix): ingestion mirrors ``tools/longmem_eval/
 ingest.py`` (search_keys + has_answer + embeddings + session props + the
@@ -365,7 +370,15 @@ def _scan_for_failures(data: list[dict], *, scan_limit: int,
             _seed_question(sdk2, question)
             hits = sdk2.tortoise_fts_query(
                 question["question"], limit=120, pool_size=None,
-                include_terminal=True, keep_numeric=keep_numeric,
+                include_terminal=True,
+                # #8487 review round 8 (P2): the SUBSET DEFINITION must be
+                # scored as of the SAME instant `_measure_question` measures
+                # it with, or a question can be admitted by the scan and then
+                # measured on a different pool order (the selection is
+                # intent-gated and takes the wall clock when the date is
+                # unset).
+                query_date=question.get("question_date") or None,
+                keep_numeric=keep_numeric,
                 search_keys_prf=search_keys_prf)
             ranks = [j + 1 for j, h in enumerate(hits)
                      if h["id"] in set(_gold_turn_ids(question))]

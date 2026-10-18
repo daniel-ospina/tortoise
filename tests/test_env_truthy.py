@@ -75,7 +75,13 @@ from collections import Counter
 
 import pytest
 
-from tortoise.env_truthy import FALSY, TRUTHY, env_flag, is_truthy
+from tortoise.env_truthy import (
+    FALSY,
+    TRUTHY,
+    env_flag,
+    env_flag_from_value,
+    is_truthy,
+)
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -160,6 +166,27 @@ def test_env_flag_matrix(monkeypatch, raw):
     else:                                                          # garbage -> the default
         assert env_flag("TORTOISE_T_CONTRACT", True) is True
         assert env_flag("TORTOISE_T_CONTRACT", False) is False
+
+
+@pytest.mark.parametrize("raw", _MATRIX)
+def test_env_flag_and_the_value_resolver_cannot_diverge(monkeypatch, raw):
+    """#8487 review round 8 (P2): ``env_flag_from_value`` is the ONE copy of the
+    resolution order, and ``env_flag`` delegates to it — so a value resolved
+    from an injection and the same value read from the environment cannot
+    disagree.
+
+    FAIL VALUE: a SECOND copy of the resolver in a non-owning module (the
+    pre-fix shape had one in ``tortoise/time_aware.py``, which this test would
+    not even import). With two copies, a future change to ``env_flag``'s
+    whitespace or vocabulary handling moves the environment path and not the
+    injected path: the two were only ever exercised on DISJOINT inputs, so no
+    test compared them — the sixth divergent spelling #4097 exists to prevent.
+    """
+    _set(monkeypatch, "TORTOISE_T_VALUE_PARITY", raw)
+    for default in (True, False):
+        assert (env_flag("TORTOISE_T_VALUE_PARITY", default)
+                is env_flag_from_value(raw, default)), (
+            f"resolver copies diverge at raw={raw!r}, default={default}")
 
 
 # ── 2. The migration property (pre-change oracle) ──────────────────────────

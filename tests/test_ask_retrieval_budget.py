@@ -744,14 +744,19 @@ def test_ask_lane_pins_the_selection_instant_to_the_question_date(monkeypatch):
     assert res["question_date"] == "2024-01-01"
 
 
-def test_bench_and_transcript_lanes_pin_the_selection_instant():
-    """FAIL VALUE: the two lanes that MIRROR the ask lane (and so deliberately
+def test_bench_and_transcript_lanes_pin_the_selection_instant(monkeypatch):
+    """FAIL VALUE: the lanes that MIRROR the ask lane (and so deliberately
     keep the selection ON) leaving the instant unset — which reorders the same
     question across a ``validTo`` boundary and breaks their own
     re-baseline-then-compare contract (#8487 review round 7, P2).
 
-    Reachable: all three call sites are driven for real against a kwargs-
-    recording SDK. Pre-fix none of them passes ``query_date``."""
+    Reachable: all four call sites are driven for real against a kwargs-
+    recording SDK. Pre-fix none of them passes ``query_date``.
+
+    (d) is the round-8 (P2) addition: ``_scan_for_failures`` DEFINES the
+    long-haystack subset with the same ``pool@120`` read ``_measure_question``
+    then measures, so an un-pinned scan can admit a question on one pool order
+    and measure it on another."""
     from tools import ask_recall_bench as bench
     from tools import gen_ask_transcripts as transcripts
 
@@ -781,3 +786,17 @@ def test_bench_and_transcript_lanes_pin_the_selection_instant():
                                      "2026-08-29", seeds=[])
     assert sdk.calls[0].get("query_date") == "2026-08-29", (
         f"gen_ask_transcripts: query_date={sdk.calls[0].get('query_date')!r}")
+
+    # (d) the long-haystack SUBSET SCAN — the same pool@120 read as (b), so it
+    # must select as of the same instant or the subset definition drifts.
+    import tortoise.sdk as sdk_mod
+
+    sdk = _KwargRecordingSDK(n_hits=2)
+    monkeypatch.setattr(sdk_mod, "TortoiseSDK", lambda _db: sdk)
+    monkeypatch.setattr(bench, "_seed_question", lambda *_a, **_k: None)
+    bench._scan_for_failures(
+        [{"question_id": "q-scan", "question": "zephyr",
+          "question_date": "2023-05-20", "haystack_sessions": []}],
+        scan_limit=1, keep_numeric=False, search_keys_prf=False)
+    assert sdk.calls[0].get("query_date") == "2023-05-20", (
+        f"ask_recall_bench subset scan: query_date={sdk.calls[0].get('query_date')!r}")

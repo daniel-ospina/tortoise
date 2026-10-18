@@ -23367,6 +23367,22 @@ class TortoiseSDK:
         # The ASK lane and its mirrors (``tools/ask_recall_bench.py``,
         # ``tools/gen_ask_transcripts.py``) keep it ON: they measure/replay the
         # shipped reader, so they must include the selection.
+        #
+        # OVERRIDES (#1745, recorded 2026-10-18 on #8487): this retrieval lever
+        # ships DEFAULT ON, where #1745's fail-safe convention keeps a new
+        # lever OFF until a measured delta adopts it (the convention
+        # ``entity_key_expansion`` and ``time_aware`` above follow). #8487 is
+        # OWNER-filed and requires the read path itself to consume valid time,
+        # so a default-OFF lever would ship the issue unimplemented. The delta
+        # is on the record rather than assumed: the shipped ask lane's context
+        # order moved on merge —
+        # ``tests/fixtures/ask_llm_transcripts/all-superseded-stale-evidence.json``
+        # was regenerated (the current session block now precedes the
+        # superseded one; ``user_message_hash`` c14618… → 495593…), and the
+        # three-claim measurement on the shipped read path is in the #8487
+        # plan-doc amendment (D3). The record lives here, in that plan doc, and
+        # on #8487 itself, so the next lane reading the #1745 convention finds
+        # why this lever is the exception.
         _valid_time_rerank: bool = True,
         pool_size: int | None = None,
         leg_trace: list[dict] | None = None,
@@ -23390,9 +23406,13 @@ class TortoiseSDK:
         # C6 (#2520, #2513): time-aware query expansion — the query-side
         # date anchor. ``time_aware`` gates the C6 branch; ``query_date``
         # is the question's date (YYYY-MM-DD, or a timestamp truncated to
-        # it). Default OFF (the #1745 fail-safe decision, matching
-        # ``entity_key_expansion``): the branch is never entered and the
-        # output is byte-identical.
+        # it). TWO consumers, and only one of them is behind ``time_aware``:
+        # with ``time_aware=False`` the C6 dense-anchor branch is never
+        # entered, but ``query_date`` is STILL the reference instant of the
+        # #8487 rank-time valid-time selection (§5e), so passing it can change
+        # the returned order without ``time_aware`` (the ask lane does exactly
+        # that). ``query_date=None`` leaves both consumers on their default
+        # (the wall-clock date for §5e) and is the byte-identical path.
         query_date: str | None = None,
         time_aware: bool = False,
     ) -> list[dict]:

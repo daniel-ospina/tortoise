@@ -90,7 +90,6 @@ __all__ = [
     "TemporalIntent",
     "dense_query_for",
     "detect_temporal_intent",
-    "env_flag_from_value",
     "inject_query_date",
     "is_not_yet_effective",
     "is_stale_entry",
@@ -407,14 +406,23 @@ def prefer_latest_order(
 #
 # These three helpers are the missing adapter, kept here (not in ``sdk.py``)
 # so the decision stays a pure function over already-fetched state: no DB, no
-# clock, no I/O — the same property :func:`prefer_latest_order` carries.
+# I/O, and no clock — the same property :func:`prefer_latest_order` carries,
+# with the TWO injectable exceptions the module docstring declares (the wall
+# clock in :func:`resolve_question_date`, ``os.environ`` in
+# :func:`prefer_latest_enabled`).
 
-#: The kill switch for the read-path validity rerank (#8487). Default ON:
-#: the reorder is MEMBERSHIP-PRESERVING and byte-identical when no candidate
-#: carries a closed/terminal window, so it cannot reorder a corpus that has
-#: no stale version in the page — a knob, not an arm that must be measured
-#: before it can be on. Explicit falsy (0/false/no/off) turns it off for an
-#: operator who wants the pre-#8487 relevance order back.
+#: The kill switch for the read-path validity rerank (#8487). Default ON —
+#: an OVERRIDE of the #1745 fail-safe convention ("a new retrieval lever ships
+#: OFF in the product until a measured delta adopts it", which
+#: ``entity_key_expansion`` and ``time_aware`` follow), recorded in the #8487
+#: plan-doc amendment, at the lever itself in ``sdk.py``, and on #8487: #8487 is
+#: OWNER-filed and requires the read path to select on valid time, so a
+#: default-OFF lever would ship it unimplemented. The reorder is
+#: MEMBERSHIP-PRESERVING and byte-identical when no candidate carries a
+#: closed/terminal window, and the delta that convention asks for is measured
+#: (the regenerated ask transcript + the three-claim read-path census).
+#: Explicit falsy (0/false/no/off) turns it off for an operator who wants the
+#: pre-#8487 relevance order back.
 VALIDITY_RERANK_ENV = "TORTOISE_VALID_TIME_RERANK"
 
 
@@ -423,35 +431,18 @@ def prefer_latest_enabled(raw: object = None) -> bool:
 
     ``raw`` is the environment VALUE (``None`` = read ``os.environ``), so a
     test never mutates the process environment. Resolution follows the ONE
-    declared env contract (#4097, ``tortoise.env_truthy.env_flag``):
-    unset/blank/garbage → the default (ON), explicit truthy → ON, explicit
-    falsy → OFF. A typo therefore never flips the knob.
+    declared env contract (#4097): unset/blank/garbage → the default (ON),
+    explicit truthy → ON, explicit falsy → OFF. A typo therefore never flips
+    the knob. The value-level resolver is NOT re-implemented here — it lives
+    in ``tortoise.env_truthy.env_flag_from_value`` and ``env_flag`` delegates
+    to it, so an injected value and the environment cannot drift apart (#8487
+    review round 8).
     """
-    if raw is None:
-        from .env_truthy import env_flag
+    from .env_truthy import env_flag, env_flag_from_value
 
+    if raw is None:
         return env_flag(VALIDITY_RERANK_ENV, True)
     return env_flag_from_value(raw, True)
-
-
-def env_flag_from_value(raw: object, default: bool) -> bool:
-    """``env_flag``'s resolution over a RAW VALUE instead of a variable name.
-
-    Reads the SAME two vocabularies the declared contract owns
-    (``tortoise.env_truthy.TRUTHY`` / ``FALSY``, #4097) rather than
-    re-spelling them, so an injected value resolves exactly as the
-    environment would.
-    """
-    from .env_truthy import FALSY, TRUTHY
-
-    value = "" if raw is None else str(raw).strip().lower()
-    if not value:
-        return default
-    if value in TRUTHY:
-        return True
-    if value in FALSY:
-        return False
-    return default
 
 
 def resolve_question_date(query_date: str | None = None, *,

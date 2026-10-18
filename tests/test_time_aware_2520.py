@@ -399,9 +399,9 @@ def test_default_weight_is_the_tr_weight():
 # rules below are the id-level adapter the SDK now calls on its
 # pre-truncation fused candidate set.
 
+from tortoise.env_truthy import env_flag_from_value  # noqa: E402
 from tortoise.time_aware import (  # noqa: E402
     VALIDITY_RERANK_ENV,
-    env_flag_from_value,
     is_not_yet_effective,
     prefer_latest_enabled,
     prefer_latest_ids,
@@ -582,6 +582,27 @@ def test_kill_switch_reads_the_environment(monkeypatch):
     assert prefer_latest_enabled() is True
     monkeypatch.delenv(VALIDITY_RERANK_ENV)
     assert prefer_latest_enabled() is True
+
+
+def test_the_value_level_resolver_has_one_home():
+    """FAIL VALUE: the #4097 resolution order duplicated in this rules module.
+
+    The pre-fix shape carried a second copy here; the two copies were only ever
+    exercised on DISJOINT inputs (the environment path vs an injected value), so
+    a future change to ``env_truthy.env_flag``'s vocabulary or whitespace
+    handling would move one and not the other with no test comparing them —
+    #8487 review round 8 (P3), and the sixth divergent spelling #4097 exists to
+    prevent."""
+    import tortoise.time_aware as rules
+    from tortoise.env_truthy import env_flag_from_value as contract_resolver
+
+    assert not hasattr(rules, "env_flag_from_value")
+    assert "env_flag_from_value" not in rules.__all__
+    # The public entry point still resolves an injected value exactly as the
+    # contract's own resolver does.
+    assert prefer_latest_enabled("off") is contract_resolver("off", True) is False
+    assert prefer_latest_enabled("on") is contract_resolver("on", False) is True
+    assert prefer_latest_enabled("garbage") is contract_resolver("garbage", True) is True
 
 
 def test_selection_date_uses_the_named_date_else_today():
