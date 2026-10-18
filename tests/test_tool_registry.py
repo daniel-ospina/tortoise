@@ -75,23 +75,30 @@ class TestRegistryEquivalence:
         )
 
     def test_registry_count(self):
-        """82 live tools = 98 − the 16 owner-approved retirements (#3863).
-        The census is bumped per add."""
+        """81 live tools = 98 − the 16 owner-approved retirements (#3863) − 1.
+
+        The extra −1 is #3540 ruling B: the two per-source switches were
+        consolidated into `tortoise_manage_sources`, which is the ruling's own
+        requirement ("the surface ends up one tool fewer, not more"). The
+        census is bumped per add — and, here, per approved CONSOLIDATION.
+        """
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 82, f"Expected 82, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 81, f"Expected 81, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
-        # The 16 retired names are NOT live, and each one is declared retired.
+        # The 16 #3863 retirements plus the 2 per-source switches #3540 ruling B
+        # consolidated are NOT live, and each one is declared retired (#3883).
         retired = {t.name for t in RETIRED_TOOL_REGISTRY}
-        assert len(retired) == 16, f"Expected 16 retired, got {len(retired)}"
+        assert len(retired) == 18, f"Expected 18 retired, got {len(retired)}"
         assert not (retired & names), f"Retired names still live: {retired & names}"
         assert "tortoise_validate_domain" in names, "Missing #405 validate_domain tool"
         assert "tortoise_packs_list" in names, "Missing #318 packs_list tool"
         assert "tortoise_graph_set_recording" in names, "Missing #2302 graph_set_recording tool"
         onboarding = {"tortoise_onboarding_demo_create", "tortoise_onboarding_state",
-                      "tortoise_onboarding_session_recording",
+                      # #3540 ruling B: ONE consolidated operation carries the
+                      # sources; the two per-source switches retired into it.
+                      "tortoise_manage_sources",
                       "tortoise_onboarding_github_connect",
                       "tortoise_onboarding_github_status",
-                      "tortoise_onboarding_github_index",
                       "tortoise_onboarding_seed"}
         assert onboarding <= names, f"Missing onboarding tools: {onboarding - names}"
         assert "tortoise_file_human_approval" in names, "Missing #531 human-approval tool"
@@ -223,37 +230,45 @@ class TestCurationGroups:
 # this table already names. Adding the row is a review obligation, and a
 # product-level enumerator is the missing piece (#3540).
 #
-# `github-documents` is the ONE tracked gap: its enable route
+# `github-documents` WAS the tracked gap: its enable route
 # (`POST /v1/index/docs`) and its job status (`GET /v1/index/docs/{job_id}`)
-# have NO MCP tool. Adding them EXPANDS the agent-facing surface, which needs
-# owner approval plus a `config/surface-manifest.yml` re-cut (#4282 —
-# `tools/surface-guard.py` reds an unrecorded addition). The verification +
-# state-key parity half is owned here; the surface addition is REPORTED, not
-# added silently.
+# had NO MCP tool. #3540's owner ruling B closed it WITHOUT a per-source tool:
+# one consolidated `tortoise_manage_sources` carries all three sources, so the
+# tool count went DOWN by one (the two per-source switches retired into it,
+# #3883) while the number of agent-settable sources went UP. That shape is the
+# ruling's own requirement — "not one tool per source" — so a future
+# per-source tool reappearing here is a regression, not an improvement.
 _INTEGRATIONS: dict[str, dict] = {
     "github-issues": {
-        "enable": ("tortoise_onboarding_github_connect",
-                   "tortoise_onboarding_github_index"),
+        # `github_connect` is the OAuth handshake, deliberately NOT folded into
+        # the consolidated operation (credentials never pass through the model).
+        "enable": ("tortoise_manage_sources",
+                   "tortoise_onboarding_github_connect"),
         "state_read": ("tortoise_onboarding_github_status",
                        "tortoise_onboarding_state"),
         "blocked": None,
     },
     "agent-session-recording": {
-        "enable": ("tortoise_onboarding_session_recording",),
+        "enable": ("tortoise_manage_sources",),
         "state_read": ("tortoise_onboarding_state",),
         "blocked": None,
     },
     "github-documents": {
-        "enable": (),
-        "state_read": (),
-        "blocked": (
-            "POST /v1/index/docs + GET /v1/index/docs/{job_id} have no MCP "
-            "tool (#3540). Adding one is an agent-facing SURFACE change: it "
-            "needs owner approval and a config/surface-manifest.yml re-cut "
-            "(#4282)."
-        ),
+        "enable": ("tortoise_manage_sources",),
+        "state_read": ("tortoise_manage_sources", "tortoise_onboarding_state"),
+        "blocked": None,
     },
 }
+
+
+def _live_registry():
+    """The ADVERTISED registry (retired names live in `RETIRED_TOOL_REGISTRY`).
+
+    Kept as a function so a test asserting "count went down" reads the same
+    surface a client's `tools/list` sees, never a cached snapshot.
+    """
+    from tortoise.tool_registry import TOOL_REGISTRY
+    return TOOL_REGISTRY
 
 
 class TestAgentAddressableIntegrations:
@@ -312,27 +327,74 @@ class TestAgentAddressableIntegrations:
             assert entry.http_policy is True, (
                 f"{integration}: {name} is not exposed on HTTP surfaces")
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="#3540: the github-documents enable tool is NOT added — it "
-               "expands the agent-facing surface and needs owner approval plus "
-               "a surface-manifest re-cut (#4282). strict=True makes this test "
-               "XPASS (red) the moment the tool lands, forcing the xfail and "
-               "the `blocked` row to be removed together.",
-    )
-    def test_docs_index_tool_registered(self):
-        """#3540 named test: the github-documents enable tool exists, is
-        grouped, and is not filtered out of group-scoped surfaces."""
+    def test_the_consolidated_tool_carries_the_docs_source(self):
+        """#3540 ruling B: the docs gap closed by the SHARED operation, not a tool.
+
+        The ruled shape is "one operation, not one tool per source". So this
+        asserts the coverage exists AND that no per-source docs tool was added
+        on the side — an addition there would undo the count reduction the
+        same ruling requires.
+        """
         by_name, grouped = self._registry()
-        assert ("POST", "/v1/index/docs") in self._docs_index_routes(by_name), (
-            "no registered tool wraps POST /v1/index/docs")
-        entry = next(
-            t for t in by_name.values()
-            if t.rest_spec is not None
-            and (t.rest_spec.method, t.rest_spec.path) == ("POST", "/v1/index/docs")
-        )
-        assert entry.group == "onboarding", f"got {entry.group!r}"
-        assert entry.name in grouped
+        assert "tortoise_manage_sources" in by_name, (
+            "the consolidated source-management tool is not registered")
+        assert "tortoise_manage_sources" in grouped, (
+            "the consolidated tool is not reachable via tools_by_group('onboarding')")
+        assert ("POST", "/v1/index/docs") not in self._docs_index_routes(by_name), (
+            "a per-source docs tool appeared — ruling B requires ONE shared "
+            "operation, and the tool count is meant to be falling")
+
+    def test_the_two_per_source_switches_are_retired_not_deleted(self):
+        """#3883: a retired name still RESOLVES and names its replacement.
+
+        Deleting them would answer "tool not found" to a caller that worked
+        yesterday — the exact failure #3883 exists to prevent.
+        """
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY
+        retired = {t.name: t for t in RETIRED_TOOL_REGISTRY}
+        advertised = {t.name for t in _live_registry()}
+        for name, replacement_arg in (
+            ("tortoise_onboarding_github_index", 'source="github_issues"'),
+            ("tortoise_onboarding_session_recording", 'source="agent_sessions"'),
+        ):
+            assert name not in advertised, (
+                f"{name} must be OUT of the advertised surface (the count must fall)")
+            entry = retired.get(name)
+            assert entry is not None, f"{name} is neither live nor retired (#3883)"
+            assert entry.retired_use_instead, (
+                f"{name} is retired with no replacement named")
+            assert "tortoise_manage_sources" in entry.retired_use_instead, (
+                f"{name} points at {entry.retired_use_instead!r}, not the "
+                "consolidated tool")
+            assert replacement_arg in entry.retired_use_instead, (
+                f"{name} does not name the argument that reproduces its behaviour")
+
+    def test_the_consolidated_tool_replaces_both_switches_one_for_one(self):
+        """The ruling's arithmetic: two switches become one — net one FEWER.
+
+        Pinned as a relationship, not a magic number, so adding a source later
+        cannot be mistaken for licence to add a tool.
+        """
+        advertised = {t.name for t in _live_registry()}
+        assert "tortoise_manage_sources" in advertised
+        for retired_switch in ("tortoise_onboarding_github_index",
+                              "tortoise_onboarding_session_recording"):
+            assert retired_switch not in advertised
+        # The OAuth handshake stays: it is not a switch, and folding it in would
+        # push credentials toward the model.
+        assert "tortoise_onboarding_github_connect" in advertised
+
+    def test_the_new_tool_is_write_gated(self):
+        """Ruling B's permission condition rests on the registry flag.
+
+        `_enforce_mcp_tool_scope` requires graphs:write for a `writes=True`
+        entry and DENIES an unresolvable name, so this flag is the enforcement
+        seam — flipping it would silently make source configuration readable
+        by a read-only key.
+        """
+        by_name, _ = self._registry()
+        entry = by_name["tortoise_manage_sources"]
+        assert entry.writes is True
         assert entry.http_policy is True
 
 
@@ -753,6 +815,27 @@ class TestCapabilityModel:
         from tool_surface_capabilities import declared_set_violations, served_registry
 
         assert declared_set_violations(served_registry()) == []
+
+    def test_every_non_sdk_writer_is_still_served(self):
+        """`NON_SDK_WRITER_TOOLS` says "Kept exact" — so assert liveness.
+
+        #3540 review P3: the two retired onboarding switches stay in the set
+        (they still resolve and still WRITE), but nothing checked that a
+        member's name still exists — a rename would leave the entry pointing at
+        nothing while `declared_set_violations` (which iterates live ENTRIES)
+        stayed silent.  This is the missing arm.
+        """
+        from tool_surface_capabilities import NON_SDK_WRITER_TOOLS, served_registry
+
+        served = {e.name for e in served_registry()}
+        stale = sorted(NON_SDK_WRITER_TOOLS - served)
+        assert stale == [], (
+            f"NON_SDK_WRITER_TOOLS names no served tool: {stale} — delete or "
+            f"rename the entry")
+        writers = {e.name for e in served_registry() if e.writes}
+        assert writers >= NON_SDK_WRITER_TOOLS, (
+            "a NON_SDK_WRITER_TOOLS member is not writer-annotated: "
+            f"{sorted(NON_SDK_WRITER_TOOLS - writers)}")
 
     def test_guards_cover_the_served_set_not_only_the_live_one(self):
         """#3883: a retired name is still resolvable and callable by name, so the
@@ -1372,10 +1455,14 @@ class TestToolIdentity:
         # (`tortoise_ingest_corpus`, `tortoise_index_sessions`) are retired
         # shims that still call the original handler, so they are writers too.
         # A change to either number is a permission change and needs the
-        # owner's eye, not a test edit.
-        assert len(WRITE_TOOL_NAMES) == 47, f"write census moved: {len(WRITE_TOOL_NAMES)}"
+        # owner's eye, not a test edit. #3540 ruling B added one live writer
+        # (`tortoise_manage_sources`) and retired two live writers into it, so
+        # LIVE writers move 45 → 44 and retired writer shims move 2 → 4; the
+        # SERVED number (get_write_tool_names covers both, #3883) therefore
+        # moves 47 → 48 while the ADVERTISED surface falls by one.
+        assert len(WRITE_TOOL_NAMES) == 48, f"write census moved: {len(WRITE_TOOL_NAMES)}"
         live = frozenset(t.name for t in TOOL_REGISTRY if t.writes)
-        assert len(live) == 45, f"live write census moved: {len(live)}"
+        assert len(live) == 44, f"live write census moved: {len(live)}"
 
     def test_gate_refuses_read_scope_for_every_writer_annotated_entry(self):
         """#4474: a `graphs:read`-only key is REFUSED for EVERY entry whose
@@ -1400,9 +1487,9 @@ class TestToolIdentity:
             e.name for e in served
             if e.annotations is not None and e.annotations.readOnlyHint is False
         )
-        # 47 = the served writer census (45 live + 2 retired shims). Pinned here
-        # so the derived loop below can never pass by covering nothing.
-        assert len(writer_annotated) == 47, writer_annotated
+        # 48 = the served writer census (44 live + 4 retired shims). Pinned
+        # here so the derived loop below can never pass by covering nothing.
+        assert len(writer_annotated) == 48, writer_annotated
         for name in ("tortoise_backfill_v25", "tortoise_dream",
                      "tortoise_index_sessions", "tortoise_ingest_corpus",
                      "tortoise_org_create"):

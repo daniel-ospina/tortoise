@@ -31,7 +31,7 @@ GENERATOR = ROOT / "tools" / "bridge_table.py"
 
 
 def test_target_mcp_matches_the_beta_doc() -> None:
-    """The 26-tool target set is declared in TWO places; they must be equal.
+    """The MCP target set is declared in TWO places; they must be equal.
 
     This is the round-2 P1 of the PR #4177 review, and it is the *same* defect
     class round 1 found: two sets that both said the same number while being different
@@ -74,6 +74,26 @@ def test_target_mcp_matches_the_beta_doc() -> None:
         "parsed no MCP twin names from the beta doc's `MCP twin` column - did its "
         "header text or table shape change? This test is the only thing binding the two target sets."
     )
+    # The beta doc's method table is one row per SDK METHOD, so a target that has NO
+    # SDK twin cannot appear in it. Ruling B (2026-10-12, on #3540) re-admitted
+    # exactly one such tool, `manage_sources`, and the doc declares it in its own
+    # table — so it is read from the DOC, not from a literal here. (A literal is the
+    # hand-maintained constant this test exists to eliminate; it is what broke when
+    # the owner's ruling took the target from 25 to 26.)
+    mcp_only: set[str] = set()
+    in_mcp_only = False
+    for line in beta.splitlines():
+        if line.startswith("| MCP-only addition"):
+            in_mcp_only = True
+            continue
+        if in_mcp_only:
+            if not line.startswith("|"):
+                in_mcp_only = False
+                continue
+            if not line.strip().strip("|").strip():
+                continue  # the `|---|---|` separator
+            mcp_only.update(re.findall(r"`([a-z_][a-z0-9_]*)`", line))
+    twins = twins | mcp_only
     declared = set(TARGET_MCP)
     # `set()` hides a DUPLICATE entry, which inflates `len(TARGET_MCP)` and every
     # count rendered from it while the set-equality above still passes. Anchored
@@ -761,7 +781,7 @@ def test_retired_rows_lead_to_their_replacement_destination() -> None:
     from tools.bridge_table import DESTINATION, _registry_rows
 
     retired = [r for r in _registry_rows() if r["use_instead"]]
-    assert len(retired) == 16, f"expected 16 retired rows, got {len(retired)}"
+    assert len(retired) == 18, f"expected 18 retired rows, got {len(retired)}"
     for r in retired:
         assert r["use_instead"] in DESTINATION, (
             f"{r['name']} names a replacement the destination map does not know: "
@@ -804,7 +824,7 @@ def test_the_live_retirement_reasons_account_for_exactly_the_retired_rows() -> N
         f"unreasoned ({sorted(retired - set(REMOVALS))}) or the reason is stale "
         f"({sorted(set(REMOVALS) - retired)})"
     )
-    assert len(retired) == 11, f"expected 11 retired tools, got {len(retired)}"
+    assert len(retired) == 9, f"expected 9 retired tools, got {len(retired)}"
 
     for name, reason in sorted(REMOVALS.items()):
         assert reason.strip(), f"{name} carries an empty reason"
