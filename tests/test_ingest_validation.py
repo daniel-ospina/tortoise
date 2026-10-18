@@ -417,7 +417,8 @@ class TestE2E1Matrix:
             joined = "\n".join(messages)
             assert any("does not exist" in m for m in messages), joined       # c1
             assert any("SUPPORTS" in m for m in messages), joined             # c2
-            assert any("must be a plain Point" in m for m in messages), joined  # c3/c4/c5
+            assert any("must be a Point/Subject/Object/Event endpoint — got a"
+                       in m for m in messages), joined  # c3/c4/c5
             assert any("multi-item 'to'" in m for m in messages), joined      # c7
             # zero mutations — only the pre-seeded Source exists
             assert _point_count(sdk) == 0
@@ -770,3 +771,48 @@ class TestTerminalStatusGuard:
         # both are hash-less; the guard stays on the safe side
         assert sdk._find_terminal_dedup_hit(
             "same content", "statement") == term["id"]
+
+
+# ── Server-managed keys are read at the write DOOR's fold depth (#7925 r5) ──
+#
+# `_coerce_props` folds one nested `props` map per application and a door may
+# apply it twice (points: `create_point` + the dedup relay into `update_point`;
+# subject/object/event: `create_*` + `create_entity`), while `document` folds
+# once. A reader pinned to the TOP LEVEL let a single-wrapped spelling reach
+# `_sanitize_props`, which raised in step 2/3 with the earlier items already
+# committed (measured). Reading at the door depth closes that without
+# over-reading a `document` (one fold).
+
+@pytest.mark.parametrize("key,value", [("is_episodic", True),
+                                       ("sourceVersion", "v1")])
+def test_server_managed_key_is_refused_when_single_wrapped(sdk, key, value):
+    bundle = {"points": [{"kind": "statement", "content": "p-one"},
+                         {"kind": "statement", "content": "p-two",
+                          "props": {key: value}}]}
+    msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
+    assert any(key in m and "server-managed" in m for m in msgs), msgs
+    from tortoise.exceptions import BundleValidationError
+    with pytest.raises(BundleValidationError):
+        sdk.ingest(bundle)
+    assert _point_count(sdk) == 0
+
+
+def test_server_managed_key_is_refused_on_an_entity_item_too(sdk):
+    bundle = {"points": [{"kind": "statement", "content": "e-one"}],
+              "entities": [{"type": "subject", "name": "S1",
+                            "props": {"is_episodic": True}}]}
+    msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
+    assert any("is_episodic" in m for m in msgs), msgs
+    assert _point_count(sdk) == 0
+
+
+def test_server_managed_key_beyond_the_document_door_depth_is_not_over_read(sdk):
+    """A `document` item folds ONCE, so a level-2 spelling is invisible to the
+    writer — refusing it would over-reject a bundle the writer performs."""
+    deep = {"sources": [{"url": "https://x.example/s", "sourceKind": "report",
+                         "props": {"props": {"sourceVersion": "v1"}}}]}
+    assert sdk._validate_bundle(deep) == []
+    shallow = {"sources": [{"url": "https://x.example/s", "sourceKind": "report",
+                            "props": {"sourceVersion": "v1"}}]}
+    assert any("sourceVersion" in v["message"]
+               for v in sdk._validate_bundle(shallow))
