@@ -79,6 +79,42 @@ record does state is the measured shipped state: ``run_s4`` is what runs today,
 so it must not be deleted on the strength of the design doc alone; a lane that
 needs the precedence settled asks the owner on **#8500**.
 
+⚠️ THE SUCCESSOR HAS NOT LANDED — and *"S2.2 and S2.3 already exist in the
+code"* is NOT the test that it has. §4.0 gives S2.2 VET the coverage question
+S4's removal relies on (*"did we account for everything the narrative said?"*),
+and S2.3 CLASSIFY is the fold's other half as this record counts it. Both
+stages are present in the tree (``_vet_gate.apply_vet``,
+``kind_classifier.classify_items``) and both are wired into
+``extract_session_v2`` behind flags that DEFAULT OFF (``TORTOISE_VET``,
+``TORTOISE_CLASSIFY_LATER``), so on the default arm neither has run at all.
+Presence is not sufficiency either: the fold's REMEDY half is unimplemented in
+both.
+
+  * VET's coverage signal only DETECTS, and only in one degenerate case.
+    ``check_batch``'s coverage signals are "reported, never acted on":
+    ``coverage_suspect`` fires only when a non-empty narrative produced ZERO
+    candidates. The gate itself does act — it records ``DISCARD`` verdicts and
+    ``apply_vet`` removes them — but VET only REMOVES, never adding a candidate
+    the NARRATIVE did not yield: the one append path is the Layer-1 entity
+    RESTORE from ``prior`` (``vet_gate.py`` Rule 4), which re-emits an entity an
+    EARLIER pass discarded, needs a surviving candidate to reference the name,
+    and so cannot fire from a coverage gap. (``OUTCOMES`` =
+    KEEP/NOOP/DISCARD/MERGE, with MERGE recorded-not-applied, #5006.)
+  * S2.3 CLASSIFY only LABELS: ``classify_items`` returns ``assignments`` (a
+    kind per EXISTING id) and ``_apply_classify_kinds`` writes that kind onto an
+    item already in the list. It adds none.
+
+So **no stage the design folds S4's purpose into — and no successor stage —
+performs S4's gap review-and-fill**: ``run_s4`` is today's gap-filler, and
+deleting it loses that capability outright rather than relocating it. (The
+universal is scoped to the FOLD on purpose: ``run_s4`` itself IS a shipped
+stage and it emits exactly the candidates the folded stages cannot, so an
+unqualified "no shipped stage" denies the very capability its own next clause
+says is lost.) The removal pre-condition is a stage that can ADD a candidate a
+coverage check found missing — building it is the migration deliverable, and
+the absence of that stage is pinned by
+``tests/test_extractor_v4_s4_stage_claims.py``.
+
 Owner confirmations honored (issue #1350): flash runs 4 prompts (S1-S4), S5
 is execution; temperature 0.0 (via tests.model_adapters MODELS); S3 reads the
 REAL backend; chains warn + repair, hard-block never; solar-pro4 parked;
@@ -3240,10 +3276,16 @@ def _carries_value(*texts: object) -> bool:
     canonicaliser: a parallel value layer is the explicitly forbidden shape
     (``docs/epics/2026-08-20-1509-extractor-v3/00-scope.md``, owner — ``never
     create a parallel layer doing the same thing with redundant machinery``;
-    ``vet_gate`` cites the same line). Its measured limits are the reason the
-    SPAN is the deliverable: ``_value_bindings`` sees ``twelve million`` as
-    ``12`` (no magnitude) and misses ``1,234`` — detection is enough here,
-    because the span carries the value VERBATIM.
+    ``vet_gate`` cites the same line).
+
+    ⚠️ Its measured reach (this predicate is a DETECTOR, not a canonicaliser —
+    that is why the span is the deliverable, since the span carries the value
+    VERBATIM). ``_value_bindings`` reads ``twelve million``/``12 million`` as
+    ``12`` (magnitude dropped), ``1.2 million``, ``$1,200,000``, ``1,234``,
+    ``1.234``, ``5k`` and ``2 hours`` as values, and sees no value in
+    ``the team prefers intervals``. (The ``1,234`` → ``None`` result belongs to
+    ``_value_signature``, the PAIR engine beside this one — it is NOT what this
+    predicate calls, so the numeric-separator forms are detected here.)
     """
     return any(_value_bindings(str(t)) for t in texts if t)
 
@@ -3278,6 +3320,17 @@ def _value_verbatim_span(content: str, quote: str, turn_idx: int | None,
     silent band pass would leave no trace of the aggregate-numerator class
     this slice exists to protect.
 
+    ⚠️ And a VERBATIM anchor is not yet an address to the VALUE: a quote can
+    be present word-for-word and still OMIT the value (the model quoted the
+    context sentence while the number lives elsewhere in the turn). Stamping
+    those offsets hands a consumer text that holds no value at all — worse
+    than no address, because the consumer cannot tell a value-free span from
+    a value-bearing one, so an enumerate-then-sum numerator silently reads
+    zero instead of reporting that it could not be resolved. The span is
+    therefore stamped only when the text it addresses CARRIES a value; the
+    absence is REPORTED as its own class, so a value that cannot be re-read
+    is a counted outcome rather than an indistinguishable pass.
+
     ⚠️ Reach: the span reaches a consumer only where the read path carries
     point provenance. The eval lane does (#2684 wired it); the PRODUCT ask
     lane's hits carry no ``quote``/``source_turn_id`` at all, so neither the
@@ -3288,12 +3341,26 @@ def _value_verbatim_span(content: str, quote: str, turn_idx: int | None,
         return None
     if turn_idx is None:
         return None          # the anchor failure already warned
-    span = _verbatim_span_in_turn(_turn_text_by_index(edus, turn_idx), quote)
-    if span is None and quote:
+    turn_text = _turn_text_by_index(edus, turn_idx)
+    span = _verbatim_span_in_turn(turn_text, quote)
+    if span is None:
+        if quote:
+            warnings.append(
+                f"value-bearing point '{str(content)[:60]}' resolved to turn "
+                f"{turn_idx} by the token-overlap band, not a verbatim anchor "
+                "— it carries no source span (the value cannot be re-read "
+                "verbatim)")
+        return None
+    if not _carries_value(turn_text[span[0]:span[1]]):
+        # Verbatim, but it addresses no value — the quote is the point's
+        # context, not its value sentence. Never stamp it: a span that
+        # resolves to value-free text is a false address.
         warnings.append(
-            f"value-bearing point '{str(content)[:60]}' resolved to turn "
-            f"{turn_idx} by the token-overlap band, not a verbatim anchor — "
-            "it carries no source span (the value cannot be re-read verbatim)")
+            f"value-bearing point '{str(content)[:60]}' resolved verbatim in "
+            f"turn {turn_idx}, but the quoted text carries no value — the "
+            "span would address words that do not hold it, so it carries no "
+            "source span (the value cannot be re-read verbatim)")
+        return None
     return span
 
 
