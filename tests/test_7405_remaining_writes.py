@@ -803,8 +803,9 @@ def test_a_rebuild_abort_on_delete_point_is_retried(tmp_path):
     """``delete_point``'s DETACH DELETE is retried.
 
     A dropped hard delete leaves the claim LIVE on the map while the caller was
-    told the delete failed — but the event and journal halves below it have
-    already recorded a ``PointRetracted`` / ``EntityMutated(delete)``, so a
+    told the delete failed — but the journal half has ALREADY recorded an
+    ``EntityMutated(delete)`` record before the statement (the #7951 §17.1
+    outbox ordering), and the ``PointRetracted`` event is emitted after it. So a
     later replay hard-deletes a Point the live graph still answers for. The two
     stores disagree, and the live one is the stale half.
     """
@@ -893,6 +894,22 @@ def test_a_deterministic_error_on_delete_point_is_not_retried(tmp_path):
 
 
 # ── 6b-bis. delete_point's DETACH DELETE — EXEMPT, and the proof ─────────────
+#
+# OWNERSHIP — do not re-derive what a merged suite already guards:
+# `tests/test_7951_delete_point_outbox.py` OWNS the ordering, the refusal arm
+# and replay-healing for this door — T1
+# (`test_delete_point_appends_the_record_before_the_cache_delete`, the
+# record-precedes-the-cache ordering), T2
+# (`test_a_failed_append_does_not_delete_the_point`, the unconfirmed-append
+# refusal plus "the Point is still live"), T3
+# (`test_a_committed_delete_record_is_healed_by_replay`). The tests below do NOT
+# re-assert those invariants from scratch; they pin the one thing T1/T2/T3
+# cannot: that the ordering makes the statement EXEMPT from a row-count witness,
+# OBSERVED on disk at the abort and triangulated by stripping the record. The
+# only delta on the refusal arm (test 3 here) is the failure MECHANISM: T2
+# monkeypatches `log.append`, this one fails it for real at `EventLog.append`'s
+# own `mkdir`, so the whole `_emit_event` → `False` → door-refusal chain runs
+# end to end.
 #
 # The section above pins that the aborted `DETACH DELETE` is RE-ISSUED. It does
 # not ask what the re-issue DID, and #7405's own census disagreed with itself
@@ -1180,13 +1197,25 @@ def test_a_delete_whose_record_cannot_be_committed_is_refused_before_the_detach_
 #
 # The exemption above is about the STATEMENT and it is scoped to a door that can
 # commit the destruction record. Two ways a delete is still lost are pinned here,
-# both ``strict=True``: closing either XPASSes its test, which FAILS the suite on
-# purpose so the pin cannot be forgotten (the convention
-# ``test_url_keyed_source_write_4649.py`` already uses for its #5048 pins).
+# each with a ``strict=True`` xfail on its DESIRED end state: closing either
+# XPASSes that test, which FAILS the suite on purpose so the pin cannot be
+# forgotten (the convention ``test_url_keyed_source_write_4649.py`` already uses
+# for its #5048 pins).
 #
 # Both are stated here rather than fixed because the fix is not a witness: a
 # witness would raise on the delete's own row count, and neither case is about
 # that count.
+#
+# Each residual is pinned as a PAIR, the way 6b-bis pins the exemption: a plain
+# test that pins TODAY's observed behaviour, and a ``strict=True`` xfail test
+# that asserts only the DESIRED end state. (The journal-less pair's plain half
+# is inside its own test — it asserts the landed ``delete_point(...) is True``
+# before the replay — so only the probe residual needs a separate one.) The
+# plain half is what keeps the pin
+# honest — a strict xfail converts any exception in the body into ``xfailed``,
+# so a single test doing both jobs would silently absorb a NEW regression in this
+# path (a door that started refusing, a rebuild that started raising, a
+# `_assert_test_graph` rejection) as "the known #7405 residual".
 
 _EXISTENCE_PROBE_RESIDUAL = (
     "#7405 indicator (c) — a delete during a rebuild window is answered 'not "
@@ -1202,6 +1231,54 @@ _JOURNALLESS_RESIDUAL = (
     "help; the missing piece is the record, not the row count.")
 
 
+def test_a_rebuild_window_answers_absent_and_records_nothing_today(tmp_path):
+    """TODAY's observed behaviour, pinned WITHOUT xfail — the residual's floor.
+
+    Same window as the test below (the replacement's WIPE, journal still holding
+    the Point's ``PointAdded``, replay not yet run), asserted on the two facts
+    that MAKE the loss: the pre-delete existence probe answers "no such Point"
+    (so the door returns ``False``), and the journal gains NO
+    ``EntityMutated`` op=delete record for the id (so the replay has no carrier
+    for the destruction).
+
+    This half is plain on purpose. Its sibling below is a ``strict`` xfail, which
+    turns ANY exception in its body into a green "expected failure"; if the door
+    began raising on this path, or the rebuild began refusing, or the graph name
+    began failing ``_assert_test_graph``, that sibling alone would still report
+    the residual as "open" and the new regression would be invisible. Pinning
+    today's answers HERE means a crash or a behaviour change reds loudly, and the
+    xfail below fails only for the residual it names.
+    """
+    sdk, log_dir = _sdk_with_journal(tmp_path, "delprobetoday")
+    try:
+        pid = sdk.create_point("statement", "a claim deleted mid-rebuild")["id"]
+        proj = sdk._get_proj()
+        # The replacement's wipe: the graph holds nothing, the journal still
+        # holds this Point's PointAdded, and the replay has not run.
+        proj.g.query("MATCH (n) DETACH DELETE n")
+
+        # The residual, in one line: the door is told the Point is absent.
+        assert sdk.delete_point(pid) is False, (
+            "today the existence probe answers 'absent' during a rebuild "
+            "window, so the delete is reported as not-found — if this ever "
+            "answers True the residual is closed and both the xfail below and "
+            "the issue's residual paragraph must be revisited")
+
+        records = _journal_records(log_dir)
+        assert any(r.get("type") == "PointAdded" for r in records), (
+            "fixture precondition: the creation record must be in the journal "
+            "the replay will use")
+        assert not any(r.get("type") == "EntityMutated"
+                       and r.get("op") == "delete" and r.get("id") == pid
+                       for r in records), (
+            "the skipped delete must have recorded NOTHING — that absent "
+            "carrier is the residual: the replay cannot know the destruction "
+            "was asked for")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
 @pytest.mark.xfail(strict=True, reason=_EXISTENCE_PROBE_RESIDUAL)
 def test_a_rebuild_window_must_not_lose_a_delete_at_the_existence_probe(tmp_path):
     """RESIDUAL: deleting during a rebuild window is answered ``False``.
@@ -1212,10 +1289,12 @@ def test_a_rebuild_window_must_not_lose_a_delete_at_the_existence_probe(tmp_path
     exists and the caller asked for it to be destroyed.
 
     Measured today: ``delete_point`` answers ``False`` ("no such Point"), appends
-    no destruction record, and the replay then re-creates the Point LIVE. The
-    assertion below is the DESIRED end state, so this test fails today — and it
+    no destruction record, and the replay then re-creates the Point LIVE — the
+    plain test above pins those two facts. THIS test asserts only the DESIRED end
+    state, so it fails today with an ``AssertionError`` on ``get_point`` and
     XPASSes the moment the residual is closed, which is when the issue's residual
-    paragraph must be revisited.
+    paragraph must be revisited. Keep it assertion-only: anything that can raise
+    belongs in the plain half, or the strict xfail swallows it.
     """
     sdk, log_dir = _sdk_with_journal(tmp_path, "delprobe")
     try:
@@ -1275,8 +1354,6 @@ def test_a_journal_less_delete_must_survive_a_replay_of_the_creators_journal(tmp
             with contextlib.suppress(Exception):
                 s.close()
 
-
-# ── 6c. promote_point — the CAS promotion SET ────────────────────────────────
 
 # ── 6c. promote_point — the CAS promotion SET ────────────────────────────────
 
