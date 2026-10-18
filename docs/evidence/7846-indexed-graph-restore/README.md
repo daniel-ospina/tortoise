@@ -328,14 +328,18 @@ Raw stdout / raw engine output of the scripts above, from the runs quoted in thi
 | `crash-variant-noindex-42006.log` | control: no vector index → survived |
 | `crash-report-isolated-kept-42006.log` | the engine's own bug report for the crash |
 | `drop-first-42201-20000.log` | §3a: guard + raw + drop-first, 20 000 nodes, graph module 42201 |
+| `drop-first-42201-5000.log` | §3a at 5 000 nodes — the shape is not size-specific |
 
-⚠️ **Provenance, stated because it is not self-evident from the file.** The `drop-first-*.log`
-files are raw stdout of `drop_first.py`, which — unlike `verify-*.log` and `evict-cost-*.log`,
-whose first line is a self-describing `{"start": {label, port, redis_version, graph_module,
-…}}` record — prints NO engine header. The engine identity for those two files (`falkordb/falkordb:latest`,
-graph module 42201) is therefore **operator-asserted in this document and NOT recorded in the
-commit**; do not read the log itself as evidence for the image. Re-running
+⚠️ **Provenance, stated because it is not self-evident from the files.** The two
+`drop-first-*.log` files are raw stdout of `drop_first.py`, which prints NO engine header.
+The `verify-*.log` files do: their first line is a self-describing `{"start": {label, port,
+redis_version, graph_module, …}}` record. The `evict-cost-*.log` files carry the same record,
+but NOT on line 1 — it sits on line 5, under a four-line stderr `DeprecationWarning` — so read
+the record, do not assume its position.
+
+So the engine identity for the two `drop-first-*.log` files (`falkordb/falkordb:latest`, graph
+module 42201) is **operator-asserted in this document and NOT recorded in the commit**; do not
+read those logs as evidence for the image. Re-running
 `python docs/evidence/7846-indexed-graph-restore/drop_first.py <port> 20000` against a known
 image reproduces the arm from scratch.
 
-| `drop-first-42201-5000.log` | §3a at 5 000 nodes — the shape is not size-specific |

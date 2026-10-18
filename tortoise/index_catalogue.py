@@ -51,10 +51,15 @@ def catalogue_cell(row, index: int):
     index-bearing" for such a row rather than raise inside a caller that (in
     the repair sweep's case) is wrapped in a bare ``except Exception``.
 
-    PUBLIC because this is the repo's single catalogue-ROW reader, and a caller that
-    needs the row anyway must import it rather than copy it: one reader per row, so
-    ``graph_key_restore.py`` cannot drift from the others by reading the same row its own
-    way.
+    PUBLIC because this is the repo's single catalogue-row CELL ACCESSOR, and a caller that
+    needs the row anyway must import it rather than copy it: one accessor per row, so
+    ``graph_key_restore.py`` cannot drift on how a cell is read.
+
+    The ACCESSOR is the shared invariant — not the whole reader. ``graph_key_restore.py``
+    carries its own ``_properties_column_names`` for the ``properties`` column on purpose: a
+    binary-safe client hands a cell over as ``bytes``, and ``indexed_field_names`` renders
+    that as the repr (``b'[embedding]'``) rather than the name. Do not "align" the two — they
+    decode different shapes, for a stated reason.
     """
     try:
         return row[index]

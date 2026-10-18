@@ -152,12 +152,13 @@ is the one a caller should default to:
     ⚠️ WHAT THAT SEQUENCE COSTS, stated because the safe path is safer but not free. Between
     the ``DROP`` and the completion of the re-``CREATE``, OTHER graphs keep serving — that is
     the whole point — but THIS graph has NO vector index at all, so vector queries against it
-    return no neighbours (or an engine "no such index") for that window, which is minutes
-    rather than milliseconds at the sizes #7846 measures. And unless the caller passes
-    ``index_ready``, the return does NOT wait for the re-created index's build: the report
-    carries ``index_ready=None``, i.e. UNPROVEN, and the index may still be under construction
-    engine-side and answer PARTIAL neighbours. Pass an ``index_ready`` probe when the call
-    must mean "queryable" rather than "the statement was accepted".
+    return no neighbours (or an engine "no such index") for that window — measured in
+    SECONDS at the sizes #7846 measures, not milliseconds (0.60 s of index-bound restore at
+    5 000 nodes, 2.96 s at 20 000; a 90 000-node build measured 40.7 s). And unless the caller
+    passes ``index_ready``, the return does NOT wait for the re-created index's build: the
+    report carries ``index_ready=None``, i.e. UNPROVEN, and the index may still be under
+    construction engine-side and answer PARTIAL neighbours. Pass an ``index_ready`` probe when
+    the call must mean "queryable" rather than "the statement was accepted".
 
 Because the vector index travels INSIDE the graph key's serialized payload (measured —
 ``docs/evidence/7846-indexed-graph-restore/README.md`` §4a), the index must be off the
@@ -626,8 +627,12 @@ def _properties_column_names(row: Any) -> tuple[str, ...]:
         items = _list_items(_cell_text(cell))
     except ValueError:
         # A bare scalar rather than a list cell — a shape a differing engine may send. It
-        # names ONE property; anything more would be a guess.
-        return (_unquote_text(_cell_text(cell)).strip(),)
+        # names ONE property; anything more would be a guess. A BLANK cell names NOTHING:
+        # returning a phantom ('') made a RANGE-only graph REFUSE (the phantom is absent
+        # from the kinds map) while telling the caller a VECTOR index the catalogue never
+        # reported. `index_catalogue.indexed_field_names` also contributes nothing here.
+        name = _unquote_text(_cell_text(cell)).strip()
+        return (name,) if name else ()
     return tuple(_unquote_text(item).strip() for item in items if item.strip())
 
 
@@ -661,7 +666,12 @@ def vector_index_definitions(rows: Any, *, graph: str = "<graph>") -> tuple[Vect
         # SKIPPED as non-vector, and left `restore_graph_key` free to issue the
         # index-bearing RESTORE that blocks the instance — the exact P0 this module exists
         # to prevent.
-        indexed_names = list(_properties_column_names(row))
+        # De-duplicated, order preserved — as `index_catalogue.indexed_field_names`
+        # documents. A `properties` cell that repeats a name would otherwise yield two
+        # IDENTICAL definitions, so the second DROP raises on an engine that rejects the
+        # duplicate (the shape this module documents) and aborts the restore AFTER the
+        # index was dropped; `same_index_definitions` is set-based and could not catch it.
+        indexed_names = list(dict.fromkeys(_properties_column_names(row)))
         for kind_name in types_by_name:
             if kind_name not in indexed_names:
                 indexed_names.append(kind_name)
@@ -2219,6 +2229,23 @@ def _append_state_to_message(exc: BaseException, state: str) -> None:
     """
     if len(exc.args) == 1 and isinstance(exc.args[0], str):
         exc.args = (f"{exc.args[0]}\n{state}",)
+        return
+    # The OSError family (`ConnectionRefusedError`, `socket.gaierror`) is EXACTLY what a
+    # dead or unreachable engine raises — the failure this module calls "the process died"
+    # (#8270). Leaving that shape untouched re-opened the same note-only defect one level
+    # down. `OSError.__str__` renders `errno`/`strerror`, NOT `args`, so the attributes are
+    # what must move; `args` is kept in step for any reader that goes through it.
+    if isinstance(exc, OSError) and isinstance(exc.strerror, str):
+        exc.strerror = f"{exc.strerror}\n{state}"
+        if len(exc.args) >= 2:
+            exc.args = (exc.args[0], exc.strerror, *exc.args[2:])
+        return
+    if (
+        len(exc.args) >= 2
+        and isinstance(exc.args[0], int)
+        and isinstance(exc.args[1], str)
+    ):
+        exc.args = (exc.args[0], f"{exc.args[1]}\n{state}", *exc.args[2:])
 
 
 def _index_state_note(
@@ -2583,9 +2610,14 @@ def restore_graph_key_safe(
             )
             with contextlib.suppress(AttributeError):
                 exc.add_note(state)
-            # Something DID fail to re-create, so an index is missing: the loss belongs in
-            # the message, not only in the note (see _append_state_to_message).
-            _append_state_to_message(exc, state)
+            # Report the loss in the message, guarded on the MEASURED set exactly as the
+            # sibling arms are. `gone == []` means the catalogue proves every definition is
+            # PRESENT — reachable when a CREATE takes effect engine-side and still raises —
+            # so there is no loss to announce and the appended text would carry no
+            # "NOT re-created" line while telling the caller to fix an index it also
+            # reports as re-created. `gone is None` (unverified) must still be reported.
+            if gone is None or gone:
+                _append_state_to_message(exc, state)
             raise exc
         recreated = True
         try:

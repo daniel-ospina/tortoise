@@ -45,6 +45,7 @@ from tortoise.graph_key_restore import (
     IndexedGraphRestoreRefused,
     IndexRestoreMismatchError,
     IndexRestoreUnverifiedError,
+    _append_state_to_message,
     restore_graph_key,
     restore_graph_key_safe,
     same_index_definitions,
@@ -790,6 +791,62 @@ def test_the_missing_index_is_in_the_MESSAGE_not_only_in_the_note() -> None:
     # ... and the note is still there for the traceback reader.
     assert "NOT re-created" in " ".join(getattr(raised.value, "__notes__", [])), (
         "the note stopped being attached; keep both, the message AND the note"
+    )
+
+
+def test_the_state_reaches_str_for_an_OSError_too() -> None:
+    """#8965 review: the OSError family was the note-only hole one level down.
+
+    ``ConnectionRefusedError``/``socket.gaierror`` is exactly what a DEAD or unreachable
+    engine raises — the failure this module calls "the process died" (#8270) — and
+    ``OSError.__str__`` renders ``errno``/``strerror`` rather than ``args``, so a guard keyed
+    on ``args`` alone silently did nothing for the failure mode that matters most.
+    """
+    for exc in (
+        OSError(111, "Connection refused"),
+        ConnectionRefusedError(111, "Connection refused"),
+        ValueError("plain message"),
+    ):
+        _append_state_to_message(exc, "the index is MISSING")
+        assert "the index is MISSING" in str(exc), (
+            f"{type(exc).__name__} still carries the loss only in __notes__: {str(exc)!r}"
+        )
+
+    errno_exc = OSError(111, "Connection refused")
+    _append_state_to_message(errno_exc, "state")
+    assert errno_exc.errno == 111, (
+        "errno must survive, or the caller loses the `[Errno 111]` the state was appended to"
+    )
+
+
+def test_a_blank_properties_cell_names_NO_property_and_a_repeat_names_ONE() -> None:
+    """Two edge cases in the both-columns union (#8965 review).
+
+    A BLANK ``properties`` cell must contribute NO name: returning a phantom ``('')`` made a
+    RANGE-only graph REFUSE (the phantom is absent from the kinds map) while telling the
+    caller about a VECTOR index the catalogue never reported — the non-vector skip this
+    module documents, defeated by an empty cell.
+
+    A cell that REPEATS a name must collapse to ONE definition: two identical definitions
+    would issue the same DROP twice, which the engine refuses (a shape this module documents),
+    aborting the restore AFTER the index was already dropped. ``same_index_definitions`` is
+    set-based, so the read-back could not catch it either.
+    """
+    for cell in ("", " ", b""):
+        rows = [["Point", cell, "{age: [RANGE]}", "{}", "english", "[]", "NODE",
+                 "OPERATIONAL", "{}"]]
+        assert vector_index_definitions(rows, graph="g") == (), (
+            f"a blank properties cell ({cell!r}) was read as a PROPERTY, so a non-vector "
+            f"graph was refused for an index the catalogue never reported"
+        )
+
+    repeated = [["Point", "[embedding, embedding]", "{embedding: [VECTOR]}",
+                 "{embedding: {dimension: 384}}", "english", "[]", "NODE",
+                 "OPERATIONAL", "{}"]]
+    definitions = vector_index_definitions(repeated, graph="g")
+    assert len(definitions) == 1, (
+        f"a repeated property yielded {len(definitions)} identical definitions, so the "
+        f"same index is dropped twice and the second DROP aborts the restore: {definitions}"
     )
 
 
