@@ -520,7 +520,10 @@ the process restarts), when the response cannot be read as a summary, when any
 org `failed` to reconcile, when any org is `unrepaired`, or when any `drift` row
 went `up`. The `enumeration_incomplete` body carries a `reason` naming which leg
 refused (a partial page, a lower-bound page, or a missing enumeration seam) —
-all three are structural, so retrying alone does not repair them; the
+the lower-bound and missing-seam legs are structural, so retrying does not
+repair them, while a partial page is usually a row inserted or deleted MID-WALK
+and certifies on the next run, so retry that leg once before treating it as
+structural; the
 `reconcile_stuck` body carries `status` + `detail` and NO `reason`. A control
 plane OUTAGE is a different path: `query_all` raises a bare `RuntimeError` the
 endpoint does not catch, so it arrives as an unnamed 500 with no reason at all.

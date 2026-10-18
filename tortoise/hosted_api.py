@@ -36979,9 +36979,13 @@ async def billing_reconcile(request: Request):
             return JSONResponse(
                 status_code=503,
                 content={"status": "enumeration_incomplete",
-                         # The refusal has several STRUCTURAL legs (a partial
-                         # page, a LOWER-BOUND page, a missing enumeration
-                         # seam) and a fixed detail string threw that away. The
+                         # The refusal has three legs (a partial page, a
+                         # LOWER-BOUND page, a missing enumeration seam) and a
+                         # fixed detail string threw the distinction away. ⛔ Do
+                         # not flatten them the other way either: the
+                         # LOWER-BOUND and missing-seam legs are STRUCTURAL,
+                         # while a PARTIAL page is usually a row inserted or
+                         # deleted mid-walk and certifies on the next walk. The
                          # leg is carried as the redacted exception text —
                          # ``redact_error`` prepends the class name and
                          # truncates, so a distinguishing tail must come early

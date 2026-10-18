@@ -27,11 +27,15 @@ name: billing-reconcile-cron
 #     named 503 statuses (plus an UNRECOGNISED fallback arm):
 #       - `enumeration_incomplete`: the pass could not certify the WHOLE fleet,
 #         so it compared an unknown fraction of it and refuses to report that as
-#         clean. ALL THREE raise sites are STRUCTURAL — a partial page, a
-#         LOWER-BOUND page (`the enumeration is a LOWER BOUND`), or a missing
+#         clean. The THREE raise sites are a partial page, a LOWER-BOUND page
+#         (`the enumeration is a LOWER BOUND`), or a missing
 #         `query_all`/`query_with_total` seam (`exposes neither query_all nor
-#         query_with_total`) — so blind
-#         retrying does not repair them; the body's `reason` names the leg. (A
+#         query_with_total`). ⛔ They do NOT share one remedy: the LOWER-BOUND
+#         and missing-seam legs are STRUCTURAL (retrying does not help), while
+#         a PARTIAL page is usually CONCURRENT MUTATION — a row inserted or
+#         deleted mid-walk — and certifies on the next walk, so retry ONCE
+#         before treating it as structural. The body's `reason` names the leg.
+#         (A
 #         control-plane OUTAGE is a different path entirely: `query_all` raises a
 #         bare RuntimeError, which this endpoint does not catch, so it arrives as
 #         an unnamed 500 whose body is the app's generic
@@ -162,7 +166,7 @@ jobs:
               -e 's/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/<org-id>/g' \
               -e 's/(^|[^0-9A-Za-z])[0-9a-f]{10,13}-[0-9a-f]{12}([^0-9A-Za-z]|$)/\1<org-id>\2/g' \
               -e 's/(^|[^0-9A-Za-z])[0-9a-f]{26}([^0-9A-Za-z]|$)/\1<org-id>\2/g' \
-              -e 's/(cus|sub)_[A-Za-z0-9]{6,}/<stripe-id>/g'
+              -e 's/(^|[^0-9A-Za-z])(cus|sub)_[A-Za-z0-9]{6,}([^0-9A-Za-z_]|$)/\1<stripe-id>\3/g'
           }
           redact_stream() {
             # APPLIED TWICE on purpose. The boundary classes consume their own
@@ -235,7 +239,7 @@ jobs:
                 echo "::error::billing reconcile is STUCK (HTTP 503 reconcile_stuck) — a previous pass has held the lock past the staleness bound and is presumed wedged. The fleet is NOT being reconciled, and the lock clears only when that pass ends or the process restarts; retrying will NOT help."
                 ;;
               enumeration_incomplete)
-                echo "::error::billing reconcile could not certify the fleet enumeration (HTTP 503 enumeration_incomplete) — the pass compared an unknown fraction of the fleet; nothing to repair. The body's reason names the leg (a partial page, a LOWER-BOUND page, or a MISSING enumeration seam) — ALL are structural, so retrying alone does not fix them."
+                echo "::error::billing reconcile could not certify the fleet enumeration (HTTP 503 enumeration_incomplete) — the pass compared an unknown fraction of the fleet; nothing to repair. The body's reason names the leg: a LOWER-BOUND page or a MISSING enumeration seam is STRUCTURAL (retrying will not help), while a PARTIAL page is usually a row changed mid-walk and certifies on the next run — retry that leg ONCE, then treat it as structural."
                 ;;
               *)
                 # Do NOT guess. Claiming a cause we did not read is the same

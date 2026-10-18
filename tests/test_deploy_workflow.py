@@ -1503,6 +1503,56 @@ class TestBillingReconcileDriverVerdicts:
             f"{expected} — {why}\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
         )
 
+    def test_the_shell_and_python_redactors_agree_on_one_corpus(self):
+        """#8904 review round 7: two redactors, one rule — or they drift.
+
+        The driver redacts the body in shell; the endpoint redacts the summary in
+        python. A shell rule without the python one's trailing boundary guard
+        ate the prefix of ordinary prose (``cus_balance_units`` became
+        ``<stripe-id>_units``) inside the very text ``show_body`` exists to make
+        readable — and nothing noticed, because only the python side was tested.
+        """
+        import subprocess
+
+        from tortoise import billing as bl
+
+        corpus = [
+            # ordinary prose that only LOOKS like an id
+            "cus_balance_units sub_balance_reported",
+            # real ids, bare and inside provider prose
+            "x cus_abc123def y sub_xyz789ghi z",
+            "stripe GET customers/cus_9f8e7d6c5b4a/subscriptions -> 404",
+            "no such customer: 'cus_9f8e7d6c5b4a'",
+        ]
+        script = _billing_steps()["Run billing reconcile pass"]["run"]
+        redactor = script[script.index("redact_once() {"):script.index("show_body() {")]
+        harness = (redactor +
+                   '\nwhile IFS= read -r line; do printf "%s\\n" "$line" '
+                   '| redact_stream; done\n')
+        proc = subprocess.run(
+            ["bash", "-c", harness], input="\n".join(corpus) + "\n",
+            capture_output=True, text=True, timeout=60)
+        assert proc.returncode == 0, proc.stderr
+        shell_lines = proc.stdout.splitlines()
+        assert len(shell_lines) == len(corpus), (
+            f"the shell redactor changed the line count:\n{proc.stdout}")
+
+        for line, shell_out in zip(corpus, shell_lines, strict=True):
+            py_out = bl._scrub_secrets(line)
+            if "_balance_" in line:
+                # Both sides must leave ordinary prose ALONE.
+                assert py_out == line, (
+                    f"the python redactor mangled prose: {line!r} -> {py_out!r}")
+                assert shell_out == line, (
+                    "the shell redactor mangled ordinary prose the python one "
+                    f"leaves intact: {line!r} -> {shell_out!r}")
+                continue
+            # Both sides must remove every real id.
+            for fragment in ("cus_abc123def", "cus_9f8e7d6c5b4a",
+                             "sub_xyz789ghi"):
+                assert fragment not in py_out, (fragment, py_out)
+                assert fragment not in shell_out, (fragment, shell_out)
+
     def test_an_unrecognised_503_cannot_forge_a_workflow_command(self):
         """#8904 review round 4: ``status`` is REMOTE data in a PUBLIC log.
 

@@ -57,7 +57,27 @@ _ACTIVE_STATUSES = ("active", "trialing", "past_due")
 #: org that re-subscribes gets a NEW active subscription while the old one sits
 #: at ``past_due``, which is exactly the stale pointer the fleet cadence exists
 #: to follow. Reusing one tuple for both questions left that org capped.
+#: ⛔ ``active`` alone is still not enough: a subscription cancelled AT PERIOD
+#: END stays ``active`` until the period runs out, so an org that cancels and
+#: resubscribes inside that window holds an ACTIVE pointer to the OLD (higher-
+#: priced, soon-dead) subscription. Pointer freshness is the tuple AND
+#: ``not cancel_at_period_end`` — see ``_stored_pointer_is_current``.
 _POINTER_CURRENT_STATUSES = ("active", "trialing")
+
+
+def _stored_pointer_is_current(sub: dict) -> bool:
+    """Is the STORED subscription still the customer's CURRENT entitlement?
+
+    A status check alone is not: ``active`` with ``cancel_at_period_end`` means
+    the subscription still runs but is already ENDING, and the customer may
+    hold a newer one that ``checkout.session.completed`` never told us about
+    (this whole cadence exists for the missed-event case). Such a pointer must
+    be checked against the customer, not trusted. When the customer holds no
+    newer subscription the LIST returns this same one, so the mirroring outcome
+    is unchanged — the cost is one extra call on a rare row.
+    """
+    return (sub.get("status") in _POINTER_CURRENT_STATUSES
+            and not sub.get("cancel_at_period_end"))
 
 
 def _select_current_subscription(subs):
@@ -70,11 +90,22 @@ def _select_current_subscription(subs):
     one and re-capped the org at the OLD tier. Prefer a live subscription, and
     fall back to a ``past_due`` one only when no live one exists (enforcement
     still applies to a failing card).
+
+    ⛔ And within the live ones, a subscription that is already ENDING
+    (``cancel_at_period_end``) LOSES to one that is not: the ending sub is the
+    old, soon-dead pointer, and taking it because Stripe listed it first is the
+    same ordering bug one level down. A customer whose ONLY live subscriber is
+    an ending one still gets it — that is a real cancellation, not a gap.
     """
-    for statuses in (_POINTER_CURRENT_STATUSES, _ACTIVE_STATUSES):
-        for sub in subs:
-            if sub.get("status") in statuses:
-                return sub
+    live = [s for s in subs if s.get("status") in _POINTER_CURRENT_STATUSES]
+    for sub in live:
+        if not sub.get("cancel_at_period_end"):
+            return sub
+    if live:
+        return live[0]
+    for sub in subs:
+        if sub.get("status") in _ACTIVE_STATUSES:
+            return sub
     return None
 
 
@@ -776,22 +807,30 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> dict:
     """Best-effort mirror repair from Stripe (boot reconcile, Task 8).
 
     - Org has ``subscription_id`` and it is ACTIVE → GET subscription → mirror.
-    - Org has ``subscription_id`` but it is INACTIVE → LIST the customer's
-      subscriptions → prefer a LIVE one (``active``/``trialing``) and fall back
-      to a ``past_due`` one — never simply the first match, which let
-      ``past_due`` win on Stripe's ordering — → mirror (this also rewrites the
-      stale pointer). With neither, mirror the stored one — a real
-      cancellation, which must still downgrade. ⛔ If the LIST itself FAILS,
-      none of that applies: the org is returned as ``action: "noop"`` and left
-      alone (a provider error is not a verdict — mirroring the stored one there
-      would re-cap a paying org, which is the bug this branch exists to fix).
-      An org with no ``stripe_customer_id`` cannot LIST at all, so the stored
-      subscription is mirrored on its status alone.
+      ⛔ "ACTIVE" means ``active``/``trialing`` AND not already ENDING: a
+      ``cancel_at_period_end`` subscription still runs, but the customer may
+      hold a newer one that a missed event never recorded, so it is checked
+      against the customer like the inactive case below. When no newer
+      subscription exists the LIST returns this same one, so the outcome is
+      unchanged — the cost is one extra call on a rare row.
+    - Org has ``subscription_id`` but it is INACTIVE or ENDING → LIST the
+      customer's subscriptions → prefer a LIVE one (``active``/``trialing``),
+      and within those prefer one that is NOT ending; fall back to a
+      ``past_due`` one only when no live one exists — never simply the first
+      match, which let ``past_due`` (or the ending pointer) win on Stripe's
+      ordering — → mirror (this also rewrites the stale pointer). With neither,
+      mirror the stored one — a real cancellation, which must still downgrade.
+      ⛔ If the LIST itself FAILS, none of that applies: the org is returned as
+      ``action: "noop"`` and left alone (a provider error is not a verdict —
+      mirroring the stored one there would re-cap a paying org, which is the
+      bug this branch exists to fix). An org with no ``stripe_customer_id``
+      cannot LIST at all, so the stored subscription is mirrored on its status
+      alone.
     - elif Org has ``stripe_customer_id`` only (missed checkout event blind
-      spot) → LIST subscriptions → the same live-then-``past_due`` preference →
-      mirror. A failed LIST is a ``noop`` here too, for the same reason: the
-      population is dominated by abandoned checkouts, and one 5xx must not turn
-      a routine row into a FAILED pass that pages.
+      spot) → LIST subscriptions → the same live-then-``past_due`` preference,
+      ending subs last → mirror. A failed LIST is a ``noop`` here too, for the
+      same reason: the population is dominated by abandoned checkouts, and one
+      5xx must not turn a routine row into a FAILED pass that pages.
     - else no-op.
 
     #4726: the identifiers are read from the SAME store ``mirror_subscription``
@@ -841,7 +880,7 @@ def reconcile_org(sdk, org_id: str, force: bool = False) -> dict:
         # rewrites ``subscription_id``, so the pointer heals), and fall back to
         # the stored one only when there is none — a real cancellation, which
         # must still downgrade.
-        if sub.get("status") in _POINTER_CURRENT_STATUSES or not customer_id:
+        if _stored_pointer_is_current(sub) or not customer_id:
             summary = mirror_subscription(sdk, org_id, sub)  # gates tier on status
             return {"org_id": org_id, "action": "mirror_subscription", **summary}
         try:

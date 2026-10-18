@@ -462,6 +462,49 @@ class TestApplyLimitsAndReconcile:
         assert t["subscription_id"] == "sub_new"   # stale pointer repaired
         assert t["subscription_status"] == "active"
 
+    def test_reconcile_an_active_but_ENDING_pointer_follows_the_newer_sub(
+            self, monkeypatch, stripe_env, billing_sdk):
+        """#8904 review round 7: ``active`` is not proof the pointer is CURRENT.
+
+        A cancel-at-period-end leaves the subscription ``active`` until the
+        period runs out. An org that cancels and resubscribes inside that
+        window holds an ACTIVE pointer to the OLD, soon-dead subscription — and
+        if ``checkout.session.completed`` was missed (the premise of this whole
+        cadence), the status check alone calls that pointer current, never
+        consults the customer, keeps the OLD tier while the org pays for the
+        new one, and records the row ``unchanged`` on a green pass.
+
+        An ENDING subscription is a pointer to CHECK, not a fact. When the
+        customer holds no newer one the LIST returns this same subscription, so
+        the mirroring outcome is unchanged.
+        """
+        sdk = billing_sdk
+        team = sdk.org_create("ending-pointer")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_old', "
+            "t.stripe_customer_id='cus_1', t.tier='solo'",
+            params={"id": team["id"]},
+        )
+        ending = {"id": "sub_old", "status": "active",
+                  "cancel_at_period_end": True, "current_period_end": 9999,
+                  "items": {"data": [{"price": {"id": "price_100soloM"}}]}}
+        newer = {"id": "sub_new", "status": "active",
+                 "cancel_at_period_end": False, "current_period_end": 19999,
+                 "items": {"data": [{"price": {"id": "price_300teamM"}}]}}
+        monkeypatch.setattr(billing.StripeClient, "get_subscription",
+                            lambda self, sid: dict(ending))
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [ending, newer])
+        out = reconcile_org(sdk, team["id"])
+        t = sdk.org_get(team["id"])
+        assert out["action"] == "mirror_customer_first_active", (
+            "an ENDING subscription is not a current pointer, so the customer "
+            f"must be consulted — got {out}")
+        assert t["tier"] == "team", (
+            "the org pays for Team; mirroring the ending Solo sub leaves it "
+            f"capped at {t['tier']!r}")
+        assert t["subscription_id"] == "sub_new"
+
     def test_reconcile_real_cancellation_still_downgrades(
             self, monkeypatch, stripe_env, billing_sdk):
         """#8895 P1 guard: the customer-level fallback must NOT keep a canceled
@@ -2890,13 +2933,13 @@ class TestReconcileSweep:
             headers={"Authorization": "Bearer internal-test-key"})
         assert r.status_code == 503, r.text
         assert r.json()["status"] == "enumeration_incomplete"
-        # The refusal has SEVERAL legs and NONE of them clears on retry: a
-        # partial page, a lower-bound page, and a missing enumeration seam are
-        # all structural. (A control-plane OUTAGE is a different path —
-        # `query_all` raises a bare RuntimeError, which the endpoint does not
-        # catch, so it arrives as a 500 and never reaches this arm.) A fixed
-        # detail string threw the distinction away and sent every operator down
-        # the retry path, so the leg must be carried.
+        # The refusal has SEVERAL legs and they do NOT share one remedy: a
+        # lower-bound page and a missing enumeration seam are structural, while
+        # a partial page is usually a row changed mid-walk and certifies on the
+        # next run. (A control-plane OUTAGE is a different path — `query_all`
+        # raises a bare RuntimeError, which the endpoint does not catch, so it
+        # arrives as a 500 and never reaches this arm.) A fixed detail string
+        # threw the distinction away, so the leg must be carried.
         assert "CERTIFIED complete" in r.json().get("reason", ""), r.text
 
 
