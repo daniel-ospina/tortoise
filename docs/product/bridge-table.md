@@ -400,34 +400,40 @@ same rows, not a correction of it.
   of that row, so the row supports it (one of several successors).
 - **`refuted`** — an approved row (or a successor of one) covers this target and does
   **not** absorb this method: the approved doc places the method elsewhere.
-- **`unstated`** — the approved doc names no row for this target, so it neither supports
-  nor refutes it. A row resting only on `unstated` is genuinely owner-open.
+- **`rehomed`** — the approved doc **does** absorb this method, but into a different row
+  than this map's destination, and it never names the destination at all. Read with
+  `refuted`: the two approved docs disagree. It is NOT `unstated` — the `Approved home`
+  cell and the quoted row below name the method, so the approved menu does answer it.
+- **`unstated`** — the approved doc names neither this target nor any row that absorbs
+  this method, so it neither supports nor refutes it. A row resting only on `unstated` is
+  genuinely owner-open.
 
-The membership set is the doc's OWN closure, parsed from its statement that
-`paginated_query` and `query_points_by_tag` `sit inside` `query` — a name it collapses
-without listing still resolves.
+The membership set is the doc's OWN closure, parsed from its statements that
+`paginated_query` and `query_points_by_tag` `sit inside` `query`, and that
+`index_sessions` and `ingest_corpus` `sit inside` `index_files` — a name it collapses
+without listing still resolves, and a closure the parse drops fails the build.
 
 | Row | Map destination | Approved home | Home's beta successors | Map destination reads | Citation rivals read |
 |---|---|---|---|---|---|
 | `tortoise_annotate_operator` | `adjust_relationship` | `adjust_relationship` (row 21) | *(none)* | **row** | `update_knowledge` — **refuted** |
 | `tortoise_assess_source` | `manage_source_trust` | `manage_source_trust` (row 14) | *(none)* | **row** | `list_knowledge` — **refuted** |
-| `tortoise_belief_timeline` | `check_confidence` | `recall_beliefs` (row 3) | *(none)* | **unstated** | `poll_events` — **refuted** |
+| `tortoise_belief_timeline` | `check_confidence` | `recall_beliefs` (row 3) | *(none)* | **rehomed** | `poll_events` — **refuted** |
 | `tortoise_get_source_reliability` | `list_knowledge` | `manage_source_trust` (row 14) | *(none)* | **refuted** | `manage_source_trust` — **row** |
 | `tortoise_invalidate` | `supersede_knowledge` | `revise_knowledge` (row 17) | `supersede_knowledge`, `update_knowledge` | **successor** | `update_knowledge` — **successor** |
 | `tortoise_mitigate_operator` | `adjust_relationship` | `adjust_relationship` (row 21) | *(none)* | **row** | `update_knowledge` — **refuted** |
 | `tortoise_paginated_query` | `search_knowledge` | `list_knowledge` (row 2) | *(none)* | **refuted** | `list_knowledge` — **row** |
-| `tortoise_provenance` | `check_confidence` | `recall_beliefs` (row 3) | *(none)* | **unstated** | `poll_events` — **refuted** |
+| `tortoise_provenance` | `check_confidence` | `recall_beliefs` (row 3) | *(none)* | **rehomed** | `poll_events` — **refuted** |
 | `tortoise_query` | `search_knowledge` | `list_knowledge` (row 2) | *(none)* | **refuted** | `list_knowledge` — **row** |
 | `tortoise_query_points_by_tag` | `search_knowledge` | `list_knowledge` (row 2) | *(none)* | **refuted** | `list_knowledge` — **row** |
-| `tortoise_session_context` | `check_confidence` | `recall_beliefs` (row 3) | *(none)* | **unstated** | `poll_events` — **refuted** |
+| `tortoise_session_context` | `check_confidence` | `recall_beliefs` (row 3) | *(none)* | **rehomed** | `poll_events` — **refuted** |
 | `tortoise_set_source_tier` | `manage_source_trust` | `manage_source_trust` (row 14) | *(none)* | **row** | `list_knowledge` — **refuted** |
 
 **5 of 12 disputed rows are placed by the approved menu where this
-map places them; 4 are placed ELSEWHERE by it; 3 are not
-named by it at all.** Every count is computed from the doc, not typed.
+map places them; 7 are placed ELSEWHERE by it; 0 are not
+covered by it at all.** Every count is computed from the doc, not typed.
 
-- **The approved menu contradicts the map on**: `tortoise_get_source_reliability`, `tortoise_paginated_query`, `tortoise_query`, `tortoise_query_points_by_tag` — two owner-approved docs disagreeing is an owner ruling, not a build step, so the destinations stand and the conflict is recorded here.
-- **The approved menu does not name the map's destination for**: `tortoise_belief_timeline`, `tortoise_provenance`, `tortoise_session_context` — the row is not refuted either; it rests on beta alone and is genuinely owner-open.
+- **The approved menu contradicts the map on**: `tortoise_get_source_reliability`, `tortoise_paginated_query`, `tortoise_query`, `tortoise_query_points_by_tag` — an approved row (or a successor of one) covers the map's destination and does **not** absorb the method. Two owner-approved docs disagreeing is an owner ruling, not a build step, so the destinations stand and the conflict is recorded here.
+- **The approved menu absorbs the method in a DIFFERENT row than the map's destination** (and never names that destination at all): `tortoise_belief_timeline`, `tortoise_provenance`, `tortoise_session_context` — the same disagreement as the sentence above, reached through a different door: the method is NOT unnamed, its approved home is in the table and the whole approved row is quoted below.
 
 **The approved row itself, for each disputed row that has one** (whole table row, by
 construction, so it cannot be a truncation of what the doc says):

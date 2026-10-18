@@ -1525,6 +1525,15 @@ def test_d4_records_the_two_4513_rows_that_were_open() -> None:
     assert "`recall_beliefs` (row 3)" in timeline[1], (
         f"§D4 does not name `belief_timeline`'s approved home: {timeline[1]!r}"
     )
+    # ...and its DESTINATION is a disagreement, not silence: the approved doc DOES absorb
+    # `belief_timeline` (row 3), it just never names the map's `check_confidence`. Reading
+    # that as `unstated` told the owner the row was "not named by" a menu whose quoted
+    # row, three lines below, names it — and it understated a contradiction it exists to
+    # disclose (#4513 review, P1).
+    assert timeline[3].strip("*") == "rehomed", (
+        "`belief_timeline` has an approved home (row 3) but not at the map's destination, so "
+        f"its destination is a DISAGREEMENT, not `unstated`: got {timeline[3]!r}"
+    )
 
     # Both claims are about the doc, so they are re-checked against the doc itself.
     assert (
@@ -1532,6 +1541,60 @@ def test_d4_records_the_two_4513_rows_that_were_open() -> None:
         "mitigate_operator |" in approved_doc
     )
     assert "| 8 | `poll_events` | events_poll |" in approved_doc
+
+
+def test_d4_never_calls_a_row_unnamed_while_naming_its_home() -> None:
+    """A row with an approved home must not be described as unnamed by the approved menu.
+
+    The generated section is the owner's evidence. A summary sentence that says the
+    approved menu "does not name" a row, printed under a table cell that names the row's
+    approved home and beside the quoted approved row, is self-contradicting evidence —
+    and it is the exact defect class §D4 exists to close (#8930 review, P1).
+    """
+    doc = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
+    section = _section(doc, "### D4 —")
+    rows = _d4_rows(doc)
+
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    approved = bt._approved_readings(
+        bt._approved_menu(), bt._citation_findings(bt._doc_citations())
+    )
+    homed = {a["tool"] for a in approved if a["homes"]}
+    assert homed, "no disputed row has an approved home — this test would be vacuous"
+
+    # Every row with a home renders that home in the table.
+    for tool in homed:
+        assert rows[tool][1].startswith("`"), (
+            f"§D4's `Approved home` cell for {tool} names no row: {rows[tool][1]!r}"
+        )
+
+    unnamed_sentences = [
+        line
+        for line in section.splitlines()
+        if "does not name" in line or "not named by it" in line or "names neither" in line
+    ]
+    for line in unnamed_sentences:
+        for tool in homed:
+            assert f"`{tool}`" not in line, (
+                f"§D4 says {tool} is unnamed by the approved menu, but the same section "
+                f"gives its approved home and quotes its row: {line!r}"
+            )
+
+    # The counts partition the rows: placed + elsewhere + silent == all of them.
+    m = re.search(
+        r"\*\*(\d+) of (\d+) disputed rows are placed by the approved menu where this\s*"
+        r"map places them; (\d+) are placed ELSEWHERE by it; (\d+) are not\s*"
+        r"covered by it at all\.\*\*",
+        section,
+    )
+    assert m, f"§D4's summary sentence is not in the rendered shape: {section[-2000:]!r}"
+    placed, total, elsewhere, silent = (int(g) for g in m.groups())
+    assert placed + elsewhere + silent == total == len(rows), (
+        f"§D4's counts ({placed}+{elsewhere}+{silent} vs {total}) do not partition the "
+        f"{len(rows)} rendered rows"
+    )
 
 
 def test_approved_menu_closure_comes_from_the_doc_not_a_copy(tmp_path, monkeypatch) -> None:
@@ -1557,7 +1620,25 @@ def test_approved_menu_closure_comes_from_the_doc_not_a_copy(tmp_path, monkeypat
         "`query` — the closure is not being applied"
     )
 
-    stripped = re.sub(r"[`\w,\s]+?sit inside `[a-z_]+`", "", real)
+    # ALL FOUR statements, not just the one whose phrase happens to be on one line: the
+    # doc line-wraps the fourth (`... ingest_corpus` sit\ninside `index_files`), so a
+    # literal-space match parsed three and left `index_files` without two members the doc
+    # gives it — silently, because nothing bounded the closure count (#8930 review, P2).
+    for member in ("index_sessions", "ingest_corpus"):
+        assert member in menu["index_files"]["members"], (
+            f"the doc says `{member}` sits inside `index_files`, and row 12 absorbs "
+            "`index_files` — the WRAPPED closure statement is not being parsed"
+        )
+    closures = bt._approved_closures(real)
+    assert len(closures) >= bt.APPROVED_MIN_CLOSURES, (
+        f"parsed {len(closures)} of the doc's {bt.APPROVED_MIN_CLOSURES} closure "
+        "statements — `get`, `overview`, `query` and the wrapped `index_files`"
+    )
+    assert not bt._approved_errors(*bt._approved_state()), (
+        "the real approved doc fails its own structural guards"
+    )
+
+    stripped = re.sub(r"[`\w,\s]+?sit\s+inside `[a-z_]+`", "", real)
     path = tmp_path / "approved-without-closure.md"
     path.write_text(stripped, encoding="utf-8")
     monkeypatch.setattr(bt, "APPROVED_DOC", path)
@@ -1565,6 +1646,9 @@ def test_approved_menu_closure_comes_from_the_doc_not_a_copy(tmp_path, monkeypat
     assert "query_points_by_tag" not in closed["list_knowledge"]["members"], (
         "the closure survived deleting the doc's own sentence — so it is hard-coded "
         "somewhere instead of parsed"
+    )
+    assert "index_sessions" not in closed["index_files"]["members"], (
+        "the wrapped closure survived deleting the doc's own sentence"
     )
 
 
@@ -1582,7 +1666,7 @@ def test_approved_menu_guards_fail_closed_on_a_parse_break(tmp_path, monkeypatch
     empty = tmp_path / "empty.md"
     empty.write_text("# nothing here\n", encoding="utf-8")
     monkeypatch.setattr(bt, "APPROVED_DOC", empty)
-    errs = bt._approved_errors(bt._approved_menu())
+    errs = bt._approved_errors(*bt._approved_state())
     assert errs and "UNARMED" in errs[0], f"an empty approved doc did not fail: {errs}"
 
     thin = tmp_path / "thin.md"
@@ -1591,19 +1675,127 @@ def test_approved_menu_guards_fail_closed_on_a_parse_break(tmp_path, monkeypatch
         encoding="utf-8",
     )
     monkeypatch.setattr(bt, "APPROVED_DOC", thin)
-    errs = bt._approved_errors(bt._approved_menu())
+    errs = bt._approved_errors(*bt._approved_state())
     assert errs and "silently dropping rows" in errs[0], (
         f"a truncated approved doc did not fail closed: {errs}"
     )
 
 
-def test_approved_verdict_is_mechanical_in_all_four_directions() -> None:
-    """`row` / `successor` / `refuted` / `unstated`, on a synthetic menu.
+def test_approved_menu_guard_fails_closed_when_a_closure_is_dropped(tmp_path, monkeypatch):
+    """A closure the doc DROPS must fail the build — the row bound cannot see it.
 
-    The four verdicts are the entire ruling-free content of §D4: `row` and `successor`
-    are support, `refuted` is the approved doc placing the method elsewhere, and
-    `unstated` is silence. Collapsing `refuted` into `unstated` would turn #4513 §2 back
-    into an open question, so each direction is pinned separately.
+    Deleting one of the doc's four `sit inside` statements leaves all 24 rows intact, so
+    `APPROVED_MIN_ROWS` stays green while every member that statement carried silently
+    disappears. The count is a separate guard for exactly that blind spot (#8930, P2):
+    a reflow the parse cannot read must fail, not narrow `members`.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    dropped = re.sub(r"`index_sessions` and `ingest_corpus` sit\s+inside `index_files`\.", "", real)
+    assert dropped != real, "the wrapped closure sentence is not in the doc — test is stale"
+    path = tmp_path / "approved-minus-one-closure.md"
+    path.write_text(dropped, encoding="utf-8")
+    monkeypatch.setattr(bt, "APPROVED_DOC", path)
+
+    menu, closures = bt._approved_state()
+    assert len(menu) >= bt.APPROVED_MIN_ROWS, (
+        "the row bound is what is being bypassed here — the doc must still parse its rows"
+    )
+    errs = bt._approved_errors(menu, closures)
+    assert errs and "transitive-closure" in errs[0], (
+        f"a dropped closure statement did not fail the build: {errs}"
+    )
+
+
+def test_approved_menu_successors_come_from_the_split_sentence_not_prose() -> None:
+    """A cell's PROSE must not mint membership: `dropped for X` is the opposite relation.
+
+    Row 23's cell reads "the seven `onboarding_*` — **OFF the MCP (settled
+    2026-09-22)**, dropped for `check_connection`", and a scan of every TARGET name in the
+    cell made `check_connection` a member of `run_onboarding` AND its only beta successor
+    — so the verdict for it read `successor`/`refuted` (the doc places it there) when the
+    doc says the container was dropped FOR it (#8930 review, P3).
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    menu = bt._approved_menu()
+    assert "check_connection" not in menu["run_onboarding"]["successors"], (
+        "`check_connection` was read as `run_onboarding`'s beta successor out of the "
+        f"replacement prose: {menu['run_onboarding']['successors']!r}"
+    )
+    assert (
+        bt._approved_verdict(menu, {"run_onboarding"}, "check_connection") != "successor"
+    ), "prose minted a successor relation the doc does not state"
+
+    # ...while the sentence that DOES state a split still yields its successors, and the
+    # closure still supplies row 12's members.
+    assert menu["revise_knowledge"]["successors"] == ["supersede_knowledge", "update_knowledge"], (
+        "the `splits this into` clause is the one place a successor is stated: "
+        f"{menu['revise_knowledge']['successors']!r}"
+    )
+
+
+def test_multi_home_row_quotes_every_home_and_never_says_none_absorbs() -> None:
+    """A method absorbed by SEVERAL approved rows must render all of them, not "none".
+
+    `home`/`quote` are the single-home convenience, so they are `None`/`""` for a
+    multi-home method. Branching the evidence list on the QUOTE therefore printed "no
+    approved row absorbs `x`" a few lines under a table cell that named several rows
+    absorbing it — two cells of one generated section asserting opposite things (#8930
+    review, P2). Latent today (every disputed row has exactly one home), and reachable the
+    moment the approved doc names one name in two rows.
+    """
+    sys.path.insert(0, str(ROOT))
+    import tools.bridge_table as bt
+
+    menu = {
+        "list_knowledge": {
+            "lineno": 2,
+            "members": {"list_knowledge", "query"},
+            "successors": [],
+            "quote": "| 2 | `list_knowledge` | query |",
+        },
+        "poll_events": {
+            "lineno": 8,
+            "members": {"poll_events", "query"},
+            "successors": ["check_connection"],
+            "quote": "| 8 | `poll_events` | query |",
+        },
+    }
+    findings = ([{"tool": "tortoise_query", "named": ["list_knowledge"]}], [], [])
+    readings = bt._approved_readings(menu, findings)
+    assert len(readings) == 1, readings
+    a = readings[0]
+    assert a["homes"] == ["list_knowledge", "poll_events"], a["homes"]
+    assert a["home"] is None and a["quote"] == "", "the single-home fields are the shape under test"
+    assert [h["row_no"] for h in a["homes_detail"]] == [2, 8], (
+        f"the multi-home row dropped a home's row number: {a['homes_detail']!r}"
+    )
+    assert a["successors"] == ["check_connection"], (
+        f"the multi-home row dropped a home's successors: {a['successors']!r}"
+    )
+
+    lines = "\n".join(bt._approved_evidence_lines(readings))
+    assert "no approved row absorbs" not in lines, (
+        f"the evidence list contradicts its own table cell: {lines!r}"
+    )
+    for home in ("`list_knowledge` (row 2)", "`poll_events` (row 8)"):
+        assert home in lines, f"the evidence list omits {home}: {lines!r}"
+    for quote in (menu["list_knowledge"]["quote"], menu["poll_events"]["quote"]):
+        assert quote in lines, f"the evidence list omits a home's quoted row: {lines!r}"
+
+
+def test_approved_verdict_is_mechanical_in_all_five_directions() -> None:
+    """`row` / `successor` / `refuted` / `rehomed` / `unstated`, on a synthetic menu.
+
+    The verdicts are the entire ruling-free content of §D4: `row` and `successor` are
+    support, `refuted` and `rehomed` are the approved doc placing the method elsewhere,
+    and `unstated` is silence. Collapsing `refuted` into `unstated` would turn #4513 §2
+    back into an open question; collapsing `rehomed` into `unstated` denies an approved
+    home the same section quotes. Each direction is pinned separately.
     """
     sys.path.insert(0, str(ROOT))
     from tools.bridge_table import _approved_verdict
@@ -1624,3 +1816,8 @@ def test_approved_verdict_is_mechanical_in_all_four_directions() -> None:
     assert _approved_verdict(menu, {"annotate_operator"}, "update_knowledge") == "refuted"
     assert _approved_verdict(menu, {"belief_timeline"}, "poll_events") == "refuted"
     assert _approved_verdict(menu, {"belief_timeline"}, "check_confidence") == "unstated"
+    # `rehomed`: the method HAS an approved home, the destination is a name the doc never
+    # uses. That is a disagreement reached through a different door, not silence — the
+    # difference is what stops an owner-facing row from denying its own quoted evidence.
+    assert _approved_verdict(menu, {"events_poll"}, "check_confidence") == "rehomed"
+    assert _approved_verdict(menu, {"invalidate"}, "refresh_confidence") == "rehomed"
