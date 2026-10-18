@@ -1800,6 +1800,21 @@ surfaces:
   # blanket-skips `contentHash` as "hash-gated"), not fail-before evidence —
   # do not count it among the pins that fail on the unfixed base.
   - test_source_rematerialisation_5024.py
+  # #8870 / #7362 (the ORDER half): every `:Source` writer that advances
+  # `(contentHash, version)` in one `SET` list must compute the ordinal BEFORE
+  # it writes the hash, and generally must not READ `s.contentHash` after
+  # WRITING it — on falkordb 6.x (the production backend) `SET` items apply
+  # left-to-right and each sees the earlier writes, so a hash-first list makes
+  # every hash-gated guard read the value the same clause just installed (the
+  # ordinal, `title`, `updatedAt`, `validFrom` and `_searchText` all freeze).
+  # The embedded engine (falkordblite) and falkordb-server v4.20.6 (the CI
+  # docker lane) read PRE-write values, so this defect is INVISIBLE to every
+  # behavioural pin in either lane — hence the pin asserts the order of the
+  # EMITTED Cypher (`_upsert_source`, `_materialize_connector_source`,
+  # `_upsert_document`), which fails on the pre-fix statements in EVERY lane.
+  # `core` is the arm that owns the change: `tortoise/projection/entities.py`
+  # selects `core`. ~5s (embedded, no embedding-model load).
+  - test_source_version_set_order_7362.py
   # #3644 (§4.6 *Versioning*, the WINDOW half): a version transition must OPEN
   # the new version's window and CLOSE the prior one in the same act —
   # `create_source` mints the window instant once (the same clock as

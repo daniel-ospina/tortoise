@@ -4216,15 +4216,30 @@ class _EntityHandlers:
             # and because the gate can only move the hash to a value it does
             # not already hold, running BOTH folds over one url cannot
             # double-bump (the second sees stored == $ch).
-            # ⛔ ORDER IS LOAD-BEARING (#8870): Cypher applies SET items LEFT TO
-            # RIGHT, and each item sees the values the EARLIER items just wrote.
-            # `version` must therefore be computed BEFORE `contentHash`, while
-            # `s.contentHash` still holds the STORED hash — otherwise the
-            # `s.contentHash <> $ch` test reads the hash this very clause just
-            # installed, is always false, and the version can never advance past
-            # its first value. Measured before this fix:
-            # `['sha-v2', 1]` where the pair should be `['sha-v2', 2]`
-            # (`tests/test_projection.py::test_document_version_counter_advances_with_the_hash`).
+            # ⛔ ORDER IS LOAD-BEARING (#8870, #7362 class). TWO ENGINES READ A
+            # `SET` LIST DIFFERENTLY and only ONE order is correct on BOTH:
+            #   * a SERVER engine (falkordb/falkordb:6.0.1 — the production
+            #     `TORTOISE_DB_URI` backend) applies the items LEFT TO RIGHT,
+            #     each item seeing what the EARLIER ones just wrote. Writing
+            #     `contentHash` first made this clause's own
+            #     `s.contentHash <> $ch` guard read the hash the clause had
+            #     just installed — always false — so the ordinal froze at its
+            #     first value (`['sha-v2', 1]`, measured).
+            #   * the EMBEDDED engine (falkordblite, the carve-out lane) and
+            #     falkordb-server v4.20.6 (the CI docker lane) evaluate every
+            #     right-hand side against the PRE-write record, so the order is
+            #     a no-op there — which is WHY a green CI lane was never
+            #     evidence about production. MEASURED 2026-10-18, same
+            #     statement + node: 6.0.1 gives `['sha2', 1]` (hash first) vs
+            #     `['sha2', 2]` (version first); v4.20.6 and embedded give 2
+            #     either way.
+            # `version` therefore goes FIRST — that one order is correct on
+            # both engines — and, generally, every SET item whose expression
+            # READS `s.contentHash` must precede the item that WRITES it
+            # (pinned order-only and engine-independently by
+            # `tests/test_source_version_set_order_7362.py`). Pinned
+            # behaviourally here by
+            # `test_document_version_counter_advances_with_the_hash`.
             "    s.version=CASE "
             "        WHEN $ch IS NULL OR $ch = '' THEN coalesce(s.version, 1) "
             "        WHEN s.contentHash IS NULL OR s.contentHash = '' "
@@ -4936,23 +4951,34 @@ class _EntityHandlers:
             # in the `SET`'s CASE pair: the WHERE is what makes an unchanged
             # re-poll a true no-op (nothing is written, nothing is dirtied), and
             # the CASE pair is what keeps the two columns moving together if the
-            # query is ever run without it. Both read the PRE-write
-            # `s.contentHash` — pinned by
-            # `test_a_content_changing_repoll_advances_the_hash_and_the_ordinal`.
+            # query is ever run without it. The WHERE is evaluated on the MATCH
+            # — always the PRE-write `s.contentHash`, on every engine. The SET's
+            # CASE pair is NOT: on a server engine (falkordb 6.x) the items
+            # apply left-to-right and each sees the earlier writes, so `version`
+            # MUST be written BEFORE `contentHash` (#7362 class, #8870); the
+            # embedded engine and falkordb-server v4.20.6 read pre-write values
+            # and are order-insensitive. MEASURED 2026-10-18 on 6.0.1: the
+            # `contentHash`-first order left the ordinal at 1 through EVERY
+            # content change (`['sha2', 1]`, expected 2) — the exact "the hash
+            # advances, the counter does not" defect the sibling document writer
+            # had, invisible in the embedded/v4.20.6 lanes. Pinned behaviourally
+            # by `test_a_content_changing_repoll_advances_the_hash_and_the_ordinal`
+            # and order-only (engine-independent) by
+            # `tests/test_source_version_set_order_7362.py`.
             self.g.query(
                 "MATCH (s:Source {url: $url}) "
                 "WHERE s.sourceKind IN $ck "
                 "  AND (s.contentHash IS NULL OR s.contentHash = '' "
                 "       OR s.contentHash <> $ch) "
-                "SET s.contentHash=CASE "
-                "        WHEN s.contentHash IS NULL OR s.contentHash = '' "
-                "             OR s.contentHash <> $ch THEN $ch "
-                "        ELSE s.contentHash END, "
-                "    s.version=CASE "
+                "SET s.version=CASE "
                 "        WHEN s.contentHash IS NULL OR s.contentHash = '' "
                 "             OR s.contentHash <> $ch "
                 "             THEN coalesce(s.version, 0) + 1 "
-                "        ELSE coalesce(s.version, 1) END",
+                "        ELSE coalesce(s.version, 1) END, "
+                "    s.contentHash=CASE "
+                "        WHEN s.contentHash IS NULL OR s.contentHash = '' "
+                "             OR s.contentHash <> $ch THEN $ch "
+                "        ELSE s.contentHash END",
                 params={"url": key, "ch": ch,
                         "ck": list(_CONNECTOR_SOURCE_KINDS)},
             )
@@ -5281,10 +5307,29 @@ class _EntityHandlers:
             # contentHash/references survive, version unchanged). Stubs
             # (NULL stored hash) are still COMPLETED by a real $hash, and the
             # hash-diff bump is unchanged for callers that DO carry a hash.
-            "ON MATCH SET s.contentHash = CASE WHEN $hash IS NULL THEN s.contentHash "
-            "                          WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
-            "                          THEN $hash ELSE s.contentHash END, "
-            "           s.title = CASE WHEN $hash IS NULL THEN s.title "
+            # ⛔ ORDER IS LOAD-BEARING (#8870/#7362). Every ON MATCH item whose
+            # expression READS `s.contentHash` — `title`, `version`,
+            # `updatedAt`, `validFrom`, `_searchText` — is written BEFORE the
+            # `s.contentHash` assignment, which is placed at the END of this
+            # list. On a SERVER engine (falkordb 6.x, the production
+            # `TORTOISE_DB_URI` backend) SET items apply LEFT TO RIGHT and each
+            # sees what the earlier ones just wrote, so a `contentHash`-first
+            # list made every one of those guards read the hash the SAME clause
+            # had just installed: the hash advanced while `version`, `title`,
+            # `updatedAt`, `validFrom` and `_searchText` all fell through to
+            # their preserve branch — the #7362 class ("the hash advances, the
+            # counter does not") on the very writer §4.6's `stale`/`current`
+            # anchor reads. MEASURED 2026-10-18 on falkordb/falkordb:6.0.1,
+            # h1→h2: `contentHash`-first left `version=1, title='t1'`; write
+            # last gives `version=2, title='T2'`. The embedded engine
+            # (falkordblite) and falkordb-server v4.20.6 evaluate every
+            # right-hand side against the PRE-write record, so the order is a
+            # NO-OP there and neither the carve-out lane nor the CI docker lane
+            # can see the defect — pinned order-only, engine-independently, by
+            # `tests/test_source_version_set_order_7362.py`; behaviourally by
+            # `test_a_rebuild_reproduces_the_source_field_for_field`
+            # (`version == 6` on the server engine).
+            "ON MATCH SET s.title = CASE WHEN $hash IS NULL THEN s.title "
             "                   WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
             "                   THEN coalesce($title, s.title) ELSE s.title END, "
             # Lane L5 (#5097 review P1): the bump is GATED ON THE SAME
@@ -5385,6 +5430,11 @@ class _EntityHandlers:
             # so the #900 T3 cycle-4 retitle-refresh semantics are unchanged.
             "                        THEN coalesce($st, s._searchText) "
             "                        ELSE s._searchText END, "
+            # ⛔ the WRITE of `s.contentHash` — LAST, after every reader of it in
+            # this ON MATCH list (see the ORDER note where the list starts).
+            "           s.contentHash = CASE WHEN $hash IS NULL THEN s.contentHash "
+            "                          WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
+            "                          THEN $hash ELSE s.contentHash END, "
             # D10 (§4.4/§9.5 Q3): `format` is a Source property now; a caller
             # supplying it must land on the node, overwriting an existing value
             # (parity with the old open-passthrough write it replaces).
