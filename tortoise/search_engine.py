@@ -2859,13 +2859,17 @@ def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
     #
     # `_is_claim` is the STRICT "is a claim" predicate — the form
     # `sdk._operator_scope_clauses` calls CANONICAL, carried by
-    # `_window_closure`'s direct-edge hop. NOT every sibling is strict:
-    # `_reachable_claim_count` (its anchor scan AND its edged scan) and
-    # `sdk._dedup_match_clauses` both carry a LENIENT form, under which an
-    # `op_type` node still counts as a claim. That fork is pre-existing and is
-    # not resolved here; this read takes the strict form because an operator is
-    # not a peer, and an operator's own typed edge `(op)-[:IMPL]->(claim)`
-    # would otherwise be reported as a relationship between claims.
+    # `_window_closure`'s direct-edge hop. The siblings differ, and none of it
+    # is resolved here: `_reachable_claim_count` (its anchor scan AND its edged
+    # scan) is lenient on BOTH arms, admitting an `op_type` node whether the
+    # flag is explicitly false or ABSENT; `sdk._dedup_match_clauses` /
+    # `_find_point_by_content` is lenient ONLY on the explicit-false hybrid —
+    # its second clause `op_type IS NULL OR is_operator = false` evaluates NULL
+    # for an ABSENT flag, so it agrees with this read on that arm (its docstring
+    # says the same: the `op_type` disjunct "excludes LEGACY operators"). This
+    # read takes the strict form because an operator is not a peer, and an
+    # operator's own typed edge `(op)-[:IMPL]->(claim)` would otherwise be
+    # reported as a relationship between claims.
     #
     # It is applied to THREE positions, and the third is a NARROWING, not a
     # refactor:
@@ -2879,10 +2883,11 @@ def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
     #                    Operator→operator is a CHAIN of single-endpoint
     #                    operators, which is R4 on #8996, not a peer relation.
     #                    So this read takes the STRICT answer to "is a hybrid a
-    #                    claim?" while `_dedup_match_clauses` takes the lenient
-    #                    one; the divergence is deliberate (dedupe must not drop
-    #                    a node it was asked about) and pinned per leg in
-    #                    `tests/test_expand_relationships_6976.py`.
+    #                    claim?" while `_find_point_by_content` takes the lenient
+    #                    one for the EXPLICIT-false shape only (they agree on the
+    #                    ABSENT-flag one); the divergence is deliberate (dedupe
+    #                    must not drop a node it was asked about) and pinned per
+    #                    leg in `tests/test_expand_relationships_6976.py`.
     #   leg 2 `other`  — the direct-edge peer half (above).
     #   leg 2 `n`      — the ANCHOR half, so what leg 2 reports really are
     #                    OPERATOR-LESS edges: otherwise, asked about an operator,

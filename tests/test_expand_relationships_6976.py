@@ -541,6 +541,37 @@ def test_one_malformed_status_row_costs_one_peer_not_all(sdk):
     )
 
 
+def test_non_scalar_related_id_does_not_fail_the_read(sdk):
+    """A list-valued ``other.id`` must cost one annotation, not the payload.
+
+    ``get_relationships``' dedupe key is deliberately TOTAL, so a row whose
+    ``other.id`` arrived as a replayed/diagnostic list is KEPT — that is the
+    point of rendering instead of skipping. It then reaches
+    ``expand_relationships`` as an entry with an unhashable ``related_id``, and
+    the status lookup (``statuses.get(...)``) raises TypeError out of a public
+    method AFTER the status sweep has logged that it kept everything. One peer's
+    annotation is the whole permitted cost (D1: a decoration never fails the
+    read); losing the payload is not.
+
+    Discriminating: with the lookup unguarded the call raises, so this reds.
+    """
+    hub = _point(sdk, "INCIDENT-57 with a corrupt neighbour id")
+    peer = _point(sdk, "a peer whose id is about to become a list")
+    sdk.create_operator("IMPL", hub, [peer])
+    _graph(sdk).query(
+        "MATCH (n:Point) WHERE n.id = $id SET n.id = ['bad-id']",
+        params={"id": peer},
+    )
+
+    entries = sdk.expand_relationships(hub)
+    assert entries, "the whole read was lost on a non-scalar related_id"
+    # The corrupt peer cannot match a status row, so its annotation is blank —
+    # but the ENTRY survives and the call returns.
+    corrupt = [e for e in entries if e["related_id"] == ["bad-id"]]
+    assert corrupt, f"the row with the list id was dropped: {entries!r}"
+    assert corrupt[0]["related_status"] == ""
+
+
 def test_one_failing_label_does_not_blank_every_related_status(sdk):
     """Same isolation for the ``related_status`` sweep in the SDK."""
     hub = _point(sdk, "INCIDENT-55 statuses through a flaky engine")

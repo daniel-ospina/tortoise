@@ -25589,7 +25589,19 @@ class TortoiseSDK:
                         "left blank, the rest are kept", exc_info=True)
                     continue
         for e in entries:
-            e["related_status"] = statuses.get(e.get("related_id"), "")
+            try:
+                e["related_status"] = statuses.get(e.get("related_id"), "")
+            except TypeError:
+                # A NON-SCALAR `related_id` is unhashable. It is in scope by
+                # design: `get_relationships`' dedupe key is deliberately total,
+                # so a row whose `other.id` came back as a replayed/diagnostic
+                # list is KEPT and reaches here. Blanking that one peer's
+                # annotation is the whole cost — a decoration must never fail the
+                # read (D1), which is what the per-row guard above promises and
+                # what an unguarded lookup here would have broken one line later
+                # (measured: `statuses.get(['bad-id'])` → TypeError, whole read
+                # lost AFTER the sweep had logged that it succeeded).
+                e["related_status"] = ""
         return entries
 
     # ── Point-in-time restore (E6 #1538, D6) ─────────────────────────
