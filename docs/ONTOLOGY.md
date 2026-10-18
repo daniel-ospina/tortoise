@@ -654,7 +654,20 @@ window, independent of when Tortoise learned it. Canonical pair:
 >   makes a zero-length window genuinely empty; evaluated as R2 of the #5362 plan),
 >   accept the closed ambiguity, or a third shape — tracked at **#7818**. Until it
 >   is decided, a shared boundary instant is a known property of the closed
->   reading, not a defect to be silently patched reader-by-reader.
+>   reading, not a defect to be silently patched reader-by-reader. The flip is
+>   **not a predicate-only change**, and the reason is measured rather
+>   than argued. `commit_schema.validate_validity_window` permits
+>   `validTo == validFrom` (#5374), so a zero-length `[t, t]` window is already
+>   persistable and this closed `_covers` covers exactly one instant: at `t` the
+>   read answers `status="found"` with the point as `valid_point` (measured,
+>   `sdk.py:25094`). Under `[vF, vT)` that window covers **no** instant and the
+>   same read answers `status="absent"` — the shape of honest absence — while
+>   #5361's `malformed` flag stays **silent**, because that detection is strictly
+>   inverted (`validTo < validFrom`, `sdk.py:25167`) and a zero-length window is
+>   not inverted. So a half-open `_covers` needs the well-formed-**empty** signal
+>   R2 names *together with* it, as a reply state of its own; the predicate alone
+>   would turn every already-persisted single-instant belief into a claim that was
+>   never true at any instant, with no way for a reader to tell.
 >
 **Per-end precision and the 3-state end (#2350, E-prec).** The window pair
 above carries an **additive** precision layer: `validFromPrecision` /

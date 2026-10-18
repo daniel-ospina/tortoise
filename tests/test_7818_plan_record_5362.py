@@ -64,3 +64,39 @@ def test_5362_plan_res_1_records_the_shipped_reply_contract() -> None:
     assert _STALE_OUT_OF_SCOPE not in plan, (
         "the #5362 plan still lists the `found`-omission as explicitly OUT of "
         "scope; #7818 fixed it, so the deferral is false")
+
+
+def test_5362_plan_r2_prices_the_half_open_flip() -> None:
+    """R2 carries the MEASURED cost of the flip, not only a re-verification appeal.
+
+    R2 is the row the owner weighs when answering §13 Q3 (schedule the half-open
+    representation as its own issue). Its first sentence used to price the flip
+    by appeal — "every window consumer must all be re-verified" — which reads as
+    an unbounded audit; measured, the flip reds exactly the tests that pin the
+    closed contract and nothing else, and what it actually needs is the
+    well-formed-empty marker it already names. The same cell also cited
+    ``_inverted`` at ``sdk.py:19221``, a line the #8337 rename left behind.
+
+    (1) *What value makes this test fail?*  The pre-measurement R2 row: no
+        "Measured flip cost" clause, no red/green counts, no zero-length
+        read-path shapes, and the stale `sdk.py:19221` citation — each of which
+        lets the owner price the flip on an unbounded-blast-radius assumption.
+    (2) *Does the test reach it?*  Yes — the row is sliced by its row key, so an
+        unrelated mention elsewhere in the plan cannot satisfy these anchors.
+    """
+    plan = PLAN.read_text(encoding="utf-8")
+    rows = [ln for ln in plan.splitlines() if ln.startswith("| **R2** |")]
+    assert len(rows) == 1, (
+        f"expected exactly one R2 row in the #5362 plan, found {len(rows)}")
+    row = rows[0]
+    assert "Measured flip cost" in row, (
+        "R2 must carry the measured cost of the flip (the owner weighs this row)")
+    assert "5 tests in 2 files" in row and (
+        "130 tests in 5 adjacent files stay green") in row, (
+        "R2 must record both halves of the measurement — the reds AND the "
+        "adjacent files that do not move")
+    assert "sdk.py:19221" not in row, (
+        "the R2 cell still cites `_inverted` at a line the #8337 rename "
+        "invalidated; the current definition is sdk.py:25167")
+    assert "well-formed-EMPTY" in row, (
+        "the priced flip names the marker it needs WITH it (R2's own terms)")
