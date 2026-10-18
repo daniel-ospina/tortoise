@@ -2010,7 +2010,8 @@ def test_a_live_status_only_promote_emits_no_point_revised(
     This fixture flips the node live AT the guarded ``SET``, so the statement IS
     issued, matches nothing, and the POST-write early return leaves before the
     tail emit; the PRE-write probe route (a point already live at entry) leaves
-    even earlier, with no statement issued at all. An earlier ``res.result_set``
+    even earlier, with no PROMOTE WRITE issued at all (the door's status /
+    label / validity READS still run). An earlier ``res.result_set``
     conjunct on that emit became unreachable-false once those early returns
     existed; this test pins the OBSERVABLE, so it holds whichever route produces
     the silence.
