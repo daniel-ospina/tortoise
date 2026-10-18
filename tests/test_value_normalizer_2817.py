@@ -275,9 +275,51 @@ def test_every_unicode_punctuation_or_space_separator_abstains():
     # away, not one word away (`nxt[0]`-only scanning typed a truncated prefix)
     "EUR 2½ million",
     "EUR 800 - million",
+    # the review-P1 forms: the vocabulary was a LIST of long spellings, so the
+    # ordinary financial ABBREVIATIONS fell through the alphabetical stop in
+    # ``_has_magnitude_word_after`` and the bare integer typed — a 10⁶/10⁹
+    # understatement (``R$ 800 mi`` → R$ 800.00). Each row is one spelling the
+    # corpus really uses, and the class invariant is asserted below.
+    "R$ 800 mi",
+    "R$ 800 bi",
+    "USD 800 mn",
+    "USD 800 mn.",
+    "EUR 800 mln",
+    "EUR 800 mlns",
+    "EUR 800 mns",
+    "EUR 800 mio",
+    "EUR 800 Mio.",
+    "USD 800 bln",
+    "USD 800 bill",
+    "EUR 800 mille",
+    "EUR 800 millions",
+    "EUR 3 millones",
+    "EUR 3 millón",
+    "USD 3 billions",
+    "EUR 800 thou",
 ])
 def test_magnitude_forms_never_type(source):
     dropped(source, "magnitude_word")
+
+
+_MAGNITUDE_ABBREVIATIONS = [
+    "mi", "bi", "mn", "mn.", "mln", "mns", "mlns", "mio", "Mio.",
+    "bln", "bio", "bill", "mille", "thou", "cr",
+    "million", "millions", "billions", "millón", "millones",
+]
+
+
+@pytest.mark.parametrize("word", _MAGNITUDE_ABBREVIATIONS, ids=repr)
+def test_a_magnitude_abbreviation_is_a_class_not_a_spelling(word):
+    """The magnitude guard is a CURATED list of spellings and cannot close the
+    class by construction — so the class is pinned over the standard
+    abbreviation FAMILIES (PT-BR ``mi``/``bi``, EU ``mn``/``Mio.``, EN
+    ``bln``) rather than over the spellings a single transcription happened to
+    remember. Mutation pin: dropping any entry from ``_MAGNITUDE_WORD`` types
+    that row's bare integer (800.00 for 800 million) and reds it."""
+    for template in ("EUR 800 {w}", "R$ 800 {w}", "USD 800 {w}"):
+        source = template.format(w=word)
+        dropped(source, "magnitude_word")
 
 
 @pytest.mark.parametrize("source", [
@@ -301,6 +343,18 @@ def test_a_neighbours_magnitude_word_does_not_abstain(source):
     ("0.5-2%", "not_money_percent"),
     ("EUR 12x", "not_money_multiplier"),
     ("12x", "not_money_multiplier"),
+    # the review-P2 forms: the guard read only the TOKEN, and ``_NUM`` accepts
+    # ``%``/``‰``/``x`` only when ATTACHED, so one space reopened the mode-3
+    # class — a ratio typed as 12.00 EUR. The same signal one word away is the
+    # same ratio (``percent``), and the no-candidate branch already treated a
+    # percent anywhere in the text as decisive, so this is one policy, not two.
+    ("EUR 12 %", "not_money_percent"),
+    ("EUR 12 ‰", "not_money_percent"),
+    ("EUR 12 percent", "not_money_percent"),
+    ("EUR 12 pct", "not_money_percent"),
+    ("the rate is EUR 800 %", "not_money_percent"),
+    ("EUR 12 x", "not_money_multiplier"),
+    ("EUR 800 x 2", "not_money_multiplier"),
 ])
 def test_percent_and_multiplier_are_not_money(source, reason):
     # design §4 puts the five valueKinds out of scope: a ratio is prose-only
@@ -424,6 +478,12 @@ _BOUND_PHRASE_CASES = [
     "or less", "or more", "or so", "or above", "or higher",
     "or greater", "and up", "and above", "and more", "and higher",
     "and greater", "post-money", "pre-money", "plus", "ish",
+    # the review-P1 forms: the tuple carried the ``or``/``and`` compounds but
+    # not the STANDALONE comparatives, so ``above EUR 800`` printed the
+    # threshold as an exact amount; and ``_RANGE_FILLER`` knew ``some``/
+    # ``maybe``/``perhaps`` while this tuple did not — the same one-vocabulary
+    # inconsistency the cycle-5/6 fixes were about, one pair of tuples over.
+    "above", "below", "some", "maybe", "perhaps",
     # a word BROKEN ACROSS A LINE is how an extract delivers it — the tuple's
     # wrap-tolerant spelling must be pinned, or a transcription can drop it and
     # type the bound as exact (cycle 6 P1: `roug hly EUR 800` → 800.00)
@@ -564,12 +624,38 @@ def test_a_range_connector_is_found_after_the_amount_in_either_order(
     "EUR -800",
     # the cycle-2 P1 forms: the sign is separated from the number
     "- 800 EUR", "\u2212 800 EUR", "( 800 EUR)", "pilot - 800 EUR",
+    # the review-P1 forms: the SAME sign, one token further out. The
+    # anchor-last branch already tolerated whitespace, the anchor-first branch
+    # looked at exactly one character — so ``- 800 EUR`` abstained while
+    # ``- EUR 800``, the same sentence reordered, typed +800.00. Two word
+    # orders of one sentence cannot have opposite policies.
+    "- EUR 800",
+    "\u2212 EUR 800",
+    "( EUR 800)",
+    "-  EUR 800",
+    "the delta was - EUR 800 last quarter",
 ])
 def test_a_signed_amount_is_not_typed_positive(source):
     """A sign convention is not defined by the design (§3's register), and
     typing ``-EUR 800`` as +800.00 is the worst false type available — so an
-    adjacent sign abstains (review P1)."""
+    adjacent sign abstains (review P1), in EITHER word order."""
     dropped(source, "signed_amount")
+
+
+@pytest.mark.parametrize("sign", ["-", "\u2212", "("])
+@pytest.mark.parametrize("gap", ["", " "])
+@pytest.mark.parametrize("form", ["EUR 800", "800 EUR"])
+def test_a_sign_is_read_the_same_in_both_word_orders(sign, gap, form):
+    """The sign probe is one predicate for both branches, so neither the gap
+    between the sign and the anchored form nor the word order can decide the
+    reading: ``-  EUR 800`` and ``-  800 EUR`` are the same negation.
+
+    Mutation pin: restoring the one-character lookbehind on the anchor-first
+    branch types every row whose ``form`` starts with the currency (800.00 for
+    a negative) and reds those rows only — which is exactly the asymmetry this
+    pins.
+    """
+    dropped(f"{sign}{gap}{form}", "signed_amount")
 
 
 @pytest.mark.parametrize("source", [
@@ -601,8 +687,17 @@ def test_a_date_adjacent_to_the_amount_is_not_read_as_one():
 
 def test_a_date_range_is_not_an_amount_range():
     """A dated sentence still types its amount — the range check runs on the
-    text with ISO dates removed, so `2026-01-01 to 2026-03-31` is not a range."""
-    props = typed("EUR 800 committed between 2026-01-01 to 2026-03-31")
+    text with ISO dates removed, so `2026-01-01 to 2026-03-31` is not a range.
+
+    ⛔ The sentence has to PUT the date range where the guard would read it
+    (review finding: the previous wording, ``EUR 800 committed between
+    2026-01-01 to 2026-03-31``, passed with ``_mask_dates`` deleted entirely —
+    no connector sat between the dates and the amount, so the test pinned
+    nothing). Mutation pin: delete ``_mask_dates`` and this row abstains as
+    ``range_or_qualifier`` (``2026-01-01 and`` matches ``_RANGE_BEFORE_TAIL``)
+    beside a second ``31 EUR`` candidate — the test now reds.
+    """
+    props = typed("between 2026-01-01 and 2026-03-31 EUR 800")
     assert props[AMOUNT_MINOR] == 80_000
 
 
@@ -634,6 +729,24 @@ def test_a_year_shaped_token_is_not_an_amount(source):
     dropped(source, "year_shaped_amount")
     # a non-year 4-digit amount still types
     assert typed("USD 8000")[AMOUNT_MINOR] == 800_000
+
+
+@pytest.mark.parametrize("source,amount", [
+    ("USD 20000", 2_000_000),        # ``2000`` is a PREFIX of the 7 digits
+    ("USD 1900000", 190_000_000),
+    ("BRL 2050000", 205_000_000),
+    ("EUR 2000000", 200_000_000),
+    ("USD 210000", 21_000_000),
+])
+def test_an_amount_that_only_STARTS_like_a_year_still_types(source, amount):
+    """The year guard is the 4-DIGIT rule it documents, not a prefix test:
+    ``_YEAR_SHAPED`` matched with ``.match``, so every amount whose first four
+    digits fall in 1900..2199 abstained — the 19k–21.9k / 190k–219k / 1.9M–
+    2.2M magnitudes, among the most common in business prose (``USD 25000000``
+    typed, ``USD 2000000`` did not). Over-abstention is the safe direction, so
+    this was not a false type — but nothing pinned it. Mutation pin: reverting
+    to ``.match`` reds every row here."""
+    assert typed(source)[AMOUNT_MINOR] == amount
 
 
 @pytest.mark.parametrize("source", ["XAU 800", "XTS 800"])

@@ -34,6 +34,18 @@ The owner selected that Option (on ``#2817``, 2026-10-07; folded into design
    already reads a bare ``M`` as *metres* — a second interpretation of the
    same token is how a third opinion gets invented. (Design §3: bare ``M``
    magnitude is "dropped, not open".)
+
+   ⚠️ **Recorded residual — the magnitude guard is a curated list of SPELLINGS,
+   and unlike the separator guard it fails OPEN.** The separator/locale class is
+   refused by a CATEGORY predicate (point 4); a magnitude word can only be
+   recognised by its spelling, so an abbreviation nobody listed is read as
+   prose and the bare integer types — ``R$ 800 mi`` printed R$ 800.00 for 800
+   *million*, the 10⁶ understatement this module exists to prevent. The standard
+   short forms of the families the corpus uses (EN ``mn``/``mln``/``bln``, EU
+   ``Mio.``, PT-BR/ES ``mi``/``bi``/``millones``) are in the list; closing the
+   class needs a lexicon this module does not have, and inventing one is the
+   locale reasoning the decision above excludes. Stated rather than implied
+   closed, exactly like the anchor-collision residual below.
 3. **Only an explicit currency anchor types a value.** An ISO 4217 alpha-3
    code (``EUR 800``, ``800 EUR``) or a *disambiguated* dollar prefix
    (``R$``, ``US$``, ``CA$``, ``A$``/``AU$``, ``MX$``). A bare ``$`` is
@@ -55,13 +67,22 @@ The owner selected that Option (on ``#2817``, 2026-10-07; folded into design
    character window, so ``EUR 800 or roughly 900`` is a range rather than a
    typed lower bound; and only approximation words may stand between the
    connector and the second bound, so ``EUR 800 and USD 900`` stays two values
-   rather than becoming a range.
+   rather than becoming a range. A bound is a bound on EITHER side of the
+   amount, and one tuple builds both position regexes — ``above EUR 800`` /
+   ``EUR 800 above``, ``some EUR 800``, ``maybe EUR 800`` are thresholds, not
+   point values.
 
    The same posture refuses a currency **PAIR**: ``EUR/USD 800`` / ``800
    EUR/USD`` name no single currency for the amount, so neither leg is an
    anchor (both orders abstain as ``ambiguous_currency_symbol``). The guard is
    scoped to the anchor's neighbourhood, so ``800 EUR was committed while
    EUR/USD rallied`` still types.
+
+   A RATIO or MULTIPLE abstains whether it is glued to the digits or one space
+   away (``EUR 12%`` and ``EUR 12 %``, ``EUR 12x`` and ``EUR 12 x``): ``%``,
+   ``‰``, ``percent``, ``pct``, ``bps`` land on ``not_money_percent`` and a bare
+   ``x`` on ``not_money_multiplier``. Reading only the token made the same
+   ratio decisive when attached and invisible one space later.
 
    ⚠️ **Recorded residual — an anchor can collide with prose, and a curated list
    cannot close that class.** Uppercase acronyms that are also active ISO 4217
@@ -227,9 +248,20 @@ _ANCHOR_THEN_NUM = re.compile(rf"{_ANCHOR}{_GAP}(?P<n>{_NUM})")
 _NUM_THEN_ANCHOR = re.compile(rf"(?P<n>{_NUM}){_GAP}{_ANCHOR}")
 
 _MAGNITUDE_SUFFIX = re.compile(r"(?i)(?:k|m|mm|bn|tn|b|trn)$")
+#: The magnitude vocabulary — ⚠️ a CURATED list of spellings, not a class, and
+#: unlike every other guard here it fails OPEN: an unlisted abbreviation opens
+#: the alphabetical stop in :func:`_has_magnitude_word_after` and the bare
+#: integer types (``R$ 800 mi`` → R$ 800.00 for 800 MILLION). The standard
+#: short forms of the three spellings families the corpus uses (EN ``mn``/
+#: ``mln``/``bln``, EU ``Mio.``, PT-BR/ES ``mi``/``bi``/``millones``) are in;
+#: the residual is stated in the module docstring rather than implied closed.
 _MAGNITUDE_WORD = re.compile(
-    r"(?i)^(?:thousand|million|billion|trillion|mil|milhao|milhão|milhoes|"
-    r"milhões|bilhao|bilhão|bilhoes|bilhões|bn|mm|tn|trn|[kmb])$")
+    r"(?i)^(?:thousand|thousands|million|millions|millon|millón|millones|"
+    r"billion|billions|billon|billón|billones|trillion|trillions|"
+    r"mil|milhar|milhares|milhao|milhão|milhoes|milhões|"
+    r"bilhao|bilhão|bilhoes|bilhões|mille|"
+    r"mns|mlns|mln|mn|mios|mio|mi|bn|bln|bio|bil|bill|bi|tn|trn|"
+    r"thou|th|cr|mm|[kmb])$")
 
 #: A range CONNECTOR: a dash, a slash, or the word connectors. Matched
 #: word-bounded — a distance window (the previous ±6 characters) missed
@@ -309,6 +341,12 @@ _BOUND_PHRASES: tuple[str, ...] = (
     r"and\s+above", r"and\s+more", r"and\s+higher", r"and\s+greater",
     r"post-money", r"pre-money", r"postmoney", r"premoney", r"plus",
     r"-?ish",
+    # ⛔ The STANDALONE comparatives and the approximation words the filler list
+    # already knew: ``above EUR 800`` typed the threshold as an exact amount
+    # while ``or above`` abstained, and ``some EUR 800`` typed while ``an
+    # estimated EUR 800`` abstained — the same one-vocabulary inconsistency the
+    # cycle-5/6 fixes closed one pair of tuples over, so it is closed here too.
+    r"above", r"below", r"some", r"maybe", r"perhaps",
 )
 
 #: Phrases that qualify only when they PRECEDE the amount: they read as a bound
@@ -331,6 +369,16 @@ _QUALIFIER_BEFORE = re.compile(
 
 _QUALIFIER_AFTER = re.compile(
     rf"(?i)^[\s,;:(\[\u2014\u2013-]*(?:{_BOUND_ALT}|±|\+)")
+
+#: A RATIO / MULTIPLE stated one space away from the amount (``EUR 12 %``,
+#: ``EUR 12 percent``, ``EUR 800 x 2``). ``_NUM`` accepts ``%``/``‰``/``x`` only
+#: when ATTACHED to the digits, so mode 3 was enforced for ``EUR 12%`` and one
+#: space reopened it — a ratio typed as 12.00 EUR (review P2). The
+#: no-candidate branch already treats a ``%`` ANYWHERE in the text as decisive,
+#: so reading the same signal in the anchored branch is one policy, not two.
+_RATIO_AFTER = re.compile(
+    r"(?i)^[\s\u00a0\u202f]*(?:(?P<pct>%|\u2030|percent\b|pct\b|bps\b|pp\b)"
+    r"|(?P<mult>x\b))")
 
 _YEAR_SHAPED = re.compile(r"(?:19|20|21)\d{2}")
 
@@ -574,15 +622,31 @@ def normalize_money(text: str) -> Normalization:
         after = text[cand.span_end:cand.span_end + 24]
         if _QUALIFIER_BEFORE.search(before) or _QUALIFIER_AFTER.search(after):
             return _drop("range_or_qualifier", text[:60])
+        ratio = _RATIO_AFTER.match(after)
+        if ratio is not None:
+            # §4: a ratio/multiple is not an amount, whether it is glued to the
+            # digits or one space away (review P2).``after`` starts at the end
+            # of the anchored FORM, so an anchor-last amount is covered too.
+            return _drop(
+                "not_money_percent" if ratio.group("pct")
+                else "not_money_multiplier",
+                text[cand.span_start:cand.span_end + 12].strip())
         # A sign the design defines no convention for (mode 5/§3): "-EUR 800"
         # must not be typed as +800.00 — a negative typed as a positive is the
         # worst false type available, so an adjacent sign abstains.
         if cand.anchor_first:
-            # "EUR -800" is caught by the token's own leading sign below; here
-            # only a sign attached to the CURRENCY counts ("-EUR 800"), so a
-            # prose dash ("pilot - EUR 800") is not read as a sign.
-            signed = (cand.span_start
-                      and text[cand.span_start - 1] in "-\u2212+(")
+            # ⛔ The SAME probe as the anchor-last branch below, one token
+            # further out: a sign in front of the CURRENCY is the same sign
+            # when it is spaced, and the two word orders of one sentence
+            # cannot get opposite policies. The previous ONE-character
+            # lookbehind read "- EUR 800" as +800.00 while "- 800 EUR" — the
+            # same negation, reordered — abstained, i.e. a negative typed as a
+            # positive, which is the worst false type available (review P1).
+            # Side effect, deliberately: a prose dash ("pilot - EUR 800") now
+            # abstains too, exactly as "pilot - 800 EUR" already did — the
+            # design's abstain-first direction, and one policy instead of two.
+            signed = bool(_SIGN_BEFORE.search(
+                text[max(0, cand.span_start - 4):cand.span_start]))
         else:
             # the number leads: a minus before it IS a sign even when spaced
             # ("- 800 EUR"), and reading it as +800.00 is the worst false type.
@@ -607,7 +671,12 @@ def normalize_money(text: str) -> Normalization:
             detail=text[cand.span_start:cand.span_end].strip())
         if classified is not None:
             return classified
-        if _YEAR_SHAPED.match(cand.token):
+        if _YEAR_SHAPED.fullmatch(cand.token):
+            # ⛔ FULL match: the rule is a 4-digit token in 1900..2199, and a
+            # PREFIX test dropped every amount whose first four digits happen
+            # to look like a year — ``USD 2000000`` (2 million), ``USD 190000``,
+            # ``EUR 2100000`` — a silent over-abstention on the commonest
+            # magnitudes in business prose (review P2).
             return _drop("year_shaped_amount", cand.token)
         if _is_currency_pair_leg(text, cand):
             # ``EUR/USD 800`` — the amount belongs to the PAIR, which names no
