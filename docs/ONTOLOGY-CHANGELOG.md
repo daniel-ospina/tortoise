@@ -230,6 +230,45 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > therefore connect any two plain epistemic nodes — **not** Point→Point only. #7853's branch converges
 > on the same shared declaration.
 >
+> **#7925 then closed the INGEST half of that widening** (the boundary #7926 recorded rather than
+> absorbed): `sdk._check_endpoints` (Phase 1) and `_check_endpoint_race` (Phase 2) still gated the
+> DIRECT route on plain `:Point`, so `ingest()` refused a `(Subject)-[:IMPL]->(Object)` connection
+> that `create_direct_edge` itself wrote — the validator was stricter than the primitive it calls.
+> Both phases now read ONE declaration, `sdk._INGEST_ENDPOINT_LABELS` (≡ `EPISTEMIC_LABELS`), the
+> same set the two write primitives accept; the `:Source` / operator-Point / not-addressed-by-`id`
+> exclusions stand, and the endpoint-KIND gate (#8499) continues to choose the STRUCTURE
+> (a Point-bearing pair is reified; Object↔Object and the other non-Point pairs keep the direct edge).
+>
+> ⚠️ **Three exclusions were WIDENED, not held** (measured against the merge-base `c7ae5c9ed`,
+> which predates #8864/#8902 — the merge-key change below, so the holder rows are read against
+> their post-#8864 meaning; fail-closed over-rejection where noted, and pinned by
+> `tests/test_ingest_event_endpoint.py`):
+>
+> - an operator-shaped **entity item** is refused in both spellings — the top-level `is_operator`
+>   AND `props: {is_operator: …}`, which the one-level read used to accept (no behaviour change in
+>   the engine: the `props` spelling reaches the same `SET n += $extra` write);
+> - an operator-shaped **merge target** is refused, and so is an operator-shaped same-name item
+>   whose extra-props write taints it. The target is the node the WRITE lands on, not "any
+>   holder": one carrier ⇒ the name merge lands on it (`ON MATCH`), while a name with 2+
+>   carriers folds on the record's own `id` (#8864/#8902), so the item lands on the carrier that
+>   already holds the deterministic `(label, name)` id, and MINTS its own node when none does —
+>   the case where no holder axis applies. Within one bundle only the FIRST item naming a
+>   `(label, name)` can mint, because every entity item writes that same deterministic id: a
+>   later same-name item lands on it, so its declared status is dropped. A name-keyed merge also
+>   ADOPTS the node that exists (rewriting its stored id to the deterministic one), so a bundle
+>   ref and an external ref to that node's PRE-write id are the same endpoint, and a connection
+>   endpoint still naming that pre-write id is refused in Phase 1 rather than dying in step 4;
+> - the `gated` row-9 status read and Phase 2's draft default now read at the WRITE DOOR's fold
+>   depth, so a double-wrapped `props: {props: {status: …}}` is refused / kept draft respectively —
+>   previously the point could be born LIVE under `gated` (a fail-open, not an over-rejection).
+>
+> The operator-shaped exclusion is an **ingest admission rule, not a `create_operator` contract**:
+> that primitive accepts an operator-shaped endpoint, and `weights.py` prices operator-targeting
+> edges. `ingest()` refuses it because a bundle is a whole-graph write whose failure mode is a
+> partial mutation. On the DIRECT route the same exclusion is the primitive's own contract
+> (`create_direct_edge` refuses an operator endpoint outright), so nothing there is a candidate
+> to reopen.
+>
 > **Changelog v3.22 (2026-10-10 — issue #2767 — `milestone` is a core EVENT kind, not an Object kind):**
 > §5's event-kind vocabulary did not list `milestone`, while the `project-management` pack declared it
 > as an `objectKind` and the miner emitted `event_kind="milestone"` — one bare name on three axes,

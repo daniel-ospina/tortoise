@@ -37086,6 +37086,21 @@ async def webhooks_stripe(request: Request):
 # #4262 removed.
 _BILLING_RECONCILE_INFLIGHT = asyncio.Lock()
 
+#: How long an in-flight pass may hold the lock before it is presumed WEDGED
+#: rather than merely slow (a hung provider socket has no client-side timeout).
+#: The lock deliberately outlives the request so a cancelled request cannot let a
+#: second pass run over the same fleet — but that means a wedged pass would
+#: otherwise hold it forever, and the driver's scheduled branch treats the 202
+#: "benign overlap" as success, which would silence the daily page permanently.
+#: Past this bound the endpoint answers a FAILURE instead, so the run reds.
+#: The bound is SIX TIMES the driver's own 600 s client ceiling — the pass
+#: deliberately outlives the request and ``reconcile_subscriptions`` has no
+#: fleet-size cap, so a bound sized to the request would libel a healthy long
+#: pass — while staying far inside the 24 h cadence, so a genuinely wedged pass
+#: cannot hide past the next cycle.
+_BILLING_RECONCILE_STALE_S = 3600.0
+_BILLING_RECONCILE_STARTED_AT: float | None = None
+
 
 @app.post("/v1/internal/billing/reconcile")
 async def billing_reconcile(request: Request):
@@ -37106,6 +37121,11 @@ async def billing_reconcile(request: Request):
     channel by the reconciler itself. A concurrent run returns **202**
     ``{"status": "already_running"}`` and does NO work (the next scheduled run
     retries; nothing queues) — a caller must not read 202 as a completed pass.
+    ⛔ UNLESS the in-flight pass has held the lock past
+    ``_BILLING_RECONCILE_STALE_S``: then it answers **503**
+    ``{"status": "reconcile_stuck"}`` instead, because that pass is presumed
+    WEDGED and retrying will not help (wait for it to end or restart the
+    process). 202 is the benign overlap; 503 ``reconcile_stuck`` is the alarm.
 
     Fails CLOSED on an uncertifiable enumeration — **503**
     ``{"status": "enumeration_incomplete"}`` — so the daily driver's red run is
@@ -37115,10 +37135,33 @@ async def billing_reconcile(request: Request):
     _check_internal(request)
     from tortoise.billing import BillingEnumerationError, reconcile_subscriptions
 
+    global _BILLING_RECONCILE_STARTED_AT
     if _BILLING_RECONCILE_INFLIGHT.locked():
+        started = _BILLING_RECONCILE_STARTED_AT
+        if (started is not None
+                and (time.monotonic() - started) > _BILLING_RECONCILE_STALE_S):
+            _logger.error(
+                "billing reconcile: the in-flight pass has held the lock for "
+                "over %.0fs — presumed WEDGED, not merely slow; the fleet is "
+                "not being reconciled", _BILLING_RECONCILE_STALE_S)
+            return JSONResponse(
+                status_code=503,
+                content={"status": "reconcile_stuck",
+                         "detail": "a previous pass has held the lock past the "
+                                   "staleness bound and is presumed wedged — "
+                                   "the fleet may be unreconciled"})
         return JSONResponse(status_code=202,
                             content={"status": "already_running"})
-    async with _BILLING_RECONCILE_INFLIGHT:
+    await _BILLING_RECONCILE_INFLIGHT.acquire()
+    _BILLING_RECONCILE_STARTED_AT = time.monotonic()
+    # The lock is handed to the PASS when one is handed off to a worker thread
+    # (``_release_when_finished``), and released by this ``finally`` only for a
+    # path that never handed one off. Releasing on cancellation would let the
+    # driver's retry start a SECOND pass over the same fleet while the first is
+    # still writing: the 202 guard would then describe a pretence rather than a
+    # fact (#8895 review P2).
+    handed_off = False
+    try:
         from tortoise.supabase_control import is_supabase_enabled
 
         # #4726 discipline: in Supabase mode the pass must NEVER construct a
@@ -37128,17 +37171,36 @@ async def billing_reconcile(request: Request):
         try:
             if is_supabase_enabled():
                 sdk = None
-                result = await asyncio.to_thread(reconcile_subscriptions, None)
             else:
                 sdk = await asyncio.to_thread(_registry_sdk)
-                try:
-                    # #3718: the whole pass is SYNC FalkorDB + Stripe work — it
-                    # rides a worker hand-off so it cannot hold the single uvicorn
-                    # event loop (the #2988/#3498 class).
-                    result = await asyncio.to_thread(reconcile_subscriptions, sdk)
-                finally:
+
+            def _release_when_finished(_f: asyncio.Future) -> None:
+                # Close first, then hand the lock back: these are ONE unit. A
+                # second pass must never start while the SDK this pass writes
+                # through is still open — the original defect, in reverse.
+                global _BILLING_RECONCILE_STARTED_AT
+                if sdk is not None:
                     with suppress(Exception):
                         sdk.close()
+                _BILLING_RECONCILE_STARTED_AT = None
+                with suppress(Exception):
+                    _BILLING_RECONCILE_INFLIGHT.release()
+
+            # ⛔ ``asyncio.to_thread`` cannot cancel its thread, so the SDK must
+            # NOT be closed from this request's ``finally``: a cancelled request
+            # (the driver's 600 s ceiling, a client disconnect) would close the
+            # projection mid-pass and lose every repair not yet committed, while
+            # the summary went nowhere (#8895 review P2). Close on COMPLETION.
+            fut = asyncio.ensure_future(
+                # #3718: the whole pass is SYNC FalkorDB + Stripe work — it
+                # rides a worker hand-off so it cannot hold the single uvicorn
+                # event loop (the #2988/#3498 class).
+                asyncio.to_thread(reconcile_subscriptions, sdk))
+            handed_off = True
+            fut.add_done_callback(_release_when_finished)
+            # Shield: cancelling the REQUEST must not cancel a pass that is
+            # already writing. The callback above still runs on completion.
+            result = await asyncio.shield(fut)
         except BillingEnumerationError as exc:
             # The pass refuses to reconcile a fleet it cannot certify COMPLETE.
             # That is not a request error — it is "the source is unavailable or
@@ -37153,10 +37215,29 @@ async def billing_reconcile(request: Request):
             return JSONResponse(
                 status_code=503,
                 content={"status": "enumeration_incomplete",
+                         # The refusal has three legs (a partial page, a
+                         # LOWER-BOUND page, a missing enumeration seam) and a
+                         # fixed detail string threw the distinction away. ⛔ Do
+                         # not flatten them the other way either: the
+                         # LOWER-BOUND and missing-seam legs are STRUCTURAL,
+                         # while a PARTIAL page is usually a row inserted or
+                         # deleted mid-walk and certifies on the next walk. The
+                         # leg is carried as the redacted exception text —
+                         # ``redact_error`` prepends the class name and
+                         # truncates, so a distinguishing tail must come early
+                         # in any future message. (A control-plane OUTAGE is a
+                         # different path: ``query_all`` raises a bare
+                         # RuntimeError, which this handler does not catch.)
+                         "reason": redact_error(exc),
                          "detail": "the fleet enumeration could not be "
                                    "confirmed complete — refusing to report a "
                                    "partial pass as clean"})
-    return result
+        return result
+    finally:
+        if not handed_off:
+            _BILLING_RECONCILE_STARTED_AT = None
+            with suppress(Exception):
+                _BILLING_RECONCILE_INFLIGHT.release()
 
 
 # ── OAuth 2.1 for remote MCP (#524) ─────────────────────────────────────

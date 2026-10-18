@@ -23,7 +23,7 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
 import tortoise.billing as billing
-from tests._verdict import verdict_client
+from tests._verdict import verdict_async_client, verdict_client
 from tortoise.billing import (
     BillingConfigError,
     BillingError,
@@ -279,6 +279,54 @@ class TestStripeClient:
         assert _last_http_requests()[0][1].endswith("/subscriptions/sub_1")
 
 
+class TestScrubbedProviderMessages:
+    """#8895 review P2 (round 3): provider text must not name a customer id.
+
+    ``reconcile_fleet`` records ``failed[].error = f"{cls}: {_scrub_secrets(msg)}"``
+    and the cron driver prints that row into a PUBLIC Actions log. Stripe's own
+    error text embeds the request path, so the customer/subscription id rides
+    along inside the sentence — the composite redactor has to know those
+    shapes, not only credentials.
+    """
+
+    def test_stripe_customer_and_subscription_ids_are_redacted(self):
+        from tortoise.billing import _scrub_secrets
+
+        for raw in ("stripe GET customers/cus_PqR3xyz9/subscriptions -> 404: {}",
+                    "stripe POST subscriptions/sub_1AbCdEfGh9 failed: 400"):
+            scrubbed = _scrub_secrets(raw)
+            token = raw.split()[2].split("/")[1]
+            assert token not in scrubbed, (
+                f"{token!r} survived the redactor: {scrubbed!r}")
+            assert "***" in scrubbed, scrubbed
+
+    def test_a_snake_case_word_starting_with_sub_is_not_a_stripe_id(self):
+        """Over-redaction costs diagnostics: ``sub_total`` is prose, not an id."""
+        from tortoise.billing import _scrub_secrets
+
+        assert _scrub_secrets("billing sub_total_price mismatch") == (
+            "billing sub_total_price mismatch")
+
+    def test_the_failed_row_built_from_a_stripe_error_carries_no_customer_id(
+            self):
+        """End of the path the public log reads: the row's own error string."""
+        from tortoise.billing import StripeAPIError, _scrub_secrets
+
+        exc = StripeAPIError(
+            "stripe GET customers/cus_PqR3xyz9/subscriptions -> 404: {}")
+        row_error = f"{exc.__class__.__name__}: {_scrub_secrets(str(exc))}"
+        assert "cus_PqR3xyz9" not in row_error, row_error
+        assert row_error.startswith("StripeAPIError: stripe GET"), row_error
+
+    def test_credentials_are_still_redacted(self):
+        """The pre-existing behaviour is not traded away for the new shapes."""
+        from tortoise.billing import _scrub_secrets
+
+        scrubbed = _scrub_secrets("auth sk_live_SUPERSECRET1234567890 rejected")
+        assert "SUPERSECRET" not in scrubbed, scrubbed
+        assert "***" in scrubbed, scrubbed
+
+
 # ── effective_tier (lazy grace) ─────────────────────────────────────────────
 
 class TestEffectiveTier:
@@ -379,6 +427,650 @@ class TestApplyLimitsAndReconcile:
         t = sdk.org_get(team["id"])
         assert t["tier"] == "team"
         assert t["subscription_status"] == "active"
+
+    def test_reconcile_stale_subscription_id_falls_back_to_the_customer(
+            self, monkeypatch, stripe_env, billing_sdk):
+        """#8895 P1: a cancel-and-resubscribe whose
+        ``checkout.session.completed`` was missed leaves the OLD (canceled)
+        ``subscription_id`` stored forever. Mirroring it on sight caps a paying
+        org at the lower tier again — the very bug this cadence repairs — and
+        reports the row as a clean ``unchanged``. The stored id is authoritative
+        for IDENTITY, not for the CURRENT entitlement: an inactive one must
+        yield to the active subscription the customer actually holds, and
+        mirroring that one rewrites the stale pointer.
+        """
+        sdk = billing_sdk
+        team = sdk.org_create("stale-sub-pointer")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_old', "
+            "t.stripe_customer_id='cus_1'",
+            params={"id": team["id"]},
+        )
+        stale = {"id": "sub_old", "status": "canceled",
+                 "items": {"data": [{"price": {"id": "price_100soloM"}}]}}
+        active = {"id": "sub_new", "status": "active", "current_period_end": 9999,
+                  "cancel_at_period_end": False,
+                  "items": {"data": [{"price": {"id": "price_300teamM"}}]}}
+        monkeypatch.setattr(billing.StripeClient, "get_subscription",
+                            lambda self, sid: dict(stale))
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [stale, active])
+        out = reconcile_org(sdk, team["id"])
+        t = sdk.org_get(team["id"])
+        assert out["action"] == "mirror_customer_first_active"
+        assert t["tier"] == "team"           # the ACTIVE sub wins, not the stale id
+        assert t["subscription_id"] == "sub_new"   # stale pointer repaired
+        assert t["subscription_status"] == "active"
+
+    def test_reconcile_an_active_but_ENDING_pointer_follows_the_newer_sub(
+            self, monkeypatch, stripe_env, billing_sdk):
+        """#8904 review round 7: ``active`` is not proof the pointer is CURRENT.
+
+        A cancel-at-period-end leaves the subscription ``active`` until the
+        period runs out. An org that cancels and resubscribes inside that
+        window holds an ACTIVE pointer to the OLD, soon-dead subscription — and
+        if ``checkout.session.completed`` was missed (the premise of this whole
+        cadence), the status check alone calls that pointer current, never
+        consults the customer, keeps the OLD tier while the org pays for the
+        new one, and records the row ``unchanged`` on a green pass.
+
+        An ENDING subscription is a pointer to CHECK, not a fact. When the
+        customer holds no newer one the LIST returns this same subscription, so
+        the mirroring outcome is unchanged.
+        """
+        sdk = billing_sdk
+        team = sdk.org_create("ending-pointer")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_old', "
+            "t.stripe_customer_id='cus_1', t.tier='solo'",
+            params={"id": team["id"]},
+        )
+        ending = {"id": "sub_old", "status": "active",
+                  "cancel_at_period_end": True, "current_period_end": 9999,
+                  "items": {"data": [{"price": {"id": "price_100soloM"}}]}}
+        newer = {"id": "sub_new", "status": "active",
+                 "cancel_at_period_end": False, "current_period_end": 19999,
+                 "items": {"data": [{"price": {"id": "price_300teamM"}}]}}
+        monkeypatch.setattr(billing.StripeClient, "get_subscription",
+                            lambda self, sid: dict(ending))
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [ending, newer])
+        out = reconcile_org(sdk, team["id"])
+        t = sdk.org_get(team["id"])
+        assert out["action"] == "mirror_customer_first_active", (
+            "an ENDING subscription is not a current pointer, so the customer "
+            f"must be consulted — got {out}")
+        assert t["tier"] == "team", (
+            "the org pays for Team; mirroring the ending Solo sub leaves it "
+            f"capped at {t['tier']!r}")
+        assert t["subscription_id"] == "sub_new"
+
+    def test_reconcile_a_cheaper_newer_sub_does_not_revoke_a_paid_ending_one(
+            self, monkeypatch, stripe_env, billing_sdk):
+        """#8904 review P2: ENDING is not a refund — the paid period still runs.
+
+        ``cancel_at_period_end`` keeps the subscription ``active`` until
+        ``current_period_end`` and the customer has PAID for that period. An
+        org that cancels Team and adds a cheaper Solo before the period ends
+        must therefore stay on Team until the period does: preferring "any
+        non-ending subscription" over a still-in-force higher one drops the
+        org from Team's 600 000 nodes to Solo's 25 000 while it is paid up,
+        and every write past Solo's cap is refused with "upgrade your plan".
+        The row is recorded as a clean ``repaired``/``direction: down``, which
+        does NOT page (only drift UP notifies) — so the revocation is silent
+        on a GREEN run, the exact failure class this cadence exists to remove.
+
+        The newer Solo subscription is not lost: once the ending Team one dies
+        the next pass sees no live ending sub and mirrors Solo then.
+        """
+        sdk = billing_sdk
+        team = sdk.org_create("ending-team-cheaper-newer")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_team', "
+            "t.stripe_customer_id='cus_1', t.tier='team', "
+            "t.subscription_status='active'",
+            params={"id": team["id"]},
+        )
+        ending = {"id": "sub_team", "status": "active",
+                  "cancel_at_period_end": True, "current_period_end": 19999,
+                  "items": {"data": [{"price": {"id": "price_300teamM"}}]}}
+        cheaper = {"id": "sub_solo", "status": "active",
+                   "cancel_at_period_end": False, "current_period_end": 29999,
+                   "items": {"data": [{"price": {"id": "price_100soloM"}}]}}
+        monkeypatch.setattr(billing.StripeClient, "get_subscription",
+                            lambda self, sid: dict(ending))
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [ending, cheaper])
+        out = reconcile_org(sdk, team["id"])
+        t = sdk.org_get(team["id"])
+        assert out["action"] == "mirror_customer_first_active", (
+            f"the customer must still be consulted about the ending sub — {out}")
+        assert t["tier"] == "team", (
+            "Team is paid through current_period_end, so a NEWER but CHEAPER "
+            f"subscription must not revoke it early — got {t['tier']!r}")
+        assert t["subscription_id"] == "sub_team", (
+            f"the still-in-force pointer is the current one — got {t}")
+
+    def test_reconcile_an_unpriceable_ENDING_sub_is_not_revoked_by_a_cheaper_newer(
+            self, monkeypatch, stripe_env, billing_sdk):
+        """#8904 review P2: the still-in-force guard must hold when ITS rank is unreadable.
+
+        ``_best_ranked`` SKIPS entries it cannot price, so a customer whose only
+        ENDING subscription carries a rotated-out price yields ``(None, None)``.
+        A guard written as ``if kept is not None`` then skipped the comparison
+        entirely and fell through to the newer, cheaper candidate — mirroring
+        Solo, rewriting ``subscription_id`` to it, and recording a clean
+        ``repaired``/``direction: down`` (which never pages) while Team was paid
+        through ``current_period_end``. That is the silent-revocation class this
+        branch exists to close, one arm over: only the direction that cannot
+        revoke was implemented.
+
+        Keeping the still-in-force sub cannot be mirrored either (its price is
+        not in the catalog), and that IS the intended answer: the row is FAILED
+        with the stored tier and pointer intact, so the run reds and an operator
+        looks — ``subscription_plan``'s contract ("log + ops-notify + KEEP
+        stored tier"), never a downgrade on a green pass.
+        """
+        sdk = billing_sdk
+        team = sdk.org_create("ending-unpriceable-team")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_team_rotated', "
+            "t.stripe_customer_id='cus_1', t.tier='team', "
+            "t.subscription_status='active'",
+            params={"id": team["id"]},
+        )
+        ending = {"id": "sub_team_rotated", "status": "active",
+                  "cancel_at_period_end": True, "current_period_end": 19999,
+                  "items": {"data": [{"price": {"id": "price_rotatedOut"}}]}}
+        cheaper = {"id": "sub_solo", "status": "active",
+                   "cancel_at_period_end": False, "current_period_end": 29999,
+                   "items": {"data": [{"price": {"id": "price_100soloM"}}]}}
+        monkeypatch.setattr(billing.StripeClient, "get_subscription",
+                            lambda self, sid: dict(ending))
+        # The newer, cheaper sub is listed FIRST: the pre-fix arm took it from
+        # any position, because the comparison never ran at all.
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [cheaper, ending])
+        summary = billing.reconcile_subscriptions(sdk, notifier=False)
+        t = sdk.org_get(team["id"])
+        assert t["tier"] == "team", (
+            "Team is paid through current_period_end and the ending sub could "
+            "not be PRICED, so the newer cheaper Solo one must not revoke it "
+            f"— got {t['tier']!r}")
+        assert t["subscription_id"] == "sub_team_rotated", (
+            f"the still-in-force pointer is the current one — got {t}")
+        assert summary["repaired"] == 0 and summary["drift"] == [], (
+            "no write is justified, so nothing may be reported as repaired "
+            f"— got {summary}")
+        assert len(summary["failed"]) == 1, (
+            "an unpriceable still-in-force sub cannot be mirrored, so the org "
+            "must be FAILED and the run must red — a green pass here is the "
+            f"silent outcome — got {summary}")
+        assert "unknown price" in summary["failed"][0]["error"], (
+            f"the row must name the real cause — got {summary['failed']}")
+
+    def test_reconcile_an_unreadable_ladder_fails_the_row_with_no_write(
+            self, monkeypatch, stripe_env, billing_sdk):
+        """The docstrings name TWO unreadable shapes; only one was executed.
+
+        ``_subscription_rank`` returns ``None`` for a price the catalog does not
+        know (pinned by the test above) AND for a pricing ladder that cannot be
+        READ at all (``_paid_tier_floor`` catching ``tier_limits``). Both put an
+        ENDING, still-in-force sub on the unrankable-ending arm, and both
+        docstrings claim the same outcome — the org is a FAILED row with its
+        stored tier and pointer intact. The second leg raises one call LATER
+        (``apply_limits`` -> ``tier_limits``, after ``subscription_plan``
+        succeeded), so it is pinned here: a raise that landed after the
+        control-plane write would leave the org holding a tier nobody proved.
+
+        Honest scope: this does NOT discriminate the pre-fix arm (with the
+        ladder unreadable the mirror raises on either selection, so the
+        pre-fix tree also ends FAILED with the stored tier intact). It pins the
+        INVARIANT the docstrings state — no write precedes the raise — not the
+        selection order.
+        """
+        import tortoise.pricing as pricing
+
+        sdk = billing_sdk
+        team = sdk.org_create("ending-unreadable-ladder")
+        # ⛔ The stored tier is ``pro`` while Stripe's still-in-force sub is
+        # Team: that is the only arrangement in which "the raise precedes the
+        # write" is OBSERVABLE. A store already holding ``team`` would look
+        # identical after a write-before-raise.
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_team', "
+            "t.stripe_customer_id='cus_1', t.tier='pro', "
+            "t.subscription_status='active'",
+            params={"id": team["id"]},
+        )
+        ending = {"id": "sub_team", "status": "active",
+                  "cancel_at_period_end": True, "current_period_end": 19999,
+                  "items": {"data": [{"price": {"id": "price_300teamM"}}]}}
+        cheaper = {"id": "sub_solo", "status": "active",
+                   "cancel_at_period_end": False, "current_period_end": 29999,
+                   "items": {"data": [{"price": {"id": "price_100soloM"}}]}}
+        monkeypatch.setattr(billing.StripeClient, "get_subscription",
+                            lambda self, sid: dict(ending))
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [cheaper, ending])
+
+        def _unreadable_ladder(tier):
+            raise KeyError("pricing.json is unreadable (ladder fault)")
+
+        monkeypatch.setattr(pricing, "tier_limits", _unreadable_ladder)
+        summary = billing.reconcile_subscriptions(sdk, notifier=False)
+        t = sdk.org_get(team["id"])
+        assert t["tier"] == "pro", (
+            "the ladder could not be read, so no tier may be written — the "
+            "raise must precede the control-plane write; a pre-write would "
+            f"have stored 'team' here — got {t['tier']!r}")
+        assert t["subscription_id"] == "sub_team", (
+            f"the still-in-force pointer must survive the raise — got {t}")
+        assert summary["repaired"] == 0 and summary["drift"] == [], (
+            f"nothing may be reported as repaired — got {summary}")
+        assert len(summary["failed"]) == 1, (
+            "an unreadable ladder cannot be mirrored, so the org is a FAILED "
+            f"row and the run reds — got {summary}")
+        assert summary["failed"][0]["org_id"] == team["id"], (
+            "the FAILED row must be THIS org's — ``len(failed) == 1`` is "
+            "fleet-wide and a sibling Team with an identity could own it — "
+            f"got {summary['failed']}")
+        assert "KeyError" in summary["failed"][0]["error"], (
+            "the row must carry the LADDER's own fault class (the raise comes "
+            "from ``apply_limits`` -> ``tier_limits``, after "
+            "``subscription_plan`` succeeded) — a price fault would read "
+            f"``BillingError`` instead — got {summary['failed']}")
+        assert "unreadable" in summary["failed"][0]["error"], (
+            f"the row must name the ladder — got {summary['failed']}")
+
+    def test_reconcile_an_unpriceable_ENDING_SIBLING_is_not_revoked_by_a_newer(
+            self, monkeypatch, stripe_env, billing_sdk):
+        """The guard is about the WHOLE ending set, not a set of one.
+
+        A customer can hold TWO ending subscriptions at once (a cancelled Team
+        plus a cancelled Solo from an earlier plan). ``_best_ranked`` skips the
+        one it cannot price, so before this pin the RANKABLE sibling won the
+        comparison and a newer Solo at that sibling's cap counted as "provably
+        at or above" — the pass mirrored Solo, rewrote ``subscription_id`` to
+        it, and recorded a clean ``repaired``/``direction: down``, which never
+        pages (only drift UP notifies). Team was paid through
+        ``current_period_end`` and nothing about it was ever read.
+
+        The unrankable sibling is kept instead and cannot be mirrored, so the
+        row is FAILED with the stored tier and pointer intact: loud and
+        fail-closed, never a silent downgrade.
+        """
+        sdk = billing_sdk
+        team = sdk.org_create("ending-unpriceable-sibling")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_team_rotated', "
+            "t.stripe_customer_id='cus_1', t.tier='team', "
+            "t.subscription_status='active'",
+            params={"id": team["id"]},
+        )
+        ending_team = {"id": "sub_team_rotated", "status": "active",
+                       "cancel_at_period_end": True,
+                       "current_period_end": 19999,
+                       "items": {"data": [{"price": {"id": "price_rotatedOut"}}]}}
+        ending_solo = {"id": "sub_solo_old", "status": "active",
+                       "cancel_at_period_end": True,
+                       "current_period_end": 18999,
+                       "items": {"data": [{"price": {"id": "price_100soloM"}}]}}
+        cheaper = {"id": "sub_solo_new", "status": "active",
+                   "cancel_at_period_end": False, "current_period_end": 29999,
+                   "items": {"data": [{"price": {"id": "price_100soloM"}}]}}
+        monkeypatch.setattr(billing.StripeClient, "get_subscription",
+                            lambda self, sid: dict(ending_team))
+        # The rankable sibling and the newer sub both sit at Solo's cap, so the
+        # pre-fix comparison was satisfied by the SIBLING — the newer Solo won.
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [cheaper, ending_solo, ending_team])
+        summary = billing.reconcile_subscriptions(sdk, notifier=False)
+        t = sdk.org_get(team["id"])
+        assert t["tier"] == "team", (
+            "Team is paid through current_period_end and the ending set holds "
+            "a sub nobody can price, so a newer Solo must not revoke it "
+            f"— got {t['tier']!r} ({summary})")
+        assert t["subscription_id"] == "sub_team_rotated", (
+            f"the pointer must not be rewritten to the newer Solo — got {t}")
+        assert summary["repaired"] == 0 and summary["drift"] == [], (
+            "no write is justified, so nothing may be reported as repaired "
+            f"— got {summary}")
+        assert len(summary["failed"]) == 1, (
+            "an unpriceable still-in-force sub cannot be mirrored, so the org "
+            f"is a FAILED row and the run reds — got {summary}")
+        assert summary["failed"][0]["org_id"] == team["id"], (
+            f"the FAILED row must be this org's — got {summary['failed']}")
+
+    def test_reconcile_customer_only_keeps_a_paid_ending_sub_over_a_cheaper_newer(
+            self, monkeypatch, stripe_env, billing_sdk):
+        """The SAME rank guard on the customer-only LIST site.
+
+        An abandoned/missed checkout can leave a ``stripe_customer_id`` and no
+        ``subscription_id``, and this branch feeds the same selector. Without
+        the guard here an org whose only stored binding is the customer would
+        drop from Team to a newer Solo before its paid period ended — a silent
+        downgrade the fleet cadence then reports as a clean repair.
+        """
+        sdk = billing_sdk
+        team = sdk.org_create("customer-only-ending-team")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_1', "
+            "t.tier='team', t.subscription_status='active'",
+            params={"id": team["id"]},
+        )
+        ending = {"id": "sub_team", "status": "active",
+                  "cancel_at_period_end": True, "current_period_end": 19999,
+                  "items": {"data": [{"price": {"id": "price_300teamM"}}]}}
+        cheaper = {"id": "sub_solo", "status": "active",
+                   "cancel_at_period_end": False, "current_period_end": 29999,
+                   "items": {"data": [{"price": {"id": "price_100soloM"}}]}}
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [cheaper, ending])
+        reconcile_org(sdk, team["id"])
+        t = sdk.org_get(team["id"])
+        assert t["tier"] == "team", (
+            "the ending Team sub is paid through the period, so it outranks "
+            f"the newer Solo one — got {t['tier']!r}")
+        assert t["subscription_id"] == "sub_team"
+
+    def test_reconcile_real_cancellation_still_downgrades(
+            self, monkeypatch, stripe_env, billing_sdk):
+        """#8895 P1 guard: the customer-level fallback must NOT keep a canceled
+        org paid. With NO active subscription at the customer, the stored
+        (canceled) one is the truth and the org reverts to free."""
+        sdk = billing_sdk
+        team = sdk.org_create("real-cancel")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_gone', "
+            "t.stripe_customer_id='cus_1', t.tier='pro', "
+            "t.subscription_status='active'",
+            params={"id": team["id"]},
+        )
+        stale = {"id": "sub_gone", "status": "canceled",
+                 "items": {"data": [{"price": {"id": "price_100soloM"}}]}}
+        monkeypatch.setattr(billing.StripeClient, "get_subscription",
+                            lambda self, sid: dict(stale))
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [stale])
+        reconcile_org(sdk, team["id"])
+        t = sdk.org_get(team["id"])
+        assert t["tier"] == "free"
+        assert t["subscription_status"] == "canceled"
+
+    def test_reconcile_list_failure_does_not_downgrade_a_paying_org(
+            self, monkeypatch, stripe_env, billing_sdk):
+        """#8904 review P2: an unanswerable LIST is not evidence of cancellation.
+
+        The stored subscription is inactive, so the customer LIST is the ONLY leg
+        that can prove the org holds a newer ACTIVE one. When that call fails
+        there is an absence of evidence, not evidence of a cancellation — and
+        mirroring the stored (inactive) subscription on it re-caps a PAYING org on
+        a GREEN run, because a downgrade is recorded as a clean ``repaired`` and
+        only drift UP alerts. The org is left alone: not verified, not
+        downgraded (the same policy a provider outage gets everywhere else).
+
+        Still true, and pinned below: the LIST failing must not RAISE, so a
+        correct downgrade elsewhere never becomes a permanent ``failed`` row.
+        """
+        sdk = billing_sdk
+        team = sdk.org_create("list-failure")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_gone', "
+            "t.stripe_customer_id='cus_gone', t.tier='pro', "
+            "t.subscription_status='active'",
+            params={"id": team["id"]},
+        )
+        gone = {"id": "sub_gone", "status": "canceled",
+                "items": {"data": [{"price": {"id": "price_100soloM"}}]}}
+        monkeypatch.setattr(billing.StripeClient, "get_subscription",
+                            lambda self, sid: dict(gone))
+        monkeypatch.setattr(
+            billing.StripeClient, "list_subscriptions",
+            lambda self, cid: (_ for _ in ()).throw(
+                billing.StripeAPIError("no such customer: 'cus_gone'")))
+        outcome = reconcile_org(sdk, team["id"])  # must NOT raise
+        assert outcome["action"] == "noop", (
+            "an unanswerable LIST must leave the org alone rather than mirror a "
+            f"subscription it cannot prove is current — got {outcome}")
+        t = sdk.org_get(team["id"])
+        assert t["tier"] == "pro", (
+            "the org is PAYING; one failed provider call in the sweep must not "
+            f"re-cap it — got {t['tier']!r}")
+        assert t["subscription_status"] == "active", (
+            "nothing was mirrored, so the stored status must be untouched "
+            f"— got {t['subscription_status']!r}")
+
+    def test_reconcile_customer_only_binding_survives_a_lookup_failure(
+            self, monkeypatch, stripe_env, billing_sdk):
+        """#8904 review P2: the customer-ONLY branch needs the same guard.
+
+        ``hosted_api`` persists ``stripe_customer_id`` BEFORE the checkout
+        session, so abandoned checkouts — the majority of this branch — carry a
+        customer id and no subscription id. With the LIST unguarded, one
+        transient 5xx/429 on one of them escaped as a ``failed`` row, and a
+        non-empty ``failed`` FAILS the pass and pages "a paying org may be
+        capped at the wrong tier" for an org with no entitlement at stake — the
+        mirror image of the stored-pointer asymmetry fixed above.
+        """
+        sdk = billing_sdk
+        team = sdk.org_create("customer-only-list-failure")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_gone' "
+            "RETURN t.id",
+            params={"id": team["id"]},
+        )
+        monkeypatch.setattr(
+            billing.StripeClient, "list_subscriptions",
+            lambda self, cid: (_ for _ in ()).throw(
+                billing.StripeAPIError("upstream 503")))
+        outcome = reconcile_org(sdk, team["id"])  # must NOT raise
+        assert outcome["action"] == "noop", (
+            "a failed customer lookup is not a verdict, so this branch must "
+            f"leave the org alone instead of failing the pass — got {outcome}")
+
+    def test_failed_customer_list_at_unpaid_tier_is_skipped_not_failed(
+            self, monkeypatch, stripe_env, billing_sdk, caplog):
+        """#8904 review P2: the ``skipped`` line must not assert a CAUSE.
+
+        ``skipped`` now covers two states an operator cannot tell apart: a
+        proven abandoned checkout, and an unpaid-tier org whose customer LIST
+        failed (left alone, NOT proven clean). The log line is what an operator
+        reads, so it may report what was ESTABLISHED and hedge the cause —
+        asserting "abandoned checkout" is the same
+        asserting-a-cause-nobody-measured fault the wording fix exists to
+        remove, one bucket over. Without this test the hedge can be deleted
+        with the suite green.
+        """
+        import logging  # noqa: I001
+        from tortoise import billing as bl
+        sdk = billing_sdk
+        team = sdk.org_create("customer-list-failure-unpaid")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_8895skip', "
+            "t.tier='free'",
+            params={"id": team["id"]},
+        )
+        monkeypatch.setattr(
+            bl.StripeClient, "list_subscriptions",
+            lambda self, cid: (_ for _ in ()).throw(
+                bl.StripeAPIError("upstream 503")))
+        with caplog.at_level(logging.INFO):
+            summary = bl.reconcile_subscriptions(sdk, notifier=False)
+        assert summary["failed"] == [], (
+            "a provider error is not a verdict, so it must not fail the pass "
+            f"and page — got {summary}")
+        assert summary["skipped"] == 1, summary
+        text = "\n".join(r.getMessage() for r in caplog.records)
+        assert "could be established" in text, (
+            "the line must report that no subscription could be ESTABLISHED "
+            f"(true for both causes) — got {text!r}")
+        assert "usual cause is an abandoned checkout" in text, (
+            "the line must HEDGE the cause (the other state that reaches "
+            "'skipped' is a failed lookup, which proves nothing about why) — "
+            f"deleting the hedge must fail this test — got {text!r}")
+
+    def test_failed_customer_list_at_paid_tier_is_unverified_not_downgraded(
+            self, monkeypatch, stripe_env, billing_sdk, caplog):
+        """#8904 review P2: the PAID arm of the same guard, end to end.
+
+        A paying org whose customer LIST failed is counted ``unverified``
+        (something to look at) and physically left alone: a provider error is
+        never a downgrade and never a ``repaired``/``drift``.
+        """
+        import logging  # noqa: I001
+        from tortoise import billing as bl
+        sdk = billing_sdk
+        team = sdk.org_create("customer-list-failure-paid")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_8895paid', "
+            "t.tier='pro', t.subscription_status='active'",
+            params={"id": team["id"]},
+        )
+        monkeypatch.setattr(
+            bl.StripeClient, "list_subscriptions",
+            lambda self, cid: (_ for _ in ()).throw(
+                bl.StripeAPIError("upstream 503")))
+        with caplog.at_level(logging.INFO):
+            summary = bl.reconcile_subscriptions(sdk, notifier=False)
+        assert summary["unverified"] == 1, summary
+        assert summary["failed"] == [] and summary["repaired"] == 0
+        assert summary["drift"] == [], (
+            "a failed lookup must never be reported as a repair/drift")
+        t = sdk.org_get(team["id"])
+        assert t["tier"] == "pro", (
+            "a provider error is not a licence to downgrade a paying org")
+        text = "\n".join(r.getMessage() for r in caplog.records)
+        assert "could be established" in text, (
+            f"the warning must not assert Stripe ANSWERED — got {text!r}")
+
+    def test_an_unreadable_ladder_is_unverified_never_nothing_to_verify(
+            self, monkeypatch, stripe_env, billing_sdk, caplog):
+        """#8904 review P2: "the ladder could not be read" is NOT "unpaid".
+
+        ``_paid_tier_floor`` returns ``None`` when ``pricing.json`` cannot be
+        read (#750.8 — a documented reachable config fault), and no tier
+        compares above Free's floor in that state. Reading that as "not paid"
+        files a stored ``pro`` org under ``skipped`` and logs it as "stored at
+        the unpaid tier 'pro'" — a paid org passing the pass that exists to
+        catch one, on the strength of an unread file. An unread signal is not a
+        zero, so the org must be counted as SOMETHING TO LOOK AT and the log may
+        not claim which side of the cap it sits on.
+        """
+        import logging  # noqa: I001
+        import tortoise.pricing as pr
+        from tortoise import billing as bl
+        sdk = billing_sdk
+        team = sdk.org_create("customer-list-failure-unreadable-ladder")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_8895unk', "
+            "t.tier='pro', t.subscription_status='active'",
+            params={"id": team["id"]},
+        )
+        # The REAL #750.8 fault: a loaded tier missing a required limit key
+        # raises KeyError at lookup, which `_paid_tier_floor` turns into None.
+        def _unreadable(tier):
+            raise KeyError(f"pricing.json tier {tier!r} missing limit keys")
+
+        monkeypatch.setattr(pr, "tier_limits", _unreadable)
+        with caplog.at_level(logging.INFO):
+            summary = bl.reconcile_subscriptions(sdk, notifier=False)
+        assert summary["skipped"] == 0, (
+            "an unreadable ladder must never be evidence that a stored 'pro' "
+            f"org has nothing to verify — got {summary}")
+        assert summary["unverified"] == 1, summary
+        assert summary["failed"] == [] and summary["repaired"] == 0
+        assert sdk.org_get(team["id"])["tier"] == "pro", (
+            "an unread config file is not a licence to downgrade")
+        text = "\n".join(r.getMessage() for r in caplog.records)
+        assert "unpaid tier" not in text, (
+            "the log must not assert which side of the cap this org is on — "
+            f"got {text!r}")
+        assert "UNKNOWN" in text, (
+            f"the operator must be told the answer is unknown — got {text!r}")
+
+    def test_a_MALFORMED_or_MISSING_pricing_file_does_not_abort_the_pass(
+            self, monkeypatch, stripe_env, billing_sdk):
+        """#8904 review P1: an unreadable ladder has FOUR shapes, not one.
+
+        ``_paid_tier_floor`` caught only ``KeyError``/``TypeError`` (a loaded
+        tier missing a limit key). A malformed ``product/pricing.json`` raises
+        ``JSONDecodeError`` and a missing one ``FileNotFoundError`` — neither is
+        a subclass of those, so the exception escaped from OUTSIDE the per-org
+        ``try`` and aborted the WHOLE pass as an unnamed 500. The first org that
+        needed the ladder decision (an abandoned checkout — the majority
+        population) killed the sweep mid-fleet, which is the partial pass this
+        cadence exists to prevent, and the driver reports a 500 as a
+        control-plane outage. The documented outcome is ``unverified``.
+
+        The fourth shape is the one a hand-written tuple always misses: a
+        valid-JSON file whose ROOT (or ``tiers`` value) is not an object raises
+        ``AttributeError`` at ``data.get(...)``, outside every exception
+        family the first fix enumerated. That is why the catch is broad now.
+        """
+        import json
+
+        import tortoise.pricing as pr
+        from tortoise import billing as bl
+
+        sdk = billing_sdk
+        team = sdk.org_create("malformed-ladder")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_8895mf', "
+            "t.tier='pro', t.subscription_status='active'",
+            params={"id": team["id"]},
+        )
+        monkeypatch.setattr(
+            bl.StripeClient, "list_subscriptions", lambda self, cid: [])
+
+        # Both shapes must land the org in `unverified` and END the pass cleanly.
+        # (The org is created BEFORE the patch: `org_create` reads the ladder
+        # too, so patching first would fail in the fixture, not the code under
+        # test.)
+        for fault in (json.JSONDecodeError("Expecting value", "{bad", 0),
+                      FileNotFoundError("product/pricing.json"),
+                      AttributeError("'list' object has no attribute 'get'")):
+            def _broken(tier, _fault=fault):
+                raise _fault
+
+            monkeypatch.setattr(pr, "tier_limits", _broken)
+            summary = bl.reconcile_subscriptions(sdk, notifier=False)  # no raise
+            assert summary["unverified"] == 1, (type(fault).__name__, summary)
+            assert summary["failed"] == [], (type(fault).__name__, summary)
+            assert sdk.org_get(team["id"])["tier"] == "pro", (
+                "an unread file is not a licence to downgrade")
+
+    def test_reconcile_past_due_pointer_still_follows_the_newer_active_sub(
+            self, monkeypatch, stripe_env, billing_sdk):
+        """#8895 review P2: ``past_due`` keeps the TIER (enforcement) but is NOT
+        a fresh POINTER.
+
+        A failed-card org that re-subscribes gets a new active subscription
+        while the old one sits at ``past_due`` — exactly the resubscribe flow
+        this repair exists for. Reusing ``_ACTIVE_STATUSES`` for pointer
+        freshness left that org capped.
+        """
+        sdk = billing_sdk
+        team = sdk.org_create("past-due-pointer")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.subscription_id='sub_pastdue', "
+            "t.stripe_customer_id='cus_1'",
+            params={"id": team["id"]},
+        )
+        past_due = {"id": "sub_pastdue", "status": "past_due",
+                    "items": {"data": [{"price": {"id": "price_100soloM"}}]}}
+        active = {"id": "sub_new", "status": "active", "current_period_end": 9999,
+                  "cancel_at_period_end": False,
+                  "items": {"data": [{"price": {"id": "price_300teamM"}}]}}
+        monkeypatch.setattr(billing.StripeClient, "get_subscription",
+                            lambda self, sid: dict(past_due))
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions",
+                            lambda self, cid: [past_due, active])
+        out = reconcile_org(sdk, team["id"])
+        t = sdk.org_get(team["id"])
+        assert out["action"] == "mirror_customer_first_active"
+        assert t["tier"] == "team"
+        assert t["subscription_id"] == "sub_new"
 
     def test_reconcile_noop_without_identifiers(self, stripe_env, billing_sdk):
         sdk = billing_sdk
@@ -2472,6 +3164,128 @@ class TestReconcileSweep:
         assert summary["repaired"] == 0 and summary["drift"] == []
         assert self._row(sdk, org_id)[0] == "free"
 
+    def test_a_failed_customer_list_is_unverified_not_a_silent_downgrade(
+            self, monkeypatch, billing_client):
+        """#8904 review P2: the sweep must not cap a paying org on a provider error.
+
+        A downgrade is recorded as ``repaired`` with ``direction: "down"``, which
+        the driver neither alerts on nor fails on (only drift UP notifies).
+        Mirroring an inactive stored subscription when the customer LIST fails
+        would therefore cap a PAYING customer on a fully green run, with no page
+        and no operator signal — the precise failure the #8895 repair exists to
+        end. The org lands in ``unverified`` instead: warned about, tier untouched.
+        """
+        from tortoise import billing as bl
+        org_id = billing_client["org_id"]
+        sdk = billing_client["sdk"]
+        self._seed(sdk, org_id, tier="pro", subscription_status="active",
+                   subscription_id="sub_gone", stripe_customer_id="cus_gone")
+        monkeypatch.setattr(
+            bl.StripeClient, "get_subscription",
+            lambda self, sid: {"id": "sub_gone", "status": "canceled",
+                               "items": {"data": [
+                                   {"price": {"id": "price_100proM"}}]}})
+        monkeypatch.setattr(
+            bl.StripeClient, "list_subscriptions",
+            lambda self, cid: (_ for _ in ()).throw(
+                bl.StripeAPIError("upstream 503")))
+        summary = bl.reconcile_subscriptions(sdk, notifier=False)
+        assert summary["checked"] == 1
+        assert summary["unverified"] == 1, (
+            "a paid org whose entitlement could not be verified is exactly what "
+            f"``unverified`` names — got {summary}")
+        assert summary["repaired"] == 0 and summary["drift"] == [], (
+            "no write was justified, so nothing may be reported as repaired "
+            f"— got {summary}")
+        assert self._row(sdk, org_id)[0] == "pro", (
+            "the org is PAYING and Stripe did not say otherwise — its tier must "
+            "be untouched")
+
+    def test_an_unreadable_rank_never_awards_a_replacement(
+            self, stripe_env):
+        """The rank guard's SAFE direction, unit-pinned — on both sides.
+
+        ``_subscription_rank`` returns ``None`` for a price the catalog does not
+        know and for an unreadable pricing ladder (``_paid_tier_floor``). Both
+        mean "cannot prove this is not lower", which is not a reason to take
+        entitlement away from a subscription the customer has PAID through
+        ``current_period_end`` — so the still-in-force one is kept. The mirror
+        of it: a provably equal-or-higher newer sub does replace it (the
+        upgrade case, also pinned end-to-end by
+        ``test_reconcile_an_active_but_ENDING_pointer_follows_the_newer_sub``).
+
+        ⛔ Both SIDES of that rule are pinned below: the unrankable entry may be
+        the newer candidate (cannot prove it is higher) or the ENDING one (cannot
+        prove it is not) — and the second only ever revokes entitlement, so a
+        guard that covers just the first is half a rule.
+        """
+        from tortoise import billing as bl
+
+        def _sub(sid, price, ending, status="active"):
+            return {"id": sid, "status": status,
+                    "cancel_at_period_end": ending,
+                    "items": {"data": [{"price": {"id": price}}]}}
+
+        ending_team = _sub("sub_team", "price_300teamM", True)
+        unknown_price = _sub("sub_unknown", "price_nope", False)
+        assert bl._subscription_rank(unknown_price) is None
+        assert bl._select_current_subscription([unknown_price, ending_team]) \
+            is ending_team
+
+        # A provably lower newer sub loses too, on either side of the ordering.
+        ending_solo = _sub("sub_solo", "price_100soloM", True)
+        newer_free = _sub("sub_free", "price_000freeM", False)
+        assert bl._select_current_subscription([newer_free, ending_solo]) \
+            is ending_solo
+        assert bl._select_current_subscription([ending_solo, newer_free]) \
+            is ending_solo
+
+        # Equal or higher DOES replace it — the rule is a floor, not a freeze.
+        newer_team = _sub("sub_team2", "price_300teamM", False)
+        assert bl._select_current_subscription([ending_solo, newer_team]) \
+            is newer_team
+        newer_solo = _sub("sub_solo2", "price_100soloM", False)
+        assert bl._select_current_subscription([ending_solo, newer_solo]) \
+            is newer_solo
+
+        # ⛔⛔ And the guard must hold when the unrankable one is the ENDING
+        # (still-in-force) sub — that is the direction that REVOKES, and it is
+        # the one the selector used to hand to the candidate. ``_best_ranked``
+        # skips unrankable entries, so a guard written as ``if kept is not
+        # None`` skipped the comparison entirely and mirrored the newer, cheaper
+        # sub, capping a paying org on a green pass.
+        ending_rotated = _sub("sub_team_old", "price_rotatedOut", True)
+        assert bl._subscription_rank(ending_rotated) is None
+        assert bl._select_current_subscription([newer_solo, ending_rotated]) \
+            is ending_rotated
+        assert bl._select_current_subscription([ending_rotated, newer_solo]) \
+            is ending_rotated
+
+        # ⛔⛔⛔ And the rule is about the WHOLE ending set, not just a set of
+        # one: an unrankable ending SIBLING makes the comparison unprovable
+        # too. ``_best_ranked`` skips what it cannot price, so the rankable
+        # sibling would win the comparison and a newer sub AT THAT SIBLING'S
+        # CAP would be taken as "provably at or above" — revoking the higher
+        # period the unpriceable sibling is still paying for, and recording it
+        # as a clean repair.
+        ending_solo_old = _sub("sub_solo_old", "price_100soloM", True)
+        for order in ([newer_solo, ending_solo_old, ending_rotated],
+                      [ending_rotated, newer_solo, ending_solo_old],
+                      [ending_solo_old, ending_rotated, newer_solo]):
+            assert bl._select_current_subscription(order) is ending_rotated, (
+                "an unrankable ending sibling must not let a newer sub at its "
+                f"rankable sibling's cap win — got {order}")
+
+        # ⛔⛔⛔ And the SAME rule decides an ending set with NO non-ending
+        # candidate: there the set used to be resolved by Stripe's LISTING
+        # ORDER, so a rankable lower sibling listed first won and the pass
+        # recorded the downgrade as a clean ``repaired``/``down``.
+        for order in ([ending_solo_old, ending_rotated],
+                      [ending_rotated, ending_solo_old]):
+            assert bl._select_current_subscription(order) is ending_rotated, (
+                "with no live candidate the ending set must still be resolved "
+                f"by rank, never by listing order — got {order}")
+
     def test_an_unreadable_ladder_is_unrankable_not_unlimited(self):
         """``None`` from ``_paid_tier_floor`` means CONFIG FAULT, not unlimited.
 
@@ -2655,6 +3469,74 @@ class TestReconcileSweep:
         tier, max_points, _status = self._row(sdk, org_id)
         assert (tier, max_points) == ("pro", 100000)
 
+    def test_a_wedged_pass_is_a_failure_not_a_benign_overlap(
+            self, monkeypatch, billing_client):
+        """#8904 round 4: the lock outlives the request, so a pass that WEDGES
+        would hold it forever and every later driver run would read 202 — which
+        the scheduled branch treats as a benign overlap — silencing the daily
+        page permanently. Past the staleness bound the endpoint must answer a
+        FAILURE that names the cause; a FRESH hold must still be 202.
+        """
+        import time as _time
+
+        from tortoise import hosted_api as ha
+
+        monkeypatch.setenv("FASTAPI_INTERNAL_KEY", "internal-test-key")
+        client = billing_client["client"]
+
+        class _Held:
+            """A lock held by a pass that is still running."""
+
+            def locked(self):
+                return True
+
+            async def acquire(self):
+                return True
+
+            def release(self):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+        monkeypatch.setattr(ha, "_BILLING_RECONCILE_INFLIGHT", _Held())
+        headers = {"Authorization": "Bearer internal-test-key"}
+
+        # The bound is not a free knob, and it is bounded in BOTH directions.
+        # Below: it must stay well clear of the driver's own client ceiling
+        # (``curl -m 600`` in the cron step) or a HEALTHY long pass gets libelled
+        # "presumed WEDGED" and pages on a working fleet. Above: it must not
+        # reach the daily cadence at all — at a bound near 24 h a pass wedged at
+        # 04:43 is still inside it when the next fire arrives, so that run
+        # answers 202, the scheduled branch exits 0, and the fleet goes a
+        # further cycle unreconciled and unpaged. Half the cadence keeps a
+        # missed fire for any schedule jitter while still paging on the next.
+        assert ha._BILLING_RECONCILE_STALE_S >= 3600.0, (
+            "the staleness bound must keep a wide margin over the driver's "
+            "600 s client ceiling, or a healthy long pass pages as wedged"
+        )
+        assert ha._BILLING_RECONCILE_STALE_S <= 43200.0, (
+            "the staleness bound must stay at or below HALF the daily "
+            "cadence, or a wedged pass silences the next cycle's page"
+        )
+
+        # A hold inside the bound is the documented benign overlap.
+        monkeypatch.setattr(ha, "_BILLING_RECONCILE_STARTED_AT", _time.monotonic())
+        fresh = client.post("/v1/internal/billing/reconcile", headers=headers)
+        assert fresh.status_code == 202, fresh.text
+        assert fresh.json()["status"] == "already_running"
+
+        # Past it, the pass is presumed wedged and the run must red.
+        monkeypatch.setattr(
+            ha, "_BILLING_RECONCILE_STARTED_AT",
+            _time.monotonic() - (ha._BILLING_RECONCILE_STALE_S + 1.0))
+        stuck = client.post("/v1/internal/billing/reconcile", headers=headers)
+        assert stuck.status_code == 503, stuck.text
+        assert stuck.json()["status"] == "reconcile_stuck", stuck.text
+
     def test_the_endpoint_names_an_uncertified_enumeration(
             self, monkeypatch, billing_client):
         """A fleet that cannot be CERTIFIED complete answers 503 with a NAME.
@@ -2662,8 +3544,16 @@ class TestReconcileSweep:
         Uncaught, that refusal renders as an opaque ``500 {"detail": "Internal
         Server Error"}`` — and the daily driver's ``::error::`` line is the
         page, so "HTTP 500" names nothing an operator can act on. ``503
-        enumeration_incomplete`` says which leg failed and that a retry is the
-        response (the fleet was not READ, not mis-repaired).
+        enumeration_incomplete`` names which leg refused, and the legs do NOT
+        share one remedy: a lower-bound page and a missing enumeration seam are
+        STRUCTURAL, while a partial page is usually a row inserted or deleted
+        mid-walk and certifies on the next run — retried ONCE, not declared
+        structural on sight.
+
+        The ``reason`` cannot tell the partial leg's sub-causes apart (one
+        message covers an unusable cursor, an unordered page, an ignored
+        filter, the page cap and a mid-walk delete), which is why the REMEDY is
+        stated per leg rather than per message.
         """
         import tortoise.supabase_control as sc
         from tortoise import billing as bl
@@ -2681,6 +3571,97 @@ class TestReconcileSweep:
             headers={"Authorization": "Bearer internal-test-key"})
         assert r.status_code == 503, r.text
         assert r.json()["status"] == "enumeration_incomplete"
+        # The refusal has SEVERAL legs and they do NOT share one remedy: a
+        # lower-bound page and a missing enumeration seam are structural, while
+        # a partial page is usually a row changed mid-walk and certifies on the
+        # next run. (A control-plane OUTAGE is a different path — `query_all`
+        # raises a bare RuntimeError, which the endpoint does not catch, so it
+        # arrives as a 500 and never reaches this arm.) A fixed detail string
+        # threw the distinction away, so the leg must be carried.
+        assert "CERTIFIED complete" in r.json().get("reason", ""), r.text
+
+
+def test_cancelling_the_request_does_not_cancel_a_writing_pass(
+        monkeypatch):
+    """#8904 review round 3: the SDK and the lock belong to the PASS, not the request.
+
+    ``asyncio.to_thread`` cannot cancel its thread, so a cancelled request (the
+    driver's 600 s ceiling, a client disconnect) must NOT close the SDK or hand
+    the lock back: the worker is still writing through both, and closing it
+    mid-pass loses every repair not yet committed while the summary goes
+    nowhere — and a released lock lets a retry start a SECOND pass over the same
+    fleet. The close and the release ride the pass's own future; this pins that
+    cancelling the REQUEST leaves both in place until the pass finishes, then
+    closes exactly once and releases.
+    """
+    import asyncio
+    import threading
+    from contextlib import suppress
+
+    import tortoise.supabase_control as sc
+    from tortoise import billing as bl
+    from tortoise import hosted_api as ha
+
+    monkeypatch.setenv("FASTAPI_INTERNAL_KEY", "internal-test-key")
+    started = threading.Event()
+    release = threading.Event()
+    closes: list[bool] = []
+
+    class _FakeSdk:
+        def close(self) -> None:
+            closes.append(True)
+
+    summary = {"checked": 0, "repaired": 0, "unchanged": 0,
+               "unverified": 0, "skipped": 0, "drift": [],
+               "unrepaired": [], "failed": []}
+
+    def _pass(_sdk):
+        started.set()
+        try:
+            release.wait(15)
+        finally:
+            pass
+        return dict(summary)
+
+    monkeypatch.setattr(bl, "reconcile_subscriptions", _pass)
+    monkeypatch.setattr(ha, "_registry_sdk", lambda: _FakeSdk())
+    monkeypatch.setattr(sc, "is_supabase_enabled", lambda: False)
+    # A FRESH lock/clock: the module-level pair may be bound to another test's
+    # event loop, and this test asserts on its state directly.
+    monkeypatch.setattr(ha, "_BILLING_RECONCILE_INFLIGHT", asyncio.Lock())
+    monkeypatch.setattr(ha, "_BILLING_RECONCILE_STARTED_AT", None)
+
+    async def _scenario() -> None:
+        async with verdict_async_client(ha.app, base_url="http://test") as client:
+            req = asyncio.ensure_future(client.post(
+                "/v1/internal/billing/reconcile",
+                headers={"Authorization": "Bearer internal-test-key"}))
+            assert await asyncio.to_thread(started.wait, 15), (
+                "the pass never started — the test proves nothing")
+            assert ha._BILLING_RECONCILE_INFLIGHT.locked()
+
+            req.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await req
+
+            # The request is gone; the pass is still running.
+            assert ha._BILLING_RECONCILE_INFLIGHT.locked(), (
+                "cancelling the REQUEST released the pass lock — a retry could "
+                "start a second pass over the same fleet")
+            assert closes == [], (
+                "the SDK was closed under a pass that is still writing")
+
+            release.set()
+            for _ in range(500):
+                if not ha._BILLING_RECONCILE_INFLIGHT.locked():
+                    break
+                await asyncio.sleep(0.02)
+            assert not ha._BILLING_RECONCILE_INFLIGHT.locked(), (
+                "the pass finished but never handed the lock back")
+            assert closes == [True], (
+                f"the SDK must be closed exactly once, after the pass — {closes}")
+
+    asyncio.run(_scenario())
 
 
 class TestLifespanStartup:

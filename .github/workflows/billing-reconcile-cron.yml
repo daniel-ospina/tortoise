@@ -23,9 +23,31 @@ name: billing-reconcile-cron
 # answers 200 with a summary. This job fails the run AND PAGES TELEGRAM when:
 #   * the request itself fails (curl rc != 0: app down / internal key wrong /
 #     the 600 s client ceiling), or
-#   * the endpoint answers 503 `enumeration_incomplete` (the pass could not
-#     certify the WHOLE fleet, so it compared an unknown fraction of it and
-#     refuses to report that as clean), or
+#   * the endpoint answers 503 — and the CAUSE is named. The endpoint emits TWO
+#     named 503 statuses (plus an UNRECOGNISED fallback arm):
+#       - `enumeration_incomplete`: the pass could not certify the WHOLE fleet,
+#         so it compared an unknown fraction of it and refuses to report that as
+#         clean. The THREE raise sites are a partial page, a LOWER-BOUND page
+#         (`the enumeration is a LOWER BOUND`), or a missing
+#         `query_all`/`query_with_total` seam (`exposes neither query_all nor
+#         query_with_total`). ⛔ They do NOT share one remedy: the LOWER-BOUND
+#         and missing-seam legs are STRUCTURAL (retrying does not help), while
+#         a PARTIAL page is usually CONCURRENT MUTATION — a row inserted or
+#         deleted mid-walk — and certifies on the next walk, so retry ONCE
+#         before treating it as structural. The body's `reason` names the leg.
+#         (A
+#         control-plane OUTAGE is a different path entirely: `query_all` raises a
+#         bare RuntimeError, which this endpoint does not catch, so it arrives as
+#         an unnamed 500 whose body is the app's generic
+#         `{"detail": "Internal server error"}` — no `status`, no `reason`.)
+#       - `reconcile_stuck`: a previous pass has held the reconcile lock past
+#         its staleness bound and is presumed WEDGED — the fleet is NOT being
+#         reconciled, and retrying will NOT help (the lock clears when that pass
+#         ends or the process restarts).
+#       - anything else: UNRECOGNISED — the driver refuses to name a runbook it
+#         cannot verify, and says so instead of guessing. Do not collapse these
+#         arms back into one: naming the wrong cause was a real defect here.
+#     (see `_BILLING_RECONCILE_STALE_S` in `tortoise/hosted_api.py`), or
 #   * the response cannot be read as a summary at all (not a JSON object, or
 #     missing any field the verdict below keys on — a shape change must fail
 #     closed, never read as a clean pass), or
@@ -127,6 +149,44 @@ jobs:
             exit 1
           fi
           out="$(mktemp)"
+          # This repository's Actions logs are PUBLIC, and the reconcile body
+          # carries per-org CUSTOMER identifiers (org id + billing state).
+          # Nothing is printed raw: the shell redacts org ids and Stripe object
+          # ids, and the summary below prints a stable fingerprint instead
+          # (#8895 review P2). An operator who needs the real ids re-reads the
+          # payload through the internal endpoint with FASTAPI_INTERNAL_KEY.
+          #
+          # The id shape matters: this fleet mints org ids as 26-hex
+          # (``uuid.uuid4().hex[:26]`` in hosted_api/supabase_control; ULID for
+          # tenant ids), NOT as hyphenated UUIDs, so a UUID-only pattern redacts
+          # nothing an actual customer id looks like. Both shapes are covered
+          # here; the python redactor below redacts the row's own id BY VALUE.
+          redact_once() {
+            sed -E \
+              -e 's/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/<org-id>/g' \
+              -e 's/(^|[^0-9A-Za-z])[0-9a-f]{10,13}-[0-9a-f]{12}([^0-9A-Za-z]|$)/\1<org-id>\2/g' \
+              -e 's/(^|[^0-9A-Za-z])[0-9a-f]{26}([^0-9A-Za-z]|$)/\1<org-id>\2/g' \
+              -e 's/(^|[^0-9A-Za-z])(cus|sub)_[A-Za-z0-9]{6,}([^0-9A-Za-z_]|$)/\1<stripe-id>\3/g'
+          }
+          redact_stream() {
+            # APPLIED TWICE on purpose. The boundary classes consume their own
+            # delimiter, so on a line carrying two ids (`a, b`) the first match
+            # eats the gap and the second id is never seen. Re-running the same
+            # rules over the OUTPUT catches it, because the delimiter has been
+            # re-emitted. Cheaper and more portable than lookarounds (BSD sed
+            # has none).
+            redact_once | redact_once
+          }
+          show_body() {
+            # The REAL id shapes this fleet mints: hosted orgs are
+            # ``uuid4().hex[:26]`` (26 hex, no dashes) and registry orgs are
+            # ``ulid()`` = <hex-ts>-<12hex>. A bare UUID pattern matches NEITHER.
+            # Indent every line: a body may contain a newline followed by a
+            # workflow command (`::error::`, `::warning::`), and printing it raw
+            # would let the PAYLOAD forge an annotation in this arm. Leading
+            # whitespace makes such a line inert without hiding the text.
+            redact_stream < "$1" | sed 's/^/    /' | head -c 2000 || true
+          }
           # `-m 600` is required, not decoration. `/v1/internal/` is
           # PREFIX-EXEMPT from the 10 s transport wait bound and has no
           # server-side ceiling (tests/test_transport_wait_bound.py: its CRON
@@ -140,11 +200,10 @@ jobs:
             -H "Authorization: Bearer ${FASTAPI_INTERNAL_KEY}")" || rc=$?
           if [ "$rc" -ne 0 ]; then
             echo "::error::billing reconcile request failed (curl rc=${rc}; rc=28 is the 600 s ceiling expiring)"
-            cat "$out" || true
+            show_body "$out"
             exit 1
           fi
           echo "HTTP ${status}"
-          cat "$out"
           echo
           if [ "$status" = "202" ]; then
             # The endpoint answers 202 `already_running` for a CONCURRENT pass,
@@ -165,15 +224,105 @@ jobs:
             exit 1
           fi
           if [ "$status" = "503" ]; then
-            echo "::error::billing reconcile could not certify the fleet enumeration (HTTP 503 enumeration_incomplete) — the pass compared an unknown fraction of the fleet; nothing to repair, retry once the control plane is readable"
+            # The endpoint emits TWO named 503 statuses, plus an UNRECOGNISED
+            # fallback arm. They need opposite responses, so they must never be
+            # collapsed into one message.
+            cause="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status", ""))' "$out" 2>/dev/null || true)"
+            # $cause is REMOTE data, and this step's rule is that no fragment of
+            # remote data reaches the (public) log unredacted. It is also
+            # single-line from here on: a value carrying a newline would be
+            # parsed by the runner as a SECOND workflow command, so `::error::`
+            # could be forged from a response body.
+            cause="$(printf '%s' "$cause" | redact_stream | tr -d '\n\r')"
+            case "$cause" in
+              reconcile_stuck)
+                echo "::error::billing reconcile is STUCK (HTTP 503 reconcile_stuck) — a previous pass has held the lock past the staleness bound and is presumed wedged. The fleet is NOT being reconciled, and the lock clears only when that pass ends or the process restarts; retrying will NOT help."
+                ;;
+              enumeration_incomplete)
+                echo "::error::billing reconcile could not certify the fleet enumeration (HTTP 503 enumeration_incomplete) — the pass compared an unknown fraction of the fleet; nothing to repair. The body's reason names the leg: a LOWER-BOUND page or a MISSING enumeration seam is STRUCTURAL (retrying will not help), while a PARTIAL page is usually a row changed mid-walk and certifies on the next run — retry that leg ONCE, then treat it as structural."
+                ;;
+              *)
+                # Do NOT guess. Claiming a cause we did not read is the same
+                # fault one remove out: the operator runs the wrong runbook.
+                echo "::error::billing reconcile returned HTTP 503 with an UNRECOGNISED cause${cause:+ (status=${cause})} — read the body below before acting; the driver will not name a runbook it cannot verify"
+                ;;
+            esac
+            show_body "$out"
             exit 1
           fi
           if [ "$status" != "200" ]; then
             echo "::error::billing reconcile returned HTTP ${status}"
+            # Diagnostics are not sacrificed with the redaction: the body is
+            # printed through the same shape-redactor used for the summary.
+            show_body "$out"
             exit 1
           fi
           python3 - "$out" <<'PY'
-          import json, sys
+          import hashlib, json, re, sys
+
+          # Shape patterns are a SAFETY NET only: the id a row is about is
+          # redacted BY VALUE below, because no shape list can enumerate every
+          # id shape the fleet mints. Two shapes are known to reach this body:
+          # hyphenated UUIDs, and the 26-hex ids ``_new_org_org_id`` actually
+          # mints (``uuid.uuid4().hex[:26]``).
+          _UUID = re.compile(
+              r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+              re.IGNORECASE)
+          _HEX26 = re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{26}(?![0-9A-Za-z])")
+          # Registry orgs are ``ids.ulid()`` = <hex-ts>-<12hex>: an ~11-hex
+          # MILLISECOND stamp, a hyphen, then 12 hex. The UUID pattern matches
+          # none of them and the 26-hex pattern matches none of them either, so
+          # without this rule a registry org named in prose is published
+          # verbatim. The stamp widens with time, hence a range not a width.
+          _ULID = re.compile(
+              r"(?<![0-9A-Za-z])[0-9a-f]{10,13}-[0-9a-f]{12}(?![0-9A-Za-z])")
+          # Stripe object ids (customers/<cus_…>, subscriptions/<sub_…>) reach
+          # ``failed[].error`` through ``StripeAPIError('stripe GET <path> …')``.
+          _STRIPE_ID = re.compile(
+              r"(?<![A-Za-z0-9])(?:cus|sub)_[A-Za-z0-9]{6,}(?![A-Za-z0-9_])")
+
+          def redact_row(row):
+              """Replace customer org ids with a STABLE fingerprint.
+
+              The Actions log of this public repository must not publish which
+              customer is on which paid tier (#8895 review P2). A fingerprint
+              still lets an operator correlate one org across runs, which is
+              all the log needs.
+
+              The row's OWN id is redacted by VALUE, in every string field —
+              ``failed[].error`` is the scrubbed provider message and embeds it
+              in prose (``no organizations row matched id='<org_id>'``), so a
+              key-based filter, or a shape list that does not name the shape
+              this fleet mints, publishes it anyway. The shape patterns above
+              remain as a net for ids that are not this row's (a Stripe customer
+              id, an org named in a provider message).
+
+              The fingerprint is computed from the ORIGINAL id, before any
+              substitution: hashing a shape-substituted value collapsed every
+              UUID-shaped org onto one constant and defeated the correlation
+              the fingerprint exists for.
+              """
+              if not isinstance(row, dict):
+                  return row
+              raw_id = row.get("org_id")
+              fingerprint = ""
+              if raw_id:
+                  fingerprint = "org-" + hashlib.sha256(
+                      str(raw_id).encode()).hexdigest()[:10]
+              out = {}
+              for key, value in row.items():
+                  if key == "org_id" and value:
+                      out[key] = fingerprint
+                      continue
+                  if isinstance(value, str):
+                      if raw_id:
+                          value = value.replace(str(raw_id), fingerprint)
+                      value = _UUID.sub("<org-id>", value)
+                      value = _ULID.sub("<org-id>", value)
+                      value = _HEX26.sub("<org-id>", value)
+                      value = _STRIPE_ID.sub("<stripe-id>", value)
+                  out[key] = value
+              return out
 
           try:
               data = json.load(open(sys.argv[1]))
@@ -197,6 +346,26 @@ jobs:
                     "response contract changed, so a clean pass cannot be told "
                     "from an unverified one; failing closed")
               sys.exit(1)
+          # The counters are coerced to INTEGERS before use. Two defects die here:
+          # a value carrying a newline could forge a workflow command from this
+          # printer (the same forgery `show_body` indents away), and a STRING count
+          # would pass the truthiness tests below while `checked == 0` silently
+          # stopped matching. STRICT, not "the digits inside whatever this is":
+          # filtering digits turns 2.0 into 20 and -3 into 3, a silent 10x on a green
+          # pass, so anything that is not plain digits fails closed.
+          def _count(value, name):
+              text = str(value).strip()
+              # A bounded length too: isdecimal() still admits a 5 000-digit
+              # string, and int() refuses past 4300 (int_max_str_digits), which
+              # would exit 1 as a traceback instead of this annotation.
+              if not text.isdecimal() or len(text) > 18:
+                  print(f"::error::reconcile summary field {name} is not an integer "
+                        "- the response contract changed; failing closed")
+                  sys.exit(1)
+              return int(text)
+          data = dict(data)
+          for _k in ("checked", "repaired", "unchanged", "unverified", "skipped"):
+              data[_k] = _count(data.get(_k), _k)
           drift_up = [d for d in data["drift"] if d.get("direction") == "up"]
           failed = data["failed"]
           unrepaired = data["unrepaired"]
@@ -208,12 +377,16 @@ jobs:
           )
           print(summary)
           if data["unverified"]:
-              # Not a failure: Stripe answered and named no active subscription.
-              # Loud anyway — an org stored as billed that Stripe does not
-              # recognise is a person someone should look at.
-              print(f"::warning::{data['unverified']} org(s) are stored as billed "
-                    "but Stripe names no active subscription (not verified, not "
-                    "downgraded) — review them")
+                # Not a failure: no active subscription could be established.
+                # THREE causes land here - Stripe named none, the customer lookup
+                # failed, or the pricing ladder could not be read - so this line must
+                # not assert which, and must not claim the orgs are billed (the third
+                # cause means we do not KNOW).
+                print(f"::warning::{data['unverified']} org(s) could not be verified "
+                      "against an active Stripe subscription (Stripe named none, the "
+                      "customer lookup failed, or pricing.json could not be read) - not "
+                      "downgraded, review them; a broken pricing.json shows up "
+                      "here and/or as failed rows naming the ladder")
           if data["checked"] == 0:
               # Loud, never fatal. The enumeration is CERTIFIED complete before
               # this point (an uncertifiable one raises and 500s), so 0 means a
@@ -221,6 +394,9 @@ jobs:
               print("::warning::the pass checked 0 orgs — a certified-empty fleet "
                     "is valid, but on a fleet with paying customers it is not")
           problems = []
+          failed = [redact_row(r) for r in failed]
+          unrepaired = [redact_row(r) for r in unrepaired]
+          drift_up = [redact_row(r) for r in drift_up]
           if failed:
               problems.append(f"{len(failed)} org(s) FAILED to reconcile: {failed}")
           if unrepaired:
