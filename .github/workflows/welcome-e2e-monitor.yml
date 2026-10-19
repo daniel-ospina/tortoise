@@ -54,6 +54,13 @@ on:
       - 'supabase/config.toml'
       - 'supabase/migrations/**'
       - 'supabase/functions/**'
+      # The job also INSTALLS the package (`pip install -e '.[test]'`) and runs
+      # pytest, so it reads `pyproject.toml` and both conftests before a single
+      # assertion executes. Same hazard as the supabase files above: a change
+      # there can red this suite with no trigger.
+      - 'pyproject.toml'
+      - 'tests/conftest.py'
+      - 'tests/e2e/conftest.py'
       # The auto-dedupe script the failure arm runs.
       - '.github/scripts/welcome-e2e-monitor.sh'
       # Self-trigger: an edit here takes effect on the merge that makes it,

@@ -18,11 +18,24 @@ cheap to pin:
 
 1. **A workflow with no ``concurrency:`` block is unbounded.** Every run of it
    that an event creates is eligible for a runner at once. Seven workflows in
-   this repo had none before this guard; ``finding-provenance`` fires on
-   ``issue_comment: [created]`` — i.e. on every comment of ~50 lanes — so it
-   could, and did, occupy the entire budget of §"queued".
+   this repo had none before this guard — all dispatch/cron/publish, none of
+   which can flood, which is why they were never the incident.
 
-2. **A per-push REPORTING workflow with no path filter fires on every merge.**
+2. **A per-unit ``concurrency:`` key bounds ONE unit, never the fan-out.**
+   ``finding-provenance`` — the workflow that ACTUALLY flooded — already had
+   ``group: … comment.id … `` with ``cancel-in-progress: true``, and it still
+   produced 12+ concurrent runs: every comment is a different unit, so every
+   comment got its own group. A per-unit key deduplicates repeats of one unit
+   and says nothing about N units, so "has a ``concurrency:`` block" is
+   NECESSARY BUT NOT SUFFICIENT, and a guard that stops there would pass the
+   #9115 workflow itself (it did, before this property was added). The key is
+   nevertheless REQUIRED where it appears, because collapsing it to a constant
+   would cancel pending verdicts — a cancelled gate posts nothing (a fail-open)
+   — so the fan-out has to be bounded OUTSIDE the key: the classifier split, a
+   job-level ``if:`` that spends no runner, or a required check that is one run
+   per head. :data:`PER_UNIT_GROUP_OK` makes each such workflow name its bound.
+
+3. **A per-push REPORTING workflow with no path filter fires on every merge.**
    Under a merge flood it starts, is cancelled by the next merge
    (``cancel-in-progress: true``), and starts again: ``welcome-e2e-monitor``
    spent 13 runner-minutes in one 3-hour window producing almost no completed
@@ -34,6 +47,9 @@ What this module pins
 * every workflow declares ``concurrency:`` **with an explicit
   ``cancel-in-progress:``** — a silent default of ``false`` is how a per-event
   workflow grows an unbounded queue;
+* a per-unit group on a per-event workflow must declare what bounds its
+  FAN-OUT (:data:`PER_UNIT_GROUP_OK`) — the #9115 shape, which a
+  block-exists rule cannot see;
 * every workflow with a ``push`` trigger is either path-scoped or listed in
   :data:`UNFILTERED_PUSH_OK` with its reason (a merged-tree validation
   genuinely has no path filter to take), and an excused entry must actually
@@ -127,6 +143,40 @@ ZERO_COST_PR_EVENT = {
     ),
 }
 
+# Per-event workflows whose `concurrency.group` is keyed PER UNIT — deliberately,
+# and with the reason its FAN-OUT is bounded SOMEWHERE ELSE.
+#
+# A per-unit key gives every unit its own group, so it bounds repeats of ONE unit
+# and nothing in aggregate: N units still run at once. #9115 is the proof — the
+# offending `finding-provenance` ALREADY had `group: … comment.id …` with
+# `cancel-in-progress: true` and still produced 12+ concurrent runs, because
+# every comment is a different unit. So the per-unit shape is only safe when
+# something else bounds the fan-out, and each entry here must name that bound.
+#
+# ⛔ A new per-event workflow that copies the shape WITHOUT a bound fails
+# `test_per_event_per_unit_groups_declare_their_bound` — the rule the
+# block-exists test structurally cannot express.
+PER_UNIT_GROUP_OK = {
+    "finding-provenance.yml": (
+        "fan-out is bounded by the CLASSIFIER SPLIT (#9115), not by the key: "
+        "`classify` is `fetch-depth: 1` + `timeout-minutes: 6`, and the "
+        "full-history `provenance` leg runs only on "
+        "`needs: … is_finding == 'true'`. Collapsing the group to a constant "
+        "would cancel pending verdicts — a cancelled gate posts NOTHING, a "
+        "fail-open — so the bound has to stay OUTSIDE the concurrency key."
+    ),
+    "ai-review-gate.yml": (
+        "a REQUIRED check: one run per PR head, superseded on each push. A "
+        "constant group would let one PR's review cancel another's and leave "
+        "the required check pending forever."
+    ),
+    "inbound-relay.yml": (
+        "the JOB is skipped before a runner is allocated for ALL internal "
+        "traffic (its `if:` excludes the owner and `mergify[bot]`), so the "
+        "only fan-out is external `opened` events — one per unit."
+    ),
+}
+
 # Per-event workflows that spend runner slots on REPORTING/BOOKKEEPING rather
 # than gating a merge. They must declare a `concurrency:` group — a flood in any
 # one of them starves the REQUIRED `python-ci-gate` exactly as #9115 measured.
@@ -155,8 +205,14 @@ REPORTING_PER_EVENT = {
 
 
 @pytest.mark.parametrize("path", _workflow_paths(), ids=lambda p: p.name)
-def test_every_workflow_declares_bounded_concurrency(path: Path) -> None:
-    """A workflow with no ``concurrency:`` is unbounded, and that is the #9115 shape."""
+def test_every_workflow_declares_a_concurrency_block(path: Path) -> None:
+    """A workflow with no ``concurrency:`` is unbounded, and that is the #9115 shape.
+
+    NOTE the narrow claim: this asserts a block EXISTS and is explicit. It does
+    NOT assert the workflow is bounded — a per-unit key passes every assertion
+    here and still fans out without limit (#9115's own workflow did). That
+    second property is `test_per_event_per_unit_groups_declare_their_bound`.
+    """
     doc = _load(path)
     conc = doc.get("concurrency")
     assert conc is not None, (
@@ -181,6 +237,44 @@ def test_every_workflow_declares_bounded_concurrency(path: Path) -> None:
     )
     assert isinstance(conc["cancel-in-progress"], (bool, str)), (
         f"{path.name}: `cancel-in-progress` must be a boolean or an expression"
+    )
+
+
+_PER_UNIT_TOKENS = ("comment.id", "issue.number", "pull_request.number", "run_id")
+_PER_EVENT_TRIGGERS = {"issues", "issue_comment", "pull_request", "pull_request_target"}
+
+
+@pytest.mark.parametrize("path", _workflow_paths(), ids=lambda p: p.name)
+def test_per_event_per_unit_groups_declare_their_bound(path: Path) -> None:
+    """A per-unit key bounds ONE unit's repeats, never the fan-out (#9115).
+
+    This is the property the block-exists rule structurally cannot express. The
+    workflow that actually flooded in #9115 already had
+    ``group: … comment.id …`` with ``cancel-in-progress: true``, so it passed
+    that rule — and it still ran 12+ at once. A per-event workflow may keep a
+    per-unit key only when something ELSE bounds its fan-out, and
+    :data:`PER_UNIT_GROUP_OK` must say what.
+    """
+    doc = _load(path)
+    triggers = _PER_EVENT_TRIGGERS & set(_triggers(doc))
+    if not triggers:
+        return
+    conc = doc.get("concurrency") or {}
+    group = str(conc.get("group", ""))
+    per_unit = [tok for tok in _PER_UNIT_TOKENS if tok in group]
+    if not per_unit:
+        return  # a constant / low-cardinality group bounds the fan-out itself
+    assert path.name in PER_UNIT_GROUP_OK, (
+        f"{path.name} takes per-event triggers ({sorted(triggers)}) and keys its "
+        f"concurrency group PER UNIT ({per_unit}) — that bounds repeats of one "
+        "unit but NOT the fan-out: N units still run at once. That is the #9115 "
+        "flood shape exactly (the offending workflow already had a per-unit key). "
+        "Bound the fan-out (constant/low-cardinality group, a job-level `if:` "
+        "that spends no runner, or a cheap classify leg), or add it to "
+        "PER_UNIT_GROUP_OK with that bound named."
+    )
+    assert PER_UNIT_GROUP_OK[path.name].strip(), (
+        f"PER_UNIT_GROUP_OK needs a reason for {path.name} — it is a reviewed decision"
     )
 
 
@@ -261,6 +355,15 @@ def test_the_allow_list_has_no_dead_entries() -> None:
     for name in ZERO_COST_PR_EVENT:
         assert (WORKFLOW_DIR / name).exists(), (
             f"ZERO_COST_PR_EVENT names a missing workflow: {name}"
+        )
+    for name in PER_UNIT_GROUP_OK:
+        path = WORKFLOW_DIR / name
+        assert path.exists(), f"PER_UNIT_GROUP_OK names a missing workflow: {name}"
+        group = str((_load(path).get("concurrency") or {}).get("group", ""))
+        assert [tok for tok in _PER_UNIT_TOKENS if tok in group], (
+            f"{name} is declared in PER_UNIT_GROUP_OK but no longer keys its group "
+            "per unit — drop the entry (and the bound it names) so the next "
+            "per-event workflow is judged on its own shape."
         )
 
 
