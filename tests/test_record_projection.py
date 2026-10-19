@@ -159,8 +159,16 @@ _MINIMAL_RECORDS: dict[str, dict] = {
     "OperatorPromoted": {"id": "p1", "point": dict(_SNAPSHOT)},
     "DedupeRecorded": {"id": "p1", "point": dict(_SNAPSHOT)},
     "DedupeRejected": {"id": "p1", "point": dict(_SNAPSHOT)},
-    "EntityBindingRefused": {"id": "p1", "point": dict(_SNAPSHOT)},
-    "BatchIdStamped": {"id": "p1", "point": dict(_SNAPSHOT)},
+    # The PRODUCERS' shape, not an invented one: both are emitted FLAT
+    # (`sdk._emit_event(_BATCH_ID_RECORD_TYPE, id=point_id, **extra)` and
+    # `subject_binding`'s `EntityBindingRefused, id=point_id, ...`). This fixture
+    # used to supply a `point` snapshot neither producer emits, which is how
+    # both mutations stayed declared as snapshot-carried and refused every real
+    # write in silence (#9078 review, measured).
+    "EntityBindingRefused": {"id": "p1", "point_id": "p1", "role": "subject",
+                             "name": "n1", "kind": "Person", "outcome": "refused",
+                             "reason": "no declared subject"},
+    "BatchIdStamped": {"id": "p1", "batch_id": "b1", "content_hash": "h1"},
     "PointRevised": {"id": "p1", "new_content": "c2"},
     "OperatorAnnotated": {"id": "p1", "annotator_bias": 0.5},
     "PointRetracted": {"id": "p1"},
@@ -1217,6 +1225,268 @@ def test_every_type_a_producer_emits_has_a_record_mutation():
     )
 
 
+# ── the id's two legal carriers (#9078) ─────────────────────────────────────
+
+
+def _point_added(snapshot_id: str, envelope_id: str | None) -> dict:
+    record = {
+        "type": "PointAdded",
+        "event_id": "01JEVENTULID",
+        "ts": "2026-10-19T00:00:00+00:00",
+        "point": {"id": snapshot_id, "content": "the projection handle is unguarded",
+                  "kind": "claim", "pointKind": "claim", "is_episodic": False},
+    }
+    if envelope_id is not None:
+        record["id"] = envelope_id
+    return record
+
+
+def test_a_point_added_key_may_ride_the_snapshot_not_the_envelope():
+    """Measured on #9078's lane: the CAPTURE writer emits exactly this shape.
+
+    `PointAdded` from `TortoiseSDK.capture_session` carries NO envelope `id` —
+    the id is only in `payload["point"]` — while this module's table comment
+    asserts the opposite. The graph fold always read
+    `inner = event.get("point") or event`, so the snapshot was a legitimate
+    carrier; without this leg the record refused every captured Point and
+    #9078's live wiring silently wrote nothing for them.
+    """
+    statements = rp.mutations_for(_point_added("pt_snapshot_only", None),
+                                  org_id="o", graph_id="g")
+    upserts = [s for s in statements if s.sql.startswith("INSERT INTO public.point")]
+    assert upserts, [s.sql for s in statements]
+    assert "pt_snapshot_only" in upserts[0].params
+
+
+def test_the_envelope_key_still_wins_when_both_carriers_are_present():
+    """The fallback must never re-point a record that names its key twice."""
+    statements = rp.mutations_for(_point_added("pt_snapshot", "pt_envelope"),
+                                  org_id="o", graph_id="g")
+    upserts = [s for s in statements if s.sql.startswith("INSERT INTO public.point")]
+    assert "pt_envelope" in upserts[0].params
+    assert "pt_snapshot" not in upserts[0].params
+
+
+# ── the producers' actual carriers (#9078, measured on the live doors) ──────
+
+
+def test_a_nested_event_record_projects_from_its_nested_carrier():
+    """`ConversationMiner` nests the node under `event` — the fold handles it.
+
+    The record did not, so every mined event was refused (`unprojectable`) while
+    the journal and the graph both had it (#9078 review). The nested mapping is
+    the props source too: keying from it and projecting an empty row would be a
+    record that exists and says nothing.
+    """
+    record = {
+        "version": "1.0",
+        "type": "EventRecorded",
+        "createdAt": "2026-10-19T00:00:00+00:00",
+        "event": {"eventId": "ev_nested", "eventKind": "decision",
+                  "content": "the record is written in production",
+                  "eventStatus": "active", "name": "record wiring"},
+    }
+    statements = rp.mutations_for(record, org_id="o", graph_id="g")
+    event_upserts = [s for s in statements
+                     if s.sql.startswith("INSERT INTO public.event")]
+    assert event_upserts, [s.sql for s in statements]
+    assert "ev_nested" in event_upserts[0].params
+    assert any("the record is written in production" in str(v)
+               for v in event_upserts[0].params), (
+        "the row was keyed from the nested carrier but carries none of it")
+
+
+def test_a_document_record_keys_the_source_by_its_id_like_the_fold_does():
+    """`EventAPI.add_document` emits `id` with NO `url`; the fold keys `url or id`."""
+    record = {
+        "type": "DocumentCreated",
+        "id": "doc_9078",
+        "title": "the record is written in production",
+        "document_kind": "note",
+        "ts": "2026-10-19T00:00:00+00:00",
+    }
+    statements = rp.mutations_for(record, org_id="o", graph_id="g")
+    source_upserts = [s for s in statements
+                      if s.sql.startswith("INSERT INTO public.source")]
+    assert source_upserts, [s.sql for s in statements]
+    assert "doc_9078" in source_upserts[0].params
+
+
+def test_a_present_but_unusable_source_url_is_refused_not_silently_repaired():
+    """A `url` the producer cannot express is refused, never half-written.
+
+    The `url → id` fallback is gated on ABSENCE, not on unusability. When it
+    fired on a *present* but unusable `url`, the row was keyed from `id` while
+    its props still carried the unusable `url` — so the emitted statement said
+    `node_key = 'd1'` and `url = ''`/`NULL`, which the schema's own
+    `chk_source_node_key_is_contract_key` (`url IS NOT NULL AND node_key = url`)
+    refuses AFTER the `node_identity` insert has already run inside the caller's
+    transaction. The module's rule is to fail where the record is known
+    (#9200 review, P2).
+    """
+    for unusable in ("", None):
+        record = {"type": "DocumentCreated", "ts": "T", "id": "d1",
+                  "url": unusable, "title": "t"}
+        with pytest.raises(rp.RecordProjectionError, match="no usable 'url' key"):
+            rp.mutations_for(record, org_id="o", graph_id="g")
+
+    # ABSENCE is the shape a producer really emits (`add_document` sends `id`
+    # and no `url`), and it still projects — with the key column agreeing with
+    # the resolved key, which is the invariant the schema pins.
+    absent = {"type": "DocumentCreated", "ts": "T", "id": "d1", "title": "t"}
+    source = next(s for s in rp.mutations_for(absent, org_id="o", graph_id="g")
+                  if s.sql.startswith("INSERT INTO public.source"))
+    assert "url" in source.sql
+    assert list(source.params).count("d1") >= 2, (
+        f"node_key and the url column must both be the resolved key: {source.params}"
+    )
+
+
+# ── the two property-leak fixes (#9078 review: both had NO pin) ─────────────
+
+
+def _props_tail(statements: list[rp.Statement]) -> str:
+    """The `props` tail of the node statement, as its serialized argument."""
+    return " ".join(str(param) for statement in statements
+                    for param in statement.params)
+
+
+def test_agent_id_is_dropped_like_the_fold_drops_it():
+    """`projection/entities.py::_META_KEYS` strips `agent_id` before the node.
+
+    A record that kept it wrote a props key no journal replay ever writes, and a
+    record-sourced rebuild copies the tail verbatim — so the two rebuild paths
+    disagreed on every API-door record. Without this leg the skip-set entry can
+    be deleted again in silence, which is the class #9078 exists to end.
+    """
+    record = _point_added("pt_agent", None)
+    record["agent_id"] = "agent-leak-check"
+    record["point"]["agent_id"] = "agent-leak-check"
+
+    statements = rp.mutations_for(record, org_id="o", graph_id="g")
+    upsert = next(s for s in statements
+                  if s.sql.startswith("INSERT INTO public.point"))
+    # Non-vacuity: the row really was materialized, so 'absent' means dropped.
+    assert "pt_agent" in upsert.params
+    assert "agent-leak-check" not in _props_tail([upsert])
+    assert "agent_id" not in _props_tail([upsert])
+
+
+def test_actor_user_id_is_stored_only_where_the_table_has_the_column():
+    """§17.5 makes it a Session PRIMARY and nothing else's property.
+
+    `public.session` is the only record table with the column, so storing it
+    everywhere else made a record-sourced rebuild diverge from a journal replay
+    on that node. Both halves are asserted: a drop in one place is
+    indistinguishable from a skip-set that swallowed the column everywhere.
+    """
+    # (a) the EPISODIC layer: the column exists, so the value is STORED.
+    session = {"type": "SessionRecorded", "ts": "T", "id": "sess1",
+               "actor_user_id": "user-1"}
+    session_row = next(s for s in rp.mutations_for(session, org_id="o",
+                                                  graph_id="g")
+                       if s.sql.startswith("INSERT INTO public.session"))
+    assert "actor_user_id" in session_row.sql
+    assert "user-1" in session_row.params
+
+    # (b) every other layer: no column, so it is a record-only property.
+    point = _point_added("pt_actor", None)
+    point["actor_user_id"] = "user-1"
+    point["point"]["actor_user_id"] = "user-1"
+    point_row = next(s for s in rp.mutations_for(point, org_id="o",
+                                                 graph_id="g")
+                     if s.sql.startswith("INSERT INTO public.point"))
+    assert "actor_user_id" not in point_row.sql
+    assert "user-1" not in _props_tail([point_row])
+
+
+def test_a_batch_id_stamp_patches_the_point_and_never_creates_it():
+    """#902/A10 restores the stamp with a MATCH, which cannot create a row.
+
+    `BatchIdStamped` is in `projection/__init__.py::_NO_PROJECTION_FOLD`: the
+    graph replay applies it in pass-2b as
+    `MATCH (p:Point {id:$pid}) SET p.batch_id = $bid`. Declared as a snapshot it
+    was an UPSERT, so a stamp whose `PointAdded` sits outside the replayed
+    segment (#9187's `first_seq=41`) materialized a point with no creator — the
+    same defect as `EntityBindingRefused`, nine lines above in the registry. The
+    statement KIND is the assertion: an upsert can create, a patch cannot.
+    """
+    record = {"type": "BatchIdStamped", "ts": "T", "id": "p1",
+              "batch_id": "batch-1", "content_hash": "h1"}
+    statements = rp.mutations_for(record, org_id="o", graph_id="g")
+
+    assert not [s for s in statements
+                if s.sql.startswith("INSERT INTO public.point")], (
+        "a batch stamp must not create the point it stamps: "
+        f"{[s.sql for s in statements]}"
+    )
+    patches = [s for s in statements if s.sql.startswith("UPDATE public.point")]
+    assert patches, [s.sql for s in statements]
+    # The stamp is the §17.5-PRIMARY `batch_id`, not an empty no-op row.
+    assert "batch_id = %s" in patches[0].sql
+    assert "batch-1" in patches[0].params
+    # `content_hash` is schema-refused (`props` CHECK) — dropped, never raised.
+    assert "content_hash" not in patches[0].sql
+
+
+def test_a_batch_id_stamp_never_writes_the_mitigation_link_into_props():
+    """The mitigation path's stamp is FLAT and WIDER than the fold writes.
+
+    `_stamp_batch_id(mid, batch_id, mitigates_operator_id=…,
+    mitigation_strength=…)` → `_emit_batch_id_record` carries all four keys on
+    the envelope, while pass-2b restores the stamp with `SET p.batch_id = $bid`
+    and nothing else. With `from_payload=None` every flat key became a node
+    property, so `mitigates_operator_id` landed in `point.props` — a key no
+    journal replay writes, and a record-sourced rebuild copies the tail verbatim
+    (`cache_projection._props_from_row`), so the two rebuild paths diverged on
+    every stamped mitigation point. Same class as the `agent_id` leak
+    (#9200 review, P2); the allow-list is the fix, so both halves are asserted:
+    the real columns survive, the fold-less keys do not.
+    """
+    record = {"type": "BatchIdStamped", "ts": "T", "id": "m1",
+              "batch_id": "batch-9", "content_hash": "h1",
+              "mitigates_operator_id": "op-1", "mitigation_strength": 0.7}
+    patches = [s for s in rp.mutations_for(record, org_id="o", graph_id="g")
+               if s.sql.startswith("UPDATE public.point")]
+    assert patches, record
+    # Non-vacuity: the patch really writes the stamp, so 'absent' means dropped.
+    assert "batch_id = %s" in patches[0].sql
+    assert "batch-9" in patches[0].params
+    assert "mitigation_strength = %s" in patches[0].sql
+    tail = _props_tail([patches[0]])
+    assert "mitigates_operator_id" not in tail, tail
+    assert "op-1" not in tail, tail
+    assert "content_hash" not in tail, tail
+
+
+# ── the position watermark (#9187 P0: deleted here, restored) ───────────────
+
+
+def test_a_mid_journal_segment_keeps_the_positions_it_was_given():
+    """Replay of a SEGMENT numbers from the caller's offset, never from 1.
+
+    `_journal_row` keys the consumed position on `(org_id, graph_id, seq)` with
+    `ON CONFLICT DO NOTHING`, so a tail segment renumbered to 1.. would have its
+    position rows absorbed by the records that already own those numbers: the
+    layer rows land but the record's claim about what it consumed is false.
+    This pin exists because the parameter was deleted from `replay`/`replay_plan`
+    on this branch while `record_writer.write_records` still passed it — a
+    merge that reads clean and breaks every armed write (#9200 review, P0).
+    """
+    records = [_point_added("p1", None), _point_added("p2", None)]
+    plan = rp.replay_plan(records, org_id="o", graph_id="g", start_seq=41)
+    seqs = [s.params[2] for s in plan if rp._JOURNAL_INSERT_PREFIX in s.sql]
+    assert len(seqs) == 2, [s.sql for s in plan]
+    assert seqs == [41, 42], seqs
+
+    # The validation that guards it, and the default that preserves old calls.
+    with pytest.raises(rp.RecordProjectionError):
+        rp.replay_plan(records, org_id="o", graph_id="g", start_seq=0)
+    default = rp.replay_plan(records, org_id="o", graph_id="g")
+    assert [s.params[2] for s in default
+            if rp._JOURNAL_INSERT_PREFIX in s.sql] == [1, 2]
+
+
 # ---------------------------------------------------------------------------
 # TENANCY (#9192) — the pair comes from the CALL, never from the process
 # ---------------------------------------------------------------------------
@@ -1309,3 +1579,35 @@ def test_a_write_that_cannot_name_its_tenant_refuses_instead_of_falling_back(
     assert _every_param(plan), "the plan bound no parameters — the leg is vacuous"
     params = _every_param(plan)
     assert "env_org" not in params and "env_graph" not in params
+
+
+def test_the_journal_payload_keeps_the_producer_fields_that_are_not_props():
+    """A props strip must not silently truncate the record's own event stream.
+
+    `ENVELOPE_KEYS` is ALSO the filter `_journal_row` applies to the DURABLE
+    `public.journal_event.payload`, while the JSONL journal keeps `agent_id`
+    (`sdk._journal_record_payload` subtracts `_JOURNAL_ENVELOPE_KEYS`, which
+    does not name it). Listing `agent_id` in both sets is what makes it a props
+    fix AND a payload loss — one stream keeps the field, the other does not, and
+    nothing raises. `_RECORD_ONLY_KEYS` alone is the props strip; the payload
+    must survive intact.
+    """
+    record = _point_added("pt_payload", None)
+    record["agent_id"] = "agent-kept-in-the-payload"
+    record["point"]["agent_id"] = "agent-kept-in-the-payload"
+
+    plan = rp.replay_plan([record], org_id="o", graph_id="g")
+    journal = next(s for s in plan if "public.journal_event" in s.sql)
+    payload = json.loads(journal.params[4])
+
+    # Non-vacuity: the position row really is this record's, and its payload is
+    # not empty (`event_type` is its own column, so it is absent by design).
+    assert journal.params[3] == "PointAdded"
+    assert payload.get("point")
+    assert payload.get("agent_id") == "agent-kept-in-the-payload", (
+        "agent_id vanished from journal_event.payload while the JSONL journal "
+        "keeps it — the two event streams now disagree on a producer field"
+    )
+    # ...while the NODE prop is still stripped (the fix this PR is about).
+    upsert = next(s for s in plan if s.sql.startswith("INSERT INTO public.point"))
+    assert "agent_id" not in _props_tail([upsert])
