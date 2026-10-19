@@ -1203,6 +1203,7 @@ surfaces:
   # SOURCE_PATTERN, so a change to it falls through to `core` — registering the
   # guard HERE is what makes the file selected for the code it holds.
   - test_5612_journal_append_serialization.py
+  - test_kind_vocabulary_consistency.py
   # #7983 (§17.4.4/§17.4.6): the read ledger — the instrument the hot fraction
   # `f` never had. `core` is the right arm: neither tortoise/read_ledger.py (a NEW
   # file, so it matches no SOURCE_PATTERN) nor tortoise/sdk.py selects anything
@@ -5496,6 +5497,7 @@ durations:
   test_free_team_entitlement.py: 4.8
   test_integration_search.py: 2.8
   test_kind_classifier.py: 2.5
+  test_kind_vocabulary_consistency.py: 2.0  # unmeasured — new in #2786; no push-to-main sweep has collected it yet, so it carries the flat default exactly as an absent key would (#3419/#2788 rule — do NOT substitute a local timing, the map is a shard-layout input). The row is also what restores `durations` coverage above the 90% floor, which a test-adding PR drops by construction.
   test_longmem_preflight.py: 0.8
   test_battery_ep_outcome.py: 1.8
   test_battery_write_channel.py: 3.3
