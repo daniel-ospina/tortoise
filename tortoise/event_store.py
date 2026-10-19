@@ -275,14 +275,16 @@ _SCHEMA_ATTR = "_tortoise_event_schema"
 #
 # ⛔ WHY THE DECLARATION IS LOAD-BEARING, not a formality. `_emit_event`
 # (`tortoise/sdk.py`) calls `ensure_event_schema` / `next_seq` /
-# `append_event` inside `try: … except Exception: _logger.warning("event
-# emission failed … continuing")` — a FAIL-OPEN caller. So an unarmed
-# `proj.g` write here, with the third door closed and no declaration, does not
-# fail loudly: it silently stops writing the durable event store on every
-# mutation, and `poll_events` returns `[]` forever with only a warning line.
-# That is the same silent-loss shape `#7951` hit on the onboarding lane, and it
-# is why the writers that legitimately reach the guarded handle must DECLARE
-# themselves before the guard lands rather than after.
+# `append_event` inside a fail-open `try: … except Exception`, so an unarmed
+# `proj.g` write here with the third door closed and no declaration STOPS the
+# change feed on every mutation while the caller reports success. Since `#9208`
+# landed (`3d7710975` / PR `#9227`) that stop is NAMED rather than silent —
+# `_emit_event` records `record_degraded(...)` and `poll_events` refuses with
+# `ChangeFeedDegraded` instead of answering `[]` — so the harm is no longer
+# invisible; it is still a stopped feed, which is why the writers that
+# legitimately reach the guarded handle must DECLARE themselves BEFORE the guard
+# lands rather than after. (Before that fix the same failure was silent — the
+# shape `#7951` hit on the onboarding lane.)
 #
 # ⛔ NOT A GENERAL BYPASS — its width, stated:
 #   * Per-call `with` block (`_record_write_scope`). No attribute, constructor

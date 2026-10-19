@@ -3324,11 +3324,12 @@ def _journal_safe_params(params, cypher=None):
 #     metadata (`#9121`);
 #   * `tortoise/event_store.RECORD_LANE` — the event store (the change-feed log
 #     and its seq allocator): a declared CARVEOUT, not a projection and not the
-#     truth store — no journal record describes it (`#9079`). This is `#9208`'s
-#     FIRST requirement only; its second — narrowing `_emit_event`'s bare
-#     `except Exception` swallow, so a refusal is not indistinguishable from "the
-#     feed was never configured" — is NOT in this increment, and `#9208` stays
-#     open for it.
+#     truth store — no journal record describes it (`#9079`). `#9208` had two
+#     requirements: THIS declaration (its first), and narrowing `_emit_event`'s
+#     bare `except Exception` into a NAMED degraded state (its second) — that
+#     second one landed on `main` as `3d7710975` / PR `#9227` and `#9208` is
+#     CLOSED. This increment supplies the first, which is why the feed is named
+#     rather than silent when a write here is refused.
 #
 # ⛔ STILL UNDECLARED — each would be REFUSED by (1) today:
 #
@@ -9646,9 +9647,10 @@ class FalkorProjection(
         it for a journal-backed projection in ``#7951``) — and the
         SNAPSHOT-RESTORE legs have no journal record describing them at all.
         This scope authorizes them by virtue of being the operation that
-        carries them across the wipe. Narrowing that is `#9210`'s, and it must
-        land before (or with) `#9124`'s guard — this docstring states the width
-        rather than letting it read as a projection.
+        carries them across the wipe. Narrowing BOTH is `#9210`'s (its scope was
+        extended to the `#548` leg there, since its body named only the
+        restores), and it must land before (or with) `#9124`'s guard — this
+        docstring states the width rather than letting it read as a projection.
         """
         with _replay_write_scope():
             return self._replay_all_from_log(
