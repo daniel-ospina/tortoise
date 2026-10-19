@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import importlib.util as _ilu
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -783,6 +784,90 @@ def test_root_is_the_repo_root():
     assert probe.ROOT == _REPO, probe.ROOT
 
 
+def test_the_readme_does_not_describe_the_retired_extraction_lookup():
+    """The bundle must name the LIVE call path, not a construction it deleted.
+
+    The README said `captured.get("extraction") or captured` hands
+    `observe_steps` the receipt. That lookup was removed under review F1 (it is
+    a DEAD lookup — `capture_session` returns no `extraction` key — and its
+    fallback hid the shape mismatch), so the shipped probe binds
+    `result = captured`. A bundle whose job is to be exact about what was and
+    was not observed cannot present a retired expression as the live one.
+
+    Non-vacuity: on the pre-fix README the first assertion reds (the dead
+    expression was there) and the second reds too (`result = captured` was
+    nowhere in it).
+    """
+    readme = (PROBE.parents[1] / "README.md").read_text()
+    assert 'captured.get("extraction")' not in readme, (
+        "the README names a lookup the probe deleted")
+    assert "result = captured" in readme, (
+        "the README must name the binding the probe actually uses")
+
+
+def test_the_durations_row_quotes_the_test_count_it_weights():
+    """The shard weight's provenance must describe the file that SHIPS.
+
+    #9080 review: the `durations` row carried `MEASURED … (40 tests): 2.26s`
+    for a file that had grown to 51 — a measurement of a smaller file used as
+    the input to shard packing, and a body sentence that could not be
+    reproduced (`pytest` cannot report `40 passed` for 51 tests). The count is
+    mechanical, so it is pinned here: change the file's test count and the
+    comment must move with it.
+
+    Non-vacuity: at the pre-fix head the comment said 40 while the file held
+    51, so this reds.
+    """
+    manifest = (_REPO / "config" / "ci-surfaces.yml").read_text()
+    row = next((ln for ln in manifest.splitlines()
+                if ln.strip().startswith(
+                    "test_7949_capstone_verdict_check.py:")), None)
+    assert row is not None, "the durations row is the weight this test guards"
+    quoted = re.search(r"(\d+)\s+tests", row)
+    assert quoted, f"the row must quote its measured test count: {row}"
+    shipped = len(re.findall(r"^def test_",
+                             (Path(__file__)).read_text(), re.MULTILINE))
+    assert int(quoted.group(1)) == shipped, (
+        f"the durations row quotes {quoted.group(1)} tests; the file ships "
+        f"{shipped} — re-measure and move the count and the weight together")
+
+
+def test_the_manifest_names_only_arms_the_file_is_registered_in():
+    """A comment that points at a row that does not exist sends a lane nowhere.
+
+    #9080 review: the `core` block told the reader to "see the `eval` arm" —
+    there is no `eval` arm for this file (it is in `core`, `tier1` and
+    `durations` only), and the docs-only reason lives in the `tier1` arm. The
+    manifest's comments ARE the rationale of record, so a dangling
+    cross-reference is a defect in the artifact, not a typo.
+
+    Non-vacuity: the `eval` reference was live at the pre-fix head, so this
+    reds on it.
+    """
+    lines = (_REPO / "config" / "ci-surfaces.yml").read_text().splitlines()
+    entries = [i for i, ln in enumerate(lines)
+               if ln.strip() == "- test_7949_capstone_verdict_check.py"]
+    assert entries, "the file must be registered in at least one surface arm"
+    blocks: list[list[str]] = []
+    for i in entries:
+        block = [lines[i]]
+        j = i - 1
+        while j >= 0 and lines[j].lstrip().startswith("#"):
+            block.append(lines[j])
+            j -= 1
+        blocks.append(block)
+    dangling = [ln for block in blocks for ln in block if "`eval`" in ln]
+    assert not dangling, (
+        "the manifest cites an `eval` arm that does not exist for this file: "
+        + repr(dangling[:2]))
+    # and the durations row (the third home) must name a real one too
+    dur = [ln for ln in lines
+           if ln.strip().startswith("test_7949_capstone_verdict_check.py:")]
+    assert len(dur) == 1, dur
+    assert "`eval`" not in dur[0], dur[0]
+    assert "`core`/`tier1`" in dur[0] or "tier1" in dur[0], dur[0]
+
+
 def test_the_readme_names_the_run_s_own_blocker_not_only_the_rows(tmp_path):
     """#9080 review F1: the bundle named the ROWS' blockers and not the RUN's.
 
@@ -823,6 +908,10 @@ def test_the_parser_declares_no_flag_the_run_ignores(tmp_path):
     evidence. The artifacts' formats are owned by `#9076` / `#7947`, so the
     flags land with them — this pins that no dead flag (nor a README line
     telling an operator to use one) comes back first.
+
+    `--head` is the counter-example that must NOT be dropped: it IS read, it is
+    validated before it can reach a shipped log (see the `--head` tests below),
+    and the README documents the single case it exists for.
     """
     parser = probe.build_parser()
     help_text = parser.format_help()
@@ -835,6 +924,87 @@ def test_the_parser_declares_no_flag_the_run_ignores(tmp_path):
     with pytest.raises(SystemExit):
         parser.parse_args(["--prereg", HEAD, "--corpus", str(tmp_path),
                            "--e1e2-evidence", "x.json"])
+
+
+def test_a_free_text_head_override_is_refused_before_it_is_stamped(tmp_path):
+    """`--head` stamps EVERY row and V5 resolves the prereg against it.
+
+    The pre-fix run stamped whatever string it was given: `head = args.head or
+    rev-parse HEAD`, with no format check and no `git cat-file` resolution. That
+    makes the provenance chain rest on free text — the log's `head`, every
+    row's `sha`, and the ancestry rule that decides whether the evidence
+    predates the thresholds it claims to validate. Refused BEFORE G0, because
+    no pre-registration can make an unusable measured commit meaningful.
+
+    Non-vacuity: on the pre-fix probe this returns the G0 refusal (code 2, the
+    artifact is absent at HEAD) and writes `# head: not-a-sha` — the assertions
+    on the reason and on the emitted head both red against it.
+    """
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
+    out = tmp_path / "bad-head.log"
+    code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
+                       "--out", str(out), "--head", "not-a-sha"])
+    assert code == 2, code
+    record = cvc.extract_block(out.read_text())
+    assert "--head" in record["run"]["reason"], record["run"]["reason"]
+    assert "not a commit sha" in record["run"]["reason"]
+    assert record["head"] != "not-a-sha", (
+        "an unvalidated override reached the shipped record")
+    assert record["head"] == "unknown"
+    assert {row["sha"] for row in record["rows"]} == {"unknown"}
+
+
+def test_a_head_that_does_not_resolve_is_refused(tmp_path):
+    """A well-FORMED sha that resolves to nothing is still not a measurement.
+
+    `--head 000...0` passes a format check and fails `git cat-file`; accepting
+    it would write a sha into the evidence file that no commit in this repo
+    carries, which V5's ancestry test can then only ever refuse for the wrong
+    reason. Non-vacuity: the pre-fix probe stamped it verbatim.
+    """
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
+    out = tmp_path / "unresolved-head.log"
+    code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
+                       "--out", str(out), "--head", "0" * 40])
+    assert code == 2, code
+    record = cvc.extract_block(out.read_text())
+    assert "does not resolve" in record["run"]["reason"]
+    assert record["head"] == "unknown"
+
+
+def test_a_resolvable_head_override_is_what_the_rows_are_stamped_with(tmp_path):
+    """The legitimate use stays legitimate: a real commit IS the measured head.
+
+    Without this control, the validation above could be satisfied by refusing
+    every override, which would delete the only reason `--head` exists (a
+    re-run against a tagged commit that is not the worktree's HEAD).
+    """
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
+    out = tmp_path / "good-head.log"
+    resolved = _git("rev-parse", HEAD)
+    assert probe.HEAD_SHA_RE.match(resolved), resolved
+    code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
+                       "--out", str(out), "--head", resolved])
+    assert code == 2, code          # still G0: #9075 has not landed
+    record = cvc.extract_block(out.read_text())
+    assert record["head"] == resolved
+    assert {row["sha"] for row in record["rows"]} == {resolved}
+    assert "--head" not in record["run"]["reason"]
+
+
+def test_the_readme_documents_the_head_override_it_exposes():
+    """A flag that changes provenance must be legible in the artifact of record.
+
+    `--head` was absent from the module docstring's `Run:` block and from the
+    README's Reproduce block, so a reader could not tell whether a shipped
+    log's `head` was the measured commit or an override (#9080 review).
+    """
+    readme = (PROBE.parents[1] / "README.md").read_text()
+    assert "--head" in readme, "the Reproduce note must name the override"
+    assert "--head" in probe.__doc__
 
 
 def test_read_preregistration_refuses_an_unknown_sha():

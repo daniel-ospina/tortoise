@@ -15,14 +15,16 @@ aboutObjects: "#7949, #9080, #9075, #9076, #9077, #9116, #5199, #7947, EXTRACTOR
 branch: the files this bundle adds (`docs/evidence/7949-capstone/**`,
 `tools/capstone_verdict_check.py`, `tests/test_7949_capstone_verdict_check.py`,
 `config/ci-surfaces.yml`) plus the surface re-cut the new caller forces
-(`config/surface-manifest.yml`, `docs/product/mcp-sdk-surface.md`). **No product
-source under `tortoise/` is modified** — `git diff --stat origin/main...HEAD --
- tortoise/` is empty (two inert lint edits that an earlier commit carried in
-`tortoise/search_engine.py` / `tests/test_bm25_lexical_8488.py` are the same fixes
-#9085 already landed on main, so they were dropped in the merge rather than
-re-applied), which is what makes the E4 row's "no monkeypatch" clause possible at
-all. The one-line `tortoise/sdk.py` receipt construction this bundle reasons about is
-read, not changed.
+(`config/surface-manifest.yml`, `docs/product/mcp-sdk-surface.md`) — and, from
+clearing two `main`-reds this lane inherited, one doc citation remap
+(`docs/engineering/auth/consent-identity-bridge.md`) and two COMMENT rewrites
+(`tortoise/api.py`, `tortoise/commit_schema.py`: the #9158 durability-claim
+pin). **Nothing under `tortoise/` changes behaviour and nothing instruments
+the extractor** — the two edits are comment text, so the E4 row's "no
+monkeypatch" clause still holds on the fact that matters: no wrapper, spy or
+step-composition is installed anywhere in the measured path. The one-line
+`tortoise/sdk.py` receipt construction this bundle reasons about is read, not
+changed.
 
 **Decision being proved:** the epic's own closing rule — *"Close this epic only when
 E1–E5 all have evidence attached to this issue — not when the children close. A child
@@ -177,8 +179,8 @@ refuses) — an honest finding for `#7949`, never a guess.
   fresh read, but *why* each is open is the issue body's decomposition, not re-derived.
 - **Nothing reachable by a run.** The eight-step observation is **currently unreachable**
   on `capture_session`'s receipt: `tortoise/sdk.py` assembles the receipt from `meta` +
-  `extracted` (no `extraction` key), so the probe's `captured.get("extraction") or
-  captured` hands `observe_steps` the receipt itself, which carries none of `result["vet"]`,
+  `extracted` (no `extraction` key), so the probe binds `result = captured` and hands
+  `observe_steps` the receipt itself, which carries none of `result["vet"]`,
   `result["classify_later"]`, `result["search"]`, `result["payload"]`. Those four steps are
   therefore reported **unobserved** and the run refuses at G5 for EVERY input, once G0
   lands. A COMPLETED run — hence any row that could ever be measured — waits on `#9116`
@@ -202,3 +204,9 @@ python docs/evidence/7949-capstone/probes/capstone_run.py \
     | tee docs/evidence/7949-capstone/capstone.log
 python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone.log --require-green
 ```
+
+`--head <sha>` (optional) measures at a commit other than the worktree's current `HEAD`
+— a re-run against a tagged commit. It is validated, not trusted: 7-40 lowercase hex
+digits that resolve to a commit in this repo, refused before G0 otherwise. Every row is
+stamped with it and the gate resolves the pre-registration's ancestry against it, so an
+unusable value cannot reach a shipped log.

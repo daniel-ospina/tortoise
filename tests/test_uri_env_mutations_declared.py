@@ -540,6 +540,16 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "longmem_eval/test_vector_arm.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #9080/#7949 capstone: the probe's G2/G3 gates ARE an env decision —
+    # `backend_is_searchable()` must refuse the embedded lane (S3 never searches
+    # there) and accept docker/redis, and no gate may be tested by inheriting the
+    # developer's ambient URI. So the suite sets the two supported URI shapes and
+    # strips the variable for the "no backend configured" case: the env control IS
+    # the test input (DELIBERATE_URI for the setenv sites,
+    # DELIBERATE_EMBEDDED_LANE for the delenv sites), and every site is a
+    # function-scoped `monkeypatch`, auto-undone at teardown (no lane leak).
+    "test_7949_capstone_verdict_check.py": [
+        r'monkeypatch\.(?:setenv|delenv)\(\s*"TORTOISE_DB_URI"'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
