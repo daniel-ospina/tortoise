@@ -37,6 +37,7 @@ Internal format (opaque — callers MUST NOT depend on this)::
 from __future__ import annotations
 
 import base64
+import contextlib
 import errno
 import inspect
 import io
@@ -44,8 +45,10 @@ import json
 import logging
 import os
 import re
+import stat
 import threading
 import time
+import weakref
 from pathlib import Path
 
 try:                      # advisory locking is POSIX-only; Windows has none
@@ -626,8 +629,22 @@ def _append_lock(key: str) -> threading.Lock:
         return lock
 
 
-def _lock_exclusive(fd: int, key: str) -> None:
-    """Serialise the append against OTHER PROCESSES, where the OS can.
+def _lock_exclusive(fd: int, key: str) -> bool:
+    """Serialise against OTHER PROCESSES, where the OS can. Returns whether it did.
+
+    The return value exists for the journal POSITION (#9190): ``True`` means
+    the cross-process lock was acquired here. That is NECESSARY but not
+    sufficient for an exclusive count — a peer already inside the
+    ``_FLOCK_UNHEALTHY`` window writes without contending at all, so the
+    position also checks the record's own byte offset after the write (see
+    ``EventLog.append``). ``False`` means *this call did NOT hold the
+    cross-process lock* — either the wait timed out ("WHAT A TIMEOUT GIVES UP"
+    below) or the path is inside the ``_FLOCK_UNHEALTHY`` window, where it does
+    not even try. So a count taken now could be taken by a peer at the same
+    instant, and a position derived from it could be handed out twice. It is NOT
+    evidence that a peer holds the lock: in the window branch nobody may. Callers that merely append a
+    record ignore this (the write-side guarantee still holds); the position
+    must not.
 
     ``flock`` on the journal fd itself (released by ``os.close``). Two fds on
     the same file contend even inside one process, so this arm also covers a
@@ -652,24 +669,27 @@ def _lock_exclusive(fd: int, key: str) -> None:
     appends during it can make this writer attach its seal to the peer's
     record), and on a filesystem whose ``O_APPEND`` is not atomic there is no
     cross-process serialisation at all. That is the deliberate trade — a wedged
-    peer must not become an outage — and it is why the warning says so.
+    peer must not become an outage — and it is why the warning says so. It is
+    also exactly why this function reports whether the lock was held.
     """
     if fcntl is None:                  # pragma: no cover - platform branch
-        return
+        # No advisory locks on this platform, so exclusivity is never held —
+        # and the position must say so rather than assume it.
+        return False
     stamp = _FLOCK_UNHEALTHY.get(key)
     now = time.monotonic()
     if stamp is not None:
         if now - stamp < _FLOCK_UNHEALTHY_FOR_S:
-            return
+            return False
         _FLOCK_UNHEALTHY.pop(key, None)
     deadline = now + _FLOCK_TIMEOUT_S
     while True:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return
+            return True
         except OSError as exc:
             if exc.errno in _FLOCK_UNSUPPORTED:
-                return
+                return False
             # ``EINTR`` is TRANSIENT here, not an append failure: the poll
             # loop makes thousands of non-blocking ``flock`` calls exactly
             # while a peer holds the lock, i.e. exactly when a signal (SIGCHLD
@@ -693,7 +713,7 @@ def _lock_exclusive(fd: int, key: str) -> None:
                     "cross-process serialisation at all. Not retrying for "
                     "%.0fs.",
                     key, _FLOCK_TIMEOUT_S, _FLOCK_UNHEALTHY_FOR_S)
-                return
+                return False
             time.sleep(min(_FLOCK_POLL_S, max(0.0, deadline - now)))
 
 
@@ -740,6 +760,229 @@ def _read_exactly(f, want: int) -> bytes:
     return b"".join(parts)
 
 
+# ── the journal POSITION — the ordinal a live write needs (#9190) ────────
+#
+# `public.journal_event` keys the position a record consumed on
+# `(org_id, graph_id, seq)`, and the schema calls `seq` *"the idempotency key:
+# applying a seq twice is a no-op"*. A FULL REPLAY derives it from the record's
+# index in the read (`record_projection.replay_plan`'s
+# `enumerate(records, start=1)`). The LIVE path had no ordinal at all, so a
+# writer could only guess `MAX(seq)+1` — a number a later replay would either
+# collide with (`ON CONFLICT DO NOTHING` silently absorbs the replay's position
+# row) or duplicate (one event recorded under two seqs). Both are silent, which
+# is the class #9078 exists to remove.
+#
+# THE SOURCE IS THE JOURNAL ITSELF. A record's position is its 1-based index
+# among the records a REPLAY would read — `read_all(salvage=True)`, the ONE
+# reader the replay engines use (`read_for_replay`) — so a live write and a full
+# replay number the same record the same way, by construction rather than by
+# agreement. Seals and skipped damage contribute no index there, so they
+# contribute none here either.
+#
+# The sidecar is only a CACHE of reading the journal, and it never has to be
+# trusted. It records the FILE STATE it describes -- byte size AND `mtime_ns`,
+# taken from one `fstat` -- so a cache that does not describe this exact state
+# sends the count back to the journal instead of answering for it:
+#
+#   * the journal is append-only (nothing rewrites or truncates a record), so
+#     any append changes the size and an append by an OLDER writer (one that
+#     does not maintain the sidecar), a rotated/restored journal, or a
+#     half-written cache all fail the check and cost a RECOUNT;
+#   * a REPLACEMENT that happens to land on the same byte length -- the case a
+#     restore can actually produce -- moves `mtime_ns`, so it fails too. The
+#     residual is a same-length rewrite INSIDE ONE mtime tick: `mtime_ns` is
+#     nanosecond-resolution on APFS but a jiffy (1-4 ms) on some ext4 mounts and
+#     a whole SECOND on HFS+/FAT and many NFS/FUSE exports, so there a
+#     replacement inside one tick is indistinguishable from the state the cache
+#     describes. Named rather than papered over: only a full read can tell those
+#     apart, and the cost of being wrong is a stale count (a wrong `seq`).
+#   * a `position()` COUNT taken while a peer writes WITHOUT contending is behind
+#     by whatever that peer wrote during the count — not by one record, and not a
+#     `_FLOCK_UNHEALTHY` window's worth: the peer keeps appending for the whole
+#     window. It is a separate residual from the cache's, because no cache is
+#     consulted here: the count is fresh, and it is stale the moment it is
+#     returned. The cache is left alone (the state it counted has moved); the
+#     NUMBER cannot be, because `position()` has no `None` to give.
+#
+# The cache is written THROUGH on every append whose position is PROVEN (and by
+# `position()`, when the state it counted is still current) -- the paths that
+# report `None` deliberately leave it alone, because a cache entry is a statement
+# about a count, and there is no count to state. Write-through is what a cache
+# that lags cannot do, and a lagging cache is worth nothing in the shape that
+# needs it: with more
+# than one process appending, EVERY append moves the file, so every append is a
+# miss and would recount the whole journal INSIDE the append's critical section.
+# It is affordable only because
+# the write is a `pwrite`+`ftruncate` on a descriptor this instance keeps open.
+# Costs measured on the dev box 2026-10-15 (min of 7, microseconds): `pwrite`+
+# `ftruncate` on a kept descriptor ~10; open/write/close ~110-140; `write_text`
+# ~120-230. End to end, write-through adds ~25 us to a ~130 us append.
+# See `EventLog._cache_fd`.
+
+#: Suffix of the position cache beside a journal (`events.jsonl.position`).
+POSITION_SUFFIX = ".position"
+
+#: What the position's optional work is allowed to raise. Named once, because
+#: every one of these sites has the same job: report an unproven position, never
+#: fail the append. ``OSError`` covers the syscalls; ``MemoryError`` covers the
+#: recount (it holds the journal, ~8x its size); ``RecursionError`` covers a
+#: deeply nested record, which ``json.loads`` raises BEFORE ``ValueError`` is
+#: even considered. Anything else is a bug in this module and must NOT be
+#: swallowed here.
+_COUNT_MAY_RAISE = (OSError, MemoryError, RecursionError)
+
+#: The cache's own format version — change it if what a field MEANS changes, so
+#: a sidecar written by a different reader is a miss rather than a misreading.
+_POSITION_VERSION = 1
+
+
+def _position_cache_path(path: Path) -> Path:
+    return path.with_name(path.name + POSITION_SUFFIX)
+
+
+def _journal_state(f) -> tuple[int, int]:
+    """``(size, mtime_ns)`` of the open journal — one ``fstat``, no seek.
+
+    The pair the position cache is validated against, and the offset the append
+    checks its own write against. Two syscalls per append: this one before the
+    write and the same call after it. (``_seal_prefix`` still seeks to the end
+    for the tail check — this does not replace that read, it adds the state the
+    position needs, which the append previously had no use for.)
+    """
+    st = os.fstat(f.fileno())
+    return st.st_size, st.st_mtime_ns
+
+
+def _read_regular_file(path: Path) -> bytes | None:
+    """The file's bytes, or ``None`` if it is not a REGULAR file.
+
+    ``O_NONBLOCK`` is load-bearing, not tidiness: both callers run inside the
+    append's critical section (thread lock + ``flock``), and a FIFO — or any
+    other special file someone left at the cache path — would BLOCK the open or
+    the read there, parking every appender to that journal in every process with
+    nothing distinguishing it from a wedged peer. Non-blocking plus an
+    ``S_ISREG`` check makes a special file a cache MISS instead: the cache is an
+    optimization, so "not a regular file" is a reason to recount, never to wait.
+
+    ``O_NOFOLLOW``: a symlink at the cache path is not a cache — we would be
+    writing a JSON payload through an attacker-chosen link. A miss costs a
+    recount.
+    """
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        with os.fdopen(fd, "rb", closefd=False) as f:
+            return f.read()
+    finally:
+        os.close(fd)
+
+
+def _open_regular_for_write(path: Path) -> int:
+    """An open descriptor for the cache, which must be a REGULAR file.
+
+    Same reasoning as :func:`_read_regular_file` (``O_NONBLOCK`` so a FIFO
+    cannot park the append's critical section, ``O_NOFOLLOW`` so a symlink
+    cannot redirect the write), and it RAISES rather than returning ``None``:
+    its caller (`EventLog._refresh_position_cache`) is the one total guard.
+    """
+    # No `S_ISREG` gate here, unlike the read side, and deliberately: `open`
+    # already refuses a directory and a FIFO without a reader, `O_NOFOLLOW`
+    # refuses a symlink, and a FIFO WITH a reader accepts the open but then
+    # refuses the `pwrite` (ESPIPE) — measured. So a write-side gate would be a
+    # branch whose outcome is identical either way, i.e. machinery nothing can
+    # verify. (A device at this path WOULD accept the write, harmlessly: the
+    # cache simply misses forever, which is a recount.)
+    return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NONBLOCK
+                   | getattr(os, "O_NOFOLLOW", 0), 0o644)
+
+
+def _read_position_cache(cache: Path, size: int, mtime_ns: int) -> int | None:
+    """The count a cache file holds for a journal in exactly this state, or ``None``.
+
+    *cache* is the CACHE FILE (`_position_cache_path` of the resolved journal),
+    not the journal — the suffix is applied once, at the caller.
+
+    ``None`` means *the cache cannot speak for this file*: absent, unreadable,
+    another version, or — the case that matters — describing a different file
+    state. See the position block above for why ``(size, mtime_ns)`` is a sound
+    identity here; a caller that gets ``None`` recounts, which is correct and
+    merely costs a pass over the journal.
+    """
+    try:
+        data = _read_regular_file(cache)
+        if data is None:
+            return None
+        raw = json.loads(data)
+    except (OSError, ValueError, RecursionError, MemoryError):
+        # RecursionError: `json.loads` raises it (not ValueError) past ~10k
+        # nesting, and a sidecar is a file anything may have written.
+        # MemoryError: reading it holds the file (and its parse) in memory —
+        # this sidecar is not size-bounded by us, and this call runs on the
+        # append path, where the one thing that must not happen is losing a
+        # record to a cache.
+        return None
+    if not isinstance(raw, dict) or raw.get("v") != _POSITION_VERSION:
+        return None
+    if raw.get("size") != size or raw.get("mtime_ns") != mtime_ns:
+        return None
+    count = raw.get("records")
+    if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+        return None
+    return count
+
+
+def _write_position_cache(fd: int, records: int, size: int,
+                          mtime_ns: int) -> None:
+    """Refresh the cache through an ALREADY-OPEN descriptor.
+
+    ``pwrite`` at offset 0 then ``ftruncate`` to the payload length: the pair
+    costs ~8 us measured, against ~114 us for open/write/close and ~230 us for
+    `write_text`, and this runs on the append path (see the POSITION block).
+    The reader is another process, so a torn payload is expected and harmless —
+    invalid JSON is a cache MISS, which recounts.
+
+    It RAISES on failure, and that is deliberate: exactly one function in this
+    module is allowed to swallow a cache failure (`EventLog._refresh_position_cache`,
+    which is the one that runs after the record has landed), so the "a failed
+    cache write must not fail the append" promise has ONE owner instead of two
+    overlapping guards. Here, raising is the honest report.
+    """
+    payload = json.dumps({"v": _POSITION_VERSION, "records": records,
+                          "size": size, "mtime_ns": mtime_ns},
+                         separators=(",", ":")).encode("utf-8")
+    written = os.pwrite(fd, payload, 0)
+    os.ftruncate(fd, written)
+
+
+def _close_quietly(fd: int) -> None:
+    with contextlib.suppress(OSError):
+        os.close(fd)
+
+
+def _count_records(path: Path) -> int:
+    """How many records a REPLAY reads from *path* — the ordinal's DEFINITION.
+
+    Deliberately this module's own replay reader, on a THROWAWAY instance: the
+    count must be the same number a replay derives with
+    ``enumerate(records, start=1)``, and a second counting implementation is
+    exactly how the two would drift. The throwaway also keeps the caller's
+    torn-tail diagnostics intact — they are per-instance state reset by every
+    ``read_all``, so counting through ``self`` would clobber a damage report.
+
+    ``_quiet_damage`` stops the throwaway REPORTING what it skips: the tally is
+    still kept on the throwaway (it is what a salvage read reports), but the
+    WARNING/ERROR is the REPLAY's job — the count's input is the number of
+    RECORDS, not the damage counters. Without it a successful ``append`` to a
+    damaged journal would itself log "the records they carried are NOT
+    replayed" at ERROR — an alarm an operator would page on, raised by the write
+    path rather than by the recovery that actually skips them.
+    """
+    counter = EventLog(path)
+    counter._quiet_damage = True
+    return len(counter.read_all(salvage=True))
+
+
 def read_for_replay(log) -> list[dict]:
     """``log.read_all(salvage=True)`` — the RECOVERY read (#5612).
 
@@ -777,8 +1020,8 @@ class EventLog:
     def __init__(self, path: str | Path):
         self.path = Path(path)
 
-    def append(self, event: dict) -> None:
-        """Append one record, sealing any torn tail first.
+    def append(self, event: dict) -> int | None:
+        """Append one record, sealing any torn tail first; report its POSITION.
 
         A writer killed mid-append leaves a record with no terminating
         newline. Appending onto that fragment merges the two, and the merged
@@ -789,13 +1032,95 @@ class EventLog:
         record starts on a line of its own. Nothing is truncated or
         rewritten — the seal is another append.
 
+        RETURNS THE RECORD'S JOURNAL POSITION (#9190) — its 1-based index
+        among the records a replay reads. That is exactly the ``seq``
+        ``public.journal_event`` keys on, which ``record_projection`` numbers
+        ``enumerate(records, start=1)`` over the SAME read, so a live write and
+        a full replay give one record one number by construction. The ordinal
+        is therefore a fact of the journal, not a number to invent: the shape
+        this replaces (``MAX(seq)+1``) could only collide with a later replay
+        — ``ON CONFLICT DO NOTHING`` silently swallowing its position row — or
+        record one event under two seqs. See the ``POSITION`` block above.
+
+        ``None`` means the append SUCCEEDED but its position is NOT PROVEN,
+        and it is a NAMED absence, never a guess — a caller that writes
+        ``journal_event`` must leave that row unwritten rather than fabricate
+        a ``seq``. FIVE states produce it, and holding the lock does not exclude
+        any of the other four — the lock speaks only to the state that names it.
+
+        * the tail could not be SIZED, so the record may not have started on a
+          clean line (``_seal_prefix`` returned ``None``). The record is
+          appended, but whether a later replay counts it as a record is
+          unknown, so nothing is claimed and nothing is cached. A healthy lock
+          and a successful write do NOT rule this out — a flaky mount does;
+        * the cross-process lock could not be taken (a wedged peer, or a
+          platform with no advisory locks — ``_lock_exclusive`` says so);
+        * the journal could not be READ, so its records could not be counted
+          (an ``OSError``). The record is still appended: the position must not
+          give the append a read dependency it never had;
+        * a peer wrote INSIDE this call's window without taking the lock — the
+          documented degraded state, where ``_lock_exclusive`` stops
+          contending for ``_FLOCK_UNHEALTHY_FOR_S`` after one bounded wait.
+          Holding the lock therefore does not prove the count was exclusive;
+          the record's own byte offset does, so the post-write offset is
+          checked and a mismatch means someone else's record now sits between
+          the count and this one;
+        * a ``fstat`` failed — before the write (no count is possible) or after
+          it (no witness for the offset). Two syscalls, two states, and the
+          post-write one is the case where the record is durable and its
+          position is simply unknown.
+
+        Note the AMPLIFICATION of the LOCK state: one bounded wait stamps the
+        path UNHEALTHY for ``_FLOCK_UNHEALTHY_FOR_S`` (30 s), and every append
+        in that window returns ``None`` without making a single attempt. So a
+        five-second stall costs 30 s of unproven positions on a lock that is
+        perfectly healthy again — a caller must treat ``None`` as "no seq for
+        this record", not as evidence that the deployment is broken.
+
         CONCURRENCY (#5612): the tail check and the write are ONE critical
         section — a per-path thread lock plus ``flock`` on the journal fd —
         and the (seal + record) bytes leave in a single ``write(2)`` on an
         ``O_APPEND`` descriptor. Two writers therefore never interleave inside
         a record, and the reader never sees a fabricated seal. See the
         ``_APPEND_LOCKS`` block above for the guarantee relied on and its
-        limits.
+        limits. The position's read-modify-write rides the SAME critical
+        section (the count and the record land under one lock and one offset
+        check), which is what keeps two appenders off one number.
+
+        COST. The common path adds two ``fstat`` calls (the pre-write state and
+        the post-write offset), a memo compare and one write-through of the
+        sidecar — measured +17 to +25 us on a ~130 us append (dev box,
+        2026-10-15, min of 7; see the ``POSITION`` block for the per-syscall
+        numbers). A cache MISS re-counts the journal INSIDE this critical
+        section, in both time and memory. Measured across runs on this box (a
+        loaded fleet box, so ranges not points): 1 MiB 0.007-0.18 s; 3 MiB
+        0.16-0.29 s; 20 MiB ~1.95 s with a peak RSS of ~127 MiB (~6x the
+        journal — ``MemoryError`` is a real branch, not a formality).
+
+        THE MISS AND THE LOCK DEADLINE, stated because they interact: the
+        recount happens with ``_FLOCK_TIMEOUT_S`` (5 s) held, so a journal past
+        roughly 50 MiB can outlast a PEER's deadline. That peer then appends
+        unserialised and stamps ``_FLOCK_UNHEALTHY`` for 30 s (see the
+        AMPLIFICATION note on the ``None`` states), during which every append
+        returns ``None`` without contending, and its record landing inside this
+        call's window also fails this call's offset check so nothing is cached —
+        the next append recounts from scratch. While the journal stays large
+        that is a repeatable recount -> degrade cycle. The fix is a
+        checkpointed counter with a tail reader (count only what follows a
+        recorded offset), which is #9233, not a knob here.
+
+        A miss happens on the first append against a journal with no sidecar
+        yet (a restart, or a journal that never carried one), after a
+        restore/rotation, and after an append by a writer that does not
+        maintain the sidecar. It does NOT happen on the steady-state path —
+        not even with several processes appending — because the sidecar is
+        written through on every append: the next writer's read is a hit.
+        Removing the remaining miss cost needs a checkpointed counter with a
+        tail reader (count only the records after a recorded offset), which is
+        its own change. A miss is a RECOUNT: it changes that stall, never the
+        record's position — the one way the cache itself could answer wrongly
+        is the same-length-inside-one-mtime-tick replacement named in the
+        ``POSITION`` block above.
         """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         record = json.dumps(event, ensure_ascii=False) + "\n"
@@ -809,9 +1134,290 @@ class EventLog:
         # one ``os.write`` below is one ``write(2)`` regardless of CPython's
         # buffering rules or the record's size.
         with (_append_lock(key), io.FileIO(self.path, mode="a+b") as f):
-            _lock_exclusive(f.fileno(), key)
+            locked = _lock_exclusive(f.fileno(), key)
+            # BEFORE the write: the file state this append starts from — both
+            # the cache-identity check and the offset the cache records. An
+            # ``fstat`` that fails (ESTALE/EIO on the networked volumes this
+            # path is hardened for) must not cost the RECORD: the position is
+            # unproven, the append is not. Below, the post-write state read is
+            # guarded for the mirror reason — raising there would hand the
+            # caller a failure for a write that already landed, and a retry
+            # would duplicate it.
+            try:
+                size, mtime_ns = _journal_state(f)
+            except _COUNT_MAY_RAISE:
+                size = mtime_ns = None
+            # Total by contract, given the lock key this caller has already
+            # resolved (`_lock_key` below would run `realpath`, the one thing in
+            # `_records_before` its guards do not cover): both of its remaining
+            # inputs are guarded, so nothing here can lose the record before it is
+            # written.
+            count = (self._records_before(size, mtime_ns)
+                     if locked and size is not None else None)
+            position = None if count is None else count + 1
             seal = self._seal_prefix(f)
-            _write_record(f.fileno(), (seal + record).encode("utf-8"))
+            payload = ((seal or "") + record).encode("utf-8")
+            _write_record(f.fileno(), payload)
+            if position is not None and seal is None:
+                # The tail could not be examined, so "this record adds exactly
+                # one to the count" is unproven even though the write landed:
+                # if the record merged into a torn fragment the next replay
+                # skips it, and a number reported here would belong to a later
+                # record. Nothing is cached either — a cache entry is a
+                # statement about the NEXT writer's identity, and this one may
+                # already be off by one.
+                return None
+            if position is not None:
+                try:
+                    after, after_mtime = _journal_state(f)
+                except _COUNT_MAY_RAISE:
+                    return None
+                if after != size + len(payload):
+                    # A PEER wrote inside our window and did NOT take the lock:
+                    # `_FLOCK_UNHEALTHY` is the documented degraded window (a
+                    # previous append gave up waiting and stopped contending),
+                    # and a platform without advisory locks has no window only
+                    # because it has no lock at all. So the lock being HELD does
+                    # not prove the count was exclusive — the byte offset does.
+                    # Our count is stale by that peer's record, so the number we
+                    # derived is not this record's position: say so, and leave
+                    # the cache alone (it would record a boundary nothing
+                    # counted).
+                    return None
+                # The record we just wrote parses by construction, so it adds
+                # exactly one to the count a replay will read — seals and
+                # skipped damage add none, here or there. Written THROUGH, so
+                # the next writer (this process or another) reads a hit.
+                self._refresh_position_cache(key, position, after, after_mtime)
+            return position
+
+    def _cache_path(self, key: str) -> Path:
+        """The sidecar beside the RESOLVED journal, so one journal has ONE cache.
+
+        ``key`` is :meth:`_lock_key`'s resolved path: two spellings of one
+        journal (a symlinked data mount, a relative path) must share the cache
+        the way they already share the lock, or each spelling keeps its own
+        sidecar and misses on the other's writes.
+        """
+        return _position_cache_path(Path(key))
+
+    def _refresh_position_cache(self, key: str, records: int, size: int,
+                                mtime_ns: int) -> None:
+        """Write the sidecar through — TOTALLY. Nothing here may reach the caller.
+
+        Both call sites run AFTER the record has landed, so an exception escaping
+        this method would report a failure for a write that succeeded, and the
+        caller's retry would duplicate the record. That is why the guard is a
+        blanket ``except Exception`` rather than a list of errno families: the
+        promise is structural, and the categories are not knowable in advance —
+        the syscalls raise ``OSError``, the payload build can raise
+        ``RecursionError`` on a deeply nested record, and the descriptor's
+        finalizer raises ``TypeError`` the day ``EventLog`` gains ``__slots__``
+        without ``__weakref__``. A cache that cannot be written costs a RECOUNT
+        next time and never a wrong number, so swallowing here cannot hide a
+        wrong count — only the missed optimization.
+
+        DEBUG, not WARNING: a full disk or a read-only data mount makes this fire
+        on every append, and a per-append warning is noise an operator cannot act
+        on. Interposed exceptions are still visible with logging enabled.
+        """
+        try:
+            # The memo is the FIRST thing set and lives inside this guard: it is
+            # the only statement after the record lands that is not itself a
+            # syscall, so a `MemoryError` building the tuple would otherwise
+            # report failure for a durable record, and the caller's retry would
+            # duplicate it. Setting it before the write also means a failed
+            # write still leaves the count known (the next append rewrites).
+            self._position_memo = (os.fspath(self.path), size, mtime_ns, records)
+            _write_position_cache(self._cache_fd(key), records, size, mtime_ns)
+        except Exception:                  # blanket ON PURPOSE — see the docstring
+            logging.getLogger(__name__).debug(
+                "EventLog %s: position cache not written", self.path,
+                exc_info=True)
+
+    def _cache_fd(self, key: str) -> int:
+        """An open descriptor for the sidecar, kept for this instance.
+
+        The cache is written on EVERY append (see the POSITION block), so the
+        descriptor must not be opened per write: open+close measured ~114 us and
+        `write_text` ~230 us, against ~8 us for `pwrite`+`ftruncate` on a
+        descriptor already open. Keyed on the RESOLVED path and re-opened when
+        ``self.path`` changes (the same rule ``_lock_key`` follows).
+
+        It RAISES if the sidecar cannot be opened (EACCES, EMFILE, a directory
+        in the way), because that is the honest report from here: this method's
+        only caller is `_refresh_position_cache`, which is TOTALLY guarded and
+        runs AFTER the record has landed — so the exception is logged at DEBUG
+        and cannot reach the append. The failure is not memoised, so a fixed
+        permission or a freed descriptor recovers by itself.
+
+        Lifetime: ``weakref.finalize`` closes it when the instance is collected
+        (CPython refcounting makes that the common case; a reference cycle
+        defers it to the collector), which is what keeps the per-request /
+        per-SDK shape from accumulating descriptors. The
+        finalizer is DETACHED when the descriptor is replaced: a stale finalizer
+        holding a closed fd NUMBER would eventually close an unrelated file that
+        inherited the number. A fork inherits the descriptor, which is harmless
+        — every write is at an absolute offset under the journal's own lock. A
+        sidecar deleted underneath us keeps receiving writes on the unlinked
+        inode; the visible sidecar then simply misses, which is a recount, never
+        a wrong count.
+        """
+        held = getattr(self, "_cache_fd_state", None)
+        if held is not None and held[0] == key:
+            return held[1]
+        # The journal moved (the same instance reused, or the first use): a
+        # descriptor opened for ANOTHER journal's sidecar must not keep serving
+        # this one, so it is dropped before the new one is opened — including
+        # its finalizer, which would otherwise close a number we no longer own.
+        self._cache_fd_state = None
+        fin = getattr(self, "_cache_fd_finalizer", None)
+        if fin is not None:
+            fin.detach()
+            self._cache_fd_finalizer = None
+        if held is not None:
+            _close_quietly(held[1])
+        # Via `_cache_path`, the SAME derivation the reader uses: two
+        # computations of this path would let a write land where no read looks,
+        # which reads as a permanent cache miss and is invisible.
+        fd = _open_regular_for_write(self._cache_path(key))
+        self._cache_fd_state = (key, fd)
+        self._cache_fd_finalizer = weakref.finalize(self, _close_quietly, fd)
+        return fd
+
+    def _records_before(self, size: int, mtime_ns: int) -> int | None:
+        """How many records the journal holds, for this file state — or ``None``.
+
+        Memo, then cache, then the journal — each step validated by the
+        ``(size, mtime_ns)`` identity described in the ``POSITION`` block, so
+        every step but the last is O(1) and none of them can answer for a file
+        state it did not observe. The memo is this instance's own last answer,
+        re-derived when ``self.path`` changes (the same rule ``_lock_key``
+        follows), because one process appending repeatedly is the common shape;
+        it is REFRESHED here on every answer a caller paid for, so a
+        ``position()`` does not re-read the journal on every call. (Both call
+        sites hold the journal's lock, so writing it here cannot race.)
+
+        ``None`` is a NAMED absence, not a zero: the journal could not be READ
+        (``OSError`` — EACCES/EIO, not a parse problem, which ``read_all``
+        already handles) or could not be HELD in memory (``MemoryError`` —
+        ``read_all`` materializes the whole journal, ~8x its size in RSS
+        measured, and ``MemoryError`` is not an ``OSError``). Counting must
+        never turn into an append failure — the record's own write is what this
+        path is for, and it had no read dependency before the position existed
+        — so the caller reports an unproven position and still appends.
+        """
+        raw = os.fspath(self.path)
+        memo = getattr(self, "_position_memo", None)
+        if (memo is not None and memo[0] == raw and memo[1] == size
+                and memo[2] == mtime_ns):
+            return memo[3]
+        cached = _read_position_cache(self._cache_path(self._lock_key()),
+                                      size, mtime_ns)
+        if cached is not None:
+            count: int | None = cached
+        else:
+            try:
+                count = _count_records(self.path)
+            except _COUNT_MAY_RAISE:
+                # OSError: unreadable. MemoryError: reciting the journal needs
+                # O(journal) RSS (~8x measured). RecursionError: `json.loads` in
+                # the reader raises it (not ValueError) on deeply nested input,
+                # which a foreign/restored journal can carry. None of the three
+                # is an OSError, and each would otherwise escape from `append`
+                # BEFORE the write — the one failure the position must not add.
+                return None
+        # The count is already derived; only the memo can be lost (and then the
+        # next call recounts). Guarded because the tuple alloc is the one
+        # statement after a RECOUNT — the allocation spike — and this runs
+        # BEFORE the record's write.
+        with contextlib.suppress(*_COUNT_MAY_RAISE):
+            self._position_memo = (raw, size, mtime_ns, count)
+        return count
+
+    def position(self) -> int:
+        """How many records the journal holds — ``0`` when it holds none.
+
+        AN OBSERVABILITY COUNT, never an allocator: it is a measurement of the
+        journal at this instant, and it reserves nothing. A record's ``seq`` is
+        ONLY ever what that record's own :meth:`append` returned — deriving one
+        from ``position() + 1`` is the read-then-fabricate shape #9190 exists to
+        remove, and under concurrency the number it names belongs to a peer's
+        record. Read it to report what the journal has consumed, not to mint.
+
+        Numbers the same records a replay does — the replay's reader,
+        ``read_all(salvage=True)``, so damage is skipped here exactly as it is
+        there — and it is 1-based (the `seq` spelling) where
+        :meth:`cursor_at_end` indexes the same records 0-based through the
+        STRICT reader, which number a journal with mid-file damage differently
+        (that read refuses it rather than skipping it).
+
+        Read from the position cache and VERIFIED against the journal's own
+        ``(size, mtime_ns)`` (``POSITION`` block above), so a cache that does
+        not describe this exact file state costs one recount — never a silently
+        wrong number out of the CACHE. One exception to that, which the
+        ``POSITION`` block names: the same-length replacement inside one
+        ``mtime_ns`` tick. (A peer that writes DURING the count is not a cache
+        exception — nothing is read from the cache, and no cache entry is written
+        for a state that has moved — but it does make the returned NUMBER stale by
+        however much the peer wrote, and this method has no ``None`` to give.)
+        ``position()`` has no ``None`` to give; a caller that needs the ordinal of
+        a record it is writing must take it from that record's own ``append``.
+
+        Side effects worth knowing at a call site: it takes the append lock (so
+        a wedged peer can park it for ``_FLOCK_TIMEOUT_S``); it opens the
+        journal ``a+b``, so it needs WRITE permission and a journal deleted
+        between the ``exists`` check and the open is re-created empty, which is
+        the answer ``0`` for the file that then exists; and it writes the
+        position cache through — but only when it holds the cross-process lock
+        AND the journal still holds the state it counted (in the degraded window,
+        or when the journal moved under the count, it leaves the cache alone).
+
+        :raises OSError: the journal exists but could not be opened, stat'ed or
+            read (a read-only journal raises here — this method needs the
+            write fd for its lock), so there is no count to give. It raises
+            rather than answering ``0``, which is a fact about an EMPTY journal
+            and would be the same silence this method's ordinal exists to
+            remove.
+        """
+        if not self.path.exists():
+            return 0
+        key = self._lock_key()
+        with (_append_lock(key), io.FileIO(self.path, mode="a+b") as f):
+            locked = _lock_exclusive(f.fileno(), key)
+            try:
+                size, mtime_ns = _journal_state(f)
+            except OSError as exc:
+                raise OSError(
+                    f"EventLog {self.path}: cannot stat the journal to count "
+                    f"its records ({type(exc).__name__})") from exc
+            count = self._records_before(size, mtime_ns)
+            if count is None:
+                # Unreadable journal: nothing to cache, and no number to give.
+                raise OSError(f"EventLog {self.path}: cannot read the journal "
+                              f"to count its records")
+            if locked:
+                # The count is only a statement about THE STATE IT WAS TAKEN
+                # ON, and `flush` does not prove it was exclusive (a peer in
+                # `_FLOCK_UNHEALTHY` writes without contending). Unlike
+                # `append`, this call has no record of its own to check the
+                # offset against, so it re-reads the state and writes the cache
+                # ONLY if the journal still holds it: the alternative is a
+                # cache entry asserting "this 18-byte file has 3 records" for a
+                # state that really had 2, which a restore to that state would
+                # then serve as a fact — forever, because no later writer can
+                # make it miss.
+                try:
+                    after, after_mtime = _journal_state(f)
+                except OSError:
+                    # Same contract as the pre-count read: this method's one
+                    # raise is "there is no count to give", and a successfully
+                    # counted journal has one. A state read that fails here only
+                    # costs the cache.
+                    after = after_mtime = None
+                if (after, after_mtime) == (size, mtime_ns):
+                    self._refresh_position_cache(key, count, size, mtime_ns)
+            return count
 
     def _lock_key(self) -> str:
         """The resolved path this journal's append lock is keyed on.
@@ -829,8 +1435,8 @@ class EventLog:
         self._lock_key_memo = (raw, resolved)
         return resolved
 
-    def _seal_prefix(self, f) -> str:
-        """What must precede *record* for it to start on a clean line.
+    def _seal_prefix(self, f) -> str | None:
+        """What must precede *record* for it to start on a clean line, or ``None``.
 
         Three states, and the third is why this reads a LINE rather than the
         last byte: a seal torn at byte 0 leaves the fragment terminated but
@@ -842,11 +1448,31 @@ class EventLog:
         * ends on a record/marker   -> nothing to do
         * ends on a terminated
           MALFORMED line            -> mark it (no extra terminator)
+
+        ``None`` means the tail's SIZE could not be read, so the tail was never
+        examined. It is distinct from ``""`` on purpose: ``""`` asserts "this tail needs
+        nothing", which the position then relies on — a record that is in fact
+        glued onto a torn fragment is skipped by the next replay, so it consumes
+        no position, and claiming one is a permanently wrong ``seq`` (and a cache
+        entry that describes the file state exactly, so nothing ever recounts
+        it). The caller treats ``None`` as "append it, prove nothing".
+
+        A failure while EXAMINING the tail (the seek/`read(2)`s below) is NOT
+        this — it raises, and `append` therefore fails before writing, which is
+        what this method did before the position existed. The asymmetry is
+        pre-existing, not a safety argument: a failed SIZE probe has always
+        appended WITHOUT a seal (the caller must not lose a record because the
+        mount hiccupped, and refusing the write there is not this issue's to
+        change), and on a torn tail that append can glue the record onto the
+        fragment, so the next replay skips it. What is new is only that such an
+        append no longer CLAIMS a position for a record whose fate the seal never
+        established. Making the size-probe path refuse the write as well is a
+        separate decision about the append's own contract, recorded in #9254.
         """
         try:
             size = f.seek(0, 2)
         except OSError:
-            return ""
+            return None
         if not size:
             return ""
         # The terminator is decided ONCE, from the file's final byte — never
@@ -1123,6 +1749,8 @@ class EventLog:
         import logging
         self.torn_trailing_count += 1
         self.torn_trailing_raw.append(line)
+        if getattr(self, "_quiet_damage", False):
+            return              # a COUNT wants the tally, not the alarm
         logging.getLogger(__name__).warning(
             "EventLog %s: skipping torn line %d "
             "(SIGKILL mid-append tolerance, S15) — %d line(s) skipped",
@@ -1141,6 +1769,8 @@ class EventLog:
         import logging
         self.corrupt_line_count += 1
         self.corrupt_line_raw.append(line)
+        if getattr(self, "_quiet_damage", False):
+            return              # a COUNT wants the tally, not the alarm
         logging.getLogger(__name__).error(
             "EventLog %s: SKIPPING malformed mid-file line %d during a "
             "salvage read (#5612) — %d line(s) skipped so far; the records "
