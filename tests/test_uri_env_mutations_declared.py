@@ -540,11 +540,18 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # It flips NO lane here, and this file's intents do not have a category for
     # that: the fixture stubs `tortoise.sdk.TortoiseSDK` to return the shared
     # `sdk_with_journal` and calls `_get_proj()` BEFORE `main()`, so the
-    # `--db` value `main()` writes is never read by anything. The row carries
-    # the DELIBERATE_URI label only because the census requires every mutation
-    # line to be declared and has no restoration intent; the `--db`-precedence
-    # assertion lives in the #1349 arm, not here. Do not read it as evidence
-    # that `--db` precedence is pinned in this module.
+    # PROJECTION the SDK dials is pinned before `--db` is written. The value
+    # `main()` writes is still READ later in that same call — `extract_metadata`
+    # → `_graph_entity_keywords` reads `TORTOISE_DB_URI` and dials it
+    # (`tortoise/session_indexer.py:719` → `:328` → `:228`) — but against the
+    # dead `localhost:1` endpoint that read only logs "graph entity keyword
+    # lookup failed" (:296) and is swallowed, so it moves no lane. The row
+    # carries the DELIBERATE_URI label because the census requires every
+    # mutation line to be declared and has no restoration intent. NO precedence
+    # assertion is pinned for this CLI anywhere: the #1349 arm's
+    # `test_db_uri_env_restored_after_cleanup` covers the longmem_eval runner's
+    # `_temporary_env_var`, a DIFFERENT CLI. Do not read this row as evidence
+    # that `session_indexer --db` precedence is pinned.
     #
     # The regex pins the CONTINUATION shape (`, <newline>`), which catches only
     # what the census CAN catch: a same-line value, `setenv("TORTOISE_DB_URI",
