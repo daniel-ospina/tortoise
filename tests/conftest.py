@@ -2428,3 +2428,32 @@ from tests._signal_hygiene import harness_sigalrm_integrity  # noqa: E402, F401
 # mechanism and its safety properties live in `tests/_tmpdir_hygiene.py`;
 # the operator-invoked backlog sweep is `tools/tmpdir_sweep.py`.
 from tests._tmpdir_hygiene import track_tempfile_artifacts  # noqa: E402, F401
+
+
+# ── #9208: per-test isolation of the change feed's PROCESS-GLOBAL state ────
+# `event_store._DEGRADED` is process memory keyed by (store identity, graph),
+# and a refused `:GraphEvent` write latches it until an explicit
+# `clear_degraded()`. Every driver of a refusal today chooses a per-construction
+# identity (a random db path / namespace), so no leak is observable — but the
+# safety of the suite must not rest on every future test choosing a unique
+# identity, and `shared_embedded_db` is ONE session-stable path shared by
+# several files: the first armed-door/refusal test on it would refuse every
+# later `poll_events` IN THE PROCESS (#9208 review).
+#
+# Autouse and function-scoped, clearing on BOTH sides: before, so each test
+# starts from "healthy" (a peer's latch cannot change what this test observes);
+# after, so a test that degrades a feed on purpose does not poison the rest of
+# the shard. Imported lazily and defensively — this must never be the reason a
+# suite that does not touch the event store fails to run.
+@pytest.fixture(autouse=True)
+def _change_feed_state_isolation():
+    try:
+        from tortoise import event_store as _event_store
+    except Exception:  # pragma: no cover — importable everywhere in this suite
+        yield
+        return
+    _event_store.clear_degraded()
+    try:
+        yield
+    finally:
+        _event_store.clear_degraded()
