@@ -19307,6 +19307,15 @@ class TortoiseSDK:
         # ``ep_prior_only_cypher`` so a #2199 baseline cannot read contested
         # there either; only the genuinely UNMEASURED (no persisted prior)
         # listing remains get_contested_claims' deliberate divergence.
+        # #7927: a SECOND divergence now exists, and it is also deliberate —
+        # get_contested_claims sweeps the four epistemic labels (#7813) and
+        # lists a MEASURED :Subject/:Object/:Event belief, while this scan is
+        # ``MATCH (n:Point)`` and therefore cannot. Do not "harmonize" that
+        # either without deciding which surface the entity belongs on: this
+        # scan feeds the PR prune (Point rewiring), not the belief report.
+        # The claim leg below keeps its own pre-#7927 ``n.is_operator = false``
+        # — the same bare form the widened scans replaced — so it is
+        # unchanged by that widening.
         contested: dict[str, dict] = {}
         rows = proj.g.query(
             "MATCH (n:Point) "
@@ -20907,7 +20916,7 @@ class TortoiseSDK:
                          include_draft: bool = False,
                          stats: dict | None = None
                          ) -> tuple[list[str], set[tuple[str, str, str]]]:
-        """BFS subgraph selection from anchor Points — A9 return contract.
+        """BFS subgraph selection from anchor epistemic nodes — A9 return contract.
 
         Delegates to the shared _bfs_select_operators in tortoise.analyze.
         Returns ``(operator_ids, factor_anchors)`` — the operator Point IDs
@@ -20918,12 +20927,20 @@ class TortoiseSDK:
         to operator nodes, GATE-2 Q3). With include_draft=False (default,
         #780) draft anchors, operators and frontier points are excluded.
 
+
         ``stats`` (#6211): OPTIONAL out-parameter, filled by the selector with
         ``truncated`` / ``operators_seen`` / ``operators_used`` / ``op_cap``.
         The return tuple is unchanged, so every existing caller (the dreamer,
         the calibration scope probe) is unaffected; only a caller that does not
         own the operator cap passes it — ``compute_confidence`` — which needs
         the cap in its RESULT, not on stderr.
+
+
+        #7927: an anchor may be any of ``live.EPISTEMIC_LABELS``
+        (:Point/:Subject/:Object/:Event, owner ruling #7813) — the widening
+        lives in the shared selector, so this surface inherits it rather than
+        re-spelling a label predicate (pinned by
+        ``tests/test_7927_epistemic_read_surfaces.py``).
         """
         from .analyze import _bfs_select_operators
         proj = self._get_proj()
@@ -24426,6 +24443,78 @@ class TortoiseSDK:
         # drop sub-relevance near neighbours.
         _vector_floor = _resolve_vector_min_similarity()
         _floored_legs: set[str] = set()
+        # ── #8488: the in-process Okapi BM25 lexical arm ────────────────────
+        # Gated OFF by default (``TORTOISE_BM25_LEXICAL``, fail-safe — the same
+        # posture as every other lever here) because swapping the lexical
+        # SCORER is a retrieval-behaviour change and #8486 has produced no
+        # baseline to measure it against yet.
+        #
+        # What it swaps. The graph-side lexical leg is scored by the graph's
+        # fulltext scorer, which on the embedded lane gives a rare term exactly
+        # the weight a ubiquitous one gets and ignores document length
+        # (measured: tortoise/bm25.py's module docstring). BM25 supplies idf,
+        # term-frequency saturation and length normalisation. The arm runs in
+        # the LEXICAL SLOT: when it produces rows they REPLACE the shipped
+        # leg's list for this read, so the lexical signal is fused once, never
+        # twice (two lexical legs would outvote the dense leg by construction —
+        # the #7704 shape).
+        #
+        # Bounds. (a) embedded lane only (the lane the measurement covers, and
+        # the only one where a corpus scan is already the design);
+        # (b) entity families the leg can actually serve (BM25_ENTITY_TYPES);
+        # (c) an arm that finds nothing leaves the shipped leg's rows EXACTLY as
+        # they were — never an empty lexical slot (fail-safe, tested);
+        # (d) it stands down when the #4028 relevance floor emptied the vector
+        # leg, because that empty answer is the read's declared result;
+        # (e) its fusion weight goes through ``clamp_lexical_fusion_weight``.
+        #
+        # The shipped leg is NOT suppressed: it runs in the chain as it always
+        # does, in parallel and inside the deadline, so the fallback costs no
+        # extra latency and the lexical slot is metered exactly once.
+        #
+        # Trace shape when the arm runs: the chain's entries keep
+        # ``degradation_chain``'s fixed order (fts, vector, structural), and the
+        # arm appends ONE further entry for the same ``fts`` leg AFTER them —
+        # because that is when it ran. The two entries are not a duplicate
+        # claim: the chain's entry has no ``mechanism`` key (the shipped
+        # scorer's rows), the arm's carries ``mechanism="bm25"``.
+        #
+        # (f) the arm does NOT run when a later lexical pass will REPLACE the
+        # slot it writes. ``_search_keys_prf_expansion`` (A4) and
+        # ``_entity_key_expansion_pass`` (C2) each RE-RUN the shipped scorer
+        # and overwrite ``raw_results["fts"]``, so an arm that ran before them
+        # would leave its rows discarded while its trace entry still claimed
+        # ``mechanism="bm25"`` — a measurement (starting with #8486) would
+        # baseline a read whose lexical order is the shipped scorer's while
+        # reading a trace that says BM25 produced it. Standing down is the
+        # honest composition: same shape as the ``#4028`` floor stand-down
+        # below (no arm, no arm trace entry, the shipped rows stand), and it
+        # costs nothing because composing the two levers was never measured.
+        # Reopening it means feeding the expansion's alias tokens INTO the arm
+        # so the arm is the last writer — not running it earlier.
+        _bm25_lexical = False
+        _prf_supersedes_the_arm = bool(
+            search_keys_prf
+            or (entity_key_expansion and entity_type == "point"))
+        if (query and query.strip() and is_embedded and not is_full_scan
+                and strategies.get("fts")):
+            from tortoise.search_engine import BM25_ENTITY_TYPES
+
+            from .bm25 import bm25_enabled
+            _bm25_enabled = bm25_enabled()
+            _bm25_lexical = (entity_type in BM25_ENTITY_TYPES
+                             and _bm25_enabled and not _prf_supersedes_the_arm)
+            if _bm25_enabled and _prf_supersedes_the_arm:
+                # Visible, not silent: the operator asked for the arm AND for an
+                # expansion pass that would overwrite it. The read is CORRECT
+                # (shipped rows, shipped scorer), but the lever they set is not
+                # in effect — say so rather than let a measurement discover it.
+                _logger.warning(
+                    "#8488: BM25 lexical arm standing down — %s replaces the "
+                    "lexical slot after the arm would have written it; the "
+                    "shipped lexical scorer's rows are used",
+                    "search_keys_prf" if search_keys_prf
+                    else "entity_key_expansion")
         raw_results = degradation_chain(
             graph, query, struct_kind, query_vec, strategies,
             entity_type=entity_type, limit=str_limit,
@@ -24452,6 +24541,41 @@ class TortoiseSDK:
                 if leg_trace is not None and query_vec is not None
                 and expanded_kinds else None),
         )
+
+        if _bm25_lexical and "vector" not in _floored_legs:
+            # #8488: re-score the lexical slot in-process. Bounded by
+            # DEFAULT_BM25_CORPUS_CAP (see run_bm25_query), and it returns []
+            # on ANY failure — in which case ``raw_results["fts"]`` keeps the
+            # shipped leg's rows untouched, so enabling the arm can never leave
+            # the read with a lexically weaker pool than it had before. The
+            # same holds when the corpus is WIDER than the cap: the leg
+            # declines its windowed ranking and returns [], because the shipped
+            # leg answered over the whole label and a first-N-ids window can
+            # only lose matches (the leg records ``degraded=True`` + a warning).
+            # ``meter=False``: the shipped leg already counted the lexical
+            # slot in the tally; this is the same slot scored differently, not
+            # a second leg.
+            from tortoise.search_engine import run_bm25_query
+            _bm25_hits = run_bm25_query(
+                graph, query, entity_type=entity_type, limit=str_limit,
+                timeout_ms=int(_elevated_timeout_ms or 500),
+                excluded_statuses=() if include_terminal else None,
+                leg_trace=status_trace,
+                keep_numeric=keep_numeric,
+                meter=False,
+            )
+            if _bm25_hits:
+                # Ordering: this replaces the key IN PLACE when the shipped
+                # leg contributed rows (dict assignment to an existing key
+                # keeps its position), and appends it when the shipped leg
+                # contributed nothing (degradation_chain only stores non-empty
+                # legs) — so the #2952 fixed order is preserved in the first
+                # case and is not in the second. Neither matters to the fused
+                # result: ``rrf_fusion`` sums over legs keyed by
+                # ``strategy_names`` built from the same dict, so leg order is
+                # not load-bearing. Kept as a plain assignment for that
+                # reason, not because order is guaranteed.
+                raw_results["fts"] = _bm25_hits
 
         if not raw_results:
             # #4028: the vector leg RAN and the relevance floor removed every
@@ -24649,6 +24773,14 @@ class TortoiseSDK:
                         fusion_weights = _json.loads(_fw)
                     except (ValueError, TypeError):
                         fusion_weights = {"vector": 1.5}
+            if _bm25_lexical:
+                # #8488: the lexical leg's weight is BOUNDED below the dense
+                # leg's (tortoise/bm25.py — #7704 / #1657). A no-op for the
+                # recorded production default; it removes only an unbounded
+                # override, which would let the lexical leg decide a fused
+                # order by itself.
+                from tortoise.search_engine import clamp_lexical_fusion_weight
+                fusion_weights = clamp_lexical_fusion_weight(fusion_weights)
             fused = rrf_fusion(
                 ranked_lists,
                 strategy_names=list(raw_results.keys()),

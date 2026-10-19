@@ -22,6 +22,7 @@ exist** and reports, for each of them, HOW the value was obtained:
     cmux surface resume show   the pane's resume binding (authoritative)
     lane-sessions.json         registry OVERRIDES (disk-verified, hand-picked)
     cmux sessions list         the durable session store: running pi pid + cwd
+    ps -axo pid,ppid,uid,command  live `pi` processes + cwd: the lane no cmux sees (#8999)
     ~/.pi/agent/sessions/      session JSONL on disk (existence + identity)
     git worktree list          worktree -> branch -> HEAD
     gh pr / gh issue list      open work items
@@ -85,6 +86,12 @@ the list WAS read and the lane's workspace is absent, the lane is **terminal**:
     the exact ``pi --session <sid>`` that restores it.
   * ``RETIRED``     — no session file resolves; never nudge, never dispatch,
     never route.
+
+⛔ The one exemption is a PROCESS lane (#8999, ``PROC:<pid>``): it never WAS a
+cmux workspace — the cell launch path starts a lane as a ``nohup`` child of a
+shell — so its synthetic workspace is registered as present. Otherwise a running
+lane would be retired by the reconciliation whose whole job is to retire lanes
+that are gone.
 
 A terminal lane is reported and is NOT live, NOT free and NOT dispatchable.
 "Reported" means never SILENTLY dropped, and it is a statement about ORPHANS: a
@@ -165,6 +172,7 @@ import time
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -1072,27 +1080,474 @@ def pane_bindings() -> dict[str, str]:
     return bindings
 
 
-def live_sessions() -> dict[str, list[dict[str, Any]]]:
-    """{workspace: [session records]} from the durable ``cmux sessions list``.
+#: The live-session STORES this reader knows about (#8999). They are not
+#: alternatives to pick from — the answer is their UNION — but each is named so the
+#: board can say WHICH store answered, and which one did not and why.
+LIVE_STORE_CMUX_PLURAL = "cmux-sessions-list"
+LIVE_STORE_CMUX_SINGULAR = "cmux-session-list"
+LIVE_STORE_PROCESS = "process-table"
 
-    ``--all`` is REQUIRED: the default limit is 100 and this store held 930 records
-    (measured 2026-10-08), so a running lane whose record fell outside the first 100
-    silently lost its pid and read ``unknown``.
+#: The synthetic workspace id for a lane that NO cmux store can enumerate (#8999).
+#: A cmux workspace id is a UUID, so this prefix cannot collide with one — which is
+#: what lets `build_state` recognise a process lane and `pane_state` refuse to ask
+#: cmux about a workspace it was never told of.
+PROC_WS_PREFIX = "PROC:"
+
+
+def is_proc_ws(ws: str) -> bool:
+    """Is ``ws`` the synthetic workspace of a process-only lane (#8999)?"""
+    return str(ws or "").upper().startswith(PROC_WS_PREFIX)
+
+
+class LiveSessions(dict):
+    """{workspace: [session records]} carrying the READ'S OWN provenance (#8999).
+
+    A plain ``{}`` cannot distinguish three different facts, and the claim gate has
+    to: cmux says there are no sessions; cmux could not be read; and cmux does not
+    have the verb in this version at all. Collapsing them into ``{}`` is what made
+    every collision pre-flight on the Cloud cell INCOMPLETE — the fail-closed
+    direction, but a gate that can never answer is not a gate.
+
+    ``source`` names which store(s) answered and ``error`` names every store that
+    did not. ``measured`` is True when a store answered (so an empty fleet IS an
+    answer) AND no store that could answer reported a gap: a store that answered
+    does not cover for one that could not be read, because that is what keeps the
+    claim gate on INCOMPLETE instead of letting it answer "nobody holds it" from a
+    read that only partly happened.
     """
-    out = _run(["cmux", "sessions", "list", "--json", "--all"], timeout=60)
-    try:
-        data = json.loads(out)
-    except Exception:
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    result: dict[str, list[dict[str, Any]]] = {}
-    for s in data.get("sessions") or []:
-        if not isinstance(s, dict) or s.get("agent") != "pi":
+
+    measured: bool
+    error: str
+    source: str
+
+    def __init__(
+        self, *args: Any, measured: bool = False, error: str = "", source: str = "",
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.measured = measured
+        self.error = error
+        self.source = source
+
+
+def cmux_session_records() -> tuple[list[dict[str, Any]], str, str]:
+    """``(records, source, error)`` from the FIRST cmux session grammar that ANSWERS.
+
+    THE GRAMMAR IS VERSION-DEPENDENT, and the fleet runs two cmuxes (#8999):
+
+        Mac cmux            ``cmux sessions list --json --all``  (PLURAL resource)
+        Cloud guest CLI     cmux 0.1.0 (``cmux-tui transport``) — no session
+                            listing at all
+
+    Measured 2026-10-18 on the cell (``/tmp/cell-t3``): the plural form answers
+    ``{"code":"usage.invalid","message":"--all needs a value"}`` and the singular
+    one ``{"code":"validation.invalid", …}``. ⛔ BOTH ARE VALID JSON, which is
+    exactly why the payload's SHAPE is checked and not merely that it parsed: a
+    guest-CLI error object would otherwise read as a session store with no
+    sessions, i.e. a measured "nothing is running" while lanes run.
+
+    ⛔ ``cmux agent list --json`` / ``cmux tree --json`` are NOT a session store on
+    that box either: they answered ``{"agents": []}`` WHILE pi lanes were running,
+    because the sanctioned launch path registers no cmux agent. A store that answers
+    "nobody" about a box with lanes is worse than an unreadable one, so it is not
+    consulted at all — the process table below is.
+
+    ``--all`` is REQUIRED on the plural form: the default limit is 100 and that
+    store held 930 records (measured 2026-10-08), so a running lane whose record
+    fell outside the first 100 silently lost its pid and read ``unknown``.
+    """
+    errors: list[str] = []
+    for source, cmd in (
+        (LIVE_STORE_CMUX_PLURAL, ["cmux", "sessions", "list", "--json", "--all"]),
+        (LIVE_STORE_CMUX_SINGULAR, ["cmux", "session", "list", "--json"]),
+    ):
+        out = _run(cmd, timeout=60)
+        if not out.strip():
+            errors.append(f"`{' '.join(cmd)}` produced nothing")
             continue
+        try:
+            data = json.loads(out)
+        except Exception:
+            errors.append(f"`{' '.join(cmd)}` returned no parsable JSON")
+            continue
+        recs = data.get("sessions") if isinstance(data, dict) else None
+        if not isinstance(recs, list):
+            if isinstance(data, dict):
+                detail = f"{data.get('code') or '?'}: {data.get('message') or ''}".strip()
+            else:
+                detail = type(data).__name__
+            errors.append(f"`{' '.join(cmd)}` answered {detail!r}, not a session store")
+            continue
+        return [r for r in recs if isinstance(r, dict)], source, ""
+    return [], "", "; ".join(errors)
+
+
+def pi_processes() -> tuple[list[dict[str, Any]], str]:
+    """``(pi processes, error)`` — the store that exists in BOTH cmux versions.
+
+    The sanctioned per-cell launch path starts a lane as a ``nohup`` child of a
+    shell, so NOTHING registers it anywhere:
+
+        cd "$wt" && nohup pi --model … -p "$(cat brief)" > lane.log 2>&1 < /dev/null &
+
+    No cmux workspace, no session record, no registry row — but its PID and its CWD
+    are facts the process table holds, and the CWD is what attributes it (worktree ->
+    branch -> issue). So the process table is the store that can see a cell lane
+    "even in principle"; repairing the cmux verb alone would only move the answer
+    from UNMEASURED to a false "nobody holds anything".
+
+    EVERY pi pid is returned, including a ``task``/``subagent`` child: what makes
+    two processes ONE lane is their CWD, not their ancestry (a child is often given
+    its own worktree and is then a lane of its own), so the collapse happens in
+    ``live_sessions`` where the cwds are known.
+
+    A FAILED read is an error (``ps`` printed nothing), never an empty fleet; a
+    readable table with no ``pi`` row is a real, reportable "nothing is running".
+
+    ⛔ ONLY THIS USER'S PROCESSES. A lane runs as the fleet user, and another
+    user's cwd is not readable, so including one would turn the whole store
+    UNMEASURED on a box where some unrelated ``pi`` happens to run as root — the
+    permanent-red-gate failure this fix exists to remove.
+    """
+    out = _run(["ps", "-axo", "pid=,ppid=,uid=,command="], timeout=30)
+    if not out.strip():
+        return [], "`ps -axo pid=,ppid=,uid=,command=` produced nothing"
+    return _pi_pids_from_ps(out), ""
+
+
+def _pi_pids_from_ps(text: str) -> list[dict[str, Any]]:
+    """Every ``pi`` process of THIS user in ``ps -axo pid=,ppid=,uid=,command=`` output.
+
+    Pure, so the rule is testable without a process table. The match is on the
+    EXECUTABLE (``basename(argv[0]) == "pi"``), which is how every sanctioned
+    launch path starts a lane — ``nohup pi …``, a cmux pane's ``exec pi`` — and it
+    deliberately does not match a shell whose command line merely CONTAINS "pi"
+    (the launcher ``/bin/bash -c 'cd … && nohup pi …'`` is such a process).
+    """
+    me = os.getuid()
+    rows: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        f = line.split(None, 3)
+        if len(f) < 4:
+            continue
+        try:
+            pid, ppid, uid = int(f[0]), int(f[1]), int(f[2])
+        except ValueError:
+            continue
+        if uid != me:
+            continue
+        if os.path.basename(f[3].split(None, 1)[0]) == "pi":
+            rows.append({"pid": pid, "ppid": ppid})
+    return rows
+
+
+def _proc_cwd_is_readable() -> bool:
+    """Can the kernel hand us a pid's cwd directly (``/proc``, i.e. Linux)?
+
+    A seam, not a constant: the ``lsof`` fallback is the path macOS runs and the
+    suite does not, so it can only be tested by forcing this answer.
+    """
+    return Path("/proc/self/cwd").exists()
+
+
+# `lsof` reporting a cwd it could not follow, and the kernel's removed-directory
+# marker: `n/proc/8/cwd (readlink: Permission denied)`, `/wt (deleted)`.
+#
+# ⛔ THE PATTERN NAMES THOSE TWO FORMS, IT DOES NOT MATCH ANY PARENTHETICAL. A
+# blanket `r" \(.*\)$"` also rejects a perfectly ordinary directory whose last
+# segment ends in a parenthesised suffix (`wt-3051 (2)`, a duplicate-checkout
+# spelling), and because an unusable cwd poisons `measured`, one such lane would
+# publish `liveness-unmeasured` and answer INCOMPLETE on EVERY issue, for as long
+# as it ran — the permanent-red gate #8999 exists to remove (review of #9016).
+# lsof's other placeholder, `(unknown)`, is already rejected by the leading `/`.
+_CWD_PLACEHOLDER_RE = re.compile(r" \((?:deleted|unlinked|readlink:[^)]*)\)$")
+
+
+def _usable_cwd(value: str) -> str:
+    """``value`` when it is a path a lane can be attributed by, else ``""``.
+
+    ⛔ AN UNUSABLE STRING IS NOT A MEASUREMENT. Neither reader fails when it cannot
+    follow a pid's cwd: ``lsof`` prints a PLACEHOLDER in the ``n`` field
+    (``/proc/8/cwd (readlink: Permission denied)`` — a live pid in a container whose
+    ``/proc`` entry this user cannot read), and the kernel appends `` (deleted)`` to
+    the cwd of a process whose directory was removed. Accepted as a path, such a
+    value matches no worktree, so ``register_process_lanes`` drops the pid as
+    "another repo's lane" while ``live_sessions`` still reports the store MEASURED —
+    the gate may then answer "nobody holds it" about a live ``pi`` the store did see,
+    the exact fail-open #8999 forbids. Reported as UNRESOLVED instead, the existing
+    per-pid judgement applies: a live pid keeps the store unmeasured, an exited one
+    is not a gap.
+    """
+    if not value.startswith("/"):
+        return ""
+    if _CWD_PLACEHOLDER_RE.search(value):
+        return ""
+    return value
+
+
+def process_cwds(pids: Sequence[int]) -> tuple[dict[int, str], str]:
+    """``({pid: cwd}, error)`` — ONE read for every pid, not one per pid.
+
+    ``/proc/<pid>/cwd`` where the kernel exposes it (Linux, the cells), otherwise a
+    single batched ``lsof`` (macOS: 69 pids in 0.17 s, measured 2026-10-18) so a
+    fleet-sized read stays one subprocess.
+
+    ⛔ A PID WITH NO CWD IS NOT AN ERROR — a pid that has EXITED is not a gap.
+    Both readers report only A REAL failure: an unread ``/proc/<pid>/cwd`` is
+    skipped, and a command that could not be run is an ``error``. Which pids that
+    leaves UNRESOLVED is judged per pid (``pid_alive``) in ``live_sessions``.
+
+    ⛔ AND A PLACEHOLDER IS NOT A CWD — see ``_usable_cwd``. Both readers can
+    return a STRING that is not a path (``lsof``'s ``(readlink: Permission
+    denied)`` form, the kernel's `` (deleted)`` suffix); taken as a cwd it is
+    attributed to no worktree, so the pid would contribute no lane while the store
+    still read MEASURED. It is reported as unresolved instead, and the per-pid
+    ``pid_alive`` judgement above decides.
+    """
+    if not pids:
+        return {}, ""
+    if _proc_cwd_is_readable():
+        got: dict[int, str] = {}
+        for pid in pids:
+            try:
+                cwd = _usable_cwd(os.readlink(f"/proc/{pid}/cwd"))
+            except OSError:
+                continue
+            if cwd:
+                got[pid] = cwd
+        return got, ""
+    out, err = _run_tolerant(
+        ["lsof", "-a", "-d", "cwd", "-Fn", "-p", ",".join(str(p) for p in pids)],
+        timeout=60,
+    )
+    if err:
+        return {}, err
+    got = {}
+    cur: int | None = None
+    for line in out.splitlines():
+        if line.startswith("p"):
+            try:
+                cur = int(line[1:])
+            except ValueError:
+                cur = None
+        elif line.startswith("n") and cur is not None:
+            cwd = _usable_cwd(line[1:])
+            if cwd:
+                got[cur] = cwd
+    return got, ""
+
+
+def _run_tolerant(cmd: Sequence[str], timeout: int = 60) -> tuple[str, str]:
+    """``(stdout, error)`` — stdout is KEPT on a non-zero exit.
+
+    ⛔ ``lsof`` exits 1 when it cannot stat SOME of the pids it was handed while
+    still printing the cwd of every one it could. Routing it through ``_run``, which
+    degrades a non-zero exit to "", would discard a complete answer because one
+    process exited mid-read — and on a busy fleet that is the normal case, not the
+    exceptional one.
+
+    ⛔ AND EMPTY STDOUT IS NOT AN ERROR WHEN THE COMMAND RAN. ``lsof`` prints
+    nothing when EVERY pid it was handed has gone — the pids are not running, which
+    is an ANSWER ("nobody"), not an unreadable store. Returning an error here
+    short-circuited the per-pid judgement in ``live_sessions`` and promoted one
+    vanished process to a whole-store failure: on a box whose cmux store also fails
+    that is ``liveness-unmeasured`` for EVERY issue, forever — the permanent-red
+    gate #8999 exists to remove. Such a pid is caught by the ``unresolved`` /
+    ``pid_alive`` filter on the way out, so the fail-closed direction survives: only
+    a genuine "there was nothing to report" reads as empty. An exit status above 1
+    is a command that did not do its job, and stays fatal.
+    """
+    try:
+        p = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout, check=False
+        )
+    except Exception as exc:  # missing binary, timeout, …
+        return "", f"`{cmd[0]}` could not be run: {type(exc).__name__}: {exc}"
+    if not p.stdout.strip():
+        if p.returncode <= 1:
+            # RAN, and reported no cwd: the pids are gone. Judged per pid upstream.
+            return "", ""
+        detail = (p.stderr or "").strip().splitlines()
+        return "", (
+            f"`{' '.join(cmd[:3])} …` produced nothing (exit {p.returncode}"
+            + (f": {detail[-1][:160]}" if detail else "")
+            + ")"
+        )
+    return p.stdout, ""
+
+
+def live_sessions() -> LiveSessions:
+    """{workspace: [session records]} from EVERY store that can answer (#8999).
+
+    The answer is the UNION of
+
+      * the cmux durable session store — workspace-keyed, and the only store that
+        carries a lane's session id; and
+      * live ``pi`` processes that NO cmux record claims — emitted under the
+        synthetic ``PROC:<pid>`` workspace, because a cell lane started by the
+        launch path above has no workspace to be keyed by.
+
+    A process whose pid a cmux record already carries is the SAME lane measured
+    twice, so it is not emitted a second time — but ONLY while that record is a
+    READING: ``--all`` is a durable HISTORY that keeps ended sessions, and pids are
+    recycled, so a record whose pid is alive NOW is the only one that can prove a
+    live process was already counted, AND the record must not be placeable
+    elsewhere: when the record names a cwd and the process runs in a DIFFERENT one,
+    they are two lanes, so the process is still published.
+
+    ⛔ ONE CWD IS ONE LANE. Several pi processes share a worktree routinely (a
+    ``task`` child runs in its parent's cwd; a respawned lane overlaps its
+    predecessor), and enumerating each as its own lane makes one lane's attribution
+    read as a COLLISION between two lanes. So the processes are collapsed by cwd and
+    every pid is kept on the single record.
+
+    ⛔ A PROCESS IS ONLY USABLE IF ITS CWD IS READ, because the cwd is the whole
+    attribution (worktree -> branch -> issue). A live pi whose cwd could not be
+    resolved is therefore reported as an UNMEASURED store, not silently dropped:
+    dropping it would let the gate answer "nobody holds it" while a process whose
+    cwd we could not read may hold exactly that issue. A pid that has EXITED is not
+    a gap — it is not running.
+
+    ⛔ AND A STORE THAT ANSWERED DOES NOT COVER FOR ONE THAT COULD NOT BE READ.
+    `measured` used to be "at least one store answered", which made a healthy EMPTY
+    cmux store outrank a process store that had just failed: every process lane was
+    dropped and the board still published `liveness_measured: true`, so no
+    `liveness-unmeasured` orphan was emitted and the gate answered "nobody holds it"
+    from a measurement the reader itself knows is incomplete. That is the fail-open
+    the invariant above forbids, and it was reachable on every box where cmux answers
+    (`ps`/`lsof` unusable, or one live `pi` whose cwd cannot be read while others
+    can). The process store's ERROR therefore poisons `measured` — the lanes it DID
+    attribute are still published (evidence is evidence), but the fleet is UNMEASURED
+    and the gate refuses with the cause named.
+    """
+    recs, cmux_source, cmux_error = cmux_session_records()
+    result = LiveSessions()
+    # The pids a PUBLISHED record claims, and EVERY cwd those records say the pid ran
+    # in (a record without one cannot place itself — see the mask below). A set, not a
+    # single value: the durable store can hold several records for one pid (a reused
+    # workspace), and last-wins would make the mask depend on payload order.
+    claimed: set[int] = set()
+    rec_cwds: dict[int, set[str]] = {}
+    for s in recs:
+        if s.get("agent") != "pi":
+            continue
+        try:
+            pid = int(s.get("pid") or 0)
+        except (TypeError, ValueError):
+            pid = 0
         ws = str(s.get("workspace_id") or "").upper()
-        if ws:
-            result.setdefault(ws, []).append(s)
+        if not ws:
+            # ⛔ A RECORD THAT MASKS A PID MUST ALSO PUBLISH ONE. A `pi` record with
+            # a live pid but NO `workspace_id` has no key to be published under, so
+            # masking its pid would drop the process from BOTH stores: the `PROC:`
+            # leg skips it as already counted while the record itself stays
+            # unpublished — a MEASURED board with no lane and no
+            # `liveness-unmeasured` orphan, i.e. the gate answering "nobody holds
+            # it" about a running lane. Unpublished, it masks nothing, so the
+            # process table still speaks for it (review of #9016).
+            continue
+        result.setdefault(ws, []).append(s)
+        # ⛔ A RECORD'S EXISTENCE IS NOT A READING. Only a record whose pid is alive
+        # NOW can prove this process is the SAME lane measured twice; a pid recycled
+        # onto an ENDED record (`--all` keeps them for ever) must not mask a live
+        # `pi` — masking it drops the only evidence that lane has and leaves the
+        # store MEASURED, so the gate answers "nobody holds it" about a running
+        # lane. This is `row_binds_evidence`'s rule, applied to the join.
+        if pid and pid_alive(pid):
+            claimed.add(pid)
+            c = str(s.get("cwd") or "")
+            if c:
+                rec_cwds.setdefault(pid, set()).add(c)
+
+    procs, proc_error = pi_processes()
+    if not proc_error:
+        # ⛔ AND A LIVE PID IS NOT A PROCESS. `pid_alive` proves only that SOME
+        # process holds the pid — `--all` keeps ENDED sessions for ever and pids are
+        # recycled (macOS wraps at ~99 998), so "recycled onto an ended record" and
+        # "a live pid" are the SAME observation. Masking on it therefore drops the
+        # live `pi` that now carries the pid: it has no cmux workspace of its own, so
+        # the process table is its only evidence, and with it gone the store still
+        # reads MEASURED — the gate answers "nobody holds it" about a running lane.
+        # The reader already holds the identity signal: the cwd the record claims and
+        # the cwd the process runs in. A recorded pid is masked only when the record
+        # cannot place itself anywhere else (no cwd) or the two cwds are the SAME
+        # lane; when both are known and differ they are provably different lanes.
+        # The cwds every mask decision depends on are read BEFORE the filter.
+        read_pids = [
+            r["pid"] for r in procs
+            if r["pid"] not in claimed or rec_cwds.get(r["pid"])
+        ]
+        cwds, cwd_error = process_cwds(read_pids)
+        if cwd_error:
+            proc_error = cwd_error
+
+        def _already_counted(pid: int) -> bool:
+            """Is this live process a lane a PUBLISHED record already speaks for?"""
+            if pid not in claimed:
+                return False
+            recorded = rec_cwds.get(pid) or set()
+            if not recorded:
+                # The record cannot place itself elsewhere, so it is the reading
+                # that proves this process was already counted.
+                return True
+            pc = cwds.get(pid) or ""
+            if not pc:
+                # ⛔ AN UNREAD PROCESS CWD IS NOT A MATCH. It cannot be shown to BE
+                # this process, so the pid stays a candidate with no cwd: it lands
+                # in `unresolved`, and because it is ALIVE the store goes UNMEASURED
+                # (`measured=False`) with the pid named — an INCOMPLETE board, never
+                # a measured "nobody holds it".
+                return False
+            real_pc = _realpath(pc) or pc
+            # ANY recorded cwd that is this one is the same lane; a record that names
+            # only OTHER worktrees is a different lane, so the process is published.
+            return any((_realpath(rc) or rc) == real_pc for rc in recorded)
+
+        candidates = [r for r in procs if not _already_counted(r["pid"])]
+        # ⛔ THE LANES THAT *WERE* ATTRIBUTED ARE PUBLISHED EVEN WHEN THE LEG IS
+        # INCOMPLETE — including the ones read beside an unresolvable pid. The
+        # verdict is withheld (below), but the evidence is not thrown away with it.
+        by_cwd: dict[str, list[int]] = {}
+        for r in candidates:
+            cwd = cwds.get(r["pid"])
+            if cwd:
+                by_cwd.setdefault(cwd, []).append(r["pid"])
+        if not cwd_error:
+            unresolved = [r["pid"] for r in candidates if r["pid"] not in cwds]
+            still_alive = [p for p in unresolved if pid_alive(p)]
+            if still_alive:
+                proc_error = (
+                    "no cwd could be read for live pi pid(s) "
+                    + ", ".join(str(p) for p in still_alive[:5])
+                    + " — a process with no cwd cannot be attributed, so 'nobody "
+                    "holds it' is unprovable for the lanes they may be"
+                )
+        for cwd, pids in by_cwd.items():
+            pids.sort()
+            # ONE record PER PID under the one workspace key, which is the shape the
+            # lane join already handles for a reused cmux workspace: the lane's
+            # `pi_pids`, its CPU tree and its `pid_alive` then cover EVERY process
+            # measured in that cwd, while the LANE is counted once
+            # (`register_process_lanes`).
+            ws = f"{PROC_WS_PREFIX}{pids[-1]}"
+            for pid in pids:
+                result.setdefault(ws, []).append({
+                    "agent": "pi",
+                    "workspace_id": ws,
+                    "pid": pid,
+                    "cwd": cwd,
+                    "session_id": None,
+                    # running RIGHT NOW, measured by `ps`
+                    "agent_lifecycle": "running",
+                    "store": LIVE_STORE_PROCESS,
+                })
+
+    sources = [s for s in (cmux_source, "" if proc_error else LIVE_STORE_PROCESS) if s]
+    # measured means NO store that could answer reported a gap — not merely that one
+    # of them answered (see the ⛔ above). `source` still names what did answer.
+    result.measured = bool(sources) and not proc_error
+    result.source = "+".join(sources)
+    result.error = "; ".join(x for x in (cmux_error, proc_error) if x)
     return result
 
 
@@ -1247,7 +1702,15 @@ def pane_screen(ws: str) -> str:
 
 
 def pane_state(ws: str) -> dict[str, Any]:
-    """One pane read -> {working, ch_pct}. ``ch_pct`` is the footer's CH reading."""
+    """One pane read -> {working, ch_pct}. ``ch_pct`` is the footer's CH reading.
+
+    A PROCESS lane (#8999) has no cmux workspace to read, so it is not asked for:
+    the synthetic id would only produce an error, and the lane's quiescence stays
+    honestly UNMEASURED (`pane_quiescent` is None) rather than being reported as a
+    quiet pane cmux never showed us.
+    """
+    if is_proc_ws(ws):
+        return {}
     text = pane_screen(ws)
     ch = None
     for m in re.finditer(r"CH\s*([0-9]+(?:\.[0-9]+)?)%", text):
@@ -1269,6 +1732,191 @@ def transcript_age(path: str | None) -> float | None:
 # ===========================================================================
 # the join
 # ===========================================================================
+
+
+def worktree_of(cwd: str, roots: Collection[str]) -> str:
+    """The worktree path containing ``cwd`` (longest match), or ``""``.
+
+    A lane's cwd is not always the worktree ROOT (a lane that has cd'ed into a
+    subdirectory is still that worktree's lane), so the match is by path prefix on a
+    real-path comparison — a symlinked ``/tmp`` vs ``/private/tmp`` is otherwise the
+    same directory spelled two ways.
+
+    ``realpath`` is memoized: a fleet-sized box carries hundreds of worktree records
+    (414 measured 2026-10-18) and this runs once per lane, so resolving every root
+    for every lane dominated the read.
+
+    ⛔ THE DEPTH IS COMPARED IN ONE SPELLING, AND IT IS THE RESOLVED ONE. The value
+    RETURNED is the raw root (the caller uses it as a key into the worktree map), so
+    ``best`` holds a raw path — but ``len(best)`` is not a depth: the parent's raw
+    spelling can be longer than its resolved one (a symlinked root) while the child's
+    is shorter, and then a deeper root loses to its own parent. The hub here IS the
+    parent of its own worktrees, so losing the deepest match collapses a
+    ``.worktrees/<lane>`` lane onto the hub — whose branch is ``main`` — and the
+    issue that lane really holds then reads "nobody holds it" (review of #9016).
+    The best RESOLVED length is therefore tracked separately from the raw value.
+    """
+    real = _realpath(cwd)
+    if not real:
+        return ""
+    best = ""
+    best_len = -1
+    for root in roots:
+        rroot = _realpath(root).rstrip(os.sep)
+        if not rroot:
+            continue
+        if (real == rroot or real.startswith(rroot + os.sep)) and len(rroot) > best_len:
+            best = root
+            best_len = len(rroot)
+    return best
+
+
+@cache
+def _realpath(path: str) -> str:
+    """``os.path.realpath`` that cannot raise and is resolved once per build."""
+    try:
+        return os.path.realpath(path)
+    except OSError:
+        return ""
+
+
+def register_process_lanes(
+    live: dict[str, list[dict[str, Any]]],
+    workspaces: dict[str, Any],
+    kept: Sequence[tuple[str, str, str]],
+    wts: Mapping[str, Any],
+) -> tuple[list[tuple[str, str, str]], set[str]]:
+    """Turn process-store records into LANE RECORDS — ``(rows, proc_workspaces)``.
+
+    A cmux session record is keyed by the workspace that already owns it. A PROCESS
+    record has no workspace: the sanctioned cell launch path starts a lane as a
+    ``nohup`` child of a shell, so nothing registered it anywhere (#8999). Without a
+    lane record the process would be an invisible liveness reading — the board would
+    enumerate zero lanes and the claim gate would answer "nobody holds it" from a
+    store that never listed anybody, the exact fail-open this fix must not create.
+
+    So each process cwd becomes a lane. ``live`` is already keyed by the synthetic
+    ``PROC:<pid>`` workspace (see ``live_sessions``); this function publishes the
+    lane record and MUTATES ``workspaces`` to register the synthetic workspace, so
+    the workspace-existence reconciliation reads it as present rather than retiring
+    a lane that was never a cmux workspace at all.
+
+    ⛔ SCOPE TO THIS REPO'S WORKTREES (``wts``). A branch slug names a number in
+    EVERY repo, so a lane checked out in another repo would falsely attribute this
+    repo's issue of the same number. When the worktree list could not be read
+    (``wts`` empty) the population is NOT narrowed: a false COLLISION blocks an
+    honest dispatch, while a false "nobody" authorises one — the direction this
+    whole gate exists to forbid.
+
+    ⛔ JOIN BEFORE SYNTHESIZING. When exactly ONE registry row's workspace already
+    claims this cwd, that lane IS this process — the process is the lane's measured
+    pid, so the reading is attached to the existing row instead of minting a second
+    lane for one process. "Exactly one" is required for the same reason ``cwd_ws``
+    requires it (#9): a checkout shared by two lanes cannot say which one a pid
+    belongs to.
+
+    Returns ``(kept_rows, proc_workspace_ids)``.
+    """
+    added: list[tuple[str, str, str]] = []
+    proc_ws: set[str] = set()
+    # ⛔ ONE WORKTREE IS ONE LANE — ENFORCED AT THE MINT, TOO, NOT ONLY AT THE
+    # READER. ``live_sessions`` collapses processes by their CWD, and a lane's
+    # processes do not all sit in the same cwd: a `pi` that has cd'ed into
+    # `<wt>/tools` is a SECOND cwd, so two `PROC:` keys reach this loop for ONE
+    # lane. The lane's identity key is the WORKTREE ROOT (`lane_cwd`), so that is
+    # what is grouped on — and the lane this call already minted for a root is
+    # consulted, because `owners` below only ever sees the registry rows handed IN
+    # (`kept`), never `added`. Grouping anywhere else publishes two records for one
+    # lane: `attribute_claims` attributes the issue to both labels, and
+    # `_holders_from_board` answers TWO live holders for it — a false COLLISION, on
+    # exactly the cell this fix exists to unblock.
+    minted: dict[str, str] = {}  # lane key (real worktree root) -> its workspace key
+    scoped = bool(wts)
+    for ws, recs in list(live.items()):
+        if not is_proc_ws(ws):
+            continue
+        cwd = ""
+        for r in recs:
+            if str(r.get("store") or "") == LIVE_STORE_PROCESS and r.get("cwd"):
+                cwd = str(r["cwd"])
+                break
+        if not cwd:
+            continue
+        root = worktree_of(cwd, list(wts)) if scoped else ""
+        if scoped and not root:
+            # ANOTHER REPO'S LANE, and not this board's. Dropped from the store as
+            # well, so it cannot be cross-attributed through `cwd_ws` either.
+            del live[ws]
+            continue
+        lane_cwd = root or cwd
+        # The COMPARISON key is the real path, because one worktree is reachable
+        # under two spellings (a symlinked `/tmp` vs `/private/tmp`, a bind mount):
+        # `worktree_of` already resolves when it matches a root, and a registry row's
+        # cwd comes from cmux unresolved, so the join has to meet in the middle.
+        key = _realpath(lane_cwd) or lane_cwd
+        already = minted.get(key)
+        if already:
+            # THE LANE WAS MINTED EARLIER IN THIS SAME CALL — same worktree, another
+            # cwd depth. Merge the pids onto that one record; the lane is counted
+            # once.
+            live.setdefault(already, []).extend(recs)
+            del live[ws]
+            continue
+        owners: list[str] = []
+        for _lbl, row_ws, _ilbl in kept:
+            if key in _row_cwds(row_ws, workspaces, live):
+                owners.append(row_ws)
+        if len(owners) == 1:
+            # THE LANE ALREADY EXISTS: merge the reading into its workspace and drop
+            # the synthetic key, so the cwd does not read as two workspaces (#9).
+            live.setdefault(owners[0].upper(), []).extend(recs)
+            del live[ws]
+            continue
+        # ⛔ THE LABEL NAMES THE SAME PID THE WORKSPACE KEY DOES. The `PROC:` key is
+        # the group's NEWEST pid (`live_sessions`), while `recs[0]` is the oldest, so
+        # reading the label off `recs[0]` published `proc-<oldest>` beside
+        # `workspace: PROC:<newest>` — two pids for one lane in two fields an operator
+        # reconciles by hand (review of #9016).
+        pid = ws.split(PROC_WS_PREFIX)[-1]
+        workspaces[ws.upper()] = {
+            "title": f"pi (process {pid}) — no cmux workspace",
+            "cwd": lane_cwd,
+        }
+        added.append((f"proc-{pid}", ws, ""))
+        proc_ws.add(ws.upper())
+        minted[key] = ws.upper()
+    return list(kept) + added, proc_ws
+
+
+def _row_cwds(
+    row_ws: str,
+    workspaces: Mapping[str, Any],
+    live: Mapping[str, list[dict[str, Any]]],
+) -> set[str]:
+    """Every REAL-PATH cwd a registry row's own evidence attributes to it.
+
+    ⛔ THE WORKSPACE MAP IS NOT THE ONLY STORE THAT KNOWS A ROW'S CWD. The cmux
+    workspace list degrades to an EMPTY map on every failure path (no single window,
+    unparsable JSON, a timeout — and a cell has no cmux at all), while the registry
+    row's own session records in ``live`` still carry the cwd it ran in. Indexing
+    owners from ``workspaces`` alone therefore took the MINT path for a worktree a
+    registry row already owned, publishing ``lane-x`` AND ``proc-<pid>`` for one
+    lane — two holders, a false COLLISION, on exactly the box this fix unblocks
+    (review of #9016).
+
+    ⛔ THE EMPTY GUARD IS LOAD-BEARING: ``_realpath("")`` is this process's cwd
+    (``os.path.realpath`` of the empty string), which would match every lane on the
+    box.
+    """
+    out: set[str] = set()
+    wcwd = str((workspaces.get(row_ws.upper(), {}) or {}).get("cwd") or "")
+    if wcwd:
+        out.add(_realpath(wcwd) or wcwd)
+    for r in live.get(row_ws.upper(), []) or []:
+        c = str((r or {}).get("cwd") or "")
+        if c:
+            out.add(_realpath(c) or c)
+    return out
 
 
 def build_state(
@@ -1319,9 +1967,14 @@ def build_state(
     github_error = str(
         getattr(prs_read, "error", "") or getattr(issues_read, "error", "") or ""
     )
-    # An empty session store means the store could not be read (the fleet always has
-    # live pi sessions); with no measured pids, ``pid_alive`` is UNMEASURED.
-    liveness_measured = bool(live)
+    # THE SESSION STORE'S OWN PROVENANCE (#8999). An empty store is no longer the
+    # only reading: `live_sessions` states whether a store ANSWERED at all, so "no
+    # pi process is running" can be a measurement (a real, reportable empty fleet)
+    # while an unread store stays UNMEASURED. A plain dict (a fixture, an older
+    # caller) declares nothing and keeps the old `bool(live)` reading.
+    liveness_measured = bool(getattr(live, "measured", bool(live)))
+    liveness_source = str(getattr(live, "source", "") or "")
+    liveness_error = str(getattr(live, "error", "") or "")
     # A worktree used by exactly ONE workspace's records clearly belongs to that lane;
     # a worktree shared by several workspaces (a reused checkout) must not be used to
     # cross-attribute, so cwd ownership is decided globally (#9).
@@ -1512,6 +2165,15 @@ def build_state(
         for label, ws, issue_label in kept
     ]
 
+    # ---- process lanes: a lane NO cmux store can enumerate (#8999) ----
+    # The cell launch path starts a lane as a `nohup` child of a shell, so no cmux
+    # workspace, session record or registry row names it. Its pid + cwd are the
+    # measurement, so it is published as a lane record here — BEFORE session
+    # resolution, so it flows through the same join as every other lane. A store that
+    # could not be read contributes NO records at all (see `live_sessions`), so this
+    # adds nothing and the board keeps publishing `liveness-unmeasured`.
+    kept, proc_ws = register_process_lanes(live, workspaces, kept, wts)
+
     rows: list[tuple[str, str]] = [(lbl, ws) for lbl, ws, _ in kept]
 
     # ---- disk candidates: ONLY for lanes the pane/override rules did not bind.
@@ -1520,6 +2182,13 @@ def build_state(
     # so scanning per-lane for every lane is 15x the necessary work.
     disk_by_label: dict[str, list[str]] = {}
     for label, ws in rows:
+        # ⛔ A PROCESS LANE NEEDS NO SESSION GUESS. Its pid is a MEASUREMENT, which
+        # is strictly stronger than a disk identity match, and the scan below is the
+        # expensive part (every file in the cwd's session directory, re-read per
+        # lane). On a cell every lane is a process lane, so skipping it keeps a
+        # fleet-sized board from re-reading the whole session store N times.
+        if ws.upper() in proc_ws:
+            continue
         sid = (bindings.get(ws.upper()) or "").strip()
         if sid and file_of(sid):
             continue
@@ -1605,7 +2274,10 @@ def build_state(
             or (running[0] if running else None)
         pid = primary.get("pid") if primary else (alive_pids[0] if alive_pids else None)
         # A live lane whose pane binding is absent or dangling needs the D2 repair.
-        binding_missing = alive and res.source != SOURCE_PANE
+        # ⛔ A PROCESS lane (#8999) never HAD a pane, so it has no binding to repair:
+        # reporting one would publish a destroyed-attributability orphan for every
+        # lane the cell launch path started, burying the real ones.
+        binding_missing = alive and res.source != SOURCE_PANE and not is_proc_ws(ws)
 
         pids = tuple(alive_pids)
         child_set: set[int] = set()
@@ -2022,6 +2694,15 @@ def build_state(
             "open_issues_truncated": issues_truncated,
             "open_issues_read": len(issues_read),
             "open_issues_limit": OPEN_ISSUES_LIMIT,
+            # #8999: the LIVE-SESSION store's provenance, in the same shape. The
+            # reader can now say WHICH store answered (the cmux session store, the
+            # process table, or both) and why any did not, so an unmeasurable
+            # liveness is a NAMED failure in the board itself — not an inference a
+            # reader has to make from an empty `lanes` list.
+            "liveness_measured": liveness_measured,
+            "liveness_source": liveness_source,
+            "liveness_error": liveness_error,
+            "process_lanes": sorted(proc_ws),
         },
         "conflicts": conflicts,
         "conflict_claimants": {str(n): who for n, who in conflict_claimants.items()},

@@ -8,7 +8,8 @@ S7 (ranking.py scoring surface) + S8 (batch EP reads) over both rankers:
 * the scored boost applies ONLY under the W4 flag (TORTOISE_W4_ENRICHMENT)
   AND a query AND a conflict RELEVANT to the query (significant-token
   overlap with the NAND-side counter-claim, resolved in ONE batch read —
-  no N+1);
+  plus one constant present-label resolution read since #7927, never one
+  read per result);
 * flag-off / no-query / irrelevant-conflict runs are byte-identical to the
   pre-W4-b ranking (R11 golden-ordering regression);
 * E2E-1 ranking-participation: the contested twin outranks its uncontested
@@ -105,28 +106,164 @@ class _FakeProjection:
             self.nand_query_count += 1
             if self.nand_rows is not None:
                 return self._Rows(self.nand_rows)
-            # (pid, claim_id, content, alpha, beta) — mirror the resolver's
-            # RETURN; neutral (1.0, 1.0) alpha/beta => medium severity.
+            # (pid, claim_id, claim_nid, content, alpha, beta) — mirror the
+            # resolver's RETURN, INCLUDING the internal node id the resolver
+            # dedupes on (the coalesced identity is not unique). Neutral
+            # (1.0, 1.0) alpha/beta => medium severity.
             return self._Rows([
-                (pid, f"{pid}-c{i}", content, 1.0, 1.0)
+                (pid, f"{pid}-c{i}", 1000 + i, content, 1.0, 1.0)
                 for i, (pid, content) in enumerate(self.counter_claims)
             ])
         self.signal_query_count += 1
         return self._Rows(self.point_rows)
 
 
+def test_conflict_subset_is_not_decided_by_row_order_under_a_collision():
+    """The budgeted subset must be deterministic even when claim identities
+    COLLIDE.
+
+    ``claim_id`` is not unique (``live.EPISTEMIC_ID_KEYS``: the guarded-merge
+    suffix branch and the #8879 cross-key shape both collide), so a tie group
+    of three claims sharing one id, with a budget of two, was resolved by
+    Cypher ROW ORDER — the docstring promises it is not. Measured before the
+    internal-id tiebreak: the same graph boosted forward and did not boost
+    reversed.
+    """
+    from tortoise.ranking import resolve_contested_relevance
+
+    class _Colliding:
+        """Three claims, ONE shared ``claim_id``, distinct internal ids."""
+
+        def __init__(self, order):
+            self.order = order
+            self.g = self
+
+        class _Rows:
+            def __init__(self, rows):
+                self.result_set = rows
+
+        def query(self, cypher, params=None):
+            rows = [
+                ("p1", "shared-claim", 1001, "the cache rollback is safer", 1.0, 1.0),
+                ("p1", "shared-claim", 1002, "an unrelated weather note", 1.0, 1.0),
+                ("p1", "shared-claim", 1003, "another unrelated note", 1.0, 1.0),
+            ]
+            if self.order == "reversed":
+                rows = list(reversed(rows))
+            return self._Rows(rows)
+
+    fwd = resolve_contested_relevance(_Colliding("forward"), ["p1"], "cache rollback")
+    rev = resolve_contested_relevance(_Colliding("reversed"), ["p1"], "cache rollback")
+    assert fwd == rev, (
+        "the boost depends on ROW ORDER — the subset is not deterministic: "
+        f"forward={fwd} reversed={rev}")
+
+
+def test_shared_claim_key_merges_commutatively():
+    """Two ROWS may describe one node with DIFFERENT ``claim_id``.
+
+    When ``src`` carries neither key, ``claim_nid`` is ``id(src)`` (non-null)
+    while ``claim_id`` falls through to the NANDer's — so the same node can
+    arrive with two claim ids, and that value is the SORT KEY's second
+    component. Keeping "the first seen" therefore still let row order decide
+    which claims fit the budget: measured, 12 of 24 row permutations boosted and
+    12 did not. The merge is a total order over ``(mean, content, claim_id)``.
+    """
+    from tortoise.ranking import resolve_contested_relevance
+
+    class _SharedNode:
+        def __init__(self, order):
+            self.order = order
+            self.g = self
+
+        class _Rows:
+            def __init__(self, rows):
+                self.result_set = rows
+
+        def query(self, cypher, params=None):
+            # One node (nid 1001) carries two claim ids that STRADDLE the two
+            # unrelated claims in sort order; the budget is 2.
+            rows = [
+                ("p1", "a1", 1001, "the cache rollback is safer", 1.0, 1.0),
+                ("p1", "z1", 1001, "the cache rollback is safer", 1.0, 1.0),
+                ("p1", "c0", 1002, "an unrelated weather note", 1.0, 1.0),
+                ("p1", "c15", 1003, "another unrelated note", 1.0, 1.0),
+            ]
+            if self.order == "reversed":
+                rows = list(reversed(rows))
+            return self._Rows(rows)
+
+    fwd = resolve_contested_relevance(_SharedNode("forward"), ["p1"], "cache rollback")
+    rev = resolve_contested_relevance(_SharedNode("reversed"), ["p1"], "cache rollback")
+    assert fwd == rev, (
+        "the merged survivor — and therefore the budgeted subset — depends on "
+        f"ROW ORDER: forward={fwd} reversed={rev}")
+    # ...and the survivor must be the one that KEEPS the relevant claim in the
+    # budget. An order-stable merge that always discards it would satisfy the
+    # equality above and be useless.
+    assert fwd == {"p1": 0.05}, (
+        "the merge is stable but always demotes the relevant claim out of the "
+        f"budget: {fwd}")
+
+
+def test_shared_claim_key_tolerates_a_mixed_type_claim_id():
+    """A raw property id can be an int on an out-of-tree graph.
+
+    Comparing two claim ids of different types raises, and the handler around
+    the read turns that into an empty ``{}`` for EVERY contested point — a
+    silent false negative. Both the merge and the sort key compare ``str()``.
+    """
+    from tortoise.ranking import resolve_contested_relevance
+
+    class _Mixed:
+        def __init__(self, order):
+            self.order = order
+            self.g = self
+
+        class _Rows:
+            def __init__(self, rows):
+                self.result_set = rows
+
+        def query(self, cypher, params=None):
+            rows = [
+                ("p1", 12345, 1001, "the cache rollback is safer", 1.0, 1.0),
+                ("p1", "12345", 1001, "the cache rollback is safer", 1.0, 1.0),
+                ("p1", "c0", 1002, "an unrelated weather note", 1.0, 1.0),
+            ]
+            if self.order == "reversed":
+                rows = list(reversed(rows))
+            return self._Rows(rows)
+
+    fwd = resolve_contested_relevance(_Mixed("forward"), ["p1"], "cache rollback")
+    rev = resolve_contested_relevance(_Mixed("reversed"), ["p1"], "cache rollback")
+    assert fwd == rev, f"mixed-type claim ids split on row order: {fwd} vs {rev}"
+    assert fwd == {"p1": 0.05}, (
+        "a mixed-type claim id produced no boost at all — the read swallowed a "
+        f"TypeError: {fwd}")
+
+
 # ── Unit: batch relevance resolution (S8 N+1 guard) ────────────────────────
 
 class TestBatchResolution:
     def test_single_batch_query_for_many_contested(self):
+        """O(1) in the number of contested ids: the SAME read count for 1 id
+        and for N ids — never one read per result."""
+        one = _FakeProjection(counter_claims=[
+            ("p1", "the cache rollback is the safer default"),
+        ])
+        resolve_contested_relevance(one, ["p1"], "cache rollback")
+        assert one.nand_query_count == 1
+
         fake = _FakeProjection(counter_claims=[
             ("p1", "the cache rollback is the safer default"),
             ("p2", "cache rollback versioning adds nothing"),
             ("p3", "unrelated weather claim"),
         ])
         boosts = resolve_contested_relevance(fake, ["p1", "p2", "p3"], "cache rollback")
-        # One query for N > 1 contested ids — never per-result.
-        assert fake.nand_query_count == 1
+        # ONE batch read for N > 1 contested ids — never per-result. (#7927:
+        # the present-label resolution is a separate constant read, and it is
+        # what keeps this at one NAND read instead of the four-label sweep.)
+        assert fake.nand_query_count == one.nand_query_count == 1
         assert boosts == {"p1": W4_CONTESTED_BOOST, "p2": W4_CONTESTED_BOOST}
 
     def test_no_ids_or_no_query_short_circuits(self):

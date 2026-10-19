@@ -775,40 +775,56 @@ def event_head_seq(graph) -> int:
     would therefore STARVE the graph's deliveries with no log line at all, which
     is the opposite of this gate's stated bias.
 
-    "Corrupt" is the same domain ``event_store.next_seq`` refuses on the write
-    side: anything that is not a real number (a numeric STRING included — the
-    store is explicit that a property of another type is "refused, never
-    coerced", because ``'5' + 1`` cannot be compared), a NEGATIVE value, or a
-    ``bool`` — which is an ``int`` subclass, so ``int(True) == 1`` would
-    otherwise pass as a trustworthy head of 1 while the events run to 5. A
-    non-integral float (``2.9``) is not a position either. All of them take the
+    "Corrupt" means a value ``_as_seq`` below will not accept as a POSITION. Note
+    that this is not the set ``event_store.next_seq`` refuses on the write side —
+    the two diverge at both ends, and the bullets below name both: anything that is
+    not a real number (a numeric STRING included — ``next_seq`` is explicit that a
+    property of another type is "refused, never coerced", because ``'5' + 1``
+    cannot be compared), a NEGATIVE value, or a ``bool`` — which is an ``int``
+    subclass, so ``int(True) == 1`` would otherwise pass as a trustworthy head of
+    1 while the events run to 5. A non-integral float (``2.9``) is not a position
+    either, and ``next_seq`` BUMPs it rather than refusing it. All of them take the
     events fallback, whose head is at or above every deliverable seq: it can only
     over-admit, never stall.
 
-    ⚠️ COST, stated rather than implied (an earlier revision of this docstring
-    priced the corrupt path as "one SDK open" — it is not). The fallback is the
-    aggregate over ``:GraphEvent`` the opening paragraph exists to avoid on the
-    steady path, so an UNTRUSTWORTHY graph pays it on every pass, and the counter
-    does not become trustworthy on its own. What the write side actually does,
-    MEASURED — the three classes behave differently and only one self-heals:
+    ⚠️ COST. The fallback is the aggregate over ``:GraphEvent`` the opening
+    paragraph exists to avoid on the steady path, so an UNTRUSTWORTHY graph pays it
+    on every pass, and the counter does not become trustworthy on its own.
 
-    * a non-number, a ``bool`` AND a negative are REFUSED by ``next_seq`` and
-      left unchanged (the negative fails its ``prev >= 0`` grant test — a graph
-      holding one cannot emit at all). ``reestablish_watermark`` refuses the
-      non-number/bool AFTER the write ("the monotone clause only compares
-      numbers … preserved rather than replaced"), and a rebuild never reaches a
-      negative in the first place: ``capture_watermark`` — the pre-wipe read —
-      raises "the live :GraphEventMeta.last_seq is -1, outside the event-store
-      integer domain", so the rebuild ABORTS instead of repairing it. **None of
-      these three has an automatic repair path**, and this fallback is permanent
-      for them;
-    * only a NON-INTEGRAL FLOAT is bumped by ``next_seq`` (``2.9`` → ``3.9``,
-      handing out a seq an existing ``:GraphEvent`` already holds — the #4653
-      collision), and ``reestablish_watermark`` reports it repaired only when the
-      events' max exceeds it: with ``max(:GraphEvent.seq) = 3`` and a counter of
-      ``3.9`` the monotone clause PRESERVES ``3.9`` while the read-back truncates
-      and RETURNS ``3`` — a false repair. So even this class clears only below
-      the events' max.
+    ⛔ WHAT HAPPENS TO A BROKEN COUNTER IS NOT ONE STORY, so this paragraph reports
+    only what the write side does, as measured. A reader who needs the repair
+    story must measure the counter node:
+
+    * ``next_seq`` REFUSES a non-number, a ``bool``, a negative counter and one
+      at/above ``event_store.MAX_SEQ`` (which ``_as_seq`` below accepts
+      deliberately) and leaves it unchanged — a negative or exhausted counter
+      fails its ``prev >= 0 AND prev < $max`` grant test — so a graph holding one
+      stops emitting until someone repairs the node. Only a non-integral float is
+      BUMPED (``2.9`` → ``3.9``, re-issuing a seq an existing ``:GraphEvent``
+      already holds — the #4653 class; #9059 records the ``bool``/numeric-string
+      coercion below, while the ``2.9`` truncation is measured here).
+    * a rebuild is NOT a repair path — it does both, by branch. Its pre-wipe
+      ``capture_watermark`` reads through ``int()``, so anything ``int()`` ACCEPTS
+      is COERCED (``'5'`` → ``5``, ``True`` → ``1``, ``2.9`` → ``2``) and the
+      rebuild proceeds, leaving a position this gate TRUSTS but that is WRONG: a
+      ``True`` counter comes back as ``1`` and a ``2.9`` as ``2``, both on a graph
+      that had already issued seqs 1..3, so the next emit RE-ISSUES an
+      already-issued seq (the #4653 class) — truncation LOWERS the head, so it is
+      not a repair either. ``:GraphEvent`` rows are not replayed after a rebuild
+      (#4664), so that ``1`` is below the seqs the graph HAD issued, not below any
+      surviving row. And a value ``int()`` REJECTS (a non-numeric string) or whose
+      ``int()`` is still outside ``0 .. MAX_SEQ`` makes that read RAISE, so the
+      rebuild REFUSES: it aborts BEFORE the wipe and the counter is left untouched
+      — the one outcome ``next_seq`` also gives, but reached by aborting a whole
+      rebuild rather than by declining one seq. The domain test is on the
+      CONVERTED value, so a stored NEGATIVE FRACTION (``-0.5``) folds to ``0``,
+      passes, and is captured: MEASURED, the rebuild completes and the counter
+      becomes a trusted ``0`` — the silent starvation the opening paragraphs rule
+      out by name, arrived at through the rebuild. A counter at exactly
+      ``MAX_SEQ`` is inside the domain too, so it is captured unchanged and the
+      rebuild COMPLETES — and the graph still cannot emit, because ``next_seq``
+      refuses it as exhausted: that one is neither coerced nor refused by the
+      rebuild.
 
     ⛔ THE ONE CASE THIS FIX'S OVER-ADMISSION IS NOT A CHEAP NO-OP. Every
     unbounded admission ``_BEHIND_PREDICATE`` enumerates costs one SDK open and

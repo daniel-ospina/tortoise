@@ -3492,9 +3492,15 @@ def _board_can_answer(state: dict) -> str:
         isinstance(o, dict) and o.get("kind") == "liveness-unmeasured"
         for o in orphans
     ):
+        # #8999: the board now names WHICH store failed and why (both cmux grammars
+        # and the process table are tried), so the refusal carries the cause instead
+        # of only the fact. An older board has no such field and gets the bare
+        # sentence.
+        cause = rec.get("liveness_error")
         return (
             "the board's live-session store could not be read, so NO lane's "
             "liveness is measurable — an unmeasured pid is not a dead owner"
+            + (f" (tried: {cause})" if isinstance(cause, str) and cause else "")
         )
     return ""
 

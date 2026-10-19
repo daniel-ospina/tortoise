@@ -2937,19 +2937,26 @@ async def _dispatch_webhooks(org_id: str, graph_namespace: str | None = None,
 # `bool`, or a non-integral float) makes the head fall back to
 # `MATCH (e:GraphEvent) RETURN max(e.seq)` — the label aggregate the steady path
 # deliberately avoids — so a broken graph pays a scan per pass, and it keeps
-# paying it. Three classes, only one of which self-heals (all MEASURED):
-# `next_seq` REFUSES a non-number, a `bool` and a negative and leaves them
-# unchanged; a non-integral float is bumped instead (`2.9` -> `3.9`, re-issuing a
-# seq: the #4653 class) but `reestablish_watermark` only clears it when the
-# events' max EXCEEDS it (at `max = 3` it preserves `3.9` and returns a truncated
-# `3` — a false repair); and a rebuild never gets to a negative at all, because
-# `capture_watermark` raises before the wipe. So no class has a reliable automatic
-# repair path. The alternative reading of that counter (as 0) made every
-# subscription look caught up, so the graph was never dispatched again — silently.
-# Over-admitting a broken graph is the cheap side of that asymmetry; the ONE case
-# where it is not a cheap no-op (a fractional `:GraphEvent.seq` the cursor can
-# never reach) is stated in `webhook_delivery.event_head_seq`'s docstring and
-# tracked with the cursor write in #9032.
+# paying it, and the counter does not become trustworthy on its own:
+# `next_seq` REFUSES a non-number, a `bool`, a negative and one at/above
+# `event_store.MAX_SEQ`, and leaves them unchanged; only a non-integral float is
+# bumped instead (`2.9` -> `3.9`, re-issuing a seq: the #4653 class). The rebuild
+# path is NOT a repair path: it COERCES anything `int()` accepts (a numeric string,
+# a `bool`, a truncated `2.9`, a negative fraction folding to `0`) and proceeds,
+# leaving a position the gate TRUSTS but that is WRONG (so a `True` counter comes
+# back as `1` on a graph that had already issued seqs 1..3 and the next emit
+# RE-ISSUES an already-issued seq — #4653; #9059), and it REFUSES what `int()`
+# rejects or what is still outside `0 .. MAX_SEQ` AFTER that conversion, by aborting
+# the whole rebuild before the wipe, LEAVING THE COUNTER UNTOUCHED — so read
+# neither the counter's fate nor the repair story off this comment; see
+# `webhook_delivery.event_head_seq`'s docstring for what the HEAD does with a
+# corrupt counter, and #9059 for the
+# measured write-side detail. The alternative reading of that
+# counter (as 0) made every subscription look caught up, so the graph was never
+# dispatched again — silently. Over-admitting a broken graph is the cheap side of
+# that asymmetry; the ONE case where it is not a cheap no-op (a fractional
+# `:GraphEvent.seq` the cursor can never reach) is in that docstring and tracked
+# with the cursor write in #9032.
 #
 # ⛔ THE "answered yes" HALF IS THE WHOLE POINT (#8098 review F1/F3). The gate
 # is TWO clauses — due by TIME *and* behind the stream — because the temporal

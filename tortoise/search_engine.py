@@ -831,6 +831,15 @@ BELOW_RELEVANCE_FLOOR = "below_relevance_floor"
 #: Trace-entry key carrying the mechanism (written by :func:`_trace_entry`,
 #: read by callers); the value is one of the three constants below, and the
 #: key is absent when no path was taken (e.g. ``breaker_open``).
+#:
+#: ⛔ PER-LEG (#8488): the key's value set depends on WHICH leg carries it —
+#: ``vector`` → the three constants below; ``fts`` → ``"bm25"``
+#: (:data:`LEXICAL_MECHANISM_BM25`) when the lexical slot was scored
+#: in-process by Okapi BM25, absent otherwise. A consumer must therefore
+#: read the value together with ``entry["leg"]``; ``mechanism in
+#: (MECHANISM_INDEX, MECHANISM_SCAN, MECHANISM_SCAN_FALLBACK)`` remains the
+#: right test for "a vector entry took a known path" and is NOT a test for
+#: "the entry is a vector entry".
 VECTOR_MECHANISM_KEY = "mechanism"
 #: Index-accelerated ``CALL db.idx.vector.queryNodes`` produced the rows.
 MECHANISM_INDEX = "index"
@@ -1296,6 +1305,304 @@ def run_fts_query(
             logger.warning("FTS query failed: %s", e)
             _breaker_record("fts", False)
             _record(ran=True, degraded=True, reason="query_failed", count=0)
+        return []
+
+
+#: #8488 — how many nodes the in-process BM25 leg will read to build its
+#: corpus. BM25 is a CORPUS statistic (idf needs document frequency, ``b``
+#: needs the average document length), so unlike the other legs it cannot be
+#: answered by an indexed top-k: it has to see the candidate population.
+#:
+#: The cap is a memory/latency bound, not a ranking parameter, and it is
+#: LOUD **and DECLINED**: the leg asks for one row more than the cap, so it can
+#: tell "exactly cap" (a complete ranking) from "more than cap" (a window) —
+#: and on a WINDOW it returns NO rows at all, recording ``degraded=True``. The
+#: shipped graph-side leg answers over the whole label (it is index-backed), so
+#: replacing its rows with a ranking over the first ``cap`` ids in id order —
+#: oldest-first on this tree's ULID ids, i.e. blind to the newest documents,
+#: which are the likeliest lexical answer — would make the read lexically
+#: WEAKER than the leg it replaced, silently, on a store the operator never
+#: measured. Declining keeps the shipped rows (the same fail-safe the empty
+#: arm gets) and leaves the signal in the trace. Raise the cap (or add an
+#: id-descending window) before enabling the arm on a store that large.
+#:
+#: ⚠️ What ``degraded=True`` then COSTS the read, stated because it is wider
+#: than "this leg ran": ``read_status.classify_leg_trace`` reports the read as
+#: ``degraded`` when any leg entry is degraded, and ``ask_lane`` sets
+#: ``retrieval_degraded`` the same way. On a store at the cap that is the
+#: intended signal (the corpus the arm could see was a window), but it also
+#: means #2952's narrower reading ("the leg contributed no results") does not
+#: apply. That is the deliberate trade: a truncated corpus must not read as a
+#: clean measurement.
+#:
+#: ⛔ Cost, stated and NOT measured. Unlike ``run_vector_query``'s embedded
+#: brute force — which scores inside the engine and returns ``limit`` rows —
+#: this leg pulls up to ``cap`` rows *including* ``content`` and
+#: ``search_keys`` into Python and tokenises all of them on the caller's
+#: thread, OUTSIDE ``degradation_chain``'s ``as_completed`` deadline (only the
+#: driver-side query timeout bounds it). That is why the arm is gated off, is
+#: embedded-lane-only, and why its latency must be measured (#8486) before it
+#: is enabled anywhere.
+DEFAULT_BM25_CORPUS_CAP = 20000
+
+#: #8488 — the value of the leg trace's ``mechanism`` key when the lexical leg
+#: was scored IN-PROCESS by Okapi BM25 (``run_bm25_query``) rather than by the
+#: graph's fulltext engine (``run_fts_query``). Written under the ``fts`` leg
+#: name — the trace vocabulary has three leg slots and the lexical one is that
+#: name; ``mechanism`` is the additive key #4999 introduced for exactly this
+#: question (which path produced these rows).
+LEXICAL_MECHANISM_BM25 = "bm25"
+
+
+def clamp_lexical_fusion_weight(weights: dict[str, float] | None) -> dict[str, float]:
+    """Apply the #8488 lexical bound to a resolved fusion-weight map.
+
+    It IS a no-op for the recorded production default: with
+    ``{"vector": 1.5}`` (owner decision 2026-08-25) and the fts leg taking
+    ``rrf_fusion``'s implicit 1.0, the lexical weight is already at the bound
+    and the map comes back with the same numbers.
+
+    It is NOT a no-op for an operator who has explicitly tuned the lexical leg
+    ABOVE that bound — ``TORTOISE_FUSION_WEIGHTS='{"fts": 2.0}'`` becomes 1.0.
+    That is deliberate, and it is the one behaviour this clamp changes: an
+    unbounded lexical weight lets the lexical leg decide a fused order by
+    itself, which is the #7704 defect class, and the reason #1657 weighted the
+    legs in the first place. The cap is therefore enforced on every source of
+    the number — the env knob, a kwarg caller, a future default — rather than
+    trusted per source. The bound and its justification live in
+    ``tortoise/bm25.py`` (ONE home for the constant); this is only where the
+    read path applies it.
+    """
+    from .bm25 import DEFAULT_LEXICAL_WEIGHT, resolve_lexical_weight
+
+    out = dict(weights or {})
+    out["fts"] = resolve_lexical_weight(
+        out.get("fts", DEFAULT_LEXICAL_WEIGHT),
+        out.get("vector", 1.0),
+    )
+    return out
+
+
+#: Entity families this leg CAN serve (#8488) — and the ONLY ones it may
+#: attempt. Its corpus text is ``index_text(coalesce(content, _searchText),
+#: search_keys)``, i.e. fields that actually exist on the label:
+#:
+#: * ``point``    → ``content`` ∪ ``search_keys`` — the ``Point`` fulltext
+#:   index's declared fields, byte-for-byte;
+#: * ``document`` / ``source`` → ``_searchText`` (a ``:Source`` stores no raw
+#:   bytes, D10 — the text lives on ``_searchText``, the field its own FTS
+#:   index is declared on).
+#:
+#: The three refused families are refused for the SAME reason — the leg could
+#: not score them, so attempting them would be a full-label scan that returns
+#: nothing while the trace claimed it "ran and found nothing":
+#:
+#: * ``object``  — merged by ``name`` and minted id-less (the #3019 note
+#:   above), so an id-keyed corpus read returns nothing;
+#: * ``operator`` — carries no ``content``; its own FTS leg matches on
+#:   ``label CONTAINS``, a different axis entirely;
+#: * ``event`` / ``subject`` — their declared FTS fields are ``subject``/
+#:   ``name`` and ``name`` respectively, and NEITHER ``content`` nor
+#:   ``_searchText`` is written on those labels by the canonical writers
+#:   (``_EVENT_HANDLED`` / ``_SUBJECT_HANDLED`` in ``projection/entities.py``),
+#:   so every row would tokenise to ``[]``. Serving them would mean a
+#:   per-family text projection, which breaks this leg's parity claim ("the
+#:   SAME index text the FTS index builds") and has no measured demand — the
+#:   reopen, if one is ever needed, should add that projection WITH its
+#:   parity test rather than resurrect this arm.
+#:
+#: Refused rather than silently scanned for nothing: the refusal is the early
+#: return in :func:`run_bm25_query`, so this tuple is the ONE place that
+#: decides which families the leg serves.
+BM25_ENTITY_TYPES = ("point", "document", "source")
+
+
+def run_bm25_query(
+    graph, query: str, entity_type: str = "point", limit: int = 20,
+    timeout_ms: int = 500, excluded_statuses: tuple | None = None,
+    leg_trace: list[dict] | None = None, keep_numeric: bool = False,
+    corpus_cap: int = DEFAULT_BM25_CORPUS_CAP, meter: bool = True,
+) -> list[tuple[str, float]]:
+    """The in-process Okapi BM25 lexical leg (#8488).
+
+    The sibling of :func:`run_fts_query`, scored by
+    :func:`tortoise.bm25.bm25_rank` instead of the server's fulltext scorer. It
+    exists because the graph-side scorer prices neither rarity nor length (see
+    ``tortoise/bm25.py``'s module docstring for the measurements): a document
+    holding the RARE term of a query earns exactly what each document holding
+    only a ubiquitous one earns, and a 30x repetition scores the same as a
+    single occurrence.
+
+    The indexed text is ``index_text(coalesce(content, _searchText),
+    search_keys)`` — the SAME fields each served label's own FTS index is
+    declared on (``tortoise.sparse``; see ``BM25_ENTITY_TYPES`` for the
+    per-family mapping), so the lexical stacks cannot disagree about what a
+    document says. A family outside ``BM25_ENTITY_TYPES`` is REFUSED at entry
+    rather than scanned for nothing — see that constant.
+
+    Returns ``[(id, score)]`` ranked descending, ties broken by id (#3019: RRF
+    is rank-based, so an unstable tie would make the fused order a function of
+    dict order). Empty list on every failure — the leg DEGRADES, never fails a
+    read (the ``run_*_query`` contract).
+
+    R3 (#1542) D4: ``leg_trace`` — an entry is appended at EVERY exit branch.
+    R3's reason vocabulary only uses terms the read path already declares
+    (``ok`` / ``empty_results`` / ``query_failed`` / ``breaker_open``); a query
+    whose tokens all get dropped by the caller's numeric policy is
+    ``empty_results`` (the leg ran, nothing matched), never a new term the
+    declaration layer does not know.
+
+    WHO RAN, and what the ``mechanism`` key therefore means. Three exit
+    branches return ``[]`` and they do NOT claim the same thing:
+
+    * REFUSED family (``BM25_ENTITY_TYPES``) — ``ran=False``, so NO
+      ``mechanism`` key is written: nothing was read, and the leg cannot
+      search that family at all. A consumer counting ``mechanism == "bm25"``
+      must not count it (that is ``_record``'s own contract).
+    * corpus WIDER than ``corpus_cap`` — ``ran=True``, ``degraded=True``,
+      ``count=0``: the leg DID read, and it declined to return a windowed
+      ranking (see ``DEFAULT_BM25_CORPUS_CAP``), so the shipped whole-label
+      rows survive. ``degraded`` is what separates this from a clean empty.
+    * a query that matched nothing — ``ran=True``, ``degraded=False``,
+      ``empty_results``, ``count=0``.
+
+    ``degraded`` is recorded only where the leg's OWN result is incomplete or
+    declined (a failed read, an open breaker, a corpus over the cap), never on
+    a clean empty result.
+
+    ``keep_numeric`` is threaded, never decided: the search lane's
+    byte-identical control is a RECORDED decision and its reopen belongs to the
+    owner (#8933). With the default, ``ERR-4032`` contributes ``err`` only —
+    the leg is honest about the policy it was given.
+
+    ``meter=False`` suppresses the retrieval-tally note while keeping the trace
+    entry. The read path uses it when it runs this leg ALONGSIDE the shipped
+    lexical leg (which has already counted the lexical slot once): one slot,
+    one tally, two distinguishable trace entries.
+    """
+    # #5404: same entry guard as the other legs — entity_type is interpolated
+    # into a Cypher LABEL below, which is query STRUCTURE.
+    validate_entity_type(entity_type)
+
+    def _record(*, ran: bool, degraded: bool, reason: str | None,
+                count: int) -> None:
+        # The leg NAME stays "fts": the leg trace's vocabulary has three slots
+        # and the lexical one is that name (``read_status``, the metering fold
+        # and the eval lane all key on it). WHICH scorer produced the rows is
+        # carried by the trace's already-declared ``mechanism`` key — the same
+        # additive seam #4999 introduced for index-vs-scan, so a measurement
+        # can tell a BM25-scored lexical leg from a server-scored one without
+        # a fourth leg name anywhere in the tree. The key is written ONLY when
+        # the leg ran: ``_trace_entry``'s contract leaves it absent on a
+        # ``breaker_open`` skip, and a consumer counting ``mechanism ==
+        # "bm25"`` must not count a skip as a run.
+        if meter:
+            _retrieval_metering.note_leg("fts", ran=ran, degraded=degraded)
+        if leg_trace is not None:
+            leg_trace.append(_trace_entry(
+                "fts", ran=ran, degraded=degraded, reason=reason, count=count,
+                mechanism=(LEXICAL_MECHANISM_BM25 if ran else None)))
+
+    if not _breaker_allow("bm25"):
+        logger.warning("BM25 circuit breaker OPEN — skipping BM25 strategy")
+        _record(ran=False, degraded=True, reason="breaker_open", count=0)
+        return []
+    if not query or not query.strip():
+        _record(ran=True, degraded=False, reason="empty_results", count=0)
+        return []
+    if entity_type not in BM25_ENTITY_TYPES:
+        # See BM25_ENTITY_TYPES: an id-less :Object, a content-less :Operator
+        # and the two families whose text lives on fields this leg does not
+        # read (:Event/:Subject) would each scan the whole label and score
+        # nothing — refused here rather than reported as a clean "ran, found
+        # nothing" (there is no second, per-family implementation of "how
+        # operators/events are served"; this early return IS the refusal).
+        #
+        # ``ran=False``: nothing was read, so NO ``mechanism`` key may be
+        # written. #8486's baseline counts ``mechanism == "bm25"``, and a
+        # refusal tallied as a run would inflate it with reads that never
+        # happened (the shape ``_record`` itself calls out).
+        _record(ran=False, degraded=False, reason="empty_results", count=0)
+        return []
+
+    from .bm25 import bm25_rank
+    from .sparse import index_text
+
+    # Label via the ONE declaration (#4997) rather than a per-leg derivation
+    # (#5407 has not migrated run_fts_query off its own); a document IS a
+    # :Source (D10, ONTOLOGY v3.15 §4.4).
+    label = entity_label(entity_type)
+    if entity_type in ("source", "document"):
+        id_field = "url"
+    else:
+        id_field = "id"
+
+    where = [f"n.{id_field} IS NOT NULL"]
+    if label in _STATUS_FILTERED_LABELS:
+        _vocab, _flag = _status_vocab_for(label)
+        if excluded_statuses != ():
+            where.append(_exclude_status_clause(
+                "n", excluded_statuses or _vocab,
+                include_outdated_flag=_flag))
+    elif entity_type == "document":
+        where.append("n.documentKind IS NOT NULL")
+    elif entity_type == "source":
+        where.append("n.documentKind IS NULL")
+
+    try:
+        start = time.monotonic()
+        # Order by the id key so the corpus read is DETERMINISTIC (the cap
+        # contract in DEFAULT_BM25_CORPUS_CAP); ``coalesce`` lets a node family
+        # whose text lives on ``_searchText`` (the multi-field FTS index's
+        # field) be scored rather than skipped. One row over the cap is
+        # requested on purpose — see ``truncated`` below.
+        cypher = (
+            f"MATCH (n:{label}) WHERE {' AND '.join(where)} "
+            f"RETURN n.{id_field}, coalesce(n.content, n._searchText, ''), "
+            "n.search_keys "
+            f"ORDER BY n.{id_field} ASC LIMIT $cap"
+        )
+        rows = graph.query(
+            cypher, params={"cap": int(corpus_cap) + 1}, timeout=timeout_ms
+        ).result_set
+        elapsed = (time.monotonic() - start) * 1000
+        if elapsed > timeout_ms:
+            logger.warning("BM25 corpus read exceeded timeout: %.0fms > %dms",
+                           elapsed, timeout_ms)
+        # ONE row past the cap, so the leg can tell "exactly cap" (the whole
+        # corpus fits — a complete ranking) from "more than cap" (a window).
+        # Without the extra row the two are indistinguishable and a store whose
+        # size happens to equal the cap loses its lexical leg for no reason.
+        truncated = len(rows) > int(corpus_cap)
+        if truncated:
+            # DECLINE, do not return a window. The shipped graph-side leg
+            # answered over the whole label; a ranking over the first ``cap``
+            # ids (oldest-first on ULID ids) is not the same answer and is
+            # often a weaker one — so the caller keeps the shipped rows, the
+            # same fail-safe an empty arm gets. ``degraded`` records WHY the
+            # slot was left alone; ``count=0`` because nothing was returned.
+            logger.warning(
+                "BM25 corpus exceeds the %d-row cap — declining to replace "
+                "the shipped lexical rows with a ranking over the first %d "
+                "ids; raise %s or measure on a smaller corpus (#8486)",
+                corpus_cap, corpus_cap, "DEFAULT_BM25_CORPUS_CAP")
+            _breaker_record("bm25", True)
+            _record(ran=True, degraded=True, reason="empty_results", count=0)
+            return []
+        docs = [
+            (row[0], index_text(row[1], row[2])) for row in rows if row[0]
+        ]
+        ranked = bm25_rank(
+            query, docs, limit=limit, keep_numeric=keep_numeric)
+        _breaker_record("bm25", True)
+        _record(ran=True, degraded=False,
+                reason=("ok" if ranked else "empty_results"),
+                count=len(ranked))
+        return ranked
+    except Exception as e:
+        logger.warning("BM25 query failed: %s", e)
+        _breaker_record("bm25", False)
+        _record(ran=True, degraded=True, reason="query_failed", count=0)
         return []
 
 
@@ -2611,6 +2918,15 @@ def _beta_mean(alpha: float, beta: float) -> float:
 
 def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
     """Fetch EP confidence breakdown for a batch of Point IDs.
+
+    #7927 KNOWN DIVERGENCE, deliberate: this read is ``:Point``-anchored (the
+    id anchor below AND the evidence reads), while ``ep.get_contested_claims``
+    and the rankers now sweep the four epistemic labels (#7813). A MEASURED
+    :Subject/:Object/:Event belief is therefore reported there and reads as
+    having NO EP state here. Its only search call site additionally gates on
+    ``entity_type == "point"``. Widening it is a separate read surface outside
+    #7927's six surfaces — do not "harmonize" it by analogy; decide first
+    which surface an entity's belief belongs on.
 
     Single Cypher query — NOT N+1. Returns EpBreakdown per Point ID.
 

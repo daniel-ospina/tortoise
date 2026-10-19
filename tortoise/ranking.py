@@ -36,7 +36,15 @@ from .search_engine import (  # noqa: E402, RUF100
     CONTESTED_VARIANCE_THRESHOLD,
     ep_measured_cypher,  # #3276: has_ep == EP measured (baseline prior != measured)
 )
-from .live import is_draft_status, is_terminal_status  # #2490: terminal rows are never contested; #2598: the draft predicate
+from .live import (  # #2490: terminal rows are never contested; #2598: the draft predicate
+    epistemic_disjunction,  # #7927: traversal-position widening
+    epistemic_identity,  # #7927: the two-key identity, declared ONCE in live.py
+    epistemic_labels_of,  # #7927: present-label resolution (resolved ONCE per rerank)
+    epistemic_sweep,  # #7927: id-anchored present-label sweep
+    is_draft_status,
+    is_terminal_status,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -170,8 +178,16 @@ def resolve_contested_relevance(
     persisted EP mean >= 0.6 is a strong dispute) then id-ordered, and
     budget-capped at why.py's W4_MAX_CONFLICTS — the SAME subset the
     canonical why-layer would surface (a boost never fires on a conflict
-    the why-layer wouldn't show, and never misses one it would).  The
-    whole read + row-processing is fail-open — ranking must never break
+    the why-layer wouldn't show, and never misses one it would).
+
+    #7927 KNOWN DIVERGENCE, deliberate: this read admits all four epistemic
+    labels (§7813) while ``why._CONFLICTS_CYPHER`` is still ``:Point``-only, so
+    a non-Point conflict CAN fire the boost without the why-layer rendering it.
+    The subset agreement above therefore holds for ``:Point`` conflicts only;
+    widening the why-layer is the residual recorded on #7927 (it is a separate
+    read surface, not one of this issue's six).
+
+    The whole read + row-processing is fail-open — ranking must never break
     from enrichment (non-str raw-graph content is coerced, never raised)."""
     if not contested_ids or not query:
         return {}
@@ -180,46 +196,141 @@ def resolve_contested_relevance(
             from .why import W4_MAX_CONFLICTS as _claim_budget
         except Exception:  # pragma: no cover — defensive
             _claim_budget = 2
-        rows = projection.g.query(
-            "MATCH (n:Point) WHERE n.id IN $ids "
+        rows = epistemic_sweep(
+            projection.g,
+            "MATCH (n:{label}) WHERE n.id IN $ids "
             "AND (n.is_operator = false OR n.is_operator IS NULL) "
+            "AND n.op_type IS NULL "
             # #6976: load-bearing `WITH n` — without it FalkorDB 6.0.0 drops the
             # id predicate at the re-binding MATCH below (foreign rows).
             "WITH n "
-            "MATCH (c:Point)-[r:NAND]->(n) "
-            "OPTIONAL MATCH (src:Point)-[ri:INPUT]->(c) "
+            "MATCH (c)-[r:NAND]->(n) "
+            "OPTIONAL MATCH (src)-[ri:INPUT]->(c) "
+            # #7927: ``src`` is a TRAVERSAL position reached from ``c`` — a
+            # NAND operator's idx-0 counter-argument may itself be a
+            # :Subject/:Object/:Event belief.
+            f"  WHERE {epistemic_disjunction('src')} "
             "WITH n, c, r, src, ri "
-            "WHERE c.id <> n.id AND (src.id IS NULL OR src.id <> n.id) AND ("
+            # #7927: identity is ``coalesce(id, eventId)``, NOT a bare ``id``.
+            # A legacy / out-of-tree ``:Event`` may be keyed on ``eventId``
+            # only, and then ``c.id <> n.id`` evaluates NULL and DROPS the row
+            # (and a bare ``coalesce(src.id, c.id)`` returns NULL, so the
+            # caller's ``if not pid or not claim_id: continue`` drops it again)
+            # — the W4 boost would silently never fire for a keyless-Event
+            # counter-claim. The same identity ``ep.get_contested_claims`` and
+            # the audit wiring checks use; all three widened in this change, so
+            # they must not disagree on how a node is addressed.
+            # The CONTESTED-vs-NANDer comparison uses the INTERNAL node id,
+            # which is unique. The coalesced identity is NOT: ``id`` is a
+            # tested-colliding property (``_event_guarded_merge``'s suffix
+            # branch leaves ``id`` at the candidate while ``eventId`` takes the
+            # suffix, so two distinct Events both coalesce to the candidate),
+            # and a value collision silently DROPS a genuine counter-claim —
+            # measured: a real non-self NAND returned ``{}``.
+            f"WHERE id(c) <> id(n) "
+            # The SELF-REFERENCE guard: skip the comparison only when ``src``
+            # has NO identity at all (an unkeyed optional match). Written with
+            # ``OR`` across the two keys it is dead for every ordinary source —
+            # a :Point/:Subject/:Object carries ``id`` and no ``eventId``, so
+            # ``src.eventId IS NULL`` was TRUE and the row was admitted, letting
+            # a self-referential NAND (``create_operator('NAND', p, [p])`` is
+            # accepted) boost the contested point by its OWN text — measured:
+            # ``{'self-x': 0.05}`` where the pre-widening guard returned ``{}``.
+            # Self-reference guard: ``src`` is an OPTIONAL match, so it is
+            # skipped only when it matched nothing. Compared on the internal
+            # id for the same reason as above — the earlier two-key form was
+            # both dead (``OR`` across the keys) and collision-blind.
+            f"AND (id(src) IS NULL OR id(src) <> id(n)) AND ("
             "  (c.is_operator = true AND r.idx > 0 AND ri.idx = 0) OR "
-            "  (c.is_operator = false OR c.is_operator IS NULL)) "
+            "  ((c.is_operator = false OR c.is_operator IS NULL) "
+            "   AND c.op_type IS NULL)) "
+            # #7927: ``c`` is the NANDer — the counter-claim is epistemic too.
+            f"AND {epistemic_disjunction('c')} "
             "AND " + _exclude_status_clause("c") + " "
-            "RETURN n.id, coalesce(src.id, c.id), "
-            "  coalesce(src.content, c.label, c.content, ''), "
+            f"RETURN {epistemic_identity('n')}, "
+            f"  coalesce({epistemic_identity('src')}, "
+            f"           {epistemic_identity('c')}), "
+            # The INTERNAL id of whichever node supplied the claim, for the
+            # per-node dedupe below. The coalesced identity above is a DISPLAY
+            # value and is NOT unique (see ``live.EPISTEMIC_ID_KEYS``) — keying
+            # a dict on it overwrote a distinct counter-claim that happened to
+            # collide, so its text never reached the conflict test and the
+            # boost silently did not fire (#7927 review).
+            "  coalesce(id(src), id(c)), "
+            # #7927: the counter-claim TEXT must come from the node that
+            # actually carries it. A :Subject/:Object stores ``name``/``title``
+            # (never ``content``), so the old chain fell through to
+            # ``c.label`` — the NANDer's own type token — and the relevance
+            # test could never match: the boost silently never fired for
+            # exactly the labels this widening added.
+            "  coalesce(src.content, src.name, src.title, c.label, "
+            "           c.content, c.name, c.title, ''), "
             "  coalesce(src.posterior_alpha, src.ep_alpha, c.posterior_alpha, c.ep_alpha, 1.0), "
             "  coalesce(src.posterior_beta, src.ep_beta, c.posterior_beta, c.ep_beta, 1.0)",
-            params={"ids": contested_ids},
-        ).result_set
+            {"ids": contested_ids},
+        )
         # Severity-then-id selection mirrors why.py's _assemble_conflicts:
         # a NANDer with persisted EP mean >= 0.6 is a high-severity dispute
         # and ranks above medium ones; ids break the tie deterministically
         # (Cypher row order never decides the budgeted subset).
-        pending: dict[str, dict[str, dict]] = {}
-        for pid, claim_id, content, a, b in rows:
+        pending: dict[str, dict[int, dict]] = {}
+        for pid, claim_id, claim_nid, content, a, b in rows:
             if not pid or not claim_id:
                 continue
             a_f, b_f = float(a), float(b)
             s = a_f + b_f
             mean = (a_f / s) if s > 0 else 0.5
-            pending.setdefault(pid, {})[claim_id] = {
+            # Keyed on the INTERNAL node id, so two distinct counter-claims that
+            # coalesce to one identity do not overwrite each other.
+            # COMMUTATIVE and TOTAL, not last-wins. Two rows can share one
+            # ``claim_nid`` with different ``mean``/``content`` (when ``src``
+            # stores no EP the alpha/beta chain falls through to the NANDer's),
+            # AND with different ``claim_id`` (``claim_nid`` is then ``id(src)``
+            # while ``claim_id`` falls through to the NANDer's). ``claim_id`` is
+            # the sort key's second component, so a first-seen tie there decided
+            # the budgeted subset — measured: 12 of 24 row orders boosted, 12
+            # did not.
+            #
+            # The tie-break is the SMALLER ``str(claim_id)``, deliberately: the
+            # larger one sorts the node AFTER unrelated claims and can push it
+            # out of the budget, so a node's own alternative claim ids must not
+            # be able to demote it. ``str()`` on both sides because the id is a
+            # raw property value and a mixed-type comparison (``12345`` vs
+            # ``"12345"``) raises inside the outer handler, which would silently
+            # return ``{}`` for the whole read.
+            slot = pending.setdefault(pid, {})
+            candidate = {
                 "content": str(content or ""),
                 "mean": mean,
                 "claim_id": claim_id,
+                "nid": claim_nid,
             }
+            previous = slot.get(claim_nid)
+            if previous is None:
+                slot[claim_nid] = candidate
+            else:
+                cand_rank = (candidate["mean"], candidate["content"])
+                prev_rank = (previous["mean"], previous["content"])
+                if cand_rank > prev_rank or (
+                        cand_rank == prev_rank
+                        and str(candidate["claim_id"])
+                        < str(previous["claim_id"])):
+                    slot[claim_nid] = candidate
         boosts: dict[str, float] = {}
         for pid, claims in pending.items():
             chosen = sorted(
                 claims.values(),
-                key=lambda c: (0 if c["mean"] >= 0.6 else 1, c["claim_id"]))
+                # ``claim_id`` is NOT unique (see live.EPISTEMIC_ID_KEYS), so
+                # the internal id is the tiebreak — without it the budgeted
+                # subset, and therefore the boost, was decided by Cypher row
+                # order (measured: the same three-claim tie group boosted
+                # forward and did not boost reversed).
+                # ``str()`` on the claim id as well: a mixed-type pair (an int
+                # id beside a string one) makes a raw comparison raise inside
+                # the handler below, which would return ``{}`` for the whole
+                # read — measured on a graph with both.
+                key=lambda c: (0 if c["mean"] >= 0.6 else 1,
+                               str(c["claim_id"]), c["nid"]))
             texts = [c["content"] for c in chosen[:_claim_budget]]
             if _query_touches_conflict(query, texts):
                 boosts[pid] = W4_CONTESTED_BOOST
@@ -469,7 +580,10 @@ class GraphRanker:
         # to 0.5 and ranked a 0.75-prior claim as unmeasured while every
         # other surface read 0.75.
         cypher = (
-            "MATCH (n:Point) WHERE n.id IN $ids "
+            "MATCH (n:{label}) WHERE n.id IN $ids "
+            # #7927: label-swept — a :Subject/:Object/:Event belief carries the
+            # same persisted EP prior and degree as a Point (the OPERATOR side
+            # stays :Point: every operator is a Point, `create_operator`).
             "OPTIONAL MATCH (n)-[r:IMPL|NAND]-(:Point {is_operator: true}) "
             "WITH n, count(r) AS degree "
             "RETURN n.id, coalesce(n.confidence, "
@@ -484,7 +598,8 @@ class GraphRanker:
             f"  {ep_measured_cypher('n')} AS has_ep, "
             "  n.status, coalesce(n.outdated, false)"
         )
-        rows = self.projection.g.query(cypher, params={"ids": ids}).result_set
+        rows = epistemic_sweep(
+            self.projection.g, cypher, {"ids": ids})
         out = {}
         for row in rows:
             pid = row[0]
@@ -824,7 +939,7 @@ class StateRanker:
         if not ids:
             return {}
         cypher = (
-            "MATCH (n:Point) WHERE n.id IN $ids "
+            "MATCH (n:{label}) WHERE n.id IN $ids "
             "OPTIONAL MATCH (n)-[r:IMPL|NAND]-() "
             "WITH n, count(r) AS ep_degree "
             "OPTIONAL MATCH (n)-[a:aboutSubject|aboutObject|aboutAction|"
@@ -837,7 +952,8 @@ class StateRanker:
             "  ep_degree + about_degree AS degree, "
             "  n.status, coalesce(n.outdated, false)"
         )
-        rows = self.projection.g.query(cypher, params={"ids": ids}).result_set
+        rows = epistemic_sweep(
+            self.projection.g, cypher, {"ids": ids})
         out = {}
         for row in rows:
             pid, alpha, beta, has_ep, degree = (
@@ -874,7 +990,19 @@ class StateRanker:
         about_types = "|".join(ABOUT_EDGE_TYPES)
         rows = self.projection.g.query(
             "MATCH (o:Object) WHERE o.id IN $ids "
-            "OPTIONAL MATCH (p:Point)-[a:" + about_types + "]->(o) "
+            # #7927: ``p`` is a TRAVERSAL position — the belief an Object is
+            # measured by may be any epistemic label, not only a Point.
+            "OPTIONAL MATCH (p)-[a:" + about_types + "]->(o) "
+            f"  WHERE {epistemic_disjunction('p')} "
+            # ``pids`` feeds ``_fetch_point_signals`` — an ID-ANCHORED Point
+            # read — so a belief with no ``id`` (a keyless legacy :Event) would
+            # be a ``None`` in that list: the edge counted toward ``degree``
+            # while its posterior vanished, i.e. a measured Object reported as
+            # unmeasured with a phantom degree (measured: degree 1, has_ep
+            # False). Held to what the pre-widening predicate admitted rather
+            # than coalescing, because the value would be re-anchored as an
+            # ``id`` it is not (#8538; #7927 review).
+            "  AND p.id IS NOT NULL "
             "WITH o, count(a) AS about_degree, collect(DISTINCT p.id) AS pids "
             "RETURN o.id, about_degree, pids",
             params={"ids": ids},
@@ -1022,13 +1150,27 @@ class GapsRanker:
         if self.projection is not None:
             ids = [r.get("id") for r in results if r.get("id")]
             try:
+                # #7927: resolve the PRESENT labels ONCE for the whole rerank.
+                # The three signal reads below are anchored on the SAME id set,
+                # so resolving inside each one paid the resolution three times
+                # — measured: 6 round-trips for a Point-only rerank where the
+                # pre-widening path took 3, three of them the byte-identical
+                # ``MATCH (n:Point) WHERE n.id IN $ids RETURN n.id``. That is
+                # the exact cost ``epistemic_labels_of`` exists to avoid, so it
+                # is paid once here and threaded down. Fail-open: a resolution
+                # error leaves ``None`` and each read re-resolves as before.
+                try:
+                    _labels = epistemic_labels_of(self.projection.g, ids)
+                except Exception as e:  # pragma: no cover — defensive
+                    logger.warning("GapsRanker label resolution failed: %s", e)
+                    _labels = None
                 # Per-signal dicts carry per-id sub-dicts — merge the FIELDS
                 # (dict.update would REPLACE the whole value for an id,
                 # dropping earlier signals).
                 for part in (
-                    self._fetch_load_signals(ids),
-                    self._fetch_support_signals(ids),
-                    self._fetch_confidence_signals(ids),
+                    self._fetch_load_signals(ids, labels=_labels),
+                    self._fetch_support_signals(ids, labels=_labels),
+                    self._fetch_confidence_signals(ids, labels=_labels),
                 ):
                     for pid, fields in part.items():
                         signals.setdefault(pid, {}).update(fields)
@@ -1132,27 +1274,42 @@ class GapsRanker:
             return float(embedded), result.get("gaps_confidence_source", "posterior")
         return NEUTRAL_CONFIDENCE, "neutral"
 
-    def _fetch_load_signals(self, ids: list[str]) -> dict[str, dict]:
+    def _fetch_load_signals(self, ids: list[str], *,
+                            labels: list[str] | None = None) -> dict[str, dict]:
         """Outgoing epistemic load: IMPL/NAND edges where the claim is the
         SOURCE — operator-mediated (idx=0) or direct to a non-operator Point.
         Operator and direct edges are counted in SEPARATE columns (chained
         OPTIONAL MATCHes cross-product; a single per-row CASE over both
-        patterns would drop one of two same-type edges — P0 fix)."""
+        patterns would drop one of two same-type edges — P0 fix).
+
+        ``labels`` is the caller's already-resolved present-label set —
+        ``GapsRanker.rerank`` resolves once and threads it through its three
+        reads, so the resolution is not paid per read."""
         if not ids:
             return {}
-        rows = self.projection.g.query(
-            "MATCH (n:Point) WHERE n.id IN $ids "
+        rows = epistemic_sweep(
+            self.projection.g,
+            "MATCH (n:{label}) WHERE n.id IN $ids "
             "OPTIONAL MATCH (op:Point {is_operator:true})-[r1:IMPL|NAND]->(n) "
             "  WHERE coalesce(r1.idx, 1) = 0 "
-            "OPTIONAL MATCH (n)-[r2:IMPL|NAND]->(m:Point) "
-            "  WHERE m.is_operator = false "
+            "OPTIONAL MATCH (n)-[r2:IMPL|NAND]->(m) "
+            # #7927: ``m`` is a TRAVERSAL position — a :Subject/:Object/:Event
+            # carries no ``is_operator``, so admit UNSET as well as false.
+            "  WHERE (m.is_operator IS NULL OR m.is_operator = false) "
+            # The CANONICAL non-operator predicate: a legacy ``op_type``-only
+            # operator (#2205/#943) has no ``is_operator``, so the UNSET
+            # admission alone would count an operator's own edge as a direct
+            # load — the pre-#7927 ``m.is_operator = false`` excluded it.
+            "    AND m.op_type IS NULL "
+            f"    AND {epistemic_disjunction('m')} "
             "RETURN n.id, "
             "  count(DISTINCT CASE WHEN type(r1) = 'IMPL' THEN r1 END) AS op_load_impl, "
             "  count(DISTINCT CASE WHEN type(r1) = 'NAND' THEN r1 END) AS op_load_nand, "
             "  count(DISTINCT CASE WHEN type(r2) = 'IMPL' THEN r2 END) AS direct_load_impl, "
             "  count(DISTINCT CASE WHEN type(r2) = 'NAND' THEN r2 END) AS direct_load_nand",
-            params={"ids": ids},
-        ).result_set
+            {"ids": ids},
+            labels=labels,
+        )
         return {
             row[0]: {
                 "outgoing_impl": int(row[1]) + int(row[3]),
@@ -1161,34 +1318,45 @@ class GapsRanker:
             for row in rows
         }
 
-    def _fetch_support_signals(self, ids: list[str]) -> dict[str, dict]:
+    def _fetch_support_signals(self, ids: list[str], *,
+                               labels: list[str] | None = None) -> dict[str, dict]:
         """Incoming epistemic support: IMPL edges where the claim is a TARGET
         (operator-mediated idx>=1, or direct from a non-operator Point/Event),
         plus extractedFrom→Source count. Incoming NAND is counted separately
-        (contention — never support)."""
+        (contention — never support).
+
+        ``labels`` is the caller's already-resolved present-label set — see
+        ``_fetch_load_signals``."""
         if not ids:
             return {}
-        rows = self.projection.g.query(
-            "MATCH (n:Point) WHERE n.id IN $ids "
+        rows = epistemic_sweep(
+            self.projection.g,
+            "MATCH (n:{label}) WHERE n.id IN $ids "
             "OPTIONAL MATCH (op:Point {is_operator:true, op_type:'IMPL'})-[r3:IMPL]->(n) "
             "  WHERE coalesce(r3.idx, 0) >= 1 "
             "OPTIONAL MATCH (s)-[r4:IMPL]->(n) "
-            "  WHERE (s:Point AND s.is_operator = false) "
-            "     OR (s:Event) "
+            # #7927: ``s`` is a TRAVERSAL position — admit the four labels and
+            # treat an UNSET ``is_operator`` (:Subject/:Object/:Event) as a
+            # non-operator claim, exactly as the old ``(s:Event)`` arm did.
+            f"  WHERE (s.is_operator IS NULL OR s.is_operator = false) "
+            "    AND s.op_type IS NULL "  # canonical: a legacy op_type-only operator is an operator
+            f"    AND {epistemic_disjunction('s')} "
             "OPTIONAL MATCH (n)-[r5:extractedFrom]->(src:Source) "
             "OPTIONAL MATCH (opn:Point {is_operator:true, op_type:'NAND'})-[r6:NAND]->(n) "
             "  WHERE coalesce(r6.idx, 1) >= 1 "
             "OPTIONAL MATCH (s2)-[r7:NAND]->(n) "
-            "  WHERE (s2:Point AND s2.is_operator = false) "
-            "     OR (s2:Event) "
+            f"  WHERE (s2.is_operator IS NULL OR s2.is_operator = false) "
+            "    AND s2.op_type IS NULL "  # canonical: a legacy op_type-only operator is an operator
+            f"    AND {epistemic_disjunction('s2')} "
             "RETURN n.id, "
             "  count(DISTINCT r3) AS op_support, "
             "  count(DISTINCT r4) AS direct_support, "
             "  count(DISTINCT r5) AS source_count, "
             "  count(DISTINCT r6) AS op_nand, "
             "  count(DISTINCT r7) AS direct_nand",
-            params={"ids": ids},
-        ).result_set
+            {"ids": ids},
+            labels=labels,
+        )
         return {
             row[0]: {
                 "incoming_impl": int(row[1]) + int(row[2]),
@@ -1200,19 +1368,25 @@ class GapsRanker:
             for row in rows
         }
 
-    def _fetch_confidence_signals(self, ids: list[str]) -> dict[str, dict]:
-        """EP posterior mean + contested — same read as StateRanker."""
+    def _fetch_confidence_signals(self, ids: list[str], *,
+                                  labels: list[str] | None = None) -> dict[str, dict]:
+        """EP posterior mean + contested — same read as StateRanker.
+
+        ``labels`` is the caller's already-resolved present-label set — see
+        ``_fetch_load_signals``."""
         if not ids:
             return {}
-        rows = self.projection.g.query(
-            "MATCH (n:Point) WHERE n.id IN $ids "
+        rows = epistemic_sweep(
+            self.projection.g,
+            "MATCH (n:{label}) WHERE n.id IN $ids "
             "RETURN n.id, "
             "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, "
             "  coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
             f"  {ep_measured_cypher('n')} AS has_ep, "
             "  n.status, coalesce(n.outdated, false)",
-            params={"ids": ids},
-        ).result_set
+            {"ids": ids},
+            labels=labels,
+        )
         out = {}
         for row in rows:
             pid, alpha, beta, has_ep = row[0], float(row[1]), float(row[2]), bool(row[3])

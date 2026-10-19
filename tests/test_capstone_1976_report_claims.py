@@ -53,6 +53,12 @@ Non-vacuity: on the pre-fix document, checks 1–3 fail (it said "which is what 
 the cross-head comparison — checked per file", carried no tree-state line, and its
 indicator-2 row had no anchor caveat); check 5's extractor surfaces the dangling name from
 synthetic doc text and the resolver rejects it; check 6 fails on "8 files, 201 tests".
+7. The report's `Surfaces` column — labelled "verbatim from `04-test-design.md`" —
+   is the map's cell, compared as whitespace-normalised TEXT. A number-SET
+   comparison (the first version) passed `10, 9, 2, 1` against `1, 2, 9, 10`,
+   which is a different cell, so the "verbatim" label stayed false while the
+   guard was green. Non-vacuity is in-suite: the comparison is driven with a
+   drifted, a REORDERED and a spacing-only pair.
 
 Static: doc-text scans plus file reads. No network, DB or graph.
 """
@@ -468,3 +474,138 @@ def test_the_resolver_rejects_the_dangling_name_an_earlier_revision_cited():
         "written for; if it has been added, pick another known-absent name so the "
         "resolver keeps a non-vacuity case."
     )
+
+
+# --------------------------------------------------------------------------- #
+# 7 — the report's `Surfaces` column really IS the map's (the "verbatim" label)
+# --------------------------------------------------------------------------- #
+
+#: The map `capstone-report.md` declares canonical — its `Surfaces` column is
+#: labelled "verbatim from `04-test-design.md`" (header, line 26) and "copied
+#: verbatim" (line 53). Nothing checked that, so PR #9013 changed the map's
+#: E2E-6 row to `1, 2, 9, 10` while the report still said `1, 2, 10` — the
+#: report misquoting its declared source is exactly the silent drift both
+#: documents exist to prevent.
+MAP = DOC.parent / "04-test-design.md"
+
+
+def _row_cells(line: str) -> list[str]:
+    body = line.strip()
+    if body.startswith("|"):
+        body = body[1:]
+    if body.endswith("|"):
+        body = body[:-1]
+    return [c.strip() for c in re.split(r"(?<!\\)\|", body)]
+
+
+def _surface_numbers(cell: str) -> set[int]:
+    """`1, 2, 9, 10` and `1-17 (all)` → the surface numbers the cell names."""
+    numbers: set[int] = set()
+    for chunk in re.findall(r"\d+\s*-\s*\d+|\d+", cell):
+        if "-" in chunk:
+            lo, hi = (int(p) for p in chunk.split("-"))
+            numbers.update(range(lo, hi + 1))
+        else:
+            numbers.add(int(chunk))
+    return numbers
+
+
+@lru_cache(maxsize=1)
+def _map_e2e_surfaces() -> dict[str, str]:
+    """`E2E-N` → the map's raw `Surfaces exercised` cell."""
+    out: dict[str, str] = {}
+    for line in MAP.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"^\|\s*(E2E-\d+)\s*[^|]*\|", line)
+        if not m:
+            continue
+        cells = _row_cells(line)
+        if len(cells) != 2:
+            continue
+        out[m.group(1)] = cells[1]
+    return out
+
+
+@lru_cache(maxsize=1)
+def _report_e2e_surfaces() -> dict[str, str]:
+    """`E2E-N` → the report's raw `Surfaces` cell (Verdict-summary table, row #)."""
+    out: dict[str, str] = {}
+    for line in _doc_text().splitlines():
+        m = re.match(r"^\|\s*(\d{1,2})\s*\|", line)
+        if not m:
+            continue
+        cells = _row_cells(line)
+        if len(cells) != 5:  # # | scenario | surfaces | evidence | result
+            continue
+        out[f"E2E-{m.group(1)}"] = cells[2]
+    return out
+
+
+def _norm_cell(cell: str) -> str:
+    """Whitespace-normalised cell text.
+
+    Spacing between numbers is markdown formatting; the NUMBERS and their ORDER
+    are the claim. Nothing else is normalised — `1,2,9,10` is not `1, 2, 9, 10`,
+    which is deliberate: the column says "verbatim".
+    """
+    return " ".join(cell.split())
+
+
+def _verbatim_drift(
+    report: dict[str, str], mapped: dict[str, str]
+) -> dict[str, tuple[str, str]]:
+    """`E2E-N` → (report cell, map cell) for every row that is not the map's.
+
+    Deliberately NOT a set comparison: `10, 9, 2, 1` names exactly the surfaces
+    `1, 2, 9, 10` does, so a number-set check passes it while the column header
+    — "Surfaces (**verbatim** from `04-test-design.md`)" — becomes false. The
+    pre-fix defect this replaces was found by reading, not by the guard.
+    """
+    return {
+        e2e: (report[e2e], mapped[e2e])
+        for e2e in report
+        if _norm_cell(report[e2e]) != _norm_cell(mapped[e2e])
+    }
+
+
+def test_the_report_surfaces_column_is_the_maps_e2e_row_verbatim():
+    """The `Surfaces` column is labelled verbatim — so it must equal the map's
+    row for the same E2E, CELL FOR CELL. PRE-FIX (before this PR's capstone fix,
+    and on any later map edit that forgets the copy): `E2E-6` was `1, 2, 10`
+    here while the map said `1, 2, 9, 10`."""
+    report, mapped = _report_e2e_surfaces(), _map_e2e_surfaces()
+    assert len(mapped) == 12, f"could not parse the map's 12 E2E rows: {sorted(mapped)}"
+    assert set(report) == set(mapped), (
+        "the report's scenario rows drifted from the map — "
+        f"missing {sorted(set(mapped) - set(report))}, "
+        f"extra {sorted(set(report) - set(mapped))}")
+    drifted = _verbatim_drift(report, mapped)
+    assert not drifted, (
+        "the report's `Surfaces` column is labelled verbatim but is not the "
+        "map's cell (report vs map): "
+        + "; ".join(f"{k}: {v[0]!r} vs {v[1]!r}" for k, v in sorted(drifted.items())))
+
+
+def test_the_surfaces_cross_check_rejects_a_misquoted_row():
+    """Non-vacuity: the comparison above must FAIL on the pre-fix disagreement,
+    and on the two drifts the previous NUMBER-SET comparison silently accepted."""
+    mapped = {"E2E-6": "1, 2, 9, 10"}
+    # the pre-fix disagreement itself
+    assert _verbatim_drift({"E2E-6": "1, 2, 10"}, mapped), (
+        "the comparison passes the exact drift this pin was written for")
+    # same set, different ORDER — the label says verbatim, so this is drift
+    assert _verbatim_drift({"E2E-6": "10, 9, 2, 1"}, mapped), (
+        "a reordered cell names the same surfaces and is still not verbatim")
+    # same set and order, only the spacing differs
+    assert _verbatim_drift({"E2E-6": "1,2,9,10"}, mapped)
+    # and it must not fire on an exact copy, spacing included
+    assert not _verbatim_drift({"E2E-6": "1, 2, 9, 10"}, mapped)
+    # the drift is reported per row, with both cells, so a failure is readable
+    assert _verbatim_drift({"E2E-6": "1, 2, 10"}, mapped) == {"E2E-6": ("1, 2, 10", "1, 2, 9, 10")}
+    # the number side still parses, for the readers that need sets
+    assert _surface_numbers("1, 2, 9, 10") == {1, 2, 9, 10}
+    assert _surface_numbers("1-17 (all)") == set(range(1, 18))
+    assert _surface_numbers(_report_e2e_surfaces()["E2E-6"]) == _surface_numbers(
+        _map_e2e_surfaces()["E2E-6"])
+    assert {1, 2, 10} != _surface_numbers(_map_e2e_surfaces()["E2E-6"]), (
+        "E2E-6 is back to `1, 2, 10` — the surface-9 door this pin exists for "
+        "was dropped again")

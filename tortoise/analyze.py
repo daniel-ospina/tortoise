@@ -9,7 +9,13 @@ from __future__ import annotations  # noqa: I001
 import json, os, re  # noqa: E401
 from typing import Any
 
-from .live import _live_only, _terminal_excluded
+from .live import (
+    _live_only,
+    _terminal_excluded,
+    epistemic_disjunction,
+    epistemic_labels_of,
+    epistemic_sweep,
+)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -419,7 +425,7 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
                           op_cap: int = 200,
                           stats: dict[str, Any] | None = None
                           ) -> tuple[set[str], set[tuple[str, str, str]]]:
-    """BFS subgraph selection from anchor Points — A9 return contract.
+    """BFS subgraph selection from anchor epistemic nodes — A9 return contract.
 
     Returns ``(operator_ids, factor_anchors)``:
       operator_ids  — operator Point IDs for the operator-mediated factors
@@ -468,6 +474,7 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
     and draft frontier points are excluded — the shared live-only filter at
     the analyze-path call site of the four-factor-extraction set.
 
+
     ``stats`` (#6211): OPTIONAL out-parameter. When a dict is passed it is
     FILLED with what the selection actually did:
 
@@ -488,9 +495,31 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
     The dict is OVERWRITTEN for THIS call on every return path, never merged:
     a caller may safely reuse one dict across calls (a stale ``truncated`` must
     not leak into a later uncapped selection — #6211 review round 1).
+
+    EPISTEMIC LABELS (#7927): an anchor, an operator's input and a direct-edge
+    endpoint may each be a :Subject/:Object/:Event (§7813), so every leg below
+    admits ``live.EPISTEMIC_LABELS`` — ``epistemic_label_queries`` on an
+    ID-ANCHORED position (label kept, so the per-(label, property) index
+    still anchors the read) and ``epistemic_disjunction`` on a TRAVERSAL
+    position. Before this, a non-Point anchor selected nothing and an operator
+    whose only second endpoint was non-Point looked EP-inert.
     """
     import logging
     _log = logging.getLogger(__name__)
+
+    def _sweep(template: str, params: dict, labels: list[str]) -> list:
+        """Sweep this hop's anchored legs over the labels PRESENT (#7927).
+
+        Thin binding of ``live.epistemic_sweep`` to this projection — the
+        frontier/anchor can hold a :Subject/:Object/:Event (§7813 ruling), so
+        an anchored leg keeps its LABEL (the per-(label, property) index) and
+        expands through ``live.epistemic_label_queries``; ``labels`` is the
+        RESOLVED set for this hop, so a Point-only graph pays one query per leg
+        instead of four (an unconditional sweep took the #395 AC5 40-claim
+        zone from ~0.73s to ~1.50s against a 1.2s bound).
+        """
+        return epistemic_sweep(proj.g, template, params, labels=labels)
+
     collected: set[str] = set()
     factor_anchors: set[tuple[str, str, str]] = set()
     # #6211 review round 1: truncation is tracked LOCALLY, never read back out
@@ -534,8 +563,11 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
         if not ids:
             return set()
         rows = proj.g.query(
-            "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]-(t:Point) "
+            "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]-(t) "
             "WHERE op.id IN $ids "
+            # #7927: ``t`` is a TRAVERSAL position reached from the anchored
+            # operator — the claim a non-Point belief feeds is epistemic too.
+            f"AND {epistemic_disjunction('t')} "
             # #3139/#3154: index-independent form — a bare `= false` is
             # emptied by a GRAPH.COPY'd boolean index, making every operator
             # look inert (zero live connections) and silently starving the
@@ -551,10 +583,15 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
         return {r[0] for r in rows}
 
     if not include_draft and frontier:
-        rows = proj.g.query(
-            "MATCH (n:Point) WHERE n.id IN $ids AND n.status = 'draft' RETURN n.id",
-            params={"ids": list(frontier)},
-        ).result_set
+        # #7927: id-anchored draft-anchor probe — sweep the labels PRESENT in
+        # the anchor set, or a draft :Subject/:Object/:Event anchor is invisible
+        # here and the live-only filter silently keeps it.
+        rows = _sweep(
+            "MATCH (n:{label}) WHERE n.id IN $ids AND n.status = 'draft' "
+            "RETURN n.id",
+            {"ids": list(frontier)},
+            epistemic_labels_of(proj.g, list(frontier)),
+        )
         draft_anchors = {r[0] for r in rows}
         if draft_anchors:
             frontier -= draft_anchors
@@ -567,10 +604,14 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
         new_ops: set[str] = set()
         new_points: set[str] = set()
         frontier_list = list(frontier)
+        # #7927: resolve this hop's labels ONCE (one query on a Point-only
+        # frontier) and reuse them for every id-anchored leg below.
+        frontier_labels = epistemic_labels_of(proj.g, frontier_list)
 
         for rel in rel_types:
             if rel not in ("IMPL", "NAND"):
                 continue
+            safe_rel = rel.replace("'", "")
 
             # NAND is always bidirectional; IMPL respects direction flag
             if rel == "NAND":  # noqa: SIM114
@@ -585,12 +626,16 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
                 if d == "incoming":
                     # frontier POINTS → operators pointing AT them; only
                     # operators with >=2 live connected points participate
-                    rows = proj.g.query(
-                        f"MATCH (op:Point {{is_operator:true}})-[:{rel}]->(p:Point) "
-                        f"WHERE p.id IN $frontier {live_op} "
-                        "RETURN DISTINCT op.id",
-                        params={"frontier": frontier_list},
-                    ).result_set
+                    # #7927: ``p`` is ID-ANCHORED (`p.id IN $frontier`) —
+                    # label-swept so a :Subject/:Object/:Event anchor finds
+                    # the operators pointing at it.
+                    rows = _sweep(
+                        ("MATCH (op:Point {is_operator:true})-[:{rel}]->(p:{label}) "
+                         f"WHERE p.id IN $frontier {live_op} "
+                         "RETURN DISTINCT op.id").replace("{rel}", rel),
+                        {"frontier": frontier_list},
+                        frontier_labels,
+                    )
                     for op_id in _derived_live_operators([r[0] for r in rows]):
                         new_ops.add(op_id)
                         new_points.add(op_id)
@@ -600,9 +645,22 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
                     # must not reach its targets)
                     alive = _derived_live_operators(frontier_list)
                     if alive:
+                        # #7927: ``target`` is a TRAVERSAL position reached
+                        # from the anchored operator.
                         rows = proj.g.query(
-                            f"MATCH (op:Point {{is_operator:true}})-[:{rel}]->(target:Point) "
+                            "MATCH (op:Point {is_operator:true})-[:" + safe_rel + "]->(target) "
                             f"WHERE op.id IN $ops {live_op} {live_t} "
+                            f"AND {epistemic_disjunction('target')} "
+                            # A keyless legacy ``:Event`` (``session_indexer`` mints
+                            # ``(e:Event {eventId:…})`` with no ``id``) has NO
+                            # addressable identity for an id-keyed frontier, so its
+                            # widened return would be a ``None`` id in ``new_points``
+                            # and in ``compute_confidence``'s seeds. Requiring ``.id``
+                            # keeps the population at exactly what the PRE-widening
+                            # label predicate admitted — ``coalesce(id, eventId)`` here
+                            # would hand back a value that is not an ``id``
+                            # (``navigation._node_identity``, #8538; #7927 review).
+                            "AND target.id IS NOT NULL "
                             "RETURN DISTINCT target.id",
                             params={"ops": list(alive)},
                         ).result_set
@@ -621,9 +679,22 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
             # legacy aliases) — a backward-only `<-` edge is never walked the
             # wrong way.
             if rel == "NAND" or direction in ("outgoing", "both"):
-                rows = proj.g.query(
-                    f"MATCH (a:Point)-[r:{rel}]->(b:Point) "
+                # #7927: ``a`` is ID-ANCHORED (`a.id IN $frontier`) → label
+                # sweep; ``b`` is the TRAVERSAL position → WHERE disjunction.
+                fwd_tpl = (
+                    "MATCH (a:{label})-[r:" + safe_rel + "]->(b) "
                     f"WHERE a.id IN $frontier {live_a} {live_b} "
+                    f"AND {epistemic_disjunction('b')} "
+                    # A keyless legacy ``:Event`` (``session_indexer`` mints
+                    # ``(e:Event {eventId:…})`` with no ``id``) has NO
+                    # addressable identity for an id-keyed frontier, so its
+                    # widened return would be a ``None`` id in ``new_points``
+                    # and in ``compute_confidence``'s seeds. Requiring ``.id``
+                    # keeps the population at exactly what the PRE-widening
+                    # label predicate admitted — ``coalesce(id, eventId)`` here
+                    # would hand back a value that is not an ``id``
+                    # (``navigation._node_identity``, #8538; #7927 review).
+                    "AND b.id IS NOT NULL "
                     # #3139/#3154: index-independent non-operator predicate.
                     "AND (a.is_operator IS NULL OR a.is_operator = false) "
                     "AND a.op_type IS NULL "
@@ -633,9 +704,9 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
                     "     AND coalesce(r.direction, 'bidirectional') <> '-' "
                     "     OR coalesce(r.direction, 'bidirectional') IN "
                     "        ['bidirectional', '<->', '->', 'unidirectional']) "
-                    "RETURN DISTINCT b.id, a.id, type(r)",
-                    params={"frontier": frontier_list},
-                ).result_set
+                    "RETURN DISTINCT b.id, a.id, type(r)"
+                )
+                rows = _sweep(fwd_tpl, {"frontier": frontier_list}, frontier_labels)
                 for (bid, aid, rtype) in rows:
                     if bid not in visited:
                         new_points.add(bid)
@@ -644,9 +715,22 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
             # IMPL only where the edge flows BACKWARD (`<-`/`<->` and their
             # legacy aliases — never back-propagate into a forward-only edge).
             if rel == "NAND" or direction in ("incoming", "both"):
-                rows = proj.g.query(
-                    f"MATCH (a:Point)-[r:{rel}]->(b:Point) "
+                # #7927: ``b`` is ID-ANCHORED (`b.id IN $frontier`) → label
+                # sweep; ``a`` is the TRAVERSAL position → WHERE disjunction.
+                bwd_tpl = (
+                    "MATCH (a)-[r:" + safe_rel + "]->(b:{label}) "
                     f"WHERE b.id IN $frontier {live_a} {live_b} "
+                    f"AND {epistemic_disjunction('a')} "
+                    # A keyless legacy ``:Event`` (``session_indexer`` mints
+                    # ``(e:Event {eventId:…})`` with no ``id``) has NO
+                    # addressable identity for an id-keyed frontier, so its
+                    # widened return would be a ``None`` id in ``new_points``
+                    # and in ``compute_confidence``'s seeds. Requiring ``.id``
+                    # keeps the population at exactly what the PRE-widening
+                    # label predicate admitted — ``coalesce(id, eventId)`` here
+                    # would hand back a value that is not an ``id``
+                    # (``navigation._node_identity``, #8538; #7927 review).
+                    "AND a.id IS NOT NULL "
                     # #3139/#3154: index-independent non-operator predicate.
                     "AND (a.is_operator IS NULL OR a.is_operator = false) "
                     "AND a.op_type IS NULL "
@@ -656,9 +740,9 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
                     "     AND coalesce(r.direction, 'bidirectional') <> '-' "
                     "     OR coalesce(r.direction, 'bidirectional') IN "
                     "        ['bidirectional', '<->', '<-']) "
-                    "RETURN DISTINCT a.id, b.id, type(r)",
-                    params={"frontier": frontier_list},
-                ).result_set
+                    "RETURN DISTINCT a.id, b.id, type(r)"
+                )
+                rows = _sweep(bwd_tpl, {"frontier": frontier_list}, frontier_labels)
                 for (aid, bid, rtype) in rows:
                     if aid not in visited:
                         new_points.add(aid)
@@ -700,8 +784,17 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
         if new_ops and (max_hops is None or hop < max_hops - 1):
             ops_list = list(new_ops)
             rows = proj.g.query(
-                "MATCH (op:Point {is_operator:true})-[r:IMPL|NAND]->(p:Point) "
+                "MATCH (op:Point {is_operator:true})-[r:IMPL|NAND]->(p) "
                 f"WHERE op.id IN $ops {live_p} "
+                # #7927: ``p`` is reached from the anchored operator.
+                f"AND {epistemic_disjunction('p')} "
+                # The EXPANSION frontier is re-anchored by ``p.id`` on the next
+                # hop, so a node with no ``id`` cannot continue it: requiring
+                # it keeps the identity-less legacy ``:Event`` population at
+                # exactly what the pre-widening label predicate admitted
+                # (``coalesce`` would re-anchor on a value that is not an ``id``
+                # — #8538; #7927 review).
+                "AND p.id IS NOT NULL "
                 "RETURN DISTINCT p.id",
                 params={"ops": ops_list},
             ).result_set
