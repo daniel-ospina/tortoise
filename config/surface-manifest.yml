@@ -21,7 +21,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: ab1f3e8584d27b88934d84f841878a6e6f85fc83
+cut_at_commit: 740fbd8876e75358863edd8baa988fd4eab52e55
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -3104,7 +3104,7 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.capture_session.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  dependency: 'reached by no registered MCP tool; caller categories: documentation'
   lifecycle: active
   used_by: eval-harness, tooling, docs
   recommendation: review
@@ -3113,7 +3113,7 @@ rows:
   proposed: false
   exemption: false
   approval: null
-  class: no-caller-found
+  class: internal
 - name: sdk:check_structure
   method: check_structure
   family: null

@@ -176,16 +176,36 @@ def test_missing_row_is_a_finding():
     assert "V2" in _codes(rec)
 
 
+def _messages(record: dict) -> list[str]:
+    return [m for _c, _w, m in
+            cvc.check(record, repo=_REPO, require_green=False).items]
+
+
 def test_duplicate_row_is_a_finding():
+    """A DUPLICATE, with no criterion missing, so only the `n > 1` arm can fire.
+
+    Non-vacuity (#9080 review F3): the old version relabelled row 2 to "E1",
+    which ALSO deleted E2 — so the `n == 0` "row is MISSING" arm reddened the
+    test no matter what the duplicate arm did. Appending a sixth row keeps
+    5/5 present and the assertion now names the duplicate branch's own text.
+    """
     rec = _record()
-    rec["rows"][1]["criterion"] = "E1"
-    assert "V2" in _codes(rec)
+    rec["rows"].append(dict(rec["rows"][0]))
+    msgs = _messages(rec)
+    assert any("2 rows" in m and "decided once" in m for m in msgs), msgs
 
 
 def test_unknown_criterion_is_a_finding():
+    """An UNKNOWN id, with no criterion missing — the same vacuity, fixed.
+
+    Non-vacuity: the old version relabelled E5 to "E6", which deleted E5 and let
+    the missing-row arm satisfy the assertion. A sixth row keeps 5/5 present, so
+    only the "not an E1–E5 criterion" branch can produce this finding.
+    """
     rec = _record()
-    rec["rows"][4]["criterion"] = "E6"
-    assert "V2" in _codes(rec)
+    rec["rows"].append(dict(rec["rows"][4], criterion="E6"))
+    msgs = _messages(rec)
+    assert any("not an E1–E5 criterion" in m for m in msgs), msgs
 
 
 # ── V4/V5: green means measured, with a file ─────────────────────────────
@@ -235,6 +255,21 @@ def test_green_with_empty_denominator_is_a_finding():
     _green(rec)
     rec["rows"][0]["denominator"] = 0
     assert "V5" in _codes(rec)
+
+
+def test_green_with_zero_numerator_is_a_finding():
+    """0 successes is the SILENT-DROP shape, never a green measurement.
+
+    Non-vacuity (#9080 review F3): the documented rule is ``0 < numerator``, the
+    code accepted ``0 <= numerator``, and no test covered 0 — so the two halves
+    could disagree without a red. ``_s4_merge``'s ``kept_from_s2=0`` of 15 is
+    exactly the total silent drop E4's row exists to refuse.
+    """
+    rec = _record()
+    _green(rec)
+    rec["rows"][0]["numerator"] = 0
+    msgs = _messages(rec)
+    assert any("at least ONE success" in m for m in msgs), msgs
 
 
 def test_green_row_naming_a_blocker_is_a_finding():
@@ -364,8 +399,15 @@ def test_reversed_markers_is_a_usage_error():
 
 
 # ── the RUN's observers — every row is derived from these ────────────────
-
-def _extract_result(**over) -> dict:
+#
+# TWO fixtures, deliberately, because there are two different objects and
+# conflating them is what made the original observer tests vacuous (#9080
+# review F2/P1). ``_extractor_result`` is ``extractor_v2.extract_session_v2``'s
+# OWN return; ``_receipt`` is what ``TortoiseSDK.capture_session`` — the entry
+# point the probe actually drives — hands back. The probe holds the SECOND one,
+# and it carries ``stats`` only (#9116).
+def _extractor_result(**over) -> dict:
+    """``extract_session_v2``'s return — NOT what the probe is handed."""
     result = {
         "stats": {"edus": 12, "chunks": 1,
                   "llm": {"by_stage": {"s1": {"calls": 1},
@@ -390,27 +432,209 @@ def _extract_result(**over) -> dict:
     return result
 
 
-def test_all_eight_steps_observed_on_a_full_pass():
-    seen = probe.observe_steps(_extract_result())
+def _receipt(**over) -> dict:
+    """``capture_session``'s receipt, VERBATIM from ``tortoise/sdk.py``.
+
+    The keys are the ``resp`` literal the SDK builds (minus the additive
+    protocol keys, which merge flat and add no pipeline surface). A test that
+    shapes this fixture differently from that literal is asserting a
+    contract the caller can never satisfy — which is the vacuity this file
+    was caught in.
+    """
+    result = {
+        "session_id": "capstone_abc123",
+        "turns": 1,
+        "extracted": 15,
+        "points": [],
+        "extraction_mode": "v2",
+        "ok": True,
+        "errors": [],
+        "warnings": [],
+        "diagnostics": [],
+        "stats": {"edus": 12, "chunks": 1,
+                  "llm": {"by_stage": {"s1": {"calls": 1},
+                                       "s2": {"calls": 1}}},
+                  "s4_merge": {"s2_items": 15, "kept_from_s2": 15,
+                               "merged_items": 15, "s4_items": 2,
+                               "corrected_by_s4": 0,
+                               "verbatim_reemissions": 0, "added_by_s4": 0}},
+        "capture_redactions": 0,
+    }
+    for k, v in over.items():
+        if v is None:
+            result.pop(k, None)
+        else:
+            result[k] = v
+    return result
+
+
+def test_all_eight_steps_are_observable_when_the_full_surface_is_passed():
+    """The observer CAN map eight steps — given ``extract_session_v2``'s return.
+
+    This is the capability half, and it is NOT evidence about the shipped run:
+    the probe is handed ``capture_session``'s receipt (next test). Kept because
+    the day #9116 lands a seam, this is the shape it must carry.
+    """
+    seen = probe.observe_steps(_extractor_result())
     assert set(seen) == set(cvc.STEPS), sorted(set(cvc.STEPS) - set(seen))
     assert all(isinstance(v, str) and v for v in seen.values())
 
 
+def test_the_shipped_receipt_observes_exactly_the_four_steps_it_carries():
+    """#9116, pinned: on the REAL receipt four steps are unobservable.
+
+    Non-vacuity: this is the assertion the old suite lacked. Pass the receipt
+    (what ``capture_session`` returns) and the four off-receipt witnesses are
+    absent; re-add any of them to the receipt and the equality reds, which is
+    what makes ``UNOBSERVABLE_STEPS`` a measurement rather than a comment.
+    """
+    seen = probe.observe_steps(_receipt())
+    assert set(seen) == {"S0", "S1", "S2.1", "S5"}, sorted(seen)
+    assert set(probe.UNOBSERVABLE_STEPS) == set(cvc.STEPS) - set(seen)
+    # and NOT one of the unobservable steps is quietly satisfied by a
+    # same-named key the receipt happens to carry
+    assert "extraction" not in probe.observe_steps.__code__.co_consts
+
+
+def test_every_witness_observe_steps_reads_is_on_the_receipt_or_declared():
+    """The contract between the observer and the entry point it reads (#9116).
+
+    Derives BOTH sides from source, so neither can drift behind a comment:
+      * the READ set — every ``result.get("X")`` / ``result["X"]`` in
+        ``observe_steps`` — must equal ``probe.WITNESS_KEYS``;
+      * the RECEIPT set — the keys of the ``resp = {...}`` literal in
+        ``TortoiseSDK.capture_session`` — must cover every witness key that is
+        not explicitly declared off-receipt, and must NOT contain one that is.
+
+    Mutations that red it: add an undeclared ``result.get("foo")``; drop
+    ``stats`` from the receipt literal; declare a key off-receipt that the
+    receipt does in fact carry (over-declaring would hide a real witness).
+    """
+    import ast
+
+    tree = ast.parse(PROBE.read_text())
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, (ast.FunctionDef,))
+              and n.name == "observe_steps")
+    read: set[str] = set()
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr != "get" or len(node.args) != 1:
+            continue
+        target, key = node.func.value, node.args[0]
+        if (isinstance(target, ast.Name) and target.id == "result"
+                and isinstance(key, ast.Constant) and isinstance(key.value, str)):
+            read.add(key.value)
+    assert read == set(probe.WITNESS_KEYS), (
+        sorted(read ^ set(probe.WITNESS_KEYS)), "observer read set != declared")
+
+    sdk_src = (_REPO / "tortoise/sdk.py").read_text()
+    sdk_tree = ast.parse(sdk_src)
+    capture = next(n for n in ast.walk(sdk_tree)
+                   if isinstance(n, ast.FunctionDef)
+                   and n.name == "capture_session")
+    resp_literals = [n.value for n in ast.walk(capture)
+                     if isinstance(n, ast.Assign)
+                     and any(isinstance(t, ast.Name) and t.id == "resp"
+                             for t in n.targets)
+                     and isinstance(n.value, ast.Dict)]
+    assert len(resp_literals) == 1, (
+        "capture_session's receipt literal moved or multiplied — re-derive "
+        "this contract, do not delete it")
+    receipt_keys = {k.value for k in resp_literals[0].keys
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+    # ``**({...} if cond else {})`` — the SDK adds ``report_url`` conditionally.
+    # Follow every dict-unpack expression and take its own string keys, so a
+    # conditional key is COUNTED rather than silently skipped.
+    for key, value in zip(resp_literals[0].keys, resp_literals[0].values,
+                          strict=True):
+        if key is not None:
+            continue
+        for nested in ast.walk(value):
+            if isinstance(nested, ast.Dict):
+                receipt_keys |= {k.value for k in nested.keys
+                                 if isinstance(k, ast.Constant)
+                                 and isinstance(k.value, str)}
+
+    off = set(probe.WITNESS_KEYS_OFF_RECEIPT)
+    assert off <= set(probe.WITNESS_KEYS), "off-receipt keys must be witnesses"
+    assert not (off & receipt_keys), (
+        sorted(off & receipt_keys),
+        "declared OFF the receipt but the receipt carries it — over-declaring "
+        "hides a witness #9116 may already have fixed")
+    assert set(probe.WITNESS_KEYS) - off <= receipt_keys, (
+        sorted((set(probe.WITNESS_KEYS) - off) - receipt_keys),
+        "the observer reads a key the receipt does not carry, and it is not "
+        "declared off-receipt")
+    # the dead branch the review found: `capture_session` returns no such key
+    assert "extraction" not in receipt_keys
+
+
 def test_a_vet_disabled_pass_does_not_observe_s2_2():
     """The flag-off arm runs no S2.2 — so its table cannot claim S2.2."""
-    seen = probe.observe_steps(_extract_result(vet={"enabled": False, "s2": {}}))
+    seen = probe.observe_steps(_extractor_result(vet={"enabled": False, "s2": {}}))
     assert "S2.2" not in seen
 
 
 def test_a_classify_disabled_pass_does_not_observe_s2_3():
-    seen = probe.observe_steps(_extract_result(
+    seen = probe.observe_steps(_extractor_result(
         classify_later={"enabled": False, "s2": {}, "union": {}}))
     assert "S2.3" not in seen
 
 
 def test_a_pass_without_a_payload_does_not_observe_s6():
-    seen = probe.observe_steps(_extract_result(payload=None))
+    seen = probe.observe_steps(_extractor_result(payload=None))
     assert "S6" not in seen
+
+
+def test_a_g5_refusal_blames_the_instrument_not_the_pipeline(tmp_path, monkeypatch):
+    """#9116: the refusal must be attributed to the surface, not to the pipeline.
+
+    A bare "steps not observed" reads as "the extractor skipped VET/classify/
+    search/commit" — a product finding this probe cannot support, and the one
+    reading that would send the epic's readers to #5199/#9077/#7947. The
+    non-vacuity: the pre-fix reason named neither #9116 nor the instrument.
+    """
+    import tortoise.sdk as sdk_mod
+
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
+    _read_prereg_ok(monkeypatch, _frozen_prereg(
+        corpus={"sha256": probe.corpus_sha256(corpus), "items": 1}))
+    monkeypatch.setattr(probe, "backend_is_searchable", lambda: (True, ""))
+    monkeypatch.setattr(probe, "model_key_present", lambda: (True, ""))
+
+    class _FakeSDK:
+        def capture_session(self, _turns, session_id=None):
+            return _receipt()
+
+    monkeypatch.setattr(sdk_mod, "TortoiseSDK", _FakeSDK)
+    out = tmp_path / "g5.log"
+    code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
+                       "--out", str(out)])
+    assert code == 5, code
+    reason = cvc.extract_block(out.read_text())["run"]["reason"]
+    assert "#9116" in reason, reason
+    assert "INSTRUMENT gap" in reason, reason
+    for step in probe.UNOBSERVABLE_STEPS:
+        assert step in reason, (step, reason)
+    assert "NOT the pipeline" in reason, reason
+
+
+def test_a_green_branch_is_unreachable_until_9116_lands(tmp_path, monkeypatch):
+    """G6 is dead code by construction while the receipt carries no witnesses.
+
+    This is the fact the bundle must not hide: no run of this probe can emit a
+    COMPLETED table, so no row can ever be GREEN — even with every dependency
+    closed. Pinned so the day #9116 lands the seam this test reds and forces
+    the README/Reproduce update with it.
+    """
+    assert set(probe.UNOBSERVABLE_STEPS), "the gap must be named"
+    full = probe.observe_steps(_extractor_result())
+    receipt = probe.observe_steps(_receipt())
+    assert len(receipt) < len(full)
+    assert set(cvc.STEPS) - set(receipt) == set(probe.UNOBSERVABLE_STEPS)
 
 
 def test_e4_receipt_flags_the_four_edge_denominator():
@@ -517,8 +741,14 @@ def test_a_g2_refusal_carries_the_corpus_it_read_and_the_preregistration(
     """
     _read_prereg_ok(monkeypatch)
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
     corpus = tmp_path / "corpus.json"
     corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
+    # G1 now fails CLOSED without a frozen corpus (#9080 review), so the record
+    # must freeze the one this test feeds — otherwise the refusal happens one
+    # gate earlier and this assertion would be reading the wrong gate's log.
+    _read_prereg_ok(monkeypatch, _frozen_prereg(
+        corpus={"sha256": probe.corpus_sha256(corpus), "items": 1}))
     out = tmp_path / "g2.log"
     code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
                        "--out", str(out)])
@@ -551,6 +781,38 @@ def test_a_g1_sha_mismatch_refusal_carries_the_computed_corpus_sha(
 def test_root_is_the_repo_root():
     """`parents[3]` is `<repo>/docs`; every ROOT-joined path would be wrong."""
     assert probe.ROOT == _REPO, probe.ROOT
+
+
+def test_the_readme_names_the_run_s_own_blocker_not_only_the_rows(tmp_path):
+    """#9080 review F1: the bundle named the ROWS' blockers and not the RUN's.
+
+    The Reproduce block used to tell the next lane the real run needs exactly
+    three things — `#9075`, a provider key, a searchable backend. At this head
+    that is false and the fix commit says so: `capture_session`'s receipt
+    carries no step surface, so `observe_steps` cannot witness
+    S2.2/S2.3/S3/S6 and the run refuses at G5 for EVERY input once G0 lands
+    (`#9116`). A bundle whose job is to stop a lane reading a claim as a
+    measurement must not send that lane into a REFUSED table with the wrong
+    cause in hand, and the gap is only visible in a commit message otherwise.
+
+    Non-vacuity: this reds on the pre-fix README — `#9116` appeared nowhere in
+    it (the four unwitnessable steps were named only in the fix commit), so
+    `"#9116" in readme` was False and the Reproduce block asserted no
+    precondition beyond `#9075`.
+    """
+    readme = (PROBE.parents[1] / "README.md").read_text()
+    assert "#9116" in readme, (
+        "the bundle must name the run's own blocker: S2.2/S2.3/S3/S6 are not "
+        "observable on capture_session's receipt, so G5 refuses for every input")
+    # the Reproduce block specifically — a mention in prose elsewhere would not
+    # stop the operator following the copy-paste command into a refused run.
+    reproduce = readme.split("## Reproduce", 1)
+    assert len(reproduce) == 2, "the Reproduce section is what an operator copies"
+    assert "#9116" in reproduce[1], (
+        "the Reproduce command's own comment must carry the #9116 precondition")
+    # and the step names, so the reader can see WHICH witnesses are missing
+    for step in ("S2.2", "S2.3", "S3", "S6"):
+        assert step in readme, step
 
 
 def test_the_parser_declares_no_flag_the_run_ignores(tmp_path):
@@ -591,19 +853,102 @@ def test_read_preregistration_refuses_a_commit_without_the_artifact():
     assert "#9075" in why
 
 
-def test_backend_must_be_searchable():
-    ok, why = probe.backend_is_searchable(None)
-    assert not ok and "unset" in why
-    ok, why = probe.backend_is_searchable("embedded://")
-    assert not ok and "embedded" in why
-    ok, _why = probe.backend_is_searchable("docker://:pw@localhost:6379/g")
-    assert ok
+def test_backend_must_be_searchable(monkeypatch):
+    """G2 decides with `extractor_v2`'s gate, not a string heuristic.
+
+    Non-vacuity, both directions (#9080 review, P1): on the pre-fix code
+    ``backend_is_searchable("/tmp/graph.db")`` returned True — a file path is
+    NOT a supported scheme, so `config.is_db_uri` rejects it and the SDK treats
+    that store as EMBEDDED and skips S3, i.e. the gate accepted verbatim the
+    lane it exists to exclude. And a hosted lane (``TORTOISE_API_URL``, no DB
+    URI) was refused. Both are pinned below.
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    ok, why = probe.backend_is_searchable()
+    assert not ok and ("unset" in why or "embedded" in why)
+
+    # the fail-open the review found: a file path is the EMBEDDED store
+    for not_a_backend in ("/tmp/graph.db", "~/.tortoise/tortoise.db",
+                          "embedded://", "x://y", "none"):
+        monkeypatch.setenv("TORTOISE_DB_URI", not_a_backend)
+        ok, why = probe.backend_is_searchable()
+        assert not ok, (not_a_backend, why)
+        assert "embedded" in why, why
+
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
+    ok, why = probe.backend_is_searchable()
+    assert ok, why
+    monkeypatch.setenv("TORTOISE_DB_URI", "redis://localhost:6379/g")
+    assert probe.backend_is_searchable()[0]
+
+    # the false refusal the review found: the hosted lane IS searchable
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.setenv("TORTOISE_API_URL", "https://api.example.invalid")
+    ok, why = probe.backend_is_searchable()
+    assert ok, why
 
 
 def test_a_missing_model_key_is_refused_not_measured_as_an_empty_extraction(monkeypatch):
+    """G3 asks the adapter's question, not a hand-written key list.
+
+    Non-vacuity (#9080 review): the pre-fix list accepted ``OPENAI_API_KEY`` /
+    ``ANTHROPIC_API_KEY`` / ``TORTOISE_LLM_API_KEY`` — keys `_extract_session_v2`
+    cannot consume (#1530), so such a host passed G3 and died at G4 blaming the
+    entry point — and it refused a ``TORTOISE_SESSION_LLM_MOCK=1`` host, which
+    would have run. Both directions are pinned.
+    """
     for key in ("TORTOISE_LLM_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-                "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "TORTOISE_API_KEY"):
+                "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "TORTOISE_API_KEY",
+                "VENICE_API_KEY", "TORTOISE_EXTRACTOR_PROVIDER",
+                "TORTOISE_SESSION_LLM_MOCK"):
         monkeypatch.delenv(key, raising=False)
     ok, why = probe.model_key_present()
     assert not ok
     assert "#3892" in why
+
+    # keys the adapter CANNOT consume must not pass the gate
+    for unusable in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+                     "TORTOISE_LLM_API_KEY", "TORTOISE_API_KEY"):
+        monkeypatch.setenv(unusable, "sk-test")
+        ok, why = probe.model_key_present()
+        assert not ok, (unusable, why)
+        monkeypatch.delenv(unusable, raising=False)
+
+    # the keys it CAN consume pass
+    for usable in ("DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "VENICE_API_KEY"):
+        monkeypatch.setenv(usable, "sk-test")
+        assert probe.model_key_present()[0], usable
+        monkeypatch.delenv(usable, raising=False)
+
+    # the offline seam (#1468) the repo's e2e lanes run must not be refused
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    assert probe.model_key_present()[0]
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK")
+
+    # explicit-but-keyless fails CLOSED, with the adapter's own reason
+    monkeypatch.setenv("TORTOISE_EXTRACTOR_PROVIDER", "openrouter")
+    ok, why = probe.model_key_present()
+    assert not ok and "explicit" in why, why
+
+
+def test_a_prereg_that_freezes_no_corpus_is_refused_not_a_no_op(tmp_path, monkeypatch):
+    """G1 must fail closed when the pre-registration carries no corpus block.
+
+    Non-vacuity (#9080 review): both G1 checks used to be conditional, so a
+    pre-registration freezing thresholds but no corpus made G1 a no-op — the run
+    measured whatever corpus it was handed and stamped that sha on every row as
+    the pre-registered one. V7 cannot see it (row sha vs the log's own sha are
+    self-consistent by construction), so the refusal has to happen here.
+    """
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
+    _read_prereg_ok(monkeypatch, _frozen_prereg())  # thresholds, NO corpus
+    out = tmp_path / "no-corpus.log"
+    code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
+                       "--out", str(out)])
+    assert code == 2, code
+    record = cvc.extract_block(out.read_text())
+    assert "corpus.sha256" in record["run"]["reason"], record["run"]["reason"]
+    assert record["prereg"]["status"] == "OK"
+    assert record["corpus"]["sha256"] == probe.corpus_sha256(corpus)

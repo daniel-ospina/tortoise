@@ -53,11 +53,21 @@ verdict vocabulary exists to make.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/capstone_verdict_check.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/capstone_verdict_check.py`"
+    )
+
 import argparse
 import json
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 SCHEMA = "capstone-verdict-v1"
@@ -231,8 +241,13 @@ def check(record: dict, *, repo: Path,
             elif den <= 0:
                 f.add("V5", where, f"denominator is {den} — a green row with an "
                                    "empty denominator measures nothing")
-            elif not 0 <= num <= den:
-                f.add("V5", where, f"numerator {num} outside 0..{den}")
+            elif not 0 < num <= den:
+                # ``0 < num``, not ``0 <= num`` (#9080 review F3): a GREEN 0/15
+                # is the total-silent-drop shape E4's row exists to refuse —
+                # zero successes reported as a measurement that passed.
+                f.add("V5", where, f"numerator {num} outside 1..{den} — a green "
+                                   "row must measure at least ONE success; "
+                                   "0 is the silent-drop shape, not a result")
             if row.get("blocked_by"):
                 f.add("V5", where, f"GREEN carries a blocker "
                                    f"({row.get('blocked_by')!r}) — green and "

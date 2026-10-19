@@ -52,16 +52,27 @@ the issue that blocks it — which is exactly what the issue asks for:
 *"it must report a red row and name the blocking issue rather than infer green
 from a closed child."*
 
-## Why the steps are observed from `stats`, not instrumented by wrapping
+## Why the steps are observed, never instrumented by wrapping
 
 E4's row explicitly *"fails if … the extractor was monkeypatched"*, so the probe
 must not wrap the pipeline to watch it — a wrapper is the evidence-destroying
-move the row is guarding against. `extract_session_v2` already returns its own
-per-stage reporting surface (``stats["llm"]["by_stage"]``, ``result["vet"]``,
-``result["classify_later"]``, ``result["search"]``, ``stats["s4_merge"]``,
-``result["payload"]``); the probe READS that surface. Where the surface cannot
-witness a step, the step is reported **unobserved** — an honest finding for
-#7949, never a guess.
+move the row is guarding against. The probe READS the pipeline's own returned
+surface; it never installs a spy.
+
+⚠️ **That surface is only half-reachable, and the half that is not is #9116.**
+`extract_session_v2` returns the full per-stage block (``vet``,
+``classify_later``, ``search``, ``payload``, ``embed_list``, ``story_arc``), but
+`capture_session` — the entry point this probe drives — assembles its receipt
+from ``extracted`` + ``meta``, and `_extract_session_v2` forwards only
+``stats``/``error_census``/``errors``/``warnings``/``mode``/``operator_ids``/
+``provider``/``route``/``failover_used``/``source_change_notices``. So the four
+keys in ``WITNESS_KEYS_OFF_RECEIPT`` are **structurally unobservable on the
+object the probe holds**, and G5 refuses for EVERY input until the seam lands.
+The refusal is attributed to that INSTRUMENT gap (#9116) — never to "the
+pipeline did not run VET/classify/search/commit", which is the one wrong
+reading a bundle like this must not produce. Where the surface cannot witness a
+step, the step is reported **unobserved** — an honest finding for #7949, never
+a guess.
 
 Run:
     python docs/evidence/7949-capstone/probes/capstone_run.py \\
@@ -95,6 +106,28 @@ DEFAULT_PREREG_ARTIFACT = EVIDENCE_DIR / "preregistration.json"
 SCHEMA = "capstone-verdict-v1"
 PREREG_SCHEMA = "capstone-preregistration/v1"
 STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", "S5", "S6")
+
+#: Every key ``observe_steps`` reads off the object it is handed. Declared so a
+#: witness can never be added silently: the contract test
+#: ``test_every_witness_observe_steps_reads_is_on_the_receipt_or_declared``
+#: derives the READ set from this module's source and the RECEIPT set from
+#: ``tortoise/sdk.py``'s ``resp = {...}`` literal, then requires
+#: ``WITNESS_KEYS - receipt == WITNESS_KEYS_OFF_RECEIPT`` exactly. Drop a key
+#: from the receipt, or read an undeclared one, and it reds.
+WITNESS_KEYS = ("stats", "story_arc", "embed_list", "vet",
+                "classify_later", "search", "payload")
+
+#: The subset of ``WITNESS_KEYS`` that ``TortoiseSDK.capture_session``'s receipt
+#: does NOT carry (#9116). ``stats`` is the receipt's only pipeline surface, so
+#: every step whose witness lives in here is unobservable through this entry
+#: point — the run refuses at G5 and says so, attributed to the instrument.
+WITNESS_KEYS_OFF_RECEIPT = ("story_arc", "embed_list", "vet",
+                            "classify_later", "search", "payload")
+
+#: The steps with NO witness on the receipt at all. S1/S2.1 survive without
+#: their ``story_arc``/``embed_list`` fallbacks because ``stats.llm.by_stage``
+#: carries them; these four have no other witness.
+UNOBSERVABLE_STEPS = ("S2.2", "S2.3", "S3", "S6")
 
 # Each criterion's OWNER — the issue that must land for the row to be
 # measurable at all. The table's non-green rows cite these, so a red row always
@@ -147,6 +180,13 @@ def observe_steps(result: dict) -> dict[str, str]:
     Returns ``{step: why}`` for the steps observed, and nothing for the rest —
     absence is the signal. Each witness is read off the pipeline's own returned
     surface (never a wrapper), so the observation cannot alter what it watches.
+
+    ⚠️ The keys in ``WITNESS_KEYS_OFF_RECEIPT`` are not on the object the
+    shipped caller can pass (#9116): ``capture_session``'s receipt carries
+    ``stats`` only. They are read anyway so that the day the seam lands the
+    observation is already complete — and ``UNOBSERVABLE_STEPS`` names which
+    steps that costs today, so G5's refusal is attributed to the instrument
+    rather than to the pipeline.
     """
     stats = result.get("stats") or {}
     llm = stats.get("llm") or {}
@@ -328,20 +368,38 @@ def read_preregistration(sha: str, artifact: Path) -> tuple[dict | None, str]:
     return record, ""
 
 
-def backend_is_searchable(uri: str | None) -> tuple[bool, str]:
+def backend_is_searchable() -> tuple[bool, str]:
     """S3 needs a SEARCHABLE backend or the whole table is structurally void.
 
     `sdk.capture_session`'s own contract: over embedded/FalkorDBLite the S3
     search is skipped, so supersession records are ZERO structurally. A capstone
     run there would measure the embedded lane's absence of S3 and report it as
     the product's — so this refuses instead.
+
+    The decision is the extractor's OWN gate, not a string test: `config.
+    is_db_uri()` accepts only ``docker://`` / ``redis://`` / ``rediss://``, and
+    `extractor_v2.resolve_backend_mode()` reports anything else as ``embedded``
+    (``TORTOISE_API_URL`` set and no supported DB URI → ``hosted``). A
+    hand-rolled heuristic drifts in BOTH directions (#9080 review): it ACCEPTED
+    ``TORTOISE_DB_URI=/tmp/graph.db`` — a file path, which `is_db_uri` rejects
+    and the SDK therefore treats as the EMBEDDED store, S3 skipped — and it
+    REFUSED a hosted lane. No SDK exists yet at G2, so the env-derived label is
+    the authoritative half of `_is_searchable_backend` here.
     """
-    if not uri:
-        return False, "TORTOISE_DB_URI is unset"
-    if uri.startswith("embedded") or "falkordblite" in uri.lower() or \
-            uri in ("", "none"):
-        return False, f"TORTOISE_DB_URI={uri!r} is the embedded store — S3 does not search there"
-    return True, ""
+    from tortoise.extractor_v2 import _is_searchable_backend, resolve_backend_mode
+
+    uri = os.environ.get("TORTOISE_DB_URI")
+    mode = resolve_backend_mode()
+    if _is_searchable_backend(mode):
+        return True, ""
+    if not uri and not os.environ.get("TORTOISE_API_URL"):
+        return False, ("neither TORTOISE_DB_URI nor TORTOISE_API_URL is set — "
+                       f"the backend is {mode!r} (the embedded store), where "
+                       "S3 does not search")
+    return False, (f"TORTOISE_DB_URI={uri!r} resolves to the {mode!r} backend — "
+                   "S3 does not search there, so supersession records would be "
+                   "structurally zero (a supported scheme is docker/redis/"
+                   "rediss, or set TORTOISE_API_URL for the hosted lane)")
 
 
 def model_key_present() -> tuple[bool, str]:
@@ -349,15 +407,32 @@ def model_key_present() -> tuple[bool, str]:
 
     That is a documented behaviour (#3892), not an error — but it means S1–S6
     never run, so measuring it would report a storage write as an extraction.
+
+    The predicate is the SAME one `_extract_session_v2` gates on (#1530), not a
+    hand-written key list (#9080 review): `resolve_extractor_provider()` reads
+    DEEPSEEK/OPENROUTER/VENICE, and ``TORTOISE_SESSION_LLM_MOCK=1`` is the
+    offline seam the repo's e2e lanes use (#1468). A list that also accepted
+    OPENAI/ANTHROPIC/TORTOISE_LLM_API_KEY passed hosts the adapter cannot
+    consume — they then died at G4 blaming the entry point — and refused a
+    mock-seam host that would have run.
     """
-    keys = ("TORTOISE_LLM_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
-            "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "TORTOISE_API_KEY")
-    for key in keys:
-        if os.environ.get(key):
-            return True, ""
-    return False, ("no routing-usable LLM provider key is set "
-                   f"({', '.join(keys)}) — capture_session would SKIP "
-                   "extraction (#3892) and S1–S6 would not run")
+    from tortoise.model_adapters import resolve_extractor_provider
+    from tortoise.sdk import _session_llm_mock_enabled
+
+    if _session_llm_mock_enabled():
+        return True, ""
+    try:
+        primary = resolve_extractor_provider()[0]
+    except ValueError as e:  # explicit TORTOISE_EXTRACTOR_PROVIDER, keyless
+        return False, ("the extractor provider is explicit but its key is "
+                       f"absent — the adapter fails closed: {e}")
+    if primary:
+        return True, ""
+    return False, ("no routing-usable LLM provider key is set (DEEPSEEK_API_KEY "
+                   "/ OPENROUTER_API_KEY / VENICE_API_KEY via "
+                   "resolve_extractor_provider, or TORTOISE_SESSION_LLM_MOCK=1) "
+                   "— capture_session would SKIP extraction (#3892) and S1–S6 "
+                   "would not run")
 
 
 # ── the run ───────────────────────────────────────────────────────────────
@@ -426,7 +501,18 @@ def main(argv: list[str] | None = None) -> int:
     # corpus it read (the row's denominator would be unattributable later).
     corpus = {"path": args.corpus, "sha256": sha, "turns": None}
     frozen = prereg_record.get("corpus") or {}
-    if frozen.get("sha256") and frozen["sha256"] != sha:
+    # FAIL CLOSED on a pre-registration that freezes no corpus (#9080 review):
+    # both checks used to be conditional, so a record carrying thresholds but no
+    # `corpus` block made G1 a no-op — the run then measured whatever corpus it
+    # was handed and stamped that corpus's sha on every row as if it were the
+    # pre-registered one. V7 cannot catch that: it compares a row's sha to the
+    # log's own, which agree by construction.
+    if not frozen.get("sha256"):
+        return refuse(
+            "the pre-registration freezes no corpus.sha256 — G1 would be a "
+            "no-op, so the run would measure an arbitrary corpus and report it "
+            "as the pre-registered one", prereg_ok=True, code=2, corpus=corpus)
+    if frozen["sha256"] != sha:
         return refuse(
             f"corpus sha256 {sha} != the pre-registered {frozen['sha256']} — "
             "a run on a different corpus cannot decide a threshold frozen "
@@ -443,7 +529,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{frozen['items']}", prereg_ok=True, code=2, corpus=corpus)
 
     # G2 / G3 — a run that cannot execute every step must not report a table
-    ok, why = backend_is_searchable(os.environ.get("TORTOISE_DB_URI"))
+    ok, why = backend_is_searchable()
     if not ok:
         return refuse(why, prereg_ok=True, code=3, corpus=corpus)
     ok, why = model_key_present()
@@ -457,7 +543,12 @@ def main(argv: list[str] | None = None) -> int:
     session_id = f"capstone_{uuid.uuid4().hex[:12]}"
     try:
         captured = sdk.capture_session(turns, session_id=session_id)
-        result = captured.get("extraction") or captured
+        # The receipt IS the only surface. ``capture_session`` never returns an
+        # ``extraction`` key (sdk.py assembles ``resp`` from ``extracted`` +
+        # ``meta``), so the old ``captured.get("extraction") or captured`` was a
+        # DEAD lookup whose fallback silently hid the shape mismatch — which is
+        # how four unobservable witnesses went unnoticed (#9116, review F1).
+        result = captured
     except Exception as e:  # noqa: BLE001, RUF100 — a refused run is a verdict, not a crash
         return refuse(f"the entry point raised: {type(e).__name__}: {e}",
                       prereg_ok=True, code=4, corpus=corpus)
@@ -472,6 +563,22 @@ def main(argv: list[str] | None = None) -> int:
     observed = observe_steps(result)
     missing = [s for s in STEPS if s not in observed]
     if missing:
+        unobservable = [s for s in missing if s in UNOBSERVABLE_STEPS]
+        # Attribute an unobservable step to the INSTRUMENT. The receipt carries
+        # `stats` only (#9116), so a bare "steps not observed" reads as "the
+        # pipeline never ran VET/classify/search/commit" — a product finding
+        # this surface cannot support, and the one wrong reading that would
+        # send the epic's readers to the wrong issue.
+        if unobservable:
+            return refuse(
+                "steps not observed in the pass: " + ", ".join(missing)
+                + f" — {', '.join(unobservable)} have NO witness on "
+                "capture_session's receipt (#9116: the receipt carries `stats` "
+                "only, and vet/classify_later/search/payload never leave "
+                "extract_session_v2), so this is an INSTRUMENT gap and NOT the "
+                "pipeline skipping those steps; §4.4 forbids a table from a "
+                "subset, so the epic stays open until #9116 lands",
+                prereg_ok=True, code=5, corpus=corpus)
         return refuse(
             "steps not observed in the pass: " + ", ".join(missing)
             + " — §4.4 forbids a table assembled from a subset",
