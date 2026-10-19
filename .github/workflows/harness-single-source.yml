@@ -4,13 +4,18 @@ name: harness single source
 # `operations/orchestrator-harness/` here is a pointer (see its README).
 #
 # This job is the enforcement half of that retirement. Measured 2026-10-19, before consolidation,
-# the SAME eight files existed in three copies that agreed on almost nothing — this repo's copy was
-# a generation behind on all six files it did carry and was missing two entirely. Every fix had to
-# be hand-applied in 3-4 places, and the live copy had no git at all, so "which commit is this box
-# running?" had no answer.
+# the SAME eight files existed in three copies that had all diverged — this repo's copy was behind on
+# five and AHEAD on `lane.sh` (its `Closes`/`Still open` rule), and was missing two entirely. Every
+# fix had to be hand-applied in 3-4 places, and the live copy had no git at all, so "which commit is
+# this box running?" had no answer. The `lane.sh` case is why the retirement ported those fixes IN
+# first instead of deleting them with the copy.
 #
 # A pointer is the intended state. A harness script is a fork. This check fails on the fork and
 # exits 2 (never 0) when it cannot tell — a gate that checks nothing is not a pass.
+#
+# One file is an ALLOWED, tracked exception: `merge-one.sh`, which carries the #8484
+# detached-reviewer sandbox that is not yet in agent-infra. It stays until that port lands; deleting
+# the only copy of an unported fix is the destruction this retirement must not commit.
 
 on:
   pull_request:
@@ -20,8 +25,13 @@ on:
       - '.github/workflows/harness-single-source.yml'
   push:
     branches: [main]
+    # ⛔ THE GUARD'S OWN PATH IS INCLUDED, NOT JUST THE RETIRED DIRECTORY (review finding). Otherwise a
+    # commit that neuters tools/check-harness-fork.sh lands on main completely unverified — the one
+    # trigger that would check the guard does not fire for a change to the guard.
     paths:
       - 'operations/orchestrator-harness/**'
+      - 'tools/check-harness-fork.sh'
+      - '.github/workflows/harness-single-source.yml'
   workflow_dispatch:
 
 jobs:

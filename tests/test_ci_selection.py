@@ -1989,10 +1989,15 @@ def test_retired_orchestrator_harness_does_not_select_the_removed_suite():
     # .github/workflows/harness-single-source.yml (tools/check-harness-fork.sh).
     r = _sel(["operations/orchestrator-harness/lane.sh"])
     assert "test_orchestrator_harness.py" not in r["test_files"], r
+    # ⛔ `full` MUST STAY FALSE (review finding): with the registration gone, a change under this
+    # path must not start forcing a full run — that would be a heavy, silent regression from a
+    # retirement. Pinning it makes this "deliberately retired" rather than "path dropped".
+    assert r["full"] is False, r
     # The pointer README must still be the thing that is there, so a change to it is a docs change
     # rather than a dropped script change.
     r2 = _sel(["operations/orchestrator-harness/README.md"])
     assert "test_orchestrator_harness.py" not in r2["test_files"], r2
+    assert r2["full"] is False, r2
 
 
 def test_queue_dispatch_and_fleet_state_change_select_core_not_tier1():
