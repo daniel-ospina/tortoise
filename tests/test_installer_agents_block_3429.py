@@ -1186,6 +1186,76 @@ def test_a_language_tagged_line_inside_a_fence_does_not_close_it(tmp_path):
     assert text.count(START) == 2, "expected the example plus the created block"
 
 
+def test_a_block_replaced_BELOW_an_unterminated_fence_still_warns(tmp_path):
+    """Review P1 on my own P3 fix: silencing the warning was wrong in this state.
+
+    A clean pair that sits BELOW an unterminated fence IS replaced inside the
+    fence — it renders as code and is never read — so the warning is TRUE there.
+    The narrow condition (`state_kind = none`) suppressed it; the condition is
+    now "the block's region lies after the fence opened", which covers an append
+    at EOF and a pair below the fence, and excludes a pair above it.
+    """
+    agents = (f"# House\n\n```bash\nnpm run build\n\n{START}\nold block\n{END}\n")
+    done, text = _install(tmp_path, agents)
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "inside it and read as code" in done.stderr, (
+        "a block BELOW an unclosed fence is written inside it and must warn:\n"
+        + done.stderr)
+    assert "old block" not in text, "the stale block is still replaced in place"
+
+
+def test_an_unterminated_fence_does_not_warn_when_the_block_is_replaced_in_place(
+        tmp_path):
+    """Review P3: the warning claimed a fate the block does not have.
+
+    With a CLEAN pair ABOVE an unclosed fence the block is rewritten where it
+    already sits — it is not "written inside" the fence. Warning anyway told the
+    user their (perfectly placed) block was unreadable, which is the same class
+    of false statement as a docs claim, one layer down.
+    """
+    agents = f"# House\n\n{START}\nold block\n{END}\n\n```bash\nnpm run build\n"
+    done, text = _install(tmp_path, agents)
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "inside it and read as code" not in done.stderr, (
+        "a block replaced IN PLACE above the fence is not written inside it:\n"
+        + done.stderr)
+    assert START in text
+    assert "old block" not in text, "the stale block must be replaced"
+
+
+def test_a_read_only_agents_md_can_still_be_upgraded_and_keeps_its_mode(
+        tmp_path):
+    """Review P3: `cp -p` copied the target's mode onto the staged file.
+
+    A 0444 AGENTS.md therefore could not be upgraded although the directory and
+    the `mv` were writable, and the failure named no cause. The upgrade must
+    work AND the read-only mode must survive it — loosening a user's file mode
+    silently is its own defect.
+    """
+    base = _fixture_tree(tmp_path)
+    installer = _patched_installer(tmp_path, base)
+    home = tmp_path / "home"
+    home.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / "AGENTS.md"
+    target.write_text(f"# House\n\n{START}\nold\n{END}\n", encoding="utf-8")
+    target.chmod(0o444)
+
+    done = _run(installer, home, project)
+    text = target.read_text(encoding="utf-8")
+
+    assert done.returncode == 0, (
+        "a read-only AGENTS.md in a writable directory must be upgradeable:\n"
+        + done.stdout + done.stderr)
+    assert "old\n" not in text, "the stale block must be replaced"
+    assert (target.stat().st_mode & 0o777) == 0o444, (
+        "the upgrade must not loosen the user's file mode: got "
+        f"{oct(target.stat().st_mode & 0o777)}")
+
+
 def test_a_block_written_inside_an_unterminated_fence_is_not_silent(tmp_path):
     """The write matches the pre-#3429 installer, so it is not refused — but a
     block inside an open fence renders as code and is never read, so it must warn."""
