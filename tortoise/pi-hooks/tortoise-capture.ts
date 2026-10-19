@@ -2250,8 +2250,13 @@ function reportFlush(summary: FlushSummary, where: string): void {
         `terminal ${summary.terminal} (kept, not retried; re-file with ` +
         `'tortoise session drain --retry-terminal')` +
         // #2100: a bounded pass that left work queued says so, and names why.
+        // A quota stop does NOT continue in the background (there is nothing to
+        // gain from a second refusal), so the line must not claim it does — a
+        // diagnostic that states the wrong next step is worse than a terse one.
         (summary.remaining > 0
-          ? `, paused ${summary.remaining} (${summary.stopped ?? "budget"}; continues in the background)`
+          ? summary.stopped === "quota"
+            ? `, paused ${summary.remaining} (quota refused; not retried in this pass)`
+            : `, paused ${summary.remaining} (${summary.stopped ?? "budget"}; continues in the background)`
           : ""),
     );
   }
