@@ -1959,8 +1959,12 @@ def select(changed_files: list[str], event: str, manifest: dict,
     legitimate FULL selection with no unknown path at all (a `SHARED_MODULES`
     entry the surface patterns also claim, a linter-policy file) records
     `reasons` and nothing else, so a caller that reads `explain["reason"]` once
-    `explain` is non-empty raises `KeyError` on the most ordinary
-    dependency-bump diff. Read `reasons`.
+    `explain` is non-empty raises `KeyError` — e.g. `tortoise/sdk.py`, a
+    `SHARED_MODULES` entry the `tortoise/` prefix fallback claims so it never
+    reaches `unknown`, or `battery/.markdownlint.json`, a policy file under a
+    claimed surface (a dependency-bump diff like `pyproject.toml` DOES carry
+    `reason`, because that path is unknown to the surface patterns as well and
+    both causes are recorded). Read `reasons`.
 
     It is a SIDE CHANNEL on purpose: the returned dict is the artifact schema
     (`.ci-selection/selection.json`) and is asserted verbatim up and down this
@@ -2129,6 +2133,14 @@ def select(changed_files: list[str], event: str, manifest: dict,
                 # another cause is also present.
                 explain["reason"] = "unknown-paths"
                 explain["unknown"] = list(unknown)
+                # Whether EVERY unrecognised path is also a blast-radius path.
+                # `unknown` is NOT a subset of those (`tests/conftest.py` beside
+                # `tools/ci_selection.py` leaves the latter unknown), and the
+                # diagnostic's lead-in must say which shape it is looking at.
+                blast = {c for c in changed
+                         if c.startswith(SHARED_MODULES)
+                         or _is_linter_policy_path(c)}
+                explain["unknown_all_blast"] = set(unknown) <= blast
         return _full_selection(manifest, slow)
 
     # No separate `SHARED_MODULES` / linter-policy returns here: both causes were
@@ -4306,15 +4318,25 @@ def _warn_unknown_paths(explain: dict) -> None:
               file=sys.stderr)
     if unknown:
         if other:
-            # "the SAME path(s)", not "additionally": when a shared-module or
-            # lint-policy path is itself unrecognised (pyproject.toml, a root
-            # `.markdownlint*`), the list below repeats the very path line 1 just
-            # explained, and "additionally" invites the reader to suspect a
-            # second, different path in a diff that has one (#9109 review).
-            print(
-                f"ci_selection: the same path(s) are also not matched by any "
-                f"SOURCE_PATTERN ({len(unknown)} changed path(s), which would "
-                "force the FULL selection on their own):", file=sys.stderr)
+            # Two shapes, and the lead-in must not confuse them. When every
+            # unrecognised path IS a blast-radius path (pyproject.toml, a root
+            # `.markdownlint*`), the list repeats the path line 1 explained, so
+            # "additionally" would invite a hunt for a second path that does not
+            # exist. When even ONE unrecognised path is something else
+            # (`tests/conftest.py` beside `tools/ci_selection.py`), "the same
+            # path(s)" would instead DENY a second path that is right there — the
+            # mirror of the same error, and the worse direction, because the
+            # unrecognised path is the only thing this diagnostic exists to name
+            # (#9109 review).
+            if explain.get("unknown_all_blast"):
+                print(
+                    f"ci_selection: the same path(s) are also not matched by any "
+                    f"SOURCE_PATTERN ({len(unknown)} changed path(s), which would "
+                    "force the FULL selection on their own):", file=sys.stderr)
+            else:
+                print(
+                    f"ci_selection: additionally, {len(unknown)} changed path(s) "
+                    "are not matched by any SOURCE_PATTERN:", file=sys.stderr)
         else:
             print(
                 f"ci_selection: FULL matrix because {len(unknown)} changed path(s) "

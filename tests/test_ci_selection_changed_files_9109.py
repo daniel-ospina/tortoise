@@ -368,10 +368,13 @@ def test_explain_records_the_reasons_list_for_every_fail_closed_cause():
     The documented shape is `{"reasons": [...]}` — EVERY cause of this call's
     FULL matrix, in scan order — plus the `reason`/`unknown` pair ONLY for the
     unknown-path arm. The distinction is load-bearing: a legitimate FULL
-    selection with no unknown path at all (a shared module the patterns also
-    claim, a linter-policy file) records `reasons` and NOTHING else, so a caller
-    that reads `explain["reason"]` as soon as `explain` is non-empty would raise
-    `KeyError` on the most ordinary dependency-bump diff.
+    selection with no unknown path at all records `reasons` and NOTHING else, so
+    a caller that reads `explain["reason"]` as soon as `explain` is non-empty
+    raises `KeyError` — e.g. `tortoise/sdk.py`, a `SHARED_MODULES` entry the
+    `tortoise/` prefix fallback claims so it never reaches `unknown`, or
+    `battery/.markdownlint.json`, a policy file under a claimed surface. (A
+    dependency-bump diff like `pyproject.toml` DOES carry `reason`: that path is
+    unknown to the surface patterns too, so both causes are recorded.)
     """
     from tools import ci_selection as cs
 
