@@ -72,7 +72,10 @@ MUTATION for the load-bearing tests:
   defect cannot reach it (that is what makes it about lane width);
 * drop either `with _replay_write_scope():` wrapper in `tortoise/projection/
   __init__.py` (`rebuild_all` / `rebuild_from_record`) → that engine's armed
-  test fails on the wipe (`MATCH (n) DETACH DELETE n`);
+  test fails on the wipe (`MATCH (n) DETACH DELETE n`), and for `rebuild_all`
+  the width test
+  (`test_the_replay_window_also_authorizes_the_raw_query_lane`) fails too: with
+  no scope open, its probe write on the raw-query lane is refused;
 * the rebuild-semantics test still passes under all three mutations — it pins
   what the declarations CLAIM, so the claims cannot drift.
 """
@@ -101,9 +104,13 @@ RECORD_LANE = "event-store.record"
 def sdk_with_journal(tmp_path):
     """A real SDK with a configured JSONL journal, so §17.1's guard is ARMED.
 
-    Same fixture shape as the other #9079 suites: the explicit `db_path` makes
-    the projection embedded when no URI is configured, and a URI-set session is
-    redirected to its server. `event_log_path` is what arms the door.
+    Same fixture shape as the other #9079 suites: the explicit `db_path` forces
+    the projection EMBEDDED even when `TORTOISE_DB_URI` is set —
+    `TortoiseSDK.__init__` takes its URI branch only when `db_path is None`, and
+    `_get_proj` then builds `FalkorProjection(db_path)` rather than
+    `from_uri(...)`. So this suite provides EMBEDDED coverage of the event store
+    and the replay engines in every lane, including the `core` (docker) leg; it
+    never touches the docker target. `event_log_path` is what arms the door.
     """
     from tortoise.sdk import TortoiseSDK
 
@@ -399,6 +406,70 @@ def test_the_record_projection_runs_inside_the_replay_scope(sdk_with_journal,
         + " | ".join(s[:120] for s in probe.refused))
     assert report["source"] == "record"
     assert report["nodes_written"] == 1
+
+
+# ── the width the replay scope claims ─────────────────────────────────────
+
+
+def test_the_replay_window_also_authorizes_the_raw_query_lane(sdk_with_journal,
+                                                              monkeypatch):
+    """`rebuild_all`'s scope authorizes the RAW-QUERY lane too, and that is a
+    claim someone implements against — so it is executable, not just prose.
+
+    `FalkorProjection.query`'s `#7951` refusal is scope-CONDITIONED: it fires
+    only while `_CACHE_WRITE_AUTHORIZED` is `None`. Opening the replay scope
+    therefore AUTHORIZES a mutating statement on that lane for the whole window,
+    while the same statement is refused outside it — which is why the docstring
+    must not call the lane "already refused here" (`#9210`, which narrows this
+    width, implements against that text).
+
+    RED on pre-fix code: `rebuild_all` opened no scope at all, so the probe
+    statement inside it raises `DirectCacheWriteRefused` — the same mutation
+    (dropping the `with _replay_write_scope():`) that reddens the armed-door
+    test above reddens this one.
+
+    NOT a claim that the engines USE the lane: neither calls `self.query` today.
+    The widening is LATENT, and it is pinned so a future helper folded into the
+    replay cannot become a second writer unnoticed.
+    """
+    from tortoise.projection import FalkorProjection
+
+    sdk = sdk_with_journal
+    proj = sdk._get_proj()
+
+    # The baseline: outside any scope the lane refuses a mutating statement.
+    with pytest.raises(DirectCacheWriteRefused):
+        proj.query("CREATE (n:RawQueryLaneProbe {id:'outside-the-window'})")
+    assert _CACHE_WRITE_AUTHORIZED.get() is None, (
+        "the refused write must not leave a lane armed")
+
+    observed: list[tuple[str | None, int]] = []
+    original = FalkorProjection._replay_all_from_log
+
+    def _helper_inside_the_window(self, log_dir, **kwargs):
+        # What a fold added to this engine would look like if it reached for the
+        # public lane instead of the handle: the count is read back on the same
+        # lane so a silently-dropped statement cannot pass as "did not raise".
+        self.query("CREATE (n:RawQueryLaneProbe {id:'inside-the-window'})")
+        rows = self.query(
+            "MATCH (n:RawQueryLaneProbe) RETURN count(n)").result_set
+        observed.append((_CACHE_WRITE_AUTHORIZED.get(), int(rows[0][0])))
+        return original(self, log_dir, **kwargs)
+
+    monkeypatch.setattr(FalkorProjection, "_replay_all_from_log",
+                        _helper_inside_the_window)
+
+    proj.rebuild_all(str(sdk._journal_path_for_test.parent),
+                     confirm_destructive=True)
+
+    assert observed == [("replay", 1)], (
+        "the raw-query lane must be AUTHORIZED (lane 'replay') and its write must "
+        f"LAND inside rebuild_all's window; observed {observed}. `None` or a "
+        "refusal here means the docstring's third widened leg is false")
+    # ... and the widening is the WINDOW, not a sticky bypass: it closes again.
+    assert _CACHE_WRITE_AUTHORIZED.get() is None
+    with pytest.raises(DirectCacheWriteRefused):
+        proj.query("CREATE (n:RawQueryLaneProbe {id:'after-the-window'})")
 
 
 # ── the semantics the declaration claims ──────────────────────────────────
