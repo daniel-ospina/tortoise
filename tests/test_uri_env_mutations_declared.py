@@ -1055,9 +1055,11 @@ def _code_only(
     line. That last case is a BACKSLASH CONTINUATION — the only way such a
     literal spans lines in valid code — and it carries because without it the
     continuation line reads as CODE: measured, ``q = "MATCH (n )\\`` followed
-    by ``(foo"`` opened a paren that nothing closed and every later ``def`` in
-    the file was attributed to the scope above it (review r11 P2). It carries
-    ONLY when `allow_single_carry` — `_scope_map` turns it OFF for a source
+    by an INDENTED ``    (foo"`` leaves the ``(`` counted, so a later
+    module-level statement is attributed to the function above it — HIDING it
+    (review r11 P2). At COLUMN 0 the same shape fails the other way: the
+    continuation closes the function, its body reads as module scope, and the
+    guard over-reports instead. It carries ONLY when `allow_single_carry` — `_scope_map` turns it OFF for a source
     that does not compile, because there an unclosed literal proves nothing and
     a carry would swallow the tail.
 
@@ -1716,14 +1718,17 @@ def test_code_only_carries_a_backslash_continued_literal():
 
     `_code_only` is a per-line lexer, so it carries the open quote in its state
     or the continuation line reads as CODE. Measured before the carry:
-    ``q = "MATCH (n )\\`` followed by ``(foo"`` opened a paren nothing closed,
-    and every later ``def`` in the file was attributed to the scope above it —
-    the #8995 class rebuilt inside its own fix.
+    ``q = "MATCH (n )\\`` followed by an INDENTED ``    (foo"`` leaves the
+    ``(`` counted and a later module-level statement attributed to the function
+    above it — HIDING it, the #8995 class rebuilt inside its own fix. At column
+    0 the shape over-reports instead (the continuation closes the function, so
+    its body reads as module scope), which is why this pin uses the INDENTED
+    form on purpose.
     """
     src = (
         'def f():\n'
         '    q = "MATCH (n )\\\n'
-        '(foo"\n'
+        '    (foo"\n'
         '    return 1\n'
         '\n'
         '\n'
