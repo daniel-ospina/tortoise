@@ -210,12 +210,14 @@ PORT_FILE="$(mktemp)"
 # above -> raise it per job. A kill is not silent either way: the health gate's
 # `termination_note` names it and prints the remedy.
 #
-# TRIMMED AT THE ENDS ONLY (`.strip()`), then lowercased — the SAME grammar as
-# the three Python seams: docker parses units case-insensitively, so `2G` and
-# `" 2g "` are valid everywhere, while `"2 g"` is refused EVERYWHERE. The
-# earlier `tr -d '[:space:]'` deleted INNER whitespace too, so `"2 g"` was
-# silently normalised to `2g` in CI and refused in every lane — one env var, two
-# contracts (#7357 review F7).
+# TRIMMED AT THE ENDS ONLY (`.strip()`), then lowercased — the SAME normalisation
+# as the three Python seams, so `2G` and `" 2g "` mean `2g` at ALL FOUR seams
+# (docker itself rejects `--memory " 2g "`; the seam strips first, which is why
+# it never reaches docker that way). The earlier `tr -d '[:space:]'` deleted
+# INNER whitespace too, so `"2 g"` was silently rewritten to `2g` in CI and
+# refused in every lane — one env var, two contracts (#7357 review F7). The
+# narrower grammar below then refuses `"2 g"` at all four seams DELIBERATELY,
+# even though docker and compose accept it; the paragraph there says why.
 FALKORDB_MEMORY="${FALKORDB_CONTAINER_MEMORY:-2g}"
 FALKORDB_MEMORY="${FALKORDB_MEMORY#"${FALKORDB_MEMORY%%[![:space:]]*}"}"
 FALKORDB_MEMORY="${FALKORDB_MEMORY%"${FALKORDB_MEMORY##*[![:space:]]}"}"
@@ -230,15 +232,35 @@ FALKORDB_MEMORY="$(printf '%s' "$FALKORDB_MEMORY" | tr '[:upper:]' '[:lower:]')"
 # message prints (raise FALKORDB_CONTAINER_MEMORY), while docker accepts it
 # without complaint (#7357 review).
 #
-# `([bkmgt]|[kmgt]b)` is docker's SUFFIX grammar exactly: `2g`, `2gb`, `1t`,
-# `1.5gb` are valid; `2bb` is "invalid suffix: 'bb'" to docker, so accepting it
-# here would replace a clear refusal with an opaque `docker run` error. Line
-# anchoring is also docker's: the subject must be ONE line (the Python seams'
-# `\Z`), which `grep -E '$'` is NOT — it matches per line, so `"2g\nabc"` used
-# to be accepted here and refused everywhere else (#7357 review).
-if ! printf '%s\n' "$FALKORDB_MEMORY" | grep -Eq '^[0-9]+(\.[0-9]+)?([bkmgt]|[kmgt]b)?$' \
+# The SUFFIX set is docker's — `b`, `k`/`kb`/`kib`, `m`/`mb`/`mib`,
+# `g`/`gb`/`gib`, `t`/`tb`/`tib`, with an optional leading `+` (all measured
+# against docker 29.1.3): `2g`, `2gb`, `2gib`, `+2g`, `1.5gb`, `1t` are valid;
+# `2bb` is "invalid suffix: 'bb'". ONE deliberate narrowing, stated rather than
+# implied: EMBEDDED whitespace (`"2 g"`) is refused here, although docker AND
+# compose both accept it (both measured) — nobody spells a cap that way, and the
+# refusal names the accepted forms, so the cost of the narrowing is one clear
+# message instead of a silent rewrite. Line anchoring is docker's too: the subject must be ONE line (the Python
+# seams' `\Z`), which `grep -E '$'` is NOT — it matches per line, so `"2g\nabc"`
+# used to be accepted here and refused everywhere else (#7357 review).
+#
+# Positivity is decided on BYTES, not on the number: docker truncates the parsed
+# spec to an int64, so `0.0000000001g` (0.107 B) and `0.1b` install as
+# `HostConfig.Memory=0` — the UNCAPPED container this action exists to prevent,
+# reached through a value that reads as positive (#7357 review).
+if ! printf '%s\n' "$FALKORDB_MEMORY" | grep -Eq '^\+?[0-9]+(\.[0-9]+)?([bkmgt]|[kmgt]b|[kmgt]ib)?$' \
    || [ "$(printf '%s' "$FALKORDB_MEMORY" | wc -l)" -ne 0 ] \
-   || ! awk -v v="$FALKORDB_MEMORY" 'BEGIN { sub(/([bkmgt]|[kmgt]b)$/, "", v); exit (v + 0 > 0) ? 0 : 1 }'; then
+   || ! awk -v v="$FALKORDB_MEMORY" 'BEGIN {
+        sub(/^\+/, "", v)
+        match(v, /[0-9]+(\.[0-9]+)?/)
+        num = substr(v, 1, RLENGTH)
+        unit = substr(v, RLENGTH + 1)
+        mult = 1
+        if (unit ~ /^(k|kb|kib)$/) mult = 1024
+        else if (unit ~ /^(m|mb|mib)$/) mult = 1048576
+        else if (unit ~ /^(g|gb|gib)$/) mult = 1073741824
+        else if (unit ~ /^(t|tb|tib)$/) mult = 1099511627776
+        exit (int(num * mult) >= 1) ? 0 : 1
+      }'; then
   annotate_error "FALKORDB_CONTAINER_MEMORY=$FALKORDB_MEMORY is not a POSITIVE docker memory spec (e.g. 512m, 2g; 0 means UNLIMITED) — refusing to start an UNCAPPED container"
   exit 1
 fi

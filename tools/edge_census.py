@@ -569,17 +569,37 @@ DEFAULT_CONTAINER_MEMORY = "2g"
 #: Group 1 is the NUMBER: docker accepts the LONG unit forms too (`2gb`,
 #: `2048mb`), so refusing them would refuse the natural spelling of the remedy
 #: these messages print (#7357 review).
-_MEMORY_SPEC_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)(?:[bkmgt]|[kmgt]b)?\Z")
+_MEMORY_SPEC_RE = re.compile(r"\+?([0-9]+(?:\.[0-9]+)?)(?:[bkmgt]|[kmgt]b|[kmgt]ib)?\Z")
 
+
+#: Byte multipliers for the units docker honours: `b`, `k`/`kb`/`kib`,
+#: `m`/`mb`/`mib`, `g`/`gb`/`gib`, `t`/`tb`/`tib`. Positivity is decided on the
+#: BYTE COUNT, not the number: docker truncates the spec to an int64, so
+#: `0.0000000001g` and `0.1b` install as `HostConfig.Memory=0` — the UNCAPPED
+#: container this seam exists to prevent, reached through a value that reads as
+#: positive (#7357 review, measured).
+_MEMORY_UNIT_BYTES = {
+    "": 1, "b": 1,
+    "k": 1 << 10, "kb": 1 << 10, "kib": 1 << 10,
+    "m": 1 << 20, "mb": 1 << 20, "mib": 1 << 20,
+    "g": 1 << 30, "gb": 1 << 30, "gib": 1 << 30,
+    "t": 1 << 40, "tb": 1 << 40, "tib": 1 << 40,
+}
 
 def _spec_is_positive(spec: str) -> bool:
     """Whether *spec* is a POSITIVE byte count.
 
     `0` (and `0g`, `0.0g`, …) means NO limit to docker — the uncapped container
-    #7357 is about — so the grammar alone is not enough.
+    #7357 is about — so the grammar alone is not enough. The test is on BYTES:
+    docker truncates to an int64, so `0.0000000001g` and `0.1b` install as
+    Memory=0 — an uncapped probe reached through a positive-looking number
+    (#7357 review).
     """
     m = _MEMORY_SPEC_RE.match(spec)
-    return bool(m) and float(m.group(1)) > 0
+    if not m:
+        return False
+    unit = spec[m.end(1):].lower()
+    return int(float(m.group(1)) * _MEMORY_UNIT_BYTES[unit]) >= 1
 
 
 def container_memory_cap() -> str:
@@ -800,6 +820,16 @@ def run_probe(
     try:
         try:
             _docker(*_probe_run_args(container, image))
+        except subprocess.CalledProcessError as exc:
+            # docker's OWN line, not just the argv and the exit status: a missing
+            # image, a permission problem and a wedged daemon are otherwise
+            # indistinguishable, and this module's stated rule is that it reports
+            # docker's reason rather than an opaque refusal (#7357 review).
+            detail = ((exc.stderr or "") or (exc.stdout or "")).strip()[:400]
+            raise CensusError(
+                f"could not start the probe container from {image!r}: "
+                f"{detail or exc}"
+            ) from exc
         except (subprocess.SubprocessError, OSError) as exc:
             raise CensusError(
                 f"could not start the probe container from {image!r}: {exc}"

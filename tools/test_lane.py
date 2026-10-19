@@ -356,8 +356,22 @@ DEFAULT_CONTAINER_MEMORY = "2g"
 #: is interpolated into an argv: a typo must fail loudly here, not as an opaque
 #: `docker run` refusal later. Group 1 is the NUMBER, so positivity is read
 #: without re-deriving the unit (#7357 review).
-_MEMORY_SPEC_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)(?:[bkmgt]|[kmgt]b)?\Z")
+_MEMORY_SPEC_RE = re.compile(r"\+?([0-9]+(?:\.[0-9]+)?)(?:[bkmgt]|[kmgt]b|[kmgt]ib)?\Z")
 
+
+#: Byte multipliers for the units docker honours: `b`, `k`/`kb`/`kib`,
+#: `m`/`mb`/`mib`, `g`/`gb`/`gib`, `t`/`tb`/`tib`. Positivity is decided on the
+#: BYTE COUNT, not the number: docker truncates the spec to an int64, so
+#: `0.0000000001g` and `0.1b` install as `HostConfig.Memory=0` — the UNCAPPED
+#: container this seam exists to prevent, reached through a value that reads as
+#: positive (#7357 review, measured).
+_MEMORY_UNIT_BYTES = {
+    "": 1, "b": 1,
+    "k": 1 << 10, "kb": 1 << 10, "kib": 1 << 10,
+    "m": 1 << 20, "mb": 1 << 20, "mib": 1 << 20,
+    "g": 1 << 30, "gb": 1 << 30, "gib": 1 << 30,
+    "t": 1 << 40, "tb": 1 << 40, "tib": 1 << 40,
+}
 
 def _spec_is_positive(spec: str) -> bool:
     """Whether *spec* is a POSITIVE byte count.
@@ -366,9 +380,27 @@ def _spec_is_positive(spec: str) -> bool:
     (`HostConfig.Memory=0`), i.e. exactly the uncapped container #7357 is
     about, reached by the one value a reader would type to "disable" the cap.
     The grammar alone accepts it, so the ZERO case is refused separately.
+
+    The test is on BYTES, not on the number: docker truncates the parsed spec to
+    an int64, so `0.0000000001g` (0.107 B) and `0.1b` install as Memory=0 —
+    a positive NUMBER that becomes an UNCAPPED container (#7357 review).
     """
     m = _MEMORY_SPEC_RE.match(spec)
-    return bool(m) and float(m.group(1)) > 0
+    if not m:
+        return False
+    unit = spec[m.end(1):].lower()
+    return int(float(m.group(1)) * _MEMORY_UNIT_BYTES[unit]) >= 1
+
+
+def _spec_bytes(spec: str) -> int | None:
+    """The BYTE count a docker memory spec denotes, or None if it is not one."""
+    m = _MEMORY_SPEC_RE.match(spec)
+    if not m:
+        return None
+    try:
+        return int(float(m.group(1)) * _MEMORY_UNIT_BYTES[spec[m.end(1):].lower()])
+    except KeyError:  # pragma: no cover - the regex constrains the unit
+        return None
 
 
 def container_memory_cap() -> str:
@@ -405,7 +437,9 @@ def _memory_cap_args(cap: str | None = None) -> list[str]:
 
 #: `docker inspect --format` for the facts that separate "the server is wedged"
 #: from "the kernel killed it" from "it is looping", in one call.
-_TERMINATION_FORMAT = "{{.State.OOMKilled}} {{.State.ExitCode}} {{.RestartCount}}"
+_TERMINATION_FORMAT = (
+    "{{.State.OOMKilled}} {{.State.ExitCode}} {{.RestartCount}} "
+    "{{.HostConfig.Memory}}")
 
 #: `docker inspect --format` for the cgroup memory limit (#7357). `0` is
 #: docker's spelling for NO LIMIT.
@@ -496,9 +530,41 @@ def _termination_report(name: str, *, live: bool) -> str:
     if r.returncode != 0:
         return ""
     parts = (r.stdout or "").strip().split()
-    if len(parts) != 3:
+    if len(parts) != 4:
         return ""
-    oom, exit_code, restarts = parts
+    oom, exit_code, restarts, cap_bytes = parts
+    # The cap that ACTUALLY applies is docker's HostConfig.Memory, not the value
+    # `FALKORDB_CONTAINER_MEMORY` holds now: a lane container outlives runs and
+    # `docker start` cannot change its limit, so a container created at 2g and
+    # OOM-killed while the env says 8g would otherwise be reported as killed by
+    # "its own cgroup cap (…=8g)" — a cap it does not have (#7357 review).
+    try:
+        measured = int(cap_bytes)
+    except ValueError:
+        measured = None
+    if measured == 0:
+        cap_note = (
+            "this container has NO cgroup cap at all (HostConfig.Memory=0) — it "
+            "was created before this tool passed one, and `docker start` cannot "
+            "add it"
+        )
+    elif measured is None:
+        cap_note = ("its cgroup memory limit could not be read, so which cap "
+                    "applies is unknown")
+    else:
+        cap_note = f"its cgroup cap is {measured} bytes"
+        # NORMALIZED exactly as `container_memory_cap()` reads it: an env value
+        # of `2G` or `" 2g "` is a cap this tool accepts, so comparing the RAW
+        # string would report a mismatch — and recommend a destructive recreate —
+        # for a cap that IS the one in effect (#7357 review).
+        wanted = (os.environ.get(CONTAINER_MEMORY_ENV)
+                  or DEFAULT_CONTAINER_MEMORY).strip().lower()
+        if _spec_bytes(wanted) != measured:
+            cap_note += (
+                f", NOT the {CONTAINER_MEMORY_ENV}={wanted} in effect now "
+                f"(`docker start` cannot change it: recreate the container to "
+                f"move the cap)"
+            )
     try:
         restarted = int(restarts) > 0
     except ValueError:
@@ -521,8 +587,7 @@ def _termination_report(name: str, *, live: bool) -> str:
         if oom.lower() == "true":
             cause = (
                 f"by the kernel under host memory pressure, or by its own "
-                f"cgroup cap ({CONTAINER_MEMORY_ENV}="
-                f"{os.environ.get(CONTAINER_MEMORY_ENV) or DEFAULT_CONTAINER_MEMORY})"
+                f"cgroup cap — {cap_note}"
             )
             verdict = "KILLED FOR MEMORY"
         else:
@@ -890,6 +955,17 @@ def container_state(name: str) -> str:
     return "absent" if re.search(r"no such (container|object)\b", err) else "unknown"
 
 
+#: Docker states that are NOT terminal: the container (or its graphs) is still
+#: there and removing it would destroy work. `created` is included because the
+#: user may be about to start it, and `dead`/`exited` are the only states this
+#: tool may replace (#7357 review — a PAUSED container used to be `rm -f`ed).
+_LIVE_ISH_STATES = frozenset({"paused", "restarting", "created", "removing"})
+
+#: Docker states this tool may replace: the container has stopped and its
+#: termination facts are what explain why.
+_TERMINAL_STATES = frozenset({"exited", "dead"})
+
+
 def _graph_count(name: str) -> int | None:
     """Graphs in a container, or None when docker could not be asked.
 
@@ -1096,6 +1172,36 @@ def start(port: int | None = None) -> tuple[str, int]:
             f"test-lane: cannot determine the state of {name} — is the docker "
             f"daemon running? (refusing to guess: removing a container that may "
             f"belong to another lane would be unforgivable)"
+        )
+    if state not in _TERMINAL_STATES and state != "absent":
+        # #7357 review, and the worst of the class: this path used to `rm -f`
+        # EVERY non-running container. But `paused` is a LIVE database —
+        # `docker pause` is exactly what an operator may reach for to freeze a
+        # runaway instance rather than kill it — and `restarting` is a container
+        # docker is still cycling. Neither is TERMINAL, and their termination
+        # facts read `OOMKilled=false ExitCode=0 RestartCount=0`, so the removal
+        # printed NOTHING: measured, a paused lane container holding a graph was
+        # silently deleted and `start()` returned the replacement as if nothing
+        # had happened. Only a terminal container may be replaced; an
+        # unrecognised state fails CLOSED to a refusal too, because docker may
+        # add one and the default must never be "remove what we do not
+        # understand".
+        if state in _LIVE_ISH_STATES:
+            why = (
+                "its graphs are still there, and `docker pause`/`unpause` (or a "
+                "`restarting` container settling) reaches the state you want "
+                "without destroying anything"
+            )
+        else:
+            why = (
+                "this tool does not recognise that state as terminal, so it "
+                "refuses to remove a container it cannot classify"
+            )
+        raise SystemExit(
+            f"test-lane: {name} is in docker state {state!r}, which is NOT "
+            f"terminal — {why}. Inspect it (`docker container inspect {name}`) "
+            f"and run `uv run python tools/test_lane.py down` if you meant to "
+            f"discard it."
         )
     if state != "absent":
         # A failed `rm` must be read and reported, not discarded: it leaves a

@@ -1551,7 +1551,7 @@ def test_a_container_killed_for_memory_is_reported_not_called_wedged(
     def fake(*a, **k):
         if a[0] == "inspect":
             if any("OOMKilled" in str(part) for part in a):
-                return _R(0, "true 137 3\n", "")
+                return _R(0, "true 137 3 2147483648\n", "")
             return _R(0, "absent\n", "")
         if a[0] == "run":
             return _R(0, "deadbeef\n", "")
@@ -1587,7 +1587,7 @@ def test_a_stale_killed_container_is_named_BEFORE_it_is_removed(
     def fake(*a, **k):
         seen.append(a)
         if a[0] == "inspect":
-            return _R(0, "true 137 2\n", "")
+            return _R(0, "true 137 2 2147483648\n", "")
         return _R(0, "deadbeef\n", "")
 
     monkeypatch.setattr(tl, "_docker", fake)
@@ -1606,7 +1606,7 @@ def test_a_stale_killed_container_is_named_BEFORE_it_is_removed(
     # …and a container that merely stopped cleanly says nothing (no false alarm)
     # while still being replaced.
     monkeypatch.setattr(tl, "_docker",
-                        lambda *a, **k: _R(0, "false 0 0\n", ""))
+                        lambda *a, **k: _R(0, "false 0 0 2147483648\n", ""))
     with pytest.raises(SystemExit):
         tl.start()
     assert "had stopped before this start" not in capsys.readouterr().err
@@ -1630,7 +1630,7 @@ def test_a_reused_container_reports_prior_termination_as_history_not_cause(
 
     def fake(*a, **k):
         if a[0] == "inspect" and any("OOMKilled" in str(part) for part in a):
-            return _R(0, "true 137 4\n", "")
+            return _R(0, "true 137 4 2147483648\n", "")
         return _R(0, "", "")
 
     monkeypatch.setattr(tl, "_docker", fake)
@@ -1659,7 +1659,7 @@ def test_a_restart_loop_is_named_as_a_restart_loop(lane, monkeypatch):
 
     def fake(*a, **k):
         if a[0] == "inspect" and any("OOMKilled" in str(part) for part in a):
-            return _R(0, "false 0 150\n", "")
+            return _R(0, "false 0 150 2147483648\n", "")
         if a[0] == "run":
             return _R(0, "deadbeef\n", "")
         return _R(0, "", "")
@@ -1737,7 +1737,7 @@ def test_a_container_that_dies_during_the_wait_is_named_a_death_not_a_wedge(
 
     def fake(*a, **k):
         if a[0] == "inspect" and any("OOMKilled" in str(part) for part in a):
-            return _R(0, "true 137 3\n", "")
+            return _R(0, "true 137 3 2147483648\n", "")
         return _R(0, "", "")
 
     monkeypatch.setattr(tl, "_docker", fake)
@@ -1770,7 +1770,7 @@ def test_a_container_that_dies_during_the_wait_is_named_a_death_not_a_wedge(
         # termination — so if the `unknown` arm appended that report, the message
         # would claim the death it had just called UNKNOWN.
         if a[0] == "inspect" and any("OOMKilled" in str(part) for part in a):
-            return _R(0, "true 137 3\n", "")
+            return _R(0, "true 137 3 2147483648\n", "")
         return _R(1, "", "deadline exceeded")
 
     monkeypatch.setattr(tl, "_docker", termination_answers)
@@ -1852,3 +1852,76 @@ def test_a_plain_sigkill_is_not_called_a_memory_kill(monkeypatch):
         "a running probe's termination facts are HISTORY, never this query "
         "error's cause"
     )
+
+
+def test_a_kill_names_the_MEASURED_cap_not_the_current_env(lane, monkeypatch):
+    """#7357 review: the message printed `FALKORDB_CONTAINER_MEMORY` — the value
+    the tool WOULD use now — as "its own cgroup cap". A lane container outlives
+    runs and `docker start` cannot change its limit, so a container created at 2g
+    and OOM-killed while the env says 8g was reported as killed by a cap it does
+    not have. The cap that applies is docker's `HostConfig.Memory`."""
+    monkeypatch.setattr(tl, "_created_image", lambda _n: tl.IMAGE)
+    monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
+    monkeypatch.setenv(tl.CONTAINER_MEMORY_ENV, "8g")
+
+    def fake(*a, **k):
+        if a[0] == "inspect" and any("OOMKilled" in str(part) for part in a):
+            # killed, restart count 0, and the cap docker really holds: 2 GiB
+            return _R(0, "true 137 0 2147483648\n", "")
+        if a[0] == "run":
+            return _R(0, "deadbeef\n", "")
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "_wait_ready", lambda *a, **k: False)
+    with pytest.raises(SystemExit) as e:
+        tl.start()
+    msg = str(e.value)
+    assert "2147483648 bytes" in msg, (
+        f"the MEASURED cap must be named, not the env value: {msg}"
+    )
+    assert "NOT the FALKORDB_CONTAINER_MEMORY=8g in effect now" in msg, (
+        f"a cap that differs from the env must be called out, or the operator "
+        f"raises a cap that was never in play: {msg}"
+    )
+
+    # …and a SPELLING that means the same cap is not a mismatch: the env value is
+    # read the way `container_memory_cap()` reads it (`.strip().lower()`), so a
+    # cap this tool would itself accept never reports "recreate the container".
+    for same in ("2g", "2G", " 2g ", "2048m", "2gb"):
+        monkeypatch.setenv(tl.CONTAINER_MEMORY_ENV, same)
+        with pytest.raises(SystemExit) as e:
+            tl.start()
+        assert "in effect now" not in str(e.value), (
+            f"{same!r} is the same 2 GiB the container holds, so recommending a "
+            f"recreate for it is a false alarm: {e.value}"
+        )
+
+
+def test_a_paused_container_is_never_removed(lane, monkeypatch):
+    """#7357 review, silent destruction of work: this path used to `rm -f` EVERY
+    non-running container. `paused` is a LIVE database — `docker pause` is what an
+    operator reaches for to freeze a runaway instance rather than kill it — and
+    its termination facts read `OOMKilled=false ExitCode=0 RestartCount=0`, so the
+    removal printed nothing: a paused container holding a graph was silently
+    deleted, and `start()` returned the replacement as if nothing had happened."""
+    monkeypatch.setattr(tl, "container_state", lambda _n: "paused")
+    monkeypatch.setattr(tl, "_assert_removal_allowed", lambda _n: None)
+
+    def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
+        raise AssertionError("a paused container must never be removed")
+
+    monkeypatch.setattr(tl, "_remove_and_describe", _boom)
+    monkeypatch.setattr(tl, "_docker", _boom)
+    with pytest.raises(SystemExit) as e:
+        tl.start()
+    msg = str(e.value)
+    assert "'paused'" in msg and "NOT terminal" in msg, msg
+    assert "unpause" in msg, f"the non-destructive way out must be named: {msg}"
+
+    # An UNRECOGNISED state is not permission to delete either: docker may add
+    # one, and the default must be "keep the container".
+    monkeypatch.setattr(tl, "container_state", lambda _n: "frobnicating")
+    with pytest.raises(SystemExit) as e:
+        tl.start()
+    assert "does not recognise" in str(e.value), str(e.value)

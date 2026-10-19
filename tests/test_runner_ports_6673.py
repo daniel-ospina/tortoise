@@ -1723,7 +1723,7 @@ def test_the_cap_grammar_is_the_SAME_at_every_seam(tmp_path, monkeypatch):
 
     setup = _load_setup_module()
     for i, good in enumerate(("2G", " 2g ", "\t2G\t", "2gb", "2048mb",
-                              "1t", "2tb", "1.5gb")):
+                              "1t", "2tb", "1.5gb", "2gib", "+2g")):
         monkeypatch.setenv(MEMORY_CAP_ENV, good)
         expected = good.strip().lower()   # `.strip().lower()`, at every seam
         assert tl.container_memory_cap() == expected, good
@@ -1747,7 +1747,12 @@ def test_the_cap_grammar_is_the_SAME_at_every_seam(tmp_path, monkeypatch):
     # Python seams' `\Z` refused it (#7357 review). A value with a newline must
     # be refused at every seam — never silently normalised, and never passed to
     # `docker run` where the refusal is opaque.
-    for i, bad in enumerate(("2 g", "2\tg", "2bb", "2g\nabc", "2g\n0")):
+    # BYTE positivity, not number positivity: docker truncates the parsed spec
+    # to an int64, so `0.0000000001g` (0.107 B) and `0.1b` install as
+    # `HostConfig.Memory=0` — the UNCAPPED container every seam exists to
+    # prevent, reached through a value that reads as positive (#7357 review).
+    for i, bad in enumerate(("2 g", "2\tg", "2bb", "2g\nabc", "2g\n0",
+                             "0.0000000001g", "0.1b", "0.0g", "0t")):
         monkeypatch.setenv(MEMORY_CAP_ENV, bad)
         with pytest.raises(SystemExit):
             tl.container_memory_cap()
@@ -1783,14 +1788,15 @@ def test_the_ci_provision_refuses_a_zero_cap(tmp_path):
     )
 
 
-#: Docker memory-spec unit multipliers, exactly the spellings docker accepts
-#: (`b`, `k`/`kb`, `m`/`mb`, `g`/`gb`).
+#: Byte multipliers for the units docker AND compose accept: `b`,
+#: `k`/`kb`/`kib`, `m`/`mb`/`mib`, `g`/`gb`/`gib`, `t`/`tb`/`tib` (measured on
+#: docker 29.1.3 / compose 2.40.3; `2bb` is "invalid suffix: 'bb'" to docker).
 _MEMORY_UNITS = {
     "": 1, "b": 1,
-    "k": 1 << 10, "kb": 1 << 10,
-    "m": 1 << 20, "mb": 1 << 20,
-    "g": 1 << 30, "gb": 1 << 30,
-    "t": 1 << 40, "tb": 1 << 40,
+    "k": 1 << 10, "kb": 1 << 10, "kib": 1 << 10,
+    "m": 1 << 20, "mb": 1 << 20, "mib": 1 << 20,
+    "g": 1 << 30, "gb": 1 << 30, "gib": 1 << 30,
+    "t": 1 << 40, "tb": 1 << 40, "tib": 1 << 40,
 }
 
 
@@ -1805,9 +1811,19 @@ def _memory_bytes(spec):
     the two keys must read the same expression and the seams' own remedy lever
     keeps working here.
     """
-    # Docker's SUFFIX grammar exactly: one letter (`b`/`k`/`m`/`g`/`t`) or
-    # letter+`b` (`kb`/`mb`/`gb`/`tb`). `2bb` is "invalid suffix: 'bb'".
-    m = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*([bkmgt]|[kmgt]b)?\s*",
+    # Docker's suffix set: `b`, `k`/`kb`/`kib`, `m`/`mb`/`mib`, `g`/`gb`/`gib`,
+    # `t`/`tb`/`tib`, with an optional leading `+` — all measured against docker
+    # (`2gib`, `+2g` are accepted; `2bb` is "invalid suffix: 'bb'").
+    #
+    # The whitespace rule is compose's OWN, measured on 2.40.3: ONE space between
+    # the number and the unit is accepted (`"2 g"` -> 2147483648), while padding
+    # or a doubled space is not (`" 2g "` fails with `strconv.ParseFloat:
+    # parsing " 2g": invalid syntax`, `"2  g"` with `parsing "2 ": invalid
+    # syntax` — each quotes ITS OWN input). A guard that trimmed
+    # the value would pass a file `docker compose up` refuses; one that refused
+    # the inner space would reject a file it accepts. So the value is judged as
+    # written, with exactly one optional inner space and no padding.
+    m = re.fullmatch(r"\+?([0-9]+(?:\.[0-9]+)?) ?([bkmgt]|[kmgt]b|[kmgt]ib)?",
                      str(spec), re.IGNORECASE)
     if not m:
         return None
@@ -1955,6 +1971,27 @@ def test_the_compose_guard_reads_bytes_not_spelling(tmp_path):
     )
     _write("1t", "1099511627776")
     assert _gaps() == ([], [], []), _gaps()
+    _write("2gib", "+2147483648")   # docker accepts both spellings
+    assert _gaps() == ([], [], []), _gaps()
+
+    # compose REJECTS padding (`strconv.ParseFloat: parsing " 2g": invalid
+    # syntax`), so the guard must not normalise it away — reporting it is the
+    # true reading (#7357 review).
+    _write(" 2g ", " 2g ")
+    unc, mism, bad = _gaps()
+    assert bad and not unc and not mism, (
+        f"a padded value is not a compose memory spec, so it is neither a cap "
+        f"nor a swap mismatch: {_gaps()}"
+    )
+
+    # …while ONE inner space IS a spec compose accepts ("2 g" -> 2147483648),
+    # so refusing it would be a false red on a deployable file.
+    _write("2 g", " 2g ".strip())
+    unc, mism, bad = _gaps()
+    assert not unc and not mism and not bad, (
+        f"compose accepts a single inner space between number and unit, so the "
+        f"guard must too: {_gaps()}"
+    )
 
     _write("512m", "1g")
     unc, mism, bad = _gaps()
@@ -2082,4 +2119,37 @@ def test_a_probe_killed_MID_STAGE_is_explained_not_left_as_raw_stderr(monkeypatc
     assert "is not running" in msg, (
         f"the engine's own error must stay — the report is APPENDED, never a "
         f"replacement: {msg}"
+    )
+
+
+def test_the_probe_start_failure_carries_dockers_own_line(monkeypatch):
+    """#7357 review: `str(CalledProcessError)` holds only the argv and the exit
+    status, so a missing image, a permission problem and a wedged daemon were
+    indistinguishable — and this module's stated rule is that it reports docker's
+    reason, never an opaque refusal. `_container_query` in the same file already
+    sets that standard."""
+    from tools import edge_census as ec
+
+    def fake(*args, **kwargs):
+        if args[0] == "version":
+            return ec.subprocess.CompletedProcess(args, 0, "8.0.0\n", "")
+        if args[0] == "run":
+            raise ec.subprocess.CalledProcessError(
+                125, args,
+                output="",
+                stderr="docker: Error response from daemon: pull access denied "
+                       "for tortoise-review/no-such-image, repository does not "
+                       "exist")
+        if args[0] == "rm":       # the `finally:` teardown, on the failure path
+            return ec.subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(f"unexpected docker call: {args}")
+
+    monkeypatch.setattr(ec, "_docker", fake)
+    with pytest.raises(ec.CensusError) as excinfo:
+        ec.run_probe(n=100, image="tortoise-review/no-such-image:1",
+                     log=lambda _m: None)
+    msg = str(excinfo.value)
+    assert "pull access denied" in msg, (
+        f"docker's own line must survive: a bare exit status cannot distinguish "
+        f"a missing image from a permission problem or a wedged daemon: {msg}"
     )

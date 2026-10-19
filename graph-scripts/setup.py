@@ -730,12 +730,20 @@ def _container_memory() -> str:
     # Group 1 is the NUMBER: docker accepts the LONG unit forms too (`2gb`,
     # `2048mb`), so the seam must not refuse a spelling docker itself accepts
     # (#7357 review) — this message is what tells an operator to raise the cap.
-    m = re.match(r"([0-9]+(?:\.[0-9]+)?)(?:[bkmgt]|[kmgt]b)?\Z", raw)
+    m = re.match(r"\+?([0-9]+(?:\.[0-9]+)?)(?:[bkmgt]|[kmgt]b|[kmgt]ib)?\Z", raw)
     if not m:
         _fail(f"{CONTAINER_MEMORY_ENV}={raw!r} is not a docker memory spec "
               f"(e.g. 512m, 2g, 1.5g) — refusing to start the container with "
               f"an unparseable cap (default {DEFAULT_CONTAINER_MEMORY})")
-    if float(m.group(1)) <= 0:
+    # BYTES, not the number: docker truncates the spec to an int64, so
+    # `0.0000000001g` (0.107 B) installs as HostConfig.Memory=0 — an UNCAPPED
+    # container reached through a value that reads as positive (#7357 review).
+    _units = {"": 1, "b": 1,
+              "k": 1 << 10, "kb": 1 << 10, "kib": 1 << 10,
+              "m": 1 << 20, "mb": 1 << 20, "mib": 1 << 20,
+              "g": 1 << 30, "gb": 1 << 30, "gib": 1 << 30,
+              "t": 1 << 40, "tb": 1 << 40, "tib": 1 << 40}
+    if int(float(m.group(1)) * _units[raw[m.end(1):].lower()]) < 1:
         _fail(f"{CONTAINER_MEMORY_ENV}={raw!r} is a ZERO cap, which docker "
               f"reads as UNLIMITED — refusing to start an uncapped container "
               f"(default {DEFAULT_CONTAINER_MEMORY})")
