@@ -3275,7 +3275,7 @@ def _journal_safe_params(params, cypher=None):
 #     `proj.db.select_graph(...)` — escape (3) below — so those writes remain
 #     unjournalled AND undeclared and are filed as `#9157`. Journalling the
 #     class is the larger, §2.0-correct increment and is filed separately
-#     (`#9144`), not assumed by this lane. A door inventory done against THIS
+#     (`#9129`), not assumed by this lane. A door inventory done against THIS
 #     block must not close escape (3) believing onboarding is covered.
 #
 # The declaration is not a bypass flag: it is a per-call `with` block (no

@@ -5750,7 +5750,7 @@ rows:
   lifecycle: active
   used_by: tooling, skill-docs, docs
   recommendation: review
-  reason: 'no MCP tool binds it; callers: engine, other-tooling, tenant-rest'
+  reason: 'no MCP tool binds it; callers: engine, eval-harness, other-tooling, tenant-rest'
   recommended_family: null
   proposed: false
   exemption: false

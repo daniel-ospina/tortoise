@@ -33,6 +33,24 @@ so each assertion has a way to fail:
 The claim these pins protect, stated in the terms of the code: every statement
 this package issues **through `state._run`** runs inside the declaration; the
 `eager_init_query()` callers do not, and are unjournalled AND undeclared.
+
+⛔ AND IT IS NOT THE ONLY INVENTORY OF THIS SEAM — the closer neighbour is
+`tests/test_write_ahead_mint.py::_MINT_SITES`, which already walks
+`tortoise/sdk.py` / `tortoise/hosted_api.py` / `tortoise/__main__.py` for
+`:TeamMeta` mint sites and recognises `eager_init_query` bindings. The two share
+**the site set** (a site that appears or disappears moves both), and each owns
+what the other cannot see:
+
+* unique to THIS file: the per-function **count** (`register_user` issues two —
+a third arm moves nothing in `_MINT_SITES`), the note↔AST agreement, and the
+  `#9157` no-declaration coupling;
+* unique to `_MINT_SITES`: the write-ahead journaling ORDER, and the
+  `tortoise/__main__.py::_cmd_key_create` site, which mints `:TeamMeta` through a
+  different shape and therefore is not an `eager_init_query()` site at all.
+
+Rather than keeping two free-handed copies that can drift apart silently,
+`test_the_escape3_sites_are_the_mint_sites_that_use_eager_init` asserts the
+RELATIONSHIP against `_MINT_SITES` itself.
 """
 from __future__ import annotations
 
@@ -44,6 +62,30 @@ from tortoise.onboarding import state as _os
 from tortoise.projection import _statement_writes
 
 _REPO = Path(__file__).resolve().parents[1]
+
+#: The `:TeamMeta` mint sites that are NOT `eager_init_query()` sites — they mint
+#: through another shape. Named, so the difference between this file's inventory
+#: and `test_write_ahead_mint.py::_MINT_SITES` is an assertion rather than a
+#: remainder nobody reads.
+_NON_EAGER_MINT_SITES = {("tortoise/__main__.py", "_cmd_key_create")}
+
+
+def _mint_sites_from_its_owner() -> set[tuple[str, str]]:
+    """`_MINT_SITES`, read from the suite that owns it.
+
+    Imported by path rather than copied: a second hand-written copy is the drift
+    seam this file exists to close (a site set is not a thing to spell twice).
+    """
+    import importlib.util
+
+    path = Path(__file__).resolve().parent / "test_write_ahead_mint.py"
+    spec = importlib.util.spec_from_file_location(
+        "_write_ahead_mint_owner", path
+    )
+    assert spec is not None and spec.loader is not None, path
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return set(module._MINT_SITES)
 
 #: The primitives that OPEN a §17.1 declaration. A `with` over any of these is
 #: what "declared" means; a site that acquires one has left the residual.
@@ -268,6 +310,33 @@ def test_every_eager_init_site_issues_its_statement_on_the_escape_three_handle()
             )
 
 
+def test_the_escape3_sites_are_the_mint_sites_that_use_eager_init():
+    """The two inventories of this seam must be two VIEWS, not two copies.
+
+    `test_write_ahead_mint.py::_MINT_SITES` is the existing owner of "every
+    product function that mints a `:TeamMeta` graph". This file owns a slice of
+    it — the sites that mint through `eager_init_query()`. Asserting the
+    relationship (rather than eyeballing two hand-written sets) means a site
+    added to one inventory only cannot pass unnoticed here, and the ONE
+    legitimate difference (`_cmd_key_create`, which mints through another shape)
+    is named instead of being an unexplained remainder.
+    """
+    mint_sites = _mint_sites_from_its_owner()
+    assert set(_ESCAPE3_CALL_SITES) <= mint_sites, (
+        "this file lists an escape-(3) site that `tests/test_write_ahead_mint.py` "
+        f"does not know mints a graph: {sorted(set(_ESCAPE3_CALL_SITES) - mint_sites)} "
+        "— one inventory moved without the other"
+    )
+    assert mint_sites - set(_ESCAPE3_CALL_SITES) == _NON_EAGER_MINT_SITES, (
+        "the mint sites this file does not cover changed: "
+        f"{sorted(mint_sites - set(_ESCAPE3_CALL_SITES))} vs the recorded "
+        f"{sorted(_NON_EAGER_MINT_SITES)}. A mint site that migrated ONTO "
+        "`eager_init_query` (or a new one that mints through it) belongs in "
+        "_ESCAPE3_CALL_SITES and in the note in `onboarding/state.py` (#9157); "
+        "one that migrated OFF it leaves the residual"
+    )
+
+
 def test_no_eager_init_site_declares_itself_yet():
     """THE COUPLING: today no escape-(3) function opens a §17.1 declaration.
 
@@ -352,3 +421,28 @@ def test_the_guards_inventory_names_this_lane_and_its_residual():
             "onboarding lane is journal-first (it is not) or fully delegated "
             "(it is not: #9157)"
         )
+
+
+def test_the_inventory_cites_the_issue_that_owns_the_journalling_increment():
+    """A pointer a reader follows must land on the tracked work, not a stub.
+
+    The inventory names the larger increment (journal the onboarding class) as
+    filed separately. That citation is load-bearing — it is how a reader weighing
+    the declaration against journalling finds the work — and it was wrong (#9144,
+    an auto-filed `NEVER_BACKED_UP` incident stub with `{}` detail, files no
+    scope). The increment is **#9129**. No pin covered this, so nothing reddened;
+    this is that pin.
+    """
+    source = (_REPO / "tortoise/projection/__init__.py").read_text(encoding="utf-8")
+    flat = " ".join(source.split())
+    assert "(`#9129`), not assumed by this lane" in flat, (
+        "`tortoise/projection/__init__.py` no longer cites `#9129` for the "
+        "onboarding-journalling increment — either the citation was dropped or "
+        "it points somewhere else (it once pointed at `#9144`, an auto-filed "
+        "NEVER_BACKED_UP incident stub that files no scope)"
+    )
+    assert "#9144" not in flat, (
+        "`tortoise/projection/__init__.py` cites `#9144`, which is a "
+        "NEVER_BACKED_UP incident stub — the onboarding-journalling increment is "
+        "`#9129` (#9121 residual)"
+    )
