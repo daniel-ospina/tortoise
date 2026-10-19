@@ -3361,7 +3361,7 @@ def _journal_safe_params(params, cypher=None):
 #     narrowing that;
 #   * `FalkorProjection._ensure_indexes()` — this package's largest block of
 #     DDL through `proj.g` (`CREATE INDEX` / `DROP INDEX` / a full-text index
-#     and a `MERGE (m:Meta …)`), and it declares nothing of its own. Three of
+#     and a `MERGE (m:Meta …)`), and it declares nothing of its own. Four of
 #     its call sites matter, and only the last is now covered:
 #     `__init__` runs it before `_bind_journal`, so it escapes only by ORDERING;
 #     TWO `hosted_api` restore paths call it after a `GRAPH.COPY` swap that
@@ -9638,8 +9638,12 @@ class FalkorProjection(
         folded and, by the ordering contract's exception 1, they must not be
         journaled again. ⚠️ Two legs are a WIDER claim than that, and neither is
         a projection: the ``#548`` synthetic events come from the PRE-WIPE
-        CACHE (the points written by the raw-query lane, which the log does not
-        cover — that is the whole reason the snapshot exists), and the
+        CACHE — the Points no journal record covers, i.e. those written through
+        the HANDLE by the unjournaled writers the §17.1 inventory names
+        (``#9206``'s ``:Point`` writers, ``#9207``'s ``delete_point``,
+        ``hosted_api``'s commit path) plus pre-journal graphs; NOT the raw-query
+        lane, which is already refused here (``FalkorProjection.query`` closed
+        it for a journal-backed projection in ``#7951``) — and the
         SNAPSHOT-RESTORE legs have no journal record describing them at all.
         This scope authorizes them by virtue of being the operation that
         carries them across the wipe. Narrowing that is `#9210`'s, and it must

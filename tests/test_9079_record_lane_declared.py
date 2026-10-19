@@ -418,10 +418,16 @@ def test_the_counter_is_carried_across_a_rebuild_and_the_rows_are_not_replayed(
     sdk = sdk_with_journal
     proj = sdk._get_proj()
     sdk.create_point("fact", "an event whose counter must survive the rebuild")
-    assert read_after(proj, 0), "the fixture must have stored an event"
+    # TWO events, not one: with a single event the captured counter is 1, which
+    # is also what a WIPED graph re-establishes (`next_seq`'s `ON CREATE SET
+    # m.last_seq = 0` plus one bump), so `after == before` could not tell a
+    # genuine carry from a reset. A real graph's counter is in the tens.
+    sdk.create_point("fact", "a second event, so 'carried' cannot mean 'reset to 1'")
+    assert len(read_after(proj, 0)) >= 2, "the fixture must have stored both events"
 
     before = capture_watermark(proj)
-    assert before and int(before["last_seq"]) >= 1
+    assert before and int(before["last_seq"]) >= 2, (
+        f"the fixture must reach a counter a reset cannot imitate; got {before}")
 
     proj.rebuild_all(str(sdk._journal_path_for_test.parent),
                      confirm_destructive=True)
