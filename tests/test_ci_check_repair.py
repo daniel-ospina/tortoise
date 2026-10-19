@@ -75,6 +75,79 @@ def test_queued_run_is_pending_too():
     assert plan.pending == ["docs"] and not plan.actionable
 
 
+# ── STARVED: a QUEUED run is not "pending" when the repo is in a FLOOD #9115 ──
+
+def test_a_queued_run_is_starved_only_under_a_measured_repo_flood():
+    """The same per-head shape is ordinary on a busy runner — the flood decides."""
+    checks = [check(c) for c in REQUIRED if c != "docs"]
+    runs = [run(10, "ci.yml", "queued")]
+
+    quiet = R.classify(pr(), checks, runs, REQUIRED, EMITTERS, max_attempts=3,
+                       queue_starved=False)
+    assert quiet.pending == ["docs"] and quiet.starved == []
+
+    flooded = R.classify(pr(), checks, runs, REQUIRED, EMITTERS, max_attempts=3,
+                         queue_starved=True)
+    # still PENDING (it drives the reopen deferral) AND named as STARVED
+    assert flooded.pending == ["docs"]
+    assert flooded.starved == ["docs"]
+    # a starved context is never repaired: no rerun, no reopen, not "actionable"
+    assert flooded.rerun == [] and flooded.missing_run == []
+    assert not flooded.actionable
+    # ...but it must still be REPORTED, or a starved head goes silent
+    assert flooded.needs_report
+
+
+def test_a_run_that_has_actually_started_is_not_starved_under_a_flood():
+    """`queued` beside `in_progress` means a slot WAS granted."""
+    checks = [check(c) for c in REQUIRED if c != "python-ci-gate"]
+    runs = [run(10, "python-ci.yml", "queued"), run(11, "python-ci.yml", "in_progress")]
+    plan = R.classify(pr(), checks, runs, REQUIRED, EMITTERS, max_attempts=3,
+                      queue_starved=True)
+    assert plan.pending == ["python-ci-gate"] and plan.starved == []
+
+
+def test_a_starved_context_is_recorded_and_repaired_by_nothing(monkeypatch):
+    """No per-PR action can create a runner slot, so none may be attempted."""
+    checks = [check(c) for c in REQUIRED if c != "docs"]
+    plan = R.classify(pr(), checks, [run(10, "ci.yml", "queued")], REQUIRED, EMITTERS,
+                      max_attempts=3, queue_starved=True)
+    monkeypatch.setattr(R, "_rerun", lambda *a, **k: pytest.fail("a starved head must not be re-run"))
+    monkeypatch.setattr(R, "_reopen", lambda *a, **k: pytest.fail("a starved head must not be reopened"))
+    code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
+    assert code == 0
+    assert recs[0]["starved"] == ["docs"]
+    assert recs[0]["rerun"] == [] and recs[0]["reopened"] is False
+
+
+def test_a_starved_head_is_not_deferred_as_though_CI_were_about_to_report():
+    """It must be reported as a QUEUE problem, not folded into in-flight deferral."""
+    checks = [check(c) for c in REQUIRED if c != "docs"]
+    plan = R.classify(pr(), checks, [run(10, "ci.yml", "queued")], REQUIRED, EMITTERS,
+                      max_attempts=3, queue_starved=True)
+    assert plan.in_flight == ["ci"]        # it IS non-completed...
+    assert plan.starved == ["docs"]        # ...and the report says WHY
+
+
+def test_the_queue_reading_degrades_to_no_flood_when_it_cannot_be_read(monkeypatch):
+    """A failed queue read must not invent a flood, and must not fail the pass."""
+    import tools.ci_queue_health as Q
+
+    def boom(*a, **k):
+        raise Q.MeasureError("gh api 500")
+
+    monkeypatch.setattr(Q, "read_health", boom)
+    assert R.read_queue_health("o/r") is None
+
+
+def test_the_queue_reading_is_the_repo_level_state(monkeypatch):
+    import tools.ci_queue_health as Q
+
+    health = Q.classify_queue([], [], None)
+    monkeypatch.setattr(Q, "read_health", lambda repo: health)
+    assert R.read_queue_health("o/r") is health
+
+
 def test_all_required_present_means_no_plan_at_all():
     checks = [check(c) for c in REQUIRED]
     plan = R.classify(pr(), checks, [run(1, "ci.yml", "completed", "success")],
@@ -1039,8 +1112,15 @@ def test_an_UNREADABLE_live_set_still_falls_back_to_the_record(monkeypatch, tmp_
 
 
 def test_main_reports_exit_2_when_the_record_cannot_be_read(capsys, tmp_path):
-    """The fail-closed pole of the contract, through `main()` itself."""
-    assert R.main(["--repo", "o/r", "--no-live", "--record",
+    """The fail-closed pole of the contract, through `main()` itself.
+
+    `--no-queue-health` is passed deliberately: this suite is registered on the
+    `core` surface as "Pure unit tests, no network", and without the flag `main()`
+    reaches `read_queue_health()` before its `try:` block, i.e. a real
+    `gh api repos/.../actions/runs` call on every run. The queue read is not what
+    this test is about, so it is switched off rather than depended on.
+    """
+    assert R.main(["--repo", "o/r", "--no-live", "--no-queue-health", "--record",
                    str(tmp_path / "nope.json")]) == 2
     assert "COULD NOT MEASURE" in capsys.readouterr().err
 
@@ -1051,8 +1131,147 @@ def test_an_unexpected_error_in_the_pass_is_exit_2_not_1(capsys, monkeypatch):
         raise KeyError("malformed run payload")
 
     monkeypatch.setattr(R, "open_prs", boom)
-    assert R.main(["--repo", "o/r", "--no-live"]) == 2
+    assert R.main(["--repo", "o/r", "--no-live", "--no-queue-health"]) == 2
     assert "unexpected KeyError" in capsys.readouterr().err
+
+
+# ── the #9115 composition: a measured FLOOD reaches the report ─────────────
+
+def _flood_record(tmp_path):
+    """A minimal required-contexts record for one context, `docs` <- ci.yml."""
+    rec = tmp_path / "required-contexts.json"
+    rec.write_text(json.dumps({
+        "required_contexts": ["docs"],
+        "emitters": {"docs": [["ci.yml", "docs"]]},
+    }))
+    return rec
+
+
+def _flood_health():
+    """A REAL (pure, no API) FLOOD reading: a trim-safe offender + a starved PR run."""
+    from datetime import UTC, datetime, timedelta
+
+    from tools import ci_queue_health as Q
+
+    now = datetime(2026, 10, 19, 3, 30, 0, tzinfo=UTC)
+
+    def stamp(seconds):
+        return (now - timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    queued = [Q.QueuedRun(id=1000 + i, name="finding-provenance", event="issues",
+                          created_at=stamp(1200 - i)) for i in range(12)]
+    queued.append(Q.QueuedRun(id=9000, name="Python CI", event="pull_request",
+                              created_at=stamp(1200)))
+    health = Q.classify_queue(queued, [], now)
+    assert health.verdict == Q.FLOOD, "the fixture must actually be a flood"
+    return health
+
+
+def test_main_threads_a_measured_flood_into_the_report(monkeypatch, capsys, tmp_path):
+    """The load-bearing composition: FLOOD -> `starves_pr` -> classify -> starved.
+
+    `read_queue_health` and `classify(..., queue_starved=)` are each tested in
+    isolation, and inverting the predicate between them (the call site's verdict
+    test, or `is not None` -> `is None`) left BOTH suites green while the
+    instrument silently never reported STARVED — the blindness #9115 exists to
+    remove, restored with a green suite. This test is that seam.
+    """
+    monkeypatch.setattr(R, "read_queue_health", lambda repo: _flood_health())
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
+    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
+    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [run(10, "ci.yml", "queued")])
+
+    assert R.main(["--repo", "o/r", "--no-live", "--json",
+                   "--record", str(_flood_record(tmp_path))]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["queue_starved"] is True
+    assert summary["starved"] == 1
+    assert summary["queue"].startswith("CI: FLOOD(")
+    assert summary["prs"][0]["starved"] == ["docs"]
+
+
+def test_main_reports_a_PR_STARVED_reading_as_starved_too(monkeypatch, capsys, tmp_path):
+    """ISSUE 2 of the #9118 final review: the late stage must not go blind.
+
+    `PR-STARVED` is the repo-level reading for "no PR-event run is executing, a
+    queued PR run has waited past the age floor, and the queue's largest share is
+    not a trim-safe offender". It differs from `FLOOD` only in whether the governor
+    has something to trim, not in whether PR CI is running — so keying the per-PR
+    seam on `FLOOD` alone left exactly the state the module calls the LATE STAGE of
+    the measured incident reading as `pending` and therefore dropped from the
+    report (#9115's original silence, one level down).
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from tools import ci_queue_health as Q
+
+    now = datetime(2026, 10, 19, 3, 30, 0, tzinfo=UTC)
+
+    def stamp(seconds):
+        return (now - timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # A PR-dominated queue: the offender (here `Python CI` itself) is not a
+    # trim-safe workflow, so this WITNESSES starvation with no action available.
+    queued = [Q.QueuedRun(id=9000 + i, name="Python CI", event="pull_request",
+                         created_at=stamp(1200)) for i in range(20)]
+    pr_starved = Q.classify_queue(queued, [], now)
+    assert pr_starved.verdict == Q.PR_STARVED, "the fixture must actually be PR-STARVED"
+    assert pr_starved.starves_pr is True
+
+    monkeypatch.setattr(R, "read_queue_health", lambda repo: pr_starved)
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
+    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
+    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [run(10, "ci.yml", "queued")])
+
+    seen: list[bool] = []
+    real_classify = R.classify
+
+    def spy(*a, **k):
+        seen.append(k.get("queue_starved"))
+        return real_classify(*a, **k)
+
+    monkeypatch.setattr(R, "classify", spy)
+
+    assert R.main(["--repo", "o/r", "--no-live", "--json",
+                   "--record", str(_flood_record(tmp_path))]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert seen == [True]
+    assert summary["queue_starved"] is True
+    assert summary["queue"].startswith("CI: PR-STARVED(")
+    assert summary["starved"] == 1
+    assert summary["prs"][0]["starved"] == ["docs"]
+
+
+def test_main_reports_starvation_not_witnessed_when_the_queue_is_unreadable(
+        monkeypatch, capsys, tmp_path):
+    """The other pole: no flood measured is NOT a flood, and says so."""
+    monkeypatch.setattr(R, "read_queue_health", lambda repo: None)
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
+    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
+    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [run(10, "ci.yml", "queued")])
+    # The seam itself: what `classify` is actually TOLD. Without this the assertion
+    # would only be that no flood was reported, which is also what a hard-wired
+    # `queue_starved=False` produces.
+    seen: list[bool] = []
+    real_classify = R.classify
+
+    def spy(*a, **k):
+        seen.append(k.get("queue_starved"))
+        return real_classify(*a, **k)
+
+    monkeypatch.setattr(R, "classify", spy)
+
+    assert R.main(["--repo", "o/r", "--no-live", "--json",
+                   "--record", str(_flood_record(tmp_path))]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert seen == [False]
+    assert summary["queue_starved"] is False
+    assert summary["starved"] == 0
+    assert summary["queue"] == "CI: UNKNOWN (the queue was not read)"
+    assert summary["open_prs"] == 1
+    # A merely-PENDING context is LATE, not absent: no repair, no record (the
+    # pre-#9115 behaviour this flag restores exactly).
+    assert summary["prs"] == []
 
 
 def test_installer_armed_by_default(tmp_path):

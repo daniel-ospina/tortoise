@@ -1,0 +1,71 @@
+[
+  {
+    "case_id": "residence",
+    "question_type": "knowledge-update",
+    "question": "Where do I live?",
+    "question_date": "2023/06/01 (Thu) 10:00",
+    "answer": "I live in Porto.",
+    "old_claim": {
+      "text": "I live in Lisbon.",
+      "session_id": "residence-old",
+      "valid_from": "2023-03-02"
+    },
+    "new_claim": {
+      "text": "I live in Porto.",
+      "session_id": "residence-new",
+      "valid_from": "2023-05-20"
+    },
+    "haystack_session_ids": ["residence-old", "residence-new"],
+    "haystack_dates": ["2023/03/02 (Thu) 10:00", "2023/05/20 (Sat) 10:00"],
+    "haystack_sessions": [
+      [{"role": "user", "content": "I live in Lisbon."}],
+      [{"role": "user", "content": "I live in Porto."}]
+    ]
+  },
+  {
+    "case_id": "diet",
+    "question_type": "knowledge-update",
+    "question": "What diet am I on?",
+    "question_date": "2023/06/01 (Thu) 10:00",
+    "answer": "I eat a vegan diet.",
+    "old_claim": {
+      "text": "I eat a vegetarian diet.",
+      "session_id": "diet-old",
+      "valid_from": "2023-04-04"
+    },
+    "new_claim": {
+      "text": "I eat a vegan diet.",
+      "session_id": "diet-new",
+      "valid_from": "2023-05-26"
+    },
+    "haystack_session_ids": ["diet-old", "diet-new"],
+    "haystack_dates": ["2023/04/04 (Tue) 08:30", "2023/05/26 (Fri) 08:30"],
+    "haystack_sessions": [
+      [{"role": "user", "content": "I eat a vegetarian diet."}],
+      [{"role": "user", "content": "I eat a vegan diet."}]
+    ]
+  },
+  {
+    "case_id": "employer",
+    "question_type": "knowledge-update",
+    "question": "Who do I work for?",
+    "question_date": "2023/06/01 (Thu) 10:00",
+    "answer": "I work at Northwind Traders.",
+    "old_claim": {
+      "text": "I work at Contoso Ltd.",
+      "session_id": "employer-old",
+      "valid_from": "2023-01-09"
+    },
+    "new_claim": {
+      "text": "I work at Northwind Traders.",
+      "session_id": "employer-new",
+      "valid_from": "2023-05-15"
+    },
+    "haystack_session_ids": ["employer-old", "employer-new"],
+    "haystack_dates": ["2023/01/09 (Mon) 09:15", "2023/05/15 (Mon) 09:15"],
+    "haystack_sessions": [
+      [{"role": "user", "content": "I work at Contoso Ltd."}],
+      [{"role": "user", "content": "I work at Northwind Traders."}]
+    ]
+  }
+]

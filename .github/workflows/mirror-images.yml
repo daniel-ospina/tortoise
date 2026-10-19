@@ -33,6 +33,13 @@ on:
   schedule:
     - cron: "17 4 * * *"
 
+# Bookkeeping, not a merge gate: a nightly mirror of pinned images. One group,
+# never cancelling — a cancel midway can leave a tag pushed but untagged, and
+# the next scheduled run re-mirrors anyway, so waiting costs nothing.
+concurrency:
+  group: mirror-images
+  cancel-in-progress: false
+
 permissions:
   contents: read
   packages: write
