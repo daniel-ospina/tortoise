@@ -2293,6 +2293,20 @@ class TestIngestCorpusEventKind5475:
             "false, `link_source_to_entity`'s `sourceKind` on BOTH shapes) — "
             "the gate is per CONNECTOR CALL SITE, not at the seam — so the "
             "scope note must keep naming them as writers that never meet a door")
+        # ...and it must state the SECOND sink's exposure, because the narrow
+        # "journal-less" framing is the one that got this note wrong: a fixer
+        # mirroring `apply`'s `if not _journal_backed: refuse` leaves the
+        # journal-backed half open while every literal above still passes.
+        # Matched on a WHITESPACE-NORMALISED copy: the docstring wraps at 79
+        # columns, so a literal spanning a line break is not a substring of the
+        # raw text (this assertion red-ed on its first run for exactly that
+        # reason, against a note that already said "both shapes").
+        flat = " ".join(ungated.split())
+        assert "both shapes" in flat, (
+            "`link_source_to_entity` has no `_journal_backed` check at all, so "
+            "it widens on both shapes — a note that scopes it to a journal-less "
+            "projection understates the gap and sends the next fix after the "
+            "wrong half")
         assert "NOT closed" in ungated, (
             "the scope note must say plainly that these gaps are not closed — "
             "a sink named under an implied closure is what a lane acts on next")

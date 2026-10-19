@@ -144,12 +144,15 @@ read the set before, perform ONE write, read it after.
      journal-backed half open — which is why the pin below carries a
      journal-backed case as well as the journal-less ones.
 
-   The five IN-REPO connectors no longer take either path: `#9068` gates each
-   batch through `connectors._gate_kinds` before its first ``apply`` (see
-   `docs/EXPANSION_PACKS.md`), so what survives here is the SEAM, not the
-   shipped connectors. The fix must reuse `pack_state`'s ONE read core rather
-   than re-deriving "records ∪ data" a second time (that re-derivation is the
-   drift `graph_installed_namespaces` exists to prevent). **XFAIL.**
+   The five IN-REPO connectors no longer take either path **ungated**: `#9068`
+   gates each batch through `connectors._gate_kinds` before its first ``apply``
+   (see `docs/EXPANSION_PACKS.md`), and `github`'s own link call
+   (`connectors/github.py` passes the event record's ``sourceKind``) is covered
+   because that value rides the gated batch. So what survives here is the
+   SEAM, not the shipped connectors. The fix must reuse `pack_state`'s ONE read
+   core rather than re-deriving "records ∪ data" a second time (that
+   re-derivation is the drift `graph_installed_namespaces` exists to prevent).
+   **XFAIL.**
 
 **Closed AT THIS HEAD, so no longer pinned as a widening** — `#9068` itself
 resolved residual 1 without a pipeline-model change: the reader no longer mines

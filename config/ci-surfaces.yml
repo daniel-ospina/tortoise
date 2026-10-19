@@ -5737,9 +5737,10 @@ durations:
   # parametrisation (the residual-2 XFAIL is parametrised over the projection's
   # TWO ungated sinks × the shapes they are open on — `apply` journal-less, and
   # `link_source_to_entity` journal-less AND journal-backed), 3 xfail cases; measured 147.65 s on this host, 166.0 s in the
-  # authoring run, hence the weight below. The two heavy rows are the pins
-  # themselves (the SDK fixture builds a store per test, twice); the inventory
-  # tests are AST walks over `tortoise/**` and cost ~1 s together. Not moved into
+  # authoring run, hence the weight below. The three heavy cases are the pins
+  # themselves (two stores on the journal-less fixture, one on the journal-backed
+  # one); the inventory tests are AST walks over `tortoise/**` and cost ~1 s
+  # together. Not moved into
   # `slow_files`: 166 s is far under the 360 s bound the watchdog pin derives, and
   # `slow_file_issues` has no duration rule.
   test_9068_pack_gate_residuals.py: 166.0
