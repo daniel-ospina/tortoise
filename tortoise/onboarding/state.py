@@ -412,14 +412,37 @@ def onboarding_write_scope(reason: str = ONBOARDING_WRITE_SCOPE):
     not by replay.
 
     **Why a declaration at all.** ``#9079`` closes the raw guarded handle
-    (``proj.g.query``) to an UNDECLARED mutating statement. Every onboarding
-    write funnels through :func:`_run`, so this scope is the single point that
-    declares the lane — the same shape the SDK's own live doors use
+    (``proj.g.query``) to an UNDECLARED mutating statement. Every statement
+    this package issues **through** :func:`_run` (and ``seed._run``) runs
+    inside this declaration, so gating the handle cannot silently disable the
+    lane — the same shape the SDK's own live doors use
     (``_live_write_scope("create_point")`` and friends). They journal first
     and then declare; this lane does not journal first because it has no
     record to append, so the declaration IS the whole of its authorization —
     which is exactly why it has to be explicit and named rather than inherited
     from a handle that happens to be unguarded.
+
+    ⚠️ **What this scope does NOT cover — the ``:OnboardingState`` CREATION
+    writes.** Do not read the paragraph above as "the ``onboarding`` class is
+    fully declared": it is not. Five call sites build their statement with
+    :func:`eager_init_query` and execute it on
+    ``proj.db.select_graph(<graph>)`` — escape **(3)** of the guard's own
+    three-escape inventory (``tortoise/projection/__init__.py``, *THE RESIDUAL
+    IS THREE ESCAPES*) — so they reach neither :func:`_run` nor this scope:
+
+    * ``tortoise/sdk.py::org_create`` (the SDK's org-create lane),
+    * ``tortoise/hosted_api.py::provision_tenant`` (the tenant-provision mint),
+    * ``tortoise/hosted_api.py::register_user`` — TWO sites (the self-service
+      register lane and its Supabase-mode arm),
+    * ``tortoise/hosted_api.py::_eager_provision_org_graph``.
+
+    They keep working after ``#9079`` precisely *because* they sit below the
+    handle, so the conclusion above still holds — gating the handle cannot
+    disable onboarding. But those writes are still **unjournalled AND
+    undeclared**, the one part of this class this increment does not move, and
+    they are filed as their own residual (**#9157**) rather than implied
+    closed here. A lane doing the §17.1 door inventory must not close escape
+    (3) believing onboarding is covered.
 
     ⛔ **NOT A SWALLOW, and nothing here may become one.** This does not catch
     ``DirectCacheWriteRefused``: the callers are fail-open
@@ -446,12 +469,16 @@ def _run(graph: Any, cypher: str, params: dict[str, Any] | None = None):
     raises a ResponseError (never a TypeError), so the fallback only fires
     on a signature mismatch.
 
-    §17.1 (#9121): every statement runs inside
+    §17.1 (#9121): every statement THIS function issues runs inside
     :func:`onboarding_write_scope` — the lane DECLARES itself instead of
     relying on a door staying open. That is the whole of the previous
     rationale ("through the raw handle, which #7951 records as the still-open
     residual") replaced: the residual is ``#9079``'s to close, and this lane is
-    declared so closing it cannot silently disable onboarding. The declaration
+    declared so closing it cannot silently disable onboarding. What this
+    declaration does NOT reach is stated on its own docstring (⚠️ the five
+    ``eager_init_query()`` call sites, which create ``:OnboardingState`` on
+    ``proj.db.select_graph(...)`` — escape (3), filed as ``#9157``); "every
+    onboarding write is declared" is a claim this increment does not make. The declaration
     is unconditional (it also covers reads, which pass the guard anyway)
     deliberately: gating it on a write-classifier would couple this seam to
     whichever classifier the guard ends up using, and that coupling is how a

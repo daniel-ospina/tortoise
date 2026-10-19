@@ -207,7 +207,10 @@ its edges), and a test pins that scope.
   **not** rebuilt-from-zero-safe and rides the `#4641` rescue instead, is in that docstring). So
   gating the handle (`#9079`) does not disable onboarding, and those two entries are no longer
   UNDECLARED doors — they are declared live-metadata lanes. Their writes are still unjournalled: what
-  changed is that the lane says so, in one named place.
+  changed is that the lane says so, in one named place. **STILL OPEN on this entry:** the five
+  `eager_init_query()` call sites that CREATE `:OnboardingState` execute on
+  `proj.db.select_graph(...)` (escape (3)) and stay unjournalled AND undeclared (#9157) — the
+  declaration covers the statements issued through the two `_run` seams, not that seam.
   **LANDED SO FAR: the `delete_point` DOOR (increment 4a)** —
   `docs/plans/2026-10-18-7951-delete-point-outbox.md`: the `EntityMutated` op=delete record is appended
   BEFORE the `DETACH DELETE`, and a failed append refuses the delete (previously an unrecorded destroy

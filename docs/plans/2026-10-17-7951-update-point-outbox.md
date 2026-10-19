@@ -127,6 +127,17 @@ each docstring rather than implied.
   first: `_POINT_DENY` drops the `#2199` baseline fields on replay).
 - **4** — the remaining raw-handle doors (`_sync_tags`, `_link_source`, deletes, `onboarding/state.py`,
   `onboarding/seed.py`, `hosted_api.py`, `__main__.py`, connectors), then gate the handle.
+  **LANDED SO FAR: the `onboarding` seams are DECLARED (#9121)** —
+  `onboarding/state.py::_run` and `onboarding/seed.py::_run` no longer rest on the handle being open:
+  every statement they issue runs inside `onboarding.state.onboarding_write_scope()` (a named
+  `_live_write_scope`, §17.1 shape (a); the metadata-vs-journal argument, including why this class is
+  **not** rebuilt-from-zero-safe and rides the `#4641` rescue instead, is in that docstring). So
+  gating the handle (`#9079`) does not disable onboarding, and those two entries are no longer
+  UNDECLARED doors — they are declared live-metadata lanes. Their writes are still unjournalled: what
+  changed is that the lane says what it is. **STILL OPEN on this entry:** the `:OnboardingState`
+  CREATION writes are NOT covered — five `eager_init_query()` call sites execute on
+  `proj.db.select_graph(...)` (escape (3)) and stay unjournalled and undeclared (#9157), so do not
+  close escape (3) believing the onboarding class is fully declared.
   **LANDED SO FAR: the `delete_point` DOOR (increment 4a)** —
   `docs/plans/2026-10-18-7951-delete-point-outbox.md`: the append is the commit point of the hard
   delete, so a delete the journal never recorded cannot be performed. **STILL OPEN:** `delete_entity`

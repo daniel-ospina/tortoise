@@ -3148,6 +3148,25 @@ def _journal_safe_params(params, cypher=None):
 #   * `_replay_write_scope()` — opened by the replay engines (`rebuild`,
 #     `recover_from_log`, `backup.restore`, `_cmd_reconcile`), whose records
 #     came FROM the journal and must not journal again.
+#   * `_live_write_scope(...)` — ALSO opened by a DECLARED METADATA lane:
+#     `onboarding/state.py::_run` and `onboarding/seed.py::_run` (via
+#     `onboarding.state.onboarding_write_scope()`, `#9121`) take this scope
+#     and append NOTHING, because there is no journal record to append. The
+#     onboarding graph (`:OnboardingState` / `:OnboardingStep` /
+#     `COMPLETED_STEP`) is org-level FLOW metadata, not the projection of a
+#     journalled document or point event, so no event exists whose fold would
+#     produce it; the class rides the `#4641` sidecar rescue (pre-wipe capture,
+#     post-wipe restore, post-restore verification that reports a gap as a
+#     LOSS) rather than replay. The reason string carries that class, so the
+#     declaration says what it is instead of borrowing the journal-first
+#     rationale above. ⚠️ Consequences for a reader of this block: the
+#     "append first, fold second" invariant describes the SDK's live doors,
+#     NOT every opener of the scope — and the onboarding class is not fully
+#     declared by it: the five `eager_init_query()` call sites that CREATE
+#     `:OnboardingState` execute on `proj.db.select_graph(...)` — escape (3)
+#     below — and remain unjournalled AND undeclared (`#9157`). Journalling
+#     the class is the larger, §2.0-correct increment and is filed separately
+#     (`#9144`), not assumed by this scope.
 #
 # The declaration is not a bypass flag: it is a per-call `with` block (no
 # instance attribute, constructor argument or env var can set it), and the
@@ -3221,7 +3240,13 @@ def _cache_write_authorized(reason: str):
 
 
 def _live_write_scope(reason: str = "live-door"):
-    """The live doors' scope: journal appended first, then the fold."""
+    """The live doors' scope: journal appended first, then the fold.
+
+    Also opened by the DECLARED METADATA lanes (`#9121`: the onboarding
+    writers, `onboarding/state.py::_run` / `onboarding/seed.py::_run`), which
+    append nothing — the opener inventory above says why, and names the seam
+    the declaration does NOT cover (`#9157`).
+    """
     return _cache_write_authorized(reason)
 
 

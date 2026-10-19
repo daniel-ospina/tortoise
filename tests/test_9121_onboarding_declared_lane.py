@@ -5,12 +5,21 @@
 (`proj.g.query`) because `#7951` had closed only the public
 `FalkorProjection.query` lane, and the handle was still open. That rationale
 EXPIRES with `#9079` — the child that closes the handle to an *undeclared*
-mutating statement. When it lands, every onboarding write in this repo runs
-through `state._run`, and the callers are all fail-open
-(`hosted_api._maybe_apply_completion` -> `except Exception: return False`,
-`mcp_server._maybe_onboarding_auto_complete` -> `return`,
+mutating statement. When it lands, every onboarding statement issued THROUGH
+`state._run` / `seed._run` would be refused were it undeclared, and the callers
+are all fail-open (`hosted_api._maybe_apply_completion` -> `except Exception:
+return False`, `mcp_server._maybe_onboarding_auto_complete` -> `return`,
 `selfhost.ensure_selfhost_onboarding_once` best-effort), so a refusal there is
 SILENT: an org simply never reaches `complete`.
+
+⚠️ That is NOT the whole class, and this suite does not claim it is: the five
+`eager_init_query()` call sites that CREATE `:OnboardingState` execute their
+statement on `proj.db.select_graph(...)` — escape (3) of the guard's own
+inventory — so they meet neither `_run` nor the declaration. They are
+unjournalled AND undeclared (residual named on `onboarding_write_scope`'s
+docstring, filed as #9157), and `test_the_eager_init_seam_is_undeclared...` /
+`test_the_declaration_note_names_the_seam_it_does_not_cover` pin both the
+reality and the note, so the narrowing is measured rather than prose.
 
 So this suite pins the chosen shape — **(a) the declared lane**: the write runs
 inside a named `_live_write_scope` (`onboarding.state.onboarding_write_scope`,
@@ -23,7 +32,7 @@ layer ahead of the child:
 
 — the same predicate `FalkorProjection.apply` and `FalkorProjection.query`
 already enforce, and the same conservative `_statement_writes` classifier. A
-lanes that still reached around the guard would fail here today, before the
+lane that still reached around the guard would fail here today, before the
 child lands, instead of silently disabling onboarding after it.
 
 ⛔ What this suite does NOT do: it does not make `_run` tolerate a refusal. A
@@ -34,7 +43,10 @@ cosmetic.
 """
 from __future__ import annotations
 
+import ast
 import contextlib
+import inspect
+from pathlib import Path
 
 import pytest
 
@@ -262,4 +274,225 @@ def test_without_the_declaration_the_lane_is_refused_and_the_org_never_completes
     node = _os.read_onboarding_node(proj, "org9121-red")
     assert node is None or node.get("status") != _os.STATUS_COMPLETE, (
         "the org reached complete without its write being declared"
+    )
+
+
+# ── the residual the declaration does NOT cover (#9157) ──────────────────
+#
+# The review of this PR found the docstrings making a universal that five call
+# sites disprove: the `:OnboardingState` CREATION writes are built by
+# `eager_init_query()` and executed on `proj.db.select_graph(<graph>)` —
+# escape (3) — so they meet neither `state._run` nor the declaration. The two
+# tests below keep the note honest: one measures the seam, one reads both the
+# note and the guard's own inventory.
+
+_REPO = Path(__file__).resolve().parents[1]
+
+#: (file, enclosing function) -> how many `eager_init_query()` statements that
+#: function issues. The COUNT is part of the pin: a sixth lane appearing
+#: without the residual being re-read is exactly the drift this records.
+_ESCAPE3_CALL_SITES = {
+    ("tortoise/sdk.py", "org_create"): 1,
+    ("tortoise/hosted_api.py", "provision_tenant"): 1,
+    ("tortoise/hosted_api.py", "register_user"): 2,
+    ("tortoise/hosted_api.py", "_eager_provision_org_graph"): 1,
+}
+
+
+def _bound_names(target: ast.AST) -> set[str]:
+    if isinstance(target, ast.Name):
+        return {target.id}
+    if isinstance(target, (ast.Tuple, ast.List)):
+        out: set[str] = set()
+        for element in target.elts:
+            out |= _bound_names(element)
+        return out
+    return set()
+
+
+def _eager_init_sites():
+    """(file, enclosing function, names bound, enclosing node) per call site."""
+    sites = []
+    for rel in ("tortoise/sdk.py", "tortoise/hosted_api.py"):
+        tree = ast.parse((_REPO / rel).read_text())
+        parents = {
+            child: node
+            for node in ast.walk(tree)
+            for child in ast.iter_child_nodes(node)
+        }
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Call)
+                and getattr(node.value.func, "attr", None) == "eager_init_query"
+            ):
+                continue
+            bound: set[str] = set()
+            for target in node.targets:
+                bound |= _bound_names(target)
+            enclosing = node
+            while enclosing is not None and not isinstance(
+                    enclosing, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                enclosing = parents.get(enclosing)
+            assert enclosing is not None, (
+                f"{rel}:{node.lineno} runs eager_init_query outside a function "
+                "— this inventory would silently skip it"
+            )
+            sites.append((rel, enclosing.name, bound, enclosing))
+    return sites
+
+
+def test_the_eager_init_seam_is_undeclared_on_the_select_graph_escape(
+        sdk_with_journal, monkeypatch):
+    """The residual, MEASURED — the note claims something; this reads reality.
+
+    The statement `eager_init_query()` builds is a MUTATING one, and the five
+    call sites issue it on `proj.db.select_graph(<graph>)`. The probe records
+    the authorization in flight at the moment it ran: `None` — i.e. the write
+    is unjournalled AND undeclared, so "every onboarding write is declared"
+    would be false and the declaration's note must not say it (pinned by
+    `test_the_declaration_note_names_the_seam_it_does_not_cover`).
+
+    Coupling, deliberately: if a later increment declares this seam (the honest
+    fix, #9157), THIS test turns RED and the note + the guard's inventory have
+    to be updated in the same change instead of drifting back.
+    """
+    sdk = sdk_with_journal
+    proj = sdk._get_proj()
+    assert proj._journal_backed is True, (
+        "the fixture did not arm §17.1 — the probe would be vacuous"
+    )
+    org_graph = proj.db.select_graph(proj._graph_name)
+    cypher, params = _os.eager_init_query(
+        "CREATE (:TeamMeta {name:$name, created:$now})",
+        {"name": "escape3", "now": "2026-10-19"},
+        org_id="org9121-escape3", fork=_os.FORK_SELF)
+    assert _statement_writes(cypher), (
+        "the eager-init statement is not classified as a write, so the probe "
+        "below would prove nothing"
+    )
+
+    seen: list[tuple[str | None, bool]] = []
+    inner = org_graph.query
+
+    def probe(statement, params=None, **kwargs):
+        seen.append((_CACHE_WRITE_AUTHORIZED.get(), _statement_writes(statement)))
+        return inner(statement, params=params, **kwargs)
+
+    monkeypatch.setattr(org_graph, "query", probe)
+    org_graph.query(cypher, params=params)
+
+    assert seen == [(None, True)], (
+        "the eager-init CREATE did not run undeclared: "
+        f"{seen!r}. If the seam is now declared, remove the residual from "
+        "`onboarding_write_scope`'s docstring and from the guard's inventory "
+        "(#9157) in the same change."
+    )
+
+
+def test_every_eager_init_site_issues_its_statement_on_the_escape_three_handle():
+    """The five sites the declaration's note names, located from the AST.
+
+    Pins the LIST, not just the prose: each function that binds a statement
+    from `eager_init_query(...)` must issue it on a name bound from
+    `.select_graph(...)` (escape (3)) rather than through `state._run`/`seed
+    ._run`. A site that migrates to the declared lane fails here, so the
+    residual cannot be closed in code while the docstrings still name it.
+    """
+    located: dict[tuple[str, str], int] = {}
+    for rel, fn_name, bound, enclosing in _eager_init_sites():
+        key = (rel, fn_name)
+        located[key] = located.get(key, 0) + 1
+
+        select_graph = [
+            call for call in ast.walk(enclosing)
+            if isinstance(call, ast.Call)
+            and getattr(call.func, "attr", None) == "select_graph"
+        ]
+        issued = [
+            call for call in ast.walk(enclosing)
+            if isinstance(call, ast.Call)
+            and getattr(call.func, "attr", None) == "query"
+            and call.args
+            and isinstance(call.args[0], ast.Name)
+            and call.args[0].id in bound
+        ]
+        assert select_graph, (
+            f"{rel}::{fn_name} issues an eager_init_query statement but builds "
+            "no `select_graph(...)` handle — the residual moved, so the "
+            "declaration's note is stale"
+        )
+        assert issued, (
+            f"{rel}::{fn_name} binds the eager_init_query statement to {bound} "
+            "but never issues it through that name — the inventory drifted"
+        )
+
+    assert located == _ESCAPE3_CALL_SITES, (
+        "the escape-(3) eager-init inventory changed. Update the list, then "
+        "`onboarding_write_scope`'s note and the guard's inventory "
+        f"(tortoise/projection/__init__.py) together. located={located!r}"
+    )
+
+
+def test_the_declaration_note_names_the_seam_it_does_not_cover():
+    """The note's own wording: no universal it cannot keep, and the uncovered
+    seam named where a §17.1 door inventory is read.
+
+    RED on the pre-fix docstring, which stated *"Every onboarding write funnels
+    through `_run`, so this scope is the single point that declares the lane"* —
+    the five `eager_init_query()` sites above disprove it.
+    """
+    note = " ".join((inspect.getdoc(_os.onboarding_write_scope) or "").split())
+
+    assert "single point that declares the lane" not in note, (
+        "the declaration still claims to be the single point that declares the "
+        "onboarding lane — five `eager_init_query()` call sites issue the "
+        "`:OnboardingState` CREATE on `proj.db.select_graph(...)` instead"
+    )
+    assert "Every onboarding write funnels through" not in note, (
+        "the declaration still states the disproved universal"
+    )
+    for expected in ("eager_init_query", "select_graph", "#9157"):
+        assert expected in note, (
+            f"the declaration's note does not name the uncovered seam "
+            f"({expected!r}) — a lane reading only this docstring would "
+            "conclude the onboarding class is fully declared"
+        )
+    # And the narrowing is scoped to the seams that DO declare themselves: the
+    # note must still make the load-bearing claim that motivated the change.
+    assert "through" in note and "_run" in note, (
+        "the note no longer says which seams ARE declared, which is the half "
+        "the declaration exists for"
+    )
+    assert "NOT built-from-zero-safe" in note or "NOT rebuilt-from-zero-safe" in note, (
+        "the durability argument (the #4641 rescue, not replay) was dropped "
+        "while narrowing the universal — it is load-bearing for shape (a)"
+    )
+
+
+def test_the_guards_inventory_lists_this_lane_among_the_live_scope_openers():
+    """`tortoise/projection/__init__.py` is where the invariant lives.
+
+    It enumerates who may open `_live_write_scope`, and it is what a §17.1
+    door inventory is read against. It must therefore list the declared
+    metadata lane (which appends nothing) — and, in the same place, the seam
+    the declaration does NOT cover. Otherwise the next reader concludes the
+    onboarding scope is a §17.1 violation, or that "only journal-first doors
+    open this" and re-opens the silent refusal #9121 exists to prevent.
+    """
+    flat = " ".join((_REPO / "tortoise/projection/__init__.py").read_text().split())
+
+    assert "onboarding/state.py::_run" in flat, (
+        "the guard's opener inventory does not name the onboarding declaration"
+    )
+    assert "onboarding/seed.py::_run" in flat, (
+        "the guard's opener inventory does not name the seed seam"
+    )
+    assert "appends NOTHING" in flat or "append nothing" in flat, (
+        "the guard's inventory still reads as 'every opener appends first' — "
+        "which this lane does not do"
+    )
+    assert "#9157" in flat, (
+        "the guard's inventory does not name the escape-(3) eager-init seam the "
+        "declaration does not cover"
     )
