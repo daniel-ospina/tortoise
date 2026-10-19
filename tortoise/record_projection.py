@@ -55,6 +55,23 @@ WHAT THIS MODULE DELIBERATELY IS NOT
 * **No migration-safety apparatus.** Owner scope ruling 2026-10-10: the only
   customer is the dogfood instance. No dual-write, backfill, cutover or
   rollback-parity surface appears here, and none should be added.
+
+TENANCY IS A PER-CALL ARGUMENT, NEVER AMBIENT
+============================================
+Every layer row is keyed by `(org_id, graph_id)` with a foreign key to
+`public.graphs`. Both are **required keyword arguments** of every entry point
+here (:func:`mutations_for`, :func:`replay_plan`, :func:`replay`): there is
+deliberately no module-level default, no ContextVar and no environment fallback
+at this layer.
+
+The reason is the failure mode, not taste. The hosted lane builds one SDK per
+tenant graph and its capture executor is process-wide, so a tenant resolved
+from anything process-global files tenant A's rows under tenant B **with no
+error** — the row is well-formed and the FK only checks that the graph exists.
+An environment pair is not a mitigation for that: env is process-global, so it
+is the same single value for every tenant the process serves. A caller that
+cannot name its tenant must refuse; anything wiring a live caller (`#9188`)
+resolves the pair from the request it is serving and passes it in.
 """
 
 from __future__ import annotations
