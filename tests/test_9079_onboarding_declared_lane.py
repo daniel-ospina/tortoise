@@ -568,9 +568,11 @@ def test_the_selfhost_onboarding_lane_reaches_the_graph_with_the_guard_armed(
     never-raise, so a refusal there is as silent as the hosted one.
 
     The pre-existing `#7951` pin for this lane
-    (`test_the_selfhost_onboarding_lane_writes_on_a_journal_backed_proj`) goes
-    through the PUBLIC `FalkorProjection.query` lane, so it cannot see a
-    third-door refusal at all — this one does.
+    (`test_the_selfhost_onboarding_lane_writes_on_a_journal_backed_proj`) reaches
+    the graph through the SAME raw handle (`proj.g`, the third door), so once
+    `#9124` arms that handle it will be refused too — it cannot see a refusal
+    today only because nothing guards that door yet. This pin differs in WHAT it
+    asserts (the walk completes with the guard armed), not in which lane it takes.
     """
     from tortoise.onboarding import selfhost
     from tortoise.onboarding import state as _os

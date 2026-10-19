@@ -456,11 +456,14 @@ def test_the_selfhost_onboarding_lane_writes_on_a_journal_backed_proj(
     RED before the fix: the create-on-write MERGE raises
     `DirectCacheWriteRefused`.
 
-    ⚠️ This pin exercises the PUBLIC raw-query lane, so it cannot see a THIRD-door
-    (`proj.g` handle) refusal at all. The armed-handle version of this lane is
+    ⚠️ This pin dispatches through the RAW HANDLE (`proj.g`, the THIRD door), not
+    the public `FalkorProjection.query` lane: `state._run` prefers `graph.g` when
+    the graph exposes one, so this pin will begin refusing/failing the moment
+    `#9124` arms that handle. The armed-handle version of the same path is
     `tests/test_9079_onboarding_declared_lane.py
     ::test_the_selfhost_onboarding_lane_reaches_the_graph_with_the_guard_armed`
-    (`#9121`); keep both — this one pins the public lane, that one the handle.
+    (`#9121`). Nothing in this file pins the public raw-query lane for onboarding,
+    because `state._run` no longer routes through it.
     """
     from tortoise.onboarding import selfhost
     from tortoise.onboarding import state as _os
