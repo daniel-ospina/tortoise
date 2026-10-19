@@ -8157,6 +8157,13 @@ def _graph_unavailable() -> HTTPException:
 async def _graph_offload(fn, *, op: str, timeout: float | None = None):
     """#3773: run ONE synchronous DATA-PLANE graph helper off the event loop.
 
+    REGISTRY reads belong here too (#3718): ``_get_registry()`` uses the
+    existing db connection rather than opening a second one, so a registry
+    attach/query carries the same cold-start and blocking shape this lane's
+    bound exists to cover. Do NOT route them to ``_cp_offload``'s default
+    ``auth`` pool — that is the PostgREST lane's seam, and a bound miss there
+    returns the sign-in 503 copy.
+
     Thin hosted-side wrapper over the #3498 seam (``_cp_offload`` ->
     ``monitoring.run_control_plane_call``) on the dedicated ``graph`` pool.
     The off-loaded unit is a graph helper (``_data_sdk``'s connect / embedded
@@ -18146,21 +18153,15 @@ async def _user_memberships(user_id: str) -> list[dict]:
         return await _cp_offload(
             lambda: _sb_memberships(get_control_plane(), user_id),
             op="user_memberships")
-    # #3718: the registry lane is the same blocking shape — the query above is
-    # sync FalkorDB socket I/O, and this helper is the FIRST read the org
-    # switcher (`GET /v1/organizations`) makes on every app load. Off the loop
-    # through the same #3498 seam the Supabase lane already uses.
-    return await _cp_offload(
-        lambda: _memberships_from_registry(user_id), op="user_memberships")
-
-
-def _memberships_from_registry(user_id: str) -> list[dict]:
-    """The selfhost registry membership read (#3718: blocking FalkorDB I/O).
-
-    Split out of ``_user_memberships`` so the read can be handed to the #3498
-    control-plane seam as ONE sync unit; the async wrapper keeps the Supabase
-    branch and the callers unchanged.
-    """
+    # #3718: the registry lane stays INLINE and declared residual (#2446), for
+    # the same reason `_membership_role` does — this is the auth path's
+    # registry Membership read, the class where off-loading produced a WRONG
+    # ANSWER (an EMPTY member list in
+    # `test_invites_http.py::TestExpiredInviteReMint`), i.e. thread-dependence
+    # that is tracked debt rather than a silent lock. The switcher's LISTING
+    # half is burned down instead (`list_my_orgs`); this read is not, on
+    # purpose, and leaving it out of
+    # `_KNOWN_INLINE_HELPER_RESIDUAL` would hide that.
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
         "MATCH (m:Membership {user_id:$uid, status:'active'}) "
@@ -18208,6 +18209,12 @@ def _graph_list_for(org_id: str) -> list[dict]:
     return _make_sdk(namespace="registry").graph_list(org_id)
 
 
+#: Orgs per ``_graph_offload`` submission when the switcher lists graphs.
+#: Each submission gets ONE wait bound, so the fan-out inside it is capped
+#: rather than left at "every org the user belongs to" — see the chunking
+#: rationale in ``list_my_orgs`` (#3718).
+_GRAPH_LIST_OFFLOAD_CHUNK = 8
+
 async def _org_node(org_id: str) -> dict | None:
     """Org node/properties for session endpoints (E5/E6/E7/E8).
 
@@ -18226,16 +18233,12 @@ async def _org_node(org_id: str) -> dict | None:
         # endpoints, and by _require_owner_admin's suspension-stamp check).
         return await _cp_offload(
             lambda: _sb_org(get_control_plane(), org_id), op="org_by_id")
-    # #3718: the registry lane is the same blocking read — off the loop. The
-    # switcher calls this ONCE PER MEMBERSHIP, so on the inline shape a user
-    # with N orgs put N registry round trips on the serving thread before the
-    # handler had answered anything.
-    return await _cp_offload(
-        lambda: _org_row_from_registry(org_id), op="org_by_id")
-
-
-def _org_row_from_registry(org_id: str) -> dict | None:
-    """The selfhost registry Team read (#3718: blocking FalkorDB I/O)."""
+    # #3718: the registry lane stays INLINE and declared residual (#2446) — the
+    # same auth-path registry read class as `_membership_role`, where
+    # off-loading produced a WRONG ANSWER (an EMPTY member list). The switcher
+    # therefore still issues N of these on the loop; its LISTING half is the
+    # part burned down (see `list_my_orgs`). Removing this from
+    # `_KNOWN_INLINE_HELPER_RESIDUAL` without burning it down would hide it.
     sdk = _registry_anchor()
     rows = sdk._get_registry().query(
         "MATCH (t:Team {id:$id}) RETURN properties(t)",
@@ -18320,16 +18323,26 @@ async def list_my_orgs(user: dict = Depends(get_current_user)):  # noqa: B008
     # Suspended rows are excluded from graph resolution — they cannot be
     # selected anyway, and graph_list must not observe the suspension stamp.
     # #3718: the listing is a blocking registry/PostgREST read, and it used to
-    # run per membership ON the loop. ONE hand-off covers every healthy org,
-    # so the switcher costs one off-loop call instead of N round trips on the
-    # thread that serves every concurrent request.
+    # run per membership ON the loop. It now costs one OFF-LOOP submission per
+    # chunk — ceil(N/8) submissions for N healthy orgs. (The membership scan and
+    # the per-org Team read stay inline under #2446; see `_user_memberships`.)
+    #
+    # CHUNKED, not one batch over every org: nothing caps how many active
+    # Memberships a user holds, and each submission gets ONE wait bound
+    # (``graph_offload_timeout_s()`` = ``probe_setup_timeout()`` + margin). N
+    # sequential reads submitted together consume that budget jointly, so a
+    # large-but-healthy fan-out would cross it — and a bound miss abandons a
+    # worker that keeps holding its graph-pool slot until it returns (CPython
+    # #87185). Chunks keep each submission's fan-out small and predictable.
     healthy = [m["org_id"] for m, org in resolved
                if org.get("suspended_at") is None]
     graphs_by_org: dict[str, list[dict]] = {}
-    if healthy:
-        graphs_by_org = await _cp_offload(
-            lambda: {org_id: _graph_list_for(org_id) for org_id in healthy},
-            op="graph_list")
+    for start in range(0, len(healthy), _GRAPH_LIST_OFFLOAD_CHUNK):
+        chunk = healthy[start:start + _GRAPH_LIST_OFFLOAD_CHUNK]
+        graphs_by_org.update(await _graph_offload(
+            lambda chunk=chunk: {
+                org_id: _graph_list_for(org_id) for org_id in chunk},
+            op="graph_list"))
 
     out = []
     for m, org in resolved:
