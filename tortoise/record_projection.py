@@ -454,7 +454,19 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
         # a stamp whose `PointAdded` sits outside the segment is the ordinary
         # case, not a corner. A patch stores the §17.5-PRIMARY `batch_id` and is
         # a 0-row no-op when the point is genuinely absent — the fold's verdict.
-        NodePatch(Node("point", "Point", "id"), key_from="id"),
+        #
+        # ⚠️ An explicit allow-list, NOT `from_payload=None`. The producer emits a
+        # WIDER flat payload (`sdk._emit_batch_id_record`: `content_hash`,
+        # `mitigates_operator_id`, `mitigation_strength`), and pass-2b restores the
+        # stamp with `SET p.batch_id = $bid` and nothing else — so
+        # `mitigates_operator_id` would land in `point.props` as a key no journal
+        # replay ever writes, and a record-sourced rebuild copies the tail verbatim
+        # (`cache_projection._props_from_row`). Same defect class as `agent_id`
+        # above (#9200 review, P2). `content_hash` is schema-refused and
+        # `mitigates_operator_id` is folded nowhere, so neither may pass;
+        # `mitigation_strength` is a real `public.point` column.
+        NodePatch(Node("point", "Point", "id"), key_from="id",
+                  from_payload=frozenset({"batch_id", "mitigation_strength"})),
     ),
     # ⚠️ `new_content` is the journal's own name for the revised `content`; it
     # is NOT a node property of that name, so it is renamed rather than written
@@ -1031,7 +1043,19 @@ def _key_value(node: Node, payload: Mapping[str, Any], key_from: str,
     # (the `EventAPI.add_document` shape: `id=doc_id`, no `url`) keys the node by
     # that id LIVE. The record must key the row the SAME way, or every ingested
     # document is refused and the record loses it (#9078).
-    if key_from == "url" and (not isinstance(value, str) or not value):
+    #
+    # ⚠️ The gate is ABSENCE (`key_from not in payload`), never unusability. A
+    # `url` that is PRESENT but unusable (`""`, `None`) means the producer named
+    # an identity it cannot express, and there are two ways to be wrong about it:
+    # resolving `id` while the *props* still carry the unusable `url` emits a row
+    # whose `node_key` and `url` column disagree — refused by the schema's own
+    # `chk_source_node_key_is_contract_key`, AFTER the `node_identity` insert has
+    # already run inside the caller's transaction — and silently repairing the
+    # column instead would store a `url` the producer never emitted, hiding its
+    # bug. Refuse here, where the record is known (this docstring's rule).
+    # Absence is the one shape that is a real producer: `add_document` emits `id`
+    # and no `url` at all.
+    if key_from == "url" and key_from not in payload:
         value = payload.get("id")
     if fallback is not None and (not isinstance(value, str) or not value):
         value = fallback.get(key_from)

@@ -1312,6 +1312,36 @@ def test_a_document_record_keys_the_source_by_its_id_like_the_fold_does():
     assert "doc_9078" in source_upserts[0].params
 
 
+def test_a_present_but_unusable_source_url_is_refused_not_silently_repaired():
+    """A `url` the producer cannot express is refused, never half-written.
+
+    The `url → id` fallback is gated on ABSENCE, not on unusability. When it
+    fired on a *present* but unusable `url`, the row was keyed from `id` while
+    its props still carried the unusable `url` — so the emitted statement said
+    `node_key = 'd1'` and `url = ''`/`NULL`, which the schema's own
+    `chk_source_node_key_is_contract_key` (`url IS NOT NULL AND node_key = url`)
+    refuses AFTER the `node_identity` insert has already run inside the caller's
+    transaction. The module's rule is to fail where the record is known
+    (#9200 review, P2).
+    """
+    for unusable in ("", None):
+        record = {"type": "DocumentCreated", "ts": "T", "id": "d1",
+                  "url": unusable, "title": "t"}
+        with pytest.raises(rp.RecordProjectionError, match="no usable 'url' key"):
+            rp.mutations_for(record, org_id="o", graph_id="g")
+
+    # ABSENCE is the shape a producer really emits (`add_document` sends `id`
+    # and no `url`), and it still projects — with the key column agreeing with
+    # the resolved key, which is the invariant the schema pins.
+    absent = {"type": "DocumentCreated", "ts": "T", "id": "d1", "title": "t"}
+    source = next(s for s in rp.mutations_for(absent, org_id="o", graph_id="g")
+                  if s.sql.startswith("INSERT INTO public.source"))
+    assert "url" in source.sql
+    assert list(source.params).count("d1") >= 2, (
+        f"node_key and the url column must both be the resolved key: {source.params}"
+    )
+
+
 # ── the two property-leak fixes (#9078 review: both had NO pin) ─────────────
 
 
@@ -1397,6 +1427,36 @@ def test_a_batch_id_stamp_patches_the_point_and_never_creates_it():
     assert "batch-1" in patches[0].params
     # `content_hash` is schema-refused (`props` CHECK) — dropped, never raised.
     assert "content_hash" not in patches[0].sql
+
+
+def test_a_batch_id_stamp_never_writes_the_mitigation_link_into_props():
+    """The mitigation path's stamp is FLAT and WIDER than the fold writes.
+
+    `_stamp_batch_id(mid, batch_id, mitigates_operator_id=…,
+    mitigation_strength=…)` → `_emit_batch_id_record` carries all four keys on
+    the envelope, while pass-2b restores the stamp with `SET p.batch_id = $bid`
+    and nothing else. With `from_payload=None` every flat key became a node
+    property, so `mitigates_operator_id` landed in `point.props` — a key no
+    journal replay writes, and a record-sourced rebuild copies the tail verbatim
+    (`cache_projection._props_from_row`), so the two rebuild paths diverged on
+    every stamped mitigation point. Same class as the `agent_id` leak
+    (#9200 review, P2); the allow-list is the fix, so both halves are asserted:
+    the real columns survive, the fold-less keys do not.
+    """
+    record = {"type": "BatchIdStamped", "ts": "T", "id": "m1",
+              "batch_id": "batch-9", "content_hash": "h1",
+              "mitigates_operator_id": "op-1", "mitigation_strength": 0.7}
+    patches = [s for s in rp.mutations_for(record, org_id="o", graph_id="g")
+               if s.sql.startswith("UPDATE public.point")]
+    assert patches, record
+    # Non-vacuity: the patch really writes the stamp, so 'absent' means dropped.
+    assert "batch_id = %s" in patches[0].sql
+    assert "batch-9" in patches[0].params
+    assert "mitigation_strength = %s" in patches[0].sql
+    tail = _props_tail([patches[0]])
+    assert "mitigates_operator_id" not in tail, tail
+    assert "op-1" not in tail, tail
+    assert "content_hash" not in tail, tail
 
 
 # ── the position watermark (#9187 P0: deleted here, restored) ───────────────
