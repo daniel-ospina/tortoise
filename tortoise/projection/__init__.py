@@ -3309,8 +3309,9 @@ def _journal_safe_params(params, cypher=None):
 # below anything a runtime signal is placed on.
 #
 # ⚠️ CLOSING (1) NEEDS THE WRITERS THAT LEGITIMATELY REACH IT TO DECLARE
-# THEMSELVES FIRST — and as of `#9079`'s declaration children, these are the
-# declared lanes, each with the reason stated at its own scope:
+# THEMSELVES FIRST. Below are the DECLARED lanes as of `#9079`'s declaration
+# children, each with the reason stated at its own scope — and, after them, the
+# writers that are still UNDECLARED and would be REFUSED if (1) closed today.
 #
 #   * `_live_write_scope` — the live doors (`TortoiseSDK._apply_and_journal`,
 #     `_doc_write`, `_create_entity`, `EventAPI._emit`, …): journal first, fold
@@ -3323,14 +3324,26 @@ def _journal_safe_params(params, cypher=None):
 #     metadata (`#9121`);
 #   * `tortoise/event_store.RECORD_LANE` — the event store (the change-feed log
 #     and its seq allocator): a declared CARVEOUT, not a projection and not the
-#     truth store — no journal record describes it (`#9079`);
+#     truth store — no journal record describes it (`#9079`, answering `#9208`).
+#
+# ⛔ STILL UNDECLARED — each would be REFUSED by (1) today:
+#
 #   * the SDK's structural-edge lane —
 #     `tortoise/projection/edges.py::_EdgeHandlers.create_edge` and its three
 #     typed wrappers (`create_owned_by` / `create_managed_by` /
 #     `create_authored_by`), reached by `TortoiseSDK.create_edge` — filed as
-#     `#9195` and NOT yet declared.
-#
-# ⚠️ AND ONE WRITER STILL UNDECLARED THAT THIS LIST MUST NOT OMIT:
+#     `#9195`;
+#   * the SDK's own write doors — the 5 public doors plus the `:Session` /
+#     `:Source` / `:Point` writers that never enter `_live_write_scope`
+#     (`#9206`), and `delete_point`, which appends its destruction record BEFORE
+#     a cache write it cannot guarantee (`#9207`);
+#   * the handle's non-Cypher verbs (`proj.g.execute_command("GRAPH.DELETE", …)`,
+#     `proj.g.delete()`) — `#9209`;
+#   * `rebuild_all`'s post-wipe SNAPSHOT-RESTORE legs (`:Batch`,
+#     `:Session` + `CONTAINS`, the onboarding state/steps/`onboards` edges,
+#     `:TeamMeta`, config entries), which the replay scope opened by this lane
+#     therefore AUTHORIZES although no record describes them — `#9210` owns
+#     narrowing that;
 # `FalkorProjection._ensure_indexes()` issues this package's largest block of
 # DDL through `proj.g` (`CREATE INDEX` / `DROP INDEX` / a full-text index and a
 # `MERGE (m:Meta …)`), and it declares nothing. Two of its call sites matter:
@@ -3347,11 +3360,16 @@ def _journal_safe_params(params, cypher=None):
 # shape the lanes above exist to prevent. It is named here as STILL UNDECLARED
 # (not fixed in this increment) so (1)'s census can enumerate it.
 #
-# So (1) is not "blocked by an unknown surface" any more — what remains before
-# it can be refused is the edge lane, that DDL lane, plus a measurement pass over
-# the SDK's other direct writers. Until then the fold and the raw-query lane
-# above are the two doors that gate, and this list is where a reader finds out
-# which writers will NOT be refused when (1) closes.
+# So (1) is NOT blocked by an unknown surface: the measurement is DONE and
+# recorded on `#9124` (an AST census of `sdk.py`'s mutating handle call sites,
+# plus the modules that census first missed — `hosted_api`, `mining`, `ingest`,
+# `commit_idempotency` — and the measured failure set when the guard is armed).
+# What remains is a PROGRAMME: those writers must move onto a declared lane or
+# the fold (children `#9195`, `#9206`-`#9210`), not another measurement. Until
+# then the fold and the raw-query lane above are the two doors that gate, and
+# this list names both populations — declared and undeclared — so a reader
+# cannot mistake one for the other. A writer NOT named here is undeclared and
+# will be refused; the SDK-wide enumeration lives on `#9124`.
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -9583,7 +9601,10 @@ class FalkorProjection(
         self._replay_log(...)``) — not at each fold or each write. This engine
         issues mutating statements straight at the projection's write handle
         (``proj.g``): the wipe, pass-1a's Point/Operator creates, the pass-1b
-        ``:Event`` folds, and the watermark re-establish. Declaring the scope
+        ``:Event`` folds, the post-wipe graph-only RESTORES (``:Batch`` /
+        ``batch_id``, ``:Session`` + ``CONTAINS``, the onboarding
+        state/steps/``onboards`` edges, the ``:TeamMeta`` marker, config entries),
+        and the watermark re-establish. Declaring the scope
         once, around the whole replay, means a fold added to any of this
         engine's helpers is covered without a second declaration — which is
         the whole reason the scope exists (a new unjournaled writer must have
@@ -9591,7 +9612,11 @@ class FalkorProjection(
 
         The records CAME FROM the journal, so they are authorized to be folded
         and, by the ordering contract's exception 1, they must not be
-        journaled again.
+        journaled again. ⚠️ The SNAPSHOT-RESTORE legs above are a WIDER claim
+        than that: no journal record describes them, so this scope authorizes
+        them by virtue of being the operation that restores them. Narrowing that
+        is `#9210`'s, and it must land before (or with) `#9124`'s guard — this
+        docstring states the width rather than letting it read as a projection.
         """
         with _replay_write_scope():
             return self._replay_all_from_log(
