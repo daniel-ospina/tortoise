@@ -47,6 +47,12 @@ const b64url = (buf) =>
  */
 const FAULTS = {
   authUser: false,
+  // #2809: `/auth/v1/user` answers WITHOUT `user_metadata`, so the dashboard's
+  // `display_name ?? full_name ?? name` chain has nothing to resolve and the
+  // chrome must fall back to the email prefix. GoTrue omits the key for a user
+  // who never set a name — a shape no other mock mode produced, which is why
+  // the fallback branch of the identity block had no browser-level coverage.
+  noDisplayName: false,
   upstream: false,
   upstream401: false,
   refreshDead: false,
@@ -211,11 +217,9 @@ const server = createServer((req, res) => {
         const claims = JSON.parse(Buffer.from(auth.split(" ")[1].split(".")[1], "base64url").toString());
         if (claims.sub) sub = claims.sub;
       } catch { /* keep the default */ }
-      return json(res, 200, {
-        id: sub,
-        email: `${sub}@example.test`,
-        user_metadata: { display_name: `Display ${sub}` },
-      });
+      const body = { id: sub, email: `${sub}@example.test` };
+      if (!FAULTS.noDisplayName) body.user_metadata = { display_name: `Display ${sub}` };
+      return json(res, 200, body);
     }
 
     if (url.pathname === "/auth/v1/token") {
@@ -295,7 +299,7 @@ const server = createServer((req, res) => {
     // null clears it, "" denies without an `error_code`, any other string is the
     // `error_code` — so it is deliberately not in the boolean loop.
     if (url.pathname === "/__mock/fault") {
-      for (const k of ["authUser", "upstream", "upstream401", "refreshDead"]) {
+      for (const k of ["authUser", "noDisplayName", "upstream", "upstream401", "refreshDead"]) {
         if (typeof parsed[k] === "boolean") FAULTS[k] = parsed[k];
       }
       if ("providerDenied" in parsed) {

@@ -6919,6 +6919,17 @@ class TortoiseSDK:
         journal on a failed append — window (a) of the contract, the one a
         replay cannot undo.
         """
+        # ── #5475 (residual): the record door is a WRITE door ──
+        # This is where a caller holding a PRE-BUILT record persists it, and the
+        # record carries its kind in its own spelling (``eventKind`` /
+        # ``object_kind``). It bypasses the create funnels by construction — the
+        # GitHub indexer's provenance writes are its callers — so without this
+        # it was one more way to install a pack (measured on the same class:
+        # ``['dev']`` → ``['dev','marketing']`` via one ``object_kind`` record).
+        # Before the append, so a refusal leaves the journal untouched and the
+        # replay cannot resurrect it. Gated against `proj`'s graph — the write
+        # TARGET — not this SDK's bound graph (see the reader's docstring).
+        self._refuse_unapproved_kinds_in_record(event, getattr(proj, "g", None))
         if journal:
             # (#7951 P1-b) Mirror `_create_entity`'s `createdAt` synthesis on
             # the journaling path, BEFORE the append (so the record and the
@@ -10724,6 +10735,15 @@ class TortoiseSDK:
         """
         proj = self._get_proj()
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        # ── #5475 (residual): an UPDATE is a WRITE, and it widened the set ──
+        # The create-side gate is at the funnels every CREATE meets, but
+        # ``pointKind`` is one of the properties ``graph_kind_namespaces``
+        # MINES, so an update that persists an unvalidated value installs the
+        # pack just as a create did — measured at HEAD: a graph recorded as
+        # ``['dev']`` became ``['dev','marketing']`` through this door alone.
+        # Gating creates and not updates left the closure property one verb
+        # away from true, which is the defect #5475 is about.
+        self._refuse_unapproved_kinds_in_props(props)
         # #329: id mutation + server-managed fields rejected
         props = _sanitize_props(props, reject_id=True,
                                 reject_belief_props=True)
@@ -22837,6 +22857,15 @@ class TortoiseSDK:
         branches) while the new path short-circuits the embedding to None —
         the SAME flag, different Event semantics on two live paths.
         """
+        # ── #5475 (residual): ``eventKind`` is CALLER-SUPPLIED here ──
+        # This FROZEN legacy branch writes it with a raw ``MERGE … SET e +=
+        # $props`` further down, bypassing every gated seam — so the approval
+        # gate is applied HERE, before the walk. Measured by the review of the
+        # #5475 change: ``ingest_corpus(dir, eventKind='marketing:meeting')`` on
+        # a ``dev``-only graph left ``['dev','marketing']``. Behaviour is
+        # otherwise unchanged (SC4): a bare / ``core:`` / approved spelling
+        # still writes, and the default ``DocumentCreated`` names no pack.
+        self._refuse_unapproved_kind("eventKind", eventKind)
         import os as _os  # noqa: I001
         import json as _json
         from pathlib import Path
@@ -28618,21 +28647,13 @@ class TortoiseSDK:
                 kind, sorted(known_kinds("pointKind")), kind,
             )
 
-    #: #5475: the general kind a writer can always fall back to, per kind
-    #: property — all CORE spellings, i.e. the anti-paralysis half of the
-    #: owner's 2026-10-17 ruling ("an 'other' or more general kind … so we
-    #: don't completely block the writer in paralyzing bureaucracy").
-    #: ``objectKind``/``subjectKind`` = ``other`` (the SDK/REST default and a
-    #: declared canonical object kind); ``eventKind`` = ``occurrence`` and
-    #: ``pointKind`` = ``statement`` (the extractor's own fallbacks);
-    #: ``documentKind`` has no declared general kind, so it names none rather
-    #: than inventing one.
-    _KIND_GENERAL_FALLBACKS: ClassVar[dict[str, str]] = {
-        "objectKind": "other",
-        "subjectKind": "other",
-        "eventKind": "occurrence",
-        "pointKind": "statement",
-    }
+    #: #5475: the general kind a writer can always fall back to now lives in
+    #: ``pack_state._KIND_GENERAL_FALLBACKS`` with the rest of the rule: the
+    #: refusal text is built there (#5475 residual — ``api.EventAPI`` is a
+    #: second gated seam, and two message builders would be two rules with one
+    #: name). Nothing in this class reads it, so it is not re-exported; a
+    #: module-level ``from .pack_state import`` here would be the import cycle
+    #: this module's lazy ``.pack_state`` imports exist to avoid.
 
     def _refuse_unapproved_kind(self, prop: str, kind) -> None:
         """#5475: the INPUT constraint — a write may not name an unapproved pack.
@@ -28713,67 +28734,68 @@ class TortoiseSDK:
         first write).
 
         Pure with respect to the graph: it decides from ``approved`` only.
+
+        The DECISION and the MESSAGE live in ``pack_state.unapproved_kind_refusal``
+        (#5475 residual): ``api.EventAPI`` is a second gated write seam that
+        holds no SDK, and a seam that built its own refusal would be a second
+        rule wearing the same name. This method stays because the SDK's own
+        callers (and the hosted commit door) reach it here.
+        """
+        from .pack_state import unapproved_kind_refusal
+        return unapproved_kind_refusal(prop, kind, approved)
+
+    def _refuse_unapproved_kinds_in_record(self, record: dict, graph=None) -> None:
+        """#5475: gate a RECORD a live door built itself, before it is persisted.
+
+        ``_refuse_unapproved_kinds_in_props`` covers the doors that hand their
+        kind as a flat keyword (``create_*`` / ``update_*``). The doors that
+        BUILD a journal record and fold it — ``_apply_and_journal`` (the live
+        door for a pre-built Object/Subject/Event record) and ``_doc_write``
+        (frontmatter → ``DocumentCreated``) — pass it in the RECORD's own
+        spelling, which is often snake_case (``object_kind``,
+        ``document_kind``), so they need the payload-shaped reader. Both spellings
+        land on the SAME node property, so a gate keyed on one is bypassable by
+        the other.
+
+        Every one of these doors appends FIRST and folds second (the journal
+        ordering contract), so a refusal raised here — before the append —
+        leaves neither store touched. Gating at the append instead
+        (``_emit_event``) is NOT equivalent: several emitters run after their
+        mutation (``PointPromoted`` / ``Dedupe*`` / ``create_operator``), where
+        a refusal could only arrive after the node was already written and
+        would split the journal from the cache.
+
+        ⛔ THE MIRROR SHAPE, stated because ``graph=`` can name a graph other
+        than this SDK's: the TARGET's set decides admission, but ``_emit_event``
+        journals through ``self``. A caller that hands over a FOREIGN
+        projection — no production caller does (``github_indexer`` passes
+        ``sdk._get_proj()``, the internal call passes its own) — can therefore
+        journal a record the JOURNAL OWNER's graph does not approve, which the
+        next ``rebuild_all`` of that graph folds (replay is ungated by design).
+        That was the pre-fix behaviour, so this is not a regression, but gating
+        the write target must not be read as closing the journal side.
         """
         from .pack_state import (
-            _ATTRIBUTABLE_BARE_KIND_KEYS,
-            approved_kind_alternatives,
-            unapproved_kind_pack,
+            payload_names_pack,
+            refuse_unapproved_kinds_in_payload,
         )
-        # The attribution flag is DERIVED from pack_state's own declaration of
-        # which keys attribute a BARE value back to a pack (today:
-        # ``eventKind``), never re-spelled here: a second copy would stop
-        # constraining a key the mining leg starts attributing — the same
-        # widening under a new name.
-        pack_ns = unapproved_kind_pack(
-            kind, approved, attribute_bare=prop in _ATTRIBUTABLE_BARE_KIND_KEYS)
-        if pack_ns is None:
-            return None
-        approved_ns = ", ".join(sorted(approved or ())) or "none"
-        alternatives = approved_kind_alternatives(kind, approved, prop=prop)
-        # The remedy is a LIST of what the caller can do (the owner ruling's
-        # third element), so the punctuation cannot drift as clauses are added.
-        # ⛔ The wording ALSO has to survive the MCP layer's error scrubber
-        # (``mcp_server._scrub_error``): its rule is ``(host=|at |to )[\w.-]+``,
-        # which -- because the alternation has no word boundary -- bites any
-        # ``at ``/``to `` SUBSTRING, i.e. "Wh**at **next" and "th**at **pack".
-        # This message crosses that boundary on every MCP tool call, and a
-        # scrubbed remedy is the one half of Option A a writer acts on. Hence
-        # "Next steps:"/"install the pack"/"for this graph", never
-        # "What next"/"that pack"/"to this graph"/"What to do". The rule is
-        # mechanical, so it is PINNED: the door tests assert the raw message is
-        # a fixed point of ``_scrub_error``.
-        remedies = [
-            "write a kind from the core vocabulary, or from a pack this graph "
-            f"HAS approved ({approved_ns})",
-        ]
-        if alternatives:
-            more = "".join(f" (or {alt!r})" for alt in alternatives[1:])
-            remedies.append(
-                "the same kind IS declared by an approved pack — write "
-                f"{alternatives[0]!r}{more}")
-        remedies.append(
-            f"with user approval, add the {pack_ns!r} ontology pack for this "
-            "graph (PUT /v1/graphs/{graph_id}/packs)")
-        what_next = "; ".join(remedies)
-        general = self._KIND_GENERAL_FALLBACKS.get(prop)
-        fallback = (
-            f" A kind you cannot classify is never blocked: the bare general "
-            f"kind {general!r} names no pack and always writes."
-            if general else
-            " A kind you cannot classify is never blocked: a bare "
-            "(un-namespaced) kind names no pack and always writes.")
-        return UnapprovedKindNamespace(
-            f"refused {prop}={kind!r}: it names the ontology pack namespace "
-            f"{pack_ns!r}, which this graph has not approved — the write was "
-            "NOT stored. Why: kinds are namespaced by ontology pack, and this "
-            "graph's approved set is mined from the kind values it already "
-            "holds, so a write naming an unapproved namespace would install "
-            "the pack by writing it — any caller could grant itself any "
-            "pack, and the namespace/kind vocabulary would balloon until it "
-            f"no longer names anything. Next steps: pick one — {what_next}. "
-            f"{fallback.strip()}",
-            prop=prop, kind=kind if isinstance(kind, str) else str(kind),
-            namespace=pack_ns, installed=approved)
+        if not (spells := payload_names_pack(record)):
+            return
+        if graph is not None:
+            # The WRITE TARGET's approval set, not this SDK's (#5475 review): a
+            # door that takes a ``proj`` argument persists into THAT graph, so
+            # reading ``self``'s set would admit an unapproved namespace into a
+            # graph that never approved it (and refuse a legitimate write the
+            # other way round). Latent today — every caller passes its own
+            # projection — which is exactly why it is fixed at the seam.
+            from tortoise.pack_state import graph_approval_namespaces
+            approved = graph_approval_namespaces(graph)
+        else:
+            # `_installed_namespaces_for_gate` is this module's SDK-aware reader
+            # (it is the one that knows a bare-``__new__`` SDK has no graph and a
+            # bound-but-unreachable graph RAISES rather than reading as no-packs).
+            approved = _installed_namespaces_for_gate(self)
+        refuse_unapproved_kinds_in_payload(record, approved, spells=spells)
 
     def _refuse_unapproved_kinds_in_props(self, props: dict) -> None:
         """Run the #5475 gate over EVERY kind property a write is carrying.
@@ -29410,6 +29432,15 @@ class TortoiseSDK:
         # #329: id + sourcePath/source_path are server-managed — reject
         props = _sanitize_props(props, reject_id=True,
                                 reject_belief_props=True)
+        # ── #5475 (residual): the UPDATE door onto every label ──
+        # ``update_entity`` is the documented tenant route onto Object /
+        # Subject / Event / Document / Source nodes, and each of those carries
+        # a kind property ``graph_kind_namespaces`` mines back into the
+        # approval set. Measured at HEAD: ``update_entity(id,
+        # objectKind='marketing:campaign')`` on a ``dev``-only graph left it
+        # ``['dev','marketing']``. Same rule, same funnel, same refusal as the
+        # create doors because it is the SAME helper.
+        self._refuse_unapproved_kinds_in_props(props)
         # #3998 (D30): the generic entity surface reaches `:Source` TOO, and its
         # per-label branch below writes caller props with a live `SET n += $p`.
         # Without this the closed :Source surface declared in
@@ -32135,6 +32166,12 @@ class TortoiseSDK:
         }
         if frontmatter.get("domain") is not None:
             ev["domain"] = str(frontmatter["domain"])
+        # ── #5475 (residual): ``document_kind`` comes from FRONTMATTER ──
+        # It is one of the properties ``graph_kind_namespaces`` mines, so an
+        # indexed file whose frontmatter says ``type: marketing:brief`` would
+        # install that pack by being indexed. Gated before ``_emit_event`` (the
+        # commit point) so a refusal leaves both stores untouched.
+        self._refuse_unapproved_kinds_in_record(ev)
         # #7951 — THE JOURNAL ORDERING CONTRACT (module top): **journal first,
         # then project.** `ev` is fully built above, so this record qualifies
         # for NEITHER contract exception (it is not a replay, and its payload
@@ -34458,6 +34495,18 @@ class TortoiseSDK:
                 (Action was dissolved in Ontology v3.0).
         """
         proj = self._get_proj()
+        # ── #5475 (residual): the SECOND writer of ``sourceKind`` ──
+        # ``create_source`` is gated at the entity funnel, but this public method
+        # auto-creates the ``:Source`` itself (``MERGE … ON CREATE SET
+        # s.sourceKind=$sk``, ``projection/edges.py``), so it was a second, ungated
+        # writer of one of the properties ``graph_kind_namespaces`` mines — a
+        # caller-chosen namespace, reachable from a public SDK method. Measured on
+        # a ``dev``-only graph: ``link_source_to_entity(url, id, 'Object',
+        # source_kind='marketing:campaign')`` left ``['dev','marketing']``.
+        # Refused BEFORE the call, not conditionally on the node's existence: a
+        # read-then-write decision here would be a race, and the value is only
+        # honoured ON CREATE, so existence is not ours to predict.
+        self._refuse_unapproved_kind("sourceKind", source_kind)
         proj.link_source_to_entity(source_url, entity_id, entity_label, source_kind)
 
     def get_org_structure(self, subject_id: str) -> dict:

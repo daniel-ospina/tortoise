@@ -1351,7 +1351,32 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # Pinned by
              # tests/test_ci_selection.py::test_surface_tools_change_selects_core_not_tier1.
              "tools/surface-guard.py",
-             "tools/surface_manifest.py")
+             "tools/surface_manifest.py",
+             # #9085 review P1: `tests/test_runner_ports_6673.py` (registered
+             # `core`) carries the two #8124 guards that pin the ENGINE, and both
+             # read a file the selector did not keep:
+             #   * `apps/graph-viz/docker-compose.yml` — scanned by the compose
+             #     sweep (`COMPOSE_GLOBS` includes `apps/*/docker-compose*.yml`),
+             #     but `apps/` is in NON_PYTHON_PREFIXES and matches no
+             #     SOURCE_PATTERNS row, so a revert of that pin filtered to
+             #     `changed == []`, took the docs-only early return, and ran
+             #     tier-1 smoke only (measured: surfaces=[]).
+             #   * `docs/quickstart-selfhosted.md` — Option B's bare-container
+             #     hand-out, pinned by
+             #     test_the_selfhost_quickstart_hands_out_the_compose_pin_not_latest.
+             #     It matched the `#3329` `docs/` SOURCE_PATTERN that carries
+             #     `test_capacity_page.py` (onboarding), NOT `core`, so the
+             #     quickstart's engine pin was unguarded on the one docs diff that
+             #     can break it (measured: surfaces=['onboarding'], the guard
+             #     absent).
+             # Either way a one-line revert merged green and reddened `main` on
+             # the post-merge push — the #1349/#3332/#3616 silent-drop class, on
+             # the exact files this PR pins. Named individually because
+             # `select()` matches with `startswith`. Pinned by
+             # tests/test_ci_selection.py::
+             # test_the_engine_pin_guards_are_selected_on_the_files_they_pin.
+             "apps/graph-viz/docker-compose.yml",
+             "docs/quickstart-selfhosted.md")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",

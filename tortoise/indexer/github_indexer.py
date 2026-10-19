@@ -57,6 +57,7 @@ import httpx
 from tortoise import github_map
 from tortoise.live import _terminal_excluded  # #2901 canonical non-current predicate
 from tortoise.quota import QuotaCheckError, QuotaExceededError
+from tortoise.sdk import UnapprovedKindNamespace  # #5475: a refused kind fails the RUN
 
 logger = logging.getLogger(__name__)
 
@@ -1311,6 +1312,16 @@ class GitHubIndexer:
                 try:
                     s_stats = self._project_issue(
                         sdk, proj, repo, item, journal_ids=journal_ids)
+                except UnapprovedKindNamespace:
+                    # #5475: a refused KIND is not a per-issue failure. The pack
+                    # this connector writes (``github_map.issue_to_object`` mints
+                    # ``object_kind='pm:issue'``) is not approved on this graph,
+                    # so EVERY issue refuses identically — collecting it in
+                    # ``stats["errors"]`` and continuing would report a
+                    # successful run that indexed nothing (measured by the #5475
+                    # review). Fail the RUN instead, with the refusal's own
+                    # remedy (approve the pack with the graph's pack set).
+                    raise
                 except Exception as e:
                     stats["errors"].append(f"{repo}#{n['number']}: {e}")
                     continue
