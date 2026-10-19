@@ -50,6 +50,7 @@ from tortoise.ask_lane import (  # noqa: E402, RUF100
 )
 from tortoise.sdk import TortoiseSDK
 from tortoise.why import (
+    _TRADEOFFS_CYPHER,
     DIG_DEEPER_KINDS,
     DIG_DEEPER_LABELS,
     W4_MAX_CONFLICTS,
@@ -300,9 +301,20 @@ def test_flag_on_emits_contract_on_search_surface(w4_flag):
         why = claim_hit.get("why") or {}
         chain = why.get("support_chain") or []
         assert 1 <= len(chain) <= W4_MAX_SUPPORT
+        # #3990: the support entry NAMES the mediating operator (id + type +
+        # Layer-3 label) and any mitigation on it — objective 4's why layer.
+        # Additive keys (#1353 D8), so the shape assertion widens with them.
         for s in chain:
-            assert set(s) == {"point_id", "content_snippet", "edge", "weight"}
+            assert set(s) == {
+                "point_id", "content_snippet", "edge", "weight",
+                "operator_id", "operator_type", "operator_label", "mitigation",
+            }
             assert s["edge"] == "IMPL"
+            # This fixture's support legend is operator-mediated, so the
+            # operator is NAMED — not present-and-null.
+            assert s["operator_id"], (
+                "an operator-mediated support must name its operator (#3990)")
+            assert s["operator_type"] == "IMPL"
         # conflicts (contested + nands ≤2).
         conflicts = claim_hit.get("conflicts")
         assert conflicts is not None
@@ -1045,9 +1057,12 @@ def test_assembly_partial_dimension_fail_open(w4_flag, monkeypatch):
         fired: list[str] = []
 
         def _flaky_query(self, cypher, params=None, timeout=None):
-            # Fail ONLY the tradeoffs read (its template matches the
-            # mitigated_by pattern); every other read passes through.
-            if "mitigated_by" in cypher:
+            # Fail ONLY the tradeoffs read. It is matched by IDENTITY, not by
+            # a substring: since #3990 the operator-mediated SUPPORT query also
+            # carries a `mitigated_by` optional match, so a substring selector
+            # would fail both dimensions and the test would no longer be able
+            # to tell "tradeoffs degraded alone" from "two legs broke".
+            if cypher == _TRADEOFFS_CYPHER:
                 fired.append(cypher)
                 raise RuntimeError("forced tradeoffs failure")
             return real_query(cypher, params=params, timeout=timeout)

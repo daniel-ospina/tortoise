@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -1274,15 +1275,15 @@ def test_refresh_durations_on_the_real_manifest_of_record() -> None:
     # PyYAML is a second implementation of the same parse, so the completeness
     # check survives without a number that can go stale.
     assert set(entries_before) == set(yaml.safe_load(before)["durations"])
-    # The stamp is NOW, not a literal: this test feeds the refresh's output to
-    # `integrity_problems`, whose durations-staleness rule reds a map captured
-    # more than 21 days ago. A hardcoded "2026-09-28T00:00:00Z" turned this test
-    # into a time bomb that went red exactly 21 days later — for every lane, on
-    # a manifest nobody had touched. A refresh writes the clock it ran at, so
-    # that is what the assertion should feed, and it stays honest forever.
-    stamp = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # The stamp must be FRESH: the manifest gate rejects a `captured_at` older
+    # than 21 days, so the hardcoded "2026-09-28T00:00:00Z" that used to live
+    # here turned this test red on 2026-10-19 with nothing in the tree changed
+    # (measured: integrity_problems -> "captured 21 days ago ... past the
+    # 21-day bound"). The value itself is not asserted anywhere below — only
+    # that the refresh re-stamps it with something the gate accepts.
+    captured = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     new_text, stats = ci_timing.render_refreshed_manifest(
-        before, {"test_bridge_table.py": 123.4}, stamp)
+        before, {"test_bridge_table.py": 123.4}, captured)
     # `manifest_keys` and `carried_forward` are BOTH computed from the INPUT
     # parse (`before`), so on their own they cannot fail when the refresh drops
     # an entry from the OUTPUT — asserting only these two is a tautology. They
@@ -1302,6 +1303,11 @@ def test_refresh_durations_on_the_real_manifest_of_record() -> None:
     assert set(entries_after) == set(yaml.safe_load(new_text)["durations"])
     assert "  test_bridge_table.py: 123.4" in new_text
     assert "# #3395: per-file CI wall time" in new_text
+    # The fresh stamp must actually REACH the output — without this the comment
+    # above would claim a property the test does not assert (the input manifest's
+    # own stamp is already fresh, so a renderer that IGNORED ``captured_at``
+    # would still satisfy every other line here).
+    assert f'durations_captured_at: "{captured}"' in new_text
     assert ci_timing.validate_refreshed_manifest(new_text) == []
     # ... and the FULL `--integrity` gate, not just its duration subset: the
     # refresh must not tilt the push halves or unclassify a file (#3395).
@@ -2590,11 +2596,15 @@ def test_push_extra_enters_the_full_selection_pool(tmp_path, monkeypatch, capsys
 
     plain = run(base, "base")
     bumped = run(with_extra, "extra")
-    # `approx`: both sides are sums of ~936 float weights, so an exact `==`
-    # asserts binary-representability, not the property under test. Measured at
-    # this head the difference is 1234.000000000001 — the assertion was red on
-    # main for every lane, while a pool that OMITS the weight (the #7537 defect)
-    # still reds it at 0.
+    # `pytest.approx`, not `==`: the totals are float sums over ~930 manifest
+    # rows, so the exact delta is only exact while the pool's magnitudes happen
+    # to line up. Adding ONE durations row anywhere in the file (e.g. #8135's
+    # `test_b7_runbook_ok_semantics_8135.py: 2.0`) shifted the operands enough
+    # that `8315.7 - 7081.7` came back 1233.9999999999995 and this read
+    # `1233.9999999999995 != 1234.0` — a red on a registration that has nothing
+    # to do with the property under test. The default relative tolerance
+    # (1e-6 ⇒ ±0.0012) still cannot be satisfied unless `push_extra`'s weight
+    # really enters the pool, so the differential property is unchanged.
     assert bumped - plain == pytest.approx(1234.0), (
         "push_extra weight must enter the full-selection pool — otherwise the "
         "counted shards run files the denominator omits"

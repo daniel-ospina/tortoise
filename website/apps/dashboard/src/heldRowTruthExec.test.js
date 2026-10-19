@@ -41,18 +41,20 @@
 // The rule's consumers, deliberately not all identical code:
 //   - `durableConnectKey` welcome tail — ONE call, this rule.
 //   - main.jsx effect — ONE call, this rule.
-//   - `durableConnectKey` paste tail — walks the same conditions to report a
-//     DISTINCT source per cause ('revoked' / 'disabled' / 'bootstrap' /
-//     'expiring'), which one boolean cannot carry. It is therefore PINNED to
-//     this rule by the executed matrix rather than rewritten (a `if (!rule)`
-//     wrapper would fall through to embedding a newly-dead row — a strictly
-//     worse failure than the duplication it removed).
-//   - `usableDurableRows` — the connect gate's ROUTING question, a third
-//     declaration today. Out of this issue's scope and pinned as separate
-//     (#2426's tripwire asserts its explicit `!k.expires_at`): routing and
-//     embedding are distinct decisions, and coupling them would make a future
-//     routing change silently change what may be embedded — the same drift
-//     class, inverted.
+//   - `durableConnectKey` paste tail — reports a DISTINCT source per cause
+//     ('revoked' / 'disabled' / 'bootstrap' / 'expiring'), which one boolean
+//     cannot carry. It used to walk the same conditions as a cascade; since #8228
+//     it reads the atom's own reason (`rowDeadReason`) as its source, so it cannot
+//     drift and cannot fall through to `'durable'` for a newly-dead row.
+//   - `usableDurableRows` — the connect gate's ROUTING question. It was a third
+//     declaration when this file was written; #8228 moved the conditions into the
+//     row-aliveness atom (`rowDeadReason`/`rowAlive`) that this rule is now a
+//     named alias of, and pinned all three surfaces against one fixture matrix in
+//     `rowAlivenessAgreementExec.test.js`. Routing still composes `isManagedKey`
+//     (the API-Keys-TABLE predicate) on purpose, so it stays a SUBSET of the
+//     atom: a future table relaxation can change what the gate ROUTES to without
+//     silently changing what may be embedded — the same deliberate separation, no
+//     longer resting on duplication.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'

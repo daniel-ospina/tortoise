@@ -22,6 +22,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { stripComments } from './testSupport.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const mainJsx = readFileSync(join(here, 'main.jsx'), 'utf8')
@@ -137,17 +138,31 @@ test('#2426: the show-once key card states the expiry (server echo / never)', ()
   // #8249: the refusal missed that move (its copy names this team's row, which
   // was read as "it may not render elsewhere" — but scoping where it renders
   // is the record key, not the guard), so it stayed after the guard and a
-  // switch dropped it. Both latches now precede the guard.
-  assert.ok(rotBody.indexOf('setRotateOutcomes((prev) =>') < rotBody.indexOf('if (orgIdRef.current !== _teamAtCall) return'),
+  // switch dropped it.
+  // #8255: the catch's ambiguous-failure disclosure missed it too — the guard
+  // was the catch's FIRST statement, so a switch across the RTT of a failed
+  // rotate returned before the re-read and the user was told nothing at all.
+  //
+  // The pins below are anchored on the CONTENT each latch writes rather than on
+  // a bare `setRotateOutcomes((prev) =>` (regenerateKey now has several,
+  // including the #8255 clear hooks), and "precedes the guard" is asserted
+  // against the 2xx path's own guard — the FIRST one in the function — so a
+  // latch that drifts back below it reddens.
+  const firstGuard = rotBody.indexOf('if (orgIdRef.current !== _teamAtCall) return')
+  assert.notEqual(firstGuard, -1, 'regenerateKey must keep the stale-team guard')
+  const beforeGuard = rotBody.slice(0, firstGuard)
+  assert.ok(beforeGuard.includes('[_teamAtCall]: { plaintext, expiresAt: (mk && mk.expires_at) || null, warning }'),
     'the outcome latch must precede the team-identity guard (#4429)')
-  assert.ok(rotBody.indexOf('if (plaintext) {') < rotBody.indexOf('setRotateOutcomes((prev) =>'),
+  assert.ok(rotBody.indexOf('if (plaintext) {') < rotBody.indexOf('[_teamAtCall]: { plaintext, expiresAt:'),
     'the REVEAL latch is gated on a revealable plaintext — a plaintext-less rotate latches no reveal (#4342); since #8249 it latches the refusal instead')
-  // #8249: BOTH latches precede the guard — the guard scopes WHERE an outcome
-  // renders, it must not decide WHETHER the user is told. The plaintext-less
-  // refusal is the branch that had no retained home: it used to be written to
-  // the transient `error` slot after the guard, so a team switch across the
-  // rotate RTT dropped the only notice that the rotate destroyed a key.
-  assert.ok(rotBody.lastIndexOf('setRotateOutcomes((prev) =>') < rotBody.indexOf('if (orgIdRef.current !== _teamAtCall) return'),
+  // #8249/#8255: BOTH later latches precede the SAME guard — the guard scopes
+  // WHERE an outcome renders, it must not decide WHETHER the user is told. The
+  // plaintext-less refusal and the ambiguous-failure notice are the two branches
+  // that had no retained home: both used to be written after the guard (the
+  // refusal into the transient `error` slot), so a team switch across the rotate
+  // RTT dropped the only notice that the rotate destroyed a key or left one in
+  // an unknown state.
+  assert.ok(beforeGuard.includes("refusal: revealRefusalFor('replacement key"),
     'the refusal latch must precede the team-identity guard too (#8249)')
   assert.match(rotBody, /refusal: revealRefusalFor\('replacement key\\u2019s value'\)/,
     '#8249: the plaintext-less branch latches the refusal on the per-team record, not in the error slot'
@@ -163,8 +178,41 @@ test('#2426: the show-once key card states the expiry (server echo / never)', ()
   assert.match(rotBody, /warning: \(mk && mk\.warning\) \? String\(mk\.warning\) : \(prior\.warning \|\| ''\)/,
     'a prior partial-state warning survives a warning-less plaintext-less response too')
   assert.doesNotMatch(rotBody, /setError\(`The server did not return the replacement key/,
-    '#8249: the refusal must not ride the un-keyed, transient `error` slot — that is what a switch dropped'
-    + ' (the catch branch\u2019s ambiguous-failure disclosure is a separate, deliberately-scoped case)')
+    '#8249: the refusal must not ride the un-keyed, transient `error` slot — that is what a switch dropped')
+  // #8255: the catch's ambiguous-failure disclosure was the last one with no
+  // retained home. Its latch must precede the SAME guard (#8249's ruling: the
+  // guard scopes WHERE an outcome renders, never WHETHER the user is told), or a
+  // switch across the RTT of a failed rotate leaves the destructive one-shot call
+  // with an unknown outcome and no notice at all.
+  const catchAt = rotBody.indexOf('} catch (e) {')
+  assert.notEqual(catchAt, -1, 'regenerateKey must keep its catch')
+  const catchBeforeGuard = rotBody.slice(
+    catchAt, rotBody.indexOf('if (orgIdRef.current !== _teamAtCall) return', catchAt))
+  assert.ok(catchBeforeGuard.includes('ambiguous: `The rotate request failed'),
+    'the ambiguous-failure latch must precede the catch\u2019s team-identity guard too (#8255)')
+  assert.match(rotBody, /ambiguous: `The rotate request failed\$\{why \? ` \(\$\{why\}\)` : ''\}, and its outcome could not be confirmed/,
+    '#8255: the retained form is the WEAKER honest one — no row truth is readable for a team the user has left')
+  assert.doesNotMatch(rotBody, /ambiguous: `[^`]*shows as revoked/,
+    '#8255: the retained notice must never claim a row state it cannot read')
+  // #8255 (review P2): the clearer is ROW-scoped. The notice names one row, so a
+  // clear that cannot name that same key (or names none) must leave it latched —
+  // an attempt-start, team-wide clear retired the notice for key A when the user
+  // rotated key B, and for outcomes that resolve nothing at all (a 402, or a
+  // definite 4xx that loses the team at its guard). The behaviour pins for all
+  // three cases live in keyRotateEmptyRevealExec.test.js; these are the cheap
+  // shape backstops.
+  assert.match(mainJsx, /if \(!keyId \|\| cur\.ambiguousKeyId !== keyId\) return prev/,
+    'the ambiguity clearer must be scoped to the key the notice names (#8255 review P2)')
+  assert.match(rotBody, /ambiguousKeyId: keyId/,
+    'and the latch must write that subject beside the notice')
+  assert.doesNotMatch(rotBody, /clearRotateAmbiguity\(_teamAtCall\)/,
+    'no team-wide clear may run at attempt start — nothing is resolved at that point (#8255 review P2)')
+  // #8255 (review P2, second cut): the rule is row-scoped on the WRITE side too.
+  // An unconditional latch overwrote a retained notice naming a DIFFERENT,
+  // still-unresolved row — the same silent retire the clearer was scoped to
+  // stop, reachable without a team switch (two lost responses, two rows).
+  assert.match(rotBody, /if \(prior\.ambiguous && prior\.ambiguousKeyId && prior\.ambiguousKeyId !== keyId\) return prev/,
+    'the latch must refuse to overwrite another row’s unresolved notice (#8255 review P2)')
   assert.match(rotBody, /has already been revoked/, 'the refusal must state the OLD key is already revoked')
   assert.match(rotBody, /\[_teamAtCall\]: \{ plaintext, expiresAt: \(mk && mk\.expires_at\) \|\| null, warning \}/,
     'rotate captures the server expiry echo + the partial-state warning into the per-team outcome')
@@ -190,11 +238,32 @@ test('#2426: isManagedKey excludes bootstrap only — no expires_at exclusion ma
   assert.match(body, /created_via === 'bootstrap'/, 'bootstrap rows stay excluded')
   assert.match(body, /return !\(k\.created_via === 'bootstrap'\)/, 'bootstrap-only predicate')
   // The embed-safe derivations (usableDurableRows / durableConnectKey) keep
-  // their own no-expiry filters — the embed surface stays Never-keys-only.
-  const usable = sessionKeyJs.slice(sessionKeyJs.indexOf('export function usableDurableRows'))
-  assert.match(usable, /!k\.expires_at/, 'usableDurableRows excludes expiring rows explicitly')
-  assert.match(sessionKeyJs, /if \(row\.expires_at\) return \{ key: '', durable: false, source: 'expiring' \}/,
-    'paste classifier reports source expiring (distinct from bootstrap)')
+  // their no-expiry filters — the embed surface stays Never-keys-only.
+  //
+  // #8228 RE-PIN, same guarantee. The explicit `!k.expires_at` this assertion
+  // used to read inside `usableDurableRows` moved into the ONE row-aliveness
+  // atom (`rowDeadReason`) that `usableDurableRows` now composes — the #2426
+  // decision is unchanged (an expiring durable is still not routable, still
+  // reported as source 'expiring', still never embed-safe), but the condition
+  // is pinned WHERE IT IS DECLARED plus the composition that carries it into the
+  // routing path. Pinning the consumer's spelling instead would pin duplication,
+  // which is the drift #8228 removed. Both halves are asserted so neither the
+  // atom's arm nor its use by the router can be dropped silently.
+  const atomStart = sessionKeyJs.indexOf('export function rowDeadReason')
+  const atom = sessionKeyJs.slice(atomStart, sessionKeyJs.indexOf('export function rowAlive', atomStart))
+  assert.ok(atomStart > -1 && atom.includes('expires_at'),
+    '#8228: the row-aliveness atom must exist and carry the expiry condition')
+  assert.match(atom, /if \(row\.expires_at\) return 'expiring'/,
+    'the atom excludes expiring rows explicitly (the #2426 Never-only embed policy)')
+  const usableStart = sessionKeyJs.indexOf('export function usableDurableRows')
+  const usable = stripComments(
+    sessionKeyJs.slice(usableStart, sessionKeyJs.indexOf('export function', usableStart + 10)))
+  assert.match(usable, /isManagedKey\(k\) && rowAlive\(k\)/,
+    'usableDurableRows composes the atom — the routing path cannot lose the expiry arm')
+  assert.doesNotMatch(usable, /revoked_at|expires_at|created_via|enabled/,
+    'usableDurableRows must not re-declare the row-aliveness conditions (#8228)')
+  assert.match(sessionKeyJs, /if \(dead\) return \{ key: '', durable: false, source: dead \}/,
+    'paste classifier reports the atom\'s own reason — source expiring stays distinct from bootstrap')
 })
 
 // 5. Wizard embed surface — Never-keys-only policy.
