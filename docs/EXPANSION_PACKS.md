@@ -548,10 +548,17 @@ the READER on both new and existing rows, not of the write.
 ⚠️ **The connector gate is per CALL SITE, not at the projection seam.**
 `FalkorProjection.apply` still gates a direct fold only when `_journal_backed`,
 so a THIRD-PARTY connector — or any caller outside `tortoise/connectors/` — that
-folds straight into a journal-less projection is still ungated. That gap is
-measured and pinned (`tests/test_9068_pack_gate_residuals.py`'s
-`test_a_journal_less_fold_does_not_widen_the_approval_set`, an XFAIL on the
-fixed behaviour), not claimed closed here.
+folds straight into a journal-less projection is still ungated. The projection
+has a **second** ungated sink of the same shape: `link_source_to_entity` writes
+the caller's `source_kind` into the mined `sourceKind` slot
+(`projection/edges.py`'s `ON CREATE SET s.sourceKind=$sk`); the refusal for that
+leg lives in the `sdk.link_source_to_entity` **wrapper**, so a direct projection
+call is open too. Both gaps are measured and pinned
+(`tests/test_9068_pack_gate_residuals.py`'s
+`test_a_journal_less_fold_does_not_widen_the_approval_set`, one parametrised
+XFAIL case per sink, on the fixed behaviour) — a residual statement that named
+only `apply` would be narrower than the measurement, and closing `apply` alone
+would read as closing the seam. Neither is claimed closed here.
 
 **Deliberately NOT gated — and why:**
 

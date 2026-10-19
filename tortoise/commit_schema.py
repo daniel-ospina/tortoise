@@ -229,8 +229,14 @@ def compile_vocab(packs_dir: Path | str | None = None,
     never meets a door at all — ``tortoise/pipeline.py``'s
     ``SET p.kind = <pipeline_key>`` (still ungated, and harmless to the approval
     set since #9068 scopes the mining leg's bare ``kind`` read to the ontology
-    labels — a pipeline KEY is not an ontology kind) and raw-Cypher / offline
-    re-typing (``tortoise/migrate_kinds.py``, ``tortoise/retype.py``).
+    labels — a pipeline KEY is not an ontology kind), raw-Cypher / offline
+    re-typing (``tortoise/migrate_kinds.py``, ``tortoise/retype.py``), and the
+    projection's OWN two sinks: ``FalkorProjection.apply`` and
+    ``link_source_to_entity`` (which writes the caller's ``sourceKind``) gate a
+    direct write only when ``_journal_backed``, so on a **journal-less**
+    projection — where the cache IS the store — a direct call widens the set.
+    #9068's connector gates sit in FRONT of the connectors' calls, not in front
+    of the sink: the gap is measured, pinned XFAIL and NOT closed.
     (``sdk.ingest_corpus`` writes its remaining fields with raw Cypher too, but
     its one mined input — ``eventKind`` — IS gated, and the rest are snake-case
     keys ``graph_kind_namespaces`` does not mine, so it is not a widening path.)

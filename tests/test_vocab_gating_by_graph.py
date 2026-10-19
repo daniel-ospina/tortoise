@@ -2271,9 +2271,23 @@ class TestIngestCorpusEventKind5475:
         # #9068 gated the connector folds (`github`/`linear`/`slack`, ingest and
         # both webhook arms), so the map may not name them as ungated either —
         # that clause is the one a lane reading this map would act on next.
-        assert "proj.apply" not in ungated, (
+        # #9068 gated the connector folds (`github`/`linear`/`slack`, ingest and
+        # both webhook arms). That is a statement about the CONNECTORS' call
+        # sites, NOT about the projection seam, so the map must drop the
+        # connector clause while KEEPING the seam itself named: the projection's
+        # own sinks still widen the set on a journal-less projection (measured,
+        # XFAIL-pinned, and stated in `docs/EXPANSION_PACKS.md`). A note that
+        # drops the sink is how "the connector folds are gated" comes to be read
+        # as "the seam is closed".
+        assert "connectors' direct" not in ungated, (
             "the connector folds are gated before the first `apply` (#9068), so "
             "the scope note may not list them as writers that never meet a door")
+        assert "journal-less" in ungated and "link_source_to_entity" in ungated, (
+            "the projection's OWN sinks (`FalkorProjection.apply` and "
+            "`link_source_to_entity`, which writes the caller's `sourceKind`) "
+            "still widen the approval set on a journal-less projection — the "
+            "gate is per CONNECTOR CALL SITE, not at the seam — so the scope "
+            "note must keep naming them as writers that never meet a door")
         for still_ungated in ("pipeline.py", "migrate_kinds.py", "retype.py"):
             assert still_ungated in ungated, (
                 f"{still_ungated} is genuinely ungated and must stay named — "

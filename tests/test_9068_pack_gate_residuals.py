@@ -1091,27 +1091,54 @@ def test_a_pipeline_row_does_not_grant_its_namespace(
 # widening assertion xfails; a refusal outside `_REFUSAL` or any other seam
 # failure is FAILED, not silently xfailed. The journal-less precondition lives
 # in the fixture (an in-body `assert` would be swallowed by this marker).
+#
+# TWO SINKS, not one. The residual names `apply`, but the projection writes a
+# mined kind property in a second place — `link_source_to_entity` stores the
+# caller's `source_kind` in `sourceKind` (`projection/edges.py`) — and the gate
+# for that leg lives in the `sdk.link_source_to_entity` WRAPPER, not in the
+# projection. A residual statement narrower than the measurement is the defect
+# this module exists to catch, so BOTH sinks are pinned: closing `apply` alone
+# must not read as closing the seam.
+def _fold_a_journal_less_projection(proj) -> None:
+    proj.apply({"type": "ObjectRegistered", "id": "o-fold-1",
+                "name": "FoldProbe", "object_kind": "pm:issue"})
+
+
+def _link_a_journal_less_source(proj) -> None:
+    proj.link_source_to_entity("https://example.test/9068-leak", "o-link-1",
+                               "Object", "marketing:leak")
+
+
+@pytest.mark.parametrize("writer,namespaced", [
+    pytest.param(_fold_a_journal_less_projection, "pm", id="apply-fold"),
+    pytest.param(_link_a_journal_less_source, "marketing", id="source-link"),
+])
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "#9068 residual 2 — `projection.apply` gates a direct fold only when "
+    "#9068 residual 2 — the projection gates a direct write only when "
     "`_journal_backed`, so on a journal-less projection (the connectors' "
-    "shape) an `object_kind` is persisted ungated and widens the set"))
+    "shape) a mined kind property is persisted ungated and widens the set: "
+    "`apply` via `object_kind`, `link_source_to_entity` via `sourceKind`"))
 def test_a_journal_less_fold_does_not_widen_the_approval_set(
-        dev_only_sdk: TortoiseSDK) -> None:
-    """(1) Failing value is the approval set gaining ``pm``; (2) the fixture is
-    a fold through the seam the connectors actually use — ``connectors/github``
-    → ``proj.apply(entities["object"])`` — carrying the kind ``github_map``
-    stamps on an issue Object (``pm:issue``), on a projection with NO journal.
+        dev_only_sdk: TortoiseSDK, writer, namespaced: str) -> None:
+    """(1) Failing value is the approval set gaining `namespaced`; (2) the
+    fixture is a write through the seam a caller outside `tortoise/connectors/`
+    actually reaches — `proj.apply(entities["object"])` carrying the kind
+    `github_map` stamps on an issue Object (`pm:issue`), and
+    `proj.link_source_to_entity(..., source_kind='marketing:leak')`, whose
+    `sourceKind` the mining leg also reads — on a projection with NO journal.
+
+    One case per sink: the gate is per CALL SITE, so a fix at one sink says
+    nothing about the other.
     """
     sdk = dev_only_sdk
     proj = sdk._get_proj()
 
-    _attempt_write(
-        lambda: proj.apply({"type": "ObjectRegistered", "id": "o-fold-1",
-                            "name": "FoldProbe", "object_kind": "pm:issue"}))
+    _attempt_write(lambda: writer(proj))
 
-    assert "pm" not in (_approved(sdk) or frozenset()), (
-        "a fold persists a mined kind property, so with no journal to gate it "
-        "the fold itself must consult the graph's approval set")
+    assert namespaced not in (_approved(sdk) or frozenset()), (
+        f"a journal-less projection write persists a mined kind property, so "
+        f"the sink itself must consult the graph's approval set — `{namespaced}` "
+        f"entered it with no journal to gate the write")
 
 
 # ── Residual 3: offline re-typing is DELIBERATELY ungated ─────────────────

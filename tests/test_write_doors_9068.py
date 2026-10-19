@@ -755,9 +755,13 @@ class TestPropsDoorsScreenTheFoldAliases:
 
         ``link_source_to_entity`` relays ``source_kind`` to
         ``projection/edges.py``'s ``ON CREATE SET s.sourceKind=$sk`` with the
-        caller's string, so a namespaced value would install its pack. The leg
-        is gated (#8982); this pins it as a REGRESSION, since it is one of the
-        doors the closure statement used to list as ungated.
+        caller's string, so a namespaced value would install its pack. The
+        **SDK wrapper** refuses it before the call (#8982); the projection
+        method itself is still open (the journal-less sink, XFAIL-pinned by
+        ``tests/test_9068_pack_gate_residuals.py``'s
+        ``test_a_journal_less_fold_does_not_widen_the_approval_set[source-link]``),
+        so this pins the wrapper as a REGRESSION, since it is one of the doors
+        the closure statement used to list as ungated.
 
         FAIL-ON: the door is ungated.
         ⚠️ At THIS branch's merge base the door is already gated (#5475), so
