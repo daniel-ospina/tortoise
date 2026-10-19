@@ -23,6 +23,15 @@ doc:
    storable, no DERIVED/VOLATILE property is ever stored as authority.
 4. Exact-SQL evidence for the shapes above (the emitted statements are asserted,
    not merely executed).
+5. **TENANCY IS PER CALL (#9192).** `(org_id, graph_id)` are REQUIRED keyword
+   arguments of every entry point here — there is no ambient tenant, no
+   environment fallback and no ContextVar at this layer. A process serving
+   several tenant graphs (the hosted lane builds one SDK per tenant graph, and
+   its capture executor is process-wide) must not be able to file one tenant's
+   rows under another: the row would be well-formed and the FK to
+   `public.graphs` only checks that the graph exists, so nothing would raise.
+   Two legs: two tenants in one process never cross-write, and a caller that
+   cannot name its tenant REFUSES rather than inheriting one.
 
 WHY THE PLACEMENT TABLE IS IMPORTED, NOT RE-DECLARED. `#7968`'s
 `tests/test_record_schema_placement.py` already parses §17.5 and resolves its
@@ -266,15 +275,20 @@ def test_points_merged_is_refused_not_approximated():
 # ════════════════════════════════════════════════════════════════════════════
 
 
-def _plan_for_everything() -> list[rp.Statement]:
-    records = [
+def _everything_records() -> list[dict[str, Any]]:
+    """One record per declared type — the plan every leg below is asserted on."""
+    records: list[dict[str, Any]] = [
         {"type": t, "ts": "2026-10-12T00:00:00Z", **payload}
         for t, payload in _MINIMAL_RECORDS.items()
     ]
     records.append({"type": "EntityMutated", "ts": "T", "id": "p1",
                     "label": "Point", "op": "restatus",
                     "state": {"status": "live"}})
-    return rp.replay_plan(records, org_id="o", graph_id="g")
+    return records
+
+
+def _plan_for_everything() -> list[rp.Statement]:
+    return rp.replay_plan(_everything_records(), org_id="o", graph_id="g")
 
 
 def test_replay_plan_is_deterministic():
@@ -1296,3 +1310,212 @@ def test_a_document_record_keys_the_source_by_its_id_like_the_fold_does():
                       if s.sql.startswith("INSERT INTO public.source")]
     assert source_upserts, [s.sql for s in statements]
     assert "doc_9078" in source_upserts[0].params
+
+
+# ── the two property-leak fixes (#9078 review: both had NO pin) ─────────────
+
+
+def _props_tail(statements: list[rp.Statement]) -> str:
+    """The `props` tail of the node statement, as its serialized argument."""
+    return " ".join(str(param) for statement in statements
+                    for param in statement.params)
+
+
+def test_agent_id_is_dropped_like_the_fold_drops_it():
+    """`projection/entities.py::_META_KEYS` strips `agent_id` before the node.
+
+    A record that kept it wrote a props key no journal replay ever writes, and a
+    record-sourced rebuild copies the tail verbatim — so the two rebuild paths
+    disagreed on every API-door record. Without this leg the skip-set entry can
+    be deleted again in silence, which is the class #9078 exists to end.
+    """
+    record = _point_added("pt_agent", None)
+    record["agent_id"] = "agent-leak-check"
+    record["point"]["agent_id"] = "agent-leak-check"
+
+    statements = rp.mutations_for(record, org_id="o", graph_id="g")
+    upsert = next(s for s in statements
+                  if s.sql.startswith("INSERT INTO public.point"))
+    # Non-vacuity: the row really was materialized, so 'absent' means dropped.
+    assert "pt_agent" in upsert.params
+    assert "agent-leak-check" not in _props_tail([upsert])
+    assert "agent_id" not in _props_tail([upsert])
+
+
+def test_actor_user_id_is_stored_only_where_the_table_has_the_column():
+    """§17.5 makes it a Session PRIMARY and nothing else's property.
+
+    `public.session` is the only record table with the column, so storing it
+    everywhere else made a record-sourced rebuild diverge from a journal replay
+    on that node. Both halves are asserted: a drop in one place is
+    indistinguishable from a skip-set that swallowed the column everywhere.
+    """
+    # (a) the EPISODIC layer: the column exists, so the value is STORED.
+    session = {"type": "SessionRecorded", "ts": "T", "id": "sess1",
+               "actor_user_id": "user-1"}
+    session_row = next(s for s in rp.mutations_for(session, org_id="o",
+                                                  graph_id="g")
+                       if s.sql.startswith("INSERT INTO public.session"))
+    assert "actor_user_id" in session_row.sql
+    assert "user-1" in session_row.params
+
+    # (b) every other layer: no column, so it is a record-only property.
+    point = _point_added("pt_actor", None)
+    point["actor_user_id"] = "user-1"
+    point["point"]["actor_user_id"] = "user-1"
+    point_row = next(s for s in rp.mutations_for(point, org_id="o",
+                                                 graph_id="g")
+                     if s.sql.startswith("INSERT INTO public.point"))
+    assert "actor_user_id" not in point_row.sql
+    assert "user-1" not in _props_tail([point_row])
+
+
+def test_a_batch_id_stamp_patches_the_point_and_never_creates_it():
+    """#902/A10 restores the stamp with a MATCH, which cannot create a row.
+
+    `BatchIdStamped` is in `projection/__init__.py::_NO_PROJECTION_FOLD`: the
+    graph replay applies it in pass-2b as
+    `MATCH (p:Point {id:$pid}) SET p.batch_id = $bid`. Declared as a snapshot it
+    was an UPSERT, so a stamp whose `PointAdded` sits outside the replayed
+    segment (#9187's `first_seq=41`) materialized a point with no creator — the
+    same defect as `EntityBindingRefused`, nine lines above in the registry. The
+    statement KIND is the assertion: an upsert can create, a patch cannot.
+    """
+    record = {"type": "BatchIdStamped", "ts": "T", "id": "p1",
+              "batch_id": "batch-1", "content_hash": "h1"}
+    statements = rp.mutations_for(record, org_id="o", graph_id="g")
+
+    assert not [s for s in statements
+                if s.sql.startswith("INSERT INTO public.point")], (
+        "a batch stamp must not create the point it stamps: "
+        f"{[s.sql for s in statements]}"
+    )
+    patches = [s for s in statements if s.sql.startswith("UPDATE public.point")]
+    assert patches, [s.sql for s in statements]
+    # The stamp is the §17.5-PRIMARY `batch_id`, not an empty no-op row.
+    assert "batch_id = %s" in patches[0].sql
+    assert "batch-1" in patches[0].params
+    # `content_hash` is schema-refused (`props` CHECK) — dropped, never raised.
+    assert "content_hash" not in patches[0].sql
+
+
+# ── the position watermark (#9187 P0: deleted here, restored) ───────────────
+
+
+def test_a_mid_journal_segment_keeps_the_positions_it_was_given():
+    """Replay of a SEGMENT numbers from the caller's offset, never from 1.
+
+    `_journal_row` keys the consumed position on `(org_id, graph_id, seq)` with
+    `ON CONFLICT DO NOTHING`, so a tail segment renumbered to 1.. would have its
+    position rows absorbed by the records that already own those numbers: the
+    layer rows land but the record's claim about what it consumed is false.
+    This pin exists because the parameter was deleted from `replay`/`replay_plan`
+    on this branch while `record_writer.write_records` still passed it — a
+    merge that reads clean and breaks every armed write (#9200 review, P0).
+    """
+    records = [_point_added("p1", None), _point_added("p2", None)]
+    plan = rp.replay_plan(records, org_id="o", graph_id="g", start_seq=41)
+    seqs = [s.params[2] for s in plan if rp._JOURNAL_INSERT_PREFIX in s.sql]
+    assert len(seqs) == 2, [s.sql for s in plan]
+    assert seqs == [41, 42], seqs
+
+    # The validation that guards it, and the default that preserves old calls.
+    with pytest.raises(rp.RecordProjectionError):
+        rp.replay_plan(records, org_id="o", graph_id="g", start_seq=0)
+    default = rp.replay_plan(records, org_id="o", graph_id="g")
+    assert [s.params[2] for s in default
+            if rp._JOURNAL_INSERT_PREFIX in s.sql] == [1, 2]
+
+
+# ---------------------------------------------------------------------------
+# TENANCY (#9192) — the pair comes from the CALL, never from the process
+# ---------------------------------------------------------------------------
+
+#: Two tenants, distinct in BOTH coordinates, so a plan that mixes the graph
+#: while keeping the org is caught too.
+_TENANT_A = ("org_a", "graph_a")
+_TENANT_B = ("org_b", "graph_b")
+
+
+def _every_param(plan: list[rp.Statement]) -> list[Any]:
+    """Every bound parameter of a plan, flattened.
+
+    Tenancy is asserted over the WHOLE plan rather than a sampled statement:
+    one statement built from a different tenant is the cross-tenant write, and
+    it would sit next to 73 correct ones.
+    """
+    return [param for statement in plan for param in statement.params]
+
+
+def test_two_tenants_in_one_process_do_not_cross_write():
+    """#9192: writing for A then for B never lets A's tenant reach B's rows.
+
+    This is the leg that stops the regression, and the shape of the failure is
+    why it is asserted exhaustively. A process that serves several tenant
+    graphs and resolves its tenant from anything ambient (env, a module global,
+    a ContextVar set at a pool thread's top level) files tenant A's rows under
+    tenant B **without raising**: the row is well-formed and the FK to
+    `public.graphs` only checks that the graph exists. Nothing downstream can
+    detect it — only the write site can, so the write site is where it is pinned.
+    """
+    plan_a = rp.replay_plan(_everything_records(), org_id=_TENANT_A[0],
+                            graph_id=_TENANT_A[1])
+    plan_b = rp.replay_plan(_everything_records(), org_id=_TENANT_B[0],
+                            graph_id=_TENANT_B[1])
+
+    # Non-vacuity: a plan that emitted nothing would satisfy "does not carry B".
+    assert plan_a, "the record set materialized no statements — the leg is vacuous"
+    # The statement SHAPES are tenant-independent, so tenancy is the only thing
+    # that may differ between the two plans. A tenant baked into SQL text (which
+    # no parameter check would see) shows up here.
+    assert [s.sql for s in plan_a] == [s.sql for s in plan_b]
+
+    for plan, tenant, other in ((plan_a, _TENANT_A, _TENANT_B),
+                                (plan_b, _TENANT_B, _TENANT_A)):
+        for statement in plan:
+            assert tenant[0] in statement.params and tenant[1] in statement.params, (
+                f"{statement.sql[:80]!r} does not bind the tenant it was asked "
+                f"for ({tenant}) — a statement can escape tenancy"
+            )
+        params = _every_param(plan)
+        assert other[0] not in params, (
+            f"{other[0]} leaked into the plan written for {tenant[0]}"
+        )
+        assert other[1] not in params, (
+            f"{other[1]} leaked into the plan written for {tenant[1]}"
+        )
+
+
+def test_a_write_that_cannot_name_its_tenant_refuses_instead_of_falling_back(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """#9192 ask 2: no ambient tenant exists, so an unnamed one cannot be armed.
+
+    The refusal is the whole safety property. A fallback is not a mitigation on
+    the process this has to hold on: env (and any module-level default) is
+    process-global, so ONE fallback value is tenant B's tenant while the process
+    is serving tenant A. The entry points therefore take the pair as required
+    keyword arguments, and the environment is never consulted — asserted with
+    the pair present, since an absent env cannot distinguish "not read" from
+    "read and empty".
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "env_org")
+    monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "env_graph")
+
+    record = {"type": "PointAdded", "ts": "T", "id": "p1",
+              "point": dict(_SNAPSHOT)}
+
+    # Every entry point: an unnamed tenant is refused, not defaulted.
+    with pytest.raises(TypeError):
+        rp.mutations_for(record)
+    with pytest.raises(TypeError):
+        rp.replay_plan([record])
+    with pytest.raises(TypeError):
+        rp.replay([record], None)
+
+    # And a NAMED tenant is the one that lands — the env pair is not read even
+    # as a fallback for the coordinate the caller did supply.
+    plan = rp.replay_plan([record], org_id=_TENANT_A[0], graph_id=_TENANT_A[1])
+    assert _every_param(plan), "the plan bound no parameters — the leg is vacuous"
+    params = _every_param(plan)
+    assert "env_org" not in params and "env_graph" not in params

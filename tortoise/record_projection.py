@@ -55,6 +55,23 @@ WHAT THIS MODULE DELIBERATELY IS NOT
 * **No migration-safety apparatus.** Owner scope ruling 2026-10-10: the only
   customer is the dogfood instance. No dual-write, backfill, cutover or
   rollback-parity surface appears here, and none should be added.
+
+TENANCY IS A PER-CALL ARGUMENT, NEVER AMBIENT
+============================================
+Every layer row is keyed by `(org_id, graph_id)` with a foreign key to
+`public.graphs`. Both are **required keyword arguments** of every entry point
+here (:func:`mutations_for`, :func:`replay_plan`, :func:`replay`): there is
+deliberately no module-level default, no ContextVar and no environment fallback
+at this layer.
+
+The reason is the failure mode, not taste. The hosted lane builds one SDK per
+tenant graph and its capture executor is process-wide, so a tenant resolved
+from anything process-global files tenant A's rows under tenant B **with no
+error** — the row is well-formed and the FK only checks that the graph exists.
+An environment pair is not a mitigation for that: env is process-global, so it
+is the same single value for every tenant the process serves. A caller that
+cannot name its tenant must refuse; anything wiring a live caller (`#9188`)
+resolves the pair from the request it is serving and passes it in.
 """
 
 from __future__ import annotations
@@ -380,7 +397,10 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
     # The `…Added` / `…Promoted` / dedup record types all carry a FULL point
     # snapshot (`payload["point"]`), which is what the graph fold indexes too
     # (`_apply_one`'s `points[p["id"]] = p`), so the record projects the same
-    # dict the fold does. `id` rides the envelope, not the snapshot.
+    # dict the fold does. `id` rides the envelope OR the snapshot, and this
+    # module reads both carriers (`_key_value`'s `fallback`): the capture writer
+    # emits `PointAdded` with the id ONLY in `payload["point"]` (#9078, measured
+    # on the live door).
     "PointAdded": Mutation(
         NodeSnapshot(Node("point", "Point", "id"), path="point", key_from="id"),
         note="full snapshot under `point`; identity keys are record-only and "
@@ -426,8 +446,16 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
         # FLAT: `sdk._emit_event(_BATCH_ID_RECORD_TYPE, id=point_id, **extra)`
         # carries the batch props on the envelope, never under a `point`. A
         # schema-refused prop (`content_hash`) is DROPPED by `_split_properties`,
-        # not raised — see its docstring.
-        NodeSnapshot(Node("point", "Point", "id"), path=None, key_from="id"),
+        # not raised — see its docstring. A PATCH, never a snapshot: the graph
+        # folds this type NOWHERE (`projection/__init__.py::_NO_PROJECTION_FOLD`
+        # — #902/A10 restores it in pass-2b with `MATCH (p:Point {id:$pid}) SET
+        # p.batch_id = $bid`, a MATCH that cannot create), so an upsert here
+        # invented the row. It is the same defect as `EntityBindingRefused`
+        # above, and it is reachable: #9187 replays SEGMENTS (`first_seq=41`), so
+        # a stamp whose `PointAdded` sits outside the segment is the ordinary
+        # case, not a corner. A patch stores the §17.5-PRIMARY `batch_id` and is
+        # a 0-row no-op when the point is genuinely absent — the fold's verdict.
+        NodePatch(Node("point", "Point", "id"), key_from="id"),
     ),
     # ⚠️ `new_content` is the journal's own name for the revised `content`; it
     # is NOT a node property of that name, so it is renamed rather than written
@@ -1552,7 +1580,7 @@ class ReplayReport:
 
 
 def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
-           graph_id: str) -> ReplayReport:
+           graph_id: str, start_seq: int = 1) -> ReplayReport:
     """Replay a journal into the record, on the CALLER's transaction.
 
     `§3`: *"One transaction covers the journal and its projection — no dual
@@ -1579,8 +1607,14 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
     TOTALITY. The whole journal is materialized into statements *before* the
     first one executes, so an undeclared record type fails the replay with the
     transaction untouched rather than leaving a half-applied record.
+
+    THE POSITION WATERMARK. ``start_seq`` is the journal position of
+    ``records[0]`` — the caller's fact, not this module's invention (see
+    :func:`replay_plan`). It defaults to ``1``, which reproduces every call
+    made before the parameter existed byte for byte.
     """
-    plan = replay_plan(records, org_id=org_id, graph_id=graph_id)
+    plan = replay_plan(records, org_id=org_id, graph_id=graph_id,
+                       start_seq=start_seq)
     cursor = conn.cursor()
     for statement in plan:
         cursor.execute(statement.sql, statement.params)
@@ -1598,7 +1632,7 @@ _JOURNAL_INSERT_PREFIX = "INSERT INTO public.journal_event"
 
 
 def replay_plan(records: Sequence[Mapping[str, Any]], *, org_id: str,
-                graph_id: str) -> list[Statement]:
+                graph_id: str, start_seq: int = 1) -> list[Statement]:
     """Every statement a full replay emits, in order, WITHOUT executing any.
 
     The totality gate lives here: an undeclared record type raises before a
@@ -1606,11 +1640,29 @@ def replay_plan(records: Sequence[Mapping[str, Any]], *, org_id: str,
     or leaves the record exactly as it found it. It is also the seam the PGlite
     harness (`supabase/tests/pglite/validate.mjs`) and the tests use to look at
     the *whole* statement set rather than one record at a time.
+
+    THE POSITION WATERMARK (#9187). `_journal_row` keys the consumed position on
+    `(org_id, graph_id, seq)`, where `seq` is a record's index in the batch — so
+    a batch is a *contiguous segment of the journal*, and its first position is
+    a fact only the caller holds: the journal append is the chokepoint's, not
+    this module's. `start_seq` therefore defaults to 1 (the whole journal, or a
+    first segment) and a caller replaying a LATER segment passes the offset it
+    read from the journal. Without it, replaying a tail segment would renumber
+    every record to seq 1.. and `ON CONFLICT DO NOTHING` would silently absorb
+    the position writes of records that were never numbered — the layer rows
+    would land, but the record's own claim about what it consumed would be a
+    lie. Since the journal is append-only, a re-run after a crash re-derives the
+    SAME offset from the same durable facts, so a retry never renumbers.
     """
+    if start_seq < 1:
+        raise RecordProjectionError(
+            f"start_seq is the journal position of records[0] and must be >= 1 "
+            f"(got {start_seq!r})"
+        )
     columns = table_columns()
     refused = refused_props_names()
     plan: list[Statement] = []
-    for seq, record in enumerate(records, start=1):
+    for seq, record in enumerate(records, start=start_seq):
         plan.extend(mutations_for(record, org_id=org_id, graph_id=graph_id,
                                   columns=columns, refused=refused))
         plan.append(_journal_row(record, seq, org_id, graph_id))
