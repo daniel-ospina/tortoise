@@ -22,12 +22,15 @@ Flows:
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import os
 import re
 import shutil
 import subprocess
+import urllib.error
 import urllib.parse
+import urllib.request
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -38,6 +41,7 @@ if not os.environ.get("RUN_DASHBOARD_E2E"):
     pytest.skip("dashboard e2e: opt-in via RUN_DASHBOARD_E2E=1", allow_module_level=True)
 
 from tests.e2e.auth.bff_test_helpers import (
+    dashboard_persist_args,
     ensure_dashboard_dist,
     pick_free_port,
     stop,
@@ -113,21 +117,54 @@ def _identity_stack() -> None:
         stop(mock)
         pytest.fail(f"the Supabase mock never listened on {mock_port}")
 
-    app = subprocess.Popen(
-        [wrangler, "pages", "dev", "dist",
-         "--port", str(app_port), "--ip", "127.0.0.1",
-         "--d1", "SESSIONS",
-         "-b", f"SUPABASE_URL={mock_url}",
-         "-b", "SUPABASE_ANON_KEY=mock-anon-key",
-         "-b", f"APP_ORIGIN={app_url}"],
-        cwd=str(DASHBOARD_DIR),
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    app = None
+    try:
+        app = subprocess.Popen(
+            [wrangler, "pages", "dev", "dist",
+             "--port", str(app_port), "--ip", "127.0.0.1",
+             # The previews the job itself boots pin this date; a preview that
+             # does not can be refused by the bundled workerd ("compatibility
+             # date past the runtime's max"), and the spec would then be
+             # asserting against different runtime behaviour than CI's.
+             "--compatibility-date=2024-09-23",
+             "--d1", "SESSIONS",
+             # State root pinned to the dir the seed's D1 glob reads
+             # (`d1_sqlite_files()`), so the row it writes and the row the
+             # preview serves are the same database wherever the run happens.
+             *dashboard_persist_args(),
+             "-b", f"SUPABASE_URL={mock_url}",
+             "-b", "SUPABASE_ANON_KEY=mock-anon-key",
+             "-b", f"APP_ORIGIN={app_url}"],
+            cwd=str(DASHBOARD_DIR),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except BaseException:
+        # The mock is already running; an OSError here would otherwise orphan
+        # its process group for the rest of the session.
+        if app is not None:
+            stop(app)
+        stop(mock)
+        raise
     if not wait_for_port(app_port):
         stop(app)
         stop(mock)
         pytest.fail(f"wrangler pages dev never listened on {app_port}")
+
+    # Materialise the preview's D1 BEFORE the first seed: `_seed_bff_session`
+    # waits for a sqlite to appear and its 30 s budget starts from the seed, so
+    # on a clean checkout the very first test would spend that budget waiting
+    # for a file this preview is about to create. One request that touches the
+    # session store is enough (the status is irrelevant — 401 is expected).
+    with contextlib.suppress(urllib.error.HTTPError):
+        # 401 is the expected answer — the store answered, which is the point.
+        urllib.request.urlopen(
+            urllib.request.Request(
+                f"{app_url}/api/session",
+                headers={"Cookie": "__Host-session=" + "0" * 64},
+            ),
+            timeout=20,
+        ).close()
 
     globals()["DASHBOARD_URL"] = app_url + "/"
     globals()["STACK_MOCK_URL"] = mock_url
