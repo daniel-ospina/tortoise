@@ -3223,3 +3223,58 @@ def test_discover_read_failure_is_a_state_error(repo, monkeypatch):
     monkeypatch.setattr(mod, "_git", fake_git)
     rc = mod.main(["discover"])
     assert rc == 2, f"an unreadable register is a state error (exit 2), got {rc}"
+
+
+def _prune_object(repo, sha: str) -> None:
+    """Delete a LOOSE object, leaving the partially pruned state `--thorough` is for.
+
+    The entry was created a moment ago in a temp repo and no `gc` has repacked it, so
+    its objects are still loose (`<common-git-dir>/objects/<2>/<38>`) — the same shape a
+    real pruned object DB presents to `discover`.
+    """
+    common = Path(repo.git("rev-parse", "--git-common-dir").stdout.strip())
+    if not common.is_absolute():
+        common = Path(repo.root) / common
+    obj = common.resolve() / "objects" / sha[:2] / sha[2:]
+    assert obj.exists(), f"{obj} is not a loose object — this probe needs a repack-free repo"
+    obj.unlink()
+
+
+def test_discover_offers_NO_recipe_for_an_entry_whose_parents_are_pruned(repo):
+    """A recipe `recover` cannot execute is worse than none: the lane reads it as GONE.
+
+    `discover` already reports this class ("the entry's trees may be partially pruned")
+    and it used to print `restore: python tools/lane_stash.py recover <sha> -m ...` for
+    it anyway, because the verdict never learned the objects are damaged. Measured:
+    with the index parent removed, `git stash store` refuses the commit (rc=128, "is not
+    a stash-like commit") and `recover` hits the same wall one step earlier on
+    `git rev-list --parents` — before `-m` is ever consulted, so the documented override
+    cannot rescue the one class where the shape is genuinely unknowable. Hence: the
+    listing must say the entry cannot be taken, and `recover` must report it as a STATE
+    error (exit 2) with the real reason rather than an opaque `git failed (rc=128)`.
+    """
+    repo.dirty(repo.a, "f.txt", "base\nlost\n")
+    repo.git("stash", "push", "-q", cwd=repo.a)          # bare push: no lane marker
+    sha = repo.stash_sha()
+    index_parent = repo.git("rev-parse", f"{sha}^2").stdout.strip()
+    repo.git("stash", "drop", "-q", cwd=repo.a)
+    _prune_object(repo, index_parent)
+
+    # precondition, so the assertions below cannot pass vacuously: one missing parent
+    # does not hide the entry from the oracle — it still enumerates
+    assert sha in repo.git(
+        "fsck", "--unreachable", "--no-reflogs", "--connectivity-only", check=False
+    ).stdout
+
+    found = repo.lane(repo.a, "discover")
+    assert found.returncode == 0, _fail(found)
+    assert sha[:12] in found.stdout, found.stdout
+    assert "partially pruned" in found.stdout, found.stdout
+    assert "restore: NONE" in found.stdout, found.stdout
+    assert f"recover {sha}" not in found.stdout, _fail(found)
+
+    refused = repo.lane(repo.a, "recover", sha, "-m", "this entry is mine")
+    assert refused.returncode == 2, _fail(refused)
+    assert "parents" in refused.stderr, refused.stderr
+    assert repo.stash_shas() == [], "a refused recover must not touch the register"
+    assert repo.stash_pins() == {}, "a refused recover must not pin anything"

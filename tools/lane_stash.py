@@ -1279,12 +1279,15 @@ def _lost_entries(thorough: bool = False) -> list[dict]:
     for sha, m in meta.items():
         if sha in live or not _looks_like_stash(m, parent2_subjects):
             continue
+        # No "branch" key: the branch is carried by the SUBJECT that is printed
+        # (`WIP on <branch>: ...` / `On <branch>: ...`), so a separate field would be
+        # computed and never read — and an output that showed a branch the subject
+        # does not is the kind of second source of truth this module avoids.
         lost.append({
             "sha": sha,
             "epoch": m["epoch"],
             "date": m["date"],
             "subject": m["subject"],
-            "branch": _subject_branch(m["subject"]),
             "lane": _subject_lane_key(m["subject"]),
         })
     # Newest first, on the EPOCH: `%cI` strings from different UTC offsets do not
@@ -1314,6 +1317,22 @@ def _entry_files(sha: str) -> list[str] | None:
         if cp.returncode == 0:
             return [ln for ln in cp.stdout.splitlines() if ln.strip()]
     return None
+
+
+def _entry_parents_readable(sha: str) -> bool:
+    """Can `recover` — and the `git stash store` behind it — actually TAKE this entry?
+
+    Not every listed entry is recoverable: in a partially pruned object DB the entry's
+    parent commit can be gone while the entry itself still enumerates. Both write paths
+    then fail on that missing parent, and neither `-m` nor anything else can rescue it:
+    `cmd_recover` reads the parents first (``git rev-list --parents`` exits 128) and
+    `git stash store` refuses a commit whose parents it cannot read (measured on a stash
+    whose index parent was removed: ``fatal: '<sha>' is not a stash-like commit``,
+    rc=128). So the probe is recover's own first step, run HERE rather than promised —
+    otherwise a lane follows a printed recipe, watches it fail, and concludes the work
+    is gone. This is the state `--thorough` exists for.
+    """
+    return _git("rev-list", "--parents", "-n", "1", sha, check=False).returncode == 0
 
 
 def _discover_verdict(entry: dict, key: str) -> tuple[str, str | None]:
@@ -1382,8 +1401,15 @@ def cmd_discover(args: argparse.Namespace) -> int:
             tail = f" (+{more} more)" if more else ""
             print(f"    files ({len(files)}): {', '.join(shown)}{tail}")
         print(f"    owner: {owner}")
-        if restore is not None:
+        if restore is not None and _entry_parents_readable(entry["sha"]):
             print(f"    restore: {restore}")
+        elif restore is not None:
+            # The recipe is only ever one `recover` will ACCEPT. Here it would not:
+            # a parent commit cannot be read, so `git stash store` refuses the entry.
+            print("    restore: NONE — this entry's parent commits cannot be read (its "
+                  "objects are partially pruned), and `git stash store` refuses a commit "
+                  "whose parents it cannot read (measured rc=128), so `recover` cannot "
+                  "take it; salvage the files it still has by hand")
     if len(lost) > limit:
         print(f"\n{len(lost) - limit} more not shown — raise --limit (0 = no limit)")
     return 0
@@ -1788,7 +1814,19 @@ def cmd_recover(args: argparse.Namespace) -> int:
     # `git stash pop` takes it (#8773 review P1). `cat-file -t` above already
     # proved the name resolves unambiguously.
     args.sha = _out("rev-parse", args.sha)
-    parents = _out("rev-list", "--parents", "-n", "1", args.sha).split()
+    parents_cp = _git("rev-list", "--parents", "-n", "1", args.sha, check=False)
+    if parents_cp.returncode != 0:
+        # Fail as a STATE error (exit 2) with the real reason, not as an opaque
+        # `git failed (rc=128)`: nothing here — not even `-m` — can make a store work
+        # on a commit whose parents cannot be read (`git stash store` refuses it).
+        why = (parents_cp.stderr or parents_cp.stdout or "git rev-list failed").strip()
+        raise LaneStashError(
+            f"cannot read {args.sha[:12]}'s parents ({why}) — a commit whose parents cannot "
+            "be read is refused by `git stash store` (measured rc=128), so an entry in a "
+            "partially pruned object DB cannot be recovered by this command; salvage the "
+            "files it still has by hand"
+        )
+    parents = parents_cp.stdout.split()
     subject = _out("log", "-1", "--format=%s", args.sha)
     commit_subject = subject
     # A stash commit has 2 parents (HEAD + index) or 3 with `-u`/`-a` (the

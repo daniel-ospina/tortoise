@@ -533,7 +533,10 @@ for three sends to one pane that were recorded as `OK` and never consumed.
   that was the only way back in #3147 (#8423).
   It is read-only, and it prints a `recover` recipe only where `recover` will act on it: a bare
   `recover <sha>` for an entry carrying THIS lane's marker, and `recover <sha> -m "<why>"` for an
-  unattributable one — where `-m` is you asserting the entry is yours. A peer's marked entry is
+  unattributable one — where `-m` is you asserting the entry is yours. An entry whose objects are
+  partially pruned (a parent commit is gone, so `git stash store` refuses it and even `-m` cannot
+  help) is listed as **`restore: NONE`** rather than handed a recipe that would fail and read as
+  "the work is gone". A peer's marked entry is
   listed with its owning lane and NO recipe at all: `recover` refuses it here by design, so
   restoring it is that lane's own work (or the deliberate `git stash store` recipe above).
   `tests/test_lane_stash.py` carries the 2-worktree reproduction. The lane rule
