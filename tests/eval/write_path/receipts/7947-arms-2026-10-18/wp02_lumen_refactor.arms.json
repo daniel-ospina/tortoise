@@ -1,0 +1,1736 @@
+{
+  "model_id": "deepseek/deepseek-v4-flash",
+  "chunk_size": 50,
+  "session_date": "2026-10-10",
+  "chunks": 1,
+  "errors": [],
+  "stories": {
+    "raw": "0: user: Let us scope the lumen auth migration. We are moving lumen auth to per-graph API keys so each graph gets its own credential and its own audit trail. I sketched this after the last cross-team token incident and the team signed off last Friday.\n1: assistant: Per-graph keys change the issuer shape: the key now encodes the graph id, not the team id. What prefix scheme do you want on the public key material so the registry can route a key back to its graph without a lookup?\n2: user: I like the tt_ prefix that the platform keys already use, so operators cannot mistake one for the other. Wait, actually let me double check what the platform team standardized on.\n3: assistant: The platform standard is the tt_ prefix with a random 32-byte secret after it. Reusing it for graph keys keeps the operator mental model to a single key family.\n4: user: Then graph keys get the tt_ prefix as well. Decision recorded: every graph key starts with tt_ and nothing else in the system may mint that prefix.\n5: assistant: Locked. Next: token lifetime. The current team tokens never expire, which is exactly how the leaked token stayed valid for weeks. What lifetime do you want for graph keys?\n6: user: Give every graph key a token lifetime of twenty-four hours and require rotation on the boundary. Short-lived keys mean a leak is a one-day problem, not a quarterly audit finding.\n7: assistant: Twenty-four-hour lifetime with rotation on the boundary. Do legacy team tokens get revoked at cutover, or do they keep working while teams rotate their callers?\n8: user: Legacy keys remain valid until the rotation window closes, but we stop minting new ones the day we flip. Forcing every team to rotate on day one would break the pilot.\n9: assistant: Grace period model: stop minting, keep honoring, revoke at window close. Who is piloting the cutover so we can watch a real traffic shape?\n10: user: Bluepeak Logistics is the pilot customer for the per-graph rollout. Their integration team is small and they were already asking for scoped credentials.\n11: assistant: Bluepeak as pilot, noted. The registry service will need to resolve a key to exactly one graph, which is a change from the team-scoped resolver. Who owns the registry service?\n12: user: Priya owns the registry service now, she inherited it with the data platform handoff. I will loop her into the interface review before we touch the resolver. Also the weather finally cleared up, I managed to run outside both mornings.\n13: assistant: Before the resolver work, we should pin the failure semantics. What should happen when a caller presents a revoked key mid-request?\n14: user: Fail closed with a 401, no fallback to team scope. If a key is revoked it must be dead on the next request, otherwise the audit story falls apart.\n15: assistant: Fail-closed 401 on revoked keys. For the audit trail, what retention do you need on key-usage events? The registry already logs issuance and revocation.\n16: user: Keep key usage events for ninety days, same as the rest of the audit log. Anything shorter and we cannot answer the incident questions we get asked. Also, reminder that the quarterly demo is next Tuesday.\n17: assistant: Ninety-day retention on key usage. Deployment shape: this touches issuance, resolution, and enforcement, so a single-commit flip is risky. How do you want to stage it?\n18: user: Two-phase deploy: mint graph keys in phase one with enforcement off, then flip enforcement in phase two after the sandbox org runs on them for a week.\n19: assistant: Phase one mints, phase two enforces, sandbox org exercises the full path in between. I can scaffold the phase flag now. Is there anything in lumen that still assumes a team token shape?\n20: user: Only the admin screen, it renders the team token on the settings page. We will replace that with a per-graph key table, honestly it is overdue, I have been meaning to clean that page up for months.\n21: assistant: Admin screen swap to the per-graph key table. Anything else before I write the migration plan?",
+    "narrative": "## Narrative: Lumen auth migration scoped \u2014 per-graph API keys\n\n**What changed.** On 2026-10-10 the team scoped and signed off the design of the lumen auth migration: lumen auth moves from team-scoped tokens to **per-graph API keys**, so each graph carries its own credential and its own audit trail.\n\nThe trigger was the last cross-team token incident; the team had signed off on the sketch the previous Friday (2026-10-02).\n\nThe core state change is the issuer shape \u2014 a key now encodes the **graph id**, not the team id \u2014 which forces the registry service to resolve a key to exactly one graph, a change from the team-scoped resolver.\n\n**Decisions fixed this session (all durable, all chosen targets):**\n- **Prefix:** every graph key starts with `tt_` \u2014 the same prefix the platform team standardized on (random 32-byte secret after it) \u2014 so operators keep a single key family and cannot mistake one key type for another.\n\nNothing else in the system may mint that prefix.\n\n- **Lifetime:** every graph key has a **twenty-four-hour token lifetime** with rotation on the boundary.\n\nReasoning: the current team tokens never expire, which is exactly how the leaked token stayed valid for weeks; short-lived keys make a leak a one-day problem rather than a quarterly audit finding.\n\n- **Cutover:** legacy team tokens **stop being minted on flip day** but remain valid until the rotation window closes, then are revoked.\n\nReasoning: forcing every team to rotate on day one would break the pilot.\n\n- **Failure semantics:** a revoked key **fails closed with a 401, no fallback to team scope** \u2014 it must be dead on the next request, otherwise the audit story falls apart.\n\n- **Retention:** key-usage events kept for **ninety days**, same as the rest of the audit log; anything shorter cannot answer the incident questions the team gets asked.\n\n- **Deployment:** **two-phase** \u2014 phase one mints graph keys with enforcement off; phase two flips enforcement after the sandbox org runs on them for a week.\n\nA single-commit flip was rejected as too risky because the change touches issuance, resolution, and enforcement.\n\n- **Admin screen:** the settings page currently renders the team token; it will be replaced with a **per-graph key table** (long overdue cleanup).\n\n**People and pilot.** **Bluepeak Logistics** is the pilot customer for the per-graph rollout \u2014 small integration team, already asking for scoped credentials.\n\n**Priya** owns the registry service (inherited with the data platform handoff) and will be looped into the interface review before the resolver is touched.\n\n**Epistemic shape.** The design is coherent: the `tt_` prefix reuse supports operator legibility; the 24-hour lifetime and fail-closed 401 support the audit story; the grace-period cutover and two-phase deploy temper the risk of breaking the pilot and of a risky single flip.\n\nThe one open dependency is the registry resolver change, gated on Priya's interface review.\n\n**Personal state (durable).** The user ran outside both mornings after the weather cleared."
+  },
+  "story_sha": {
+    "raw": "ba98c915b89ec045",
+    "narrative": "ae4449dd03fe6341"
+  },
+  "story_chars": {
+    "raw": 4031,
+    "narrative": 3035
+  },
+  "embed_list": {
+    "raw": {
+      "entities": [
+        {
+          "name": "lumen auth migration",
+          "kind": "core:Project",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Migration of lumen auth to per-graph API keys, each graph with its own credential and audit trail; team signed off 2026-10-02"
+        },
+        {
+          "name": "per-graph API keys",
+          "kind": "product-strategy:feature",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Each graph gets its own credential encoding the graph id rather than the team id"
+        },
+        {
+          "name": "the tt_ key prefix",
+          "kind": "core:standard",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Platform standard: tt_ prefix followed by a random 32-byte secret; adopted for graph keys"
+        },
+        {
+          "name": "the registry service",
+          "kind": "core:tool",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Resolves a key to exactly one graph; owned by Priya after the data platform handoff"
+        },
+        {
+          "name": "Bluepeak Logistics",
+          "kind": "product-strategy:customer",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Pilot customer for the per-graph rollout; small integration team already asking for scoped credentials"
+        },
+        {
+          "name": "Priya",
+          "kind": "core:naturalPerson",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Owns the registry service, inherited with the data platform handoff"
+        },
+        {
+          "name": "the admin screen",
+          "kind": "product-strategy:feature",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Renders the team token on the settings page; to be replaced with a per-graph key table"
+        },
+        {
+          "name": "the per-graph key table",
+          "kind": "product-strategy:feature",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Replaces the team token display on the admin settings page"
+        }
+      ],
+      "events": [
+        {
+          "content": "The team signed off on the per-graph API key migration on 2026-10-02",
+          "eventKind": "core:decision",
+          "about_entities": [
+            "lumen auth migration",
+            "per-graph API keys"
+          ],
+          "startedAt": "2026-10-02",
+          "slots": {
+            "subject": [
+              {
+                "name": "lumen auth migration",
+                "kind": "core:Project",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "per-graph API keys",
+                "kind": "product-strategy:feature",
+                "confidence": 0.8
+              }
+            ]
+          }
+        },
+        {
+          "content": "Decision recorded: every graph key starts with tt_ and nothing else in the system may mint that prefix",
+          "eventKind": "core:decision",
+          "about_entities": [
+            "the tt_ key prefix",
+            "per-graph API keys"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "per-graph API keys",
+                "kind": "product-strategy:feature",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "the tt_ key prefix",
+                "kind": "core:standard",
+                "confidence": 0.9
+              }
+            ]
+          }
+        },
+        {
+          "content": "Decision recorded: every graph key gets a twenty-four-hour token lifetime with rotation on the boundary",
+          "eventKind": "core:decision",
+          "about_entities": [
+            "per-graph API keys"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "per-graph API keys",
+                "kind": "product-strategy:feature",
+                "confidence": 0.8
+              }
+            ]
+          }
+        },
+        {
+          "content": "Decision recorded: legacy team keys remain valid until the rotation window closes, but new ones stop being minted the day of the flip",
+          "eventKind": "core:decision",
+          "about_entities": [
+            "lumen auth migration"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "lumen auth migration",
+                "kind": "core:Project",
+                "confidence": 0.7
+              }
+            ]
+          }
+        },
+        {
+          "content": "Decision recorded: revoked keys fail closed with a 401 and no fallback to team scope",
+          "eventKind": "core:decision",
+          "about_entities": [
+            "per-graph API keys",
+            "the registry service"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the registry service",
+                "kind": "core:tool",
+                "confidence": 0.7
+              }
+            ],
+            "object": [
+              {
+                "name": "per-graph API keys",
+                "kind": "product-strategy:feature",
+                "confidence": 0.7
+              }
+            ]
+          }
+        },
+        {
+          "content": "Decision recorded: key usage events are retained for ninety days, same as the rest of the audit log",
+          "eventKind": "core:decision",
+          "about_entities": [
+            "the registry service"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the registry service",
+                "kind": "core:tool",
+                "confidence": 0.7
+              }
+            ]
+          }
+        },
+        {
+          "content": "Decision recorded: two-phase deploy \u2014 phase one mints graph keys with enforcement off, phase two flips enforcement after the sandbox org runs on them for a week",
+          "eventKind": "core:decision",
+          "about_entities": [
+            "lumen auth migration",
+            "per-graph API keys"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "lumen auth migration",
+                "kind": "core:Project",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "per-graph API keys",
+                "kind": "product-strategy:feature",
+                "confidence": 0.7
+              }
+            ]
+          }
+        },
+        {
+          "content": "Decision recorded: the admin screen's team token display is replaced with a per-graph key table",
+          "eventKind": "core:decision",
+          "about_entities": [
+            "the admin screen",
+            "the per-graph key table"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the admin screen",
+                "kind": "product-strategy:feature",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "the per-graph key table",
+                "kind": "product-strategy:feature",
+                "confidence": 0.8
+              }
+            ]
+          }
+        }
+      ],
+      "points": [
+        {
+          "content": "Lumen auth is moving to per-graph API keys so each graph gets its own credential and its own audit trail",
+          "pointKind": "statement",
+          "about_entities": [
+            "lumen auth migration",
+            "per-graph API keys"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "lumen auth migration",
+                "kind": "core:Project",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "per-graph API keys",
+                "kind": "product-strategy:feature",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "We are moving lumen auth to per-graph API keys so each graph gets its own credential and its own audit trail.",
+          "search_keys": [
+            "per-graph API keys",
+            "lumen auth",
+            "graph credential",
+            "audit trail"
+          ],
+          "source_turn_id": 0
+        },
+        {
+          "content": "The per-graph key migration was sketched after the last cross-team token incident",
+          "pointKind": "statement",
+          "about_entities": [
+            "lumen auth migration",
+            "per-graph API keys"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "lumen auth migration",
+                "kind": "core:Project",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "I sketched this after the last cross-team token incident and the team signed off last Friday.",
+          "search_keys": [
+            "cross-team token incident",
+            "leaked token",
+            "migration motivation"
+          ],
+          "source_turn_id": 0
+        },
+        {
+          "content": "Every graph key starts with the tt_ prefix and nothing else in the system may mint that prefix",
+          "pointKind": "statement",
+          "about_entities": [
+            "the tt_ key prefix",
+            "per-graph API keys"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "per-graph API keys",
+                "kind": "product-strategy:feature",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "the tt_ key prefix",
+                "kind": "core:standard",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Decision recorded: every graph key starts with tt_ and nothing else in the system may mint that prefix.",
+          "search_keys": [
+            "tt_ prefix",
+            "key prefix",
+            "platform key standard",
+            "32-byte secret"
+          ],
+          "source_turn_id": 4
+        },
+        {
+          "content": "The platform standard is the tt_ prefix with a random 32-byte secret after it",
+          "pointKind": "statement",
+          "about_entities": [
+            "the tt_ key prefix"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "the tt_ key prefix",
+                "kind": "core:standard",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The platform standard is the tt_ prefix with a random 32-byte secret after it.",
+          "search_keys": [
+            "tt_ prefix",
+            "32-byte secret",
+            "platform standard"
+          ],
+          "source_turn_id": 3
+        },
+        {
+          "content": "Every graph key has a token lifetime of twenty-four hours with rotation required on the boundary",
+          "pointKind": "statement",
+          "about_entities": [
+            "per-graph API keys"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "per-graph API keys",
+                "kind": "product-strategy:feature",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Give every graph key a token lifetime of twenty-four hours and require rotation on the boundary.",
+          "search_keys": [
+            "twenty-four hours",
+            "24h token lifetime",
+            "key rotation",
+            "short-lived keys"
+          ],
+          "source_turn_id": 6
+        },
+        {
+          "content": "The current team tokens never expire, which is how the leaked token stayed valid for weeks",
+          "pointKind": "statement",
+          "about_entities": [
+            "lumen auth migration"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "lumen auth migration",
+                "kind": "core:Project",
+                "confidence": 0.6
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The current team tokens never expire, which is exactly how the leaked token stayed valid for weeks.",
+          "search_keys": [
+            "team tokens never expire",
+            "leaked token valid for weeks",
+            "no expiry"
+          ],
+          "source_turn_id": 5
+        },
+        {
+          "content": "Legacy team keys remain valid until the rotation window closes, but new ones stop being minted the day of the flip",
+          "pointKind": "statement",
+          "about_entities": [
+            "lumen auth migration"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "lumen auth migration",
+                "kind": "core:Project",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Legacy keys remain valid until the rotation window closes, but we stop minting new ones the day we flip.",
+          "search_keys": [
+            "grace period",
+            "legacy keys",
+            "stop minting",
+            "rotation window"
+          ],
+          "source_turn_id": 8
+        },
+        {
+          "content": "Forcing every team to rotate on day one would break the pilot",
+          "pointKind": "statement",
+          "about_entities": [
+            "lumen auth migration",
+            "Bluepeak Logistics"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "lumen auth migration",
+                "kind": "core:Project",
+                "confidence": 0.7
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak Logistics",
+                "kind": "product-strategy:customer",
+                "confidence": 0.6
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Forcing every team to rotate on day one would break the pilot.",
+          "search_keys": [
+            "day-one rotation risk",
+            "pilot breakage",
+            "grace period rationale"
+          ],
+          "source_turn_id": 8
+        },
+        {
+          "content": "Bluepeak Logistics is the pilot customer for the per-graph rollout",
+          "pointKind": "statement",
+          "about_entities": [
+            "Bluepeak Logistics",
+            "lumen auth migration"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "Bluepeak Logistics",
+                "kind": "product-strategy:customer",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "lumen auth migration",
+                "kind": "core:Project",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Bluepeak Logistics is the pilot customer for the per-graph rollout.",
+          "search_keys": [
+            "Bluepeak Logistics",
+            "pilot customer",
+            "per-graph rollout"
+          ],
+          "source_turn_id": 10
+        },
+        {
+          "content": "Bluepeak Logistics' integration team is small and was already asking for scoped credentials",
+          "pointKind": "statement",
+          "about_entities": [
+            "Bluepeak Logistics"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "Bluepeak Logistics",
+                "kind": "product-strategy:customer",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Their integration team is small and they were already asking for scoped credentials.",
+          "search_keys": [
+            "scoped credentials",
+            "Bluepeak integration team",
+            "small team"
+          ],
+          "source_turn_id": 10
+        },
+        {
+          "content": "The registry service must resolve a key to exactly one graph, a change from the team-scoped resolver",
+          "pointKind": "statement",
+          "about_entities": [
+            "the registry service",
+            "per-graph API keys"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "the registry service",
+                "kind": "core:tool",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "per-graph API keys",
+                "kind": "product-strategy:feature",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The registry service will need to resolve a key to exactly one graph, which is a change from the team-scoped resolver.",
+          "search_keys": [
+            "registry resolver",
+            "key to graph resolution",
+            "team-scoped resolver"
+          ],
+          "source_turn_id": 11
+        },
+        {
+          "content": "Priya owns the registry service, having inherited it with the data platform handoff",
+          "pointKind": "statement",
+          "about_entities": [
+            "Priya",
+            "the registry service"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "Priya",
+                "kind": "core:naturalPerson",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "the registry service",
+                "kind": "core:tool",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Priya owns the registry service now, she inherited it with the data platform handoff.",
+          "search_keys": [
+            "Priya",
+            "registry service owner",
+            "data platform handoff"
+          ],
+          "source_turn_id": 12
+        },
+        {
+          "content": "Priya will be looped into the interface review before the resolver is touched",
+          "pointKind": "statement",
+          "about_entities": [
+            "Priya",
+            "the registry service"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "Priya",
+                "kind": "core:naturalPerson",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "the registry service",
+                "kind": "core:tool",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "I will loop her into the interface review before we touch the resolver.",
+          "search_keys": [
+            "interface review",
+            "Priya review",
+            "resolver change"
+          ],
+          "source_turn_id": 12
+        },
+        {
+          "content": "A revoked key fails closed with a 401 and no fallback to team scope, dead on the next request",
+          "pointKind": "statement",
+          "about_entities": [
+            "per-graph API keys",
+            "the registry service"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the registry service",
+                "kind": "core:tool",
+                "confidence": 0.7
+              }
+            ],
+            "object": [
+              {
+                "name": "per-graph API keys",
+                "kind": "product-strategy:feature",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Fail closed with a 401, no fallback to team scope. If a key is revoked it must be dead on the next request",
+          "search_keys": [
+            "fail closed",
+            "401",
+            "revoked key",
+            "no team scope fallback"
+          ],
+          "source_turn_id": 14
+        },
+        {
+          "content": "Key usage events are retained for ninety days, same as the rest of the audit log",
+          "pointKind": "statement",
+          "about_entities": [
+            "the registry service"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the registry service",
+                "kind": "core:tool",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Keep key usage events for ninety days, same as the rest of the audit log.",
+          "search_keys": [
+            "ninety days",
+            "90-day retention",
+            "key usage events",
+            "audit log retention"
+          ],
+          "source_turn_id": 16
+        },
+        {
+          "content": "The per-graph rollout deploys in two phases: phase one mints graph keys with enforcement off, phase two flips enforcement after the sandbox org runs on them for a week",
+          "pointKind": "statement",
+          "about_entities": [
+            "lumen auth migration",
+            "per-graph API keys"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "lumen auth migration",
+                "kind": "core:Project",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "per-graph API keys",
+                "kind": "product-strategy:feature",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Two-phase deploy: mint graph keys in phase one with enforcement off, then flip enforcement in phase two after the sandbox org runs on them for a week.",
+          "search_keys": [
+            "two-phase deploy",
+            "phase one mint",
+            "phase two enforce",
+            "sandbox org week"
+          ],
+          "source_turn_id": 18
+        },
+        {
+          "content": "The admin screen is the only place in lumen that still assumes a team token shape, rendering the team token on the settings page",
+          "pointKind": "statement",
+          "about_entities": [
+            "the admin screen"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "the admin screen",
+                "kind": "product-strategy:feature",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Only the admin screen, it renders the team token on the settings page.",
+          "search_keys": [
+            "admin screen",
+            "team token display",
+            "settings page"
+          ],
+          "source_turn_id": 20
+        },
+        {
+          "content": "The admin screen's team token display is replaced with a per-graph key table",
+          "pointKind": "statement",
+          "about_entities": [
+            "the admin screen",
+            "the per-graph key table"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the admin screen",
+                "kind": "product-strategy:feature",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "the per-graph key table",
+                "kind": "product-strategy:feature",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "We will replace that with a per-graph key table, honestly it is overdue",
+          "search_keys": [
+            "per-graph key table",
+            "admin screen swap",
+            "settings page cleanup"
+          ],
+          "source_turn_id": 20
+        }
+      ],
+      "operators": [
+        {
+          "src": "The current team tokens never expire, which is how the leaked token stayed valid for weeks",
+          "dst": "Every graph key has a token lifetime of twenty-four hours with rotation required on the boundary",
+          "op_type": "IMPL"
+        },
+        {
+          "src": "Forcing every team to rotate on day one would break the pilot",
+          "dst": "Legacy team keys remain valid until the rotation window closes, but new ones stop being minted the day of the flip",
+          "op_type": "IMPL"
+        },
+        {
+          "src": "A revoked key fails closed with a 401 and no fallback to team scope, dead on the next request",
+          "dst": "Key usage events are retained for ninety days, same as the rest of the audit log",
+          "op_type": "IMPL"
+        }
+      ],
+      "chain_notes": [
+        {
+          "chain": "productDelivery",
+          "finding": "Bluepeak Logistics (customer) is connected to the per-graph API keys feature and the migration project rather than directly to architecture requirements",
+          "action": "repaired",
+          "note": "Customer mapped to the feature it pilots, not to the resolver architecture"
+        }
+      ],
+      "link_before_create": [
+        {
+          "searched_for": "lumen auth migration",
+          "found": false,
+          "note": "No prior entity for the migration"
+        },
+        {
+          "searched_for": "per-graph API keys",
+          "found": false,
+          "note": "No prior entity for per-graph keys"
+        },
+        {
+          "searched_for": "tt_ key prefix",
+          "found": false,
+          "note": "No prior standard entity for the prefix"
+        },
+        {
+          "searched_for": "the registry service",
+          "found": false,
+          "note": "No prior entity for the registry service"
+        },
+        {
+          "searched_for": "Bluepeak Logistics",
+          "found": false,
+          "note": "No prior customer entity"
+        },
+        {
+          "searched_for": "Priya",
+          "found": false,
+          "note": "No prior person entity"
+        },
+        {
+          "searched_for": "the admin screen",
+          "found": false,
+          "note": "No prior entity for the admin screen"
+        }
+      ],
+      "retractions": []
+    },
+    "narrative": {
+      "entities": [
+        {
+          "name": "lumen auth migration",
+          "kind": "core:Project",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Migration of lumen auth from team-scoped tokens to per-graph API keys; design scoped and signed off 2026-10-10, sketch signed off 2026-10-02."
+        },
+        {
+          "name": "per-graph API keys",
+          "kind": "core:strategy",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Each graph gets its own credential and its own audit trail; key encodes graph id, not team id."
+        },
+        {
+          "name": "registry service",
+          "kind": "core:tool",
+          "lifecycle": "unchanged",
+          "supersedes": null,
+          "note": "Must resolve a key to exactly one graph \u2014 a change from the team-scoped resolver; owned by Priya."
+        },
+        {
+          "name": "tt_ key prefix",
+          "kind": "core:standard",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Platform-standard prefix with a random 32-byte secret after it; reused for graph keys."
+        },
+        {
+          "name": "Bluepeak Logistics",
+          "kind": "product-strategy:customer",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Pilot customer for the per-graph rollout; small integration team, already asking for scoped credentials."
+        },
+        {
+          "name": "Priya",
+          "kind": "core:naturalPerson",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Owns the registry service, inherited with the data platform handoff; to be looped into the interface review."
+        },
+        {
+          "name": "per-graph key table",
+          "kind": "product-strategy:feature",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Replaces the team-token rendering on the admin settings page; long overdue cleanup."
+        },
+        {
+          "name": "admin settings screen",
+          "kind": "core:tool",
+          "lifecycle": "changed",
+          "supersedes": null,
+          "note": "Currently renders the team token; to be replaced with a per-graph key table."
+        },
+        {
+          "name": "cross-team token incident",
+          "kind": "dev:incident",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Trigger for the migration; leaked token stayed valid for weeks because team tokens never expire."
+        },
+        {
+          "name": "sandbox org",
+          "kind": "core:organization",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Runs on graph keys for a week between phase one and phase two enforcement."
+        }
+      ],
+      "events": [
+        {
+          "content": "The team scoped and signed off the design of the lumen auth migration to per-graph API keys",
+          "eventKind": "core:decision",
+          "about_entities": [
+            "lumen auth migration",
+            "per-graph API keys"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "lumen auth migration",
+                "kind": "core:Project",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "per-graph API keys",
+                "kind": "core:strategy",
+                "confidence": 0.9
+              }
+            ]
+          }
+        },
+        {
+          "content": "The team signed off the sketch of the per-graph key migration",
+          "eventKind": "core:decision",
+          "about_entities": [
+            "lumen auth migration"
+          ],
+          "startedAt": "2026-10-02",
+          "slots": {
+            "subject": [
+              {
+                "name": "lumen auth migration",
+                "kind": "core:Project",
+                "confidence": 0.8
+              }
+            ]
+          }
+        },
+        {
+          "content": "The cross-team token incident exposed that a leaked team token stayed valid for weeks",
+          "eventKind": "core:occurrence",
+          "about_entities": [
+            "cross-team token incident"
+          ],
+          "startedAt": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "cross-team token incident",
+                "kind": "dev:incident",
+                "confidence": 0.85
+              }
+            ]
+          }
+        }
+      ],
+      "points": [
+        {
+          "content": "Lumen auth moves from team-scoped tokens to per-graph API keys so each graph gets its own credential and its own audit trail",
+          "pointKind": "statement",
+          "about_entities": [
+            "lumen auth migration",
+            "per-graph API keys"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "lumen auth migration",
+                "kind": "core:Project",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "per-graph API keys",
+                "kind": "core:strategy",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "We are moving lumen auth to per-graph API keys so each graph gets its own credential and its own audit trail.",
+          "search_keys": [
+            "per-graph API keys",
+            "graph-scoped credentials",
+            "lumen auth migration",
+            "audit trail per graph"
+          ],
+          "source_turn_id": 0
+        },
+        {
+          "content": "The per-graph key issuer shape encodes the graph id, not the team id, forcing the registry service to resolve a key to exactly one graph",
+          "pointKind": "statement",
+          "about_entities": [
+            "per-graph API keys",
+            "registry service"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "per-graph API keys",
+                "kind": "core:strategy",
+                "confidence": 0.85
+              }
+            ],
+            "object": [
+              {
+                "name": "registry service",
+                "kind": "core:tool",
+                "confidence": 0.85
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Per-graph keys change the issuer shape: the key now encodes the graph id, not the team id.",
+          "search_keys": [
+            "issuer shape",
+            "graph id in key",
+            "team-scoped resolver",
+            "key resolution"
+          ],
+          "source_turn_id": 1
+        },
+        {
+          "content": "Every graph key starts with the tt_ prefix and nothing else in the system may mint that prefix",
+          "pointKind": "statement",
+          "about_entities": [
+            "tt_ key prefix",
+            "per-graph API keys"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "per-graph API keys",
+                "kind": "core:strategy",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "tt_ key prefix",
+                "kind": "core:standard",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Decision recorded: every graph key starts with tt_ and nothing else in the system may mint that prefix.",
+          "search_keys": [
+            "tt_ prefix",
+            "key prefix scheme",
+            "single key family",
+            "prefix reservation"
+          ],
+          "source_turn_id": 4
+        },
+        {
+          "content": "The platform standard is the tt_ prefix followed by a random 32-byte secret",
+          "pointKind": "statement",
+          "about_entities": [
+            "tt_ key prefix"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "tt_ key prefix",
+                "kind": "core:standard",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The platform standard is the tt_ prefix with a random 32-byte secret after it.",
+          "search_keys": [
+            "tt_ prefix",
+            "32-byte secret",
+            "platform key standard"
+          ],
+          "source_turn_id": 3
+        },
+        {
+          "content": "Every graph key has a token lifetime of twenty-four hours with rotation on the boundary",
+          "pointKind": "statement",
+          "about_entities": [
+            "per-graph API keys"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "per-graph API keys",
+                "kind": "core:strategy",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Give every graph key a token lifetime of twenty-four hours and require rotation on the boundary.",
+          "search_keys": [
+            "twenty-four hours",
+            "24h token lifetime",
+            "key rotation",
+            "short-lived keys"
+          ],
+          "source_turn_id": 6
+        },
+        {
+          "content": "Current team tokens never expire, which is how the leaked token stayed valid for weeks",
+          "pointKind": "statement",
+          "about_entities": [
+            "cross-team token incident"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "cross-team token incident",
+                "kind": "dev:incident",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The current team tokens never expire, which is exactly how the leaked token stayed valid for weeks.",
+          "search_keys": [
+            "non-expiring tokens",
+            "leaked token",
+            "token expiry",
+            "incident root cause"
+          ],
+          "source_turn_id": 5
+        },
+        {
+          "content": "Short-lived keys make a leak a one-day problem rather than a quarterly audit finding",
+          "pointKind": "statement",
+          "about_entities": [
+            "per-graph API keys"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "per-graph API keys",
+                "kind": "core:strategy",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Short-lived keys mean a leak is a one-day problem, not a quarterly audit finding.",
+          "search_keys": [
+            "one-day problem",
+            "leak blast radius",
+            "audit finding"
+          ],
+          "source_turn_id": 6
+        },
+        {
+          "content": "Legacy team tokens stop being minted on flip day but remain valid until the rotation window closes, then are revoked",
+          "pointKind": "statement",
+          "about_entities": [
+            "lumen auth migration",
+            "per-graph API keys"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "lumen auth migration",
+                "kind": "core:Project",
+                "confidence": 0.85
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Legacy keys remain valid until the rotation window closes, but we stop minting new ones the day we flip.",
+          "search_keys": [
+            "grace period",
+            "stop minting",
+            "rotation window",
+            "legacy token revocation"
+          ],
+          "source_turn_id": 8
+        },
+        {
+          "content": "Forcing every team to rotate on day one would break the pilot",
+          "pointKind": "statement",
+          "about_entities": [
+            "Bluepeak Logistics",
+            "lumen auth migration"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "Bluepeak Logistics",
+                "kind": "product-strategy:customer",
+                "confidence": 0.7
+              }
+            ],
+            "object": [
+              {
+                "name": "lumen auth migration",
+                "kind": "core:Project",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Forcing every team to rotate on day one would break the pilot.",
+          "search_keys": [
+            "pilot breakage",
+            "day-one rotation",
+            "grace period rationale"
+          ],
+          "source_turn_id": 8
+        },
+        {
+          "content": "A revoked key fails closed with a 401 and no fallback to team scope; it must be dead on the next request",
+          "pointKind": "statement",
+          "about_entities": [
+            "per-graph API keys",
+            "registry service"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "per-graph API keys",
+                "kind": "core:strategy",
+                "confidence": 0.85
+              }
+            ],
+            "object": [
+              {
+                "name": "registry service",
+                "kind": "core:tool",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Fail closed with a 401, no fallback to team scope. If a key is revoked it must be dead on the next request, otherwise the audit story falls apart.",
+          "search_keys": [
+            "fail closed",
+            "401 on revoked key",
+            "no team-scope fallback",
+            "revocation semantics"
+          ],
+          "source_turn_id": 14
+        },
+        {
+          "content": "Key-usage events are kept for ninety days, same as the rest of the audit log",
+          "pointKind": "statement",
+          "about_entities": [
+            "per-graph API keys"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "per-graph API keys",
+                "kind": "core:strategy",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Keep key usage events for ninety days, same as the rest of the audit log.",
+          "search_keys": [
+            "ninety days",
+            "90-day retention",
+            "key usage events",
+            "audit log retention"
+          ],
+          "source_turn_id": 16
+        },
+        {
+          "content": "Anything shorter than ninety-day retention cannot answer the incident questions the team gets asked",
+          "pointKind": "statement",
+          "about_entities": [
+            "per-graph API keys"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "per-graph API keys",
+                "kind": "core:strategy",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Anything shorter and we cannot answer the incident questions we get asked.",
+          "search_keys": [
+            "incident questions",
+            "retention rationale",
+            "audit answers"
+          ],
+          "source_turn_id": 16
+        },
+        {
+          "content": "Deployment is two-phase: phase one mints graph keys with enforcement off, phase two flips enforcement after the sandbox org runs on them for a week",
+          "pointKind": "statement",
+          "about_entities": [
+            "lumen auth migration",
+            "sandbox org"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "lumen auth migration",
+                "kind": "core:Project",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "sandbox org",
+                "kind": "core:organization",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Two-phase deploy: mint graph keys in phase one with enforcement off, then flip enforcement in phase two after the sandbox org runs on them for a week.",
+          "search_keys": [
+            "two-phase deploy",
+            "phase flag",
+            "enforcement off",
+            "sandbox week"
+          ],
+          "source_turn_id": 18
+        },
+        {
+          "content": "A single-commit flip was rejected as too risky because the change touches issuance, resolution, and enforcement",
+          "pointKind": "statement",
+          "about_entities": [
+            "lumen auth migration"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "lumen auth migration",
+                "kind": "core:Project",
+                "confidence": 0.85
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "this touches issuance, resolution, and enforcement, so a single-commit flip is risky",
+          "search_keys": [
+            "single-commit flip",
+            "rejected option",
+            "deployment risk"
+          ],
+          "source_turn_id": 17
+        },
+        {
+          "content": "The admin settings page currently renders the team token and will be replaced with a per-graph key table",
+          "pointKind": "statement",
+          "about_entities": [
+            "admin settings screen",
+            "per-graph key table"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "admin settings screen",
+                "kind": "core:tool",
+                "confidence": 0.85
+              }
+            ],
+            "object": [
+              {
+                "name": "per-graph key table",
+                "kind": "product-strategy:feature",
+                "confidence": 0.85
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Only the admin screen, it renders the team token on the settings page. We will replace that with a per-graph key table",
+          "search_keys": [
+            "admin screen",
+            "per-graph key table",
+            "team token rendering",
+            "settings page cleanup"
+          ],
+          "source_turn_id": 20
+        },
+        {
+          "content": "Bluepeak Logistics is the pilot customer for the per-graph rollout; their integration team is small and they were already asking for scoped credentials",
+          "pointKind": "statement",
+          "about_entities": [
+            "Bluepeak Logistics",
+            "per-graph API keys"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "Bluepeak Logistics",
+                "kind": "product-strategy:customer",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "per-graph API keys",
+                "kind": "core:strategy",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Bluepeak Logistics is the pilot customer for the per-graph rollout. Their integration team is small and they were already asking for scoped credentials.",
+          "search_keys": [
+            "Bluepeak Logistics",
+            "pilot customer",
+            "scoped credentials"
+          ],
+          "source_turn_id": 10
+        },
+        {
+          "content": "Priya owns the registry service, inherited with the data platform handoff, and will be looped into the interface review before the resolver is touched",
+          "pointKind": "statement",
+          "about_entities": [
+            "Priya",
+            "registry service"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "Priya",
+                "kind": "core:naturalPerson",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "registry service",
+                "kind": "core:tool",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Priya owns the registry service now, she inherited it with the data platform handoff. I will loop her into the interface review before we touch the resolver.",
+          "search_keys": [
+            "Priya",
+            "registry service owner",
+            "interface review",
+            "data platform handoff"
+          ],
+          "source_turn_id": 12
+        },
+        {
+          "content": "The registry resolver change is the one open dependency, gated on Priya's interface review",
+          "pointKind": "statement",
+          "about_entities": [
+            "registry service",
+            "Priya",
+            "lumen auth migration"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "registry service",
+                "kind": "core:tool",
+                "confidence": 0.85
+              }
+            ],
+            "object": [
+              {
+                "name": "Priya",
+                "kind": "core:naturalPerson",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "I will loop her into the interface review before we touch the resolver.",
+          "search_keys": [
+            "open dependency",
+            "resolver change",
+            "interface review gate"
+          ],
+          "source_turn_id": 12
+        },
+        {
+          "content": "The user ran outside both mornings after the weather cleared",
+          "pointKind": "statement",
+          "about_entities": [],
+          "when": "2026-10-10",
+          "slots": {},
+          "tier": "A",
+          "quote": "Also the weather finally cleared up, I managed to run outside both mornings.",
+          "search_keys": [
+            "ran outside",
+            "morning run",
+            "weather cleared"
+          ],
+          "source_turn_id": 12
+        }
+      ],
+      "operators": [
+        {
+          "src": "Every graph key has a token lifetime of twenty-four hours with rotation on the boundary",
+          "dst": "Current team tokens never expire, which is how the leaked token stayed valid for weeks",
+          "op_type": "NAND"
+        },
+        {
+          "src": "A revoked key fails closed with a 401 and no fallback to team scope; it must be dead on the next request",
+          "dst": "Current team tokens never expire, which is how the leaked token stayed valid for weeks",
+          "op_type": "NAND"
+        },
+        {
+          "src": "Legacy team tokens stop being minted on flip day but remain valid until the rotation window closes, then are revoked",
+          "dst": "Forcing every team to rotate on day one would break the pilot",
+          "op_type": "MITIGATES",
+          "target_edge": {
+            "src": "Lumen auth moves from team-scoped tokens to per-graph API keys so each graph gets its own credential and its own audit trail",
+            "dst": "Forcing every team to rotate on day one would break the pilot",
+            "op_type": "IMPL"
+          },
+          "strength": 0.3
+        },
+        {
+          "src": "Deployment is two-phase: phase one mints graph keys with enforcement off, phase two flips enforcement after the sandbox org runs on them for a week",
+          "dst": "A single-commit flip was rejected as too risky because the change touches issuance, resolution, and enforcement",
+          "op_type": "MITIGATES",
+          "target_edge": {
+            "src": "Lumen auth moves from team-scoped tokens to per-graph API keys so each graph gets its own credential and its own audit trail",
+            "dst": "A single-commit flip was rejected as too risky because the change touches issuance, resolution, and enforcement",
+            "op_type": "IMPL"
+          },
+          "strength": 0.3
+        },
+        {
+          "src": "Every graph key starts with the tt_ prefix and nothing else in the system may mint that prefix",
+          "dst": "Lumen auth moves from team-scoped tokens to per-graph API keys so each graph gets its own credential and its own audit trail",
+          "op_type": "IMPL"
+        },
+        {
+          "src": "Every graph key has a token lifetime of twenty-four hours with rotation on the boundary",
+          "dst": "Lumen auth moves from team-scoped tokens to per-graph API keys so each graph gets its own credential and its own audit trail",
+          "op_type": "IMPL"
+        },
+        {
+          "src": "A revoked key fails closed with a 401 and no fallback to team scope; it must be dead on the next request",
+          "dst": "Lumen auth moves from team-scoped tokens to per-graph API keys so each graph gets its own credential and its own audit trail",
+          "op_type": "IMPL"
+        },
+        {
+          "src": "Key-usage events are kept for ninety days, same as the rest of the audit log",
+          "dst": "Lumen auth moves from team-scoped tokens to per-graph API keys so each graph gets its own credential and its own audit trail",
+          "op_type": "IMPL"
+        },
+        {
+          "src": "Deployment is two-phase: phase one mints graph keys with enforcement off, phase two flips enforcement after the sandbox org runs on them for a week",
+          "dst": "Lumen auth moves from team-scoped tokens to per-graph API keys so each graph gets its own credential and its own audit trail",
+          "op_type": "IMPL"
+        }
+      ],
+      "chain_notes": [
+        {
+          "chain": "productDelivery",
+          "finding": "Bluepeak Logistics (customer) is connected to the per-graph API keys strategy and the migration project rather than to a JTBD/use case; no JTBD or use case was stated in the session.",
+          "action": "warned",
+          "note": "No JTBD/useCase entity exists to re-map to; customer is attached to the rollout it pilots, not to architecture."
+        }
+      ],
+      "link_before_create": [
+        {
+          "searched_for": "lumen auth migration",
+          "found": false,
+          "note": "No prior entity for the lumen auth migration in the graph."
+        },
+        {
+          "searched_for": "per-graph API keys",
+          "found": false,
+          "note": "No prior per-graph key strategy entity."
+        },
+        {
+          "searched_for": "registry service",
+          "found": false,
+          "note": "No prior registry service entity."
+        },
+        {
+          "searched_for": "tt_ key prefix",
+          "found": false,
+          "note": "No prior prefix standard entity."
+        },
+        {
+          "searched_for": "Bluepeak Logistics",
+          "found": false,
+          "note": "No prior customer entity."
+        },
+        {
+          "searched_for": "Priya",
+          "found": false,
+          "note": "No prior natural person entity."
+        },
+        {
+          "searched_for": "cross-team token incident",
+          "found": false,
+          "note": "No prior incident entity."
+        }
+      ],
+      "retractions": []
+    }
+  },
+  "s2_stats": {
+    "raw": {
+      "attempts": 1,
+      "retries": 0,
+      "last_class": null,
+      "truncated": false,
+      "finish_reason": "stop",
+      "prompt_tokens": 9292,
+      "completion_tokens": 4860,
+      "cost": {
+        "calls": 1,
+        "prompt_tokens": 9292,
+        "completion_tokens": 4860,
+        "calls_without_cost": 1,
+        "by_route": {
+          "deepseek-direct": {
+            "deepseek-v4-flash": {
+              "calls": 1,
+              "prompt_tokens": 9292,
+              "completion_tokens": 4860,
+              "cost_usd": 0.0,
+              "calls_without_cost": 1,
+              "calls_without_usage": 0,
+              "calls_without_tokens": 0,
+              "usage_present": true
+            }
+          }
+        }
+      },
+      "recovery": {
+        "s2_out_tokens": 4860
+      }
+    },
+    "narrative": {
+      "attempts": 1,
+      "retries": 0,
+      "last_class": null,
+      "truncated": false,
+      "finish_reason": "stop",
+      "prompt_tokens": 9068,
+      "completion_tokens": 4424,
+      "cost": {
+        "calls": 1,
+        "prompt_tokens": 9068,
+        "completion_tokens": 4424,
+        "calls_without_cost": 1,
+        "by_route": {
+          "deepseek-direct": {
+            "deepseek-v4-flash": {
+              "calls": 1,
+              "prompt_tokens": 9068,
+              "completion_tokens": 4424,
+              "cost_usd": 0.0,
+              "calls_without_cost": 1,
+              "calls_without_usage": 0,
+              "calls_without_tokens": 0,
+              "usage_present": true
+            }
+          }
+        }
+      },
+      "recovery": {
+        "s2_out_tokens": 4424
+      }
+    }
+  },
+  "s2_errors": {},
+  "s2_seconds": {
+    "raw": 13.8,
+    "narrative": 13.1
+  },
+  "session_id": "wp02_lumen_refactor",
+  "turns": 22,
+  "seconds": 30.7
+}

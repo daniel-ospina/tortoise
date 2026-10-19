@@ -4547,6 +4547,13 @@ def _cmd_session(args) -> int:
         # it just created — refusing it for want of a hosted key would make the
         # one surface that exists to be accurate silent exactly there.
         return _cmd_session_disclosure(args)
+    if args.session_cmd == "health":
+        # agent-infra#2100: likewise BEFORE the credential gate. It is answered from the
+        # LOCAL spool (counts + the durable refusal record), and the box that
+        # most needs to report `BLOCKED (n queued, 402)` is exactly the box whose
+        # captures are being refused — a health check that refused to run there
+        # would hide the state it exists to show.
+        return _cmd_session_health()
 
     # Transmitting-identity resolver (#2369 D1.2, #3660): this resolver runs
     # BEFORE dispatch, so the uploaders (`capture`) and the read-only
@@ -5226,6 +5233,83 @@ def _cmd_session_drain_best_effort(args) -> int:
     except Exception as e:
         print(f"spool drain: nothing filed — {e}", file=_sys.stderr)
         return 0
+    finally:
+        # agent-infra#2100: EVERY drain exit reports the box's capture health, including
+        # the no-credential early return above — so a drain run BY HAND explains
+        # the spool it just could not file. (The SessionStart hook backgrounds
+        # this with `>/dev/null 2>&1`, so on that path the line is deliberately
+        # discarded: the durable surfaces are `tortoise session health`,
+        # `tortoise doctor`, and the Pi extension's own lane log.)
+        _print_capture_health()
+
+
+def _capture_key_presence() -> str | None:
+    """``""`` when this box has NO transmitting credential (capture is INACTIVE).
+
+    ``None`` when it cannot be determined: a corrupt/unreadable config is not
+    evidence that the box is keyless, and :func:`capture_health_line` treats
+    ``None`` as "do not claim INACTIVE" — the same "a check that could not look
+    is not an answer" rule the line's own ``UNREADABLE`` state follows.
+    """
+    try:
+        _cfg_path, _config, api_key, _api_url = _resolve_transmit_config()
+    except Exception:
+        return None
+    return api_key or ""
+
+
+def _print_capture_health() -> None:
+    """Print the per-box capture health line when it needs explaining (agent-infra#2100).
+
+    Best-effort by construction: a health read must never break the exit-0
+    contract of the drain, and an `OK`/`DRAINING` line on every drain would be
+    noise. Only a BLOCKED or an UNREADABLE spool is worth printing.
+
+    NOTE the surface: this writes to the DRAIN's stderr, which the SessionStart
+    hook redirects to /dev/null. It is therefore an operator's line for a drain
+    run by hand — NOT the fleet's health surface. The durable answers are
+    `tortoise session health` (explicit, one line), the `tortoise doctor` row,
+    and the Pi extension's `capture:` lane-log lines.
+    """
+    import sys as _sys
+
+    try:
+        from tortoise.capture_spool import capture_health_line, spool_dir
+        health = capture_health_line(spool_dir(), api_key=_capture_key_presence())
+    except Exception:
+        return
+    # BLOCKED and UNREADABLE only: a DRAINING spool on a normal SessionStart is
+    # usually the live session held back for its own final flush (and INACTIVE is
+    # already reported by this command's own keyless message), so a line about
+    # either on every start is noise — the alert-fatigue pattern recorded at the
+    # doctor's consent row. UNREADABLE is printed because a drain that could not
+    # READ the spool is the one case where printing nothing would leave the
+    # operator with the silent empty backlog this issue removed.
+    if health.state in ("blocked", "unreadable"):
+        print(health.line, file=_sys.stderr)
+
+
+def _cmd_session_health() -> int:
+    """Print the per-box capture health line (agent-infra#2100). Always exits 0.
+
+    Answered from the LOCAL spool — the pending captures and the durable refusal
+    record both legs write — so it needs no credential and no network. That is
+    the point: the box that most needs to report `capture: BLOCKED (n queued,
+    402 quota)` is the box whose captures are being refused.
+
+    Real failures (an unreadable spool root) are REPORTED, never laundered into
+    a healthy reading: a health check that says `OK` when it could not look is
+    the false-PASS this line exists to prevent.
+    """
+    import sys as _sys
+
+    try:
+        from tortoise.capture_spool import capture_health_line, spool_dir
+        print(capture_health_line(spool_dir(),
+                                 api_key=_capture_key_presence()).line)
+    except Exception as exc:
+        print(f"capture: UNREADABLE (health read failed: {exc})", file=_sys.stderr)
+    return 0
 
 
 def _record_drain_deferrals(root, summary) -> None:
@@ -9676,6 +9760,40 @@ def _cmd_doctor(args):
         results.append(("Capture hooks", "⚠️",
                         f"check unavailable: {str(e)[:60]}"))
 
+    # agent-infra#2100: the capture SPOOL is a per-box health surface in its own right — a
+    # box whose graph allowance is exhausted refuses every capture, and an
+    # operator who reads only "hooks installed" would call the box idle when it is
+    # blocked. The severity is decided by the HEALTH STATE, never by "not
+    # BLOCKED": an `UNREADABLE` (the spool could not be READ) is a check that did
+    # not run, and an `else ✅` arm laundered it into a pass — the same "cannot
+    # read → healthy" false PASS the line's own UNREADABLE state exists to
+    # prevent, one level up. Every state is named here so a new one cannot fall
+    # through.
+    #
+    # `❌` only for BLOCKED: only a refusal retrying cannot fix fails the report
+    # (and so the exit code). DRAINING and INACTIVE are INFORMATION, not warnings:
+    # a pending capture on a live box is usually the running session awaiting its
+    # own final flush, and a keyless box is a normal install — painting either as
+    # "1 warn" is the alert-fatigue pattern the consent row below already
+    # records (#3615).
+    try:
+        from tortoise.capture_spool import capture_health_line, spool_dir
+        _capture_health = capture_health_line(
+            spool_dir(), api_key=_capture_key_presence())
+        _capture_icon = {
+            "blocked": "❌",
+            "unreadable": "⚠️",
+            "draining": "ℹ️",
+            "inactive": "ℹ️",
+            "ok": "✅",
+        }.get(_capture_health.state, "⚠️")  # an unknown state is not a pass
+        results.append(("Capture spool", _capture_icon, _capture_health.line))
+    except MemoryError:
+        raise
+    except Exception as e:
+        results.append(("Capture spool", "⚠️",
+                        f"check unavailable: {str(e)[:60]}"))
+
     # Print results
     for check, icon, detail in results:
         print(f"  {icon} {check}: {detail}")
@@ -11057,6 +11175,13 @@ def main(argv: list[str] | None = None) -> int:
     session_spool.add_argument(
         "--model", default=None, help="Model label to record with the session")
     session_list = session_sp.add_parser("list", help="List all sessions")  # noqa: F841
+    # agent-infra#2100: the per-box capture health line — `capture: BLOCKED (320 queued,
+    # 402)`. Local-only (the spool + its durable refusal record), so it is
+    # readable on an idle box with no credential: "no idle lane" must never be
+    # the only explanation an operator can get.
+    session_sp.add_parser(
+        "health",
+        help="Report the per-box capture health line (spool state, refusals)")
     session_view = session_sp.add_parser("view", help="View a specific session")
     session_view.add_argument("id", help="Session ID")
     # #3517: the capture disclosure, rendered from runtime structured data. The

@@ -72,6 +72,38 @@
       }
     }
   ],
+  "planted_qualifiers": [
+    {
+      "class": "hedge",
+      "id": "wp03_ember_design_q_01",
+      "notes": "weakens the claim that on-call load falls on the platform team (not exclusively); that claim is not a planted unit",
+      "planted_turn": 3,
+      "verbatim_qualifier": "mostly"
+    },
+    {
+      "bound_claim": "wp03_ember_design_u_02",
+      "class": "hedge",
+      "id": "wp03_ember_design_q_02",
+      "notes": "marks the unactionable-page share as approximate",
+      "planted_turn": 5,
+      "verbatim_qualifier": "Roughly"
+    },
+    {
+      "bound_claim": "wp03_ember_design_u_09",
+      "class": "stance",
+      "id": "wp03_ember_design_q_03",
+      "notes": "speaker endorses Aisha's human-owned-declarations suggestion",
+      "planted_turn": 17,
+      "verbatim_qualifier": "which I agree with"
+    },
+    {
+      "class": "scope",
+      "id": "wp03_ember_design_q_04",
+      "notes": "limits expansion of ownership-based routing until the first two weeks are watched; the stance 'Tomas wants' rides on the same clause",
+      "planted_turn": 21,
+      "verbatim_qualifier": "before we expand"
+    }
+  ],
   "planted_units": [
     {
       "depth_bucket": "early",

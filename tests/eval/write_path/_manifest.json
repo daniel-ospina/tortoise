@@ -8,15 +8,15 @@
     "fixtures/wp05_retro_writeup.json": "sha256:9572e302e727917ec20a633873e6862a7737236b2da7cc21e614fad12ca930a8",
     "fixtures/wp06_quarry_rollout.json": "sha256:a8255802f428be4e9510bb3959772c5936479bbdb34786612f8bb1609d61c1fa",
     "fixtures/wp07_bluepeak_followup.json": "sha256:96bcd85c8c32bcfb09c2032e18558f09488f4ff4b964b188f26f17d4a0a2513e",
-    "gold/wp01_quarry_debug.gold.json": "sha256:41998b1822120a06a0c50311c52da7170bf7d17a3ac0e89bbb2643e110a77a93",
-    "gold/wp02_lumen_refactor.gold.json": "sha256:2960f3d48d1b948dce021d460e7dd8888aa216cd4356bb612d8a78407a2d51e9",
-    "gold/wp03_ember_design.gold.json": "sha256:c2bef729e95340227b635cc2e8c3f6fc0dce99b21d8661554ce367188d7f4729",
-    "gold/wp04_aurora_perf.gold.json": "sha256:8476fa939a42703fea004adae982b6ea616e05bf08d13e4b5593e1da99456658",
-    "gold/wp05_retro_writeup.gold.json": "sha256:bb74fbc6adddf2f77210f1436840825f76c31e8983f0c71eed9df51f156eca61",
-    "gold/wp06_quarry_rollout.gold.json": "sha256:77ec92586da389f28fa795ffdc0c8daf338ec71abe51c272e4d724e8756857ef",
-    "gold/wp07_bluepeak_followup.gold.json": "sha256:41a34efeecfebb184f0ce69da3966b1295dd61d0ba3c8336f06bd6f9d906c6d1"
+    "gold/wp01_quarry_debug.gold.json": "sha256:94b91e3159e608b42fc9eaf8ccb17ded871989b87f4293b5e592b87e99815998",
+    "gold/wp02_lumen_refactor.gold.json": "sha256:ff883cbf65fbc852c8922aa1c544153afa648a9f5840d7ab6a90da0b772823ca",
+    "gold/wp03_ember_design.gold.json": "sha256:de641cb65b8187477e6e44212e45e127f224a1b52e1683d3a61d06b97aa725ef",
+    "gold/wp04_aurora_perf.gold.json": "sha256:af0bc4817b12839c5062a7bfc32e098a48a193400f34725bc9358a61c2216fa8",
+    "gold/wp05_retro_writeup.gold.json": "sha256:59921a44faa2d1c13b091061e2cd9474c8c9e0bd2f3bab1f362aa67e1df4075a",
+    "gold/wp06_quarry_rollout.gold.json": "sha256:df6e5474f45860234be0f3330f6aacfaaba4497263f8efa1fe89ce3fb2bc8bf0",
+    "gold/wp07_bluepeak_followup.gold.json": "sha256:417819351f2903a1ee99c2db1c385b6cfebc2fb7cd2ea437e7a915047a9a26d8"
   },
-  "fixtures_hash": "sha256:943a99ec619b4c67b8e31fefb90316ea023bbaddd1905d835b9d930243518324",
+  "fixtures_hash": "sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc",
   "generator": "tests/eval/write_path/generate_corpus.py",
   "schema_version": 1,
   "seed": 42

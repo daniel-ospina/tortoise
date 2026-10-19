@@ -877,7 +877,25 @@ SOURCE_PATTERNS = {
              # P2-1 (code review): an embeddings.py/cross_lens.py-only PR must
              # select eval so probe/vector-arm/threshold tests run (they assert
              # the EMBEDDING_MODEL + threshold constants — drift class #1260).
-             "tortoise/embeddings.py", "tortoise/cross_lens.py"),
+             "tortoise/embeddings.py", "tortoise/cross_lens.py",
+             # #7947 review P1: the write-path MEASUREMENT sources — the
+             # corpus generator and its schema, the two-arm harness, and the
+             # pre-registered scorer (`score_qualifiers.py`) — live under
+             # `tests/eval/write_path/`, and none of them is named `test_*.py`,
+             # so before this entry a `score_qualifiers.py`-only change matched
+             # no pattern, fell to the `tests/` -> `core` fallback at
+             # `select()`, and selected `core` — where NOT ONE of the tests that
+             # pin the rule it edits is registered (`test_score_qualifiers.py`
+             # and `test_write_path_corpus.py` are `eval`). A change to
+             # `MARKERS`/`BAND_PP`/`classify()`/`evaluate_branches()` therefore
+             # rewrote every number in §10 with every gate green, and a
+             # hand-edited `gold/*.json` did not run the planted-count pin
+             # either. Registering the test file alone (config/ci-surfaces.yml)
+             # only fixes the manifest classification: selection is driven by
+             # THIS table. Same #1349/#2938/#3616 silent-drop class as the
+             # entries above. Pinned by
+             # tests/test_ci_selection.py::test_write_path_measurement_source_edit_selects_eval.
+             "tests/eval/write_path/"),
     # core is the fallback for any other python-relevant path
 }
 
@@ -913,6 +931,16 @@ SOURCE_PATTERNS = {
 # tuple is redundant for any path already listed here.
 CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.py",
              "tortoise/projection/edges.py",
+             # #7947 review P1: `tests/eval/write_path/` is a SOURCE_PATTERNS
+             # entry of `eval` (the measurement sources), and a named-surface
+             # match REPLACES the `tests/` -> core fallback — but `core`
+             # registers two tests that READ those sources:
+             # `test_extractor_v2.py` imports `tests.eval.write_path.runner`,
+             # and `test_salience_labels_4917.py` reads
+             # `tests/eval/write_path/salience_labels.jsonl`. Without this
+             # entry a write_path-only change would drop them from the
+             # selection, trading one silent drop for another.
+             "tests/eval/write_path/",
              "tools/tmpdir_sweep.py",
              # queue_resweep: `tools/` is in NON_PYTHON_PREFIXES, so a
              # tools/queue_resweep.py-only change was filtered out BEFORE the
@@ -1179,6 +1207,34 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # Pinned by
              # tests/test_ci_selection.py::test_capstone_probe_change_selects_core_not_tier1.
              "docs/evidence/7950-capstone/probes/",
+             # #9076: the E1+E2 evidence bundle
+             # (`docs/evidence/7949-capstone/` — the probe, the corpus JSON and its
+             # builder, the evidence log) and its structural checker
+             # (`tools/e1_e2_census_check.py`) own
+             # `tests/test_e1_e2_measurement.py`, registered `core`.
+             #
+             # MEASURED before these entries (2026-10-18, `select()` in-process):
+             # a diff touching ANY of them returned `surfaces=[]`, `full=False`,
+             # 50 test files — i.e. `docs/` and `tools/` are flat
+             # NON_PYTHON_PREFIXES entries, the changed list came back empty and
+             # select() took the docs-only early return. The pin still RAN, but
+             # only because this PR also dual-registers it in `tier1` (the same
+             # `core`=home / `tier1`=docs-only pairing the extractor-v4 guards
+             # above use). That is the fragile state these entries remove: `tier1`
+             # is a CURATED list, so the guard's owning surface (`core`) was
+             # nominal and one tier1 edit from dropping the pin silently — the
+             # #1349/#3332/#3616 class, reached through the early return rather
+             # than through `_selection_relevant`. After: `surfaces=['core']`,
+             # `full=False`, pin present — the same shape and remedy as
+             # `docs/evidence/7950-capstone/probes/` above, and (unlike that
+             # entry) it is a cost/home fix rather than a hole fix, which is
+             # stated so the polarity is not misread later.
+             "docs/evidence/7949-capstone/",
+             # `tools/` is a flat NON_PYTHON_PREFIXES entry too, so the checker was
+             # swallowed by the same early return; its pins are `core`-registered
+             # and hermetic, so `core` is the right lane (the shape
+             # `tools/lane_stash.py` above takes).
+             "tools/e1_e2_census_check.py",
              # #4030: `supabase/config.toml` is the committed LOCAL-stack config,
              # and every env var it resolves by `env(NAME)` substitution must be
              # declared in `.env.example` — the guard for that pair

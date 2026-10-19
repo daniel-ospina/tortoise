@@ -555,9 +555,11 @@ Normalises the shape **and applies the declared field→type mapping** (§3). Pa
 
 This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 
-**✅ FINDING (2026-09-23) — the code hands extraction the raw alongside the story.** The call is `run_s2(model, story, master, session_date=…, edus=edus, …)` (`extractor_v2.py:7314`) — **`edus` is the raw segmented input, passed together with the computed story.** **⇒ D3-Option 4 holds: the narrative is a **focus**, and the raw is present too.**
+**✅ FINDING (2026-09-23) — the code hands extraction the raw alongside the story.** The call is `run_s2(model, story, master, session_date=…, edus=edus, …)` (`extractor_v2.py:7776`) — **`edus` is the raw segmented input, passed together with the computed story.** **⇒ D3-Option 4 holds: the narrative is a **focus**, and the raw is present too.**
 
-> ⚠️ **What this does to D3.** The open question is not *"may extraction consult the raw?"* — it does. It is the much smaller **"what does the narrative add that the raw does not?"** The measurement (§10) must compare **narrative + raw** against **raw alone**.
+> ⚠️ **What this does to D3.** The open question is not *"may extraction consult the raw?"* — it does. It is the much smaller **"what does the narrative add that the raw does not?"** The measurement (§10) compares **narrative + raw** against **raw alone** — ⛔ **and that shape cannot test loss-by-replacement**, so the D3 question is now two: *what the narrative ADDS* (measured, §10) and *what it LOSES when it replaces the raw* (**not yet measured**). §10's verdict says so. **This paragraph named the ADD question correctly; the error was downstream** — the
+registration then fixed the contrast with *"the same `edus`"* for both arms, which is what makes the falsifier
+unfirable (block at the top of §10).
 
 ### S2.2 — VET *(the counter-filter; owner proposal)*
 >
@@ -1076,7 +1078,7 @@ A carve-out scoped only to **user-personal state** (personal bests, schedules, p
 |---|---|
 | **D1** | The narrative lives in **Postgres, referenced by its `Source`** — **not in the graph**, not a `Document` node, not a `Point`. The graph holds the **reference**; the **text** stays out of the graph, and therefore out of RAM. |
 | **D2** | A GitHub PR is an **`Object` (WorkItem)**, its merge is an **`Event`**, and its body is a **`Source`**. A completed task is a **lifecycle `Event` whose status is the fold** — never a second node. |
-| **D3** | **The narrative is a *focus* and the raw text is the *source*** — extraction may consult the raw text. **Provisional**, pending the measurement in §10. |
+| **D3** | **The narrative is a *focus* and the raw text is the *source*** — extraction may consult the raw text. **STILL PROVISIONAL after two runs** (`#7947`; §10) — **the measurement cannot decide it**, for three independent reasons: both arms receive the raw transcript, so the falsifier cannot fire for the loss it was written to test; the decisive raw arm ran `partial`; and n=25 cannot resolve anything finer than ~10 pp — one holdout qualifier IS 10 pp — with the bound subset flipping sign between the tuning and holdout halves. Run 1 (the pre-registered run) lands in branch 3 by the rule; run 2 meets branch 2 but cannot be certified. Both stay provisional; cost recorded. **What would settle it** — two arms whose carriers differ (narrative-replaces-transcript vs raw-transcript-suppressed), on clean receipts, with ~100 bound qualifiers AND independent sessions (§10). |
 | **D4** | **Salience is relational** — one **entity-keyed neighbourhood lookup**, consumed by the **salience judgment** and by **S3** (resolution). **Extraction does not consume it.** |
 | **D5** | **One adversarial reviewer — one step, two questions, one artifact**: item validity **and** coverage, both at **S2.2**. |
 | **D6** | **Two distinct connection sets** — within-batch and to-graph, both **proposed by the model**. |
@@ -1133,6 +1135,354 @@ Option 4 (narrative as *focus*, raw as *source*) **hedges precisely this unresol
 ### ⚠️ The falsifier to measure
 
 The research names it: **does the summary lose the hedging / scope / stance information that a claim's confidence depends on?** Adjacent evidence (no head-to-head study exists): summaries can be unfaithful, hallucination propagates across summary chains, and summarising raises precision while **dropping recall**. **Any measurement must be run on OUR corpus — none of these transferred cleanly.**
+
+#### ⛔ FIRST, WHAT THIS DESIGN CANNOT TEST — the premise is §S2.1's, the consequence is drawn here
+
+§S2.1 recorded the premise on **2026-09-23**; the consequence was drawn on **2026-10-18**, in review of the
+first run. This block governs how every number below may be read.
+
+**Both arms receive the full raw transcript.** `render_s2_prompt()` appends
+`_render_source_transcript(edus)` to the S2 prompt **whenever the transcript is under
+`_SOURCE_TRANSCRIPT_CAP` (8,000 chars — these blocks are 3,801–5,311, well under it)**, and both arms
+pass the same `edus` (`tortoise/extractor_v2.py:1755`, the `+ ("\n\n" + transcript)` tail at `:1775`).
+⚠️ **Above the cap the block is omitted entirely** (`:1737`), and the arms would then differ by the whole
+transcript — i.e. a long session would land in exactly the replace-configuration this section says was never
+run. None of these seven does. So the
+prompts differ **only in the `story` slot**: arm A is *raw story + raw transcript*, arm B is *narrative story +
+raw transcript*. **The receipts prove it from the other side, exactly:** in all 7 sessions the narrative arm's prompt is
+smaller, and the difference **equals the story difference** — Δprompt_tokens tracks Δstory_chars at
+≈4.2 chars/token (per session 4.04–4.55; aggregate 4.23): wp01 −2146 chars / −512 tok; wp02 −996 / −224; wp03 −1422 / −342;
+wp04 −1389 / −305; wp05 −1032 / −250; wp06 −2030 / −502; wp07 −1776 / −414. **No length-visible component but the
+`story` slot differs between the two ~9,000-token prompts.** ⚠️ That arithmetic rules out a differing
+section of any size, but it is blind to a SAME-LENGTH difference — and one exists: under
+`TORTOISE_LABEL_ORDER=shuffle` the label order is seeded **from the story** (`extractor_v2._label_order_rng`),
+so the arms would see different label orders at identical prompt length. It was observed unset for run 2 and is
+unknown for run 1 (see the limits below). Had
+the narrative REPLACED the transcript, the prompt would have shrunk by the transcript's own length — the block is
+3,801–5,311 chars, i.e. ~900–1,300 tokens, not the 224–512 observed.
+
+**Consequence, and it is worse than "both arms carry the raw": the raw arm receives the transcript TWICE** —
+its `story` is `_edus_to_text(edus)` and the same text is appended again as the `SOURCE TRANSCRIPT` block — so
+the raw arm sees the conversation at roughly double the exposure of the narrative arm. The harness's own framing
+("exactly one value differs") is true of the `story` slot and understates the asymmetry.
+
+**So this harness measures what the narrative ADDS on top of the raw — which is exactly D3-Option 4's shipped
+configuration — and it does NOT measure whether a narrative could REPLACE the raw.** A narrative that dropped a
+hedge would still have that hedge in the transcript, so S2 could preserve it anyway: **the falsifier cannot fire
+for the reason it was written to test.** "The falsifier did not fire" is therefore a much weaker statement than
+it looks, and must never be quoted as "summaries do not lose hedging" — that counterfactual was not run.
+
+**⚠️ AND ONE DECISIVE ARM RAN INCOMPLETELY.** In run 2 the `wp07_bluepeak_followup` **raw** receipt carries
+`partial: true` — the extractor's rung-4 partial-accept path fired and the tail of the model's list was
+dropped (`s2_stats.partial`, `recovery: {}`, no `s2_out_tokens`), which production itself treats as an error
+(*"S2 output partial — truncated tail dropped (embed list incomplete)"*). That is the worst cell in the corpus
+(6 claims vs the narrative's 16) and **it contributes 3 of the holdout's 6 raw losses**. The scorer read only
+`embed_list` and the harness printed only exceptions, so **nobody saw it** — the flag was in the receipt, unread
+(both now consume it: the scorer refuses to certify a branch on it, the harness prints it). **A single qualifier there flips
+the holdout Δ from +10.0 to +20 pp, i.e. across the branch-1 trigger** — which is enough to disqualify this run
+from certifying a branch, and it is why the scorer now refuses to certify one on a partial receipt.
+
+#### ✅ MEASURED, RUN 1 — 2026-10-10 (`#7947`). ⚠️ Its MAGNITUDE did not replicate; see the run-2 block below before quoting any number here
+
+**Design (pre-registered before the first call:** `#7947` comment `6102402694`**).** Two arms differing in exactly one
+value: the shipped pipeline feeds S2 either `story = compile_stories(chunk_stories)` (**narrative**) or
+`story = _edus_to_text(edus)` (**raw**), with the same pinned model (`deepseek/deepseek-v4-flash`), the same
+`run_s2` (so one prompt scaffolding), the same chunking and the same `edus`. Corpus: the planted-gold
+write-path corpus (`tests/eval/write_path/`, wp01–wp07); split fixed as **wp01–wp04 tuning / wp05–wp07
+holdout**. 25 planted qualifiers (hedge/scope/stance, annotated into the gold as `planted_qualifiers` before
+the run), 90 planted units. Harness: `tests/eval/write_path/raw_vs_narrative.py` + `score_qualifiers.py`.
+
+| arm | qualifier loss | distortion (of claims that survived) | recall | precision | claims emitted |
+|---|---|---|---|---|---|
+| **raw** | 80.0% (20/25) | 44.4% | 54.4% (49/90) | 62.8% | 113 |
+| **narrative** | **48.0%** (12/25) | **27.8%** | **80.0%** (72/90) | 59.9% | 152 |
+
+Holdout alone (wp05–wp07): raw 100% loss / 42.4% recall / 2 of the 2 surviving claims distorted; narrative
+**40% loss / 66.7% recall**, precision parity (49.2% vs 50.0%), 0 of 6 distorted. Artifact:
+`tests/eval/write_path/results/7947-score-all.json` — ⚠️ **not reproducible from committed artifacts:** run 1's
+per-session arm outputs were not retained (the receipts convention came in with run 2), so this file is a
+record of that run, not something the repo can re-derive. Run 2's is re-derivable. (The `instrument.note`
+string in BOTH files was corrected in place on 2026-10-18 — it formerly claimed the lexical error "can only
+under-credit preservation", which the two-sided bullet below contradicts. That is the instrument's
+DESCRIPTION, not a measurement: no number, classification or verdict changed — run 1's file carries the
+correction by hand precisely because its receipts are gone.)
+
+**⚠️ Run 1's numbers are reported, not withdrawn — but the SECOND run shows the magnitude is not a stable
+result.** One qualifier out of ten moves the holdout figure by 10 pp, and the raw arm moved by 28 pp between
+runs. **Read run 2 for what replicates; treat run 1's gap as one draw from a wide distribution.**
+
+**⚠️ LIMITS that bound BOTH runs — the first are part of the registration, the rest were found during
+the work and are declared here rather than dropped:**
+
+- **n = 25 qualifiers across 7 sessions, of which 10 are holdout.** One qualifier is 10 pp on the holdout and
+  4 pp pooled, so neither run can resolve a difference smaller than about one qualifier.
+- **9 of 25 qualifiers (4 of the 10 holdout) carry no `bound_claim`** — a warrant, a hypothesis or a scope
+  limit on a clause that no planted unit carries. For those the scorer anchors on the qualifier's own words,
+  so `claim_present` normally *entails* `marker_present`: the subset can report `preserved` or `absent` but
+  almost never `flattened` (**0 of 18 unbound cells in run 2**; 1 of 18 in run 1, and that one only because
+  `only` is in `STOP`). It measures **whether the phrase survived at all, not whether it survived on its
+  claim** — a LOOSER test than the bound subset, not a stricter one, and 4 of the 10 decision-input
+  qualifiers are of this kind. The two are reported separately below because they do not measure the same
+  thing.
+- **The instrument is lexical, and its error is TWO-SIDED.** It can **under-credit preservation** (an arm
+  may keep a hedge in vocabulary the marker list lacks and be scored `flattened`) — the conservative
+  direction for a loss metric — and it can **over-credit it**: `marker_present` is an unbounded substring
+  test over a table that mixes space-suffixed markers (`"may "`, `"one "`, `"just "`, `"before "`) with bare
+  stems (`"only"`, `"except"`, `"single "`, `"support"`, `"review"`, `"decision"`, `"likely"`), so
+  `"commonly"` satisfies scope's `"only"`, `"exception"` satisfies `"except"` and `"unlikely"` satisfies
+  hedge's `"likely"`, turning a `flattened` cell into `preserved` and thus UNDERSTATING loss. That second
+  direction is **not arm-neutral** — the arm emitting more claim text has more chances to contain a
+  mid-word hit, and the narrative emits 25–35 % more claims — so it leans toward the arm whose loss this
+  measurement treats as the risk. It is **latent on these runs, not a wrong number**: every `preserved` row
+  in both committed score files was checked and none is carried by a mid-word hit (the three preserved
+  `scope` rows are the literal "the admin screen is the only place…" and "defaults off until the perf review
+  signs off" ×2). Word-bounding the match would remove the class, but the marker table is the REGISTERED
+  instrument, so that belongs in a newly registered run rather than a silent re-scoring of these two.
+- **One annotation binds a warrant to the claim it warrants, deliberately.** `wp02 q_01` ("the team signed off
+  last Friday") is *also* planted as the fact `wp02 u_02`, but its `bound_claim` is `u_01`, the migration
+  decision — so it scores `flattened` when the warrant and the decision survive as separate claims. That is the
+  intended reading (a warrant is a *qualifier on* the decision it supports) and it is recorded here rather than
+  re-bound: re-binding it after the runs would be editing the answer key to suit the result. It affects 1 of 25
+  qualifiers, in the TUNING half, so the decision input is untouched.
+- **The registered judge-arbitration pass over the decisive `flattened` cases was NOT run**, and the
+  registration's repeat-run variance check was never exercised: the deterministic instrument was judged to
+  need no session-to-session variance estimate. That judgement is exactly what the two runs then tested —
+  and the raw arm moved 28 pp on the same corpus. Declared, not quietly skipped. (`score_qualifiers.py` has
+  no `--judge` flag; if it grows one, this paragraph is what it must retire.)
+- **The registered SECONDARY arm was never run.** Registration §2 also fixed a robustness arm — "a **fixed**
+  sample of real fleet sessions, drawn and listed by id at first run", scored by the pinned judge on *"was a
+  qualifier present in the raw and absent or flattened in the output?"*. No session ids were drawn, no judge
+  pass exists, and neither run covers it. (It would not have decided anything — §7 says only the primary
+  endpoint decides — but it is registered work that did not happen.)
+- **The registered outcome taxonomy was reduced from six to three.** Registration §4 defines
+  `preserved | weakened | strengthened | flattened | absent | unknown`; `classify()` emits only
+  `preserved | flattened | absent`. `loss = flattened + absent` is unaffected, **but `weakened` and
+  `strengthened` are both scored `preserved`**, so the instrument **over-credits** a softer or harder
+  rendering as preservation — an error in the same direction as the lexical one, and undeclared until now.
+- **The receipt pins the model, chunk size and session date but NOT the environment that shapes the S2
+  prompt.** `TORTOISE_EXTRACTOR_PROMPT`, `TORTOISE_LABEL_ORDER` / `TORTOISE_LABEL_ORDER_SEED`, and the two
+  stage caps `TORTOISE_EXTRACTOR_MAX_TOKENS` / `TORTOISE_EXTRACTOR_ESCALATION_TOKENS` (whose documented
+  failure mode is *silent tail loss via partial-accept*) all change the scaffolding or the truncation
+  behaviour. **Run 2's console showed the first three UNSET — that observation is not in the receipts**, so
+  it cannot be re-verified from the repo, and run 1's environment is unknown. The harness now persists these
+  five into every receipt (`env_pins`), and a console print no longer has to be taken on trust —
+  **but that landed WITH this write-up, so it covers neither run**: the seven committed `arms-2026-10-18`
+  receipts carry no `env_pins`, and run 1's are gone. The claim for these numbers is therefore "one value
+  differed **given an unchecked environment**", and any repeat run will carry its own proof.
+
+#### ⚠️ REPLICATED 2026-10-18 — the NON-FIRING replicates (as built it could not have been otherwise); the MAGNITUDE does not
+
+Re-run of the identical pre-registered protocol: same corpus, same gold `planted_qualifiers`, same pinned
+model id, same `SESSION_DATE`, same chunk size, same harness — **no parameter changed**. Output receipts are
+committed this time (`tests/eval/write_path/receipts/7947-arms-2026-10-18/`, the 7 per-session arm outputs) so
+the scoring is re-runnable offline, and it reproduces the committed score exactly:
+
+```bash
+python -m tests.eval.write_path.score_qualifiers \
+  --sessions wp01_quarry_debug wp02_lumen_refactor wp03_ember_design wp04_aurora_perf \
+             wp05_retro_writeup wp06_quarry_rollout wp07_bluepeak_followup \
+  --arms-dir tests/eval/write_path/receipts/7947-arms-2026-10-18 \
+  --out /tmp/7947-score.json
+```
+
+Score file: `tests/eval/write_path/results/7947-score-replication-2026-10-18.json`.
+
+| arm | qualifier loss | distortion | recall | precision | claims emitted |
+|---|---|---|---|---|---|
+| **raw** | 52.0% (13/25; 10 absent, 3 flattened) | 20.0% | 78.9% (71/90) | 65.5% (78/119) | 119 |
+| **narrative** | **48.0%** (12/25; 8 absent, 4 flattened) | 23.5% | **81.1%** (73/90) | 63.1% (94/149) | 149 |
+
+Holdout alone (wp05–wp07): raw 60.0% loss (6/10) / 66.7% recall / 51.1% precision / 0 of 4 survivors
+distorted; narrative 70.0% loss (7/10) / 69.7% recall / 51.9% precision / **2 of 5 survivors distorted**.
+
+**The split, and the subsets the decision turns on** — the tuning half is reported so a reader can see the
+split did work, never as part of the decision input:
+
+| split | subset | n | raw loss | narrative loss | Δ | other |
+|---|---|---|---|---|---|---|
+| **holdout** (decision input) | all qualifiers | 10 | 6 (60%) | 7 (70%) | **+10.0 pp** | Δprecision +0.8, Δrecall +3.0 |
+| holdout | **bound** (anchored to a planted unit) | 6 | 3 (50%) | 4 (67%) | **+16.7 pp** | past branch 1's trigger |
+| holdout | unbound (own words as anchor) | 4 | 3 (75%) | 3 (75%) | 0 pp | |
+| tuning | all qualifiers | 15 | 7 (47%) | 5 (33%) | **−13.3 pp** | Δprecision **−5.3 pp** (outside the ±5 tolerance), Δrecall +1.8 |
+| tuning | bound | 10 | 3 | 2 | −10.0 pp | |
+| tuning | unbound | 5 | 4 | 3 | −20.0 pp | |
+
+**The subset does not hold its sign across the split, and the two halves disagree on two metrics, not one:**
+the bound qualifiers favour the narrative by 10.0 pp on tuning and raw by 16.7 pp on the holdout, and the
+tuning half's Δprecision (−5.3 pp) is outside the registered ±5 tolerance while the holdout's (+0.8) is
+inside it. That is what noise looks like at this n — the subset is not a finding in either direction, and
+neither is the registered total.
+
+**What replicates:**
+
+- **The falsifier does not fire on the registered metric, in either run** — *and as built it could not have:
+  both arms carry the raw transcript (⛔ block above), so a narrative-borne loss has nowhere to show up.*
+  Neither run shows the narrative losing materially more hedging/scope/stance than raw *on the holdout Δ the
+  registration fixed* — ⚠️ **on a reported SUBSET one run does**: the holdout's bound qualifiers are
+  **+16.7 pp** against the narrative (table above), which is past branch 1's trigger. Read "does not fire" as
+  "not on the registered total", never as "no subset moves".
+- **Pooled loss coincided — 48.0% (12/25) in both runs.** ⚠️ **That coincidence is a net, not stability:** the
+  narrative's per-session loss changed in **6 of 7 sessions** (wp01 2/3→1/3, wp02 3/4→2/4, wp03 2/4→1/4,
+  wp05 1/3→2/3, wp06 2/4→3/4, wp07 1/3→2/3; only wp04 held), moving −1,−1,−1,0,+1,+1,+1 and cancelling. **Do
+  not read the matching total as "the narrative is the stable arm";** the honest statement is that the two
+  arms' totals are indistinguishable at this n.
+- **The narrative emitted more claims in AGGREGATE in both runs** (152 vs 113; 149 vs 119, +35% and +25%) — the
+  premise that bears on E1's volume question, whose verdict belongs to `#7949`. ⚠️ **Per session it is 7 of 7
+  in run 1 but 6 of 7 in run 2:** `wp06_quarry_rollout` inverted (raw 24 claims vs narrative 15). So the E1
+  premise rests on the aggregate, not on per-session dominance.
+- **Absence dominates the loss in both arms of both runs** (pooled absent raw 16→10, narrative 7→8;
+  flattened raw 4→3, narrative 5→4), so the dominant failure is that the claim is never emitted, not that the qualifier is
+  mangled. ⚠️ **On run 2's holdout subset that flips:** narrative distortion is **2/5 (40%) vs raw 0/4**, and
+  the pooled distortion column is volume-sensitive (see the instrument note below).
+
+**What does NOT replicate — and it is the whole of run 1's headline:**
+
+- **The raw arm moved 28 pp on the same corpus** (loss 80.0% → 52.0%; recall 54.4% → 78.9%). Its precision
+  rose too (62.8% → 65.5%). **Run 1's weak raw arm may not be a property of the raw input** — the confound
+  below is the other live explanation, and two runs cannot separate them.
+- **"The narrative recalls materially more" is unsupported.** The holdout recall gap went from 24.2 pp to
+  **3.0 pp** — and run 1's raw holdout recall (42.4%) sits *below* run 2's raw figure on the same holdout
+  (66.7%), so run 1 may have under-measured the raw arm rather than the narrative out-performing it.
+- **Δ(loss) on the holdout went from −60 pp to +10 pp** — a 70 pp swing on one dataset.
+
+**⚠️ THE INSTRUMENT HAS ONE KNOWN VOLUME SENSITIVITY, and it matters for the distortion column.** `classify()`
+searches the class marker in the **union of every claim that matches the anchor** (≥60% of the anchor's content
+words), so an arm that emits more claims — and the narrative emits 25% more — gets more chances to have *some*
+matched claim carry the marker, which biases its distortion **down**. Restricting the marker search to the
+single best-matching claim moves pooled narrative distortion **23.5% → 29.4%** (raw unchanged at 20.0%); the
+holdout figures are unchanged (three holdout qualifiers DO have a two-claim match, but the extra matched claim
+carried no marker in either arm, so the union and the best match agree there). **The direction of the
+metric's verdict therefore survives, but its margin does not** — distortion is a weak secondary reading here.
+⛔ **The primary is LESS exposed, not unexposed:** `loss = flattened + absent`, and while `absent` never reads a
+marker, `flattened` does, so the same volume bias can only push a cell from `flattened` to `preserved`. Measured:
+the best-match restriction moves tuning Δloss **−13.3 → −6.7 pp** and pooled **−4.0 → 0.0 pp**, and leaves
+the **holdout Δ unchanged at +10.0 pp** — it can move the decision input's neighbours, not the decision input.
+
+**⚠️ A confound that must be stated, and it is not sampling noise:** the repo's extractor moved between the
+two runs (`main` advanced 8 days), so part of the swing may be code, not sampling. The comparison is valid
+**within** each run (both arms fed the same code, the same prompts and the same `edus`, differing only in
+`story`), but the **run-to-run** delta cannot be attributed to any one cause.
+
+#### ⛔ ⇒ D3-Option 4 STAYS PROVISIONAL — the measurement cannot decide it, and that IS the verdict
+
+**This question needs no owner verdict, and that is a recorded protocol, not an interpretation:**
+`EXTRACTOR-V4-ARCHITECTURE-CHANGELOG.md` §16 (the decision-protocol run, 2026-09-23) carried the row — quoted
+here **as it stood before this change amended its second and fourth cells** —
+
+| decision | contradiction test | needs the owner? | artifact / action |
+|---|---|---|---|
+| **D3: raw vs narrative** | No contradiction (D3 is provisional) | **no** | ✅ The owner already approved the measurement. **The measurement decides** — not a gate |
+
+**Apply the registered rule to each run, in the order they happened.** The registration was written
+**before run 1** (`#7947` comment `6102402694`), so run 1 is the pre-registered run and run 2 is a repeat.
+
+| run | holdout Δ(loss) | Δprecision | Δrecall | branch 1 (fires if Δ > +10 or a P/R drop > 5) | branch 2 (Δ within ±10, P/R within ±5) | what the rule returns |
+|---|---|---|---|---|---|---|
+| **run 1** — the registered run (2026-10-10) | **−60.0 pp**† | −0.8 pp | +24.2 pp | does not fire | does **not** apply (Δ is −60) | **branch 3: stays provisional** |
+| **run 2** — repeat (2026-10-18) | **+10.0 pp** | +0.8 pp | +3.0 pp | does not fire | **applies literally** | **branch 2, but not certifiable** (below) |
+
+† Run 1's magnitude is a **RECORD, not a derivation**: it comes from the committed
+`results/7947-score-all.json`, and run 1's per-session arm receipts were not retained, so the figure cannot be
+regenerated from this repository the way run 2's can. The caveat is repeated here because a table row is what gets
+quoted — a derivation-shaped number with no provenance signal reads as reproducible.
+
+**⇒ Run 1 — the run the registration actually fixed — lands in branch 3 by the rule's own terms, and that is
+the verdict: D3-Option 4 stays PROVISIONAL.** No post-hoc rule is needed to get there: the narrative looked
+*better* on the holdout by 60 pp, which is neither "the falsifier fired" nor "near parity", and the rule's third
+branch is exactly "anything else → provisional". The measured cost is recorded in §10. ⚠️ And run 1's own
+magnitude did not replicate, which is the reason to keep reading rather than to settle.
+
+**Run 2 is where it gets uncomfortable, and the honest description is not "branch 3 applies".** Its holdout
+Δ lands exactly on the branch-2 ceiling and **branch 2 applies literally** — but it cannot be *certified*, and
+that is a different statement:
+
+- **The registration has no branch for "parity met, but the run cannot be trusted".** Inventing one and calling
+  it branch 3 would misdescribe the rule, so `score_qualifiers.py` records the outcome as
+  `provisional (branch 2 met, not certifiable; branch 3 not reached)` and says so on the console. The EFFECT is
+  branch 3's (stays provisional); the ROUTE is not.
+- **The decisiveness of a repeat is itself unallocated.** A pre-registered single run is the run the rule was
+  written against; a repeat is evidence, not a replacement. Had run 2 been clean, that would have been an
+  argument for reopening the question — it is not, because it is not clean.
+- ⚠️ **The one incomplete receipt biases the two LEGS in OPPOSITE directions, so "the bias flatters the
+  narrative" was only half the story.** `wp07`'s truncated raw arm drops a tail of claims, and the two legs
+  react to that differently:
+  - **Δloss (pro-narrative).** Dropping claims can only remove opportunities to count a loss, so raw's loss
+    is **overstated** and Δ = narrative − raw is **under**stated: the true holdout Δ is ≥ +10 pp, and one
+    qualifier moving in that cell puts it at +20 pp — past branch 1.
+  - **Δprecision (contra-narrative).** Precision is a RATIO, so dropping a tail of *unmatched* claims
+    **raises** raw precision (78/119 = 65.5% → 78/109 = 71.6%), which **lowers** Δprecision (63.1 − 71.6 =
+    −8.5 pp) and pushes branch 1 the other way. That is why the scorer's contamination gate is one-sided per
+    LEG: only a dirty narrative receipt suppresses the loss leg, while the P/R leg is suppressed by a dirty
+    receipt in either arm.
+
+  **So the parity reading is not conservative, and it is not uniformly flattering either** — one channel
+  flatters the narrative and the other works against it, on the same receipt. The honest statement is that
+  the run cannot be certified in either direction, which is what the verdict records.
+
+**⛔ Why neither run can settle it — and the first reason is a defect in the REGISTRATION, not in the run:**
+
+1. **The registration specified a design whose falsifier cannot fire for the question it was written about.**
+   §S2.1 (2026-09-23) recorded that the code passes the raw alongside the story and concluded *"the measurement
+   (§10) must compare **narrative + raw** against **raw alone**"* — and the registration's own line says both arms
+   use *"the same `edus`"*. So the registered contrast measures **what the narrative ADDS**, which is the smaller
+   question §S2.1 itself asked; it does not measure **whether a narrative could REPLACE the raw**, which is what
+   D3's provisional flag is actually about. Both arms carry the full transcript (block at the top of this
+   section), so a narrative that dropped a hedge would still have it available. **A non-firing result here says
+   nothing about replacement** — and that was true before any data existed, which is why it cannot be waved away
+   as a caveat on one run.
+2. **The decisive arm of the repeat ran partially.** `wp07` raw is `partial: true` and supplies 3 of the
+   holdout's 6 raw losses; one qualifier moving there turns +10.0 pp into +20 pp — branch 1. This disqualifies
+   **certifying a branch**, not the run: the run happened and its numbers are recorded.
+3. **n = 25 (10 holdout) is narrower than the effect it must resolve, and the subset flips sign.** One qualifier
+   is 10 pp on the holdout — the width of the entire registered band; the bound-qualifier subset is +16.7 pp on
+   the holdout and −10.0 pp on the tuning half. Neither direction is a finding at this n.
+
+**⇒ Therefore: Option 4 stays PROVISIONAL.** Run 1 gets there by the rule (branch 3); run 2 gets there because
+branch 2 cannot be certified. **Both runs arrive at the same verdict by different routes, and neither is a
+failure of the work** — it is the question, not the answer, that turned out to be mismeasured.
+
+**What the two runs DO establish, stated at the strength the instrument supports:** *within the shipped shape
+(narrative + raw vs raw alone), the two arms are indistinguishable at this n* — pooled 52.0% vs 48.0% in
+run 2, 80.0% vs 48.0% in run 1, and **the incomplete raw receipt biases the two legs in opposite directions**
+(its dropped tail overstates raw's loss, understating Δ, while the same dropped tail of unmatched claims raises
+raw's precision, overstating the precision drop — see the per-leg note above). That is **not** evidence that a
+narrative could replace the raw, and it is **not** an established "no degradation": the holdout's bound subset
+is +16.7 pp the wrong way.
+Given the instrument, **neither parity nor superiority is established.** §S2.4's raw-fact layer and §10's
+statement that raw is required independently (a summary cannot see prior state; re-extraction is always from
+raw) are untouched and do not depend on this result, so the design continues on Option 4's *shipped shape* while
+the flag stays up.
+
+**What would actually settle it — the next measurement, not another reading of these two runs:**
+
+1. **Replace, don't add:** two arms that differ ONLY in what carries the conversation — narrative with the
+   transcript suppressed (`edus=None`) vs **raw with the transcript suppressed too**. That is the only
+   configuration in which a narrative-borne loss can show up at all, and it is a different experiment from this
+   one, not a re-run of it. ⛔ **It does NOT control for length, and the next lane must not think it does:** with
+   the transcript suppressed the raw arm's `story` IS the whole conversation, so the prompts differ by Δstory
+   (1.0–2.1 k chars on these fixtures) — and a shorter input yields fewer claims per se, which is a competing
+   explanation for any qualifier the narrative appears to lose. **Add a length-matched control: the raw story
+   truncated to the narrative's character count.** Without it the experiment cannot separate a compression loss
+   from an input-length effect, and it would produce a second unfalsifiable result.
+2. **Refuse partial receipts** (the scorer now does) and re-run `wp07`'s raw arm if it degrades again.
+3. **More qualifiers AND more independent sessions.** ~100 annotated **bound** qualifiers in these fixtures would
+   make a 10 pp band resolvable to one qualifier — but it would not touch the variance that actually moved: the
+   raw arm swung 28 pp between two runs on this same corpus, which is a **run-level** shift (it moves every
+   qualifier in a session at once), not qualifier sampling. The registered repeat-run variance check, never run,
+   is what bounds that; independent sessions are what average it out.
+4. Optionally the registered secondary arm (a fixed fleet-session sample, judge-scored).
+
+**⚠️ One more thing the measurement shows, and it is not about the arms:** qualifier survival is **poor
+regardless of input** (48–80% loss). §10's question therefore has a real answer — claim-confidence information
+*is* being lost at the S2 layer — and the narrative is not what causes it. That is a fidelity finding for the
+S2 work, not for D3.
+
+**⇒ And a SEPARATE premise is in question, and it is E1's.** The narrative arm emitted **more** claims in
+aggregate in both runs (152 vs 113; 149 vs 119); per session it led in 7 of 7 sessions in run 1 and 6 of 7 in
+run 2 (`wp06_quarry_rollout` inverted). So the narrative is **not** a volume-reduction mechanism at the S2
+layer, which leaves E1's volume premise unsupported. **This is NOT a demand for a volume target** — §16.3's O2
+forbids one outright ("no node budget anywhere in this document") and §1's volume row is a direction, not a
+promise. Recorded here because §10 produced it; the E1 verdict belongs to `#7949`.
 
 ### ✅ A STATED reason for raw extraction — 2026-09-23
 
