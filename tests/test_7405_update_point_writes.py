@@ -2848,12 +2848,24 @@ def test_a_landed_promote_is_journaled_before_a_later_arm_can_abort(
     must not follow the TAG sync either: that arm is witnessed, so an
     unlandable tag merge aborts the whole call, and a record appended at the tail
     was never reached. Measured on `main`: the node ended `status='live'`, the
-    caller was told the call failed, and ZERO `PointRevised` was appended —
-    `rebuild_all` then replayed the creation as `draft` and the promotion was
-    gone.
+    caller was told the call failed, and ZERO `PointRevised` was appended — a
+    promotion that APPLIED with no record of it at all.
 
     No other test combines `status` with `tags`; this is the union that exposed
     the window, and the assertion is on ONE emit so a double record also reds.
+
+    ⚠️ WHAT THIS PIN PROVES, AND WHAT IT DOES NOT. It proves the APPEND: exactly
+    one `PointRevised`, and (asserted below) a payload that CARRIES the
+    promotion (`status='live'` a payload without it would close nothing — the
+    record lane applies `status` from this payload, `PointRevised` being a flat
+    `NodePatch` onto `point.status`). It does NOT prove replay parity: the GRAPH
+    fold (`projection._revise_point`) has no `status` clause, so a `rebuild_all`
+    over this journal still materialises the point as `draft` — the pre-existing
+    gap declared in `docs/plans/2026-10-17-7951-update-point-outbox.md` §6.5 and
+    filed as #9255. Do not restate this test as "the promotion survives a
+    rebuild"; when that fold lands, extend THIS test with
+    `rebuild_all(..., confirm_destructive=True)` instead of reading the count as
+    parity.
     """
     monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
     monkeypatch.setattr("tortoise.retry.time",
@@ -2889,6 +2901,12 @@ def test_a_landed_promote_is_journaled_before_a_later_arm_can_abort(
         assert emitted == 1, (
             "a landed promote whose later arm aborted must be journaled exactly "
             f"once — appends observed: {emitted}")
+        record = revised(sdk)[-1]
+        assert (record.get("payload") or {}).get("status") == "live", (
+            "the record of a LANDED promote must CARRY the promotion: the "
+            "record lane applies `status` from this payload (`PointRevised` is "
+            "a flat NodePatch onto `point.status`), so a record without it "
+            f"would close nothing — record: {record!r}")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()

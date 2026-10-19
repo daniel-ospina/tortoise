@@ -11334,9 +11334,28 @@ class TortoiseSDK:
             left a landed promotion with NO record: measured on `main`, a
             ``update_point(status='live', tags=[...])`` whose TAGGED merge could
             not land left the node ``status='live'``, told the caller the call
-            had failed, and appended zero ``PointRevised``. Replay then
-            re-created the point as ``draft`` and the promotion was gone
-            (live ≠ replay, the class this ordering exists to close).
+            had failed, and appended ZERO ``PointRevised`` — a promotion that
+            APPLIED with no record of it at all.
+
+            ⚠️ WHAT THIS CLOSES, AND WHAT IT DOES NOT. The record now exists,
+            and it carries the promotion (``status`` rides ``emit_props``), so
+            the RECORD lane applies it: ``PointRevised`` is a flat
+            ``NodePatch`` in ``record_projection.RECORD_MUTATIONS`` and
+            ``Point.status`` is a primary column, so replaying the record
+            restores ``live``. The GRAPH lane does NOT: ``_revise_point`` has
+            no ``status`` clause (nor does ``_apply_one``'s ``PointRevised``
+            arm), so ``rebuild_all`` over the same journal still replays such a
+            promote as ``draft``. That is a PRE-EXISTING graph live-vs-replay
+            parity gap, listed with ``:Object`` ``version``/``updatedAt`` in
+            ``docs/plans/2026-10-17-7951-update-point-outbox.md`` §6.5 and
+            filed as #9255 — this increment moves *when* the record is
+            appended, it adds no fold. §6.5 also carries the TAG half: the
+            record carries ``tags``, which the fold DOES apply (property +
+            ``_sync_tags``), so a graph rebuild mints the ``TAGGED`` edges this
+            window's aborted sync never wrote — a divergence in the opposite
+            direction, and the reason #9255 needs a decision, not just a
+            clause. Do not restate this docstring as "the promotion survives a
+            rebuild" until that fold lands.
 
             So the commit point is "after the guarded write, before anything
             that can strand it" — the point ``invalidate_point`` and
