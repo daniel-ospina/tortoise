@@ -4505,7 +4505,8 @@ tier1:
 # into a green one, or a probe whose observation surface moves).
 # ⚠️ Measured at this head: a `docs/`-only diff currently selects FULL for
 # `pull_request` (not tier1-only, contrary to the sibling comments above), so this
-# arm is belt-and-braces rather than load-bearing. Kept because it costs one row.
+# arm is belt-and-braces rather than load-bearing. Kept because it costs one row; the
+# drift is filed as #9090 (the same stale rationale is load-bearing for ~6 sibling rows).
 - test_7949_capstone_verdict_check.py
 # ── #9017 (2026-10-18): the slow pool's weights and its leg split are MEASURED
 #
