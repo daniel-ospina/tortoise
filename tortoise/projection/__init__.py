@@ -3276,8 +3276,9 @@ def _journal_safe_params(params, cypher=None):
 #     not a vetted precedent: it holds no declaration of its own — its writers
 #     escape at (3).
 #   * `structural-edge.derived` (`tortoise/projection/edges.py`, #9195) — the
-#     SDK's structural-edge mints (`create_edge` and its three typed wrappers,
-#     one funnel and one statement). It is a DECLARATION and not a scope for
+#     SDK's structural-edge mints (`create_edge` and `create_about_edge`, each
+#     with ONE `MERGE`, plus `create_edge`'s three typed wrappers — two mints
+#     over one statement shape). It is a DECLARATION and not a scope for
 #     journalled links: the write mints no node, no property and no identity
 #     (`MATCH` on both endpoints), so its whole content is
 #     `(source, predicate, target)` between two entities that already exist.

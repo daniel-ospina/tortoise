@@ -1473,8 +1473,9 @@ surfaces:
   # otherwise run this suite never — the #1349/#2938/#3154 silent-drop class.
   - test_9079_onboarding_declared_lane.py
   # #9195 (§17.1's FOURTH declaration child): the SDK's structural-edge write
-  # lane (`create_edge` + its three typed wrappers — one funnel, one `MERGE`
-  # that mints no node, no property and no identity). REGISTERED on `core` and
+  # lane (`create_edge` and `create_about_edge`, each with ONE `MERGE`, plus
+  # `create_edge`'s three typed wrappers — the lane mints no node, no property
+  # and no identity). REGISTERED on `core` and
   # `sdk` because those are exactly the surfaces its subject resolves to:
   # `tortoise/projection/edges.py` selects `core`+`sdk` (verified with
   # `tools/ci_selection.py --changed-files tortoise/projection/edges.py`), and
@@ -4187,8 +4188,9 @@ surfaces:
   # otherwise run this suite never — the #1349/#2938/#3154 silent-drop class.
   - test_9079_onboarding_declared_lane.py
   # #9195 (§17.1's FOURTH declaration child): the SDK's structural-edge write
-  # lane (`create_edge` + its three typed wrappers — one funnel, one `MERGE`
-  # that mints no node, no property and no identity). REGISTERED on `core` and
+  # lane (`create_edge` and `create_about_edge`, each with ONE `MERGE`, plus
+  # `create_edge`'s three typed wrappers — the lane mints no node, no property
+  # and no identity). REGISTERED on `core` and
   # `sdk` because those are exactly the surfaces its subject resolves to:
   # `tortoise/projection/edges.py` selects `core`+`sdk` (verified with
   # `tools/ci_selection.py --changed-files tortoise/projection/edges.py`), and
