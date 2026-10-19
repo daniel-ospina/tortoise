@@ -1378,8 +1378,13 @@ here **as it stood before this change amended its second and fourth cells** —
 
 | run | holdout Δ(loss) | Δprecision | Δrecall | branch 1 (fires if Δ > +10 or a P/R drop > 5) | branch 2 (Δ within ±10, P/R within ±5) | what the rule returns |
 |---|---|---|---|---|---|---|
-| **run 1** — the registered run (2026-10-10) | **−60.0 pp** | −0.8 pp | +24.2 pp | does not fire | does **not** apply (Δ is −60) | **branch 3: stays provisional** |
+| **run 1** — the registered run (2026-10-10) | **−60.0 pp**† | −0.8 pp | +24.2 pp | does not fire | does **not** apply (Δ is −60) | **branch 3: stays provisional** |
 | **run 2** — repeat (2026-10-18) | **+10.0 pp** | +0.8 pp | +3.0 pp | does not fire | **applies literally** | **branch 2, but not certifiable** (below) |
+
+† Run 1's magnitude is a **RECORD, not a derivation**: it comes from the committed
+`results/7947-score-all.json`, and run 1's per-session arm receipts were not retained, so the figure cannot be
+regenerated from this repository the way run 2's can. The caveat is repeated here because a table row is what gets
+quoted — a derivation-shaped number with no provenance signal reads as reproducible.
 
 **⇒ Run 1 — the run the registration actually fixed — lands in branch 3 by the rule's own terms, and that is
 the verdict: D3-Option 4 stays PROVISIONAL.** No post-hoc rule is needed to get there: the narrative looked

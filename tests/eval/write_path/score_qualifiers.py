@@ -357,10 +357,13 @@ def evaluate_branches(delta_loss_pp: float | None, delta_precision_pp: float | N
     Pure, so the boundary cases can be tested without a run. Two decisions this
     encodes, both of which the measurement depends on:
 
-    * **Rounded percentage points, not raw floats.** ``100 * (7/10 - 6/10)`` is
-      ``9.999999999999998``, so a raw ``> 10.0`` test would decide the same
-      mathematical +10 pp differently depending on summation order — a branch
-      flipped by representation error is not reproducible.
+    * **Rounded percentage points, not raw floats.** The same mathematical
+      +10 pp is ``9.999999999999998`` when it is summed one way and
+      ``10.000000000000002`` the other, so a raw ``> 10.0`` test decides the same
+      delta differently by summation order — a branch flipped by representation
+      error is not reproducible. (The *discriminating* value is the second one:
+      it fires a raw test and does not fire a rounded one. ``100*(7/10-6/10)``
+      alone is not a witness — it reads "no fire" both ways.)
     * **No branch is certified on an incomplete receipt.** ``partial``/
       ``truncated``/error means the arm's extract is not what the model produced,
       so its loss is overstated; on this corpus one qualifier moves the holdout
@@ -383,11 +386,29 @@ def evaluate_branches(delta_loss_pp: float | None, delta_precision_pp: float | N
     # when the narrative receipt is the dirty one; refusing it in both directions
     # would let a broken raw arm hide a real fire.
     narrative_dirty = any(t.endswith(":narrative") for t in contaminated)
+    raw_dirty = any(t.endswith(":raw") for t in contaminated)
     # The CONDITION, computed once and independently of contamination: branch 1's
     # condition is met by Δloss > band OR a precision/recall drop beyond tolerance.
-    condition_met = ((loss is not None and loss > BAND_PP)
-                     or any(d is not None and d < -PR_TOLERANCE_PP for d in (prec, rec)))
-    fires = condition_met and not narrative_dirty
+    #
+    # ⛔ THE TWO LEGS ARE NOT SYMMETRIC IN THE SAME DIRECTION, which is why they are
+    # suppressed SEPARATELY. The paragraph above reasons about LOSS, where a dropped
+    # tail only removes opportunities to count a loss — so a dirty RAW arm is
+    # conservative there. PRECISION is a RATIO (hits / claims_emitted): dropping a
+    # tail of UNMATCHED claims RAISES raw precision, which LOWERS
+    # Δprecision = prec_narr − prec_raw and can fire branch 1 off an extract the
+    # extractor marked incomplete. Measured on this run: raw 78/119 = 65.5%; drop 10
+    # unmatched tail claims and it is 78/109 = 71.6%, so Δprecision = 63.1 − 71.6 =
+    # −8.5 pp → branch 1 fires. And `wp07_bluepeak_followup:raw` — the receipt that
+    # IS partial in the committed holdout — is exactly that channel. So the P/R leg
+    # is suppressed by a dirty receipt in EITHER arm, while the Δloss leg keeps the
+    # one-sided rule (a dirty raw arm there leaves a fire as real, merely
+    # under-detected).
+    loss_leg = loss is not None and loss > BAND_PP
+    pr_leg = any(d is not None and d < -PR_TOLERANCE_PP for d in (prec, rec))
+    # `condition_met` is `loss_leg or pr_leg`; the legs are kept apart above because
+    # each answers to a different contamination direction.
+    fires = ((loss_leg and not narrative_dirty)
+             or (pr_leg and not narrative_dirty and not raw_dirty))
     # ⛔ A MISSING P/R delta is not a PASSING one. `all(d is None or abs(d) <= tol)`
     # made an ABSENT delta satisfy the tolerance, so a split in which an arm emitted
     # NO claims read as certified: precision is `hits / n_claims` with `n_claims ==
@@ -419,7 +440,43 @@ def evaluate_branches(delta_loss_pp: float | None, delta_precision_pp: float | N
             # labelling that cell "branch 1's condition was MET but SUPPRESSED"
             # asserts a route the rule's own inputs contradict, while overwriting
             # the route that IS available (branch 2 met, not certifiable).
-            "falsifier_suppressed_by_contamination": condition_met and narrative_dirty}
+            "falsifier_suppressed_by_contamination":
+                (loss_leg and narrative_dirty)
+                or (pr_leg and (narrative_dirty or raw_dirty)),
+            # WHICH arm withheld the fire. The two are not interchangeable: a
+            # narrative receipt overstates the delta, a raw one can overstate the
+            # PRECISION drop. One label for both would name a cause the run does not
+            # support.
+            "falsifier_suppressed_by": (
+                "narrative" if narrative_dirty else "raw" if raw_dirty else None)}
+
+
+def suppression_log(verdict: dict) -> list[str]:
+    """The operator-facing suppression lines — ONE arm per message.
+
+    The two suppressors work in OPPOSITE directions: a dirty NARRATIVE receipt
+    overstates the delta, while a dirty RAW receipt can drop a tail of unmatched
+    claims, which RAISES raw precision and so overstates the PRECISION DROP. One
+    sentence for both would name a mechanism the run does not support, so the log
+    and :func:`verdict_label` are derived from the same ``falsifier_suppressed_by``
+    field — and a test pins the text against the arm in both directions.
+    """
+    if not verdict.get("falsifier_suppressed_by_contamination"):
+        return []
+    if verdict.get("falsifier_suppressed_by") == "raw":
+        return [
+            "  \u26d4 BRANCH 1 WAS SUPPRESSED: its condition was met, but the RAW receipt is"
+            " incomplete — a",
+            "     dropped tail of unmatched claims RAISES raw precision, so it OVERSTATES the"
+            " precision",
+            "     DROP (not the delta). Not a finding either way until that arm is re-run.",
+        ]
+    return [
+        "  \u26d4 BRANCH 1 WAS SUPPRESSED: its condition was met, but the NARRATIVE receipt is"
+        " incomplete — a",
+        "     dropped tail removes claims and so OVERSTATES the delta. Not a finding either way"
+        " until re-run.",
+    ]
 
 
 def verdict_label(verdict: dict) -> str:
@@ -431,6 +488,10 @@ def verdict_label(verdict: dict) -> str:
     must agree with the console, case by case.
     """
     if verdict.get("falsifier_suppressed_by_contamination"):
+        if verdict.get("falsifier_suppressed_by") == "raw":
+            return ("branch 1's condition was MET but SUPPRESSED: the raw receipt is "
+                    "incomplete, so its dropped tail inflates raw precision and would "
+                    "overstate the precision drop")
         return ("branch 1's condition was MET but SUPPRESSED: the narrative receipt is "
                 "incomplete and would overstate the delta")
     if verdict["branch_1_fires"]:
@@ -705,11 +766,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  branch 3 (anything else → stays provisional): "
               f"{'APPLIES' if branch_3 else 'not reached'}"
               + ("  → VERDICT: D3 STAYS PROVISIONAL" if branch_3 else ""))
-    if verdict["falsifier_suppressed_by_contamination"]:
-        print("  ⛔ BRANCH 1 WAS SUPPRESSED: its condition was met, but the NARRATIVE receipt is"
-              " incomplete — a")
-        print("     dropped tail removes claims and so OVERSTATES the delta. Not a finding either"
-              " way until re-run.")
+    for line in suppression_log(verdict):
+        print(line)
     if contaminated:
         print(f"  ⛔ INCOMPLETE RECEIPTS IN THE HOLDOUT: {', '.join(contaminated)}")
         for tag in contaminated:

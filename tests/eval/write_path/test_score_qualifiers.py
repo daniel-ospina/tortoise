@@ -214,6 +214,71 @@ def test_a_partial_narrative_receipt_cannot_fire_branch_1():
     assert evaluate_branches(20.0, 0.0, 0.0, contaminated=CLEAN)["branch_1_fires"] is True
 
 
+def test_a_partial_raw_receipt_cannot_fire_branch_1_off_the_precision_leg():
+    """The loss leg's asymmetry does NOT carry over to the P/R legs.
+
+    A dirty RAW arm is conservative for Δloss: a dropped tail only removes
+    opportunities to count a loss. It is the OPPOSITE for precision, which is a
+    ratio — dropping a tail of unmatched claims RAISES raw precision, which lowers
+    Δprecision = prec_narr − prec_raw and can fire branch 1 off an extract the
+    extractor itself marked incomplete. Precision on this run is exactly that
+    shape: raw 78/119 = 65.5%, and dropping 10 unmatched tail claims gives
+    78/109 = 71.6%, i.e. Δprecision = 63.1 − 71.6 = −8.5 pp → branch 1.
+
+    `wp07_bluepeak_followup:raw` is `partial=True` in the committed holdout, so the
+    dirty receipt and the fire channel are the same receipt.
+    """
+    dirty_raw = ["wp07_bluepeak_followup:raw"]
+    for prec, rec in ((-15.0, 0.0), (0.0, -15.0)):
+        verdict = evaluate_branches(2.0, prec, rec, contaminated=dirty_raw)
+        assert verdict["branch_1_fires"] is False, (
+            "a P/R-borne fire was published off an incomplete raw extract")
+        assert verdict["falsifier_suppressed_by_contamination"] is True
+        assert verdict["falsifier_suppressed_by"] == "raw"
+        label = verdict_label(verdict)
+        assert "SUPPRESSED" in label
+        assert "raw receipt" in label, (
+            "the label must name the arm that withheld the fire — the raw tail "
+            f"inflates precision, not the delta: {label}")
+        # ... and the same deltas on a CLEAN run do fire.
+        assert evaluate_branches(2.0, prec, rec, contaminated=CLEAN)["branch_1_fires"] is True
+
+    # The LOSS leg keeps the one-sided rule: a dirty raw arm does not withhold a
+    # Δloss-borne fire, because there it can only under-detect.
+    loss_fire = evaluate_branches(20.0, 0.0, 0.0, contaminated=dirty_raw)
+    assert loss_fire["branch_1_fires"] is True
+    assert loss_fire["falsifier_suppressed_by_contamination"] is False
+
+
+def test_the_console_printer_names_the_arm_that_suppressed_the_fire():
+    """The LOG must agree with `verdict_label`, not just the returned dict.
+
+    The printer is what an operator reads before the label, and it carried ONE
+    sentence ("the NARRATIVE receipt is incomplete — a dropped tail removes claims
+    and so OVERSTATES the delta") for both arms. Under the P/R rule the raw arm can
+    be the suppressor, and there the mechanism is the opposite: a dropped tail of
+    unmatched claims RAISES raw precision, which LOWERS Δprecision. A log that
+    names the wrong mechanism is the same defect one consumer over — so this pins
+    the text against the arm, in both directions.
+    """
+    for delta_kwargs, arm, expect, forbid in (
+        ((2.0, -8.5, 0.0), "raw", ("RAW receipt", "precision"), ("NARRATIVE receipt",)),
+        ((20.0, 0.0, 0.0), "narrative", ("NARRATIVE receipt", "OVERSTATES the delta"),
+         ("RAW receipt", "precision")),
+    ):
+        contaminated = [f"wp07_bluepeak_followup:{arm}"]
+        verdict = evaluate_branches(*delta_kwargs, contaminated=contaminated)
+        assert verdict["falsifier_suppressed_by"] == arm
+        out = "\n".join(sq.suppression_log(verdict))
+        for needle in expect:
+            assert needle in out, f"{arm} suppression log is missing {needle!r}:\n{out}"
+        for needle in forbid:
+            assert needle not in out, (
+                f"the {arm} suppression log names the wrong arm ({needle!r}):\n{out}")
+    # No suppression, no lines: the log must not invent a cause on a clean run.
+    assert sq.suppression_log(evaluate_branches(2.0, 0.0, 0.0, contaminated=CLEAN)) == []
+
+
 def test_a_dirty_narrative_receipt_is_not_called_a_suppressed_fire_when_the_condition_failed():
     """Suppression needs the CONDITION, not merely a dirty narrative receipt.
 
