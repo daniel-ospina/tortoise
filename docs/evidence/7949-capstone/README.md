@@ -113,15 +113,21 @@ The body's figures are pinned to `9037c7a7b`. Re-measured at `717355e67`:
    So the capstone drives the **real entry point**, which is what the epic's phrase *"the
    pipeline running end to end"* demands — it does not compose the step functions, the
    construction the issue forbids.
-4. **Dependency status at this head:** `#9075` (pre-registration), `#9076` (E1+E2),
-   `#9077` (E4) are **OPEN**; `#9075` is a precondition for the whole table. `#5199`
-   (E3 anchoring) and `#7947` (E5 falsifier) could not be re-queried at the time of this
-   run — the GitHub API was rate-limited mid-lane (`gh` returned HTTP 403 with a reset
-   ~6 min out, `gh-rest: gh-limit … FAILED`) — so their rows cite the issue body's
-   decomposition rather than a fresh state read. ⚠️ **That is a named, unverified
-   assumption in this bundle, not a measured fact:** if either has landed, its row moves
-   to `RED`/`GREEN` only by RE-RUNNING the probe and producing the artifact, never by
-   reading the issue state.
+4. **Dependency status at this head — all five re-queried, all OPEN**
+   (first read was rate-limited mid-lane, `gh` HTTP 403 / `gh-rest: gh-limit … FAILED`;
+   re-read after the reset, before the PR):
+
+   | issue | title (truncated) | state |
+   |---|---|---|
+   | `#9075` | pre-register the capstone corpus, split and scoring BEFORE any E1–E5 run | **OPEN** |
+   | `#9076` | E1+E2 on one run — volume falls, correctness preserved | **OPEN** |
+   | `#9077` | E4 on the real extraction leg — wired AND persisted, no monkeypatch | **OPEN** |
+   | `#5199` | the version anchor stops at Points — `:Object`/`:Event` not version-scoped | **OPEN** |
+   | `#7947` | the raw-vs-narrative measurement — D3's falsifier | **OPEN** |
+
+   `#9075` is a precondition for the whole table (it is G0). ⚠️ A row moves to
+   `RED`/`GREEN` only by RE-RUNNING the probe and producing the artifact — never by
+   reading an issue's state, even when that state is CLOSED.
 
 ## Why the steps are observed, never wrapped
 
@@ -137,7 +143,8 @@ refuses) — an honest finding for `#7949`, never a guess.
   was performed. The table's honesty is structural, not numerical.
 - **The gate cannot detect a fabricated evidence file** with a plausible sha. Its stated
   limit: it closes *inference* (green rows with no artifact), not forgery.
-- **`#5199`/`#7947` state is unverified here** (rate limit, above).
+- **Nothing about the five dependencies beyond their `state`** — that they are OPEN is a
+  fresh read, but *why* each is open is the issue body's decomposition, not re-derived.
 
 ## Reproduce
 
