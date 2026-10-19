@@ -2559,3 +2559,109 @@ def test_4643_the_real_deploy_step_is_executed_and_its_failure_propagates(tmp_pa
                 f"{name}: the gate must run isolated (`uv run --no-project "
                 f"--with pyyaml…`) — a bare `uv run` syncs the whole project "
                 f"from PyPI before the gate starts")
+
+
+# ── §7.1's INSTALLER row must be TRUE, not merely intended ─────────────────
+#
+# Review finding (three cycles, 3 × P1 + 2 × P2), measured against both repos:
+# the row had been rewritten into the past tense ("#8747 removed that copy —
+# the MIT repo now ships no installer at all … exist in exactly one place")
+# while the MIT repo's `main` still served the 2,770-byte v1 installer and the
+# PR that deletes it (`…-skills-and-integrations#5`) was **OPEN**. The row is
+# the artifact `tools/served_skills_parity.py` sends a contributor to by name,
+# so a false state there is the provenance staleness #8747 exists to end.
+#
+# Three of the five findings are claims an OFFLINE assertion can police,
+# because they are INTERNAL to this document — and they are the ones that
+# survive a review if nobody re-measures:
+#
+#   * it credited a cross-repo deletion to **#8747**, an ISSUE in this repo;
+#   * it contradicted itself — "exist in exactly one place" twelve words before
+#     "two repos author it", the identical inversion the `Authored in` cell
+#     assertion in `test_4643_the_ownership_table_states_the_rule_per_artifact`
+#     exists to forbid;
+#   * it nominated a guard that does not exist on this side: "the ownership
+#     statement in **both READMEs**" while this repository's `README.md` never
+#     mentions the installer or the MIT repo at all.
+#
+# What no offline test can decide is whether the upstream FILE exists today —
+# the row says so itself ("no offline check can read the MIT repo"), and it now
+# records the removal as pending with the PR that performs it, so the ordering
+# is reviewable instead of assumed.
+
+def _installer_row() -> list[str]:
+    """§7.1's `install-tortoise-skills.sh` row — the cells, stripped."""
+    rows = _table_rows(_section_71())
+    installer = [r for r in rows if _artifacts(r[0]) == {"install-tortoise-skills.sh"}]
+    assert len(installer) == 1, (
+        f"§7.1 needs exactly one `install-tortoise-skills.sh` row; rows: "
+        f"{[r[0] for r in rows]}")
+    return installer[0]
+
+
+def test_8747_the_installer_row_records_the_upstream_removal_as_pending():
+    """An ISSUE in this repo cannot delete a file in another one, and a removal
+    that has not landed must not be recorded as done.
+
+    Non-vacuity (measured against the pre-fix cell, which read "…and **#8747
+    removed that copy** — the MIT repo now ships no installer at all"):
+    assertion 1 and assertion 2 both red on it.
+    """
+    cell = _installer_row()[2]
+    removed_by_issue = re.search(r"#8747\s+(?:removed|deletes|deleted|removes)", cell)
+    assert removed_by_issue is None, (
+        f"'{removed_by_issue and removed_by_issue.group(0)}' credits the deletion "
+        "to #8747, which is the TRACKING ISSUE in this repo — name the PR in the "
+        "other repo that performs it, as the row's own evidence does: " + cell)
+    assert re.search(r"tortoise-skills-and-integrations#5", cell), (
+        "the row must name the artifact that performs the upstream deletion, so a "
+        "reader can check whether it landed: " + cell)
+    assert re.search(r"\bopen\b|unmerged|pending|until .*?\blands?\b", cell, re.I), (
+        "…and must record that it has NOT landed — the MIT copy was still served "
+        "when this row was written, so a completed removal in the past tense is a "
+        "false provenance record: " + cell)
+
+
+def test_8747_the_installer_row_does_not_re_admit_a_second_installer_author():
+    """`Authored in` says one repo; the prose must not say two.
+
+    Non-vacuity (measured): the pre-fix cell read "**Stated, not gated** — two
+    repos author it and the second is not gated *from here*", five words after
+    "exist in exactly one place", so this reds on it.
+    """
+    cell = _installer_row()[2]
+    two_authors = re.search(
+        r"\b(two|three|both|[2-9])\s+(?:repositor(?:y|ies)|repos?)\s+author",
+        cell, re.I)
+    assert two_authors is None, (
+        f"§7.1 says the installer is authored in exactly one place, so "
+        f"'{two_authors and two_authors.group(0)}' re-admits the duplicated-"
+        f"authoring shape this row exists to end — if the intent is that the "
+        f"SERVED PAYLOAD spans two repos, say that, not that two repos author "
+        f"the installer: {cell}")
+
+
+def test_8747_a_readme_named_as_a_guard_must_carry_the_statement():
+    """A record that names a guard nobody wrote is the same false claim in
+    reverse — `test_4643_the_upstream_arm_has_a_runner_and_the_docs_name_it` is
+    the same assertion one level down, about runners.
+
+    Non-vacuity (measured): the pre-fix cell nominated "the ownership statement
+    in both READMEs", and `README.md` in this repo contains neither
+    `install-tortoise-skills` nor `tortoise-skills-and-integrations`.
+    """
+    cell = _installer_row()[2]
+    plural_guard = re.search(r"\bboth READMEs?\b|\b(?:each|every) README\b|READMEs\b",
+                             cell, re.I)
+    if plural_guard:
+        readme = (REPO / "README.md").read_text(encoding="utf-8")
+        assert ("tortoise-skills-and-integrations" in readme
+                or "install-tortoise-skills" in readme), (
+            f"the row nominates '{plural_guard.group(0)}' as a guard, but "
+            f"README.md in this repo never mentions the installer or the MIT "
+            f"repo — a guard nobody wrote is not a guard: {cell}")
+    # The one guard the row CAN be held to offline: the served installer's own
+    # header, which §7.1 names and which a `curl … | bash` customer reads.
+    assert "tortoise-skills-and-integrations" in INSTALLER.read_text(encoding="utf-8"), (
+        "the served installer's header must still name the MIT repo — it is the "
+        "statement a customer's agent reads")
