@@ -568,9 +568,10 @@ def test_org_switcher_listing_runs_off_the_loop(client, monkeypatch):
 
     Scope, stated rather than implied: this test covers the LISTING half of the
     switcher only. Its membership scan and its per-org Team read stay INLINE as
-    declared residual under #2446 — that registry read class has a MEASURED
-    thread-dependence (off-loading it produced an EMPTY member list in
-    `test_invites_http.py::TestExpiredInviteReMint`), so they are asserted
+    declared residual under #2446 — a thread-dependence MEASURED on
+    `_membership_role`'s registry read (off-loading THAT produced an EMPTY
+    member list in `test_invites_http.py::TestExpiredInviteReMint`), with these
+    two helpers in the same read class by inference — so they are asserted
     REACHED here but deliberately NOT asserted off-loop. Pretending otherwise
     would let this pin certify a behaviour the #2446 note records as broken.
 
@@ -725,10 +726,6 @@ def test_org_switcher_listing_never_builds_a_graph_handle_in_supabase_mode(
 
     assert ha_mod._graph_list_for("org-x") == [{"graph_id": "org-x-pg"}]
 
-    # ROUTE level, not just the helper: the contract this pins is the endpoint's
-    # ("never touches the registry in Supabase mode"). `_org_node` and
-    # `_user_memberships` branch on the mode themselves, and the submission lane
-    # is chosen on the loop, so the whole path must stay FalcorDB-free.
     monkeypatch.setattr(
         sb, "user_memberships",
         lambda cp, uid: [{"org_id": "org-x", "role": "owner"}])
@@ -739,10 +736,30 @@ def test_org_switcher_listing_never_builds_a_graph_handle_in_supabase_mode(
         sb, "graph_metadata",
         lambda cp, org_id: [{"graph_id": f"{org_id}-pg", "kind": "default"}])
 
-    async def _inline(fn, *, op, **_kwargs):
+    # ROUTE level, not just the helper: the contract this pins is the endpoint's
+    # ("never touches the registry in Supabase mode"). `_org_node` and
+    # `_user_memberships` branch on the mode themselves, and the submission lane
+    # is chosen on the loop, so the whole path must stay FalkorDB-free.
+    #
+    # BOTH lanes are patched with RECORDERS, not one passthrough: `_graph_offload`
+    # delegates to `_cp_offload(pool="graph")`, so replacing only the latter
+    # makes the graph lane indistinguishable from the control-plane lane at this
+    # seam — and the wrong-lane regression this docstring is about (the round-5
+    # P2: Supabase listings riding the graph lane under its cold-projection
+    # bound) would keep this pin green. Measured: with the lane decision forced
+    # to `_graph_offload`, the row assertion alone passes.
+    lanes = {"cp": 0, "graph": 0}
+
+    async def _cp_rec(fn, *, op, **_kwargs):
+        lanes["cp"] += 1
         return fn()
 
-    monkeypatch.setattr(ha_mod, "_cp_offload", _inline)
+    async def _graph_rec(fn, *, op, **_kwargs):
+        lanes["graph"] += 1
+        return fn()
+
+    monkeypatch.setattr(ha_mod, "_cp_offload", _cp_rec)
+    monkeypatch.setattr(ha_mod, "_graph_offload", _graph_rec)
 
     rows = asyncio.run(ha_mod.list_my_orgs({"user_id": "u-3718"}))
 
@@ -750,6 +767,41 @@ def test_org_switcher_listing_never_builds_a_graph_handle_in_supabase_mode(
             for r in rows] == [("org-x", 1, "org-x-pg")], (
         f"the Supabase-mode switcher did not answer from the control plane: "
         f"{rows!r} (#3718)")
+    # 1 membership scan + 1 Team read (`_org_node`) + 1 listing submission.
+    # The scan and the Team read are on THIS lane too (they branch on the mode
+    # and enumerate no registry), which is why the count is 3 and not 1.
+    assert lanes == {"cp": 3, "graph": 0}, (
+        f"the Supabase switcher did not run on the control-plane lane only: "
+        f"{lanes!r} (#3718)")
+
+    # And the CHUNK is sized for THIS lane's bound, not the graph lane's: the
+    # Supabase read is 3 PostgREST round trips per org under a 10 s bound, so
+    # the same count the registry lane uses (8) would budget 24 against it.
+    org_count = 9
+    monkeypatch.setattr(
+        sb, "user_memberships",
+        lambda cp, uid: [{"org_id": f"org-{i}", "role": "owner"}
+                         for i in range(org_count)])
+    monkeypatch.setattr(
+        sb, "org_by_id",
+        lambda cp, org_id: {"id": org_id, "name": org_id, "tier": "free"})
+    monkeypatch.setattr(
+        sb, "graph_metadata",
+        lambda cp, org_id: [{"graph_id": f"{org_id}-pg", "kind": "default"}])
+    lanes.update(cp=0, graph=0)
+
+    rows = asyncio.run(ha_mod.list_my_orgs({"user_id": "u-3718"}))
+
+    expected_chunks = -(-org_count // ha_mod._GRAPH_LIST_CONTROL_PLANE_CHUNK)
+    assert expected_chunks >= 2, (
+        f"this pin's premise is broken: {org_count} orgs span only "
+        f"{expected_chunks} chunk(s) (#3718)")
+    assert lanes == {"cp": 1 + org_count + expected_chunks, "graph": 0}, (
+        f"{org_count} Supabase orgs used lanes {lanes!r}, expected "
+        f"{1 + org_count + expected_chunks} control-plane call(s) (1 scan + "
+        f"{org_count} Team reads + {expected_chunks} chunks) and no graph-lane "
+        f"call — the lane or the per-lane chunk size regressed (#3718)")
+    assert len(rows) == org_count, (rows,)
 
 
 # ── AST inventory pin: the sync-FalkorDB-on-the-loop class ─────────────────
@@ -788,7 +840,17 @@ def test_org_switcher_listing_never_builds_a_graph_handle_in_supabase_mode(
 # `_make_sdk` one level down), which is the same helper-mediated boundary the
 # paragraph above names, and which the behavioural probe extension in
 # `tests/test_dataplane_lane_loop_responsiveness.py` (#4660) is the guard for.
-_GRAPH_SEAM_CALLEES = frozenset({"_get_proj", "_get_registry", "dream_health_check"})
+_GRAPH_SEAM_CALLEES = frozenset({"_get_proj", "_get_registry", "dream_health_check",
+                           # #3718: the org switcher's listing seam. Sync by
+                           # design (it returns the rows), and its FalkorDB I/O
+                           # is reached through the cached ``_registry_anchor()``
+                           # — a name this scan does not otherwise know. Without
+                           # this member the switcher's listing was invisible to
+                           # the inventory: reverting it to an inline per-org
+                           # call left ``_has_inline_graph_io(list_my_orgs)``
+                           # EMPTY, so its ``_OFFLOADED_ASYNC_BODIES`` entry
+                           # asserted nothing (measured).
+                           "_graph_list_for"})
 #: SDK CONSTRUCTION seams (#4660) — kept SEPARATE from the graph seams above so
 #: the two classes of violation stay distinguishable in the failure message
 #: (``test_graph_io_is_offloaded``) instead of merging into one count that hides
@@ -826,6 +888,13 @@ _OFFLOAD_BOUNDARY_CALLEES = frozenset({
     "_run_index_off_loop",
     "_cp_offload", "_oauth_offload", "run_control_plane_call",
     "run_on_daemon_worker", "_graph_offload",
+    # #3718: the per-MODE lane alias in ``list_my_orgs``
+    # (``offload = _cp_offload if is_supabase_enabled() else _graph_offload``).
+    # The scan sees the call through the local name, so the alias itself must be
+    # declared here for the listing's ``_graph_list_for`` to be recognised as
+    # OFF-loop — otherwise the correct shape is reported as a violation (the same
+    # failure mode ``_graph_offload`` was added for in #4660).
+    "offload",
 })
 
 #: Async bodies this change OFF-LOADS. A subset assertion: a rename or a
