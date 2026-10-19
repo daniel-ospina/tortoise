@@ -32,6 +32,11 @@ back into a silently short page.
 """
 from __future__ import annotations
 
+import os
+import threading
+import time
+from pathlib import Path
+
 import pytest
 
 from tortoise import event_store
@@ -57,12 +62,25 @@ def _no_carried_degradation():
 
 @pytest.fixture
 def armed_sdk(tmp_path):
-    """A real SDK with a configured JSONL journal — the §17.1 guard is ARMED.
+    """A real SDK with a configured JSONL journal — `_journal_backed` is True.
+
+    ⚠️ WHAT THIS DOES **NOT** DO (#9208 review, P3): it does not put the §17.1
+    third door on the path these tests drive. `DirectCacheWriteRefused` is
+    raised by `FalkorProjection.apply`/`.query` (the fold and the raw-query
+    lane); `event_store` writes through `proj.g`, i.e. `_GuardedGraph.query`,
+    whose refusals are the `=~` operator, the numeric-domain guards and the
+    bulk-wipe L2 — none of which is that door. On `main` the door does not
+    reach `proj.g` at all, so the refusal is SIMULATED here (`_refuse_the_store_leg`)
+    at the statement it would refuse, and the "feed survives an armed door"
+    claim belongs to #9124 part 1 / #9079.
+    `test_the_9124_door_does_not_reach_the_write_handle_yet` is the pin that
+    reds when that changes, so the simulation is re-evaluated rather than
+    remembered.
 
     Same construction as the `#9123`/`#7951` fixtures: `event_log_path` is what
-    arms the guard, and the explicit `db_path` makes the projection embedded
-    when no URI is configured (a URI-set session is redirected to its server, so
-    the file is lane-agnostic rather than embedded-only).
+    arms the journal fold, and the explicit `db_path` makes the projection
+    embedded when no URI is configured (a URI-set session is redirected to its
+    server, so the file is lane-agnostic rather than embedded-only).
     """
     from tortoise.sdk import TortoiseSDK
 
@@ -230,12 +248,14 @@ def test_a_duplicate_append_is_not_reported_as_a_loss(armed_sdk, monkeypatch):
 
 
 def test_a_healthy_feed_answers_and_leaves_a_row(armed_sdk):
-    """The indicator the issue asks for, on an ARMED (journal-backed) SDK.
+    """A journal-backed SDK's feed WORKS: one `:GraphEvent` row, one poll.
 
-    Nothing here is a simulation: `create_point` on a journal-backed SDK must
-    leave a `:GraphEvent` row and `poll_events` must return it. This is the
-    case that fails when a declaration is missing under an armed door, and it
-    is also the guard against the degraded state firing on a healthy feed.
+    ⚠️ NOT the issue's Indicator (`with §17.1's third door armed, create_point
+    leaves a :GraphEvent row`): that door is not wired to `proj.g` on this
+    branch, so no armed-door case is expressible here — see `armed_sdk` and
+    `test_the_9124_door_does_not_reach_the_write_handle_yet`. What this pins is
+    the healthy direction plus the false-positive guard: a journal-backed SDK
+    must leave a row and must NOT be reported as degraded.
     """
     sdk = armed_sdk
 
@@ -369,9 +389,24 @@ def test_an_unverifiable_append_is_reported_as_unverified_not_as_a_loss(
     assert state["stage"] == "append-unverified", (
         "an unreadable store proves neither a loss nor a landing, so the stage "
         f"must say so; observed={state['stage']!r}")
+    assert state["first_stage"] == "append-unverified", (
+        "the FIRST diagnosis must be kept, not overwritten by a later one: it "
+        "is often the only provable one (#9208 review); "
+        f"observed={state['first_stage']!r}")
     with pytest.raises(ChangeFeedDegraded) as excinfo:
         sdk.poll_events()
     assert "append-unverified" in str(excinfo.value)
+
+    # A SECOND, different failure on the same graph: the latest diagnosis moves
+    # and the first is still readable beside it.
+    event_store.record_degraded(sdk._get_proj(), "append", "PointAdded", None,
+                                RuntimeError("row really is gone"))
+    state = event_store.degraded(sdk._get_proj())
+    assert (state["stage"], state["first_stage"]) == ("append", "append-unverified"), (
+        "the later stage must not discard the first failure's diagnosis; "
+        f"observed stage={state['stage']!r} "
+        f"first_stage={state['first_stage']!r}")
+    assert state["lost"] == 2, "both failures are losses, so both are counted"
 
 
 def test_the_emit_hook_never_raises_even_when_the_recorder_fails(
@@ -434,6 +469,137 @@ def test_the_store_identity_includes_the_server_PORT():
         stub(path="/b.db"))
 
 
+def test_the_9124_door_does_not_reach_the_write_handle_yet(armed_sdk):
+    """VISIBILITY pin for the #9124 dependency, not a proof of this fix.
+
+    Every refusal in this file is SIMULATED at the statement the §17.1 third
+    door would refuse, because on this branch the door does not sit on
+    `proj.g` (see `armed_sdk`). That is a fact about the code, and a fact
+    recorded only in a docstring goes stale silently — so it is asserted here:
+    a mutating statement through the write handle is ACCEPTED today.
+
+    When #9124 part 1 lands the door on this handle, this test goes RED on
+    purpose. That is the moment to (a) re-read `_refuse_the_store_leg` — the
+    measured case then comes from the real door instead of a patch — and (b)
+    turn the armed-door Indicator into a real test
+    (`test_a_healthy_feed_answers_and_leaves_a_row`'s original claim).
+    """
+    from tortoise.projection import DirectCacheWriteRefused
+
+    proj = armed_sdk._get_proj()
+    try:
+        rows = proj.g.query(
+            "CREATE (n:_DoorProbe {id:'probe'}) RETURN n.id").result_set
+    except DirectCacheWriteRefused as exc:  # pragma: no cover — future state
+        pytest.fail(
+            "the §17.1 third door now refuses writes at `proj.g` "
+            f"({exc}). The refusal these tests simulate is now a REAL refusal: "
+            "re-derive `_refuse_the_store_leg` from the live door, restore the "
+            "armed-door Indicator in "
+            "`test_a_healthy_feed_answers_and_leaves_a_row`, and remove this pin "
+            "(#9124 part 1 landed).")
+    assert rows, "the probe write must reach the store while the door is absent"
+
+
+def test_the_degraded_state_is_atomic_across_threads():
+    """The hosted path records from WORKER THREADS while `/health` reads.
+
+    `record_degraded` runs inside `asyncio.to_thread` on the hosted write path,
+    and `degraded_graphs()` runs on the event loop from the `async def` health
+    route — two thread populations over one module dict. What the lock
+    guarantees, and what is asserted here: `lost` is an exact
+    read-modify-write (that count is quoted to the consumer verbatim, so an
+    undercount is a false number about data loss), and a report taken while
+    writers are live neither raises nor tears.
+
+    ⚠️ NON-VACUITY, STATED HONESTLY — this is a ROBUSTNESS pin, not a
+    red-before-green proof. On CPython the pre-lock shape did not observably
+    fail this harness: `list(dict.items())` is atomic under the GIL, and the
+    unlocked `previous["lost"] + 1` did not undercount in 10/10 trials at both
+    8x60 and 8x20,000 (the GIL's 5 ms switch interval is long relative to one
+    increment, so writers effectively serialise). The lock is taken because the
+    alternative is a CPython-implementation accident, not a contract — it must
+    hold for free-threaded builds, and it reds here if a future refactor puts an
+    await or a hand-off between the read and the write.
+    """
+    from types import SimpleNamespace
+
+    event_store.clear_degraded()
+    proj = SimpleNamespace(_path="/atomic.db", _host=None,
+                           graph_name="atomic", db=None)
+    threads_n, per_thread = 8, 60
+    new_keys = 40
+    start = threading.Barrier(threads_n + 2)  # workers + resizer + this thread
+    def record() -> None:
+        start.wait()
+        for _ in range(per_thread):
+            event_store.record_degraded(proj, "append", "PointAdded", None,
+                                        RuntimeError("lost"))
+
+    def mint_keys() -> None:
+        """New (store, graph) keys — a RESIZE while the reporter iterates."""
+        start.wait()
+        for i in range(new_keys):
+            event_store.record_degraded(
+                SimpleNamespace(_path=f"/resize-{i}.db", _host=None,
+                                graph_name="r", db=None),
+                "emit", "PointAdded", None, RuntimeError("lost"))
+
+    workers = [threading.Thread(target=record) for _ in range(threads_n)]
+
+    for t in workers:
+        t.start()
+    resizer = threading.Thread(target=mint_keys)
+    resizer.start()
+    start.wait()  # release every thread at once
+    seen = []
+    while any(t.is_alive() for t in (*workers, resizer)):
+        try:
+            seen.append(len(event_store.degraded_graphs()))
+        except RuntimeError as exc:  # pragma: no cover — the pre-lock failure
+            pytest.fail(
+                "reporting the degraded state must not raise on a concurrent "
+                f"insert — /health swallows that and reports `degraded: false`: {exc}")
+        time.sleep(0.001)
+    for t in (*workers, resizer):
+        t.join()
+
+    assert seen, "the reporter must have run while the writers did"
+    state = event_store.degraded(proj)
+    assert state["lost"] == threads_n * per_thread, (
+        "every loss must be counted — the count is quoted to the consumer as "
+        f"\"N event(s) are unaccounted for\"; observed={state['lost']!r}")
+    assert len(event_store.degraded_graphs()) == new_keys + 1
+    event_store.clear_degraded()
+
+
+def test_the_store_identity_is_one_key_however_the_path_is_spelled():
+    """One database reached through two spellings is ONE store (#9208 review).
+
+    A symlinked deployment directory, a `~`-spelled home and a `.`-relative
+    path are the same file. Keyed on the raw string, the state SPLITS: a refused
+    write recorded under one spelling leaves a poll through the other answering
+    `[]` over the lost event — the silence this module exists to break. The
+    canonicalisation is the repo's own (`realpath(abspath(expanduser()))`, cf.
+    `projection._prewipe_db_path_identity` and `fallback_snapshot.snapshot_key`).
+    """
+    from types import SimpleNamespace
+
+    def key(path):
+        return event_store._graph_key(
+            SimpleNamespace(_path=path, _host=None, graph_name="tortoise", db=None))
+
+    spelling = str(Path("/tmp") / ".." / "/tmp" / "one.db")
+    assert key(spelling) == key("/tmp/one.db"), (
+        "a `.`/`..`-relative spelling of one database must not key apart: "
+        f"{key(spelling)!r} != {key('/tmp/one.db')!r}")
+    assert key("~/feed.db") == key(str(Path("~").expanduser() / "feed.db")), (
+        "a `~`-spelled path must key as the database it names")
+    assert key(":memory:") != key(str(Path(":memory:").absolute())), (
+        "`:memory:` names no file — folding the cwd into it would make two "
+        "cwds two keys for one embedded daemon")
+
+
 def test_a_real_projection_reports_the_store_identity_the_key_uses(tmp_path):
     """The `_store_identity` seam against a REAL projection, in BOTH lanes.
 
@@ -461,9 +627,10 @@ def test_a_real_projection_reports_the_store_identity_the_key_uses(tmp_path):
         proj = sdk._get_proj()
         identity = event_store._store_identity(proj)
         if proj._path:
-            assert identity == f"file:{proj._path}", (
+            canonical = os.path.realpath(os.path.abspath(str(proj._path)))
+            assert identity == f"file:{canonical}", (
                 "an embedded projection's identity is its database FILE, "
-                f"got {identity!r}")
+                f"canonically spelled; got {identity!r}")
             return
         pool = proj.db.connection.connection_pool
         port = pool.connection_kwargs["port"]
