@@ -2751,6 +2751,18 @@ surfaces:
   # code diffs (`tortoise/pack_registry.py`, `tortoise/value_extractor.py` — each
   # selects `core`) that can reverse the refusal the brief now states.
   - test_entity_attachment_brief_claims.py
+  # #9080: the extractor-v4 CAPSTONE's gate — `tools/capstone_verdict_check.py`
+  # (the epic #7949 closing rule in mechanical form) + the run probe's refusal
+  # chain and its pure step/census observers
+  # (`docs/evidence/7949-capstone/probes/capstone_run.py`). The epic's failure
+  # mode is INFERENCE — rows marked green off closed children with no artifact
+  # behind them — so every check here is one of the shapes that failure takes
+  # (missing row, green on a nonexistent file, denominator from another corpus,
+  # green evidence predating the thresholds, red row with no named cause). No
+  # DB, no network, no model: pure functions + `git cat-file`/`merge-base` on
+  # this repo. `core` is the home because `tools/capstone_verdict_check.py` is
+  # the artifact under test; see the `eval` arm for the docs-only reason.
+  - test_7949_capstone_verdict_check.py
   # #2008 review (P1+P2): the capstone verification report's OWN claims guard — the
   # cross-head licence must be the test-file check it can actually prove (it is not),
   # the shared-hub tree state at measurement time must be recorded as un-recorded,
@@ -4767,6 +4779,17 @@ tier1:
 # a fast, no-DB file scan of the brief plus two module-text reads, so a docs-only
 # PR must run it here.
 - test_entity_attachment_brief_claims.py
+# #9080: the extractor-v4 capstone's gate + run probe (`core` above) — a pure,
+# no-DB file/JSON read plus `git cat-file`/`merge-base`. Dual-registered with
+# `core` on the same rule the extractor-v4 guards above follow: `core` is the
+# classification home `--integrity` reads, and this arm is the cheap fast-pool
+# placement for the diff that can rot the bundle it pins
+# (`docs/evidence/7949-capstone/**` — a shipped log whose refusal rows are tidied
+# into a green one, or a probe whose observation surface moves).
+# ⚠️ Measured at this head: a `docs/`-only diff currently selects FULL for
+# `pull_request` (not tier1-only, contrary to the sibling comments above), so this
+# arm is belt-and-braces rather than load-bearing. Kept because it costs one row.
+- test_7949_capstone_verdict_check.py
 # ── #9017 (2026-10-18): the slow pool's weights and its leg split are MEASURED
 #
 # WHY THIS BLOCK EXISTS. `test-slow (b)` was reported as the CI critical path
@@ -5418,6 +5441,7 @@ durations:
   test_license_surface_consumer.py: 0.3
   test_7818_plan_record_5362.py: 2.0  # #7818/#5362: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the #3400 flat 2.0s default. Hermetic (one plan-doc read, no fixture/DB); refresh from the first post-merge run that includes it. Required for the durations half as well as the surface half (#4348 trap): without this row the durations coverage fell to 89.9% and `tools/ci_selection.py --integrity` red, which is how this row was found.
   test_7950_capstone_probe.py: 2.0  # #7950: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the #3400 flat 2.0s default. MEASURED this turn: WITHOUT this row the durations coverage fell to 89.9% (760/845 fast files) and `tools/ci_selection.py --integrity` red — the surface entry alone does not cover it, and the file itself is DB-free pure-function work (<0.01s per test; the local session total is conftest/DB setup). Refresh from the first post-merge run that includes it.
+  test_7949_capstone_verdict_check.py: 2.5  # #9080 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so it packs at the flat 2.0s default and drops `duration_coverage_issues()` under the 90% floor without this row — the surface entry alone does not cover it (#4348). MEASURED locally this turn (embedded carve-out lane, 40 tests): 2.26s wall for the whole file; the `git cat-file`/`merge-base` ancestry assertions are subprocess calls, so the file is NOT the pure-file-scan shape its siblings (`core`/`eval` arms) are. 2.5 sits above the measured wall for the shard-balance veto; the junit metric (sum of `testcase/@time`) is strictly smaller. Refresh from the first post-merge run that includes it.
   test_8066_served_skill_relay_ratchet.py: 3.5  # #8066 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red at 782/869 = 89.99% — the file is in the fast pool, so its absence packs it at the flat 2.0s default and drops coverage under the 90% floor. Locally measured (embedded carve-out lane, 2 tests): call 2.67s (the registration ratchet's 1097 `select()` calls) + 0.80s (the `tests/**` walk, after the necessary-condition fast path cut it from 16.0s); conftest/collection setup is the once-per-leg cost the #3400 method attributes to no file. Refresh from the first post-merge run that includes it.
   test_7405_remaining_writes.py: 2.2  # #7405/#8698: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so the #3400 flat 2.0s default was its FIRST weight — this value is a CI measurement since the 2026-10-17 refresh, so the read-me-from-junit half of this note is dropped with it (see the provenance rule above the block). Required for the durations half as well as the surface half (#4348 trap): the surface entry alone does not cover it — merging origin/main is where the fast pool crossed the DURATION_COVERAGE_MIN floor, which is how this row was found. NO pool figure or percentage is restated here on purpose (each base merge re-stales it; see the #4387 row above). Do NOT drop the row without re-deriving the floor at that head. Refresh from the first post-merge run that includes it.
   test_7405_update_point_writes.py: 2.0  # #7405/#8737: same #3400 flat default as the row above and for the same reason — a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). Required for the durations half as well as the surface half (#4348 trap): the surface entry alone does not cover it. Refresh from the first post-merge run that includes it.

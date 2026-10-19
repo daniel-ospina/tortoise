@@ -1,0 +1,120 @@
+# extractor-v4 capstone — S0 → S6 on the pre-registered corpus (#9080)
+# generated: 2026-10-19T01:09:39Z
+# head: 717355e67afd5262812f000e32ab0f545b91fa3d
+# pre-registration: 717355e67afd5262812f000e32ab0f545b91fa3d (ABSENT)
+# corpus: battery/config/corpus.json sha256=None turns=None
+# run: REFUSED — commit 717355e67afd5262812f000e32ab0f545b91fa3d does not carry docs/evidence/7949-capstone/preregistration.json — there is no pre-registration to measure against (#9075)
+# steps observed: (none)  required: S0 S1 S2.1 S2.2 S2.3 S3 S5 S6
+# steps MISSING: S0 S1 S2.1 S2.2 S2.3 S3 S5 S6
+
+## Verdict
+
+| criterion | verdict | evidence | blocked_by | note |
+|---|---|---|---|---|
+| E1 | UNPREREGISTERED | docs/evidence/7949-capstone/capstone.log | #9075 | gate refused: commit 717355e67afd5262812f000e32ab0f545b91fa3d does not carry docs/evidence/7949-capstone/preregistration.json — there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #9075 / the measurement itself is #9076 |
+| E2 | UNPREREGISTERED | docs/evidence/7949-capstone/capstone.log | #9075 | gate refused: commit 717355e67afd5262812f000e32ab0f545b91fa3d does not carry docs/evidence/7949-capstone/preregistration.json — there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #9075 / the measurement itself is #9076 |
+| E3 | BLOCKED | docs/evidence/7949-capstone/capstone.log | #5199 | gate refused: commit 717355e67afd5262812f000e32ab0f545b91fa3d does not carry docs/evidence/7949-capstone/preregistration.json — there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #5199 |
+| E4 | BLOCKED | docs/evidence/7949-capstone/capstone.log | #9077 | gate refused: commit 717355e67afd5262812f000e32ab0f545b91fa3d does not carry docs/evidence/7949-capstone/preregistration.json — there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #9077 |
+| E5 | BLOCKED | docs/evidence/7949-capstone/capstone.log | #7947 | gate refused: commit 717355e67afd5262812f000e32ab0f545b91fa3d does not carry docs/evidence/7949-capstone/preregistration.json — there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #7947 |
+
+=== CAPSTONE-VERDICT-BEGIN ===
+{
+  "corpus": {
+    "path": "battery/config/corpus.json",
+    "sha256": null,
+    "turns": null
+  },
+  "epic": 7949,
+  "head": "717355e67afd5262812f000e32ab0f545b91fa3d",
+  "issue": 9080,
+  "prereg": {
+    "artifact": "docs/evidence/7949-capstone/preregistration.json",
+    "sha": "717355e67afd5262812f000e32ab0f545b91fa3d",
+    "status": "ABSENT"
+  },
+  "rows": [
+    {
+      "blocked_by": "#9075",
+      "corpus_sha256": null,
+      "criterion": "E1",
+      "denominator": null,
+      "evidence": "docs/evidence/7949-capstone/capstone.log",
+      "evidence_kind": "refusal",
+      "note": "gate refused: commit 717355e67afd5262812f000e32ab0f545b91fa3d does not carry docs/evidence/7949-capstone/preregistration.json \u2014 there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #9075 / the measurement itself is #9076",
+      "numerator": null,
+      "sha": "717355e67afd5262812f000e32ab0f545b91fa3d",
+      "sibling": null,
+      "verdict": "UNPREREGISTERED"
+    },
+    {
+      "blocked_by": "#9075",
+      "corpus_sha256": null,
+      "criterion": "E2",
+      "denominator": null,
+      "evidence": "docs/evidence/7949-capstone/capstone.log",
+      "evidence_kind": "refusal",
+      "note": "gate refused: commit 717355e67afd5262812f000e32ab0f545b91fa3d does not carry docs/evidence/7949-capstone/preregistration.json \u2014 there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #9075 / the measurement itself is #9076",
+      "numerator": null,
+      "sha": "717355e67afd5262812f000e32ab0f545b91fa3d",
+      "sibling": null,
+      "verdict": "UNPREREGISTERED"
+    },
+    {
+      "blocked_by": "#5199",
+      "corpus_sha256": null,
+      "criterion": "E3",
+      "denominator": null,
+      "evidence": "docs/evidence/7949-capstone/capstone.log",
+      "evidence_kind": "refusal",
+      "note": "gate refused: commit 717355e67afd5262812f000e32ab0f545b91fa3d does not carry docs/evidence/7949-capstone/preregistration.json \u2014 there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #5199",
+      "numerator": null,
+      "sha": "717355e67afd5262812f000e32ab0f545b91fa3d",
+      "sibling": null,
+      "verdict": "BLOCKED"
+    },
+    {
+      "blocked_by": "#9077",
+      "corpus_sha256": null,
+      "criterion": "E4",
+      "denominator": null,
+      "evidence": "docs/evidence/7949-capstone/capstone.log",
+      "evidence_kind": "refusal",
+      "note": "gate refused: commit 717355e67afd5262812f000e32ab0f545b91fa3d does not carry docs/evidence/7949-capstone/preregistration.json \u2014 there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #9077",
+      "numerator": null,
+      "sha": "717355e67afd5262812f000e32ab0f545b91fa3d",
+      "sibling": null,
+      "verdict": "BLOCKED"
+    },
+    {
+      "blocked_by": "#7947",
+      "corpus_sha256": null,
+      "criterion": "E5",
+      "denominator": null,
+      "evidence": "docs/evidence/7949-capstone/capstone.log",
+      "evidence_kind": "refusal",
+      "note": "gate refused: commit 717355e67afd5262812f000e32ab0f545b91fa3d does not carry docs/evidence/7949-capstone/preregistration.json \u2014 there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #7947",
+      "numerator": null,
+      "sha": "717355e67afd5262812f000e32ab0f545b91fa3d",
+      "sibling": null,
+      "verdict": "BLOCKED"
+    }
+  ],
+  "run": {
+    "gate_failed": 2,
+    "reason": "commit 717355e67afd5262812f000e32ab0f545b91fa3d does not carry docs/evidence/7949-capstone/preregistration.json \u2014 there is no pre-registration to measure against (#9075)",
+    "status": "REFUSED",
+    "steps_observed": [],
+    "steps_required": [
+      "S0",
+      "S1",
+      "S2.1",
+      "S2.2",
+      "S2.3",
+      "S3",
+      "S5",
+      "S6"
+    ]
+  },
+  "schema": "capstone-verdict-v1"
+}
+=== CAPSTONE-VERDICT-END ===
