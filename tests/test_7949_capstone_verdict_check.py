@@ -125,8 +125,10 @@ def _record(**over) -> dict:
     return rec
 
 
-def _codes(record: dict, *, require_green: bool = False) -> list[str]:
-    findings = cvc.check(record, repo=_REPO, require_green=require_green)
+def _codes(record: dict, *, require_green: bool = False,
+           require_resolvable: bool = False) -> list[str]:
+    findings = cvc.check(record, repo=_REPO, require_green=require_green,
+                         require_resolvable=require_resolvable)
     return [code for code, _w, _m in findings.items]
 
 
@@ -322,13 +324,25 @@ def test_green_row_without_a_frozen_preregistration_is_a_finding():
 
 
 def test_green_row_with_a_sha_that_does_not_resolve_is_a_finding():
+    """A GREEN row must be provable where the commit still exists.
+
+    Resolution is REPORTED by default and FAILS only under
+    `--require-resolvable` (see V11): the acceptance command stamps the BRANCH
+    head, and main carries single-parent squashes, so requiring it by default
+    would red this bundle's own shipped-log test on every PR after merge.
+    """
     rec = _record()
     _green(rec)
     rec["rows"][0]["sha"] = "0" * 40
-    assert "V3" in _codes(rec)
+    codes = _codes(rec, require_resolvable=True)
+    assert "V11" in codes, codes
+    # not a finding by default — but it IS reported
+    findings = cvc.check(rec, repo=_REPO, require_green=False)
+    assert not findings, findings.render()
+    assert findings.unresolved
 
 
-def test_a_NON_GREEN_row_whose_sha_does_not_resolve_is_a_finding():
+def test_a_NON_GREEN_row_whose_sha_is_unresolvable_is_still_RESOLVED_ON_REQUEST():
     """REGRESSION (#9089 review). The resolve check lived inside the GREEN
     branch, so it ran on ZERO rows of the shipped table — which is 0/5 green.
 
@@ -340,9 +354,12 @@ def test_a_NON_GREEN_row_whose_sha_does_not_resolve_is_a_finding():
     rec = _record()
     for row in rec["rows"]:
         row["sha"] = "0" * 40
-    codes = _codes(rec)
-    assert codes.count("V3") == 5, codes
+    codes = _codes(rec, require_resolvable=True)
+    assert codes.count("V11") == 5, codes
     assert "V5" not in codes, codes
+    # and it is reported (not silently dropped) without the flag
+    findings = cvc.check(rec, repo=_REPO, require_green=False)
+    assert len(findings.unresolved) == 5, findings.unresolved
 
 
 def test_green_row_with_an_unparseable_sha_is_a_finding():
@@ -742,6 +759,46 @@ def test_the_e3_census_instrument_is_not_shipped_unwired():
     without the reader that calls it.
     """
     assert not hasattr(probe, "e3_census_from_rows")
+
+
+def test_a_post_g0_refusal_does_not_blame_the_preregistration():
+    """REGRESSION (#9089 review, cycle 2): `refused_rows` named `#9075` for
+    E1/E2 even on a `prereg_ok=True` refusal — a table that records
+    `prereg.status: OK` and, in the same breath, sends the next lane to the
+    pre-registration issue it just read. The G6 half of this was fixed; this is
+    the half on the REACHABLE path.
+    """
+    rows = probe.refused_rows("corpus missing", prereg_ok=True)
+    by_id = {r["criterion"]: r for r in rows}
+    assert by_id["E1"]["blocked_by"] == probe.ALSO_BLOCKED_BY["E1"]
+    assert by_id["E2"]["blocked_by"] == probe.ALSO_BLOCKED_BY["E2"]
+    assert by_id["E1"]["verdict"] != "UNPREREGISTERED"
+    # The G0 refusal still says the prereg is the missing thing.
+    g0 = {r["criterion"]: r for r in probe.refused_rows("no prereg",
+                                                        prereg_ok=False)}
+    assert g0["E1"]["verdict"] == "UNPREREGISTERED"
+    assert g0["E1"]["blocked_by"] == probe.OWNERS["E1"]
+
+
+def test_a_pre_g0_refusal_claims_nothing_about_the_preregistration(tmp_path):
+    """A gate that stopped at G-1 never looked at the pre-registration.
+
+    It must not write `prereg.status: ABSENT` (a claim about a check nobody ran)
+    nor `UNPREREGISTERED` on E1/E2 (a claim that the prereg is what is
+    missing). Measured on `--head not-a-sha`: the pre-fix table asserted both.
+    """
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
+    out = tmp_path / "g-1.log"
+    code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
+                       "--out", str(out), "--head", "not-a-sha"])
+    assert code == 2, code
+    record = cvc.extract_block(out.read_text())
+    assert record["prereg"]["status"] == "UNREAD", record["prereg"]
+    assert {r["verdict"] for r in record["rows"]} == {"BLOCKED"}
+    assert "UNPREREGISTERED" not in {r["verdict"] for r in record["rows"]}
+    # and the refusal table is still clean for the gate that reads it
+    assert "V3" not in _codes(record), _codes(record)
 
 
 def test_refused_rows_are_never_green_and_always_name_a_bug():

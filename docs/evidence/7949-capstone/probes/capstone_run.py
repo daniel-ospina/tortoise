@@ -257,7 +257,8 @@ def e4_receipt(stats: dict) -> dict:
     }
 
 
-def refused_rows(reason: str, *, prereg_ok: bool) -> list[dict]:
+def refused_rows(reason: str, *, prereg_ok: bool,
+                 prereg_unread: bool = False) -> list[dict]:
     """The 5 rows of a REFUSED run.
 
     A refusal cannot make a row green, so every row is non-green and names its
@@ -265,18 +266,31 @@ def refused_rows(reason: str, *, prereg_ok: bool) -> list[dict]:
     itself is the missing thing: those two rows are the ones whose thresholds
     #9075 owns, and calling them "blocked by an unimplemented mechanism" would
     misattribute the cause.
+
+    ``prereg_ok=True`` means G0 READ the frozen thresholds, so ``#9075`` is NOT
+    this run's blocker any more — the row names the measurement lane
+    (``ALSO_BLOCKED_BY``) instead. Naming ``#9075`` for E1/E2 after it landed
+    sends the next lane to a closed issue; that was the G6 half of the same
+    misattribution (#9089 review) and it lived on in the REACHABLE path.
     """
     rows = []
     for cid in ("E1", "E2", "E3", "E4", "E5"):
-        verdict = ("UNPREREGISTERED" if cid in ("E1", "E2") and not prereg_ok
+        # `UNPREREGISTERED` CLAIMS the pre-registration is the missing thing, so
+        # it needs a run that actually looked (G0). A gate that stopped at G-1
+        # never consulted it and must not say either way: every row is BLOCKED
+        # and names the lane that OWNS the evidence, which is true regardless.
+        verdict = ("UNPREREGISTERED"
+                   if cid in ("E1", "E2") and not prereg_ok and not prereg_unread
                    else "BLOCKED")
         # Two distinct causes, both stated: WHY this run produced no number,
         # and WHICH lane owns the number. A row that named only the gate would
         # read as "blocked by the run", and the next lane would re-run instead
         # of landing the mechanism. A row that named only the owner would hide
         # that the table's own run never got off the ground.
+        owner = (ALSO_BLOCKED_BY.get(cid, OWNERS[cid])
+                 if prereg_ok and not prereg_unread else OWNERS[cid])
         note = f"gate refused: {reason}; this criterion's evidence is owned by "
-        note += OWNERS[cid]
+        note += owner
         if cid in ALSO_BLOCKED_BY:
             note += f" / the measurement itself is {ALSO_BLOCKED_BY[cid]}"
         rows.append({
@@ -289,7 +303,7 @@ def refused_rows(reason: str, *, prereg_ok: bool) -> list[dict]:
             "denominator": None,
             "corpus_sha256": None,
             "sibling": None,
-            "blocked_by": OWNERS[cid],
+            "blocked_by": owner,
             "note": note,
         })
     return rows
@@ -571,7 +585,8 @@ def main(argv: list[str] | None = None) -> int:
     head = "unknown"
 
     def refuse(reason: str, *, prereg_ok: bool, code: int,
-               prereg: dict | None = None, corpus: dict | None = None) -> int:
+               prereg: dict | None = None, corpus: dict | None = None,
+               prereg_unread: bool = False) -> int:
         """Record a refusal as a verdict table and return the gate's exit code.
 
         ``prereg_ok`` is not a label for the reason — it IS "G0 read the
@@ -583,11 +598,16 @@ def main(argv: list[str] | None = None) -> int:
         tests/test_7949_capstone_verdict_check.py::
         test_post_g0_refusals_record_the_preregistration_as_read.
         """
-        rows = refused_rows(reason, prereg_ok=prereg_ok)
+        rows = refused_rows(reason, prereg_ok=prereg_ok,
+                            prereg_unread=prereg_unread)
+        # Three states, because there are three facts: G0 read it (OK), G0
+        # looked and it was not there (ABSENT), or the gate stopped BEFORE G0 —
+        # in which case `ABSENT` would assert something this run never checked.
+        status = ("UNREAD" if prereg_unread
+                  else ("OK" if prereg_ok else "ABSENT"))
         text = emit_log(
             head=head,
-            prereg=prereg or {"sha": args.prereg,
-                              "status": "OK" if prereg_ok else "ABSENT",
+            prereg=prereg or {"sha": args.prereg, "status": status,
                               "artifact": args.prereg_artifact},
             corpus=corpus or {"path": args.corpus, "sha256": None, "turns": None},
             run={"status": "REFUSED", "reason": reason, "steps_observed": [],
@@ -602,7 +622,11 @@ def main(argv: list[str] | None = None) -> int:
     # meaningless, whatever the pre-registration says (see resolve_head).
     head, head_error = resolve_head(args.head)
     if head_error:
-        return refuse(head_error, prereg_ok=False, code=2)
+        # G-1 stopped BEFORE G0, so the refusal must not claim anything about
+        # the pre-registration: `prereg_unread` keeps `ABSENT` (a claim about a
+        # check nobody ran) and `UNPREREGISTERED` (a claim that the prereg is
+        # the missing thing) out of the table (#9089 review).
+        return refuse(head_error, prereg_ok=False, code=2, prereg_unread=True)
 
     # G0 — the pre-registration (FAIL-CLOSED, before any model call).
     # `head` is threaded in: G0's ancestry test is about the commit the evidence
