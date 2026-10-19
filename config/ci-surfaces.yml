@@ -6754,6 +6754,12 @@ durations:
   # = 11.85s, wall 12.32s on 2026-10-19 (the eight pins each spawn the selector
   # as a subprocess). Refresh from the first post-merge run that includes it.
   test_ci_selection_changed_files_9109.py: 11.9
+  # The #9109 pin is a file ADDED BY A PR, so it has no CI junit measurement (the
+  # refresher samples push-to-main runs only): it carries the flat default until a
+  # sweep collects it (the #3419/#2788 rule), and the tail LEADS with
+  # `# unmeasured` so `render_refreshed_manifest` drops it on that first sweep
+  # instead of leaving a stale local-basis note attached to a CI value.
+  test_ci_selection_changed_files_9109.py: 2.0  # unmeasured — local embedded-lane reading was ~11.9s, but a new file's first weight is the flat default; refresh from the first post-merge sweep
 on_demand:
   - eval/retrieval/test_integration.py
   - test_perf_lane_volunteer_context.py

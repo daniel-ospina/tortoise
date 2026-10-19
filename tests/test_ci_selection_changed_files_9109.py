@@ -9,10 +9,11 @@ surfaces=[all]` — an answer indistinguishable from a legitimate full selection
 in a live PR's CI-registration rationale.
 
 The fix is a stderr diagnostic, not a refusal: the single-path form is a
-documented inline invocation, and AT LEAST SIX places in this repo pass a real repo
-path inline and take its surfaces (`config/ci-surfaces.yml:74/95/1299/1358/1614`,
-`docs/plans/2026-09-14-3467-trunk-green-honest-gate.md:187`). Refusing "the
-argument is an existing file" would refuse all six. So these pins are:
+documented inline invocation — `config/ci-surfaces.yml` documents several
+(`--changed-files tortoise/hosted_api.py`, `--changed-files tortoise/audit.py`,
+…; grep the file for `--changed-files tortoise/`) and
+`docs/plans/2026-09-14-3467-trunk-green-honest-gate.md` records one. Refusing
+"the argument is an existing file" would refuse all of them. So these pins are:
 
   * the SELECTION is unchanged for every invocation (stdout byte-identical);
   * the diagnostic fires exactly when the FULL matrix came from unknown paths,
@@ -66,7 +67,7 @@ def test_a_list_file_passed_as_a_changed_file_says_why_it_is_full(tmp_path):
         "the diagnostic must offer the working remedy, not just complain")
     # The guarantee the CI consumer depends on: stdout is JSON and nothing else
     # (python-ci.yml captures it with `SEL=$(...)`). A diagnostic printed to
-    # BOTH streams would pass every other assertion here (review P3).
+    # BOTH streams would pass every other assertion here.
     payload = json.loads(proc.stdout)
     assert payload["full"] is True
 
@@ -108,7 +109,7 @@ def test_a_documented_single_path_inline_invocation_is_unchanged_and_silent(tmp_
 
 
 def test_a_legitimate_unknown_repo_path_gets_no_list_hint(tmp_path):
-    """Review P1: an unknown path is mostly a REAL diff, not a mistake.
+    """An unknown path is mostly a REAL diff, not a mistake.
 
     A large part of the tracked tree reaches FULL through the unknown branch
     alone — `.github/workflows/ci.yml`, `uv.lock`, `Makefile`, `.mergify.yml`,
@@ -166,7 +167,7 @@ def test_an_in_repo_symlink_to_an_outside_file_is_a_repo_path(tmp_path, monkeypa
     try:
         # The relative arm is only meaningful from the checkout: `is_file()`
         # resolves a relative name against the CWD, so assert the CWD instead of
-        # inheriting whatever directory pytest was started from (review P3).
+        # inheriting whatever directory pytest was started from.
         monkeypatch.chdir(repo)
         rel = ".ci-selection/zz-9109-symlink-probe.txt"
         assert cs._is_outside_repo_file(rel) is False, (
@@ -180,9 +181,9 @@ def test_an_in_repo_symlink_to_an_outside_file_is_a_repo_path(tmp_path, monkeypa
 
 
 def test_explain_is_cleared_for_a_selection_that_does_not_fail_closed():
-    """Review P3: `explain`'s contract is "empty unless THIS call recorded a
-    reason". A caller reusing one dict across two calls would otherwise get the
-    previous call's diagnostic."""
+    """`explain`'s contract is "empty unless THIS call recorded a reason". A
+    caller reusing one dict across two calls would otherwise get the previous
+    call's diagnostic."""
     from tools import ci_selection as cs
     stale = {"reason": "unknown-paths", "unknown": ["/tmp/from-a-previous-call"]}
     cs.select(["tortoise/audit.py"], "pull_request", cs.load_manifest(),
@@ -193,6 +194,35 @@ def test_explain_is_cleared_for_a_selection_that_does_not_fail_closed():
               explain=fresh)
     assert fresh.get("reason") == "unknown-paths"
     assert fresh.get("unknown") == ["brand/new/thing.py"]
+
+
+def test_a_mixed_list_marks_only_the_paths_that_are_outside_the_checkout(tmp_path):
+    """The hint belongs to the PATH, never to the list.
+
+    A list can mix a legitimate unknown repo path with an operator's outside list
+    file. A blanket line under the list ("file(s) OUTSIDE the checkout") then
+    asserts something false about the repo path — the exact plausible-but-false
+    reading this diagnostic exists to prevent — so the marker is on the path's
+    own line and the repo path carries none.
+    """
+    outside = tmp_path / "changed.txt"
+    outside.write_text("tortoise/audit.py\n", encoding="utf-8")
+    repo = Path(__file__).resolve().parents[1]
+    assert (repo / "uv.lock").is_file(), "the repo-path arm needs a real tracked path"
+
+    proc = _run(["--changed-files", f"uv.lock\n{outside}", "--event", "pull_request"],
+                cwd=repo)
+
+    assert proc.returncode == 0, proc.stderr
+    assert '"full": true' in proc.stdout, proc.stdout
+    lines = [ln for ln in proc.stderr.splitlines() if ln.startswith("  - ")]
+    marked = [ln for ln in lines if "[OUTSIDE the checkout" in ln]
+    assert marked == [f"  - {outside}  [OUTSIDE the checkout — if this is a file "
+                      f"CONTAINING the list, pass its contents instead]"], (
+        "only the outside file may carry the list hint: "
+        f"{[ln for ln in lines]}")
+    assert any(ln == "  - uv.lock" for ln in lines), (
+        f"the repo path must be named WITHOUT the hint: {proc.stderr}")
 
 
 def test_an_unknown_path_that_is_not_a_file_still_says_why_without_the_list_hint(

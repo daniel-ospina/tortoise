@@ -1950,8 +1950,7 @@ def select(changed_files: list[str], event: str, manifest: dict,
 
     *explain*, when passed a dict, is filled with WHY a fail-closed answer was
     chosen — `{"reason": "unknown-paths", "unknown": [...]}` — so `main()` can
-    say
-    so on stderr. It is a SIDE CHANNEL on purpose: the returned dict is the
+    say so on stderr. It is a SIDE CHANNEL on purpose: the returned dict is the
     artifact schema (`.ci-selection/selection.json`) and is asserted verbatim up
     and down this suite, so a reason field inside it would be a migration; and
     the reason must not be re-derived by the caller, which is how the
@@ -4202,34 +4201,36 @@ def _warn_unknown_paths(explain: dict) -> None:
     (the same list on stdin selects `core`).
 
     WHY A WARNING AND NOT A REFUSAL (the issue's first proposal): the single
-    path form is an ALLOWED, DOCUMENTED inline invocation. At least six places in
-    this repo pass a REAL repo path inline and take its surfaces —
-    `config/ci-surfaces.yml:74/95/1299/1358/1614` and
-    `docs/plans/2026-09-14-3467-...:187` — and one further example
-    (`config/ci-surfaces.yml`, the `--changed-files <path>` line) uses a
-    placeholder rather than a path. A refusal keyed on "the argument is an
-    existing file" refuses all six, which is the issue's OWN target 2 ("100%
-    of the documented invocations unchanged") failing. The ambiguity between `a
-    one-item list` and `a path to a list` has no syntactic answer, so this
-    keeps the argument contract, keeps stdout byte-identical, and makes the
-    fail-closed answer SELF-DESCRIBING instead. A caller that ignores stderr
-    still gets exactly the selection it got before.
+    path form is an ALLOWED, DOCUMENTED inline invocation — `config/ci-surfaces.yml`
+    documents several of them (`--changed-files tortoise/hosted_api.py`,
+    `--changed-files tortoise/__main__.py`, `--changed-files tortoise/audit.py`,
+    and the same shape for other modules; grep the file for
+    `--changed-files tortoise/`), and
+    `docs/plans/2026-09-14-3467-trunk-green-honest-gate.md` records one. A
+    refusal keyed on "the argument is an existing file" refuses all of them,
+    which is the issue's OWN target 2 ("100% of the documented invocations
+    unchanged") failing. The ambiguity between `a one-item list` and `a path to
+    a list` has no syntactic answer, so this keeps the argument contract, keeps
+    stdout byte-identical, and makes the fail-closed answer SELF-DESCRIBING
+    instead. A caller that ignores stderr still gets exactly the selection it
+    got before.
 
-    WHAT THE FIRST VERSION GOT WRONG (review P1, fixed here): it appended the
-    list-vs-path hint to EVERY unknown path that happened to exist on disk. But
-    an unknown path is mostly a LEGITIMATE diff — 138 of the 3,645 tracked paths
-    reach FULL through this branch alone, measured 2026-10-19 (`.github/
-    workflows/ci.yml`, `uv.lock`, `Makefile`, `.mergify.yml`, and the
+    WHY THE LIST-VS-PATH HINT IS CONFINED TO A PATH OUTSIDE THE CHECKOUT: an
+    unknown path is mostly a LEGITIMATE diff — most of the tracked tree that
+    reaches FULL through this branch alone is real repo content
+    (`.github/workflows/ci.yml`, `uv.lock`, `Makefile`, `.mergify.yml`, and the
     `TOOL_CARVEOUTS`-registered `tools/*.py` such as `tools/ci_selection.py` —
     an UNREGISTERED `tools/*.py` is dropped by `_keep_changed` and never reaches
     this branch) — and every added or modified path in a checked-out PR is an
-    existing file. So the hint fired on nearly every real fail-closed selection
-    and asserted a malformed invocation that had not happened — a new
-    plausible-but-false reading, which is the class this issue is about. The
-    hint is now confined to the shape an operator's list file actually takes: an
-    existing file OUTSIDE the checkout (`/tmp/c.txt` in the measured case). A
-    repo path is a changed path by definition, so the generic explanation is all
-    it gets.
+    existing file. A hint keyed on "this path exists" therefore fires on nearly
+    every real fail-closed selection and asserts a malformed invocation that did
+    not happen: a new plausible-but-false reading, which is the class this issue
+    is about. The hint is confined instead to the shape an operator's list file
+    actually takes — an existing file OUTSIDE the checkout (`/tmp/c.txt` in the
+    measured case) — and it is attached to the MARKED path on its own line, so a
+    mixed list (one repo path + one outside file) cannot be read as "all of
+    these are outside". A repo path is a changed path by definition, so the
+    generic explanation is all it gets.
 
     KNOWN RESIDUAL — this branch speaks only for the paths that SURVIVED
     `_keep_changed`. The other resolutions of "I passed a path, not a list" are
@@ -4253,15 +4254,23 @@ def _warn_unknown_paths(explain: dict) -> None:
         file=sys.stderr)
     outside: list[str] = []
     for c in unknown:
+        mark = ""
         if _is_outside_repo_file(c):
             outside.append(c)
-        print(f"  - {c}", file=sys.stderr)
+            # Marked ON the path's own line, never as a blanket claim under the
+            # list: a mixed list (one repo path + one outside file) would then
+            # assert that the repo path is outside too, which is exactly the
+            # plausible-but-false reading this diagnostic exists to prevent.
+            mark = ("  [OUTSIDE the checkout — if this is a file CONTAINING the "
+                    "list, pass its contents instead]")
+        print(f"  - {c}{mark}", file=sys.stderr)
     if outside:
         print(
-            "  ^ file(s) OUTSIDE the checkout. `--changed-files` takes the "
-            "newline-separated LIST, not a path to it — if one of these is a "
-            "file CONTAINING the list, pass its contents instead "
-            "(`--changed-files -` with the list on stdin) (#9109).",
+            "  ^ the path(s) marked above are OUTSIDE the checkout. "
+            "`--changed-files` takes the newline-separated LIST, not a path to "
+            "it — if one of them is a file CONTAINING the list, pass its "
+            "contents instead (`--changed-files -` with the list on stdin) "
+            "(#9109).",
             file=sys.stderr)
 
 
@@ -4271,8 +4280,8 @@ def _is_outside_repo_file(c: str) -> bool:
     That is the shape of an operator's list file (`/tmp/c.txt`), and the only
     evidence this tool has that the argument might have been meant as a path to
     a list. A repo-relative path is a changed path whatever else it is, so it is
-    deliberately NOT eligible — that discrimination is the whole fix for the
-    review P1 above.
+    deliberately NOT eligible — that discrimination is what keeps the hint off
+    the legitimate fail-closed case.
 
     BOTH operands are absolute before they are compared, and each is anchored to
     where the argument actually means: `c` is a shell argument, so a relative one
