@@ -1504,6 +1504,15 @@ For the record, since two members of the design rest on it:
 
 > **A derived cache that is also written to directly is not derived.**
 
+**⚠️ ONE PERMANENT CARVE-OUT IS DECLARED — the GRAPH-METADATA lane — and it is a declared class, not a residual gap awaiting closure.** A *few* writes have no record to project and cannot have one: they write graph-wide bookkeeping whose value is not a fact about the corpus. They run under `tortoise/projection/__init__.py::_graph_metadata_write_scope(...)`, a per-call `with` over the SAME single-writer ContextVar the live and replay scopes use — so an undeclared writer still fails closed (the gate refuses on `None`) and this is a **declaration, not a bypass**. **Its one writer today** is `TortoiseSDK._advance_ep_version` — `:EpMeta.ep_version`, the monotonic EP ordering counter (`#9123`).
+
+**The two obligations a caller must be able to state, and their exact edges:**
+
+1. **No journal record describes it AS GRAPH METADATA** — no event writes a `:EpMeta`-shaped node. ⚠️ The near-miss reading is **false**: the epoch's *value* does ride the record as each Point's `ep_dirty_at` stamp (`create_point`'s CREATE map, restored by the replay passthrough). The **counter** is unjournalled; not every appearance of its value.
+2. **A rebuild may reset it, and nothing reconciles over its value** — but the epoch is an ordering **BOUND**, not an inert hint. `_sweep_dirty_roots` clears a flag only under `n.ep_dirty_at <= $run_ep`, and `_ep_epoch()` reads `0` when `:EpMeta` is absent — so after a rebuild the replayed stamps sit **ahead** of the reset counter, and those flags stay dirty (and `TortoiseEP._flush_cache`'s stale-run guard, `current > _run_ep_version`, cannot fire) until it re-climbs. A delayed sweep, not corruption; pre-existing and recorded as **`#5166`**.
+
+Pins: `tests/test_9079_ep_epoch_declared.py`. The obligations' source of truth is the scope's own docstring.
+
 **Measured 2026-10-08** (method: a regex scan for mutating Cypher verbs over `tortoise/**/*.py`): **the write surface has NO chokepoint — 387 mutating `.query(` sites across 211 functions in 32 files** (`SET` 176 · `MERGE` 119 · `CREATE` 55 · `DETACH DELETE` 37; the top-20 functions hold only **125/387 = 32%**, and **135 functions have exactly one**). **⇒ "Point the write path at Postgres" is not one change** — until a chokepoint exists, the cache is written to directly, and is therefore **not derived**. **Where the work lives:** the journal half is separate work; the routing half is §3's invariant.
 
 ### 17.2 Cache coherence — and a COMPLETENESS MARKER

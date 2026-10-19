@@ -3253,13 +3253,17 @@ def _journal_safe_params(params, cypher=None):
 #     came FROM the journal and must not journal again.
 #   * `_graph_metadata_write_scope(...)` — the GRAPH-METADATA lane: a write
 #     that is NOT a projection of any journal record and never becomes one,
-#     because a rebuild re-derives it from zero. `:EpMeta`'s monotonic epoch
+#     because it is graph-wide bookkeeping rather than a fact about the corpus,
+#     so a rebuild re-derives it from zero. `:EpMeta`'s monotonic epoch
 #     (`TortoiseSDK._advance_ep_version`, #9123) is its one writer today. The
 #     lane exists so a reader who assumes "every cache write is a journal
 #     projection" meets the reason at the door — and so closing the guarded
 #     handle (`#9079`) refuses a writer that has NOT declared itself instead of
 #     silently refusing the create hot path. It is a DECLARATION, not a
-#     bypass: see the two properties it claims at `_graph_metadata_write_scope`.
+#     bypass: see the two properties it claims at `_graph_metadata_write_scope`
+#     — including what those properties do NOT claim (the epoch value rides the
+#     record as each Point's `ep_dirty_at`, and the epoch is an ordering BOUND
+#     a reset inverts for a while, `#5166`).
 #   * `onboarding.metadata` (`tortoise/onboarding/state.py`, #9121) — the
 #     onboarding FLOW metadata (`:OnboardingState`, `:OnboardingStep`, the
 #     `COMPLETED_STEP` edges) is graph-resident org-level metadata, not a
@@ -3365,13 +3369,31 @@ def _graph_metadata_write_scope(reason: str = "graph-metadata"):
     difference between a declared lane and an undeclared hole, so the scope
     carries TWO obligations, and a caller must be able to state both:
 
-    1. **No journal record describes it.** Nothing happened to the corpus that
-       a replay could re-apply; journalling it would put a non-fact in the
-       log and make `derived == replay(journal)` depend on it.
-    2. **A rebuild may reset it, and nothing reconciles over it.** It is
-       rebuilt-from-zero-safe — the state it holds is re-derivable (or
-       simply harmless) after a loss, so no reconciliation reports divergence
-       when a rebuild drops it.
+    1. **No journal record describes it AS GRAPH METADATA.** Nothing happened
+       to the corpus that a replay could re-apply, so a rebuild cannot
+       reconstruct it: no event writes a `:EpMeta`-shaped node, and no payload
+       key carries the counter. ⚠️ **Stated precisely, because the near-miss
+       reading is FALSE:** the epoch's *value* does ride the record — every
+       non-born-terminal `create_point` stamps it into the Point's own
+       `ep_dirty_at` (`sdk.py::_create_map`), and the replay restores that
+       stamp (`projection/entities.py`, open-set passthrough). What is
+       unjournalled is the counter itself, never every appearance of its
+       value; `tests/test_9079_ep_epoch_declared.py` pins exactly this split.
+    2. **A rebuild may reset it; nothing reconciles over its VALUE — but it is
+       an ordering BOUND, and a reset inverts that bound for a while.** No
+       reconciliation reports divergence when a rebuild drops it, and the
+       corpus is unaffected (belief recomputation is idempotent from the
+       record). What a caller may NOT claim is that no comparison exists: two
+       guards compare against the epoch. `_sweep_dirty_roots` clears a dirty
+       flag only under `n.ep_dirty_at <= $run_ep` (`sdk.py`), and `_ep_epoch()`
+       returns 0 when `:EpMeta` is absent — so after a rebuild the stamps the
+       replay restored (obligation 1) sit AHEAD of the reset counter, those
+       flags cannot be swept until the epoch re-climbs past them, and
+       `TortoiseEP._flush_cache`'s stale-run guard (`current >
+       _run_ep_version`) cannot fire in the direction it exists for over the
+       same window. That is a DELAYED sweep, not corruption, and it predates
+       this lane (`#5166` records it) — but this obligation means "the bound is
+       absorbable", not "there is no bound".
 
     ⛔ **It is not a general-purpose "let this write through".** Both
     obligations are properties of the WRITE, not of the caller's convenience:

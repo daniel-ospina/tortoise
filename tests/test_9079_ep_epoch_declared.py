@@ -18,9 +18,12 @@ lane (5 of 7 failures), because it runs outside every authorization scope:
 block, and this MERGE happens *before* it.
 
 **It is not a journal projection, and journaling it would be wrong.** The epoch
-is graph-wide monotonic bookkeeping: no journal record carries it, a rebuild
-legitimately resets it, and belief recomputation is idempotent from the record,
-so nothing treats its value as recoverable state. What was missing is not a
+is graph-wide monotonic bookkeeping: no journal record writes the COUNTER,
+a rebuild legitimately resets it, and belief recomputation is idempotent from
+the record, so nothing treats the counter as recoverable state. (The counter's
+VALUE does ride the record, as each Point's own `ep_dirty_at` stamp — see
+`test_the_epoch_is_not_journaled`, which pins that split rather than asserting
+the value away.) What was missing is not a
 journal append — it is the DECLARATION, so (a) the guard that closes the third
 door does not silently refuse the create hot path, and (b) a future reader who
 assumes "every cache write is a journal projection" meets the reason here
@@ -31,12 +34,19 @@ This suite pins the declaration, not the prose:
 
 * the write runs inside a NAMED scope — observed from inside the handle, so a
   caller that merely succeeds today cannot pass;
-* the scope wraps the RETRY, so every re-issue re-enters the same
-  authorization instead of losing it (#7405/#7685's predicate untouched);
+* the scope wraps the RETRY, so both attempts observe the same declared
+  reason and the refused attempt does not land (#7405/#7685's predicate
+  untouched). It does NOT separate "around the retry" from "inside the
+  re-entered lambda" — the retry's unit of re-issue is `fn()` itself, so an
+  inner scope is re-entered on every attempt too and no behaviour differs;
+  the test's docstring states what it actually proves;
 * the epoch still advances exactly once per advance, and a create still lands;
-* the epoch is NOT journal-derived: no journal record mentions it, and a
-  `rebuild` does not restore it — the "rebuilt-from-zero-safe" half of the
-  declaration, pinned rather than asserted.
+* the epoch is NOT journal-derived as GRAPH METADATA: no record writes an
+  `:EpMeta`-shaped node and no payload key carries the counter — while its
+  VALUE does ride the record as each point's `ep_dirty_at` stamp — and a
+  `rebuild` does not restore the counter, which leaves those replayed stamps
+  AHEAD of it until it re-climbs (#5166: a delayed sweep, not corruption).
+  Both halves of the declaration, pinned rather than asserted.
 
 MUTATION for every test here: drop the `_graph_metadata_write_scope` wrapper in
 `TortoiseSDK._advance_ep_version`. The declaration tests fail on
@@ -56,6 +66,20 @@ from tortoise.projection import _CACHE_WRITE_AUTHORIZED
 #: The declared lane name. Pinned as a literal: a lane that renames itself
 #: silently is a lane a future reader cannot find from the refusal message.
 EPOCH_LANE = "graph-metadata:ep-epoch"
+
+#: The journal's own ENVELOPE keys — record schema, not payload data. Excluded
+#: from the "is the epoch's value in the payload?" walk because
+#: `projection_version` is an envelope integer that can coincide with the
+#: epoch's value by accident (it is 2 today), which would make the walk report
+#: a payload occurrence that says nothing about the epoch.
+_JOURNAL_ENVELOPE = frozenset({
+    "event_id", "ts", "type", "initiated_by", "projection_version",
+})
+
+#: Payload key spellings that WOULD journal the counter itself. Case-folded.
+_EPOCH_COUNTER_KEYS = frozenset({
+    "ep_version", "ep_version_at", "ep_epoch", "epoch", "ep_meta_epoch",
+})
 
 
 @pytest.fixture
@@ -135,13 +159,22 @@ def test_the_epoch_write_runs_inside_a_named_scope(sdk_with_journal,
 
 
 def test_the_declaration_survives_a_retry(sdk_with_journal, monkeypatch):
-    """The scope wraps the RETRY, not one attempt inside it.
+    """Every attempt of a retried write observes the same declaration, and the
+    refused attempt does not land.
 
     A contended write refuses the first attempt and is re-issued by
-    `_graph_write_with_retry` (#7405). If the scope were opened inside the
-    retried lambda it would still pass a single-attempt assertion and lose the
-    authorization on the re-issue — which, with `#9079`'s guard armed, refuses
-    the SECOND write of a statement whose first attempt never landed.
+    `_graph_write_with_retry` (#7405). What this pins is that the authorization
+    is in force at the handle on EVERY attempt — a scope opened around a single
+    attempt would fail here on the second one — and that the aborting attempt
+    wrote nothing (the epoch advances exactly once).
+
+    WHAT IT DOES NOT SEPARATE, stated so the claim cannot drift again: this
+    test cannot tell "scope around the retry" from "scope inside the retried
+    lambda", because the retry's unit of re-issue is `fn()` itself
+    (`sdk.py::_graph_write_with_retry`), so an inner scope is re-entered on
+    every attempt and yields `[EPOCH_LANE, EPOCH_LANE]` as well. The shipped
+    shape is chosen for locality (one scope around the whole retried
+    operation), not because an inner scope would lose the authorization.
     """
     from tortoise.projection import _GuardedGraph
 
@@ -234,34 +267,94 @@ def test_a_create_path_is_not_refused_for_its_epoch_write(sdk_with_journal,
 
 # ── the semantics the declaration claims ─────────────────────────────────
 
-def test_the_epoch_is_not_journaled(sdk_with_journal):
-    """The declaration says "not a journal projection". Pin it: no journal
-    record carries the epoch, so a rebuild cannot be expected to restore it.
+def _leaves(node, path=()):
+    """Every scalar leaf in a record, with the key path that reaches it."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            yield from _leaves(value, (*path, key))
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            yield from _leaves(value, (*path, index))
+    else:
+        yield path, node
 
-    (`ep_version` appears NOWHERE in the journal — the write is graph
-    bookkeeping, not a record of anything that happened to the corpus.)"""
+
+def test_the_epoch_is_not_journaled(sdk_with_journal):
+    """The declaration says "not a journal projection". Pin BOTH halves of the
+    precise claim, because only one of them is "the value is absent":
+
+    * the COUNTER is not journaled — no record writes an `:EpMeta`-shaped node
+      and no payload key carries it (obligation 1), so a rebuild cannot be
+      expected to restore it;
+    * the VALUE does ride the record — as each Point's own `ep_dirty_at` stamp,
+      which the replay restores — which is why "no record carries the epoch"
+      would be too strong, and why obligation 2 is a BOUND (see
+      `test_a_rebuild_does_not_restore_the_epoch`).
+
+    DISCRIMINATION: the first half is asserted on PARSED records and key paths,
+    not on a substring of the file, so an epoch journaled under another event
+    name or key still fails it (a `{"type": "EpochAdvanced", "epoch": N}`
+    record trips the type and key checks) — the previous `"ep_version" not in
+    text` spelling passed under any renamed key and was therefore vacuous about
+    the claim it was captioned with. The second half is a POSITIVE assertion:
+    drop the `ep_dirty_at` stamp from `create_point`'s CREATE map and it fails.
+    """
     sdk, journal = sdk_with_journal
     sdk._advance_ep_version()
     sdk.create_point("fact", "a point whose create advances the epoch")
+    epoch = sdk._ep_epoch()
 
     text = _journal_text(journal)
     assert text.strip(), "the fixture must produce journal records"
-    assert "EpMeta" not in text and "ep_version" not in text, (
-        "the epoch must ride NO journal record; found one — either the "
-        "declaration is wrong or something started journaling it, and a "
-        "rebuild would then depend on it")
+    records = [json.loads(raw) for raw in text.splitlines()]
+
+    # (a) obligation 1: the counter is in NO record, under any key or event.
+    assert {rec.get("type") for rec in records} == {"PointAdded"}, (
+        "the journal must carry only corpus events; observed types="
+        f"{sorted({rec.get('type') for rec in records})} — a graph-metadata "
+        "event WOULD be a record describing the epoch, which obligation 1 "
+        "forbids, and a rebuild would then depend on it")
+    stamped: list[tuple] = []
+    for rec in records:
+        payload = {k: v for k, v in rec.items() if k not in _JOURNAL_ENVELOPE}
+        for path, value in _leaves(payload):
+            assert "EpMeta" not in path, (
+                "a journal payload carries an `:EpMeta`-shaped node; the "
+                f"epoch must not be journaled as graph metadata: {path}")
+            assert not (isinstance(path[-1], str)
+                        and path[-1].lower() in _EPOCH_COUNTER_KEYS), (
+                f"a journal payload key carries the epoch counter: {path}={value!r}")
+            if isinstance(value, bool):
+                continue  # `ep_dirty: true` is a flag, not the epoch (1 == True)
+            if isinstance(value, int) and value == epoch:
+                stamped.append(path)
+
+    # (b) the value IS in the record — only ever as the per-point stamp.
+    assert stamped, (
+        "no journal record carries the epoch's value at all, so the stamp half "
+        "of this test would be vacuous: `ep_dirty_at` is supposed to ride the "
+        "PointAdded payload")
+    assert all(path[-1] == "ep_dirty_at" for path in stamped), (
+        "the epoch value may appear in the record ONLY as a per-point "
+        f"`ep_dirty_at` stamp; observed paths={stamped}")
     for raw in text.splitlines():
         json.loads(raw)  # the log stays parseable, not just absent-of-a-word
 
 
 def test_a_rebuild_does_not_restore_the_epoch(sdk_with_journal):
-    """The other half of the declaration: the epoch is rebuilt-from-zero-safe.
+    """The other half of the declaration: the epoch is rebuilt-from-zero-safe —
+    and the reset really does invert the ordering bound, which is what makes
+    obligation 2 a BOUND rather than an absence.
 
     A `rebuild` folds only journal records; `:EpMeta` is not one of them, so
-    the epoch is NOT restored — and nothing may reconcile over it. This is
-    what makes "declare it" honest rather than a bypass: the state it holds is
-    re-derivable (recomputation is idempotent from the record), so losing it to
-    a rebuild costs nothing.
+    the epoch is NOT restored. What IS restored is each Point's `ep_dirty_at`
+    stamp (obligation 1's value half) — so the reset leaves that stamp AHEAD
+    of the counter, and `_sweep_dirty_roots`' own guard
+    (`n.ep_dirty_at <= $run_ep`) refuses to clear the flag until the epoch
+    re-climbs past it. That is #5166: a delayed sweep, not corruption, and the
+    reason a caller may not claim "no comparison exists". Both halves are
+    pinned here — the loss, and the comparison the loss inverts — so this test
+    cannot pass by the bound being inert.
     """
     sdk, journal = sdk_with_journal
     proj = sdk._get_proj()
@@ -279,3 +372,24 @@ def test_a_rebuild_does_not_restore_the_epoch(sdk_with_journal):
     assert int(rows[0][0]) == 1, (
         "the REBUILD must still reproduce the point from the journal alone — "
         "if this fails the fixture, not the claim, is what broke")
+
+    # THE BOUND, exercised rather than described: the replayed stamp outlives
+    # the counter that minted it, and the sweep compares the two.
+    rows = proj.g.query(
+        "MATCH (p:Point {id:$id}) RETURN p.ep_dirty, p.ep_dirty_at",
+        params={"id": point["id"]}).result_set
+    dirty, stamp = rows[0][0], rows[0][1]
+    assert dirty is True, (
+        "the journaled `ep_dirty` flag must survive the replay — it is what "
+        f"the sweep compares against the epoch; observed={dirty!r}")
+    assert int(stamp) == 1, (
+        "the replayed stamp is the epoch the create minted; "
+        f"observed={stamp!r}")
+    run_ep = sdk._ep_epoch()  # what dream.py::_snapshot_ep_epoch reads
+    assert run_ep == 0, (
+        f"a graph with no `:EpMeta` reads 0; observed={run_ep}")
+    assert not int(stamp) <= run_ep, (
+        "`_sweep_dirty_roots` clears a flag only under `ep_dirty_at <= "
+        f"run_ep`; observed stamp={stamp} run_ep={run_ep}. If this ever holds, "
+        "the reset stopped inverting the bound — update obligation 2 of "
+        "`_graph_metadata_write_scope` rather than deleting this assertion")

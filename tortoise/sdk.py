@@ -20014,16 +20014,28 @@ class TortoiseSDK:
         projection of the journal — ``_graph_metadata_write_scope`` states the
         two properties that earn it:
 
-        * **no record describes it.** ``:EpMeta.ep_version`` is a graph-wide
-          monotonic counter that orders EP dirty-markings across processes. No
-          journal event carries it and none could: it is not a fact about the
-          corpus, so journalling it would put a non-fact in the log and make
-          ``derived == replay(journal)`` depend on it.
-        * **a rebuild may reset it.** ``rebuild`` folds journal records;
-          ``:EpMeta`` is not one, so the epoch simply does not come back — and
-          nothing reconciles over it. Losing it costs nothing because belief
-          recomputation is idempotent from the record: the epoch is an ordering
-          hint, never a value any node's truth is read from.
+        * **no record describes it, as graph metadata.** ``:EpMeta.ep_version``
+          is a graph-wide monotonic counter that orders EP dirty-markings
+          across processes. No journal event writes it and no event can: it is
+          not a fact about the corpus, so journalling the COUNTER would put a
+          non-fact in the log and make ``derived == replay(journal)`` depend on
+          it. ⚠️ The counter's VALUE does ride the record — as each Point's own
+          ``ep_dirty_at`` stamp, written by ``create_point``'s CREATE map and
+          restored by the replay's open-set passthrough. Unjournalled counter,
+          journalled value: both halves are true, and the next obligation is a
+          bound rather than an absence because of the second one.
+        * **a rebuild may reset it, and nothing reconciles over its value.**
+          ``rebuild`` folds journal records; ``:EpMeta`` is not one, so the
+          epoch does not come back — and no reconciliation reports divergence
+          when it does not. ⚠️ But the epoch IS an **ordering bound**, not an
+          inert hint: ``_sweep_dirty_roots`` clears a dirty flag only under
+          ``n.ep_dirty_at <= $run_ep``, and ``_ep_epoch()`` returns 0 on a graph
+          with no ``:EpMeta`` — so the stamps the replay restored sit AHEAD of
+          the reset counter, those flags stay dirty until it re-climbs past
+          them, and ``TortoiseEP._flush_cache``'s stale-run guard
+          (``current > _run_ep_version``) cannot fire in the direction it
+          exists for over the same window. A DELAYED sweep, not corruption,
+          and pre-existing (``#5166``).
           ``tests/test_9079_ep_epoch_declared.py`` pins both halves.
 
         Why the declaration had to exist: this statement is the most frequently
@@ -20031,9 +20043,9 @@ class TortoiseSDK:
         outside every scope today (``create_point`` opens its own scope around
         its CREATE, and this write happens BEFORE it), so closing the guarded
         handle would refuse the create hot path. The scope goes AROUND
-        ``_graph_write_with_retry`` rather than inside its lambda, so every
-        re-issued attempt re-enters the same authorization and #7405/#7685's
-        predicate is untouched.
+        ``_graph_write_with_retry`` rather than inside its lambda, so the whole
+        retry — including every re-issued attempt — runs under ONE declaration
+        and #7405/#7685's predicate is untouched.
         """
         proj = self._get_proj()
         with _graph_metadata_write_scope("graph-metadata:ep-epoch"):
