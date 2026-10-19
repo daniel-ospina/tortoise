@@ -2559,3 +2559,195 @@ def test_4643_the_real_deploy_step_is_executed_and_its_failure_propagates(tmp_pa
                 f"{name}: the gate must run isolated (`uv run --no-project "
                 f"--with pyyaml…`) — a bare `uv run` syncs the whole project "
                 f"from PyPI before the gate starts")
+
+
+# ── §7.1's INSTALLER row must be TRUE, not merely intended ─────────────────
+#
+# Review finding (three cycles, 3 × P1 + 2 × P2), measured against both repos:
+# the row had been rewritten into the past tense ("#8747 removed that copy —
+# the MIT repo now ships no installer at all … exist in exactly one place")
+# while the MIT repo's `main` still served the 2,770-byte v1 installer and the
+# PR that deletes it (`…-skills-and-integrations#5`) was **OPEN**. The row is
+# the artifact `tools/served_skills_parity.py` sends a contributor to by name,
+# so a false state there is the provenance staleness #8747 exists to end.
+#
+# Three of the five findings are claims an OFFLINE assertion can police,
+# because they are INTERNAL to this document — and they are the ones that
+# survive a review if nobody re-measures:
+#
+#   * it credited a cross-repo deletion to **#8747**, an ISSUE in this repo;
+#   * it contradicted itself — "exist in exactly one place" twelve words before
+#     "two repos author it", the identical inversion the `Authored in` cell
+#     assertion in `test_4643_the_ownership_table_states_the_rule_per_artifact`
+#     exists to forbid;
+#   * it nominated a guard that does not exist on this side: "the ownership
+#     statement in **both READMEs**" while this repository's `README.md` never
+#     mentions the installer or the MIT repo at all.
+#
+# What no offline test can decide is whether the upstream FILE exists today —
+# the row says so itself ("no offline check can read the MIT repo"), and it now
+# records the removal as pending with the PR that performs it, so the ordering
+# is reviewable instead of assumed.
+#
+# ⚠️ The row also instructs the TRANSITION ("flip this row to the past tense
+# when `…#5` merges"), so PENDING and LANDED must both be legal — a guard that
+# reds on obedience to its own document, and whose verdict then turns on
+# incidental wording, is the defect this file polices elsewhere (review
+# finding, P1). Each `Non-vacuity` note below names the REVISION it was measured
+# against, and pytest reports only the FIRST failing assert — so a per-assertion
+# claim needs each predicate evaluated, not one run. Re-measure with:
+#   git show <rev>:docs/license-notes.md > /tmp/x && cp /tmp/x docs/…
+#   pytest tests/test_served_skills_parity.py -q -k 8747; git checkout docs/…
+
+def _installer_row() -> list[str]:
+    """§7.1's `install-tortoise-skills.sh` row — the cells, stripped."""
+    rows = _table_rows(_section_71())
+    installer = [r for r in rows if _artifacts(r[0]) == {"install-tortoise-skills.sh"}]
+    assert len(installer) == 1, (
+        f"§7.1 needs exactly one `install-tortoise-skills.sh` row; rows: "
+        f"{[r[0] for r in rows]}")
+    return installer[0]
+
+
+def test_8747_the_installer_row_records_the_upstream_removal_as_pending():
+    """An ISSUE in this repo cannot delete a file in another one, and a removal
+    that has not landed must not be recorded as done.
+
+    TWO states are legal — PENDING while the MIT copy is still served, and
+    LANDED once `…#5` merges (the row's own flip instruction). What neither
+    state may do is assert the removal as complete with nothing that shows the
+    deleting PR landed: that is the claim this branch's first draft made.
+
+    Non-vacuity (MEASURED against the merge base plus MUTATIONS of the committed
+    cell — a branch-only sha does not survive the merge, so it is not offered as
+    the recipe):
+
+      · `origin/main` ("… is a stale v1 duplicate — tracked by **#8747**") —
+        assertions 2 and 3 red; assertion 1 is green (main records no deletion
+        at all, so there is nothing for it to mis-credit).
+      · mutation `"**#8747** tracks deleting it"` → `"**#8747** removed it
+        upstream"` — assertion 1 red. This is the shape that had to be FIXED
+        (review finding, P2): the first pattern here was
+        `#8747\\s+(?:removed|deletes|deleted|removes)`, whose `\\s+` a CLOSED bold
+        token escapes (`*`, not whitespace, sits after `8747`), so it green-lit
+        exactly the false credit it exists to stop — and the row itself writes
+        `**#8747**` bolded, so the unflagged spelling was the likely one. It now
+        tolerates the emphasis markers this document uses on issue numbers.
+    """
+    cell = _installer_row()[2]
+    removed_by_issue = re.search(
+        r"#8747[*_`]{0,4}\s+(?:removed|removes|deletes|deleted)", cell)
+    assert removed_by_issue is None, (
+        f"'{removed_by_issue and removed_by_issue.group(0)}' credits the deletion "
+        "to #8747, which is the TRACKING ISSUE in this repo — name the PR in the "
+        "other repo that performs it, as the row's own evidence does: " + cell)
+    assert re.search(r"tortoise-skills-and-integrations#5", cell), (
+        "the row must name the artifact that performs the upstream deletion, so a "
+        "reader can check whether it landed: " + cell)
+    pending = re.search(r"\bopen\b|unmerged|pending|until .*?\blands?\b", cell, re.I)
+    # `merged`/`landed` only — NOT a bare `merge`, which the row legitimately
+    # carries inside "#4327's backup-then-merge" and would match on every state.
+    landed = re.search(r"\bmerged\b|\blanded\b", cell, re.I)
+    assert pending or landed, (
+        "…and must say either that the deletion is PENDING (it has not landed: the "
+        "MIT copy was still served when this row was written) or that it has "
+        "LANDED — the flip the row itself instructs once `…#5` merges. A removal "
+        "recorded as complete with neither is the false provenance record this "
+        "test exists to stop: " + cell)
+
+
+def test_8747_the_installer_row_does_not_re_admit_a_second_installer_author():
+    """`Authored in` says one repo; the prose must not say two.
+
+    A FORWARD regression guard — and it does NOT discriminate this PR from its
+    base, which its note must say plainly:
+
+      · `origin/main` — GREEN ("… is a stale v1 duplicate — tracked by
+        **#8747**" makes no authoring claim at all);
+      · `5da309b5d`, the superseded draft — RED ("**Stated, not gated** — two
+        repos author it and the second is not gated *from here*", five words
+        after "exist in exactly one place").
+
+    Its job is to keep that specific inversion — the one
+    `test_4643_the_ownership_table_states_the_rule_per_artifact` forbids in the
+    `Authored in` cell — from re-entering the prose of the `Enforced by` cell,
+    where no structural assertion can see it.
+    """
+    cell = _installer_row()[2]
+    two_authors = re.search(
+        r"\b(two|three|both|[2-9])\s+(?:repositor(?:y|ies)|repos?)\s+author",
+        cell, re.I)
+    assert two_authors is None, (
+        f"§7.1 says the installer is authored in exactly one place, so "
+        f"'{two_authors and two_authors.group(0)}' re-admits the duplicated-"
+        f"authoring shape this row exists to end — if the intent is that the "
+        f"SERVED PAYLOAD spans two repos, say that, not that two repos author "
+        f"the installer: {cell}")
+
+
+def test_8747_the_installer_row_names_a_guard_that_exists_on_this_side():
+    """A record that names a guard nobody wrote is the same false claim in
+    reverse — `test_4643_the_upstream_arm_has_a_runner_and_the_docs_name_it` is
+    the same assertion one level down, about runners.
+
+    Three arms, each naming the base revision or the MUTATION that reds it. The
+    previous version of this test claimed "Two arms, BOTH unconditional" and
+    then ran its second arm under `if plural_guard:`, a phrase no committed cell
+    contains — and its one unconditional assertion merely repeated
+    `test_4643_the_ownership_table_states_the_rule_per_artifact` step 4 — so it
+    reduced to "the string `the guard is` appears in the cell" while its NAME
+    promised that the guard exists here (review finding, P2). That stronger
+    property is asserted now:
+
+      1. the cell must NAME what enforces single authorship — `origin/main`'s
+         cell names no guard at all ("… is a stale v1 duplicate — tracked by
+         **#8747**"), so arm 1 reds there;
+      2. the guard it names must BE the artifact that carries the statement on
+         this side — the served installer's own header — and that header must
+         still carry it. Arm 2 reds on mutation `"the guard is the served
+         installer's own header plus this row"` → `"the guard is the ownership
+         statement in both READMEs"` (an out-of-tree guard), which is the shape
+         the superseded draft on this branch actually wrote;
+      3. if the named guard is a README, that README must carry the statement.
+         The arm fires on ANY `README` mention — singular or plural — so it is
+         not fail-open on phrasing, but it is conditional by construction (only
+         a cell that nominates a README can be wrong that way), and no
+         committed cell nominates one. It reds on the draft above, and it is
+         checked against THIS repository's README, the only one readable
+         offline — the same bound the row states.
+
+    Arm 2's content check (`"tortoise-skills-and-integrations" in INSTALLER`) is
+    deliberately the FACT step 4 of
+    `test_4643_the_ownership_table_states_the_rule_per_artifact` owns: that test
+    owns "the header carries the statement", this one owns the LINKAGE the
+    table makes — "the row nominates that header as its guard". Neither holds
+    alone: a header that stopped carrying the statement would make this row's
+    guard a guard nobody wrote.
+    """
+    cell = _installer_row()[2]
+    guard = re.search(r"\b(?:the\s+guard\s+is|guarded\s+by)\b(.+?)(?:\.\s|\.$|$)",
+                      cell, re.I | re.S)
+    assert guard, (
+        "the `Enforced by` cell must name WHAT enforces the installer's single "
+        "authorship. A row that names no guard is a claim no reader can check, "
+        "and it is the shape that let the stale v1 copy sit unremarked until "
+        "#8747: " + cell)
+    guard_text = guard.group(1)
+    assert re.search(r"installer|install-tortoise-skills", guard_text, re.I), (
+        f"the row nominates a guard ('{guard_text.strip()}') that does not exist on "
+        f"this side. The artifact HERE that carries the ownership statement is the "
+        f"served installer's own header (#4643), so a guard named without it is "
+        f"one no reader of this table can check from this repository: {cell}")
+    installer = INSTALLER.read_text(encoding="utf-8")
+    assert "tortoise-skills-and-integrations" in installer, (
+        f"the row names the served installer's own header as its guard, but that "
+        f"header no longer carries the ownership statement §7.1 attributes to it — "
+        f"the guard the table points at is gone: {INSTALLER}")
+    if re.search(r"\bREADME", guard_text, re.I):
+        readme = (REPO / "README.md").read_text(encoding="utf-8")
+        assert ("tortoise-skills-and-integrations" in readme
+                or "install-tortoise-skills" in readme), (
+            f"the row nominates a README as the guard ('{guard_text.strip()}'), but "
+            f"README.md in this repo never mentions the installer or the MIT "
+            f"repo — a guard nobody wrote is not a guard (and a README in the "
+            f"other repo is not checkable from here): {cell}")
