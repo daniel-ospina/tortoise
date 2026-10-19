@@ -99,15 +99,24 @@ exists — the append-only journal. A re-run after a crash re-derives the same
 offset from the same durable facts, so nothing renumbers.
 
 **THE TRANSACTION.** The seam never calls `commit()` and never calls
-`rollback()` (pinned by a test whose fake connection raises if it does). When
-the caller injects `conn=`, the boundary is unambiguously theirs. When the seam
-opens the connection itself it RETURNS it on the outcome (`RecordWrite.
-connection`) so the caller can commit or close it — a seam that opened its own
-connection and committed it would commit the projection ALONE, which is the dual
-write §3 forbids.
+`rollback()` (pinned by a test whose fake connection counts both and asserts
+they are zero). When the caller injects `conn=`, the boundary is unambiguously
+theirs. When the seam opens the connection itself it RETURNS it on the outcome
+(`RecordWrite.connection`) so the caller can commit or close it — a seam that
+opened its own connection and committed it would commit the projection ALONE,
+which is the dual write §3 forbids.
+
+**THE FAILURE PATH DISPOSES OF WHAT THE SEAM OPENED.** A connection the seam
+opened and could not use is CLOSED before `RecordWriteError` is raised: the
+caller never receives that handle, so it has nothing to roll back and no way to
+close it, and the raising traceback would otherwise keep the handle (its aborted
+server-side transaction and backend slot) alive for as long as the exception is
+held. An INJECTED connection is never touched — it is the caller's, and its
+transaction stays open and unrolled-back on failure.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 from collections.abc import Callable, Mapping, Sequence
@@ -143,14 +152,20 @@ class RecordWriteError(Exception):
     One catchable class for every armed-path failure — a refusal raised by the
     projection before the first statement (totality), a Postgres error during
     execution, a connection that could not be opened, or a malformed DSN — so a
-    caller has exactly one thing to catch in order to roll its transaction back.
+    caller has exactly one thing to catch in order to do the one right thing
+    next: dispose of the transaction, and never claim durability.
+
+    When the seam OPENED the connection and the write failed, that connection
+    has already been closed by the seam (a close aborts its transaction), so
+    there is nothing left for the caller to dispose of. An INJECTED connection
+    is left open, uncommitted and not rolled back — rolling it back is the
+    caller's act, since only the caller knows what else is in it.
 
     ``__cause__`` carries the underlying error unchanged. In particular a
     totality failure keeps its own type:
     ``except RecordWriteError as exc: isinstance(exc.__cause__,
     record_projection.UnknownJournalRecordType)``. The seam wraps rather than
-    re-raises because the caller's REQUIRED ACTION is identical in every case
-    (roll back, do not claim durability), while the cause is what a human reads.
+    re-raises because the cause is what a human reads.
     """
 
 
@@ -184,8 +199,10 @@ class RecordWrite:
     statements: int = 0
     #: Journal position of ``records[0]`` on an APPLIED call.
     first_seq: int = 1
-    #: Journal position of the LAST record consumed (``first_seq - 1`` when the
-    #: batch was empty), so a caller can advance its offset without re-deriving.
+    #: Journal position of the LAST record consumed (``first_seq - 1`` when
+    #: nothing was consumed — an empty batch, or a not-armed call), so a caller
+    #: can advance its offset without re-deriving. Never a rewind: it is always
+    #: derived from the caller's own ``first_seq``.
     last_seq: int = 0
     #: The connection the seam OPENED, or ``None`` when the caller injected one
     #: (theirs to close) or the call was not armed. When set, the caller owns the
@@ -298,16 +315,22 @@ class RecordWriter:
         :param records: the journal records the chokepoint has just appended —
             ONE contiguous segment, in journal order. Empty is legal and cheap.
         :param first_seq: the journal position of ``records[0]``. The caller's
-            fact (see the module docstring, decision 5).
+            fact (see the module docstring, decision 5). A position below 1 is
+            refused by the projection (`RecordProjectionError` as the cause) —
+            on the ARMED path only: an unarmed call materializes no plan, so it
+            accepts what it was given and reports it back unchanged.
         :param conn: an already-open connection to write on. Inject it to span
             the journal append and this projection in ONE transaction; the seam
             then neither opens nor closes nor commits it.
 
         :raises RecordWriteError: the record was ARMED and the write did not
             happen (malformed DSN, unreachable record, totality refusal, or a
-            Postgres error). The caller's transaction is still open, uncommitted
-            and NOT rolled back — rolling back is the caller's act, because only
-            the caller knows what else is in that transaction.
+            Postgres error). With an injected ``conn=`` the caller's transaction
+            is still open, uncommitted and NOT rolled back — rolling back is the
+            caller's act, because only the caller knows what else is in that
+            transaction. When the seam opened the connection itself it CLOSES it
+            before raising (closing aborts the transaction), because the caller
+            never receives that handle: there is nothing it could roll back.
 
         NOT ARMED ⇒ returns ``RecordWrite(NOT_ARMED)`` and touches nothing: no
         connection, no statements, no fold materialization, no exception. It is
@@ -315,8 +338,11 @@ class RecordWriter:
         """
         dsn = record_dsn(self.dsn)          # raises on a malformed value
         if dsn is None:
+            # `last_seq` is `first_seq - 1` here too, not the dataclass default:
+            # a caller advancing `next_offset = result.last_seq + 1` must not
+            # rewind its watermark to 1 because nothing was written.
             return RecordWrite(outcome=RecordWriteOutcome.NOT_ARMED,
-                               first_seq=first_seq)
+                               first_seq=first_seq, last_seq=first_seq - 1)
 
         if not records:
             # Nothing to write: do not open a connection to say so. (An armed
@@ -349,6 +375,19 @@ class RecordWriter:
             # Totality (an undeclared/refused record type raises before the
             # first statement) and execution failures share one catchable class
             # and one required caller action: roll back, do not claim durability.
+            #
+            # A connection the SEAM opened is disposed of here: the caller never
+            # receives it, so nobody else can close it, and the traceback below
+            # would otherwise keep `target` (its aborted transaction, its backend
+            # slot) alive as long as the exception is held. Closing aborts the
+            # transaction, which is the only outcome left once it is invisible.
+            # An INJECTED connection is never touched — it is the caller's.
+            if opened is not None:
+                # A close failure must not mask the cause — the write failure is
+                # what the caller has to report, and a close that raised would
+                # replace it with a less informative error.
+                with contextlib.suppress(Exception):
+                    opened.close()
             raise RecordWriteError(
                 f"the record write failed after {len(records)} journal "
                 f"record(s) were materialized from position {first_seq} "
