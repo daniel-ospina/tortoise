@@ -1624,3 +1624,652 @@ class TestSdkKindLegsTheDoorsDoNotName5475:
         """
         from tortoise.sdk import UnapprovedKindNamespace
         assert issubclass(UnapprovedKindNamespace, ValueError)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# G. #5475 — the seam the CREATE-side fix left open: UPDATE and JOURNAL writes
+# ══════════════════════════════════════════════════════════════════════════
+#
+# The create-side doors are gated at their funnels, but #5475's closure property
+# — **no write may widen the graph's approved pack set** — is about WRITES, not
+# about creates. Two write seams were still ungated and re-measured WIDENED at
+# HEAD (#8968, #8982):
+#
+#     update_point          ['dev'] -> ACCEPTED -> ['dev','marketing']  WIDENED
+#     update_entity         ['dev'] -> ACCEPTED -> ['dev','marketing']  WIDENED
+#     EventAPI.add_point    ['dev'] -> ACCEPTED -> ['dev','marketing']  WIDENED
+#     EventAPI.add_object   ['dev'] -> ACCEPTED -> ['dev','marketing']  WIDENED
+#
+# Both are the same defect the issue names — an unvalidated kind value on a
+# live write path installs a pack — so both are pinned here, per DOOR, against
+# the same observable (``graph_installed_namespaces`` before vs after).
+
+
+def _journal_types_event_api(api) -> list[str]:
+    """The event types already COMMITTED to the journal behind an ``EventAPI``."""
+    return [e.get("type") for e in api.log.read_all()]
+
+
+def _event_api(sdk, tmp_path, name: str = "journal"):
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+    return EventAPI(EventLog(str(tmp_path / f"{name}.jsonl")),
+                    initiated_by="extractor", projection=sdk._get_proj())
+
+
+class TestUpdateDoorsRefuseUnapprovedPacks5475:
+    """#8968: the UPDATE doors are writes, and they widened the same set."""
+
+    def test_update_point_refuses_an_unapproved_namespace(self, sdk):
+        """``pointKind`` is a mined property, so an update installs a pack.
+
+        FAIL-ON (measured at HEAD): the update is accepted and the set goes
+        ``['dev']`` → ``['dev','marketing']`` — the create-side gate is
+        bypassed by first creating with the general kind and then updating.
+        REACHABLE: the graph genuinely starts gated to ``dev`` (asserted) and
+        the point exists before the update, so the only write is the update.
+        """
+        _seed_install(sdk, DEV)
+        point = sdk.create_point("statement", "an update-door probe")
+        before = graph_installed_namespaces(sdk)
+        assert before == frozenset({DEV}), "fixture: a dev-only graph"
+
+        with pytest.raises(ValueError) as excinfo:
+            sdk.update_point(point["id"], pointKind=MARKETING_POINT)
+
+        assert MARKETING in str(excinfo.value)
+        assert graph_installed_namespaces(sdk) == before, (
+            "a refused update must not widen the approval set")
+
+    @pytest.mark.parametrize("prop,kind,pack_ns", [
+        ("objectKind", "marketing:campaign", MARKETING),
+        ("subjectKind", "marketing:persona", MARKETING),
+        ("eventKind", "agent-ops:ruleRevised", "agent-ops"),
+        ("documentKind", "legal:contract", "legal"),
+    ])
+    def test_update_entity_refuses_an_unapproved_namespace(
+            self, sdk, prop, kind, pack_ns):
+        """``update_entity`` is the documented tenant route onto EVERY label.
+
+        FAIL-ON (measured at HEAD): accepted, ``['dev']`` →
+        ``['dev', <pack>]``.
+        REACHABLE: each prop really is one ``graph_kind_namespaces`` mines
+        (``_KIND_PROP_KEYS``), and the target node exists first.
+        """
+        _seed_install(sdk, DEV)
+        node = sdk.create_object(f"update-door-{prop}", objectKind="other")
+        before = graph_installed_namespaces(sdk)
+        assert before == frozenset({DEV}), "fixture: a dev-only graph"
+
+        with pytest.raises(ValueError) as excinfo:
+            sdk.update_entity(node["id"], **{prop: kind})
+
+        assert pack_ns in str(excinfo.value)
+        assert graph_installed_namespaces(sdk) == before
+
+    def test_update_entity_batch_checks_every_kind_it_carries(self, sdk):
+        """A single update can carry several mined keys; each must be refused.
+
+        FAIL-ON: a gate that checks only the FIRST kind prop it sees (the props
+        dict is unordered from the caller's point of view).
+        REACHABLE: ``objectKind`` is approved-first in the payload and
+        ``subjectKind`` is not, so a first-only check would pass.
+        """
+        _seed_install(sdk, DEV)
+        node = sdk.create_object("update-door-batch", objectKind="other")
+        before = graph_installed_namespaces(sdk)
+        with pytest.raises(ValueError) as excinfo:
+            sdk.update_entity(node["id"], objectKind="dev:epic",
+                              subjectKind="marketing:persona")
+        assert MARKETING in str(excinfo.value)
+        assert graph_installed_namespaces(sdk) == before
+
+    def test_update_point_still_writes_approved_and_general_kinds(self, sdk):
+        """The non-vacuity control: the guard is not a blanket update ban.
+
+        FAIL-ON: a fix that gates `update_point` on "any kind present".
+        REACHABLE: ``dev:technicalDebt`` is a real declaration of the installed
+        pack and ``statement`` is the general core kind, so both really are
+        admissible — the refusal above is about membership, not spelling.
+        """
+        _seed_install(sdk, DEV)
+        point = sdk.create_point("statement", "a keep-writable probe")
+        sdk.update_point(point["id"], pointKind=DEV_POINT)
+        sdk.update_point(point["id"], pointKind="statement")
+        assert graph_installed_namespaces(sdk) == frozenset({DEV})
+
+    def test_no_records_graph_keeps_updating_any_pack_kind(self, sdk):
+        """#2714 indicator 3 at the UPDATE doors: no records ⇒ no gate.
+
+        FAIL-ON: the update gate treats ``None`` (no records) as an empty set,
+        which would break every pre-#318 / self-hosted graph.
+        REACHABLE: the fixture genuinely has zero ``:PackInstall`` rows, and the
+        post-condition reads the NODE's kind — ``graph_installed_namespaces``
+        returns ``None`` on this branch whether or not the write landed, so
+        asserting on it would be true by construction and could not catch a
+        refusal (reported by the #5475 review of this diff).
+        """
+        assert graph_installed_namespaces(sdk) is None
+        point = sdk.create_point("statement", "an ungated update probe")
+        sdk.update_point(point["id"], pointKind=MARKETING_POINT)
+        stored = sdk.get_point(point["id"])
+        assert stored.get("pointKind") == MARKETING_POINT, (
+            "the ungated (no-records) arm must actually WRITE, not merely "
+            "avoid raising")
+        assert graph_installed_namespaces(sdk) is None
+
+    def test_historical_data_namespace_stays_writable_on_update(self, sdk):
+        """#2714 indicator 2 at the UPDATE doors — old data must stay updatable.
+
+        The gate checks membership in the RESOLVED set (records ∪ data), so a
+        namespace the graph's own data already carries is IN the set even
+        though no ``:PackInstall`` record names it. Without this, a fix could
+        quietly regress into "records only" and make historical rows
+        un-updatable — the regression #2714 indicator 2 exists to prevent.
+
+        FAIL-ON: the update gate reads the RECORDS (the ``:PackInstall`` rows)
+        only.
+        REACHABLE: the marketingrow is a real node in the same graph the
+        resolver scans, and the seeded record is ``dev`` only (asserted).
+        """
+        _seed_install(sdk, DEV)
+        sdk._get_proj().g.query(
+            "MERGE (n:Object {id: 'l7-update-historical'}) "
+            f"SET n.objectKind = '{MARKETING_OBJECT}'")
+        assert graph_installed_namespaces(sdk) == frozenset({DEV, MARKETING})
+        point = sdk.create_point("statement", "a historical-namespace probe")
+        sdk.update_point(point["id"], pointKind=MARKETING_POINT)
+        node = sdk.create_object("historical-namespace object",
+                                 objectKind="other")
+        sdk.update_entity(node["id"], objectKind=MARKETING_OBJECT)
+        assert sdk.get_point(point["id"]).get("pointKind") == MARKETING_POINT
+
+
+class TestJournalSeamRefusesUnapprovedPacks5475:
+    """#8982: ``EventAPI`` is the journal-first write seam for every pipeline."""
+
+    def test_add_point_refuses_and_appends_nothing(self, sdk, tmp_path):
+        """The refusal must land BEFORE the journal append (the commit point).
+
+        FAIL-ON (measured at HEAD): the point is accepted, the journal grows,
+        and the set goes ``['dev']`` → ``['dev','marketing']``.
+        REACHABLE: the graph is genuinely gated to ``dev`` and the kind is a
+        real marketing declaration.
+        """
+        _seed_install(sdk, DEV)
+        api = _event_api(sdk, tmp_path)
+        before = graph_installed_namespaces(sdk)
+        assert before == frozenset({DEV}), "fixture: a dev-only graph"
+        committed = _journal_types_event_api(api)
+
+        with pytest.raises(ValueError) as excinfo:
+            api.add_point("a journal seam probe", {"run_id": "r1"},
+                          pointKind=MARKETING_POINT)
+
+        assert MARKETING in str(excinfo.value)
+        assert _journal_types_event_api(api) == committed, (
+            "the refusal must precede the journal append: a committed-then-"
+            "refused record is replay-faithful and widens on the next rebuild")
+        assert graph_installed_namespaces(sdk) == before
+
+    @pytest.mark.parametrize("door,call,pack_ns", [
+        ("add_object", lambda api: api.add_object("journal object",
+                                                  "marketing:campaign"), MARKETING),
+        ("add_subject", lambda api: api.add_subject("journal subject",
+                                                    "marketing:persona"), MARKETING),
+        ("add_document", lambda api: api.add_document(
+            "a contract", "a contract title",
+            document_kind="legal:contract"), "legal"),
+        ("add_event", lambda api: api.add_event("ev-1",
+                                                "agent-ops:ruleRevised"), "agent-ops"),
+        # add_point's kind rides the ``fields`` passthrough, so it is the one
+        # door whose spelling is the SDK's (camelCase) rather than snake_case.
+        ("add_point", lambda api: api.add_point(
+            "a journal probe", {"run_id": "r1"},
+            pointKind="marketing:contentPerformance"), MARKETING),
+    ])
+    def test_entity_doors_refuse_an_unapproved_namespace(
+            self, sdk, tmp_path, door, call, pack_ns):
+        """Every ``EventAPI`` entity door funnels through ``_emit``.
+
+        The payload spellings DIFFER per door (``object_kind``/``subject_kind``
+        are snake_case, ``eventKind`` is camelCase — the projection normalizes
+        each to the same node property), which is exactly why a gate keyed on
+        one spelling would be bypassable by the other.
+        """
+        _seed_install(sdk, DEV)
+        api = _event_api(sdk, tmp_path)
+        before = graph_installed_namespaces(sdk)
+        committed = _journal_types_event_api(api)
+
+        with pytest.raises(ValueError) as excinfo:
+            call(api)
+
+        assert pack_ns in str(excinfo.value), door
+        assert _journal_types_event_api(api) == committed
+        assert graph_installed_namespaces(sdk) == before
+
+    def test_uses_item_kind_is_refused(self, sdk, tmp_path):
+        """``uses[].kind`` becomes an ``:Object`` stub's ``objectKind``.
+
+        The event fold MERGEs one Object per use item with
+        ``objectKind = item['kind']``, so the leg widens the set without the
+        door naming it as a kind at all (the same leg #8988 had to close on
+        ``create_event``).
+        """
+        _seed_install(sdk, DEV)
+        api = _event_api(sdk, tmp_path)
+        before = graph_installed_namespaces(sdk)
+        with pytest.raises(ValueError) as excinfo:
+            api.add_event("ev-uses", "occurrence",
+                          uses=[{"name": "stub", "kind": MARKETING_OBJECT}])
+        assert MARKETING in str(excinfo.value), (
+            "the refusal must NAME the pack, not merely raise (a differently "
+            "broken gate would satisfy a bare raises())")
+        assert graph_installed_namespaces(sdk) == before
+
+    def test_approved_and_general_kinds_still_write(self, sdk, tmp_path):
+        """The non-vacuity control for the journal seam.
+
+        FAIL-ON: a gate that refuses the whole seam once any pack record exists
+        (the ingest, mining and extractor lanes all write through it).
+        REACHABLE: ``dev`` is installed and ``statement`` names no pack.
+        """
+        _seed_install(sdk, DEV)
+        api = _event_api(sdk, tmp_path)
+        api.add_point("an approved journal probe", {"run_id": "r1"},
+                      pointKind=DEV_POINT)
+        api.add_point("a general journal probe", {"run_id": "r1"},
+                      pointKind="statement")
+        api.add_object("approved journal object", "dev:epic")
+        assert graph_installed_namespaces(sdk) == frozenset({DEV})
+
+    def test_no_records_graph_keeps_writing_any_pack_kind(self, sdk, tmp_path):
+        """#2714 indicator 3 at the journal seam.
+
+        FAIL-ON: ``None`` (no records) read as an empty approval set.
+        REACHABLE: zero ``:PackInstall`` rows, asserted — and the POST-CONDITION
+        reads the FOLDED NODE's kind, because ``graph_installed_namespaces``
+        returns ``None`` on this branch whether or not the write landed, so
+        asserting on it would be true by construction (reported by the #5475
+        review for the twin of this test).
+        """
+        assert graph_installed_namespaces(sdk) is None
+        api = _event_api(sdk, tmp_path)
+        api.add_object("ungated journal object", MARKETING_OBJECT)
+        assert graph_installed_namespaces(sdk) is None
+        rows = sdk._get_proj().g.query(
+            "MATCH (o:Object) WHERE o.objectKind = $k RETURN o.id",
+            params={"k": MARKETING_OBJECT}).result_set
+        assert rows, "the ungated (no-records) arm must actually WRITE"
+
+    def test_projection_less_lane_still_journals(self, tmp_path):
+        """A ``projection=None`` lane has no graph to widen — it must not raise.
+
+        ``EventAPI`` is constructed projection-less ONLY by the two demo sites
+        (``__main__``'s demo subcommand and ``m0.py``'s fold demo) — no
+        production lane does, and ``ingest``/``docs_miner``/``mining``/``sdk``
+        all pass a projection. The gate has no graph handle there, so it
+        abstains rather than inventing an approval set.
+        """
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+        api = EventAPI(EventLog(str(tmp_path / "projectionless.jsonl")),
+                       initiated_by="extractor")
+        api.add_object("projectionless object", MARKETING_OBJECT)
+        assert "ObjectRegistered" in _journal_types_event_api(api)
+
+
+class TestApprovalSetOfAGraphHandle5475:
+    """``EventAPI`` has a projection, not an SDK — the read core must serve both.
+
+    ``resolved_pack_set`` took an SDK only, so a seam holding a bare graph had
+    no way to ask the ONE question this whole issue is about. The graph-level
+    reader is that question; it must answer IDENTICALLY to the SDK one, or the
+    two surfaces could disagree about a graph's own approval set.
+    """
+
+    def test_graph_reader_agrees_with_the_sdk_reader(self, sdk):
+        _seed_install(sdk, DEV)
+        sdk._get_proj().g.query(
+            "MERGE (n:Object {id: 'graph-reader-historical'}) "
+            f"SET n.objectKind = '{MARKETING_OBJECT}'")
+        from tortoise.pack_state import graph_approval_namespaces
+        assert graph_approval_namespaces(sdk._get_proj().g) == (
+            graph_installed_namespaces(sdk))
+        assert graph_installed_namespaces(sdk) == frozenset({DEV, MARKETING})
+
+    def test_graph_reader_keeps_the_no_records_none(self, sdk):
+        from tortoise.pack_state import graph_approval_namespaces
+        assert graph_approval_namespaces(sdk._get_proj().g) is None
+
+
+class TestRecordBuildingSeamsRefuseUnapprovedPacks5475:
+    """The other live doors that build a RECORD and then journal-then-fold.
+
+    They bypass the create funnels by construction (a caller hands a fully
+    built record, or frontmatter supplies the kind), so closing the funnels
+    alone left them as widening paths. Each is gated on the record in the
+    record's OWN spelling — ``object_kind``/``document_kind`` here, not the
+    ``objectKind`` the SDK keywords use — because the projection persists both
+    spellings onto the same node property.
+    """
+
+    def test_apply_and_journal_refuses_before_the_append(self, sdk):
+        """``_apply_and_journal`` is the live door for a PRE-BUILT record.
+
+        FAIL-ON (measured on this seam's class at HEAD): the record is
+        appended, folded, and the approval set goes ``['dev']`` →
+        ``['dev','marketing']``.
+        REACHABLE: the record names a real marketing kind and the graph is
+        genuinely gated to ``dev``.
+        """
+        _seed_install(sdk, DEV)
+        before = graph_installed_namespaces(sdk)
+        assert before == frozenset({DEV}), "fixture: a dev-only graph"
+        with pytest.raises(ValueError) as excinfo:
+            sdk._apply_and_journal(sdk._get_proj(), {
+                "type": "ObjectRegistered",
+                "id": "record-door-object",
+                "name": "record door",
+                "object_kind": MARKETING_OBJECT,
+            })
+        assert MARKETING in str(excinfo.value)
+        assert graph_installed_namespaces(sdk) == before
+        assert sdk._get_proj().g.query(
+            "MATCH (o:Object) WHERE o.id = 'record-door-object' "
+            "RETURN o.id").result_set == [], "a refused record must not fold"
+
+    def test_apply_and_journal_still_writes_an_approved_record(self, sdk):
+        """The control: an approved record still lands (journal + fold).
+
+        FAIL-ON: a gate that refuses every pre-built record once pack records
+        exist — the indexer's provenance writes would stop.
+        REACHABLE: ``dev`` is installed, so the same shape is admitted.
+        """
+        _seed_install(sdk, DEV)
+        sdk._apply_and_journal(sdk._get_proj(), {
+            "type": "ObjectRegistered",
+            "id": "record-door-approved",
+            "name": "approved record",
+            "object_kind": "dev:epic",
+        })
+        assert graph_installed_namespaces(sdk) == frozenset({DEV})
+
+    def test_apply_and_journal_gates_the_TARGET_graph_not_the_sdk(self, sdk,
+                                                                 tmp_path):
+        """The gate must read the approval set of the graph the record lands in.
+
+        ``_apply_and_journal(proj, record)`` takes the projection as an
+        ARGUMENT, so the caller — not ``self`` — decides which graph is
+        written. A gate that resolved ``self``'s set would admit a namespace
+        into a graph that never approved it (and refuse a legitimate write the
+        other way round), which is the widening #5475 exists to close, moved
+        one argument to the right. Latent today (every caller passes its own
+        projection), so it is pinned at the seam instead of left to be
+        discovered by the first caller that does not.
+
+        FAIL-ON (measured): with the gate reading ``self``'s set, a
+        ``marketing``-approved SDK writes ``marketing:campaign`` into a
+        ``dev``-only graph, whose approval set then holds ``marketing`` too.
+        REACHABLE: both graphs are real projections on the same embedded DB,
+        the ``self`` SDK genuinely has ``marketing`` approved, and the target
+        genuinely does not — so the two reads disagree, which is the only way
+        this test can fail.
+        """
+        _seed_install(sdk, DEV)
+        _seed_install(sdk, MARKETING)
+        target = TortoiseSDK(
+            db_path=str(tmp_path / "l7-vocab-gating.db"),
+            namespace=f"test_l7_vocab_{uuid.uuid4().hex[:8]}")
+        _seed_install(target, DEV)
+        target_g = target._get_proj().g
+        self_set = graph_installed_namespaces(sdk)
+        assert self_set == frozenset({DEV, MARKETING}), "fixture: self admits it"
+        assert graph_installed_namespaces(target) == frozenset({DEV}), (
+            "fixture: the WRITE TARGET does not")
+        with pytest.raises(ValueError) as excinfo:
+            sdk._apply_and_journal(target._get_proj(), {
+                "type": "ObjectRegistered",
+                "id": "target-graph-object",
+                "name": "target graph object",
+                "object_kind": MARKETING_OBJECT,
+            })
+        assert MARKETING in str(excinfo.value)
+        assert graph_installed_namespaces(target) == frozenset({DEV}), (
+            "a refused record must not widen the TARGET graph's approval set")
+        assert target_g.query(
+            "MATCH (o:Object) WHERE o.id = 'target-graph-object' "
+            "RETURN o.id").result_set == [], "a refused record must not fold"
+
+    def test_doc_write_refuses_a_frontmatter_kind(self, sdk, tmp_path):
+        """``_doc_write`` takes ``document_kind`` from the file's FRONTMATTER.
+
+        That is a caller-controlled value on the indexing path, and
+        ``documentKind`` is one of the mined properties, so indexing a file
+        that says ``type: legal:contract`` installed the ``legal`` pack.
+
+        FAIL-ON: the doc is written and ``legal`` joins the approval set.
+        REACHABLE: ``legal`` is a real catalog namespace absent from the
+        seeded records.
+        """
+        _seed_install(sdk, DEV)
+        before = graph_installed_namespaces(sdk)
+        doc = tmp_path / "a-contract.md"
+        doc.write_text("# A contract\n")
+        with pytest.raises(ValueError) as excinfo:
+            sdk._doc_write({"type": "legal:contract"}, "doc-legal", "A contract",
+                           doc, None)
+        assert "legal" in str(excinfo.value)
+        assert graph_installed_namespaces(sdk) == before
+
+    def test_mining_own_envelope_is_gated(self, sdk, tmp_path):
+        """``mining`` builds its own nested envelope, bypassing ``_emit``.
+
+        FAIL-ON: the record is appended (nested ``event.eventKind``) and
+        ``agent-ops`` joins the approval set.
+        REACHABLE: ``agent-ops:ruleRevised`` is a real catalog event kind.
+        """
+        from tortoise.mining import ConversationMiner
+        _seed_install(sdk, DEV)
+        api = _event_api(sdk, tmp_path, "mining")
+        committed = _journal_types_event_api(api)
+        with pytest.raises(ValueError) as excinfo:
+            ConversationMiner._emit_event(api, {
+                "eventId": "mining-event-1",
+                "eventKind": "agent-ops:ruleRevised",
+                "subject": "probe",
+            })
+        assert "agent-ops" in str(excinfo.value)
+        assert _journal_types_event_api(api) == committed
+        assert graph_installed_namespaces(sdk) == frozenset({DEV})
+
+
+class TestSecondWritersOfAKindProperty5475:
+    """A gated DOOR is not the same as a gated PROPERTY.
+
+    ``create_source`` is gated at the entity funnel, but the property it writes
+    (``sourceKind``) has a SECOND writer — ``link_source_to_entity`` — which
+    auto-mints the ``:Source`` itself. Closing the door and leaving the second
+    writer open is the same class of gap as gating creates and not updates, one
+    property over: measured on a ``dev``-only graph,
+    ``link_source_to_entity(url, id, 'Object', source_kind='marketing:campaign')``
+    left ``['dev','marketing']`` (reported by the review of this diff).
+    """
+
+    def test_link_source_to_entity_refuses_an_unapproved_namespace(self, sdk):
+        """The auto-created ``:Source`` must not install a pack either.
+
+        FAIL-ON (measured pre-fix): the link is created, the Source is minted
+        with the caller's ``sourceKind``, and the set goes ``['dev']`` →
+        ``['dev','marketing']``.
+        REACHABLE: the graph is genuinely gated to ``dev`` and the url is new,
+        so the ``ON CREATE`` branch really mints the node.
+        """
+        _seed_install(sdk, DEV)
+        target = sdk.create_object("link target", objectKind="other")
+        before = graph_installed_namespaces(sdk)
+        assert before == frozenset({DEV}), "fixture: a dev-only graph"
+
+        with pytest.raises(ValueError) as excinfo:
+            sdk.link_source_to_entity(
+                "https://example.test/a-source", target["id"], "Object",
+                source_kind=MARKETING_OBJECT)
+
+        assert MARKETING in str(excinfo.value)
+        assert graph_installed_namespaces(sdk) == before
+        assert sdk._get_proj().g.query(
+            "MATCH (s:Source) WHERE s.url = 'https://example.test/a-source' "
+            "RETURN s.url").result_set == [], (
+            "a refused link must not have minted the Source")
+
+    def test_link_source_to_entity_still_links_an_approved_kind(self, sdk):
+        """The control: an approved or bare ``sourceKind`` still links.
+
+        FAIL-ON: a gate that refuses every ``link_source_to_entity`` call once
+        pack records exist (the ingest/corpus paths call it constantly with the
+        default ``'document'``).
+        REACHABLE: ``dev`` is installed, and the default ``document`` names no
+        pack — both real call shapes are exercised.
+        """
+        _seed_install(sdk, DEV)
+        target = sdk.create_object("link target 2", objectKind="other")
+        sdk.link_source_to_entity("https://example.test/bare-kind", target["id"],
+                                  "Object")  # default source_kind="document"
+        sdk.link_source_to_entity("https://example.test/dev-kind", target["id"],
+                                  "Object", source_kind="dev:epic")
+        assert graph_installed_namespaces(sdk) == frozenset({DEV})
+
+
+class TestReplayIsDeliberatelyUngated5475:
+    """#8982's second acceptance half — the REPLAY boundary is stated AND pinned.
+
+    Refusing at ``rebuild_all`` would make a committed record unfoldable, which
+    is strictly worse than the widening it prevents: the journal is the truth.
+    So replay MUST stay ungated, and this pins it.
+
+    ⛔ WHAT IT DOES NOT COVER, measured during the #5475 review round: a gate
+    added inside the FOLD that reads the graph at fold time would ALSO pass this
+    test, because ``rebuild_all`` wipes the graph before replay and restores
+    the ``:PackInstall`` config from the sidecar AFTER it — so at fold time the
+    approval set is empty and such a gate abstains for EVERY record. It does
+    catch the other natural variant (a fold gate fed a captured PRE-WIPE set),
+    which was verified by patching one in. Closing the fold-time variant needs a
+    test that installs a pack mid-replay, which the current rebuild shape cannot
+    express; that residual is written down here rather than implied away.
+    """
+
+    def test_rebuild_reproduces_an_unapproved_namespace_without_refusing(
+            self, sdk, tmp_path):
+        """A legacy journal record naming an unapproved pack must reproduce.
+
+        The record is written STRAIGHT to the journal (``log.append``),
+        bypassing ``EventAPI._emit`` — that is exactly what a journal written
+        before this gate existed looks like, and what a projection-less lane
+        produces today.
+
+        FAIL-ON: a replay path that consults an approval set (a pre-wipe
+        capture, or a caller-supplied one) raises instead of reproducing — the
+        graph comes back missing a record the journal holds. See the class
+        docstring for the variant this pin cannot catch.
+        REACHABLE: the graph is genuinely gated to ``dev`` (asserted) and the
+        record genuinely names ``marketing``, so a replay that consulted that
+        set WOULD refuse — the assertion is not vacuous.
+        """
+        import json
+
+        from tortoise.log import EventLog
+
+        _seed_install(sdk, DEV)
+        assert graph_installed_namespaces(sdk) == frozenset({DEV})
+        log_path = tmp_path / "legacy.jsonl"
+        log = EventLog(str(log_path))
+        record = {
+            "event_id": "legacy-1",
+            "ts": "2026-01-01T00:00:00Z",
+            "type": "ObjectRegistered",
+            "initiated_by": "extractor",
+            "id": "legacy-object-1",
+            "name": "a legacy object",
+            "object_kind": MARKETING_OBJECT,
+            "createdAt": "2026-01-01T00:00:00Z",
+        }
+        log.append(record)
+        assert json.loads(log_path.read_text().splitlines()[0])["id"] == (
+            "legacy-object-1")
+
+        sdk._get_proj().rebuild_all(str(tmp_path), confirm_destructive=True)
+
+        rows = sdk._get_proj().g.query(
+            "MATCH (o:Object) WHERE o.id = 'legacy-object-1' "
+            "RETURN o.objectKind").result_set
+        assert rows and rows[0][0] == MARKETING_OBJECT, (
+            "the rebuilder must reproduce a journal record the live gate would "
+            "have refused — refusing here would lose a committed write")
+        # …and that replay is what can widen the set, which is why the write
+        # doors refuse BEFORE the append rather than after.
+        assert MARKETING in (graph_installed_namespaces(sdk) or frozenset())
+
+
+class TestIngestCorpusEventKind5475:
+    """``ingest_corpus(eventKind=...)`` is caller-supplied and writes RAW Cypher.
+
+    It never meets a gated seam (``MERGE … SET e += $props``), so it was one
+    more way to install a pack from a public SDK method — reported by the review
+    of this change with the measurement
+    ``ingest_corpus(dir, eventKind='marketing:meeting')`` on a ``dev``-only
+    graph leaving ``['dev','marketing']``.
+    """
+
+    def test_ingest_corpus_refuses_an_unapproved_event_kind(self, sdk, tmp_path):
+        """FAIL-ON (measured pre-fix): accepted, and the set widens.
+
+        REACHABLE: the graph is gated to ``dev`` and the kind is a real
+        marketing event kind, so the widening was observable.
+        """
+        _seed_install(sdk, DEV)
+        corpus = tmp_path / "corpus"
+        corpus.mkdir()
+        (corpus / "a.md").write_text("# a session\n\nbody\n")
+        before = graph_installed_namespaces(sdk)
+        with pytest.raises(ValueError) as excinfo:
+            sdk.ingest_corpus(str(corpus), eventKind=MARKETING_OBJECT)
+        assert MARKETING in str(excinfo.value)
+        assert graph_installed_namespaces(sdk) == before
+
+    def test_scope_note_no_longer_lists_this_closed_seam_as_ungated(self):
+        """The ``compile_vocab`` map must not name a seam this PR CLOSED.
+
+        ``compile_vocab``'s docstring carries the authoritative "what is still
+        open" map — it is what a later lane reads to decide whether a write
+        path needs work, and the PR body leans on it for the same reason. The
+        paragraph this test pins listed ``sdk.ingest_corpus(eventKind=...)``'s
+        raw ``SET e += $props`` among the writers that "never meet a door at
+        all"; this PR gated that argument BEFORE the raw write, so the map had
+        to drop the clause and say what is really left on that method.
+
+        FAIL-ON: the sentence still names ``ingest_corpus(eventKind=...)`` as
+        ungated — the state at ``origin/main`` and at this PR's first head. A
+        lane reading it re-investigates landed work, or files a duplicate of
+        #9068 against it.
+        REACHABLE: the seam really IS gated (the refusal above is the
+        evidence), so "not listed as ungated" is true rather than convenient,
+        and the paragraph is still present and still names the writers that
+        genuinely never meet a door (``pipeline.py``, the connectors,
+        ``migrate_kinds.py``/``retype.py``).
+        """
+        doc = compile_vocab.__doc__ or ""
+        marker = "never meets a door at all"
+        assert marker in doc, (
+            "the ungated-writers map must still exist — deleting it would make "
+            "'not listed as ungated' vacuous rather than true")
+        ungated = doc.split(marker, 1)[1].split("This function still gates", 1)[0]
+        assert "ingest_corpus(eventKind" not in ungated, (
+            "``ingest_corpus``'s eventKind is gated before the raw write, so "
+            "the scope note may not list it as a writer that never meets a door")
+        for still_ungated in ("pipeline.py", "proj.apply", "migrate_kinds.py",
+                              "retype.py"):
+            assert still_ungated in ungated, (
+                f"{still_ungated} is genuinely ungated and must stay named — "
+                "a scope note that drops the real residuals is the same defect "
+                "in the other direction")

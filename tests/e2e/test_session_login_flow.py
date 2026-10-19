@@ -169,13 +169,21 @@ def _local_d1_sqlite() -> Path:
     )
 
 
-def _seed_bff_session(user_id: str) -> str:
+def _seed_bff_session(user_id: str, access_token: str = "seed-access-token") -> str:
     """Create the schema + a LIVE cached-token session row; return the handle.
 
     A cached `access_token` keeps `getAccessTokenForSession` off the network (it
     only refreshes when the cached value is inside the skew window), so the gate
     resolves without any Supabase binding — which is exactly the contract the
     seed is here to satisfy: a handle that the store positively recognises.
+
+    ``access_token`` (#2809) is overridable so a spec that ALSO exercises the
+    decorated profile can seed a JWT-shaped token: `/api/session` reads
+    email/display name from the provider's `/auth/v1/user` with this token as
+    the bearer, and a local Supabase mock derives the profile from its `sub`.
+    With the default opaque string the gate still resolves; the profile is
+    simply undecorated (email/display name absent), which is the state the
+    other migrated specs rely on.
     """
     handle = secrets.token_hex(32)
     now = int(time.time() * 1000)
@@ -188,7 +196,7 @@ def _seed_bff_session(user_id: str) -> str:
             "(handle,user_id,refresh_token,revoked,created_at,expires_at,"
             " access_token,access_token_expires_at) VALUES (?,?,?,?,?,?,?,?)",
             (handle, user_id, "seed-refresh-token", 0, now, now + 86_400_000,
-             "seed-access-token", now + 3_600_000),
+             access_token, now + 3_600_000),
         )
         con.commit()
     finally:
@@ -327,7 +335,9 @@ def _preflight_local_servers() -> None:
 
 def _seed_local_session_cookie(page: Page, user_id: str,
                               session: dict | None = None,
-                              parent_domain: bool = True) -> None:
+                              parent_domain: bool = True,
+                              access_token: str = "seed-access-token",
+                              origin: str | None = None) -> None:
     """Seed a LIVE BFF session for the LOCAL preview origin (#2731, #4054).
 
     What the gate actually requires (read off the real code): an HttpOnly
@@ -356,11 +366,19 @@ def _seed_local_session_cookie(page: Page, user_id: str,
     When ``session`` is given, ``user_id`` is IGNORED (the dict's own
     ``user.id`` is what the cookie carries); otherwise the standard
     ``_session_json(user_id)`` is used.
+
+    #2809: ``origin`` overrides this module's ``DASHBOARD_URL`` for the cookie
+    scope. A spec that boots its OWN preview on a runtime-picked port must pass
+    it — the default would scope the cookie to this module's constant instead,
+    and the pairing works today only because cookies are HOST-scoped (a port
+    mismatch is invisible), so a ``DASHBOARD_URL`` override that changes the
+    HOST silently sends every request back to ``/auth``.
     """
+    origin = origin or DASHBOARD_URL
     payload = session if session is not None else _session_json(user_id)
     value = urllib.parse.quote(json.dumps(payload))
     bff_user_id = (payload.get("user") or {}).get("id") or user_id
-    handle = _seed_bff_session(bff_user_id)
+    handle = _seed_bff_session(bff_user_id, access_token=access_token)
     # `__Host-` rules: Secure, Path=/, NO Domain — enforced by Chromium's cookie
     # store. Playwright's `context.add_cookies` CANNOT set it here: for a plain
     # http URL it force-clears `secure` (verified: a `secure: True` cookie comes
@@ -373,14 +391,14 @@ def _seed_local_session_cookie(page: Page, user_id: str,
     cdp.send("Network.setCookie", {
         "name": SESSION_COOKIE,
         "value": handle,
-        "url": DASHBOARD_URL,
+        "url": origin,
         "path": "/",
         "secure": True,
         "httpOnly": True,
         "sameSite": "Lax",
     })
     cookies = [
-        {"name": "sb-tortoise-auth-token", "value": value, "url": DASHBOARD_URL},
+        {"name": "sb-tortoise-auth-token", "value": value, "url": origin},
     ]
     if parent_domain:
         cookies.append({"name": "sb-tortoise-auth-token", "value": value,

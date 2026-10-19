@@ -4,9 +4,10 @@ HERMETIC tests (no graph, no model, no IO): the product pure function
 ``tortoise/retrieval.py::package_evidence_pool`` collapses a distilled
 point's OWN source raw chunks/turns into ONE package entry (point + ≤ one
 verbatim ref), dedups cross-item near-dupe statements restating the same
-fact to one slot, and orders the surviving packages value/verbatim-marked
-first with relevance order preserved within a tier. The docker-lane half
-(the eval arm markers on ``retrieve_for_question`` outcomes + the ask
+fact to one slot, and orders the surviving packages by D3 hit-type tier
+(statement Points, then turn Points, then raw chunks) with the #1763/#1945
+value mark and then relevance order preserved WITHIN a tier. The docker-lane
+half (the eval arm markers on ``retrieve_for_question`` outcomes + the ask
 lane knob default) is exercised by the existing docker suites
 (test_retrieval.py / test_eval_* / test_ask_retrieval_levers.py) — this
 file runs the IDENTICAL pure logic offline (the single-source-of-truth
@@ -21,16 +22,22 @@ Design contract under test (docs/scoping/2026-09-09-evidence-assembly-wave.md
   * (b) cross-item near-dupe dedup — two statements restating the SAME
         fact (exact / ≥0.9 near-verbatim content, or same source turn +
         overlapping quotes) dedupe to one slot BEFORE the window fill,
-  * (c) ordering — exact-value/verbatim-marked packages first, relevance
-        (pool order) preserved within a tier,
+  * (c) ordering — D3 hit-type tiers: statement Points first, then verbatim
+        source turn Points, then raw chunks; the #1763/#1945 value mark (and
+        relevance / pool order) is preserved WITHIN a tier,
   * (d) OFF parity — the eval retrieval seam adds the arm as a tri-state
         kwarg defaulting to None (env-gated fail-safe OFF) and the ask
         lane defaults the knob OFF; the OFF path never invokes packaging
         (byte-identical),
   * (e) no-dupe no-regression — on a duplicate-free pool with no value
-        marks the ON path returns the input BYTE-IDENTICAL (same ids,
-        same order) — flipping the arm ON cannot regress single-evidence
-        questions,
+        marks the ON path preserves pool order WITHIN each hit-type tier
+        (statement < turn < chunk), and returns the input BYTE-IDENTICAL
+        (same ids, same order) when the pool is ALREADY tier-ordered. It
+        does NOT preserve GLOBAL pool order: a source hit ranked above a
+        statement is regrouped below it by design (D3, #9092) — pinned by
+        ``test_unmarked_mixed_type_pool_regroups_by_hit_type``. So the
+        no-regression claim is tier-scoped, not "any duplicate-free pool
+        comes back untouched",
   * value safety — a same-frame DIFFERENT-VALUE claim ("cost 300" vs
         "cost 400") never collapses (the aggregation numerator Slice B
         protects),
@@ -332,12 +339,18 @@ def test_standalone_duplicate_chunk_content_dedups_to_container():
     assert stats["collapsed_duplicates"] == 1
 
 
-# ── (c) ordering: value/verbatim-marked packages first ────────────────────
+# ── (c) ordering: D3 hit-type tiers, value mark inside a tier ────────────
+#
+# Epic #2281 D3: STATEMENT Points lead, then verbatim source TURN Points, then
+# raw chunks. The #1763/#1945 value mark does NOT pick the tier — it breaks
+# ties INSIDE one (so an exact-value statement still leads its unmarked
+# peers, and a `raw_chunk`-marked chunk keeps leading its FELLOW CHUNKS
+# without ever being lifted over a distilled statement).
 
 def test_verbatim_marked_point_leads_window_over_higher_ranked_unmarked():
     """A verbatim-marked point ranks into the window FIRST even when it sits
     BELOW an unmarked point in pool order (the #1763/#1945 precise classes
-    lead; relevance order preserved within each tier)."""
+    lead INSIDE the statement tier; relevance order preserved within a tier)."""
     pool = [
         _point("pt:unmarked", "some unrelated filler about cooking pasta"),
         _point("pt:verbatim", "I bought the tea set from cousin Rachel for "
@@ -349,8 +362,11 @@ def test_verbatim_marked_point_leads_window_over_higher_ranked_unmarked():
 
 
 def test_answer_string_class_orders_within_marked_tier():
-    """Marked packages (all value tiers) keep pool relevance order between
-    themselves; unmarked packages follow as a second tier."""
+    """D3 (#9092): the value mark is a tiebreak INSIDE the statement tier, not
+    a tier of its own — marked statements keep pool relevance order between
+    themselves and lead the UNMARKED statements (there is no separate
+    unmarked tier any more; every anchor here is a statement, so the hit-type
+    key is constant and the mark decides)."""
     pool = [
         _point("pt:low-verbatim", "the tea set from cousin Rachel cost 300",
                quote="cost 300 dollars"),
@@ -365,9 +381,13 @@ def test_answer_string_class_orders_within_marked_tier():
         "pt:low-verbatim", "pt:answer", "pt:unmarked"]
 
 
-def test_source_chunk_mark_orders_chunk_above_unmarked_point():
-    """A raw-chunk-marked package leads the window (the eval marks raw
-    chunks with ``raw_chunk`` — the #1945 precise source class)."""
+def test_raw_chunk_mark_does_not_lift_a_chunk_over_a_statement():
+    """RE-PINNED from ``test_source_chunk_mark_orders_chunk_above_unmarked_point``
+    (D3, #9092). The eval marks raw chunks with ``raw_chunk``; that mark used
+    to put the chunk in the SAME value tier as an exact-value statement, so a
+    ``raw_chunk``-marked chunk arriving at a better pool rank LED the reader
+    window over a distilled statement. Under D3 the mark only orders chunks
+    among themselves — the statement leads regardless of rank."""
     pool = [
         _point("pt:1", "unrelated filler"),
         _chunk("lme:0:c9", ["User: I bought the tea set from cousin "
@@ -375,7 +395,65 @@ def test_source_chunk_mark_orders_chunk_above_unmarked_point():
     ]
     packaged, _ = package_evidence_pool(
         pool, mark_for=_marks_for(raw_chunk={"lme:0:c9"}))
-    assert [h["id"] for h in packaged] == ["lme:0:c9", "pt:1"]
+    assert [h["id"] for h in packaged] == ["pt:1", "lme:0:c9"]
+
+
+def test_statement_leads_over_raw_chunk_marked_chunk_at_better_pool_rank():
+    """D3 (#9092): a distilled statement package leads a ``raw_chunk``-marked
+    chunk that arrived at a BETTER pool rank (0 vs 1). The mark is a
+    within-tier tiebreak, never a tier of its own — this is the exact defect
+    the #1945 value-tier set caused by carrying ``raw_chunk`` alongside
+    ``answer_string``/``verbatim``."""
+    pool = [
+        _chunk("lme:0:c1", ["User: I bought the tea set from cousin "
+                             "Rachel for 300 dollars"]),
+        _point("pt:1", "the tea set from cousin Rachel cost 300 dollars"),
+    ]
+    packaged, _ = package_evidence_pool(
+        pool, mark_for=_marks_for(raw_chunk={"lme:0:c1"}))
+    assert [h["id"] for h in packaged] == ["pt:1", "lme:0:c1"]
+
+
+def test_turn_point_orders_between_statement_and_raw_chunk():
+    """D3 (#9092): the three tiers, all in one pool with the WORST hit type
+    at the BEST rank — statement (rank 2) then turn Point (rank 1) then raw
+    chunk (rank 0). Rank must not cross a tier boundary."""
+    pool = [
+        _chunk("lme:0:c1", ["User: the garden fence needs repainting "
+                             "before the winter"]),
+        _turn("lme:0:t3", "user", "my sister borrowed the blue ladder"),
+        _point("pt:1", "the road bike repairs cost 300 dollars"),
+    ]
+    packaged, _ = package_evidence_pool(
+        pool, mark_for=_marks_for(raw_chunk={"lme:0:c1"}))
+    assert [h["id"] for h in packaged] == ["pt:1", "lme:0:t3", "lme:0:c1"]
+
+
+def test_value_mark_does_not_lift_a_turn_point_to_the_statement_tier():
+    """D3 (#9092): a turn Point carrying the ``verbatim`` value mark stays in
+    the MIDDLE tier — the mark does not raise it over an unmarked distilled
+    statement (D3: turn Points are the middle tier, full stop)."""
+    pool = [
+        _turn("lme:0:t3", "user", "the tea set cost 300 dollars"),
+        _point("pt:1", "filler about the garden fence"),
+    ]
+    packaged, _ = package_evidence_pool(
+        pool, mark_for=_marks_for(verbatim={"lme:0:t3"}))
+    assert [h["id"] for h in packaged] == ["pt:1", "lme:0:t3"]
+
+
+def test_raw_chunk_mark_still_orders_chunks_among_themselves():
+    """D3 (#9092): the ``raw_chunk`` mark keeps its #1945 meaning WITHIN the
+    chunk tier — a marked chunk leads unmarked chunks even from a worse pool
+    rank (the mark is demoted, never discarded)."""
+    pool = [
+        _chunk("lme:0:c1", ["User: the garden fence needs repainting"]),
+        _chunk("lme:0:c2", ["User: I bought the tea set from cousin "
+                             "Rachel for 300 dollars"]),
+    ]
+    packaged, _ = package_evidence_pool(
+        pool, mark_for=_marks_for(raw_chunk={"lme:0:c2"}))
+    assert [h["id"] for h in packaged] == ["lme:0:c2", "lme:0:c1"]
 
 
 # ── (d) OFF parity: tri-state fail-safe OFF on both seams ─────────────────
@@ -413,13 +491,17 @@ def test_ask_lane_knob_failsafe_off_by_default():
 
 
 # ── (e) no-dupe no-regression: the ON path is byte-identical when there is
-#      nothing to package ──────────────────────────────────────────────────
+#      nothing to package AND the pool is already tier-ordered ──────────────
 
 def test_no_duplicate_no_value_marks_returns_byte_identical_pool():
     """A duplicate-free pool with no value marks passes through BYTE-
-    IDENTICAL (same ids, same order, same dicts) — flipping the arm ON
-    cannot regress single-evidence questions (the hermetic no-regression
-    proof that would license a default-ON decision)."""
+    IDENTICAL (same ids, same order, same dicts) — flipping the arm ON cannot
+    regress single-evidence questions **whose pool is already tier-ordered**.
+    Scope (D3, #9092): the fixture is deliberately tier-aligned (all points,
+    ranks 0-2, ahead of the chunks, ranks 3-4), so the hit-type key is a no-op
+    here. A mixed pool IS regrouped by hit type — that is by design, and it is
+    measured by ``test_unmarked_mixed_type_pool_regroups_by_hit_type`` rather
+    than asserted away here."""
     pool = [
         _point("pt:1", "the road bike repairs cost 300 dollars",
                session="sA", date="2025-06-01"),
@@ -438,6 +520,36 @@ def test_no_duplicate_no_value_marks_returns_byte_identical_pool():
     assert stats["collapsed_duplicates"] == 0
     assert stats["verbatim_refs_kept"] == 0
     assert stats["package_items"] == stats["pool_items"]
+
+
+def test_unmarked_mixed_type_pool_regroups_by_hit_type():
+    """D3 (#9092): the hit TYPE is the PRIMARY key, so an UNMARKED pool that
+    lists a raw chunk above its statements is regrouped — the statements lead
+    in their own pool order, then the chunk — even though nothing collapsed
+    and no mark was supplied.
+
+    This is the deliberate reorder that SCOPES contract (e): ``mark_for=None``
+    (the ask-lane call) is not "pure collapse + ordering-by-rank" any more.
+    Measured with NO mark to confound it — every tier-crossing test above
+    carries a ``raw_chunk``/``verbatim`` mark, which cannot show this.
+    RED on the pre-#9092 ``(mark, rank)`` key, which returned the input order.
+    """
+    pool = [
+        _chunk("lme:0:c1", ["User: the garden fence needs repainting "
+                             "before the winter"]),
+        _point("pt:1", "the road bike repairs cost 300 dollars"),
+        _point("pt:2", "the tea set from cousin Rachel cost 300 dollars"),
+    ]
+    packaged, stats = package_evidence_pool(pool, mark_for=None)
+    # the statements lead IN POOL ORDER (rank 1 then 2), then the chunk (rank 0)
+    assert [h["id"] for h in packaged] == ["pt:1", "pt:2", "lme:0:c1"]
+    # a REGROUP, never a collapse: same items, nothing dropped, no refs kept
+    assert sorted(h["id"] for h in packaged) == ["lme:0:c1", "pt:1", "pt:2"]
+    assert stats["collapsed_duplicates"] == 0
+    assert stats["verbatim_refs_kept"] == 0
+    assert stats["package_items"] == stats["pool_items"]
+    # the value-mark census is 0 — the reorder is hit-type-only
+    assert stats["value_first_packages"] == 0
 
 
 def test_membership_is_a_subset_of_the_pool():

@@ -23,10 +23,15 @@ Two things are pinned here:
 """
 from __future__ import annotations
 
+import ast
+import importlib
+import inspect
 import os
+import re
 import socket
 import subprocess
 import sys
+import types
 import uuid
 from pathlib import Path
 
@@ -45,6 +50,17 @@ ACTION_DIR = ROOT / ".github" / "actions"
 # The one engine pin every provisioned job resolves to (#6386). Named once so
 # the guard cannot disagree with itself about which version is canon.
 FALKORDB_PIN = "falkordb/falkordb-server:v4.20.6"
+
+#: Compose files that can publish a FalkorDB. Enumerated rather than
+#: `rglob`-ed: the repo root carries `.worktrees/` checkouts whose compose files
+#: this guard does not own.
+COMPOSE_GLOBS = (
+    "docker-compose*.yml", "docker-compose*.yaml",
+    "compose*.yml", "compose*.yaml",
+    "apps/*/docker-compose*.yml", "apps/*/docker-compose*.yaml",
+    "integrations/*/*/docker-compose*.yml",
+    "integrations/*/*/docker-compose*.yaml",
+)
 
 # (workflow, job, uri_graph expected on the provision step['with'], legacy)
 # `legacy` is the EFFECTIVE value: the fast/slow/validate jobs replace a
@@ -297,13 +313,7 @@ def test_published_falkordb_compose_ports_bind_loopback():
     repo root carries `.worktrees/` checkouts whose compose files this change
     does not own.
     """
-    globs = (
-        "docker-compose*.yml", "docker-compose*.yaml",
-        "compose*.yml", "compose*.yaml",
-        "apps/*/docker-compose*.yml", "apps/*/docker-compose*.yaml",
-        "integrations/*/*/docker-compose*.yml",
-        "integrations/*/*/docker-compose*.yaml",
-    )
+    globs = COMPOSE_GLOBS
     compose_files = sorted({p for g in globs for p in ROOT.glob(g) if p.is_file()})
     assert compose_files, f"no compose file matched {globs} — the guard is vacuous"
 
@@ -887,3 +897,476 @@ def test_provision_refuses_a_non_numeric_port(tmp_path):
     assert proc.returncode != 0
     assert any(ln.startswith("::error::") for ln in proc.stdout.splitlines()), proc.stdout
     assert "TORTOISE_TEST_DOCKER_PORT" not in genv.read_text()
+
+
+# ── 4. the engine PIN reaches every docker-lane entry point (#8124) ───────
+#
+# #6386 pinned the CI half of the container-image class (every provisioned job
+# runs FALKORDB_PIN). #8124 is the same class on the LANE-TOOLING half: tools
+# and compose files that START a FalkorDB container resolved the floating
+# `falkordb/falkordb:latest`, which now points at engine 6.0.x. That engine
+# PANICS the server (`src/reply.rs:655` in `reply::reply_compact`, "called
+# `Option::unwrap()` on a `None` value") on a query shape the suite really
+# issues — `OPTIONAL MATCH (s:Session) RETURN count(s) AS n, s.harness AS h`,
+# i.e. an OPTIONAL MATCH projecting an AGGREGATE column beside a PROPERTY one.
+# The server process EXITS, so the lane does not fail like a bad assertion: it
+# fails like `redis.exceptions.ConnectionError: Connection closed by server`,
+# which the DB-unreachable session guard reports as "no TORTOISE_DB_URI
+# database could be reached" (the #6073 wedge class) — and a lane pointed at a
+# SHARED instance takes the DB down for every peer mid-run.
+#
+# MEASURED 2026-10-19, one disposable container per reading: module 60002
+# (`:latest`) and module 60001 (`6.0.1`) both panic and exit (1); module 42006
+# (`falkordb-server:v4.20.6`) and 42004 (`v4.20.4`) answer the same query and
+# stay Up. Pinning the APP-image family was therefore NOT sufficient — every
+# 6.0.x tag carries the panic.
+
+#: Docker-lane entry points that can START a FalkorDB container, enumerated
+#: (never `rglob`-ed, for the same `.worktrees/` reason as COMPOSE_GLOBS). A
+#: new entry point belongs here — that is what makes "0 lane entry points
+#: resolve a floating tag" a checkable statement instead of a claim.
+LANE_ENTRY_POINTS = (
+    ROOT / "tools" / "test_lane.py",
+    ROOT / "tools" / "edge_census.py",
+    ROOT / "graph-scripts" / "setup.py",
+)
+
+#: A reference whose tag is `latest*` or an `edge*` build — the floating FAMILY,
+#: not an enumerated set (upstream also publishes `latest-6.0.1`, `edge-ts`,
+#: `edge-x64`, `edge-rhel9-x64`, `edge-alpine`, …). `.github/workflows/
+#: mirror-images.yml` deliberately mirrors upstream `:latest` into the
+#: pull-through mirror — it SELECTS nothing a lane runs, so it is out of this
+#: guard on purpose; every path listed in LANE_ENTRY_POINTS and every compose
+#: file is in it. `tools/test_lane.py::is_floating_image` is the seam's own
+#: predicate and must agree with this one
+#: (pinned by test_the_seam_and_the_lane_sweep_classify_floating_tags_the_same_way).
+_FLOATING_REF = re.compile(r":(?:latest|edge)[a-z0-9._-]*$", re.IGNORECASE)
+_IMAGE_REF = re.compile(r"falkordb/falkordb[a-z-]*", re.IGNORECASE)
+
+
+def _is_floating(ref: str) -> bool:
+    """True for `:latest`, an `edge*` build, or NO tag at all.
+
+    An untagged reference is included deliberately: Docker reads it as
+    `:latest`, so `image: falkordb/falkordb` floats exactly the same and is the
+    spelling a "pin" is most likely to be mistyped into.
+    """
+    if "@sha256:" in ref:               # a digest IS the pin
+        return False
+    if ":" not in ref.rsplit("/", 1)[-1]:
+        return True                     # no tag = implicitly :latest
+    return bool(_FLOATING_REF.search(ref))
+
+
+def _code_string_constants(path: Path) -> list[str]:
+    """The string constants a module can actually PASS TO DOCKER.
+
+    Docstrings are excluded: the fix for #8124 is mostly prose that must be able
+    to NAME the floating tag it forbids, and a text scan over the file would
+    red on its own explanation. A docstring is a `Constant(str)` that is the
+    first statement of a module/class/function body, which `ast` can tell apart
+    from a value a call site uses.
+    """
+    tree = ast.parse(path.read_text())
+    docstrings = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                 ast.AsyncFunctionDef)):
+            continue
+        first = (getattr(node, "body", None) or [None])[0]
+        if (isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)):
+            docstrings.add(id(first.value))
+    return [n.value for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            and id(n) not in docstrings]
+
+
+def _lane_image_references() -> list[tuple[str, str]]:
+    """(location, reference) for every place a lane entry point starts a DB."""
+    refs: list[tuple[str, str]] = []
+    for path in LANE_ENTRY_POINTS:
+        # Every entry point is Python today. A new one in another language must
+        # not slip past silently — that is a loud failure, not a silent skip.
+        assert path.suffix == ".py", (
+            f"{path.relative_to(ROOT)}: this guard only reads .py entry points — "
+            "teach it how to read this file type before adding it to "
+            "LANE_ENTRY_POINTS"
+        )
+        for ref in _code_string_constants(path):
+            if _IMAGE_REF.search(ref):
+                refs.append((str(path.relative_to(ROOT)), ref))
+    for path in sorted({p for g in COMPOSE_GLOBS
+                        for p in ROOT.glob(g) if p.is_file()}):
+        doc = yaml.safe_load(path.read_text()) or {}
+        for service, svc in (doc.get("services") or {}).items():
+            image = str((svc or {}).get("image", "") or "")
+            if _IMAGE_REF.search(image):
+                refs.append((f"{path.relative_to(ROOT)}:{service}", image))
+    return refs
+
+
+def _entry_point_references() -> dict[str, list[str]]:
+    """{entry-point relpath: the image refs THAT file passes to docker}.
+
+    Per FILE, not a count across sources: compose files also carry image refs,
+    so a total cannot tell which entry point contributed one (#9085 review).
+    """
+    by_file: dict[str, list[str]] = {}
+    for where, ref in _lane_image_references():
+        by_file.setdefault(where, []).append(ref)
+    return {str(p.relative_to(ROOT)): by_file.get(str(p.relative_to(ROOT)), [])
+            for p in LANE_ENTRY_POINTS}
+
+
+def _subparser_actions(parser):
+    """Every argparse action of `parser` AND of each of its subparsers."""
+    found = []
+    for action in parser._actions:
+        choices = getattr(action, "choices", None)
+        if isinstance(choices, dict):
+            for sub in choices.values():
+                found.extend(sub._actions)
+                found.extend(_subparser_actions(sub))
+    return found
+
+
+def _load_setup_module():
+    """Import `graph-scripts/setup.py` — a hyphenated dir, not importable by name.
+
+    Module level only defines constants and functions (plus a version guard), so
+    loading it runs no docker call.
+    """
+    import importlib.util
+
+    path = ROOT / "graph-scripts" / "setup.py"
+    spec = importlib.util.spec_from_file_location("graph_scripts_setup_9085", path)
+    assert spec and spec.loader, f"cannot load {path}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _run_step8(monkeypatch, *, status: str, created_image: str):
+    """Run `setup.step8()` against a fake docker, returning the argv it issued.
+
+    `socket` is replaced on the module so the readiness loop answers on the
+    first attempt and no real connection is made.
+    """
+    setup = _load_setup_module()
+    calls: list[list[str]] = []
+    monkeypatch.setattr(setup, "MODE", "docker")
+    monkeypatch.setattr(setup, "_container_status", lambda _n: status)
+    monkeypatch.setattr(setup, "_container_image", lambda _n: created_image)
+    monkeypatch.setattr(setup, "_port_collision", lambda _p: None)
+    monkeypatch.setattr(setup, "_run", lambda cmd, **kw: calls.append(cmd))
+
+    class _Sock:
+        def __init__(self, *a, **k):
+            pass
+
+        def settimeout(self, _t):
+            pass
+
+        def connect(self, _addr):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(setup, "socket", types.SimpleNamespace(
+        socket=_Sock, AF_INET=socket.AF_INET, SOCK_STREAM=socket.SOCK_STREAM))
+    setup.step8()
+    return setup, calls
+
+
+def test_setup_recreates_an_existing_container_off_the_pin(monkeypatch):
+    """#9085 review: the pin must reach an EXISTING container, not only a new one.
+
+    `FALKORDB_IMAGE` is consumed by the `docker run` that happens ONLY on the
+    `missing` path. A container created before the pin existed — from the then
+    floating `falkordb/falkordb:latest` — keeps its engine ID for life, because
+    `docker start` never re-resolves an image; under `--restart unless-stopped`
+    that is the panicking 6.0.x engine restarted forever, on the container MOST
+    likely to be broken (it is the one that crashed). Recreate it on the pin.
+    """
+    for status in ("running", "exited"):
+        setup, calls = _run_step8(monkeypatch, status=status,
+                                  created_image="falkordb/falkordb:latest")
+        rm = [c for c in calls if c[:2] == ["docker", "rm"]]
+        assert rm and rm[0][-1] == setup._FALKORDB_CONTAINER, (
+            f"a {status} container created from `:latest` was not recreated "
+            f"(docker calls: {calls}) — it keeps the panicking engine for life"
+        )
+        run = [c for c in calls if c[:2] == ["docker", "run"]]
+        assert run, f"nothing recreated the container on the pin (calls: {calls})"
+        assert setup.FALKORDB_IMAGE in run[-1], (
+            f"the recreated container must name the pin, got {run[-1]}"
+        )
+        assert not [c for c in calls if c[:2] == ["docker", "start"]], (
+            "`docker start` on the old container re-uses its original engine — "
+            f"that is the bug, not the fix (calls: {calls})"
+        )
+
+
+def test_setup_keeps_an_existing_container_that_already_runs_the_pin(monkeypatch):
+    """The recreation must not fire on the happy path — a pinned container is
+    reused as-is (running) or restarted (exited), never removed: the pin decides,
+    the status only decides which of the two reuse branches is taken."""
+    for status in ("running", "exited"):
+        _setup, calls = _run_step8(monkeypatch, status=status,
+                                   created_image=FALKORDB_PIN)
+        assert not [c for c in calls if c[:2] == ["docker", "rm"]], (
+            f"a {status} container already on the pin must not be removed "
+            f"(docker calls: {calls})"
+        )
+        assert not [c for c in calls if c[:2] == ["docker", "run"]], (
+            f"a {status} container already on the pin must not be recreated "
+            f"(docker calls: {calls})"
+        )
+        if status == "exited":
+            assert [c for c in calls if c[:2] == ["docker", "start"]], (
+                f"an exited container on the pin must simply be restarted "
+                f"(docker calls: {calls})"
+            )
+
+
+def test_setup_never_reads_an_unreadable_image_as_the_pin(monkeypatch, capsys):
+    """#8124 review (P3): a failed query is never read as permission.
+
+    `_container_image` returns `""` when `docker inspect` cannot answer, and
+    `""` used to fall through the truthiness test into "container already
+    running" / "Restarting stopped container" — a container whose engine was
+    never established, reported as if it had been confirmed on the pin. It must
+    neither be reused as pinned nor DESTROYED (its provenance is unknown): it is
+    left untouched, and the message says what is unknown and how to settle it.
+    """
+    for status in ("running", "exited"):
+        _setup, calls = _run_step8(monkeypatch, status=status, created_image="")
+        out = capsys.readouterr().out
+        assert not [c for c in calls if c[:2] in (["docker", "rm"],
+                                                 ["docker", "run"],
+                                                 ["docker", "start"])], (
+            f"an unreadable image is not permission to touch the container "
+            f"(status={status}, docker calls: {calls})"
+        )
+        assert "#8124" in out and "untouched" in out, (
+            f"the unreadable branch must name itself, not pass silently "
+            f"(status={status}): {out!r}"
+        )
+
+
+def test_no_lane_entry_point_resolves_a_floating_falkordb_tag():
+    """#8124: lane tooling must name an engine, never track a floating tag."""
+    refs = _lane_image_references()
+    assert refs, (
+        "no lane entry point resolves a FalkorDB image — the guard is vacuous "
+        "(a path in LANE_ENTRY_POINTS/COMPOSE_GLOBS stopped pointing at the "
+        "file that starts the container)"
+    )
+
+    floating = [f"{where}: {ref}" for where, ref in refs if _is_floating(ref)]
+    assert not floating, (
+        "these docker-lane entry points start a FalkorDB from a FLOATING tag:\n  "
+        + "\n  ".join(floating)
+        + f"\n`latest` now resolves to engine 6.0.x, whose reply_compact panics"
+        f" the server on `OPTIONAL MATCH ... RETURN count(s), s.harness` and"
+        f" EXITS it — the lane then reports `Connection closed by server` instead"
+        f" of a result, and a SHARED instance takes every peer lane down with it"
+        f" (#8124). Pin {FALKORDB_PIN} (the engine the CI gate runs, #6386)."
+    )
+    # Non-vacuous in the OTHER direction too, and PER FILE: the scan must be
+    # reading the very files where the pin lives, AND each of them must name the
+    # canon engine. A COUNT across all sources cannot do the second job (#9085
+    # review): while this PR also sets `apps/graph-viz/docker-compose.yml` to the
+    # pin, the count is `len(LANE_ENTRY_POINTS) + 1`, so ONE entry point
+    # drifting to a different EXPLICIT engine (`graph-scripts/setup.py` ->
+    # `falkordb/falkordb-server:v4.20.4`) kept the count at 3 and this guard
+    # GREEN — the exact drift the sibling test's docstring says it exists to
+    # prevent ("a tool whose default is a different explicit version would pass
+    # the sweep above").
+    by_entry_point = _entry_point_references()
+    for path in LANE_ENTRY_POINTS:
+        rel = str(path.relative_to(ROOT))
+        here = by_entry_point.get(rel, [])
+        assert here, (
+            f"{rel} resolves no FalkorDB image — the guard is not reading the "
+            f"file that starts the container (refs found: {refs})"
+        )
+        assert all(ref == FALKORDB_PIN for ref in here), (
+            f"{rel} resolves {here!r} instead of the canon engine "
+            f"{FALKORDB_PIN!r} — a different EXPLICIT version is engine drift, "
+            f"not a pin (#8124/#6386): the engine the gate never approved can "
+            f"carry the same `reply_compact` panic, and the floating-tag sweep "
+            f"cannot see it."
+        )
+
+
+def test_the_lane_tools_default_to_the_canon_engine_pin(monkeypatch):
+    """The DEFAULT is the pin, not merely a refusal of `latest`.
+
+    A tool whose default is a different explicit version would pass the sweep
+    above while running an engine the gate never approved — the drift #6386
+    exists to prevent, one layer down. Read from the modules themselves so the
+    guard cannot be satisfied by a comment.
+    """
+    sys.path.insert(0, str(ROOT))
+
+    from tools import test_lane as tl  # deliberately lazy
+
+    # The CODE property, order-independently (#9085 review). `tl.IMAGE` is bound
+    # at IMPORT time, and `tests/test_test_lane_tool.py` imports this module at
+    # module level — so pytest's COLLECTION already bound it before this test
+    # runs. Deleting the env var here cannot undo that, and a lane that
+    # legitimately exports the seam (to compare two pinned engines) would red
+    # this test for an environment reason. Reload under a deleted env var, so
+    # what is asserted is the module's own default rather than the shell's.
+    monkeypatch.delenv("TORTOISE_TEST_LANE_IMAGE", raising=False)
+    importlib.reload(tl)
+
+    assert tl.LANE_IMAGE_PIN == FALKORDB_PIN, (
+        f"tools/test_lane.py pins {tl.LANE_IMAGE_PIN!r}, not the canon engine "
+        f"{FALKORDB_PIN!r} (#8124/#6386)"
+    )
+    assert tl.IMAGE == tl.LANE_IMAGE_PIN, (
+        "with no TORTOISE_TEST_LANE_IMAGE exported the lane must run the pin — "
+        f"the module resolved {tl.IMAGE!r}"
+    )
+
+    from tools import edge_census as ec
+
+    assert ec.PROBE_IMAGE == FALKORDB_PIN, (
+        f"tools/edge_census.py's probe default is {ec.PROBE_IMAGE!r}, not "
+        f"{FALKORDB_PIN!r} — a panic there kills the probe container "
+        "mid-measurement and reports a partial reading (#8124)"
+    )
+    assert inspect.signature(ec.run_probe).parameters["image"].default == ec.PROBE_IMAGE, (
+        "run_probe's default and the --image default must be ONE value"
+    )
+    # ...and the OTHER side of that pair is the argparse default, which neither
+    # `run_probe`'s signature nor the floating sweep reads (#9085 review): a
+    # drift of that one line to another EXPLICIT version kept both green.
+    image_actions = [a for a in _subparser_actions(ec._build_parser())
+                     if "--image" in a.option_strings]
+    assert image_actions, (
+        "tools/edge_census.py's parser declares no --image argument — this "
+        "assertion has gone vacuous, not green"
+    )
+    for action in image_actions:
+        assert action.default == ec.PROBE_IMAGE, (
+            f"the parser default for {action.option_strings} is "
+            f"{action.default!r}, not PROBE_IMAGE ({ec.PROBE_IMAGE!r}) — "
+            "`probe --image` and run_probe's signature must agree on the pin"
+        )
+
+    # graph-scripts/setup.py is the third entry point, and it is checkable here
+    # by VALUE rather than only by the floating sweep (#9085 review).
+    setup = _load_setup_module()
+    assert setup.FALKORDB_IMAGE == FALKORDB_PIN, (
+        f"graph-scripts/setup.py's dev-container image is "
+        f"{setup.FALKORDB_IMAGE!r}, not the canon engine {FALKORDB_PIN!r} — its "
+        "container is long-lived (`--restart unless-stopped`), so a panicking "
+        "engine there reads as an unreachable host (#8124)"
+    )
+
+
+def test_the_lane_image_seam_refuses_a_floating_override(monkeypatch):
+    """A digest and an explicit version are pins; the `latest`/`edge` FAMILY is not.
+
+    Fail-closed at the seam matters because the old default is the thing an
+    operator copy-pastes: `TORTOISE_TEST_LANE_IMAGE=falkordb/falkordb:latest`
+    reproduces #8124 exactly, and it would look like a deliberate comparison.
+    The seam must match the FAMILY, not an enumerated set (#9085 review):
+    upstream also publishes `edge-ts`, `edge-x64`, `edge-rhel9-x64`,
+    `edge-alpine`, `latest-6.0.1`, and an enumerated refusal list is always one
+    publication behind — the four spellings below that the earlier set did NOT
+    contain were ACCEPTED by it and reached the `docker run`.
+    """
+    sys.path.insert(0, str(ROOT))
+    from tools import test_lane as tl
+
+    assert tl.assert_pinned_image(FALKORDB_PIN) == FALKORDB_PIN
+    assert tl.assert_pinned_image("falkordb/falkordb-server:v4.20.4") == (
+        "falkordb/falkordb-server:v4.20.4"
+    )
+    digest = "falkordb/falkordb@sha256:" + "a" * 64
+    assert tl.assert_pinned_image(digest) == digest
+
+    for floating in ("falkordb/falkordb:latest", "falkordb/falkordb",
+                     "falkordb/falkordb:edge", "falkordb/falkordb-server:latest",
+                     "falkordb/falkordb:edge-ts", "falkordb/falkordb:latest-6.0.1",
+                     "falkordb/falkordb-server:edge-x64",
+                     "falkordb/falkordb:edge-alpine",
+                     "falkordb/falkordb-server:EDGE-RHEL9-X64"):
+        with pytest.raises(SystemExit) as exc:
+            tl.assert_pinned_image(floating)
+        assert "#8124" in str(exc.value), (
+            f"refusing {floating!r} must name the issue it is protecting: "
+            f"{exc.value}"
+        )
+
+
+def test_the_seam_and_the_lane_sweep_classify_floating_tags_the_same_way():
+    """ONE predicate owns the verdict (#9085 review).
+
+    Two definitions of "floating" in the same PR is how a lane slips between
+    them: `_is_floating` (this file's sweep) refuses every `edge*` spelling,
+    while `tools/test_lane.py`'s seam used to accept anything outside a
+    six-item set. They must agree on the whole family, and on the pins.
+    """
+    sys.path.insert(0, str(ROOT))
+    from tools import test_lane as tl
+
+    samples = [
+        "falkordb/falkordb", "falkordb/falkordb:latest",
+        "falkordb/falkordb:latest-6.0.1", "falkordb/falkordb:latest-alpine",
+        "falkordb/falkordb:edge", "falkordb/falkordb:edge-c",
+        "falkordb/falkordb:edge-rs", "falkordb/falkordb:edge-ts",
+        "falkordb/falkordb-server:edge-x64",
+        "falkordb/falkordb-server:edge-rhel9-x64",
+        "falkordb/falkordb:edge-alpine-arm64v8",
+        FALKORDB_PIN, "falkordb/falkordb-server:v4.20.4",
+        "falkordb/falkordb-server@sha256:" + "a" * 64,
+    ]
+    disagreements = [
+        f"{ref}: sweep={_is_floating(ref)} seam={tl.is_floating_image(ref)}"
+        for ref in samples if _is_floating(ref) != tl.is_floating_image(ref)
+    ]
+    assert not disagreements, (
+        "the lane sweep and the image seam disagree about which references "
+        "float — one predicate must own the verdict:\n  "
+        + "\n  ".join(disagreements)
+    )
+    # Both directions non-vacuous: the samples must contain pins AND floats.
+    assert any(_is_floating(ref) for ref in samples)
+    assert any(not _is_floating(ref) for ref in samples)
+
+
+def test_the_selfhost_quickstart_hands_out_the_compose_pin_not_latest():
+    """The doc's runnable example is a docker-lane entry point too (#8124).
+
+    Option B says "Same image, standalone" — it is the bare-container form of
+    `docker-compose.yml`'s sidecar, so it must name the COMPOSE pin, read from
+    the compose file rather than restated here. A floating tag in a copy-paste
+    block is how a reader ends up running the engine whose `reply_compact`
+    panics the server; the documented default is the compose's own pin, and
+    bumping the compose must carry the doc with it.
+    """
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
+    compose_image = compose["services"]["falkordb"]["image"]
+    assert ":" in compose_image.rsplit("/", 1)[-1], (
+        f"docker-compose.yml's falkordb image {compose_image!r} is untagged "
+        "(implicitly :latest) — pin it before relying on it here"
+    )
+
+    quick = (ROOT / "docs" / "quickstart-selfhosted.md").read_text()
+    option_b = quick.split("### Option B", 1)[1].split("### Option C", 1)[0]
+    assert compose_image in option_b, (
+        f"docs/quickstart-selfhosted.md's Option B no longer names the compose "
+        f"pin {compose_image!r} — a bare `docker run` there must hand the reader "
+        "the pinned engine, not a floating tag (#8124)"
+    )
+    assert not re.search(r"falkordb/falkordb[a-z-]*:latest", option_b), (
+        "Option B still hands out a floating `:latest` engine (#8124)"
+    )
