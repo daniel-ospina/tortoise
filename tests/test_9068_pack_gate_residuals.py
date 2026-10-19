@@ -136,8 +136,16 @@ lane instead of both; the honest cost of running it on both is that a URI-set
 run mints five per-test throwaway graphs on the shared server — the `#5084`
 accumulation surface every ``tmp_path``-SDK test already sits on.
 
-Registered in ``config/ci-surfaces.yml`` (``core``), beside the pack tests it
-reads.
+Registered in ``config/ci-surfaces.yml`` (``core``, DUAL-REGISTERED with
+``api`` and ``onboarding``), beside the pack tests it reads. The extra arms are
+not decoration: the inventory walks ALL of ``tortoise/**``, and three of the
+thirteen doors live in ``tortoise/hosted_api.py``, an EXACT ``api``
+SOURCE_PATTERN match that REPLACES the ``core`` fallback in
+``tools/ci_selection.py::select`` — so a ``hosted_api.py``-only diff would
+otherwise run every guard EXCEPT this one, and a stale inventory would merge
+green (the #1349/#3332/#3616 silent-drop class).
+``test_the_inventory_runs_on_a_diff_to_every_module_it_scans`` pins the
+selection, derived from ``_DOORS``, so this cannot rot back.
 """
 
 from __future__ import annotations
@@ -448,9 +456,52 @@ def test_the_gate_helper_vocabulary_is_complete() -> None:
         "it so the vocabulary stays decidable")
 
 
+def test_the_inventory_runs_on_a_diff_to_every_module_it_scans() -> None:
+    """A guard the diff that falsifies it does not RUN is not a guard.
+
+    ``_gate_call_sites`` walks ALL of ``tortoise/**``, so the change that can
+    add a fourteenth door is a change to ANY module — not only to the ones that
+    happen to hold the thirteen today. Registration is per SURFACE, and an
+    exact ``SOURCE_PATTERNS`` match (``tortoise/hosted_api.py`` and
+    ``tortoise/__main__.py`` → ``api``+``onboarding``) REPLACES the ``core``
+    fallback that was this file's only arm: before those arms, a
+    ``hosted_api.py``-only PR — where THREE of the thirteen doors live —
+    selected ``['api', 'onboarding']`` and ran every guard except this one, so a
+    stale ``_DOORS`` merged green and reddened ``main`` only on the next full
+    run (the #1349/#3332/#3616 silent-drop class).
+
+    Derived from ``_DOORS`` rather than from a hand-kept module list, so when a
+    door lands in a NEW module this pin asks the same question about it.
+    """
+    from tools.ci_selection import load_manifest, select
+
+    manifest = load_manifest()
+    this_file = Path(__file__).name
+    doors_by_module: dict[str, int] = {}
+    for door in _DOORS:
+        module = door.split(":", 1)[0]
+        doors_by_module[module] = doors_by_module.get(module, 0) + 1
+
+    missing: dict[str, tuple[list[str], int]] = {}
+    for module, door_count in sorted(doors_by_module.items()):
+        sel = select([module], "pull_request", manifest)
+        selected = (sel["full"] or sel["test_files"] == "ALL"
+                    or this_file in set(sel["test_files"]))
+        if not selected:
+            missing[module] = (sel["surfaces"], door_count)
+
+    assert not missing, (
+        "a diff to a module this inventory scans does not SELECT this file, so "
+        "a fourteenth door (or a moved one) there would merge green: "
+        + "; ".join(
+            f"{module} holds {n} door(s) and selects {surfaces}"
+            for module, (surfaces, n) in missing.items())
+        + ". Register this file on that surface in config/ci-surfaces.yml (the "
+          "`test_7951_write_doors.py` precedent) rather than only in `core`")
+
+
 def test_the_pin_mechanic_is_fail_closed() -> None:
     """The two guards that make the two pins above mean anything, exercised.
-
     (a) The fixture precondition must NOT be an ``AssertionError``. Under
         ``xfail(strict=True, raises=AssertionError)`` a raised assertion — in
         the body OR out of a fixture — is recorded as ``xfailed`` (verified on
