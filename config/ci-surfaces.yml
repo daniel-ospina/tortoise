@@ -1266,6 +1266,25 @@ surfaces:
   # this file's do not, and an over-broad registration would run it on diffs
   # it cannot observe.
   - test_9079_ep_epoch_declared.py
+  # #9079 (§17.1 write-lane DECLARATION): registered on `core` ONLY, and the
+  # withholding check is why. The ONE subject this suite observes is
+  # `tortoise/projection/__init__.py` — the `rebuild_from_record` engine and the
+  # lane it opens. It reads the handle's OWN census (`undeclared_handle_writes`)
+  # and flips `_HANDLE_GUARD_ENFORCES` for its armed tests; it does not touch
+  # `tortoise/event_store.py` (that declaration landed in `#9224` and is pinned
+  # by `test_9124_declared_live_doors.py`), nor `tortoise/hosted_api.py`.
+  #   * `tortoise/projection/__init__.py` selects the FULL matrix (`full: True`,
+  #     `test_files: ALL`), so every arm already carries this suite; `core` is the
+  #     row that satisfies `--integrity` and puts the file in `fast_pool()`, and
+  #     an extra row could not add a leg it is missing.
+  #   * A row for a surface the suite cannot observe would run it on diffs it
+  #     says nothing about — the over-broad registration the `#9123` entry above
+  #     warns about (the `#9121` entries below are the OPPOSITE precedent: they
+  #     multi-register because their subjects span those surfaces).
+  # Without this row `uv run python tools/ci_selection.py --integrity` exits 1
+  # with `manifest drift: ['test_9079_record_replay_declared.py']`, and
+  # `fast_pool()` is manifest-derived, so the four pins would run in NO leg.
+  - test_9079_record_replay_declared.py
   # #7983 (§17.4.4/§17.4.6): the read ledger — the instrument the hot fraction
   # `f` never had. `core` is the right arm: neither tortoise/read_ledger.py (a NEW
   # file, so it matches no SOURCE_PATTERN) nor tortoise/sdk.py selects anything
@@ -6747,6 +6766,7 @@ durations:
   test_7951_update_point_outbox.py: 7.2  # unmeasured — #7951 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red (790/878 = 90.0% at the floor, and the file packs at the flat 2.0s default) — the same shape as the `test_7951_create_point_outbox.py` row above. Local embedded-lane reading 7.2s (6 tests; two of them rebuild the graph). Refresh from the first post-merge run that includes it.
   test_7951_delete_point_outbox.py: 5.0  # unmeasured — #7951 increment 4a (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), and an absent row packs it at the flat 2.0s default, which drops `duration_coverage_issues()` under the 90% floor — the same shape as the `test_7951_create_point_outbox.py` row above. Local embedded-lane readings 4.3–6.8 s when the file collected 6 tests; at this head it collects 10 (T1-T10, TWO of which call `rebuild_all` — T3 and T8) and measured 7.5 s here on the same lane, so the 5.0 weight is a lower-ish bound in the right neighbourhood rather than a stale one. Refresh from the first post-merge run that includes it.
   test_9079_ep_epoch_declared.py: 7.2  # unmeasured — #9123 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red at 840/934 = 89.9% — the same shape as the `test_7951_create_point_outbox.py` row above. Local embedded-lane readings 5.9/6.0/6.4 s over three runs (6 tests; one calls `rebuild_all`). ⚠️ A longer reading (148 s) is NOT this file's weight: the FIRST `create_point` in a process lazily loads the embedding model — 15.7 s standalone, and 134 s for the one test that pays it under fleet load 65 — after which creates are 0.16 s. That one-time load is paid once per file and is not what this weight packs. Declared above the quiet-box readings so a cold leg cannot under-pack. Refresh from the first post-merge run that includes it.
+  test_9079_record_replay_declared.py: 9.0  # unmeasured — #9079 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), and an absent row packs it at the flat 2.0s default. Four tests, each one `rebuild_from_record` round trip in an embedded SDK with NO `create_point` (so the once-per-leg embedding-model load the `test_9079_ep_epoch_declared.py` row above pays is NOT part of this weight); local readings are recorded on the `#9079` PR. Refresh from the first post-merge run that includes it.
   test_audit_fallback_home_isolation.py: 2.4
   test_9208_change_feed_degraded.py: 2.0  # unmeasured — new in #9208 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). Without this row the file is in the fast pool, so it packs at the flat 2.0s default AND `duration_coverage_issues()` sits at 90.02% — one peer lane adding a file tips it under the 90% floor. The weight is the flat default deliberately (a LOCAL reading would not be a shard-layout input, #3419/#2788): the local 42-65 s readings for this file are almost entirely the once-per-leg embedding-model load the #3400 method attributes to no file. Refresh from the first post-merge run that includes it.
   test_ci_stall_identify.py: 16.0  # #5035: the 1.8 predated this PR's subprocess-launching tests. A quiet-machine estimate (measured 12.3, 14.8, 16.3 s; 25.9 s under moderate load and 34-40 s at fleet load 67-79 — the file spawns pytest children, so it tracks box load hard). `tools/ci_timing.py --refresh-durations` is the canonical (CI-measured) writer; this line is a local estimate until it next runs.
