@@ -135,6 +135,25 @@ panic for every peer lane, so the ``TORTOISE_TEST_LANE_IMAGE`` seam is
 validated (``assert_pinned_image``) and a floating tag is REFUSED rather than
 copy-pasted back in.
 
+MEMORY — A KERNEL CAP, NOT ONLY `maxmemory` (#7357)
+---------------------------------------------------
+The container is created with ``--memory`` AND ``--memory-swap`` set to the
+same value (``CONTAINER_MEMORY_ENV``, default ``2g``). ``--maxmemory`` is a
+REDIS-side limit; with ``HostConfig.Memory=0`` the container's real ceiling is
+the HOST's, and the host's ceiling is swap. So one runaway instance pages the
+whole box for minutes and starves every neighbour — including the canonical
+graph instance, whose process then goes away and is restarted by its own
+``restart: always`` policy, forever (#7357 measured exactly that). The cap
+converts a fleet-wide outage into ONE container dying alone, in its own cgroup,
+in seconds. It also makes the death LEGIBLE: a container the kernel (or this
+cap) killed used to read as "it may be wedged: run down and retry", so the
+operator retried into the same death and never learned the cause —
+``_memory_kill_report`` now names ``OOMKilled``/``ExitCode`` when docker says
+so. Two limits, stated: an EXISTING container keeps the limits it was created
+with (docker cannot change them on ``start`` — ``down`` then ``start``
+recreates it, as with the image pin), and a value above the host's real
+headroom still dies (it just dies alone).
+
 CONTRACT — THE TARGET IS NOT A PARAMETER
 ----------------------------------------
 The container this tool acts on is ALWAYS ``fdb-lane-<sha1(worktree)[:10]>``,
@@ -306,6 +325,110 @@ GIT_TIMEOUT = 30
 IMAGE_PULL_TIMEOUT = 600
 #: How long a fresh or reused container gets to answer PING.
 READY_TIMEOUT = 60
+#: #7357 — the KERNEL (cgroup) memory cap every lane container is created
+#: with, as a docker memory spec. Defaulted to the SHARED instance's own
+#: ceiling (the docker lane refuses writes at `used_memory 2.0 GiB of
+#: maxmemory 2.0 GiB`), so a lane that needs more than this was never a drop-in
+#: for the instance it replaces.
+#:
+#: WHY A KERNEL CAP AND NOT ONLY `maxmemory`: `--maxmemory` is a REDIS-side
+#: limit. Without `HostConfig.Memory` the container's real ceiling is the
+#: HOST's, and the host's ceiling is swap — so a runaway instance pages the
+#: whole box for minutes and starves every neighbour, including the canonical
+#: graph instance, whose process then goes away and is restarted by its
+#: `restart: always` policy, forever (#7357: `ExitCode=0`, `OOMKilled=false`,
+#: `Memory=0`, `RestartCount` climbing). A cgroup cap converts that fleet-wide
+#: outage into ONE container dying alone, in seconds, inside its own cgroup.
+#:
+#: `--memory-swap` is set EQUAL to `--memory` on purpose: docker's default is
+#: 2x memory, i.e. the container may swap, and a swapping FalkorDB is the
+#: 96-146 s RDB reload the issue records rather than a fast failure.
+CONTAINER_MEMORY_ENV = "FALKORDB_CONTAINER_MEMORY"
+DEFAULT_CONTAINER_MEMORY = "2g"
+#: The docker memory-spec grammar (`512m`, `2g`, `1.5g`, bytes). Validated at
+#: the seam because the value is interpolated into an argv: a typo must fail
+#: loudly here, not as an opaque `docker run` refusal later.
+_MEMORY_SPEC_RE = re.compile(r"[0-9]+(?:\.[0-9]+)?[bkmg]?\Z")
+
+
+def _spec_is_positive(spec: str) -> bool:
+    """Whether *spec* is a POSITIVE byte count.
+
+    `0` (and `0g`, `0.0g`, …) is not a small cap — to docker it means NO limit
+    (`HostConfig.Memory=0`), i.e. exactly the uncapped container #7357 is
+    about, reached by the one value a reader would type to "disable" the cap.
+    The grammar alone accepts it, so the ZERO case is refused separately.
+    """
+    number = spec[:-1] if spec[-1] in "bkmg" else spec
+    return float(number) > 0
+
+
+def container_memory_cap() -> str:
+    """The kernel memory cap for the container this tool starts (#7357).
+
+    Read at CALL time (not import time) so a lane can raise it per run, and
+    validated so a malformed value cannot reach `docker run`. Fail-closed: an
+    unusable value is refused rather than silently dropped, because a dropped
+    cap is exactly the uncapped container this exists to prevent.
+    """
+    raw = (os.environ.get(CONTAINER_MEMORY_ENV)
+           or DEFAULT_CONTAINER_MEMORY).strip().lower()
+    if not _MEMORY_SPEC_RE.match(raw) or not _spec_is_positive(raw):
+        raise SystemExit(
+            f"test-lane: {CONTAINER_MEMORY_ENV}={raw!r} is not a POSITIVE "
+            f"docker memory spec (e.g. 512m, 2g, 1.5g; `0` means UNLIMITED to "
+            f"docker) — refusing to start the lane with an unusable cap "
+            f"(default {DEFAULT_CONTAINER_MEMORY})"
+        )
+    return raw
+
+
+def _memory_cap_args() -> list[str]:
+    """`--memory`/`--memory-swap` for `docker run` — the pair, never one."""
+    cap = container_memory_cap()
+    return ["--memory", cap, "--memory-swap", cap]
+
+
+#: `docker inspect --format` for the three facts that distinguish "the server
+#: is wedged" from "the kernel killed it", in one call.
+_TERMINATION_FORMAT = "{{.State.OOMKilled}} {{.State.ExitCode}} {{.RestartCount}}"
+
+
+def _memory_kill_report(name: str) -> str:
+    """Name a MEMORY kill instead of calling it a wedge — or `""` when the
+    container was not killed by memory pressure, or docker could not be asked.
+
+    #7357's second half is LEGIBILITY, not the cap: a container killed by the
+    kernel (or OOM-killed by its own cgroup cap) currently reads as "it may be
+    wedged: run down and retry" — the same sentence a hung daemon gets — so the
+    operator retries into the same death and never learns the real cause. The
+    facts come from docker itself (`OOMKilled`, `ExitCode`), never inferred
+    from the connection error.
+
+    A failed/unknown inspect reports NOTHING rather than guessing: this
+    function's whole purpose is that the failure names what was measured.
+    """
+    r = _docker("inspect", "--format", _TERMINATION_FORMAT, name)
+    if r.returncode != 0:
+        return ""
+    parts = (r.stdout or "").strip().split()
+    if len(parts) != 3:
+        return ""
+    oom, exit_code, restarts = parts
+    # 137 is 128+SIGKILL — the kernel OOM killer, or this very cgroup cap.
+    # Anything else (0 = a clean exit, 143 = our own `docker stop`) is NOT a
+    # memory kill and must not be reported as one.
+    if oom.lower() != "true" and exit_code != "137":
+        return ""
+    return (
+        f" The container was KILLED FOR MEMORY (OOMKilled={oom}, "
+        f"ExitCode={exit_code}, RestartCount={restarts}): it did not hang, it "
+        f"was terminated — by the kernel under host memory pressure, or by its "
+        f"own cgroup cap ({CONTAINER_MEMORY_ENV}="
+        f"{os.environ.get(CONTAINER_MEMORY_ENV) or DEFAULT_CONTAINER_MEMORY}). "
+        f"Nothing the client retried could have succeeded, and this being "
+        f"invisible is what made it read as a wedged database."
+    )
 #: The shared instances every lane and the orchestration graph depend on, PLUS
 #: particular peer lanes' private containers that must never be removed. It is
 #: HAND-MAINTAINED, and NONE of its entries carries the NAME_PREFIX — so the
@@ -782,11 +905,20 @@ def start(port: int | None = None) -> tuple[str, int]:
                 f"tools/test_lane.py down` first to move it"
             )
         if not _wait_ready(name, published):
+            # #7357: a PROVEN memory kill REPLACES the "may be wedged" advice —
+            # appending it after that sentence left the operator reading two
+            # contradictory diagnoses in one message ("it may be wedged … The
+            # container was KILLED FOR MEMORY … it did not hang").
+            killed = _memory_kill_report(name)
+            advice = "" if killed else (
+                " — it may be wedged: run `uv run python "
+                "tools/test_lane.py down` and retry"
+            )
             raise SystemExit(
                 f"test-lane: {name} is running but never answered PING over its "
-                f"published host port {published} within {READY_TIMEOUT}s — it "
-                f"may be wedged: run `uv run python "
-                f"tools/test_lane.py down` and retry"
+                f"published host port {published} within {READY_TIMEOUT}s"
+                f"{advice}."
+                + killed
             )
         return name, published
     if state == "unknown":
@@ -815,6 +947,10 @@ def start(port: int | None = None) -> tuple[str, int]:
         # "container <id> is zombie and can not be killed. Use the `--init`
         # option", leaving a container no `down()` could remove.
         "run", "-d", "--init", "--name", name,
+        # #7357: the KERNEL cap (see CONTAINER_MEMORY_ENV). `--init` and the
+        # cap are independent: one reaps orphaned children, the other bounds
+        # what a runaway instance can take from every neighbour on the host.
+        *_memory_cap_args(),
         "-p", f"127.0.0.1:{chosen}:6379",
         "-e", "REDIS_ARGS=--appendonly no --save ''",
         # #8071: engine parity with the SHARED instance (see the module
@@ -848,10 +984,13 @@ def start(port: int | None = None) -> tuple[str, int]:
         raise SystemExit(f"test-lane: docker run failed: {detail} ({outcome})")
 
     if not _wait_ready(name, chosen):
+        # #7357: read docker's termination facts BEFORE removing the container —
+        # `rm -f` destroys the evidence the report is made of.
+        killed = _memory_kill_report(name)
         logs = _docker("logs", "--tail", "20", name)
         raise SystemExit(
             f"test-lane: {name} never answered PING; {_remove_and_describe(name)}. "
-            f"Logs:\n{logs.stdout}{logs.stderr}"
+            f"Logs:\n{logs.stdout}{logs.stderr}{killed}"
         )
     asked, published = _published_port(name)
     if not asked or published is None:

@@ -1370,3 +1370,293 @@ def test_the_selfhost_quickstart_hands_out_the_compose_pin_not_latest():
     assert not re.search(r"falkordb/falkordb[a-z-]*:latest", option_b), (
         "Option B still hands out a floating `:latest` engine (#8124)"
     )
+
+
+# ── #7357: every FalkorDB container this repo starts carries a KERNEL cap ──
+#
+# The issue's measured root cause is not one bug but one MISSING FLAG,
+# repeated at every entry point that starts a FalkorDB: `HostConfig.Memory=0`.
+# `--maxmemory` (where it is set at all) is a REDIS-side limit, so with no
+# cgroup cap the container's real ceiling is the HOST's — and the host's
+# ceiling is swap. Measured on the fleet box: `Memory=0`, `OOMKilled=false`,
+# `ExitCode=0`, `RestartCount` climbing, every lane degraded with it, and the
+# canonical graph instance killed and restarted by its own restart policy.
+#
+# So the guard is per ENTRY POINT, from the argv each one really issues: a
+# source-level `grep` for `--memory` is satisfied by a comment, and a single
+# count across all entry points stays green when one of them loses the flag.
+
+MEMORY_CAP_ENV = "FALKORDB_CONTAINER_MEMORY"
+MEMORY_CAP_DEFAULT = "2g"
+
+
+def test_the_lane_tool_caps_the_container_memory(monkeypatch):
+    """`tools/test_lane.py` — the fleet's per-lane container (#7357)."""
+    monkeypatch.delenv(MEMORY_CAP_ENV, raising=False)
+    from tools import test_lane as tl
+
+    args = tl._memory_cap_args()
+    assert args == ["--memory", MEMORY_CAP_DEFAULT,
+                    "--memory-swap", MEMORY_CAP_DEFAULT], args
+    assert tl.DEFAULT_CONTAINER_MEMORY == MEMORY_CAP_DEFAULT
+
+    monkeypatch.setenv(MEMORY_CAP_ENV, "1536m")
+    assert tl._memory_cap_args()[1] == "1536m", (
+        "the cap must be read at CALL time, so one lane can raise it"
+    )
+
+
+def test_the_edge_census_probe_caps_the_container_memory(monkeypatch):
+    """`tools/edge_census.py` — the disposable probe the issue names as a
+    neighbour that can starve the canonical graph (#7357)."""
+    monkeypatch.delenv(MEMORY_CAP_ENV, raising=False)
+    from tools import edge_census as ec
+
+    args = ec._probe_run_args("probe-x", ec.PROBE_IMAGE)
+    assert args[:5] == ["run", "-d", "--rm", "--network", "none"], args
+    assert "--memory" in args and "--memory-swap" in args, args
+    cap = args[args.index("--memory") + 1]
+    assert args[args.index("--memory-swap") + 1] == cap, (
+        "swap must EQUAL memory: docker's default is 2x, which lets the "
+        "container page the host for minutes instead of dying alone"
+    )
+    assert cap == MEMORY_CAP_DEFAULT, cap
+    assert args[-1] == ec.PROBE_IMAGE, args
+
+
+def test_the_dev_installer_caps_the_memory_and_bounds_the_restart_loop(monkeypatch):
+    """`graph-scripts/setup.py` — the only in-repo launcher of a 16379 container,
+    and the only one with an unconditional restart policy (#7357).
+
+    Two properties, both from the argv: the KERNEL cap (an over-consuming dev
+    container must die alone, not swap the host), and a BOUNDED restart policy
+    (`unless-stopped` + a container that dies on every boot is a silent infinite
+    loop — `docker ps` just shows a small uptime each time).
+    """
+    monkeypatch.delenv(MEMORY_CAP_ENV, raising=False)
+    _setup, calls = _run_step8(
+        monkeypatch, status="missing", created_image=FALKORDB_PIN)
+    run = next(c for c in calls if c[:2] == ["docker", "run"])
+    assert "--memory" in run and "--memory-swap" in run, run
+    cap = run[run.index("--memory") + 1]
+    assert run[run.index("--memory-swap") + 1] == cap, run
+    assert cap == MEMORY_CAP_DEFAULT, run
+    assert "unless-stopped" not in run, (
+        f"an unconditional restart policy is the loop #7357 records: {run}"
+    )
+    assert "on-failure:5" in run, run
+
+
+def _run_ci_provision(tmp_path, *, mode: str, cap: str | None = None):
+    """Run the REAL provision.sh with a stub `docker`, returning (result, argv log).
+
+    A stub on PATH rather than a source-level grep: the defect is an argv that
+    reaches docker, so the guard has to read the argv docker really got.
+    ``mode`` is ``healthy`` (PING answers), ``killed`` (never answers, docker
+    reports the kernel killed it), or ``gone`` (never answers AND the container
+    is already removed — what `--rm` does to a container that died).
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "docker.log"
+    stub = bindir / "docker"
+    if mode == "healthy":
+        answers = (
+            '  image) exit 0 ;;&\n'
+            '  port) printf "127.0.0.1:32770\\n" ;;&\n'
+            '  exec) printf "PONG\\n" ;;&\n'
+            '  inspect) printf "false 0\\n" ;;&\n'
+        )
+    elif mode == "killed":
+        # The container never answers, and docker says the kernel killed it.
+        answers = (
+            '  image) exit 0 ;;&\n'
+            '  port) printf "127.0.0.1:32770\\n" ;;&\n'
+            '  exec) exit 1 ;;&\n'
+            '  inspect) printf "true 137\\n" ;;&\n'
+        )
+    else:  # gone
+        # `--rm` already removed the container, so inspect fails.
+        answers = (
+            '  image) exit 0 ;;&\n'
+            '  port) printf "127.0.0.1:32770\\n" ;;&\n'
+            '  exec) exit 1 ;;&\n'
+            '  inspect) exit 1 ;;&\n'
+        )
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
+        'case "$1" in\n' + answers + "esac\n"
+        "exit 0\n"
+    )
+    stub.chmod(0o755)
+    gh_env = tmp_path / "gh_env"
+    gh_env.write_text("")
+    env = {
+        **os.environ,
+        "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
+        "DOCKER_LOG": str(log),
+        "GITHUB_ENV": str(gh_env),
+        "FALKORDB_IMAGE": FALKORDB_PIN,
+        "FALKORDB_LEGACY": "false",
+        "FALKORDB_URI_GRAPH": "",
+        "FALKORDB_HEALTH_TIMEOUT": "1",
+    }
+    env.pop(MEMORY_CAP_ENV, None)
+    if cap is not None:
+        env[MEMORY_CAP_ENV] = cap
+    script = ACTION_DIR / "falkordb-provision" / "provision.sh"
+    result = subprocess.run(
+        ["bash", str(script)], capture_output=True, text=True, env=env,
+        timeout=120,
+    )
+    return result, log
+
+
+def test_the_ci_provision_caps_the_container_memory(tmp_path):
+    """`.github/actions` — the CI spawner, on the SAME host as the canonical
+    instance (the runners share one Docker daemon), two containers per job."""
+    result, log = _run_ci_provision(tmp_path, mode="healthy")
+    assert result.returncode == 0, result.stdout + result.stderr
+    run_lines = [ln for ln in log.read_text().splitlines() if ln.startswith("run ")]
+    assert run_lines, log.read_text()
+    for line in run_lines:
+        cap = line.split("--memory ", 1)[1].split(" ", 1)[0]
+        assert line.count("--memory") == 2, line  # --memory and --memory-swap
+        assert f"--memory-swap {cap}" in line, (
+            f"swap must EQUAL the memory cap, not docker's 2x default: {line}"
+        )
+        assert cap == MEMORY_CAP_DEFAULT, line
+
+
+def test_the_ci_provision_names_a_memory_kill_instead_of_merely_unhealthy(tmp_path):
+    """#7357's legibility half, at the CI gate: a container the kernel (or the
+    cap) killed must be reported as KILLED FOR MEMORY, not as a server that
+    "did not answer" — otherwise the operator retries into the same death."""
+    result, _log = _run_ci_provision(tmp_path, mode="killed")
+    out = result.stdout + result.stderr
+    assert result.returncode != 0, out
+    assert "KILLED FOR MEMORY" in out, out
+    assert "OOMKilled=true" in out and "137" in out, out
+
+
+def test_the_ci_provision_says_when_the_failed_container_is_already_gone(tmp_path):
+    """`--rm` removes a container when it STOPS, so a container that died is
+    usually absent by the time the failure is reported. "Not there" must be said
+    out loud: it is the fact that separates a crash from a slow start, and
+    reporting nothing would leave the `--rm` case silent (#7357)."""
+    result, _log = _run_ci_provision(tmp_path, mode="gone")
+    out = result.stdout + result.stderr
+    assert result.returncode != 0, out
+    assert "no longer EXISTS" in out, out
+    assert "CRASHED or was KILLED" in out, out
+
+
+def test_the_probe_names_a_memory_kill_and_a_rm_removed_absence(monkeypatch):
+    """#7357 review: the probe runs with `--rm`, so a container that EXITED is
+    already gone — and the absence is the report. The two facts must not collapse
+    into the same "never became ready" sentence, and a merely-running container
+    must stay silent (no false alarm)."""
+    from tools import edge_census as ec
+
+    class _R:
+        def __init__(self, rc, out=""):
+            self.returncode, self.stdout, self.stderr = rc, out, ""
+
+    monkeypatch.setattr(ec, "_docker", lambda *a, **k: _R(0, "true 137\n"))
+    assert "KILLED FOR MEMORY" in ec._memory_kill_report("probe-x")
+
+    # inspect fails (a `--rm`-removed dead container, or a wedged daemon): the
+    # read is reported as failed AND the absence is named as a crash/kill —
+    # never silently "" (the #7357 review's dead-code finding).
+    monkeypatch.setattr(ec, "_docker", lambda *a, **k: _R(1, ""))
+    gone = ec._memory_kill_report("probe-x")
+    assert "could not be read" in gone, gone
+    assert "CRASHED or was KILLED" in gone, gone
+
+    # A `_docker` that RAISES (a timeout on an overloaded host) must not replace
+    # the CensusError with a traceback (#7357 review).
+    def boom(*a, **k):
+        raise OSError("docker timed out")
+    monkeypatch.setattr(ec, "_docker", boom)
+    assert "could not be read" in ec._memory_kill_report("probe-x")
+
+    # Still running (or exited cleanly): nothing to report.
+    monkeypatch.setattr(ec, "_docker", lambda *a, **k: _R(0, "false 0\n"))
+    assert ec._memory_kill_report("probe-x") == ""
+
+
+def test_the_cap_seams_refuse_a_zero_value(monkeypatch):
+    """`--memory 0` is docker's spelling for NO LIMIT, so the ZERO value must be
+    refused at every seam — not only malformed text (#7357 review)."""
+    from tools import edge_census as ec
+
+    for bad in ("0", "0g", "0.0m"):
+        monkeypatch.setenv(MEMORY_CAP_ENV, bad)
+        with pytest.raises(ec.CensusError) as e:
+            ec.container_memory_cap()
+        assert MEMORY_CAP_ENV in str(e.value), (bad, str(e.value))
+
+    setup = _load_setup_module()
+    for bad in ("0", "0g"):
+        monkeypatch.setenv(MEMORY_CAP_ENV, bad)
+        with pytest.raises(SystemExit):
+            setup._container_memory()
+
+
+def test_the_dev_installer_reports_an_existing_uncapped_container(monkeypatch, capsys):
+    """`docker start` cannot add a limit, so an EXISTING container keeps
+    `Memory=0` for life. That must be SAID, not silently reused: the same
+    "an existing container keeps the bad setting forever" mechanism as #8124's
+    image pin, and the reason this cap could otherwise never reach the
+    container most likely to need it (#7357 review N1)."""
+    setup = _load_setup_module()
+    monkeypatch.setenv(MEMORY_CAP_ENV, MEMORY_CAP_DEFAULT)
+    monkeypatch.setattr(setup, "MODE", "docker")
+    monkeypatch.setattr(setup, "_container_status", lambda _n: "running")
+    monkeypatch.setattr(setup, "_container_image", lambda _n: setup.FALKORDB_IMAGE)
+    monkeypatch.setattr(setup, "_container_memory_limit", lambda _n: 0)
+    setup.step8()
+    out = capsys.readouterr().out
+    assert "WITHOUT a kernel memory cap" in out, out
+    assert "docker rm -f" in out, out
+
+    # …and a container that IS capped says nothing (no false alarm).
+    monkeypatch.setattr(setup, "_container_memory_limit", lambda _n: 2 << 30)
+    setup.step8()
+    assert "WITHOUT a kernel memory cap" not in capsys.readouterr().out
+
+
+def test_the_ci_provision_refuses_a_zero_cap(tmp_path):
+    """The CI seam refuses a zero cap too — the shell validator's zero arm."""
+    result, log = _run_ci_provision(tmp_path, mode="healthy", cap="0")
+    out = result.stdout + result.stderr
+    assert result.returncode != 0, out
+    assert "POSITIVE docker memory spec" in out, out
+    assert "run " not in log.read_text(), (
+        f"no container may be started with a zero cap: {log.read_text()}"
+    )
+
+
+def test_every_compose_falkordb_has_a_memory_limit():
+    """The invariant the cap comments claim: NO compose service in this repo
+    starts a FalkorDB without a limit. `deploy.resources.limits.memory` IS
+    applied by `docker compose up` (measured, compose 2.40.3 — #7357)."""
+    missing = []
+    for pattern in COMPOSE_GLOBS:
+        for path in ROOT.glob(pattern):
+            if ".worktrees" in path.parts:
+                continue
+            data = yaml.safe_load(path.read_text()) or {}
+            for name, svc in (data.get("services") or {}).items():
+                if "falkordb" not in str((svc or {}).get("image", "")):
+                    continue
+                limit = (((svc.get("deploy") or {}).get("resources") or {})
+                         .get("limits") or {}).get("memory")
+                if not limit:
+                    missing.append(f"{path.relative_to(ROOT)}:{name}")
+    assert not missing, (
+        "these compose FalkorDB services have no kernel memory limit, so one "
+        "runaway instance can swap the host and starve the canonical graph "
+        f"(#7357): {missing}"
+    )

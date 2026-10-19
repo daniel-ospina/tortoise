@@ -20,7 +20,21 @@ services:
       - FALKORDB_ARGS=MAX_QUEUED_QUERIES 25 TIMEOUT 1000 RESULTSET_SIZE 10000
     volumes:
       - tortoise-data:/var/lib/falkordb/data
-    restart: always
+    # #7357: a KERNEL cap, on the same terms as every other FalkorDB container
+    # this repo starts (root `docker-compose.yml`, `tools/test_lane.py`,
+    # `tools/edge_census.py`, `graph-scripts/setup.py`,
+    # `.github/actions/falkordb-provision`). This service publishes 16379 and
+    # restarts on a policy, so an over-consuming viz DB is a neighbour that can
+    # starve the canonical graph instance on the same host — the measured
+    # outage. `docker compose up` DOES apply `deploy.resources.limits`
+    # (verified, compose 2.40.3).
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+    # A BOUNDED policy, not `always`: a viz DB that dies on every boot must end
+    # `Exited` and inspectable, not cycle silently forever.
+    restart: on-failure:5
 
 volumes:
   tortoise-data:

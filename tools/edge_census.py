@@ -109,6 +109,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 import argparse
 import json
 import os
+import re
 import subprocess
 import time
 from collections.abc import Callable, Sequence
@@ -516,6 +517,102 @@ _REDIS_ERROR_TOKENS = (
 #: identifiable and reapable instead of accumulating invisibly.
 _PROBE_LABEL = "edge-census-probe=1"
 
+#: #7357 — the KERNEL (cgroup) memory cap for the disposable probe container,
+#: as a docker memory spec. Same env seam and default as every other FalkorDB
+#: container this repo starts (`tools/test_lane.py`,
+#: `.github/actions/falkordb-provision/provision.sh`,
+#: `graph-scripts/setup.py`); the rationale is in `test_lane.CONTAINER_MEMORY_ENV`
+#: — short version: `--maxmemory` is a Redis-side limit and the probe runs with
+#: NO `maxmemory` at all, so without a cgroup cap a runaway probe can starve the
+#: HOST and take the canonical graph instance down with it.
+CONTAINER_MEMORY_ENV = "FALKORDB_CONTAINER_MEMORY"
+DEFAULT_CONTAINER_MEMORY = "2g"
+_MEMORY_SPEC_RE = re.compile(r"[0-9]+(?:\.[0-9]+)?[bkmg]?\Z")
+
+
+def _spec_is_positive(spec: str) -> bool:
+    """Whether *spec* is a POSITIVE byte count.
+
+    `0` (and `0g`, `0.0g`, …) means NO limit to docker — the uncapped container
+    #7357 is about — so the grammar alone is not enough.
+    """
+    number = spec[:-1] if spec[-1] in "bkmg" else spec
+    return float(number) > 0
+
+
+def container_memory_cap() -> str:
+    """The kernel memory cap for the probe container (#7357).
+
+    Read at CALL time and validated: a malformed or ZERO spec is refused rather
+    than dropped, because a dropped cap is the uncapped probe this exists to
+    prevent.
+    """
+    raw = (os.environ.get(CONTAINER_MEMORY_ENV)
+           or DEFAULT_CONTAINER_MEMORY).strip().lower()
+    if not _MEMORY_SPEC_RE.match(raw) or not _spec_is_positive(raw):
+        raise CensusError(
+            f"{CONTAINER_MEMORY_ENV}={raw!r} is not a POSITIVE docker memory "
+            f"spec (e.g. 512m, 2g, 1.5g; `0` means UNLIMITED to docker) — "
+            f"refusing to start the probe with an unusable cap "
+            f"(default {DEFAULT_CONTAINER_MEMORY})"
+        )
+    return raw
+
+
+def _probe_run_args(container: str, image: str) -> list[str]:
+    """The `docker run` argv for the probe container — the cap included.
+
+    Factored out so the argv is assertable: a guard that only greps this file
+    for `--memory` is satisfied by a comment, and the defect it prevents
+    (an uncapped container) is invisible at run time.
+    """
+    cap = container_memory_cap()
+    return ["run", "-d", "--rm", "--network", "none",
+            "--memory", cap, "--memory-swap", cap,
+            "--label", _PROBE_LABEL, "--name", container, image]
+
+
+def _memory_kill_report(container: str) -> str:
+    """Name a MEMORY kill of the probe container, or `""` when it was not one.
+
+    Docker's own facts (`OOMKilled`, `ExitCode`) where the container still
+    exists, never inferred from the connection error. ⚠️ The probe runs with
+    `--rm`, so a container that EXITED is usually already gone — and *that* is
+    itself the report: `--rm` removes on exit, so an absent container crashed or
+    was killed, it did not merely start slowly. An inspect that fails for any
+    OTHER reason (a wedged daemon, a timeout) reports the FAILED READ as well
+    rather than asserting the container is gone — a failure is not evidence of
+    absence, and this module states that rule everywhere else.
+    """
+    try:
+        r = _docker("inspect", "--format",
+                    "{{.State.OOMKilled}} {{.State.ExitCode}}",
+                    container, check=False)
+    except (OSError, subprocess.SubprocessError):
+        r = None
+    if r is None or r.returncode != 0:
+        return (
+            " — and its termination could not be read (the `docker inspect` "
+            "failed; a wedged daemon is one reason). If the container is gone, "
+            "`--rm` removed it on exit, so it CRASHED or was KILLED rather "
+            "than starting slowly (a memory kill on this host is the #7357 "
+            "shape); check the daemon and the engine's own error, then re-run "
+            "with a smaller `--n`"
+        )
+    parts = (r.stdout or "").strip().split()
+    if len(parts) != 2:
+        return ""
+    oom, exit_code = parts
+    if oom.lower() != "true" and exit_code != "137":
+        return ""
+    return (
+        f" — it was KILLED FOR MEMORY (OOMKilled={oom}, ExitCode={exit_code}), "
+        f"not wedged: the host was out of memory or the cgroup cap "
+        f"({CONTAINER_MEMORY_ENV}="
+        f"{os.environ.get(CONTAINER_MEMORY_ENV) or DEFAULT_CONTAINER_MEMORY}) "
+        f"was reached. Raise the cap for a larger n rather than re-running"
+    )
+
 #: The engine the probe container runs. It used to be a floating
 #: ``falkordb/falkordb:latest``, which resolves to engine 6.0.x — and that build
 #: PANICS the server (`reply.rs:655` in ``reply::reply_compact``, "called
@@ -636,8 +733,7 @@ def run_probe(
     # try a failure there left a container behind with no `rm`.
     try:
         try:
-            _docker("run", "-d", "--rm", "--network", "none",
-                    "--label", _PROBE_LABEL, "--name", container, image)
+            _docker(*_probe_run_args(container, image))
         except (subprocess.SubprocessError, OSError) as exc:
             raise CensusError(
                 f"could not start the probe container from {image!r}: {exc}"
@@ -649,7 +745,10 @@ def run_probe(
                 break
             time.sleep(1)
         else:
-            raise CensusError(f"{container!r} never became ready (60s)")
+            raise CensusError(
+                f"{container!r} never became ready (60s)"
+                + _memory_kill_report(container)
+            )
 
         stages: list[Stage] = [
             Stage("baseline (fresh instance)",

@@ -1454,3 +1454,110 @@ def test_uri_for_refuses_a_graph_name_that_would_break_the_eval_line(bad):
     with pytest.raises(SystemExit) as exc:
         tl.uri_for(16399, bad)
     assert "refusing graph name" in str(exc.value)
+
+
+# ── #7357: the KERNEL memory cap, and naming a memory kill ────────────────
+
+def test_the_container_is_created_with_a_kernel_memory_cap(lane, monkeypatch):
+    """#7357 pinned at the ARGV — the flag that was missing everywhere.
+
+    `--maxmemory` is a REDIS-side limit; without `HostConfig.Memory` the
+    container's real ceiling is the HOST's, and the host's ceiling is swap. So a
+    runaway lane instance pages the whole box and the canonical graph instance is
+    killed and restarted by its own policy — the fleet-wide outage #7357
+    measured, which is why this is a LANE-tool guard and not a comment.
+    """
+    monkeypatch.delenv(tl.CONTAINER_MEMORY_ENV, raising=False)
+    seen: list = []
+
+    def fake(*a, **k):
+        seen.append(a)
+        if a[0] == "inspect":
+            return _R(0, "absent\n", "")
+        if a[0] == "run":
+            return _R(0, "deadbeef\n", "")
+        if a[0] == "port":
+            return _R(0, "0.0.0.0:16390\n", "")
+        return _R(0, "PONG\n", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    tl.start()
+    run_args = next(c for c in seen if c[0] == "run")
+    assert "--memory" in run_args, run_args
+    cap = run_args[run_args.index("--memory") + 1]
+    assert cap == tl.DEFAULT_CONTAINER_MEMORY, run_args
+    assert run_args[run_args.index("--memory-swap") + 1] == cap, (
+        f"swap must EQUAL the memory cap (docker's default is 2x, which lets "
+        f"the container page the host instead of dying alone): {run_args}"
+    )
+
+
+def test_the_memory_cap_seam_refuses_a_malformed_or_zero_value(monkeypatch):
+    """A dropped cap is the uncapped container this exists to prevent, so an
+    unusable value is REFUSED with the variable named — never ignored.
+
+    `0` is the case that matters most: it is VALID docker syntax meaning NO
+    LIMIT, so a grammar-only check accepts the one value that reproduces #7357
+    while every message claims the cap was validated (#7357 review).
+    """
+    monkeypatch.setenv(tl.CONTAINER_MEMORY_ENV, "1536m")
+    assert tl.container_memory_cap() == "1536m"
+    for bad in ("2 gigs", "0", "0g", "0.0g"):
+        monkeypatch.setenv(tl.CONTAINER_MEMORY_ENV, bad)
+        with pytest.raises(SystemExit) as e:
+            tl.container_memory_cap()
+        assert tl.CONTAINER_MEMORY_ENV in str(e.value), (bad, str(e.value))
+
+
+def test_a_container_killed_for_memory_is_reported_not_called_wedged(
+        lane, monkeypatch):
+    """#7357's legibility half: the same failure used to read "it may be wedged:
+    run down and retry", which sends the operator to retry into the same death.
+    The facts come from docker (`OOMKilled`/`ExitCode`), never from the
+    connection error."""
+    def fake(*a, **k):
+        if a[0] == "inspect":
+            if any("OOMKilled" in str(part) for part in a):
+                return _R(0, "true 137 3\n", "")
+            return _R(0, "absent\n", "")
+        if a[0] == "run":
+            return _R(0, "deadbeef\n", "")
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "_wait_ready", lambda *a, **k: False)
+    with pytest.raises(SystemExit) as e:
+        tl.start()
+    msg = str(e.value)
+    assert "KILLED FOR MEMORY" in msg, msg
+    assert "OOMKilled=true" in msg and "ExitCode=137" in msg, msg
+    assert "RestartCount=3" in msg, msg
+
+
+def test_a_reused_container_killed_for_memory_drops_the_wedged_advice(
+        lane, monkeypatch):
+    """The REUSE branch (#7357 review): a proven memory kill must REPLACE the
+    "may be wedged: run down and retry" advice, not be appended after it. Two
+    contradictory diagnoses in one message send the operator to retry into the
+    same death — and "down" is the wrong remedy for a container the kernel killed
+    for memory: the cap or the host is what has to change."""
+    monkeypatch.setattr(tl, "_created_image", lambda _n: tl.IMAGE)
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
+    monkeypatch.setattr(tl, "_wait_ready", lambda *a, **k: False)
+    monkeypatch.setattr(tl, "READY_TIMEOUT", 1)
+
+    def fake(*a, **k):
+        if a[0] == "inspect" and any("OOMKilled" in str(part) for part in a):
+            return _R(0, "true 137 4\n", "")
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    with pytest.raises(SystemExit) as e:
+        tl.start()
+    msg = str(e.value)
+    assert "KILLED FOR MEMORY" in msg, msg
+    assert "OOMKilled=true" in msg and "RestartCount=4" in msg, msg
+    assert "may be wedged" not in msg, (
+        f"a proven memory kill must not also be called a wedge: {msg}"
+    )

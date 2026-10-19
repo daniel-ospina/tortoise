@@ -184,6 +184,27 @@ trap cleanup_own EXIT
 # quietly turn the failure annotation into plain text.
 PORT_FILE="$(mktemp)"
 
+# The container is created with the SAME kernel memory cap every other
+# FalkorDB container this repo starts gets (#7357): `--maxmemory` in REDIS_ARGS
+# is a Redis-side limit, so without `HostConfig.Memory` the container's real
+# ceiling is the HOST's — and the host's ceiling is swap. Measured on the fleet
+# box (#7357): `HostConfig.Memory=0`, `OOMKilled=false`, `ExitCode=0`,
+# `RestartCount` climbing, every lane degraded with it. A cgroup cap converts
+# that fleet-wide outage into ONE container dying alone, in seconds.
+# `--memory-swap` EQUALS `--memory` on purpose: docker's default is 2x memory,
+# i.e. the container may swap, which turns a fast isolated death into a
+# minutes-long RDB reload. Raise FALKORDB_CONTAINER_MEMORY for a job that
+# genuinely needs more; a malformed value is refused, never silently dropped.
+FALKORDB_MEMORY="${FALKORDB_CONTAINER_MEMORY:-2g}"
+# Grammar first, then the ZERO case: `--memory 0` is not a tiny cap, it is
+# docker's spelling for NO LIMIT — the uncapped container #7357 is about, via the
+# one value a reader would type to "disable" the cap.
+if ! printf '%s' "$FALKORDB_MEMORY" | grep -Eq '^[0-9]+(\.[0-9]+)?[bkmg]?$' \
+   || ! awk -v v="${FALKORDB_MEMORY%[bkmg]}" 'BEGIN { exit (v + 0 > 0) ? 0 : 1 }'; then
+  annotate_error "FALKORDB_CONTAINER_MEMORY=$FALKORDB_MEMORY is not a POSITIVE docker memory spec (e.g. 512m, 2g; `0` means UNLIMITED) — refusing to start an UNCAPPED container"
+  exit 1
+fi
+
 # start <name> <REDIS_ARGS> <health-cli-auth-args>
 # On success writes the ASSIGNED host port to $PORT_FILE and returns 0. All
 # diagnostics go to stderr; on failure it emits an ::error:: annotation on
@@ -208,7 +229,9 @@ start() {
   # --rm  removes the container when it STOPS (a normal exit, a crash, or a
   #       `docker stop`) — it is not a job-death reaper: a hard-killed runner
   #       can leave a RUNNING container, attributable by $LABEL.
+  # --memory / --memory-swap: the kernel cap (#7357, see FALKORDB_MEMORY above).
   if ! docker run -d --rm --name "$name" --label "$LABEL" \
+      --memory "$FALKORDB_MEMORY" --memory-swap "$FALKORDB_MEMORY" \
       -e REDIS_ARGS="$redis_args" \
       -p 127.0.0.1:0:6379 \
       "$RUN_IMAGE" >/dev/null; then
@@ -248,9 +271,29 @@ start() {
     fi
     sleep 1
   done
-  annotate_error "$name did not answer PING within ${HEALTH_TIMEOUT}s (host port $port)"
+  annotate_error "$name did not answer PING within ${HEALTH_TIMEOUT}s (host port $port)$(termination_note "$name")"
   docker logs "$name" 2>&1 | tail -n 40 >&2 || true
   return 1
+}
+
+# termination_note <name> — "" or a suffix naming a MEMORY kill (#7357).
+# Docker's own facts, never inferred from the connection error: a container the
+# kernel or its cgroup cap killed must not be reported as merely unhealthy,
+# because the operator then retries into the same death.
+termination_note() {
+  local name="$1" facts oom code
+  if ! facts="$(docker inspect -f '{{.State.OOMKilled}} {{.State.ExitCode}}' "$name" 2>/dev/null)"; then
+    # `--rm` removes a container when it STOPS, so a container that died is often
+    # already gone by the time this runs. Its absence is the fact worth reporting:
+    # a slow start is still there to inspect, a dead one is not.
+    printf '%s' " — the container no longer EXISTS: it exited and --rm removed it, so it CRASHED or was KILLED rather than starting slowly; see the engine's own lines above (a memory kill on this host is the #7357 shape)"
+    return 0
+  fi
+  oom="${facts%% *}"
+  code="${facts##* }"
+  if [ "$oom" = "true" ] || [ "$code" = "137" ]; then
+    printf '%s' " — it was KILLED FOR MEMORY (OOMKilled=$oom, ExitCode=$code), not unhealthy: raise FALKORDB_CONTAINER_MEMORY (now $FALKORDB_MEMORY) or reduce the job's graph load"
+  fi
 }
 
 log "starting passworded service from $RUN_IMAGE (label $LABEL)"
