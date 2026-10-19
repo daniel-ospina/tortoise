@@ -2151,13 +2151,26 @@ export function captureHealthLine(
   if (opts.apiKey === "") {
     return { state: "inactive", queued, line: "capture: INACTIVE (no TORTOISE_API_KEY)" };
   }
-  if (recorded?.state === "blocked" && queued > 0) {
-    const status = recorded.status ?? 402;
+  // A marker we cannot UNDERSTAND is not a marker — the same rule this file
+  // applies to `terminal_failure` and to a corrupt backoff window. A hand-edited
+  // or foreign `status.json` carrying `{"state": "blocked"}` (or a status that
+  // is a JSON string) must not be able to report a block that nothing observed:
+  // the safe reading is "no recorded block", which the spool count still
+  // governs. `recordOutcome` always writes a NUMBER, so nothing is lost.
+  const blockedStatus =
+    recorded !== undefined &&
+    recorded.state === "blocked" &&
+    typeof recorded.status === "number" &&
+    Number.isFinite(recorded.status) &&
+    recorded.status > 0
+      ? recorded.status
+      : undefined;
+  if (blockedStatus !== undefined && queued > 0) {
     return {
       state: "blocked",
       queued,
-      status,
-      line: `capture: BLOCKED (${queued} queued, ${status} quota)`,
+      status: blockedStatus,
+      line: `capture: BLOCKED (${queued} queued, ${blockedStatus} quota)`,
     };
   }
   if (queued > 0) {

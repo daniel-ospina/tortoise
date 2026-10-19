@@ -35,6 +35,7 @@ import {
   PROBE_TIMEOUT_MS,
   REQUEST_TIMEOUT_MS,
   RETRY_MAX_MS,
+  SPOOL_STATUS_FILE,
   TRUNCATION_SENTINEL,
   TURN_MAX_CHARS,
   _CREDENTIAL_MODE_WARNED,
@@ -2780,4 +2781,20 @@ test("#2100: the per-box health line is present in every state", async () => {
   assert.equal(health.queued, 2, "every meta file counts, readable or not");
   assert.ok(existsSync(join(entries, "corrupt.meta.json")), "the corrupt meta is NOT deleted");
   assert.equal(readDiscards(dirty).length, 0, "the health read records no discards");
+
+  // A marker we cannot UNDERSTAND is not a marker: a hand-edited / foreign
+  // `status.json` with no numeric status must not be able to report a block
+  // nothing observed (the same rule the file applies to `terminal_failure`).
+  //
+  // MUTATION THAT REDS THIS: trust `state === "blocked"` alone (default the
+  // status to 402) → this box reads BLOCKED for a marker we cannot read.
+  const forged = tmpSpool();
+  writeSpoolEntry(forged, snapshot("sess-h4"));
+  writeFileSync(join(forged, SPOOL_STATUS_FILE), JSON.stringify({ state: "blocked" }));
+  assert.equal(captureHealthLine(forged, { apiKey: "tt_x" }).state, "draining");
+  writeFileSync(
+    join(forged, SPOOL_STATUS_FILE),
+    JSON.stringify({ state: "blocked", status: "402" }),
+  );
+  assert.equal(captureHealthLine(forged, { apiKey: "tt_x" }).state, "draining");
 });
