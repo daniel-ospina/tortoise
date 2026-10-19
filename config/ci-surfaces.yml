@@ -127,6 +127,19 @@ surfaces:
   # subjects span `projection/` (core), `sdk.py`, `api.py` (api),
   # `backup.py`/`consistency.py`/`mining.py` (core), and `__main__.py` (api).
   - test_7951_enforce_atomic_write.py
+  # #9122 (§17.1 raw `:Event` writers): MULTI-REGISTERED on `api`, `core` and
+  # `sdk`, and each row is load-bearing for a DIFFERENT subject — verified by
+  # re-running `select()` with the row withheld:
+  #   * `api` — `tortoise/hosted_api.py` (the hosted ingest caller) selects
+  #     `api`; a `core`-only registration is ABSENT from that 333-file set.
+  #   * `core` — `tortoise/session_indexer.py` (the CLI this suite drives)
+  #     selects `core`; a lone `sdk` row would drop it there.
+  #   * `sdk` — explicit, mirroring the #7951 door suites on the same subject.
+  # An exact SOURCE_PATTERNS match REPLACES the `core` fallback in `select()`,
+  # which is why one row cannot cover the others (the #1349/#2938/#3154 class).
+  # NOTE `tortoise/sdk.py` alone selects the FULL matrix, so the `sdk` row is
+  # not what makes an sdk.py-only change run this suite.
+  - test_9079_event_writers_journal.py
   # #9121 (§17.1 write-lane DECLARATION): MULTI-REGISTERED with `onboarding`,
   # `core`, `api` and `sdk`. The suite pins a declaration in
   # `tortoise/onboarding/state.py` (onboarding) that the HOSTED callers
@@ -1437,6 +1450,19 @@ surfaces:
   # `sdk.py` are this guard's subjects; an `sdk.py`-only change selects the
   # full matrix, and a `projection/`-only change falls through to `core`.
   - test_7951_enforce_atomic_write.py
+  # #9122 (§17.1 raw `:Event` writers): MULTI-REGISTERED on `api`, `core` and
+  # `sdk`, and each row is load-bearing for a DIFFERENT subject — verified by
+  # re-running `select()` with the row withheld:
+  #   * `api` — `tortoise/hosted_api.py` (the hosted ingest caller) selects
+  #     `api`; a `core`-only registration is ABSENT from that 333-file set.
+  #   * `core` — `tortoise/session_indexer.py` (the CLI this suite drives)
+  #     selects `core`; a lone `sdk` row would drop it there.
+  #   * `sdk` — explicit, mirroring the #7951 door suites on the same subject.
+  # An exact SOURCE_PATTERNS match REPLACES the `core` fallback in `select()`,
+  # which is why one row cannot cover the others (the #1349/#2938/#3154 class).
+  # NOTE `tortoise/sdk.py` alone selects the FULL matrix, so the `sdk` row is
+  # not what makes an sdk.py-only change run this suite.
+  - test_9079_event_writers_journal.py
   # #9121 (§17.1 write-lane DECLARATION): MULTI-REGISTERED with `onboarding`,
   # `core`, `api` and `sdk`. The suite pins a declaration in
   # `tortoise/onboarding/state.py` (onboarding) that the HOSTED callers
@@ -4109,6 +4135,19 @@ surfaces:
   # test_the_inventory_runs_on_a_diff_to_every_module_it_scans`.
   - test_9068_pack_gate_residuals.py
   - test_7951_enforce_atomic_write.py
+  # #9122 (§17.1 raw `:Event` writers): MULTI-REGISTERED on `api`, `core` and
+  # `sdk`, and each row is load-bearing for a DIFFERENT subject — verified by
+  # re-running `select()` with the row withheld:
+  #   * `api` — `tortoise/hosted_api.py` (the hosted ingest caller) selects
+  #     `api`; a `core`-only registration is ABSENT from that 333-file set.
+  #   * `core` — `tortoise/session_indexer.py` (the CLI this suite drives)
+  #     selects `core`; a lone `sdk` row would drop it there.
+  #   * `sdk` — explicit, mirroring the #7951 door suites on the same subject.
+  # An exact SOURCE_PATTERNS match REPLACES the `core` fallback in `select()`,
+  # which is why one row cannot cover the others (the #1349/#2938/#3154 class).
+  # NOTE `tortoise/sdk.py` alone selects the FULL matrix, so the `sdk` row is
+  # not what makes an sdk.py-only change run this suite.
+  - test_9079_event_writers_journal.py
   # #9121 (§17.1 write-lane DECLARATION): MULTI-REGISTERED with `onboarding`,
   # `core`, `api` and `sdk`. The suite pins a declaration in
   # `tortoise/onboarding/state.py` (onboarding) that the HOSTED callers
@@ -5674,17 +5713,38 @@ durations:
   test_tenancy_spine.py: 3.0
   test_transport_wait_bound.py: 2.1
   test_collision_preflight.py: 3.6
-  # #8051: 102 tests. 330.0 is from LOCAL readings on this
-  # fleet-loaded host (subprocess + real-git harness): 173s / 182s at 61 tests
-  # (head 876dabfe), 187s at 69, 192s at 76, 198s at 79, 223s at 82, 241s at 83,
-  # 250s at 83, 227s at 87, 323s at 90, 273s at 92, 234s at 94, 288s / 295s at 98,
-  # 318s at 101, 289s at 102. The weight this
-  # replaces — 160.0, published with an "88-169s" range — sat BELOW every one of
-  # those readings; each superseded weight (185.0 / 250.0 / 260.0) was overtaken by
-  # a later reading (worst 323s at 90 tests), so 330.0 is above every reading and
-  # erring high is correct for sharding. Refresh from the first post-merge junit
-  # artifact.
-  test_lane_stash.py: 330.0
+  # #8051: LOCAL readings on this fleet-loaded host (subprocess + real-git
+  # harness): 173s / 182s at 61 tests (head 876dabfe), 187s at 69, 192s at 76,
+  # 198s at 79, 223s at 82, 241s at 83, 250s at 83, 227s at 87, 323s at 90, 273s
+  # at 92, 234s at 94, 288s / 295s at 98, 318s at 101, 289s at 102, then 366.4s,
+  # 422.9s and 216.6s once #8423 grew the file (the last on a quiet host). The
+  # weight this replaces — 160.0,
+  # published with an "88-169s" range — sat BELOW every one of those readings;
+  # each superseded weight (185.0 / 250.0 / 260.0 / 330.0) was overtaken by a
+  # later reading, 330.0 by the 366.4s one.
+  #
+  # ⛔ 355.0 IS A DELIBERATE CAP, NOT A READING — the two LOADED post-#8423
+  # readings (366.4s, 422.9s) are ABOVE it and a quiet-host one (216.6s at 115
+  # tests) below; the spread is fleet load, and erring high is the rule. The
+  # declaration cannot be raised past the ceiling either:
+  # `WATCHDOG_FLOOR_MIN` (15 min) must clear the largest fast file by 2.5x
+  # (#6133, asserted by
+  # `tests/test_ci_selection.py::test_watchdog_is_per_shard_and_scales_with_the_shard`
+  # from this manifest): 900/360 = 2.5 exactly, so EVERY declarable weight is
+  # <360s and 366.4 / 380 / 422.9 all fail that assertion. The arithmetic ceiling
+  # is therefore just under 360s (359.9 still clears it: 900/359.9 = 2.501), and
+  # 355.0 is a ROUNDED CAP below that ceiling — not the ceiling itself — chosen to
+  # leave the #6133 assertion real margin instead of sitting on it. It is still far
+  # above every pre-#8423 reading, so sharding stays accurate to ~within the
+  # skew of one file. Overtaking the runtime honestly needs the WATCHDOG FLOOR
+  # raised with it, which is a CI-budget decision recorded on #9172 rather than
+  # smuggled in with a weight.
+  #
+  # NO test count in the claim above: nothing reads or revalidates a count in a
+  # comment (the reason `test_journal_growth.py` below dropped its own), so a count
+  # published here re-stales silently — the per-reading counts stay only because a
+  # reading is meaningless without the run it came from.
+  test_lane_stash.py: 355.0
   # #5612: 12.2 is the HIGHER of two local readings of this file at head 4b112ccbc
   # (5.9 s / 12.2 s; hermetic — temp-dir journals + the committed fixture, no DB;
   # the spread is fleet I/O, same as #6144 above). Erring high is correct for

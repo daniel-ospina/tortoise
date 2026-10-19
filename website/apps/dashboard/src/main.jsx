@@ -566,6 +566,9 @@ function SettingsTab(props) {
     state, loading, onResumeSetup,
     github, githubConnected, reposCount, onConnectGithub, githubError,
     githubDisconnect, onOpenGithubDisconnect, onCloseGithubDisconnect, onConfirmGithubDisconnect,
+    // #8670: the containment effect for that dialog is the App's (the card is a
+    // hook-free module), so the node is handed down to it as a ref.
+    githubDisconnectDialogRef,
     sessions, sessionsOn, sessionsLoading, sessionsLoaded, onRetrySessions,
     memorySourcesProps,
     // #2002 (W6): captured-sessions view/delete consumer props (the W4 seam:
@@ -602,7 +605,70 @@ function SettingsTab(props) {
   // while `confirmSessionId` stays truthy. Gate the page-level copy on the
   // dialog that ACTUALLY renders, so a delete reason can never be suppressed
   // with no surface left to show it (exactly one visible surface, always).
-  const sessionDeleteArmed = !!confirmSessionId && sessions.some((x) => String(x.id) === confirmSessionId)
+  //
+  // #8670 review P1: the flag therefore models the WHOLE render gate, not just
+  // the list membership. The card lives in the deepest arm of this home's status
+  // chain (`!sessionsLoading && state && sessionsOn && sessionsLoaded`), and any
+  // of those can flip while the dialog is open WITHOUT `sessions` or
+  // `confirmSessionId` changing: a failed background `loadAll` sets
+  // `sessionsLoaded = false` and touches neither (`main.jsx`'s #3520 retry arm),
+  // and a `refreshOnboarding()` landing `session_recording: false` flips
+  // `sessionsOn` with `sessions` intact. A flag blind to those would not change
+  // on that transition, so the inert effect below would neither re-run nor clean
+  // up: the page outside the card would keep `inert` with no dialog left to
+  // release it — the page-wide keyboard lockout that effect exists to prevent.
+  // The flag IS the card's render gate (`{sessionDeleteArmed && `), so the
+  // effect's dependency flips exactly when the card mounts and unmounts.
+  const sessionDeleteArmed = !sessionsLoading && !!state && sessionsOn && sessionsLoaded
+    && !!confirmSessionId && sessions.some((x) => String(x.id) === confirmSessionId)
+  // #8670 (a11y): the #2577 APG containment set for the captured-session delete
+  // dialog — the last of the aria-modal family to get it. The dialog declared
+  // modality but moved no focus out of the page behind it: Tab walked straight
+  // out of the card, and with no `inert` background a screen reader's virtual
+  // cursor reached the list underneath. Both halves are needed and neither
+  // substitutes for the other (`inert` also removes the subtree from the a11y
+  // tree, which no keydown handler can do).
+  //
+  // The release is HELD in a ref because every close path must run it BEFORE
+  // restoreFocus: an element inside an inert subtree is not focusable, so a
+  // synchronous restore while the background is still marked silently no-ops
+  // (#2577). The effect cleanup re-runs the same one-shot release harmlessly.
+  //
+  // Focus-INTO is part of the set, not a nicety: marking the background inert
+  // removes the opener's subtree from the tab order, so the browser drops focus
+  // to <body> — and this dialog's Tab handler sits on the CONTAINER, which only
+  // receives keys when focus is inside it. The guarded focus below keeps that
+  // invariant true in every state instead of depending on the input's autoFocus
+  // surviving a future edit.
+  const sessionDeleteDialogRef = React.useRef(null)
+  const sessionDeleteInertRef = React.useRef(null)
+  // #2392 minimal set — the restore half. Without it this dialog would move
+  // focus INTO the card (autoFocus, plus the containment above) and then drop
+  // it on <body> when it unmounts: strictly worse than before the containment.
+  const sessionDeleteRestoreRef = React.useRef(null)
+  const sessionDeleteClose = () => {
+    setConfirmSessionId(null)
+    setSessionConfirmTyped('')
+    if (sessionDeleteInertRef.current) sessionDeleteInertRef.current()
+    // A SUCCESS (row leaves the live list) unmounts the dialog without a close
+    // path, so this is only ever the user-dismissal route; restoreFocus's
+    // detached-node guard still covers an opener that unmounted under us.
+    restoreFocus(sessionDeleteRestoreRef)
+  }
+  React.useEffect(() => {
+    // Keyed on the DERIVED flag, not on `confirmSessionId`: the dialog returns
+    // null the moment its session leaves the live list while the id stays set
+    // (the #3885 review P3-2b hazard). A dependency that cannot change on that
+    // transition would leave the whole page inert with no dialog to release it.
+    if (!sessionDeleteArmed || typeof document === 'undefined') return undefined
+    const el = sessionDeleteDialogRef.current
+    if (!el) return undefined
+    const release = applyBackgroundInert(el, document)
+    sessionDeleteInertRef.current = release
+    if (typeof el.focus === 'function'
+      && !(el.contains && el.contains(document.activeElement))) el.focus()
+    return () => { sessionDeleteInertRef.current = null; release() }
+  }, [sessionDeleteArmed])
   return (
     <section className="settings" aria-label="Settings">
       <h2>Settings</h2>
@@ -668,6 +734,7 @@ function SettingsTab(props) {
             onOpen={onOpenGithubDisconnect}
             onClose={onCloseGithubDisconnect}
             onConfirm={onConfirmGithubDisconnect}
+            dialogRef={githubDisconnectDialogRef}
           />
         </div>
       </section>
@@ -806,6 +873,10 @@ function SettingsTab(props) {
                           // Review P3-2c: clear the previous delete's reason
                           // FIRST — otherwise session A's failure would appear
                           // inside the dialog armed for session B.
+                          // #8670 (a11y): capture the trigger for the restore
+                          // half of the containment set — the dialog moves
+                          // focus into itself and hands it back here on close.
+                          rememberFocusedTrigger(sessionDeleteRestoreRef)
                           onClearSessionsActionError()
                           setConfirmSessionId(sid)
                           setSessionConfirmTyped('')
@@ -854,14 +925,28 @@ function SettingsTab(props) {
                 unreadable while the gate stays up. The dialog renders only
                 while its session is still listed, so a successful DELETE
                 closes it and a failed one keeps it armed. */}
-            {confirmSessionId && (() => {
+            {/* #8670 review P1: the render gate IS the derived flag, so the
+                inert effect's dependency cannot drift from "this card actually
+                renders". `ds` is still resolved below (a vanished row must not
+                render a card) — `sessionDeleteArmed` already proves the row is
+                in the list, so that guard is now belt-and-braces. */}
+            {sessionDeleteArmed && (() => {
               const ds = sessions.find((x) => String(x.id) === confirmSessionId)
               if (!ds) return null
               const sessionTypedOk = deleteTypedMatches(sessionConfirmTyped, DELETE_CONFIRM_WORD)
               const sessionBusy = deletingSessionId === confirmSessionId
               return (
-                <div className="modal-backdrop" onClick={() => { if (!sessionBusy) { setConfirmSessionId(null); setSessionConfirmTyped('') } }}>
-                  <div className="modal graph-delete-modal session-delete-modal" role="dialog" aria-modal="true" aria-label="Delete captured session" onClick={(e) => e.stopPropagation()}>
+                <div className="modal-backdrop" onClick={() => { if (!sessionBusy) sessionDeleteClose() }}>
+                  <div className="modal graph-delete-modal session-delete-modal" role="dialog" aria-modal="true" aria-label="Delete captured session" onClick={(e) => e.stopPropagation()}
+                       ref={sessionDeleteDialogRef}
+                       tabIndex={-1}
+                       onKeyDown={(e) => {
+                         // #8670: APG modal containment — wrap Tab/Shift+Tab at
+                         // the dialog boundary so the background can never take
+                         // the keyboard (the `inert` background above is the
+                         // screen-reader half; this is the keyboard half).
+                         if (e.key === 'Tab') { if (containTabFocus(e.currentTarget, { shiftKey: e.shiftKey })) e.preventDefault() }
+                       }}>
                     <h3>Delete this captured session?</h3>
                     <p className="danger-note">This cannot be undone — think before you confirm.</p>
                     <ul className="dim small">
@@ -878,11 +963,11 @@ function SettingsTab(props) {
                       onChange={(e) => setSessionConfirmTyped(e.target.value)}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' && sessionTypedOk && !sessionBusy) { e.preventDefault(); onDeleteSession(ds.id) }
-                        if (e.key === 'Escape' && !sessionBusy) { setConfirmSessionId(null); setSessionConfirmTyped('') }
+                        if (e.key === 'Escape' && !sessionBusy) { sessionDeleteClose() }
                       }}
                     />
                     <div className="new-key-actions" style={{ marginTop: '0.8rem' }}>
-                      <button type="button" className="ghost" disabled={sessionBusy} onClick={() => { setConfirmSessionId(null); setSessionConfirmTyped('') }}>Cancel</button>
+                      <button type="button" className="ghost" disabled={sessionBusy} onClick={() => sessionDeleteClose()}>Cancel</button>
                       <button
                         type="button"
                         className="danger"
@@ -1497,6 +1582,17 @@ function App() {
   // is captured at the gesture and every close hands focus back instead of
   // dropping it on <body>.
   const githubDisconnectRestoreRef = React.useRef(null)
+  // #8670 (a11y): the #2577 APG containment set for the disconnect dialog. The
+  // card lives in `githubDisconnect.js` (which must stay hook-free — its
+  // `node --test` guard invokes it as a plain function), so the inert effect is
+  // HERE, where the open state and every close path already are, and the node is
+  // handed down as a ref prop.
+  const githubDisconnectDialogRef = React.useRef(null)
+  const githubDisconnectInertRef = React.useRef(null)
+  // #8670 (a11y): the inert effect itself is declared BELOW, next to the other
+  // derived containment flags (`githubDisconnectArmed` / `deleteAccountArmed`) —
+  // it must be keyed on a flag that carries BOTH the dialog's render gate and the
+  // open-bit, and that flag can only be declared after `tab` / `team` / `authMode`.
   // #4029 (a11y) applied to #4946: while the disconnect request is in flight
   // BOTH dialog buttons are disabled, which drops focus to <body>. Reclaim it
   // for the dialog container (tabIndex -1), guarded on activeElement === body so
@@ -1515,6 +1611,13 @@ function App() {
   // and every non-logout close hands focus back instead of dropping it on
   // <body>.
   const deleteAccountRestoreRef = React.useRef(null)
+  // #8670 (a11y): the #2577 APG containment set for the account-deletion dialog —
+  // held here for the same reason as the disconnect dialog above (the module is
+  // hook-free so its plain-function guard keeps working).
+  const deleteAccountDialogRef = React.useRef(null)
+  const deleteAccountInertRef = React.useRef(null)
+  // #8670 (a11y): the inert effect is declared BELOW with the other derived
+  // containment flags, for the reason recorded on `githubDisconnectArmed`.
   // #4029 (a11y): while the DELETE is in flight BOTH dialog buttons are
   // disabled, which drops focus to <body>. Reclaim it for the dialog container
   // (tabIndex -1) — guarded on activeElement === body, mirroring the account
@@ -1722,6 +1825,30 @@ function claimIntentInFlight() {
   const [keyModalOpen, setKeyModalOpen] = React.useState(false)
   const [keyModalBusy, setKeyModalBusy] = React.useState(false)
   const [keyModalStage, setKeyModalStage] = React.useState('form') // 'form' | 'done'
+  // #8670 (a11y): the #2577 APG containment set for the key-create dialog —
+  // Tab wrapped inside the card and the background inert, so neither the
+  // keyboard nor a screen reader's virtual cursor can leave a dialog that
+  // announces itself as modal. Release held in a ref: every close path runs it
+  // BEFORE restoreFocus (an element inside an inert subtree is not focusable,
+  // so the restore would silently no-op), and the effect cleanup re-runs the
+  // same one-shot release harmlessly.
+  const keyModalDialogRef = React.useRef(null)
+  const keyModalInertRef = React.useRef(null)
+  // #2392 minimal set. This dialog had NO focus restore at all before #8670,
+  // which was invisible while focus stayed on the opener; once the containment
+  // moves focus into the card, closing without a restore would drop it on
+  // <body> — a regression, so the restore is part of the set, not an extra.
+  const keyModalRestoreRef = React.useRef(null)
+  React.useEffect(() => {
+    if (!keyModalOpen || typeof document === 'undefined') return undefined
+    const el = keyModalDialogRef.current
+    if (!el) return undefined
+    const release = applyBackgroundInert(el, document)
+    keyModalInertRef.current = release
+    if (typeof el.focus === 'function'
+      && !(el.contains && el.contains(document.activeElement))) el.focus()
+    return () => { keyModalInertRef.current = null; release() }
+  }, [keyModalOpen])
   // #4330: show-once reveal feedback. `keyCopied` drives the Copy control's
   // "Copied ✓" state and its live-region announcement; `keyCopyFailed` is the
   // clipboard-refused fallback — the key stays on screen, selected for a
@@ -2543,6 +2670,73 @@ function claimIntentInFlight() {
     }
   }, [])
   const [authMode, setAuthMode] = React.useState('session') // 'session' | 'apikey'
+  // #8670 review P1: the two MODULE dialogs' inert effects are keyed on DERIVED
+  // flags that model their card's WHOLE render gate — the same failure class the
+  // inline flags (`sessionDeleteArmed`, `graphDeleteArmed`) carry, and here it
+  // bites HARDER because neither card is rendered by this component's own JSX at
+  // the point the effect lives:
+  //
+  //   • `GithubDisconnectControl` renders inside `<SettingsTab>`, which App
+  //     mounts only under `tab === 'settings' && team`;
+  //   • `DeleteAccountSection` renders only under `tab === 'profile' &&
+  //     authMode === 'session' && identityInv && !identityInv.unsupported`.
+  //
+  // Every one of those conditions can flip while the dialog is OPEN with
+  // `githubDisconnect.open` / `deleteAccountOpen` untouched, and the effect's
+  // owner (this component) stays mounted either way — so keyed on the open-bit
+  // alone the effect neither re-runs nor cleans up and the page outside the card
+  // keeps `inert` with no dialog left to release it (the page-wide keyboard
+  // lockout the pair of effects exists to prevent). Measured triggers, none of
+  // them exotic: `tab` moves on browser Back / an address-bar hash edit (#2509's
+  // popstate+hashchange handler calls `setTab` with no regard for an open
+  // dialog, and `inert` does not disable browser chrome); `team` nulls on an org
+  // transition; and `fetchIdentity()` — re-run on window focus — fails CLOSED to
+  // `setIdentityInv(null)`, so alt-tabbing away from an open Delete-account
+  // dialog and back during an identity-read blip unmounts the section with no
+  // navigation at all.
+  //
+  // Declared HERE, below `tab` (2563), `team` (1735) and `authMode` themselves:
+  // an expression is evaluated eagerly during render, so a flag that reads a
+  // later `const` is the #2709 TDZ class `tdzDepsTripwire.test.js` guards.
+  const githubDisconnectArmed = tab === 'settings' && !!team
+    && githubDisconnect.open
+  // #9170 review P1: TWO questions, not one. `DeleteAccountSection` renders its
+  // OWNER and its dialog in the same component (`accountDeletion.js`: the
+  // `Delete account` button, then `open ? <backdrop> : null`), so the card's
+  // render gate must NOT read the open-bit: the only setter of
+  // `deleteAccountOpen = true` is a prop of the very component that would then
+  // not render — a closed circle that lost the Profile tab's whole delete-account
+  // home (heading, warning copy and the only opener) with the dialog
+  // un-containerable because it could never mount.
+  //
+  // The GATE answers "may this card exist here" (the tab/auth/identity chain) and
+  // is what the JSX renders from. The FLAG answers "is the dialog open" for the
+  // inert effect below — it adds the open-bit so the effect still cleans up on
+  // close, while its other four conditions keep it keyed on the gate's flips too
+  // (see the page-wide-lockout note above).
+  const deleteAccountGate = tab === 'profile' && authMode === 'session'
+    && !!identityInv && !identityInv.unsupported
+  const deleteAccountArmed = deleteAccountGate && deleteAccountOpen
+  React.useEffect(() => {
+    if (!githubDisconnectArmed || typeof document === 'undefined') return undefined
+    const el = githubDisconnectDialogRef.current
+    if (!el) return undefined
+    const release = applyBackgroundInert(el, document)
+    githubDisconnectInertRef.current = release
+    if (typeof el.focus === 'function'
+      && !(el.contains && el.contains(document.activeElement))) el.focus()
+    return () => { githubDisconnectInertRef.current = null; release() }
+  }, [githubDisconnectArmed])
+  React.useEffect(() => {
+    if (!deleteAccountArmed || typeof document === 'undefined') return undefined
+    const el = deleteAccountDialogRef.current
+    if (!el) return undefined
+    const release = applyBackgroundInert(el, document)
+    deleteAccountInertRef.current = release
+    if (typeof el.focus === 'function'
+      && !(el.contains && el.contains(document.activeElement))) el.focus()
+    return () => { deleteAccountInertRef.current = null; release() }
+  }, [deleteAccountArmed])
   const [checking, setChecking] = React.useState(true)
   // #3890: move focus to the deep-linked section heading once its tab has
   // rendered (WCAG 2.4.3 Focus Order / 2.4.11 Focus Not Obscured). The tab
@@ -2715,6 +2909,54 @@ function claimIntentInFlight() {
   const [graphMsg, setGraphMsg] = React.useState('') // inline PANEL error (mint/revoke — renders inside the open key panel only; #2301: delete failures are page-level, never here)
   const [confirmDeleteId, setConfirmDeleteId] = React.useState(null) // custom row whose type-to-confirm delete modal is open
   const [deleteConfirmTyped, setDeleteConfirmTyped] = React.useState('') // #2701: typed word gate for the delete modal
+  // #8670 (a11y): the #2577 APG containment set for the graph-delete dialog.
+  // "The dialog is armed" is NOT "confirmDeleteId is set" — the modal resolves
+  // its graph from the LIVE list and returns null the moment the row is gone,
+  // while the id stays set. The effect is keyed on this DERIVED flag for that
+  // reason: keyed on the id, a successful delete would unmount the card with the
+  // background still marked inert and nothing left to release it.
+  //
+  // #8670 review P1: the flag models the WHOLE render gate, not just the live
+  // row. The card renders only when the role still allows it (its gate is
+  // `graphDeleteArmed` below, which includes the role), and `roleIsOwnerAdmin()`
+  // is re-derived from `teams` on every render — a role change landing while the
+  // dialog is open (`refreshTeam` after an org switch, a demotion applied from a
+  // second tab) unmounts the card. A flag without the role would not change on
+  // that transition, so the effect would neither re-run nor clean up and the
+  // page outside the card would keep `inert` with no dialog left to release it.
+  //
+  // #8670 review P1 (same shape, second condition): the card is also nested in
+  // the Settings home's `tab === 'graphs'` block, and `tab` can change WITHOUT a
+  // click — the popstate/hashchange handler (#2509) calls `setTab` straight from
+  // browser Back or an address-bar edit, and `inert` does not disable browser
+  // chrome. That unmounts the card while `confirmDeleteId` and `graphs` are
+  // untouched, so the flag has to carry the tab too; leaving it out strands
+  // `inert` on the whole page with no dialog to release it. Returning to the
+  // tab re-arms the flag, so the effect re-applies on the way back in.
+  const graphDeleteArmed = tab === 'graphs' && roleIsOwnerAdmin() && !!confirmDeleteId
+    && graphs.some((g) => g.graph_id === confirmDeleteId)
+  const graphDeleteDialogRef = React.useRef(null)
+  const graphDeleteInertRef = React.useRef(null)
+  // #2392 minimal set — the restore half (see the key-create dialog above: the
+  // containment moves focus into the card, so it must hand it back on close).
+  const graphDeleteRestoreRef = React.useRef(null)
+  const graphDeleteClose = () => {
+    setConfirmDeleteId(null)
+    setDeleteConfirmTyped('')
+    // Release BEFORE the restore (#2577): an inert element is not focusable.
+    if (graphDeleteInertRef.current) graphDeleteInertRef.current()
+    restoreFocus(graphDeleteRestoreRef)
+  }
+  React.useEffect(() => {
+    if (!graphDeleteArmed || typeof document === 'undefined') return undefined
+    const el = graphDeleteDialogRef.current
+    if (!el) return undefined
+    const release = applyBackgroundInert(el, document)
+    graphDeleteInertRef.current = release
+    if (typeof el.focus === 'function'
+      && !(el.contains && el.contains(document.activeElement))) el.focus()
+    return () => { graphDeleteInertRef.current = null; release() }
+  }, [graphDeleteArmed])
   // #2701: inline graph rename (mirrors the API-Keys ✏️ inline edit).
   const [editingGraphId, setEditingGraphId] = React.useState(null) // row in inline rename (null = none)
   const [editingGraphName, setEditingGraphName] = React.useState('')
@@ -3294,6 +3536,10 @@ function claimIntentInFlight() {
     // (tabIndex -1) instead — the same programmatic-focus-target pattern as the
     // Memory-sources heading (#3890).
     const completed = !!(githubDisconnect && githubDisconnect.result)
+    // #8670: release the inert background BEFORE restoreFocus — an element
+    // inside an inert subtree is not focusable, so a restore that ran first
+    // would silently no-op (#2577). One-shot, so the effect cleanup is safe.
+    if (githubDisconnectInertRef.current) githubDisconnectInertRef.current()
     const restored = restoreFocus(githubDisconnectRestoreRef)
     if ((!restored || completed) && typeof document !== 'undefined') {
       const heading = document.getElementById('settings-github-heading')
@@ -6280,11 +6526,19 @@ function claimIntentInFlight() {
 
 
   // ── #300: graphs + members + backups (session JWT authed) ──
-  function myRole() {
+  // #8670 review P1: a HOISTED function declaration, not a `const`, on purpose.
+  // The graph-delete background-inert flag (`graphDeleteArmed`) is declared
+  // beside its effect, far ABOVE this line, because it is that effect's
+  // dependency — and the flag has to model the card's WHOLE render gate, which
+  // includes the role. Reading the `isOwnerAdmin` const from up there would be a
+  // TDZ throw (the const is not initialized yet at that point in the render),
+  // so the predicate is a hoisted declaration both sites share: `isOwnerAdmin`
+  // for the render, and the flag for the effect's dependency.
+  function roleIsOwnerAdmin() {
     const t = teams.find((x) => x.org_id === currentOrgId)
-    return t ? t.role : ''
+    return !!t && (t.role === 'owner' || t.role === 'admin')
   }
-  const isOwnerAdmin = myRole() === 'owner' || myRole() === 'admin'
+  const isOwnerAdmin = roleIsOwnerAdmin()
 
   async function loadGraphs(orgId) {
     const tok = sessionTokenRef.current
@@ -6804,6 +7058,14 @@ function claimIntentInFlight() {
         throw new Error(b.detail || `HTTP ${res.status}`)
       }
       if (orgIdRef.current !== _teamAtCall) return
+      // #8670 review P3 (recorded, not changed): a SUCCESS deliberately does NOT
+      // route through `graphDeleteClose()`. The opener is this row's own 🗑, which
+      // `loadGraphs` below removes — restoring focus synchronously here would aim
+      // it at a node that is about to unmount (focus falls to <body> anyway) and
+      // the deferred pattern is only needed on paths where the opener SURVIVES.
+      // The user-dismissal paths (Cancel / backdrop / Escape) do restore, via
+      // `graphDeleteClose`. What matters for `inert` — the release — happens
+      // either way: the flag flips, so the effect cleanup runs it.
       setConfirmDeleteId(null)
       setDeleteConfirmTyped('')
       if (panelGraphId === graphId) closeGraphPanel()
@@ -7587,6 +7849,11 @@ function claimIntentInFlight() {
         && !window.confirm('Close without copying it? This dialog will not show the key again.')) return
     if (plaintext) setWizardDurableKey(plaintext)
     setKeyModalOpen(false)
+    // #8670: release the inert background BEFORE the restore — an element inside
+    // an inert subtree is not focusable, so a restore that ran first would
+    // silently no-op (#2577). Both are one-shot, so the effect cleanup is safe.
+    if (keyModalInertRef.current) keyModalInertRef.current()
+    restoreFocus(keyModalRestoreRef)
     setNewKey(null)
     setNewKeyExpiresAt(null)
     setKeyCopied(false)
@@ -10310,7 +10577,18 @@ function claimIntentInFlight() {
       {keyModalOpen && (
         <div className="modal-backdrop" onClick={() => { if (!keyModalBusy) dismissKeyModal() }}>
           <div className="modal key-create-modal" role="dialog" aria-modal="true" aria-label="Create API key"
-               onClick={(e) => e.stopPropagation()}>
+               ref={keyModalDialogRef}
+               tabIndex={-1}
+               onClick={(e) => e.stopPropagation()}
+               onKeyDown={(e) => {
+                 // #8670: APG modal containment, same pair as the #2577 dialogs
+                 // — Tab/Shift+Tab wrap at the boundary (keyboard) on top of the
+                 // `inert` background (accessibility tree + tab order). Escape
+                 // is new here: the dialog announces modality, so it owes a
+                 // keyboard exit that the busy guard still respects.
+                 if (e.key === 'Tab') { if (containTabFocus(e.currentTarget, { shiftKey: e.shiftKey })) e.preventDefault() }
+                 else if (e.key === 'Escape' && !keyModalBusy) dismissKeyModal()
+               }}>
             {/* #4330 (review P2): the reveal is an OPT-IN stage. `newKeyReveal`
                 is the ONLY gate — the done stage renders iff a live non-empty
                 key exists, and every other state (including a team switch or
@@ -10327,6 +10605,7 @@ function claimIntentInFlight() {
                   <input
                     placeholder="Name (e.g. CI, staging)"
                     aria-label="New key name"
+                    autoFocus
                     value={newKeyName}
                     maxLength={64}
                     onChange={(e) => setNewKeyName(e.target.value)}
@@ -10989,6 +11268,7 @@ function claimIntentInFlight() {
             onOpenGithubDisconnect={openGithubDisconnect}
             onCloseGithubDisconnect={closeGithubDisconnect}
             onConfirmGithubDisconnect={disconnectGithub}
+            githubDisconnectDialogRef={githubDisconnectDialogRef}
             sessions={sessions}
             sessionsOn={!!(onboarding && onboarding.session_recording)}
             sessionsLoading={onboardingLoading}
@@ -11057,7 +11337,17 @@ function claimIntentInFlight() {
         {/* #4029: personal-account deletion lives on the Profile tab and only
             for a real SESSION account — a key-login has no auth account to
             delete (the server answers `unsupported` in registry mode). */}
-        {tab === 'profile' && authMode === 'session' && identityInv && !identityInv.unsupported && (
+        {/* #4029/#8670: the card renders from the GATE (`deleteAccountGate`) —
+            the tab/auth/identity chain only, never the open-bit. It is also one
+            condition WIDER than `deleteAccountArmed`, the flag the inert effect
+            is keyed on, so a flip of ANY gate condition — the tab, the auth
+            mode, or an identity read landing null — clears the flag too and the
+            effect cleans up instead of stranding `inert` on the page with no
+            dialog left to release it. Rendering from the flag itself would be a
+            closed circle: this component owns both the `Delete account` opener
+            and the dialog, so its only opener could never mount before it was
+            already open (#9170 review P1). */}
+        {deleteAccountGate && (
           <DeleteAccountSection
             open={deleteAccountOpen}
             busy={deleteAccountBusy}
@@ -11074,10 +11364,14 @@ function claimIntentInFlight() {
               // drop the response state, and hand focus back to the opener.
               setDeleteAccountOpen(false)
               setDeleteAccountResult(null)
+              // #8670: release the inert background BEFORE the restore — an inert
+              // element is not focusable, so the restore would no-op (#2577).
+              if (deleteAccountInertRef.current) deleteAccountInertRef.current()
               restoreFocus(deleteAccountRestoreRef)
             }}
             onConfirm={deleteAccount}
             onDone={finishAccountDeletion}
+            dialogRef={deleteAccountDialogRef}
           />
         )}
         {tab === 'keys' && (
@@ -11153,7 +11447,7 @@ function claimIntentInFlight() {
                   intact. Without this a reopened dialog rendered the previous
                   attempt's notice with no mint attempted. */}
               {isOwnerAdmin && (
-                <button className="ghost" onClick={() => { setKeyModalCapNotice(''); setKeyModalOpen(true); setKeyModalStage('form'); setError(''); setNewKeyName(''); setNewKeyExpiryPreset('30'); setNewKeyExpiryDate('') }}>+ New key</button>
+                <button className="ghost" onClick={() => { rememberFocusedTrigger(keyModalRestoreRef); setKeyModalCapNotice(''); setKeyModalOpen(true); setKeyModalStage('form'); setError(''); setNewKeyName(''); setNewKeyExpiryPreset('30'); setNewKeyExpiryDate('') }}>+ New key</button>
               )}
             </div>
             {/* #3874: the allowance stated BEFORE the cap — the same
@@ -11565,6 +11859,9 @@ function claimIntentInFlight() {
                           onClick={() => {
                             if (!graphCanDelete(g)) return
                             setDeleteConfirmTyped('')
+                            // #8670 (a11y): capture the trigger for the restore
+                            // half of the containment set.
+                            rememberFocusedTrigger(graphDeleteRestoreRef)
                             setConfirmDeleteId(g.graph_id)
                             setError('')
                           }}
@@ -11584,13 +11881,21 @@ function claimIntentInFlight() {
                 on top of the 7-day Trash recovery window. Failure keeps the
                 modal open (armed retry) and lands the reason in the
                 page-level banner (#2301). */}
-            {isOwnerAdmin && confirmDeleteId && (() => {
+            {graphDeleteArmed && (() => {
               const dg = graphs.find((x) => x.graph_id === confirmDeleteId)
               if (!dg) return null
               const typedOk = deleteTypedMatches(deleteConfirmTyped)
               return (
-                <div className="modal-backdrop" onClick={() => { if (!graphBusy) { setConfirmDeleteId(null); setDeleteConfirmTyped('') } }}>
-                  <div className="modal graph-delete-modal" role="dialog" aria-modal="true" aria-label="Delete graph" onClick={(e) => e.stopPropagation()}>
+                <div className="modal-backdrop" onClick={() => { if (!graphBusy) graphDeleteClose() }}>
+                  <div className="modal graph-delete-modal" role="dialog" aria-modal="true" aria-label="Delete graph" onClick={(e) => e.stopPropagation()}
+                       ref={graphDeleteDialogRef}
+                       tabIndex={-1}
+                       onKeyDown={(e) => {
+                         // #8670: APG modal containment (same pair as the #2577
+                         // dialogs) — Tab wrapped at the boundary so the keyboard
+                         // cannot leave the card, on top of the inert background.
+                         if (e.key === 'Tab') { if (containTabFocus(e.currentTarget, { shiftKey: e.shiftKey })) e.preventDefault() }
+                       }}>
                     <h3>Delete {dg.name || dg.graph_id}?</h3>
                     <p className="danger-note">This is destructive and permanent — think before you confirm.</p>
                     <ul className="dim small">
@@ -11609,11 +11914,11 @@ function claimIntentInFlight() {
                       onChange={(e) => setDeleteConfirmTyped(e.target.value)}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' && typedOk && !graphBusy) { e.preventDefault(); deleteGraphRow(dg.graph_id) }
-                        if (e.key === 'Escape' && !graphBusy) { setConfirmDeleteId(null); setDeleteConfirmTyped('') }
+                        if (e.key === 'Escape' && !graphBusy) { graphDeleteClose() }
                       }}
                     />
                     <div className="new-key-actions" style={{ marginTop: '0.8rem' }}>
-                      <button className="ghost" disabled={graphBusy} onClick={() => { setConfirmDeleteId(null); setDeleteConfirmTyped('') }}>Cancel</button>
+                      <button className="ghost" disabled={graphBusy} onClick={() => graphDeleteClose()}>Cancel</button>
                       <button
                         className="danger"
                         disabled={!typedOk || graphBusy}
@@ -12524,9 +12829,30 @@ function MemorySources(props) {
   const comingSoonCloseRef = React.useRef(null)
   const comingSoonDismissRef = React.useRef(null)
   const comingSoonRetryRef = React.useRef(null)
+  // #8670 (a11y): the #2577 APG containment set for the coming-soon dialog. The
+  // card announced modality but left the page behind it reachable — Tab walked
+  // out of it and, with no `inert` background, a screen reader's virtual cursor
+  // reached the integrations grid underneath. Release held in a ref so the close
+  // path can run it BEFORE the deferred restoreFocus below.
+  const comingSoonDialogRef = React.useRef(null)
+  const comingSoonInertRef = React.useRef(null)
+  React.useEffect(() => {
+    if (!comingSoonKey || typeof document === 'undefined') return undefined
+    const el = comingSoonDialogRef.current
+    if (!el) return undefined
+    const release = applyBackgroundInert(el, document)
+    comingSoonInertRef.current = release
+    if (typeof el.focus === 'function'
+      && !(el.contains && el.contains(document.activeElement))) el.focus()
+    return () => { comingSoonInertRef.current = null; release() }
+  }, [comingSoonKey])
   const closeComingSoon = () => {
     setComingSoonKey(null)
     setComingSoonExpanded(false)
+    // #8670: release the inert background BEFORE the restore lands — the restore
+    // is already deferred by a frame (#3514), and an element inside an inert
+    // subtree is not focusable, so the ordering has to be explicit (#2577).
+    if (comingSoonInertRef.current) comingSoonInertRef.current()
     requestAnimationFrame(() => restoreFocus(comingSoonRestoreRef))
   }
   const openComingSoon = (key, trigger) => {
@@ -13062,7 +13388,16 @@ function MemorySources(props) {
             aria-modal="true"
             aria-labelledby="integration-modal-title"
             aria-describedby="integration-modal-body"
-            onKeyDown={(e) => { if (e.key === 'Escape') closeComingSoon() }}
+            ref={comingSoonDialogRef}
+            tabIndex={-1}
+            onKeyDown={(e) => {
+              // #8670: APG modal containment — the keyboard cannot leave the
+              // card (the inert background is the screen-reader half). Escape is
+              // kept verbatim from #3513; the document-level handler below stays
+              // the recovery path for a busy transition that blurs to <body>.
+              if (e.key === 'Tab') { if (containTabFocus(e.currentTarget, { shiftKey: e.shiftKey })) e.preventDefault() }
+              else if (e.key === 'Escape') closeComingSoon()
+            }}
           >
             <h3 id="integration-modal-title">{COMING_SOON_DIALOG_TITLE}</h3>
             <p id="integration-modal-body">
