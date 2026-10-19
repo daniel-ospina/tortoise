@@ -487,7 +487,6 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # `TortoiseSDK` with a journal-backed fake and pre-builds the projection
     # before `main()` writes the var. Function-scoped `monkeypatch` — auto-undone
     # at teardown, so no lane leaks into a later module.
-    "test_9079_event_writers_journal.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # #7017: the engine-probe suite is hermetic — every probe is injected, so
     # the URI's SOLE role is as the input to `graph_target_from_env()`, and the
     # endpoint-resolution tests set/del it precisely to pin which endpoint
@@ -579,6 +578,12 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # (`monkeypatch.setenv("TORTOISE_DB_URI",` + a newline + `"docker://…")`) is
     # still excused by this entry — the continuation line is not inspected. The
     # narrow shape is a real improvement, not a bound.
+    # NOTE (#9249 follow-up): this entry SUPERSEDES an earlier, BROADER one for the
+    # same file (`...TORTOISE_DB_URI")` with no continuation anchor) that sat
+    # earlier in this dict and was silently shadowed by this key — F601. The
+    # narrow form is the declared intent (see the paragraph above), so the
+    # shadowed entry was deleted rather than merged: adding the broad pattern back
+    # here would excuse same-line values and undo that narrowing.
     "test_9079_event_writers_journal.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*$'],
     # The arm's `--db` scoping tests (#1349 isolation): an explicit `--db` must

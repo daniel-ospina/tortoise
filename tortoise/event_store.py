@@ -927,7 +927,7 @@ def _refresh_first_seq(proj) -> None:
     inputs produce a floor above every cursor, so both answer 410.
     """
     from .projection import _graph_metadata_write_scope
-    try:  # noqa: SIM105
+    try:
         # §17.1 (#9124): the purge FLOOR is the same graph-metadata lane as the
         # purge that triggers it — it describes the store, not the corpus.
         with _graph_metadata_write_scope("event-store-purge"):
