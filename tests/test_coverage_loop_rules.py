@@ -19,7 +19,12 @@ from, so a rule regression fails fast and hermetically:
     never drops an item — additive by construction),
   * the sparse reserved-slot contract the second pass composes with:
     original query tokens keep their OR slots; an alias pool fills only
-    the bounded expansion tail.
+    the bounded expansion tail,
+  * the date-window resolution (#8710): recency bounds resolve instead of
+    raising ``TypeError``, both date shapes the sources actually carry
+    (ISO and the producer's ``2023/05/20 (Sat) 03:29``) qualify correctly,
+    and an unresolvable date degrades to "no bound" — never to a hard
+    filter that silently kills the facet.
 """
 from __future__ import annotations
 
@@ -35,8 +40,11 @@ from tortoise.coverage_loop import (
     LOOP_MAX_EXTRA_PASSES,
     LoopFacet,
     _aliases_add_recall,
+    _calendar_date,
+    _span_in_window,
     coverage_gap,
     facet_date_constraint,
+    facet_window_bounds,
     merge_expansion_order,
     session_diverse_order,
 )
@@ -124,6 +132,142 @@ def test_facet_date_constraint_detection():
     kind, start, _end = facet_date_constraint("what happened 3 weeks ago")
     assert kind == "recency" and start == "21"
     assert facet_date_constraint(QUESTION) == (None, None, None)
+
+
+# ── the date-window resolution (#8710) ───────────────────────────────────
+
+#: The ONLY shape the ingest producer emits for ``haystack_dates`` /
+#: ``createdAt`` (measured on the frozen dataset, 23,867/23,867 values, #3011)
+#: — and therefore the shape ``session_dates`` really arrives in.
+PRODUCER_DATES = {
+    "late": "2023/04/10 (Mon) 17:50",
+    "edge": "2023/04/03 (Mon) 09:00",
+    "out": "2023/04/02 (Sun) 23:00",
+}
+
+
+def test_span_in_window_recency_no_longer_raises_typeerror():
+    """The #8710 defect, verbatim: the recency branch took ``max()`` over the
+    raw date STRINGS and then subtracted a ``timedelta`` — a ``TypeError``
+    that the ``except ValueError`` guard did not catch, so every "last N
+    days/weeks/months" query raised out of the census and the eval's
+    fail-open wrapper silently swallowed the loop."""
+    kind, start, end = facet_date_constraint(
+        "how much did i spend in the last 7 days")
+    assert (kind, start, end) == ("recency", "7", None)
+    span = frozenset({"s1", "s2"})
+    window = _span_in_window(span, {"s1": "2026-09-01", "s2": "2026-01-01"},
+                             kind, start, end)
+    assert window == frozenset({"s1"})  # no TypeError; the bound applies
+
+
+def test_span_in_window_qualifies_the_producer_slash_date_shape():
+    """The real dataset shape (``2023/04/10 (Mon) 17:50``) must qualify in
+    BOTH branches. Comparing the raw strings — what the pre-#8710 interval
+    branch did — drops every session on that shape, and a dropped-everything
+    span is dropped by the caller, so the temporal facet was dead for
+    recency AND interval on the frozen dataset."""
+    window = _span_in_window(frozenset(PRODUCER_DATES), PRODUCER_DATES,
+                             "recency", "7", None)
+    # qdate = 2023-04-10 (the latest parseable) → window [04-03, 04-10]
+    assert window == frozenset({"late", "edge"})
+    interval = _span_in_window(frozenset(PRODUCER_DATES), PRODUCER_DATES,
+                               "interval", "2023-04-03", "2023-04-10")
+    assert interval == frozenset({"late", "edge"})
+
+
+def test_span_in_window_unresolvable_dates_degrade_to_no_bound():
+    """#8710's structural rule: a date that cannot be resolved means
+    UNBOUNDED, never "matches nothing". A hard filter here would silently
+    kill the facet — the exact failure mode this fix removes."""
+    span = frozenset({"s1", "s2"})
+    # no parseable session date at all → the recency window cannot be built
+    garbage = {"s1": "early May", "s2": ""}
+    assert _span_in_window(span, garbage, "recency", "7", None) == span
+    # an interval bound that does not parse → no bound
+    assert _span_in_window(span, {"s1": "2026-09-01"}, "interval",
+                           "last spring", "2026-09-03") == span
+    # unknown kind / no session dates → untouched
+    assert _span_in_window(span, {"s1": "2026-09-01"}, None, None, None) == span
+    assert _span_in_window(span, None, "recency", "7", None) == span
+
+
+def test_span_in_window_qualifies_an_unpadded_session_date():
+    """An unpadded session date is the same calendar day, so a bound must
+    qualify it — reading it as undated drops the session and makes a partial
+    span look fully covered (which suppresses the fire)."""
+    dates = {"padded": "2023/04/10 (Mon) 17:50", "unpadded": "2023/4/9"}
+    assert _span_in_window(frozenset(dates), dates, "recency", "7", None) == \
+        frozenset(dates)
+
+
+def test_span_in_window_drops_undated_sessions_only_when_a_bound_applies():
+    """An undated session cannot be proven in-window, so a bound drops it —
+    while an UNBOUNDED qualification keeps it (no date required)."""
+    dates = {"dated": "2023/04/10 (Mon) 17:50", "undated": ""}
+    assert _span_in_window(frozenset(dates), dates, "recency", "7", None) == \
+        frozenset({"dated"})
+    assert _span_in_window(frozenset(dates), dates, None, None, None) == \
+        frozenset(dates)
+
+
+def test_facet_window_bounds_resolution():
+    """The shared resolution both qualifications route through: inclusive
+    ISO bounds, ordered (a reversed pair still means the intended window),
+    and ``None`` for every unresolvable input."""
+    assert facet_window_bounds("interval", "2023-04-03", "2023-04-10") == (
+        "2023-04-03", "2023-04-10")
+    assert facet_window_bounds("interval", "2023-04-10", "2023-04-03") == (
+        "2023-04-03", "2023-04-10")  # ordered, not emptied
+    assert facet_window_bounds("interval", "April 3", "2023-04-10") is None
+    assert facet_window_bounds("interval", None, "2023-04-10") is None
+    assert facet_window_bounds(None, None, None) is None
+    assert facet_window_bounds("ordering", "1", "2") is None
+    # recency: the latest parseable session date stands in for "now". The
+    # window is INCLUSIVE on BOTH ends — the ``qdate − N`` boundary day is in
+    # it (pinned end-to-end below by the slash-shape branch test, which keeps
+    # ``edge``); a half-open window here would drop that day.
+    assert facet_window_bounds("recency", "7", None, PRODUCER_DATES) == (
+        "2023-04-03", "2023-04-10")
+    assert facet_window_bounds("recency", "7", None, None) is None
+    assert facet_window_bounds("recency", "seven", None, PRODUCER_DATES) is None
+    # a MISSING day count is unresolvable → NO BOUND. Coercing it to 0 would
+    # build the narrowest possible window (``qdate`` alone) and empty the span.
+    assert facet_window_bounds("recency", None, None, PRODUCER_DATES) is None
+    assert facet_window_bounds("recency", "  ", None, PRODUCER_DATES) is None
+    # an UNREPRESENTABLE day count is unresolvable, not fatal — `\d+` means
+    # real question text reaches here (assembly.resolve_relative_anchor guards
+    # the identical input the same way)
+    assert facet_window_bounds("recency", "99999999999999999999", None,
+                               PRODUCER_DATES) is None
+    # a negative day count can never invert the window
+    assert facet_window_bounds("recency", "-7", None, PRODUCER_DATES) == (
+        "2023-04-10", "2023-04-10")
+
+
+def test_calendar_date_normalizes_both_shapes_and_rejects_the_rest():
+    """One calendar-date normalizer for both sources: ISO (date and
+    timestamp), the producer's slash shape, and ``None`` for everything else
+    — including an out-of-range month/day, which validation through
+    ``date.fromisoformat`` rejects."""
+    assert _calendar_date("2026-09-01") == "2026-09-01"
+    assert _calendar_date("2026-09-01T00:00:00Z") == "2026-09-01"
+    assert _calendar_date("2023/05/20 (Sat) 03:29") == "2023-05-20"
+    # UNPADDED month/day is the same calendar date — treating it as undated
+    # would drop that session from every bounded span (a silent partial
+    # census is the failure this module exists to remove)
+    assert _calendar_date("2023/4/9") == "2023-04-09"
+    assert _calendar_date("2023-4-9") == "2023-04-09"
+    # the ingest UN dated sentinel is a POSITIVE date meaning "no date" in
+    # every ISO spelling — as a bound it would qualify (or exclude) everything
+    for sentinel in ("1970-01-01", "1970-01-01T00:00:00Z",
+                     "1970-01-01T00:00:00+00:00"):
+        assert _calendar_date(sentinel) is None, sentinel
+    assert facet_window_bounds("recency", "7", None,
+                               {"s": "1970-01-01T00:00:00Z"}) is None
+    for undated in (None, "", "   ", "early May", "2026-13-45",
+                    "2023/04/105", "2026-09"):
+        assert _calendar_date(undated) is None, undated
 
 
 # ── the budget: ≤1 extra pass + the no-op alias guard ────────────────────

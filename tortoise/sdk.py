@@ -3073,6 +3073,24 @@ def _journal_record_payload(event: dict) -> dict:
     return {k: v for k, v in event.items() if k not in _JOURNAL_ENVELOPE_KEYS}
 
 
+def _journal_vector(value):
+    """An embedding as a JSON-able ``list[float]``, or ``None``.
+
+    The journal is the sanctioned replay carrier for a stored vector
+    (``_session_event_write`` journals the freshly COMPUTED one). A live node's
+    value is a ``Vectorf32``, which is not JSON, so a door that re-journals the
+    STORED vector has to convert it. A conversion failure degrades to ``None``
+    — the record simply omits the vector, exactly as it did before this helper
+    — and never raises into the caller's sweep.
+    """
+    if value is None:
+        return None
+    try:
+        return [float(x) for x in value]
+    except (TypeError, ValueError):
+        return None
+
+
 # Epic #902 A4 (§4.2): JSONL-ONLY batch_id record type — deliberately NOT in
 # _GRAPH_EVENT_TYPES, so _stamp_batch_id writes the prop SET + this record and
 # NO GraphEvent-store event (Q4 stays deferred). A10's rebuild pass-2b replays
@@ -6919,7 +6937,7 @@ class TortoiseSDK:
             # before/after delta can be moved by another thread's failure.
             return False
 
-    def _journal_entity_event(self, event: dict) -> None:
+    def _journal_entity_event(self, event: dict) -> bool | None:
         """Append a canonical entity record to the journal (the WRITE half).
 
         The emission half of :meth:`_apply_and_journal`; split out so a
@@ -6936,11 +6954,18 @@ class TortoiseSDK:
         """
         type_ = event.get("type")
         if type_ not in _JOURNALED_ENTITY_EVENT_TYPES:
-            return
+            return None
         id_ = event.get("id") or event.get("eventId")
         if id_ is None:
-            return
-        self._emit_event(type_, id=id_, **_journal_record_payload(event))
+            return None
+        # RETURN the append outcome: `_emit_event` is True (appended), False (a
+        # configured journal's append RAISED) or None (nothing to log / no
+        # journal). This is the PER-CALL value, which is what a live door must
+        # gate its cache write on — never a delta of `_journal_write_failures`,
+        # which a CONCURRENT writer can inflate (#5612). Existing callers
+        # ignored the return and are unaffected by its arrival.
+        return self._emit_event(
+            type_, id=id_, **_journal_record_payload(event))
 
     def _apply_and_journal(self, proj, event: dict, *,
                            journal: bool = True) -> None:
@@ -7028,6 +7053,148 @@ class TortoiseSDK:
         # `FalkorProjection.apply`.
         with _live_write_scope("chokepoint"):
             proj.apply(event)
+
+    def _event_raw_write_door(self, proj, statement: str, *,
+                              event_id: str, props: dict,
+                              event_kind: str | None = None,
+                              embedding=None, lane: str) -> bool:
+        """THE live-write door for an ``:Event`` written with RAW CYPHER.
+
+        §17.1's rule is "writes go to the truth first, then project".
+        :meth:`_apply_and_journal` is that door for a caller holding a
+        **record**; this is the same door for a caller holding a **statement**
+        — the legacy writers that put ``:Event`` nodes in the cache with
+        ``proj.g.query`` and had no way to declare themselves.
+
+        Journal-first, then the handle, for exactly the reasons
+        ``_apply_and_journal`` gives (the crash window between the two is
+        replay-healable; the reverse is not). The handle write runs inside
+        ``_live_write_scope`` because a caller that HAS journalled is the
+        sanctioned lane ``#9079``'s third door (#9124) must let through: the
+        refusal exists to catch an *unjournalled* write, not to stop the
+        product writing.
+
+        ⛔ THE RECORD TYPE IS ``EventRecorded``, NOT ``DocumentCreated``, even
+        for the writers whose ``eventKind`` reads ``DocumentCreated``.
+        ``DocumentCreated`` is an eventKind here, not a record type, and the
+        two are not interchangeable: the ``DocumentCreated`` RECORD folds
+        through ``_upsert_document``, which MERGEs a **`:Source` keyed `url`**
+        (D10, ONTOLOGY §4.4). Replaying one for this writer would materialise a
+        Source and destroy the Event, and a rebuild test asserting only "a node
+        came back" would pass while the node changed label. ``EventRecorded``
+        folds through ``_upsert_event``, which MERGEs ``:Event {eventId}`` —
+        the identity every one of these writers actually uses.
+
+        ``embedding`` rides the payload when the writer computed one, because
+        the journal is the sanctioned replay carrier for a stored vector
+        (``_session_event_write``'s contract (a), epic #900 cycle-18/19);
+        ``_upsert_event`` consumes ``embedding`` off the record instead of
+        recomputing it, so live and replayed vectors agree.
+
+        THE APPEND IS THE COMMIT POINT, exactly as in ``_apply_and_journal``:
+        a FAILED append (``_emit_event`` returning ``False``) skips the cache
+        write and this returns ``False``, so the derived store is never ahead
+        of truth. The caller owns the consequence — ``ingest_corpus`` counts it
+        as a retryable failure and does not mark the file complete, so the next
+        run retries instead of silently losing the document. A journal-less
+        SDK (embedded / dev / CI) appends nothing and writes as before, because
+        ``_emit_event`` returns ``None`` there — the configured/unconfigured
+        switch, not a separate path.
+
+        ⚠️ ONE behaviour change DOES reach the journal-less lane, deliberately:
+        the `#5475` kind gate runs before the append check, so a frontmatter
+        ``type:`` naming an unapproved pack namespace is now REFUSED on a graph
+        whose ``:PackInstall`` set lacks it — where this writer previously wrote
+        the node and widened the approval set (`#9068`, the P0 this shares a
+        root with). ``_doc_write`` already gates its frontmatter the same way.
+        """
+        if self._journal_event_raw_write(
+                event_id, props, graph=getattr(proj, "g", None),
+                event_kind=event_kind, embedding=embedding) is False:
+            # `_emit_event` already logged + counted the failure (#4240); the
+            # refusal to fold is this door's half of the contract.
+            return False
+        # `$embedding` is always supplied: `set_embedding_clause` references it
+        # unconditionally (a missing param is a query error, not a null), and
+        # an unused param is inert on a statement that has no vector clause.
+        query_params = {"eid": event_id, "props": props,
+                        "embedding": embedding}
+        with _live_write_scope(lane):
+            proj.g.query(statement, params=query_params)
+        return True
+
+    def _journal_event_raw_write(self, event_id: str, props: dict, *,
+                                 graph, event_kind: str | None = None,
+                                 embedding=None) -> bool | None:
+        """The RECORD half of :meth:`_event_raw_write_door`.
+
+        Split out (like ``_journal_entity_event`` is split out of
+        ``_apply_and_journal``) so a caller that must write through a different
+        statement shape can still record, and so the payload rule lives in ONE
+        place: the record is the props the cache is about to receive, minus the
+        ``id`` this door carries in its own envelope.
+
+        ⛔ ``_drop_reserved_emit_props`` IS LOAD-BEARING, not hygiene. `props`
+        here comes from the GRAPH in the update arms
+        (``RETURN properties(e)``) and from frontmatter in the create arms, so
+        it is caller data. A ``type`` key would win the ``**record`` spread and
+        re-type the record (``_journal_entity_event`` then returns ``None`` for
+        a non-journaled type, which the door reads as "not a failure" — the
+        cache write proceeding with NO record, the exact §17.1 hole this door
+        closes), a ``type``/``DocumentCreated`` value would replay as a
+        ``:Source``, and a ``self``/``type_``/``new_content`` key binds
+        ``_emit_event``'s named parameter at the CALL — a ``TypeError`` raised
+        BEFORE its ``try``, so it would abort the whole ingest sweep. One strip,
+        from the one shared set, keeps the door's commit-point guarantee
+        structural instead of a property of what happens to be stored today.
+        """
+        record = {k: v for k, v in props.items() if k != "id"}
+        _drop_reserved_emit_props(record)
+        # ⛔ DEGRADE, NEVER RAISE — and NULL is the FAITHFUL value. These props
+        # come from `yaml.safe_load` frontmatter, so `created:`/`updated:` with
+        # a bare YAML date is a `datetime.date`, which `EventLog.append`'s
+        # `json.dumps` cannot encode. The NODE write already degrades it: the
+        # projection's transport gate nulls an unrepresentable parameter before
+        # dispatch ("degrading rather than raising on purpose"), so the cache
+        # receives NULL. Writing `None` here therefore puts the SAME thing on
+        # the record that the node gets, and a replay reproduces it. Letting it
+        # raise instead would be a hard regression: `_emit_event` returns
+        # `False`, the door treats that as "not committed" and skips the write,
+        # so every document with a bare date in frontmatter — 470 tracked `.md`
+        # files in this repo alone — would fail, be marked retryable, and never
+        # converge. (Measured on this repo's own corpus before the degradation:
+        # `ingested 0 / failed 2`, graph count 0.)
+        # The ENCODE is part of the test, not just the dump: `json.dumps` accepts
+        # a lone surrogate (``ensure_ascii=False`` passes it through) and the
+        # failure only appears at `EventLog.append`'s UTF-8 file write, inside
+        # `_emit_event`'s try — so a `dumps`-only probe left exactly the same
+        # permanent, retryable-forever failure one step later (measured: a
+        # frontmatter `title` with an unpaired surrogate gave `ingested 0 /
+        # failed 1` on every run, and pre-PR the same file ingested with
+        # `title = None` via the transport gate's degradation).
+        for _k, _v in list(record.items()):
+            try:
+                _json.dumps(_v, ensure_ascii=False).encode("utf-8")
+            except (TypeError, ValueError, UnicodeError):
+                record[_k] = None
+        record["eventId"] = event_id
+        if event_kind is not None:
+            record["eventKind"] = event_kind
+        if embedding is not None:
+            record["embedding"] = embedding
+        built = {"type": "EventRecorded", "id": event_id, **record}
+        # ── #5475: the record door is a WRITE door ──
+        # The payload carries kind spellings straight from frontmatter --
+        # `document_kind` above all (`ingest_corpus` takes it from
+        # `frontmatter["type"]`, and `document_kind` IS one of
+        # `pack_state._KIND_PROP_SPELLINGS`) -- so journalling it without the
+        # gate would make the journal a DURABLE carrier of an unapproved
+        # namespace: replay is ungated by design, so a rebuild would re-install
+        # it after the node was deleted or the pack un-declared. Gated BEFORE
+        # the append, exactly as `_apply_and_journal` and `_doc_write` do, so a
+        # refusal leaves neither store touched.
+        self._refuse_unapproved_kinds_in_record(built, graph)
+        return self._journal_entity_event(built)
 
     def create_point(self, kind: str, content: str, *, is_episodic: bool | None = None,
                       credibility: str | int | float | None = None,
@@ -23206,6 +23373,20 @@ class TortoiseSDK:
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         proj = self._get_proj()
 
+        def _record_failure(_rel: str, _reason: str, *,
+                            retryable: bool) -> None:
+            """Count ONE file as failed without aborting the sweep (#9122).
+
+            A journal-append failure is retryable; a #5475 kind refusal is not
+            (it will refuse identically on every retry, so a `retryable` flag
+            would make the sweep non-convergent on that file). Neither may take
+            the whole corpus down with it: `ingest_corpus` is a batch door.
+            """
+            nonlocal failed
+            failed += 1
+            errors.append({"file": _rel, "error": _reason,
+                           "retryable": retryable})
+
         files = sorted(Path(directory).rglob("*.md"))
 
         # Resume from progress file
@@ -23458,12 +23639,65 @@ class TortoiseSDK:
                             update_props["name"], metadata.get("summary", ""),
                             merged_keywords, update_props["topics"],
                         )
-                        proj.g.query(
-                            "MATCH (e:Event {eventId:$eid}) "
-                            + clear_then_set_prefix("e")
-                            + "SET e += $props, " + set_embedding_clause("e"),
-                            params={"eid": event_id, "props": update_props, "embedding": embedding},
-                        )
+                        # #9122 (§17.1): this writer reached the cache with no
+                        # journal record. Journal-first, then the handle inside
+                        # the sanctioned scope (see `_event_raw_write_door`).
+                        #
+                        # ⛔ The RECORD carries the merged node view, not
+                        # `update_props` alone. This arm is a partial patch
+                        # (`e += $props`), but its replay is not partial: the
+                        # fold writes its OWN fixed props dict (`startedAt`,
+                        # `endedAt`, `format`, `subject`, `object`, …) with
+                        # defaults for anything the record omits
+                        # (`_upsert_event`), so a record carrying only this
+                        # patch would REPLACE a good `startedAt` with `''` and
+                        # a `format` of `markdown` with `jsonl` on every
+                        # rebuild — silently dropping the key `search_sessions`
+                        # orders by. Measuring it is what caught this; the
+                        # established precedent is `_session_event_write`, which
+                        # journals the FULL props dict on its ON MATCH arm too.
+                        # `embedding` is excluded from the merge: the stored
+                        # value is a `Vectorf32` (not JSON) and the live clause's
+                        # preserve-on-null already governs it, so the computed
+                        # vector below is the only one that may ride the record.
+                        _record_props = {k: v for k, v in existing_props.items()
+                                         if k != "embedding"}
+                        _record_props.update(update_props)
+                        # The record must carry the vector the NODE will end up
+                        # with. The live clause is preserve-on-null, so a None
+                        # here keeps the stored vector — but the FOLD does not
+                        # preserve: with no `embedding` on the record it falls
+                        # back to encoding `subject + eventKind + object`, i.e.
+                        # the single token "AgentSession", and writes that OVER
+                        # the good stored vector. Carrying the stored value
+                        # forward is what keeps live == replay for it.
+                        _record_embedding = (
+                            embedding if embedding is not None
+                            else _journal_vector(existing_props.get("embedding")))
+                        try:
+                            _written = self._event_raw_write_door(
+                                proj,
+                                "MATCH (e:Event {eventId:$eid}) "
+                                + clear_then_set_prefix("e")
+                                + "SET e += $props, " + set_embedding_clause("e"),
+                                event_id=event_id, props=_record_props,
+                                event_kind=eventKind,
+                                embedding=_record_embedding,
+                                lane="ingest_corpus",
+                            )
+                        except UnapprovedKindNamespace as _refused:
+                            _record_failure(rel_path, f"refused: {_refused}",
+                                            retryable=False)
+                            continue
+                        if not _written:
+                            # Append is the commit point: nothing was written, so
+                            # do NOT count it updated or mark the file complete —
+                            # the next run retries it.
+                            _record_failure(
+                                rel_path,
+                                "journal append failed — the :Event write was "
+                                "not committed", retryable=True)
+                            continue
                         updated += 1
                         completed_files.append(rel_path)
                         # Connect issue/PR references to Objects
@@ -23514,12 +23748,28 @@ class TortoiseSDK:
                             props["name"], metadata.get("summary", ""),
                             props["keywords"], props["topics"],
                         )
-                        proj.g.query(
-                            "MERGE (e:Event {eventId:$eid}) "
-                            + clear_then_set_prefix("e")
-                            + "SET e += $props, " + set_embedding_clause("e"),
-                            params={"eid": event_id, "props": props, "embedding": embedding},
-                        )
+                        # #9122 (§17.1): journal the new session Event before
+                        # the handle write (see `_event_raw_write_door`).
+                        try:
+                            _written = self._event_raw_write_door(
+                                proj,
+                                "MERGE (e:Event {eventId:$eid}) "
+                                + clear_then_set_prefix("e")
+                                + "SET e += $props, " + set_embedding_clause("e"),
+                                event_id=event_id, props=props,
+                                event_kind=eventKind, embedding=embedding,
+                                lane="ingest_corpus",
+                            )
+                        except UnapprovedKindNamespace as _refused:
+                            _record_failure(rel_path, f"refused: {_refused}",
+                                            retryable=False)
+                            continue
+                        if not _written:
+                            _record_failure(
+                                rel_path,
+                                "journal append failed — the :Event write was "
+                                "not committed", retryable=True)
+                            continue
                         ingested += 1
                         completed_files.append(rel_path)
                         # Connect issue/PR references to Objects
@@ -23567,10 +23817,25 @@ class TortoiseSDK:
 
                 if not exists_rows:
                     # New document
-                    proj.g.query(
-                        "CREATE (e:Event {eventId:$eid}) SET e += $props",
-                        params={"eid": doc_id, "props": props},
-                    )
+                    # #9122 (§17.1): journal-first, then the handle inside the
+                    # sanctioned scope (see `_event_raw_write_door`).
+                    try:
+                        _written = self._event_raw_write_door(
+                            proj,
+                            "CREATE (e:Event {eventId:$eid}) SET e += $props",
+                            event_id=doc_id, props=props,
+                            lane="ingest_corpus",
+                        )
+                    except UnapprovedKindNamespace as _refused:
+                        _record_failure(rel_path, f"refused: {_refused}",
+                                        retryable=False)
+                        continue
+                    if not _written:
+                        _record_failure(
+                            rel_path,
+                            "journal append failed — the :Event write was not "
+                            "committed", retryable=True)
+                        continue
                     ingested += 1
                 elif exists_rows[0][0] == file_hash:
                     # Byte-identical re-ingest — nothing to do (#330)
@@ -23578,10 +23843,25 @@ class TortoiseSDK:
                 else:
                     # Changed content, or legacy event without a stored hash
                     # (None) — update and backfill the hash.
-                    proj.g.query(
-                        "MATCH (e:Event {eventId:$eid}) SET e += $props",
-                        params={"eid": doc_id, "props": props},
-                    )
+                    # #9122 (§17.1): the update arm is a write too, so it
+                    # carries its own record.
+                    try:
+                        _written = self._event_raw_write_door(
+                            proj,
+                            "MATCH (e:Event {eventId:$eid}) SET e += $props",
+                            event_id=doc_id, props=props,
+                            lane="ingest_corpus",
+                        )
+                    except UnapprovedKindNamespace as _refused:
+                        _record_failure(rel_path, f"refused: {_refused}",
+                                        retryable=False)
+                        continue
+                    if not _written:
+                        _record_failure(
+                            rel_path,
+                            "journal append failed — the :Event write was not "
+                            "committed", retryable=True)
+                        continue
                     updated += 1
 
             # Progress checkpoint every 100 files
