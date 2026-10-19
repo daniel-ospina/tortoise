@@ -325,10 +325,12 @@ RECORD_LANE = "event-store.record"
 def _record_write_scope(cypher: str):
     """The §17.1 declaration for `cypher` — or a no-op scope for a read.
 
-    Lazy import on purpose: this module is imported by `tortoise.sdk` and
-    function-locally by `tortoise.projection` (its rebuild lanes), so a
-    module-level import of the projection would put the dependency in both
-    directions and make the pair circular in a future import order.
+    Lazy import on purpose. Nothing in the package imports THIS module at
+    module level — `tortoise.sdk` and `tortoise.projection`'s rebuild lanes both
+    import it function-locally — and keeping that direction one-way is what
+    leaves room for the projection to import these helpers without a cycle if it
+    ever needs to. A module-level import here would also pull the whole
+    projection package into any caller that only wants the store.
 
     The reason string is what the lane's test reads back AT THE WRITE HANDLE
     (`tests/test_9079_record_lane_declared.py`), so the two cannot drift about

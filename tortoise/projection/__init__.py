@@ -3343,6 +3343,13 @@ def _journal_safe_params(params, cypher=None):
 #     a cache write it cannot guarantee (`#9207`);
 #   * the handle's non-Cypher verbs (`proj.g.execute_command("GRAPH.DELETE", …)`,
 #     `proj.g.delete()`) — `#9209`;
+#   * the WEBHOOK-DELIVERY store — `tortoise/webhook_delivery.py`'s
+#     `:ContextSubscription` / `:DeliveryReceipt` writes and their index DDL:
+#     the closest sibling of the lane this increment declares (a graph-native
+#     durable surface with no journal record, allocating through
+#     `event_store.next_seq` while writing its own labels through `proj.g`), and
+#     reached on the hosted lane by `hosted_api.create_subscription` ->
+#     `create_subscription(sdk._get_proj(), …)` — `#9233`;
 #   * `rebuild_all`'s post-wipe SNAPSHOT-RESTORE legs (`:Batch`,
 #     `:Session` + `CONTAINS`, the onboarding state/steps/`onboards` edges,
 #     `:TeamMeta`, config entries), which the replay scope opened by this lane
@@ -3350,24 +3357,26 @@ def _journal_safe_params(params, cypher=None):
 #     narrowing that;
 #   * `FalkorProjection._ensure_indexes()` — this package's largest block of
 #     DDL through `proj.g` (`CREATE INDEX` / `DROP INDEX` / a full-text index
-#     and a `MERGE (m:Meta …)`), and it declares nothing. Two of its call sites
-#     matter: `__init__` runs it before `_bind_journal`, so it escapes only by
-#     ORDERING, and TWO `hosted_api` restore paths call it after a `GRAPH.COPY`
-#     swap that restores data but not schema — `_rebuild_import_indexes` and
+#     and a `MERGE (m:Meta …)`), and it declares nothing of its own. Three of
+#     its call sites matter, and only the last is now covered:
+#     `__init__` runs it before `_bind_journal`, so it escapes only by ORDERING;
+#     TWO `hosted_api` restore paths call it after a `GRAPH.COPY` swap that
+#     restores data but not schema — `_rebuild_import_indexes` and
 #     `backups_restore` — with no scope in flight, on their `dump_proj = proj`
-#     fallback branch. That branch is journal-backed only when
+#     fallback branch, which is journal-backed only when
 #     `TORTOISE_EVENT_LOG_BASE_DIR` is set (otherwise
 #     `_resolve_event_log_path` returns None, `_bind_journal(None)` leaves
 #     `_journal_backed` at its False default, and the branch is outside (1)'s
-#     guard like the fresh-projection branches below — whose `_journal_backed`
-#     is False too). Both wrap the call in `except Exception: log`, so where the
-#     branch IS journal-backed a refusal there is a logged no-op.
-#     `_ensure_indexes` swallows a per-statement `Exception` and only logs, so
-#     under (1) that DDL would be refused and merely logged: the import endpoint
-#     would report success on an index-less graph, which is the same
-#     silent-swallow shape the lanes above exist to prevent. It is named here as
-#     STILL UNDECLARED
-# (not fixed in this increment) so (1)'s census can enumerate it.
+#     guard like the fresh-projection branches, whose `_journal_backed` is False
+#     too); and `rebuild_from_record` calls it INSIDE its replay, which is the
+#     one site this increment's `_replay_write_scope` declares. Both `hosted_api`
+#     callers wrap the call in `except Exception: log`, so where the branch IS
+#     journal-backed a refusal there is a logged no-op. `_ensure_indexes`
+#     swallows a per-statement `Exception` and only logs, so under (1) that DDL
+#     would be refused and merely logged: the import endpoint would report
+#     success on an index-less graph, which is the same silent-swallow shape the
+#     lanes above exist to prevent. It is named here as STILL UNDECLARED (not
+#     fixed in this increment) so (1)'s census can enumerate it.
 #
 # So (1) is NOT blocked by an unknown surface: the measurement is DONE and
 # recorded on `#9124` (an AST census of `sdk.py`'s mutating handle call sites,
@@ -9610,7 +9619,9 @@ class FalkorProjection(
         self._replay_log(...)``) — not at each fold or each write. This engine
         issues mutating statements straight at the projection's write handle
         (``proj.g``): the wipe, pass-1a's Point/Operator creates, the pass-1b
-        ``:Event`` folds, the post-wipe graph-only RESTORES (``:Batch`` /
+        ``:Event`` folds, the ``#548`` SYNTHETIC ``PointAdded`` /
+        ``OperatorAdded`` events it derives from the PRE-WIPE CACHE for points
+        the log does not cover, the post-wipe graph-only RESTORES (``:Batch`` /
         ``batch_id``, ``:Session`` + ``CONTAINS``, the onboarding
         state/steps/``onboards`` edges, the ``:TeamMeta`` marker, config entries),
         and the watermark re-establish. Declaring the scope
@@ -9619,13 +9630,17 @@ class FalkorProjection(
         the whole reason the scope exists (a new unjournaled writer must have
         to work at escaping the door, not merely forget to declare itself).
 
-        The records CAME FROM the journal, so they are authorized to be folded
-        and, by the ordering contract's exception 1, they must not be
-        journaled again. ⚠️ The SNAPSHOT-RESTORE legs above are a WIDER claim
-        than that: no journal record describes them, so this scope authorizes
-        them by virtue of being the operation that restores them. Narrowing that
-        is `#9210`'s, and it must land before (or with) `#9124`'s guard — this
-        docstring states the width rather than letting it read as a projection.
+        The JSONL records CAME FROM the journal, so they are authorized to be
+        folded and, by the ordering contract's exception 1, they must not be
+        journaled again. ⚠️ Two legs are a WIDER claim than that, and neither is
+        a projection: the ``#548`` synthetic events come from the PRE-WIPE
+        CACHE (the points written by the raw-query lane, which the log does not
+        cover — that is the whole reason the snapshot exists), and the
+        SNAPSHOT-RESTORE legs have no journal record describing them at all.
+        This scope authorizes them by virtue of being the operation that
+        carries them across the wipe. Narrowing that is `#9210`'s, and it must
+        land before (or with) `#9124`'s guard — this docstring states the width
+        rather than letting it read as a projection.
         """
         with _replay_write_scope():
             return self._replay_all_from_log(
