@@ -223,7 +223,10 @@ def test_facet_window_bounds_resolution():
     assert facet_window_bounds("interval", None, "2023-04-10") is None
     assert facet_window_bounds(None, None, None) is None
     assert facet_window_bounds("ordering", "1", "2") is None
-    # recency: the latest parseable session date stands in for "now"
+    # recency: the latest parseable session date stands in for "now". The
+    # window is INCLUSIVE on BOTH ends — the ``qdate − N`` boundary day is in
+    # it (pinned end-to-end below by the slash-shape branch test, which keeps
+    # ``edge``); a half-open window here would drop that day.
     assert facet_window_bounds("recency", "7", None, PRODUCER_DATES) == (
         "2023-04-03", "2023-04-10")
     assert facet_window_bounds("recency", "7", None, None) is None

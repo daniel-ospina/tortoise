@@ -198,10 +198,14 @@ def facet_window_bounds(kind: str | None, start: str | None, end: str | None,
     * ``interval`` — ``(start, end)`` as calendar dates, ordered (a reversed
       "between A and B" still means the window the question named rather
       than an empty one).
-    * ``recency`` — ``(qdate − N days, qdate)`` where ``qdate`` is the LATEST
-      parseable date in ``session_dates``. The graph carries no global clock,
-      so the haystack's newest session stands in for "now" (the eval passes
-      the question's ``haystack_dates``; unchanged from the pre-#8710 rule).
+    * ``recency`` — ``[qdate − N days, qdate]``, INCLUSIVE on BOTH ends (the
+      same inclusivity ``_span_in_window`` applies with ``lo <= d <= hi``, and
+      pinned by ``test_span_in_window_qualifies_the_producer_slash_date_shape``,
+      which asserts the ``qdate − N`` boundary day IS in the window), where
+      ``qdate`` is the LATEST parseable date in ``session_dates``. The graph
+      carries no global clock, so the haystack's newest session stands in for
+      "now" (the eval passes the question's ``haystack_dates``; unchanged from
+      the pre-#8710 rule).
 
     ``None`` means NO BOUND: the caller keeps its unqualified input. Every
     unresolvable input degrades here rather than raising — an unknown kind, a

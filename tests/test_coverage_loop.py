@@ -480,6 +480,8 @@ def test_date_qualified_out_of_window_span_never_fires(seeded_sdk):
     assert on["coverage_loop_stats"]["loop_fired_facet"] is None
 
 
+# ── (d2) the producer date shape — the #8710 fire path ────────────────────
+
 def test_recency_window_qualifies_on_the_producer_date_shape(seeded_sdk):
     """#8710 end-to-end: the ONLY shape the dataset emits for
     ``haystack_dates`` is ``2023/04/10 (Mon) 17:50`` (#3011 — 23,867/23,867
