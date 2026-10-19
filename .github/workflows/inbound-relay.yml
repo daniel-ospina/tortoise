@@ -21,6 +21,18 @@ on:
   pull_request_target:
     types: [opened]
 
+# Bookkeeping, not a merge gate — and the one per-event workflow here whose
+# job-level `if:` already excludes the owner and `mergify[bot]` (all internal
+# traffic) at ZERO runner cost, so it cannot flood (#9115). The group still
+# belongs here for the surface it does NOT exclude: a burst of external
+# `opened` events must not stack unbounded relay jobs. Keyed PER UNIT (the
+# issue/PR number) and never cancelled in flight: this relay CLOSES fork
+# PRs, and a cancel between the close and the intake POST would leave a
+# closed PR with no intake record — a half-applied action no re-run repairs.
+concurrency:
+  group: inbound-relay-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
 jobs:
   relay:
     runs-on: ubuntu-latest

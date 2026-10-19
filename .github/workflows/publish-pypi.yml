@@ -19,6 +19,13 @@ on:
     tags:
       - "v*"
 
+# A PUBLISH must never be cancelled midway: one group, never cancelling, so a
+# second dispatch/tag waits instead of aborting the upload (a half-uploaded
+# release cannot be un-published). Bookkeeping, not a merge gate (#9115).
+concurrency:
+  group: publish-pypi
+  cancel-in-progress: false
+
 permissions:
   id-token: write  # PyPI trusted publishing (OIDC)
 
