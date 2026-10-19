@@ -336,6 +336,31 @@ def test_a_shared_module_beside_an_unknown_path_still_names_the_unknown(tmp_path
             f"{proc.stderr or '(silent)'}")
 
 
+def test_the_over_determined_lead_in_says_same_path_only_when_it_is_true(tmp_path):
+    """The lead-in names the shape it is looking at, in BOTH directions.
+
+    When every unrecognised path IS a blast-radius path (`pyproject.toml`, a root
+    `.markdownlint*`), "the same path(s) are also not matched…" is exact: the list
+    repeats the path line 1 just explained. When even one unrecognised path is
+    something else (`tools/ci_selection.py` beside `tests/conftest.py`),
+    "additionally" is exact and "the same path(s)" would DENY a second path that
+    is right there — the mirror of the error this round removed, and the worse
+    direction, because the unrecognised path is the only thing the diagnostic
+    exists to name. Rounds 5 and 6 both corrected this one sentence, so both arms
+    are pinned: a constant would pass every other test in this module.
+    """
+    same = _run(["--changed-files", "pyproject.toml", "--event", "pull_request"],
+                cwd=tmp_path)
+    assert "the same path(s) are also not matched" in same.stderr, same.stderr
+    assert "additionally" not in same.stderr, same.stderr
+
+    other = _run(["--changed-files", "tests/conftest.py\ntools/ci_selection.py",
+                  "--event", "pull_request"], cwd=tmp_path)
+    assert "additionally, 1 changed path(s)" in other.stderr, other.stderr
+    assert "the same path(s)" not in other.stderr, other.stderr
+    assert "tools/ci_selection.py" in other.stderr, other.stderr
+
+
 def test_a_shared_module_that_no_pattern_claims_is_not_called_unknown(tmp_path):
     """A `SHARED_MODULES` entry the surface patterns do not match is FULL because
     its BLAST RADIUS is the matrix — never because the argument was malformed
@@ -375,6 +400,9 @@ def test_explain_records_the_reasons_list_for_every_fail_closed_cause():
     `battery/.markdownlint.json`, a policy file under a claimed surface. (A
     dependency-bump diff like `pyproject.toml` DOES carry `reason`: that path is
     unknown to the surface patterns too, so both causes are recorded.)
+    A fourth key, `unknown_all_blast`, accompanies `reason` and is INTERNAL to
+    the diagnostic (it picks the lead-in), so assert keys individually rather
+    than the whole dict.
     """
     from tools import ci_selection as cs
 

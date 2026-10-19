@@ -1966,6 +1966,13 @@ def select(changed_files: list[str], event: str, manifest: dict,
     `reason`, because that path is unknown to the surface patterns as well and
     both causes are recorded). Read `reasons`.
 
+    A fourth key, `unknown_all_blast`, appears at the same time as `reason` and is
+    INTERNAL to the diagnostic: it says whether every unrecognised path is also a
+    blast-radius path (which decides whether the lead-in reads "the same path(s)"
+    or "additionally, …"). Branch on `reasons`/`unknown`; treat
+    `unknown_all_blast` as private and never assert the dict verbatim while it is
+    present.
+
     It is a SIDE CHANNEL on purpose: the returned dict is the artifact schema
     (`.ci-selection/selection.json`) and is asserted verbatim up and down this
     suite, so a reason field inside it would be a migration; and the reason must
