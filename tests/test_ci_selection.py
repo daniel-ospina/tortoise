@@ -1976,25 +1976,43 @@ def test_write_op_reachability_guard_runs_on_every_surface_it_pins():
     assert "test_write_op_reachability.py" in r["test_files"], r
 
 
-def test_retired_orchestrator_harness_does_not_select_the_removed_suite():
+def test_retired_orchestrator_harness_selects_its_retained_guards():
     # RETIRED 2026-10-19. The harness moved to agent-infra/scripts/orchestrator-harness/
     # (single source of truth) and tests/test_orchestrator_harness.py was retired WITH the
-    # copy it drove, after its coverage for the ported instrument moved to
-    # agent-infra/scripts/orchestrator-harness/merged-not-closed.test.sh.
+    # copy it drove.
     #
-    # The CORE_ALSO entry that used to select it is removed in the same change. This pins the
-    # removal from the SELECTOR's side: a stale mapping would schedule a suite that no longer
-    # exists (a silent no-op at best) and would hide the retirement from anyone reading the map.
-    # Enforcement that no script reappears under the retired path lives in
-    # .github/workflows/harness-single-source.yml (tools/check-harness-fork.sh).
+    # The directory is NOT a dead path, though: two scripts are retained because their fixes are
+    # UNPORTED (`merge-one.sh` — #8484/#8602/#8612; `merged-not-closed.sh` — no landed copy
+    # anywhere, agent-infra#2160 is still open), and they carry hermetic guards of their own
+    # (tests/test_orchestrator_harness_retained.py), as does the guard that keeps the rest
+    # retired (tests/test_harness_pointer_guard.py for tools/check-harness-fork.sh).
+    #
+    # Both must run on a change to their subject. `operations/` and `tools/` are flat
+    # NON_PYTHON_PREFIXES entries and no SOURCE_PATTERNS row matches either path, so without the
+    # CORE_ALSO entries an operations-only or tools-only diff came back with `changed == []`, took
+    # the docs-only early return and ran NO surface — the #1349/#3332/#3616 silent-drop class (the
+    # guard would not run on the PR that weakens the guard). A name in a surface's test_files is
+    # NOT sufficient: it only runs when the surface is already selected.
+    #
+    # Mutation check: removing either CORE_ALSO entry restores `surfaces=[]` and reds these asserts.
     r = _sel(["operations/orchestrator-harness/lane.sh"])
+    assert "core" in r["surfaces"], r
+    assert "test_orchestrator_harness_retained.py" in r["test_files"], r
+    # ⛔ The RETIRED suite must not come back with it: a stale registration schedules a file that
+    # no longer exists and hides the retirement from anyone reading the map.
     assert "test_orchestrator_harness.py" not in r["test_files"], r
-    # ⛔ `full` MUST STAY FALSE (review finding): with the registration gone, a change under this
-    # path must not start forcing a full run — that would be a heavy, silent regression from a
-    # retirement. Pinning it makes this "deliberately retired" rather than "path dropped".
+    # ⛔ `full` MUST STAY FALSE (review finding): a change under this path must not start forcing
+    # a full run — that would be a heavy, silent regression from a retirement. Pinning it makes
+    # this "deliberately retired" rather than "path dropped".
     assert r["full"] is False, r
-    # The pointer README must still be the thing that is there, so a change to it is a docs change
-    # rather than a dropped script change.
+
+    # The guard's own path: same class, same requirement.
+    g = _sel(["tools/check-harness-fork.sh"])
+    assert "core" in g["surfaces"], g
+    assert "test_harness_pointer_guard.py" in g["test_files"], g
+    assert g["full"] is False, g
+
+    # The pointer README is a docs change: still no harness suite, still not a full run.
     r2 = _sel(["operations/orchestrator-harness/README.md"])
     assert "test_orchestrator_harness.py" not in r2["test_files"], r2
     assert r2["full"] is False, r2

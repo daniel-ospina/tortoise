@@ -1127,10 +1127,22 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # RETIRED 2026-10-19: the orchestrator harness (and therefore
              # tests/test_orchestrator_harness.py) moved to
              # agent-infra/scripts/orchestrator-harness/. This repo keeps only a pointer
-             # README in `operations/orchestrator-harness/`; a harness script here is a fork,
-             # which `.github/workflows/harness-single-source.yml` now fails on. The CORE_ALSO
-             # entry is removed WITH the copy it selected for, so the selection map cannot
-             # point at a test file that no longer exists.
+             # README plus the two scripts whose fixes are UNPORTED (`merge-one.sh`,
+             # `merged-not-closed.sh`); a harness script beyond those is a fork, which
+             # tools/check-harness-fork.sh now fails on.
+             #
+             # #9217 review: the directory is STILL registered, because the two retained
+             # scripts are live code with hermetic guards
+             # (tests/test_orchestrator_harness_retained.py) — a change to either, or to the
+             # guard itself, must run them. That is the #1349/#3332/#3616 silent-drop class:
+             # `operations/` and `tools/` are flat NON_PYTHON_PREFIXES entries, so an
+             # operations-only or tools-only diff filtered to `changed == []`, took the
+             # docs-only early return and fell to tier-1 smoke, which does not carry these
+             # files. A name in a surface's test_files cannot fix that on its own — it only
+             # runs when the surface is ALREADY selected. Pinned by
+             # tests/test_ci_selection.py::test_retired_orchestrator_harness_selects_its_retained_guards.
+             "operations/orchestrator-harness/",
+             "tools/check-harness-fork.sh",
              # #3554 review (P2, Finding 2): the :Session declaration's own doc
              # subjects — `docs/ONTOLOGY.md` §4.8 (the owner table the machine
              # declaration mirrors) and

@@ -45,62 +45,75 @@ Three generations of one system: every fix had to be applied by hand in three pl
 a different version, and "self-healing" was impossible because there was no authority to heal
 toward. Retiring the copies is what makes one authority possible.
 
-## What was NOT lost
+## What was ported, what was NOT, and what is therefore still here
 
 This copy was old, **but not strictly behind** — it was behind the current agent-infra generation on
-all six files it had, and **ahead on fixes in four of them** that agent-infra never got. All of them
-have now been ported IN; the one that has NOT is listed last, with its file still present here on
-purpose.
+all six files it had, and **ahead on fixes in four of them** that agent-infra had never received.
 
-- `lane.sh` — `Closes #N` required; a bare `Refs #N` refused for finished work (25 of 36 open
-  P0-blockers already had merged PRs; nothing re-reads an issue whose PR merged).
-- `merged-not-closed.sh` — the instrument that answers "which open issues already have a merged
-  PR?", ported with a repo resolution that derives from the checkout instead of hardcoding this
-  repo (agent-infra#2040's defect class).
-- The `p0_merge_priority_override` rule plus its `.prio` map — a P0-blocker at the backlog head
-  clears *only* the merge-priority gate. The ported version additionally refuses to clear any
-  reason that is not `merge-priority*`, and the canonical suite drives that case.
-- `refresh-candidates.sh`'s `landed.txt` half and `RETRY_MAX` bound — a LANDED verdict goes to
-  `landed.txt` (never `checked.txt`, which would retire an OPEN issue from the backlog permanently
-  and invisibly), the set is named on every pass, the reaper settles CLOSED entries / releases
-  OPEN ones / keeps unreadable ones, and a candidate that never answers is bounded instead of
-  starving the pool behind it. ⛔ This one was found **late**: the first cut of this retirement
-  deleted the file while these fixes were still unported, because the retirement's "everything was
-  ported first" premise had never been checked against this file. The port now precedes the
-  deletion, and `selftest.sh` drives the behaviour.
-- `merge-one.sh` — `verdict_kind()` / `apply_verdict_marker()`: a verdict-LESS reviewer run (stall,
-  crash, timeout) must not authorise a fixer. Ported, with driving tests in the canonical
-  `selftest.sh` (measured cost of the bug: 7 of 7 cap-hits in one window were verdict-less and 4
-  were then parked "needs a human", never reviewed).
+**Read the "state" column as the state of agent-infra `main`, not of a branch.** Verified
+2026-10-19; re-verify with `gh api repos/daniel-ospina/agent-infra/git/trees/main?recursive=1 --jq
+'.tree[].path' | grep -F <name>` before changing this table.
 
-**NOT ported, and therefore still present in this directory: `merge-one.sh`'s #8484 detached-reviewer
-checkout.** The reviewer should run in its own checkout rather than the tree it reviews, and the
-`AGENT_ALLOW_MAIN_EDITS` export should be withdrawn. That change is larger and is blocked on files
-other lanes hold, so the file is kept rather than deleted: **deleting the only copy of an unported
-fix is exactly the silent destruction this retirement exists to avoid.** `tools/check-harness-fork.sh`
-allows `merge-one.sh` by name (the only allowed script) and says so in its output, so the exception is
-visible instead of load-bearing on someone's memory. Port it, then delete it here and add it to that
-guard's deny-set by removing it from `ALLOWED`.
+| fix this copy was ahead on | state on agent-infra `main` | where the code is now |
+|---|---|---|
+| `lane.sh` — `Closes #N` required, a bare `Refs #N` refused for finished work (25 of 36 open P0-blockers already had merged PRs; nothing re-reads an issue whose PR merged) | **PORTED** | agent-infra `scripts/orchestrator-harness/lane.sh` |
+| `merge-one.sh` — `reviewer_prompt()` must not send the reviewer hunting for an interpreter (#8602: ~35% of reviewer runs ended at the 1800 s cap with **no verdict**, the last tool call a `find $HOME`) | **NOT PORTED** — agent-infra's `port-provenance.txt` records it as not-yet-ported | **retained here** (`merge-one.sh`), see below |
+| `merge-one.sh` — `verdict_kind()` / `apply_verdict_marker()`: a verdict-**LESS** run (stall, crash, timeout) must not authorise a fixer (#8612: three such markers parked a PR "needs a human" with the findings never addressed) | **NOT PORTED** — same ledger row | **retained here** (`merge-one.sh`) |
+| `merge-one.sh` — the #8484 detached-reviewer sandbox (the reviewer runs in its own checkout, and the `AGENT_ALLOW_MAIN_EDITS` export is withdrawn) | **NOT PORTED** — blocked on files other lanes hold | **retained here** (`merge-one.sh`) |
+| `merged-not-closed.sh` — the instrument that answers "which open issues already have a merged PR?", with repo resolution derived from the checkout instead of hardcoding this repo (agent-infra#2040's defect class) | **NOT PORTED** — no path on `main` matches `merged-not-closed`; it exists only on **agent-infra#2160**, which is **OPEN** | **retained here** (`merged-not-closed.sh`) |
+| `orch-loop.sh` — the `p0_merge_priority_override` rule plus its `.prio` map (a P0-blocker at the backlog head clears *only* the merge-priority gate) | **NOT PORTED** — the canonical `orch-loop.sh` has no `p0_merge_priority_override`; the ledger records it as not-yet-ported | deleted here; recovery source is tortoise git history, and the port lives on agent-infra#2160 |
+| `refresh-candidates.sh` — the `landed.txt` half and the `RETRY_MAX` bound (a LANDED verdict goes to `landed.txt`, never `checked.txt`, which would retire an OPEN issue from the backlog permanently and invisibly) | **NOT PORTED** — the canonical copy says so in its own body (`port-provenance.txt`: *NOT DONE*) | deleted here; recovery source is tortoise git history, and the port lives on agent-infra#2160 |
 
-The regression suite that guarded this copy (`tests/test_orchestrator_harness.py`) was retired with
-it, after its coverage for the ported instrument moved into
-`agent-infra/scripts/orchestrator-harness/merged-not-closed.test.sh` and the canonical
-`selftest.sh`. That move was deliberate: the suite could not run without the copy it drove, and
-retiring it before moving the coverage would have deleted the only tests the instrument ever had. The
-canonical suite now also covers the `verdict_kind` port with driving tests.
+⛔ **The ordering matters, and the ledger states it in its own words:** *"The removal PR must either
+wait for it to merge or port it."* Agent-infra **#2160** is still **OPEN**, so the two artifacts that
+have **no other copy anywhere** are kept here rather than deleted:
+
+* **`merged-not-closed.sh`** — nothing else in either repo's `main` holds it, and
+  `tests/test_orchestrator_harness_retained.py` is its only test suite.
+* **`merge-one.sh`** — the only copy of the three `merge-one.sh` fixes above.
+
+Both are `ALLOWED` by name in `tools/check-harness-fork.sh`, so the exception is visible in the
+instrument rather than load-bearing on someone's memory. **Port them, then delete them here and
+remove them from that `ALLOWED` list.**
+
+`merge-one.sh` is retained as **text, not as a runnable tool**: its exec bit is cleared, it says so
+in its own header, and the `spawn-gate.sh` it sources was retired with the rest of the copy — so
+running it exits 78 ("refusing to run an ungated reviewer") before doing any work. That is
+fail-closed and deliberate. The contracts that matter (no provisioning/execution instruction in the
+reviewer prompt; no authorising marker for a verdict-less run) are pinned by
+`tests/test_orchestrator_harness_retained.py`, which drives the *shipped* function text.
+
+The other two fixes above (`orch-loop.sh`'s P0 override, `refresh-candidates.sh`'s `landed.txt`
+half) are NOT retained as files — keeping them would have kept most of the fork. Their only copy is
+tortoise git history (recoverable at the commit that retired this directory) and agent-infra#2160,
+and the canonical ledger names them as not-yet-ported. **If #2160 is closed or rewritten, those two
+halves must be re-derived from tortoise history before this directory's history is ever squashed.**
+Tracked by tortoise#8246.
 
 ## The rule this directory now enforces
 
-**`harness-single-source.yml` fails CI if any harness script reappears here.** A pointer is the
+**`tools/check-harness-fork.sh` fails CI if any harness script reappears here.** A pointer is the
 intended state; a script is a fork. If you need to change the harness, change it in agent-infra —
 a fix applied to a copy is not a fix.
 
-To check a box by hand:
+The check runs as a step of the `manifest-integrity` job in `.github/workflows/python-ci.yml`, whose
+red is part of the **required** `python-ci-gate`. It used to have a workflow of its own
+(`harness-single-source.yml`); that was a fail-open, because a path-scoped workflow is not a required
+context and a red on it blocked nothing.
+
+To check by hand, from the repo root:
 
 ```bash
-agent-infra/scripts/orchestrator-harness/check-single-source.sh \
-  --fork <path-to-this-directory>
-agent-infra/bin/harness doctor        # platform, supervisor, provenance, fork state
+bash tools/check-harness-fork.sh operations/orchestrator-harness
+# 0 clean · 1 a harness script reappeared · 2 UNKNOWN (cannot check — never a pass)
 ```
+
+(The earlier revision of this file pointed at `agent-infra/scripts/orchestrator-harness/
+check-single-source.sh --fork` and `agent-infra/bin/harness doctor`. Neither exists on agent-infra
+`main` — they are on #2160 — so the pointer pointed at nothing. Use the in-repo script above until
+that PR lands.)
+
+The `operations/orchestrator-harness/` path is registered in `tools/ci_selection.py` (`CORE_ALSO`),
+so a change to the guard or to a retained script runs the two hermetic suites that hold them.
 
 Tracked by tortoise#8246.
