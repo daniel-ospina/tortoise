@@ -19,6 +19,11 @@ argument is an existing file" would refuse all six. So these pins are:
     names them, and offers the stdin remedy;
   * a documented single-path inline invocation stays SILENT — that is the
     discriminator the refusal proposal would have destroyed.
+
+Every count in this file is omitted on purpose: a number about the test file's
+own size or mutation behaviour re-stales the moment a pin is added, and the
+things worth knowing here are which invocation is pinned and what the assertion
+proves.
 """
 from __future__ import annotations
 
@@ -105,13 +110,14 @@ def test_a_documented_single_path_inline_invocation_is_unchanged_and_silent(tmp_
 def test_a_legitimate_unknown_repo_path_gets_no_list_hint(tmp_path):
     """Review P1: an unknown path is mostly a REAL diff, not a mistake.
 
-    137 of the 3,634 tracked paths reach FULL through the unknown branch alone
-    (`.github/workflows/ci.yml`, `uv.lock`, `tools/*.py`, `Makefile`, …), and
-    every added/modified path in a checked-out PR is an existing file. Keying
-    the list-vs-path hint on `Path(c).is_file()` therefore fired it on nearly
-    every legitimate fail-closed selection and claimed a malformed invocation
-    that had not happened — the same plausible-but-false reading this issue is
-    about. A repo path is a changed path by definition: generic text only.
+    A large part of the tracked tree reaches FULL through the unknown branch
+    alone — `.github/workflows/ci.yml`, `uv.lock`, `Makefile`, `.mergify.yml`,
+    and every `TOOL_CARVEOUTS`-registered `tools/*.py` — and every
+    added/modified path in a checked-out PR is an existing file. Keying the
+    list-vs-path hint on `Path(c).is_file()` therefore fired it on nearly every
+    legitimate fail-closed selection and claimed a malformed invocation that had
+    not happened — the same plausible-but-false reading this issue is about. A
+    repo path is a changed path by definition: generic text only.
     """
     # cwd = the repo root, so the argument RESOLVES: with `cwd=tmp_path` the
     # path is simply absent and the assertion below could not distinguish the
@@ -132,31 +138,45 @@ def test_a_legitimate_unknown_repo_path_gets_no_list_hint(tmp_path):
         f"no malformed-invocation remedy for a legitimate repo path: {proc.stderr}")
 
 
-def test_an_in_repo_symlink_to_an_outside_file_is_a_repo_path(tmp_path):
+def test_an_in_repo_symlink_to_an_outside_file_is_a_repo_path(tmp_path, monkeypatch):
     """A repo RELATIVE path is a changed path even when it links outside.
 
     `_is_outside_repo_file` answers "where is the PATH", not "where is the
     target". The first implementation used `Path.resolve()`, which follows the
-    link and mislabelled such a path as an outside list file — and nothing pinned
-    it (a verifier reverted the one-line fix and all seven pins stayed green).
+    link and mislabelled such a path as an outside list file.
+
+    The probe lives in `.ci-selection/` — INSIDE the checkout (which is what the
+    repo-path branch needs) and gitignored, so an aborted run leaves nothing in
+    the working tree for `who-is-on.sh --inventory` to read as stranded work. It
+    is created with `unlink(missing_ok=True)` first, because a symlink to a
+    `tmp_path` target is DANGLING once pytest prunes the old tmp dir, and
+    `Path.exists()` is False for a dangling link — it cannot see the leftover it
+    is meant to guard against. `os.path.lexists` is the predicate that answers
+    "is something at this PATH".
     """
     from tools import ci_selection as cs
 
     repo = Path(__file__).resolve().parents[1]
     target = tmp_path / "outside.txt"
     target.write_text("not a list\n", encoding="utf-8")
-    link = repo / "zz-9109-symlink-probe.txt"
-    assert not link.exists()
+    link = repo / ".ci-selection" / "zz-9109-symlink-probe.txt"
+    link.parent.mkdir(exist_ok=True)
+    link.unlink(missing_ok=True)
     os.symlink(target, link)
     try:
-        assert cs._is_outside_repo_file("zz-9109-symlink-probe.txt") is False, (
+        # The relative arm is only meaningful from the checkout: `is_file()`
+        # resolves a relative name against the CWD, so assert the CWD instead of
+        # inheriting whatever directory pytest was started from (review P3).
+        monkeypatch.chdir(repo)
+        rel = ".ci-selection/zz-9109-symlink-probe.txt"
+        assert cs._is_outside_repo_file(rel) is False, (
             "a repo-relative symlink must stay a repo path")
         assert cs._is_outside_repo_file(str(link)) is False, (
             "the absolute form of a repo path must also stay a repo path")
         assert cs._is_outside_repo_file(str(target)) is True, (
             "a genuine outside file is still the list-file shape")
     finally:
-        link.unlink()
+        link.unlink(missing_ok=True)
 
 
 def test_explain_is_cleared_for_a_selection_that_does_not_fail_closed():

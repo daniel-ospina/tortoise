@@ -4217,16 +4217,30 @@ def _warn_unknown_paths(explain: dict) -> None:
 
     WHAT THE FIRST VERSION GOT WRONG (review P1, fixed here): it appended the
     list-vs-path hint to EVERY unknown path that happened to exist on disk. But
-    an unknown path is mostly a LEGITIMATE diff — 137 of the 3,634 tracked paths
-    reach FULL through this branch alone (`.github/workflows/ci.yml`, `uv.lock`,
-    `tools/*.py`, `Makefile`, `.mergify.yml`, …), and every added or modified
-    path in a checked-out PR is an existing file. So the hint fired on nearly
-    every real fail-closed selection and asserted a malformed invocation that
-    had not happened — a new plausible-but-false reading, which is the class
-    this issue is about. The hint is now confined to the shape an operator's
-    list file actually takes: an existing file OUTSIDE the checkout (`/tmp/c.txt`
-    in the measured case). A repo path is a changed path by definition, so the
-    generic explanation is all it gets.
+    an unknown path is mostly a LEGITIMATE diff — 138 of the 3,645 tracked paths
+    reach FULL through this branch alone, measured 2026-10-19 (`.github/
+    workflows/ci.yml`, `uv.lock`, `Makefile`, `.mergify.yml`, and the
+    `TOOL_CARVEOUTS`-registered `tools/*.py` such as `tools/ci_selection.py` —
+    an UNREGISTERED `tools/*.py` is dropped by `_keep_changed` and never reaches
+    this branch) — and every added or modified path in a checked-out PR is an
+    existing file. So the hint fired on nearly every real fail-closed selection
+    and asserted a malformed invocation that had not happened — a new
+    plausible-but-false reading, which is the class this issue is about. The
+    hint is now confined to the shape an operator's list file actually takes: an
+    existing file OUTSIDE the checkout (`/tmp/c.txt` in the measured case). A
+    repo path is a changed path by definition, so the generic explanation is all
+    it gets.
+
+    KNOWN RESIDUAL — this branch speaks only for the paths that SURVIVED
+    `_keep_changed`. The other resolutions of "I passed a path, not a list" are
+    still silent, and the two under-selecting ones are the worse direction: a
+    list file under a `NON_PYTHON_PREFIXES` directory (`docs/changed.txt`,
+    `tools/changed.txt`, `website/…`) is dropped there, so `changed == []` and
+    the docs-only early return answers tier-1 smoke with `full=false`; a list
+    file under `tests/` or `config/` takes that prefix's fallback surface. Both
+    predate #9109 and are NOT fixed here; they are recorded on #9109 so this
+    shape is not read as closed. The remedy is the same for all of them: pass
+    the list on stdin.
     """
     if explain.get("reason") != "unknown-paths":
         return
@@ -4259,6 +4273,13 @@ def _is_outside_repo_file(c: str) -> bool:
     a list. A repo-relative path is a changed path whatever else it is, so it is
     deliberately NOT eligible — that discrimination is the whole fix for the
     review P1 above.
+
+    BOTH operands are absolute before they are compared, and each is anchored to
+    where the argument actually means: `c` is a shell argument, so a relative one
+    is relative to the process CWD, while `REPO` is derived from `__file__` and
+    is therefore checkout-anchored whatever the CWD is. A caller that runs this
+    tool from a subdirectory therefore gets `False` (never `True`) for a
+    repo-relative name — it fails QUIET, it cannot invent a list-file hint.
     """
     p = Path(c)
     if not p.is_file():
