@@ -2618,18 +2618,25 @@ def test_8747_the_installer_row_records_the_upstream_removal_as_pending():
     state may do is assert the removal as complete with nothing that shows the
     deleting PR landed: that is the claim this branch's first draft made.
 
-    Non-vacuity (MEASURED against each revision's own cell, with the recipe in
-    the comment block above):
+    Non-vacuity (MEASURED against the merge base plus MUTATIONS of the committed
+    cell — a branch-only sha does not survive the merge, so it is not offered as
+    the recipe):
 
       · `origin/main` ("… is a stale v1 duplicate — tracked by **#8747**") —
         assertions 2 and 3 red; assertion 1 is green (main records no deletion
         at all, so there is nothing for it to mis-credit).
-      · `5da309b5d`, this branch's superseded draft ("**#8747 removed that
-        copy** — the MIT repo now ships no installer at all") — assertions 1
-        and 3 red; assertion 2 is green (it already named `…#5`).
+      · mutation `"**#8747** tracks deleting it"` → `"**#8747** removed it
+        upstream"` — assertion 1 red. This is the shape that had to be FIXED
+        (review finding, P2): the first pattern here was
+        `#8747\\s+(?:removed|deletes|deleted|removes)`, whose `\\s+` a CLOSED bold
+        token escapes (`*`, not whitespace, sits after `8747`), so it green-lit
+        exactly the false credit it exists to stop — and the row itself writes
+        `**#8747**` bolded, so the unflagged spelling was the likely one. It now
+        tolerates the emphasis markers this document uses on issue numbers.
     """
     cell = _installer_row()[2]
-    removed_by_issue = re.search(r"#8747\s+(?:removed|deletes|deleted|removes)", cell)
+    removed_by_issue = re.search(
+        r"#8747[*_`]{0,4}\s+(?:removed|removes|deletes|deleted)", cell)
     assert removed_by_issue is None, (
         f"'{removed_by_issue and removed_by_issue.group(0)}' credits the deletion "
         "to #8747, which is the TRACKING ISSUE in this repo — name the PR in the "
@@ -2683,24 +2690,39 @@ def test_8747_the_installer_row_names_a_guard_that_exists_on_this_side():
     reverse — `test_4643_the_upstream_arm_has_a_runner_and_the_docs_name_it` is
     the same assertion one level down, about runners.
 
-    Two arms, BOTH unconditional, each reached by a real cell (measured, with
-    the recipe in the comment block above):
+    Three arms, each naming the base revision or the MUTATION that reds it. The
+    previous version of this test claimed "Two arms, BOTH unconditional" and
+    then ran its second arm under `if plural_guard:`, a phrase no committed cell
+    contains — and its one unconditional assertion merely repeated
+    `test_4643_the_ownership_table_states_the_rule_per_artifact` step 4 — so it
+    reduced to "the string `the guard is` appears in the cell" while its NAME
+    promised that the guard exists here (review finding, P2). That stronger
+    property is asserted now:
 
       1. the cell must NAME what enforces single authorship — `origin/main`'s
          cell names no guard at all ("… is a stale v1 duplicate — tracked by
-         #8747"), so this arm reds there;
-      2. if the guard it names is a README, that README must carry the
-         statement — `5da309b5d`, the superseded draft, nominated "the
-         ownership statement in both READMEs", and this repo's `README.md`
-         mentions neither the installer nor the MIT repo, so this arm reds
-         there.
+         **#8747**"), so arm 1 reds there;
+      2. the guard it names must BE the artifact that carries the statement on
+         this side — the served installer's own header — and that header must
+         still carry it. Arm 2 reds on mutation `"the guard is the served
+         installer's own header plus this row"` → `"the guard is the ownership
+         statement in both READMEs"` (an out-of-tree guard), which is the shape
+         the superseded draft on this branch actually wrote;
+      3. if the named guard is a README, that README must carry the statement.
+         The arm fires on ANY `README` mention — singular or plural — so it is
+         not fail-open on phrasing, but it is conditional by construction (only
+         a cell that nominates a README can be wrong that way), and no
+         committed cell nominates one. It reds on the draft above, and it is
+         checked against THIS repository's README, the only one readable
+         offline — the same bound the row states.
 
-    The prior version of this test guarded arm 2 behind `if plural_guard:`,
-    which no committed cell ever satisfied (dead code), and repeated the
-    installer-header assertion that
-    `test_4643_the_ownership_table_states_the_rule_per_artifact` step 4 already
-    owns — so it could not fail on any state of this repository (review
-    finding, P2). Neither is repeated here.
+    Arm 2's content check (`"tortoise-skills-and-integrations" in INSTALLER`) is
+    deliberately the FACT step 4 of
+    `test_4643_the_ownership_table_states_the_rule_per_artifact` owns: that test
+    owns "the header carries the statement", this one owns the LINKAGE the
+    table makes — "the row nominates that header as its guard". Neither holds
+    alone: a header that stopped carrying the statement would make this row's
+    guard a guard nobody wrote.
     """
     cell = _installer_row()[2]
     guard = re.search(r"\b(?:the\s+guard\s+is|guarded\s+by)\b(.+?)(?:\.\s|\.$|$)",
@@ -2711,10 +2733,21 @@ def test_8747_the_installer_row_names_a_guard_that_exists_on_this_side():
         "and it is the shape that let the stale v1 copy sit unremarked until "
         "#8747: " + cell)
     guard_text = guard.group(1)
+    assert re.search(r"installer|install-tortoise-skills", guard_text, re.I), (
+        f"the row nominates a guard ('{guard_text.strip()}') that does not exist on "
+        f"this side. The artifact HERE that carries the ownership statement is the "
+        f"served installer's own header (#4643), so a guard named without it is "
+        f"one no reader of this table can check from this repository: {cell}")
+    installer = INSTALLER.read_text(encoding="utf-8")
+    assert "tortoise-skills-and-integrations" in installer, (
+        f"the row names the served installer's own header as its guard, but that "
+        f"header no longer carries the ownership statement §7.1 attributes to it — "
+        f"the guard the table points at is gone: {INSTALLER}")
     if re.search(r"\bREADME", guard_text, re.I):
         readme = (REPO / "README.md").read_text(encoding="utf-8")
         assert ("tortoise-skills-and-integrations" in readme
                 or "install-tortoise-skills" in readme), (
             f"the row nominates a README as the guard ('{guard_text.strip()}'), but "
             f"README.md in this repo never mentions the installer or the MIT "
-            f"repo — a guard nobody wrote is not a guard: {cell}")
+            f"repo — a guard nobody wrote is not a guard (and a README in the "
+            f"other repo is not checkable from here): {cell}")
