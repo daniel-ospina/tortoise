@@ -53,8 +53,9 @@ stage  granularity        source        evidence
 ===== ================== ============= ==========================================
 
 Stage 4 is an ATTEMPT, not an answer. ``mcp_tool_call.status == "ok"`` means
-only that the tool did not raise (``tortoise/mcp_server.py``); a search that
-returned zero points is still ``ok``. It is reported because it is the only
+only that the dispatch neither raised nor returned a failure `_safe` swallowed
+(``tortoise/mcp_server.py``); a search that returned zero points is still
+``ok``. It is reported because it is the only
 recorded observation of the read side, and mislabelling it as activation is
 precisely the error this lane exists to fix — hence no ``activated`` key, no
 activation rate, anywhere in the payload.
@@ -1060,9 +1061,18 @@ LIMITATIONS: tuple[str, ...] = (
     "rows certainly returned nothing (a failed call did), so this is the "
     "CONSERVATIVE direction — the alternative would publish a lower bound as a "
     "count. The two counters are separate so a shape regression is not read as "
-    "a deploy-boundary window. (The underlying reason a failed call is hard to "
-    "tell apart here is that `_safe` swallows the exception, so the row reads "
-    "`status: 'ok'` — a separate defect.)",
+    "a deploy-boundary window. (ONE of those producers is now distinguishable "
+    "in the series itself, since #8135 — a `_safe`-SWALLOWED failure is "
+    "recorded `status: 'exec_error'` / `error_kind: 'safe_error'` rather than "
+    "`ok`, and before that deploy the row read `ok`. That holds for "
+    "`tortoise_recall` too, whose body reshapes the failure into a wider "
+    "payload (`{'mode': ..., **results}`): the classification matches the "
+    "identifying `error` text `_safe` produced in that dispatch, not whole-dict "
+    "equality. A tool-level refusal returned as a plain dict — the "
+    "unrecognised recall mode above, `#9084` — is NOT `_safe`-produced and "
+    "still reads `ok` to a filter on `status`, so the class this bullet names "
+    "is NOT wholly identifiable that way. Either way THIS stage reads "
+    "`result_count` alone, so the row refuses here regardless.)",
     "recall_returned uses the NARROW retrieval allowlist only, where stage 4 "
     "reports both. The wide set adds known-id reads (`tortoise_get_point` et "
     "al) whose result is a single object with no item collection: uncountable "

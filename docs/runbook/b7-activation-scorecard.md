@@ -112,7 +112,12 @@ instant was counted, letting the funnel disagree with itself on the boundary
 instant. If you change one leg's bounds, the other must move with it.
 
 **`recall_attempted` is an ATTEMPT, not an answer.** `mcp_tool_call.status ==
-"ok"` means only that the tool did not raise.
+"ok"` means only that the dispatch neither raised nor returned a failure `_safe`
+swallowed — since #8135 such a call is recorded `status: 'exec_error'` /
+`error_kind: 'safe_error'` — and a search that returned zero points is still
+`ok`. One failure class does still read `ok`: a tool-level refusal returned as a
+**plain dict** rather than through `_safe` (the unrecognised recall mode is one),
+which is tracked in #9084. Do not filter on `status` to find those rows.
 
 **`recall_returned` is a RETURN, not an answer.** Since #3675 the
 `mcp_tool_call` props carry `result_count` — the number of items the call

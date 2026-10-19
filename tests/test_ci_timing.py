@@ -2582,7 +2582,16 @@ def test_push_extra_enters_the_full_selection_pool(tmp_path, monkeypatch, capsys
 
     plain = run(base, "base")
     bumped = run(with_extra, "extra")
-    assert bumped - plain == 1234.0, (
+    # `pytest.approx`, not `==`: the totals are float sums over ~930 manifest
+    # rows, so the exact delta is only exact while the pool's magnitudes happen
+    # to line up. Adding ONE durations row anywhere in the file (e.g. #8135's
+    # `test_b7_runbook_ok_semantics_8135.py: 2.0`) shifted the operands enough
+    # that `8315.7 - 7081.7` came back 1233.9999999999995 and this read
+    # `1233.9999999999995 != 1234.0` — a red on a registration that has nothing
+    # to do with the property under test. The default relative tolerance
+    # (1e-6 ⇒ ±0.0012) still cannot be satisfied unless `push_extra`'s weight
+    # really enters the pool, so the differential property is unchanged.
+    assert bumped - plain == pytest.approx(1234.0), (
         "push_extra weight must enter the full-selection pool — otherwise the "
         "counted shards run files the denominator omits"
     )

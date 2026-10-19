@@ -641,3 +641,44 @@ class TestToolContract:
         payload = json.loads(capsys.readouterr().out)
         assert payload["tiers_evaluated"] == 1
         assert payload["tiers_published"] == 2
+
+
+def test_the_unbilled_write_doors_are_named_by_symbol_not_by_line_number():
+    """#9093 review (P3): both prose copies named the MCP write-op seam by LINE.
+
+    ``tortoise/metering.py`` and this tool's own module docstring both said
+    "every MCP tool write (``mcp_server.py:1550``)". That line was correct on
+    ``main`` — it is ``record_write_ops(org_id, tier=…)`` in ``_quota_gated`` —
+    and went stale the moment #8135 inserted ~130 lines above it, so line 1550
+    became an unrelated tool-name set. Nothing FAILS when a prose pointer rots;
+    it just stops resolving to what it claims, which is how a reader ends up
+    trusting a door list that no longer describes the code.
+
+    Pinned as a SYMBOL reference instead of a corrected line number, because a
+    new number re-opens the same hole on the next insertion: the assertion is
+    that both copies name ``_quota_gated``, that the symbol exists in
+    ``mcp_server.py``, and that the ``record_write_ops`` call really is inside
+    that symbol's body — i.e. the pointer RESOLVES.
+    """
+    import inspect
+
+    import tortoise.mcp_server as ms
+
+    for path in ("tortoise/metering.py", "tools/write_op_reachability.py"):
+        prose = (_REPO_ROOT / path).read_text()
+        assert "_quota_gated" in prose, (
+            f"{path} must name the MCP write-op seam by symbol "
+            "(``_quota_gated``); a bare line number rots on the next insertion "
+            "above it (#9093 review P3)")
+        assert "mcp_server.py:1550" not in prose, (
+            f"{path} still carries the stale ``mcp_server.py:1550`` pointer — "
+            "that line is no longer the write-op seam (#9093 review P3)")
+
+    # The pointer must RESOLVE: the decorated seam the prose names is where the
+    # write op is billed. `_quota_gated` returns the `_gated` closure, so the
+    # `record_write_ops` call lives in that inner function's source.
+    gated = inspect.getsource(ms._quota_gated)
+    assert "record_write_ops(org_id" in gated, (
+        "``_quota_gated`` is no longer the function that bills the write op, so "
+        "the prose pointer in tortoise/metering.py and "
+        "tools/write_op_reachability.py resolves to the wrong seam")
