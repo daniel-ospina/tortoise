@@ -86,7 +86,9 @@ An UNKNOWN verdict never acts. Neither does ``OK``: the governor only ever
 removes load, and there is no load to remove when the queue is healthy.
 
 Exit codes (fail-closed, matching ``tools/ci_check_repair.py``):
-  0  measured: ``OK`` (also: a flood that this invocation cleared)
+  0  measured: ``OK`` — including a flood this invocation cleared, which is
+     reported as the POST-action reading (the pre-action state line is kept in
+     ``pre_action_state_line``, and ``cleared`` says the difference)
   1  measured: ``FLOOD`` (either no action was available, or it persists)
   2  could not measure (API/auth failure). NOTHING is changed, and this is never
      reported as OK.
@@ -145,9 +147,11 @@ GH_BIN = os.environ.get("GH_BIN") or shutil.which("gh") or "gh"
 #: renamed workflow silently, which is the drift class this repo keeps removing.
 PR_EVENTS = frozenset({"pull_request", "pull_request_target", "merge_group"})
 
-#: The statuses that mean "a runner slot has not been granted". Named, not
-#: inferred, and matched against the run's own `status`.
-QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
+#: NOTE: there is deliberately NO queued-status vocabulary in this module. The
+#: queue feed is already filtered by `status=queued` at the API, so every run
+#: read here IS queued by construction, and the ONE copy of the vocabulary that
+#: classifies a run's own `status` lives in `tools/ci_check_repair.py`
+#: (`QUEUED_STATUSES`). A second copy here would have no consumer and would drift.
 
 #: Workflows whose QUEUED runs the governor may trim, each with the loss it
 #: accepts. This is a reviewed allow-list ON PURPOSE: `finding-provenance` is
@@ -521,9 +525,20 @@ def read_health(
 
 
 def cancel_run(repo: str, run_id: int) -> tuple[bool, str]:
-    """Cancel one queued run. Returns ``(ok, detail)``; never raises MeasureError."""
+    """Cancel one queued run. Returns ``(ok, detail)``; NEVER raises MeasureError.
 
-    proc = _gh(["api", "-X", "POST", f"repos/{repo}/actions/runs/{run_id}/cancel"], timeout=60)
+    The no-raise contract is load-bearing, not cosmetic: `main()` cancels in a
+    loop, and a hung or unauthorised `gh` on run N must not abort the governor
+    mid-action (the earlier cancellations have landed, the later ones would be
+    silently skipped, and the "cancelled N of M" summary would never print). A
+    `_gh` failure is therefore a FAILED CANCEL of this one run — and it is
+    reported as such by the caller, which is why the exit code stays a measured
+    FLOOD rather than becoming an unmeasured crash.
+    """
+    try:
+        proc = _gh(["api", "-X", "POST", f"repos/{repo}/actions/runs/{run_id}/cancel"], timeout=60)
+    except MeasureError as exc:
+        return False, f"could not run gh: {exc}"[:300]
     if proc.returncode == 0:
         return True, "cancelled"
     return False, (proc.stderr or proc.stdout or "").strip()[:300] or "cancel failed"
@@ -564,15 +579,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    measure_kwargs: dict[str, Any] = {
+        "min_dominant_queued": args.min_dominant_queued,
+        "min_age_seconds": args.min_age_seconds,
+        "keep": args.keep,
+        "max_cancel": args.max_cancel,
+        "max_pages": args.max_pages,
+    }
     try:
-        health = read_health(
-            args.repo,
-            min_dominant_queued=args.min_dominant_queued,
-            min_age_seconds=args.min_age_seconds,
-            keep=args.keep,
-            max_cancel=args.max_cancel,
-            max_pages=args.max_pages,
-        )
+        health = read_health(args.repo, **measure_kwargs)
     except MeasureError as exc:
         print(f"ci_queue_health: could not measure the queue: {exc}", file=sys.stderr)
         return EXIT_UNMEASURABLE
@@ -581,7 +596,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     failures: list[dict[str, Any]] = []
     if args.apply and health.verdict == FLOOD and health.trimmable:
         for run in health.trimmable:
-            ok, detail = cancel_run(args.repo, run.id)
+            # `cancel_run` is contracted never to raise; this guard is what keeps a
+            # future change to it from turning ONE unreachable runner into an
+            # aborted governor: the failure becomes this run's failed cancel, the
+            # remaining candidates are still attempted, and the summary still prints.
+            try:
+                ok, detail = cancel_run(args.repo, run.id)
+            except MeasureError as exc:
+                ok, detail = False, f"measurement failed during the cancel: {exc}"[:300]
             if ok:
                 cancelled.append(run.id)
                 print(
@@ -603,14 +625,48 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
 
-    payload = health.to_dict()
+    # RE-MEASURE after acting. The state line is what the fleet reads, so on a
+    # queue this invocation just drained it must say the queue MOVED — reporting
+    # the pre-action FLOOD for a cleared queue is the "measurement artifact read as
+    # state" failure, and a reader has no way to tell it from a flood that stands.
+    # Only an ACTION is re-measured (a plain measure costs no extra API call), and
+    # a failed re-read leaves the pre-action reading standing while
+    # `state_after_action` says it is the earlier one — a measurement that did not
+    # happen is never inferred.
+    reported = health
+    remeasured = False
+    if cancelled or failures:
+        try:
+            reported = read_health(args.repo, **measure_kwargs)
+            remeasured = True
+        except MeasureError as exc:
+            print(
+                f"ci_queue_health: could not re-measure the queue after the governor "
+                f"ran ({exc}) — the state below is the PRE-action reading",
+                file=sys.stderr,
+            )
+    cleared = health.verdict == FLOOD and reported.verdict != FLOOD
+
+    payload = reported.to_dict()
     payload["cancelled"] = cancelled
     payload["cancel_failures"] = failures
+    # What the reading was BEFORE the governor acted, so "did the queue move" is
+    # answerable from the JSON alone rather than only from `cancelled`. `candidates`
+    # is the PRE-action candidate count for the same reason: the post-action
+    # reading's own `trimmable` is empty precisely when the action worked, so
+    # "cleared N of M" read off it would say "N of 0".
+    payload["pre_action_state_line"] = health.state_line
+    payload["candidates"] = len(health.trimmable)
+    payload["state_after_action"] = remeasured
+    payload["cleared"] = cleared
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        print(render(health))
-        if health.verdict == FLOOD:
+        print(render(reported))
+        if cleared:
+            print(f"  → cleared {len(cancelled)} of {len(health.trimmable)} candidate(s): "
+                  f"was {health.state_line}")
+        if reported.verdict == FLOOD:
             print(
                 "  → PR CI is NOT slow, it is NOT RUNNING: the required "
                 "`python-ci-gate` cannot start without a slot. Re-run this tool with "
@@ -619,10 +675,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "`gh workflow run finding-provenance.yml -f issue_number=<N>`."
             )
 
-    # A flood this invocation cleared is a success — the state it reports is the
-    # state AFTER the action, so "did the queue move" is answered, not "was a
-    # flood seen".
-    if health.verdict != FLOOD:
+    # Exit 0 means "a measured state that needs no action": either the reported
+    # (post-action) reading is not a flood, or this invocation issued its
+    # cancellations with no failure. The second clause is NOT redundant with the
+    # first: GitHub moves a cancelled run out of the queue asynchronously, so the
+    # re-read taken seconds later can legitimately still show it queued, and a
+    # governor that did its job must not cry FLOOD while the cancels land.
+    if reported.verdict != FLOOD:
         return EXIT_OK
     if cancelled and not failures:
         return EXIT_OK

@@ -110,6 +110,16 @@ jobs:
                    || echo 'CI: UNKNOWN (the tool produced no state line)')"
           echo "$state"
           echo "$state" >> "$GITHUB_STEP_SUMMARY"
+          # A CLEARED flood reports the POST-action reading (the tool re-measures
+          # after it cancels), so the summary would otherwise read as though no
+          # flood was ever seen. Print what it was: `was CI: FLOOD(...) -> cleared
+          # N of M`, which keeps "the queue moved" distinct from "the queue was
+          # healthy all along" — the ambiguity ISSUE 2 of the #9118 review named.
+          transition="$(python3 -c "import json; d=json.load(open('/tmp/ci-queue-health.json')); print(f\"was {d['pre_action_state_line']} -> cleared {len(d['cancelled'])} of {d['candidates']}\" if d.get('cleared') else '')" 2>/dev/null || true)"
+          if [ -n "$transition" ]; then
+            echo "$transition"
+            echo "$transition" >> "$GITHUB_STEP_SUMMARY"
+          fi
           {
             echo '```json'
             cat /tmp/ci-queue-health.json

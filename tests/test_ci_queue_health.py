@@ -19,6 +19,7 @@ without touching GitHub. Four things these tests exist to keep true:
 """
 from __future__ import annotations
 
+import json
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -133,7 +134,13 @@ def test_governor_trims_the_oldest_excess_of_a_trim_safe_offender():
     assert [r.id for r in health.trimmable] == [1000, 1001, 1002, 1003, 1004, 1005, 1006]
 
 
-def test_governor_never_returns_a_pr_run_even_when_it_is_the_bulk():
+def test_governor_never_returns_a_pr_run_while_the_offender_leads():
+    """PR work is the priority the governor exists to protect, not a candidate.
+
+    (A PR-DOMINATED queue classifies `OK` and yields no `trimmable` at all, so the
+    only shape in which this assertion can be made is the one below: the offender
+    leads the queue and PR runs are merely also present.)
+    """
     queued = flood_queued(12) + starving_pr_runs(3, age_seconds=2000)
     health = classify(queued)
     assert health.verdict == Q.FLOOD
@@ -284,3 +291,150 @@ def test_a_failed_cancel_keeps_the_flood_standing(monkeypatch, capsys):
     monkeypatch.setattr(Q, "cancel_run", lambda repo, run_id: (False, "Cannot cancel"))
     assert Q.main(["--apply"]) == Q.EXIT_FLOOD
     assert "could NOT cancel" in capsys.readouterr().err
+
+
+# ── a cancel must never abort the governor (ISSUE 1 of the #9118 review) ───
+
+def test_cancel_run_converts_a_gh_failure_into_a_failed_cancel(monkeypatch):
+    """`cancel_run`'s docstring promises it never raises MeasureError.
+
+    It called `_gh`, which turns OSError/timeouts into exactly that, so the promise
+    was false — and the caller's loop ran unwrapped. The promise is now enforced
+    here, where a regression shows up as one failed cancel rather than as an
+    aborted governor.
+    """
+    def boom(args, timeout=120):
+        raise Q.MeasureError("could not run gh: timed out after 60s")
+
+    monkeypatch.setattr(Q, "_gh", boom)
+    ok, detail = Q.cancel_run("o/r", 42)      # must NOT raise
+    assert ok is False
+    assert "timed out" in detail
+
+
+def test_one_unreachable_cancel_does_not_abort_the_rest(monkeypatch, capsys):
+    """Earlier cancellations land and later ones are still attempted.
+
+    Before the fix an exception escaped the loop, so the governor stopped
+    mid-action, the "cancelled N of M" summary never printed, and the process
+    exited 1 — which this tool defines as "measured: FLOOD" — while its contract
+    says an API/auth failure is exit 2 "NOTHING is changed".
+    """
+    health = classify(flood_queued(12) + starving_pr_runs(1), keep=5)
+    attempted: list[int] = []
+
+    def flaky_cancel(repo, run_id):
+        attempted.append(run_id)
+        if run_id == 1002:
+            raise Q.MeasureError("gh api timed out")
+        return True, "cancelled"
+
+    monkeypatch.setattr(Q, "read_health", lambda *a, **k: health)
+    monkeypatch.setattr(Q, "cancel_run", flaky_cancel)
+    rc = Q.main(["--apply", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert attempted == [1000, 1001, 1002, 1003, 1004, 1005, 1006]
+    assert payload["cancelled"] == [1000, 1001, 1003, 1004, 1005, 1006]
+    assert payload["cancel_failures"] == [
+        {"run": 1002, "detail": "measurement failed during the cancel: gh api timed out"}
+    ]
+    assert rc == Q.EXIT_FLOOD      # a measured FLOOD, not an uncaught crash
+
+
+# ── the reported state is the state AFTER the action (ISSUE 2) ──────────────
+
+def _readings(*healths):
+    """A `read_health` stub that walks the given readings, then repeats the last."""
+    seq = list(healths)
+
+    def read(*args, **kwargs):
+        return seq.pop(0) if len(seq) > 1 else seq[0]
+
+    return read
+
+
+def test_a_report_only_run_does_not_re_measure(monkeypatch, capsys):
+    """A plain measure costs exactly one read: no action, nothing to re-measure."""
+    flood = classify(flood_queued(12) + starving_pr_runs(1), keep=5)
+    seen: list[int] = []
+
+    def read(*a, **k):
+        seen.append(1)
+        return flood
+
+    monkeypatch.setattr(Q, "read_health", read)
+    assert Q.main(["--json"]) == Q.EXIT_FLOOD
+    payload = json.loads(capsys.readouterr().out)
+    assert len(seen) == 1
+    assert payload["state_after_action"] is False
+    assert payload["cleared"] is False
+
+
+def test_a_cleared_flood_reports_the_state_after_the_action(monkeypatch, capsys):
+    """The exact case the old comment claimed and the code did not do.
+
+    On a green run of a queue this invocation just drained, the emitted state line
+    used to be `CI: FLOOD(finding-provenance, queued=21, pr_running=0)` — the
+    PRE-action reading, printed into the step summary with no error marker, for a
+    queue that was no longer flooded. That is the "measurement artifact read as
+    state" class, so the fix re-measures and names the transition.
+    """
+    flood = classify(flood_queued(12) + starving_pr_runs(1), keep=5)
+    drained = classify(flood_queued(2))        # below the floor -> OK
+
+    monkeypatch.setattr(Q, "cancel_run", lambda repo, run_id: (True, "cancelled"))
+    monkeypatch.setattr(Q, "read_health", _readings(flood, drained))
+    assert Q.main(["--apply", "--json"]) == Q.EXIT_OK
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state_line"].startswith("CI: OK(")
+    assert payload["pre_action_state_line"].startswith("CI: FLOOD(finding-provenance")
+    assert payload["state_line"] != payload["pre_action_state_line"]
+    assert payload["cleared"] is True
+    assert payload["state_after_action"] is True
+    # the ACTION is described by pre-action counts: after the cancels the
+    # post-action reading's own `trimmable` is empty, so "7 of 0" would be read
+    # off it. `candidates` is the pre-action count and is what the workflow prints.
+    assert payload["cancelled"] == [1000, 1001, 1002, 1003, 1004, 1005, 1006]
+    assert payload["candidates"] == 7
+
+
+def test_a_failed_re_read_reports_the_pre_action_state_and_says_so(monkeypatch, capsys):
+    """A re-measure that did not happen is never inferred."""
+    flood = classify(flood_queued(12) + starving_pr_runs(1), keep=5)
+    calls = {"n": 0}
+
+    def read(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return flood
+        raise Q.MeasureError("gh api 502")
+
+    monkeypatch.setattr(Q, "read_health", read)
+    monkeypatch.setattr(Q, "cancel_run", lambda repo, run_id: (True, "cancelled"))
+    rc = Q.main(["--apply", "--json"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert payload["state_after_action"] is False
+    assert payload["cleared"] is False
+    # the reading it could not refresh is still reported — labelled as the EARLIER one
+    assert payload["state_line"].startswith("CI: FLOOD(")
+    assert "PRE-action reading" in captured.err
+    assert rc == Q.EXIT_OK              # the cancels landed with no failure
+
+
+def test_the_workflow_binds_the_token_the_repo_wide_guard_cannot_see():
+    """`test_workflow_gh_token.py` greps for a literal `gh` in a `run:` step.
+
+    This workflow has none — it runs `python3 tools/ci_queue_health.py`, which
+    shells out to `gh` internally — so the repo-wide guard passes VACUOUSLY while
+    an unbound token makes every measurement exit 2. Pin the binding here, where
+    the blind spot is visible (the same pin `ci-check-repair.yml` carries).
+    """
+    wf = (Path(__file__).resolve().parents[1]
+          / ".github/workflows/ci-queue-health.yml").read_text()
+    assert "GH_TOKEN: ${{ github.token }}" in wf
+    assert "actions: write" in wf      # POST /actions/runs/{id}/cancel
+    assert "cancel-in-progress: false" in wf   # two governors would race on the excess set

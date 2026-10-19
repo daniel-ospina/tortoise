@@ -1112,8 +1112,15 @@ def test_an_UNREADABLE_live_set_still_falls_back_to_the_record(monkeypatch, tmp_
 
 
 def test_main_reports_exit_2_when_the_record_cannot_be_read(capsys, tmp_path):
-    """The fail-closed pole of the contract, through `main()` itself."""
-    assert R.main(["--repo", "o/r", "--no-live", "--record",
+    """The fail-closed pole of the contract, through `main()` itself.
+
+    `--no-queue-health` is passed deliberately: this suite is registered on the
+    `core` surface as "Pure unit tests, no network", and without the flag `main()`
+    reaches `read_queue_health()` before its `try:` block, i.e. a real
+    `gh api repos/.../actions/runs` call on every run. The queue read is not what
+    this test is about, so it is switched off rather than depended on.
+    """
+    assert R.main(["--repo", "o/r", "--no-live", "--no-queue-health", "--record",
                    str(tmp_path / "nope.json")]) == 2
     assert "COULD NOT MEASURE" in capsys.readouterr().err
 
@@ -1124,8 +1131,95 @@ def test_an_unexpected_error_in_the_pass_is_exit_2_not_1(capsys, monkeypatch):
         raise KeyError("malformed run payload")
 
     monkeypatch.setattr(R, "open_prs", boom)
-    assert R.main(["--repo", "o/r", "--no-live"]) == 2
+    assert R.main(["--repo", "o/r", "--no-live", "--no-queue-health"]) == 2
     assert "unexpected KeyError" in capsys.readouterr().err
+
+
+# ── the #9115 composition: a measured FLOOD reaches the report ─────────────
+
+def _flood_record(tmp_path):
+    """A minimal required-contexts record for one context, `docs` <- ci.yml."""
+    rec = tmp_path / "required-contexts.json"
+    rec.write_text(json.dumps({
+        "required_contexts": ["docs"],
+        "emitters": {"docs": [["ci.yml", "docs"]]},
+    }))
+    return rec
+
+
+def _flood_health():
+    """A REAL (pure, no API) FLOOD reading: a trim-safe offender + a starved PR run."""
+    from datetime import UTC, datetime, timedelta
+
+    from tools import ci_queue_health as Q
+
+    now = datetime(2026, 10, 19, 3, 30, 0, tzinfo=UTC)
+
+    def stamp(seconds):
+        return (now - timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    queued = [Q.QueuedRun(id=1000 + i, name="finding-provenance", event="issues",
+                          created_at=stamp(1200 - i)) for i in range(12)]
+    queued.append(Q.QueuedRun(id=9000, name="Python CI", event="pull_request",
+                              created_at=stamp(1200)))
+    health = Q.classify_queue(queued, [], now)
+    assert health.verdict == Q.FLOOD, "the fixture must actually be a flood"
+    return health
+
+
+def test_main_threads_a_measured_flood_into_the_report(monkeypatch, capsys, tmp_path):
+    """The load-bearing composition: FLOOD -> queue_flood -> classify -> starved.
+
+    `read_queue_health` and `classify(..., queue_flood=)` are each tested in
+    isolation, and inverting the predicate between them (line ~939: `=="FLOOD"` ->
+    `!="FLOOD"`, or `is not None` -> `is None`) left BOTH suites green while the
+    instrument silently never reported STARVED — the blindness #9115 exists to
+    remove, restored with a green suite. This test is that seam.
+    """
+    monkeypatch.setattr(R, "read_queue_health", lambda repo: _flood_health())
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
+    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
+    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [run(10, "ci.yml", "queued")])
+
+    assert R.main(["--repo", "o/r", "--no-live", "--json",
+                   "--record", str(_flood_record(tmp_path))]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["queue_flood"] is True
+    assert summary["starved"] == 1
+    assert summary["queue"].startswith("CI: FLOOD(")
+    assert summary["prs"][0]["starved"] == ["docs"]
+
+
+def test_main_reports_starvation_not_witnessed_when_the_queue_is_unreadable(
+        monkeypatch, capsys, tmp_path):
+    """The other pole: no flood measured is NOT a flood, and says so."""
+    monkeypatch.setattr(R, "read_queue_health", lambda repo: None)
+    monkeypatch.setattr(R, "open_prs", lambda repo, include_drafts: [pr(1)])
+    monkeypatch.setattr(R, "check_runs_at", lambda repo, head: [])
+    monkeypatch.setattr(R, "runs_at_head", lambda repo, head: [run(10, "ci.yml", "queued")])
+    # The seam itself: what `classify` is actually TOLD. Without this the assertion
+    # would only be that no flood was reported, which is also what a hard-wired
+    # `queue_flood=False` produces.
+    seen: list[bool] = []
+    real_classify = R.classify
+
+    def spy(*a, **k):
+        seen.append(k.get("queue_flood"))
+        return real_classify(*a, **k)
+
+    monkeypatch.setattr(R, "classify", spy)
+
+    assert R.main(["--repo", "o/r", "--no-live", "--json",
+                   "--record", str(_flood_record(tmp_path))]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert seen == [False]
+    assert summary["queue_flood"] is False
+    assert summary["starved"] == 0
+    assert summary["queue"] == "CI: UNKNOWN (the queue was not read)"
+    assert summary["open_prs"] == 1
+    # A merely-PENDING context is LATE, not absent: no repair, no record (the
+    # pre-#9115 behaviour this flag restores exactly).
+    assert summary["prs"] == []
 
 
 def test_installer_armed_by_default(tmp_path):
