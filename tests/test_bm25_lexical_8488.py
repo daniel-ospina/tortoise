@@ -627,8 +627,7 @@ class TestReadPath:
         monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)
 
         control_trace: list[dict] = []
-        control = sdk.tortoise_fts_query(QUERY, limit=10,
-                                         leg_trace=control_trace)
+        sdk.tortoise_fts_query(QUERY, limit=10, leg_trace=control_trace)
         assert not [e for e in control_trace
                     if e.get("mechanism") == LEXICAL_MECHANISM_BM25], (
             "guard: gate OFF must never claim a BM25 lexical entry")
