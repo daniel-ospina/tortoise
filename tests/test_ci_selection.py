@@ -1973,6 +1973,32 @@ def test_install_queue_reconcile_schedule_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_ci_queue_health_tool_change_selects_core_not_tier1():
+    # tools/ci_queue_health.py owns tests/test_ci_queue_health.py (the hermetic
+    # cases pinning the FLOOD classification — a deep queue of PR runs is not a
+    # flood, a reporting workflow holding the queue is — the governor's bounds
+    # (never a pull-request-event run, never a workflow outside TRIM_SAFE), and
+    # the truncation labelling).
+    #
+    # Without its CORE_ALSO entry this is the #1349/#3332/#3616 silent-drop
+    # class: `tools/` is a flat NON_PYTHON_PREFIXES entry, so a tool-only change
+    # came back with `changed == []` and took the docs-only early return —
+    # `select()` returned NO surface and the guard never ran on the file it
+    # guards.
+    #
+    # Measured before the fix: `_sel(["tools/ci_queue_health.py"])` ->
+    # surfaces=[], full=False, test_ci_queue_health.py absent.
+    #
+    # CORE_ALSO (not TOOL_CARVEOUTS) is the deliberate choice: the suite is
+    # hermetic and `core`-registered, so selecting `core` runs it at the lowest
+    # CI cost. Mutation check: removing the CORE_ALSO entry selects no surface,
+    # so assert 1 below fails.
+    r = _sel(["tools/ci_queue_health.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_ci_queue_health.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_graph_write_repair_tool_change_selects_core_not_tier1():
     # PR #8427 review Finding 4: tools/graph_write_repair.py and its launchd
     # installer (tools/install-graph-write-repair-schedule.sh) own

@@ -69,13 +69,27 @@ throws away CI that was about to report. When any run at the head is not
 `completed`, the missing-run PR is reported as DEFERRED and the next window acts.
 This costs at most one window and cannot lose a check that was going to arrive.
 
-KNOWN RESIDUAL — recorded, deliberately not repaired. A producing run that is
-`queued` and never starts is indistinguishable from one that is in flight, so its
-context reads PENDING and is never repaired. Measured 2026-10-13 across 14 open
-PRs: 6 non-started runs, the oldest 11 minutes — no observed stall, so no
-staleness bound is implemented (a bound with no failure behind it is machinery,
-not a guard). If a stall is ever observed, the right primitive is `rerun` of the
-stalled run, not a new PR event, and this docstring is where to record it.
+KNOWN RESIDUAL — CLOSED for the flood case (#9115), still open for a lone stall.
+A producing run that is `queued` and never starts is indistinguishable from one
+that is in flight, so its context reads PENDING and is never repaired. That is
+correct for a lone stall — and it is exactly how a QUEUE FLOOD hid from every
+instrument in the fleet: on 2026-10-19 twelve PR heads carried ZERO check-runs
+while 44-49 runs sat queued behind one reporting workflow, and "pending" read as
+"CI is slow". So the queue is measured ONCE per pass
+(`tools/ci_queue_health.py`, the repo-level `CI: FLOOD(<workflow>, queued=N,
+pr_running=0)` state, or `CI: PR-STARVED(...)` when PR CI is not running but no
+trim-safe offender can be blamed) and a context whose producing run is QUEUED
+while the repo is starved — `QueueHealth.starves_pr`, i.e. either verdict — is
+reported as STARVED — a named state, distinct from PENDING and from UNTRIGGERED
+— instead of as pending. A starved context is NOT repaired here:
+no per-PR action can create a runner slot, a `rerun` would add load to the flood,
+and a close/reopen would cancel in-flight CI. The remedy is the governor
+(`ci_queue_health.py --apply`), and the report names it.
+The residual that remains is a lone `queued` run in an otherwise healthy queue:
+no stall has been observed to bound it (measured 2026-10-13 across 14 open PRs:
+6 non-started runs, the oldest 11 minutes), and a bound with no failure behind it
+is machinery, not a guard. If a stall is ever observed, the right primitive is
+`rerun` of the stalled run, not a new PR event.
 
 Exit codes (fail-closed, mirroring `~/.pi/agent/scripts/ci_runner_gate.sh`):
   0  measured, and every required repair was applied (or none was needed)
@@ -157,6 +171,12 @@ class MeasureError(RuntimeError):
     """Could not measure. Fail closed: change nothing, exit 2."""
 
 
+#: The statuses in which a run EXISTS at the head and has NOT been given a
+#: runner slot. Named, never inferred: a status this tool has not seen is not
+#: evidence of queue starvation, and must not be classified as one.
+QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
+
+
 @dataclass
 class Run:
     id: int
@@ -189,6 +209,12 @@ class PrPlan:
     # workflow's own `timeout-minutes`, the primitive is `rerun` of the stalled
     # run — not a new PR event, and not a new threshold invented here.
     oldest_pending_age_seconds: float | None = None
+    # Contexts whose producing run is QUEUED while the REPO is in a queue FLOOD
+    # (#9115). Deliberately a THIRD state: "pending" is what a starved head used
+    # to read as, and that is how the flood stayed invisible for hours. These
+    # contexts are NOT repaired by any per-PR action — no rerun and no reopen can
+    # create a runner slot.
+    starved: list[str] = field(default_factory=list)
 
     @property
     def actionable(self) -> bool:
@@ -206,7 +232,7 @@ class PrPlan:
         nothing left to act on (`actionable` is False) and must still be reported
         and escalated — dropping it is how an unrepairable check goes silent.
         """
-        return bool(self.actionable or self.rerun or self.exhausted)
+        return bool(self.actionable or self.rerun or self.exhausted or self.starved)
 
 
 def _run(argv: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
@@ -391,15 +417,28 @@ def producing_runs(ctx: str, all_runs: list[Run], emitters: dict[str, list[str]]
 
 
 def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[str],
-             emitters: dict[str, list[str]], max_attempts: int) -> PrPlan:
+             emitters: dict[str, list[str]], max_attempts: int,
+             queue_starved: bool = False) -> PrPlan:
     """The whole decision, PURE — no API calls — so it is unit-testable.
 
     For each required context absent from the head's check runs, the producing
-    workflow's runs at that head decide which of three states it is in:
+    workflow's runs at that head decide which state it is in:
 
       * a run is still in flight            -> PENDING (wait; the run emits it)
       * a completed run exists              -> DEAD   (re-run it)
       * no run exists at all                -> UNTRIGGERED (re-trigger the PR)
+
+    and, orthogonally, `queue_starved` adds the repo-level reading: a context
+    whose producing runs EXIST but are all QUEUED (none executing) while the repo
+    has WITNESSED PR starvation is ALSO recorded in `starved` (#9115). The seam is
+    `QueueHealth.starves_pr`, which is true for BOTH measured-starvation verdicts,
+    `FLOOD` and `PR-STARVED` — they differ only in whether the governor has an
+    offender to trim, which is not what a per-head reading can act on, and
+    PR-STARVED is the LATE STAGE of the same incident (a flood inflates the PR
+    backlog it starves). `PR-UNWITNESSED` is deliberately NOT starvation: a
+    page-capped feed did not measure the wait. It stays in `pending` as well,
+    deliberately — `pending` drives the deferral of a reopen, and a starved head
+    must not be reopened either. `starved` is what makes the reason visible.
     """
     plan = PrPlan(number=int(pr["number"]), head=pr["headRefOid"],
                   in_flight=sorted({r.name or r.path for r in all_runs
@@ -421,6 +460,13 @@ def classify(pr: dict, checks: list[dict], all_runs: list[Run], required: list[s
         # is the context DEAD (the #8254 signature: a completed run with zero jobs).
         if any(r.status != "completed" for r in runs):
             plan.pending.append(ctx)
+            # STARVED (#9115): the runs EXIST and NONE of them is executing, so no
+            # slot was granted. Requires the repo-level reading to have WITNESSED
+            # starvation (FLOOD or PR-STARVED) — the same per-head shape is the
+            # ordinary one on a busy runner, and calling that starvation would be
+            # the noise that gets this report muted.
+            if queue_starved and all(r.status in QUEUED_STATUSES for r in runs):
+                plan.starved.append(ctx)
             continue
         # Completed runs, check never landed. Prefer the newest attempts.
         dead = sorted(runs, key=lambda r: r.run_attempt, reverse=True)
@@ -595,7 +641,8 @@ def open_prs(repo: str, include_drafts: bool) -> list[dict]:
 
 
 def build_plans(repo: str, required: list[str], emitters: dict[str, list[str]],
-                include_drafts: bool, max_attempts: int) -> list[PrPlan]:
+                include_drafts: bool, max_attempts: int,
+                queue_starved: bool = False) -> list[PrPlan]:
     plans: list[PrPlan] = []
     for pr in open_prs(repo, include_drafts):
         head = pr.get("headRefOid") or ""
@@ -603,8 +650,31 @@ def build_plans(repo: str, required: list[str], emitters: dict[str, list[str]],
             raise MeasureError(f"PR #{pr.get('number')} has no headRefOid — cannot measure")
         checks = check_runs_at(repo, head)
         runs = runs_at_head(repo, head)
-        plans.append(classify(pr, checks, runs, required, emitters, max_attempts))
+        plans.append(classify(pr, checks, runs, required, emitters, max_attempts,
+                              queue_starved=queue_starved))
     return plans
+
+
+def read_queue_health(repo: str):
+    """The repo-level queue reading (#9115), or ``None`` when it cannot be read.
+
+    A failed queue read is NOT a verdict and NOT an outage of this tool: it
+    degrades the classification to exactly what it was before #9115 (a queued run
+    reads PENDING) and says so in the report. Inventing `flood=False` silently
+    would be the same fail-open in the opposite direction — a starved head
+    reported as healthy — so `None` is threaded through and printed.
+    """
+    try:
+        root = str(Path(__file__).resolve().parent.parent)
+        if root not in sys.path:
+            # The tool is invoked as `python3 tools/ci_check_repair.py`, so the
+            # script's own directory (not the repo root) is sys.path[0].
+            sys.path.insert(0, root)
+        from tools import ci_queue_health  # noqa: PLC0415 — optional dependency
+
+        return ci_queue_health.read_health(repo)
+    except Exception:  # noqa: BLE001 — a queue read must never fail the repair pass
+        return None
 
 
 def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
@@ -666,6 +736,7 @@ def report(plans: list[PrPlan], apply: bool, trigger_ok: bool, repo: str,
         rec: dict = {"pr": p.number, "head": p.head, "absent": p.absent,
                      "pending": p.pending, "rerun": [], "reopened": False,
                      "missing_run": p.missing_run, "exhausted": list(p.exhausted),
+                     "starved": list(p.starved),
                      "reopen_attempts": 0, "needs_user_actor": False}
         # A SPENT BUDGET ESCALATES REGARDLESS OF WHAT ELSE IS TRUE OF THE PR, so it
         # is hoisted above the repair branches. When a PR had BOTH an exhausted
@@ -841,6 +912,9 @@ def main(argv: list[str] | None = None) -> int:
                          "is shared: both paths end in a REPORT, never an endless loop)")
     ap.add_argument("--reopen-cooldown-minutes", type=int, default=60)
     ap.add_argument("--no-live", action="store_true", help="skip the live protection read")
+    ap.add_argument("--no-queue-health", action="store_true",
+                    help="skip the repo-level queue read (#9115); a queued run then "
+                         "reads PENDING exactly as it did before, and the report says so")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
@@ -868,6 +942,15 @@ def main(argv: list[str] | None = None) -> int:
         candidate = root / args.record
         if candidate.is_file():
             record_path = candidate
+    queue = None if args.no_queue_health else read_queue_health(args.repo)
+    # A queue read that failed is reported as UNKNOWN and does NOT block the pass:
+    # the repair it performs is still correct, it just cannot name starvation.
+    # `starves_pr` is the queue tool's own predicate, so the two instruments cannot
+    # disagree: FLOOD and PR-STARVED both mean "PR CI is not running" and both reach
+    # the per-head report. Keying on FLOOD alone left the late stage — PR work
+    # holding the queue, nothing executing — silent here while the repo-level line
+    # said PR-STARVED (#9118 review).
+    queue_starved = bool(getattr(queue, "starves_pr", False))
     try:
         required = resolve_required(args.repo, record_path, live=not args.no_live)
         emitters = emitters_from_record(record_path)
@@ -875,7 +958,7 @@ def main(argv: list[str] | None = None) -> int:
         # PR scan (see require_emitters).
         require_emitters(required, emitters, record_path)
         plans = build_plans(args.repo, required, emitters, args.include_drafts,
-                            args.max_attempts)
+                            args.max_attempts, queue_starved=queue_starved)
         code, records = report(plans, args.apply, can_trigger_events(), args.repo,
                                args.reopen_cooldown_minutes, args.max_attempts)
     except MeasureError as exc:
@@ -897,6 +980,16 @@ def main(argv: list[str] | None = None) -> int:
         "apply": args.apply,
         "trigger_ok": can_trigger_events(),
         "open_prs": len(plans),
+        # The REPO-LEVEL queue state (#9115). Printed even when OK: an `OK` here
+        # is a measurement ("a slot was being granted"), and its absence would
+        # make a starved pass and a healthy pass look identical.
+        "queue": (queue.state_line if queue is not None
+                  else "CI: UNKNOWN (the queue was not read)"),
+        "queue_starved": bool(queue_starved),
+        # Starved contexts are NOT "needing repair" — no per-PR repair can create a
+        # runner slot — so they are counted separately rather than inflating a
+        # number whose whole meaning is "a repair will be attempted".
+        "starved": sum(1 for p in plans if p.starved),
         # A check that is merely LATE (its producing run is in flight) needs no
         # repair, so it is deliberately excluded from this count — otherwise the
         # number would report the normal in-flight state of every pushed PR.
@@ -914,13 +1007,23 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(summary, indent=2))
     else:
         mode = "APPLY" if args.apply else "DRY-RUN"
+        print(f"{summary['queue']}")
         print(f"ci-check-repair [{mode}] repo={args.repo} open_prs={summary['open_prs']} "
-              f"needing_repair={summary['needing_repair']} trigger={summary['trigger_ok']}")
+              f"needing_repair={summary['needing_repair']} starved={summary['starved']} "
+              f"trigger={summary['trigger_ok']}")
         for r in records:
             print(f"  #{r['pr']} absent={r['absent']} pending={r['pending']} "
+                  f"starved={r.get('starved', [])} "
                   f"rerun={[x['run'] for x in r['rerun']]} missing_run={r['missing_run']} "
                   f"reopened={r['reopened']} reopen_attempts={r['reopen_attempts']} "
                   f"needs_user_actor={r['needs_user_actor']}")
+        if summary["starved"]:
+            # Named state, named remedy. A starved head is not repaired by anything
+            # this tool can do: the missing resource is a runner slot.
+            print("ci-check-repair: STARVED — the required checks exist as QUEUED runs "
+                  "that no runner slot has started; PR CI is not slow, it is not "
+                  "running. No per-PR repair can clear this: unjam the queue with "
+                  "`uv run python tools/ci_queue_health.py --apply`.", file=sys.stderr)
         if code != 0:
             print("ci-check-repair: some repairs need a credential that can trigger events "
                   "(the local fallback covers this) — see --json for per-PR detail",
