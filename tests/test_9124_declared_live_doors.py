@@ -417,9 +417,7 @@ def _bind_handle_aliases(node, aliases, params=()) -> None:
     """
     if isinstance(node, ast.Assign):
         value, targets = node.value, node.targets
-    elif isinstance(node, ast.AnnAssign):
-        value, targets = node.value, [node.target]
-    elif isinstance(node, ast.NamedExpr):
+    elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
         value, targets = node.value, [node.target]
     elif isinstance(node, ast.withitem):
         value, targets = node.context_expr, [node.optional_vars]
@@ -436,7 +434,7 @@ def _bind_handle_aliases(node, aliases, params=()) -> None:
         return
     if isinstance(value, (ast.Tuple, ast.List)) and len(targets) == 1 \
             and targets[0] is not None:
-        pairs = zip(value.elts, _flatten_target(targets[0]))
+        pairs = zip(value.elts, _flatten_target(targets[0]), strict=False)
         for part, target in pairs:
             if _carries_handle(part, aliases, params):
                 _add_alias_target(target, aliases)
@@ -1751,11 +1749,12 @@ def test_the_measure_mode_census_is_what_a_flip_would_refuse(armed_sdk_factory):
     measure mode — and, once the switch is on, one it REFUSES. That is the
     shared-classifier property this whole suite rests on (#3595).
     """
+    import tortoise.projection as projection
     from tortoise.projection import (
-        DirectCacheWriteRefused, _reset_undeclared_handle_writes,
+        DirectCacheWriteRefused,
+        _reset_undeclared_handle_writes,
         undeclared_handle_writes,
     )
-    import tortoise.projection as projection
 
     sdk = armed_sdk_factory()
     proj = sdk._get_proj()
