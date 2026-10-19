@@ -2588,6 +2588,16 @@ def test_4643_the_real_deploy_step_is_executed_and_its_failure_propagates(tmp_pa
 # the row says so itself ("no offline check can read the MIT repo"), and it now
 # records the removal as pending with the PR that performs it, so the ordering
 # is reviewable instead of assumed.
+#
+# ⚠️ The row also instructs the TRANSITION ("flip this row to the past tense
+# when `…#5` merges"), so PENDING and LANDED must both be legal — a guard that
+# reds on obedience to its own document, and whose verdict then turns on
+# incidental wording, is the defect this file polices elsewhere (review
+# finding, P1). Each `Non-vacuity` note below names the REVISION it was measured
+# against, and pytest reports only the FIRST failing assert — so a per-assertion
+# claim needs each predicate evaluated, not one run. Re-measure with:
+#   git show <rev>:docs/license-notes.md > /tmp/x && cp /tmp/x docs/…
+#   pytest tests/test_served_skills_parity.py -q -k 8747; git checkout docs/…
 
 def _installer_row() -> list[str]:
     """§7.1's `install-tortoise-skills.sh` row — the cells, stripped."""
@@ -2603,9 +2613,20 @@ def test_8747_the_installer_row_records_the_upstream_removal_as_pending():
     """An ISSUE in this repo cannot delete a file in another one, and a removal
     that has not landed must not be recorded as done.
 
-    Non-vacuity (measured against the pre-fix cell, which read "…and **#8747
-    removed that copy** — the MIT repo now ships no installer at all"):
-    assertion 1 and assertion 2 both red on it.
+    TWO states are legal — PENDING while the MIT copy is still served, and
+    LANDED once `…#5` merges (the row's own flip instruction). What neither
+    state may do is assert the removal as complete with nothing that shows the
+    deleting PR landed: that is the claim this branch's first draft made.
+
+    Non-vacuity (MEASURED against each revision's own cell, with the recipe in
+    the comment block above):
+
+      · `origin/main` ("… is a stale v1 duplicate — tracked by **#8747**") —
+        assertions 2 and 3 red; assertion 1 is green (main records no deletion
+        at all, so there is nothing for it to mis-credit).
+      · `5da309b5d`, this branch's superseded draft ("**#8747 removed that
+        copy** — the MIT repo now ships no installer at all") — assertions 1
+        and 3 red; assertion 2 is green (it already named `…#5`).
     """
     cell = _installer_row()[2]
     removed_by_issue = re.search(r"#8747\s+(?:removed|deletes|deleted|removes)", cell)
@@ -2616,18 +2637,34 @@ def test_8747_the_installer_row_records_the_upstream_removal_as_pending():
     assert re.search(r"tortoise-skills-and-integrations#5", cell), (
         "the row must name the artifact that performs the upstream deletion, so a "
         "reader can check whether it landed: " + cell)
-    assert re.search(r"\bopen\b|unmerged|pending|until .*?\blands?\b", cell, re.I), (
-        "…and must record that it has NOT landed — the MIT copy was still served "
-        "when this row was written, so a completed removal in the past tense is a "
-        "false provenance record: " + cell)
+    pending = re.search(r"\bopen\b|unmerged|pending|until .*?\blands?\b", cell, re.I)
+    # `merged`/`landed` only — NOT a bare `merge`, which the row legitimately
+    # carries inside "#4327's backup-then-merge" and would match on every state.
+    landed = re.search(r"\bmerged\b|\blanded\b", cell, re.I)
+    assert pending or landed, (
+        "…and must say either that the deletion is PENDING (it has not landed: the "
+        "MIT copy was still served when this row was written) or that it has "
+        "LANDED — the flip the row itself instructs once `…#5` merges. A removal "
+        "recorded as complete with neither is the false provenance record this "
+        "test exists to stop: " + cell)
 
 
 def test_8747_the_installer_row_does_not_re_admit_a_second_installer_author():
     """`Authored in` says one repo; the prose must not say two.
 
-    Non-vacuity (measured): the pre-fix cell read "**Stated, not gated** — two
-    repos author it and the second is not gated *from here*", five words after
-    "exist in exactly one place", so this reds on it.
+    A FORWARD regression guard — and it does NOT discriminate this PR from its
+    base, which its note must say plainly:
+
+      · `origin/main` — GREEN ("… is a stale v1 duplicate — tracked by
+        **#8747**" makes no authoring claim at all);
+      · `5da309b5d`, the superseded draft — RED ("**Stated, not gated** — two
+        repos author it and the second is not gated *from here*", five words
+        after "exist in exactly one place").
+
+    Its job is to keep that specific inversion — the one
+    `test_4643_the_ownership_table_states_the_rule_per_artifact` forbids in the
+    `Authored in` cell — from re-entering the prose of the `Enforced by` cell,
+    where no structural assertion can see it.
     """
     cell = _installer_row()[2]
     two_authors = re.search(
@@ -2641,27 +2678,43 @@ def test_8747_the_installer_row_does_not_re_admit_a_second_installer_author():
         f"the installer: {cell}")
 
 
-def test_8747_a_readme_named_as_a_guard_must_carry_the_statement():
+def test_8747_the_installer_row_names_a_guard_that_exists_on_this_side():
     """A record that names a guard nobody wrote is the same false claim in
     reverse — `test_4643_the_upstream_arm_has_a_runner_and_the_docs_name_it` is
     the same assertion one level down, about runners.
 
-    Non-vacuity (measured): the pre-fix cell nominated "the ownership statement
-    in both READMEs", and `README.md` in this repo contains neither
-    `install-tortoise-skills` nor `tortoise-skills-and-integrations`.
+    Two arms, BOTH unconditional, each reached by a real cell (measured, with
+    the recipe in the comment block above):
+
+      1. the cell must NAME what enforces single authorship — `origin/main`'s
+         cell names no guard at all ("… is a stale v1 duplicate — tracked by
+         #8747"), so this arm reds there;
+      2. if the guard it names is a README, that README must carry the
+         statement — `5da309b5d`, the superseded draft, nominated "the
+         ownership statement in both READMEs", and this repo's `README.md`
+         mentions neither the installer nor the MIT repo, so this arm reds
+         there.
+
+    The prior version of this test guarded arm 2 behind `if plural_guard:`,
+    which no committed cell ever satisfied (dead code), and repeated the
+    installer-header assertion that
+    `test_4643_the_ownership_table_states_the_rule_per_artifact` step 4 already
+    owns — so it could not fail on any state of this repository (review
+    finding, P2). Neither is repeated here.
     """
     cell = _installer_row()[2]
-    plural_guard = re.search(r"\bboth READMEs?\b|\b(?:each|every) README\b|READMEs\b",
-                             cell, re.I)
-    if plural_guard:
+    guard = re.search(r"\b(?:the\s+guard\s+is|guarded\s+by)\b(.+?)(?:\.\s|\.$|$)",
+                      cell, re.I | re.S)
+    assert guard, (
+        "the `Enforced by` cell must name WHAT enforces the installer's single "
+        "authorship. A row that names no guard is a claim no reader can check, "
+        "and it is the shape that let the stale v1 copy sit unremarked until "
+        "#8747: " + cell)
+    guard_text = guard.group(1)
+    if re.search(r"\bREADME", guard_text, re.I):
         readme = (REPO / "README.md").read_text(encoding="utf-8")
         assert ("tortoise-skills-and-integrations" in readme
                 or "install-tortoise-skills" in readme), (
-            f"the row nominates '{plural_guard.group(0)}' as a guard, but "
+            f"the row nominates a README as the guard ('{guard_text.strip()}'), but "
             f"README.md in this repo never mentions the installer or the MIT "
             f"repo — a guard nobody wrote is not a guard: {cell}")
-    # The one guard the row CAN be held to offline: the served installer's own
-    # header, which §7.1 names and which a `curl … | bash` customer reads.
-    assert "tortoise-skills-and-integrations" in INSTALLER.read_text(encoding="utf-8"), (
-        "the served installer's header must still name the MIT repo — it is the "
-        "statement a customer's agent reads")
