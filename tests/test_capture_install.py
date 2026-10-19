@@ -3511,12 +3511,12 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
     siblings, so a stale installed copy is comparable rather than
     unmeasurable (#4680).
 
-    Mutation: delete ``// tortoise-hook-version: 4`` from
+    Mutation: delete ``// tortoise-hook-version: 5`` from
     ``tortoise/pi-hooks/tortoise-capture.ts`` — ``read_hook_version`` returns
     ``None``, ``contract_version_for('pi')`` returns ``None``, and both this
     test and the generation pin RED.
     """
-    assert hook_install.read_hook_version(_PI_SRC) == 4
+    assert hook_install.read_hook_version(_PI_SRC) == 5
     assert hook_install.count_canonical_markers(_PI_SRC) == 1, (
         "the Pi seam must carry exactly ONE column-0 marker (a second one is a "
         "site marker that would be mistaken for the contract)")
@@ -3532,7 +3532,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: SHIPPED bytes and so compares equal by construction.  Edit the artifact, move
 #: the generation, update this pair — all three in one commit.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    4, "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498")
+    5, "5016104d2d017aa532a64e624bdc84098f1c21051532a970ccb4d15c773673ae")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -3543,6 +3543,7 @@ _PINNED_PI_SEAM_INSTALL_CONTRACT = (
 _GENERATION_DIGESTS = {
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
+    5: "5016104d2d017aa532a64e624bdc84098f1c21051532a970ccb4d15c773673ae",
 }
 
 

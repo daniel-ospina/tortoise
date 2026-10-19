@@ -27,6 +27,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import {
   CAPTURE_LANES,
+  COHORT_COST_CAP_CODE,
   DISCARD_COUNT_EXCEEDED,
   DISCARD_HTTP_REJECTED,
   HARNESS,
@@ -35,6 +36,7 @@ import {
   PROBE_TIMEOUT_MS,
   REQUEST_TIMEOUT_MS,
   RETRY_MAX_MS,
+  FLUSH_MAX_ATTEMPTS,
   SPOOL_STATUS_FILE,
   TRUNCATION_SENTINEL,
   TURN_MAX_CHARS,
@@ -49,6 +51,7 @@ import {
   classifyFailure,
   clipTurnContent,
   contentDigest,
+  countPendingEntries,
   deriveMachineId,
   discardEntry,
   entryKey,
@@ -2797,4 +2800,128 @@ test("#2100: the per-box health line is present in every state", async () => {
     JSON.stringify({ state: "blocked", status: "402" }),
   );
   assert.equal(captureHealthLine(forged, { apiKey: "tt_x" }).state, "draining");
+});
+
+// ── #2100 (review cycle 1): the health line describes WORK, not occupancy ──
+
+test("#2100: the health line counts PENDING work — a filed entry is not `queued`", async () => {
+  // Review finding: `queued` counted every `*.meta.json`. A FILED entry is
+  // KEPT (the success path stamps `filed_*`; nothing unlinks a filed capture),
+  // so occupancy only ever grows on a healthy box — `OK (0 queued)` was
+  // unreachable, the `n` in `BLOCKED (n queued, …)` was not the blocked
+  // backlog, and the `queued === 0` self-heal could never fire.
+  //
+  // MUTATION THAT REDS THIS: count meta files (occupancy) → `queued` is 1 on a
+  // box with nothing left to do.
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("sess-filed"));
+  const { fetchImpl } = mockFetch([{ ok: true }]);
+  const summary = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 1 });
+  assert.equal(summary.filed, 1);
+  assert.ok(readSpoolEntry(spool, "sess-filed")?.filed_key, "the filed entry is KEPT, not unlinked");
+  assert.equal(countPendingEntries(spool), 0, "a filed entry is not pending work");
+
+  const health = captureHealthLine(spool, { apiKey: "tt_x" });
+  assert.equal(health.state, "ok");
+  assert.equal(health.line, "capture: OK (0 queued)");
+
+  // …and a stale BLOCKED marker with nothing pending is cleared on the spot.
+  writeFileSync(
+    join(spool, SPOOL_STATUS_FILE),
+    JSON.stringify({ version: 1, state: "blocked", status: 402, updated_at: "then" }),
+  );
+  const healed = captureHealthLine(spool, { apiKey: "tt_x" });
+  assert.equal(healed.state, "ok", "a block with nothing pending is not evidence of a block");
+  assert.equal(readCaptureStatus(spool)?.state, "ok", "the marker is cleared, not just ignored");
+});
+
+test("#2100: a spool of TERMINAL entries is not a live block", () => {
+  // Review finding: terminal entries are KEPT forever (#7708, never retried),
+  // so with occupancy-counting a box whose refusals were all PERMANENT read
+  // `BLOCKED (n queued, 402 quota)` on every lane, forever, for a 402 that no
+  // longer existed. Nothing pending means nothing is blocked.
+  const spool = tmpSpool();
+  const sid = "sess-terminal";
+  writeSpoolEntry(spool, snapshot(sid));
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const meta = JSON.parse(readFileSync(metaPath, "utf8")) as Record<string, unknown>;
+  meta.terminal_failure = { reason: "http_rejected", detail: "422", at: "now" };
+  writeFileSync(metaPath, JSON.stringify(meta));
+  writeFileSync(
+    join(spool, SPOOL_STATUS_FILE),
+    JSON.stringify({ version: 1, state: "blocked", status: 402, updated_at: "then" }),
+  );
+
+  assert.equal(countPendingEntries(spool), 0, "a terminal entry is never retried, so never pending");
+  assert.equal(captureHealthLine(spool, { apiKey: "tt_x" }).state, "ok");
+});
+
+test("#2100: agent_end returns BEFORE the spool is touched (Pi awaits this handler too)", async () => {
+  // Review finding: Pi awaits EVERY handler (`agent-session.js` → `await
+  // emit('agent_end')`), and `flushSpool`'s body runs synchronously up to its
+  // first `await` — the scan, the sort and the first turn read all landed on
+  // the awaited tick (~23 ms measured on a 320-entry spool). The durable
+  // snapshot stays inline; only the drain moves to `setImmediate`.
+  //
+  // MUTATION THAT REDS THIS: call `drain(...)` directly (not in `setImmediate`)
+  // → the first POST is already dispatched when the handler returns.
+  const spool = tmpSpool();
+  for (let i = 0; i < 30; i += 1) writeSpoolEntry(spool, snapshot(`sess-ae${i}`));
+  const { fetchImpl, calls } = mockFetch([{ ok: true }]);
+  const pi = mockPi();
+  tortoiseCapture(pi as never, hermeticDeps(fetchImpl, spool));
+
+  await pi.handlers.agent_end(undefined, mockCtx({ entries: PI_ENTRIES, sessionId: "live" }));
+  assert.ok(existsSync(join(spool, "entries", `${entryKey("live")}.meta.json`)),
+    "the snapshot is durable BEFORE the handler returns — that is what it exists for");
+  assert.equal(calls.length, 0, "no drain work may run on the handler's own tick");
+
+  await settle();
+  assert.ok(calls.length > 0, "the drain still runs, in the background");
+});
+
+test("#2100: session_shutdown files the LIVE session first, not last", async () => {
+  // Review finding: the shipped bound ranks oldest-first, so a shutdown pass
+  // over a spool holding >= FLUSH_MAX_ATTEMPTS older entries never reached the
+  // one session ONLY shutdown can file. On an ephemeral cell (the #2100 box)
+  // that spool dies with the box — the bound turned "slow" into a silent loss.
+  //
+  // MUTATION THAT REDS THIS: drop the `onlySessionId` live pass → `live-sess`
+  // is ranked last and never attempted.
+  const spool = tmpSpool();
+  // More pending entries than ONE bounded pass may attempt.
+  const older = FLUSH_MAX_ATTEMPTS + 2;
+  for (let i = 0; i < older; i += 1) writeSpoolEntry(spool, snapshot(`sess-old${i}`));
+  const { fetchImpl } = mockFetch([{ ok: true }]);
+  const pi = mockPi();
+  tortoiseCapture(pi as never, hermeticDeps(fetchImpl, spool));
+
+  await pi.handlers.session_shutdown(
+    { reason: "quit" },
+    mockCtx({ entries: PI_ENTRIES, sessionId: "live-sess" }),
+  );
+
+  assert.ok(
+    readSpoolEntry(spool, "live-sess")?.filed_key,
+    "the final capture of the session that is ending must be filed, not left behind the bound",
+  );
+  assert.ok(readSpoolEntry(spool, "sess-old0")?.filed_key, "the bounded pass still drains the rest");
+});
+
+test("#2100: the spend cap is named as ITSELF, not as a plan quota", async () => {
+  // Review finding: `/v1/sessions` has TWO 402 categories, and the server says
+  // a caller must not read the spend cap as "out of plan allowance" (buying a
+  // bigger plan would not lift it). The line said "quota" for any 402.
+  //
+  // MUTATION THAT REDS THIS: hardcode `quota` in the line → the cause is lost.
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("sess-cap1"));
+  const capped = statusFetch(402, { code: COHORT_COST_CAP_CODE, message: "cohort cap" });
+  const { lines } = await sessionStartLines(spool, capped.fetchImpl);
+
+  assert.ok(
+    lines.some((l) => l.includes("capture: BLOCKED (1 queued, 402 cohort_cost_cap)")),
+    `the spend cap must be named as itself: ${JSON.stringify(lines)}`,
+  );
+  assert.equal(readCaptureStatus(spool)?.reason, COHORT_COST_CAP_CODE);
 });

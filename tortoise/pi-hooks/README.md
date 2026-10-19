@@ -302,6 +302,10 @@ Three properties close that, and they are all pinned in the suite:
   run after the handler returns. Fire-and-forget alone was not enough: an
   `async` body runs synchronously up to its first `await`, so `void flush(…)`
   still charged the spool scan and its turn reads to the turn's critical path.
+  `session_shutdown` is the exception by nature — Pi runs it before exit — so
+  there the bounds are what protect the exit, and the *live* session is filed
+  first (one `onlySessionId` pass) rather than ranked behind older entries it
+  can only be filed by shutdown.
 * **One pass is bounded.** At most `FLUSH_MAX_ATTEMPTS` (8) POSTs and
   `FLUSH_BUDGET_MS` (5 s) of wall clock, checked between entries (never
   mid-POST, so a completed attempt's outcome is always recorded). Entries the
@@ -310,10 +314,14 @@ Three properties close that, and they are all pinned in the suite:
   finished Pi process alive either. Removal on the bound is the spool's own
   count/byte ceiling, unchanged.
 * **A quota refusal is a NAMED state, not a growing backlog.** The first 402
-  carrying `quota_exceeded` stops the pass (the remaining entries cannot
+  carrying one of the server's categories (`quota_exceeded` for the plan
+  allowance, `cohort_cost_cap` for the org spend cap — the two are named
+  separately, because a spend cap reported as "quota" sends the owner to buy a
+  plan that cannot lift it) stops the pass (the remaining entries cannot
   succeed either) and is recorded in `<spool>/status.json`, so the *next*
-  process reports it without re-POSTing to rediscover it. Any 2xx clears the
-  marker — a stale `BLOCKED` would be its own lie.
+  process reports it without re-POSTing to rediscover it. A filed entry clears
+  the marker — a stale `BLOCKED` would be its own lie — and so does observing
+  nothing pending at all (see below).
 
 Every `session_start` prints exactly one health line, which is the per-box
 surface an operator (or a lane log that produced 259 B) reads:
@@ -325,7 +333,14 @@ capture: BLOCKED (320 queued, 402 quota)
 capture: INACTIVE (no TORTOISE_API_KEY)
 ```
 
-`queued` is recomputed from the spool on every call, so the recorded marker is
-only trusted while entries are still waiting; an empty spool always reads `OK`
-and clears the marker. The Python leg's `flush_spool` is unchanged: it runs on
-explicit commands (`session capture`, `session drain`), not on the Pi turn path.
+`queued` is **pending** work — recomputed from the spool on every call as
+entries that are neither FILED (the server already accepted exactly that
+content; the entry is kept, not unlinked) nor TERMINAL (kept, never retried —
+#7708). Counting raw meta files would count spool *occupancy*, which only grows
+on a healthy box: `OK (0 queued)` would never print and `BLOCKED` could never
+clear. The recorded marker is only trusted while something is still pending, so
+a quota that has since lifted, or a spool another leg has drained, cannot keep
+claiming a block — nothing pending reads `OK` and clears the marker.
+
+The Python leg's `flush_spool` is unchanged: it runs on explicit commands
+(`session capture`, `session drain`), not on the Pi turn path.
