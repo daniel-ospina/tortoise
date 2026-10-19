@@ -8575,6 +8575,22 @@ function claimIntentInFlight() {
               setWizardDurableError(`That key can't be used — it is revoked or disabled. ${isOwnerAdmin ? 'Create or rotate a key in the API Keys tab and paste the new one.' + capRevokeFirstClause(team, keys) : 'Ask an owner or admin to create or rotate a key for you.'}`)
               return
             }
+            // #8228: FAIL-CLOSED NET. The four arms above cover every dead-row
+            // cause the shared row-aliveness atom (`rowDeadReason`,
+            // sessionKey.js) knows TODAY; an arm added to that atom later
+            // arrives here as its own source, with no copy of its own. Falling
+            // through would store a row the atom calls DEAD into
+            // `wizardDurableKey` — which is the harness snippet's key source
+            // (`harnessKey = wizardDurableKey || durableConnect.key`, below) —
+            // so a new atom arm would embed a dead key and never raise an error.
+            // Refusing anything that is not `'durable'` makes the drift
+            // direction closed by construction rather than by remembering to
+            // add a fifth branch. The remedy names create/rotate, so it carries
+            // the at-cap clause for the same reason the four above do (#4353).
+            if (check.source !== 'durable' || !check.key) {
+              setWizardDurableError(`That key can't be used — it is no longer active in this organization. ${isOwnerAdmin ? 'Create or rotate a key in the API Keys tab and paste the new one.' + capRevokeFirstClause(team, keys) : 'Ask an owner or admin to create or rotate a key for you.'}`)
+              return
+            }
             setWizardDurableKey(pasted)
             setWizardDurablePaste('')
           }}>Use this key</button>

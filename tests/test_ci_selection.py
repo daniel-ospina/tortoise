@@ -144,6 +144,14 @@ def test_docs_scanning_gates_stay_in_tier1():
         "surface, so a diff that ONLY adds the copy runs tier1 only; without "
         "this registration the fourth copy merges green (#4309 class)"
     )
+    assert "test_b7_runbook_ok_semantics_8135.py" in tier1, (
+        "#8135 review (P1): the B7 operator runbook's `status == \"ok\"` pin "
+        "reads docs/runbook/b7-activation-scorecard.md — `docs/` is in "
+        "NON_PYTHON_PREFIXES and the runbook matches no SOURCE_PATTERNS "
+        "entry, so a runbook-only diff runs tier1 only; without this "
+        "registration the pre-#8135 sentence (or a dropped #9084 plain-dict "
+        "clause) merges green (#4309 class, same as #8614)"
+    )
 
 
 def test_fly_secret_drift_gate_runs_on_a_runbook_only_diff():
@@ -170,6 +178,35 @@ def test_fly_secret_drift_gate_runs_on_a_runbook_only_diff():
         "a docs/infra-runbook.md-only diff must select the guards that bind its "
         "prose (`test_fly_secret_drift.py`) — otherwise a docs-only edit that "
         "re-breaks a claim it pins merges green (#8614 review, #4309 class)"
+    )
+
+
+def test_b7_runbook_ok_semantics_gate_runs_on_a_runbook_only_diff():
+    """#8135 review (P1, two reviews): the runbook's `ok` pin must run on the runbook.
+
+    `tests/test_b7_runbook_ok_semantics_8135.py` binds the claim
+    `docs/runbook/b7-activation-scorecard.md` makes about
+    `mcp_tool_call.status == "ok"` — the claim #8135 corrected after it had
+    already drifted once (#3675). `docs/` is in NON_PYTHON_PREFIXES and the
+    runbook matches no SOURCE_PATTERNS entry, so a runbook-only diff filters to
+    `changed == []` and takes the docs-only early return — tier1 ONLY.
+
+    The pin used to live in `tests/test_activation_scorecard.py`, registered on
+    `api` and `core` but NOT in `tier1`, so it was asleep on the one change that
+    can break it: re-introducing "means only that the tool did not raise", or
+    deleting the #9084 plain-dict clause, in a docs-only PR merged green.
+    Dropping the tier1 entry moves the pin back into that hole (#4309 silent-drop
+    class; the #8614 shape one runbook over).
+    """
+    r = _sel(["docs/runbook/b7-activation-scorecard.md"])
+    assert r["full"] is False
+    assert r["surfaces"] == []
+    assert "test_b7_runbook_ok_semantics_8135.py" in r["test_files"], (
+        "a docs/runbook/b7-activation-scorecard.md-only diff must select the "
+        "pin that binds its prose (test_b7_runbook_ok_semantics_8135.py) — "
+        "otherwise a docs-only edit that re-teaches the pre-#8135 meaning of "
+        "`ok`, or drops the #9084 boundary, merges green (#8135 review P1, "
+        "#4309 class)"
     )
 
 

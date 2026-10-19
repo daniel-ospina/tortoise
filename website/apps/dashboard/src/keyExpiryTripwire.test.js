@@ -22,6 +22,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { stripComments } from './testSupport.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const mainJsx = readFileSync(join(here, 'main.jsx'), 'utf8')
@@ -190,11 +191,32 @@ test('#2426: isManagedKey excludes bootstrap only — no expires_at exclusion ma
   assert.match(body, /created_via === 'bootstrap'/, 'bootstrap rows stay excluded')
   assert.match(body, /return !\(k\.created_via === 'bootstrap'\)/, 'bootstrap-only predicate')
   // The embed-safe derivations (usableDurableRows / durableConnectKey) keep
-  // their own no-expiry filters — the embed surface stays Never-keys-only.
-  const usable = sessionKeyJs.slice(sessionKeyJs.indexOf('export function usableDurableRows'))
-  assert.match(usable, /!k\.expires_at/, 'usableDurableRows excludes expiring rows explicitly')
-  assert.match(sessionKeyJs, /if \(row\.expires_at\) return \{ key: '', durable: false, source: 'expiring' \}/,
-    'paste classifier reports source expiring (distinct from bootstrap)')
+  // their no-expiry filters — the embed surface stays Never-keys-only.
+  //
+  // #8228 RE-PIN, same guarantee. The explicit `!k.expires_at` this assertion
+  // used to read inside `usableDurableRows` moved into the ONE row-aliveness
+  // atom (`rowDeadReason`) that `usableDurableRows` now composes — the #2426
+  // decision is unchanged (an expiring durable is still not routable, still
+  // reported as source 'expiring', still never embed-safe), but the condition
+  // is pinned WHERE IT IS DECLARED plus the composition that carries it into the
+  // routing path. Pinning the consumer's spelling instead would pin duplication,
+  // which is the drift #8228 removed. Both halves are asserted so neither the
+  // atom's arm nor its use by the router can be dropped silently.
+  const atomStart = sessionKeyJs.indexOf('export function rowDeadReason')
+  const atom = sessionKeyJs.slice(atomStart, sessionKeyJs.indexOf('export function rowAlive', atomStart))
+  assert.ok(atomStart > -1 && atom.includes('expires_at'),
+    '#8228: the row-aliveness atom must exist and carry the expiry condition')
+  assert.match(atom, /if \(row\.expires_at\) return 'expiring'/,
+    'the atom excludes expiring rows explicitly (the #2426 Never-only embed policy)')
+  const usableStart = sessionKeyJs.indexOf('export function usableDurableRows')
+  const usable = stripComments(
+    sessionKeyJs.slice(usableStart, sessionKeyJs.indexOf('export function', usableStart + 10)))
+  assert.match(usable, /isManagedKey\(k\) && rowAlive\(k\)/,
+    'usableDurableRows composes the atom — the routing path cannot lose the expiry arm')
+  assert.doesNotMatch(usable, /revoked_at|expires_at|created_via|enabled/,
+    'usableDurableRows must not re-declare the row-aliveness conditions (#8228)')
+  assert.match(sessionKeyJs, /if \(dead\) return \{ key: '', durable: false, source: dead \}/,
+    'paste classifier reports the atom\'s own reason — source expiring stays distinct from bootstrap')
 })
 
 // 5. Wizard embed surface — Never-keys-only policy.

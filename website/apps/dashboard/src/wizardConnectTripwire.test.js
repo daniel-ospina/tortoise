@@ -1871,10 +1871,11 @@ test('#4353: the connect step’s existing-key note is DERIVED, not an inline li
 })
 
 test('#4353: the paste-validation owner remedies APPEND the at-cap clause', () => {
-  // wizardPasteRow's "Use this key" handler has four owner/admin remedies
-  // (unknown / bootstrap / expiring / revoked-disabled). Each names a route —
-  // create or rotate — that needs a slot the gate has spent at the cap, so
-  // each must append the pure clause rather than promise a mint that 402s. The
+  // wizardPasteRow's "Use this key" handler has four cause-specific owner/admin
+  // remedies (unknown / bootstrap / expiring / revoked-disabled), plus #8228's
+  // fail-closed catch-all. Each names a route — create or rotate — that needs a
+  // slot the gate has spent at the cap, so each must append the pure clause
+  // rather than promise a mint that 402s. The
   // slice is marker-guarded on both ends (a renamed/removed handler fails
   // loudly instead of silently widening).
   const paste = slice('const wizardPasteRow = (', 'const wizardNoKeyAffordance = (',
@@ -1894,10 +1895,13 @@ test('#4353: the paste-validation owner remedies APPEND the at-cap clause', () =
     'the revoked/disabled rejection’s owner remedy must append the at-cap clause')
   // The member arms route to an owner/admin — the only actor who can revoke,
   // and the actor who then sees the corrected at-cap remedy on the key
-  // surfaces — so they must NOT carry the clause: exactly four occurrences,
-  // one per owner arm.
-  assert.equal((paste.match(/capRevokeFirstClause\(team, keys\)/g) || []).length, 4,
-    'exactly the four owner/admin remedies carry the clause (member arms do not)')
+  // surfaces — so they must NOT carry the clause: exactly five occurrences,
+  // one per owner remedy. #8228 raised this from four by adding the fail-closed
+  // catch-all (any classification that is not 'durable' is refused, so a NEW arm
+  // on the shared row-aliveness atom can never fall through to the store); it
+  // is an owner remedy too, so it carries the clause like the other four.
+  assert.equal((paste.match(/capRevokeFirstClause\(team, keys\)/g) || []).length, 5,
+    'exactly the five owner/admin remedies carry the clause (member arms do not)')
   assert.match(mainJsx,
     /import \{[^}]*capRevokeFirstClause[^}]*\} from '\.\/keyAllowance\.js'/,
     'the clause is imported from the pure module')

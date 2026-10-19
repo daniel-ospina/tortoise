@@ -33,7 +33,10 @@ than really happens: three write paths bill a write op and leave
 ``nodes_written`` at its 0 default — ``POST /v1/points``
 (``hosted_api.py:8651``), the live ``/v1/sessions`` capture lane
 (``_capture_session_impl``, ``hosted_api.py:13709``), and every MCP tool write
-(``mcp_server.py:1550``). So a measured ``r`` is a LOWER BOUND on the true
+(``_quota_gated``'s ``record_write_ops(org_id, tier=…)`` call in
+``mcp_server.py`` — named by SYMBOL, not by line number: the line pointer this
+prose used to carry went stale when #8135 inserted ~130 lines above it, #9093
+review P3). So a measured ``r`` is a LOWER BOUND on the true
 ``r``. That makes the two verdicts ASYMMETRIC:
 
 - measured UNREACHABLE ⇒ the truth is worse or equal ⇒ **exit 1 CONFIRMS** the

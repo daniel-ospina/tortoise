@@ -99,10 +99,9 @@ and the `empty-uri-default-ok:` marker.
 from __future__ import annotations
 
 import ast
-import io
 import re
 import sys
-import tokenize
+import warnings
 from pathlib import Path
 
 _TESTS_ROOT = Path(__file__).resolve().parent
@@ -933,62 +932,37 @@ def test_the_cost_skip_cannot_hide_a_uri_agnostic_leak():
 # Restoration guard (#2084) — static scope/evidence analysis helpers
 # ═══════════════════════════════════════════════════════════════════════
 
-def _code_bracket_deltas(src: str) -> list[int]:
-    """Net bracket delta per line, counting ONLY brackets in CODE (#8995).
-
-    `_scope_map`'s continuation counter decides whether a `def` line is a real
-    definition or a wrapped continuation of the expression above it, so a
-    bracket counted as code when it is actually COPY poisons the classification
-    for the REST of the file. That is exactly what happened to
-    `test_time_aware_sdk_2520.py`: `assert "(as of" in t` (line 115) opened a
-    paren that nothing closes, so every later `def` — including the `_ku_sdk`
-    contextmanager that saves and restores `TORTOISE_DB_URI` — was read as a
-    continuation line of the test above it. Its restore then fell OUTSIDE that
-    test's body window and `test_uri_mutations_restored` reded on a mutation
-    that is restored in a `finally`, with a message naming the wrong function.
-    An unmatched bracket in copy is not an open expression.
-
-    String and comment tokens are located with `tokenize` (which understands
-    quoting, escapes, triple quotes and f-strings), and their spans are skipped
-    by the counter. An unparsable fragment falls back to the raw count — the
-    pre-#8995 behaviour, never a silent under-count.
-    """
-    lines = src.split("\n")
-    excluded: dict[int, list[tuple[int, int]]] = {}
-    stringish = {tokenize.STRING, tokenize.COMMENT}
-    fstring_middle = getattr(tokenize, "FSTRING_MIDDLE", None)
-    if fstring_middle is not None:
-        stringish.add(fstring_middle)
-    try:
-        for tok in tokenize.generate_tokens(io.StringIO(src).readline):
-            if tok.type not in stringish:
-                continue
-            (start_row, start_col), (end_row, end_col) = tok.start, tok.end
-            for row in range(start_row, end_row + 1):
-                if row - 1 >= len(lines):
-                    continue
-                span_start = start_col if row == start_row else 0
-                span_end = end_col if row == end_row else len(lines[row - 1])
-                excluded.setdefault(row, []).append((span_start, span_end))
-    except (tokenize.TokenError, IndentationError, SyntaxError):
-        excluded = {}
-    deltas: list[int] = []
-    for row, line in enumerate(lines, start=1):
-        spans = excluded.get(row, ())
-        delta = 0
-        for col, ch in enumerate(line):
-            if any(s <= col < e for s, e in spans):
-                continue
-            if ch in "([{":
-                delta += 1
-            elif ch in ")]}":
-                delta -= 1
-        deltas.append(delta)
-    return deltas
-
-
 def _scope_map(src: str) -> list[tuple[str, str | None]]:
-    """Per-line scope classification: ("top", None) for module-level
+    """Per-line scope classification, with a FAIL-CLOSED fallback.
+
+    `_scope_map_pass` carries a single-quoted literal across a backslash
+    continuation. If the source ends with that literal still open it cannot
+    tokenize at all, so the carry established nothing about where the code ends
+    — and honouring it would attribute every remaining line to the function
+    that opened the literal, HIDING violations rather than surfacing them. The
+    second pass disables the carry, which is the pre-carry behaviour."""
+    try:
+        # A test file may carry a deprecation-shaped escape sequence; compiling
+        # it here must not print a warning the guard never printed before.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            compile(src, "<scope-map>", "exec")
+    except (SyntaxError, ValueError):
+        # The source does not parse, so NOTHING it says about where a literal
+        # ends can be trusted — and a carry on an unterminated literal
+        # attributes the rest of the file to the function that opened it,
+        # HIDING violations instead of surfacing them. Fail CLOSED: no carry,
+        # which over-reports rather than under-reports.
+        scopes, _ = _scope_map_pass(src, allow_single_carry=False)
+        return scopes
+    scopes, _ = _scope_map_pass(src, allow_single_carry=True)
+    return scopes
+
+
+def _scope_map_pass(
+    src: str, *, allow_single_carry: bool
+) -> tuple[list[tuple[str, str | None]], str | tuple[str, str] | None]:
+    """One pass. ("top", None) for module-level
     code, ("fixture", <name>) inside a @pytest.fixture-decorated
     function, ("fn", <name>) inside any other function.
 
@@ -1003,11 +977,10 @@ def _scope_map(src: str) -> list[tuple[str, str | None]]:
     scopes: list[tuple[str, str | None]] = [("top", None)] * len(lines)
     # Continuation state comes from CODE brackets only — a bracket inside a
     # string literal or comment is copy, not an open expression (#8995).
-    deltas = _code_bracket_deltas(src)
     stack: list[tuple[int, str, str]] = []  # (indent, kind, name)
     paren = 0
     pending_fixture = False
-    triple: str | None = None
+    state: str | tuple[str, str] | None = None
     for i, line in enumerate(lines):
         # Count brackets in CODE ONLY. A bracket inside a string literal or a
         # comment is not a continuation: `assert "(as of" in text` left the
@@ -1017,7 +990,7 @@ def _scope_map(src: str) -> list[tuple[str, str | None]]:
         # `tests/test_time_aware_sdk_2520.py`, where a compliant
         # `@contextmanager` helper was reported as a mutation inside an
         # unrelated test (#8937 / #8487).
-        code, triple = _code_only(line, triple)
+        code, state = _code_only(line, state, allow_single_carry=allow_single_carry)
         stripped = code.strip()
         if stripped.startswith("@") and paren == 0:
             # precise fixture-marker test: `.fixture(` / `.fixture\n` — a
@@ -1044,23 +1017,56 @@ def _scope_map(src: str) -> list[tuple[str, str | None]]:
             scopes[i] = stack[-1][1:] if stack else ("top", None)
         else:
             scopes[i] = stack[-1][1:] if stack else ("top", None)
-        # Paren balance from the tokenize-based per-line counter: code
-        # brackets only, so a bracket inside a string literal or comment
-        # cannot freeze the continuation state (#8995). `deltas` is computed
-        # once per source above; the INDENT in this loop comes from
-        # `_code_only`, whose output is COLUMN-ALIGNED with the line, so a
-        # triple-quoted region closing mid-line cannot shift the resumed
-        # code's column (#8937 review r7).
-        paren = max(0, paren + deltas[i])
-    return scopes
+        # Paren balance over `code`, the `_code_only` output — code brackets
+        # only, so a bracket inside copy cannot freeze the continuation state
+        # (#8995). NOT over the raw line (#8487), and NOT over a second,
+        # `tokenize`-based counter: `tokenize` emits ONE column for the
+        # `FSTRING_MIDDLE` holding `{{`, so the second brace of `f"a {{ b"`
+        # reaches a tokenize-span counter as code and opens a paren that
+        # nothing closes. Measured on this tree by diffing the two scope maps
+        # over the whole guard scan set — every module `_scanned_modules()`
+        # scans (`_iter_test_module_paths()`, not a flat glob): 8 files / 9,263
+        # mislabelled lines, every one of them a `{{` on an f-string line —
+        # `tests/test_ship_test_onboarding.py` alone loses 5,845 lines from its
+        # `{{` at L546. `_code_only` blanks the whole literal, f-string braces
+        # included, in one column-aligned pass.
+        for ch in code:
+            if ch in "([{":
+                paren += 1
+            elif ch in ")]}":
+                paren = max(0, paren - 1)
+    return scopes, state
 
 
-def _code_only(line: str, triple: str | None) -> tuple[str, str | None]:
+def _code_only(
+    line: str,
+    state: str | tuple[str, str] | None,
+    *,
+    allow_single_carry: bool = True,
+) -> tuple[str, str | tuple[str, str] | None]:
     """The CODE part of one line: string literals and comments replaced by
     spaces, so a bracket inside them cannot unbalance a continuation count.
 
     COLUMN-ALIGNED: the returned text is the same length as `line`, so the
     leading-whitespace count of the code is the code's real indent.
+
+    `state` is the carried lexer state: `None`, a triple-quote delimiter, or a
+    ``('single', quote)`` pair for a single-quoted literal still open at end of
+    line. That last case is a BACKSLASH CONTINUATION — the only way such a
+    literal spans lines in valid code — and it carries because without it the
+    continuation line reads as CODE: measured, ``q = "MATCH (n )\\`` followed
+    by an INDENTED ``    (foo"`` leaves the ``(`` counted, so a later
+    module-level statement is attributed to the function above it — HIDING it
+    (review r11 P2). At COLUMN 0 the same shape fails the other way: the
+    continuation closes the function, its body reads as module scope, and the
+    guard over-reports instead. It carries ONLY when `allow_single_carry` — `_scope_map` turns it OFF for a source
+    that does not compile, because there an unclosed literal proves nothing and
+    a carry would swallow the tail.
+
+    KNOWN LIMIT (pinned by `test_pep701_nested_quote_is_a_KNOWN_limitation`):
+    an f-string nesting the SAME quote kind in a replacement field
+    (``f"{d["a(b"]}"``) closes at the nested quote, so that field's brackets
+    are read as code. 3.12 accepts the shape; no file in this tree uses it.
 
     Tracks a triple-quoted region across lines (docstrings are the common
     case), honouring backslash escapes on the closing delimiter exactly as
@@ -1074,6 +1080,24 @@ def _code_only(line: str, triple: str | None) -> tuple[str, str | None]:
     out: list[str] = []
     i = 0
     n = len(line)
+    triple = state if isinstance(state, str) else None
+    carried = state[1] if isinstance(state, tuple) else None
+    if carried is not None:
+        quote = carried
+        while i < n:
+            if line[i] == "\\":
+                out.append(" " * min(2, n - i))
+                i += 2
+                continue
+            if line[i] == quote:
+                out.append(" ")
+                i += 1
+                carried = None
+                break
+            out.append(" ")
+            i += 1
+        if carried is not None:
+            return "".join(out), ("single", quote)
     while i < n:
         if triple is not None:
             end = _find_unescaped(line, triple, i)
@@ -1103,17 +1127,30 @@ def _code_only(line: str, triple: str | None) -> tuple[str, str | None]:
             quote = ch
             out.append(" ")
             i += 1
+            closed = False
             while i < n:
                 if line[i] == "\\":
-                    out.append("  ")
+                    out.append(" " * min(2, n - i))
                     i += 2
                     continue
                 if line[i] == quote:
                     out.append(" ")
                     i += 1
+                    closed = True
                     break
                 out.append(" ")
                 i += 1
+            if not closed:
+                # Unterminated at end of line. In a source that COMPILES this
+                # is necessarily a backslash continuation — no other unclosed
+                # single-quoted literal is legal — so the parity of the trailing
+                # backslashes needs no test of its own: `_scope_map` only
+                # enables the carry for sources that compile (measured: adding
+                # a parity test changes NONE of the scan set's scope maps,
+                # because every shape it would reject is already unparsable).
+                if allow_single_carry:
+                    return "".join(out), ("single", quote)
+                return "".join(out), triple
             continue
         out.append(ch)
         i += 1
@@ -1253,11 +1290,12 @@ def _restoration_violations(files) -> list[str]:
     """
     violations: list[str] = []
     for fname, src in files:
-        # #9061: `_scope_map` (tokenize plus a per-line bracket scan) is the
-        # whole cost of this guard, so it has to run on the modules that can
-        # hold a violation, not on the size of the tree. The skip is SOUND BY
-        # CONSTRUCTION, which is why it may narrow the analysis at all: its two
-        # predicates are this guard's OWN — a module whose source mentions
+        # #9061: `_scope_map` (`_code_only`'s one column-aligned pass plus
+        # the per-line bracket scan) is the whole cost of this guard, so it has
+        # to run on the modules that can hold a violation, not on the size of
+        # the tree. The skip is SOUND BY CONSTRUCTION, which is why it may
+        # narrow the analysis at all: its two predicates are this guard's OWN —
+        # a module whose source mentions
         # neither `TORTOISE_DB_URI` (the raw-mutation census below) nor a bare
         # `pytest.MonkeyPatch(` (the URI-agnostic bare-instance arm) cannot hold
         # a site this guard would report, so nothing it would flag is skipped.
@@ -1454,9 +1492,10 @@ def test_a_def_inside_a_docstring_is_not_a_function_start():
     `fake` rather than to `test_first`, so any report about them names a scope
     the file does not have (the wrong-name class #8487 produced).
 
-    Discriminating by construction: `_scope_map` routed through the raw line
-    (`_code_bracket_deltas` makes only BRACKETS code-only — it does not blank
-    strings for the `def` match) maps line 3 to ``("fn", "fake")``.
+    Discriminating by construction: a counter that blanks only BRACKETS and
+    not string literals — the pre-#8487 raw-line count — maps line 3 to
+    ``("fn", "fake")``, while the `_code_only`-based map keeps it in
+    ``test_first``.
     """
     src = (
         "def test_first():\n"
@@ -1592,16 +1631,21 @@ def test_a_comment_cannot_open_a_string_or_freeze_the_scope_map():
     """A `#` comment is COPY for both lexers (#8937 review — the COMMENT arm
     had no pin left once the interim raw-line counter was replaced).
 
-    Two arms, each discriminating on its own:
+    Two arms, each discriminating against a DIFFERENT pre-fix shape:
 
     * `_code_only` truncates at `#` BEFORE it looks at quotes, so a comment
       that MENTIONS a triple quote cannot open a region. Without that branch
       the `\"\"\"` in the comment sets the triple state, every following line
       is blanked as string content, and the next real `def` is not recognised
       — so statements after it are attributed to the function above it.
-    * `_code_bracket_deltas` counts code brackets only (`tokenize` excludes
-      COMMENT), so an unmatched `(` in a comment cannot freeze the
-      continuation counter for the rest of the file.
+    * the continuation counter runs over `_code_only`'s output, so an
+      unmatched `(` in a comment cannot freeze it for the rest of the file —
+      the raw-line count (#8487/#8995) does freeze it. That arm is observed on
+      the `def` AFTER the comment line, never on the comment line itself:
+      `_scope_map` assigns a line's scope BEFORE applying that line's bracket
+      delta, so a frozen counter can only show up downstream. Pre-fix scope
+      maps are identical to this one for the comment LINE, which is why the
+      pin here is `scopes[5]`.
     """
     line = '    note = 1  # a """ triple quote and a ( bracket in prose'
     code, triple = _code_only(line, None)
@@ -1622,14 +1666,148 @@ def test_a_comment_cannot_open_a_string_or_freeze_the_scope_map():
         'def second():\n'
         '    return 2\n'
     )
-    assert _code_bracket_deltas(src)[1] == 0, (
-        "the bracket inside the comment was counted as an open expression",
-        _code_bracket_deltas(src)[1])
     scopes = _scope_map(src)
     assert scopes[1] == ("fn", "_helper"), scopes[1]
     assert scopes[5] == ("fn", "second"), (
         "comment copy swallowed the next def — it was attributed to "
         f"`_helper` — got {scopes[5]}")
+
+
+def test_scope_map_ignores_an_escaped_brace_in_an_fstring():
+    """`{{` in an f-string is ONE brace of COPY, not an open bracket (#8995).
+
+    A `tokenize`-span counter sees one column for the `FSTRING_MIDDLE` that
+    holds `{{`, so the SECOND brace reaches the counter as code and opens a
+    paren nothing closes: `f"a {{ b"` nets `+1`. Measured on this tree (the
+    whole guard scan set — every `_scanned_modules()` module — with the two
+    scope maps diffed against the tokenize-span counter), that mislabelled 8
+    files / 9,263 lines from their first `{{` — and a COMPLIANT test appended
+    downstream reded with two violations naming the wrong function.
+    `_code_only` blanks the whole literal, escaped braces included.
+
+    Only a NET-POSITIVE surplus is observable: `}}` nets `-1` and the clamp
+    absorbs it, so a `}}` line alone cannot discriminate (a `{{`/`}}`-balanced
+    line is invisible to the clamp as well). This source therefore carries the
+    `{{` arm ONLY.
+    """
+    src = (
+        'import os\n'
+        'def first():\n'
+        '    assert f"a {{ b" in _text()\n'
+        '\n'
+        '\n'
+        'def second():\n'
+        '    old = os.environ.get("TORTOISE_DB_URI")\n'
+        '    os.environ["TORTOISE_DB_URI"] = _uri()\n'
+        '    try:\n'
+        '        yield\n'
+        '    finally:\n'
+        '        os.environ["TORTOISE_DB_URI"] = old\n'
+    )
+    scopes = _scope_map(src)
+    assert scopes[5] == ("fn", "second"), (
+        "an escaped brace in copy must not freeze the continuation counter — "
+        f"got {scopes[5]}")
+    assert _restoration_violations([("synthetic_8995_f.py", src)]) == [], (
+        "a mutation restored in a finally must stay green when an earlier line "
+        "carries `{{` inside an f-string")
+
+
+def test_code_only_carries_a_backslash_continued_literal():
+    """A single-quoted literal continued with a backslash spans LINES (r11 P2).
+
+    `_code_only` is a per-line lexer, so it carries the open quote in its state
+    or the continuation line reads as CODE. Measured before the carry:
+    ``q = "MATCH (n )\\`` followed by an INDENTED ``    (foo"`` leaves the
+    ``(`` counted and a later module-level statement attributed to the function
+    above it — HIDING it, the #8995 class rebuilt inside its own fix. At column
+    0 the shape over-reports instead (the continuation closes the function, so
+    its body reads as module scope), which is why this pin uses the INDENTED
+    form on purpose.
+    """
+    src = (
+        'def f():\n'
+        '    q = "MATCH (n )\\\n'
+        '    (foo"\n'
+        '    return 1\n'
+        '\n'
+        '\n'
+        'def g():\n'
+        '    pass\n'
+    )
+    compile(src, "<test>", "exec")  # the shape is VALID code, not a stray
+    scopes = _scope_map(src)
+    assert scopes[6] == ("fn", "g"), (
+        "the continuation line was read as code and froze the scope map — "
+        f"got {scopes[6]}")
+    line = '    q = "MATCH (n )\\'
+    code, state = _code_only(line, None)
+    assert len(code) == len(line), code
+    assert state == ("single", '"'), state
+
+
+def test_an_unterminated_literal_does_not_swallow_the_rest_of_the_file():
+    """A source that does not PARSE must not carry a literal across it (r11 P2).
+
+    The carry is gated on `compile()`: in a source that parses, an unclosed
+    single-quoted literal at end of line is necessarily a backslash
+    continuation, but in one that does NOT parse it proves nothing — and
+    honouring it attributes every later line to the function that opened the
+    literal, HIDING a top-level mutation the raw count surfaces. Fail closed.
+
+    Each shape below is a SyntaxError; in every one the module-level statement
+    after it must stay `("top", None)`. Non-vacuous against the gate: with the
+    carry enabled unconditionally, all five arms move to `('fn','f')`.
+    """
+    strays = (
+        '    x = "oops\n',            # no trailing backslash
+        "    x = \"oops\\\\\n",          # EVEN run: an escaped backslash, continues nothing
+        '    x = "oops\\ \n',        # whitespace after the backslash
+        '    x = "oops (\n',          # a bracket inside the stray literal
+        '    x = "oops\\\n',         # ODD run, but the literal never closes
+    )
+    for stray in strays:
+        src = 'def f():\n' + stray + 'import os\nos.environ.pop("TORTOISE_DB_URI")\n'
+        try:
+            compile(src, "<test>", "exec")
+        except SyntaxError:
+            pass
+        else:  # pragma: no cover - the shapes are chosen to be unparsable
+            raise AssertionError(f"{stray!r} parses; the arm proves nothing")
+        scope = _scope_map(src)[2]
+        assert scope == ("top", None), (
+            f"{stray!r} carried across an unparsable source and attributed a "
+            f"top-level mutation to the function above it — got {scope}")
+
+
+def test_pep701_nested_quote_is_a_KNOWN_limitation():
+    """PEP-701 nesting is NOT handled, and this pin says so out loud (r11 P2).
+
+    3.12 accepts ``f"{d["a(b"]}"`` and the compiler reads it, but `_code_only`
+    closes the literal at the NESTED quote, so that replacement field's
+    brackets are counted as code and everything after the line is attributed to
+    the scope above it. Documented in `_code_only`'s docstring; no file in this
+    tree uses the shape today.
+
+    If this test FAILS, the lexer gained nesting awareness: delete this pin and
+    the docstring's KNOWN LIMIT paragraph, and assert the correct scope here.
+    """
+    src = (
+        'def f():\n'
+        '    d = {"a(b": 1}\n'
+        '    x = f"{d["a(b"]}"\n'
+        '\n'
+        '\n'
+        'def g():\n'
+        '    pass\n'
+    )
+    compile(src, "<test>", "exec")  # PEP-701 is valid 3.12
+    scopes = _scope_map(src)
+    assert scopes[6] == ("fn", "f"), (
+        "the PEP-701 shape is now handled — see this test's docstring")
+    code, _ = _code_only('    x = f"{d["a(b"]}"', None)
+    assert "(" in code, (
+        "the nested quote no longer leaks the bracket — update the docstring")
 
 
 def test_module_scoped_pop_without_restore_reds():
