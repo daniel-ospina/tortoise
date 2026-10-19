@@ -3331,7 +3331,7 @@ def _journal_safe_params(params, cypher=None):
 #     CLOSED. This increment supplies the first, which is why the feed is named
 #     rather than silent when a write here is refused.
 #
-# ⛔ STILL UNDECLARED — each would be REFUSED by (1) today:
+# ⛔ WOULD BE REFUSED by (1) today — undeclared, and nothing authorizes them:
 #
 #   * the SDK's structural-edge lane —
 #     `tortoise/projection/edges.py::_EdgeHandlers.create_edge` and its three
@@ -3355,11 +3355,6 @@ def _journal_safe_params(params, cypher=None):
 #     hosted door reaches it with the SDK's own projection
 #     (`hosted_api.create_subscription` -> `create_subscription(sdk._get_proj(),
 #     …)`) — `#9233`;
-#   * `rebuild_all`'s post-wipe SNAPSHOT-RESTORE legs (`:Batch`,
-#     `:Session` + `CONTAINS`, the onboarding state/steps/`onboards` edges,
-#     `:TeamMeta`, config entries), which the replay scope opened by this lane
-#     therefore AUTHORIZES although no record describes them — `#9210` owns
-#     narrowing that;
 #   * `FalkorProjection._ensure_indexes()` — this package's largest block of
 #     DDL through `proj.g` (`CREATE INDEX` / `DROP INDEX` / a full-text index
 #     and a `MERGE (m:Meta …)`), and it declares nothing of its own. Four of
@@ -3383,6 +3378,20 @@ def _journal_safe_params(params, cypher=None):
 #     lanes above exist to prevent. It is named here as STILL UNDECLARED (not
 #     fixed in this increment) so (1)'s census can enumerate it.
 #
+# ⚠️ THE SECOND, OPPOSITE POPULATION — AUTHORIZED TODAY and too WIDE. These are
+# NOT refused (they run inside the `_replay_write_scope()` this increment opens),
+# so they are not part of the arm-the-guard set; they are the over-broad-permit
+# set, and a reader looking for "what does this PR authorize that no record
+# describes" looks here:
+#
+#   * `rebuild_all`'s post-wipe SNAPSHOT-RESTORE legs (`:Batch` / `batch_id`,
+#     `:Session` + `CONTAINS`, the onboarding state/steps/`onboards` edges,
+#     `:TeamMeta`, config entries) and its `#548` SYNTHETIC
+#     `PointAdded`/`OperatorAdded` folds for points the log does not cover.
+#     Neither is a projection of the record — the restores have no record at
+#     all, and the synthetics come from the PRE-WIPE CACHE. `#9210` owns
+#     narrowing both (its scope was extended to the `#548` leg there).
+#
 # So (1) is NOT blocked by an unknown surface: the measurement is DONE and
 # recorded on `#9124` (an AST census of `sdk.py`'s mutating handle call sites,
 # plus the modules that census first missed — `hosted_api`, `mining`, `ingest`,
@@ -3391,8 +3400,9 @@ def _journal_safe_params(params, cypher=None):
 # the fold (children `#9195`, `#9206`-`#9210`), not another measurement. Until
 # then the fold and the raw-query lane above are the two doors that gate, and
 # this list names both populations — declared and undeclared — so a reader
-# cannot mistake one for the other. A writer NOT named here is undeclared and
-# will be refused; the SDK-wide enumeration lives on `#9124`.
+# cannot mistake one for the other — the refused set, and the authorized-but-too-
+# wide set. A writer NOT named in EITHER is undeclared and will be refused; the
+# SDK-wide enumeration lives on `#9124`.
 # ═══════════════════════════════════════════════════════════════════════════
 
 
