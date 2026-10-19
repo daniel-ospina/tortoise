@@ -420,6 +420,20 @@ def test_an_unverifiable_append_is_reported_as_unverified_not_as_a_loss(
         f"got: {detail[:400]}")
     assert "stage 'append'" in detail, (
         "the LATEST diagnosis must still be named, and named as the latest")
+    # ⚠️ AND THE POINTER MUST POINT SOMEWHERE (#9208 review, P3): the FIRST clause
+    # is APPENDED, so the latest stage is named ABOVE it. "the stage named below"
+    # sent the reader past the end of the string, and a presence-only assertion
+    # could not see it — the early clause satisfies `"stage 'append'" in detail`
+    # on its own. So assert the ORDER and the direction word.
+    assert detail.index("stage 'append'") < detail.index("The FIRST failure"), (
+        "the latest stage must be named BEFORE the appended first-failure "
+        f"clause, or no directional pointer can be true; got: {detail[-300:]}")
+    assert "the stage named above is the LATEST" in detail, (
+        "the appended clause must point ABOVE (where the latest stage is named), "
+        f"not 'below' — nothing follows it; got: {detail[-300:]}")
+    assert "below" not in detail.rsplit("The FIRST failure", 1)[1], (
+        "no part of the appended clause may tell the reader to look below "
+        f"itself; got: {detail[-300:]}")
     assert "row really is gone" in detail and "unverifiable" not in detail.split(
         "The FIRST failure")[0], (
             "the first clause must quote the FIRST error, not the latest one")
@@ -520,10 +534,13 @@ def test_the_9124_door_does_not_reach_the_write_handle_yet(armed_sdk):
 def test_the_degraded_state_is_atomic_across_threads():
     """The hosted path records from WORKER THREADS while `/health` reads.
 
-    `record_degraded` runs inside `asyncio.to_thread` on the hosted write path,
-    and `degraded_graphs()` runs on the event loop from the `async def` health
-    route — two thread populations over one module dict. What the lock
-    guarantees, and what is asserted here: `lost` is an exact
+    `record_degraded` runs inside `hosted_api._graph_offload` — the dedicated
+    #3498 `graph` pool (`_cp_offload` -> `monitoring.run_control_plane_call`),
+    NOT `asyncio.to_thread`'s shared default pool (#3060) — and
+    `degraded_graphs()` runs on the event loop from the `async def` health
+    route (`_health_payload` -> `_change_feed_health`) — two thread populations,
+    over one module dict. What the lock guarantees, and what is asserted here:
+    `lost` is an exact
     read-modify-write (that count is quoted to the consumer verbatim, so an
     undercount is a false number about data loss), and a report taken while
     writers are live neither raises nor tears.
@@ -579,8 +596,13 @@ def test_the_degraded_state_is_atomic_across_threads():
     resizer = threading.Thread(target=mint_keys)
     resizer.start()
     start.wait()  # release every thread at once
-    seen = [len(event_store.degraded_graphs())]  # the gate's first sample
-    sampled.set()
+    # ⚠️ `sampled.set()` is in a `finally`: if this first sample RAISED, eight
+    # non-daemon workers would block on `sampled.wait()` forever and turn a
+    # report bug into a hung shard (#9208 review, P3).
+    try:
+        seen = [len(event_store.degraded_graphs())]  # the gate's first sample
+    finally:
+        sampled.set()
     while any(t.is_alive() for t in (*workers, resizer)):
         try:
             seen.append(len(event_store.degraded_graphs()))
@@ -592,9 +614,18 @@ def test_the_degraded_state_is_atomic_across_threads():
     for t in (*workers, resizer):
         t.join()
 
-    assert seen, (
-        "the reporter must have run while the writers did — it is gated on its "
-        "own first sample, so this cannot lose the race to a fast lane")
+    # WHAT THE GATE ACTUALLY GUARANTEES (and what is asserted): the first sample
+    # is taken while every writer is still held at `sampled.wait()`, so it must
+    # see an EMPTY map. The old `assert seen` was a one-element list and could
+    # never fail (#9208 review, P3); this one reds if the gate is ever moved
+    # after the writers are released.
+    assert seen[0] == 0, (
+        "the first sample must precede every write — the writers are held at "
+        f"`sampled.wait()` until it is taken; observed={seen[0]!r}")
+    # The NUMBER of samples is deliberately NOT asserted: it depends on how long
+    # the writers take to finish after the gate opens, which is a timing claim on
+    # a fast lane — the class of latent false red this test already had to remove
+    # (#9208 review). What the gate guarantees is the FIRST sample only.
     state = event_store.degraded(proj)
     assert state["lost"] == threads_n * per_thread, (
         "every loss must be counted — the count is quoted to the consumer as "
@@ -803,3 +834,102 @@ def test_two_stores_under_one_graph_name_do_not_share_a_state(tmp_path,
     finally:
         healthy.close()
         dead.close()
+
+
+def test_every_writer_takes_the_degraded_map_lock_and_the_reader_does_not(
+        monkeypatch):
+    """The lock is a KEEP-IT contract, pinned by acquisition, not by a race.
+
+    `test_the_degraded_state_is_atomic_across_threads` is a robustness pin and
+    says so: under CPython's GIL the pre-lock shape does not observably fail it,
+    so deleting `with _DEGRADED_LOCK` from all three writers leaves that test
+    green (#9208 review). This one is DETERMINISTIC — it counts `__enter__` on a
+    real lock wrapper, with no threads and no timing — and it pins BOTH halves of
+    the documented contract:
+
+    * the three writers (`record_degraded`, `degraded_graphs`, `clear_degraded`)
+      take it, because each is a read-modify-write or a resize-sensitive walk;
+    * `degraded()` does NOT, because it is a single `dict.get` over a dict that
+      `record_degraded` publishes instead of mutating — locking it would
+      serialise every `poll_events` behind an emitting thread's error path.
+
+    MUTATION that reds it: drop any one `with _DEGRADED_LOCK:` in
+    `tortoise/event_store.py`, or "tidy" a lock into `degraded()`.
+    """
+    from types import SimpleNamespace
+
+    class CountingLock:
+        def __init__(self):
+            self.enters = 0
+            self._real = threading.Lock()
+
+        def __enter__(self):
+            self.enters += 1
+            self._real.acquire()
+            return self
+
+        def __exit__(self, *exc_info):
+            self._real.release()
+            return False
+
+    counting = CountingLock()
+    monkeypatch.setattr(event_store, "_DEGRADED_LOCK", counting)
+    event_store.clear_degraded()
+    proj = SimpleNamespace(_path="/locked.db", _host=None, graph_name="locked",
+                           db=None)
+
+    def enters_during(fn):
+        before = counting.enters
+        fn()
+        return counting.enters - before
+
+    assert enters_during(
+        lambda: event_store.record_degraded(proj, "append", "PointAdded", None,
+                                            RuntimeError("lost"))) == 1, (
+        "`record_degraded` must hold _DEGRADED_LOCK across its whole "
+        "read-modify-write — `lost` is an exact count quoted to the consumer")
+    assert enters_during(event_store.degraded_graphs) == 1, (
+        "`degraded_graphs` must SNAPSHOT under the lock; /health walks a dict "
+        "that a peer thread resizes")
+    assert enters_during(lambda: event_store.degraded(proj)) == 0, (
+        "`degraded()` is DOCUMENTED lock-free (one atomic `dict.get` over a "
+        "freshly published dict) — taking the lock here would put every "
+        "`poll_events` behind an emitting thread's error path")
+    assert enters_during(event_store.clear_degraded) == 1, (
+        "`clear_degraded` mutates the map, so it must hold the lock")
+    event_store.clear_degraded()
+
+
+def test_a_leaked_degradation_is_attributed_to_the_test_that_left_it():
+    """The isolation fixture's attribution half NAMES the polluter (#9208 P1).
+
+    `tests/conftest.py`'s `_change_feed_state_isolation` clears before and after
+    every test. The loud half is the AFTER one, and it is the half that can name
+    a polluter: the same fixture's post-test clear runs first, so a pre-test check
+    could never see the previous test's leak — the defect the review found in the
+    old shape, where the message promised attribution it could not deliver.
+
+    The decision is pinned here because a fixture's teardown body cannot be
+    asserted from inside a test: this is the same seam-in-a-module pattern as
+    `tests/_signal_hygiene.py` and `tests/_tmpdir_hygiene.py`.
+    """
+    from tests._change_feed_isolation import leaked_state_message
+
+    assert leaked_state_message([], "tests/test_x.py::t_clean") is None, (
+        "a test that leaves nothing behind must not be failed")
+
+    message = leaked_state_message(
+        [{"store": "file:/a.db", "graph": "tortoise", "stage": "append"},
+         {"store": "file:/a.db", "graph": "tortoise", "stage": "emit"}],
+        "tests/test_x.py::t_polluter")
+    assert "tests/test_x.py::t_polluter" in message, (
+        "the failure must name the test that LEFT the state, not the next one: "
+        f"{message}")
+    assert "tortoise" in message and "2 degraded" in message, (
+        f"it must name the affected graph(s) and how much was left: {message}")
+    assert "clear_degraded" in message, (
+        "it must name the remedy the polluter owes, or the next reader "
+        f"re-derives it: {message}")
+    assert "leaked into this test" not in message, (
+        "the old wording blamed the SUCCESSOR; the attribution must be the "
+        f"polluter: {message}")
