@@ -175,17 +175,16 @@ _ENTITY_MATCH_COLUMNS: dict[str, tuple[str, ...]] = {
 #: ``_emit_event`` owns these envelope keys; they are never node properties.
 ENVELOPE_KEYS: frozenset[str] = frozenset({
     "type", "ts", "event_id", "initiated_by", "projection_version", "seq",
-    # #9078 review: the graph's ONE global skip-set (`projection/entities.py::
-    # _META_KEYS`) strips `agent_id` before it reaches a node, so a record that
-    # kept it wrote a props key a journal replay never does — and a
-    # record-sourced rebuild copies the props tail VERBATIM
-    # (`cache_projection._props_from_row`), so the two rebuild paths diverged on
-    # every API-door record. ⚠️ `actor_user_id` is DELIBERATELY NOT here: §17.5
-    # places it as a PRIMARY record property, so the record stores it even
-    # though the cache node does not carry it (the record is the truth; the
-    # cache is the projection). `test_record_projection`'s storable-primary leg
-    # is what keeps that distinction honest.
-    "agent_id",
+    # ⚠️ `agent_id` is DELIBERATELY NOT here, though the record must not keep it
+    # as a NODE prop: this set is not only a props set — `_journal_row` filters
+    # the DURABLE `public.journal_event.payload` through it, while the JSONL
+    # journal keeps `agent_id` (`sdk._journal_record_payload` subtracts
+    # `_JOURNAL_ENVELOPE_KEYS`, which does not name it). Adding it here truncated
+    # the record's own event stream on every API-door record — a NEW divergence
+    # between the two journals, introduced by the fix whose premise is that they
+    # must not diverge (#9078 review). The props strip is `_RECORD_ONLY_KEYS`'
+    # job, and `test_agent_id_is_dropped_like_the_fold_drops_it` is the leg that
+    # keeps it.
 })
 
 #: The journal's record-type vocabulary. Sourced from the graph fold's own

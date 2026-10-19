@@ -1519,3 +1519,35 @@ def test_a_write_that_cannot_name_its_tenant_refuses_instead_of_falling_back(
     assert _every_param(plan), "the plan bound no parameters — the leg is vacuous"
     params = _every_param(plan)
     assert "env_org" not in params and "env_graph" not in params
+
+
+def test_the_journal_payload_keeps_the_producer_fields_that_are_not_props():
+    """A props strip must not silently truncate the record's own event stream.
+
+    `ENVELOPE_KEYS` is ALSO the filter `_journal_row` applies to the DURABLE
+    `public.journal_event.payload`, while the JSONL journal keeps `agent_id`
+    (`sdk._journal_record_payload` subtracts `_JOURNAL_ENVELOPE_KEYS`, which
+    does not name it). Listing `agent_id` in both sets is what makes it a props
+    fix AND a payload loss — one stream keeps the field, the other does not, and
+    nothing raises. `_RECORD_ONLY_KEYS` alone is the props strip; the payload
+    must survive intact.
+    """
+    record = _point_added("pt_payload", None)
+    record["agent_id"] = "agent-kept-in-the-payload"
+    record["point"]["agent_id"] = "agent-kept-in-the-payload"
+
+    plan = rp.replay_plan([record], org_id="o", graph_id="g")
+    journal = next(s for s in plan if "public.journal_event" in s.sql)
+    payload = json.loads(journal.params[4])
+
+    # Non-vacuity: the position row really is this record's, and its payload is
+    # not empty (`event_type` is its own column, so it is absent by design).
+    assert journal.params[3] == "PointAdded"
+    assert payload.get("point")
+    assert payload.get("agent_id") == "agent-kept-in-the-payload", (
+        "agent_id vanished from journal_event.payload while the JSONL journal "
+        "keeps it — the two event streams now disagree on a producer field"
+    )
+    # ...while the NODE prop is still stripped (the fix this PR is about).
+    upsert = next(s for s in plan if s.sql.startswith("INSERT INTO public.point"))
+    assert "agent_id" not in _props_tail([upsert])
