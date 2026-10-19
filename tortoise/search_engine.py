@@ -3961,11 +3961,13 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             # read-projection home so search/recall annotation cannot drift
             # from ``get_historical_knowledge``/``assembly``. The bounds are
             # passed RAW: ``window_read_fields``' presence gate is
-            # ``is not None`` (a falsey-but-present bound — ``""``, ``0`` —
-            # is a REAL bound for PRECISION, an axis of its own and no longer
-            # a mirror of ``_covers``' start gate: since #6140 an unparseable
-            # start is an OPEN start for coverage while its precision still
-            # reads ``day`` here — #9201). Pre-normalizing with
+            # ``is not None``, so a falsey-but-present bound — ``""``, ``0`` —
+            # is a REAL bound and its key is still emitted. Since #9201 an
+            # unorderable bound reports precision ``None`` on BOTH ends, which
+            # is how this surface stops disagreeing with the #6140 start gate
+            # in ``sdk._covers`` (an unorderable start is an OPEN start there):
+            # neither invents a precision for a value it cannot order.
+            # Pre-normalizing with
             # ``or None`` here made the same stored window read ``day`` in
             # assembly / ``get_historical_knowledge`` and ``None`` here — the
             # exact cross-surface drift this module exists to prevent.

@@ -1009,7 +1009,8 @@ because §4.7 already forbids inventing a start from the write clock. Reading B 
 as a reopen of that rule and refused.
 
 The model rule this settled is in §4.7; this entry is the record of how it got there. Two residuals
-of the same family were filed rather than absorbed: an unparseable start still reports
-`valid_from_precision: "day"` on the read surfaces (#9201, #2350's field semantics), and a
-present-but-unparseable `validTo` covers every later instant while still reporting
+of the same family were filed rather than absorbed: an unparseable start still reported
+`valid_from_precision: "day"` on the read surfaces (that residual is now **closed by #9201**,
+which requires orderability before any precision is reported; #2350 carries the field semantics),
+and a present-but-unparseable `validTo` covers every later instant while still reporting
 `end_state: "known"` (#9202, the END side, untouched by this ruling).
