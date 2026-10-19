@@ -204,8 +204,13 @@ being built without ``event_log_path`` (``_bind_journal(None)``), not from the
 engine, and every assertion reads the approval set. Registering the file
 embedded-only (`test_pipeline_2792`'s option) would run the measurement on ONE
 lane instead of both; the honest cost of running it on both is that a URI-set
-run mints five per-test throwaway graphs on the shared server — the `#5084`
-accumulation surface every ``tmp_path``-SDK test already sits on.
+run mints ONE per-test throwaway graph per SDK-constructing test INSTANCE on the
+shared server — the `#5084` accumulation surface every ``tmp_path``-SDK test
+already sits on. Deliberately stated per instance and NOT as a number: each
+parametrised residual-2 case builds its own SDK (and this header is not one of
+the counts `test_the_header_census_matches_this_file` recomputes), so any count
+written here would be the next stale number in a file whose whole argument is
+that counts go stale.
 
 Registered in ``config/ci-surfaces.yml`` on the SIX surfaces a module the
 inventory walks can resolve to (``core``, DUAL-REGISTERED with ``api``,
