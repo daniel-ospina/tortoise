@@ -23,18 +23,27 @@ services:
     # #7357: a KERNEL cap, on the same terms as every other FalkorDB container
     # this repo starts (root `docker-compose.yml`, `tools/test_lane.py`,
     # `tools/edge_census.py`, `graph-scripts/setup.py`,
-    # `.github/actions/falkordb-provision`). This service publishes 16379 and
-    # restarts on a policy, so an over-consuming viz DB is a neighbour that can
-    # starve the canonical graph instance on the same host — the measured
-    # outage. `docker compose up` DOES apply `deploy.resources.limits`
-    # (verified, compose 2.40.3).
+    # `.github/actions/falkordb-provision`). This service publishes 16379, so an
+    # over-consuming viz DB is a neighbour that can starve the canonical graph
+    # instance on the same host — the measured outage. `docker compose up` DOES
+    # apply `deploy.resources.limits` (verified, compose 2.40.3).
+    #
+    # `memswap_limit` EQUALS the cap on purpose: docker's default swap is 2x
+    # memory, and a swapping FalkorDB is a minutes-long RDB reload instead of a
+    # fast, isolated death (measured: memory-only -> Swap=2x; with this -> equal).
     deploy:
       resources:
         limits:
           memory: 2g
-    # A BOUNDED policy, not `always`: a viz DB that dies on every boot must end
-    # `Exited` and inspectable, not cycle silently forever.
-    restart: on-failure:5
+    memswap_limit: 2g
+    # `unless-stopped`, NOT the bounded `on-failure:5` used for the long-lived dev
+    # container in `graph-scripts/setup.py`: this one is a developer convenience
+    # whose header promises `docker compose up -d` starts FalkorDB, and
+    # `on-failure` does not restart a container when the DAEMON restarts (docker
+    # documents it), so a bounded policy here would silently lose the DB after a
+    # reboot. The cap above is what removes the host-starvation loop; the policy
+    # choice is about coming back after a reboot.
+    restart: unless-stopped
 
 volumes:
   tortoise-data:

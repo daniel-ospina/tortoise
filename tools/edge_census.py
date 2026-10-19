@@ -48,8 +48,11 @@ worth stating exactly:
   otherwise be created by the act of measuring it; ``--create-if-missing`` is
   the deliberate opt-in.
 - The only writes the tool itself performs are inside a **disposable isolated
-  container it starts and removes itself** (``--network none``, ``--rm``), for
-  the RAM probe.
+  container it starts and removes itself** (``--network none``, an explicit
+  ``docker rm -f`` in a ``finally:``), for the RAM probe. It is deliberately NOT
+  started with ``--rm``: that removes a stopped container before its
+  ``OOMKilled``/``ExitCode`` can be read, which is the evidence a failed probe's
+  report is made of (#7357).
 
 Relationship-type names are read from the graph and are therefore never
 interpolated into Cypher. The census returns the name as a **value**
@@ -567,7 +570,13 @@ def _probe_run_args(container: str, image: str) -> list[str]:
     (an uncapped container) is invisible at run time.
     """
     cap = container_memory_cap()
-    return ["run", "-d", "--rm", "--network", "none",
+    # NOT `--rm` (#7357 review): `--rm` removes a container the moment it STOPS,
+    # which deletes the only evidence of WHY it stopped — the `OOMKilled` /
+    # `ExitCode` facts this module now reports. Removal is explicit and already
+    # unconditional (`finally:` below removes it on every path), and the label
+    # makes an escaped container reapable, so `--rm` bought nothing but an
+    # unreadable failure.
+    return ["run", "-d", "--network", "none",
             "--memory", cap, "--memory-swap", cap,
             "--label", _PROBE_LABEL, "--name", container, image]
 
@@ -575,14 +584,11 @@ def _probe_run_args(container: str, image: str) -> list[str]:
 def _memory_kill_report(container: str) -> str:
     """Name a MEMORY kill of the probe container, or `""` when it was not one.
 
-    Docker's own facts (`OOMKilled`, `ExitCode`) where the container still
-    exists, never inferred from the connection error. ⚠️ The probe runs with
-    `--rm`, so a container that EXITED is usually already gone — and *that* is
-    itself the report: `--rm` removes on exit, so an absent container crashed or
-    was killed, it did not merely start slowly. An inspect that fails for any
-    OTHER reason (a wedged daemon, a timeout) reports the FAILED READ as well
-    rather than asserting the container is gone — a failure is not evidence of
-    absence, and this module states that rule everywhere else.
+    Docker's own facts (`OOMKilled`, `ExitCode`), never inferred from the
+    connection error. The probe is started WITHOUT `--rm` precisely so a dead
+    container is still there to be read; if the read still fails (a wedged
+    daemon, a timeout) the FAILED READ is what gets reported — a failure is not
+    evidence of absence, and this module states that rule everywhere else.
     """
     try:
         r = _docker("inspect", "--format",
@@ -592,12 +598,11 @@ def _memory_kill_report(container: str) -> str:
         r = None
     if r is None or r.returncode != 0:
         return (
-            " — and its termination could not be read (the `docker inspect` "
-            "failed; a wedged daemon is one reason). If the container is gone, "
-            "`--rm` removed it on exit, so it CRASHED or was KILLED rather "
-            "than starting slowly (a memory kill on this host is the #7357 "
-            "shape); check the daemon and the engine's own error, then re-run "
-            "with a smaller `--n`"
+            " — and its termination could not be READ (the `docker inspect` "
+            "failed or timed out; a wedged daemon is one reason), so whether it "
+            "was killed, crashed or never started is UNKNOWN. Check the daemon "
+            "and the engine's own error, then re-run with a smaller `--n` — a "
+            "memory kill on this host is the #7357 shape"
         )
     parts = (r.stdout or "").strip().split()
     if len(parts) != 2:
@@ -723,9 +728,11 @@ def run_probe(
     edges = n - 1
     container = f"edge-census-probe-{os.getpid()}-{int(time.time())}"
     log(f"starting disposable container {container!r} ({image})")
-    # `--rm` so a failure that escapes the teardown below still removes the
-    # container; `--network none` so the probe cannot reach any sibling
-    # container — the caller's own FalkorDB is routinely a bridge container on
+    # NO `--rm` (#7357 review): it removes a stopped container before its
+    # `OOMKilled`/`ExitCode` can be read, which is the evidence the failure
+    # report is made of. `finally:` below removes the container on every path,
+    # and `--label` makes an escaped one reapable. `--network none` so the probe
+    # cannot reach any sibling container — the caller's own FalkorDB is routinely a bridge container on
     # the documented local URI, and the probe only ever talks to its own
     # loopback. `--label` marks an orphan (SIGKILL / host crash) reapable.
     # The `run` is INSIDE the try: starting the container is the step most

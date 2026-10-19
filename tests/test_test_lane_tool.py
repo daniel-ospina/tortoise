@@ -945,6 +945,11 @@ def test_start_reuses_a_running_container_without_removing_it(lane, monkeypatch)
     monkeypatch.setattr(tl, "container_state", lambda _n: "running")
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
     monkeypatch.setattr(tl, "_wait_ready", lambda _n, _host_port=None: True)
+    # #7357: the reuse path also READS the container's memory limit (and warns
+    # when it has none). Pinned here so this test keeps exercising its own
+    # property — "the reuse path never runs `docker run`" — instead of the read,
+    # whose own behaviour is covered below.
+    monkeypatch.setattr(tl, "_container_memory_limit", lambda _n: 2 << 30)
     monkeypatch.setattr(tl, "_remove_and_describe",
                         lambda n: removed.append(n) or "removed it")
 
@@ -1534,17 +1539,20 @@ def test_a_container_killed_for_memory_is_reported_not_called_wedged(
     assert "RestartCount=3" in msg, msg
 
 
-def test_a_reused_container_killed_for_memory_drops_the_wedged_advice(
+def test_a_reused_container_reports_prior_termination_as_history_not_cause(
         lane, monkeypatch):
-    """The REUSE branch (#7357 review): a proven memory kill must REPLACE the
-    "may be wedged: run down and retry" advice, not be appended after it. Two
-    contradictory diagnoses in one message send the operator to retry into the
-    same death — and "down" is the wrong remedy for a container the kernel killed
-    for memory: the cap or the host is what has to change."""
+    """The REUSE branch (#7357 review): for a container that is Up, docker's
+    `OOMKilled`/`ExitCode`/`RestartCount` describe a PREVIOUS termination — the
+    live server did not hang because it was killed earlier. So the facts are
+    reported as HISTORY (with the genuine hypothesis: memory pressure) and the
+    "may be wedged: down and retry" advice MUST stay: for a live server that does
+    not answer, restarting it is the remedy. Calling this failure a kill was the
+    false diagnosis the review measured on a live lane container."""
     monkeypatch.setattr(tl, "_created_image", lambda _n: tl.IMAGE)
     monkeypatch.setattr(tl, "container_state", lambda _n: "running")
     monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
     monkeypatch.setattr(tl, "_wait_ready", lambda *a, **k: False)
+    monkeypatch.setattr(tl, "_container_memory_limit", lambda _n: 2 << 30)
     monkeypatch.setattr(tl, "READY_TIMEOUT", 1)
 
     def fake(*a, **k):
@@ -1556,8 +1564,64 @@ def test_a_reused_container_killed_for_memory_drops_the_wedged_advice(
     with pytest.raises(SystemExit) as e:
         tl.start()
     msg = str(e.value)
-    assert "KILLED FOR MEMORY" in msg, msg
-    assert "OOMKilled=true" in msg and "RestartCount=4" in msg, msg
-    assert "may be wedged" not in msg, (
-        f"a proven memory kill must not also be called a wedge: {msg}"
+    assert "PREVIOUS termination" in msg, msg
+    assert "OOMKilled=true" in msg and "ExitCode=137" in msg, msg
+    assert "may be wedged" in msg, (
+        f"a live server that does not answer is still a wedge — the history is "
+        f"context, not the cause: {msg}"
     )
+    assert "it did not hang" not in msg, (
+        f"a stale fact must never be asserted as this failure's cause: {msg}"
+    )
+
+
+def test_a_restart_loop_is_named_as_a_restart_loop(lane, monkeypatch):
+    """#7357 review F2: the CANONICAL instance's own signature is
+    `ExitCode=0`, `OOMKilled=false`, `RestartCount` climbing (8 -> 68 -> 150).
+    A report keyed only on OOMKilled/137 stayed silent on exactly the restart
+    loop the issue is about, so `RestartCount > 0` is its own trigger — with
+    memory pressure named as the HYPOTHESIS, because docker reports no reason."""
+    monkeypatch.setattr(tl, "container_state", lambda _n: "absent")
+    monkeypatch.setattr(tl, "_wait_ready", lambda *a, **k: False)
+
+    def fake(*a, **k):
+        if a[0] == "inspect" and any("OOMKilled" in str(part) for part in a):
+            return _R(0, "false 0 150\n", "")
+        if a[0] == "run":
+            return _R(0, "deadbeef\n", "")
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    with pytest.raises(SystemExit) as e:
+        tl.start()
+    msg = str(e.value)
+    assert "RestartCount=150" in msg, msg
+    assert "RESTARTED" in msg, msg
+    assert "hypothesis" in msg, (
+        f"docker reports no restart reason, so it must be named as a "
+        f"hypothesis, not a finding: {msg}"
+    )
+
+
+def test_reusing_an_uncapped_container_warns_instead_of_handing_it_back(
+        lane, monkeypatch, capsys):
+    """#7357 review F10: `docker start` cannot add a limit, so a lane container
+    created before this cap keeps `Memory=0` for life. Those are exactly the
+    neighbours the issue names as the pressure source — handing one back in
+    silence is how they stay uncapped."""
+    monkeypatch.setattr(tl, "_created_image", lambda _n: tl.IMAGE)
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
+    monkeypatch.setattr(tl, "_wait_ready", lambda *a, **k: True)
+    monkeypatch.setattr(tl, "_container_memory_limit", lambda _n: 0)
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(0, "", ""))
+    name, port = tl.start()
+    err = capsys.readouterr().err
+    assert "WITHOUT a kernel memory cap" in err, err
+    assert "down` and retry" in err, err
+    assert (name, port) == (tl.lane_name(), 16390)
+
+    # A capped container warns about nothing.
+    monkeypatch.setattr(tl, "_container_memory_limit", lambda _n: 2 << 30)
+    tl.start()
+    assert "WITHOUT a kernel memory cap" not in capsys.readouterr().err

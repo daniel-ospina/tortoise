@@ -1059,6 +1059,10 @@ def _run_step8(monkeypatch, *, status: str, created_image: str):
     monkeypatch.setattr(setup, "MODE", "docker")
     monkeypatch.setattr(setup, "_container_status", lambda _n: status)
     monkeypatch.setattr(setup, "_container_image", lambda _n: created_image)
+    # #7357: the reuse paths read the container's memory limit. Stubbed so this
+    # helper stays HERMETIC — an unstubbed read shells out to a real docker with
+    # no timeout, and the test would hang on a wedged daemon (#7357 review F9).
+    monkeypatch.setattr(setup, "_container_memory_limit", lambda _n: 2 << 30)
     monkeypatch.setattr(setup, "_port_collision", lambda _p: None)
     monkeypatch.setattr(setup, "_run", lambda cmd, **kw: calls.append(cmd))
 
@@ -1413,7 +1417,11 @@ def test_the_edge_census_probe_caps_the_container_memory(monkeypatch):
     from tools import edge_census as ec
 
     args = ec._probe_run_args("probe-x", ec.PROBE_IMAGE)
-    assert args[:5] == ["run", "-d", "--rm", "--network", "none"], args
+    assert args[:4] == ["run", "-d", "--network", "none"], args
+    assert "--rm" not in args, (
+        f"`--rm` removes a stopped container before its OOMKilled/ExitCode can "
+        f"be read — the evidence this report is made of (#7357 review): {args}"
+    )
     assert "--memory" in args and "--memory-swap" in args, args
     cap = args[args.index("--memory") + 1]
     assert args[args.index("--memory-swap") + 1] == cap, (
@@ -1447,17 +1455,19 @@ def test_the_dev_installer_caps_the_memory_and_bounds_the_restart_loop(monkeypat
     assert "on-failure:5" in run, run
 
 
-def _run_ci_provision(tmp_path, *, mode: str, cap: str | None = None):
+def _run_ci_provision(tmp_path, *, mode: str, cap: str | None = None,
+                      inspect_stderr: str = ""):
     """Run the REAL provision.sh with a stub `docker`, returning (result, argv log).
 
     A stub on PATH rather than a source-level grep: the defect is an argv that
     reaches docker, so the guard has to read the argv docker really got.
     ``mode`` is ``healthy`` (PING answers), ``killed`` (never answers, docker
-    reports the kernel killed it), or ``gone`` (never answers AND the container
-    is already removed — what `--rm` does to a container that died).
+    reports the kernel killed it), or ``gone`` (never answers and `docker
+    inspect` FAILS — which is UNKNOWN, not absence; ``inspect_stderr`` supplies
+    docker's own wording when the case is genuinely an absence).
     """
     bindir = tmp_path / "bin"
-    bindir.mkdir()
+    bindir.mkdir(exist_ok=True)
     log = tmp_path / "docker.log"
     stub = bindir / "docker"
     if mode == "healthy":
@@ -1476,12 +1486,14 @@ def _run_ci_provision(tmp_path, *, mode: str, cap: str | None = None):
             '  inspect) printf "true 137\\n" ;;&\n'
         )
     else:  # gone
-        # `--rm` already removed the container, so inspect fails.
+        # `docker inspect` FAILS: a wedged daemon, a timeout, or a container
+        # removed by hand. That is UNKNOWN, not evidence of absence (see
+        # `inspect_stderr` above for the genuine-absence wording).
         answers = (
             '  image) exit 0 ;;&\n'
             '  port) printf "127.0.0.1:32770\\n" ;;&\n'
             '  exec) exit 1 ;;&\n'
-            '  inspect) exit 1 ;;&\n'
+            '  inspect) printf "%s" "$INSPECT_STDERR" >&2; exit 1 ;;&\n'
         )
     stub.write_text(
         "#!/usr/bin/env bash\n"
@@ -1505,6 +1517,7 @@ def _run_ci_provision(tmp_path, *, mode: str, cap: str | None = None):
     env.pop(MEMORY_CAP_ENV, None)
     if cap is not None:
         env[MEMORY_CAP_ENV] = cap
+    env["INSPECT_STDERR"] = inspect_stderr
     script = ACTION_DIR / "falkordb-provision" / "provision.sh"
     result = subprocess.run(
         ["bash", str(script)], capture_output=True, text=True, env=env,
@@ -1540,23 +1553,31 @@ def test_the_ci_provision_names_a_memory_kill_instead_of_merely_unhealthy(tmp_pa
     assert "OOMKilled=true" in out and "137" in out, out
 
 
-def test_the_ci_provision_says_when_the_failed_container_is_already_gone(tmp_path):
-    """`--rm` removes a container when it STOPS, so a container that died is
-    usually absent by the time the failure is reported. "Not there" must be said
-    out loud: it is the fact that separates a crash from a slow start, and
-    reporting nothing would leave the `--rm` case silent (#7357)."""
+def test_the_ci_provision_distinguishes_absence_from_a_failed_read(tmp_path):
+    """#7357 review F3: a failed `docker inspect` is NOT evidence of absence —
+    it also fails when the daemon is wedged, which is this issue's condition. So
+    only docker's OWN absence wording is reported as a disappearance; any other
+    failure says the state is UNKNOWN."""
     result, _log = _run_ci_provision(tmp_path, mode="gone")
     out = result.stdout + result.stderr
     assert result.returncode != 0, out
+    assert "could not be READ" in out, out
+    assert "UNKNOWN" in out, out
+    assert "no longer EXISTS" not in out, (
+        f"a failed read must not be asserted as an absence: {out}"
+    )
+
+    result, _log = _run_ci_provision(tmp_path, mode="gone", inspect_stderr="No such object: x")
+    out = result.stdout + result.stderr
     assert "no longer EXISTS" in out, out
     assert "CRASHED or was KILLED" in out, out
 
 
-def test_the_probe_names_a_memory_kill_and_a_rm_removed_absence(monkeypatch):
-    """#7357 review: the probe runs with `--rm`, so a container that EXITED is
-    already gone — and the absence is the report. The two facts must not collapse
-    into the same "never became ready" sentence, and a merely-running container
-    must stay silent (no false alarm)."""
+def test_the_probe_names_a_memory_kill_and_an_unreadable_termination(monkeypatch):
+    """#7357 review: the probe is started WITHOUT `--rm` so a dead container's
+    facts are still readable; when they are not, the report says the state is
+    UNKNOWN instead of asserting a kill or an absence. A healthy container must
+    stay silent (no false alarm)."""
     from tools import edge_census as ec
 
     class _R:
@@ -1566,20 +1587,23 @@ def test_the_probe_names_a_memory_kill_and_a_rm_removed_absence(monkeypatch):
     monkeypatch.setattr(ec, "_docker", lambda *a, **k: _R(0, "true 137\n"))
     assert "KILLED FOR MEMORY" in ec._memory_kill_report("probe-x")
 
-    # inspect fails (a `--rm`-removed dead container, or a wedged daemon): the
-    # read is reported as failed AND the absence is named as a crash/kill —
-    # never silently "" (the #7357 review's dead-code finding).
+    # inspect fails (a wedged daemon, a timeout, a container removed by hand):
+    # the READ is what gets reported, and the state stays UNKNOWN — never a
+    # guessed kill, never an asserted absence, never a silent "" (the #7357
+    # review's dead-code finding).
     monkeypatch.setattr(ec, "_docker", lambda *a, **k: _R(1, ""))
     gone = ec._memory_kill_report("probe-x")
-    assert "could not be read" in gone, gone
-    assert "CRASHED or was KILLED" in gone, gone
+    assert "could not be READ" in gone, gone
+    assert "UNKNOWN" in gone, (
+        f"a failed read must not be asserted as an absence or a kill: {gone}"
+    )
 
     # A `_docker` that RAISES (a timeout on an overloaded host) must not replace
     # the CensusError with a traceback (#7357 review).
     def boom(*a, **k):
         raise OSError("docker timed out")
     monkeypatch.setattr(ec, "_docker", boom)
-    assert "could not be read" in ec._memory_kill_report("probe-x")
+    assert "could not be READ" in ec._memory_kill_report("probe-x")
 
     # Still running (or exited cleanly): nothing to report.
     monkeypatch.setattr(ec, "_docker", lambda *a, **k: _R(0, "false 0\n"))
@@ -1633,6 +1657,12 @@ def test_the_ci_provision_refuses_a_zero_cap(tmp_path):
     out = result.stdout + result.stderr
     assert result.returncode != 0, out
     assert "POSITIVE docker memory spec" in out, out
+    assert "0 means UNLIMITED" in out, (
+        f"the refusal must explain WHY zero is refused; a backtick in the "
+        f"annotation makes bash run the token and lose it (#7357 review "
+        f"F7): {out}"
+    )
+    assert "command not found" not in out, out
     assert "run " not in log.read_text(), (
         f"no container may be started with a zero cap: {log.read_text()}"
     )
@@ -1655,6 +1685,16 @@ def test_every_compose_falkordb_has_a_memory_limit():
                          .get("limits") or {}).get("memory")
                 if not limit:
                     missing.append(f"{path.relative_to(ROOT)}:{name}")
+                    continue
+                # #7357 review F5: memory alone leaves docker's 2x SWAP default,
+                # which is the minutes-long reload this cap exists to avoid — so
+                # the compose files must pin `memswap_limit` to the same value.
+                swap = svc.get("memswap_limit")
+                if str(swap).strip() != str(limit).strip():
+                    missing.append(
+                        f"{path.relative_to(ROOT)}:{name} (memswap_limit="
+                        f"{swap!r}, memory={limit!r})"
+                    )
     assert not missing, (
         "these compose FalkorDB services have no kernel memory limit, so one "
         "runaway instance can swap the host and starve the canonical graph "

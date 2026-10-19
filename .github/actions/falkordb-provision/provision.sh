@@ -143,11 +143,12 @@ fi
 # it, so this job can remove exactly its own containers.
 #
 # ⚠️ Residual risk, stated rather than papered over: a job that is HARD-KILLED
-# (runner death) runs neither the teardown step nor the EXIT trap, and `--rm`
-# only removes a container when the container itself exits — so such a job can
-# leave a RUNNING container behind. Its label names the run/job/attempt, which
-# is how a human or a future reaper can attribute it; NO automatic reaper
-# exists today.
+# (runner death) runs neither the teardown step nor the EXIT trap, so it can
+# leave a container behind — RUNNING, or (since this action no longer passes
+# `--rm`, #7357) STOPPED. Its label names the run/job/attempt, which is how a
+# human or a future reaper can attribute it; NO automatic reaper exists today.
+# NB: the stopped case is the one that carries the failure evidence the health
+# gate reads (`OOMKilled`/`ExitCode`), which is why `--rm` was dropped.
 ## ⛔ GITHUB_JOB is the job_id — IDENTICAL for every matrix shard (a 9-shard
 # fast matrix is ONE GITHUB_JOB), so the run/job/attempt triple alone is NOT
 # unique among concurrent shards: keying on it made each shard's
@@ -195,13 +196,18 @@ PORT_FILE="$(mktemp)"
 # i.e. the container may swap, which turns a fast isolated death into a
 # minutes-long RDB reload. Raise FALKORDB_CONTAINER_MEMORY for a job that
 # genuinely needs more; a malformed value is refused, never silently dropped.
+# NORMALIZED first, so this seam shares ONE grammar with the Python seams
+# (which `.strip().lower()`): docker parses units case-insensitively, so `2G`
+# is valid and must not fail the job here while it passes everywhere else.
 FALKORDB_MEMORY="${FALKORDB_CONTAINER_MEMORY:-2g}"
-# Grammar first, then the ZERO case: `--memory 0` is not a tiny cap, it is
+FALKORDB_MEMORY="$(printf '%s' "$FALKORDB_MEMORY" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+# Grammar first, then the ZERO case: a memory spec of 0 is not a tiny cap, it is
 # docker's spelling for NO LIMIT — the uncapped container #7357 is about, via the
-# one value a reader would type to "disable" the cap.
+# one value a reader would type to "disable" the cap. (No backticks in this
+# string: inside double quotes bash would run the token as a command.)
 if ! printf '%s' "$FALKORDB_MEMORY" | grep -Eq '^[0-9]+(\.[0-9]+)?[bkmg]?$' \
    || ! awk -v v="${FALKORDB_MEMORY%[bkmg]}" 'BEGIN { exit (v + 0 > 0) ? 0 : 1 }'; then
-  annotate_error "FALKORDB_CONTAINER_MEMORY=$FALKORDB_MEMORY is not a POSITIVE docker memory spec (e.g. 512m, 2g; `0` means UNLIMITED) — refusing to start an UNCAPPED container"
+  annotate_error "FALKORDB_CONTAINER_MEMORY=$FALKORDB_MEMORY is not a POSITIVE docker memory spec (e.g. 512m, 2g; 0 means UNLIMITED) — refusing to start an UNCAPPED container"
   exit 1
 fi
 
@@ -226,11 +232,15 @@ start() {
   # Every consumer of this action dials localhost (the exported
   # TORTOISE_TEST_DOCKER_PORT/_LEGACY_PORT are read by `tests/_live_utils.py`
   # with host `localhost`), so restricting the bind costs the CI path nothing.
-  # --rm  removes the container when it STOPS (a normal exit, a crash, or a
-  #       `docker stop`) — it is not a job-death reaper: a hard-killed runner
-  #       can leave a RUNNING container, attributable by $LABEL.
+  # NO --rm (#7357 review): `--rm` removes a container the moment it STOPS, so a
+  #       container that was killed leaves NOTHING to inspect — the OOMKilled /
+  #       ExitCode facts the failure report is made of. Removal stays explicit
+  #       and unconditional: `cleanup_own` on the failure path, the paired
+  #       teardown step (label sweep) on success, and `docker rm -f` on the next
+  #       provision. A hard-killed runner can leave a container either way; the
+  #       label is what makes it attributable.
   # --memory / --memory-swap: the kernel cap (#7357, see FALKORDB_MEMORY above).
-  if ! docker run -d --rm --name "$name" --label "$LABEL" \
+  if ! docker run -d --name "$name" --label "$LABEL" \
       --memory "$FALKORDB_MEMORY" --memory-swap "$FALKORDB_MEMORY" \
       -e REDIS_ARGS="$redis_args" \
       -p 127.0.0.1:0:6379 \
@@ -276,17 +286,30 @@ start() {
   return 1
 }
 
-# termination_note <name> — "" or a suffix naming a MEMORY kill (#7357).
-# Docker's own facts, never inferred from the connection error: a container the
-# kernel or its cgroup cap killed must not be reported as merely unhealthy,
-# because the operator then retries into the same death.
+# termination_note <name> — a suffix explaining why the health gate failed
+# (#7357), or "" when there is nothing measured to say. Three cases, all from
+# docker itself and never inferred from the connection error:
+#   * OOMKilled/ExitCode 137  -> KILLED FOR MEMORY (kernel, or this cgroup cap);
+#   * docker's own "No such object" -> the container no longer EXISTS, so it
+#     crashed or was killed rather than starting slowly;
+#   * any other inspect failure -> its termination could not be READ, so the
+#     state is UNKNOWN (a wedged daemon also fails this way, and a failure is
+#     not evidence of absence).
 termination_note() {
   local name="$1" facts oom code
-  if ! facts="$(docker inspect -f '{{.State.OOMKilled}} {{.State.ExitCode}}' "$name" 2>/dev/null)"; then
-    # `--rm` removes a container when it STOPS, so a container that died is often
-    # already gone by the time this runs. Its absence is the fact worth reporting:
-    # a slow start is still there to inspect, a dead one is not.
-    printf '%s' " — the container no longer EXISTS: it exited and --rm removed it, so it CRASHED or was KILLED rather than starting slowly; see the engine's own lines above (a memory kill on this host is the #7357 shape)"
+  if ! facts="$(docker inspect -f '{{.State.OOMKilled}} {{.State.ExitCode}}' "$name" 2>&1)"; then
+    # A failed read is NOT evidence of absence: `docker inspect` also fails when
+    # the daemon is unreachable or wedged, which is the condition this issue is
+    # about. Only docker's OWN absence wording is reported as a disappearance
+    # (the same rule `tools/test_lane.py::container_state` applies).
+    case "$facts" in
+      *"No such object"*|*"no such container"*|*"no such object"*)
+        printf '%s' " — the container no longer EXISTS: it exited and was removed, so it CRASHED or was KILLED rather than starting slowly; see the engine's own lines above (a memory kill on this host is the #7357 shape)"
+        ;;
+      *)
+        printf '%s' " — and its termination could not be READ (docker inspect failed; a wedged daemon is one reason), so whether it was killed, crashed or never started is UNKNOWN: $facts"
+        ;;
+    esac
     return 0
   fi
   oom="${facts%% *}"

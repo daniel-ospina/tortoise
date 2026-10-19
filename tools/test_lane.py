@@ -148,10 +148,11 @@ converts a fleet-wide outage into ONE container dying alone, in its own cgroup,
 in seconds. It also makes the death LEGIBLE: a container the kernel (or this
 cap) killed used to read as "it may be wedged: run down and retry", so the
 operator retried into the same death and never learned the cause —
-``_memory_kill_report`` now names ``OOMKilled``/``ExitCode`` when docker says
-so. Two limits, stated: an EXISTING container keeps the limits it was created
-with (docker cannot change them on ``start`` — ``down`` then ``start``
-recreates it, as with the image pin), and a value above the host's real
+``_termination_report`` now names ``OOMKilled``/``ExitCode``/``RestartCount``
+when docker reports them. Two limits, stated: an EXISTING container keeps the
+limits it was created with — docker cannot change them on ``start``, so the
+reuse path WARNS when that container has no cap and ``down`` + ``start``
+recreates it (as with the image pin) — and a value above the host's real
 headroom still dies (it just dies alone).
 
 CONTRACT — THE TARGET IS NOT A PARAMETER
@@ -389,24 +390,75 @@ def _memory_cap_args() -> list[str]:
     return ["--memory", cap, "--memory-swap", cap]
 
 
-#: `docker inspect --format` for the three facts that distinguish "the server
-#: is wedged" from "the kernel killed it", in one call.
+#: `docker inspect --format` for the facts that separate "the server is wedged"
+#: from "the kernel killed it" from "it is looping", in one call.
 _TERMINATION_FORMAT = "{{.State.OOMKilled}} {{.State.ExitCode}} {{.RestartCount}}"
 
+#: `docker inspect --format` for the cgroup memory limit (#7357). `0` is
+#: docker's spelling for NO LIMIT.
+_MEMORY_LIMIT_FORMAT = "{{.HostConfig.Memory}}"
 
-def _memory_kill_report(name: str) -> str:
-    """Name a MEMORY kill instead of calling it a wedge — or `""` when the
-    container was not killed by memory pressure, or docker could not be asked.
 
-    #7357's second half is LEGIBILITY, not the cap: a container killed by the
-    kernel (or OOM-killed by its own cgroup cap) currently reads as "it may be
-    wedged: run down and retry" — the same sentence a hung daemon gets — so the
-    operator retries into the same death and never learns the real cause. The
-    facts come from docker itself (`OOMKilled`, `ExitCode`), never inferred
-    from the connection error.
+def _container_memory_limit(name: str) -> int | None:
+    """The container's cgroup memory limit in BYTES, or None when unreadable.
 
-    A failed/unknown inspect reports NOTHING rather than guessing: this
-    function's whole purpose is that the failure names what was measured.
+    None is "could not read", never "it is capped": a failed `docker inspect` is
+    not evidence about the limit (#7357).
+    """
+    r = _docker("inspect", "--format", _MEMORY_LIMIT_FORMAT, name)
+    if r.returncode != 0:
+        return None
+    try:
+        return int((r.stdout or "").strip())
+    except ValueError:
+        return None
+
+
+def _note_uncapped_existing(name: str) -> None:
+    """Say it out loud when the container about to be REUSED has no cap (#7357).
+
+    `docker start` cannot add a limit, so a container created before this tool
+    passed `--memory` keeps `HostConfig.Memory=0` for life. Those are precisely
+    the neighbours the issue names as the pressure source, so handing one back
+    silently is how they go on being uncapped: the whole point of the issue is
+    that the failure is not reported. Prints to STDERR because it is a warning,
+    and prints nothing when the limit cannot be read (not evidence of absence).
+    """
+    limit = _container_memory_limit(name)
+    if limit is not None and limit <= 0:
+        print(
+            f"test-lane: WARNING — {name} was created WITHOUT a kernel memory "
+            f"cap (HostConfig.Memory=0, #7357) and `docker start` cannot add "
+            f"one; it can take the host down with it. Run `uv run python "
+            f"tools/test_lane.py down` and retry to recreate it with "
+            f"{CONTAINER_MEMORY_ENV}="
+            f"{os.environ.get(CONTAINER_MEMORY_ENV) or DEFAULT_CONTAINER_MEMORY}",
+            file=sys.stderr,
+        )
+
+
+def _termination_report(name: str, *, live: bool) -> str:
+    """Explain a container that did not answer — or `""` when docker says nothing
+    relevant, or could not be asked.
+
+    #7357's second half is LEGIBILITY, not the cap. Three measured shapes used to
+    read as the same sentence ("it may be wedged: run down and retry"), so the
+    operator retried into the same death and never learned the cause:
+
+    * **killed for memory** — `OOMKilled=true` or `ExitCode=137` (128+SIGKILL:
+      the kernel OOM killer, or this tool's own cgroup cap);
+    * **restarting** — `RestartCount > 0`. This is the CANONICAL instance's own
+      signature in #7357 (`ExitCode=0`, `OOMKilled=false`, `RestartCount`
+      climbing 8 -> 68 -> 150): a restart loop under host memory pressure. It is
+      named as the leading HYPOTHESIS, not as a measurement, because docker
+      exposes no reason for a restart;
+    * **`live`** — the container is Up right now, so those facts describe a
+      PREVIOUS termination and cannot explain a live server that does not answer.
+      Saying "it did not hang" there would be a false diagnosis, and it also
+      suppressed the correct remedy.
+
+    A failed/unknown inspect reports NOTHING rather than guessing: this function
+    exists so the failure names what was measured.
     """
     r = _docker("inspect", "--format", _TERMINATION_FORMAT, name)
     if r.returncode != 0:
@@ -415,20 +467,46 @@ def _memory_kill_report(name: str) -> str:
     if len(parts) != 3:
         return ""
     oom, exit_code, restarts = parts
+    try:
+        restarted = int(restarts) > 0
+    except ValueError:
+        return ""
     # 137 is 128+SIGKILL — the kernel OOM killer, or this very cgroup cap.
     # Anything else (0 = a clean exit, 143 = our own `docker stop`) is NOT a
     # memory kill and must not be reported as one.
-    if oom.lower() != "true" and exit_code != "137":
-        return ""
-    return (
-        f" The container was KILLED FOR MEMORY (OOMKilled={oom}, "
-        f"ExitCode={exit_code}, RestartCount={restarts}): it did not hang, it "
-        f"was terminated — by the kernel under host memory pressure, or by its "
-        f"own cgroup cap ({CONTAINER_MEMORY_ENV}="
-        f"{os.environ.get(CONTAINER_MEMORY_ENV) or DEFAULT_CONTAINER_MEMORY}). "
-        f"Nothing the client retried could have succeeded, and this being "
-        f"invisible is what made it read as a wedged database."
-    )
+    killed = oom.lower() == "true" or exit_code == "137"
+    if live:
+        if not (killed or restarted):
+            return ""
+        return (
+            f" (Docker also reports a PREVIOUS termination for this container "
+            f"— OOMKilled={oom}, ExitCode={exit_code}, RestartCount={restarts}. "
+            f"It is Up now, so that history cannot explain an unanswered PING; "
+            f"it does mean memory pressure has killed or restarted it before, "
+            f"so check {CONTAINER_MEMORY_ENV} and the host before re-running.)"
+        )
+    if killed:
+        return (
+            f" The container was KILLED FOR MEMORY (OOMKilled={oom}, "
+            f"ExitCode={exit_code}, RestartCount={restarts}): it did not hang, "
+            f"it was terminated — by the kernel under host memory pressure, or "
+            f"by its own cgroup cap ({CONTAINER_MEMORY_ENV}="
+            f"{os.environ.get(CONTAINER_MEMORY_ENV) or DEFAULT_CONTAINER_MEMORY}). "
+            f"Nothing the client retried could have succeeded, and this being "
+            f"invisible is what made it read as a wedged database."
+        )
+    if restarted:
+        return (
+            f" Docker also reports RestartCount={restarts}: the container has "
+            f"been RESTARTED, so this is not a slow start. The reason is not "
+            f"reported by docker — host memory pressure is the leading "
+            f"hypothesis (#7357: a killed process under an unconditional "
+            f"restart policy comes back, repeatedly), so check free memory and "
+            f"{CONTAINER_MEMORY_ENV} before re-running."
+        )
+    return ""
+
+
 #: The shared instances every lane and the orchestration graph depend on, PLUS
 #: particular peer lanes' private containers that must never be removed. It is
 #: HAND-MAINTAINED, and NONE of its entries carries the NAME_PREFIX — so the
@@ -904,21 +982,20 @@ def start(port: int | None = None) -> tuple[str, int]:
                 f"--port {port} cannot be applied to it; run `uv run python "
                 f"tools/test_lane.py down` first to move it"
             )
+        _note_uncapped_existing(name)
         if not _wait_ready(name, published):
-            # #7357: a PROVEN memory kill REPLACES the "may be wedged" advice —
-            # appending it after that sentence left the operator reading two
-            # contradictory diagnoses in one message ("it may be wedged … The
-            # container was KILLED FOR MEMORY … it did not hang").
-            killed = _memory_kill_report(name)
-            advice = "" if killed else (
-                " — it may be wedged: run `uv run python "
-                "tools/test_lane.py down` and retry"
-            )
+            # #7357: `live=True` — the container is Up, so docker's
+            # OOMKilled/ExitCode/RestartCount describe a PREVIOUS termination.
+            # They are reported as history (never as this failure's cause), and
+            # the "may be wedged" advice stays: for a live server that does not
+            # answer, restarting it IS the remedy — the history only says why it
+            # may have died before.
             raise SystemExit(
                 f"test-lane: {name} is running but never answered PING over its "
-                f"published host port {published} within {READY_TIMEOUT}s"
-                f"{advice}."
-                + killed
+                f"published host port {published} within {READY_TIMEOUT}s — it "
+                f"may be wedged: run `uv run python "
+                f"tools/test_lane.py down` and retry."
+                + _termination_report(name, live=True)
             )
         return name, published
     if state == "unknown":
@@ -986,7 +1063,7 @@ def start(port: int | None = None) -> tuple[str, int]:
     if not _wait_ready(name, chosen):
         # #7357: read docker's termination facts BEFORE removing the container —
         # `rm -f` destroys the evidence the report is made of.
-        killed = _memory_kill_report(name)
+        killed = _termination_report(name, live=False)
         logs = _docker("logs", "--tail", "20", name)
         raise SystemExit(
             f"test-lane: {name} never answered PING; {_remove_and_describe(name)}. "

@@ -141,6 +141,10 @@ services:
         limits:
           cpus: "2"
           memory: 8g
+    # #7357: swap EQUALS the limit. `deploy.resources.limits.memory` bounds RAM
+    # only; docker's default swap allowance is 2x, and a swapping FalkorDB is the
+    # 96-146 s RDB reload #7357 records instead of a fast, isolated death.
+    memswap_limit: 8g
 
 volumes:
   falkordb-data:
