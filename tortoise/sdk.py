@@ -15278,14 +15278,26 @@ class TortoiseSDK:
         EXCLUDED for the same reason ``create_direct_edge`` refuses them —
         silently rerouting a connection TO an operator would hide that misuse
         rather than report it.
+
+        The PROBE is ``_point_bearing_ids`` — ONE declaration of that query,
+        so the boolean question and the per-id answer (which
+        `_effective_connection_routes` needs to resolve a whole bundle in a
+        single read) cannot drift apart.
         """
+        return bool(self._point_bearing_ids(node_ids))
+
+    def _point_bearing_ids(self, node_ids: list[str]) -> set[str]:
+        """The subset of ``node_ids`` that are PLAIN ``:Point`` nodes — the
+        id-anchored half of :meth:`_point_mediated_route` (see its docstring
+        for the contract, the index rationale and the operator-endpoint
+        exclusion). Unresolvable ids simply do not come back."""
         rows = self._get_proj().g.query(
             "MATCH (p:Point) WHERE p.id IN $ids "
             "AND coalesce(p.is_operator, false) = false "
-            "RETURN count(p)",
+            "RETURN p.id",
             params={"ids": list(node_ids)},
         ).result_set
-        return bool(rows and rows[0][0])
+        return {row[0] for row in rows}
 
     @staticmethod
     def _direction_from_semantics(semantics: str) -> str | None:
@@ -16656,7 +16668,71 @@ class TortoiseSDK:
                                f"rejected (#2422)",
                 })
 
-    def _connections_conflict(self, ca: dict, cb: dict) -> bool:
+    def _effective_connection_routes(self, bundle: dict) -> list[str]:
+        """The EFFECTIVE route of EVERY connection item, positionally aligned
+        with ``bundle['connections']`` (#8623).
+
+        `_connection_route` reads the connection ITEM only — its 'direct' is a
+        REQUEST, not the final route (its own docstring says so), because the
+        endpoint-kind gate (`_point_mediated_route`, owner ruling 2026-10-13,
+        #8499) can promote it to 'operator' once the endpoints are known.
+        `ingest`'s write loop resolves refs FIRST and then promotes; a Phase-1
+        check that consumes the REQUEST instead of the EFFECTIVE route refuses
+        connections the write loop handles correctly. That is the #8623 class:
+        a same-pair label-differing pair is a duplicate CONFLICT on the direct
+        edge (whose MERGE key is ``(src, tgt, type)``) but LEGAL on the
+        operator route (whose `_find_operator` key includes ``label``).
+
+        Resolution mirrors what step 4 will see, and BOTH halves are needed:
+
+        - a bundle-local ``points`` ref has no node yet in Phase 1, so no graph
+          probe can see it — but step 2 mints it as a plain ``:Point`` and
+          step 4 resolves the ref onto that id, so it IS Point-bearing;
+        - every other endpoint is addressed by node id (`_check_endpoints`
+          enforces the id-anchoring), so it is probed in ONE read for the
+          whole bundle via ``_point_bearing_ids``.
+
+        A bundle whose refs/endpoints are already refused elsewhere (duplicate
+        ref, ghost endpoint, operator-shaped endpoint) resolves to whatever is
+        observable here; those bundles are rejected by their own checks, so the
+        only consequence is that this predicate does not fire on them.
+        """
+        conns = bundle.get("connections") or []
+        routes = [self._connection_route(c) if isinstance(c, dict) else "relation"
+                  for c in conns]
+        local_section: dict[str, str] = {}
+        for section in ("sources", "points", "entities"):
+            for item in bundle.get(section) or []:
+                if isinstance(item, dict) and isinstance(item.get("ref"), str):
+                    local_section[item["ref"]] = section
+        external: set[str] = set()
+        for conn, route in zip(conns, routes, strict=True):
+            if route != "direct":
+                continue
+            tos = conn.get("to")
+            for v in [conn.get("from"), *(tos if isinstance(tos, list) else [tos])]:
+                if isinstance(v, str) and v not in local_section:
+                    external.add(v)
+        external_points = self._point_bearing_ids(sorted(external)) \
+            if external else set()
+        effective: list[str] = []
+        for conn, route in zip(conns, routes, strict=True):
+            if route != "direct":
+                effective.append(route)
+                continue
+            tos = conn.get("to")
+            vals = [conn.get("from"), *(tos if isinstance(tos, list) else [tos])]
+            mediated = any(
+                isinstance(v, str) and (local_section[v] == "points"
+                                        if v in local_section
+                                        else v in external_points)
+                for v in vals
+            )
+            effective.append("operator" if mediated else "direct")
+        return effective
+
+    def _connections_conflict(self, ca: dict, cb: dict,
+                              route_a: str, route_b: str) -> bool:
         """§5.2.7 conflict predicate for a same from/to/operator pair.
 
         Conflicts: differing canonical direction (per op_type), differing
@@ -16664,6 +16740,17 @@ class TortoiseSDK:
         value (absent-vs-present → conflict); label-differing on the
         direct-edge path (label joins the predicate there); mitigation-reason
         conflict on same-label pairs. Identical pairs are clean dedup.
+
+        ``route_a``/``route_b`` are the EFFECTIVE routes
+        (`_effective_connection_routes`) — not the `_connection_route`
+        REQUEST — because the label arm is scoped to the edge shape the pair
+        will actually be written as (#8623). A direct edge MERGEs on
+        ``(src, tgt, type)``, so a second same-pair edge with a different
+        label would silently overwrite the first: that is why label joins the
+        predicate there. The operator route's `_find_operator` key INCLUDES
+        ``label``, so two label-differing operators are legitimately distinct
+        and both are committed (the #8623 over-refusal: a Point-bearing pair
+        promoted by the endpoint-kind gate was judged by the direct rule).
         """
         op = ca["operator"]
         if direction_flows(self._canonical_direction(op, ca.get("direction"))) != \
@@ -16682,8 +16769,7 @@ class TortoiseSDK:
         if la != lb:
             if la is None or lb is None:
                 return True  # label-absent is a DISTINCT value (cycle-14)
-            if self._connection_route(ca) == "direct" \
-                    or self._connection_route(cb) == "direct":
+            if route_a == "direct" or route_b == "direct":
                 return True  # label joins the direct-edge predicate (cycle-8)
             # both operator-routed with differing labels → LEGAL (two
             # operators; _find_operator's key includes label).
@@ -16701,9 +16787,25 @@ class TortoiseSDK:
         violations (fail-closed — _find_operator's key lacks strength, so
         acceptance would be order-dependent). Reversed-pair bidirectional
         contradictions (a→b AND b→a, IMPL/NAND) are violations.
+
+        #8623: the label arm of the conflict predicate is applied against each
+        connection's EFFECTIVE route (`_effective_connection_routes`), so a
+        same-pair label-differing pair on the OPERATOR route — which
+        `_find_operator` keys on `label` and therefore commits as two distinct
+        operators — is not a conflict. The direct-edge case (Object↔Object)
+        keeps it: there the MERGE key is (src, tgt, type) and the second edge
+        would silently overwrite the first's label.
         """
         ops = [(i, c) for i, c in enumerate(bundle.get("connections") or [])
                if isinstance(c, dict) and "operator" in c]
+        # #8623: the label arm of the conflict predicate is DIRECT-edge-scoped,
+        # so it must read the EFFECTIVE route the write loop will take — a
+        # Point-bearing pair is promoted to the operator route by the
+        # endpoint-kind gate (#8499), where a differing label is LEGAL (the
+        # operator dedup key includes `label`, so both operators commit).
+        # Resolved ONCE per bundle: the predicate is pairwise, and each probe
+        # is a graph read.
+        routes = self._effective_connection_routes(bundle)
         for a in range(len(ops)):
             for b in range(a + 1, len(ops)):
                 ia, ca = ops[a]
@@ -16712,7 +16814,7 @@ class TortoiseSDK:
                         or ca.get("to") != cb.get("to")
                         or ca["operator"] != cb["operator"]):
                     continue
-                if self._connections_conflict(ca, cb):
+                if self._connections_conflict(ca, cb, routes[ia], routes[ib]):
                     violations.append({
                         "section": "connections", "index": ib,
                         "message": f"ingest: connections[{ia}] and "
