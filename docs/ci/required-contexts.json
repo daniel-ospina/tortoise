@@ -98,6 +98,12 @@
         "check-drift"
       ]
     ],
+    "classify": [
+      [
+        "finding-provenance.yml",
+        "classify"
+      ]
+    ],
     "client-build": [
       [
         "ci.yml",
@@ -531,7 +537,7 @@
       ]
     ]
   },
-  "gate_digest": "0a89f3c53a810b231edea24895433786654955eb7c384742e30607f22b89f301",
+  "gate_digest": "fde5d045e3cf658e6be00fdcd0f467ea80ba6acf9ead6e2aa93afc1e9ac20460",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -555,5 +561,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-10-19T04:13:53Z"
+  "verified_at": "2026-10-19T05:04:18Z"
 }

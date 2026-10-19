@@ -3286,6 +3286,13 @@ surfaces:
   - test_wiring_phase01.py
   - test_workflow_secret_interpolation.py
   - test_workflow_gh_token.py
+  # #9115: the workflow-SHAPE guard (every workflow declares bounded
+  # `concurrency:`; per-push reports are path-scoped; `python-ci-gate` keeps
+  # its load-bearing job id). Its subject is `.github/workflows/*.yml`, which
+  # `ci_selection` deliberately keeps on the FULL matrix (it is not a
+  # NON_CODE_DOC_PATH), so this entry is what puts the guard in the matrix on
+  # a workflow-only diff as well.
+  - test_reporting_workflow_concurrency.py
   - test_write_path_unreachable_seam_5148.py
   - test_write_verb.py
   - test_write_consolidation.py
@@ -4071,6 +4078,13 @@ surfaces:
   - test_ask_seed_shape.py   # #3914: every ask-lane seeder emits the CAPTURE shape (Session + CONTAINS edge, no sessionId/eventId prop) — asserted on the RESOLVED graph, mutation-proven against the edge
   - test_ask_spotcheck_judge.py
   - test_ask_spotcheck_seed_shape.py   # #3910: the spot-check fixture seeds the CAPTURE shape (Session + CONTAINS edge, no sessionId/eventId prop) — mutation-proven against the edge
+  # #9095: the instrument epic #2281's D7 measurement + D8 gate READ. The
+  # planted-supersession corpus is committed and the check reads the ASSEMBLED
+  # READER EVIDENCE, so a drift in the marker vocabulary the D8 promise is
+  # stated in (``[SUPERSEDED BY: …]`` / ``[valid <from> → <to>]``) fails this
+  # gate loudly rather than silently passing. Mutation-proven: drop the
+  # supersession and the gate goes RED.
+  - test_ask_spotcheck_distilled_corpus.py
   - test_client_surface.py
   # #6869: `commit_session(base_url=..., api_key=...)` configures the Tortoise
   # API POST only — this pins that it does NOT select the extraction provider
@@ -5505,6 +5519,7 @@ durations:
   test_session_context.py: 2.3
   test_slack_connector.py: 2.6
   test_workflow_secret_interpolation.py: 2.0
+  test_reporting_workflow_concurrency.py: 2.0  # unmeasured — new in #9115; no sweep has collected it, so it carries the documented flat default for an unmeasured file (same convention as test_workflow_gh_token.py)
   test_workflow_gh_token.py: 2.0  # unmeasured — new in #3092; no source leg sampled it, so this carries the documented flat default for an unmeasured file (same as test_branch_reaper.py), not the sibling's 0.6
   test_action_endpoints_dual_auth.py: 2.7
   test_cross_lens_candidates.py: 3.2
@@ -5995,6 +6010,11 @@ durations:
   test_ask_eval_only.py: 4.6
   test_ask_seed_shape.py: 0.6
   test_ask_spotcheck_seed_shape.py: 0.3
+  # Measured locally 2026-10-19 (10 tests, 8 embedded stores; sum of junit
+  # testcase times = 8.71s — 2.17s of it is the first test paying the
+  # `tortoise` import). Refresh from the first post-merge CI run that measures
+  # it.
+  test_ask_spotcheck_distilled_corpus.py: 8.7
   test_battery_recall_wiring.py: 0.3
   test_blog_agent_delete_guard.py: 2.5
   test_blog_post_status_validation.py: 2.5  # #4311: analogue estimate (same Node type-stripping harness as test_blog_agent_delete_guard.py); refresh from the first post-merge junit artifact

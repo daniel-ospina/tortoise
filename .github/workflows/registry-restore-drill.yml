@@ -17,6 +17,13 @@ on:
         description: "Explicit backup key (backups/{org_id}/.../dump.enc). Default: newest non-empty."
         required: false
 
+# Manual drill, one at a time: two concurrent restores into the same scratch
+# graph would measure each other's writes and the drill's own assertion (that
+# the restored archive is the only thing read) would be meaningless.
+concurrency:
+  group: registry-restore-drill
+  cancel-in-progress: false
+
 permissions:
   contents: read
   issues: write

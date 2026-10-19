@@ -57,6 +57,23 @@ Composition fixture: the committed ``tests/fixtures/ask_spotcheck_composition.js
 (21 questions — the reproducibility gap closed by issue #2071 step 1).
 Path resolution order: ``--fixture`` CLI arg → ``TORTOISE_SPOTCHECK_FIXTURE``
 env → committed fixture → ``/tmp/ask_spotcheck.json`` (legacy compat).
+
+Distilled-corpus leg (#9095 — epic #2281 D7/D8): ``--distilled`` runs a
+SECOND, additive instrument over the committed planted-supersession corpus
+(``tests/fixtures/ask_spotcheck_supersession.json``: three hand-authored
+old→new pairs), because the 21-question composition seeds only RAW episodic
+turns and has no supersession case at all — so neither the epic's distilled
+knowledge-update number nor its *"0% superseded points appear as live
+answers"* product gate had any instrument. For each case the leg seeds TWO
+fresh stores in ONE invocation (the D4 rule: extend, never a parallel
+benchmark) — ``raw`` (the turn store alone) and ``distilled`` (the same turn
+store plus the distilled claims and the planted supersession, written through
+the product's own ``create_point(is_episodic=False, validFrom=…, …)`` +
+``supersede_point``) — and prints two numbers plus one machine-readable
+``DISTILLED_JSON`` line: the knowledge-update ``current_state`` rate (no pass
+threshold; the first run sets it) and the ``superseded_live`` D8 gate (must be
+0 rendered live, and every planted claim must be OBSERVED: an unmeasured claim
+is never a pass).
 """
 from __future__ import annotations
 
@@ -652,6 +669,413 @@ def _normalize(text) -> str:
     return re.sub(r"\s+", " ", str(text or "").lower()).strip()
 
 
+# ===========================================================================
+# #9095 — the DISTILLED corpus leg: epic #2281's D7 measurement + D8 gate
+# ===========================================================================
+#
+# Deliberately a SIBLING of the raw-turn instrument above, not a mode flag on
+# ``_seed_memory``: a flag would move the store of every non-opt-in caller (the
+# same class of mistake ``SEED_SEARCH_KEYS_BY_DEFAULT`` exists to prevent), and
+# the 21-question composition must keep its store and its number.
+
+#: The committed planted-supersession corpus (#9095): three hand-authored
+#: old→new pairs (residence, diet, employer). Authored, hermetic and small on
+#: purpose — the standing method (owner, 2026-09-23) is *run it small and by
+#: hand first*, and the first run should show input rows → output rows for a
+#: handful of planted cases, not a generated set. Rejected: the LongMemEval
+#: knowledge-update subset (not row-by-row reviewable, not hermetic).
+_SUPERSESSION_FIXTURE = os.path.join(
+    _REPO_ROOT, "tests", "fixtures", "ask_spotcheck_supersession.json")
+_SUPERSESSION_ENV = "TORTOISE_SPOTCHECK_SUPERSESSION_FIXTURE"
+
+#: The arm the D8 gate is evaluated on. The RAW arm is reported too (the paired
+#: read D4 requires), but the promise — *"0% superseded points appear as live
+#: answers"* — is about DISTILLED points, and the raw-turn store has none.
+_DISTILLED_GATE_ARM = "distilled"
+
+
+class _ClaimRender:
+    """One rendered evidence block, split into ANNOTATION and BODY (#9095).
+
+    The product's supersession flagging lives entirely in the annotation
+    prefix the renderer adds (``_render_block`` → ``_validity_marker``):
+    ``[SUPERSEDED BY: <successor snippet>]`` and the closed window
+    ``[valid <from> → <to>; expired <at>]``. The BODY is the claim itself.
+
+    Splitting them is what makes the D8 gate honest. Two independent traps sit
+    on the same string:
+
+      1. **The snippet trap.** The SUCCESSOR's block carries the PREDECESSOR's
+         text verbatim inside ``[SUPERSEDES: <old content>]``. A whole-line
+         substring test therefore reads the successor as "the old claim,
+         rendered live" — the gate would then demand the successor stop naming
+         what it replaced. Only the BODY may be tested for the old claim.
+      2. **The episodic-record trap.** A raw turn Point that says the old
+         claim is NOT the superseded point: it is the episodic record of what
+         was said at the time, and rendering it unflagged is correct. The
+         superseded point is the DISTILLED claim, and a distilled claim's
+         rendered block is the one carrying a validity window — turns carry
+         none. Attribution therefore needs the window marker, or every
+         correct corpus reads as a D8 failure.
+    """
+
+    __slots__ = ("body", "flagged", "is_claim", "prefix")
+
+    def __init__(self, prefix: str, body: str) -> None:
+        self.prefix = prefix
+        self.body = body
+        # A distilled claim renders its WINDOW; a raw turn/episodic record
+        # never does. This is the attribution rule, not a heuristic: the
+        # window is written by the create path (``validFrom``) and closed by
+        # ``supersede_point``, and turns are written by the capture turn store,
+        # which stamps no window at all.
+        self.is_claim = bool(_VALID_WINDOW_OPEN.search(prefix))
+        # The product's two flagging forms: an explicit successor reference and
+        # a CLOSED window (an arrow — "stopped being true here"). An OPEN
+        # window (``[valid since …]``) asserts the claim is still true, so it is
+        # the failure shape, not a flag.
+        self.flagged = bool(
+            _FLAG_SUPERSEDED_BY.search(prefix)
+            or _FLAG_CLOSED_WINDOW.search(prefix))
+
+
+#: One annotation group the renderer puts BEFORE the body: a bracketed marker
+#: group (``[session …]``, ``[user]``, ``[SUPERSEDED BY: …]``, ``[valid …]``)
+#: or the parenthesized session-date annotation.
+_ANNOTATION_GROUP = re.compile(
+    r"\s*(?:\[[^\[\]\n]*\]|\((?i:session date|today|now)[^)\n]*\))")
+_DATE_PREAMBLE = re.compile(r"^Current Date:[^\n]*\n*")
+_VALID_WINDOW_OPEN = re.compile(r"\[valid ")
+_FLAG_SUPERSEDED_BY = re.compile(r"\[SUPERSEDED BY:")
+_FLAG_CLOSED_WINDOW = re.compile(r"\[valid [^\]]*→")
+
+
+def load_supersession_cases(path: str | None = None) -> list[dict]:
+    """Load the committed planted-supersession corpus (#9095).
+
+    Resolution order: explicit ``path`` (CLI) → the
+    ``TORTOISE_SPOTCHECK_SUPERSESSION_FIXTURE`` env → the committed fixture.
+    Each case is one
+    knowledge-update pair: a ``old_claim``/``new_claim`` (text + session id +
+    ``valid_from``), the ``answer`` the current state IS, and a capture-shaped
+    two-session ``haystack_*`` block so the raw-turn arm can be paired from the
+    same run.
+    """
+    candidates = [p for p in (path, os.environ.get(_SUPERSESSION_ENV)) if p]
+    candidates.append(_SUPERSESSION_FIXTURE)
+    for cand in candidates:
+        if cand and os.path.exists(cand):
+            with open(cand) as f:
+                data = json.load(f)
+            cases = data["cases"] if isinstance(data, dict) else data
+            if not isinstance(cases, list) or not cases:
+                raise ValueError(
+                    f"supersession corpus {cand!r}: expected a non-empty list "
+                    f"of cases or a {{\"cases\": [...]}} wrapper")
+            return cases
+    raise FileNotFoundError(
+        "no planted-supersession corpus found (tried "
+        f"{candidates}; set --supersession-fixture or {_SUPERSESSION_ENV})")
+
+
+def _seed_distilled_claim(sdk: TortoiseSDK, claim: dict) -> str:
+    """Write ONE distilled claim the way the capture extraction writer does.
+
+    ``create_point(kind='statement', is_episodic=False, session_id=…, …)`` is
+    the extraction path's own call (``session_id`` infers ``extractedFrom`` =
+    ``session:<id>``), and it embeds the content itself — so the claim is
+    reachable on both retrieval legs without a private write. ``validFrom``
+    stamps the bi-temporal window START (§4.7 D3); ``quote`` + ``source_turn_id``
+    anchor the claim to the verbatim turn it was distilled FROM, which is the
+    provenance the read path (and the A8 own-source collapse) resolves.
+
+    Points are seeded LIVE (post-promotion): the D8 promise is about live
+    claims, and a draft would make the gate measure a shape the product never
+    shows a reader.
+    """
+    out = sdk.create_point(
+        "statement", claim["text"], is_episodic=False, dedup=True,
+        session_id=claim["session_id"],
+        validFrom=claim["valid_from"],
+        quote=claim["text"],
+        source_turn_id=f"{claim['session_id']}_t0",
+    )
+    pid = out["id"]
+    # The (:Session)-[:CONTAINS]->(:Point) edge capture's extraction writer
+    # wires (and the shipping read resolves identity from). MERGE, so a
+    # re-seed converges.
+    sdk._get_proj().g.query(
+        "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+        "MERGE (s)-[:CONTAINS]->(p)",
+        params={"sid": claim["session_id"], "pid": pid},
+    )
+    return pid
+
+
+def seed_distilled_corpus(sdk: TortoiseSDK, case: dict) -> dict[str, str]:
+    """Seed ONE planted case's distilled corpus, ADDITIVELY (#9095 D7).
+
+    Writes the two distilled claims and then the supersession through the
+    product's OWN ``supersede_point`` (CORRECTS + ``outdated`` + the
+    predecessor's ``validTo`` = the successor's ``validFrom`` — contiguous
+    windows, §4.7). Nothing here restates the product's write shape: a fixture
+    that taught a shape the product cannot produce would make the instrument
+    measure itself.
+
+    Additive by contract: this does NOT touch ``_seed_memory``'s raw turn leg,
+    so a caller gets the distilled corpus ALONGSIDE the turn store it already
+    had, and the 21-question composition's store and number are unchanged.
+    """
+    old_id = _seed_distilled_claim(sdk, case["old_claim"])
+    new_id = _seed_distilled_claim(sdk, case["new_claim"])
+    sdk.supersede_point(old_id, new_id)
+    return {"old": old_id, "new": new_id}
+
+
+def _evidence_blocks(evidence: str) -> list[str]:
+    """Split rendered reader evidence into one block per hit.
+
+    ``render_context`` joins blocks with a blank line and prefixes the whole
+    context with a ``Current Date:`` line; the preamble is not a hit, and
+    counting it would make every case look like it rendered something.
+
+    One caveat inherited from the renderer: a hit whose body contains a BLANK
+    line is fenced line-by-line (``_fence_body``) but its blank line survives
+    unfenced, so such a hit splits into two blocks here. The planted corpus is
+    single-line claims by construction, and a split can only ever SHRINK a body
+    (never fabricate one), so it cannot turn an unflagged render into a green —
+    but a future multi-paragraph corpus should split on the session tag instead.
+    """
+    blocks: list[str] = []
+    for block in re.split(r"\n[ \t]*\n", str(evidence or "")):
+        block = _DATE_PREAMBLE.sub("", block.strip("\n")).strip("\n")
+        if block.strip():
+            blocks.append(block)
+    return blocks
+
+
+def _strip_annotations(block: str) -> tuple[str, str]:
+    """``(annotation prefix, body)`` for one rendered block (see
+    :class:`_ClaimRender` for why the split is load-bearing).
+
+    Only LEADING annotation groups are stripped, so a bracket that is part of
+    the claim's own text stays in the body where it belongs. A snippet whose
+    own text contains ``]`` truncates its group early — the body then carries
+    the residue, and since the residue is not a leading group it is never
+    mistaken for an annotation.
+    """
+    text = str(block or "")
+    pos = 0
+    while True:
+        m = _ANNOTATION_GROUP.match(text, pos)
+        if not m:
+            break
+        pos = m.end()
+    return text[:pos], text[pos:]
+
+
+def _superseded_live_state(evidence: str, claim_text: str) -> tuple[bool, bool, bool]:
+    """``(seen, rendered_live, flagged)`` for ONE superseded claim.
+
+    Read over the ASSEMBLED READER EVIDENCE (not package stats): the promise
+    is about what the reader was shown — the dead claim must be "flagged or
+    excluded".
+
+    * ``seen`` — a DISTILLED-claim render naming the superseded claim exists.
+      A claim the instrument cannot observe is an UNMEASURED claim, and an
+      unmeasured claim is never a pass, so the leg fails closed on it.
+    * ``rendered_live`` — such a render presents the old claim as its BODY
+      with NO flag: the reader is told a dead claim is still true. This is the
+      D8 failure.
+    * ``flagged`` — a render carries ``[SUPERSEDED BY: …]`` or a CLOSED window
+      ``[valid <from> → <to>]``: the product's two ways of saying "this
+      stopped being true".
+    """
+    norm = _normalize(claim_text)
+    if not norm:
+        return False, False, False
+    seen = rendered_live = flagged = False
+    for block in _evidence_blocks(evidence):
+        render = _ClaimRender(*_strip_annotations(block))
+        # A raw turn/episodic record of the same words is NOT the superseded
+        # point — it is the episodic log of what was said then, and it renders
+        # unflagged by design. Only distilled claims are in scope.
+        if not render.is_claim:
+            continue
+        if norm not in _normalize(block):
+            continue
+        seen = True
+        if norm in _normalize(render.body):
+            if render.flagged:
+                flagged = True
+            else:
+                rendered_live = True
+    return seen, rendered_live, flagged
+
+
+def _judge_committed(case: dict, result: dict, judge) -> bool:
+    """Does the reader's answer commit the CURRENT state (the D7 KU number)?
+
+    Graded by the same semantic judge as the rest of the spot-check, so the
+    number is comparable to the 21-question aggregate. There is NO pass
+    threshold on this one: D8 says the first run SETS it.
+    """
+    return bool(judge.judge(
+        question_type=case.get("question_type") or "knowledge-update",
+        question=case.get("question") or "",
+        answer=case.get("answer") or "",
+        hypothesis=result.get("answer") or "",
+        abstention=False,
+    ))
+
+
+def _run_one_arm(sdk: TortoiseSDK, case: dict, arm: str, judge,
+                 mutate=None) -> dict:
+    """Run one case through ONE arm and return its readings."""
+    _seed_memory(sdk, case)
+    if arm == _DISTILLED_GATE_ARM:
+        seed_distilled_corpus(sdk, case)
+        if mutate is not None:
+            mutate(sdk)
+    try:
+        result = run_ask_lane(sdk, case["question"],
+                              question_date=_to_iso_date(
+                                  case.get("question_date") or ""))
+    except Exception as exc:  # noqa: BLE001, RUF100 — a per-case reader or
+        # retrieval fault is a MISS for this case, never a whole-run abort
+        # (same posture as the 21-question loop). ``old_seen`` stays False, so
+        # the D8 leg fails CLOSED rather than passing on an unread case.
+        return {"ok": False, "answer": "", "committed": False,
+                "old_seen": False, "rendered_live": False, "flagged": False,
+                "note": f"ask unavailable: {type(exc).__name__}"}
+    evidence = result.get("evidence") or ""
+    seen, rendered_live, flagged = _superseded_live_state(
+        evidence, case["old_claim"]["text"])
+    return {
+        "ok": True,
+        "answer": result.get("answer") or "",
+        "committed": _judge_committed(case, result, judge),
+        "old_seen": seen,
+        "rendered_live": rendered_live,
+        "flagged": flagged,
+        "note": "",
+    }
+
+
+def _arm_totals(cases: list[dict], arm: str) -> tuple[dict, dict]:
+    rows = [c["arms"][arm] for c in cases]
+    n = len(rows)
+    committed = sum(1 for r in rows if r["committed"])
+    seen = sum(1 for r in rows if r["old_seen"])
+    live = sum(1 for r in rows if r["rendered_live"])
+    return (
+        {"committed": committed, "n": n,
+         "rate": (committed / n) if n else 0.0},
+        {"seen": seen, "rendered_live": live, "n": n,
+         "rate": (live / n) if n else 0.0},
+    )
+
+
+def _default_sdk_factory() -> TortoiseSDK:
+    db = os.path.join(tempfile.mkdtemp(prefix="ask_distilled_"), "t.db")
+    return TortoiseSDK(db)
+
+
+def run_distilled_leg(*, cases: list[dict] | None = None, judge=None,
+                      out=None, fixture: str | None = None,
+                      sdk_factory=None, mutate=None) -> dict:
+    """Run the planted-supersession leg: BOTH arms, ONE invocation (#9095).
+
+    Per case, two fresh stores:
+
+      * **raw** — ``_seed_memory`` only (the turn store, i.e. the pre-D7
+        instrument's shape);
+      * **distilled** — the same turn store PLUS the distilled corpus and the
+        planted supersession (``seed_distilled_corpus``).
+
+    Same case, same judge, one run — the D4 rule (extend W2-b; no parallel
+    benchmark). Prints human lines plus ONE machine-readable ``DISTILLED_JSON``
+    line on the same stream (no second file, no second invocation) carrying the
+    two numbers the epic's exits need:
+
+      * ``current_state {committed, n, rate}`` — the knowledge-update class:
+        how often the reader committed the CURRENT state. No pass threshold
+        (D8: the first run sets it).
+      * ``superseded_live {seen, rendered_live, rate}`` — the D8 product gate.
+        ``rendered_live > 0`` is a hard failure of the run, and so is
+        ``seen < n``: a claim the instrument could not observe was not shown to
+        be flagged, it was merely not seen.
+
+    ``mutate`` is the mutation hook (the falsification probe: drop the
+    supersession and the gate must go RED). It runs on the distilled arm after
+    seeding.
+    """
+    if cases is None:
+        cases = load_supersession_cases(fixture)
+    if judge is None:
+        judge = build_judge()
+    out = out or sys.stdout
+    sdk_factory = sdk_factory or _default_sdk_factory
+
+    records: list[dict] = []
+    for case in cases:
+        arms = {}
+        for arm in ("raw", _DISTILLED_GATE_ARM):
+            sdk = sdk_factory()
+            try:
+                arms[arm] = _run_one_arm(sdk, case, arm, judge, mutate)
+            finally:
+                sdk.close()
+        records.append({"case_id": case["case_id"], "arms": arms})
+        raw, dist = arms["raw"], arms[_DISTILLED_GATE_ARM]
+        print(
+            f"  {case['case_id']:10s} "
+            f"raw: committed={raw['committed']} "
+            f"seen={raw['old_seen']} live={raw['rendered_live']} | "
+            f"distilled: committed={dist['committed']} "
+            f"seen={dist['old_seen']} live={dist['rendered_live']} "
+            f"flagged={dist['flagged']}",
+            file=out)
+
+    raw_state, raw_live = _arm_totals(records, "raw")
+    dist_state, dist_live = _arm_totals(records, _DISTILLED_GATE_ARM)
+    n = len(records)
+    # The D8 gate: no superseded claim rendered live, AND every planted claim
+    # actually OBSERVED as a distilled render (fail closed on the unmeasured).
+    ok = bool(n) and dist_live["rendered_live"] == 0 and dist_live["seen"] == n
+
+    report = {
+        "fixture": fixture or os.environ.get(_SUPERSESSION_ENV)
+                   or _SUPERSESSION_FIXTURE,
+        "judge_model": getattr(judge, "model_id", ""),
+        "gate_arm": _DISTILLED_GATE_ARM,
+        "n_cases": n,
+        "seed": {"turns_embedded": SEED_TURNS_EMBEDDED_BY_DEFAULT,
+                 "search_keys": SEED_SEARCH_KEYS_BY_DEFAULT},
+        "current_state": dist_state,
+        "superseded_live": dist_live,
+        "raw_arm": {"current_state": raw_state,
+                    "superseded_live": raw_live},
+        "cases": records,
+        "ok": ok,
+    }
+
+    print(f"\ndistilled current-state (KU class, {_DISTILLED_GATE_ARM} arm): "
+          f"{dist_state['committed']}/{n} "
+          f"({dist_state['rate']:.2f}) — no pass threshold, the first run "
+          f"sets it (D8)", file=out)
+    print(f"superseded-live (D8 gate, {_DISTILLED_GATE_ARM} arm): "
+          f"{dist_live['rendered_live']}/{n} rendered live, "
+          f"{dist_live['seen']}/{n} observed — "
+          f"{'PASS' if ok else 'FAIL'} (must be 0 rendered live, {n} "
+          f"observed)", file=out)
+    print(f"  paired raw-turn arm: KU {raw_state['committed']}/{n}, "
+          f"superseded seen {raw_live['seen']}/{n} "
+          f"(a raw-turn store holds no distilled claim to flag)", file=out)
+    print("DISTILLED_JSON " + json.dumps(report, sort_keys=True), file=out)
+    return report
+
+
 def _require_judge_key() -> str:
     """Fail-fast pre-flight (issue #2071 step 6): the semantic judge grades
     EVERY question, so a judge provider key is required BEFORE any question
@@ -795,7 +1219,33 @@ def main(argv: list[str] | None = None) -> int:
         help=f"composition path (default: {_FIXTURE_ENV} env, then the "
              f"committed tests/fixtures/ask_spotcheck_composition.json, "
              f"then {_LEGACY_FIXTURE})")
+    ap.add_argument(
+        "--distilled", action="store_true",
+        help="run the PLANTED-SUPERSESSION distilled-vs-raw leg (#9095: epic "
+             "#2281 D7/D8) instead of the 21-question spot-check — one run, "
+             "both arms, plus a DISTILLED_JSON line")
+    ap.add_argument(
+        "--supersession-fixture", default=None,
+        help="planted-supersession corpus path (default: the "
+             f"{_SUPERSESSION_ENV} env, then the committed "
+             "tests/fixtures/ask_spotcheck_supersession.json)")
     args = ap.parse_args(argv)
+
+    if args.distilled:
+        # Same fail-fast posture as the 21-question path: the KU number is
+        # graded, so no judge key means no number — never a silent skip.
+        try:
+            _require_judge_key()
+        except (RuntimeError, ValueError) as exc:
+            print(f"ask_spotcheck: {exc}", file=sys.stderr)
+            return 2
+        try:
+            report = run_distilled_leg(fixture=args.supersession_fixture)
+        except (FileNotFoundError, ValueError) as exc:
+            # No corpus, no number — never an empty run reported as a pass.
+            print(f"ask_spotcheck: {exc}", file=sys.stderr)
+            return 2
+        return 0 if report["ok"] else 1
 
     spotcheck = _load_composition(args.fixture)
     # Fail-fast pre-flight (issue #2071 step 6): no judge key → exit BEFORE

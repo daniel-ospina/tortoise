@@ -21,6 +21,22 @@ on:
   pull_request_target:
     types: [opened]
 
+# Bookkeeping, not a merge gate — and the one per-event workflow here whose
+# job-level `if:` already excludes the owner and `mergify[bot]` (all internal
+# traffic) at ZERO runner cost, so it cannot flood (#9115). The group still
+# belongs here so a re-run of the SAME unit supersedes rather than racing
+# itself: it is keyed PER UNIT and never cancelled in flight, because this relay
+# CLOSES fork PRs and a cancel between the close and the intake POST would leave
+# a closed PR with no intake record — a half-applied action no re-run repairs.
+#
+# ⛔ The per-unit key does NOT bound a burst across DIFFERENT units (N opened
+# events are N groups and all N run). The bound here is the job-level `if:`, not
+# the concurrency key — see PER_UNIT_GROUP_OK in
+# tests/test_reporting_workflow_concurrency.py.
+concurrency:
+  group: inbound-relay-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
 jobs:
   relay:
     runs-on: ubuntu-latest
