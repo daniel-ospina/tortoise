@@ -60,6 +60,24 @@ from tortoise.sdk import TortoiseSDK
 #: behavioural divergence, not a rounding artefact.
 PARITY_TOLERANCE = 1e-9
 
+#: The SOLVER tolerance the parity comparison runs at — deliberately three
+#: orders BELOW :data:`PARITY_TOLERANCE`. EP's own stop is ``tol=1e-4`` on the
+#: RELATIVE change of one step, so ``converged=True`` certifies that the last
+#: step was small, NOT that the iterate IS the fixed point. MEASURED on this
+#: fixture: both routes report ``converged=True`` at the default tolerance and
+#: still sit ~3.6e-5 apart, because each stops a different number of damped
+#: steps short of the SAME attractor — the operator route arrives at it through
+#: the no-arg dream pass (1 exact iteration), while the direct route, which the
+#: dream's ``is_operator``-only selector cannot reach, needs 12. Driving both to
+#: ``PARITY_SOLVER_TOL`` removes the stopping distance: the same fixture then
+#: agrees to ~5e-13, i.e. the ROUTES are identical and only the STOP was being
+#: compared. :data:`PARITY_TOLERANCE` is not loosened by this.
+PARITY_SOLVER_TOL = 1e-12
+
+#: Head-room for the tightened stop — the fixture converges in <=58 damped
+#: iterations, well inside EP's default 50-iteration cap scaled up here.
+PARITY_SOLVER_MAX_ITER = 1000
+
 #: The Beta(1,1) prior every seeded node starts from.
 PRIOR_MEAN = 0.5
 PRIOR_ALPHA = 1.0
@@ -186,14 +204,33 @@ def _write_via_direct_route(sdk: TortoiseSDK, src: str, tgt: str,
     ]})
 
 
+def _solve_to_fixed_point(sdk: TortoiseSDK) -> None:
+    """Tighten EP's stopping rule so ``converged`` means FIXED POINT.
+
+    ``TortoiseEP`` stops when one step's RELATIVE change falls below ``tol``
+    (default ``1e-4``), so a converged run may still be ~1e-5 short of the
+    attractor — enough to fail a 1e-9 parity assertion with no route
+    divergence behind it. One EP instance serves the no-arg dream pass AND the
+    exact pass, so tightening it here covers the whole
+    :meth:`compute_confidence` call.
+    """
+    ep = sdk._get_ep()
+    ep.tol = PARITY_SOLVER_TOL
+    ep.max_iter = max(ep.max_iter, PARITY_SOLVER_MAX_ITER)
+
+
 def _target_confidence(sdk: TortoiseSDK, *node_ids: str) -> dict[str, dict]:
-    """Posteriors for ``node_ids`` after ONE EP run over the graph."""
+    """Posteriors for ``node_ids`` at EP's fixed point over the graph.
+
+    ⚠️ The 1e-9 parity assertion below is only meaningful at EP's FIXED POINT:
+    the run shuffles the factor list every iteration, so an iterate that is
+    still moving hands us two arbitrary — and order-dependent — points.
+    ``converged`` alone does not establish that (see
+    :data:`PARITY_SOLVER_TOL`), so the solver is tightened FIRST and the flag
+    is then asserted as a second, independent guard.
+    """
+    _solve_to_fixed_point(sdk)
     out = sdk.compute_confidence()
-    # ⚠️ The 1e-9 parity assertion below is only meaningful at EP's FIXED POINT:
-    # the run's own stopping tolerance is 1e-4 and it shuffles the factor list
-    # every iteration, so a non-converged run would hand us two arbitrary — and
-    # order-dependent — iterates. Without this guard that case reds with the
-    # message blaming a route divergence that does not exist.
     assert out["converged"] is True, (
         f"EP did not converge in {out['iterations']} iterations "
         f"(diagnostic={out.get('diagnostic')!r}); route parity is only "
@@ -259,6 +296,11 @@ def test_both_routes_produce_the_same_confidence(sdk_factory, op_type: str):
 
     The fan-out and the mutual direction are what make the direct route's
     per-edge back-message slot (#888 W5) load-bearing; see :data:`DIRECTION`.
+
+    Both graphs are driven to EP's fixed point before the comparison
+    (:func:`_solve_to_fixed_point`): a route may reach the same attractor at a
+    different number of damped steps, and comparing two stopping points says
+    nothing about the routes.
     """
     # Route A — operator route (two binary operators sharing the subject)
     sdk_op = sdk_factory()

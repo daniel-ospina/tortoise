@@ -1718,8 +1718,22 @@ def test_snapshot_contents_are_pinned_so_an_entry_cannot_be_swapped():
     # burned DOWN by one. Removing an entry changes the snapshot exactly as much
     # as adding one, which is why this digest moves — and it is the direction the
     # doctrine wants (`update` after every fix; the count may only fall).
+    #
+    # 2026-10-19 (#9193): burned down by TWO more, from the same cause one file
+    # over. #9071 fixed `tests/eval/write_path/README.md`'s MD040 + MD018 and
+    # REMOVED both entries so the ceiling followed the code — but it left
+    # `snapshot.counts.markdownlint` at 3299 while the list held 3297, and left
+    # this digest pointing at the pre-burn-down contents. Both inconsistencies
+    # are hard errors (`load_baseline` refuses a counts/lists mismatch), so the
+    # REQUIRED `docs` check failed on main and on every PR that merged it until
+    # the pair was moved together. Three guards would have caught it — this one,
+    # `test_snapshot_exists_is_consistent_and_announces_its_end_state`, and
+    # `load_baseline` — and #9071 still merged: its shards were killed by the
+    # 19-minute watchdog, so the failure set was never observed (#5049). The
+    # lesson is not a new guard, it is that the guard has to RUN — which is why
+    # the count and the digest move in ONE change, with the reason written here.
     assert _canonical_digest(baseline["markdownlint"]) == (
-        "1cc55fcd90f4cea146b6d546bc4b79fdebeef2e86defad9305f0ad87fe9fea17"
+        "7a563e5fd489cfc5d6acb26e35d43ce2bc4e9e66932dff6c4647122625cc08fb"
     ), "the markdownlint snapshot contents changed — a swap is not a re-baseline"
     assert _canonical_digest(baseline["lychee"]) == (
         "42efc6c28d6efc385ad49dc59c443f2954220ca9b5eb34e9e66b9f71de38c2db"
