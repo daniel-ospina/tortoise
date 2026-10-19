@@ -1606,6 +1606,13 @@ surfaces:
   # `supabase/tests/pglite/validate.mjs` (the #7968 convention: the SQL half
   # lives in the harness that has a Postgres, this file stays hermetic).
   - test_record_projection.py
+  # #9078: the record's FIRST production write path — the three live journal
+  # doors project into Postgres, fail-soft and counted, tenant resolved or
+  # refused. Hermetic (a recording connection; no Postgres, no docker), so
+  # `core` is the correct home: the change it guards spans `tortoise/sdk.py`,
+  # `tortoise/api.py`, `tortoise/mining.py` and `tortoise/record_projection.py`,
+  # and `--changed-files tortoise/record_writer.py` selects it.
+  - test_9078_record_written_by_production_path.py
   # #7968 / PR #8179 review P1: guards the org-erasure wiring — `purge_org_control_plane`
   # must route the organizations delete through the `purge_org_record` RPC
   # (migration 20261012000005), which sets app.record_journal_purge so the

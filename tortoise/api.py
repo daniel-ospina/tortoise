@@ -151,6 +151,25 @@ class EventAPI:
         # before the append rather than after.
         self._refuse_unapproved_kinds(event)
         self.log.append(event)
+        # ── #9078: journal-first, so the RECORD follows the append ──────
+        # The same order as `TortoiseSDK._emit_event`: journal (commit point) →
+        # Postgres record → cache fold. Without this door, every record written
+        # through `EventAPI` (MCP `tortoise_mine_conversation`, `ingest`,
+        # `docs_miner`, the GitHub indexer) reached the journal and the graph
+        # and never the record, so a `rebuild_from_record` would silently drop
+        # them. `project` is fail-soft and counted, never raising: the append
+        # above has already committed.
+        try:
+            from . import record_writer
+            record_writer.project(event)
+        except Exception:  # never fail a write that already committed
+            # `project` does not raise; this covers the import and any future
+            # defect on the seam. Counted, so it is not silent (#9078).
+            try:
+                from . import monitoring
+                monitoring.record_record_write_failure("raised")
+            except Exception:
+                pass
         if self.projection is not None:
             # #7951 §17.1: journal-first door — the append above is the COMMIT
             # POINT, so the fold runs inside the live-write scope.

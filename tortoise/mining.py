@@ -927,6 +927,23 @@ class ConversationMiner:
         # abstains, exactly as a projection-less lane does.
         EventAPI._refuse_unapproved_kinds(api, record)
         api.log.append(record)
+        # ── #9078: journal-first, so the RECORD follows the append ──────
+        # The miner owns its own envelope and its own append — `record_writer`'s
+        # module docstring names the door set (`_emit_event` in `sdk.py`,
+        # `EventAPI._emit` in `api.py`, and this one) — so it must own the
+        # record write too. This door's record NESTS the node under `event`, the
+        # carrier `record_projection._nested_node_carrier` accepts —
+        # otherwise a mined conversation reaches the journal and the graph and
+        # never the Postgres record, and a `rebuild_from_record` drops it.
+        try:
+            from tortoise import record_writer
+            record_writer.project(record)
+        except Exception:  # never fail a write that already committed
+            try:
+                from tortoise import monitoring
+                monitoring.record_record_write_failure("raised")
+            except Exception:
+                pass
         if api.projection is not None:
             # #7951 §17.1: journal-first door (its own envelope) — the append
             # above is the COMMIT POINT, so the fold runs inside the

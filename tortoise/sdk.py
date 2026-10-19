@@ -6728,6 +6728,16 @@ class TortoiseSDK:
         log = self._get_event_log()
         if log is None:
             # No journal configured: there is no rebuild source to commit to.
+            # #9078: with the RECORD armed this is a MISCONFIGURATION rather
+            # than a no-op — the record is projected FROM the journal, so an
+            # armed record with no journal writes nothing and, without this,
+            # `metrics()["record_write_failures"]` would read 0 over an empty
+            # record (the healthy-looking-surface class this issue removes).
+            try:
+                from . import record_writer
+                record_writer.note_no_journal(type_)
+            except Exception:
+                pass
             return None
         from .ids import ulid, now_iso  # noqa: I001
         event: dict = {
@@ -6819,7 +6829,6 @@ class TortoiseSDK:
             event["actor_user_id"] = _jsonl_actor
         try:
             log.append(event)
-            return True
         except Exception as exc:
             # The graph mutation already succeeded — a log-write failure must
             # not crash the caller or pretend the write failed. Rebuild parity
@@ -6860,6 +6869,33 @@ class TortoiseSDK:
             # "committed?" must read THIS, not the shared counter above, whose
             # before/after delta can be moved by another thread's failure.
             return False
+        # ── #9078: the append COMMITTED, so the record follows it ──────────
+        # §17.1/§2.0 ordering: journal (log of what happened) → Postgres (the
+        # truth state) → cache fold (`proj.apply`, below the callers). ONE OF
+        # THREE live journal doors that reach `record_projection` — this one, and
+        # `EventAPI._emit` (`tortoise/api.py`), and `ConversationMiner`'s own
+        # emitter (`tortoise/mining.py`). A fourth door that appends a journal
+        # record MUST join them (`python tools/record_wiring_check.py` counts the
+        # callers). It emits the same statements a rebuild-from-journal replay
+        # derives, so the two paths cannot disagree about the mapping. `project` is fail-soft BY DESIGN
+        # and returns False with a counted reason — the append is already the
+        # commit point, so failing here would fail a write that persisted. An
+        # unarmed record (`TORTOISE_RECORD_DSN` unset) costs one env lookup.
+        try:
+            from . import record_writer
+            record_writer.project(event)
+        except Exception:  # never fail a committed write
+            # `project` itself does not raise; this covers the import and any
+            # future defect on this seam. Counted so it is not silent.
+            try:  # noqa: SIM105 — counting must never mask the original error
+                monitoring.record_record_write_failure("raised")
+            except Exception:  # noqa: BLE001, RUF100
+                pass
+            _logger.exception(
+                "the record write path raised for %s — the journal holds the "
+                "record, so a replay heals the record (#9078)", type_,
+            )
+        return True
 
     def _journal_entity_event(self, event: dict) -> None:
         """Append a canonical entity record to the journal (the WRITE half).

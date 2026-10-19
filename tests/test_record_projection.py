@@ -150,8 +150,16 @@ _MINIMAL_RECORDS: dict[str, dict] = {
     "OperatorPromoted": {"id": "p1", "point": dict(_SNAPSHOT)},
     "DedupeRecorded": {"id": "p1", "point": dict(_SNAPSHOT)},
     "DedupeRejected": {"id": "p1", "point": dict(_SNAPSHOT)},
-    "EntityBindingRefused": {"id": "p1", "point": dict(_SNAPSHOT)},
-    "BatchIdStamped": {"id": "p1", "point": dict(_SNAPSHOT)},
+    # The PRODUCERS' shape, not an invented one: both are emitted FLAT
+    # (`sdk._emit_event(_BATCH_ID_RECORD_TYPE, id=point_id, **extra)` and
+    # `subject_binding`'s `EntityBindingRefused, id=point_id, ...`). This fixture
+    # used to supply a `point` snapshot neither producer emits, which is how
+    # both mutations stayed declared as snapshot-carried and refused every real
+    # write in silence (#9078 review, measured).
+    "EntityBindingRefused": {"id": "p1", "point_id": "p1", "role": "subject",
+                             "name": "n1", "kind": "Person", "outcome": "refused",
+                             "reason": "no declared subject"},
+    "BatchIdStamped": {"id": "p1", "batch_id": "b1", "content_hash": "h1"},
     "PointRevised": {"id": "p1", "new_content": "c2"},
     "OperatorAnnotated": {"id": "p1", "annotator_bias": 0.5},
     "PointRetracted": {"id": "p1"},
@@ -1201,3 +1209,90 @@ def test_every_type_a_producer_emits_has_a_record_mutation():
         "mutation — a NEW producer must red this suite (Interface A's total "
         "clause), or the silent skip returns"
     )
+
+
+# ── the id's two legal carriers (#9078) ─────────────────────────────────────
+
+
+def _point_added(snapshot_id: str, envelope_id: str | None) -> dict:
+    record = {
+        "type": "PointAdded",
+        "event_id": "01JEVENTULID",
+        "ts": "2026-10-19T00:00:00+00:00",
+        "point": {"id": snapshot_id, "content": "the projection handle is unguarded",
+                  "kind": "claim", "pointKind": "claim", "is_episodic": False},
+    }
+    if envelope_id is not None:
+        record["id"] = envelope_id
+    return record
+
+
+def test_a_point_added_key_may_ride_the_snapshot_not_the_envelope():
+    """Measured on #9078's lane: the CAPTURE writer emits exactly this shape.
+
+    `PointAdded` from `TortoiseSDK.capture_session` carries NO envelope `id` —
+    the id is only in `payload["point"]` — while this module's table comment
+    asserts the opposite. The graph fold always read
+    `inner = event.get("point") or event`, so the snapshot was a legitimate
+    carrier; without this leg the record refused every captured Point and
+    #9078's live wiring silently wrote nothing for them.
+    """
+    statements = rp.mutations_for(_point_added("pt_snapshot_only", None),
+                                  org_id="o", graph_id="g")
+    upserts = [s for s in statements if s.sql.startswith("INSERT INTO public.point")]
+    assert upserts, [s.sql for s in statements]
+    assert "pt_snapshot_only" in upserts[0].params
+
+
+def test_the_envelope_key_still_wins_when_both_carriers_are_present():
+    """The fallback must never re-point a record that names its key twice."""
+    statements = rp.mutations_for(_point_added("pt_snapshot", "pt_envelope"),
+                                  org_id="o", graph_id="g")
+    upserts = [s for s in statements if s.sql.startswith("INSERT INTO public.point")]
+    assert "pt_envelope" in upserts[0].params
+    assert "pt_snapshot" not in upserts[0].params
+
+
+# ── the producers' actual carriers (#9078, measured on the live doors) ──────
+
+
+def test_a_nested_event_record_projects_from_its_nested_carrier():
+    """`ConversationMiner` nests the node under `event` — the fold handles it.
+
+    The record did not, so every mined event was refused (`unprojectable`) while
+    the journal and the graph both had it (#9078 review). The nested mapping is
+    the props source too: keying from it and projecting an empty row would be a
+    record that exists and says nothing.
+    """
+    record = {
+        "version": "1.0",
+        "type": "EventRecorded",
+        "createdAt": "2026-10-19T00:00:00+00:00",
+        "event": {"eventId": "ev_nested", "eventKind": "decision",
+                  "content": "the record is written in production",
+                  "eventStatus": "active", "name": "record wiring"},
+    }
+    statements = rp.mutations_for(record, org_id="o", graph_id="g")
+    event_upserts = [s for s in statements
+                     if s.sql.startswith("INSERT INTO public.event")]
+    assert event_upserts, [s.sql for s in statements]
+    assert "ev_nested" in event_upserts[0].params
+    assert any("the record is written in production" in str(v)
+               for v in event_upserts[0].params), (
+        "the row was keyed from the nested carrier but carries none of it")
+
+
+def test_a_document_record_keys_the_source_by_its_id_like_the_fold_does():
+    """`EventAPI.add_document` emits `id` with NO `url`; the fold keys `url or id`."""
+    record = {
+        "type": "DocumentCreated",
+        "id": "doc_9078",
+        "title": "the record is written in production",
+        "document_kind": "note",
+        "ts": "2026-10-19T00:00:00+00:00",
+    }
+    statements = rp.mutations_for(record, org_id="o", graph_id="g")
+    source_upserts = [s for s in statements
+                      if s.sql.startswith("INSERT INTO public.source")]
+    assert source_upserts, [s.sql for s in statements]
+    assert "doc_9078" in source_upserts[0].params

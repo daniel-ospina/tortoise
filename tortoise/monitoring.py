@@ -671,6 +671,20 @@ AUDIT_FALLBACK_DROP_COUNT = Counter(
     "Audit events that reached no durable sink (#7924 review)",
     ["reason"],
 )
+# #9078: a journal record that did NOT reach the Postgres record. The write is
+# deliberately fail-soft — the append is the commit point (§17.1), so a
+# projection that fails after it cannot un-commit the write, and the healing
+# path is the existing replay. That is exactly why the failure must be
+# OBSERVED: the journal keeps the record, the record lags it, and the only
+# repair is a replay nobody runs unless this number says to. Labels are the
+# refusal/failure REASON (``no_tenant``, ``connect``, ``unprojectable``,
+# ``execute``), never record contents. Single writer:
+# ``record_record_write_failure`` (the #501/#3677 house shape).
+RECORD_WRITE_FAILURE_COUNT = Counter(
+    "tortoise_record_write_failures_total",
+    "Journal records that did not reach the Postgres record (#9078)",
+    ["reason"],
+)
 # #4095: an allowlist-dropped telemetry key — the same loss class as the audit
 # drop above, and the exact defect #3821 fixed half-way. #3821's choke point
 # (``hosted_api._report_unregistered``) counts, warns once per site and never
@@ -1236,6 +1250,41 @@ def record_ingest() -> None:
 
 def record_error() -> None:
     ERROR_COUNT.inc()
+
+
+def record_record_write_failure(reason: str) -> None:
+    """Count one journal record that reached NO Postgres record (#9078).
+
+    ``reason`` is ``"no_tenant"`` (the record is armed but nothing named the
+    organisation/graph — refused rather than guessed), ``"connect"`` (the DSN
+    could not be reached, or is inside its post-failure backoff),
+    ``"unprojectable"`` (the record type has no declared mutation / carries no
+    snapshot — a replay would fail identically), ``"execute"`` (Postgres refused
+    the statement set), ``"no_journal"`` (the record is armed but the write door
+    has no journal to project from), or ``"raised"`` (the seam itself raised —
+    the counting is the backstop, never the expected path). Called from
+    ``tortoise.record_writer`` and from the three live write doors, which count
+    ``"raised"`` for their own try/except.
+
+    A record that lags the journal is recoverable by replay, so this is
+    fail-soft like the append it follows — but the number has to exist, or the
+    lag is visible only in a log line nothing watches.
+    """
+    RECORD_WRITE_FAILURE_COUNT.labels(reason=reason).inc()
+
+
+def record_write_failure_count(reason: str | None = None) -> int:
+    """In-process snapshot of ``RECORD_WRITE_FAILURE_COUNT`` (#9078).
+
+    ``reason=None`` sums every reason; a reason name reads one label. Mirrors
+    ``journal_write_failure_count`` — the readable form used by ``metrics()``
+    and by tests.
+    """
+    counts = _collect_by_label(RECORD_WRITE_FAILURE_COUNT, "reason")
+    if reason is None:
+        return sum(counts.values())
+    return counts.get(reason, 0)
+
 
 
 def record_journal_write_failure() -> None:
@@ -4383,6 +4432,10 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
         # real degradation (the derived graph becomes live-only), so it rides
         # the health/metrics surface rather than a log line nothing watches.
         "journal_write_failures": _counter_val(JOURNAL_WRITE_FAILURE_COUNT),
+        # #9078: the record lags the journal when a projection fails. Same
+        # reasoning as the line above — a degradation the operator must be able
+        # to see, not a log line nothing watches.
+        "record_write_failures": record_write_failure_count(),
         # #7924 review P2: an audit event that reached no durable sink is
         # the same class of failure as a journal write, so it rides THIS
         # payload alongside ``journal_write_failures`` rather than a log line
