@@ -9,14 +9,18 @@ docker" math then counts it as docker-covered while it never touches the
 server (the #942 vacuity vector, cycle-8 P1-3).
 
 SCOPE (#9061): every test module in the tree, at any depth —
-`tests/**/test_*.py` (1076 modules as of 2026-10-18). It used to be
+`tests/**/test_*.py` (1076 modules as of 2026-10-18), and the carve-out
+exemption applies to the MODULE the registry names (`tests/<stem>.py`), never
+to a same-named file in a subdirectory. It used to be
 `tests/test_*.py` plus `tests/e2e/test_*.py`, which left
 `tests/longmem_eval/`, `tests/e2e/auth/`, `tests/e2e/hosted/`, `tests/eval/…`,
 `tests/bench/` and `tests/mini_beir/` outside a guard whose whole purpose is
 to notice a mutation wherever it is written: 72 modules and 7 live mutation
-sites were unscanned while it reported green. `test_the_scan_is_recursive`
-pins the coverage so a later "simplify" back to a flat glob reds instead of
-going quiet.
+sites were unscanned while it reported green. `test_both_guards_scan_the_
+recursive_population` binds the two GUARDS to that enumeration (a pin on the
+helper alone stayed green when both guards were reverted to the flat glob),
+and `test_a_subdirectory_module_cannot_inherit_a_carve_out_exemption` keeps
+the exemption from following a stem into a subdirectory.
 
 Lane intents:
   DELIBERATE_URI            — the site intentionally forces the docker lane
@@ -95,6 +99,7 @@ from __future__ import annotations
 import ast
 import io
 import re
+import sys
 import tokenize
 from pathlib import Path, PurePosixPath
 
@@ -279,7 +284,12 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_integration_search.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_search_engine.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_session_capture_e2e.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
-    "test_billing_upgrade.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+    # #9061: keyed by tests/-relative path — this module lives in tests/e2e/,
+    # so a bare-name key resolved only through the compatibility fallback in
+    # _is_declared, which would hand the declaration to any future same-named
+    # file once this one moved (test_declaration_keys_are_unambiguous now reds
+    # on exactly that).
+    "e2e/test_billing_upgrade.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     # ── DELIBERATE_URI: fixtures/tests that force the docker lane directly ──
     "test_consolidation_4way.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_doctor.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
@@ -610,18 +620,41 @@ def _exempt_stems() -> frozenset[str]:
             TEST_NO_REDIRECT_STEMS)
 
 
+def _is_exempt_module(path: Path) -> bool:
+    """True only for the carve-out MODULE itself — `tests/<stem>.py`, top level.
+
+    The exempt set is a list of carve-out STEMS, and a stem is not a path.
+    Matching on `path.stem` made the exemption follow the NAME into any
+    subdirectory the moment the scan went recursive: `tests/bench/test_smoke_embedded.py`
+    inherited the exemption of the carve-out `tests/test_smoke_embedded.py`
+    and was silently outside both guards, for a reason ("carve-out modules run
+    in the URI-less lane and never co-run with docker-lane files") that is
+    false of a bench module. The exemption's stated rationale is a property of
+    THE MODULE the carve-out registry names, so it is granted by path.
+    """
+    return "/" not in _scan_key(path) and path.stem in _exempt_stems()
+
+
+def _scanned_modules():
+    """Yield (key, src) for every scanned module — the ONE scan population.
+
+    Both guards read this, so they cannot narrow independently, and
+    `test_both_guards_scan_the_recursive_population` pins the population to the
+    recursive enumeration (#9061)."""
+    for f in _iter_test_module_paths():
+        if _is_exempt_module(f):
+            continue
+        yield _scan_key(f), f.read_text(encoding="utf-8")
+
+
 def _uri_mutation_sites():
     """Yield (key, line_number, line) for every mutation site in a
     NON-allowlist (migrated) test file. The executable census — the plan's
     Step 1 grep is the enumeration, this is its machine form."""
-    exempt = _exempt_stems()
-    for f in _iter_test_module_paths():
-        if f.stem in exempt:
-            continue
-        src = f.read_text(encoding="utf-8")
+    for key, src in _scanned_modules():
         for m in _MUTATION_RE.finditer(src):
             line = src.count("\n", 0, m.start()) + 1
-            yield _scan_key(f), line, src.split("\n")[line - 1].strip()
+            yield key, line, src.split("\n")[line - 1].strip()
 
 
 def _is_declared(fname: str, line: str) -> bool:
@@ -671,13 +704,11 @@ def test_uri_mutations_declared_files_exist():
 
 
 def test_the_scan_is_recursive():
-    """#9061: the census must see EVERY directory, not `tests/` + `tests/e2e/`.
+    """#9061: the census must see EVERY directory, not `tests/` + `tests.e2e/`.
 
-    Pins the coverage itself, because the guard's only failure mode when it
+    Pins the enumeration itself, because the guard's only failure mode when it
     narrows is silence: 72 modules and 7 mutation sites were outside it while
-    it reported green. Each path below is one that a non-recursive glob misses;
-    the assertion is about the SCAN, so it stays true no matter which of them
-    later gain or lose a mutation.
+    it reported green.
     """
     scanned = {_scan_key(p) for p in _iter_test_module_paths()}
     for required in ("longmem_eval/test_assembly_arm.py",
@@ -686,6 +717,74 @@ def test_the_scan_is_recursive():
         assert required in scanned, (
             f"the census scan does not reach {required!r} — the glob stopped "
             f"covering the tree (#9061)")
+
+
+def test_both_guards_scan_the_recursive_population():
+    """#9061: the PINS above are worthless unless the GUARDS use the population.
+
+    `test_the_scan_is_recursive` passed even with both guards reverted to the
+    pre-#9061 flat glob, because the 72 newly-visible modules hold no violation
+    today — a pin with nothing to see is silent, not safe. So bind each guard's
+    population to the recursive enumeration and require that neither can scan
+    independently:
+
+      * both guards yield from the SAME seam (`_scanned_modules`), and
+      * that seam IS the recursive enumeration minus the carve-out modules.
+    """
+    expected = {_scan_key(p) for p in _iter_test_module_paths()
+                if not _is_exempt_module(p)}
+    restored = {name for name, _src in _non_exempt_test_files()}
+    assert restored == expected, (
+        "the restoration guard's population drifted from the recursive scan "
+        f"— missing {sorted(expected - restored)[:5]}")
+    # The declaration guard's output is SITES, not a population, so a narrowed
+    # scan would not show up in its results — pin that it READS the seam
+    # functionally (`test_both_guards_consume_the_one_population`).
+
+
+def test_both_guards_consume_the_one_population(monkeypatch):
+    """#9061: a guard that iterates its OWN glob can narrow without reddening.
+
+    Functional, not textual: the population seam is replaced by one synthetic
+    module and each guard must report on THAT module. A guard holding its own
+    `glob(...)` would not see the sentinel and reds here, whatever its source
+    looks like — the previous version of this pin scanned the file's own text
+    for `_scanned_modules()`, which a mere annotation on the def line defeated
+    (the string then matched the TEST's literal instead of the function).
+    """
+    sentinel = "synthetic/sub/test_planted_9061.py"
+    planted = 'x = 1\nos.environ.pop("TORTOISE_DB_URI", None)\n'
+    monkeypatch.setattr(sys.modules[__name__], "_scanned_modules",
+                        lambda: iter([(sentinel, planted)]))
+    sites = list(_uri_mutation_sites())
+    files = list(_non_exempt_test_files())
+    assert [s[0] for s in sites] == [sentinel], (
+        "the declaration guard did not read the one scan population — it is "
+        f"iterating its own glob (#9061): {sites}")
+    assert [name for name, _src in files] == [sentinel], (
+        "the restoration guard did not read the one scan population — it is "
+        f"iterating its own glob (#9061): {files}")
+
+
+def test_a_subdirectory_module_cannot_inherit_a_carve_out_exemption():
+    """#9061: the exempt set is a list of STEMS; a stem is not a path.
+
+    Matching on `path.stem` let `tests/bench/test_smoke_embedded.py` inherit
+    the carve-out exemption of `tests/test_smoke_embedded.py` the moment the
+    scan went recursive — silently outside both guards, justified by a
+    rationale that is false of a bench module. Exemptions are granted to the
+    MODULE the registry names, so the exemption must be by path.
+    """
+    population = {name for name, _src in _non_exempt_test_files()}
+    assert "bench/test_smoke_embedded.py" in population, (
+        "a subdirectory module inherited a carve-out exemption by STEM — the "
+        "exemption must apply only to `tests/<stem>.py` (#9061)")
+    # …and no exempt stem may exempt a subdirectory module at all.
+    collided = sorted(p.name for p in _iter_test_module_paths()
+                      if _scan_key(p) not in population
+                      and "/" in _scan_key(p))
+    assert not collided, (
+        f"subdirectory modules excluded by a stem collision: {collided}")
 
 
 def test_declaration_keys_are_unambiguous():
@@ -706,6 +805,17 @@ def test_declaration_keys_are_unambiguous():
         "bare-name declaration key(s) matching more than one module — key "
         "them by their tests/-relative path instead: "
         + "; ".join(f"{k} -> {ambiguous[k]}" for k in offenders))
+    # …and a bare key must still BE the top-level module it was written for.
+    # `by_name` catches a key that matches two paths TODAY; it cannot see a
+    # reassignment: delete `tests/test_foo.py`, add `tests/sub/test_foo.py`, and
+    # the fallback in `_is_declared` silently re-targets the declaration at a
+    # file nobody declared.
+    moved = sorted(k for k in DELIBERATE_URI_MUTATIONS
+                   if "/" not in k and not (_TESTS_ROOT / k).is_file())
+    assert not moved, (
+        "bare-name declaration key(s) whose top-level module no longer exists "
+        "— the fallback would hand the declaration to a same-named file "
+        f"elsewhere: {moved}")
 
 
 def test_the_cost_skip_cannot_hide_a_uri_agnostic_leak():
@@ -1063,20 +1173,23 @@ def _restoration_violations(files) -> list[str]:
     """
     violations: list[str] = []
     for fname, src in files:
-        # #9061: a file that mentions NEITHER the URI nor a bare MonkeyPatch
-        # cannot hold a violation of either check, and `_scope_map` (tokenize
-        # plus a per-line bracket scan) is the whole cost of this guard: run on
-        # every module it took 296s for 1003 files and 415s+ for 1076, i.e. 4s
-        # from the 300s per-test timeout. Cost must scale with the SITES, not
-        # with the size of the tree.
+        # #9061: `_scope_map` (tokenize plus a per-line bracket scan) is the
+        # whole cost of this guard, so it must run on modules that can hold a
+        # violation, not on the size of the tree. Measured on this host, over
+        # the 810 modules the skip excludes: 51.4s without the skip, 2.8s with
+        # it (`test_uri_mutations_restored`: ~296s -> 21-91s depending on fleet
+        # load). Those numbers are load-dependent; the RATIO is what makes
+        # scanning the whole tree affordable. Cost scales with SITES.
         #
         # BOTH strings are required here: the bare-instance check below
         # (`pytest.MonkeyPatch()` without `.undo()`) is URI-AGNOSTIC — a fixture
         # that sets TORTOISE_TEST_DOCKER_PORT through a bare MonkeyPatch has no
         # `TORTOISE_DB_URI` in its source and still leaks if it never undoes. A
-        # URI-only skip would have silently stopped looking at 4 modules that
-        # use `pytest.MonkeyPatch(` today (no violation among them yet — a
-        # latent hole is exactly what this file exists to prevent).
+        # URI-only skip silently stopped looking at the 4 modules that use
+        # `pytest.MonkeyPatch(` today (no violation among them yet — a latent
+        # hole is exactly what this file exists to prevent), which is why
+        # `test_the_cost_skip_cannot_hide_a_uri_agnostic_leak` plants a URI-free
+        # leak and asserts it is still reported.
         if "TORTOISE_DB_URI" not in src and not _MONKEYPATCH_INST_RE.search(src):
             continue
         lines = src.split("\n")
@@ -1220,12 +1333,10 @@ def _restoration_violations(files) -> list[str]:
 
 
 def _non_exempt_test_files():
-    """(name, src) for every scan-relevant test module (same census as the
-    declaration guard — carve-outs and this task's own files exempt)."""
-    exempt = _exempt_stems()
-    for f in _iter_test_module_paths():
-        if f.stem not in exempt:
-            yield _scan_key(f), f.read_text(encoding="utf-8")
+    """(name, src) for every scan-relevant test module — the same population
+    as the declaration guard (`_scanned_modules`), so the two guards cannot
+    narrow independently (#9061)."""
+    yield from _scanned_modules()
 
 
 def test_uri_mutations_restored():
