@@ -9,6 +9,7 @@ network, no real GitHub API.
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import re
@@ -1273,8 +1274,15 @@ def test_refresh_durations_on_the_real_manifest_of_record() -> None:
     # PyYAML is a second implementation of the same parse, so the completeness
     # check survives without a number that can go stale.
     assert set(entries_before) == set(yaml.safe_load(before)["durations"])
+    # The stamp is NOW, not a literal: this test feeds the refresh's output to
+    # `integrity_problems`, whose durations-staleness rule reds a map captured
+    # more than 21 days ago. A hardcoded "2026-09-28T00:00:00Z" turned this test
+    # into a time bomb that went red exactly 21 days later — for every lane, on
+    # a manifest nobody had touched. A refresh writes the clock it ran at, so
+    # that is what the assertion should feed, and it stays honest forever.
+    stamp = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     new_text, stats = ci_timing.render_refreshed_manifest(
-        before, {"test_bridge_table.py": 123.4}, "2026-09-28T00:00:00Z")
+        before, {"test_bridge_table.py": 123.4}, stamp)
     # `manifest_keys` and `carried_forward` are BOTH computed from the INPUT
     # parse (`before`), so on their own they cannot fail when the refresh drops
     # an entry from the OUTPUT — asserting only these two is a tautology. They
@@ -2582,7 +2590,12 @@ def test_push_extra_enters_the_full_selection_pool(tmp_path, monkeypatch, capsys
 
     plain = run(base, "base")
     bumped = run(with_extra, "extra")
-    assert bumped - plain == 1234.0, (
+    # `approx`: both sides are sums of ~936 float weights, so an exact `==`
+    # asserts binary-representability, not the property under test. Measured at
+    # this head the difference is 1234.000000000001 — the assertion was red on
+    # main for every lane, while a pool that OMITS the weight (the #7537 defect)
+    # still reds it at 0.
+    assert bumped - plain == pytest.approx(1234.0), (
         "push_extra weight must enter the full-selection pool — otherwise the "
         "counted shards run files the denominator omits"
     )
