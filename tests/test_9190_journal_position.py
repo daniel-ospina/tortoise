@@ -649,8 +649,12 @@ def test_a_failed_cache_write_costs_the_cache_not_the_record(
 
     assert [r["n"] for r in read_for_replay(log)] == [0, 1, 2]
     # ...and the failure is not sticky: once the disk has room, the next append
-    # repairs the sidecar (after the recount the stale one forces) and the append
-    # after THAT answers from it.
+    # repairs the sidecar and the append after THAT answers from it. The
+    # repairing append itself answers from the MEMO, not from a recount — the
+    # memo was refreshed by every append whose cache write failed, so the stale
+    # sidecar was never on the answering path. That is why the monkeypatched
+    # `_count_records` below pins the append AFTER the repair: a fresh instance
+    # must read the repaired sidecar rather than recount.
     failing["on"] = False
     assert log.append({"n": 3}) == 4
     monkeypatch.setattr(log_mod, "_count_records",
@@ -991,6 +995,7 @@ def test_one_descriptor_serves_every_cache_write(
     """
     path = tmp_path / "events.jsonl"
     opens: list[str] = []
+    sidecar_fds: list[int] = []       # the fds THIS test's filtered opens returned
     closes: list[int] = []
     real_open, real_close = os.open, os.close
 
@@ -1005,6 +1010,9 @@ def test_one_descriptor_serves_every_cache_write(
         if (os.fspath(target).endswith(log_mod.POSITION_SUFFIX)
                 and flags & os.O_WRONLY):
             opens.append(os.fspath(target))
+            fd = real_open(target, *args, **kwargs)
+            sidecar_fds.append(fd)
+            return fd
         return real_open(target, *args, **kwargs)
 
     def counting_close(fd: int, *args, **kwargs):
@@ -1018,7 +1026,13 @@ def test_one_descriptor_serves_every_cache_write(
     assert [log.append({"n": i}) for i in range(5)] == [1, 2, 3, 4, 5]
     assert len(opens) == 1, f"{len(opens)} opens for 5 appends: the descriptor " \
                             f"was not kept"
-    assert closes == [], "the descriptor was closed while the log was in use"
+    # Intersected with the SIDECAR fds, not `closes == []`: `closes` collects
+    # every `os.close` in the process (`log_mod.os` IS `os`), so an unrelated
+    # file object closed by a fixture, another thread or a finalizer during this
+    # test would fail it for the wrong reason — and the failure would name a
+    # kept descriptor that was never closed.
+    assert not (set(sidecar_fds) & set(closes)), (
+        "the descriptor was closed while the log was in use")
 
     held = log._cache_fd_state[1]
     del log

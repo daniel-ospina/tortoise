@@ -1107,7 +1107,11 @@ class EventLog:
         the next append recounts from scratch. While the journal stays large
         that is a repeatable recount -> degrade cycle. The fix is a
         checkpointed counter with a tail reader (count only what follows a
-        recorded offset), which is #9233, not a knob here.
+        recorded offset), which is #9252, not a knob here. The SAME issue owns
+        the shape where the sidecar cannot be WRITTEN at all (a read-only data
+        dir, ENOSPC, a directory at the sidecar path): `_cache_fd` is
+        re-attempted on every append, so every append then takes that recount
+        under the lock — one DEBUG line is the only signal.
 
         A miss happens on the first append against a journal with no sidecar
         yet (a restart, or a journal that never carried one), after a
@@ -1365,7 +1369,12 @@ class EventLog:
         a record it is writing must take it from that record's own ``append``.
 
         Side effects worth knowing at a call site: it takes the append lock (so
-        a wedged peer can park it for ``_FLOCK_TIMEOUT_S``); it opens the
+        a wedged peer can park it for ``_FLOCK_TIMEOUT_S``), and a timeout there
+        stamps the path UNHEALTHY for ``_FLOCK_UNHEALTHY_FOR_S`` (30 s), during
+        which every :meth:`append` returns ``None`` WITHOUT contending — a
+        read-shaped call can therefore suppress the ``seq`` of writes for 30 s,
+        which is the amplification described on the ``append`` ``None`` states
+        and the one cost of polling this method; it opens the
         journal ``a+b``, so it needs WRITE permission and a journal deleted
         between the ``exists`` check and the open is re-created empty, which is
         the answer ``0`` for the file that then exists; and it writes the

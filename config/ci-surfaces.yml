@@ -1255,6 +1255,17 @@ surfaces:
   # SOURCE_PATTERN, so a change to it falls through to `core` — registering the
   # guard HERE is what makes the file selected for the code it holds.
   - test_5612_journal_append_serialization.py
+  # #9190: `EventLog.append()` returns the record's journal position (the `seq`
+  # `record_projection.replay_plan` keys `journal_event` on) and
+  # `EventLog.position()` exposes the count. Same anchor as the #5612 entry
+  # directly above, for the same reason: `tortoise/log.py` matches no
+  # SOURCE_PATTERN, so a change to it selects `core`, and `core` is where this
+  # guard has to live for the code it holds to run it. Without this entry the
+  # file classifies NOWHERE — `--integrity` reds the required
+  # `manifest-integrity` job, and the suite is selected by no leg at all (not
+  # even on a push, whose fast pool is built from the manifest, not from the
+  # `tests/` glob).
+  - test_9190_journal_position.py
   - test_kind_vocabulary_consistency.py
   # #9123 (§17.1's THIRD lane): the `:EpMeta` epoch declaration. BOTH its
   # subjects — `tortoise/projection/__init__.py` (the new
@@ -6337,6 +6348,18 @@ durations:
   test_lint_tripwire.py: 0.1
   test_log.py: 0.3
   test_5612_journal_append_serialization.py: 3.2
+  # #9190: a file ADDED BY A PR can never have a CI duration at PR time —
+  # `tools/ci_timing.py --refresh-durations` samples push-to-main runs only — so
+  # this row carries a LOCAL measurement rather than waiting for one. Measured on
+  # this host 2026-10-19 at the PR head:
+  # `TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest
+  # tests/test_9190_journal_position.py -q` -> "37 passed in 2.95s", with
+  # "53 passed in 6.77s" for this file plus the #5612 suite. The repo's durations
+  # coverage floor (`DURATION_COVERAGE_MIN = 0.90`) sat at 0.9003 with this file
+  # unweighted — 0.3 files of headroom — so the row is not cosmetic: one more
+  # unmeasured fast file tips `--integrity` red. Refresh from the first
+  # post-merge push run that includes the file.
+  test_9190_journal_position.py: 3.0
   test_5917_torn_tail_seal.py: 2.0
   test_longmem_costing.py: 0.2
   test_longmem_errors.py: 0.1
