@@ -126,13 +126,25 @@ read the set before, perform ONE write, read it after.
 
 **Widening at HEAD, pinned here** (nothing is fixing these):
 
-1. **A bare fold STRAIGHT into a journal-less projection** — a THIRD-PARTY
-   connector, or any caller outside `tortoise/connectors/`, can still fold with
-   ``proj.apply(...)`` (kind ``pm:issue`` from `github_map`), and
-   `FalkorProjection.apply` refuses a direct fold only when ``_journal_backed``
-   — correctly, since with no journal there is no truth store for the cache to
-   be ahead of. So on a journal-less projection the kind is persisted ungated.
-   The five IN-REPO connectors no longer take this path: `#9068` gates each
+1. **A bare write STRAIGHT into a projection** — a THIRD-PARTY connector, or
+   any caller outside `tortoise/connectors/`, can still widen the set through
+   TWO sinks, and they are open on DIFFERENT shapes:
+
+   * `proj.apply(...)` — kind `pm:issue` from `github_map`. It refuses a direct
+     fold only when ``_journal_backed``, correctly, since with no journal there
+     is no truth store for the cache to be ahead of. **So this sink is open on
+     a journal-less projection only.**
+   * `proj.link_source_to_entity(url, id, label, source_kind)` — the value lands
+     in the MINED `sourceKind` slot (`projection/edges.py`: `ON CREATE SET
+     s.sourceKind=$sk`). This method has **no `_journal_backed` check at all**
+     (measured: a journal-backed SDK widens too), so **it is open on BOTH
+     shapes**, and the ONLY refusal on that leg is in the
+     `sdk.link_source_to_entity` WRAPPER. A fix that mirrors `apply`'s gate
+     (`if not _journal_backed: refuse`) would therefore leave the
+     journal-backed half open — which is why the pin below carries a
+     journal-backed case as well as the journal-less ones.
+
+   The five IN-REPO connectors no longer take either path: `#9068` gates each
    batch through `connectors._gate_kinds` before its first ``apply`` (see
    `docs/EXPANSION_PACKS.md`), so what survives here is the SEAM, not the
    shipped connectors. The fix must reuse `pack_state`'s ONE read core rather
@@ -1092,13 +1104,15 @@ def test_a_pipeline_row_does_not_grant_its_namespace(
 # failure is FAILED, not silently xfailed. The journal-less precondition lives
 # in the fixture (an in-body `assert` would be swallowed by this marker).
 #
-# TWO SINKS, not one. The residual names `apply`, but the projection writes a
-# mined kind property in a second place — `link_source_to_entity` stores the
-# caller's `source_kind` in `sourceKind` (`projection/edges.py`) — and the gate
-# for that leg lives in the `sdk.link_source_to_entity` WRAPPER, not in the
-# projection. A residual statement narrower than the measurement is the defect
-# this module exists to catch, so BOTH sinks are pinned: closing `apply` alone
-# must not read as closing the seam.
+# TWO SINKS, with DIFFERENT exposure. The residual names `apply`, but the
+# projection writes a mined kind property in a second place —
+# `link_source_to_entity` stores the caller's `source_kind` in `sourceKind`
+# (`projection/edges.py`) — and the gate for that leg lives in the
+# `sdk.link_source_to_entity` WRAPPER, not in the projection. `apply` gates
+# only when `_journal_backed`; the link has NO `_journal_backed` check at all,
+# so it is open on both shapes. Hence THREE cases: the journal-less pair plus a
+# journal-backed link, so a fix that mirrors `apply`'s gate cannot leave the
+# journal-backed half both open and unpinned.
 def _fold_a_journal_less_projection(proj) -> None:
     proj.apply({"type": "ObjectRegistered", "id": "o-fold-1",
                 "name": "FoldProbe", "object_kind": "pm:issue"})
@@ -1109,36 +1123,72 @@ def _link_a_journal_less_source(proj) -> None:
                                "Object", "marketing:leak")
 
 
-@pytest.mark.parametrize("writer,namespaced", [
-    pytest.param(_fold_a_journal_less_projection, "pm", id="apply-fold"),
-    pytest.param(_link_a_journal_less_source, "marketing", id="source-link"),
+@pytest.fixture()
+def journal_backed_dev_only_sdk(tmp_path: Path) -> Iterator[TortoiseSDK]:
+    """The SAME ``{'dev'}``-approved graph, but on a JOURNAL-BACKED projection.
+
+    The shape contrast the link sink needs: `apply` refuses a direct fold here
+    (`DirectCacheWriteRefused`) while `link_source_to_entity` does not, so this
+    is the only fixture on which that difference is observable. Deliberately a
+    second construction rather than a parameter on ``dev_only_sdk`` — that
+    fixture's journal-less precondition is a guard the other 14 tests rely on.
+    """
+    sdk = TortoiseSDK(str(tmp_path / "residuals-jb.db"),
+                      event_log_path=str(tmp_path / "residuals.jsonl"))
+    try:
+        pack_state.set_graph_packs(sdk, packs=[dict(p) for p in _DEV_ONLY])
+        approved = pack_state.graph_installed_namespaces(sdk)
+        if approved != frozenset({"dev"}):
+            raise _PreconditionNotMet(
+                "fixture precondition: the graph must start approved for 'dev' "
+                f"only, got {sorted(approved or ())}")
+        if sdk._get_proj()._journal_backed is not True:
+            raise _PreconditionNotMet(
+                "fixture precondition: this must be the JOURNAL-BACKED shape — "
+                "the link sink's exposure is the one that differs here")
+        yield sdk
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+@pytest.mark.parametrize("writer,namespaced,fixture_name", [
+    pytest.param(_fold_a_journal_less_projection, "pm", "dev_only_sdk",
+                 id="apply-fold-journal-less"),
+    pytest.param(_link_a_journal_less_source, "marketing", "dev_only_sdk",
+                 id="source-link-journal-less"),
+    pytest.param(_link_a_journal_less_source, "marketing",
+                 "journal_backed_dev_only_sdk", id="source-link-journal-backed"),
 ])
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "#9068 residual 2 — the projection gates a direct write only when "
-    "`_journal_backed`, so on a journal-less projection (the connectors' "
-    "shape) a mined kind property is persisted ungated and widens the set: "
-    "`apply` via `object_kind`, `link_source_to_entity` via `sourceKind`"))
+    "#9068 residual 2 — the projection's two sinks widen the set ungated on "
+    "a direct call: `apply` refuses only when `_journal_backed` (open on a "
+    "journal-less projection), while `link_source_to_entity` has no "
+    "`_journal_backed` check at all (open on BOTH shapes) — its only refusal "
+    "is the `sdk.link_source_to_entity` wrapper"))
 def test_a_journal_less_fold_does_not_widen_the_approval_set(
-        dev_only_sdk: TortoiseSDK, writer, namespaced: str) -> None:
+        request, writer, namespaced: str, fixture_name: str) -> None:
     """(1) Failing value is the approval set gaining `namespaced`; (2) the
     fixture is a write through the seam a caller outside `tortoise/connectors/`
     actually reaches — `proj.apply(entities["object"])` carrying the kind
     `github_map` stamps on an issue Object (`pm:issue`), and
     `proj.link_source_to_entity(..., source_kind='marketing:leak')`, whose
-    `sourceKind` the mining leg also reads — on a projection with NO journal.
+    `sourceKind` the mining leg also reads — on a projection with NO journal,
+    plus the SAME link on a JOURNAL-BACKED one (where `apply` would refuse).
 
-    One case per sink: the gate is per CALL SITE, so a fix at one sink says
+    One case per (sink, shape): the gate is per CALL SITE and the two sinks do
+    not share an exposure, so a fix at one sink — or in one shape — says
     nothing about the other.
     """
-    sdk = dev_only_sdk
+    sdk = request.getfixturevalue(fixture_name)
     proj = sdk._get_proj()
 
     _attempt_write(lambda: writer(proj))
 
     assert namespaced not in (_approved(sdk) or frozenset()), (
-        f"a journal-less projection write persists a mined kind property, so "
-        f"the sink itself must consult the graph's approval set — `{namespaced}` "
-        f"entered it with no journal to gate the write")
+        f"a projection write persists a mined kind property, so the sink "
+        f"itself must consult the graph's approval set — `{namespaced}` "
+        f"entered it ({fixture_name}) with no gate in front of the write")
 
 
 # ── Residual 3: offline re-typing is DELIBERATELY ungated ─────────────────

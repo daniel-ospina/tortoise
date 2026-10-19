@@ -468,7 +468,8 @@ let the polling entry point install `pm` on a `dev`-only graph), `sdk._doc_write
 `sdk.ingest_corpus` (its `eventKind` keyword on a raw-Cypher writer),
 `sdk._journal_event_raw_write` (the raw `:Event` seam, #9197),
 the conversation miner's emitter (`mining.ConversationMiner._emit_event`),
-`link_source_to_entity`,
+`link_source_to_entity` (through the **SDK wrapper** — the projection method
+behind it is NOT gated; see the per-call-site caveat below),
 and the REST object/subject/commit doors. That list is the human-readable
 summary; the EXECUTABLE inventory — and the one to read before adding a door —
 is `tests/test_9068_pack_gate_residuals.py::_DOORS` (19 doors at this head),
@@ -549,16 +550,17 @@ the READER on both new and existing rows, not of the write.
 `FalkorProjection.apply` still gates a direct fold only when `_journal_backed`,
 so a THIRD-PARTY connector — or any caller outside `tortoise/connectors/` — that
 folds straight into a journal-less projection is still ungated. The projection
-has a **second** ungated sink of the same shape: `link_source_to_entity` writes
-the caller's `source_kind` into the mined `sourceKind` slot
-(`projection/edges.py`'s `ON CREATE SET s.sourceKind=$sk`); the refusal for that
-leg lives in the `sdk.link_source_to_entity` **wrapper**, so a direct projection
-call is open too. Both gaps are measured and pinned
-(`tests/test_9068_pack_gate_residuals.py`'s
-`test_a_journal_less_fold_does_not_widen_the_approval_set`, one parametrised
-XFAIL case per sink, on the fixed behaviour) — a residual statement that named
-only `apply` would be narrower than the measurement, and closing `apply` alone
-would read as closing the seam. Neither is claimed closed here.
+has a **second** ungated sink with WIDER exposure: `link_source_to_entity`
+writes the caller's `source_kind` into the mined `sourceKind` slot
+(`projection/edges.py`'s `ON CREATE SET s.sourceKind=$sk`) and has **no
+`_journal_backed` check at all**, so a direct call widens on BOTH shapes — the
+refusal for that leg lives only in the `sdk.link_source_to_entity` **wrapper**.
+Both gaps are measured and pinned (`tests/test_9068_pack_gate_residuals.py`'s
+`test_a_journal_less_fold_does_not_widen_the_approval_set`: `apply-fold` on a
+journal-less projection, `source-link` on journal-less AND on journal-backed) —
+a residual statement that named only `apply` would be narrower than the
+measurement, and closing `apply` alone would read as closing the seam. Neither
+is claimed closed here.
 
 **Deliberately NOT gated — and why:**
 
@@ -569,7 +571,8 @@ would read as closing the seam. Neither is claimed closed here.
 | `retype.py` / `tools/retype_snapshot.py` | Offline: they transform a dump and never touch a live graph. They enforce the target kind against the **declared vocabulary** instead (`RetypeError`). |
 | `hosted_api._seed_demo_graph` | Raw Cypher for the sample content, but every kind it writes is a **bare** `pointKind` literal from the reviewed `_DEMO_*` tables (`observation`, `statement`, `event`, `workflow`). A bare `pointKind` names no pack, so it cannot widen the approved set. (Note the asymmetry: a bare **`eventKind`** IS attributable, `_ATTRIBUTABLE_BARE_KIND_KEYS` — this writer sets none.) |
 | `sdk._emit_event` (post-mutation payload append) | The pre-write doors are gated instead. The mutations it describes (`PointPromoted`, `Dedupe*`, `create_operator`) have already written their node, so a refusal at the append could only split the journal from the cache. NOT to be confused with `mining.ConversationMiner._emit_event`, which builds its own `EventRecorded` envelope and IS gated before its append (#5475/#8982). |
-| `FalkorProjection.apply` on a journal-less projection | The #9068 gate sits at the five connector CALL SITES, not at this sink (see the per-call-site caveat above). A third-party connector folding directly is still ungated, and that residual is pinned as an XFAIL rather than declared closed. |
+| `FalkorProjection.apply` on a journal-less projection | The #9068 gate sits at the five connector CALL SITES, not at this sink (see the per-call-site caveat above). A third-party connector folding directly is still ungated, and that residual is pinned as an XFAIL rather than declared closed. The sink's own refusal is `_journal_backed`-conditional, so on a journal-backed projection it DOES refuse. |
+| `FalkorProjection.link_source_to_entity` on ANY projection | Same per-call-site gate, and unlike `apply` this sink has **no `_journal_backed` check at all**: the caller's `source_kind` reaches the mined `sourceKind` slot (`projection/edges.py`) on a journal-backed projection too. The only refusal on that leg is the `sdk.link_source_to_entity` WRAPPER, so a direct projection call widens on BOTH shapes. Pinned XFAIL, one case per shape, not declared closed. |
 | `pipeline.py`'s `SET p.kind = <pipeline_key>` | The value is a real namespaced **pipeline key** (`venture:deal`), not a pack kind — gating the writer would start refusing legitimate pipeline edits. What had to change was the READER: the mining leg no longer treats a bare `kind` on `:Pipeline`/`:Graph` as an ontology kind (#9068, above), so this write stays ungated and no longer widens the approved set. |
 
 A re-typing that DOES need a namespace the graph has not approved is an

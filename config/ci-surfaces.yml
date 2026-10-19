@@ -5733,9 +5733,10 @@ durations:
   # value — it is not a junit-sweep figure, and a sweep should replace it. Current
   # shape at the head of this branch: 15 test FUNCTIONS (`CENSUS: 14 PASS, 1
   # XFAIL, 15 total`, recomputed by the file's own
-  # `test_the_header_census_matches_this_file`), 31 node ids after
-  # parametrisation (the residual-2 XFAIL is parametrised over BOTH ungated
-  # projection sinks — `apply` and `link_source_to_entity`), 2 xfail cases; measured 147.65 s on this host, 166.0 s in the
+  # `test_the_header_census_matches_this_file`), 32 node ids after
+  # parametrisation (the residual-2 XFAIL is parametrised over the projection's
+  # TWO ungated sinks × the shapes they are open on — `apply` journal-less, and
+  # `link_source_to_entity` journal-less AND journal-backed), 3 xfail cases; measured 147.65 s on this host, 166.0 s in the
   # authoring run, hence the weight below. The two heavy rows are the pins
   # themselves (the SDK fixture builds a store per test, twice); the inventory
   # tests are AST walks over `tortoise/**` and cost ~1 s together. Not moved into

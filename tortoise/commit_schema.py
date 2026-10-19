@@ -231,12 +231,15 @@ def compile_vocab(packs_dir: Path | str | None = None,
     set since #9068 scopes the mining leg's bare ``kind`` read to the ontology
     labels — a pipeline KEY is not an ontology kind), raw-Cypher / offline
     re-typing (``tortoise/migrate_kinds.py``, ``tortoise/retype.py``), and the
-    projection's OWN two sinks: ``FalkorProjection.apply`` and
-    ``link_source_to_entity`` (which writes the caller's ``sourceKind``) gate a
-    direct write only when ``_journal_backed``, so on a **journal-less**
-    projection — where the cache IS the store — a direct call widens the set.
-    #9068's connector gates sit in FRONT of the connectors' calls, not in front
-    of the sink: the gap is measured, pinned XFAIL and NOT closed.
+    projection's OWN two sinks, which do NOT share an exposure:
+    ``FalkorProjection.apply`` refuses a direct write only when
+    ``_journal_backed`` (so it is open on a **journal-less** projection, where
+    the cache IS the store), while ``link_source_to_entity`` writes the caller's
+    ``sourceKind`` with **no ``_journal_backed`` check at all** (open on both
+    shapes — a journal-backed SDK widens too) and its only refusal is in the
+    ``sdk.link_source_to_entity`` **wrapper**. #9068's connector gates sit in
+    FRONT of the connectors' calls, not in front of either sink: the gaps are
+    measured, pinned XFAIL and NOT closed.
     (``sdk.ingest_corpus`` writes its remaining fields with raw Cypher too, but
     its one mined input — ``eventKind`` — IS gated, and the rest are snake-case
     keys ``graph_kind_namespaces`` does not mine, so it is not a widening path.)
