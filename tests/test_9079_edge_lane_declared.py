@@ -50,7 +50,9 @@ for the argument. Its two measured legs:
   writes it property-free and a later `link_source_to_*` `MERGE` cannot repair
   it (`#5213` option 3, §9.6, `tests/test_references_boundary_5213.py`);
   `test_the_references_edge_is_still_written_bare` asserts THAT shape.
-* it does not claim durability for the carrier-less relations (above).
+* it does not claim durability for the relations this lane emits no carrier for
+  (above) — the engine's `DirectEdgeCreated` fold could carry them, and this verb
+  emits nothing.
 
 ⚠️ What is NOT acceptable, and what these tests exist to prevent: "fixing" this
 by making `create_edge` tolerate a refusal, or by treating the lane as a bypass

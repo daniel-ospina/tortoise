@@ -657,24 +657,26 @@ def source_change_notices(g, source_refs, current_versions: dict[str, str] | Non
 # content is `(source, predicate, target)` between two entities that already
 # exist, so the write adds no state of its own: it is a DERIVATION.
 #
-# WHY DECLARED AND NOT JOURNALLED. A record COULD describe it (so this is not
-# the `_graph_metadata_write_scope` lane, whose first obligation is that no
-# record describes the write), and the edges it mints are not re-derived by
-# today's replay — the two shapes that would make journaling or
-# `_live_write_scope` honest. ⛔ WHY NOT JOURNALLED, PRECISELY — the replay half
-# of journalling ALREADY EXISTS and this is NOT a request for a new resolver:
-# `DirectEdgeCreated` is a flat `{src, tgt, edge_type, direction}` record whose
-# pass-2b fold re-creates exactly this edge shape, and MEASURED on this head,
-# emitting that record and running `rebuild_all` brings `ownedBy`, `dependsOn`,
-# `references` and `memberOf` edges back. What is missing is the EMISSION: this
-# verb is a PROJECTION method with no journal handle, so the gap is on the
-# producer side (an SDK-level edge door that emits the record), not in the
-# replay engines — a bigger change than a declaration child, and it belongs to
-# the record-store epic (`#7879`) with the write-class row carried on `#9079`'s
-# census; its ordering is settled the OTHER way round: the declaration lands
-# BEFORE the guard, because a guard that refuses the product's own edge mints is
-# not a guard, it is a regression (measured on `#9079`'s lane: arming it refused
-# these writers; the seed path's REST caller answers 500 — see
+# WHY DECLARED AND NOT JOURNALLED, PRECISELY. Two shapes would have made this
+# write honest without a declaration, and the evidence rejects BOTH:
+#   * `_live_write_scope` — its contract is "journal appended first, then the
+#     fold", and NOTHING is appended on this path: `sdk.create_edge` →
+#     `proj.create_edge` emits no record, so the scope would state a false
+#     ordering.
+#   * journalling — the replay half ALREADY EXISTS and this is NOT a request for
+#     a new resolver: `DirectEdgeCreated` is a flat `{src, tgt, edge_type,
+#     direction}` record whose pass-2b fold re-creates exactly this edge shape,
+#     and MEASURED on this head, emitting that record and running `rebuild_all`
+#     brings `ownedBy`, `dependsOn`, `references` and `memberOf` edges back.
+#     What is missing is the EMISSION: this is a PROJECTION method with no
+#     journal handle, so the gap is on the producer side (an SDK-level edge door
+#     that emits the record) — a bigger change than a declaration child, and it
+#     belongs to the record-store epic (`#7879`) with the write-class row carried
+#     on `#9079`'s census.
+# And the ORDERING is settled the other way round regardless: the declaration
+# lands BEFORE the guard, because a guard that refuses the product's own edge
+# mints is not a guard, it is a regression (measured on `#9079`'s lane: arming it
+# refused these writers; the seed path's REST caller answers 500 — see
 # `selfhost_api.py::POST /onboarding/seed` and
 # `hosted_api.py::POST /v1/onboarding/seed`).
 #
