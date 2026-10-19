@@ -4498,15 +4498,19 @@ tier1:
 - test_entity_attachment_brief_claims.py
 # #9080: the extractor-v4 capstone's gate + run probe (`core` above) — a pure,
 # no-DB file/JSON read plus `git cat-file`/`merge-base`. Dual-registered with
-# `core` on the same rule the extractor-v4 guards above follow: `core` is the
-# classification home `--integrity` reads, and this arm is the cheap fast-pool
-# placement for the diff that can rot the bundle it pins
+# `core`, and this `tier1` arm is LOAD-BEARING, not belt-and-braces: measured at
+# this head, a `docs/`-only `pull_request` diff returns
+# `{"surfaces": [], "full": false, test_files: <the tier-1 set>}` — the docs-only
+# early return selects tier1 and NOTHING else, so this row is the only reason the
+# pin runs on the very diff that can rot the bundle it holds
 # (`docs/evidence/7949-capstone/**` — a shipped log whose refusal rows are tidied
-# into a green one, or a probe whose observation surface moves).
-# ⚠️ Measured at this head: a `docs/`-only diff currently selects FULL for
-# `pull_request` (not tier1-only, contrary to the sibling comments above), so this
-# arm is belt-and-braces rather than load-bearing. Kept because it costs one row; the
-# drift is filed as #9090 (the same stale rationale is load-bearing for ~6 sibling rows).
+# into a green one, or a probe whose observation surface moves). Do not delete it
+# as "one cheap redundant row". The `core` half is what `--integrity` reads, and
+# `tools/ci_selection.py::CORE_ALSO` carries `docs/evidence/7949-capstone/probes/`
+# so a PROBE-ONLY diff selects `core` too — the same entry its siblings
+# (`docs/evidence/7950-capstone/probes/`, `docs/evidence/5612-journal-growth/probes/`)
+# carry. Pinned by
+# tests/test_ci_selection.py::test_7949_capstone_probe_change_selects_core_not_tier1.
 - test_7949_capstone_verdict_check.py
 # ── #9017 (2026-10-18): the slow pool's weights and its leg split are MEASURED
 #

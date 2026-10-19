@@ -1883,6 +1883,32 @@ def test_capstone_probe_change_selects_core_not_tier1():
         assert r["full"] is False, (path, r)
 
 
+def test_7949_capstone_probe_change_selects_core_not_tier1():
+    # #9080: docs/evidence/7949-capstone/probes/capstone_run.py owns
+    # tests/test_7949_capstone_verdict_check.py (`core`), the DB-free pin on the
+    # run's refusal chain and the pure observers every row is derived from.
+    #
+    # PR #9089 review P2: `docs/` is a flat NON_PYTHON_PREFIXES entry and no
+    # SOURCE_PATTERNS row matches the probe, so a PROBE-ONLY change came back
+    # with `changed == []` and took the docs-only early return — `select()`
+    # returned NO `core` surface, so the pin's `core` registration never reached
+    # the file it guards (the #1349/#3332/#3616 silent-drop class, the same
+    # shape as `docs/evidence/7950-capstone/probes/` above).
+    #
+    # Measured before the CORE_ALSO entry (2026-10-19):
+    # `_sel(["docs/evidence/7949-capstone/probes/capstone_run.py"])` ->
+    # surfaces=[], full=False, the pin present only through `tier1`.
+    # Mutation check: removing the CORE_ALSO entry fails assert 1 below.
+    for path in (
+        "docs/evidence/7949-capstone/probes/capstone_run.py",
+        "docs/evidence/7949-capstone/probes/README.md",
+    ):
+        r = _sel([path])
+        assert "core" in r["surfaces"], (path, r)
+        assert "test_7949_capstone_verdict_check.py" in r["test_files"], (path, r)
+        assert r["full"] is False, (path, r)
+
+
 def test_supabase_config_change_selects_core_not_tier1():
     # supabase/config.toml is the committed LOCAL-stack config and resolves its
     # providers by `env(NAME)` substitution, so each of those names is required

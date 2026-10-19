@@ -47,12 +47,56 @@ probe = _load_probe()
 
 
 def _git(*args: str) -> str:
+    """Read a revision WITHOUT assuming history or a resolvable parent.
+
+    ``check=False`` on purpose: CI checks this repo out at ``fetch-depth: 1``,
+    so only ``HEAD`` is guaranteed to resolve. A ``check=True`` call on a
+    revision the shallow clone does not have raises ``CalledProcessError`` at
+    MODULE IMPORT — i.e. a collection error on every PR (no `FAILED <nodeid>`
+    for the merge rail to attribute) — which is exactly what a
+    ``git rev-parse HEAD~1`` here did. Anything needing two commits builds its
+    own pair (``_ancestry_pair``); nothing derives ancestry from the checkout.
+    """
     return subprocess.run(["git", *args], cwd=str(_REPO), capture_output=True,
-                          text=True, check=True).stdout.strip()
+                          text=True, check=False).stdout.strip()
 
 
 HEAD = _git("rev-parse", "HEAD")
-PARENT = _git("rev-parse", "HEAD~1")
+
+
+def _ancestry_pair(tmp_path: Path) -> tuple[Path, str, str]:
+    """A throwaway repo with two commits and the cited evidence file.
+
+    Returns ``(repo, parent_sha, child_sha)``. This is what makes the
+    "evidence predates the pre-registration" case real (a genuine
+    non-ancestor pair) without depending on THIS checkout's history depth.
+    """
+    repo = tmp_path / "ancestry"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    for key, value in (("user.email", "capstone@example.invalid"),
+                       ("user.name", "capstone"),
+                       ("commit.gpgsign", "false")):
+        subprocess.run(["git", "-C", str(repo), "config", key, value],
+                       check=True)
+    evidence = repo / "docs/evidence/7949-capstone/capstone.log"
+    evidence.parent.mkdir(parents=True)
+    # A REAL capstone log: the refusal rows cite it, and V6 requires the cited
+    # file to carry their row (so a placeholder text file would red on V6 for
+    # the four rows this test is not about).
+    cited = {"schema": cvc.SCHEMA,
+             "rows": [{"criterion": f"E{i}"} for i in range(1, 6)]}
+    evidence.write_text(f"{cvc.BEGIN}\n{json.dumps(cited)}\n{cvc.END}\n")
+
+    def commit(message: str) -> str:
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q",
+                        "--allow-empty", "-m", message], check=True)
+        return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                              capture_output=True, text=True,
+                              check=True).stdout.strip()
+
+    return repo, commit("parent"), commit("child")
 
 
 def _record(**over) -> dict:
@@ -81,8 +125,7 @@ def _record(**over) -> dict:
 
 
 def _codes(record: dict, *, require_green: bool = False) -> list[str]:
-    findings = cvc.check(record, log_path=LOG, repo=_REPO,
-                         require_green=require_green)
+    findings = cvc.check(record, repo=_REPO, require_green=require_green)
     return [code for code, _w, _m in findings.items]
 
 
@@ -96,7 +139,7 @@ def test_shipped_capstone_log_is_structurally_clean():
     evidence bundle cannot quietly rot the way §10's prose did.
     """
     record = cvc.extract_block(LOG.read_text())
-    findings = cvc.check(record, log_path=LOG, repo=_REPO, require_green=False)
+    findings = cvc.check(record, repo=_REPO, require_green=False)
     assert not findings, findings.render()
     assert [r["criterion"] for r in record["rows"]] == list(cvc.CRITERIA)
 
@@ -209,13 +252,26 @@ def test_green_without_all_eight_steps_observed_is_a_finding():
     assert "V5" in _codes(rec)
 
 
-def test_green_row_whose_evidence_predates_the_preregistration_is_a_finding():
-    """`0 rows green where the evidence artifact predates the pre-registration`."""
+def test_green_row_whose_evidence_predates_the_preregistration_is_a_finding(
+        tmp_path):
+    """`0 rows green where the evidence artifact predates the pre-registration`.
+
+    The pair is built in a throwaway repo (parent, then child): the row is
+    measured at the PARENT while the thresholds were frozen at the CHILD, so
+    the evidence predates them by construction. Before this, the test read
+    ``git rev-parse HEAD~1`` at MODULE IMPORT, which does not resolve in CI's
+    depth-1 checkout and turned the whole file into a collection error on
+    every PR.
+    """
+    repo, parent, child = _ancestry_pair(tmp_path)
     rec = _record()
     _green(rec)
-    rec["prereg"]["sha"] = HEAD
-    rec["rows"][0]["sha"] = PARENT          # measured BEFORE the thresholds froze
-    assert "V5" in _codes(rec)
+    rec["prereg"]["sha"] = child
+    rec["rows"][0]["sha"] = parent        # measured BEFORE the thresholds froze
+    findings = cvc.check(rec, repo=repo, require_green=False)
+    codes = [code for code, _w, _m in findings.items]
+    assert codes == ["V5"], findings.render()
+    assert "PREDATES" in findings.render()
 
 
 def test_green_row_without_a_frozen_preregistration_is_a_finding():
@@ -366,24 +422,17 @@ def test_e4_receipt_flags_the_four_edge_denominator():
     assert (ok["numerator"], ok["denominator"]) == (14, 15)
 
 
-def test_e3_census_counts_one_unanchored_object_as_a_failure():
-    rows = [
-        {"label": "Point", "id": "p1", "sourceVersion": "abc"},
-        {"label": "Point", "id": "p2", "sourceVersion": "abc"},
-        {"label": "Event", "id": "e1", "sourceVersion": "abc"},
-        {"label": "Object", "id": "o1", "sourceVersion": None},
-    ]
-    census = probe.e3_census_from_rows(rows)
-    assert census["denominator"] == 4
-    assert census["numerator"] == 3
-    assert census["unanchored_total"] == 1
-    assert census["unanchored"] == [{"label": "Object", "id": "o1"}]
-    assert census["by_label"] == {"Point": 2, "Event": 1, "Object": 1}
+def test_the_e3_census_instrument_is_not_shipped_unwired():
+    """E3's census is #5199's to land WITH its graph reader.
 
-
-def test_e3_census_on_an_empty_graph_is_zero_not_green():
-    census = probe.e3_census_from_rows([])
-    assert (census["numerator"], census["denominator"]) == (0, 0)
+    A census function the shipped path never calls reads as coverage of the run
+    while measuring nothing, and a reader written blind (a Cypher filter on an
+    anchor property `#5199` says does not exist yet on `:Object`/`:Event`)
+    would return zero rows and read as a working instrument reporting `(0, 0)`.
+    So the probe carries no census; this pins that it does not come back
+    without the reader that calls it.
+    """
+    assert not hasattr(probe, "e3_census_from_rows")
 
 
 def test_refused_rows_are_never_green_and_always_name_a_bug():
@@ -419,10 +468,111 @@ def test_run_refuses_without_a_preregistration_and_emits_a_clean_table(tmp_path)
     record = cvc.extract_block(out.read_text())
     assert record["run"]["status"] == "REFUSED"
     assert record["run"]["steps_observed"] == []
-    findings = cvc.check(record, log_path=out, repo=_REPO,
+    findings = cvc.check(record, repo=_REPO,
                          require_green=False)
     assert not findings, findings.render()
     assert "V9" in _codes(record, require_green=True)
+
+
+def _frozen_prereg(**over) -> dict:
+    record = {"schema": probe.PREREG_SCHEMA, "written_before_any_run": True}
+    record.update(over)
+    return record
+
+
+def _read_prereg_ok(monkeypatch, record: dict | None = None) -> None:
+    """G0 PASSES, so the run reaches G1+ — the half no test used to reach."""
+    fixed = record if record is not None else _frozen_prereg()
+    monkeypatch.setattr(probe, "read_preregistration",
+                        lambda _sha, _artifact: (fixed, ""))
+
+
+def test_post_g0_refusals_record_the_preregistration_as_read(tmp_path, monkeypatch):
+    """A G1–G5 refusal must not write `prereg.status: "ABSENT"`.
+
+    Only the G0 refusal means "#9075 is open". Every later gate reached the run
+    BECAUSE the frozen pre-registration was read, so the log has to say so —
+    otherwise a G2/G5 refusal tells the next lane the thresholds are still
+    missing and the table it leaves behind is wrong about the one dependency
+    the whole chain hangs on.
+    """
+    _read_prereg_ok(monkeypatch)
+    out = tmp_path / "missing-corpus.log"
+    code = probe.main(["--prereg", HEAD,
+                       "--corpus", str(tmp_path / "absent.json"),
+                       "--out", str(out)])
+    assert code == 2, code
+    record = cvc.extract_block(out.read_text())
+    assert record["run"]["status"] == "REFUSED"
+    assert record["prereg"]["status"] == "OK", record["prereg"]
+    assert record["prereg"]["sha"] == HEAD
+
+
+def test_a_g2_refusal_carries_the_corpus_it_read_and_the_preregistration(
+        tmp_path, monkeypatch):
+    """The corpus sha/turns are COMPUTED before G2, so the refusal carries them.
+
+    A refusal that drops a sha it already computed leaves the log saying "no
+    corpus" about a corpus whose bytes it hashed a line earlier.
+    """
+    _read_prereg_ok(monkeypatch)
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
+    out = tmp_path / "g2.log"
+    code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
+                       "--out", str(out)])
+    assert code == 3, code
+    record = cvc.extract_block(out.read_text())
+    assert record["run"]["gate_failed"] == 3
+    assert record["prereg"]["status"] == "OK"
+    assert record["corpus"]["sha256"] == probe.corpus_sha256(corpus)
+    assert record["corpus"]["turns"] == 1
+
+
+def test_a_g1_sha_mismatch_refusal_carries_the_computed_corpus_sha(
+        tmp_path, monkeypatch):
+    """The sha-mismatch refusal is ABOUT a sha — it must record the one it read."""
+    _read_prereg_ok(monkeypatch, _frozen_prereg(
+        corpus={"path": "corpus.json", "sha256": "f" * 64, "items": 1}))
+    corpus = tmp_path / "corpus.json"
+    corpus.write_text(json.dumps([{"role": "user", "content": "hello"}]))
+    out = tmp_path / "g1.log"
+    code = probe.main(["--prereg", HEAD, "--corpus", str(corpus),
+                       "--out", str(out)])
+    assert code == 2, code
+    record = cvc.extract_block(out.read_text())
+    assert "sha256" in record["run"]["reason"]
+    assert record["prereg"]["status"] == "OK"
+    assert record["corpus"]["sha256"] == probe.corpus_sha256(corpus), (
+        "the refusal discarded a sha it had already computed")
+
+
+def test_root_is_the_repo_root():
+    """`parents[3]` is `<repo>/docs`; every ROOT-joined path would be wrong."""
+    assert probe.ROOT == _REPO, probe.ROOT
+
+
+def test_the_parser_declares_no_flag_the_run_ignores(tmp_path):
+    """A documented flag the run never reads is a claim with no mechanism.
+
+    `--e1e2-evidence` / `--e5-evidence` were accepted and ignored, while the
+    README told the operator to pass them as the way E1/E2/E5 get their
+    evidence. The artifacts' formats are owned by `#9076` / `#7947`, so the
+    flags land with them — this pins that no dead flag (nor a README line
+    telling an operator to use one) comes back first.
+    """
+    parser = probe.build_parser()
+    help_text = parser.format_help()
+    readme = (PROBE.parents[1] / "README.md").read_text()
+    assert "--e1e2-evidence" not in help_text
+    assert "--e5-evidence" not in help_text
+    assert "--e1e2-evidence" not in readme
+    assert "--e5-evidence" not in readme
+    import pytest
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--prereg", HEAD, "--corpus", str(tmp_path),
+                           "--e1e2-evidence", "x.json"])
 
 
 def test_read_preregistration_refuses_an_unknown_sha():

@@ -1532,10 +1532,7 @@ def run_bm25_query(
     # (#5407 has not migrated run_fts_query off its own); a document IS a
     # :Source (D10, ONTOLOGY v3.15 §4.4).
     label = entity_label(entity_type)
-    if entity_type in ("source", "document"):
-        id_field = "url"
-    else:
-        id_field = "id"
+    id_field = "url" if entity_type in ("source", "document") else "id"
 
     where = [f"n.{id_field} IS NOT NULL"]
     if label in _STATUS_FILTERED_LABELS:

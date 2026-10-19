@@ -133,8 +133,15 @@ def _is_ancestor(repo: Path, maybe_ancestor: str, of: str) -> bool:
                 maybe_ancestor, of).returncode == 0
 
 
-def check(record: dict, *, log_path: Path, repo: Path,
+def check(record: dict, *, repo: Path,
           require_green: bool) -> Findings:
+    """Apply V1–V9 to a parsed verdict table.
+
+    ``repo`` is the checkout the evidence paths and shas are resolved against —
+    the ONLY input besides the record. (A ``log_path`` parameter used to be
+    threaded here and never read; a dead parameter in a gate reads as if the
+    path took part in the verdict, so it is gone rather than documented away.)
+    """
     f = Findings()
 
     # ── V1 root schema ────────────────────────────────────────────────────
@@ -354,7 +361,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     repo = Path(args.repo).resolve()
-    findings = check(record, log_path=log_path, repo=repo,
+    findings = check(record, repo=repo,
                      require_green=args.require_green)
     rows = record.get("rows") or []
     tally = {v: sum(1 for r in rows if isinstance(r, dict)

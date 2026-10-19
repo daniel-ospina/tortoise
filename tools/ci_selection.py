@@ -1237,6 +1237,22 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::test_journal_growth_guard_runs_on_a_tool_or_probe_change.
              "tools/journal_growth.py",
              "docs/evidence/5612-journal-growth/probes/",
+             # #9080 review P2: the extractor-v4 capstone probe
+             # (docs/evidence/7949-capstone/probes/capstone_run.py) owns
+             # tests/test_7949_capstone_verdict_check.py, registered `core` —
+             # the DB-free pin on the refusal chain and the pure observers the
+             # run derives every row from. `docs/` is a flat
+             # NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches the
+             # probe, so a PROBE-ONLY change came back with `changed == []` and
+             # took the docs-only early return: `select()` returned NO `core`
+             # surface, and the pin's `core` registration could not reach the
+             # file it guards (the #1349/#3332/#3616 silent-drop class, the same
+             # shape as `docs/evidence/7950-capstone/probes/` above). Measured
+             # before this entry (2026-10-19):
+             # `{"surfaces": [], "full": false}` with the pin present only via
+             # `tier1`. Pinned by
+             # tests/test_ci_selection.py::test_7949_capstone_probe_change_selects_core_not_tier1.
+             "docs/evidence/7949-capstone/probes/",
              # #5612: `tests/test_journal_growth.py` hard-codes the CORPUS's
              # shape (`records == 39`, 29 distinct types), so an edit to the
              # fixture alone must select `core` too — it sits under

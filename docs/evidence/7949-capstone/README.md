@@ -59,7 +59,7 @@ python docs/evidence/7949-capstone/probes/capstone_run.py \
 **G0 refused, before any model call** (§4.4: *S0 is FAIL-CLOSED — end the run before any
 model call or write*):
 
-```
+```text
 run: REFUSED — commit 717355e67… does not carry
      docs/evidence/7949-capstone/preregistration.json
 steps observed: (none)   required: S0 S1 S2.1 S2.2 S2.3 S3 S5 S6
@@ -141,6 +141,14 @@ refuses) — an honest finding for `#7949`, never a guess.
 
 - **No E1–E5 number.** No row carries a numerator or denominator, because no measurement
   was performed. The table's honesty is structural, not numerical.
+- **No E3 census instrument.** The probe carries none: E3's census reader over the real
+  `:Point`/`:Object`/`:Event` nodes belongs to `#5199` (the lane that gives `:Object` /
+  `:Event` their anchor at all). Shipping one here would mean a Cypher filter on a
+  property that does not exist yet — it would return zero rows and read as a working
+  instrument reporting `(0, 0)`.
+- **No E1/E2/E5 evidence inputs.** The probe takes none, and this README no longer tells
+  an operator to pass any: the artifacts' shapes are owned by `#9076` (E1/E2 on one run)
+  and `#7947` (the §10 falsifier), so the flags land with them rather than ahead of them.
 - **The gate cannot detect a fabricated evidence file** with a plausible sha. Its stated
   limit: it closes *inference* (green rows with no artifact), not forgery.
 - **Nothing about the five dependencies beyond their `state`** — that they are OPEN is a
@@ -156,7 +164,6 @@ TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest \
 # the real run, once #9075 lands and a provider key + a searchable backend exist:
 python docs/evidence/7949-capstone/probes/capstone_run.py \
     --prereg <pre-registration commit> --corpus <pre-registered corpus> \
-    --e1e2-evidence <#9076 artifact> --e5-evidence <#7947 record> \
     | tee docs/evidence/7949-capstone/capstone.log
 python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone.log --require-green
 ```
