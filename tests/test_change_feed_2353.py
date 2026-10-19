@@ -10,7 +10,8 @@ WHAT THIS PINS
    `PointRetracted` payload carries the `deleted` marker unconditionally (see
    `tortoise/change_feed.py`'s module docstring).
 2. **PointRevised reaches the store when the feed is on** — the source half of
-   indicator (1), drawn as an opt-in so the default stream is untouched.
+   indicator (1), drawn as an opt-in so the default emit SET is unchanged (no
+   `PointRevised` row). The stream itself is not byte-identical; see 1.
 3. **The semantic feed is per-claim deltas** — one `poll_events` call returns
    per-claim deltas with before→after for content, validity and status,
    aggregated from the SAME page `poll_events` already returns, rather than a

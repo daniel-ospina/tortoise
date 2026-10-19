@@ -294,13 +294,26 @@ purge watermark (any cursor below it is expired → 410).
 - **Retention:** `TORTOISE_EVENT_RETENTION_DAYS` (default 30) + per-team size
   cap `TORTOISE_EVENT_MAX_PER_TEAM` (default 500k), purged at boot + interval
   (`TORTOISE_EVENT_RETENTION_INTERVAL`, default 3600s) + lazily gated in polls.
+- **Degraded feed (#9208).** A `:GraphEvent` write that the store REFUSED, or
+  that failed with the row provably absent, makes the feed **KNOWN-INCOMPLETE**
+  for that graph: events in the gap never reached the store, so a short page
+  cannot be told from a quiet stream. `poll_events` then raises
+  `event_store.ChangeFeedDegraded` (REST **503**) instead of answering a page,
+  and polling stays refused until an operator acknowledges the loss with
+  `event_store.clear_degraded(<graph>)` — the missing events are NOT recovered
+  by a later successful write. The state is per **store + graph** and lives in
+  PROCESS MEMORY: a peer process cannot see it or clear it, and there is no
+  REST/MCP/CLI acknowledgement surface yet, so the exits are a clear inside the
+  process that observed the loss, or a restart of that worker. `GET /health`
+  reports it under `change_feed` (counts per stage, no graph names), which is
+  how the worker holding it is found from outside.
 
 ## Surfaces
 
 | Surface | Endpoint / tool | Notes |
 |---|---|---|
-| REST | `GET /v1/events?after=<cursor>&types=a,b&limit=N` | Team-scoped via auth; 400 malformed/unknown type; 410 expired |
-| MCP | `tortoise_events_poll(after, types, limit)` | `readOnly`; stdio + HTTP; maintenance purge gated by interval |
+| REST | `GET /v1/events?after=<cursor>&types=a,b&limit=N` | Team-scoped via auth; 400 malformed/unknown type; 410 expired; **503** degraded feed (the detail names the stage, the refusal and the remedy) |
+| MCP | `tortoise_events_poll(after, types, limit)` | `readOnly`; stdio + HTTP; maintenance purge gated by interval; a degraded feed returns a named `error`, never an empty `[]` |
 
 Related: `tortoise_retract_point` (MCP) / `TortoiseSDK.retract_point` — the
 tombstone-retraction write that emits `PointRetracted`.

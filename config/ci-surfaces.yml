@@ -1473,6 +1473,30 @@ surfaces:
   # otherwise run this suite never — the #1349/#2938/#3154 silent-drop class.
   - test_9079_onboarding_declared_lane.py
   - test_7951_create_point_outbox.py
+  # #9124 (the THIRD door): the projection's WRITE HANDLE (`proj.g`,
+  # `_GuardedGraph`) refuses a mutating statement outside a declared scope, on
+  # every mutating-capable verb, plus the schema-DDL declaration that keeps the
+  # refusal from silently disabling fulltext retrieval. Its subjects are
+  # `tortoise/projection/__init__.py` (SHARED_MODULE — a change there selects the
+  # full matrix) and `tortoise/cypher_guard.py` (the
+  # `_GRAPH_QUERY_COMMANDS`/statement-recovery seam for `execute_command`,
+  # which matches no named SOURCE_PATTERN and falls through to `core`). So a
+  # single `core` arm runs it on BOTH subjects a change can re-open the door
+  # through — verified with the repo's own selector:
+  # `--changed-files tortoise/cypher_guard.py` → surfaces=['core']. `--integrity`
+  # also requires every test file to be classified, which this entry satisfies.
+  - test_9079_handle_write_authority.py
+  # #9124 part 1 (the DECLARATION census): every mutating entry point that
+  # reaches the write handle must be declared or inventoried, enumerated from
+  # the SOURCE of `tortoise/sdk.py` and `tortoise/event_store.py` rather than
+  # from a hand list. Its subjects are `tortoise/event_store.py` (which matches
+  # no named SOURCE_PATTERN and falls through to `core` — the only subject a
+  # `core`-only registration must catch), plus `tortoise/sdk.py` and
+  # `tortoise/projection/__init__.py`, each of which selects the FULL matrix
+  # (`ci_selection.py --changed-files tortoise/sdk.py` → `"full": true`), so
+  # they need no arm of their own. `--integrity` also requires every test file
+  # to be classified, which this entry satisfies.
+  - test_9124_declared_live_doors.py
   # #7951 (increment 2, the revision door): `update_point` appends its
   # `PointRevised` record BEFORE the cache write. Same subjects as the
   # create-side suite above (`tortoise/sdk.py`), so it is registered on the
@@ -2655,6 +2679,14 @@ surfaces:
   - test_event_log.py
   - test_event_provenance.py
   - test_event_store.py
+  # #9208: the `:GraphEvent` change feed's SILENT death. A refused store write
+  # (e.g. §17.1's third door refusing an undeclared one) used to be swallowed by
+  # `_emit_event`'s and `append_event`'s bare `except`, so the feed stopped while
+  # `poll_events` kept answering `[]` — a dead feed and an idle one, the same
+  # reply. `core` is the right arm: the subjects are `tortoise/event_store.py`
+  # (no SOURCE_PATTERN of its own) and `tortoise/sdk.py` (a SHARED_MODULE), and
+  # its siblings (`test_event_store.py`, `test_change_feed_2353.py`) live here.
+  - test_9208_change_feed_degraded.py
   # #2353: the semantic change feed — the `:GraphEvent` → per-claim-delta fold
   # (`tortoise/change_feed.py`), the off-by-default `changes` response field on
   # `poll_events`, the re-pin of the store's transition-only contract, and the
@@ -6695,10 +6727,14 @@ durations:
   test_7951_delete_point_outbox.py: 5.0  # unmeasured — #7951 increment 4a (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), and an absent row packs it at the flat 2.0s default, which drops `duration_coverage_issues()` under the 90% floor — the same shape as the `test_7951_create_point_outbox.py` row above. Local embedded-lane readings 4.3–6.8 s when the file collected 6 tests; at this head it collects 10 (T1-T10, TWO of which call `rebuild_all` — T3 and T8) and measured 7.5 s here on the same lane, so the 5.0 weight is a lower-ish bound in the right neighbourhood rather than a stale one. Refresh from the first post-merge run that includes it.
   test_9079_ep_epoch_declared.py: 7.2  # unmeasured — #9123 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red at 840/934 = 89.9% — the same shape as the `test_7951_create_point_outbox.py` row above. Local embedded-lane readings 5.9/6.0/6.4 s over three runs (6 tests; one calls `rebuild_all`). ⚠️ A longer reading (148 s) is NOT this file's weight: the FIRST `create_point` in a process lazily loads the embedding model — 15.7 s standalone, and 134 s for the one test that pays it under fleet load 65 — after which creates are 0.16 s. That one-time load is paid once per file and is not what this weight packs. Declared above the quiet-box readings so a cold leg cannot under-pack. Refresh from the first post-merge run that includes it.
   test_audit_fallback_home_isolation.py: 2.4
+  test_9208_change_feed_degraded.py: 2.0  # unmeasured — new in #9208 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). Without this row the file is in the fast pool, so it packs at the flat 2.0s default AND `duration_coverage_issues()` sits at 90.02% — one peer lane adding a file tips it under the 90% floor. The weight is the flat default deliberately (a LOCAL reading would not be a shard-layout input, #3419/#2788): the local 42-65 s readings for this file are almost entirely the once-per-leg embedding-model load the #3400 method attributes to no file. Refresh from the first post-merge run that includes it.
   test_ci_stall_identify.py: 16.0  # #5035: the 1.8 predated this PR's subprocess-launching tests. A quiet-machine estimate (measured 12.3, 14.8, 16.3 s; 25.9 s under moderate load and 34-40 s at fleet load 67-79 — the file spawns pytest children, so it tracks box load hard). `tools/ci_timing.py --refresh-durations` is the canonical (CI-measured) writer; this line is a local estimate until it next runs.
   test_env_contract_covers_supabase_config.py: 2.0  # #4030: appended by hand so the entry exists at all — main sat only just above the guard's floor (764/848 fast files = 90.09%), and this new fast file tipped `duration_coverage_issues()` below it (764/849 = 89.99%, formatted as the `90.0%` in that error). Local estimate: 3.24 s measured for this file plus its paired pin in test_ci_selection.py, most of it one conftest import. `tools/ci_timing.py --refresh-durations` replaces it with the CI-measured value.
   test_7936_stable_stub_ids.py: 18.0  # #7936 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red at 777/864 = 89.9% (the file is in the fast pool, so its absence packs it at the flat 2.0s default and drops coverage under the 90% floor) — the same shape as `test_7951_create_point_outbox.py` above, and it is also what reds `tests/test_ci_timing.py`'s four `validate_refreshed_manifest` assertions on the manifest of record. Local embedded-lane reading 16.6–20.4 s (18 tests; three rebuild the graph). Refresh from the first post-merge run that includes it.
   test_7935_restore_destination_lock.py: 5.0  # #7935 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red at 780/867 = 89.97% (formatted as the `90.0%` in that error) — the file is in the fast pool, so its absence packs it at the flat 2.0s default and drops coverage under the 90% floor; the same shape as the rows above. Local embedded-carve-out reading (4 tests, re-measured after the P3 journal-lock test was added): call 0.52 s + 2.83 s + 2.73 s + <0.01 s (the lock-only test enters `_destination_lock` directly, no restore), setup/teardown ~0.5 s each. The file's FIRST embedded replay in a cold process also pays the once-per-leg embedding-model load the #3400 method attributes to no file (~124 s, and the fixture pays it in setup so the lock gates are not timed against it) — that cost is already carried by `test_7767_restore_rollback.py`, which replays the same path. Refresh from the first post-merge run that includes it.
+
+  test_9079_handle_write_authority.py: 10.0  # unmeasured — new in #9124 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so an absent row packs it at the flat 2.0s default and this PR's two new fast files tipped `duration_coverage_issues()` to 848/943 = 89.9% (red against the 90% floor) — the same shape as the `test_7951_create_point_outbox.py` row above. Local embedded-lane reading 9.2s (23 tests) out of the 22.4s both new files took; setup dominates (each test builds its own journal-backed SDK) and the one `rebuild_all`/sweep test pays the FTS drop→recreate. Declared above the local reading so a cold leg cannot under-pack. Refresh from the first post-merge run that includes it.
+  test_9124_declared_live_doors.py: 14.0  # unmeasured — new in #9124 (#3400 trap): same class as the row above (new fast file, no CI measurement). Local embedded-lane reading 13.2s (13 tests), of which `test_arming_the_guard_requires_a_fully_declared_surface` alone is 9.2s: it parses and censuses EVERY module in the package that reaches the write handle, so it tracks the package's size rather than the box's load. Declared above the local reading so a cold leg cannot under-pack. Refresh from the first post-merge run that includes it.
 
 # ── ON-DEMAND LANE: runs the pipeline, does not gate the merge ────────────
 # A file here is excluded from EVERY pre-merge leg (fast halves, slow, carve-
