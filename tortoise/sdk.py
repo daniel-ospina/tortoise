@@ -108,6 +108,9 @@ from . import file_indexer  # noqa: F401 — binds the classifier/identity modul
 from .projection import FalkorProjection
 # #7951 §17.1: the single-writer scope the live doors open around their fold.
 from .projection import _live_write_scope
+# #9123 §17.1: the GRAPH-METADATA lane — a write with no journal record that
+# describes it, and whose loss a rebuild absorbs.
+from .projection import _graph_metadata_write_scope
 # #7951 review P1: the journal payload is built from the WRITE INTENT, so it
 # must state what the store will HOLD — the transport model lives in the
 # projection package (one home), not in a second copy at this call site.
@@ -20006,16 +20009,42 @@ class TortoiseSDK:
         ``ep_dirty_at`` with the SAME epoch inside the CREATE statement that
         writes the point — instead of issuing a second, post-CREATE ``SET``
         (see create_point for why that second write is not free).
+
+        §17.1 (#9123): this MERGE is a DECLARED **graph-metadata** write, not a
+        projection of the journal — ``_graph_metadata_write_scope`` states the
+        two properties that earn it:
+
+        * **no record describes it.** ``:EpMeta.ep_version`` is a graph-wide
+          monotonic counter that orders EP dirty-markings across processes. No
+          journal event carries it and none could: it is not a fact about the
+          corpus, so journalling it would put a non-fact in the log and make
+          ``derived == replay(journal)`` depend on it.
+        * **a rebuild may reset it.** ``rebuild`` folds journal records;
+          ``:EpMeta`` is not one, so the epoch simply does not come back — and
+          nothing reconciles over it. Losing it costs nothing because belief
+          recomputation is idempotent from the record: the epoch is an ordering
+          hint, never a value any node's truth is read from.
+          ``tests/test_9079_ep_epoch_declared.py`` pins both halves.
+
+        Why the declaration had to exist: this statement is the most frequently
+        refused one on #9079's measuring lane (5 of 7 failures) — it runs
+        outside every scope today (``create_point`` opens its own scope around
+        its CREATE, and this write happens BEFORE it), so closing the guarded
+        handle would refuse the create hot path. The scope goes AROUND
+        ``_graph_write_with_retry`` rather than inside its lambda, so every
+        re-issued attempt re-enters the same authorization and #7405/#7685's
+        predicate is untouched.
         """
         proj = self._get_proj()
-        rows = self._graph_write_with_retry(
-            lambda: proj.g.query(
-                "MERGE (m:EpMeta) "
-                "SET m.ep_version = coalesce(m.ep_version, 0) + 1 "
-                "RETURN m.ep_version"
-            ).result_set,
-            what="_advance_ep_version MERGE(:EpMeta)",
-        )
+        with _graph_metadata_write_scope("graph-metadata:ep-epoch"):
+            rows = self._graph_write_with_retry(
+                lambda: proj.g.query(
+                    "MERGE (m:EpMeta) "
+                    "SET m.ep_version = coalesce(m.ep_version, 0) + 1 "
+                    "RETURN m.ep_version"
+                ).result_set,
+                what="_advance_ep_version MERGE(:EpMeta)",
+            )
         return int(rows[0][0]) if rows else 1
 
     def _mark_dirty(self, point_ids: list[str], *, ep_version: int | None = None,
