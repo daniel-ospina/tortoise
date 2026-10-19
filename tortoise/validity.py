@@ -89,8 +89,11 @@ def effective_precision(bound: object, declared: object) -> str | None:
     """The precision a READ path should report for ``bound``.
 
     A declared token wins. A PRESENT bound with no declared token is the
-    #1538 legacy shape and reads as ``"day"`` (``is not None`` presence, the
-    same gate ``_covers`` uses — a falsey-but-present bound is a real bound).
+    #1538 legacy shape and reads as ``"day"`` (``is not None`` presence — a
+    falsey-but-present bound is a real bound for PRECISION purposes, which is
+    this function's own rule and no longer a mirror of ``_covers``' start gate:
+    since #6140 that gate also requires ORDERABILITY, so an unparseable start is
+    an OPEN start there while its precision still reads ``day`` here — #9201).
     An absent bound with no declared token has no precision (``None``); an
     absent bound with ``"unknown"`` is the closed-unknown end.
     """
@@ -191,10 +194,17 @@ def window_read_fields(
 
     Callers pass the bounds RAW. The presence gate is ``is not None`` (inside
     ``effective_precision``/``end_state``), so a falsey-but-present bound —
-    ``""``, ``0`` — is a REAL bound and reads as ``day``, the same predicate
-    ``_covers`` orders with. Pre-normalizing at a call site (``bound or
-    None``) makes the same stored window resolve differently per surface,
-    which is the drift this home exists to prevent (#2350 review P2).
+    ``""``, ``0`` — is a REAL bound and reads as ``day``. Pre-normalizing at a
+    call site (``bound or None``) makes the same stored window resolve
+    differently per surface, which is the drift this home exists to prevent
+    (#2350 review P2).
+
+    NOTE the deliberate asymmetry with ``sdk._covers`` since #6140: that gate
+    also requires the START to be ORDERABLE (an unorderable start is an OPEN
+    start, so it hides nothing), while precision here still reports ``day`` for
+    it. Cross-surface CONSISTENCY is this module's contract and still holds;
+    whether an unparseable start should report a precision at all is #2350's
+    field semantics and is tracked on **#9201**.
     """
     return {
         "valid_from_precision": effective_precision(valid_from, valid_from_precision),

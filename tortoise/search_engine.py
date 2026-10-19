@@ -3946,8 +3946,10 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             # from ``get_historical_knowledge``/``assembly``. The bounds are
             # passed RAW: ``window_read_fields``' presence gate is
             # ``is not None`` (a falsey-but-present bound — ``""``, ``0`` —
-            # is a REAL bound, matching ``_covers`` and
-            # ``_assert_window_start_not_inverted``). Pre-normalizing with
+            # is a REAL bound for PRECISION, an axis of its own and no longer
+            # a mirror of ``_covers``' start gate: since #6140 an unparseable
+            # start is an OPEN start for coverage while its precision still
+            # reads ``day`` here — #9201). Pre-normalizing with
             # ``or None`` here made the same stored window read ``day`` in
             # assembly / ``get_historical_knowledge`` and ``None`` here — the
             # exact cross-surface drift this module exists to prevent.
