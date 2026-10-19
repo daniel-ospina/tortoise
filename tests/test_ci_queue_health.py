@@ -16,9 +16,14 @@ without touching GitHub. Four things these tests exist to keep true:
      absent from `trimmable`, not filtered later in the CLI.
   4. **An unreadable queue is never OK.** That is the fail-open class this repo
      keeps removing, and here it would hide the silence the tool exists to hear.
+  5. **The alarm follows the REPORTED verdict, not "did the governor act".** A
+     flood that still stands after a successful governor run is a real state and
+     exits 1; and a queue where PR CI is not running but no offender can be
+     blamed is `PR-STARVED`, never `OK`.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 from datetime import UTC, datetime, timedelta
@@ -71,21 +76,44 @@ def test_the_9115_shape_is_a_flood_naming_the_offender():
     assert health.dominant_queued == 12
     assert health.pr_running == 0
     # the EXACT spelling the issue asks the fleet to see
-    assert health.state_line == f"CI: FLOOD(finding-provenance, queued=21, pr_running=0)"
+    assert health.state_line == "CI: FLOOD(finding-provenance, queued=21, pr_running=0)"
 
 
-def test_a_deep_queue_of_pr_work_is_not_a_flood():
-    """PR CI with a backlog is the thing this tool protects, not the offender."""
+def test_a_deep_queue_of_pr_work_is_not_a_flood_but_it_is_not_OK_either():
+    """PR CI with a backlog is not the offender — but it is also not healthy.
+
+    ISSUE 3 of the #9118 review: the `offender_queued < global_max` clause returned
+    `OK` BEFORE the `pr_running`/age clauses ran, so this exact shape — 20 PR-event
+    runs queued, oldest waiting 20 min, `pr_running = 0` — was reported as
+    `CI: OK(queued=26, ...)` with a green workflow. That is "PR CI is not running",
+    the state #9115 was filed for. The governor still must not act (there is no
+    trim-safe offender to blame), so it is its own state, warned about, exit 0.
+    """
     queued = starving_pr_runs(20) + flood_queued(6)
     health = classify(queued)
-    assert health.verdict == Q.OK
+    assert health.verdict == Q.PR_STARVED
+    assert health.verdict != Q.FLOOD
+    assert health.trimmable == ()          # nothing trim-safe to blame -> no action
     assert any("dominated by PR work" in reason for reason in health.reasons)
+    assert health.state_line == (
+        "CI: PR-STARVED(queued=26, pr_running=0, pr_queued=20, oldest=1200s)"
+    )
+
+
+def test_a_deep_queue_of_pr_work_that_has_not_waited_is_ok():
+    """The age clause gates PR-STARVED too: a fresh PR backlog is not starvation."""
+    health = classify(starving_pr_runs(20, age_seconds=30) + flood_queued(6))
+    assert health.verdict == Q.OK
+    assert not any("PR-STARVED" in r for r in health.reasons)
 
 
 def test_a_reporting_workflow_below_the_floor_is_not_a_flood():
     health = classify(flood_queued(4) + starving_pr_runs(1))
-    assert health.verdict == Q.OK
+    assert health.verdict != Q.FLOOD
+    assert health.trimmable == ()
     assert any("min_dominant_queued" in reason for reason in health.reasons)
+    # ... and starvation is still reported under its own state, never as OK
+    assert health.verdict == Q.PR_STARVED
 
 
 def test_pr_ci_being_served_is_not_a_flood():
@@ -111,7 +139,7 @@ def test_a_fresh_queued_pr_run_has_not_waited_long_enough():
 
 def test_an_unreadable_timestamp_does_not_satisfy_the_age_clause():
     broken = Q.QueuedRun(id=5, name="Python CI", event="pull_request", created_at="not-a-date")
-    health = classify(flood_queued(12) + [broken])
+    health = classify([*flood_queued(12), broken])
     assert health.verdict == Q.OK
     assert health.oldest_pr_queued_age_seconds is None
     assert any("no readable timestamp" in reason for reason in health.reasons)
@@ -173,7 +201,51 @@ def test_only_declared_trim_safe_workflows_are_in_the_allow_list():
     # Pinned as a fact about THIS commit, not as a policy: widening the allow
     # list is a deliberate act that must be argued in review, and this test is
     # where the argument becomes a diff.
-    assert Q.TRIM_SAFE == frozenset({"finding-provenance"})
+    assert set(Q.TRIM_SAFE) == {"finding-provenance"}
+
+
+def test_the_trim_SCOPE_is_declared_per_workflow():
+    """An event the allow-list does not justify is not a candidate (ISSUE 2, #9118).
+
+    `finding-provenance` fires on `issues`, `issue_comment` and `workflow_dispatch`.
+    The first two are automatic annotations the author can re-request by commenting
+    again; `workflow_dispatch` IS that re-request, and it is the exact command this
+    tool prints as the recovery — so it must never be trimmed.
+    """
+    assert dict(Q.TRIM_SAFE_EVENTS) == {
+        "finding-provenance": frozenset({"issues", "issue_comment"})
+    }
+    assert "workflow_dispatch" not in Q.TRIM_SAFE_EVENTS["finding-provenance"]
+    assert set(Q.TRIM_SAFE_EVENTS) <= set(Q.TRIM_SAFE)
+
+
+def test_governor_never_trims_the_workflow_dispatch_recovery_run():
+    """The prescribed recovery run must not become a trim candidate.
+
+    Discipline test for the narrowing: the dispatch run is the OLDEST of the
+    offender's runs here, so a name-keyed candidate predicate (the pre-fix code)
+    puts it FIRST in `trimmable` — i.e. the governor would cancel the replacement
+    the tool itself told the operator to request.
+    """
+    recovery = run(7000, "finding-provenance", event="workflow_dispatch",
+                   created_at="2026-10-19T03:00:00Z")     # older than every issues run
+    health = classify(flood_queued(12) + starving_pr_runs(1) + [recovery], keep=5)
+    assert health.verdict == Q.FLOOD
+    assert 7000 not in [r.id for r in health.trimmable]
+    assert [r.id for r in health.trimmable] == [1000, 1001, 1002, 1003, 1004, 1005, 1006]
+    assert all(r.event in Q.TRIM_SAFE_EVENTS["finding-provenance"]
+               for r in health.trimmable)
+    assert any("NOT trimmed" in reason for reason in health.reasons)
+
+
+def test_a_trim_safe_workflow_with_undeclared_events_trims_nothing(monkeypatch):
+    """An undeclared trim scope fails CLOSED (no events => no action)."""
+    monkeypatch.setattr(Q, "TRIM_SAFE", frozenset(Q.TRIM_SAFE | {"publish-selfhost"}))
+    health = classify(flood_queued(12, name="publish-selfhost", event="push")
+                      + starving_pr_runs(1))
+    assert health.verdict == Q.FLOOD
+    assert health.trimmable == ()
+    assert any("declares no" in reason for reason in health.reasons)
 
 
 # ── reading the feed ──────────────────────────────────────────────────────
@@ -264,9 +336,37 @@ def _flood_infra(monkeypatch, verdict_health):
 def test_apply_cancels_only_the_trimmable_runs(monkeypatch, capsys):
     health = classify(flood_queued(12) + starving_pr_runs(1), keep=5)
     calls = _flood_infra(monkeypatch, health)
-    assert Q.main(["--apply"]) == Q.EXIT_OK
+    # Every read returns the SAME standing FLOOD, which is what GitHub looks like
+    # seconds after a cancel (a cancelled run leaves the queue asynchronously). The
+    # reported verdict is therefore still FLOOD, so this run IS the alarm: ISSUE 1 of
+    # the #9118 review — the old contract exited 0 here, i.e. every scheduled tick
+    # green while the queue stayed held.
+    assert Q.main(["--apply"]) == Q.EXIT_FLOOD
     assert calls == [1000, 1001, 1002, 1003, 1004, 1005, 1006]
     assert "cancelled 7 of 7" in capsys.readouterr().err
+
+
+def test_a_flood_that_stands_after_the_governor_ran_is_still_an_alarm(monkeypatch, capsys):
+    """ISSUE 1 of the #9118 review: acting is not clearing.
+
+    A governor that issued cancellations has not made the queue healthy. The exit
+    code follows the REPORTED (post-action) verdict, so a flood still standing is
+    exit 1 and a red run — and the payload distinguishes "the cancels landed but the
+    queue is still held" (`flood_stands_after_action`) from "the re-read failed"
+    (`state_after_action=False`).
+    """
+    flood = classify(flood_queued(12) + starving_pr_runs(1), keep=5)
+    monkeypatch.setattr(Q, "read_health", lambda *a, **k: flood)   # pre AND post = FLOOD
+    monkeypatch.setattr(Q, "cancel_run", lambda repo, run_id: (True, "cancelled"))
+    rc = Q.main(["--apply", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == Q.EXIT_FLOOD
+    assert payload["cancelled"] == [1000, 1001, 1002, 1003, 1004, 1005, 1006]
+    assert payload["state_line"].startswith("CI: FLOOD(finding-provenance")
+    assert payload["state_after_action"] is True      # the re-read DID happen
+    assert payload["cleared"] is False               # ... and it did not clear
+    assert payload["flood_stands_after_action"] is True
 
 
 def test_apply_does_nothing_on_ok(monkeypatch):
@@ -419,10 +519,13 @@ def test_a_failed_re_read_reports_the_pre_action_state_and_says_so(monkeypatch, 
 
     assert payload["state_after_action"] is False
     assert payload["cleared"] is False
+    assert payload["flood_stands_after_action"] is True
     # the reading it could not refresh is still reported — labelled as the EARLIER one
     assert payload["state_line"].startswith("CI: FLOOD(")
     assert "PRE-action reading" in captured.err
-    assert rc == Q.EXIT_OK              # the cancels landed with no failure
+    # A re-read that FAILED cannot clear a flood: the last MEASURED state is a
+    # flood, so the alarm fires (exit 1). Exit 0 here would be an inferred clear.
+    assert rc == Q.EXIT_FLOOD
 
 
 def test_the_workflow_binds_the_token_the_repo_wide_guard_cannot_see():
@@ -438,3 +541,31 @@ def test_the_workflow_binds_the_token_the_repo_wide_guard_cannot_see():
     assert "GH_TOKEN: ${{ github.token }}" in wf
     assert "actions: write" in wf      # POST /actions/runs/{id}/cancel
     assert "cancel-in-progress: false" in wf   # two governors would race on the excess set
+    # The alarm is annotated, not only summarised — and PR-STARVED has no action
+    # available, so it warns instead of reddening a run nobody can act on.
+    assert "::error" in wf
+    assert 'PR-STARVED' in wf
+    assert "1 = FLOOD stands" in wf
+
+
+# ── PR-STARVED through the CLI ────────────────────────────────────────────
+
+def test_pr_starved_is_exit_0_with_its_own_state_line(monkeypatch, capsys):
+    """Measured, warned about, and NOT red: there is nothing the governor may cancel."""
+    starved = classify(starving_pr_runs(20) + flood_queued(6))
+    assert starved.verdict == Q.PR_STARVED
+    monkeypatch.setattr(Q, "read_health", lambda *a, **k: starved)
+    assert Q.main(["--json"]) == Q.EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "PR-STARVED"
+    assert payload["state_line"] == (
+        "CI: PR-STARVED(queued=26, pr_running=0, pr_queued=20, oldest=1200s)"
+    )
+
+
+def test_an_unnamed_verdict_is_never_exit_0(monkeypatch):
+    """Fail closed: a verdict this module does not know is UNMEASURABLE, never healthy."""
+    flood = classify(flood_queued(12) + starving_pr_runs(1), keep=5)
+    monkeypatch.setattr(Q, "read_health",
+                        lambda *a, **k: dataclasses.replace(flood, verdict="SOMETHING-NEW"))
+    assert Q.main([]) == Q.EXIT_UNMEASURABLE

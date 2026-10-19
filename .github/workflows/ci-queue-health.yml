@@ -35,11 +35,16 @@ name: ci-queue-health
 # duplicate loses one annotation, and that workflow's own header documents the
 # recovery (`gh workflow run finding-provenance.yml -f issue_number=<N>`).
 #
-# THE RED IS THE ALARM, AND IT CANNOT BLOCK A MERGE. When a flood stands after the
-# governor ran, this job exits 1 and the run is red. That is deliberate: the state
-# must be loud enough to be seen, or the fleet reads the silence as "slow CI"
-# again. It cannot block a merge, because a `schedule`-event run is a NON-CODE
-# event: the merge rail's own `NON_CODE_EVENTS` set excludes
+# THE RED IS THE ALARM, AND IT CANNOT BLOCK A MERGE. The exit code follows the
+# tool's REPORTED (post-action) verdict, so a flood that still stands after the
+# governor ran exits 1 and the run is red — a governor that issued cancellations
+# has NOT made the queue healthy, and a green run for a held queue is exactly the
+# silence this workflow exists to break. A flood this invocation CLEARED exits 0
+# and prints `was CI: FLOOD(...) -> cleared N of M`. `PR-STARVED` (no PR run
+# executing, a queued PR run past the age floor, and no trim-safe offender to
+# blame) is an `::warning` at exit 0: the state is real, and there is nothing the
+# governor may cancel. It cannot block a merge, because a `schedule`-event run is
+# a NON-CODE event: the merge rail's own `NON_CODE_EVENTS` set excludes
 # `schedule|issues|issue_comment` from the merge decision, so a red scheduled run
 # never gates a PR.
 #
@@ -130,11 +135,17 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           # An annotation, so the state is visible in the run's annotations and not
-          # only inside a summary nobody opens.
+          # only inside a summary nobody opens. The tool's exit code already follows
+          # its REPORTED verdict (1 = a FLOOD still stands, 2 = could not measure),
+          # so `rc` is a payload-derived alarm; the verdict is read as well for the
+          # PR-STARVED warning, which is a real state with no action available.
+          verdict="$(python3 -c "import json; print(json.load(open('/tmp/ci-queue-health.json')).get('verdict','UNKNOWN'))" 2>/dev/null || echo UNKNOWN)"
           if [ "$rc" -eq 1 ]; then
-            echo "::error title=${state}::PR CI is NOT slow — it is NOT RUNNING. See the step summary."
+            echo "::error title=${state}::PR CI is NOT slow — it is NOT RUNNING, and it still is after this run's cancellations. See the step summary."
           elif [ "$rc" -eq 2 ]; then
             echo "::warning title=CI: UNKNOWN::The queue could not be measured, so nothing was changed and nothing is certified healthy."
+          elif [ "$verdict" = "PR-STARVED" ]; then
+            echo "::warning title=${state}::PR CI is not running: no PR-event run is executing and a queued PR run has waited past the age floor. No trim-safe offender can be blamed, so there is nothing the governor may cancel."
           fi
-          echo "ci-queue-health exit=$rc (0 = OK or cleared; 1 = FLOOD; 2 = could not measure)"
+          echo "ci-queue-health exit=$rc (0 = OK, cleared, or PR-STARVED (warned); 1 = FLOOD stands; 2 = could not measure)"
           exit "$rc"
