@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,21 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 import ci_timing  # noqa: E402, RUF100
+
+
+def _fresh_captured_at() -> str:
+    """A ``durations_captured_at`` that is INSIDE the staleness bound.
+
+    Any test that feeds a rendered manifest to :func:`ci_timing.integrity_problems`
+    and asserts the gate is green must not hardcode the date: the validator reds
+    a map older than 21 days (``tools/ci_manifest.py::staleness``), so a literal
+    is a time bomb that goes off for every lane on the twenty-second day — which
+    is exactly what happened to ``2026-09-28T00:00:00Z`` on 2026-10-19. Deriving
+    the stamp from the same clock the validator reads removes the way it can rot;
+    the assertion still proves the property it names (a fresh stamp is not a
+    finding).
+    """
+    return (datetime.now(UTC) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 FAKE_RUN = {
     "id": 4242,
@@ -1080,7 +1096,7 @@ def test_refresh_durations_on_the_real_manifest_adds_a_pending_file() -> None:
     # A real stamp: `integrity_problems` treats a PRESENT-but-unparseable
     # `durations_captured_at` as red, and this test asserts the full gate is green.
     new_text, stats = ci_timing.render_refreshed_manifest(
-        before, {target: 4.34}, "2026-10-07T00:00:00Z")
+        before, {target: 4.34}, _fresh_captured_at())
     assert stats["added_keys"] == 1
     assert f"  {target}: 4.3" in new_text
     _, entries_before = ci_timing._locate_durations_block(before.split("\n"))
@@ -1274,7 +1290,7 @@ def test_refresh_durations_on_the_real_manifest_of_record() -> None:
     # check survives without a number that can go stale.
     assert set(entries_before) == set(yaml.safe_load(before)["durations"])
     new_text, stats = ci_timing.render_refreshed_manifest(
-        before, {"test_bridge_table.py": 123.4}, "2026-09-28T00:00:00Z")
+        before, {"test_bridge_table.py": 123.4}, _fresh_captured_at())
     # `manifest_keys` and `carried_forward` are BOTH computed from the INPUT
     # parse (`before`), so on their own they cannot fail when the refresh drops
     # an entry from the OUTPUT — asserting only these two is a tautology. They
@@ -1563,7 +1579,20 @@ def test_integrity_problems_promotes_a_present_but_unparseable_stamp() -> None:
     problems = ci_timing.integrity_problems(rendered)
     assert any("not a parseable timestamp" in p for p in problems), problems
     # Absence is still the notice-only class: no stamp key, no problem.
-    assert ci_timing.integrity_problems(before) == []
+    #
+    # The key must actually be ABSENT for that to be what this line proves. It
+    # used to assert over `before` — the committed manifest — which carries a
+    # `durations_captured_at` (config/ci-surfaces.yml), so the assertion passed
+    # through the FRESHNESS branch and the absence branch was never executed:
+    # the comment described a property the test could not reach. Strip the key
+    # and assert the stripped manifest is notice-only.
+    absent = yaml.safe_load(before)
+    absent.pop(ci_timing.DURATIONS_CAPTURED_AT, None)
+    absent_text = yaml.safe_dump(absent, sort_keys=False)
+    assert ci_timing.DURATIONS_CAPTURED_AT not in absent_text, (
+        "the absence case must be built by REMOVING the stamp, not by trusting "
+        "the committed manifest's age")
+    assert ci_timing.integrity_problems(absent_text) == []
 
 
 def test_ci_timing_docstring_no_longer_claims_it_never_gates_ci() -> None:
