@@ -9139,14 +9139,25 @@ async def events_poll(
     """
     _require_scope(org, "graphs:read", "events_poll")
     sdk = await _data_sdk_offloaded(org)
+    # Lazy import, matching this module's pattern for tortoise submodules.
+    from tortoise.event_store import ChangeFeedDegraded
+
     type_list = [t.strip() for t in (types or "").split(",") if t.strip()]
     try:
         # #3718: sync FalkorDB I/O — off-loaded off the event loop so a slow
         # event-page read does not stall every concurrent request. The
         # ValueError contract (410/400 mapping) is unchanged: the same
         # exception propagates out of the worker thread.
+        #
+        # #9208: `ChangeFeedDegraded` is NOT a client error — the org's event
+        # store refused a write, so the feed is incomplete — and a bare 500
+        # would strip the graph name, the refusal and the remedy out of a state
+        # that exists to be readable. 503 says "the feed's store is broken,
+        # not your request", and the detail relays the named diagnosis verbatim.
         result = await asyncio.to_thread(
             sdk.poll_events, after=after, types=type_list or None, limit=limit)
+    except ChangeFeedDegraded as e:
+        raise HTTPException(status_code=503, detail=str(e))  # noqa: B904
     except ValueError as e:
         msg = str(e)
         if "cursor expired" in msg:

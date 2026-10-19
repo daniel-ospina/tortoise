@@ -33,9 +33,16 @@ must not refuse another tenant's poll, and two databases are two stores even
 under one name), and it lives in PROCESS MEMORY — a peer process cannot see it.
 That is a real residual, not an oversight: when the door is refusing these
 writes, the store is exactly where the notice cannot be written. What it does
-guarantee is the property the issue targets — within any process that emitted
-for a graph, that graph's reader cannot be told "nothing happened" over lost
-events.
+guarantee is the property the issue targets — **a `poll_events` caller in a
+process that emitted for a graph cannot be told "nothing happened" over lost
+events.**
+
+⚠️ AND ONE CONSUMER IS NOT COVERED, named rather than implied: the webhook
+delivery sweep (`webhook_delivery.deliver_due`) reads `read_after` directly, so
+its `if not events: continue` still treats an empty page as "caught up". Wiring
+the degraded state into the delivery/retry state machine changes a
+delivery-loss decision that `#8098` deliberately keeps in the dispatch state
+machine, so it is a follow-up, not a silent part of this fix.
 """
 from __future__ import annotations
 
@@ -81,12 +88,34 @@ _DEGRADED: dict[tuple[str, str], dict[str, Any]] = {}
 
 
 def _store_identity(proj) -> str:
-    """Which STORE this projection talks to — its file, or its server."""
+    """Which STORE this projection talks to — its file, or its HOST:PORT.
+
+    The PORT is part of the identity, not decoration. One host can carry several
+    FalkorDB servers, and this repo's own environment runs two on loopback —
+    `localhost:6379` (the test matrix) and `localhost:16379` (canonical/dev) —
+    both with the default graph name `tortoise`. Keyed on the host alone, a
+    refused write on one would permanently refuse `poll_events` on the other.
+
+    The port is read from the connection pool, the same seam
+    `tests/_embedded._projection_host` uses: `FalkorProjection` records `_host`
+    but not `_port`, and the client keeps it in
+    `connection.connection_pool.connection_kwargs`. Every step is `getattr`-guarded
+    because callers reach here with lightweight projection stubs, and `None`
+    simply degrades to the host-only key rather than raising from an error path.
+    """
     path = getattr(proj, "_path", None)
     if path:
         return f"file:{path}"
     host = getattr(proj, "_host", None)
-    return f"host:{host}" if host else ""
+    if not host:
+        return ""
+    port = getattr(proj, "_port", None)
+    if port is None:
+        pool = getattr(getattr(getattr(proj, "db", None), "connection", None),
+                       "connection_pool", None)
+        kwargs = getattr(pool, "connection_kwargs", None)
+        port = kwargs.get("port") if isinstance(kwargs, dict) else None
+    return f"host:{host}:{port}" if port is not None else f"host:{host}"
 
 
 def _graph_key(proj) -> tuple[str, str]:
@@ -98,9 +127,17 @@ def record_degraded(proj, stage: str, event_type: str, event_id: str | None,
                     exc: BaseException) -> dict[str, Any]:
     """Record that a `:GraphEvent` write was refused or lost (#9208).
 
-    `stage` names the statement that failed (``"emit"`` for the hook's own
-    leg — the schema DDL and the `seq` allocator — and ``"append"`` for the
-    row write), because the two are different defects with the same symptom.
+    `stage` names the statement that failed, because the defects share a symptom
+    but not a diagnosis — and a reader must be told WHICH one it is, not only
+    that something went wrong:
+
+    * ``"emit"`` — the hook's own leg (the `seq` allocator, the schema DDL);
+    * ``"append"`` — the row write, and the store PROVABLY does not hold it
+      (the post-failure re-read found nothing), so the event is LOST;
+    * ``"append-unverified"`` — the row write failed AND the store could not be
+      read back, so the row may or may not have landed. Reported as a guess
+      about nothing would be the same collapse this function exists to undo.
+
     ``lost`` counts the events this graph has lost in this process; it only ever
     grows, matching the fact that those rows can never be delivered.
 
@@ -556,11 +593,25 @@ def append_event(proj, seq: int, type_: str, payload: dict, event_id: str,
         # deletion §17.1's third door must not produce. So the two are told
         # apart by what the store actually holds, and only a real loss is
         # recorded as the named degraded state.
-        if _event_row_exists(proj, event_id):
+        verified = _event_row_exists(proj, event_id)
+        if verified is True:
             # The unique constraint fired on a retried `event_id`: the row we
             # would have written is already in the store, so nothing is lost.
             logger.warning(
                 "event_store: duplicate event_id %r skipped", event_id)
+            return False
+        if verified is None:
+            # The row write failed AND the read-back failed: neither "lost" nor
+            # "landed" is provable, so the state names the UNCERTAINTY rather
+            # than asserting a loss nobody can confirm.
+            state = record_degraded(proj, "append-unverified", type_,
+                                    event_id, exc)
+            logger.warning(
+                "event_store: append failed for event_id %r and the store could "
+                "not be read back — the change feed is DEGRADED (%s "
+                "unverified, %s: %s); poll_events will refuse to answer until "
+                "this is acknowledged (#9208)",
+                event_id, state["lost"], type(exc).__name__, exc)
             return False
         state = record_degraded(proj, "append", type_, event_id, exc)
         logger.warning(
@@ -571,12 +622,18 @@ def append_event(proj, seq: int, type_: str, payload: dict, event_id: str,
         return False
 
 
-def _event_row_exists(proj, event_id: str) -> bool:
+def _event_row_exists(proj, event_id: str) -> bool | None:
     """Does the store already hold this `event_id`? (#9208's loss discriminator)
 
-    Reads the SAME store the failed write targets. ``False`` on a read error: an
-    unreadable store is not evidence that the row landed, and guessing "it is
-    fine" is how the loss this function exists to expose gets swallowed twice.
+    TRI-state on purpose. ``True`` = the row is there, so a failed write lost
+    nothing (the unique-constraint race). ``False`` = the store was read and does
+    NOT hold it, so this event is provably lost. ``None`` = the read itself
+    failed, so neither claim is available.
+
+    Collapsing ``None`` into ``False`` would report "lost" for a transient read
+    error on a store that may have committed — a permanent refusal over an
+    unproven loss. Collapsing it into ``True`` is the opposite lie. The caller
+    names the third outcome instead.
     """
     try:
         rows = proj.g.query(
@@ -584,7 +641,7 @@ def _event_row_exists(proj, event_id: str) -> bool:
             params={"id": event_id},
         ).result_set
     except Exception:  # noqa: BLE001, RUF100
-        return False
+        return None
     return bool(rows and rows[0][0] > 0)
 
 

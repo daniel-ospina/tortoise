@@ -269,8 +269,14 @@ degraded state (`event_store.degraded()`), per store+graph, and `poll_events`
 RAISES `event_store.ChangeFeedDegraded` rather than return a page that cannot be
 read as "lost" — `event_store.clear_degraded(<graph>)` is the explicit
 acknowledgement, because the events in the gap never reached the store and are
-not recovered by a later successful write. It is process memory: a peer process
-cannot see it, which is stated rather than assumed.
+not recovered by a later successful write. The stage is part of the diagnosis:
+`append` means the store was read and provably does not hold the row, while
+`append-unverified` means the read-back also failed, so "lost" is a guess the
+state refuses to make. Over HTTP the state is a **503** carrying that detail
+verbatim, not a bare 500. It is process memory: a peer process cannot see it,
+which is stated rather than assumed, and one consumer — the webhook delivery
+sweep, which reads `read_after` directly — is NOT covered and is named as a
+follow-up rather than implied covered.
 
 **The counter's domain is `0 .. MAX_SEQ`, and the ceiling is `2**53 - 1`, not
 INT64_MAX.** `ensure_event_schema` indexes `:GraphEvent.seq`, and FalkorDB

@@ -5155,6 +5155,48 @@ class TestEventReplay:
 
     # ── Tenant isolation ──────────────────────────────────────────────
 
+    def test_a_degraded_change_feed_is_503_not_a_bare_500(self, client,
+                                                        monkeypatch):
+        """#9208: the NAMED degraded state must survive the HTTP boundary.
+
+        `ChangeFeedDegraded` is a `RuntimeError`, so before this arm it escaped
+        to the catch-all handler as `500 {"detail": "Internal server error"}` —
+        stripping the graph name, the refusal and the remedy out of a state whose
+        whole purpose is to be readable by the feed's consumer. 503 is the honest
+        classification: the org's event store refused a write, so the request is
+        not the problem. The mutation itself still succeeds (the emit hook is
+        best-effort by contract), which is exactly why the poll must not answer
+        as if the stream were merely quiet.
+        """
+        from tortoise import event_store
+        from tortoise.projection import DirectCacheWriteRefused
+
+        def refuse(_proj):
+            raise DirectCacheWriteRefused(
+                "Refusing a mutating statement issued at the projection's write "
+                "handle (`proj.g`) ... statement=MERGE (m:GraphEventMeta) ...")
+
+        event_store.clear_degraded()
+        monkeypatch.setattr(event_store, "next_seq", refuse)
+        try:
+            r = client.post("/v1/points", json={
+                "content": "the feed write is refused",
+                "kind": "statement",
+            })
+            assert r.status_code == 200, r.text[:200]
+
+            r = client.get("/v1/events")
+            assert r.status_code == 503, r.text[:300]
+            detail = r.json()["detail"]
+            assert "DEGRADED" in detail
+            assert "DirectCacheWriteRefused" in detail, (
+                "the refusal that caused it must reach the consumer: "
+                f"{detail[:300]}")
+            assert "clear_degraded" in detail
+        finally:
+            monkeypatch.undo()
+            event_store.clear_degraded()
+
     def test_tenant_cannot_see_other_team_events(self, client):
         """Team A cannot see team B's events — trust boundary.
         #432: team scoping is via graph namespace, not a org_id property."""

@@ -278,6 +278,109 @@ def test_a_later_success_does_not_un_degrade_the_feed(armed_sdk, monkeypatch):
         "lost event is gone, which is what acknowledging it means")
 
 
+def test_an_unverifiable_append_is_reported_as_unverified_not_as_a_loss(
+        armed_sdk, monkeypatch):
+    """The third outcome: the write failed AND the read-back failed.
+
+    `append_event` distinguishes a duplicate from a loss by re-reading the store
+    for the `event_id`. When that read ALSO fails, neither "landed" nor "lost" is
+    provable — the socket may have died after the server committed. Collapsing
+    that into "lost" would report a permanent refusal over an unproven gap, and
+    into "landed" would be the old lie. The state names the uncertainty instead,
+    which is the only honest third answer for a dict whose job is to NAME the
+    diagnosis.
+    """
+    from tortoise.projection import _GuardedGraph
+
+    sdk = armed_sdk
+    real = _GuardedGraph.query
+    pre_checks = {"n": 0}
+
+    def query(self, cypher, params=None, timeout=None):
+        if cypher.lstrip().startswith("CREATE (e:GraphEvent"):
+            raise RuntimeError("Connection closed by server")
+        if "RETURN count(e)" in cypher:
+            # The PRE-check must succeed (there is no row yet) so the write is
+            # attempted; only the post-failure READ-BACK is unreadable.
+            pre_checks["n"] += 1
+            if pre_checks["n"] > 1:
+                raise RuntimeError("Connection closed by server")
+        return real(self, cypher, params=params, timeout=timeout)
+
+    monkeypatch.setattr(_GuardedGraph, "query", query)
+
+    sdk.create_point("statement", "append and read-back both fail")
+
+    state = event_store.degraded(sdk._get_proj())
+    assert state is not None
+    assert state["stage"] == "append-unverified", (
+        "an unreadable store proves neither a loss nor a landing, so the stage "
+        f"must say so; observed={state['stage']!r}")
+    with pytest.raises(ChangeFeedDegraded) as excinfo:
+        sdk.poll_events()
+    assert "append-unverified" in str(excinfo.value)
+
+
+def test_the_emit_hook_never_raises_even_when_the_recorder_fails(
+        armed_sdk, monkeypatch):
+    """The handler must not become a new failure mode.
+
+    The emit hook is best-effort BY CONTRACT: several doors emit AFTER their
+    cache write, so a raise out of `_emit_event` would report a FAILED mutation
+    that actually landed. Recording the degraded state therefore must not be
+    able to escalate — its own import comes from the module the handler is
+    handling, and a raise inside the handler would escape it.
+    """
+    sdk = armed_sdk
+    _refuse_the_store_leg(monkeypatch)
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("the recorder itself is broken")
+
+    monkeypatch.setattr(event_store, "record_degraded", explode)
+
+    point = sdk.create_point("statement", "the recorder explodes")
+    assert _point_landed(sdk, point["id"]), (
+        "a broken recorder must not turn a landed mutation into a reported "
+        "failure")
+
+
+def test_the_store_identity_includes_the_server_PORT():
+    """Two servers on one HOST are two stores — the port is part of identity.
+
+    This repo's own environment runs two FalkorDB servers on loopback (`:6379`
+    the test matrix, `:16379` canonical/dev), both with the default graph name
+    `tortoise`. Keyed on the host alone, a refused write against one would
+    permanently refuse `poll_events` on the other. `FalkorProjection` records
+    `_host` but not `_port`, so the port is read from the client's connection
+    pool — the same seam `tests/_embedded._projection_host` uses — and that seam
+    is what this unit pin fixes in place.
+    """
+    from types import SimpleNamespace
+
+    def stub(*, path=None, host=None, port=None, graph="tortoise"):
+        kwargs = {"host": host, "port": port}
+        return SimpleNamespace(
+            _path=path, _host=host, graph_name=graph,
+            db=SimpleNamespace(connection=SimpleNamespace(
+                connection_pool=SimpleNamespace(connection_kwargs=kwargs))))
+
+    here = event_store._graph_key(stub(host="localhost", port=16379))
+    there = event_store._graph_key(stub(host="localhost", port=6379))
+    assert here != there, (
+        "two servers on one host must not share a degraded key; "
+        f"both keyed as {here!r}")
+    assert here == event_store._graph_key(stub(host="localhost", port=16379))
+
+    # The graph half of the composite key, in the same store.
+    assert event_store._graph_key(
+        stub(host="localhost", port=16379, graph="tenant_a")) != here
+
+    # The embedded half: two DATABASES are two stores even under one name.
+    assert event_store._graph_key(stub(path="/a.db")) != event_store._graph_key(
+        stub(path="/b.db"))
+
+
 def test_an_unconfigured_feed_is_not_degraded(armed_sdk):
     """A refusal must not be confused with "the feed was never written to".
 
@@ -290,43 +393,79 @@ def test_an_unconfigured_feed_is_not_degraded(armed_sdk):
     assert event_store.degraded(sdk._get_proj()) is None
     assert sdk.poll_events()["events"] == []
 
+def test_a_dead_feed_on_one_graph_does_not_refuse_another(tmp_path, monkeypatch):
+    """The degraded state is per (STORE, GRAPH) — the product's own partition.
 
-def test_a_dead_feed_on_one_graph_does_not_refuse_another(armed_sdk, tmp_path,
-                                                        monkeypatch):
-    """The degraded state is per GRAPH, because the store is (the issue's
-    namespace = org partition).
-
-    A process-global flag is the easy version of this fix and it over-reads the
-    failure in the direction that harms a healthy tenant: one graph's refused
-    write would refuse every other graph's poll in the same process. It also
-    latched a whole test session on ANY deliberate refusal elsewhere (the #5379
-    allocator ceiling is driven on purpose by `tests/test_event_store.py`), which
-    is how this test came to exist.
+    ⚠️ BOTH halves of the key must be distinguishable IN THIS TEST or it pins
+    neither. An earlier version opened the two SDKs on different db paths AND
+    different graph names, so a store-ONLY key and a graph-ONLY key both passed:
+    it proved nothing about the over-read it exists to prevent. Here both SDKs
+    sit on the SAME database with DIFFERENT graph names — the shape the product
+    actually has (one store, one graph per tenant/namespace), and the only shape
+    where a wrong key refuses a healthy tenant's poll.
     """
     from tortoise.sdk import TortoiseSDK
 
-    dead = armed_sdk
-    _refuse_the_store_leg(monkeypatch)
-    dead.create_point("statement", "lost on the degraded graph")
-    assert event_store.degraded(dead._get_proj()) is not None
-    monkeypatch.undo()  # the healthy graph must see a WORKING store leg
+    db_path = str(tmp_path / "shared.db")
+    journal = str(tmp_path / "journal.jsonl")
 
-    healthy = TortoiseSDK(str(tmp_path / "healthy.db"),
-                          event_log_path=str(tmp_path / "healthy.jsonl"),
-                          # A DISTINCT partition: the key is the graph name,
-                          # which is the store's own unit in the product (the
-                          # namespace IS the org partition). Two embedded DBs
-                          # sharing the default name are indistinguishable by
-                          # design — a test artifact, not a product shape.
-                          graph_name="test_9208_healthy")
+    dead = TortoiseSDK(db_path, event_log_path=journal, graph_name="tenant_a")
+    healthy = TortoiseSDK(db_path, event_log_path=journal, graph_name="tenant_b")
     try:
+        assert dead._get_proj()._path == healthy._get_proj()._path, (
+            "the two SDKs must share ONE store, or this test cannot tell a "
+            "per-store key from a per-graph one")
+
+        _refuse_the_store_leg(monkeypatch)
+        dead.create_point("statement", "lost on the degraded graph")
+        assert event_store.degraded(dead._get_proj()) is not None
+        monkeypatch.undo()  # tenant_b's graph must see a WORKING store leg
+
         point = healthy.create_point("statement", "this graph's feed is fine")
         assert _graph_events(healthy) == 1
         reply = healthy.poll_events()
         assert [e["type"] for e in reply["events"]] == ["PointAdded"]
         assert reply["events"][0]["payload"]["id"] == point["id"]
+
+        with pytest.raises(ChangeFeedDegraded):
+            dead.poll_events()
     finally:
         healthy.close()
+        dead.close()
 
-    with pytest.raises(ChangeFeedDegraded):
-        dead.poll_events()
+
+def test_two_stores_under_one_graph_name_do_not_share_a_state(tmp_path,
+                                                              monkeypatch):
+    """The OTHER half of the composite key: the store identity matters.
+
+    Two databases whose graphs share a NAME are two stores — and this repo's own
+    environment runs exactly that shape (the test matrix and the canonical/dev
+    FalkorDB both default to the graph name `tortoise`). Keyed on the graph name
+    alone, a refused write on one permanently refuses the other's poll.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    dead = TortoiseSDK(str(tmp_path / "one.db"),
+                       event_log_path=str(tmp_path / "one.jsonl"),
+                       graph_name="tortoise")
+    healthy = TortoiseSDK(str(tmp_path / "two.db"),
+                          event_log_path=str(tmp_path / "two.jsonl"),
+                          graph_name="tortoise")
+    try:
+        assert dead._get_proj()._path != healthy._get_proj()._path
+
+        _refuse_the_store_leg(monkeypatch)
+        dead.create_point("statement", "lost in the first store")
+        assert event_store.degraded(dead._get_proj()) is not None
+        monkeypatch.undo()
+
+        healthy.create_point("statement", "fine in the second store")
+        assert _graph_events(healthy) == 1
+        assert [e["type"] for e in healthy.poll_events()["events"]] == [
+            "PointAdded"]
+
+        with pytest.raises(ChangeFeedDegraded):
+            dead.poll_events()
+    finally:
+        healthy.close()
+        dead.close()

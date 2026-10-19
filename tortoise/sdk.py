@@ -6578,12 +6578,24 @@ class TortoiseSDK:
             if unknown:
                 raise ValueError(f"unknown event type: {unknown[0]}")
         proj = self._get_proj()
+        # Lazy retention (plan-review P2 / Task 6 readOnlyHint tension):
+        # maintenance purge at most once per TORTOISE_EVENT_RETENTION_INTERVAL
+        # per process, so steady-state polls are read-only. Best-effort — a
+        # purge failure never blocks the poll.
+        self._maybe_purge_events(proj)
         # #9208: THIS graph's change-feed write was REFUSED or lost, so a short
         # page cannot be told from a quiet stream. Refusing to answer is the
         # whole point of the named degraded state: the alternative is returning
         # success over a dead feed, which is the silent deletion §17.1's third
-        # door must never be allowed to produce. Before the purge below, because
-        # a writer that cannot emit must not be handed more writes to lose.
+        # door must never be allowed to produce.
+        #
+        # AFTER the purge deliberately: retention is housekeeping (a DELETE of
+        # old rows), not an emit, and the state persists until an explicit
+        # `clear_degraded` — so refusing before the purge would stop retention
+        # for as long as the graph stayed degraded (indefinitely, in a worker
+        # that has no one to acknowledge it) and let `:GraphEvent` grow
+        # unbounded on a graph nobody can poll. The purge cannot change the
+        # answer: it is `try`-wrapped and never raises.
         state = degraded(proj)
         if state is not None:
             raise ChangeFeedDegraded(
@@ -6591,7 +6603,7 @@ class TortoiseSDK:
                 f"{state['graph']!r} is DEGRADED: a change-feed write was "
                 f"refused or lost at stage {state['stage']!r} for event type "
                 f"{state['event_type']!r} ({state['error']}); {state['lost']} "
-                "event(s) never reached the store, so this poll cannot "
+                "event(s) are unaccounted for, so this poll cannot "
                 "distinguish a quiet stream from a dead one and will not "
                 "answer as if it could. Fix the store (the refusal message "
                 "names the cause — e.g. an undeclared write under §17.1), "
@@ -6599,11 +6611,6 @@ class TortoiseSDK:
                 "tortoise.event_store.clear_degraded(<graph name>) — the "
                 "missing events are NOT recovered by a later successful "
                 "write (#9208)")
-        # Lazy retention (plan-review P2 / Task 6 readOnlyHint tension):
-        # maintenance purge at most once per TORTOISE_EVENT_RETENTION_INTERVAL
-        # per process, so steady-state polls are read-only. Best-effort — a
-        # purge failure never blocks the poll.
-        self._maybe_purge_events(proj)
         # Expired-cursor check: a NON-ZERO cursor pointing below the graph's
         # min seq was purged/compacted. after_seq == 0 is the "from the start"
         # sentinel (after=None) — it never expires, it just returns all
@@ -6785,13 +6792,37 @@ class TortoiseSDK:
                 # stopped while `poll_events` kept answering `[]` — a quiet
                 # stream and a dead one, the same reply. The loss is recorded
                 # as the named degraded state the feed's CONSUMER can see.
-                from .event_store import record_degraded
-                state = record_degraded(proj, "emit", type_, None, exc)
-                _logger.warning(
-                    "event emission failed for %s — the change feed is "
-                    "DEGRADED (%s lost, %s: %s); poll_events will refuse to "
-                    "answer until this is acknowledged (#9208)",
-                    type_, state["lost"], type(exc).__name__, exc)
+                #
+                # The recorder is itself `try`-wrapped: its import is from the
+                # very module named above as a possible failure (`_emit_event`
+                # may have got here because `tortoise.event_store` failed to
+                # exec, and an import that raised is re-executed), and a raise
+                # INSIDE this handler would escape `_emit_event` and defeat the
+                # best-effort contract it is here to preserve.
+                try:
+                    from .event_store import record_degraded
+                    if proj is None:
+                        # No projection ⇒ no graph to key the state to, and a
+                        # reader would hit the same `_get_proj()` failure rather
+                        # than a successful poll, so nothing can be hidden here.
+                        # Logged loudly, not filed under a bucket no reader reads.
+                        _logger.warning(
+                            "event emission failed for %s and the projection "
+                            "could not be resolved, so the change feed's "
+                            "degraded state cannot be attributed: %s: %s",
+                            type_, type(exc).__name__, exc)
+                    else:
+                        state = record_degraded(proj, "emit", type_, None, exc)
+                        _logger.warning(
+                            "event emission failed for %s — the change feed is "
+                            "DEGRADED (%s lost, %s: %s); poll_events will "
+                            "refuse to answer until this is acknowledged "
+                            "(#9208)",
+                            type_, state["lost"], type(exc).__name__, exc)
+                except Exception:  # noqa: BLE001, RUF100
+                    _logger.exception(
+                        "event emission failed for %s — and recording the "
+                        "degraded state failed too (#9208)", type_)
 
         # ── JSONL event log (#548) ─────────────────────────────────
         if point is None and id is None:
