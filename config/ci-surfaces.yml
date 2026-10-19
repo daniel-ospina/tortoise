@@ -1271,8 +1271,10 @@ surfaces:
   # `tortoise/event_store.py` (the funnel it censuses) and
   # `tortoise/projection/__init__.py` (the replay scopes it opens). Verified by
   # re-running `select()` with this row absent:
-  #   * `tortoise/event_store.py` selects `['core']` over 589 files — the row is
-  #     load-bearing for it, and it is the ONLY surface row that is.
+  #   * `tortoise/event_store.py` selects `['core']` (and NOT the full matrix) —
+  #     the row is load-bearing for it, and it is the ONLY surface row that is.
+  #     The file count is deliberately not quoted: it moved between the first
+  #     measurement and the rebase (this file warns about exactly that rot).
   #   * `tortoise/projection/__init__.py` selects the FULL matrix (`full: True`,
   #     `test_files: ALL`), so every other arm already carries this suite; a
   #     second row could not add a leg it is missing.
