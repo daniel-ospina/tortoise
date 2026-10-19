@@ -102,6 +102,15 @@ surfaces:
   # subjects span `projection/` (core), `sdk.py`, `api.py` (api),
   # `backup.py`/`consistency.py`/`mining.py` (core), and `__main__.py` (api).
   - test_7951_enforce_atomic_write.py
+  # #9122 (§17.1 raw `:Event` writers): MULTI-REGISTERED with `core` and `sdk`.
+  # The suite pins `TortoiseSDK._event_raw_write_door` (`tortoise/sdk.py` ->
+  # sdk), the projection's live-write scope and journal replay it depends on
+  # (`tortoise/projection/` -> core), and the hosted/MCP ingest callers that
+  # reach `ingest_corpus` (`tortoise/hosted_api.py` -> api). Each of those is an
+  # EXACT SOURCE_PATTERNS match, and an exact match REPLACES the `core` fallback
+  # in `select()` — so a lone `core` entry would silently drop this suite on a
+  # `sdk.py`-or-`hosted_api.py`-only change (the #1349/#2938/#3154 class).
+  - test_9079_event_writers_journal.py
   # #9121 (§17.1 write-lane DECLARATION): MULTI-REGISTERED with `onboarding`,
   # `core`, `api` and `sdk`. The suite pins a declaration in
   # `tortoise/onboarding/state.py` (onboarding) that the HOSTED callers
@@ -1394,6 +1403,15 @@ surfaces:
   # `sdk.py` are this guard's subjects; an `sdk.py`-only change selects the
   # full matrix, and a `projection/`-only change falls through to `core`.
   - test_7951_enforce_atomic_write.py
+  # #9122 (§17.1 raw `:Event` writers): MULTI-REGISTERED with `core` and `sdk`.
+  # The suite pins `TortoiseSDK._event_raw_write_door` (`tortoise/sdk.py` ->
+  # sdk), the projection's live-write scope and journal replay it depends on
+  # (`tortoise/projection/` -> core), and the hosted/MCP ingest callers that
+  # reach `ingest_corpus` (`tortoise/hosted_api.py` -> api). Each of those is an
+  # EXACT SOURCE_PATTERNS match, and an exact match REPLACES the `core` fallback
+  # in `select()` — so a lone `core` entry would silently drop this suite on a
+  # `sdk.py`-or-`hosted_api.py`-only change (the #1349/#2938/#3154 class).
+  - test_9079_event_writers_journal.py
   # #9121 (§17.1 write-lane DECLARATION): MULTI-REGISTERED with `onboarding`,
   # `core`, `api` and `sdk`. The suite pins a declaration in
   # `tortoise/onboarding/state.py` (onboarding) that the HOSTED callers
@@ -4015,6 +4033,15 @@ surfaces:
   # #1349/#2938 silent-drop class; full rationale in the `api` entry).
   - test_7951_write_doors.py
   - test_7951_enforce_atomic_write.py
+  # #9122 (§17.1 raw `:Event` writers): MULTI-REGISTERED with `core` and `sdk`.
+  # The suite pins `TortoiseSDK._event_raw_write_door` (`tortoise/sdk.py` ->
+  # sdk), the projection's live-write scope and journal replay it depends on
+  # (`tortoise/projection/` -> core), and the hosted/MCP ingest callers that
+  # reach `ingest_corpus` (`tortoise/hosted_api.py` -> api). Each of those is an
+  # EXACT SOURCE_PATTERNS match, and an exact match REPLACES the `core` fallback
+  # in `select()` — so a lone `core` entry would silently drop this suite on a
+  # `sdk.py`-or-`hosted_api.py`-only change (the #1349/#2938/#3154 class).
+  - test_9079_event_writers_journal.py
   # #9121 (§17.1 write-lane DECLARATION): MULTI-REGISTERED with `onboarding`,
   # `core`, `api` and `sdk`. The suite pins a declaration in
   # `tortoise/onboarding/state.py` (onboarding) that the HOSTED callers
