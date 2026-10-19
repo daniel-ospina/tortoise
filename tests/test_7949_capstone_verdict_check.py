@@ -220,6 +220,9 @@ def _green(rec: dict) -> dict:
                numerator=31, denominator=50, blocked_by=None,
                corpus_sha256="a" * 64)
     rec["corpus"] = {"path": "corpus.json", "sha256": "a" * 64, "turns": 50}
+    # A green row rests on a pre-registration the run READ: the block says so.
+    rec["prereg"] = {"sha": rec["prereg"]["sha"], "status": "OK",
+                     "artifact": rec["prereg"]["artifact"]}
     rec["run"] = {"status": "COMPLETED", "reason": "eight steps",
                   "steps_observed": list(cvc.STEPS),
                   "steps_required": list(cvc.STEPS)}
@@ -342,6 +345,44 @@ def test_green_row_with_a_sha_that_does_not_resolve_is_a_finding():
     assert findings.unresolved
 
 
+def test_a_green_row_under_a_log_that_says_the_prereg_was_never_read_reds():
+    """REGRESSION (#9089 review cycle 5): V5 read `prereg.sha` and never
+    `prereg.status`, so a table that records `status: "ABSENT"` in its own
+    block — denying the read the green verdict rests on — passed 5/5 GREEN and
+    `--require-green` exited 0. The epic's closing verdict was granted on a log
+    that says the pre-registration was never read.
+    """
+    rec = _record()
+    _green(rec)
+    for row in rec["rows"]:
+        row.update(verdict="GREEN", evidence_kind="measurement",
+                   evidence="docs/evidence/7949-capstone/capstone.log",
+                   numerator=10, denominator=50, blocked_by=None,
+                   corpus_sha256="a" * 64, sha=HEAD)
+    rec["prereg"]["status"] = "ABSENT"
+    codes = _codes(rec, require_green=True)
+    assert codes.count("V5") == 5, codes
+    assert "V9" not in codes, codes
+
+
+def test_an_unreadable_log_shape_is_a_usage_error_not_a_verdict(tmp_path, capsys):
+    """A block that parses but is not a table, and a non-UTF-8 byte, are exit 2.
+
+    Both used to raise and surface as exit 1 — the code that means "the table
+    has findings", which a lane reads as a verdict on the evidence.
+    """
+    for name, body in (
+        ("not-a-table.log", f"x\n{cvc.BEGIN}\n[]\n{cvc.END}\n"),
+        ("null-table.log", f"x\n{cvc.BEGIN}\nnull\n{cvc.END}\n"),
+    ):
+        p = tmp_path / name
+        p.write_text(body)
+        assert cvc.main([str(p)]) == 2, name
+    raw = tmp_path / "bad-bytes.log"
+    raw.write_bytes(b"x\n" + cvc.BEGIN.encode() + b"\n{\xff}\n" + cvc.END.encode() + b"\n")
+    assert cvc.main([str(raw)]) == 2
+
+
 def test_an_unreachable_prereg_sha_does_not_accuse_the_evidence_of_predating():
     """REGRESSION (#9089 review cycle 4): the prereg commit is the OTHER operand
     of the ancestry test, and `_is_ancestor` read git's exit 128 ("cannot
@@ -363,7 +404,8 @@ def test_an_unreachable_prereg_sha_does_not_accuse_the_evidence_of_predating():
     findings = cvc.check(rec, repo=_REPO, require_green=False)
     codes = [c for c, _w, _m in findings.items]
     assert "V5" not in codes, findings.render()
-    assert ("prereg", "d" * 40) in findings.unresolved, findings.unresolved
+    assert ("prereg", "d" * 40, "not in this object DB") in findings.unresolved, \
+        findings.unresolved
     assert "V11" in _codes(rec, require_resolvable=True)
 
 
@@ -418,11 +460,14 @@ def test_a_NON_GREEN_row_whose_sha_is_unresolvable_is_still_RESOLVED_ON_REQUEST(
     for row in rec["rows"]:
         row["sha"] = "0" * 40
     codes = _codes(rec, require_resolvable=True)
-    assert codes.count("V11") == 5, codes
+    # ONE V11, not five: the five rows share one pointer and V11 names the
+    # POINTER (a note that said "5 row sha(s)" about one sha is a wrong
+    # remediation target).
+    assert codes.count("V11") == 1, codes
     assert "V5" not in codes, codes
     # and it is reported (not silently dropped) without the flag
     findings = cvc.check(rec, repo=_REPO, require_green=False)
-    assert len(findings.unresolved) == 5, findings.unresolved
+    assert {kind for kind, _p, _w in findings.unresolved} == {"row"}
 
 
 def test_green_row_with_an_unparseable_sha_is_a_finding():

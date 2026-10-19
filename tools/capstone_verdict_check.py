@@ -53,9 +53,10 @@ marked green off closed children, with no artifact at all. This closes that.
     V9  --require-green (the EPIC's closing rule): 5/5 GREEN
     V10 a MEASURED E4 whose denominator is 4 is the historical 4-edge defect
         re-appearing, not a measurement
-    V11 (``--require-resolvable``) every row's sha resolves in this checkout.
-        OFF by default: a squash-merged branch sha is unresolvable in ``main``
-        by design, so a default finding would red a shipped bundle after merge
+    V11 (``--require-resolvable``) the provenance POINTERS resolve in this
+        checkout — each row's sha AND the pre-registration commit. OFF by
+        default: a squash-merged branch sha is unresolvable in ``main`` by
+        design, so a default finding would red a shipped bundle after merge
 
 Exit codes: 0 = clean, 1 = findings, 2 = usage / unreadable log. Without
 ``--require-green`` an honest all-blocked table is CLEAN (exit 0): the epic is
@@ -116,12 +117,13 @@ def extract_block(text: str) -> dict:
 class Findings:
     def __init__(self) -> None:
         self.items: list[tuple[str, str, str]] = []
-        #: Rows whose sha is a well-formed commit sha that this checkout cannot
-        #: resolve. Reported, not failed by default: a squash-merged branch sha
-        #: NEVER reaches main, so making it fatal would red the shipped bundle on
+        #: Provenance POINTERS this checkout cannot answer for, as
+        #: ``(kind, pointer, reason)`` where kind is ``"row"`` or ``"prereg"``.
+        #: Reported, not failed by default: a squash-merged branch sha NEVER
+        #: reaches main, so making it fatal would red the shipped bundle on
         #: every PR after merge (V11, and `--require-resolvable` for the lane
         #: that still carries the commit).
-        self.unresolved: list[tuple[str, str]] = []
+        self.unresolved: list[tuple[str, str, str]] = []
 
     def add(self, code: str, where: str, msg: str) -> None:
         self.items.append((code, where, msg))
@@ -192,7 +194,12 @@ def check(record: dict, *, repo: Path,
     if not isinstance(rows, list):
         f.add("V2", "root.rows", "missing or not a list — the table is 5 rows")
         return f
-    seen = [r.get("criterion") for r in rows if isinstance(r, dict)]
+    # A `criterion` that is a LIST (or dict) is unhashable: the census below
+    # would raise on `count()`/`in` and surface as exit 1 — the code reserved
+    # for "the table has findings". Only hashable scalars take part.
+    seen = [r.get("criterion") for r in rows
+            if isinstance(r, dict)
+            and isinstance(r.get("criterion"), (str, int, float, bool, type(None)))]
     for criterion in CRITERIA:
         n = seen.count(criterion)
         if n == 0:
@@ -216,7 +223,9 @@ def check(record: dict, *, repo: Path,
         # green row tries to lean on it (V5).
         prereg_sha = None
 
-    by_id = {r.get("criterion"): r for r in rows if isinstance(r, dict)}
+    by_id = {r.get("criterion"): r for r in rows
+             if isinstance(r, dict)
+             and isinstance(r.get("criterion"), (str, int, float, bool, type(None)))}
 
     for row in rows:
         if not isinstance(row, dict):
@@ -239,7 +248,7 @@ def check(record: dict, *, repo: Path,
             f.add("V3", where, f"sha {sha!r} is not a commit sha — every row "
                                "is measured AT a sha")
         elif not _is_git_repo(repo):
-            f.unresolved.append((where, sha))
+            f.unresolved.append(("row", sha, "not a git work tree"))
         elif not _resolves(repo, sha):
             # ⛔ EVERY row, not only the green ones (#9089 review). The resolve
             # check used to sit inside the GREEN branch, and the shipped table
@@ -257,7 +266,7 @@ def check(record: dict, *, repo: Path,
             # instrument. So resolution is REPORTED here (V11) and only FAILS
             # under `--require-resolvable`, which the lane that still holds the
             # commit passes. Shape is always fatal (above).
-            f.unresolved.append((where, sha))
+            f.unresolved.append(("row", sha, "not in this object DB"))
 
         # ── V4 the artifact must exist ────────────────────────────────────
         evidence = row.get("evidence")
@@ -322,6 +331,19 @@ def check(record: dict, *, repo: Path,
                                        "sha — the verdict would be measured "
                                        "against a threshold nobody fixed "
                                        "first (#9075)")
+                elif prereg.get("status") != "OK":
+                    # The block ALSO records whether G0 read the frozen record.
+                    # A table saying `status: "ABSENT"` (in the same breath as a
+                    # resolvable, ancestral prereg sha) denies the read that the
+                    # green verdict rests on. Measured before the fix: such a
+                    # table passed 5/5 GREEN and `--require-green` exited 0 —
+                    # the epic's closing verdict granted on a log that says the
+                    # pre-registration was never read.
+                    f.add("V5", where, "GREEN under a log whose own prereg "
+                                       f"block records status="
+                                       f"{prereg.get('status')!r} — green "
+                                       "rests on a pre-registration this run "
+                                       "did not read")
                 # ...whereas ANCESTRY is a git question and only answerable
                 # where the measured commit is reachable. It is reported, not
                 # failed, for the same reason V3's resolution is (a
@@ -335,11 +357,13 @@ def check(record: dict, *, repo: Path,
                     # see made `_is_ancestor` answer "no" and the gate printed
                     # five FALSE "evidence PREDATES the pre-registration"
                     # findings with a cause the lane cannot remediate.
-                    f.unresolved.append(("prereg", prereg_sha))
+                    f.unresolved.append(
+                        ("prereg", prereg_sha, "not in this object DB"))
                 else:
                     ancestry = _is_ancestor(repo, prereg_sha, sha)
                     if ancestry is None:
-                        f.unresolved.append(("prereg", prereg_sha))
+                        f.unresolved.append(
+                        ("prereg", prereg_sha, "not in this object DB"))
                     elif ancestry is False:
                         f.add("V5", where, "evidence PREDATES the "
                                            f"pre-registration ({sha} is not a "
@@ -437,10 +461,13 @@ def check(record: dict, *, repo: Path,
     # red the shipped bundle forever. `--require-resolvable` is for the lane
     # that still carries the commit and wants the pointers proven.
     if require_resolvable:
-        for where, sha in list(dict.fromkeys(f.unresolved)):
-            f.add("V11", where, f"evidence sha {sha} does not resolve in this "
-                                "repo — pass --require-resolvable only where "
-                                "the measured commit is still reachable")
+        for kind, pointer, why in list(dict.fromkeys(f.unresolved)):
+            what = "row sha" if kind == "row" else "pre-registration commit"
+            f.add("V11", f"{kind}[{pointer}]", f"{what} {pointer} does not "
+                                               f"resolve in this repo ({why}) "
+                                               "— pass --require-resolvable "
+                                               "only where the measured "
+                                               "commit is still reachable")
 
     # ── V9 the epic's closing rule ───────────────────────────────────────
     if require_green:
@@ -460,10 +487,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("log", help="the capstone log (capstone_run.py output)")
     ap.add_argument("--repo", default=".", help="repo root (default: cwd)")
     ap.add_argument("--require-resolvable", action="store_true",
-                    help="FAIL when a row's (well-formed) sha is not "
-                         "resolvable in this checkout. Off by default: a "
-                         "squash-merged branch sha never reaches main, so "
-                         "requiring it would red a shipped bundle after merge")
+                    help="FAIL when a provenance pointer (a row's sha or the "
+                         "pre-registration commit) is not resolvable in this "
+                         "checkout. Off by default: a squash-merged branch sha "
+                         "never reaches main, so requiring it would red a "
+                         "shipped bundle after merge")
     ap.add_argument("--require-green", action="store_true",
                     help="the EPIC's closing rule: exit 0 only when 5/5 rows "
                          "are green (without this, an honest all-blocked table "
@@ -473,7 +501,9 @@ def main(argv: list[str] | None = None) -> int:
     log_path = Path(args.log).resolve()
     try:
         text = log_path.read_text()
-    except OSError as e:
+    except (OSError, UnicodeDecodeError) as e:
+        # A single non-UTF-8 byte used to escape the OSError guard and surface
+        # as exit 1 ("the table has findings") on a traceback.
         print(f"capstone-verdict-check: cannot read {args.log}: {e}",
               file=sys.stderr)
         return 2
@@ -481,6 +511,12 @@ def main(argv: list[str] | None = None) -> int:
         record = extract_block(text)
     except (ValueError, json.JSONDecodeError) as e:
         print(f"capstone-verdict-check: {args.log}: {e}", file=sys.stderr)
+        return 2
+    if not isinstance(record, dict):
+        # The block parsed but is not a table (`[]`, `null`, `"x"`): a usage
+        # error, not a verdict on the evidence.
+        print(f"capstone-verdict-check: {args.log}: the verdict block is "
+              f"{type(record).__name__}, not a table", file=sys.stderr)
         return 2
 
     repo = Path(args.repo).resolve()
@@ -499,12 +535,22 @@ def main(argv: list[str] | None = None) -> int:
                     and r.get("verdict") == v) for v in VERDICTS}
     print(f"capstone-verdict-check: {args.log} — "
           + ", ".join(f"{v}={tally[v]}" for v in VERDICTS))
-    if findings.unresolved and not args.require_resolvable:
+    unresolved = list(dict.fromkeys(findings.unresolved))
+    if unresolved and not args.require_resolvable:
         # Say it, do not fail it: the pointer may be a squash-merged branch sha
-        # that this checkout is not expected to carry.
-        print(f"  note: {len(findings.unresolved)} row sha(s) are not "
-              "resolvable in this checkout (expected after a squash merge; "
-              "re-run with --require-resolvable where the commit exists)")
+        # that this checkout is not expected to carry. Named PER POINTER KIND,
+        # because "5 row sha(s)" about five rows that DO resolve and one prereg
+        # commit that does not is a wrong remediation target.
+        rows_n = sum(1 for kind, _p, _w in unresolved if kind == "row")
+        prereg_n = len(unresolved) - rows_n
+        parts = []
+        if rows_n:
+            parts.append(f"{rows_n} row sha(s)")
+        if prereg_n:
+            parts.append(f"{prereg_n} pre-registration commit(s)")
+        print(f"  note: {' + '.join(parts)} not resolvable in this checkout "
+              "(expected after a squash merge; re-run with "
+              "--require-resolvable where the commit exists)")
     if findings:
         print(f"❌ {len(findings.items)} finding(s):", file=sys.stderr)
         print(findings.render(), file=sys.stderr)
