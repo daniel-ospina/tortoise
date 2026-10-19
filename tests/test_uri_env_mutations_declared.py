@@ -589,31 +589,12 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # (`monkeypatch.setenv("TORTOISE_DB_URI",` + a newline + `"docker://…")`) is
     # still excused by this entry — the continuation line is not inspected. The
     # narrow shape is a real improvement, not a bound.
-    # #9219 — the #9197 site (`b9d99c5e5`), declared late: it redded the required
-    # `test (e)` / `python-ci-gate` on `main` while the suite itself passed.
-    # SITE CLASS: RESTORATION RECORD, not a lane switch (the #2500 shape one entry
-    # up). `_run_indexer` (:451) records the CURRENT `TORTOISE_DB_URI` before
-    # calling `session_indexer.main()`, because `main()` writes its `--db` value
-    # straight into `os.environ` (:691, :714) — the fixture-param monkeypatch
-    # would then have nothing of its own to restore, and every later module would
-    # inherit a dead endpoint (the sdk_factory lane flip). So the recorded value
-    # is the AMBIENT one and this site forces NO lane; it is declared rather than
-    # exempted because the census counts every mutation line, and a mutation it
-    # cannot see is one nothing audits.
-    # LANE INTENT: DELIBERATE_URI — the mutation this record guards is `main()`'s
-    # write of the deliberately-UNREACHABLE docker probe
-    # `docker://:x@localhost:1/g` (the docstring's "deliberately-unreachable URI
-    # probes" class). Nothing connects to it: `indexer_sdk` (:427) replaces
-    # `TortoiseSDK` with a journal-backed fake and pre-builds the projection
-    # before `main()` writes the var. Function-scoped `monkeypatch` — auto-undone
-    # at teardown, so no lane leaks into a later module.
-    #
-    # ⛔ ONE ROW ONLY — this module had a SECOND, broad row
-    # (`[r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"']`) further up the dict.
-    # Python's last-wins dict semantics made the broad row DEAD (it never applied;
-    # ruff `F601` flagged it), so removing it changes no exemption, while MERGING
-    # the two would silently re-widen the shape the entry below deliberately
-    # narrows. Same behaviour, one row, no reading that says otherwise.
+    # NOTE (#9249 follow-up): this entry SUPERSEDES an earlier, BROADER one for the
+    # same file (`...TORTOISE_DB_URI")` with no continuation anchor) that sat
+    # earlier in this dict and was silently shadowed by this key — F601. The
+    # narrow form is the declared intent (see the paragraph above), so the
+    # shadowed entry was deleted rather than merged: adding the broad pattern back
+    # here would excuse same-line values and undo that narrowing.
     "test_9079_event_writers_journal.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*$'],
     # The arm's `--db` scoping tests (#1349 isolation): an explicit `--db` must
