@@ -53,8 +53,9 @@ WHAT THIS PINS
    from the table's rows and then required in all four places the report states them (status
    line, "Surfaces:" paragraph, Verdict, indicator 2), and every green count **and not-green
    count** a site states is read — in digits or spelled out (`fifteen green`, `2 are not (7
-   and 12)`) — so a site that keeps its true sentence and gains a stale one fails, and a
-   count that disagrees with the list beside it fails at its own site. Required, not
+   and 12)`, the Verdict's `the two that are not`) — so a site that keeps its true sentence
+   and gains a stale one fails, and a count that disagrees with the list beside it fails at
+   its own site. Required, not
    optional: a site whose count no reading matches is a site that is not guarded at all.
    Each leg is also recorded on its own surface row. The defect this pins: the headline
    numbers are the artefact's whole deliverable and were hand-maintained, so they drifted
@@ -96,13 +97,14 @@ synthetic doc text and the resolver rejects it; check 6 fails on "8 files, 201 t
 checks 7–8 fail on it too (its per-surface table's only not-green row is 7, so the derived
 set is `{7}` against a stated `16 green`; it carries no "seven legs" claim at all, and its
 rows 7, 8 and 12 carry none of their leg clauses). Checks 9 and 10 are non-vacuous in-suite.
-So are the two fail-opens found in the count readings at `035102ea`, and each is driven
-negatively below: a leg-gap bullet whose buckets
-were moved into the Totals paragraph must stop reading as stating them (pre-fix the widest
-slice still read them), a status line whose count is changed to `3 are not (7 and 12)` must
-be read as 3 (pre-fix no reading matched the `are not` form, so the assertion was inert),
-and a stale spelled-out `sixteen green` beside the true `15 green` must be read (pre-fix
-only digits were).
+So are the four fail-opens found in the readings by mutation, and each is driven negatively
+below: a leg-gap bullet whose buckets were moved into the Totals paragraph must stop reading
+as stating them (pre-fix the widest slice still read them); a status line whose count is
+changed to `3 are not (7 and 12)` must be read as 3 (pre-fix no reading matched the
+`are not` form, so the assertion was inert); the Verdict's `the two that are not` must be
+read as 2, and as 3 once it is drifted (pre-fix no reading matched the `that are not` form,
+and the Verdict's count was never asserted at all); and a stale spelled-out `sixteen green`
+beside the true `15 green` must be read (pre-fix only digits were).
 
 Static: doc-text scans plus file reads. No network, DB or graph.
 """
@@ -856,7 +858,11 @@ def _stated_leg_totals(site: str) -> set[int]:
 #: (7 and 12)", not "2 not green": without the `N are not` form no reading matched that
 #: site, so the count assertion written for it could never fail (a `3 are not (7 and 12)`
 #: — a count disagreeing with the list beside it, this artefact's recurring defect — left
-#: the suite green). An optional `surfaces` keeps a faithful reword readable.
+#: the suite green). An optional `surfaces` keeps a faithful reword readable. The Verdict
+#: phrases it "the two that are not are **surface 7** ... and **surface 12**", where the
+#: word *that* sits between the count and `are not`, so a `the N that are not` form is
+#: needed as well — without it no reading matched the Verdict either, and a `the three that
+#: are not` beside a two-surface list left the suite green.
 _NOT_GREEN_READINGS = (
     re.compile(r"(?<![\w.])(\d+)\s+not green\b", re.IGNORECASE),
     re.compile(
@@ -864,6 +870,11 @@ _NOT_GREEN_READINGS = (
     ),
     re.compile(
         r"(?<![\w.])(" + _NUMERAL_ALTERNATION + r")\s+(?:surfaces?\s+)?are\s+not\b",
+        re.IGNORECASE,
+    ),
+    # "the two that are not" — the Verdict's phrasing: the count, then `that are not`.
+    re.compile(
+        r"(?<![\w.])(" + _NUMERAL_ALTERNATION + r")\s+that\s+are\s+not\b",
         re.IGNORECASE,
     ),
 )
@@ -953,7 +964,9 @@ def test_the_not_green_set_and_the_green_count_follow_from_the_per_surface_table
             f"the {name} must state exactly the green count the table derives ({green}); "
             f"it reads {sorted(_green_readings(site)) or 'none'}. Site: {site}"
         )
-    for name in ("\"Surfaces:\" paragraph", "status line"):
+    # The Verdict is here because it states the count too ("the two that are not"); a
+    # site left out of this loop is a site whose count is not guarded at all.
+    for name in ("status line", "\"Surfaces:\" paragraph", "Verdict"):
         # Required, not optional: a site that states no readable count is not guarded at
         # all, and the status line is the site where the drift originally occurred.
         assert _not_green_readings(sites[name]) == {len(not_green)}, (
@@ -1026,6 +1039,33 @@ def test_the_count_readings_read_every_spelling_the_guard_claims():
     assert _surfaces_named_in(
         _claim_block("**Status:", drifted), r"are not"
     ) == not_green, "the mutation must move only the count, not the list"
+
+    # (a2) the Verdict states its count as "the two that are not", which no reading
+    # matched before the `the N that are not` form was added — so the assertion written
+    # for the Verdict was inert there, exactly as the status line's was.
+    verdict = _fold(_section("## Verdict"))
+    assert _not_green_readings(verdict) == {len(not_green)}, (
+        "the Verdict's not-green count must be readable by `_NOT_GREEN_READINGS` (the "
+        f"table derives {len(not_green)}); it reads "
+        f"{sorted(_not_green_readings(verdict)) or 'none'}, so a count that disagrees "
+        "with the surfaces named beside it would pass unread. Site: " + verdict
+    )
+    verdict_drifted = _fold(
+        _section(
+            "## Verdict",
+            _with_doc_edit("the two that are not", "the three that are not"),
+        )
+    )
+    assert _not_green_readings(verdict_drifted) == {3}, (
+        "a Verdict whose count (3) disagrees with the two surfaces it names must be read "
+        "as 3, so the site assertion fails; pre-fix the `that are not` form matched no "
+        "reading and the drift passed"
+    )
+    for surface in sorted(not_green):
+        assert f"**surface {surface}**" in verdict_drifted, (
+            "the mutation must move only the count, not the surfaces named: "
+            + verdict_drifted
+        )
 
     # (b) spelled-out green counts are read in the same form the report spells its others
     summary = _claim_block("**Surfaces:")
