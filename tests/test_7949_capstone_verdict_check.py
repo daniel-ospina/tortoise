@@ -342,6 +342,42 @@ def test_green_row_with_a_sha_that_does_not_resolve_is_a_finding():
     assert findings.unresolved
 
 
+def test_an_unreachable_prereg_sha_does_not_accuse_the_evidence_of_predating():
+    """REGRESSION (#9089 review cycle 4): the prereg commit is the OTHER operand
+    of the ancestry test, and `_is_ancestor` read git's exit 128 ("cannot
+    answer") as "not an ancestor".
+
+    Measured before the fix: rows at a REAL sha with `prereg.sha` absent from
+    the object DB produced five `V5 — evidence PREDATES the pre-registration`
+    findings, exit 1 — a false accusation about the evidence, with a cause the
+    lane cannot remediate. It is now REPORTED as unreported provenance.
+    """
+    rec = _record()
+    _green(rec)
+    for row in rec["rows"]:
+        row.update(verdict="GREEN", evidence_kind="measurement",
+                   evidence="docs/evidence/7949-capstone/capstone.log",
+                   numerator=10, denominator=50, blocked_by=None,
+                   corpus_sha256="a" * 64, sha=HEAD)
+    rec["prereg"]["sha"] = "d" * 40          # well-formed, not in this repo
+    findings = cvc.check(rec, repo=_REPO, require_green=False)
+    codes = [c for c, _w, _m in findings.items]
+    assert "V5" not in codes, findings.render()
+    assert ("prereg", "d" * 40) in findings.unresolved, findings.unresolved
+    assert "V11" in _codes(rec, require_resolvable=True)
+
+
+def test_an_unreadable_repo_is_a_usage_error_not_a_verdict(tmp_path, capsys):
+    """Exit 1 means "the table has findings" — a lane reads it as a verdict.
+
+    An unreadable `--repo` used to reach `subprocess.run(cwd=…)` and raise
+    FileNotFoundError, exiting 1 on a traceback.
+    """
+    log = tmp_path / "capstone.log"
+    log.write_text(LOG.read_text())
+    assert cvc.main([str(log), "--repo", str(tmp_path / "nope")]) == 2
+
+
 def test_a_green_table_with_no_frozen_prereg_reds_even_when_the_sha_is_absent():
     """REGRESSION (#9089 review cycle 3): the frozen-threshold rule needs no git.
 

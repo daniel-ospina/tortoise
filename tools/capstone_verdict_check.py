@@ -24,18 +24,18 @@ runs in CI, so a hand-edited table cannot pass without the artifacts behind it.
 carries an artifact that exists, a sha whose FORM is a commit sha (and, with
 ``--require-resolvable``, one this checkout still carries), a denominator that
 agrees with its sibling, and a named blocker when it is not green. It CANNOT
-establish
-that the measurement itself was performed honestly — a fabricated evidence
-file with a plausible sha passes. That limit is stated rather than hidden
-because the epic's failure mode is *inference*, not forgery: five rows marked
-green off closed children, with no artifact at all. This closes that.
+establish that the measurement itself was performed honestly — a fabricated
+evidence file with a plausible sha passes. That limit is stated rather than
+hidden because the epic's failure mode is *inference*, not forgery: five rows
+marked green off closed children, with no artifact at all. This closes that.
 
 ## The rule set (each finding carries a stable code)
 
     V1  root schema is ``capstone-verdict-v1``
     V2  exactly five rows, ids E1..E5, one each — no missing, no duplicate
-    V3  per-row required fields; verdict/evidence_kind in vocabulary; sha shape
-        AND resolvability — every row, whatever its verdict
+    V3  per-row required fields; verdict/evidence_kind in vocabulary; sha SHAPE
+        (always fatal, every row, whatever its verdict). Resolvability is
+        REPORTED and fails only under ``--require-resolvable`` — see V11
     V4  every row's evidence path exists (repo-relative, no escape)
     V5  GREEN requires: evidence_kind=measurement, 0 < numerator <= denominator,
         blocked_by null, a FROZEN pre-registration sha, and run.status=COMPLETED
@@ -146,18 +146,29 @@ def _resolves(repo: Path, sha: str) -> bool:
     return _git(repo, "cat-file", "-e", f"{sha}^{{commit}}").returncode == 0
 
 
-def _is_ancestor(repo: Path, maybe_ancestor: str, of: str) -> bool:
-    """True when ``maybe_ancestor`` is ``of`` or precedes it.
+def _is_ancestor(repo: Path, maybe_ancestor: str, of: str) -> bool | None:
+    """True when ``maybe_ancestor`` is ``of`` or precedes it; None if UNKNOWN.
 
     This is the mechanical form of *"0 rows green where the evidence artifact
     predates the pre-registration"*: evidence measured BEFORE the thresholds
     were frozen cannot be evidence for them — the threshold would have been
     chosen to fit the number.
+
+    ⛔ THREE outcomes, not two. ``git merge-base --is-ancestor`` exits 1 for
+    "no" and 128 for "I cannot answer" (a missing object, e.g. a prereg commit
+    that was squash-merged away). Reading 128 as "not an ancestor" emits a
+    finding that CLAIMS the evidence predates the thresholds — a false
+    accusation the lane cannot remediate, so the unknown case returns None and
+    the caller reports it as unreported provenance instead.
     """
     if maybe_ancestor == of:
         return True
-    return _git(repo, "merge-base", "--is-ancestor",
-                maybe_ancestor, of).returncode == 0
+    rc = _git(repo, "merge-base", "--is-ancestor", maybe_ancestor, of).returncode
+    if rc == 0:
+        return True
+    if rc == 1:
+        return False
+    return None
 
 
 def check(record: dict, *, repo: Path,
@@ -318,12 +329,23 @@ def check(record: dict, *, repo: Path,
                 # `--require-resolvable` turns it into a finding.
                 elif not _is_git_repo(repo) or not _resolves(repo, sha):
                     pass
-                elif not _is_ancestor(repo, prereg_sha, sha):
-                    f.add("V5", where, "evidence PREDATES the pre-registration "
-                                       f"({sha} is not a descendant of "
-                                       f"{prereg_sha}) — evidence cannot "
-                                       "validate thresholds it was measured "
-                                       "before")
+                elif not _resolves(repo, prereg_sha):
+                    # The prereg commit is the OTHER operand of the ancestry
+                    # test. Without this, a prereg object this checkout cannot
+                    # see made `_is_ancestor` answer "no" and the gate printed
+                    # five FALSE "evidence PREDATES the pre-registration"
+                    # findings with a cause the lane cannot remediate.
+                    f.unresolved.append(("prereg", prereg_sha))
+                else:
+                    ancestry = _is_ancestor(repo, prereg_sha, sha)
+                    if ancestry is None:
+                        f.unresolved.append(("prereg", prereg_sha))
+                    elif ancestry is False:
+                        f.add("V5", where, "evidence PREDATES the "
+                                           f"pre-registration ({sha} is not a "
+                                           f"descendant of {prereg_sha}) — "
+                                           "evidence cannot validate "
+                                           "thresholds it was measured before")
 
         # ── V6 non-green names its blocker ────────────────────────────────
         else:
@@ -462,6 +484,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     repo = Path(args.repo).resolve()
+    if not repo.is_dir():
+        # Exit 1 means "the table has findings" and a lane reads it as a
+        # verdict on the evidence. An unreadable `--repo` is usage error 2;
+        # without this the first `subprocess.run(cwd=…)` raised
+        # FileNotFoundError and the traceback surfaced as exit 1.
+        print(f"capstone-verdict-check: --repo {args.repo} is not a "
+              "directory", file=sys.stderr)
+        return 2
     findings = check(record, repo=repo, require_green=args.require_green,
                      require_resolvable=args.require_resolvable)
     rows = record.get("rows") or []
