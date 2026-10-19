@@ -10,8 +10,10 @@ server (the #942 vacuity vector, cycle-8 P1-3).
 
 SCOPE (#9061): every test module in the tree, at any depth —
 `tests/**/test_*.py` (1076 modules as of 2026-10-18), and the carve-out
-exemption applies to the MODULE the registry names (`tests/<stem>.py`), never
-to a same-named file in a subdirectory. It used to be
+exemption applies to the MODULE its stem resolves to — `tests/<stem>.py`, or the
+registry's subdirectory module where that is where it lives
+(`test_smoke_embedded` → `tests/bench/`), never to a same-named file elsewhere.
+It used to be
 `tests/test_*.py` plus `tests/e2e/test_*.py`, which left
 `tests/longmem_eval/`, `tests/e2e/auth/`, `tests/e2e/hosted/`, `tests/eval/…`,
 `tests/bench/` and `tests/mini_beir/` outside a guard whose whole purpose is
@@ -650,7 +652,13 @@ def _exempt_paths() -> frozenset[Path]:
     exempt: set[Path] = set()
     for stem in _exempt_stems():
         top = _TESTS_ROOT / f"{stem}.py"
-        exempt.update([top] if top.is_file() else by_stem.get(stem, []))
+        candidates = [top] if top.is_file() else by_stem.get(stem, [])
+        if len(candidates) == 1:
+            exempt.add(candidates[0])
+        # 0 candidates (a dead stem) and 2+ (an ambiguous one) are BOTH red in
+        # `test_every_carve_out_stem_resolves_to_one_module`. Until they are
+        # fixed the exemption fails CLOSED — nothing is exempted, so an
+        # ambiguity can only over-report, never silently exempt two modules.
     return frozenset(exempt)
 
 
@@ -764,8 +772,9 @@ def test_both_guards_scan_the_recursive_population():
       * both guards yield from the SAME seam (`_scanned_modules`), and
       * that seam IS the recursive enumeration minus the carve-out modules.
     """
+    exempt = _exempt_paths()
     expected = {_scan_key(p) for p in _iter_test_module_paths()
-                if p not in _exempt_paths()}
+                if p not in exempt}
     restored = {name for name, _src in _non_exempt_test_files()}
     assert restored == expected, (
         "the restoration guard's population drifted from the recursive scan "
@@ -892,15 +901,15 @@ def test_the_cost_skip_cannot_hide_a_uri_agnostic_leak():
     check, which does not depend on the URI string.
 
     The guard skips a module that mentions neither `TORTOISE_DB_URI` nor a bare
-    `pytest.MonkeyPatch()` — that skip is what keeps scanning the whole tree
-    affordable inside the 300s per-test timeout (measured 2026-10-19 on this
-    host: the restoration guard 119.2s with the skip vs 156.4s without, over
-    the same population; load-dependent, so read the ratio, not the absolute).
-    A URI-ONLY skip is still wrong: a fixture that sets some OTHER variable
-    through a bare MonkeyPatch and never calls `.undo()` leaks exactly like the
-    #2062 pop did, and its source contains no URI at all. So the fixture below
-    is a real violation with no URI in it — if the skip is ever narrowed back
-    to the URI alone, this reports nothing and the test reds.
+    `pytest.MonkeyPatch()`. That skip is sound by construction — a module whose
+    source contains neither cannot hold a site this guard reports, and the
+    second predicate IS the URI-agnostic check's trigger, so it cannot hide a
+    module that check would flag. A URI-ONLY skip is still wrong: a fixture that
+    sets some OTHER variable through a bare MonkeyPatch and never calls
+    `.undo()` leaks exactly like the #2062 pop did, and its source contains no
+    URI at all. So the fixture below is a real violation with no URI in it — if
+    the skip is ever narrowed back to the URI alone, this reports nothing and
+    the test reds.
     """
     src = (
         "import pytest\n"
@@ -1246,24 +1255,27 @@ def _restoration_violations(files) -> list[str]:
     for fname, src in files:
         # #9061: `_scope_map` (tokenize plus a per-line bracket scan) is the
         # whole cost of this guard, so it has to run on the modules that can
-        # hold a violation, not on the size of the tree. Measured on this host
-        # 2026-10-19, over the 1026-module population: the guard costs 119.2s
-        # with this skip against 156.4s without it, and the 777 modules it
-        # excludes cost ~54s in total on their own. Those absolute numbers are
-        # LOAD-DEPENDENT (this is a shared box — an earlier measurement of the
-        # same guard read 296s); the ratio is what makes scanning the whole
-        # tree affordable. The skip STAYS, and the reason is headroom, not the
-        # ratio: the whole file measured 221s and 261s on two runs here against
-        # the 300s per-test timeout, so the no-skip scan would sit on the
-        # limit. Cost scales with SITES.
+        # hold a violation, not on the size of the tree. The skip is SOUND BY
+        # CONSTRUCTION, which is why it may narrow the analysis at all: its two
+        # predicates are this guard's OWN — a module whose source mentions
+        # neither `TORTOISE_DB_URI` (the raw-mutation census below) nor a bare
+        # `pytest.MonkeyPatch(` (the URI-agnostic bare-instance arm) cannot hold
+        # a site this guard would report, so nothing it would flag is skipped.
+        # Cost is the secondary argument, and on this shared box the absolute
+        # is not even stable: the whole file measured 20s, 221s and 261s on
+        # 2026-10-19 over the same population — fleet load, not tree size. The
+        # skip is therefore justified by what it cannot hide, not by what it
+        # saves. Cost scales with SITES.
         #
         # BOTH strings are required here: the bare-instance check below
         # (`pytest.MonkeyPatch()` without `.undo()`) is URI-AGNOSTIC — a fixture
         # that sets TORTOISE_TEST_DOCKER_PORT through a bare MonkeyPatch has no
         # `TORTOISE_DB_URI` in its source and still leaks if it never undoes. A
-        # URI-only skip silently stopped looking at the 4 modules that use
-        # `pytest.MonkeyPatch(` today (no violation among them yet — a latent
-        # hole is exactly what this file exists to prevent), which is why
+        # URI-only skip silently stopped looking at the FOUR modules that use
+        # `pytest.MonkeyPatch(` AND carry no URI string today (18 capture an
+        # instance across the population; the other 14 mention the URI and are
+        # let in by that alone — no violation among any of them yet, which is
+        # what made it a latent hole rather than a live one), which is why
         # `test_the_cost_skip_cannot_hide_a_uri_agnostic_leak` plants a URI-free
         # leak and asserts it is still reported.
         if "TORTOISE_DB_URI" not in src and not _MONKEYPATCH_INST_RE.search(src):
