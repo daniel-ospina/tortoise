@@ -597,6 +597,11 @@ def test_an_empty_batch_is_applied_without_opening_a_connection() -> None:
     assert (result.events, result.statements) == (0, 0)
     assert result.last_seq == result.first_seq - 1
     assert opened == []
+    # `.status` is `available` here — recorded as a DECISION, not as an observed
+    # reachability: nothing was required of the store, so no probe happened, and
+    # `empty` ("a read returned no rows") would be equally untrue. Pinned so the
+    # term cannot drift into a claim that the store was reached.
+    assert result.status == status_vocabulary.STATUS_AVAILABLE
 
 
 def test_importing_the_seam_pulls_in_no_database_driver() -> None:

@@ -229,14 +229,19 @@ class RecordWrite:
         """
         if self.outcome is RecordWriteOutcome.NOT_ARMED:
             return status_vocabulary.classify(configured=False, reached=False)
-        return status_vocabulary.classify(
-            configured=True, reached=True,
-            # `None` = "no read was asked of the store" → available, which is
-            # the right term for an APPLIED call that had no statements to run
-            # (an empty batch never opens a connection). A statement count > 0
-            # keeps the same term by the classifier's own rule.
-            hits=self.statements or None,
-        )
+        # APPLIED ⇒ `available` BY CONSTRUCTION, not from an observation: the
+        # classifier's rule is `hits is None or hits > 0` → available, so no
+        # statement count this call could supply would move the term. Passing
+        # `hits=` here would be a dead argument claiming a distinction the
+        # classifier does not make.
+        #
+        # An APPLIED EMPTY batch therefore reports `available` too, and that is
+        # deliberate: nothing was REQUIRED of the store (no connection, no
+        # statement — `test_an_empty_batch_is_applied_without_opening_a_
+        # connection` pins the absence), so this is not a claim that it was
+        # probed. The alternative — `empty` — would assert a read returned no
+        # rows, which is equally untrue.
+        return status_vocabulary.classify(configured=True, reached=True)
 
 
 def record_dsn(explicit: str | None = None) -> str | None:
