@@ -2404,55 +2404,54 @@ from tests._tmpdir_hygiene import track_tempfile_artifacts  # noqa: E402, F401
 # ── #9208: per-test isolation of the change feed's PROCESS-GLOBAL state ────
 # `event_store._DEGRADED` is process memory keyed by (store identity, graph),
 # and a refused `:GraphEvent` write latches it until an explicit
-# `clear_degraded()`. Every driver of a refusal today chooses a per-construction
-# identity (a random db path / namespace), so no leak is observable — but the
-# safety of the suite must not rest on every future test choosing a unique
-# identity, and `shared_embedded_db` is ONE session-stable path shared by
-# several files: the first armed-door/refusal test on it would refuse every
-# later `poll_events` IN THE PROCESS (#9208 review).
+# `clear_degraded()`. A latch that outlives its test refuses every later
+# `poll_events` for that graph IN THE PROCESS, and `shared_embedded_db` is ONE
+# session-stable path shared by several files — so the first armed-door/refusal
+# test on it would refuse every later poll in the session (#9208 review).
 #
-# Autouse and function-scoped. It CLEARS on both sides, so each test starts from
-# "healthy" and a test that degrades a feed on purpose does not poison the rest
-# of the shard — and it FAILS LOUDLY, naming the polluter, when it finds state
-# left behind by the previous test (#9208 review). The loud half is the point: a
-# silent pre-clear would also hide the regression MEMORY.md's `[silent-loss]`
-# entry records — a process-global latch reddened 21 unrelated tests because
-# nothing said which test had set it. Isolation for the honest case, attribution
-# for the broken one.
+# Two halves, and the ORDER is the whole point (#9208 review, P1):
 #
-# ⚠️ The pre-test state can also come from a SESSION/MODULE-scoped fixture's
-# setup (those instantiate BEFORE a function-scoped fixture), so the message says
-# "earlier setup" rather than accusing the named test outright.
+#   * BEFORE the test — CLEAR SILENTLY. That is the isolation: each case starts
+#     from "healthy" whatever ran earlier, so a suite that never degrades
+#     anything cannot be reddened by this fixture.
+#   * AFTER the test — if state is still latched, CLEAR AND FAIL, naming the node
+#     that LEFT it. Attribution has to live in the after half and not in a
+#     pre-test check: this fixture's own post-test clear runs first, so a
+#     pre-test check could never see a leak made by the previous test — the
+#     polluter the old message claimed it named. It could only ever fire for a
+#     session/module-scoped fixture's setup or for state recorded after a test's
+#     own finalizers (#9208 review).
+#
+# The check is EMPTINESS, not key identity: a driver's per-construction identity
+# keeps two concurrent tests from colliding, it does NOT make a leftover
+# invisible. `tests/test_event_store.py`'s #5379 allocator ceiling really does
+# latch one — a refused emit IS a loss — and clears it in a `finally` for this
+# reason; a future test that forgets is named here instead of reddening the next
+# one. The decision lives in `tests/_change_feed_isolation.py` so a test can pin
+# it (it used to be unreachable code inside this fixture).
 #
 # Imported lazily and defensively — this must never be the reason a suite that
 # does not touch the event store fails to run.
-_LAST_TEST_NODEID = "(none yet)"
 
 
 @pytest.fixture(autouse=True)
 def _change_feed_state_isolation(request):
-    global _LAST_TEST_NODEID
     try:
         from tortoise import event_store as _event_store
     except Exception:  # pragma: no cover — importable everywhere in this suite
         yield
         return
-    leftover = _event_store.degraded_graphs()
-    if leftover:
-        # Clear BEFORE failing: a setup failure must not cascade the same red
-        # through every remaining test in the shard.
-        _event_store.clear_degraded()
-        graphs = sorted({row["graph"] for row in leftover})
-        pytest.fail(
-            "a degraded change feed leaked into this test — left by earlier "
-            f"setup (last completed test: {_LAST_TEST_NODEID}): {graphs}. The "
-            "state is PROCESS-GLOBAL and refuses `poll_events` for those graphs "
-            "(#9208), so a test that degrades a feed on purpose must "
-            "`event_store.clear_degraded()` in a finally — otherwise it reddens "
-            "unrelated tests later in the shard, which is the failure mode "
-            "MEMORY.md records as `[silent-loss]`.")
+    from tests._change_feed_isolation import leaked_state_message
+
+    # Isolation: a clean start, silently, whatever earlier setup left behind.
+    _event_store.clear_degraded()
     try:
         yield
     finally:
+        # Attribution, and CLEAR BEFORE FAILING: a teardown failure must not
+        # cascade the same red through every remaining test in the shard.
+        leftover = _event_store.degraded_graphs()
         _event_store.clear_degraded()
-        _LAST_TEST_NODEID = request.node.nodeid
+        message = leaked_state_message(leftover, request.node.nodeid)
+        if message is not None:
+            pytest.fail(message)

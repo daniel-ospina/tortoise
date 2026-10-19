@@ -91,10 +91,13 @@ _DEGRADED: dict[tuple[str, str], dict[str, Any]] = {}
 
 #: Guards `_DEGRADED`, because it is touched from BOTH thread populations.
 #:
-#: `record_degraded` runs off the event loop on the hosted path (a write goes
-#: through `asyncio.to_thread`, so the `:GraphEvent` emit leg executes on a
-#: thread-pool worker), while `degraded_graphs()` is called from the `async def`
-#: `/health` route ON the loop. `sorted(_DEGRADED.items())` materialises a list
+#: `record_degraded` runs off the event loop on the hosted path — the write is
+#: offloaded through `hosted_api._graph_offload` (→ `_cp_offload` →
+#: `monitoring.run_control_plane_call`) onto the dedicated #3498 `graph` pool,
+#: NOT `asyncio.to_thread`, whose shared default executor is the #3060
+#: starvation path the repo avoids — so the `:GraphEvent` emit leg executes on a
+#: graph-pool worker, while `degraded_graphs()` is called from the `async def`
+#: `/health` route ON the loop (`_health_payload` → `_change_feed_health`). `sorted(_DEGRADED.items())` materialises a list
 #: while a peer thread may insert, which raises ``RuntimeError: dictionary
 #: changed size during iteration`` — and `/health` swallows that, so it would
 #: answer ``change_feed.degraded: false`` at the exact moment a second feed went

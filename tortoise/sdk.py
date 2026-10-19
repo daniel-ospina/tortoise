@@ -6624,10 +6624,15 @@ class TortoiseSDK:
             # reader, and reporting only the latest would discard it.
             first = ""
             if state.get("first_stage") and state["first_stage"] != state["stage"]:
+                # ⚠️ `first` is APPENDED to the message, so the latest stage is
+                # named ABOVE it. An earlier wording said "the stage named
+                # below", which is the one direction that sends the reader
+                # looking past the end of the string for a diagnosis that is
+                # not there (#9208 review).
                 first = (
                     f" The FIRST failure on this graph was at stage "
                     f"{state['first_stage']!r} ({state.get('first_error')}); the "
-                    f"stage named below is the LATEST.")
+                    f"stage named above is the LATEST.")
             raise ChangeFeedDegraded(
                 "the :GraphEvent change feed for graph "
                 f"{state['graph']!r} is DEGRADED: a change-feed write was "
