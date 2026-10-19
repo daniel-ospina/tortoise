@@ -1424,7 +1424,7 @@ class ReplayReport:
 
 
 def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
-           graph_id: str) -> ReplayReport:
+           graph_id: str, start_seq: int = 1) -> ReplayReport:
     """Replay a journal into the record, on the CALLER's transaction.
 
     `§3`: *"One transaction covers the journal and its projection — no dual
@@ -1451,8 +1451,14 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
     TOTALITY. The whole journal is materialized into statements *before* the
     first one executes, so an undeclared record type fails the replay with the
     transaction untouched rather than leaving a half-applied record.
+
+    THE POSITION WATERMARK. ``start_seq`` is the journal position of
+    ``records[0]`` — the caller's fact, not this module's invention (see
+    :func:`replay_plan`). It defaults to ``1``, which reproduces every call
+    made before the parameter existed byte for byte.
     """
-    plan = replay_plan(records, org_id=org_id, graph_id=graph_id)
+    plan = replay_plan(records, org_id=org_id, graph_id=graph_id,
+                       start_seq=start_seq)
     cursor = conn.cursor()
     for statement in plan:
         cursor.execute(statement.sql, statement.params)
@@ -1470,7 +1476,7 @@ _JOURNAL_INSERT_PREFIX = "INSERT INTO public.journal_event"
 
 
 def replay_plan(records: Sequence[Mapping[str, Any]], *, org_id: str,
-                graph_id: str) -> list[Statement]:
+                graph_id: str, start_seq: int = 1) -> list[Statement]:
     """Every statement a full replay emits, in order, WITHOUT executing any.
 
     The totality gate lives here: an undeclared record type raises before a
@@ -1478,11 +1484,29 @@ def replay_plan(records: Sequence[Mapping[str, Any]], *, org_id: str,
     or leaves the record exactly as it found it. It is also the seam the PGlite
     harness (`supabase/tests/pglite/validate.mjs`) and the tests use to look at
     the *whole* statement set rather than one record at a time.
+
+    THE POSITION WATERMARK (#9187). `_journal_row` keys the consumed position on
+    `(org_id, graph_id, seq)`, where `seq` is a record's index in the batch — so
+    a batch is a *contiguous segment of the journal*, and its first position is
+    a fact only the caller holds: the journal append is the chokepoint's, not
+    this module's. `start_seq` therefore defaults to 1 (the whole journal, or a
+    first segment) and a caller replaying a LATER segment passes the offset it
+    read from the journal. Without it, replaying a tail segment would renumber
+    every record to seq 1.. and `ON CONFLICT DO NOTHING` would silently absorb
+    the position writes of records that were never numbered — the layer rows
+    would land, but the record's own claim about what it consumed would be a
+    lie. Since the journal is append-only, a re-run after a crash re-derives the
+    SAME offset from the same durable facts, so a retry never renumbers.
     """
+    if start_seq < 1:
+        raise RecordProjectionError(
+            f"start_seq is the journal position of records[0] and must be >= 1 "
+            f"(got {start_seq!r})"
+        )
     columns = table_columns()
     refused = refused_props_names()
     plan: list[Statement] = []
-    for seq, record in enumerate(records, start=1):
+    for seq, record in enumerate(records, start=start_seq):
         plan.extend(mutations_for(record, org_id=org_id, graph_id=graph_id,
                                   columns=columns, refused=refused))
         plan.append(_journal_row(record, seq, org_id, graph_id))
