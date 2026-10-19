@@ -38,8 +38,11 @@ green off closed children, with no artifact at all. This closes that.
         AND resolvability — every row, whatever its verdict
     V4  every row's evidence path exists (repo-relative, no escape)
     V5  GREEN requires: evidence_kind=measurement, 0 < numerator <= denominator,
-        blocked_by null, sha resolvable AND not predating the pre-registration,
-        and run.status=COMPLETED with ALL eight steps observed in one pass
+        blocked_by null, a FROZEN pre-registration sha, and run.status=COMPLETED
+        with ALL eight steps observed in one pass. Its ancestry half (evidence
+        does not predate the pre-registration) is answerable only where the
+        measured commit is still reachable — see V11 for why that is reported
+        rather than fatal by default
     V6  non-green requires a named blocker (``#NNN``) — *name the blocking issue*;
         a ``refusal`` row must cite a capstone log that carries that row
     V7  a measurement row's ``corpus_sha256`` equals the log's corpus sha —
@@ -159,7 +162,7 @@ def _is_ancestor(repo: Path, maybe_ancestor: str, of: str) -> bool:
 
 def check(record: dict, *, repo: Path,
           require_green: bool, require_resolvable: bool = False) -> Findings:
-    """Apply V1–V10 to a parsed verdict table.
+    """Apply V1–V11 to a parsed verdict table.
 
     ``repo`` is the checkout the evidence paths and shas are resolved against —
     the ONLY input besides the record. (A ``log_path`` parameter used to be
@@ -297,15 +300,24 @@ def check(record: dict, *, repo: Path,
                                    f"{', '.join(missing)} — the epic measures "
                                    "the pipeline end to end, not a step probe")
             if sha and isinstance(sha, str) and _SHA_RE.match(sha):
-                # Shape + resolvability are reported by V3; what V5 adds is the
-                # ANCESTRY of that resolved sha.
-                if not _is_git_repo(repo) or not _resolves(repo, sha):
-                    pass
-                elif prereg_sha is None:
+                # The FROZEN-THRESHOLD check needs no git at all, so it must not
+                # sit behind resolvability: a 5/5-green table with NO frozen
+                # pre-registration at all reported "structurally sound" (exit 0,
+                # even with --require-green) as soon as the row shas were
+                # absent-but-well-formed — the exact shape a depth-1 CI clone
+                # produces (#9089 review cycle 3).
+                if prereg_sha is None:
                     f.add("V5", where, "GREEN with no frozen pre-registration "
                                        "sha — the verdict would be measured "
                                        "against a threshold nobody fixed "
                                        "first (#9075)")
+                # ...whereas ANCESTRY is a git question and only answerable
+                # where the measured commit is reachable. It is reported, not
+                # failed, for the same reason V3's resolution is (a
+                # squash-merged branch sha never reaches main);
+                # `--require-resolvable` turns it into a finding.
+                elif not _is_git_repo(repo) or not _resolves(repo, sha):
+                    pass
                 elif not _is_ancestor(repo, prereg_sha, sha):
                     f.add("V5", where, "evidence PREDATES the pre-registration "
                                        f"({sha} is not a descendant of "

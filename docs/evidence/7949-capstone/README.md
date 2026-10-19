@@ -11,11 +11,17 @@ aboutObjects: "#7949, #9080, #9075, #9076, #9077, #9116, #5199, #7947, EXTRACTOR
 
 # Capstone evidence — `#7949` / `#9080` (extractor-v4, E1–E5)
 
-**Measured at:** `717355e67` on branch `feat/9080-tm` (2026-10-19). Scope of this
-branch: the files this bundle adds (`docs/evidence/7949-capstone/**`,
-`tools/capstone_verdict_check.py`, `tests/test_7949_capstone_verdict_check.py`,
-`config/ci-surfaces.yml`) plus the surface re-cut the new caller forces
-(`config/surface-manifest.yml`, `docs/product/mcp-sdk-surface.md`).
+**Measured at:** `717355e67` on branch `feat/9080-tm` (2026-10-19). **Blast
+radius — the 13 files this branch touches** (`git diff --name-only origin/main...HEAD`):
+the bundle itself (`docs/evidence/7949-capstone/**`, `tools/capstone_verdict_check.py`,
+`tests/test_7949_capstone_verdict_check.py`); its registration (`config/ci-surfaces.yml`
+`core`/`tier1`/`durations` arms, `docs/00_index.md`); the selection change that makes
+a PROBE-ONLY diff select this suite (`tools/ci_selection.py` + `tests/test_ci_selection.py`,
+the `CORE_ALSO` sibling pattern); the surface re-cut the new caller forces
+(`config/surface-manifest.yml`, `docs/product/mcp-sdk-surface.md`); and two test-side
+edits that are NOT this bundle's subject — `tests/test_ci_check_repair.py` (the `gh`
+launcher stub) and `tests/test_uri_env_mutations_declared.py` (the declaration for
+`#9122`'s indexer `TORTOISE_DB_URI` setenv, a `main` red every lane inherited).
 **Nothing under `tortoise/` changes behaviour and nothing instruments the
 extractor** — this bundle installs no wrapper, spy or step-composition anywhere
 in the measured path, so the E4 row's "no monkeypatch" clause holds on the fact

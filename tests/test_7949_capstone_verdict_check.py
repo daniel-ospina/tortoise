@@ -14,7 +14,7 @@ assertion below is one of the shapes that failure takes — a missing row, a
 green row on a file that does not exist, a denominator inherited from a
 different corpus, a green row whose evidence predates the thresholds it claims
 to validate, a red row with no named cause. Each one has a stable finding code
-(V1–V9) and a test that reds if the gate stops catching it.
+(V1–V11) and a test that reds if the gate stops catching it.
 """
 from __future__ import annotations
 
@@ -340,6 +340,33 @@ def test_green_row_with_a_sha_that_does_not_resolve_is_a_finding():
     findings = cvc.check(rec, repo=_REPO, require_green=False)
     assert not findings, findings.render()
     assert findings.unresolved
+
+
+def test_a_green_table_with_no_frozen_prereg_reds_even_when_the_sha_is_absent():
+    """REGRESSION (#9089 review cycle 3): the frozen-threshold rule needs no git.
+
+    Making sha resolution report-only put the `prereg_sha is None` branch behind
+    the resolvability guard, so a 5/5-green table with NO frozen
+    pre-registration reported "structurally sound" (exit 0, even with
+    --require-green) as soon as the row shas were absent-but-well-formed — the
+    exact shape a depth-1 CI clone produces. A pre-registration that does not
+    exist is not a thing git resolution can excuse.
+    """
+    rec = _record()
+    _green(rec)
+    for row in rec["rows"]:
+        row.update(verdict="GREEN", evidence_kind="measurement",
+                   evidence="docs/evidence/7949-capstone/capstone.log",
+                   numerator=10, denominator=50, blocked_by=None,
+                   corpus_sha256="a" * 64)
+    rec["prereg"] = {"sha": None, "status": "ABSENT",
+                     "artifact": "docs/evidence/7949-capstone/preregistration.json"}
+    # the shas are well-formed but absent here, so ancestry cannot be answered
+    for row in rec["rows"]:
+        row["sha"] = "1234567890abcdef" + "0" * 24
+    codes = _codes(rec, require_green=True)
+    assert codes.count("V5") == 5, codes
+    assert "V9" not in codes, codes      # the rows ARE green; the V5s are the defect
 
 
 def test_a_NON_GREEN_row_whose_sha_is_unresolvable_is_still_RESOLVED_ON_REQUEST():
