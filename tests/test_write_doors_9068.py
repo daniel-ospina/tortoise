@@ -839,7 +839,7 @@ class TestWebhookFoldsAreGated:
         assert graph_installed_namespaces(sdk) == frozenset({DEV})
 
     def test_github_webhook_answers_a_refusal_422_and_keeps_the_store_empty(
-            self, tmp_path, force_embedder_on):
+            self, tmp_path, force_embedder_on, monkeypatch):
         """Review P3: a DETERMINISTIC refusal must not be answered 500.
 
         ``UnapprovedKindNamespace`` is the SDK's "you may not write this"
@@ -858,6 +858,11 @@ class TestWebhookFoldsAreGated:
         import urllib.request
 
         from tortoise.connectors.github import GitHubConnector
+
+        # The handler reads the secret from the ENV in preference to the
+        # config, so a shell holding the connector secrets would answer 403
+        # before the gate ever runs — the 422 arm must be the only variable.
+        monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
 
         sdk = _mk_sdk(tmp_path)
         _seed_install(sdk, DEV)
@@ -902,7 +907,7 @@ class TestWebhookFoldsAreGated:
             gh.stop_webhook()
 
     def test_slack_webhook_answers_a_refusal_422_and_keeps_the_store_empty(
-            self, tmp_path, force_embedder_on):
+            self, tmp_path, force_embedder_on, monkeypatch):
         """The same 422 pin for SLACK's handler — its arm had none.
 
         #9068 added the 422 branch to BOTH webhook servers, but only GitHub's
@@ -921,6 +926,10 @@ class TestWebhookFoldsAreGated:
         import urllib.request
 
         from tortoise.connectors.slack import SlackConnector
+
+        # Same env-precedence hazard as the GitHub arm above: a shell holding
+        # SLACK_SIGNING_SECRET answers 403 before the gate runs.
+        monkeypatch.delenv("SLACK_SIGNING_SECRET", raising=False)
 
         sdk = _mk_sdk(tmp_path)
         _seed_install(sdk, DEV)

@@ -5620,8 +5620,9 @@ durations:
   # durations refresher samples push-to-main runs only — so an absent key would
   # drop `duration_coverage_issues()` under the 90% floor. The row exists to
   # satisfy coverage and carries the flat 2.0 default, per the rule stated on
-  # the `test_venture_pack.py` entry below: a local timing (27 tests measured
-  # 14.38s here on 2026-10-19, embedded lane) is a SHARD-LAYOUT input, and a
+  # the `test_venture_pack.py` entry below: a local timing (28 tests measured
+  # 14.4s-25.8s here on 2026-10-19, embedded lane, load-dependent) is a
+  # SHARD-LAYOUT input, and a
   # weight that does not model CI must not decide what runs together. The tests
   # that let a fold LAND request the suite's `force_embedder_on` stub, which
   # keeps this out of the cold HF-model-load cost class. Refresh from the first
