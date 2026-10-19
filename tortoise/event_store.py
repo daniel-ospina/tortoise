@@ -303,17 +303,20 @@ _SCHEMA_ATTR = "_tortoise_event_schema"
 #     SCOPE, not in a label check — this funnel does NOT verify that the
 #     statement touches `:GraphEvent`/`:GraphEventMeta`, so a future call site
 #     routed through it with a foreign label WOULD be authorized. What
-#     `tests/test_9079_record_lane_declared.py` actually pins is (a) the census
-#     of this store's mutating statements at the handle, each observing the
-#     lane, and (b) that the lane is not a general bypass (an undeclared
-#     `:Point` write through the same armed handle is still refused). The
-#     label set is therefore held by REVIEW of the call sites, not by a runtime
-#     check, and the trade is stated rather than glossed: the census fails when
-#     one of the pinned shapes changes or stops being exercised, and it fails
-#     when a pinned shape loses its lane — but an ADDED mutating statement is
-#     caught only if it names `:GraphEvent`/`:GraphEventMeta` (the lane
-#     assertion's filter) or by review. A runtime label assertion would have to
-#     parse Cypher; that is why this is a review obligation and not a claim.
+#     `tests/test_9079_record_lane_declared.py` actually pins is (a) a CENSUS at
+#     the handle — nine statement-level fragments, each identifying exactly one
+#     observed statement, all nine distinct, AND exhaustive over what the
+#     exercise observed, each observing the lane — and (b) that the lane is not
+#     a general bypass (an undeclared `:Point` write through the same armed
+#     handle is still refused). What the census CANNOT see is bounded and stated:
+#     its population is "statements naming `:GraphEvent`/`:GraphEventMeta`
+#     observed at the handle during the exercise", so a store statement that
+#     names NEITHER label — a second graph-native surface, or a bookkeeping node
+#     — is outside it, and so is a mutating path the exercise does not reach.
+#     Inside that population an ADDED statement is caught (it would be pinned by
+#     no fragment), which is the property that made this a census rather than a
+#     floor. The labels each statement writes are still held by REVIEW: a
+#     runtime label assertion would have to parse Cypher.
 #   * It authorizes nothing outside §17.1's third door: the two lower escapes
 #     (`proj.g._g.query(...)`, `proj.db.select_graph(<g>).query(...)`) stay
 #     open — they are one hop below anything a runtime signal sits on.

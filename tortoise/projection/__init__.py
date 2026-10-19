@@ -3390,7 +3390,16 @@ def _journal_safe_params(params, cypher=None):
 #     `PointAdded`/`OperatorAdded` folds for points the log does not cover.
 #     Neither is a projection of the record — the restores have no record at
 #     all, and the synthetics come from the PRE-WIPE CACHE. `#9210` owns
-#     narrowing both (its scope was extended to the `#548` leg there).
+#     narrowing both (its scope was extended to the `#548` leg there);
+#   * the RAW-QUERY lane INSIDE the replay window — `FalkorProjection.query`,
+#     whose `#7951` refusal is scope-CONDITIONED (it fires only while
+#     `_CACHE_WRITE_AUTHORIZED` is `None`), so the replay scopes this lane opens
+#     AUTHORIZE a mutating statement there for their whole duration. LATENT —
+#     neither replay engine calls `self.query` today — but it is the THIRD
+#     widened leg, `#9210` owns narrowing it, and it is pinned so it cannot be
+#     mistaken for an unconditional refusal:
+#     `tests/test_9079_record_lane_declared.py::
+#     test_the_replay_window_also_authorizes_the_raw_query_lane`.
 #
 # So (1) is NOT blocked by an unknown surface: the measurement is DONE and
 # recorded on `#9124` (an AST census of `sdk.py`'s mutating handle call sites,
@@ -9647,20 +9656,33 @@ class FalkorProjection(
 
         The JSONL records CAME FROM the journal, so they are authorized to be
         folded and, by the ordering contract's exception 1, they must not be
-        journaled again. ⚠️ Two legs are a WIDER claim than that, and neither is
-        a projection: the ``#548`` synthetic events come from the PRE-WIPE
-        CACHE — the Points no journal record covers, i.e. those written through
-        the HANDLE by the unjournaled writers the §17.1 inventory names
-        (``#9206``'s ``:Point`` writers, ``#9207``'s ``delete_point``,
-        ``hosted_api``'s commit path) plus pre-journal graphs; NOT the raw-query
-        lane, which is already refused here (``FalkorProjection.query`` closed
-        it for a journal-backed projection in ``#7951``) — and the
-        SNAPSHOT-RESTORE legs have no journal record describing them at all.
-        This scope authorizes them by virtue of being the operation that
-        carries them across the wipe. Narrowing BOTH is `#9210`'s (its scope was
-        extended to the `#548` leg there, since its body named only the
-        restores), and it must land before (or with) `#9124`'s guard — this
-        docstring states the width rather than letting it read as a projection.
+        journaled again. ⚠️ THREE legs are a WIDER claim than that, and none is
+        a projection:
+
+        1. the ``#548`` synthetic events come from the PRE-WIPE CACHE — the
+           Points no journal record covers, i.e. those written through the
+           HANDLE by the unjournaled writers the §17.1 inventory names
+           (``#9206``'s ``:Point`` writers, ``#9207``'s ``delete_point``,
+           ``hosted_api``'s commit path) plus pre-journal graphs;
+        2. the SNAPSHOT-RESTORE legs have no journal record describing them at
+           all;
+        3. the RAW-QUERY lane (:meth:`FalkorProjection.query`) is AUTHORIZED for
+           the whole window this scope is open. Its ``#7951`` refusal is
+           scope-CONDITIONED — it fires only while ``_CACHE_WRITE_AUTHORIZED``
+           is ``None`` (``FalkorProjection.query``), which is exactly what
+           ``_replay_write_scope`` sets — so a mutating statement there is
+           REFUSED outside this ``with`` and PERMITTED inside it. That widening
+           is LATENT today: neither engine calls ``self.query``. Naming it is
+           the point — it is the hidden-door class §17.1 exists to close, and
+           it is a third leg for `#9210` to narrow, not a lane that is already
+           refused here.
+
+        This scope authorizes all three by virtue of being the operation that
+        carries them across the wipe. Narrowing ALL THREE is `#9210`'s (its
+        scope was extended there to the `#548` leg and to this one, since its
+        body named only the restores), and it must land before (or with)
+        `#9124`'s guard — this docstring states the width rather than letting it
+        read as a projection.
         """
         with _replay_write_scope():
             return self._replay_all_from_log(

@@ -86,9 +86,11 @@ _EPOCH_COUNTER_KEYS = frozenset({
 def sdk_with_journal(tmp_path):
     """A real SDK with a configured JSONL journal (so §17.1's guard is ARMED).
 
-    Lane-agnostic, like the `#7951` fixture: the explicit `db_path` makes the
-    projection embedded when no URI is configured, and a URI-set session is
-    redirected to its server. `event_log_path` is what arms the guard.
+    Lane-agnostic, like the `#7951` fixture: the explicit `db_path` forces the
+    projection EMBEDDED even when `TORTOISE_DB_URI` is set —
+    `TortoiseSDK.__init__` takes its URI branch only when `db_path is None`, so
+    this suite never reaches the docker server and provides embedded coverage in
+    every lane. `event_log_path` is what arms the guard.
     """
     from tortoise.sdk import TortoiseSDK
 
