@@ -17,7 +17,7 @@
     "lychee": "lychee 0.24.2",
     "population": "git ls-files '*.md' (minus vendored) \u2014 772 files",
     "counts": {
-      "markdownlint": 3299,
+      "markdownlint": 3297,
       "lychee": 46,
       "relative_links": 0
     },
