@@ -26776,13 +26776,45 @@ def _now_iso() -> str:
 #
 # threading.Lock (not asyncio.Lock): loop-agnostic (tests spin fresh asyncio
 # loops; asyncio.Lock caches its loop on first acquire) and the section is
-# all-sync, so acquire() never blocks the event loop in the current
-# architecture. ⛔ If an await is ever introduced INSIDE the section, switch to
+# all-sync, so acquire() never blocks the event loop ON THE SUCCESS PATH.
+# ⛔ If an await is ever introduced INSIDE the section, switch to
 # an asyncio.Lock (same per-org keying) — or route the lane through the SQL RPC,
 # as the Supabase lane now does. Cross-process (--workers > 1) serialization
 # requires that SQL RPC.
+#
+# ⛔ THE UNCONTESTED PATH IS NOT THE ONLY PATH — `acquire()` on a lock somebody
+# ELSE holds blocks the calling thread, and on an `async def` endpoint that
+# thread is the EVENT LOOP. The old text claimed "acquire() never blocks the
+# event loop in the current architecture", which is true only until the lock is
+# already held; then one owner stalls every route on this server. So every scope
+# entry goes through `_org_mint_lock_bounded()`, which bounds the wait, keeps it
+# off the loop, and stays cancellable. `tests/test_health_ready_nonblocking.py`
+# fails if a bare `with _org_mint_lock(...)` ever comes back.
 _ORG_MINT_LOCKS: dict[str, threading.Lock] = {}
 _ORG_MINT_LOCKS_GUARD = threading.Lock()
+
+#: How long a mint waits for the per-org lock before FAILING CLOSED (503).
+#: Who can hold it longer than this: a WEDGED owner (a leaked lock), or another
+#: THREAD in this process. No coroutine can: both critical sections are
+#: await-free, so on one loop the holder always finishes before any other
+#: coroutine runs, and `--workers > 1` gives each process its own table.
+#: MEASURED (main run 39264762684, `test (a)`; and 39235544056/39254836130 /
+#: 39255746368 on `test (c)` — 4/4 runs affected): a leaked lock blocked every
+#: later mint with no bound, the shard sat on the deadlock past the per-item
+#: pytest-timeout bound (300s, faulthandler dumping at 280s) and then spent its
+#: whole 20m watchdog, was killed at 20.2m with 366 nodeids unrun, and reported
+#: INCOMPLETE — a 23.5m job that owned `ci_crit_med` on main.
+_ORG_MINT_LOCK_TIMEOUT_S = 10.0
+
+#: Re-poll interval while the lock is held by someone else. Small enough that a
+#: contended mint is imperceptible, large enough that a 10s wait is ~2000 cheap
+#: iterations rather than a spin.
+_ORG_MINT_LOCK_POLL_S = 0.005
+
+#: The `detail` of the busy refusal — ONE home, so a test can assert WHICH 503
+#: this route returned (it legitimately returns other 503s).
+_ORG_MINT_LOCK_MESSAGE = ("Session-key mint is busy for this team — retry "
+                         "(the per-team mint lock was held past its bound)")
 
 
 def _org_mint_lock(org_id: str) -> threading.Lock:
@@ -26793,6 +26825,66 @@ def _org_mint_lock(org_id: str) -> threading.Lock:
             lock = threading.Lock()
             _ORG_MINT_LOCKS[org_id] = lock
         return lock
+
+
+@contextlib.asynccontextmanager
+async def _org_mint_lock_bounded(org_id: str):
+    """`with _org_mint_lock(org_id)` — bounded wait, fail CLOSED, cancellable.
+
+    Two defects, one entry point:
+
+    * UNBOUNDED. A bare `with _org_mint_lock(tid):` waits forever. It is also
+      ON THE LOOP (`session_key` is `async def`), so one wedged owner stalls
+      every route on this server. Measured as a 20m-per-shard CI hang
+      (2026-10-19) that reddened `python-ci-gate`.
+    * UNINTERRUPTIBLE. Bounding the wait is not enough if the waiter cannot be
+      torn down: `await asyncio.to_thread(lock.acquire, ...)` looks like the
+      fix (and is how `_restore_trash_graph` waits for its own lock) but a
+      worker thread cannot be cancelled — on a client disconnect mid-wait the
+      orphaned thread ACQUIRES the lock after the coroutine is gone and nothing
+      ever releases it. That is the same permanent wedge, now reachable from
+      production. (Verified by probe against a real `threading.Lock`: after
+      cancel + holder release, `lock.locked()` is True forever.)
+
+    So the wait is a NON-BLOCKING poll: the only await happens BEFORE ownership
+    is taken, so a cancellation there simply unwinds having never held the lock,
+    and no thread is parked (the default executor is shared with ~80 other call
+    sites and the per-request auth path — parking waiters on it starves them).
+    The uncontended path takes the lock on the first try: no await, no thread.
+
+    503 rather than mint-without-the-lock: the lock protects a cap COUNT +
+    INSERT, so proceeding unbounded would overshoot `max_api_keys` (the #1855
+    invariant). Refusing is the fail-closed direction.
+    """
+    lock = _org_mint_lock(org_id)
+    if not lock.acquire(blocking=False):
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _ORG_MINT_LOCK_TIMEOUT_S
+        while not lock.acquire(blocking=False):
+            if loop.time() >= deadline:
+                # A wedge is otherwise SILENT: every later mint for this org
+                # just returns 503. One line is the only local evidence that
+                # the process needs a restart. No user data, just the org id.
+                _logger.warning(
+                    "session-key mint lock for org %s held past %.1fs — "
+                    "refusing the mint (the owner is wedged; retry after a "
+                    "restart if this persists)",
+                    org_id, _ORG_MINT_LOCK_TIMEOUT_S)
+                # `Retry-After` because this 503 is "busy", not an outage — the
+                # distinction #3284 makes for the session-auth 503 on this route
+                # (the header is in CORS `expose_headers`, so a browser can read
+                # it). 5s, not 1s: the reachable causes are a wedged owner or a
+                # foreign thread, so a rapid retry only re-polls.
+                raise HTTPException(
+                    status_code=503,
+                    headers={"Retry-After": "5"},
+                    detail=_ORG_MINT_LOCK_MESSAGE,
+                ) from None
+            await asyncio.sleep(_ORG_MINT_LOCK_POLL_S)
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -26991,6 +27083,10 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
     RESOLVED org — body org_id when multi-membership, else
     memberships[0] — in BOTH auth lanes, see the gates below); BOOTSTRAP
     (24h ephemeral) stays member-open per product posture.
+
+    503 + ``Retry-After`` when the per-team mint lock is held past its bound
+    (``_org_mint_lock_bounded``) — RETRYABLE and nothing was minted, distinct
+    from the session-auth 503 that means the control plane is unavailable.
     """
     import uuid as _uuid
     from datetime import datetime, timedelta
@@ -27092,7 +27188,7 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
     if replace_key_id is not None:
         replace_target = await _resolve_replace_target(tid, replace_key_id, user_id)
 
-    with _org_mint_lock(tid):
+    async with _org_mint_lock_bounded(tid):
 
         if purpose == "bootstrap":
             active_boot = reg.query(
@@ -27480,7 +27576,7 @@ async def _session_key_supabase(body: dict, request: Request, user: dict,
     # when a rotation happened; None otherwise.
     rotated_key_prefix = None
 
-    with _org_mint_lock(tid):
+    async with _org_mint_lock_bounded(tid):
         # #1879: the ENTIRE critical section (bootstrap 3-active check / cap
         # count -> oldest-OTHER revoke -> fail-closed re-check -> 3-tier
         # rotation -> fail-closed re-check -> INSERT) runs in ONE Postgres
