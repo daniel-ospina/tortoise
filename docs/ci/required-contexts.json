@@ -98,6 +98,12 @@
         "check-drift"
       ]
     ],
+    "classify": [
+      [
+        "finding-provenance.yml",
+        "classify"
+      ]
+    ],
     "client-build": [
       [
         "ci.yml",
@@ -364,6 +370,12 @@
         "python-ci-gate"
       ]
     ],
+    "queue-health": [
+      [
+        "ci-queue-health.yml",
+        "queue-health"
+      ]
+    ],
     "reconcile": [
       [
         "e2e-live-reconcile.yml",
@@ -525,7 +537,7 @@
       ]
     ]
   },
-  "gate_digest": "2dc174ca7b56b87beac210548a8c5d7f61623f68e8c802564de09e32515436f1",
+  "gate_digest": "fde5d045e3cf658e6be00fdcd0f467ea80ba6acf9ead6e2aa93afc1e9ac20460",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -549,5 +561,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-10-18T16:40:13Z"
+  "verified_at": "2026-10-19T05:04:18Z"
 }

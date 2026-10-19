@@ -44,6 +44,13 @@ on:
       - '.github/workflows/publish-selfhost.yml'
   workflow_dispatch:
 
+# A PUBLISH must never be cancelled midway — the GHCR push is not atomic and a
+# cancelled build can leave `:latest` pointing at a partial image. One group,
+# never cancelling. Bookkeeping, not a merge gate (#9115).
+concurrency:
+  group: publish-selfhost-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # #1929 (G1 gate): the image must ship the pack catalog BEFORE publish.
   # Builds Dockerfile.selfhost from source (gha cache — the publish job

@@ -1,4 +1,4 @@
-// tortoise-hook-version: 4
+// tortoise-hook-version: 5
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -40,6 +40,16 @@
 // shipped bytes move. `session verify`'s "it captures with older logic"
 // wording is imprecise for this one generation; the classification and the
 // repair it prompts are right.
+//
+// Generation 5 (#2100): the drain is now BOUNDED and never runs on the turn's
+// critical path, a quota refusal is a NAMED per-box state instead of a silent
+// per-item backoff, and every `session_start` prints one `capture:` health
+// line. agent-infra#2100 measured what the absence cost: a box whose spool had
+// grown to 3.3 MB / 320 quota-deferred entries produced 259–262 B of
+// banner-only output per lane and looked dead, while two sibling boxes with the
+// same harness ran normally. Behaviour moved, so the generation moves — an
+// already-installed generation-4 copy must read as STALE, or the box keeps the
+// unbounded drain that filled its spool.
 //
 // This is the Pi leg of the capture-INSTALL seam. It is installed BY THE
 // PRODUCT — `HARNESS_INSTALL.pi` copies this file into
@@ -209,6 +219,56 @@ export const REQUEST_TIMEOUT_MS = 10_000;
  * burn the full capture budget on every start. Best-effort telemetry only.
  */
 export const PROBE_TIMEOUT_MS = 2_000;
+
+/**
+ * #2100: how much filing work ONE drain pass may do before it yields.
+ *
+ * The defect these bound: a drain attempted EVERY entry that was past its
+ * backoff window, on every opportunity, and the `session_start` call ran its
+ * synchronous prologue (spool scan + turn reads) inside a handler Pi AWAITS.
+ * A 3.3 MB / 320-entry quota-blocked spool therefore sat between a lane and
+ * its first model call, and the lane produced nothing (259–262 B of banner).
+ *
+ * These are bounds on a PASS, not on retention and not a capture cadence: the
+ * spool's own ceilings stay COUNT and BYTES only (#3870 — no TTL / max-age),
+ * and "no N-turns cadence" above still holds. A pass that stops early leaves
+ * every un-attempted entry in the spool, unfiled and un-dropped, and the
+ * extension continues in the background (see `FLUSH_MAX_CHAIN`).
+ *
+ * `FLUSH_MAX_ATTEMPTS` of 8 with the 10 s `REQUEST_TIMEOUT_MS` keeps the WORST
+ * case (a blackholed endpoint) at ~80 s of background work, which nothing
+ * awaits — and the wall-clock budget usually binds first anyway.
+ */
+export const FLUSH_MAX_ATTEMPTS = 8;
+/** Wall-clock budget for one pass, checked between entries (never mid-POST). */
+export const FLUSH_BUDGET_MS = 5_000;
+/** Background continuation passes after a bounded pass. Bounded: an always-full
+ *  spool must not become a self-feeding drain loop. */
+export const FLUSH_MAX_CHAIN = 4;
+/** Delay before a continuation pass. `unref()`d, so it never holds Pi open. */
+export const FLUSH_FOLLOW_UP_DELAY_MS = 250;
+
+/** #2100: the per-box status file. Lives in the spool ROOT (never `entries/`),
+ *  so it is invisible to the spool's own accounting, and is written atomically.
+ *  It is the durable half of the health line: a fresh process (every Pi lane is
+ *  one) must be able to say WHY the spool is not moving, without re-POSTing to
+ *  find out. */
+export const SPOOL_STATUS_FILE = "status.json";
+/** The server's machine-readable plan-allowance category (`hosted_api` 402 body). */
+export const QUOTA_EXCEEDED_CODE = "quota_exceeded";
+/**
+ * #2100: the OTHER 402 category — the org's COHORT SPEND CAP.
+ *
+ * Both arrive as 402 on `/v1/sessions`, and the server is explicit that a
+ * caller must be able to tell them apart: reading a spend cap as "you are out
+ * of plan allowance" would send the user to buy a bigger plan that cannot lift
+ * it (`tortoise/cohort_cost.py`, `COHORT_COST_REFUSAL_CODE`). The classification
+ * below (`classifyFailure`: 402 stays TRANSIENT → defer) is unchanged; only the
+ * NAME the operator reads changes.
+ */
+export const COHORT_COST_CAP_CODE = "cohort_cost_cap";
+/** Every 402 category this client can name. */
+const REFUSAL_CODES = [QUOTA_EXCEEDED_CODE, COHORT_COST_CAP_CODE] as const;
 
 export interface CaptureConfig {
   apiUrl: string;
@@ -822,7 +882,47 @@ export interface FlushSummary {
    *  whose entries are all terminal still reports on every flush instead of
    *  reaching the silent steady state `heldByBackoff` was added to close. */
   terminal: number;
+  /** #2100: entries that COULD be attempted but the pass never reached, because
+   *  it stopped at its attempt cap, its time budget, or a quota refusal. They
+   *  stay in the spool, unfiled and un-dropped — this counter is what proves a
+   *  bounded pass lost nothing, and what tells the caller to continue. */
+  remaining: number;
+  /** #2100: why the pass stopped early. Absent on a pass that reached the end. */
+  stopped?: "attempts" | "budget" | "quota";
+  /** #2100: the quota refusal this pass hit, if any (402 / `quota_exceeded`).
+   *  A quota-blocked box is a NAMED state (`capture: BLOCKED`), not a growing
+   *  silent backlog of per-item deferrals. */
+  quota?: QuotaRefusal;
   discarded: DiscardRecord[];
+}
+
+/** The server's quota refusal, as the client can name it (#2100). */
+export interface QuotaRefusal {
+  status: number;
+  /** The server's machine-readable category when its body carries one
+   *  (`quota_exceeded` | `cohort_cost_cap`). */
+  code?: string;
+  detail?: string;
+}
+
+/** The per-box capture state a health line reports (#2100). */
+export type CaptureState = "ok" | "draining" | "blocked" | "inactive" | "unreadable";
+
+/** What `status.json` holds. Advisory: it records the LAST refusal this leg saw;
+ *  the health line always recomputes `queued` from the spool and treats an empty
+ *  spool as `ok` regardless, so a stale marker can never claim a block that no
+ *  longer exists. */
+export interface CaptureStatus {
+  version: 1;
+  state: CaptureState;
+  /** Short reason token for the operator (`quota_exceeded`, `no_api_key`…). */
+  reason?: string;
+  /** The HTTP status behind a `blocked` state, when there is one. */
+  status?: number;
+  detail?: string;
+  /** Entries queued when the state was recorded (advisory, never the authority). */
+  queued?: number;
+  updated_at: string;
 }
 
 /** sha256 hex of the canonical turns (ordered `{role, content}` objects). */
@@ -1663,6 +1763,30 @@ function terminalMarker(meta: SpoolMeta): { reason?: string; detail?: string } |
 }
 
 /**
+ * #2100: is this entry already FILED — has the server accepted EXACTLY this
+ * content, for this lane and this client stamp?
+ *
+ * ONE definition, read by three places: the drain's skip clause, the
+ * post-POST CAS re-read, and the per-box health count. A health line that
+ * used a different notion of "filed" from the drain would describe a spool
+ * nobody is draining — and a filed entry is NOT pending work: the success
+ * path stamps `filed_*` and keeps the entry (nothing unlinks a filed
+ * capture), so counting meta files measures spool OCCUPANCY, not backlog.
+ */
+function entryFiled(meta: SpoolMeta): boolean {
+  return Boolean(
+    meta.filed_key && meta.filed_key === meta.capture_key &&
+      // Compared against the SAME normalisation the payload uses: the wire
+      // carries `finiteInstant(...)`, so comparing the RAW disk value can never
+      // match for a value the guards refuse — and the drain never rewrites the
+      // meta, so such an entry would re-POST its full transcript on EVERY
+      // drain, forever (#4714 amplification).
+      normaliseLane(meta.filed_lane) === normaliseLane(meta.capture_lane) &&
+      (meta.filed_stamp ?? undefined) === finiteInstant(meta.client_captured_at),
+  );
+}
+
+/**
  * Replay opportunity. For every spooled session whose content has not been
  * filed, attempt one POST. Transient failures back off; a permanent 4xx is
  * recorded and the entry is marked terminal and KEPT (never unlinked — #7708);
@@ -1685,6 +1809,16 @@ export async function flushSpool(
     bounds?: SpoolBounds;
     /** Session ids another flush in this process is already handling (#3963). */
     inFlight?: Set<string>;
+    /** #2100: POST attempts this pass may make (default `FLUSH_MAX_ATTEMPTS`). */
+    maxAttempts?: number;
+    /** #2100: wall-clock budget for this pass (default `FLUSH_BUDGET_MS`).
+     *  Checked BETWEEN entries, never mid-POST, so one slow POST still finishes
+     *  and its outcome is recorded rather than lost. */
+    budgetMs?: number;
+    /** #2100: clock seam for the budget, separate from `now` (which is the
+     *  BACKOFF clock a test may freeze at `1`; sharing it would make every pass
+     *  look instantaneous or infinitely long). */
+    budgetClock?: () => number;
   } = {},
 ): Promise<FlushSummary> {
   const dir = opts.dir ?? SPOOL_DIR;
@@ -1699,8 +1833,20 @@ export async function flushSpool(
     heldByBackoff: 0,
     heldBack: 0,
     terminal: 0,
+    remaining: 0,
     discarded: [],
   };
+
+  const maxAttempts =
+    typeof opts.maxAttempts === "number" && Number.isFinite(opts.maxAttempts)
+      ? Math.max(0, Math.floor(opts.maxAttempts))
+      : FLUSH_MAX_ATTEMPTS;
+  const budgetMs =
+    typeof opts.budgetMs === "number" && Number.isFinite(opts.budgetMs)
+      ? Math.max(0, opts.budgetMs)
+      : FLUSH_BUDGET_MS;
+  const budgetClock = opts.budgetClock ?? (() => Date.now());
+  const startedAt = budgetClock();
 
   const { metas, discards } = listSpoolEntries(dir);
   summary.discarded.push(...discards);
@@ -1732,14 +1878,9 @@ export async function flushSpool(
     // #7708: BOTH sides through ONE normaliser, so a stored falsy lane
     // (`""`/`0`/`false`) agrees with the `undefined` the payload omits — a raw
     // `undefined === ""` was false and the entry re-POSTed forever (#4714).
-    if (meta.filed_key && meta.filed_key === meta.capture_key &&
-        normaliseLane(meta.filed_lane) === normaliseLane(meta.capture_lane) &&
-        // Compared against the SAME normalisation the payload uses: the wire
-        // carries `finiteInstant(...)`, so comparing the RAW disk value can never
-        // match for a value the guards refuse — and the drain never rewrites the
-        // meta, so such an entry would re-POST its full transcript on EVERY
-        // drain, forever (#4714 amplification).
-        (meta.filed_stamp ?? undefined) === finiteInstant(meta.client_captured_at)) {
+    // #2100: ONE definition of "filed", shared with the health count and the
+    // CAS re-read below (see `entryFiled`).
+    if (entryFiled(meta)) {
       summary.skipped += 1;
       continue;
     }
@@ -1758,6 +1899,27 @@ export async function flushSpool(
     }
     if (busy?.has(meta.session_id)) {
       summary.skipped += 1;
+      continue;
+    }
+    // #2100: the three pass bounds. An entry we refuse to REACH is not
+    // "skipped" — it was attemptable and is still queued, so it is counted in
+    // `remaining` and left untouched (its window is neither armed nor reset).
+    // A quota refusal is checked FIRST: once the organization's quota is
+    // exhausted, every further POST in this pass is guaranteed to fail, and
+    // attempting them only deepens each entry's backoff.
+    if (summary.quota) {
+      summary.stopped ??= "quota";
+      summary.remaining += 1;
+      continue;
+    }
+    if (summary.attempted >= maxAttempts) {
+      summary.stopped ??= "attempts";
+      summary.remaining += 1;
+      continue;
+    }
+    if (budgetClock() - startedAt >= budgetMs) {
+      summary.stopped ??= "budget";
+      summary.remaining += 1;
       continue;
     }
     busy?.add(meta.session_id);
@@ -1887,9 +2049,7 @@ export async function flushSpool(
       const pending = readSpoolEntry(dir, meta.session_id) ?? meta;
       // #7708: both sides through the normaliser (the same class as the skip
       // clause and the CAS).
-      if (pending.filed_key && pending.filed_key === pending.capture_key &&
-          normaliseLane(pending.filed_lane) === normaliseLane(pending.capture_lane) &&
-          (pending.filed_stamp ?? undefined) === finiteInstant(pending.client_captured_at)) {
+      if (entryFiled(pending)) {
         // A CONCURRENT flush already filed this exact content while our POST was
         // in flight. Re-arming the backoff here would attach a window to content
         // that was never refused — and since writeSpoolEntry now CARRIES the
@@ -1902,6 +2062,10 @@ export async function flushSpool(
       pending.next_attempt_at_ms = nowMs + backoffDelay(pending.attempts);
       writeMeta(dir, pending);
       summary.deferred += 1;
+      // #2100: name the quota refusal (reporting only — the deferral above is
+      // unchanged, so the capture is still retried on its backoff clock).
+      const quota = quotaRefusal(res);
+      if (quota) summary.quota = quota;
     } finally {
       busy?.delete(meta.session_id);
     }
@@ -1916,6 +2080,214 @@ export function readSpoolEntry(dir: string, sessionId: string): SpoolMeta | unde
   } catch {
     return undefined;
   }
+}
+
+/**
+ * #2100: does this failed POST mean no further POST in this pass can succeed?
+ *
+ * `classifyFailure` deliberately keeps 402 TRANSIENT (the identical capture
+ * succeeds once a node frees) — that verdict is unchanged. This is the other
+ * question, asked for REPORTING: a 402 (or a body carrying one of the server's
+ * 402 categories — `quota_exceeded` for the plan allowance, `cohort_cost_cap`
+ * for the org's spend cap) means the refusal is the ORGANIZATION's, not this
+ * payload's, so attempting the remaining entries only burns the budget and
+ * deepens every entry's backoff. Naming it is what turns a silent backlog into
+ * `capture: BLOCKED (n queued, 402 quota)`.
+ */
+export function quotaRefusal(res: {
+  status?: number | null;
+  detail?: string;
+}): QuotaRefusal | undefined {
+  const detail = typeof res.detail === "string" ? res.detail : "";
+  const code = REFUSAL_CODES.find((c) => detail.includes(c));
+  const status =
+    typeof res.status === "number" && Number.isFinite(res.status) ? res.status : undefined;
+  if (status !== 402 && code === undefined) return undefined;
+  return {
+    status: status ?? 402,
+    ...(code ? { code } : {}),
+    ...(detail ? { detail } : {}),
+  };
+}
+
+function statusPathFor(dir: string): string {
+  return join(dir, SPOOL_STATUS_FILE);
+}
+
+/**
+ * #2100: how many entries are PENDING — a READ-ONLY count for the health line.
+ *
+ * "Pending" is what the drain would still try: an entry that is neither
+ * TERMINAL (kept forever, never retried — #7708) nor FILED (the server already
+ * accepted exactly this content; the entry is kept, not unlinked). Counting raw
+ * meta files counts OCCUPANCY, and on a normal box every filed session stays in
+ * `entries/` until the count ceiling evicts it — so an occupancy count reads
+ * `DRAINING (n)` on a perfectly healthy box, makes `OK (0 queued)`
+ * unreachable, and can never self-clear a stale `BLOCKED` marker.
+ *
+ * Deliberately NOT `listSpoolEntries`: that one is the drain's scanner, and it
+ * REPAIRS as it reads (it records `corrupt_entry` discards and quarantines the
+ * metas it cannot parse). A status line printed on every `session_start` must
+ * not mutate the spool it is describing — a health check that deletes things is
+ * its own defect — and it must not append a ledger line per session to a spool
+ * it cannot read.
+ * @returns the pending count, or `undefined` when the spool cannot be LISTED
+ *   (any error other than ENOENT). An unreadable directory is NOT an empty one
+ *   — the same rule `listSpoolEntries` follows with `DISCARD_SPOOL_UNREADABLE`,
+ *   and the reason it matters here is that a transient EACCES/EMFILE read as
+ *   "nothing pending" would both print `OK` and let the self-heal OVERWRITE the
+ *   durable block marker with `ok` (found in review cycle 2).
+ */
+export function countPendingEntries(dir: string): number | undefined {
+  let names: string[];
+  try {
+    names = readdirSync(entriesDir(dir));
+  } catch (err) {
+    // ENOENT is an absent spool: nothing has been captured, which IS empty.
+    if ((err as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return 0;
+    return undefined; // unreadable is not empty
+  }
+  let pending = 0;
+  for (const name of names) {
+    if (!name.endsWith(".meta.json")) continue;
+    let meta: SpoolMeta | undefined;
+    try {
+      meta = JSON.parse(readFileSync(join(entriesDir(dir), name), "utf8")) as SpoolMeta;
+    } catch {
+      meta = undefined;
+    }
+    // A meta we cannot read is UNKNOWABLE, not absent: count it conservatively
+    // (it may be waiting) and leave the repair to the drain's own scan.
+    if (!meta || typeof meta !== "object") {
+      pending += 1;
+      continue;
+    }
+    if (terminalMarker(meta) !== undefined) continue;
+    if (entryFiled(meta)) continue;
+    pending += 1;
+  }
+  return pending;
+}
+
+/** Read the recorded per-box status. Absent/corrupt reads as `undefined` (the
+ *  health line then falls back to what the spool itself proves). */
+export function readCaptureStatus(dir: string): CaptureStatus | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(statusPathFor(dir), "utf8")) as CaptureStatus;
+    return parsed && typeof parsed === "object" ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Record the per-box status. Best-effort: local bookkeeping must never fail a
+ *  capture path (the same contract as `recordDiscard`). */
+export function writeCaptureStatus(dir: string, status: CaptureStatus): void {
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    atomicWrite(statusPathFor(dir), `${JSON.stringify(status, null, 2)}\n`);
+  } catch {
+    // a health line that cannot be persisted is not a capture failure
+  }
+}
+
+/**
+ * #2100: the ONE per-box health line.
+ *
+ * An operator (or `pr-doctor`, or whoever reads the lane log after it produced
+ * 259 B) must be able to tell a BLOCKED box from an idle one. The line is
+ * printed once per `session_start` and again whenever a drain discovers a new
+ * quota refusal.
+ *
+ * `queued` is the number of PENDING entries (see `countPendingEntries`) —
+ * recomputed from the spool on every call — and the recorded marker is only
+ * trusted while entries are still waiting, so a marker left behind by a quota
+ * that has since lifted, or by the Python leg draining the same directory,
+ * cannot keep claiming a block. Nothing pending is always `ok` (nothing is
+ * blocked), and the marker is cleared when that is observed — including when
+ * every remaining entry turned TERMINAL, which is a refusal with no quota
+ * behind it. A spool that cannot be LISTED is `unreadable` and is never
+ * reported as empty, nor healed.
+ */
+export function captureHealthLine(
+  dir: string,
+  opts: { apiKey?: string } = {},
+): { state: CaptureState; queued: number; status?: number; line: string } {
+  const pending = countPendingEntries(dir);
+  if (pending === undefined) {
+    // A spool we cannot list is UNKNOWN, not empty. Reporting `OK` here would be
+    // a false pass on the acceptance's own surface, and it would also let the
+    // self-heal below destroy a durable block marker that a later, readable
+    // process still needs.
+    return {
+      state: "unreadable",
+      queued: 0,
+      line: `capture: UNREADABLE (cannot list ${entriesDir(dir)})`,
+    };
+  }
+  const queued = pending;
+  let recorded = readCaptureStatus(dir);
+  if (queued === 0 && recorded && recorded.state !== "ok") {
+    // Self-healing: the block is over (or another leg filed everything). Never
+    // keep a stale verdict on disk that no evidence supports.
+    recorded = { version: 1, state: "ok", queued: 0, updated_at: new Date().toISOString() };
+    writeCaptureStatus(dir, recorded);
+  }
+  if (opts.apiKey === "") {
+    // The count is NOT dropped here: a keyless box is exactly the box whose
+    // spool grows forever (nothing can file it), so the backlog must stay
+    // visible on the line that explains why.
+    return {
+      state: "inactive",
+      queued,
+      line: `capture: INACTIVE (no TORTOISE_API_KEY, ${queued} queued)`,
+    };
+  }
+  // A marker we cannot UNDERSTAND is not a marker — the same rule this file
+  // applies to `terminal_failure` and to a corrupt backoff window. A hand-edited
+  // or foreign `status.json` carrying `{"state": "blocked"}` (or a status that
+  // is a JSON string) must not be able to report a block that nothing observed:
+  // the safe reading is "no recorded block", which the spool count still
+  // governs. `recordOutcome` always writes a NUMBER, so nothing is lost.
+  const blockedStatus =
+    recorded !== undefined &&
+    recorded.state === "blocked" &&
+    typeof recorded.status === "number" &&
+    Number.isFinite(recorded.status) &&
+    recorded.status > 0
+      ? recorded.status
+      : undefined;
+  if (blockedStatus !== undefined && queued > 0) {
+    return {
+      state: "blocked",
+      queued,
+      status: blockedStatus,
+      // #2100: 402 has TWO categories on `/v1/sessions`, and the server says a
+      // caller must not read the spend cap as "out of plan allowance"
+      // (`tortoise/cohort_cost.py` — buying a bigger plan would not lift it).
+      // `blocked` alone would name the status and lose the cause, so the
+      // marker's own recorded category is reported when it has one.
+      line: `capture: BLOCKED (${queued} queued, ${blockedStatus} ${refusalLabel(recorded.reason)})`,
+    };
+  }
+  if (queued > 0) {
+    return { state: "draining", queued, line: `capture: DRAINING (${queued} queued)` };
+  }
+  return { state: "ok", queued, line: "capture: OK (0 queued)" };
+}
+
+/**
+ * #2100: the cause word in the BLOCKED line.
+ *
+ * `quota` is the plain-plan-allowance reading and the string operator docs and
+ * this issue's acceptance name, so an unlabelled 402 (or the org's points
+ * allowance) stays exactly that. A DIFFERENT recorded category is named as
+ * itself — a spend cap reported as "quota" sends the owner to buy a plan that
+ * cannot lift it.
+ */
+function refusalLabel(reason: string | undefined): string {
+  if (!reason || reason === QUOTA_EXCEEDED_CODE || reason === "402") return "quota";
+  return reason;
 }
 
 /** Read the discard ledger (observable, append-only). */
@@ -1975,19 +2347,43 @@ function warn(message: string): void {
   console.warn(`[tortoise-capture] ${message}`);
 }
 
-/** Report a flush outcome — success lines on 2xx, every discard named. */
-function reportFlush(summary: FlushSummary, where: string): void {
+/**
+ * Report a flush outcome — success lines on 2xx, every discard named.
+ *
+ * `continuing` says whether a follow-up pass is actually scheduled. It is a
+ * PARAMETER, not a guess: the line is the operator's only account of what the
+ * drain will do next, and both `session_shutdown` (the process is exiting) and
+ * the last pass of a spent chain schedule nothing — a claim that the drain
+ * "continues in the background" there is a false statement on exactly the
+ * surface #2100 is about.
+ */
+function reportFlush(
+  summary: FlushSummary,
+  where: string,
+  opts: { continuing?: boolean } = {},
+): void {
   // Deferrals are reported too: a quota-blocked spool is otherwise a steady
   // state that logs NOTHING while captures sit unfiled (#4714 review). A
   // terminal-only spool is the same shape (#7708).
   if (summary.filed > 0 || summary.deferred > 0 || summary.heldByBackoff > 0 ||
-      summary.terminal > 0) {
+      summary.terminal > 0 || summary.remaining > 0) {
     log(
       `spool flush (${where}): filed ${summary.filed}, deferred ${summary.deferred}, ` +
         `skipped ${summary.skipped} (${summary.heldByBackoff} waiting on backoff), ` +
         `held back ${summary.heldBack}, ` +
         `terminal ${summary.terminal} (kept, not retried; re-file with ` +
-        `'tortoise session drain --retry-terminal')`,
+        `'tortoise session drain --retry-terminal')` +
+        // #2100: a bounded pass that left work queued says so, and names why.
+        // A quota stop does NOT continue in the background (there is nothing to
+        // gain from a second refusal), so the line must not claim it does — a
+        // diagnostic that states the wrong next step is worse than a terse one.
+        (summary.remaining > 0
+          ? summary.stopped === "quota"
+            ? `, paused ${summary.remaining} (quota refused; not retried in this pass)`
+            : opts.continuing
+              ? `, paused ${summary.remaining} (${summary.stopped ?? "budget"}; continues in the background)`
+              : `, paused ${summary.remaining} (${summary.stopped ?? "budget"}; left for the next opportunity)`
+          : ""),
     );
   }
   for (const d of summary.discarded) {
@@ -2072,7 +2468,76 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
     }
   };
 
-  const flush = (where: string, filter: { excludeSessionId?: string } = {}): void => {
+  // ── #2100: the bounded drain + the per-box health line ────────────────
+
+  /**
+   * Record what a pass observed, and say it out loud when it learned something
+   * the operator needs: a quota refusal turns the box `BLOCKED` (durable, so the
+   * NEXT process — every lane is one — does not have to re-POST to find out),
+   * and any 2xx proves the quota is not refusing, so it clears the marker.
+   *
+   * A marker is only ever `blocked` or `ok`; `draining`/`inactive` are derived
+   * from the spool and the credential on each health line, never stored.
+   */
+  const recordOutcome = (summary: FlushSummary): void => {
+    try {
+      const previous = readCaptureStatus(spoolDir);
+      if (summary.quota) {
+        writeCaptureStatus(spoolDir, {
+          version: 1,
+          state: "blocked",
+          reason: summary.quota.code ?? `${summary.quota.status}`,
+          status: summary.quota.status,
+          ...(summary.quota.detail ? { detail: summary.quota.detail.slice(0, 500) } : {}),
+          updated_at: new Date().toISOString(),
+        });
+      } else if (summary.attempted > 0) {
+        // Some POST was ATTEMPTED and none of them was refused for quota, so the
+        // recorded cause is superseded: the marker is the LAST OBSERVED
+        // 402, not a permanent verdict. Without this, a box that was
+        // quota-blocked yesterday and is now `ECONNREFUSED`/500ing keeps
+        // telling its operator to buy points — the same misdiagnosis as #2100
+        // in mirror image (found in review cycle 2; `updated_at` was written
+        // and never read).
+        //
+        // Note what this does NOT claim: a REPLAY 2xx is accepted without the
+        // points gate (`hosted_api`: `if (not session_existed or
+        // retry_failed_capture) and not store_only`), so a 2xx is evidence the
+        // server accepted a capture, not proof the allowance lifted. The window
+        // is one pass wide: a still-exhausted quota refuses the NEXT attempt
+        // and re-marks it in the same pass that attempted it.
+        writeCaptureStatus(spoolDir, {
+          version: 1,
+          state: "ok",
+          updated_at: new Date().toISOString(),
+        });
+      }
+      // Say the state out loud whenever it MOVED: the start-of-session line was
+      // printed from the marker this pass has just superseded, and leaving that
+      // as the last thing the lane logged is the misdiagnosis the supersede
+      // exists to prevent.
+      if (summary.quota || (previous?.state === "blocked" && summary.attempted > 0)) {
+        log(captureHealthLine(spoolDir, { apiKey: cfg.apiKey }).line);
+      }
+    } catch (err) {
+      warn(`spool status error: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  /**
+   * #2100: dispatch ONE bounded drain pass and return immediately.
+   *
+   * NOT awaited by any handler that gates a turn. The pass itself is bounded
+   * (`FLUSH_MAX_ATTEMPTS`, `FLUSH_BUDGET_MS`); what it could not reach stays in
+   * the spool and is continued in the BACKGROUND, on an `unref()`d timer so a
+   * pending continuation can never keep a finished Pi process alive (the
+   * mirror image of the same bug: a capture that pins the event loop open).
+   */
+  const drain = (
+    where: string,
+    filter: { excludeSessionId?: string } = {},
+    chain = 0,
+  ): void => {
     void flushSpool(cfg, {
       dir: spoolDir,
       fetchImpl: doFetch,
@@ -2081,8 +2546,34 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
       inFlight,
       ...filter,
     })
-      .then((summary) => reportFlush(summary, where))
+      .then((summary) => {
+        // The report is told whether a continuation is ACTUALLY scheduled — it
+        // runs before the decision, so asking it to guess produced "continues in
+        // the background" on the last pass of a spent chain (#2100 review 2).
+        const willChain =
+          summary.remaining > 0 && !summary.quota && chain + 1 < FLUSH_MAX_CHAIN;
+        reportFlush(summary, where, { continuing: willChain });
+        recordOutcome(summary);
+        if (willChain) {
+          const timer = setTimeout(
+            () => drain(where, filter, chain + 1),
+            FLUSH_FOLLOW_UP_DELAY_MS,
+          );
+          timer.unref?.();
+        }
+      })
       .catch((err) => warn(`spool flush error: ${err instanceof Error ? err.message : String(err)}`));
+  };
+
+  /** The one health line. Cheap enough to print per session start (a spool scan,
+   *  no network), and the only surface that distinguishes a BLOCKED box from an
+   *  idle one in a lane log that otherwise produced 259 B. */
+  const logHealth = (): void => {
+    try {
+      log(captureHealthLine(spoolDir, { apiKey: cfg.apiKey }).line);
+    } catch (err) {
+      warn(`spool health error: ${err instanceof Error ? err.message : String(err)}`);
+    }
   };
 
   // #1727 T2-P1: the SERVER-VISIBLE install signal — the extension-on-load
@@ -2098,6 +2589,13 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
   // `await emit("session_start")`), so awaiting the network would stall startup
   // on a blackholed endpoint. Both the probe and the replay are dispatched with
   // bounded budgets and report when they land.
+  //
+  // #2100: and the REPLAY ITSELF MOVES OFF THIS TICK. An `async` function runs
+  // its body synchronously up to its first `await`, and `flushSpool` scans the
+  // spool and reads turn logs before that point — so `void flush(...)` was still
+  // charging a 320-entry spool to the handler Pi awaits. `setImmediate` is what
+  // makes "never blocks turn start" true for the SYNC half too, not just for
+  // the network half.
   pi.on("session_start", (_event, ctx) => {
     void postInstallProbe(cfg, doFetch)
       .then((res) => {
@@ -2120,7 +2618,10 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
     // done — so every post-reload decision is stored but NEVER extracted. The
     // replay opportunity is for sessions that are no longer live.
     const current = (ctx.sessionManager?.getSessionId?.() ?? "") as string;
-    flush("session_start", { excludeSessionId: current || undefined });
+    setImmediate(() => {
+      logHealth();
+      drain("session_start", { excludeSessionId: current || undefined });
+    });
   });
 
   // The cheap capture cadence (#3963): after EVERY turn, extend the spool. This
@@ -2135,20 +2636,48 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
   // replays a succeeded `session_id` as a no-op, so filing a still-growing
   // conversation would freeze the capture at that snapshot and silently drop
   // every later turn.
+  // #2100: `agent_end` is awaited by Pi too (`agent-session.js` → `await
+  // emit('agent_end')`), and `flushSpool`'s body runs SYNCHRONOUSLY up to its
+  // first `await` — the spool scan, the sort and the first turn read all happen
+  // on the handler's own tick. `setImmediate` is what makes "this handler never
+  // blocks a turn" true for that sync half as well (measured: ~23 ms for a
+  // 320-entry spool). The snapshot above stays INLINE — that is the durability
+  // guarantee this handler exists for.
   pi.on("agent_end", (_event, ctx) => {
     spoolSnapshot(ctx as never);
     const current = (ctx.sessionManager?.getSessionId?.() ?? "") as string;
-    flush("agent_end", { excludeSessionId: current || undefined });
+    setImmediate(() => drain("agent_end", { excludeSessionId: current || undefined }));
   });
 
   // The session is ending: snapshot the FINAL turns (durability even if Pi is
   // killed mid-handler), then — for a real end — attempt the filing as the
   // final flush. On `/reload` the SAME session stays alive, so we spool but do
   // not file: a premature file would freeze the capture (see `agent_end`).
+  //
+  // #2100: this one IS awaited (Pi runs shutdown handlers before exit), so it is
+  // the pass where the bounds matter most — an unbounded drain here held a
+  // finishing process open for one POST timeout per queued entry.
   pi.on("session_shutdown", async (event, ctx) => {
     spoolSnapshot(ctx as never);
     if (event.reason === "reload") return;
     try {
+      // #2100: THE LIVE SESSION GOES FIRST. `flushSpool` ranks oldest-first, so
+      // a bounded pass over a spool holding >= FLUSH_MAX_ATTEMPTS older entries
+      // never reaches the one session that ONLY shutdown can file — it stays
+      // spooled, which is fine on a persistent box and a LOSS on an ephemeral
+      // cell whose spool dies with it. One `onlySessionId` pass files it first;
+      // the bounded pass then drains the rest as before.
+      const live = (ctx.sessionManager?.getSessionId?.() ?? "") as string;
+      const liveSummary = live
+        ? await flushSpool(cfg, {
+            dir: spoolDir,
+            fetchImpl: doFetch,
+            now: clock(),
+            bounds,
+            inFlight,
+            onlySessionId: live,
+          })
+        : null;
       const summary = await flushSpool(cfg, {
         dir: spoolDir,
         fetchImpl: doFetch,
@@ -2156,10 +2685,18 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
         bounds,
         inFlight,
       });
-      if (summary.filed > 0) {
-        log(`captured session(s) → ${cfg.apiUrl} (filed ${summary.filed})`);
+      const filedTotal = summary.filed + (liveSummary?.filed ?? 0);
+      if (filedTotal > 0) {
+        log(`captured session(s) → ${cfg.apiUrl} (filed ${filedTotal})`);
       }
-      reportFlush(summary, "session_shutdown");
+      if (liveSummary) reportFlush(liveSummary, "session_shutdown (live session)", { continuing: false });
+      // No continuation exists on this path — the process is exiting, so the
+      // un-attempted entries are left for the NEXT session, and the line says so.
+      reportFlush(summary, "session_shutdown", { continuing: false });
+      // The general pass is the LATER evidence, so it writes last (a quota
+      // refusal it saw must win over the live session's 2xx).
+      if (liveSummary) recordOutcome(liveSummary);
+      recordOutcome(summary);
     } catch (err) {
       warn(`capture error: ${err instanceof Error ? err.message : String(err)}`);
     }

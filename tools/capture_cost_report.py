@@ -76,7 +76,8 @@ an exported rows file, or a JSON array)::
 Exit codes: ``0`` report produced (including an empty window — an empty
 window prints the loud "no measurement yet" notice, it is NOT a pass with
 numbers); ``2`` unusable input (bad file, unreadable JSON, missing
-credentials for a live pull).
+credentials for a live pull), or a live pull the walk could not CERTIFY
+complete (#8151: a refusal, never a silently truncated window).
 
 #3843 (lane B7, owner-decided). The owner's per-capture record shape is
 *team · session · timestamp · harness · model(s) · calls · input tokens ·
@@ -153,10 +154,38 @@ def load_rows_from_json(path: str) -> list[dict]:
 def fetch_rows(days: int, *, timeout: float = 30.0) -> list[dict]:
     """Pull ``capture_cost`` rows from Supabase (service role).
 
-    The same REST surface ``_track_analytics_event`` writes to. Paginated
-    with ``Range`` so a chatty beta does not silently truncate the window
-    (Supabase caps a single response; a truncated window would understate
-    p95 — the number the whole issue is about).
+    The same REST surface ``_track_analytics_event`` writes to, walked with
+    ``SupabaseControlPlane.query_all`` so a chatty beta cannot silently
+    truncate the window — a truncated window would understate p95, the number
+    this report exists for.
+
+    #8151: this function used to hand-roll its own ``Range`` paging and end the
+    walk on a page SHORTER than the size it asked for. That is not the end of
+    the data — it is the deployment's per-request cap (PostgREST's
+    ``db-max-rows``, or a proxy in front of it), so on any deployment tuned
+    below 1000 rows the reported distribution was computed over PAGE ONE with
+    no error and no signal. The same fail-OPEN #5388 removed from
+    ``hosted_api._iter_registered_orgs``; the fix never reached this caller.
+
+    So the walk is not re-implemented here — it is the seam #4038 built and
+    #5388's doctrine defines, adopted rather than mirrored (a second copy of
+    that rule is exactly how the two drifted apart):
+
+    * **keyset on ``id``** (unique + immutable uuid PK, and this table is
+      append-only by trigger) — ``offset``/``Range`` paging walks a MOVING
+      window, so a capture written mid-walk shifts every later page and one
+      row is served twice while another is skipped;
+    * **an EMPTY page is the only end-of-walk signal** — a short page continues
+      the walk (the defect this issue is);
+    * **the server's own total** (``Content-Range`` via ``Prefer: count=exact``
+      on page 1) may only DOWNGRADE the walk, never promote it — the total is a
+      page-1 snapshot that concurrent inserts pass.
+
+    ``complete`` is therefore a certificate, and it is ENFORCED here: a walk
+    that could not reach an empty page, or that met fewer rows than the store
+    stated, RAISES (exit 2) instead of returning a lower bound. A p95 over a
+    partial window is precisely the silent wrong number this tool must never
+    publish, so a refusal is the honest answer.
 
     #3677: the service key comes from the ONE resolution seam
     (``supabase_control._service_key()``) — the hosted deployment sets only
@@ -168,7 +197,7 @@ def fetch_rows(days: int, *, timeout: float = 30.0) -> list[dict]:
     just the writer.
     """
     # Function-local so this tool stays importable without the SDK.
-    from tortoise.supabase_control import _service_key
+    from tortoise.supabase_control import SupabaseControlPlane, _service_key
 
     url = os.environ.get("SUPABASE_URL")
     key = _service_key() or None
@@ -177,48 +206,46 @@ def fetch_rows(days: int, *, timeout: float = 30.0) -> list[dict]:
             "SUPABASE_URL and a service key (SUPABASE_SERVICE_ROLE_KEY or the "
             "legacy SUPABASE_SERVICE_KEY) must both be set for a live pull — "
             "or pass --jsonl/--json for an offline report")
-    import httpx
 
     since = _iso_days_ago(days)
-    # Filters go through httpx ``params`` so they are percent-encoded: the
-    # ISO timestamp's ``+00:00`` sent as a raw query string would be decoded
-    # as a SPACE by form-encoding rules, silently corrupting the window.
-    params = {
-        "event_name": f"eq.{_EVENT_NAME}",
-        "created_at": f"gte.{since}",
-        "select": "org_id,properties,created_at",
-        "order": "created_at.desc",
-    }
-    endpoint = f"{url}/rest/v1/analytics_events"
-    headers = {"apikey": key, "Authorization": f"Bearer {key}"}
-    rows: list[dict] = []
-    page = 1000
-    with httpx.Client(timeout=timeout) as client:
-        start = 0
-        while True:
-            try:
-                resp = client.get(
-                    endpoint,
-                    params=params,
-                    headers={**headers, "Range-Unit": "items",
-                             "Range": f"{start}-{start + page - 1}"},
-                )
-                resp.raise_for_status()
-                batch = resp.json()
-            except (httpx.HTTPError, httpx.InvalidURL) as exc:
-                # The tool's PRIMARY documented path is this live pull, so a
-                # transport/status failure (expired service key, egress) — or
-                # a malformed SUPABASE_URL, which raises ``InvalidURL`` and is
-                # NOT an ``HTTPError`` — must honour the documented exit-2
-                # contract, not traceback.
-                raise ValueError(f"live pull failed: {exc}") from exc
-            if not isinstance(batch, list):
-                raise ValueError(
-                    "unexpected Supabase response (expected a JSON array)")
-            rows.extend(batch)
-            if len(batch) < page:
-                return rows
-            start += page
+    # Filters are passed to the seam (never interpolated into a query string):
+    # the ISO timestamp's ``+00:00`` sent raw would be decoded as a SPACE by
+    # form-encoding rules, silently corrupting the window.
+    #
+    # The client is constructed HERE rather than taken from
+    # ``get_control_plane()``: this is a one-shot CLI, and the process-wide
+    # singleton would bind a report run to whatever env/timeout first created
+    # it (and leak that across callers in the same process). The plane's
+    # persistent httpx client is NOT closed here — ``SupabaseControlPlane``
+    # exposes no ``close()`` (filed as #9139); the process exits after the
+    # report, so the pool is released with it.
+    plane = SupabaseControlPlane(url=url, service_key=key, timeout=timeout)
+    try:
+        rows, complete = plane.query_all(
+            "analytics_events",
+            # ``id`` is the walk's cursor: query_all reads the next page's bound
+            # from the last row it saw, so the column must be selected (and the
+            # other three are what the report reads).
+            select=["id", "org_id", "properties", "created_at"],
+            filters=[("event_name", "eq", _EVENT_NAME),
+                     ("created_at", "gte", since)],
+            timeout=timeout,
+        )
+    except RuntimeError as exc:
+        # The tool's PRIMARY documented path is this live pull, so a
+        # transport/status failure (expired service key, egress, a malformed
+        # SUPABASE_URL) must honour the documented exit-2 contract, not
+        # traceback. The seam fails CLOSED by raising; this re-labels it.
+        raise ValueError(f"live pull failed: {exc}") from exc
+    if not complete:
+        raise ValueError(
+            f"live pull could not be certified complete over the last {days}d "
+            "window — the paginated walk did not reach an empty page, or the "
+            "store served fewer rows than the total it stated. Refusing to "
+            "report a p95 over a partial window (it would be a lower bound "
+            "presented as the measurement); narrow --days to a window the walk "
+            "can certify.")
+    return rows
 
 
 def _harness_ids(rows: list[dict]) -> list[str]:

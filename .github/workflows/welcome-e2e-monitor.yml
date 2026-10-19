@@ -22,11 +22,57 @@ name: welcome-e2e-monitor
 on:
   schedule:
     - cron: '0 */2 * * *'   # every 2 hours — smoke is cheap (no email send)
+  # #9115: NOT every push to main. This monitor is a REPORT — it never gates a
+  # merge — and it probes PRODUCTION, so the only thing a push can tell it is
+  # "a file this smoke reads just changed". Under a merge flood (~50 lanes) the
+  # unfiltered trigger started this job on every merge, where `cancel-in-progress`
+  # then killed it on the NEXT merge: measured 2026-10-19, 13 run-minutes spent
+  # to produce almost no completed reading — pure slot theft from `python-ci-gate`.
+  # The 2-hourly schedule still catches prod drift that no push causes (the
+  # live-funnel risk this workflow exists for).
+  #
+  # ⛔ `workflow_dispatch:` below is ADDED by this change (main had schedule +
+  # push only). It shares the cancel-in-progress group with the schedule, so a
+  # manual dispatch would kill an in-flight scheduled prod reading — on the one
+  # workflow whose whole purpose is completing a reading. The group is keyed by
+  # EVENT NAME so the two arms supersede only themselves.
   push:
     branches: [main]
+    paths:
+      # The signup path this smoke drives, served by the website + its BFF.
+      - 'website/**'
+      # The suites the job runs (pytest + the two node harnesses).
+      - 'tests/e2e/test_welcome_page.py'
+      - 'tests/test_waitlist_form.py'
+      - 'tests/test_waitlist_subscribe.mjs'
+      - 'tests/test_tenant_provision_cors.mjs'
+      # `tests/test_waitlist_form.py` READS these: it derives the expected
+      # endpoint from `supabase/config.toml`'s project_id and asserts against a
+      # migration + a function definition. Without them a supabase-only push
+      # can red the suite with no trigger here — the filter would be narrower
+      # than what the suite actually reads.
+      - 'supabase/config.toml'
+      - 'supabase/migrations/**'
+      - 'supabase/functions/**'
+      # The job also INSTALLS the package (`pip install -e '.[test]'`) and runs
+      # pytest, so it reads `pyproject.toml` and both conftests before a single
+      # assertion executes. Same hazard as the supabase files above: a change
+      # there can red this suite with no trigger.
+      - 'pyproject.toml'
+      - 'tests/conftest.py'
+      - 'tests/e2e/conftest.py'
+      # The auto-dedupe script the failure arm runs.
+      - '.github/scripts/welcome-e2e-monitor.sh'
+      # Self-trigger: an edit here takes effect on the merge that makes it,
+      # rather than only on the next 2-hourly tick.
+      - '.github/workflows/welcome-e2e-monitor.yml'
+  workflow_dispatch:
 
 concurrency:
-  group: welcome-e2e
+  # Keyed by EVENT so a manual dispatch cannot cancel a scheduled prod reading
+  # (and vice versa); `cancel-in-progress: true` still makes a newer run of the
+  # SAME arm supersede the older one, which is what bounds this report.
+  group: welcome-e2e-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
