@@ -286,3 +286,46 @@ The Claude Code leg implements the same contract in `tortoise/capture_spool.py`,
 wired through `tortoise session capture` (write-before-upload) and
 `tortoise session drain` (run by `session-start.sh`). See
 `docs/plans/2026-09-17-3963-capture-spool.md`.
+
+### The drain is bounded, and a blocked box says so (#2100)
+
+A capture feature is observability: it must never be able to make a machine's
+capacity unusable. It could, and did — agent-infra#2100 measured one cloud cell
+whose spool had grown to 3.3 MB / 320 **quota-deferred** entries, where every
+lane produced 259–262 B of banner-only output and looked dead while two sibling
+boxes ran normally.
+
+Three properties close that, and they are all pinned in the suite:
+
+* **Nothing in the handler Pi awaits touches the spool.** `session_start` and
+  `agent_end` only *schedule* (`setImmediate`); the health line and the replay
+  run after the handler returns. Fire-and-forget alone was not enough: an
+  `async` body runs synchronously up to its first `await`, so `void flush(…)`
+  still charged the spool scan and its turn reads to the turn's critical path.
+* **One pass is bounded.** At most `FLUSH_MAX_ATTEMPTS` (8) POSTs and
+  `FLUSH_BUDGET_MS` (5 s) of wall clock, checked between entries (never
+  mid-POST, so a completed attempt's outcome is always recorded). Entries the
+  pass never reached stay queued — counted as `remaining` and continued in the
+  background on an `unref()`d timer, so a pending continuation can never keep a
+  finished Pi process alive either. Removal on the bound is the spool's own
+  count/byte ceiling, unchanged.
+* **A quota refusal is a NAMED state, not a growing backlog.** The first 402
+  carrying `quota_exceeded` stops the pass (the remaining entries cannot
+  succeed either) and is recorded in `<spool>/status.json`, so the *next*
+  process reports it without re-POSTing to rediscover it. Any 2xx clears the
+  marker — a stale `BLOCKED` would be its own lie.
+
+Every `session_start` prints exactly one health line, which is the per-box
+surface an operator (or a lane log that produced 259 B) reads:
+
+```
+capture: OK (0 queued)
+capture: DRAINING (12 queued)
+capture: BLOCKED (320 queued, 402 quota)
+capture: INACTIVE (no TORTOISE_API_KEY)
+```
+
+`queued` is recomputed from the spool on every call, so the recorded marker is
+only trusted while entries are still waiting; an empty spool always reads `OK`
+and clears the marker. The Python leg's `flush_spool` is unchanged: it runs on
+explicit commands (`session capture`, `session drain`), not on the Pi turn path.

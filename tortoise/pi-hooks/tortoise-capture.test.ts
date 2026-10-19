@@ -27,6 +27,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import {
   CAPTURE_LANES,
+  DISCARD_COUNT_EXCEEDED,
   DISCARD_HTTP_REJECTED,
   HARNESS,
   MAX_ATTEMPTS,
@@ -39,6 +40,7 @@ import {
   _CREDENTIAL_MODE_WARNED,
   backoffDelay,
   buildCapturePayload,
+  captureHealthLine,
   captureKey,
   carriedWindow,
   clampAttempts,
@@ -57,6 +59,7 @@ import {
   postInstallProbe,
   pruneSpool,
   quarantineEntry,
+  readCaptureStatus,
   readDiscards,
   readSpoolEntry,
   readSpoolTurns,
@@ -2502,4 +2505,279 @@ test("#8531: an empty role is not a turn (the writers' contract on both legs)", 
   // the reader is not a role-VALUE filter. Only EMPTINESS is refused.
   writeFileSync(log, '{"role":"system","content":"policy"}\n');
   assert.deepEqual(readSpoolTurns(spool, sid), [{ role: "system", content: "policy" }]);
+});
+
+// ── #2100: the spool can never make a box unusable ────────────────────────
+//
+// Measured on agent-infra#2100: one cloud cell's spool reached 3.3 MB /
+// 320 quota-deferred entries, and EVERY lane on that box produced 259–262 B of
+// banner-only output and nothing else — while two sibling boxes with the same
+// harness ran lanes normally. Clearing the spool did not hold (it regrew to
+// 136 KB in one session). The four defects were: (1) the `session_start` drain
+// ran its synchronous spool scan on the tick Pi awaits and then attempted every
+// ready entry, (2) a 402 quota refusal was a silent per-item backoff with no
+// named state, (3) nothing reported the state per box (an operator saw a dead
+// lane, not a blocked one), (4) — already true, now pinned — the spool's count
+// bound is what keeps an exhausted quota from consuming unbounded disk.
+
+/** Run one `session_start` on a fresh extension instance, returning its stdout lines. */
+async function sessionStartLines(
+  spool: string,
+  fetchImpl: unknown,
+  env: Record<string, string | undefined> = TEST_ENV,
+): Promise<{ lines: string[]; calls: string[] }> {
+  const calls: string[] = [];
+  const counting = async (url: string, init?: Record<string, unknown>) => {
+    calls.push(url);
+    return (fetchImpl as (u: string, i?: Record<string, unknown>) => Promise<unknown>)(url, init);
+  };
+  const pi = mockPi();
+  tortoiseCapture(pi as never, {
+    fetchImpl: counting as never,
+    env,
+    configPath: NO_CONFIG_PATH,
+    spoolDir: spool,
+  });
+  const lines: string[] = [];
+  const original = console.log;
+  console.log = (...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  };
+  try {
+    await pi.handlers.session_start(undefined, mockCtx({ entries: [], sessionId: "live" }) as never);
+    await settle();
+  } finally {
+    console.log = original;
+  }
+  return { lines, calls };
+}
+
+test("#2100: session_start returns BEFORE the spool is touched (a queued spool cannot block turn start)", async () => {
+  // THE measured failure: 320 queued entries between a lane and its first model
+  // call. The spool scan + turn reads run synchronously inside an `async`
+  // function up to its first `await`, so "fire-and-forget" alone was NOT enough
+  // — the handler Pi awaits still paid for the scan.
+  //
+  // MUTATION THAT REDS THIS: call `drain(...)` directly in the handler (or
+  // `await` it) instead of `setImmediate(() => …)` → a `capture:` health line is
+  // already on stdout when the handler returns, which is the proof the spool was
+  // read on the handler's own tick.
+  const spool = tmpSpool();
+  for (let i = 0; i < 30; i += 1) writeSpoolEntry(spool, snapshot(`sess-q${i}`));
+  const pi = mockPi();
+  // A BLACKHOLED endpoint: every POST hangs forever, so nothing can be filed
+  // and the pass cannot finish. If the handler waited on the drain it would
+  // never return.
+  const hanging = () => new Promise(() => {});
+  tortoiseCapture(pi as never, hermeticDeps(hanging, spool));
+
+  const lines: string[] = [];
+  const original = console.log;
+  console.log = (...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  };
+  let returned = false;
+  try {
+    const handler = Promise.resolve(
+      pi.handlers.session_start(undefined, mockCtx({ entries: [], sessionId: "live" }) as never),
+    ).then(() => {
+      returned = true;
+    });
+    await Promise.race([handler, new Promise((resolve) => setTimeout(resolve, 200))]);
+    assert.equal(returned, true, "session_start must return without waiting on the spool");
+    assert.equal(
+      lines.filter((l) => l.includes("capture:")).length,
+      0,
+      "no spool scan may happen on the handler's tick — the health line comes later",
+    );
+    await settle();
+  } finally {
+    console.log = original;
+  }
+  // The spool is untouched: 30 entries still queued, none filed, none dropped.
+  const metas = listSpoolEntries(spool).metas;
+  assert.equal(metas.length, 30, "a bounded pass loses nothing");
+  assert.ok(metas.every((m) => m.filed_key === undefined));
+  assert.ok(lines.some((l) => l.includes("capture: DRAINING (30 queued)")), JSON.stringify(lines));
+});
+
+test("#2100: one drain pass is bounded — the attempt cap leaves the rest queued, not dropped", async () => {
+  // The pass must stop; the entries it never reached must stay fileable. This is
+  // the difference between "bounded" and "bounded and lossy".
+  //
+  // MUTATION THAT REDS THIS: ignore `maxAttempts` → `attempted` becomes all 20.
+  const spool = tmpSpool();
+  const N = 20;
+  for (let i = 0; i < N; i += 1) {
+    writeSpoolEntry(spool, snapshot(`sess-b${String(i).padStart(2, "0")}`));
+  }
+  const { fetchImpl, calls } = mockFetch([{ ok: true }]);
+  const first = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 1, maxAttempts: 5 });
+
+  assert.equal(first.attempted, 5, "the cap binds");
+  assert.equal(first.remaining, N - 5, "everything unreached is COUNTED, not silently ignored");
+  assert.equal(first.stopped, "attempts");
+  assert.equal(calls.length, 5, "no more than the cap left the box");
+  assert.equal(listSpoolEntries(spool).metas.length, N, "nothing was dropped to satisfy the cap");
+
+  // …and the next opportunity continues where this one stopped (the entries the
+  // first pass filed are skipped, the next five are attempted).
+  const second = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 1, maxAttempts: 5 });
+  assert.equal(second.attempted, 5);
+  assert.equal(second.remaining, N - 10);
+});
+
+test("#2100: one drain pass is bounded in TIME too — the budget binds before the cap", async () => {
+  // A pass of 8 slow POSTs is still ~80 s against a blackholed endpoint. The
+  // clock stops the pass between entries (never mid-POST, so a completed
+  // attempt's outcome is always recorded rather than lost).
+  //
+  // MUTATION THAT REDS THIS: drop the budget check → all 6 entries are attempted.
+  const spool = tmpSpool();
+  for (let i = 0; i < 6; i += 1) writeSpoolEntry(spool, snapshot(`sess-t${i}`));
+  const { fetchImpl } = mockFetch([{ ok: true }]);
+  let reads = 0;
+  const summary = await flushSpool(TEST_CFG, {
+    dir: spool,
+    fetchImpl,
+    now: 1,
+    maxAttempts: 100,
+    budgetMs: 5_000,
+    // `0` at the start of the pass, `100` for the first entry's check (inside the
+    // budget), then far past it — so entry 1 is attempted and entry 2 is not.
+    budgetClock: () => {
+      reads += 1;
+      return reads === 1 ? 0 : reads === 2 ? 100 : 10_000;
+    },
+  });
+  assert.equal(summary.attempted, 1, "the first entry is attempted, then the budget stops the pass");
+  assert.equal(summary.stopped, "budget");
+  assert.equal(summary.remaining, 5);
+  assert.equal(listSpoolEntries(spool).metas.length, 6, "the unreached entries stay queued");
+});
+
+test("#2100: a 402 quota refusal is NAMED — BLOCKED, one attempt per pass, durable across processes", async () => {
+  // The measured symptom was 320 entries "waiting on backoff" with nothing
+  // naming WHY, so every lane looked dead rather than blocked. One refusal must
+  // stop the pass (the remaining entries cannot succeed either), name the state
+  // on the operator surface, and survive into the NEXT process — every lane is a
+  // new process, and re-POSTing to rediscover the quota is the amplification.
+  const spool = tmpSpool();
+  for (let i = 0; i < 3; i += 1) writeSpoolEntry(spool, snapshot(`sess-quota${i}`));
+
+  // (1) FIRST process: the server refuses with the machine-readable category.
+  const refusing = statusFetch(402, { code: "quota_exceeded", message: "quota exceeded" });
+  const first = await sessionStartLines(spool, refusing.fetchImpl);
+
+  const posts = first.calls.filter((u) => /\/v1\/sessions$/.test(u));
+  assert.equal(posts.length, 1, "ONE refusal stops the pass — the rest cannot succeed either");
+  assert.ok(
+    first.lines.some((l) => l.includes("capture: BLOCKED (3 queued, 402 quota)")),
+    `the banner must name the quota block: ${JSON.stringify(first.lines)}`,
+  );
+  const recorded = readCaptureStatus(spool);
+  assert.equal(recorded?.state, "blocked", "the block is durable, not just one line in a log");
+  assert.equal(recorded?.status, 402);
+
+  // (2) SECOND process, with a healthy endpoint that never answers in time: the
+  // state is reported WITHOUT re-POSTing to discover it.
+  const second = await sessionStartLines(spool, () => new Promise(() => {}));
+  assert.ok(
+    second.lines.some((l) => l.includes("capture: BLOCKED (3 queued, 402 quota)")),
+    `a fresh process must report the recorded block: ${JSON.stringify(second.lines)}`,
+  );
+
+  // (3) THIRD process: the quota is back (a 2xx), which must CLEAR the marker —
+  // a stale BLOCKED would be its own lie.
+  const accepted = statusFetch(200);
+  await sessionStartLines(spool, accepted.fetchImpl);
+  assert.equal(readCaptureStatus(spool)?.state, "ok", "a 2xx clears the recorded block");
+  const fourth = await sessionStartLines(spool, accepted.fetchImpl);
+  assert.equal(
+    fourth.lines.filter((l) => l.includes("capture: BLOCKED")).length,
+    0,
+    `a lifted quota must not keep reporting BLOCKED: ${JSON.stringify(fourth.lines)}`,
+  );
+});
+
+test("#2100: an exhausted quota cannot grow the spool past its count bound (drop-OLDEST)", async () => {
+  // The disk half of the defect. The bound already exists (`pruneSpool`); what
+  // was never pinned is the QUOTA-BLOCKED steady state that #2100 measured — a
+  // spool that never drains because every POST is refused. It must still be
+  // bounded, and it must drop the OLDEST (the newest conversation is the one
+  // worth keeping), recording every eviction.
+  const spool = tmpSpool();
+  const bounds = {
+    maxEntries: 3,
+    maxTotalBytes: 64 * 1024 * 1024,
+    maxEntryBytes: 16 * 1024 * 1024,
+  };
+  const refusing = statusFetch(402, { code: "quota_exceeded" });
+  for (let i = 0; i < 6; i += 1) {
+    writeSpoolEntry(spool, snapshot(`sess-cap${i}`), bounds);
+    // Every pass is refused, so the spool can never shrink on its own.
+    await flushSpool(TEST_CFG, { dir: spool, fetchImpl: refusing.fetchImpl, now: 1 });
+  }
+  assert.equal(listSpoolEntries(spool).metas.length, 3, "the count bound holds under a dead quota");
+  const kept = listSpoolEntries(spool)
+    .metas.map((m) => m.session_id)
+    .sort();
+  assert.deepEqual(kept, ["sess-cap3", "sess-cap4", "sess-cap5"], "drop-OLDEST keeps the newest");
+  assert.ok(
+    readDiscards(spool).some((d) => d.reason === DISCARD_COUNT_EXCEEDED),
+    "every eviction is recorded — never a silent drop",
+  );
+});
+
+test("#2100: the per-box health line is present in every state", async () => {
+  // The operator surface. A box whose lanes produce 259 B must be readable as
+  // BLOCKED — and a healthy box must NOT read as blocked (an over-block in the
+  // other direction is the same lie).
+  //
+  // MUTATION THAT REDS THIS: drop `logHealth()` from `session_start`, or emit the
+  // line only when a flush has something to report → an idle box logs nothing.
+  const empty = await sessionStartLines(tmpSpool(), statusFetch(200).fetchImpl);
+  assert.ok(
+    empty.lines.some((l) => l.includes("capture: OK (0 queued)")),
+    `an idle box says so: ${JSON.stringify(empty.lines)}`,
+  );
+
+  const queued = tmpSpool();
+  writeSpoolEntry(queued, snapshot("sess-h1"));
+  const draining = await sessionStartLines(queued, () => new Promise(() => {}));
+  assert.ok(
+    draining.lines.some((l) => l.includes("capture: DRAINING (1 queued)")),
+    `a queued-but-fine box says DRAINING: ${JSON.stringify(draining.lines)}`,
+  );
+
+  const keyless = await sessionStartLines(tmpSpool(), statusFetch(200).fetchImpl, {});
+  assert.ok(
+    keyless.lines.some((l) => l.includes("capture: INACTIVE (no TORTOISE_API_KEY)")),
+    `a keyless box is named INACTIVE, not silently fine: ${JSON.stringify(keyless.lines)}`,
+  );
+
+  // The pure helper is the ONE implementation of the line, so pin its states
+  // directly instead of only through the wiring.
+  const dir = tmpSpool();
+  writeSpoolEntry(dir, snapshot("sess-h2"));
+  assert.equal(captureHealthLine(dir, { apiKey: "tt_x" }).state, "draining");
+  assert.equal(captureHealthLine(dir, { apiKey: "" }).state, "inactive");
+
+  // A HEALTH CHECK MUST NOT MUTATE WHAT IT DESCRIBES. `listSpoolEntries` (the
+  // drain's scanner) REPAIRS as it reads: it records `corrupt_entry` discards
+  // and unlinks the metas it cannot parse. Reusing it here would mean a line
+  // printed on every session start appends a ledger record per session and
+  // deletes files — a health check with side effects.
+  //
+  // MUTATION THAT REDS THIS: count with `listSpoolEntries(dir).metas.length` →
+  // the corrupt meta is removed and a discard is recorded.
+  const dirty = tmpSpool();
+  writeSpoolEntry(dirty, snapshot("sess-h3"));
+  const entries = join(dirty, "entries");
+  mkdirSync(entries, { recursive: true });
+  writeFileSync(join(entries, "corrupt.meta.json"), "{not json");
+  const health = captureHealthLine(dirty, { apiKey: "tt_x" });
+  assert.equal(health.queued, 2, "every meta file counts, readable or not");
+  assert.ok(existsSync(join(entries, "corrupt.meta.json")), "the corrupt meta is NOT deleted");
+  assert.equal(readDiscards(dirty).length, 0, "the health read records no discards");
 });
