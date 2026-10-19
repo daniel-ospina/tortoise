@@ -21,8 +21,10 @@ def _gate_kinds(proj, records, *, approved=_READ_THE_SET) -> object:
     ``FalkorProjection.apply`` refuses a direct fold only on a JOURNAL-BACKED
     projection (§17.1's single-writer guard) — and there the cache is a derived
     image of the journal. On a journal-less projection the cache IS the store,
-    so "the journal is the truth, replay must be faithful" does not apply and
-    the fold is a real write with nothing in front of it. Measured before this
+    so the replay-fidelity argument (a record already appended reproduces
+    faithfully, which is why refusing at replay is worse than the widening —
+    durability authority lives only in ``docs/durability-posture.md``) does not
+    apply, and the fold is a real write with nothing in front of it. Measured before this
     gate: ``github``'s ``object_kind='pm:issue'`` put ``pm`` into the approved
     set of a graph whose only ``:PackInstall`` record is ``dev``.
 
