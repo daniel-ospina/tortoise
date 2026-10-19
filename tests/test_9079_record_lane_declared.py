@@ -240,11 +240,12 @@ def test_every_event_store_write_declares_the_record_lane(sdk_with_journal,
     # Each fragment must identify exactly ONE statement: `any()`/membership alone
     # would let a fragment that also matches a sibling's statement keep the
     # census green while the REAL statement stopped being exercised — the
-    # family-keyed defect this per-statement split replaced. Three cases, and
-    # they are checked in this order because a zero-hit fragment IS a
-    # `len != 1` case: checked the other way round, a statement a maintainer
-    # merely stopped exercising would be reported as "ambiguous", which names
-    # the wrong defect.
+    # family-keyed defect this per-statement split replaced. Three cases, checked
+    # in this order because the ambiguity branch is `len(hit) > 1`: with the
+    # DISTINCT-statements assertion allowed to run first, a statement a
+    # maintainer merely stopped exercising would fall through and be reported as
+    # "a fragment is matching a sibling's statement" — the wrong defect, and the
+    # one a reader would chase.
     hits = {name: {stmt for stmt, _lane in observed if fragment in stmt}
             for name, fragment in statements.items()}
 
