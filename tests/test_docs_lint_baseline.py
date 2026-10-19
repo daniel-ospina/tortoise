@@ -1718,18 +1718,21 @@ def test_snapshot_contents_are_pinned_so_an_entry_cannot_be_swapped():
     # burned DOWN by one. Removing an entry changes the snapshot exactly as much
     # as adding one, which is why this digest moves — and it is the direction the
     # doctrine wants (`update` after every fix; the count may only fall).
-    # 2026-10-19 (#9193): REMOVED again, not appended, and this time the entry
-    # removal had landed without its two bookkeeping numbers. `ecc7bc8ca` (#9071)
-    # dropped the MD018 + MD040 entries for `tests/eval/write_path/README.md`
-    # (both genuinely fixed — `markdownlint-cli2@0.23.3` on that file reports
-    # `0 issues`), which is the doctrine's direction, but left
-    # `snapshot.counts.markdownlint` at 3299 against a 3297-entry list and left
-    # THIS pin at the pre-removal digest. A required check fails closed on the
-    # pair (`docs`: "…says 3299 markdownlint entries but carries 3297 — the
-    # snapshot is corrupt"), and this test is the second half of the same red: the
-    # count and the digest must move in the SAME change as the deletion, or the
-    # snapshot stops describing itself. Ceiling stays 3300 (it is a ceiling, not
-    # an exact count) and #7534 still owns the burn-down.
+    # 2026-10-19 (#9193): burned down by TWO more, not appended, and this time the
+    # entry removal had landed without its two bookkeeping numbers. `ecc7bc8ca`
+    # (#9071) fixed `tests/eval/write_path/README.md`'s MD040 + MD018
+    # (verified — `markdownlint-cli2@0.23.3` on that file reports `0 issues`) and
+    # REMOVED both entries so the ceiling followed the code, but it left
+    # `snapshot.counts.markdownlint` at 3299 while the list held 3297, and left
+    # this digest pointing at the pre-burn-down contents. Both inconsistencies
+    # are hard errors (`load_baseline` refuses a counts/lists mismatch), so the
+    # REQUIRED `docs` check failed on main and on every PR that merged it until
+    # the pair was moved together. Three guards would have caught it — this one,
+    # `test_snapshot_exists_is_consistent_and_announces_its_end_state`, and
+    # `load_baseline` — and #9071 still merged: its shards were killed by the
+    # 19-minute watchdog, so the failure set was never observed (#5049). The
+    # lesson is not a new guard, it is that the guard has to RUN — which is why
+    # the count and the digest move in ONE change, with the reason written here.
     assert _canonical_digest(baseline["markdownlint"]) == (
         "7a563e5fd489cfc5d6acb26e35d43ce2bc4e9e66932dff6c4647122625cc08fb"
     ), "the markdownlint snapshot contents changed — a swap is not a re-baseline"
