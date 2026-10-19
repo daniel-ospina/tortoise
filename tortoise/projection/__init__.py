@@ -3330,11 +3330,28 @@ def _journal_safe_params(params, cypher=None):
 #     `create_authored_by`), reached by `TortoiseSDK.create_edge` — filed as
 #     `#9195` and NOT yet declared.
 #
+# ⚠️ AND ONE WRITER STILL UNDECLARED THAT THIS LIST MUST NOT OMIT:
+# `FalkorProjection._ensure_indexes()` issues this package's largest block of
+# DDL through `proj.g` (`CREATE INDEX` / `DROP INDEX` / a full-text index and a
+# `MERGE (m:Meta …)`), and it declares nothing. Two of its call sites matter:
+# `__init__` runs it before `_bind_journal`, so it escapes only by ORDERING, and
+# TWO `hosted_api` restore paths call it after a `GRAPH.COPY` swap that restores
+# data but not schema — `_rebuild_import_indexes` and `backups_restore` — with no
+# scope in flight, on their `dump_proj = proj` fallback branch, i.e. on a
+# projection that IS journal-backed (their other branches construct a fresh
+# `FalkorProjection`, whose `_journal_backed` is False, so those are outside
+# (1)'s guard). Both wrap the call in `except Exception: log`, so a refusal
+# there is a logged no-op. `_ensure_indexes` swallows a per-statement `Exception` and only logs,
+# so under (1) that DDL would be refused and merely logged: the import endpoint
+# would report success on an index-less graph, which is the same silent-swallow
+# shape the lanes above exist to prevent. It is named here as STILL UNDECLARED
+# (not fixed in this increment) so (1)'s census can enumerate it.
+#
 # So (1) is not "blocked by an unknown surface" any more — what remains before
-# it can be refused is the edge lane plus a measurement pass over the SDK's
-# other direct writers. Until then the fold and the raw-query lane above are
-# the two doors that gate, and this list is where a reader finds out which
-# writers will NOT be refused when (1) closes.
+# it can be refused is the edge lane, that DDL lane, plus a measurement pass over
+# the SDK's other direct writers. Until then the fold and the raw-query lane
+# above are the two doors that gate, and this list is where a reader finds out
+# which writers will NOT be refused when (1) closes.
 # ═══════════════════════════════════════════════════════════════════════════
 
 

@@ -229,8 +229,11 @@ _SCHEMA_ATTR = "_tortoise_event_schema"
 # ruling) splits the store in two: **Postgres/the journal is the system of
 # record; FalkorDB is a derived hot cache**, so "every write goes to the truth
 # store first, and the cache is projected from it". `#7951` enforced that at
-# the fold, and `#9079` closes the third door — the projection's own write
-# handle, `proj.g`.
+# the fold; `#9079` DECLARES the writers that must not be refused when the third
+# door — the projection's own write handle, `proj.g` — is closed. That door is
+# still OPEN (`#9124`, not on `main`), which is why this declaration lands
+# first: arming it without the declarations refuses the product, not the
+# violation.
 #
 # This module writes the cache graph through that SAME handle and is NOT a
 # projection of the JSONL journal: no journal record describes `:GraphEvent` or
