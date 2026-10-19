@@ -2085,10 +2085,12 @@ def select(changed_files: list[str], event: str, manifest: dict,
     # one found (#9109 review P1 on this branch). A `SHARED_MODULES` member or a
     # linter-policy file is FULL because its blast radius IS the whole matrix, so
     # labelling one of those "unknown to every SOURCE_PATTERN … NOT a statement
-    # that this diff touches everything" inverts its meaning — and 4 of the 19
-    # shared-module entries (`pyproject.toml`, `requirements.txt`, the
-    # `.github/workflows/…` files) are genuinely unknown to the surface patterns,
-    # so the mislabel is reachable from the most ordinary legit-full diff.
+    # that this diff touches everything" inverts its meaning — and several
+    # shared-module entries (`pyproject.toml`, `requirements.txt`,
+    # `.github/workflows/python-ci.yml`, `.github/actions/`) are genuinely unknown
+    # to the surface patterns, so the mislabel is reachable from the most
+    # ordinary legit-full diff. (`len(SHARED_MODULES)` is the count; do not
+    # restate it here, it decays.)
     shared_cause = any(c.startswith(SHARED_MODULES) for c in changed)
     # Linter POLICY is a FULL cause of its own (#7435 review P1), recorded here
     # rather than in a return of its own: a `.markdownlint*`/`.lycheeignore`/
@@ -4355,15 +4357,23 @@ def _is_outside_repo_file(c: str) -> bool:
     p = Path(c)
     if not p.is_file():
         return False
-    # abspath, NOT resolve(): a repo-relative symlink that points outside the
-    # checkout is still a repo path, and `resolve()` would relabel it as an
-    # outside file and hint at it. The question here is where the PATH is, not
-    # where its target is.
-    try:
-        Path(os.path.abspath(p)).relative_to(Path(os.path.abspath(REPO)))
-    except ValueError:
-        return True
-    return False
+    # abspath FIRST, and deliberately not on its own: a repo-relative symlink
+    # that points OUTSIDE the checkout is still a repo path, and `resolve()`
+    # alone would relabel it as an outside file and hint at it (pin exists). But
+    # abspath alone is not enough either — an ABSOLUTE argument routed through a
+    # symlinked ALIAS of the checkout (`/tmp/linkrepo -> .../checkout`) is never
+    # under the resolved REPO string, so the repo's own `uv.lock` was marked
+    # "OUTSIDE the checkout" and told to pass its contents instead. Inside is
+    # therefore EITHER form: abspath keeps the repo-symlink-to-outside behaviour,
+    # realpath closes the alias case (#9109 review P2).
+    repo = Path(os.path.abspath(REPO))
+    for candidate in (os.path.abspath(p), os.path.realpath(p)):
+        try:
+            Path(candidate).relative_to(repo)
+        except ValueError:
+            continue
+        return False
+    return True
 
 
 def main() -> int:

@@ -226,6 +226,41 @@ def test_a_mixed_list_marks_only_the_paths_that_are_outside_the_checkout(tmp_pat
         f"the repo path must be named WITHOUT the hint: {proc.stderr}")
 
 
+def test_a_symlinked_alias_of_the_checkout_is_not_reported_as_outside(tmp_path):
+    """The repo's own file reached through a symlink to the checkout is INSIDE.
+
+    `_is_outside_repo_file` compares an absolute argument against the resolved
+    `REPO`, so an absolute path routed through a symlinked ALIAS of the checkout
+    (`/tmp/link -> .../checkout`) is never under that string: the repo's own
+    `uv.lock` came out as "OUTSIDE the checkout — if this is a file CONTAINING the
+    list, pass its contents instead". That is the same plausible-but-false claim
+    about where a path lives this diagnostic exists to prevent, so the helper now
+    accepts EITHER form — abspath (which keeps a repo symlink pointing outside as
+    a repo path) or realpath (which closes the alias). The genuine outside file
+    must still be hinted, or the fix would have silenced the hint entirely.
+    """
+    repo = Path(__file__).resolve().parents[1]
+    assert (repo / "uv.lock").is_file(), "the alias arm needs a real tracked path"
+    alias = tmp_path / "link-to-checkout"
+    alias.symlink_to(repo, target_is_directory=True)
+
+    proc = _run(["--changed-files", str(alias / "uv.lock"),
+                 "--event", "pull_request"], cwd=repo)
+
+    assert proc.returncode == 0, proc.stderr
+    assert '"full": true' in proc.stdout, proc.stdout
+    assert "[OUTSIDE the checkout" not in proc.stderr, (
+        f"a symlinked alias of the checkout is not outside it: {proc.stderr}")
+
+    # ...and the hint still fires for a file that really is outside.
+    outside = tmp_path / "changed.txt"
+    outside.write_text("tortoise/audit.py\n", encoding="utf-8")
+    proc = _run(["--changed-files", str(outside), "--event", "pull_request"],
+                cwd=repo)
+    assert "OUTSIDE the checkout" in proc.stderr, (
+        f"the hint must still fire for a genuine outside file: {proc.stderr}")
+
+
 def test_an_unknown_path_that_is_not_a_file_still_says_why_without_the_list_hint(
         tmp_path):
     """The diagnostic is general: ANY unknown path selects FULL (deliberate),
@@ -306,10 +341,10 @@ def test_a_shared_module_that_no_pattern_claims_is_not_called_unknown(tmp_path):
     its BLAST RADIUS is the matrix — never because the argument was malformed
     (#9109 review P1 on this branch).
 
-    4 of the 19 shared-module entries are unknown to every `SOURCE_PATTERNS` row
-    (`pyproject.toml`, `requirements.txt`, the `.github/workflows/...` files), so
-    falling into the unknown-path diagnostic for them states the exact inverse of
-    the truth: it denies that the diff touches everything, for the one shape that
+    Several shared-module entries are unknown to every `SOURCE_PATTERNS` row
+    (`pyproject.toml`, `requirements.txt`, `.github/workflows/python-ci.yml`,
+    `.github/actions/`), so falling into the unknown-path diagnostic for them
+    states the exact inverse of the truth: it denies that the diff touches everything, for the one shape that
     touches everything. Before this fix these printed the unknown-path sentence;
     the truthful answer names the shared-module cause and drops the inverted
     claim. Measured vectors are real repo paths, not invented ones.
