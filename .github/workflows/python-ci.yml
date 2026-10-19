@@ -3240,15 +3240,7 @@ jobs:
           RESULTS="${{ join(needs.*.result, ' ') }}"
           echo "matrix results: $RESULTS"
 
-          # 1. Any declared need that failed or was cancelled blocks the merge.
-          #    `join(needs.*.result)` covers EVERY entry in `needs:`, so no leg
-          #    escapes the red check by accident of ordering or naming.
-          if echo "$RESULTS" | grep -qE 'failure|cancelled'; then
-            echo "::error::matrix leg failed or was cancelled — merge blocked"
-            exit 1
-          fi
-
-          # 2. `skipped` is NOT a pass by default. A docs-only diff legitimately
+          # `skipped` is NOT a pass by default. A docs-only diff legitimately
           #    skips the matrix, so a leg the SELECTOR declined may skip — but a
           #    shard the selector DID select that reports `skipped` is a lost
           #    shard, and this REQUIRED check must not certify it (#5219).
@@ -3258,16 +3250,29 @@ jobs:
           #    `-` means the leg has no diff gate and must therefore always be
           #    SUCCESS (the surface guard's original explicit assertion, applied
           #    to every always-run leg).
-          while IFS='|' read -r leg result selected; do
-            if [ -z "$leg" ]; then continue; fi
-            if [ "$result" = "success" ]; then continue; fi
-            if [ "$result" = "skipped" ] && [ "$selected" = "false" ]; then
-              echo "  $leg: skipped by the selector (not selected for this diff)"
-              continue
-            fi
-            echo "::error::$leg reported '$result' and the selector did not decline it (selected='$selected') — merge blocked"
-            exit 1
-          done <<'LEGS'
+          #
+          #    THIS TABLE NOW RUNS FIRST. It used to be dead code: a bare
+          #    `grep -qE 'failure|cancelled'` bail sat ABOVE it and exited first,
+          #    so on every red the operator got "matrix leg failed or was
+          #    cancelled — merge blocked" and never the leg name — the table's
+          #    `::error::leg ...` line was unreachable for exactly the case it was
+          #    written for (agent-infra#2148 sibling). Measured 2026-10-19: 11 open
+          #    PRs red on this required check, every one reporting only the bare
+          #    sentence while a red shard sat un-named.
+          #
+          #    The sweep is NOT deleted — it is the #5219 defence in depth that
+          #    catches a leg reaching `needs:` with no row (pinned by
+          #    tests/test_ci_selection.py). It now runs LAST, as a backstop the
+          #    naming loop has already made redundant in the normal case.
+          #
+          #    Fail-closed is preserved and made explicit per class:
+          #      failure          -> red, named
+          #      cancelled        -> red, named (a cancelled leg certifies nothing)
+          #      empty (#5219)    -> red, named (a missing leg is not a pass)
+          #      skipped+selected -> red, named (a lost shard is not a pass)
+          #      skipped+declined -> pass (the selector declined this leg)
+          LEGS_FILE="$(mktemp)"
+          cat > "$LEGS_FILE" <<'LEGS'
           changes|${{ needs.changes.result }}|-
           manifest-integrity|${{ needs.manifest-integrity.result }}|-
           workflow-lint|${{ needs.workflow-lint.result }}|-
@@ -3280,4 +3285,69 @@ jobs:
           test-d14-hosted-api|${{ needs.test-d14-hosted-api.result }}|-
           surface-guard|${{ needs.surface-guard.result }}|-
           LEGS
+
+          # Fail closed by construction: a job added to `needs:` without a row here
+          # would never be inspected (the #5219 shape). The per-leg loop below runs
+          # FIRST so a real per-leg problem is named specifically; this count check
+          # then catches only the shape the loop cannot see — a need with no row.
+          FAILED=0
+          while IFS='|' read -r leg result selected; do
+            if [ -z "$leg" ]; then
+              continue
+            fi
+            case "$result" in
+              success)
+                continue
+                ;;
+              skipped)
+                if [ "$selected" = "false" ]; then
+                  echo "  $leg: skipped by the selector (not selected for this diff)"
+                  continue
+                fi
+                echo "::error::leg '$leg' is SKIPPED although the selector selected it (selected='$selected') — a lost shard is not a pass (#5219); merge blocked"
+                FAILED=$((FAILED + 1))
+                ;;
+              cancelled)
+                echo "::error::leg '$leg' was CANCELLED (selector: selected='$selected') — a cancelled leg certifies nothing; merge blocked"
+                FAILED=$((FAILED + 1))
+                ;;
+              '')
+                echo "::error::leg '$leg' reported NO RESULT (empty) — the #5219 missing-leg shape is not a pass; merge blocked"
+                FAILED=$((FAILED + 1))
+                ;;
+              *)
+                echo "::error::leg '$leg' reported '$result' (selector: selected='$selected') — merge blocked"
+                FAILED=$((FAILED + 1))
+                ;;
+            esac
+          done < "$LEGS_FILE"
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "❌ $FAILED leg(s) did not pass — the ::error:: lines above name each one"
+            rm -f "$LEGS_FILE"
+            exit 1
+          fi
+
+          # Fail closed by construction. The naming loop above already reds on any
+          # leg it can see; this guard catches the shape it cannot — a job added to
+          # `needs:` whose row is missing, or (worse) whose row was duplicated by
+          # copy-paste so the counts still matched. Counting DISTINCT leg names is
+          # what makes a duplicated row collapse the count instead of hiding an
+          # unrowed need (#5219).
+          NEED_COUNT=$(echo "$RESULTS" | wc -w)
+          ROW_COUNT=$(cut -d'|' -f1 "$LEGS_FILE" | sort -u | wc -l)
+          rm -f "$LEGS_FILE"
+          if [ "$NEED_COUNT" -ne "$ROW_COUNT" ]; then
+            echo "::error::leg table drift — needs: reports $NEED_COUNT result(s) but the table declares $ROW_COUNT distinct leg(s); a leg is uninspected and could escape the red check (#5219)"
+            exit 1
+          fi
+
+          # Defence in depth (#5219), pinned by tests/test_ci_selection.py: the plain
+          # sweep over `needs.*.result` is identity-blind and catches a failing or
+          # cancelled need that no row named. Reached only when the loop above found
+          # nothing, so it can only fire on a table/`needs:` mismatch.
+          if echo "$RESULTS" | grep -qE 'failure|cancelled'; then
+            echo "::error::a need reported failure-or-cancelled but no leg row named it — the leg table above has drifted from needs:; merge blocked"
+            exit 1
+          fi
           echo "✅ every declared leg ran to success, or was declined by the selector"
