@@ -9,6 +9,7 @@ carve-out so tools/longmem_eval/ etc. select the eval surface).
 from __future__ import annotations
 
 import ast
+import copy
 import json
 import os
 import re
@@ -1400,6 +1401,52 @@ def test_the_session_declaration_guard_runs_on_its_docs_subjects_too():
             "tests/test_session_schema_3554.py, so its declaration mirror cannot "
             "fire on the change it pins (#3554 review)"
         )
+
+
+def test_kind_vocabulary_guard_runs_on_a_docs_only_ontology_edit():
+    """#2786: the §5 vocabulary guard IS selected by a docs-only ONTOLOGY edit.
+
+    `tests/test_kind_vocabulary_consistency.py` reads `docs/ONTOLOGY.md` §5 as its
+    canonical source, so a docs-only §5 edit must run it. A review of PR #9146
+    raised this as a P1 (`ci-selection-gap`): "the file is not in tier1, so a
+    docs-only ONTOLOGY edit never runs it". **Measured false** at `547411b27` with
+    this selector — `select(['docs/ONTOLOGY.md'])` → `surfaces=['core']` with the
+    guard in `test_files`.
+
+    The premise was wrong: `docs/ONTOLOGY.md` is in `CORE_ALSO` (the #3554 entry,
+    the #1349/#3332/#3616 silent-drop remedy), so the docs path survives
+    `_keep_changed`, `core` is selected, and the docs-only tier-1 early return is
+    never reached. `tier1` registration is therefore NOT the remedy here: it would
+    add ~3 s to every PR for coverage the `core` leg already provides.
+
+    The residual risk that WOULD be real — `docs/ONTOLOGY.md` dropping out of
+    `CORE_ALSO`, which reverts every doc-anchored guard in this file's family to a
+    tier-1-only run — is what this pin holds (and
+    `test_the_session_declaration_guard_runs_on_its_docs_subjects_too` pins the
+    same mechanism for the #3554 guard).
+    """
+    r = _sel(["docs/ONTOLOGY.md"])
+    assert r["full"] is False
+    assert r["surfaces"] == ["core"], (
+        f"a docs-only docs/ONTOLOGY.md edit selects {r['surfaces']} — `core` is "
+        "lost, so the §5 vocabulary guard would fall back to tier-1 smoke and "
+        "never run on the doc it exists to pin (CORE_ALSO entry removed?)"
+    )
+    assert "test_kind_vocabulary_consistency.py" in r["test_files"], (
+        "a docs-only docs/ONTOLOGY.md edit does not run "
+        "tests/test_kind_vocabulary_consistency.py, so a §5 drop/addition/rename "
+        "merges green (#2786, #4309 class)"
+    )
+
+    # Non-vacuous: the same selection loses the guard the moment its `core`
+    # registration is dropped, so the assertion above is not satisfied by any file.
+    stripped = copy.deepcopy(load_manifest())
+    stripped["surfaces"]["core"] = [
+        t for t in stripped["surfaces"]["core"]
+        if t != "test_kind_vocabulary_consistency.py"
+    ]
+    assert "test_kind_vocabulary_consistency.py" not in select(
+        ["docs/ONTOLOGY.md"], "pull_request", stripped)["test_files"]
 
 
 def test_session_import_change_selects_the_window_guard():
