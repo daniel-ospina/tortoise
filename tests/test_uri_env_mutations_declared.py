@@ -529,6 +529,17 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         r'os\.environ\["TORTOISE_DB_URI"\]\s*=',
         r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']',
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # #9122/#9197's second writer (`python -m tortoise.session_indexer`).
+    # `_run_indexer` re-sets `TORTOISE_DB_URI` to its CURRENT value purely so
+    # `monkeypatch` has something to restore: `session_indexer.main()` writes
+    # the var DIRECTLY from `--db`, which monkeypatch would otherwise never undo,
+    # leaking a dead endpoint into every module collected after this one. The
+    # set is a no-op value-wise and is NOT a lane flip — the URI that is already
+    # set is the INPUT the explicit `--db` must beat, so the intent is
+    # DELIBERATE_URI. Declared because the census counts every matching line and
+    # cannot tell a restore-recording set from a lane-forcing one.
+    "test_9079_event_writers_journal.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # The arm's `--db` scoping tests (#1349 isolation): an explicit `--db` must
     # beat a stale `TORTOISE_DB_URI`, so the stale value is set to a DIFFERENT
     # endpoint and then the store's own `_temporary_env_var` proves the scoped
