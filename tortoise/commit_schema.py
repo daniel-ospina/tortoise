@@ -205,15 +205,22 @@ def compile_vocab(packs_dir: Path | str | None = None,
     written (#5202, still open).
 
     The approval set this gate is handed is no longer writable by the DOORS it
-    gates: #8380 gated ``POST /v1/objects`` / ``POST /v1/subjects`` and #5475
+    gates: #8380 gated ``POST /v1/objects`` / ``POST /v1/subjects``; #5475
     gated the SDK/entity + point funnels (``sdk._create_entity``,
-    ``sdk.create_point``) plus this door's own ``entities[].kind`` leg
-    (pre-write). ⛔ That is NOT the whole write path — do not read it as one:
-    the journal-first seam (``api.EventAPI`` → ``projection._upsert_*``, used by
-    the v1 extractor, ingest and docs_miner) still persists kinds ungated
-    (#8982), the update doors still widen (#8968), and ``entities[].kind`` has
-    no Layer-1 membership test (#5202). This function still gates the vocab it
-    is GIVEN; it does not make the write path's object kinds closed-vocab.
+    ``sdk.create_point``), this door's own ``entities[].kind`` leg (pre-write),
+    the SDK UPDATE doors (``sdk.update_point`` / ``sdk._update_entity``,
+    formerly #8968) and the journal-first seam — ``api.EventAPI._emit``,
+    ``sdk._apply_and_journal``, ``sdk._doc_write`` and ``mining``'s own
+    emitter — each BEFORE its journal append (formerly #8982).
+    ⛔ That is NOT every write into a mined property — do not read it as one.
+    Still outside it: ``entities[].kind`` has no Layer-1 membership test
+    (#5202, open); replay/``rebuild_all`` is deliberately ungated (the journal
+    is the truth, so a record already in it reproduces faithfully); a
+    projection-less ``EventAPI`` lane would journal a kind for the replay to
+    fold; and raw-Cypher / offline re-typing writers
+    (``tortoise/migrate_kinds.py``, ``tortoise/retype.py``) never meet a door.
+    This function still gates the vocab it is GIVEN; it does not make the write
+    path's object kinds closed-vocab.
 
     Memoized per gate (#5163 review, P1). ``compile_vocab`` runs
     ``PackRegistry.load_all()`` — a filesystem walk + YAML parse of every

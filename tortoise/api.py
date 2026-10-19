@@ -45,6 +45,64 @@ class EventAPI:
         self._svbp = None
 
     # -- internals -----------------------------------------------------------
+    def _refuse_unapproved_kinds(self, payload: dict) -> None:
+        """#5475 (residual): a journal-first write may not install a pack.
+
+        ``EventAPI`` is the write seam every pipeline uses (the v1 extractor,
+        ``ingest``, ``docs_miner``, ``mining``, the CLI): it appends to the
+        journal and folds through ``projection._upsert_*``, which persists the
+        kind verbatim — so ``graph_kind_namespaces`` mines the value straight
+        back into the graph's APPROVAL set. Measured at HEAD: a graph recorded
+        as ``['dev']`` became ``['dev','marketing']`` from one
+        ``add_object(..., 'marketing:campaign')``. The create-side gate does not
+        see this seam (it never touches the SDK), so the closure property #5475
+        states — *a write may not widen the approved set* — was still false one
+        transport over.
+
+        ⛔ THE BOUND, stated so this is not read as "the write path is closed":
+        this gates a write that HAS a graph handle. ``rebuild_all`` folds a
+        journal directly and stays ungated BY DESIGN — the journal is the truth,
+        so a record already in it must reproduce faithfully; refusing at replay
+        would make a committed record unfoldable, which is strictly worse than
+        the widening. Two consequences follow, both recorded rather than
+        papered over: a record already in a legacy journal still widens the
+        graph when rebuilt, and a ``projection``-less lane
+        (``EventAPI(log, projection=None)`` — no production caller today) would
+        journal a kind for that replay to fold. Neither is a caller-controlled
+        escalation from a live tenant; both are why #8982's replay half is a
+        STATEMENT here, not a test.
+
+        It runs BEFORE ``self.log.append`` in ``_emit``, and that ordering is
+        load-bearing: the append is this seam's COMMIT POINT (the journal IS the
+        truth), so a refusal raised after it would leave a record that is
+        faithfully replayed on the next ``rebuild_all`` — refused live, widened
+        anyway on replay. Fail closed means fail BEFORE the commit, not after.
+
+        One approval-set read per CALL (not per kind property): the read is a
+        whole-graph scan (``graph_installed_namespaces``' own COST note), and a
+        capture that names several kinds must not pay it once per spelling. It
+        is not paid at all for a payload that names no pack — the cheap
+        ``kind_named_packs`` pre-check runs first, exactly as at the SDK doors.
+
+        A ``projection``-less lane (``EventAPI(log, projection=None)``) has NO
+        graph in scope: this gate abstains there rather than reading an approval
+        set from a graph it does not hold (see THE BOUND above — the record is
+        gated by nothing on that lane, and the replay that folds it is
+        deliberately ungated too).
+        """
+        g = getattr(self.projection, "g", None)
+        if g is None:
+            return
+        from .pack_state import (
+            graph_approval_namespaces,
+            payload_names_pack,
+            refuse_unapproved_kinds_in_payload,
+        )
+        if not payload_names_pack(payload):
+            return
+        refuse_unapproved_kinds_in_payload(
+            payload, graph_approval_namespaces(g))
+
     def _emit(self, type_: str, *, corrects=None, actor: str | None = None,
               **payload) -> dict:
         # #7951 — THE JOURNAL ORDERING CONTRACT: **journal first, then
@@ -71,6 +129,13 @@ class EventAPI:
         # caller change required for existing lanes.
         if actor is not None:
             event["actor_user_id"] = actor
+        # #5475 (residual): the approved-pack gate, BEFORE the commit point.
+        # Every EventAPI mutation funnels through here, so gating here is what
+        # closes the seam for the doors it has today AND for a door added
+        # tomorrow — the argument the SDK makes for its own funnel, one
+        # transport over. See `_refuse_unapproved_kinds` for why it must run
+        # before the append rather than after.
+        self._refuse_unapproved_kinds(event)
         self.log.append(event)
         if self.projection is not None:
             # #7951 §17.1: journal-first door — the append above is the COMMIT
