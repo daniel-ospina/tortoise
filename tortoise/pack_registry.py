@@ -89,6 +89,15 @@ CANONICAL_EVENT_KINDS = frozenset({
     # extracted occurrence, `AgentSession` = the canonical session-capture kind,
     # `humanApproval` = the #531 approval event), so there is no doc-side fix —
     # this set was the stale layer. Guard: tests/test_kind_vocabulary_consistency.py.
+    #
+    # ⚠ Not only a widening — these four names also become RESERVED, which is worth
+    # knowing before adding the next one: (a) a pack that *declares* one of them in
+    # its `ontology.eventKinds` is now refused ("already in canonical vocabulary —
+    # no need to register", the pre-existing rule every canonical kind already
+    # follows), and a manifest with an error is dropped by `load_all()`; (b) `tortoise
+    # pack new` refuses them as namespaces (`_cmd_pack_new` lower-cases the canonical
+    # set). No in-repo pack declares any of the four, so the blast radius is
+    # third-party manifests — #2786 records the compatibility edge.
     "AgentSession", "humanApproval", "occurrence", "turn",
 })
 
