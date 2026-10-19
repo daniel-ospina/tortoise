@@ -1472,6 +1472,20 @@ surfaces:
   # the `core` fallback in `select()`, so a change to any ONE of them alone would
   # otherwise run this suite never — the #1349/#2938/#3154 silent-drop class.
   - test_9079_onboarding_declared_lane.py
+  # #9195 (§17.1's FOURTH declaration child): the SDK's structural-edge write
+  # lane (`create_edge` + its three typed wrappers — one funnel, one `MERGE`
+  # that mints no node, no property and no identity). REGISTERED on `core` and
+  # `sdk` because those are exactly the surfaces its subject resolves to:
+  # `tortoise/projection/edges.py` selects `core`+`sdk` (verified with
+  # `tools/ci_selection.py --changed-files tortoise/projection/edges.py`), and
+  # `tortoise/projection/__init__.py` (where the declaration ledger lives) is a
+  # SHARED_MODULE that forces the full matrix anyway. Deliberately NOT
+  # registered on `api`/`onboarding`/`ep`: unlike the #9121 suite, this lane's
+  # writers are not reached from those modules' own diff surface, and an
+  # over-broad row would run a 9-test embedded suite on diffs it cannot
+  # observe. It is also what satisfies `--integrity`'s "every test file is
+  # classified" rule.
+  - test_9079_edge_lane_declared.py
   - test_7951_create_point_outbox.py
   # #7951 (increment 2, the revision door): `update_point` appends its
   # `PointRevised` record BEFORE the cache write. Same subjects as the
@@ -4172,6 +4186,20 @@ surfaces:
   # the `core` fallback in `select()`, so a change to any ONE of them alone would
   # otherwise run this suite never — the #1349/#2938/#3154 silent-drop class.
   - test_9079_onboarding_declared_lane.py
+  # #9195 (§17.1's FOURTH declaration child): the SDK's structural-edge write
+  # lane (`create_edge` + its three typed wrappers — one funnel, one `MERGE`
+  # that mints no node, no property and no identity). REGISTERED on `core` and
+  # `sdk` because those are exactly the surfaces its subject resolves to:
+  # `tortoise/projection/edges.py` selects `core`+`sdk` (verified with
+  # `tools/ci_selection.py --changed-files tortoise/projection/edges.py`), and
+  # `tortoise/projection/__init__.py` (where the declaration ledger lives) is a
+  # SHARED_MODULE that forces the full matrix anyway. Deliberately NOT
+  # registered on `api`/`onboarding`/`ep`: unlike the #9121 suite, this lane's
+  # writers are not reached from those modules' own diff surface, and an
+  # over-broad row would run a 9-test embedded suite on diffs it cannot
+  # observe. It is also what satisfies `--integrity`'s "every test file is
+  # classified" rule.
+  - test_9079_edge_lane_declared.py
   - test_7951_create_point_outbox.py
   # #7951 (increment 2, the revision door): `update_point` appends its
   # `PointRevised` record BEFORE the cache write. Same subjects as the
@@ -5574,6 +5602,7 @@ durations:
   # this branch head as the sum of testcase/@time over all tests:
   test_7951_enforce_atomic_write.py: 7.4  # #7951: 19 tests, 7.39s wall (measured at the rebase head; refresh from the first post-merge run)
   test_9079_onboarding_declared_lane.py: 3.6  # #9079: 14 tests, 3.63s wall (same convention)
+  test_9079_edge_lane_declared.py: 18.0  # unmeasured — #9195 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), and WITHOUT this row `duration_coverage_issues()` reds on `ci_selection.py --integrity`. Local embedded-lane wall readings at this head: 15.3 s and 22.4 s over two runs (9 tests; fleet load varies). ⚠️ The testcase/@time sum is ~18 s, NOT the wall clock — the first `create_point` in a process pays the one-time lazy embedding load (the same weight the #9123 row above documents), and the fixture is per-test. Refresh from the first post-merge run that includes it.
   test_write_op_reachability.py: 3.3  # #8135: 43 tests + 1 xfail, 3.25s wall (same convention)
   test_capture_loop_responsiveness.py: 10.2
   # #2988/#3243: AST pins plus behavioural tests that park real daemon-pool

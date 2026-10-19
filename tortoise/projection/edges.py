@@ -629,6 +629,142 @@ def source_change_notices(g, source_refs, current_versions: dict[str, str] | Non
     return notices
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# §17.1 (#9195) — the STRUCTURAL-EDGE write lane is DECLARED.
+#
+# `docs/architecture/STORAGE-ARCHITECTURE.md` §17.1 (from the §2.0 owner
+# ruling: Postgres is the record, FalkorDB a derived cache) forbids a SECOND
+# writer of the cache. `#7951` enforced that at the fold (`FalkorProjection.
+# apply`) and at the public raw-query lane (`FalkorProjection.query`); `#9079`
+# decomposes closing the third door — the guarded write handle the SDK itself
+# uses, `proj.g.query` — into the writers that legitimately reach it FIRST, and
+# `#9124` is the guard that lands last. This is the FOURTH and last declaration
+# child (`#9123` the `:EpMeta` epoch, `#9121` onboarding metadata, `#9122` the
+# raw `:Event` writers).
+#
+# WHAT THE WRITE IS. `create_edge` issues exactly ONE mutating statement,
+#
+#   MATCH (s:L {k:$sv}) MATCH (t:M {k:$tv}) MERGE (s)-[:<predicate>]->(t)
+#
+# and its three typed wrappers (`create_owned_by`, `create_managed_by`,
+# `create_authored_by`) are `return self.create_edge(...)` — one funnel, one
+# statement. The write mints NO node (`MATCH` on both endpoints, never `MERGE`:
+# an absent endpoint returns `False` and writes nothing), NO property (no `SET`
+# on the relationship, no value parameter — the verb takes none, see
+# `docs/architecture/STORAGE-ARCHITECTURE.md` §9.6) and NO identity. Its whole
+# content is `(source, predicate, target)` between two entities that already
+# exist, so the write adds no state of its own: it is a DERIVATION.
+#
+# WHY DECLARED AND NOT JOURNALLED. A record COULD describe it (so this is not
+# the `_graph_metadata_write_scope` lane, whose first obligation is that no
+# record describes the write), and the edge is not re-derived by today's replay
+# from the edge itself — the two shapes that would make journaling or
+# `_live_write_scope` honest. Journalling needs a record type, a fold and a
+# replay resolver; that is the record-store epic's work (`#7879`), not this
+# child's, and the ordering it settles is the OPPOSITE one: the declaration
+# lands BEFORE the guard, because a guard that refuses the product's own edge
+# mints is not a guard, it is a regression (measured on `#9079`'s lane: arming
+# it refused these writers; the seed path's REST caller answers 500 — see
+# `selfhost_api.py::POST /onboarding/seed` and
+# `hosted_api.py::POST /v1/onboarding/seed`).
+#
+# ⛔ WHAT THIS LANE CLAIMS, PER RELATION — not one global claim, because one
+# global claim would be false. ``structural_edge_carrier`` answers it from the
+# ONE set the replay engines read, and the two halves are MEASURED (an embedded
+# journal-backed SDK, two endpoints, `rebuild_all` from the journal):
+#   * **snapshot-carried** — `DERIVABLE_STRUCTURAL_RELS` (`aboutSubject`,
+#     `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDocument`,
+#     `extractedFrom`): the graph has a carrier — the endpoint Point's immutable
+#     snapshot (`aboutEntities` / the `extractedFrom` prop, resurrected by
+#     `entities._upsert_point_edges` at replay). An edge minted HERE is
+#     resurrected when the endpoint's snapshot already carries the same link,
+#     which is how the sanctioned writers write it (`create_point(aboutSubject=
+#     …)`, `extractedFrom=…`), and NOT when it is a bare assertion on a node
+#     whose record never held it.
+#   * **carrier-less** — every other predicate in `_VALID_EDGE_PREDICATES`
+#     (`related`, `dependsOn`, `ownedBy`, `managedBy`, `authoredBy`, `memberOf`,
+#     `hasMember`, `holdsRole`, `reportsTo`, `participatesIn`, `hasPart`,
+#     `performs`, `produces`, `uses`, `wasDerivedFrom`, `references`,
+#     `aboutSource`, `aboutAction`): there is NO replay carrier. MEASURED at
+#     this head: a `rebuild_all` over a journal holding such edges reports
+#     `edges: 0` and the edges are GONE, whether they were minted bare or
+#     carried by an `ownedBy`/`managedBy`/`authoredBy` node property.
+#     **This lane does NOT claim durability for them.** It discloses the gap so
+#     the next reader meets it here instead of discovering it, and so that
+#     `#9124`'s census has the class enumerated rather than assumed: the
+#     missing replay carrier is a REBUILD-fidelity gap in the replay engines,
+#     tracked on `#9079`'s census (the folded write-surface map of `#2296`,
+#     whose per-write-class obligation (`#7951`) this row discharges only for
+#     the LIVE side). Declaring this lane does not create that gap and does not
+#     bless it — the gap exists on `origin/main` today, with no declaration
+#     anywhere (measured the same way).
+#
+# ⛔ WHAT THIS LANE DOES NOT COVER — stated, so a reader does not infer it from
+# a green suite. `_EdgeHandlers` holds OTHER edge-minting verbs; they are not
+# this lane and deliberately keep their own shape:
+#   * `create_about_edge` / `_create_about_edges` / `wire_about_link` — the
+#     `about*` path, where a caller-supplied NAME is resolved through the
+#     Subject→Object→Event→Source→Point cascade and the resolved decision is
+#     journalled (`resolve_about_link`, `EventRecorded`'s replay links, #8398).
+#     Their record exists, so they belong to their journalling door's scope, not
+#     to a declaration; `wire_about_link` can also MINT a `:Subject` stub — a
+#     node, so an edge lane must not authorize it.
+#   * `_link_source` / `link_source_to_entity` / `link_source_to_event` /
+#     `link_source_to_legacy_event` — the PROVENANCE lane: they `MERGE` a
+#     `:Source` NODE and stamp `r.sourceVersion` (a `:Source` mint under an edge
+#     lane would be the `#9068` shape).
+#   * `_sync_tags` — `TAGGED` edges plus a `:Tag` MERGE, written from
+#     `create_point`'s own declared scope.
+#   * `_create_edges` / `replay_about_links` — the FOLD: they run inside
+#     `_live_write_scope` / `_replay_write_scope` already.
+# `tests/test_9079_edge_lane_declared.py::test_every_edge_minting_verb_is_
+# declared_or_stated` enumerates those verbs from this module's own AST, so a
+# NEW one fails the suite instead of appearing undeclared.
+#
+# ⛔ AND `references` KEEPS ITS OWN SHAPE. The generic verb writes that edge
+# BARE: no `sourceVersion` anchor, and a later `link_source_to_*` `MERGE`
+# cannot repair it because its stamp is `ON CREATE`-only (`#5213` option 3;
+# §9.6; pinned by `tests/test_references_boundary_5213.py`). This lane does not
+# route it through the anchor and does not claim the anchor for it.
+#
+# ⚠️ THE DECLARATION IS NOT A BYPASS. It is a per-call `with` block — no
+# instance attribute, constructor argument or env var can set it — and it wraps
+# the MUTATING statement only, so a read on this path is not swept into a lane
+# it does not belong to, and a write that does not go through `create_edge`
+# still fails closed.
+# ═══════════════════════════════════════════════════════════════════════════
+
+#: The declared lane name. A refusal never prints it (a refusal fires when NO
+#: reason is in flight), so this value is what a test reads back AT THE WRITE
+#: and what the projection's declaration ledger cites — stable on purpose, so a
+#: reader can grep it.
+STRUCTURAL_EDGE_WRITE_LANE = "structural-edge.derived"
+
+
+def structural_edge_carrier(rel: str) -> str | None:
+    """The replay carrier for an edge minted by ``create_edge``, or ``None``.
+
+    DERIVED from ``DERIVABLE_STRUCTURAL_RELS`` — the one set the replay engines
+    read — rather than a second hand-maintained table: adding a rel to that set
+    moves this answer with it, so the lane's per-relation claim cannot drift
+    from replay's actual behaviour. See the block above: a ``None`` here is a
+    DISCLOSED carrier gap, not a claim that no record is needed.
+    """
+    return "endpoint-snapshot" if rel in DERIVABLE_STRUCTURAL_RELS else None
+
+
+def _structural_edge_write_scope():
+    """The §17.1 declaration for the structural-edge lane's ONE statement.
+
+    Lazy import on purpose: `tortoise.projection` imports THIS module, so a
+    module-level import would be circular (the same reason `state.py`'s
+    ``_onboarding_write_scope`` imports late, #9121).
+    """
+    from tortoise.projection import _cache_write_authorized
+
+    return _cache_write_authorized(STRUCTURAL_EDGE_WRITE_LANE)
+
+
 class _EdgeHandlers:
     """Mixin: edge creation, about edges, source linking, edge stats."""
 
@@ -1989,16 +2125,22 @@ class _EdgeHandlers:
                         raise ValueError(
                             f"Circular ownership: {target_id} already owned by {source_id}")
         created = False
-        for s in sources:
-            for t in targets:
-                r = self.g.query(
-                    f"MATCH (s:{s['label']} {{{s['key']}:$sv}}) "
-                    f"MATCH (t:{t['label']} {{{t['key']}:$tv}}) "
-                    f"MERGE (s)-[:{predicate}]->(t) RETURN count(*) > 0",
-                    params={"sv": s["value"], "tv": t["value"]},
-                )
-                if r.result_set and r.result_set[0][0]:
-                    created = True
+        # §17.1 (#9195): the lane's ONE mutating statement, DECLARED. Both
+        # endpoints were just resolved by `MATCH` above, so this writes a bare
+        # relationship and nothing else — read the block above
+        # `STRUCTURAL_EDGE_WRITE_LANE` for what the lane claims per relation and
+        # for the carrier gap it discloses rather than blesses.
+        with _structural_edge_write_scope():
+            for s in sources:
+                for t in targets:
+                    r = self.g.query(
+                        f"MATCH (s:{s['label']} {{{s['key']}:$sv}}) "
+                        f"MATCH (t:{t['label']} {{{t['key']}:$tv}}) "
+                        f"MERGE (s)-[:{predicate}]->(t) RETURN count(*) > 0",
+                        params={"sv": s["value"], "tv": t["value"]},
+                    )
+                    if r.result_set and r.result_set[0][0]:
+                        created = True
         return created
 
     def create_owned_by(self, entity_id: str, subject_id: str) -> bool:
