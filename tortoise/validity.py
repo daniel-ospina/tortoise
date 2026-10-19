@@ -30,7 +30,9 @@ this issue adds is about the end (open / closed-at-known-date /
 closed-unknown).
 
 Legacy compatibility is total: a window written by #1538 carries no precision
-property, ``effective_precision`` reports ``"day"`` for its present bounds,
+property, ``effective_precision`` reports ``"day"`` for its present, ORDERABLE
+bounds (#9201: a present but unparseable bound names no instant, so it reports
+no precision — the #6140 ruling's read on the start side),
 ``end_state`` reports ``END_OPEN`` for its open end — byte-identical reads,
 no migration.
 """
@@ -89,17 +91,38 @@ def effective_precision(bound: object, declared: object) -> str | None:
     """The precision a READ path should report for ``bound``.
 
     A declared token wins. A PRESENT bound with no declared token is the
-    #1538 legacy shape and reads as ``"day"`` (``is not None`` presence, the
-    same gate ``_covers`` uses — a falsey-but-present bound is a real bound).
+    #1538 legacy shape and reads as ``"day"`` — but ONLY when the bound names
+    an instant. Presence is not precision (#9201): the write path stores
+    ``validFrom``/``validTo`` verbatim, so ``""``, ``"TBD"`` and ``"not-a-date"``
+    are all PRESENT values that ``_created_sort_key`` cannot order, and the
+    #6140 ruling makes an unparseable START mean *no start was recorded*. A
+    ``"day"`` claim about an absent datum is the defect #9201 records, so the
+    legacy default additionally requires the bound to ORDER — the same
+    ``_created_sort_key`` the read path orders with (``key[0] == 0`` ⇒ a
+    parseable instant), never a second notion of "parseable". A numeric epoch
+    ``0`` (or ``False``) IS an instant — 1970-01-01T00:00:00Z — so it keeps
+    ``"day"``.
+
     An absent bound with no declared token has no precision (``None``); an
     absent bound with ``"unknown"`` is the closed-unknown end.
+
+    A NUMERIC bound (``int``/``float``) short-circuits to ``"day"`` before
+    ``_created_sort_key`` runs: it always names an instant, and an integer too
+    large for ``float()`` would otherwise raise ``OverflowError`` from the
+    ordering primitive — a read path must not acquire a failure mode it never
+    had (#9201 review P3). ``nan``/``inf`` keep the pre-#9201 ``"day"`` too.
     """
     declared_token = normalize_precision(declared, field="precision")
     if declared_token is not None:
         return declared_token
-    if bound is not None:
+    if bound is None:
+        return None
+    if isinstance(bound, (int, float)):
         return "day"
-    return None
+    from .search_engine import _created_sort_key  # lazy — no import cycle
+    if _created_sort_key(bound)[0] != 0:
+        return None
+    return "day"
 
 
 def end_state(valid_to: object, valid_to_precision: object) -> str:
@@ -191,10 +214,18 @@ def window_read_fields(
 
     Callers pass the bounds RAW. The presence gate is ``is not None`` (inside
     ``effective_precision``/``end_state``), so a falsey-but-present bound —
-    ``""``, ``0`` — is a REAL bound and reads as ``day``, the same predicate
-    ``_covers`` orders with. Pre-normalizing at a call site (``bound or
-    None``) makes the same stored window resolve differently per surface,
-    which is the drift this home exists to prevent (#2350 review P2).
+    ``""``, ``0`` — is a REAL bound and keeps its block. Pre-normalizing at a
+    call site (``bound or None``) makes the same stored window resolve
+    differently per surface, which is the drift this home exists to prevent
+    (#2350 review P2).
+
+    The block ALWAYS carries the three keys: a present-but-unorderable bound
+    yields ``None`` for its precision (``effective_precision``, #9201) and the
+    key is still emitted, so no consumer has to distinguish "no precision"
+    from "this surface did not report it". This holds on BOTH ends — a
+    present-but-unorderable ``validTo`` reports ``valid_to_precision: None``
+    while ``end_state`` stays ``known`` (whether an un-datable END should
+    report ``END_UNKNOWN`` is #9202's owner decision, not this read fix).
     """
     return {
         "valid_from_precision": effective_precision(valid_from, valid_from_precision),
