@@ -4,7 +4,12 @@
 
 services:
   falkordb:
-    image: falkordb/falkordb:latest
+    # PINNED, never `falkordb/falkordb:latest` (#8124): that floating tag now
+    # resolves to engine 6.0.x, whose `reply.rs:655` `reply_compact` PANICS the
+    # server on `OPTIONAL MATCH (s) RETURN count(s) AS n, s.harness AS h`
+    # (aggregate + property in one projection) and exits it — the viz then just
+    # cannot connect. Same engine as the CI gate (#6386).
+    image: falkordb/falkordb-server:v4.20.6
     container_name: tortoise-falkordb
     ports:
       # Loopback only (#7637): the server (`python3 server/main.py`) dials

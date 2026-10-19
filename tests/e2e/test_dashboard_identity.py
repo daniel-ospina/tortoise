@@ -1,9 +1,14 @@
 """#1765 dashboard identity surface e2e (RUN_DASHBOARD_E2E opt-in).
 
-Harness: same as test_dashboard_gate.py — wrangler pages dev servers
-(:8788 site root / :8790 dashboard dist) + parent-domain session cookie +
-api.premiselabs.co route interception (the API is mocked; the full OAuth
-round-trip is staging-manual per the plan).
+Harness (#2809): the SAME two-origin BFF harness the other wired dashboard
+specs use — two `wrangler pages dev` previews (site root + dashboard dist)
+and a **server-held** session (`__Host-session` handle + a row in the
+preview's local D1), NOT the legacy client cookie. Migrated here from the
+retired `sb-tortoise-auth-token` seed: after #3501 the app holds no session
+client-side, so a seeded cookie can never authenticate and every spec in this
+file dead-ended on `/auth`. The API is mocked at the **app origin** (#4054),
+not `api.premiselabs.co`, and prod-origin subresources are proxied to the
+local previews so an intercepted redirect stays coherent.
 
 Flows:
 1. Single-method inventory → recovery banner shows; CTA lands on Profile.
@@ -16,10 +21,16 @@ Flows:
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
+import shutil
+import subprocess
+import time
+import urllib.error
 import urllib.parse
+import urllib.request
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -29,14 +40,192 @@ from playwright.sync_api import Page, expect
 if not os.environ.get("RUN_DASHBOARD_E2E"):
     pytest.skip("dashboard e2e: opt-in via RUN_DASHBOARD_E2E=1", allow_module_level=True)
 
+from tests.e2e.auth.bff_test_helpers import (
+    d1_sqlite_files,
+    dashboard_persist_args,
+    ensure_dashboard_dist,
+    pick_free_port,
+    stop,
+    wait_for_port,
+)
+from tests.e2e.test_session_login_flow import (
+    APP_HOST,
+    AUTH_HOST,
+    AUTH_ORIGIN,
+    DASHBOARD_URL,
+    _bff_path,
+    _is_bff_api,
+    _proxy_body,
+    _seed_local_session_cookie,
+)
+
 ROOT = Path(__file__).resolve().parent.parent.parent
-DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "http://127.0.0.1:8790/")
+DASHBOARD_DIR = ROOT / "website" / "apps" / "dashboard"
+SUPABASE_MOCK = ROOT / "tests" / "e2e" / "auth" / "mock_supabase.mjs"
+
+
+def _jwt(sub: str) -> str:
+    """A JWT-shaped access token whose payload carries ``sub``.
+
+    The BFF's `/api/session` decorates the profile by calling the provider's
+    `/auth/v1/user` with this token as the bearer, and the local mock derives
+    the id/email/display name from the payload's `sub` (it does not verify the
+    signature). An OPAQUE seed token — what the other migrated specs use —
+    resolves the gate but leaves the profile undecorated, which is exactly the
+    state the identity block has to be tested OUT of.
+    """
+    def enc(obj: dict) -> str:
+        raw = json.dumps(obj, separators=(",", ":")).encode()
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    return f"{enc({'alg': 'none', 'typ': 'JWT'})}.{enc({'sub': sub})}.e2e-signature"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _identity_stack() -> None:
+    """A Supabase-BOUND dashboard preview, started here (#2809).
+
+    The identity surface renders `display_name`/`email` from the BFF's decorated
+    profile (`functions/api/session.ts` → `/auth/v1/user`). A preview with no
+    `SUPABASE_URL` binding answers `/api/session` without either field, so the
+    chrome falls back to the ORGANIZATION name and every assertion in this file
+    would be testing the fallback instead of the identity block.
+
+    Self-contained on purpose: the spec spawns the mock provider and the preview
+    it needs, on ports it picks, so it cannot silently adopt a stale server built
+    from different code (the failure mode that made two sibling suites share
+    ports and test the wrong build).
+    """
+    ensure_dashboard_dist()
+    mock_port = pick_free_port(9050)
+    app_port = pick_free_port(mock_port + 1, taken={mock_port})
+    app_url = f"http://127.0.0.1:{app_port}"
+    mock_url = f"http://127.0.0.1:{mock_port}"
+
+    node = shutil.which("node")
+    wrangler = shutil.which("wrangler")
+    if not node or not wrangler:
+        # `pytest.exit`, not `pytest.fail`: this is a module-scoped autouse
+        # fixture, so a `fail` would be repeated once per test (22 errors for
+        # one missing tool). Same precedent as
+        # `test_session_login_flow.py`'s server fixture.
+        pytest.exit("node + wrangler are required for the dashboard identity e2e "
+                    "(the suite must not silently skip: it is the only browser-level "
+                    "coverage of the account-menu identity block)", returncode=1)
+
+    mock_env = os.environ.copy()
+    mock_env["MOCK_PORT"] = str(mock_port)
+
+    # ONE guard for the whole setup phase, starting at the FIRST spawn: both
+    # children are their own process group (`start_new_session=True`), so an
+    # interrupt during either readiness wait — the exact moment a human or the
+    # job's step timeout interrupts a hanging preview — would otherwise leave
+    # them running with nothing to reap them.
+    mock = None
+    app = None
+    try:
+        mock = subprocess.Popen([node, str(SUPABASE_MOCK)], env=mock_env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+        if not wait_for_port(mock_port):
+            pytest.fail(f"the Supabase mock never listened on {mock_port}")
+
+        app = subprocess.Popen(
+            [wrangler, "pages", "dev", "dist",
+             "--port", str(app_port), "--ip", "127.0.0.1",
+             # The previews the job itself boots pin this date; a preview that
+             # does not can be refused by the bundled workerd ("compatibility
+             # date past the runtime's max"), and the spec would then be
+             # asserting against different runtime behaviour than CI's.
+             "--compatibility-date=2024-09-23",
+             "--d1", "SESSIONS",
+             # State root pinned to the dir the seed's D1 glob reads
+             # (`d1_sqlite_files()`), so the row it writes and the row the
+             # preview serves are the same database wherever the run happens.
+             *dashboard_persist_args(),
+             "-b", f"SUPABASE_URL={mock_url}",
+             "-b", "SUPABASE_ANON_KEY=mock-anon-key",
+             "-b", f"APP_ORIGIN={app_url}"],
+            cwd=str(DASHBOARD_DIR),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        if not wait_for_port(app_port):
+            pytest.fail(f"wrangler pages dev never listened on {app_port}")
+
+        # Materialise the preview's D1 BEFORE the first seed. `_seed_bff_session`
+        # waits for a sqlite to appear, but its budget starts from the seed and
+        # it polls the SHARED `test_session_login_flow.DASHBOARD_URL` (which this
+        # module does not rebind), so on a clean checkout the first test would
+        # spend 30 s waiting on the wrong server and die naming a preview this
+        # fixture never started.
+        #
+        # TWO conditions, and "a sqlite exists somewhere" is neither: every
+        # earlier spec in the job seeds through the SAME `.wrangler/state` tree,
+        # so that check is already true before this preview proves anything.
+        #
+        # 1. THIS preview answers `/api/session` with a routing answer (401 for a
+        #    bogus cookie) rather than a 5xx — a preview booted without `--d1
+        #    SESSIONS` answers 503, and would otherwise surface as 22 confusing
+        #    auth failures instead of naming the binding.
+        # 2. a session sqlite exists under the pinned state root, because that is
+        #    what `_seed_bff_session` waits for and writes its row into.
+        warm_deadline = time.monotonic() + 30
+        warmed = False
+        status: int | None = None
+        while time.monotonic() < warm_deadline:
+            try:
+                # 401 is the expected answer — the store answered, which is the
+                # point. Transports can also drop the first request while the
+                # function bundler is still settling, hence the retry.
+                status = urllib.request.urlopen(
+                    urllib.request.Request(
+                        f"{app_url}/api/session",
+                        headers={"Cookie": "__Host-session=" + "0" * 64},
+                    ),
+                    timeout=10,
+                ).status
+            except urllib.error.HTTPError as exc:
+                status = exc.code
+            except Exception:
+                status = None
+            if status in (200, 401, 403) and d1_sqlite_files(DASHBOARD_DIR):
+                warmed = True
+                break
+            time.sleep(0.5)
+        if not warmed:
+            pytest.fail(
+                f"the identity preview on {app_url} is not serving the session "
+                f"store (last status {status!r}; a 5xx here usually means it is "
+                "booting without `--d1 SESSIONS`), or no D1 sqlite appeared under "
+                f"{DASHBOARD_DIR / '.wrangler'}"
+            )
+    except BaseException:
+        if app is not None:
+            stop(app)
+        if mock is not None:
+            stop(mock)
+        raise
+
+    globals()["DASHBOARD_URL"] = app_url + "/"
+    globals()["STACK_MOCK_URL"] = mock_url
+    try:
+        yield
+    finally:
+        stop(app)
+        stop(mock)
 
 
 def _session(user_id: str = "u-e2e-identity", display_name: str = "danielospinabotero") -> dict:
     """Supabase session JSON for the parent-domain cookie (mirrors
-    test_dashboard_gate's _session). ``display_name=None`` omits
-    user_metadata entirely — the email-prefix fallback branch."""
+    test_dashboard_gate's _session).
+
+    ``display_name=None`` omits ``user_metadata`` from the SEEDED session, which
+    is now only the legacy residue the app must ignore: the rendered name comes
+    from ``/api/session`` → ``/auth/v1/user``. The email-prefix fallback branch is
+    produced by the mock's ``noDisplayName`` mode instead (see
+    ``test_account_menu_email_prefix_fallback``).
+    """
     now = datetime.now(UTC)
     user = {
         "id": user_id,
@@ -59,13 +248,22 @@ def _session(user_id: str = "u-e2e-identity", display_name: str = "danielospinab
 
 
 def _seed(page: Page, display_name: str | None = "danielospinabotero") -> None:
-    from urllib.parse import urlparse
-    host = urlparse(DASHBOARD_URL).hostname or "127.0.0.1"
-    page.context.add_cookies([{
-        "name": "sb-tortoise-auth-token",
-        "value": urllib.parse.quote(json.dumps(_session(display_name=display_name))),
-        "domain": host, "path": "/",
-    }])
+    """Seed a LIVE BFF session (#2809).
+
+    Writes the `__Host-session` handle + its D1 row (and, deliberately, the
+    legacy `sb-tortoise-auth-token` residue the app must ignore) via the shared
+    helper. The legacy-only cookie this used to write is no longer a session at
+    all since #3501, which is why the whole file dead-ended on `/auth`.
+    """
+    payload = _session(display_name=display_name)
+    sub = payload["user"]["id"]
+    # `origin=` is load-bearing: without it the cookie is scoped to the SHARED
+    # `test_session_login_flow.DASHBOARD_URL`, not to the preview this module
+    # boots. That works today only because cookies are host-scoped and the port
+    # differs — so a `DASHBOARD_URL` override with a different HOST would send
+    # every request back to `/auth`, the exact failure this file exists to test.
+    _seed_local_session_cookie(page, sub, payload, access_token=_jwt(sub),
+                               origin=globals()["DASHBOARD_URL"])
 
 
 def _inventory(login_methods: int = 1, linking: bool = True) -> dict:
@@ -128,9 +326,19 @@ def _wire(page: Page, *, inv: dict | None = None,
         # #1874 + #1828: the shell pins /v1/team?org_id=… (multi-membership
         # resolution) — matchers must be query-tolerant or every team-scoped
         # read 404s (pre-existing breakage from #1828, fixed here).
-        path = url.split("?", 1)[0]
+        path = _bff_path(url)
         method = route.request.method
-        if "api.premiselabs.co" not in url:
+        if not _is_bff_api(url):
+            # #2809/#2744: prod-origin subresources (the /auth document,
+            # script chunks) are proxied to the LOCAL previews — falling
+            # through to production would make every run depend on the
+            # deployed host, which is exactly what this seam broke on.
+            if url.startswith(AUTH_HOST):
+                _proxy_body(route, AUTH_ORIGIN + url[len(AUTH_HOST):], page)
+                return
+            if url.startswith(APP_HOST):
+                _proxy_body(route, DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):], page)
+                return
             route.continue_()
             return
         if path.endswith("/v1/onboarding/state") and method == "GET":
@@ -231,6 +439,25 @@ def _wire(page: Page, *, inv: dict | None = None,
     page.route("**/*", handle)
 
 
+def _mock_fault(**faults) -> None:
+    """Set a mock-provider fault (JSON body to the mock's own control route).
+
+    Used for the profile SHAPES the provider can return — e.g. a user who never
+    set a display name (#2809) — which route interception cannot express because
+    the decoration happens worker-side, not in the browser.
+    """
+    import urllib.request
+
+    req = urllib.request.Request(
+        (globals()["STACK_MOCK_URL"] + "/__mock/fault"),
+        data=json.dumps(faults).encode(),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as res:
+        return json.loads(res.read())
+
+
 def _open_account_menu(page: Page) -> None:
     # #1874: blob aria-label is `Account menu — {team}` (regex match)
     page.get_by_role("button", name=re.compile(r"Account menu")).click()
@@ -247,8 +474,13 @@ def test_account_menu_identity_block_single_team(page: Page):
     _wire(page, inv=_inventory(login_methods=1))
     page.goto(DASHBOARD_URL)
     _open_account_menu(page)
-    expect(page.locator(".account-identity-name")).to_have_text("danielospinabotero")
-    expect(page.locator(".account-identity-email")).to_have_text("identity-e2e@premise-labs.dev")
+    # #2809: the identity block renders the BFF-DECORATED profile
+    # (`/api/session` → provider `/auth/v1/user`), which the mock derives from
+    # the seeded token's `sub`. It used to assert a hardcoded display name the
+    # legacy cookie carried; after #3501 the name can only come from the
+    # provider, so the assertion follows that seam instead of the old fixture.
+    expect(page.locator(".account-identity-name")).to_have_text("Display u-e2e-identity")
+    expect(page.locator(".account-identity-email")).to_have_text("u-e2e-identity@example.test")
     # #2494: tier badge is on the Organization block, NOT the identity block
     expect(page.locator(".account-identity .tier-badge")).to_have_count(0)
     expect(page.locator(".account-menu .tier-badge")).to_have_count(1)
@@ -267,15 +499,25 @@ def test_account_menu_identity_block_single_team(page: Page):
 
 
 def test_account_menu_email_prefix_fallback(page: Page):
-    """#1874: session WITHOUT display_name → identity block shows the
-    email-prefix (identity-e2e@… → identity-e2e), not the team name."""
-    _seed(page, display_name=None)
-    _wire(page, inv=_inventory(login_methods=1))
-    page.goto(DASHBOARD_URL)
-    _open_account_menu(page)
-    expect(page.locator(".account-identity-name")).to_have_text("identity-e2e")
-    expect(page.locator(".account-identity-email")).to_have_text("identity-e2e@premise-labs.dev")
-    expect(page.locator(".account-identity-name")).not_to_have_text("E2E")
+    """#1874: a user who never set a display name → identity block shows the
+    email prefix (`u-e2e-identity@example.test` → `u-e2e-identity`), not the
+    organization name.
+
+    #2809: the "no display name" SHAPE is the provider's to produce — a seeded
+    session dict cannot express it, because the decoration comes from
+    `/auth/v1/user`. The mock's `noDisplayName` mode is that shape.
+    """
+    _mock_fault(noDisplayName=True)
+    try:
+        _seed(page, display_name=None)
+        _wire(page, inv=_inventory(login_methods=1))
+        page.goto(DASHBOARD_URL)
+        _open_account_menu(page)
+        expect(page.locator(".account-identity-name")).to_have_text("u-e2e-identity")
+        expect(page.locator(".account-identity-email")).to_have_text("u-e2e-identity@example.test")
+        expect(page.locator(".account-identity-name")).not_to_have_text("E2E")
+    finally:
+        _mock_fault(noDisplayName=False)
 
 
 def test_account_menu_multi_team_switch(page: Page):
@@ -293,8 +535,11 @@ def test_account_menu_multi_team_switch(page: Page):
     _open_account_menu(page)
     menu = page.locator(".account-menu")
     expect(menu.get_by_text("Switch organization")).to_be_visible()
-    expect(menu.get_by_text("Alpha")).to_be_visible()
-    expect(menu.get_by_text("Bravo")).to_be_visible()
+    # #2809: scope to the SWITCH BUTTONS — the org row renders the active
+    # name too, so a bare text locator matches twice (strict-mode violation)
+    # the day the two blocks coexist, which is the shipped DOM.
+    expect(menu.get_by_role("button", name="Alpha", exact=True)).to_be_visible()
+    expect(menu.get_by_role("button", name="Bravo", exact=True)).to_be_visible()
     # active team carries aria-current
     expect(menu.locator("button[aria-current='true']")).to_contain_text("Alpha")
     # switch to Bravo → active moves AND the data layer re-reads team_b
@@ -311,13 +556,19 @@ def test_account_menu_multi_team_switch(page: Page):
 
 
 def test_members_heading_and_nav(page: Page):
-    """#1874: no Profile button in nav; Members section reads Team members."""
+    """#1874: no Profile button in nav; the Members tab renders its section.
+
+    #2809: the heading is `Members` (main.jsx `<h2>Members</h2>`) — this
+    assertion still read "Team members", one of the copy-sweep strings the
+    team→organization rename left behind. Asserting the shipped string is what
+    keeps the spec honest; it is not a relaxation (the heading must exist).
+    """
     _seed(page)
     _wire(page, inv=_inventory(login_methods=1))
     page.goto(DASHBOARD_URL)
     expect(page.locator("nav").get_by_role("button", name="Profile")).to_have_count(0)
     page.get_by_role("button", name="Members").click()
-    expect(page.get_by_role("heading", name="Team members")).to_be_visible()
+    expect(page.get_by_role("heading", name="Members", exact=True)).to_be_visible()
 
 
 def test_billing_team_context(page: Page):
@@ -336,7 +587,9 @@ def test_billing_team_context(page: Page):
     page.get_by_role("button", name="Billing").click()
     expect(page.get_by_role("heading", name="Billing — Alpha")).to_be_visible()
     expect(page.get_by_text("free plan")).to_be_visible()
-    select = page.get_by_label("Billing team")
+    # #2809: the control's aria-label is "Billing organization"
+    # (main.jsx `billing-team-select`) — "Billing team" was the pre-rename copy.
+    select = page.get_by_label("Billing organization")
     expect(select).to_be_visible()
     expect(select.locator("option")).to_have_count(2)
     # switch — the ?org_id= pin must reach the API and the card re-renders
@@ -356,7 +609,10 @@ def test_billing_team_context_single_team(page: Page):
     page.goto(DASHBOARD_URL)
     page.get_by_role("button", name="Billing").click()
     expect(page.get_by_role("heading", name="Billing — E2E")).to_be_visible()
-    expect(page.get_by_label("Billing team")).to_have_count(0)
+    # #2809: the selector's aria-label is "Billing organization"; asserting the
+    # retired string "Billing team" was vacuous — it matched nothing, so the
+    # count was 0 whether or not an empty selector rendered.
+    expect(page.get_by_label("Billing organization")).to_have_count(0)
 
 
 def test_recovery_banner_shows_and_routes_to_profile(page: Page):
@@ -396,7 +652,11 @@ def test_link_commit_fires_on_oauth_return(page: Page):
     assert len(commits) == 1, "link-commit must fire on the OAuth return"
     assert "e2e-ref.abcdef" in commits[0], f"link-commit must carry the intent_ref: {commits}"
     # the ?link_flow= param must be stripped (review P3)
-    expect(page).to_have_url(DASHBOARD_URL.rstrip("/") + "/")
+    # #2809: the OAuth return lands on the Profile ROUTE (`#/profile`) — the
+    # pre-#4054 assertion expected the bare URL because the flow ended on the
+    # root document. What matters (and what was reviewed) is that the
+    # `?link_flow=` param is STRIPPED, not which route it settles on.
+    expect(page).to_have_url(re.compile(re.escape(DASHBOARD_URL.rstrip("/")) + r"/#/profile$"))
 
 
 def test_no_horizontal_scroll_narrow_viewport(page: Page):
@@ -426,6 +686,13 @@ def test_no_horizontal_scroll_narrow_viewport(page: Page):
     assert scroll_w <= client_w + 1, f"horizontal overflow with menu open: {scroll_w} > {client_w}"
     # #1876: the Billing header row (team select + Manage button) wraps via
     # .billing .row flex-wrap — re-check with Billing open.
+    # #2809: close the menu FIRST. While it is open its overlay sits over the
+    # header cluster at 375px and legitimately intercepts the nav click
+    # (`.account-avatar` from `.header-cluster` intercepts pointer events), so
+    # the click retried to timeout. Escape is the menu's own close path
+    # (main.jsx:2675), which is what a user at this width would reach for.
+    page.keyboard.press("Escape")
+    expect(page.locator(".account-menu")).to_have_count(0)
     page.get_by_role("button", name="Billing").click()
     scroll_w = page.evaluate("document.documentElement.scrollWidth")
     client_w = page.evaluate("document.documentElement.clientWidth")
@@ -672,7 +939,7 @@ def test_account_menu_two_sections(page: Page):
     menu = page.locator(".account-menu")
     # section labels visible
     expect(menu.get_by_text("Personal Account")).to_be_visible()
-    expect(menu.get_by_text("Organization")).to_be_visible()
+    expect(menu.get_by_text("Organization", exact=True)).to_be_visible()
     # personal section: identity + Profile + Log out grouped
     expect(menu.get_by_role("button", name="Profile")).to_be_visible()
     expect(menu.get_by_role("button", name="Log out")).to_be_visible()
@@ -698,8 +965,12 @@ def test_account_menu_org_block_single_team(page: Page):
     _open_account_menu(page)
     menu = page.locator(".account-menu")
     # org section visible with team name + tier
-    expect(menu.get_by_text("Organization")).to_be_visible()
-    expect(menu.get_by_text("E2E")).to_be_visible()
+    expect(menu.get_by_text("Organization", exact=True)).to_be_visible()
+    # #2809: scope to the ORG ROW's own class. A bare `get_by_text("E2E")` is a
+    # case-insensitive SUBSTRING match in Playwright, so it also matches the
+    # decorated identity block (`u-e2e-identity@example.test`) as soon as the
+    # profile renders — a strict-mode violation, not a missing element.
+    expect(menu.locator(".account-org-name")).to_have_text("E2E")
     expect(menu.get_by_text("Switch organization")).to_have_count(0)
     expect(menu.get_by_role("button", name="+ Create new organization")).to_be_visible()
 
@@ -809,13 +1080,31 @@ def test_durable_create_on_selected_team_lands_on_selected_team(page: Page) -> N
     # open the API Keys tab and create a durable key
     page.locator('[data-tab="keys"]').click()
     expect(page.get_by_role("button", name="+ New key")).to_be_visible(timeout=10_000)
+    # #2809: "+ New key" opens the key dialog (form stage); the POST fires from
+    # its "Create key" primary (main.jsx:10181-10186). The spec used to assert
+    # the POST right after opening the button, which was true only while the
+    # button minted directly — a dialog-race, not a mint failure.
     page.get_by_role("button", name="+ New key").click()
+    # A sync-API route handler only runs while a Playwright command is pumping,
+    # so the click must be WAITED ON: without this the assert below can read
+    # `created_keys` before the handler has been dispatched into.
+    with page.expect_response(
+        lambda r: r.request.method == "POST" and "/v1/team/keys" in r.url,
+        timeout=15_000,
+    ):
+        page.get_by_role("button", name="Create key").click()
     # the POST carried ?org_id=team_b (rule 4) and the shown-once plaintext
     # card renders
     assert created_keys, "createKey POST must fire"
+    # #2809: the shown-once REVEAL is asserted by `test_keys_table_mixed.py`
+    # (`:1132`–`:1170`: the dialog's heading is exactly "New API key" and the
+    # empty-`.key-value` regression is pinned there). This spec's subject is
+    # #2167 F9 — WHICH team the create lands on — so it asserts the durable row
+    # and the org pin below and leaves the reveal markup to the spec that owns
+    # it. (The old `.new-key .key-value` locator here was a stale container
+    # class; waiting on it told us nothing about the mint, which had succeeded.)
     post_url = created_keys[-1]["url"]
     assert "org_id=team_b" in post_url, f"mintKey must pin the SELECTED team: {post_url}"
-    expect(page.locator(".new-key .key-value")).to_contain_text("tt_created_abcdef0123456789", timeout=10_000)
     # the keys table row appears under the selected team (loadAll refetch)
     expect(page.locator("tbody tr", has_text="tt_created")).to_have_count(1, timeout=10_000)
     assert mint_calls == [], f"zero-mint: POST /v1/session/key fired: {mint_calls}"

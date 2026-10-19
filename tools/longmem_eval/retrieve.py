@@ -1350,7 +1350,10 @@ def retrieve_for_question(
     # (product, pure): a distilled point's OWN source raw chunks/turns
     # collapse into ONE package (point + ≤ one verbatim source ref), cross-
     # item near-dupe points restating the same fact dedupe to one slot, and
-    # the package orders exact-value/verbatim-marked items first. The pool
+    # the package orders by D3 hit-type tier — distilled statement Points,
+    # then verbatim source turn Points, then raw chunks — with the #1763/#1945
+    # value mark breaking ties INSIDE a tier (#9092; it no longer picks the
+    # tier, so a raw_chunk-marked chunk is ordered among chunks). The pool
     # recall surface (``ret["hits"]``, ``evidence_recall@k``) is UNCHANGED —
     # packaging only shapes what ``assemble_context`` hands the reader (the
     # measured context is ``reader_evidence@k`` / ``reader_surface@k``). The
@@ -2318,8 +2321,10 @@ def retrieve_for_question(
     # candidate list is the EVIDENCE PACKAGE (tortoise.retrieval.package_evidence_pool
     # — product, pure): a distilled point's own source raw chunks/turns
     # collapse into one package, cross-item near-dupe points restating the
-    # same fact dedupe to one slot, and the package orders value/verbatim-
-    # marked items first. The POOL (recall surface, ``ret["hits"]``) is
+    # same fact dedupe to one slot, and the package orders by D3 hit-type
+    # tier (statement Points, then turn Points, then raw chunks — the
+    # #1763/#1945 value mark breaks ties inside a tier, #9092). The POOL
+    # (recall surface, ``ret["hits"]``) is
     # untouched — packaging only shapes what assemble_context admits to the
     # reader window (the measured surface is reader_evidence@k /
     # reader_surface@k below). TR questions keep the R5 time-ascending date

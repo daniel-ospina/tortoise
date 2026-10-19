@@ -516,6 +516,18 @@ _REDIS_ERROR_TOKENS = (
 #: identifiable and reapable instead of accumulating invisibly.
 _PROBE_LABEL = "edge-census-probe=1"
 
+#: The engine the probe container runs. It used to be a floating
+#: ``falkordb/falkordb:latest``, which resolves to engine 6.0.x — and that build
+#: PANICS the server (`reply.rs:655` in ``reply::reply_compact``, "called
+#: `Option::unwrap()` on a `None` value") on a query shape that needs no data at
+#: all: ``OPTIONAL MATCH (s:Session) RETURN count(s) AS n, s.harness AS h``.
+#: A panic EXITS the container, so a probe on it would die mid-measurement and
+#: report a partial reading as if the run had finished (#8124). Pinned to the
+#: engine the CI gate runs (#6386), measured to answer that shape and stay up,
+#: and named once here so the two defaults (``run_probe`` and ``--image``)
+#: cannot disagree.
+PROBE_IMAGE = "falkordb/falkordb-server:v4.20.6"
+
 
 #: The staged shapes. Deliberately the SAME shapes the #4333 §3.4 node probe
 #: used for its props-only Point, so the two probes are comparable; the edge
@@ -592,7 +604,7 @@ def derive_marginals(stages: list[Stage], *, n: int,
 def run_probe(
     *,
     n: int = 5000,
-    image: str = "falkordb/falkordb:latest",
+    image: str = PROBE_IMAGE,
     log: Callable[[str], None] = lambda _m: None,
 ) -> dict[str, Any]:
     """Measure marginal RAM per element shape in a disposable container.
@@ -921,7 +933,7 @@ def _build_parser() -> argparse.ArgumentParser:
     probe = sub.add_parser(
         "probe", help="marginal RAM per element shape (disposable container)")
     probe.add_argument("--n", type=int, default=5000, help="node count")
-    probe.add_argument("--image", default="falkordb/falkordb:latest")
+    probe.add_argument("--image", default=PROBE_IMAGE)
     probe.add_argument("--json", action="store_true", help="emit JSON")
     return parser
 

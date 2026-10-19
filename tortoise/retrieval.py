@@ -1615,7 +1615,9 @@ def _rank_delta(scored: list[tuple[dict, float, int]], orig_index: int) -> bool:
 # ═══════════════════════════════════════════════════════════════════════════
 # Slice A (#2683, epic #2080): evidence-package assembly — collapse a fact's
 # own-source duplicates, dedup cross-item near-dupes, then order the package
-# (exact-value/verbatim first, relevance order preserved, recency tiebreak).
+# (D3 hit-type tiers: statement Points, then turn Points, then raw chunks;
+# the #1763/#1945 value mark breaks ties INSIDE a tier, then relevance order,
+# recency tiebreak).
 # ---------------------------------------------------------------------------
 # The measured regression the wave attacks (docs/scoping/2026-09-09-evidence-
 # assembly-wave.md §5 Slice A): the reader context floods with near-duplicate
@@ -1845,8 +1847,19 @@ def _is_turn_point(h: dict) -> bool:
     ⚠️ DELIBERATELY BROADER than ``session_reinjection._TURN_SHAPE_FILTER``,
     which needs BOTH conjuncts. This OR classifies a non-turn ``event``
     point (the hosted demo/dashboard seed, which writes no ``is_episodic``)
-    as a turn; that is harmless for the collapse/slot decision here but it
-    is NOT the predicate the C4 fetch may use — see the constant for why.
+    as a turn. That is NOT harmless any more, and this docstring said it was
+    until #9092: D3 made the predicate an ORDERING key as well as a
+    collapse/slot key (``_package_type_tier``), so every ``point_kind ==
+    "event"`` hit — including that demo/dashboard seed — is filed in the
+    MIDDLE (turn) tier and ordered BEHIND every distilled statement. That is
+    intended: an ``event`` point is verbatim-event-shaped, not a distilled
+    claim, so it belongs with the turns rather than leading the window — and
+    the tier only DEMOTES it, never drops it (membership and the pool recall
+    surface are untouched). The conjunct predicate stays the rule for the C4
+    FETCH; the tier deliberately reuses this broad OR so the sort tier is the
+    exact complement of the pass-1/pass-2 partition (a narrower predicate
+    here would file a hit that pass 2 treats as a SOURCE in the statement
+    tier — see ``_package_type_tier``).
     """
     return (h.get("point_kind") == TURN_POINT_KIND
             or bool(_ROLE_PREFIX_RE.match(str(h.get("content") or ""))))
@@ -1944,20 +1957,58 @@ def _same_fact(a: dict, b: dict) -> bool:
     return _pkg_overlap(qa, qb) >= DEFAULT_PACKAGE_SAME_TURN_OVERLAP
 
 
-#: #1945 mark-class ordering (strongest → weakest) for the value-tier split.
+#: #1945 mark classes (strongest → weakest) — the WITHIN-tier tiebreak.
+#: #9092 / D3: these no longer pick the tier. They order an anchor against
+#: its TIER PEERS only, so `raw_chunk`-marked chunks still lead other chunks
+#: without ever being lifted over a distilled statement.
 _PACKAGE_VALUE_CLASSES = ("answer_string", "verbatim", "raw_chunk")
+
+#: D3 (epic #2281) read-preference tiers, primary key of the package order:
+#: a distilled STATEMENT Point leads (0), then a verbatim source TURN Point
+#: (1), then a raw chunk (2). ``is_raw_chunk`` is tested BEFORE
+#: ``_is_turn_point`` so a chunk can never be classified as a turn.
+_PACKAGE_TYPE_STATEMENT = 0
+_PACKAGE_TYPE_TURN = 1
+_PACKAGE_TYPE_CHUNK = 2
+
+
+def _package_type_tier(h: dict) -> int:
+    """D3 (#2281): the anchor's HIT-TYPE tier — statement < turn Point <
+    raw chunk. This is the primary ordering key; the anchor's pool rank never
+    crosses a tier boundary.
+
+    ⚠️ The turn leg reuses :func:`_is_turn_point`, which is deliberately
+    broader than the C4 fetch's conjunct predicate (any ``point_kind ==
+    "event"`` counts, including the hosted demo/dashboard seed that writes no
+    ``is_episodic``). That breadth is REQUIRED here: pass 2 partitions
+    ``sources`` with the same predicate, so a narrower tier predicate would
+    file a hit that pass 2 treats as a source in the STATEMENT tier and the
+    sort key would disagree with the package membership. The consequence —
+    a non-turn ``event`` point is demoted behind the statements — is
+    deliberate and stated on ``_is_turn_point``.
+    """
+    if is_raw_chunk(h):
+        return _PACKAGE_TYPE_CHUNK
+    if _is_turn_point(h):
+        return _PACKAGE_TYPE_TURN
+    return _PACKAGE_TYPE_STATEMENT
 
 
 def _package_tier(h: dict, mark_for: Callable[[dict], dict[str, bool]] | None
-                  ) -> tuple[int, int]:
-    """Slice A: the package's value tier = (0, rank) when the anchor carries
-    an exact-value/verbatim mark (answer_string / verbatim / raw_chunk — the
-    #1763/#1945 precise classes), else (1, rank). The rank tiebreaks within a
-    tier by the anchor's original pool position (relevance)."""
+                  ) -> tuple[int, int, int]:
+    """Slice A + D3 (#9092): the package's ordering key =
+    ``(hit-type tier, value-mark tiebreak, pool rank)``.
+
+    The HIT TYPE picks the tier (D3: statement Points, then turn Points, then
+    raw chunks). The #1763/#1945 value mark (``answer_string`` / ``verbatim``
+    / ``raw_chunk``) breaks ties INSIDE a tier — 0 when the anchor carries
+    one, 1 otherwise — so an exact-value statement still leads its unmarked
+    peers and a marked chunk still leads its fellow chunks, while neither can
+    be lifted across a tier boundary. The rank tiebreaks last, by the
+    anchor's original pool position (relevance)."""
     marks = mark_for(h) if mark_for is not None else _stored_marks(h)
-    if any(marks.get(cls) for cls in _PACKAGE_VALUE_CLASSES):
-        return (0, h.get("_pkg_rank", 0))
-    return (1, h.get("_pkg_rank", 0))
+    marked = 0 if any(marks.get(cls) for cls in _PACKAGE_VALUE_CLASSES) else 1
+    return (_package_type_tier(h), marked, h.get("_pkg_rank", 0))
 
 
 def package_evidence_pool(
@@ -1992,12 +2043,15 @@ def package_evidence_pool(
     (a turn whose utterance is contained in a kept chunk, or a byte-identical
     second chunk) dedups to the container/earlier copy.
 
-    Ordering: surviving packages sort value-tier first (exact-value/verbatim-
-    marked anchors lead the window — the #1763/#1945 precise classes), then
-    by original pool relevance order (``_pkg_rank``) WITHIN a tier — the pool
-    order the hybrid search + recency-aware dedup already produced (relevance,
-    recency as its upstream tiebreak), so the package preserves the product's
-    existing order semantics exactly for equal-tier items.
+    Ordering (D3, epic #2281 / #9092): the anchor's HIT TYPE is the primary
+    key — distilled statement Points lead, then verbatim source TURN Points,
+    then raw chunks. WITHIN a tier the #1763/#1945 value mark wins first
+    (exact-value/verbatim-marked anchors lead their unmarked peers), then the
+    original pool relevance order (``_pkg_rank``) — the pool order the hybrid
+    search + recency-aware dedup already produced (relevance, recency as its
+    upstream tiebreak). The mark never crosses a tier boundary: a
+    ``raw_chunk``-marked chunk is ordered among CHUNKS, and a ``verbatim``
+    mark does not lift a turn Point to the statement tier.
 
     Semantics contract:
       * membership is a SUBSET of the pool — never a synthesis (each package
@@ -2042,7 +2096,8 @@ def package_evidence_pool(
                 merged = pkg
                 break
         if merged is not None:
-            # keep the higher-value anchor (value tier, then earlier rank)
+            # both candidates are statements (pass 1 sees the point list
+            # only), so this reduces to the value mark, then the earlier rank
             if _package_tier(h, mark_for) < _package_tier(
                     merged["anchor"], mark_for):
                 merged["dropped"] += 1
@@ -2100,8 +2155,7 @@ def package_evidence_pool(
 
     ordered = sorted(
         packages,
-        key=lambda p: (_package_tier(p["anchor"], mark_for)[0],
-                       p["anchor"].get("_pkg_rank", 0)),
+        key=lambda p: _package_tier(p["anchor"], mark_for),
     )
     out: list[dict] = []
     for pkg in ordered:
@@ -2116,8 +2170,11 @@ def package_evidence_pool(
         "packages": len(packages),
         "collapsed_duplicates": sum(p["dropped"] for p in packages),
         "verbatim_refs_kept": sum(len(p["verbatim"]) for p in packages),
+        # #9092: the anchors carrying a #1763/#1945 value mark (the classes
+        # that now break ties WITHIN their hit-type tier). A census of the
+        # mark, not of the leading tier — under D3 the leading tier is the
+        # statement tier, which the pool mix already determines.
         "value_first_packages": sum(
-            1 for p in packages
-            if _package_tier(p["anchor"], mark_for)[0] == 0),
+            1 for p in packages if _package_tier(p["anchor"], mark_for)[1] == 0),
     }
     return out, stats
