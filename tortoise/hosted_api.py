@@ -18146,6 +18146,21 @@ async def _user_memberships(user_id: str) -> list[dict]:
         return await _cp_offload(
             lambda: _sb_memberships(get_control_plane(), user_id),
             op="user_memberships")
+    # #3718: the registry lane is the same blocking shape — the query above is
+    # sync FalkorDB socket I/O, and this helper is the FIRST read the org
+    # switcher (`GET /v1/organizations`) makes on every app load. Off the loop
+    # through the same #3498 seam the Supabase lane already uses.
+    return await _cp_offload(
+        lambda: _memberships_from_registry(user_id), op="user_memberships")
+
+
+def _memberships_from_registry(user_id: str) -> list[dict]:
+    """The selfhost registry membership read (#3718: blocking FalkorDB I/O).
+
+    Split out of ``_user_memberships`` so the read can be handed to the #3498
+    control-plane seam as ONE sync unit; the async wrapper keeps the Supabase
+    branch and the callers unchanged.
+    """
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
         "MATCH (m:Membership {user_id:$uid, status:'active'}) "
@@ -18188,6 +18203,11 @@ async def _membership_org(user_id: str, org_id: str) -> dict | None:
     return {"org_id": org_id, "role": rows[0][0]}
 
 
+def _graph_list_for(org_id: str) -> list[dict]:
+    """One org's graph listing (#3718: blocking registry/PostgREST read)."""
+    return _make_sdk(namespace="registry").graph_list(org_id)
+
+
 async def _org_node(org_id: str) -> dict | None:
     """Org node/properties for session endpoints (E5/E6/E7/E8).
 
@@ -18206,6 +18226,16 @@ async def _org_node(org_id: str) -> dict | None:
         # endpoints, and by _require_owner_admin's suspension-stamp check).
         return await _cp_offload(
             lambda: _sb_org(get_control_plane(), org_id), op="org_by_id")
+    # #3718: the registry lane is the same blocking read — off the loop. The
+    # switcher calls this ONCE PER MEMBERSHIP, so on the inline shape a user
+    # with N orgs put N registry round trips on the serving thread before the
+    # handler had answered anything.
+    return await _cp_offload(
+        lambda: _org_row_from_registry(org_id), op="org_by_id")
+
+
+def _org_row_from_registry(org_id: str) -> dict | None:
+    """The selfhost registry Team read (#3718: blocking FalkorDB I/O)."""
     sdk = _registry_anchor()
     rows = sdk._get_registry().query(
         "MATCH (t:Team {id:$id}) RETURN properties(t)",
@@ -18280,18 +18310,31 @@ async def list_my_orgs(user: dict = Depends(get_current_user)):  # noqa: B008
     registry → Graph nodes), so this endpoint never touches the registry in
     Supabase mode."""
     memberships = await _user_memberships(user["user_id"])
-    out = []
+    resolved = []
     for m in memberships:
         org = await _org_node(m["org_id"])
         if org is None:
             continue
+        resolved.append((m, org))
+
+    # Suspended rows are excluded from graph resolution — they cannot be
+    # selected anyway, and graph_list must not observe the suspension stamp.
+    # #3718: the listing is a blocking registry/PostgREST read, and it used to
+    # run per membership ON the loop. ONE hand-off covers every healthy org,
+    # so the switcher costs one off-loop call instead of N round trips on the
+    # thread that serves every concurrent request.
+    healthy = [m["org_id"] for m, org in resolved
+               if org.get("suspended_at") is None]
+    graphs_by_org: dict[str, list[dict]] = {}
+    if healthy:
+        graphs_by_org = await _cp_offload(
+            lambda: {org_id: _graph_list_for(org_id) for org_id in healthy},
+            op="graph_list")
+
+    out = []
+    for m, org in resolved:
         suspended_at = org.get("suspended_at")
-        graphs = []
-        if suspended_at is None:
-            # Suspended rows are excluded from graph resolution — they
-            # cannot be selected anyway, and graph_list must not observe
-            # the suspension stamp.
-            graphs = _make_sdk(namespace="registry").graph_list(m["org_id"])
+        graphs = graphs_by_org.get(m["org_id"], []) if suspended_at is None else []
         out.append({
             "org_id": m["org_id"],
             "org_name": org.get("name", m["org_id"]),

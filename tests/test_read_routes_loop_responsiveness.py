@@ -412,6 +412,131 @@ def test_read_route_does_not_freeze_the_event_loop(client, monkeypatch):
     assert response.status_code == 200, response.text[:200]
 
 
+# ── the org switcher (GET /v1/organizations), #3718 ───────────────────────
+#
+# The switcher is the FIRST read every client makes (app load) and it issued
+# N+1 sync registry reads on the loop: the membership scan, one Team read per
+# membership (``_org_node``) and one ``graph_list`` per membership. All three
+# reach the registry through ``_get_registry()``, so ONE probe on that seam
+# sees the whole path — no per-handler instrumentation, and no reliance on how
+# each read is spelled.
+
+
+def _seed_org_switcher():
+    """Seed an active Membership + a default Graph node for the session user.
+
+    Runs after ``_seed_read_surface()``: the Team for ``_SEEDED_INVITE_ORG``
+    is already there, so the switcher's per-membership ``_org_node`` resolves
+    and the ``graph_list`` leg is actually reached.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    reg = ha_mod._make_sdk(namespace="registry")
+    try:
+        g = reg._get_registry()  # warm the registry graph + its indexes
+        g.query(
+            "CREATE (m:Membership {user_id:$uid, org_id:$oid, "
+            "role:'owner', status:'active'})",
+            params={"uid": "read-loop-3718-user", "oid": _SEEDED_INVITE_ORG},
+        )
+        g.query(
+            "CREATE (g:Graph {graph_id:$gid, org_id:$oid, name:'main', "
+            "kind:'default'})",
+            params={"gid": f"{_SEEDED_INVITE_ORG}-default",
+                    "oid": _SEEDED_INVITE_ORG},
+        )
+    finally:
+        reg.close()
+
+
+class _RegistryReadProbe:
+    """Record every registry graph READ the request makes, and whether it ran
+    ON the loop.
+
+    ``asyncio.get_running_loop()`` succeeds only when the call executes on the
+    loop thread; a worker thread has no running loop. This is the direct
+    mechanism assertion — behavioural, not a source-grep for ``to_thread`` — so
+    a refactor that puts any of these reads back on the loop fails here
+    however it is written.
+    """
+
+    def __init__(self, monkeypatch):
+        self.reads: list[tuple[str, bool]] = []
+        probe = self
+        real = TortoiseSDK._get_registry
+
+        class _RecordingGraph:
+            def __init__(self, graph):
+                self._graph = graph
+
+            def query(self, statement, *args, **kwargs):
+                try:
+                    asyncio.get_running_loop()
+                    on_loop = True
+                except RuntimeError:
+                    on_loop = False
+                probe.reads.append((statement, on_loop))
+                return self._graph.query(statement, *args, **kwargs)
+
+            def __getattr__(self, item):
+                return getattr(self._graph, item)
+
+        def _get_registry(self_sdk, *args, **kwargs):
+            return _RecordingGraph(real(self_sdk, *args, **kwargs))
+
+        monkeypatch.setattr(TortoiseSDK, "_get_registry", _get_registry)
+
+
+def test_org_switcher_reads_run_off_the_loop(client, monkeypatch):
+    """#3718: the switcher's membership / Team / graph reads must be off-loop.
+
+    Measured at ``main``: all three ran ON the loop, so the first request of
+    every client issued N+1 blocking registry round trips on the thread that
+    serves every other request.
+    """
+    from tortoise.hosted_api import app
+
+    _seed_read_surface()
+    _seed_org_switcher()
+    _arm_session_endpoints(monkeypatch)
+    probe = _RegistryReadProbe(monkeypatch)
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            return await ac.get("/v1/organizations")
+
+    response = asyncio.run(_run())
+
+    assert response.status_code == 200, response.text[:300]
+    rows = response.json()
+    assert any(r.get("org_id") == _SEEDED_INVITE_ORG for r in rows), (
+        f"the seeded org is missing from the switcher's answer ({rows!r}) — "
+        f"the per-org reads did not run, so this proves nothing (#3718)")
+    assert any(r.get("graph_count") == 1 for r in rows), (
+        f"the seeded Graph node is not in the answer ({rows!r}) — the "
+        f"graph_list leg did not run (#3718)")
+
+    legs = {
+        "membership scan": "MATCH (m:Membership",
+        "Team read (_org_node)": "MATCH (t:Team",
+        "graph_list read": "MATCH (g:Graph",
+    }
+    for label, needle in legs.items():
+        hits = [r for r in probe.reads if needle in r[0]]
+        assert hits, (
+            f"the {label} was never executed — the request short-circuited "
+            f"before it (or the statement changed), so this run proves nothing "
+            f"about the off-load (#3718)")
+        on_loop = [stmt for stmt, loop in hits if loop]
+        assert not on_loop, (
+            f"{label} ran ON the event loop ({len(on_loop)} of {len(hits)} "
+            f"call(s)) — one slow registry round trip freezes every concurrent "
+            f"request; GET /v1/organizations is the first read every client "
+            f"makes (the /v1/search precedent off-loads it; #3718)")
+
+
 # ── AST inventory pin: the sync-FalkorDB-on-the-loop class ─────────────────
 #
 # The #2988 pin in `test_health_ready_nonblocking.py` matches one handler and
@@ -591,9 +716,13 @@ _KNOWN_INLINE_ROUTE_RESIDUAL = frozenset({
     # (#3718 via #2924); the inventory is posted on #3718.
     "accept_invite_by_id", "agent_token_revoke", "create_graph", "create_org",
     "create_org_graph", "issue_insight", "list_graphs", "list_invites",
-    "list_my_orgs", "list_packs", "list_trash", "rescind_invite", "search",
+    "list_packs", "list_trash", "rescind_invite", "search",
     "session_context", "topic_summary", "upload_pack_manifest",
     "volunteer_context",
+    # #3718: `list_my_orgs` (GET /v1/organizations, the switcher every client
+    # reads on app load) BURNED DOWN — its membership scan, per-org Team read
+    # and graph listings all run off the loop now, so it left this residual.
+    # `test_org_switcher_reads_run_off_the_loop` is its behavioural pin.
 })
 
 #: Non-route async bodies with inline sync FalkorDB I/O — the per-request auth
@@ -630,8 +759,8 @@ _KNOWN_INLINE_ROUTE_RESIDUAL = frozenset({
 #: Same declared residual; same burn-down. Scanned rather than ignored because a
 #: dependency body is still ON the loop.
 _KNOWN_INLINE_HELPER_RESIDUAL = frozenset({
-    "get_current_org", "_capture_session_impl", "_user_memberships",
-    "_membership_org", "_org_node", "_count_active_free_memberships",
+    "get_current_org", "_capture_session_impl",
+    "_membership_org", "_count_active_free_memberships",
     "_owned_free_org_ids", "_create_org_registry_lane",
     "_apply_graph_recording_override", "_apply_graph_rename", "_graph_row_probe",
     "_rollback_restore_name_race", "_trash_name_conflict",
