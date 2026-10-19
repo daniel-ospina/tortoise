@@ -6351,14 +6351,23 @@ durations:
   # #9190: a file ADDED BY A PR can never have a CI duration at PR time —
   # `tools/ci_timing.py --refresh-durations` samples push-to-main runs only — so
   # this row carries a LOCAL measurement rather than waiting for one. Measured on
-  # this host 2026-10-19 at the PR head:
+  # this host 2026-10-19, at the PR head that defines 43 tests in this file and 16
+  # in the #5612 sibling above (59 together):
   # `TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest
-  # tests/test_9190_journal_position.py -q` -> "37 passed in 2.95s", with
-  # "53 passed in 6.77s" for this file plus the #5612 suite. The repo's durations
-  # coverage floor (`DURATION_COVERAGE_MIN = 0.90`) sat at 0.9003 with this file
-  # unweighted — 0.3 files of headroom — so the row is not cosmetic: one more
-  # unmeasured fast file tips `--integrity` red. Refresh from the first
-  # post-merge push run that includes the file.
+  # tests/test_9190_journal_position.py -q` -> "43 passed in 5.20s", 4.31s and
+  # 4.68s on three warm repeats; with
+  # `tests/test_5612_journal_append_serialization.py` added -> "59 passed in
+  # 5.53s". An earlier measurement of the same file at 42 tests gave
+  # 2.42/2.74/3.06s. The weight stays 3.0: it is the STEADY-STATE figure the fast
+  # leg pays per file (one file per invocation, so the import is paid once), and
+  # the 4-5 s figures above are this box under fleet load rather than the CI
+  # runner's pool.
+  #
+  # Deliberately NO commit sha in this citation: the branch is rebased onto main
+  # repeatedly, so any sha here stops being an ancestor of the merged commit while
+  # the numbers stay true. The counts are the check that ties the figures to a
+  # tree; if they no longer match the file, re-measure.
+  # Refresh from the first post-merge push run that includes the file.
   test_9190_journal_position.py: 3.0
   test_5917_torn_tail_seal.py: 2.0
   test_longmem_costing.py: 0.2
