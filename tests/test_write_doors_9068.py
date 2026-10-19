@@ -525,15 +525,16 @@ class TestConnectorFoldIsGated:
 
 class TestSdkLiveDoorsAreGated:
     def test_github_indexer_fold_refuses_and_writes_nothing(self, tmp_path):
-        """⭐ #9068: the chokepoint behind the GITHUB INDEXER.
+        """The chokepoint behind the GITHUB INDEXER — a REGRESSION pin.
 
         ``github_indexer`` folds every issue through
         ``TortoiseSDK._apply_and_journal`` and the Object it hands over comes
         from ``github_map.issue_to_object`` — which carries
-        ``object_kind='pm:issue'`` (the fold's SNAKE spelling, which the
-        camel-only props gate does not screen). So the polling entry point most
-        callers actually use widened a ``dev``-only graph with ``pm`` — the
-        identical defect this PR closes for the connectors, one file over.
+        ``object_kind='pm:issue'``, the SNAKE spelling the camel-only props
+        gate does not screen. The record gate (#8982) already refuses it; this
+        pins that it KEEPS refusing, because the polling entry point is the
+        one most callers actually use and the props-screen fix in #9068 is
+        one spelling over from it.
 
         FAIL-ON: ``_apply_and_journal`` folds without asking (the record gate
         is removed, or reduced to the camel-only props gate).
@@ -730,7 +731,9 @@ class TestPropsDoorsScreenTheFoldAliases:
 
         ``link_source_to_entity`` relays ``source_kind`` to
         ``projection/edges.py``'s ``ON CREATE SET s.sourceKind=$sk`` with the
-        caller's string, so a namespaced value installed its pack.
+        caller's string, so a namespaced value would install its pack. The leg
+        is gated (#8982); this pins it as a REGRESSION, since it is one of the
+        doors the closure statement used to list as ungated.
 
         FAIL-ON: the door is ungated.
         REACHABLE: the CONTROL links the same source with a bare kind and the
@@ -897,6 +900,70 @@ class TestWebhookFoldsAreGated:
             assert proj.g.query("MATCH (n:Event) RETURN n").result_set
         finally:
             gh.stop_webhook()
+
+    def test_slack_webhook_answers_a_refusal_422_and_keeps_the_store_empty(
+            self, tmp_path, force_embedder_on):
+        """The same 422 pin for SLACK's handler — its arm had none.
+
+        #9068 added the 422 branch to BOTH webhook servers, but only GitHub's
+        is driven over HTTP; deleting or mis-indenting Slack's arm reddened
+        nothing. Slack retries a failed delivery, so a blanket 500 here is the
+        same retry loop the GitHub fix exists to stop.
+
+        FAIL-ON: the handler's blanket ``except Exception`` answers 500 (or the
+        ``isinstance`` branch is dropped, or it no longer writes the body).
+        REACHABLE: the same handler answers 200 for the SAME payload once the
+        namespace is approved.
+
+        """
+        import json as _json
+        import urllib.error
+        import urllib.request
+
+        from tortoise.connectors.slack import SlackConnector
+
+        sdk = _mk_sdk(tmp_path)
+        _seed_install(sdk, DEV)
+        proj = sdk._get_proj()
+        port = _free_port()
+        conn = SlackConnector(
+            config={"token": "x", "webhook_port": port}, api=_ApiStub(proj))
+        # Slack's handler maps through `_message_to_event`; inject the
+        # namespaced spelling there so the gate, not the mapper, is the only
+        # variable between the two arms.
+        conn._message_to_event = lambda msg, parent_ts=None: {
+            "type": "EventRecorded", "eventId": "sl-webhook-9068",
+            "eventKind": "slack.message",
+            "sourceKind": f"{MARKETING}:slack_message"}
+        body = _json.dumps({"type": "event_callback", "event": {
+            "type": "message", "text": "hi", "ts": "1.1",
+            "channel": "C1", "user": "U1"}}).encode()
+        url = f"http://127.0.0.1:{port}/"
+        assert conn.start_webhook() == port
+        try:
+            def _post():
+                req = urllib.request.Request(
+                    url, data=body,
+                    headers={"Content-Type": "application/json"})
+                try:
+                    with urllib.request.urlopen(req, timeout=5) as r:
+                        return r.status, r.read()
+                except urllib.error.HTTPError as exc:
+                    return exc.code, exc.read()
+
+            status, payload = _post()
+            assert status == 422, (
+                f"a deterministic refusal was answered {status}")
+            assert MARKETING.encode() in payload, (
+                "the refusal's remedy text must reach the caller")
+            assert proj.g.query("MATCH (n:Event) RETURN n").result_set == []
+
+            _seed_install(sdk, MARKETING)
+            status, _ = _post()
+            assert status == 200, "the approved arm must be admitted"
+            assert proj.g.query("MATCH (n:Event) RETURN n").result_set
+        finally:
+            conn.stop_webhook()
 
 
 class TestGateCostOnTheHotPaths:
