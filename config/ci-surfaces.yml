@@ -78,6 +78,31 @@ surfaces:
   # state-model half lives in `tortoise/pack_state.py`, which does select `core`
   # today, and `--integrity` requires every file to carry a classification.
   - test_pack_selection_by_graph.py
+  # #9068 review P1: DUAL-REGISTERED with `core` (below) AND `onboarding`, plus
+  # `ep` / `eval` / `sdk` — the six-surface set. The
+  # door INVENTORY this file pins (`_gate_call_sites`) walks ALL of
+  # `tortoise/**`, and THREE of the thirteen doors it inventories live in
+  # `tortoise/hosted_api.py` (`commit_session`, `create_object`,
+  # `create_subject`) — an EXACT `api` SOURCE_PATTERN match that REPLACES the
+  # `core` fallback in `select()` (`core` is added only when NOTHING named
+  # matched). Measured before this arm:
+  # `--changed-files tortoise/hosted_api.py` → surfaces=['api','onboarding']
+  # with `test_9068_pack_gate_residuals.py` ABSENT, so a hosted_api-only PR
+  # that added a FOURTEENTH gate call site (or moved one of the three) merged
+  # GREEN with `_DOORS` stale, and only reddened `main` on the next full-matrix
+  # run — the #1349/#3332/#3616 silent-drop class, on the file where the two
+  # `#8380` REST doors landed. `tortoise/__main__.py` is the same shape (it is
+  # an EXACT `api` match and holds `_cmd_*` doors for the #7951 inventory), so
+  # the `api` arm covers both. Keep the `core` entry too: the pack state model
+  # this file reads (`tortoise/pack_state.py`) falls through to `core`, and
+  # `--integrity` requires every file to carry a classification. Sibling
+  # precedent: `test_7951_write_doors.py` (the other door inventory). SIX-SURFACE
+  # arm set — `api` + `onboarding` here, `core` (below), and `ep` / `eval` / `sdk`
+  # for the modules the scan reaches that resolve to those surfaces before the
+  # `core` fallback can apply. Pinned over the WHOLE scanned population by
+  # `test_9068_pack_gate_residuals.py::
+  # test_the_inventory_runs_on_a_diff_to_every_module_it_scans`.
+  - test_9068_pack_gate_residuals.py
   # #7951 (remaining doors) / review P1: the write-door INVENTORY is
   # DUAL-REGISTERED with `core` (below) AND with every surface whose exact
   # SOURCE_PATTERN match can REPLACE the `core` fallback for a file the
@@ -1886,6 +1911,13 @@ surfaces:
   - test_embed_metering.py   # #4488: the tally/middleware/hook + the registry-lane writer/reader (dual with `api`/`eval`)
   - test_retrieval_metering.py   # #4489: the tally/middleware/hook + the registry-lane writer/reader (dual with `api`)
   - test_embedder_provision.py
+  # #3990: the why block must name the operator that mediates a support (id +
+  # type + Layer-3 label) plus any mitigation on it. `tortoise/why.py` selects
+  # `core` and nothing else, so this is the surface its guard has to live on —
+  # registered on `ep` it would never run for the file it pins (measured:
+  # select(['tortoise/why.py'], 'pull_request') -> ['core']).
+  - test_why_operator_mediation.py
+  - test_why_layer_rate.py  # #3990: the why-layer rate instrument (W0/W1/W2/W3 + M4/M5/M6 movement control); `tools/why_layer_rate.py` is in ci_selection.CORE_ALSO so a tool-only diff selects `core` too
   - test_embedding_model_required.py   # #4861: the REQUIRED-embedder contract (core: embeddings.py + exceptions.py)
   - test_hermetic_egress_guard.py  # #4387: pins the suite-wide egress guard installed by tests/conftest.py — a conftest change already forces `full`, so this registration exists to keep the guard's own file in the surface it protects
   - test_embedded_evidence.py
@@ -2933,6 +2965,11 @@ surfaces:
   - test_pack_shipping.py
   - test_pack_shipping_wheel.py
   - test_pack_state.py
+  # #9068: the #5475 pack-approval-set residuals MEASURED — a :Pipeline row,
+  # a journal-less fold, and the DECLARED offline re-typing. Registered beside
+  # the pack tests it reads (`pack_state.graph_kind_namespaces` /
+  # `resolved_pack_set`) so the scope of #5475's closure claim is executable.
+  - test_9068_pack_gate_residuals.py
   - test_pipeline_cli.py
   - test_postmerge_verdict.py
   # #6139: guards `tools/pr_lead_time.py` — the PR lead-time decomposition.
@@ -3568,6 +3605,15 @@ surfaces:
   # change could add an unclassified `.apply` door silently (the
   # #1349/#2938 silent-drop class; full rationale in the `api` entry).
   - test_7951_write_doors.py
+  # #9068 (the OTHER door inventory) / review P1: the same arm and the same
+  # reason as the sibling above. `_gate_call_sites` scans ALL of `tortoise/**`,
+  # and `tortoise/analyze.py` / `dream.py` / `ranking.py` select `ep`, REPLACING
+  # the `core` fallback — so without this arm an `ep`-only change could add a
+  # FOURTEENTH #5475 gate call site while `_DOORS` stayed stale and green (the
+  # #1349/#3332/#3616 silent-drop class). Pinned over the whole scanned
+  # population by `test_9068_pack_gate_residuals.py::
+  # test_the_inventory_runs_on_a_diff_to_every_module_it_scans`.
+  - test_9068_pack_gate_residuals.py
   - test_7951_enforce_atomic_write.py
   # #9121 residual: the seam the §17.1 declaration does NOT cover — the five
   # `eager_init_query()` call sites that CREATE `:OnboardingState` on
@@ -3752,6 +3798,16 @@ surfaces:
   # otherwise run this suite never — the #1349/#2938/#3154 silent-drop class.
   - test_9079_onboarding_declared_lane.py
   - test_7951_write_doors.py
+  # #9068 review P1: MULTI-REGISTERED with `core` (below), `api` and `onboarding`
+  # (above), and `ep` / `eval` / `sdk` — the six surfaces a module the #5475 door
+  # inventory scans can resolve to. `tortoise/hosted_api.py` is an EXACT
+  # `api`+`onboarding` SOURCE_PATTERN match that REPLACES the `core` fallback —
+  # so on a `hosted_api.py`-only diff (where three of the thirteen doors live)
+  # the inventory would not run at all. Full rationale in the `api` entry;
+  # pinned over the whole scanned population by
+  # `test_9068_pack_gate_residuals.py::
+  # test_the_inventory_runs_on_a_diff_to_every_module_it_scans`.
+  - test_9068_pack_gate_residuals.py
   - test_7951_enforce_atomic_write.py
   - test_7951_create_point_outbox.py
   # #7951 (increment 2, the revision door): `update_point` appends its
@@ -4036,6 +4092,16 @@ surfaces:
   # `sdk`-only change could add an unclassified `.apply` door silently (the
   # #1349/#2938 silent-drop class; full rationale in the `api` entry).
   - test_7951_write_doors.py
+  # #9068 (the OTHER door inventory) / review P1: same arm, same reason as the
+  # sibling above. `_gate_call_sites` scans ALL of `tortoise/**`, and
+  # `tortoise/ask_lane.py` / `crypto.py` / `ids.py` / `models.py` / `reader.py` /
+  # `retrieval.py` / `schemas.py` select `sdk`, REPLACING the `core` fallback —
+  # so an `sdk`-only change could add a FOURTEENTH #5475 gate call site while
+  # `_DOORS` stayed stale and green (the #1349/#3332/#3616 silent-drop class).
+  # Pinned over the whole scanned population by
+  # `test_9068_pack_gate_residuals.py::
+  # test_the_inventory_runs_on_a_diff_to_every_module_it_scans`.
+  - test_9068_pack_gate_residuals.py
   - test_7951_enforce_atomic_write.py
   # #9121 (§17.1 write-lane DECLARATION): MULTI-REGISTERED with `onboarding`,
   # `core`, `api` and `sdk`. The suite pins a declaration in
@@ -4325,6 +4391,15 @@ surfaces:
   # could add an unclassified `.apply` door silently (the #1349/#2938
   # silent-drop class; full rationale in the `api` entry).
   - test_7951_write_doors.py
+  # #9068 (the OTHER door inventory) / review P1: same arm, same reason as the
+  # sibling above. `_gate_call_sites` scans ALL of `tortoise/**`, and
+  # `tortoise/cross_lens.py` / `embeddings.py` select `eval`, REPLACING the
+  # `core` fallback — so an `eval`-only change could add a FOURTEENTH #5475 gate
+  # call site while `_DOORS` stayed stale and green (the #1349/#3332/#3616
+  # silent-drop class). Pinned over the whole scanned population by
+  # `test_9068_pack_gate_residuals.py::
+  # test_the_inventory_runs_on_a_diff_to_every_module_it_scans`.
+  - test_9068_pack_gate_residuals.py
   - test_7951_enforce_atomic_write.py
   - test_7951_create_point_outbox.py
   # #5045 review P1: the cost-dimension CENSUS walks every tracked `.py`, and
@@ -5413,6 +5488,16 @@ durations:
   test_invite_fusion_http.py: 12.2
   test_signup_token_revoke.py: 4.0
   test_w4_why_enrichment.py: 4.0
+  test_why_operator_mediation.py: 4.5  # #3990 measured locally (9 tests, embedded graphs)
+  test_why_layer_rate.py: 22.0  # #3990 measured locally (15 tests; each movement control seeds a fresh graph)
+  #3400 trap: files ADDED BY A MAIN PUSH carry no junit row until the next
+  # refresh, which dropped `durations` coverage to 89.9% (below the 90% floor)
+  # and reds `ci_selection.py --integrity` on EVERY PR (python-ci.yml's required
+  # manifest-integrity job). Local embedded/docker-lane readings, measured at
+  # this branch head as the sum of testcase/@time over all tests:
+  test_7951_enforce_atomic_write.py: 7.4  # #7951: 19 tests, 7.39s wall (measured at the rebase head; refresh from the first post-merge run)
+  test_9079_onboarding_declared_lane.py: 3.6  # #9079: 14 tests, 3.63s wall (same convention)
+  test_write_op_reachability.py: 3.3  # #8135: 43 tests + 1 xfail, 3.25s wall (same convention)
   test_capture_loop_responsiveness.py: 10.2
   # #2988/#3243: AST pins plus behavioural tests that park real daemon-pool
   # workers on threading.Event gates and drive a reachable cold-start through
@@ -5510,6 +5595,23 @@ durations:
   # model CI, not this box.
   test_status_folds_2729.py: 2.0
   test_pack_state.py: 5.1
+  # #9068: this row is REQUIRED, not cosmetic — the file is new to the fast pool
+  # and an absent key leaves the `durations` coverage further under the 90% floor
+  # (#3400), which reds `--integrity` and
+  # `test_duration_coverage_guard_boundary_and_realistic` on the slice containing
+  # it. The value is this file's own whole-file EMBEDDED-lane reading in a fresh
+  # worktree, stated HIGH on the #5048 precedent rather than as a measured CI
+  # value — it is not a junit-sweep figure, and a sweep should replace it. Current
+  # shape at the head of this branch: 12 test FUNCTIONS (`CENSUS: 12 PASS, 2
+  # XFAIL, 14 total`, recomputed by the file's own
+  # `test_the_header_census_matches_this_file`), 27 node ids after
+  # parametrisation, 2 xfail; measured 147.65 s on this host, 166.0 s in the
+  # authoring run, hence the weight below. The two heavy rows are the pins
+  # themselves (the SDK fixture builds a store per test, twice); the inventory
+  # tests are AST walks over `tortoise/**` and cost ~1 s together. Not moved into
+  # `slow_files`: 166 s is far under the 360 s bound the watchdog pin derives, and
+  # `slow_file_issues` has no duration rule.
+  test_9068_pack_gate_residuals.py: 166.0
   test_pack_selection_by_graph.py: 2.0  # unmeasured — new in #2728; no sweep has collected it, so it carries the flat default exactly as an absent key would. Do NOT substitute a local timing here: the weight is a SHARD-LAYOUT input, and the #3419 venture-pack precedent (a local 67.2 that re-grouped unrelated files and exposed a pre-existing embedded-lane isolation leak) is why an unmeasured new file stays at the flat default until a junit sweep measures it.
   test_skip_guard.py: 38.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 52.4
   test_admin_return_to.py: 3.1

@@ -667,15 +667,13 @@ def read_queue_health(repo: str):
     try:
         root = str(Path(__file__).resolve().parent.parent)
         if root not in sys.path:
-            # The tool is invoked as `python3 tools/ci_check_repair.py`, so the
-            # script's own directory (not the repo root) is sys.path[0].
+            # The tool is invoked as `uv run python tools/ci_check_repair.py`,
+            # so the script's own directory (not the repo root) is sys.path[0].
             sys.path.insert(0, root)
-        # optional dependency
-        from tools import ci_queue_health
+        from tools import ci_queue_health  # optional dependency
 
         return ci_queue_health.read_health(repo)
-    except Exception:
-        # a queue read must never fail the repair pass
+    except Exception:  # a queue read must never fail the repair pass
         return None
 
 

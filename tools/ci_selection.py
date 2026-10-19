@@ -1036,6 +1036,13 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # hermetic (synthetic books, a fake SDK) and `core` is where its
              # `core` arm lives. Pinned by
              # tests/test_ci_selection.py::test_write_op_reachability_tool_change_selects_core_not_tier1.
+             # #3990: tools/ is in NON_PYTHON_PREFIXES, so a
+             # `tools/why_layer_rate.py`-only change filtered to `changed == []`
+             # and took the docs-only early return — the why-layer instrument's
+             # own guard (tests/test_why_layer_rate.py, `core`-registered) never
+             # ran on the file it pins. Same silent-drop class as the
+             # queue_resweep / write_op_reachability entries above.
+             "tools/why_layer_rate.py",
              "tools/write_op_reachability.py",
              # #3036: oauth.py is pinned by BOTH api-registered tests
              # (test_oauth_mcp.py, test_oauth_token_fault.py, ...) and core
