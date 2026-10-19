@@ -43,7 +43,10 @@ name: ci-queue-health
 # and prints `was CI: FLOOD(...) -> cleared N of M`. `PR-STARVED` (no PR run
 # executing, a queued PR run past the age floor, and no trim-safe offender to
 # blame) is an `::warning` at exit 0: the state is real, and there is nothing the
-# governor may cancel. It cannot block a merge, because a `schedule`-event run is
+# governor may cancel. `PR-UNWITNESSED` (the feed was cut at its page cap, so the
+# oldest queued runs — the end the age clause needs — were never read) is also an
+# `::warning` at exit 0: it names what was NOT measured instead of inferring
+# health. Neither can block a merge, because a `schedule`-event run is
 # a NON-CODE event: the merge rail's own `NON_CODE_EVENTS` set excludes
 # `schedule|issues|issue_comment` from the merge decision, so a red scheduled run
 # never gates a PR.
@@ -138,14 +141,27 @@ jobs:
           # only inside a summary nobody opens. The tool's exit code already follows
           # its REPORTED verdict (1 = a FLOOD still stands, 2 = could not measure),
           # so `rc` is a payload-derived alarm; the verdict is read as well for the
-          # PR-STARVED warning, which is a real state with no action available.
+          # PR-STARVED / PR-UNWITNESSED warnings, which are real states with no
+          # action available.
+          #
+          # ⛔ THE STATE LINE GOES IN THE MESSAGE, NEVER IN A `title=` PROPERTY.
+          # GitHub parses a workflow command's property section as `key=value`
+          # pairs separated by COMMAS, and every state line contains commas
+          # (`queued=21, pr_running=0`). `title=${state}` therefore ended the title
+          # at the first comma and silently dropped the rest: the rendered title was
+          # `CI: FLOOD(finding-provenance` — exactly the `queued=N, pr_running=0`
+          # spelling #9115 asks the fleet to see. Repo convention elsewhere is
+          # `::error::<message>`; do not try to escape the commas (P2-1 of the
+          # #9118 review).
           verdict="$(python3 -c "import json; print(json.load(open('/tmp/ci-queue-health.json')).get('verdict','UNKNOWN'))" 2>/dev/null || echo UNKNOWN)"
           if [ "$rc" -eq 1 ]; then
-            echo "::error title=${state}::PR CI is NOT slow — it is NOT RUNNING, and it still is after this run's cancellations. See the step summary."
+            echo "::error::${state} — PR CI is NOT slow, it is NOT RUNNING, and it still is after this run's cancellations. See the step summary."
           elif [ "$rc" -eq 2 ]; then
-            echo "::warning title=CI: UNKNOWN::The queue could not be measured, so nothing was changed and nothing is certified healthy."
+            echo "::warning::CI: UNKNOWN — the queue could not be measured, so nothing was changed and nothing is certified healthy."
           elif [ "$verdict" = "PR-STARVED" ]; then
-            echo "::warning title=${state}::PR CI is not running: no PR-event run is executing and a queued PR run has waited past the age floor. No trim-safe offender can be blamed, so there is nothing the governor may cancel."
+            echo "::warning::${state} — PR CI is not running: no PR-event run is executing and a queued PR run has waited past the age floor. No trim-safe offender can be blamed, so there is nothing the governor may cancel."
+          elif [ "$verdict" = "PR-UNWITNESSED" ]; then
+            echo "::warning::${state} — the queued feed was cut at the page cap while no PR-event run is executing, so PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here; raise --max-pages to read further back."
           fi
-          echo "ci-queue-health exit=$rc (0 = OK, cleared, or PR-STARVED (warned); 1 = FLOOD stands; 2 = could not measure)"
+          echo "ci-queue-health exit=$rc (0 = OK, cleared, PR-STARVED or PR-UNWITNESSED (warned); 1 = FLOOD stands; 2 = could not measure)"
           exit "$rc"

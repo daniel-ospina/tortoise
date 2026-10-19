@@ -20,8 +20,8 @@ said ``queued``, pr-doctor said ``no idle lane``, the heartbeat said
 the reason lives one level UP from every per-commit reading: in the repo's
 QUEUE. This tool measures that level.
 
-FOUR STATES, DELIBERATELY NOT INTERCHANGEABLE
----------------------------------------------
+FIVE STATES, DELIBERATELY NOT INTERCHANGEABLE
+--------------------------------------------
   ABSENT      per SHA — no check-run / no run exists at this head. Waiting
               cannot clear it (``tools/ci_verdict.py`` ``no-verdict``;
               ``tools/ci_check_repair.py`` ``UNTRIGGERED``).
@@ -39,6 +39,28 @@ FOUR STATES, DELIBERATELY NOT INTERCHANGEABLE
               this is the LATE STAGE of the measured incident, not a corner case.
               (ISSUE 3 of the #9118 review: clause order used to return ``OK``
               here, which is a clean bill of health for a CI that is not running.)
+  PR-UNWITNESSED
+              per REPO — no PR-event run is executing, and the FEED WAS CUT AT ITS
+              PAGE CAP, so the older runs — the end the age clause needs — were
+              never read. Neither starvation nor health is witnessed: it is not
+              ``OK`` (the fail-open the truncation residual of the #9118 review
+              names), and not ``PR-STARVED`` either (the wait was not measured).
+              WARNED about, never acted on, exit 0 — see the truncation note below.
+              `tools/ci_check_repair.py` deliberately does NOT treat it as a flood
+              (`queue_flood` keys on `FLOOD` alone): an unread window is not a
+              measured flood, and inferring STARVED from it would be the same
+              inference this state exists to refuse.
+
+The truncation note, MEASURED rather than assumed (it is what makes
+PR-UNWITNESSED necessary):
+    gh api repos/daniel-ospina/tortoise/actions/runs?status=queued&per_page=3
+    gh api "...?status=queued&sort=created&direction=asc&per_page=3"
+    gh api "...?status=queued&sort=created&direction=desc&per_page=3"
+all three returned the same runs, NEWEST FIRST (2026-10-19T05:04:43Z,
+05:04:05Z, 05:02:49Z). The endpoint ignores ``sort``/``direction``, so a
+capped read silently drops the OLDEST runs — the starved PR work that has been
+waiting is at that end. There is therefore no read ordering that makes a
+truncated feed sound, and the verdict has to say so instead.
 
 FLOOD is spelled with its offender and its counts — ``CI: FLOOD(<workflow>,
 queued=N, pr_running=0)`` — and PR-STARVED with its own counts —
@@ -105,6 +127,10 @@ Exit codes (fail-closed, matching ``tools/ci_check_repair.py``):
      state line stays available in ``pre_action_state_line`` with ``cleared``
      naming the difference. ``PR-STARVED`` is also 0: the state is real and
      warned about, but no action is available (nothing trim-safe to blame).
+     ``PR-UNWITNESSED`` is 0 for the same reason — an action already happened
+     before the verdict was reached, and the honest claim is "not witnessed",
+     which is warned about rather than turned into a red run nobody can clear by
+     acting.
   1  measured: ``FLOOD`` in the REPORTED reading — either no action was
      available, or the flood STILL STANDS after the governor acted. A governor
      that issued cancellations has NOT made the queue healthy, and a green run
@@ -149,6 +175,11 @@ from typing import Any
 OK = "OK"
 FLOOD = "FLOOD"
 PR_STARVED = "PR-STARVED"
+#: A truncated feed with no PR-event run executing: starvation is neither
+#: witnessed nor DISPROVED, so this is not ``OK``. See the truncation note in the
+#: module docstring — the runs endpoint is newest-first and cannot be asked for
+#: the oldest end, so a capped read loses exactly the runs the age clause needs.
+PR_UNWITNESSED = "PR-UNWITNESSED"
 UNKNOWN = "UNKNOWN"
 
 EXIT_OK = 0
@@ -158,7 +189,15 @@ EXIT_UNMEASURABLE = 2
 #: PR-STARVED is a MEASURED state (never UNKNOWN) with no action available, so it
 #: shares EXIT_OK's code — it is announced by its own state line and the
 #: workflow's `::warning`, not by a red run that no one can act on.
-EXIT_FOR = {OK: EXIT_OK, FLOOD: EXIT_FLOOD, PR_STARVED: EXIT_OK, UNKNOWN: EXIT_UNMEASURABLE}
+#: PR-UNWITNESSED joins them: it is measured-and-incomplete, not unmeasurable,
+#: and no action can clear it, so it is announced (state line + `::warning`).
+EXIT_FOR = {
+    OK: EXIT_OK,
+    FLOOD: EXIT_FLOOD,
+    PR_STARVED: EXIT_OK,
+    PR_UNWITNESSED: EXIT_OK,
+    UNKNOWN: EXIT_UNMEASURABLE,
+}
 
 REPO_DEFAULT = "daniel-ospina/tortoise"
 GH_BIN = os.environ.get("GH_BIN") or shutil.which("gh") or "gh"
@@ -270,6 +309,12 @@ class QueueHealth:
             return (
                 f"CI: FLOOD({self.dominant_workflow or 'unknown'}, "
                 f"queued={self.queued_total}, pr_running={self.pr_running})"
+            )
+        if self.verdict == PR_UNWITNESSED:
+            # The one thing a truncated feed must never print is a bare `OK`.
+            return (
+                f"CI: PR-UNWITNESSED(queued={self.queued_total}, pr_running=0, "
+                f"pr_queued={self.pr_queued}, feed=truncated)"
             )
         if self.verdict == PR_STARVED:
             oldest = self.oldest_pr_queued_age_seconds
@@ -424,6 +469,24 @@ def classify_queue(
     ]
 
     def health(verdict: str, **override: Any) -> QueueHealth:
+        # A TRUNCATED FEED CANNOT CERTIFY HEALTH. The runs endpoint is newest-first
+        # and ignores `sort`/`direction` (measured — see the module docstring), so a
+        # capped read drops the OLDEST runs, and the oldest queued PR run is the age
+        # clause's only witness. With `pr_running == 0` the difference between "PR CI
+        # is not running" and "we did not read far enough back" is exactly what the
+        # truncation destroyed, so `OK` is not available: the verdict degrades to
+        # PR-UNWITNESSED and NAMES the lost dimension instead of inferring health.
+        # Positive claims are untouched — a FLOOD or a PR-STARVED needs only what was
+        # read (this offender, this waiting run), and an executing PR run is observed
+        # in the in_progress read regardless of the queued window.
+        if verdict == OK and truncated and pr_running == 0:
+            verdict = PR_UNWITNESSED
+            reasons.append(
+                "PR-UNWITNESSED: the queued feed was cut at the page cap, and the "
+                "feed is NEWEST-FIRST, so the oldest queued runs (the ones the age "
+                "clause needs) were never read; no PR-event run is executing, so "
+                "starvation is neither witnessed nor disproved — not reported as OK"
+            )
         base: dict[str, Any] = {
             "verdict": verdict,
             "queued_total": len(queued),
@@ -450,13 +513,21 @@ def classify_queue(
         """
         if starved_wait is None:
             return health(OK)
+        # NAME THE CLAUSE THAT ACTUALLY DECLINED. The dominance floor and the
+        # allow-list are different questions, and asserting "not a trim-safe
+        # offender" for a leader that IS in TRIM_SAFE (and declined only because
+        # `offender_queued < min_dominant_queued`) sends the operator to the one
+        # place the answer is not — while the reason line above says the opposite.
+        # So the leader and its trim-safety are reported as FACTS, with no causal
+        # claim; the clause that returned here is named by the reason above it.
         reasons.append(
             f"PR-STARVED: no PR-event run is executing and the oldest queued "
             f"PR-event run has waited {starved_wait:.0f}s "
-            f"(> {min_age_seconds:.0f}s), so PR CI is NOT RUNNING. The queue's "
-            f"largest share is '{global_leader or 'unknown'}' "
-            f"({global_max} of {len(queued)}), which is not a trim-safe offender, "
-            "so the governor has nothing it may cancel"
+            f"(> {min_age_seconds:.0f}s), so PR CI is NOT RUNNING. Largest share: "
+            f"'{global_leader or 'unknown'}' ({global_max} of {len(queued)}); "
+            f"trim-safe offender present: {bool(set(non_pr_tally) & TRIM_SAFE)} — "
+            f"no run was trimmed, and the reason line above names the condition "
+            f"that declined to act"
         )
         return health(PR_STARVED)
 

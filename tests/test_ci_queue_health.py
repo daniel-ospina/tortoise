@@ -107,6 +107,27 @@ def test_a_deep_queue_of_pr_work_that_has_not_waited_is_ok():
     assert not any("PR-STARVED" in r for r in health.reasons)
 
 
+def test_the_pr_starved_reason_names_the_clause_that_declined_not_the_allow_list():
+    """P2-2 of the #9118 review: the reason used to assert the WRONG mechanism.
+
+    Here the queue's largest share IS `finding-provenance` — a workflow that IS in
+    `TRIM_SAFE` with its events declared — and the governor declined only because
+    `offender_queued=4 < min_dominant_queued=5`. The old reason line said "which is
+    not a trim-safe offender", i.e. it contradicted the reason line above it and
+    sent the operator to the allow-list, the one place the answer is not. The
+    leader and its trim-safety are now reported as FACTS, with no causal claim.
+    """
+    health = classify(flood_queued(4) + starving_pr_runs(2, age_seconds=1200))
+    assert health.verdict == Q.PR_STARVED
+    assert health.dominant_workflow == "finding-provenance"
+    joined = " ".join(health.reasons)
+    # the clause that actually declined is named ...
+    assert "min_dominant_queued=5" in joined
+    # ... and the false mechanism is gone, with the true facts stated
+    assert "is not a trim-safe offender" not in joined
+    assert "trim-safe offender present: True" in joined
+
+
 def test_a_reporting_workflow_below_the_floor_is_not_a_flood():
     health = classify(flood_queued(4) + starving_pr_runs(1))
     assert health.verdict != Q.FLOOD
@@ -255,6 +276,46 @@ def test_truncated_feed_is_labelled_not_presented_as_a_total():
     assert health.verdict == Q.FLOOD
     assert health.truncated is True
     assert any("LOWER BOUND" in reason for reason in health.reasons)
+
+
+def test_a_truncated_feed_cannot_certify_pr_ci_as_healthy():
+    """The truncation residual of the #9118 review, SETTLED by measurement.
+
+    `repos/{repo}/actions/runs` is NEWEST-FIRST and IGNORES `sort`/`direction`
+    (all three spellings returned the same runs, newest first — the command is
+    recorded in the module docstring), so a page-capped read drops the OLDEST
+    queued runs: exactly the end the age clause needs, and exactly where the
+    starved PR work sits. Pre-fix this shape returned `CI: OK(queued=4,
+    pr_running=0, pr_queued=0)` — health inferred from a window that could not
+    contain the witness, the fail-open shape the module docstring rules out.
+    """
+    health = classify(flood_queued(4), truncated=True)
+    assert health.verdict == Q.PR_UNWITNESSED
+    assert health.verdict != Q.OK
+    assert health.trimmable == ()                     # nothing is acted on
+    assert health.state_line == (
+        "CI: PR-UNWITNESSED(queued=4, pr_running=0, pr_queued=0, feed=truncated)"
+    )
+    assert any("NEWEST-FIRST" in reason for reason in health.reasons)
+    assert Q.EXIT_FOR[Q.PR_UNWITNESSED] == Q.EXIT_OK
+
+
+def test_a_truncated_feed_with_a_pr_run_executing_is_still_ok():
+    """The guard is narrow: a serving PR run is observed outside the queued window."""
+    health = classify(
+        flood_queued(4),
+        in_progress=[run(1, "Python CI", event="pull_request", age_seconds=60)],
+        truncated=True,
+    )
+    assert health.verdict == Q.OK
+
+
+def test_a_truncated_feed_still_reports_a_witnessed_starvation():
+    """A positive claim survives truncation: this PR run WAS read, and it waited."""
+    health = classify(flood_queued(4) + starving_pr_runs(1, age_seconds=1200),
+                      truncated=True)
+    assert health.verdict == Q.PR_STARVED
+    assert health.verdict != Q.PR_UNWITNESSED
 
 
 def test_read_runs_paginates_and_reports_truncation(monkeypatch):
@@ -548,6 +609,27 @@ def test_the_workflow_binds_the_token_the_repo_wide_guard_cannot_see():
     assert "1 = FLOOD stands" in wf
 
 
+def test_the_workflow_annotations_carry_the_state_line_in_the_message():
+    """P2-1 of the #9118 review: a `title=` property is COMMA-SEPARATED.
+
+    `title=${state}` ended the title at the state line's first comma, so the
+    rendered annotation read `CI: FLOOD(finding-provenance` — the
+    `queued=N, pr_running=0` spelling #9115 asks the fleet to see, dropped
+    silently. The state must travel in the message body (repo convention:
+    `::error::<message>`), and nothing may re-introduce a `title=` property.
+    """
+    wf = (Path(__file__).resolve().parents[1]
+          / ".github/workflows/ci-queue-health.yml").read_text()
+    annotations = [line for line in wf.splitlines()
+                   if "::error" in line or "::warning" in line]
+    assert annotations, "the alarm must be annotated, not only summarised"
+    assert not any("title=" in line for line in annotations)
+    assert any("::error::${state}" in line for line in annotations)
+    # every state the tool can report has an annotation branch
+    assert 'verdict" = "PR-STARVED"' in wf
+    assert 'verdict" = "PR-UNWITNESSED"' in wf
+
+
 # ── PR-STARVED through the CLI ────────────────────────────────────────────
 
 def test_pr_starved_is_exit_0_with_its_own_state_line(monkeypatch, capsys):
@@ -561,6 +643,18 @@ def test_pr_starved_is_exit_0_with_its_own_state_line(monkeypatch, capsys):
     assert payload["state_line"] == (
         "CI: PR-STARVED(queued=26, pr_running=0, pr_queued=20, oldest=1200s)"
     )
+
+
+def test_pr_unwitnessed_is_exit_0_and_warned_not_red(monkeypatch, capsys):
+    """Measured-and-incomplete, warned about, exit 0 — and never `OK`."""
+    unwitnessed = classify(flood_queued(4), truncated=True)
+    assert unwitnessed.verdict == Q.PR_UNWITNESSED
+    monkeypatch.setattr(Q, "read_health", lambda *a, **k: unwitnessed)
+    assert Q.main(["--json"]) == Q.EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verdict"] == "PR-UNWITNESSED"
+    assert payload["state_line"].startswith("CI: PR-UNWITNESSED(")
+    assert payload["truncated"] is True
 
 
 def test_an_unnamed_verdict_is_never_exit_0(monkeypatch):
