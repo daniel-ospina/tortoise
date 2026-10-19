@@ -19,6 +19,20 @@ on:
     tags:
       - "v*"
 
+# A PUBLISH must never be cancelled midway: one group PER RELEASE, never
+# cancelling, so a second dispatch of the SAME tag waits instead of aborting the
+# upload (a half-uploaded release cannot be un-published). Bookkeeping, not a
+# merge gate (#9115).
+#
+# ⛔ The group is keyed per tag on purpose. A constant group holds at most one
+# RUNNING plus one PENDING run, and a third arrival cancels the pending one
+# regardless of `cancel-in-progress` — so a constant key would silently drop the
+# second of three tagged releases. Per-tag keying means two different releases
+# never evict each other while same-tag re-runs still serialise.
+concurrency:
+  group: publish-pypi-${{ github.ref_name }}
+  cancel-in-progress: false
+
 permissions:
   id-token: write  # PyPI trusted publishing (OIDC)
 

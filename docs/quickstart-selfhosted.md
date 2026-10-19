@@ -112,8 +112,14 @@ Same image, standalone — useful when you don't want the full compose stack:
 ```bash
 docker run -d --name tortoise-falkordb -p 127.0.0.1:6379:6379 \
   -e REDIS_ARGS="--requirepass falkordb --appendonly yes" \
-  falkordb/falkordb-server:latest
+  falkordb/falkordb-server:v4.20.4
 ```
+
+Pinned, not `:latest` (#8124): the floating tag drifted to engine 6.0.x, which
+panics the server (`reply.rs:655`, `reply_compact`) on a Cypher shape that mixes
+an aggregate with a property column — `OPTIONAL MATCH (s) RETURN count(s) AS n,
+s.harness AS h` — and the process EXITS, so it reads as an unreachable database
+rather than a crash. This is the same pin the compose stack above uses.
 
 Point Tortoise at it with `TORTOISE_DB_URI=docker://:falkordb@localhost:6379/tortoise`.
 

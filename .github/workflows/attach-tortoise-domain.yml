@@ -5,6 +5,13 @@ name: Attach Tortoise Domain
 on:
   workflow_dispatch:
 
+# Bookkeeping, not a merge gate. One group, never cancelling: a DNS attach is a
+# single mutating call — cancelling it midway can leave the custom domain
+# attached to one project and the route pointed at another.
+concurrency:
+  group: attach-tortoise-domain
+  cancel-in-progress: false
+
 jobs:
   attach:
     runs-on: ubuntu-latest

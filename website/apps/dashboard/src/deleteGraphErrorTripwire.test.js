@@ -50,18 +50,19 @@ test('#2301: deleteGraphRow writes failures to the page-level error sink, never 
 })
 
 test('#2301: the delete-failure sink (error banner) renders OUTSIDE the key-panel conditional — visible with the panel closed', () => {
-  // Anchor A: the page-level banner render ({error && (…)}, since #8249 the
-  // gate also admits the active team's retained rotate refusal,
-  // {(error || rotateRefusalText) && (…)}) sits at <main>
+  // Anchor A: the page-level banner render ({error && (…)}; since #8249 the gate
+  // also admits the active team's retained rotate refusal and since #8255 the
+  // retained ambiguous-failure notice, so it reads
+  // {(error || rotateRefusalText || rotateAmbiguousText) && (…)}) sits at <main>
   // top, before every tab body. Anchor B: the key-panel block render
   // ({panelGraphId && (…)}), which wraps the graphMsg render. A delete
   // error routed to setError is always visible because A precedes B (the
   // panel block is not even mounted when closed). If a future edit wraps
   // the error banner in a panel/tab conditional — or renders the delete
   // failure only inside the panel — this ordering guard fails.
-  const errorBanner = mainJsx.indexOf('(error || rotateRefusalText) && (')
+  const errorBanner = mainJsx.indexOf('(error || rotateRefusalText || rotateAmbiguousText) && (')
   const panelBlock = mainJsx.indexOf('{panelGraphId && (')
-  assert.notEqual(errorBanner, -1, 'could not locate the page-level {(error || rotateRefusalText) && (…)} banner render in main.jsx')
+  assert.notEqual(errorBanner, -1, 'could not locate the page-level {(error || rotateRefusalText || rotateAmbiguousText) && (…)} banner render in main.jsx')
   assert.notEqual(panelBlock, -1, 'could not locate the key-panel {panelGraphId && (…) block render in main.jsx')
   assert.ok(errorBanner < panelBlock,
     `the error banner (index ${errorBanner}) must render BEFORE/OUTSIDE the key-panel block (index ${panelBlock}) — ` +

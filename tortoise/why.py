@@ -144,7 +144,9 @@ def _severity(mean: float) -> str:
     return "high" if mean >= 0.6 else "medium"
 
 
-def _assemble_supports(rows: list, by_id: dict[str, dict], *, merge: bool = False) -> None:
+def _assemble_supports(rows: list, by_id: dict[str, dict], *,
+                       merge: bool = False,
+                       operator_leg: bool = False) -> None:
     """Fold support-chain rows into the blocks. Collect ALL candidates per
     point (dedup by point id), then sort by (weight desc, point_id) and
     truncate to the ≤3 cap — the selected subset is the strongest ≤3 and
@@ -154,18 +156,72 @@ def _assemble_supports(rows: list, by_id: dict[str, dict], *, merge: bool = Fals
     chain the first leg already built instead of overwriting it — a point
     with BOTH operator-mediated supports AND direct statement→statement
     IMPL edges must surface the union of both legs (mixed-edge points were
-    silently dropping the operator-mediated leg before this fix)."""
+    silently dropping the operator-mediated leg before this fix).
+
+    ``operator_leg=True`` reads the FOUR extra columns of
+    ``_SUPPORT_OP_CYPHER`` (the mediating operator's id / type / label and its
+    mitigation) — #3990: objective 4 requires the operator, not just the
+    supporting claim, so the block must name it. The DIRECT leg carries no
+    operator and passes ``operator_leg=False``; its entries still get all four
+    keys set to ``None`` so every support entry has ONE shape (a present null
+    is a measured "no operator", never an unread dimension — §3.1.3)."""
     pending: dict[str, dict[str, dict]] = {}
-    for pid, sup_id, content, a, b in rows:
+    # The deterministic tie-break rank per (target, supporter) is kept OUT of
+    # the emitted entry so the block's key set stays exactly the contract's.
+    rank: dict[tuple[str, str], tuple[str, str]] = {}
+    for row in rows:
+        if operator_leg:
+            (pid, sup_id, content, a, b,
+             op_id, op_type, op_label, mitigation, mit_id) = row
+        else:
+            pid, sup_id, content, a, b = row
+            op_id = op_type = op_label = mitigation = mit_id = None
         if not pid or not sup_id:
             continue
-        if sup_id not in pending.setdefault(pid, {}):
-            pending[pid][sup_id] = {
-                "point_id": sup_id,
-                "content_snippet": _snippet(content),
-                "edge": "IMPL",
-                "weight": round(_mean(float(a), float(b)), 4),
-            }
+        entry = {
+            "point_id": sup_id,
+            "content_snippet": _snippet(content),
+            "edge": "IMPL",
+            "weight": round(_mean(float(a), float(b)), 4),
+            # #3990 — the WHY layer's operator leg. ``operator_label`` is
+            # the Layer-3 predicate (ONTOLOGY §8); ``operator_type`` is the
+            # epistemic mechanism. It is ``IMPL`` on every entry today
+            # because this leg traverses ``-[:IMPL]->`` only — a NAND
+            # operator over the same pair is a CONFLICT and surfaces in
+            # ``conflicts``, never here. ``mitigation`` is on THAT operator
+            # (#4937: a mitigation is a separate Point attacking the
+            # operator bridge), which is why the operator id had to exist
+            # first — the mitigation is unreachable without it.
+            "operator_id": op_id or None,
+            "operator_type": op_type or None,
+            "operator_label": op_label or None,
+            "mitigation": _mitigation_text(mitigation),
+        }
+        # Deterministic tie-break rank for this (target, supporter): the pair
+        # (operator_id, mitigation_id). The "no operator" sentinel orders a
+        # DIRECT row after every operator row — within ONE call. The direct leg
+        # runs as a SEPARATE call (merge=True) and its union keeps the existing
+        # entry via ``setdefault``, so cross-leg precedence comes from that call
+        # order, not from this rank; the sentinel exists so a future single-call
+        # merge cannot silently invert it.
+        key = (op_id or "\uffff", mit_id or "\uffff")
+        existing = pending.get(pid, {}).get(sup_id)
+        if existing is None:
+            pending.setdefault(pid, {})[sup_id] = entry
+            rank[(pid, sup_id)] = key
+            continue
+        # ONE entry per supporter (the ≤3 cap and the merge leg both dedup by
+        # point id), so a supporter mediated by MORE THAN ONE operator cannot
+        # be represented faithfully — and an operator mitigated MORE THAN ONCE
+        # has the same shape. Pick the LOWEST (operator, mitigation) pair
+        # rather than whichever row the storage layer returned first: row order
+        # is not guaranteed, and an arbitrary pick made the surfaced operator —
+        # and with it the surfaced mitigation TEXT — insertion-order dependent
+        # (the same pair reported a different reason depending on which edge
+        # was written first).
+        if key < rank[(pid, sup_id)]:
+            pending[pid][sup_id] = entry
+            rank[(pid, sup_id)] = key
     for pid, chain_map in pending.items():
         chain = sorted(chain_map.values(),
                        key=lambda s: (-s["weight"], s["point_id"]))
@@ -232,6 +288,11 @@ def _assemble_tradeoffs(rows: list, by_id: dict[str, dict]) -> None:
                 "point_id": alt_id,
                 "label": _snippet(row[3]),
                 "kind": row[4] or "",
+                # #3990: the connecting operator was already READ (row[5]) to
+                # reach the mitigation and then discarded — the alternative's
+                # own explanation needs it. Same additive-shape rule as the
+                # support leg: present, ``None`` when the edge carries none.
+                "operator_id": row[5] or None,
                 "ep_weight": round(_mean(float(row[7]), float(row[8])), 4),
                 "mitigation": _mitigation_text(row[6]),
             }
@@ -247,8 +308,9 @@ def _assemble_tradeoffs(rows: list, by_id: dict[str, dict]) -> None:
                 a.get("kind") == "option" for a in alt_list):
             continue
         block = by_id[pid]
-        # Contract shape: {point_id, label, ep_weight, mitigation} — the
-        # option-kind marker is internal detection only, never emitted.
+        # Contract shape: {point_id, label, ep_weight, mitigation,
+        # operator_id} (#3990 — the connecting operator) — the option-kind
+        # marker is internal detection only, never emitted.
         # Bounded: strongest W4_MAX_TRADEOFFS by EP weight (the other
         # dimensions are capped; a decision with N alternatives must not
         # make every enriched recall of it emit N entries).
@@ -434,9 +496,20 @@ _SUPPORT_OP_CYPHER = (
     "MATCH (sup:Point)-[r:INPUT]->(op:Point {is_operator:true})-[:IMPL]->(n) "
     f"WHERE r.idx = 0 AND sup.id <> n.id "
     f"AND (sup.is_operator = false OR sup.is_operator IS NULL) AND {_exclude_status_clause('sup')} "
+    # #3990: the operator that mediates THIS support rides the same traversal
+    # — objective 4 requires the operator (id + kind) plus any mitigation on
+    # it, and a second query per support would be a new read on the hot path.
+    # The mitigation is OPTIONAL (an operator need not be mitigated) and uses
+    # the same ``mitigated_by`` predicate as _TRADEOFFS_CYPHER.
+    "OPTIONAL MATCH (op)-[:mitigated_by]->(mit:Point) "
     "RETURN n.id, sup.id, sup.content, "
     "  coalesce(sup.posterior_alpha, sup.ep_alpha, 1.0), "
-    "  coalesce(sup.posterior_beta, sup.ep_beta, 1.0)"
+    "  coalesce(sup.posterior_beta, sup.ep_beta, 1.0), "
+    # mit.id rides the same traversal so an operator mitigated MORE THAN ONCE
+    # resolves deterministically (lowest mitigation id) instead of to whichever
+    # row the storage layer returned first — the sibling of the operator
+    # tie-break below, and the same defect shape.
+    "  op.id, op.op_type, op.label, mit.content, mit.id"
 )
 _SUPPORT_DIRECT_CYPHER = (
     "MATCH (n:Point) WHERE n.id IN $ids "
@@ -563,6 +636,7 @@ def assemble_why_blocks(
             _assemble_supports(
                 g.query(_SUPPORT_OP_CYPHER, params={"ids": ids}).result_set,
                 blocks,
+                operator_leg=True,
             )
             _assemble_supports(
                 g.query(_SUPPORT_DIRECT_CYPHER, params={"ids": ids}).result_set,

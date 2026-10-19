@@ -96,6 +96,43 @@ def _store(ch) -> AlertStore:
     )
 
 
+# ── the two R2 failure archetypes (#8422) ───────────────────────────────────
+# A ``BackupStorage`` whose ``list`` raises is AMBIGUOUS between the DR
+# vocabulary's two tiers (#3147): the substrate may not answer at all, or it may
+# answer while this credential may not list. `MemoryStorage.head_bucket`
+# returning normally is the evidence that separates them, so a double must say
+# which failure it means — otherwise a test silently asserts one tier while
+# simulating the other.
+
+
+class _R2Unreachable(MemoryStorage):
+    """R2 does not ANSWER — the reachability tier.
+
+    Both the listing and the bucket-level HEAD fail, so the watcher has no
+    evidence the substrate is there and files ``R2_DOWN``.
+    """
+
+    def list(self, prefix):
+        raise ConnectionError("r2 down")
+
+    def head_bucket(self):
+        raise ConnectionError("r2 down")
+
+
+class _R2Unlistable(MemoryStorage):
+    """R2 ANSWERS but this credential cannot LIST — the listing tier (#8422).
+
+    The bucket-level HEAD returns (the substrate answered) while ``list`` is
+    denied, which is the documented ``R2_LIST_OK=0`` permission class. The
+    watcher therefore files ``R2_UNLISTABLE``, not ``R2_DOWN``.
+    """
+
+    def list(self, prefix):
+        raise ConnectionError("AccessDenied: ListObjects on backups/")
+
+    # `head_bucket` is inherited: the substrate answers this probe.
+
+
 # ── compute_status table ────────────────────────────────────────────────────
 
 
@@ -231,12 +268,8 @@ def test_watcher_never_fires_on_chronic_no_teams():
 
 
 def test_watcher_unknown_silence_on_r2_down_fresh():
-    class _Boom(MemoryStorage):
-        def list(self, prefix):
-            raise ConnectionError("r2 down")
-
     ch = _Channels()
-    w = _watcher(_Boom(), ch, orgs=("team_a",))
+    w = _watcher(_R2Unreachable(), ch, orgs=("team_a",))
     status = w.poll()
     assert status["unknown"] is True
     assert ch.issues == {}
@@ -293,17 +326,186 @@ def test_watcher_degraded_mode_keeps_cached_surface():
     w.poll()
     assert w._last_status["per_team"]["team_a"] == "ok"
 
-    class _Boom(MemoryStorage):
-        def list(self, prefix):
-            raise ConnectionError("r2 down")
-
-    w._storage = _Boom()
+    w._storage = _R2Unreachable()
     status2 = w.poll()
     # Degraded: the cached surface holds — team_a is NOT reclassified stale.
     assert status2["per_team"]["team_a"] == "ok"
-    # R2_DOWN is the one incident that SHOULD fire while degraded (neither
-    # fabricate NOR silence); no STALE for the healthy team.
+    # An R2 incident IS the one that SHOULD fire while degraded (neither
+    # fabricate NOR silence); no STALE for the healthy team. R2_DOWN specifically
+    # because this double fails the bucket-level HEAD too (#8422).
     assert list(ch.issues.values()) == ["[DR] R2_DOWN"]
+
+
+# ── #8422: a watcher-side R2 failure is filed at its OWN tier ───────────────
+# The watcher's read is `list()` (list-objects-v2), which fails for BOTH tiers of
+# the #3147 vocabulary. These tests pin the discriminator — the bucket-level HEAD
+# — to the kind it must select, one shape per test, because the mis-filing is
+# exactly a wrong KIND (a labelling defect is invisible to a test that only
+# asserts "an incident was filed").
+
+
+def test_watcher_r2_permission_failure_files_the_listing_tier():
+    """A revoked/absent ``ListObjects`` grant is NOT an unreachable substrate.
+
+    The read fails, but the bucket-level HEAD is ANSWERED — positive evidence the
+    substrate is there — so the incident must be filed at the LISTING tier
+    (``R2_UNLISTABLE``, the class the driver reports as ``R2_LIST_OK=0``). Filing
+    ``R2_DOWN`` here is a mislabelled incident: its recovery evidence is "a probe
+    reaches R2", which this fault satisfies on the very next poll, so the label
+    would clear for a condition that never recovered.
+    """
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 1)
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+    w.poll()
+    assert ch.issues == {}
+
+    w._storage = _R2Unlistable()
+    w.poll()
+    assert list(ch.issues.values()) == ["[DR] R2_UNLISTABLE"], (
+        "a listing failure beside an ANSWERING bucket-level HEAD is the listing "
+        "tier — R2_DOWN would claim the substrate does not answer"
+    )
+
+
+def test_watcher_r2_unreachable_files_the_reachability_tier():
+    """Both probes fail ⇒ no evidence R2 answered ⇒ the reachability tier."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 1)
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+    w.poll()
+    assert ch.issues == {}
+
+    w._storage = _R2Unreachable()
+    w.poll()
+    assert list(ch.issues.values()) == ["[DR] R2_DOWN"], (
+        "nothing answered, so the filing must stay on the reachability tier — "
+        "claiming the listing tier would assert R2 answered"
+    )
+
+
+def test_watcher_r2_probe_clears_r2_down_while_the_listing_still_fails():
+    """``R2_DOWN``'s recovery condition is "the substrate ANSWERS a probe".
+
+    Once the bucket-level HEAD is answered that condition is satisfied, even
+    though the pool still cannot be listed — so ``R2_DOWN`` must be RESOLVED with
+    the listing tier filed BESIDE it (#3147: one kind = one recovery condition).
+    Leaving it open would strand it on the listing fault's timeline, and the
+    two-tier split exists precisely so each kind clears on its own evidence.
+    """
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 1)
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+    w.poll()
+
+    w._storage = _R2Unreachable()
+    w.poll()
+    assert list(ch.issues.values()) == ["[DR] R2_DOWN"]
+
+    # The substrate comes back, but the listing grant is still broken.
+    w._storage = _R2Unlistable()
+    w.poll()
+    assert list(ch.issues.values()) == ["[DR] R2_UNLISTABLE"], (
+        "R2_DOWN's own evidence (a probe reaching R2) now holds, so it clears; "
+        "the remaining fault is the listing tier's"
+    )
+
+
+def test_watcher_never_clears_the_driver_owned_listing_tier():
+    """The watcher may FILE ``R2_UNLISTABLE`` but never CLEAR it (#3147/ADR-011).
+
+    Its own read measures ONE surface; the tier's recovery evidence is the
+    driver's whole-pool measurement (head-bucket OK + ``storage_error`` clear +
+    ``R2_LIST_OK=1``). A watcher resolve would be a fabricated recovery for a
+    pool it never measured, so the leg is not even attempted — the kind is filed
+    beside ``R2_DOWN`` and cleared by its owner.
+    """
+    ch = _Channels()
+    w = _watcher(MemoryStorage(), ch)
+    w.poll()  # healthy: known-good
+
+    w._alerts.open_incident("R2_UNLISTABLE", "")
+    assert any("R2_UNLISTABLE" in t for t in ch.issues.values())
+
+    w.poll()  # healthy again — the watcher's own listing is fine
+    assert any("R2_UNLISTABLE" in t for t in ch.issues.values()), (
+        "the listing tier is driver-owned: a watcher poll must not clear it"
+    )
+
+
+def test_watcher_without_a_reachability_probe_keeps_the_reachability_tier():
+    """No probe ⇒ no evidence ⇒ the PRE-#8422 label. The change can only ever
+    relabel a failure it has positive evidence about."""
+
+    class _NoProbe(MemoryStorage):
+        head_bucket = None  # a store that predates the protocol method
+
+        def list(self, prefix):
+            raise ConnectionError("r2 down")
+
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 1)
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+    w.poll()
+
+    w._storage = _NoProbe()
+    w.poll()
+    assert list(ch.issues.values()) == ["[DR] R2_DOWN"]
+
+
+def test_watcher_refused_head_is_the_reachability_tier():
+    """The boundary the probe cannot cross, pinned so it is not "improved" away.
+
+    A store that REFUSES the bucket-level HEAD is indistinguishable from one that
+    does not answer — "no probe reaches the substrate" IS the reachability tier's
+    definition — so a refused HEAD must NOT be reclassified as a listing fault.
+    """
+
+    class _HeadRefused(MemoryStorage):
+        def list(self, prefix):
+            raise ConnectionError("AccessDenied: ListObjects on backups/")
+
+        def head_bucket(self):
+            raise PermissionError("AccessDenied: HeadBucket")
+
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 1)
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+    w.poll()
+
+    w._storage = _HeadRefused()
+    w.poll()
+    assert list(ch.issues.values()) == ["[DR] R2_DOWN"]
+
+
+def test_watcher_does_not_probe_the_bucket_on_a_healthy_poll():
+    """The probe is a SECOND round trip; a completed read is already reachability
+    evidence, so a healthy poll must not pay for it."""
+
+    class _Counted(MemoryStorage):
+        head_calls = 0
+
+        def head_bucket(self):
+            type(self).head_calls += 1
+
+    ch = _Channels()
+    storage = _Counted()
+    _seed_archive(storage, "team_a", 1)
+    _seed_state(storage, "team_a")
+    w = _watcher(storage, ch)
+    w.poll()
+    w.poll()
+    assert _Counted.head_calls == 0
 
 
 def test_watcher_production_key_parse():
@@ -454,14 +656,6 @@ def test_watcher_custom_graph_removal_resolves_incidents():
     assert ch.issues == {}
 
 
-class _BoomListStorage(MemoryStorage):
-    """MemoryStorage whose ``list`` raises — simulates R2 read failure AFTER a
-    healthy poll so the watcher evaluates degraded-from-known-good."""
-
-    def list(self, prefix):
-        raise RuntimeError("r2 down")
-
-
 def test_watcher_degraded_never_fabrication_for_new_custom_graph():
     """F1 regression (#2313 Task 4): NEVER_BACKED_UP requires a confirmed
     listing. On a degraded poll (R2 down), a custom graph never seen in a
@@ -477,7 +671,7 @@ def test_watcher_degraded_never_fabrication_for_new_custom_graph():
     assert s1["per_graph"]["team_a:g_old"] == "ok"  # healthy baseline
 
     # R2 dies; a NEW custom graph joins the seam surface mid-outage.
-    w._storage = _BoomListStorage()
+    w._storage = _R2Unreachable()
     w._graphs_for = lambda t: ["g_old", "g_new"]
     s2 = w.poll()
     # g_old from the cache stays ok; g_new (unconfirmed) is stale, never NEVER.
@@ -770,11 +964,7 @@ def test_watcher_degraded_poll_does_not_open_backup_set_missing():
     w.poll()
     assert ch.issues == {}  # healthy and fresh — nothing to page
 
-    class _Boom(MemoryStorage):
-        def list(self, prefix):
-            raise ConnectionError("r2 down")
-
-    w._storage = _Boom()
+    w._storage = _R2Unreachable()
     w._orgs = lambda: []  # census empties on the SAME degraded poll
     status = w.poll()
     # The inference IS made (state present, archive surface unreadable)...
@@ -1196,11 +1386,7 @@ def test_watcher_degraded_poll_does_not_resolve_a_real_never_incident():
     assert s1["per_team"]["team_a"] == "never"
     assert any("NEVER_BACKED_UP — team_a" in t for t in ch.issues.values())
 
-    class _Boom(MemoryStorage):
-        def list(self, prefix):
-            raise ConnectionError("r2 down")
-
-    w._storage = _Boom()
+    w._storage = _R2Unreachable()
     s2 = w.poll()
     # The degraded poll classifies from the CACHE — team_a is not `never` here,
     # it is the cache-miss arm. That is exactly why the resolve is unsafe (and
@@ -1224,11 +1410,7 @@ def test_watcher_degraded_poll_does_not_shrink_resolve():
     assert sorted(ch.issues.values()) == [
         "[DR] NEVER_BACKED_UP — team_a", "[DR] NEVER_BACKED_UP — team_b"]
 
-    class _Boom(MemoryStorage):
-        def list(self, prefix):
-            raise ConnectionError("r2 down")
-
-    w._storage = _Boom()
+    w._storage = _R2Unreachable()
     w._orgs = lambda: ["team_b"]  # census shrinks on the SAME degraded poll
     status = w.poll()
     assert status["no_teams"] is False
@@ -1248,11 +1430,7 @@ def test_watcher_org_departing_in_a_degraded_poll_still_closes_on_recovery():
     assert sorted(ch.issues.values()) == [
         "[DR] NEVER_BACKED_UP — team_a", "[DR] NEVER_BACKED_UP — team_b"]
 
-    class _Boom(MemoryStorage):
-        def list(self, prefix):
-            raise ConnectionError("r2 down")
-
-    w._storage = _Boom()  # degraded...
+    w._storage = _R2Unreachable()  # degraded...
     w._orgs = lambda: ["team_b"]  # ...and the census shrinks in the same poll
     w.poll()
     assert any("NEVER_BACKED_UP — team_a" in t for t in ch.issues.values())
@@ -1397,11 +1575,7 @@ def test_watcher_not_eligible_closes_preexisting_backup_set_missing():
     w._alerts.open_incident("BACKUP_SET_MISSING", "team_a")
     assert any("BACKUP_SET_MISSING — team_a" in t for t in ch.issues.values())
 
-    class _Boom(MemoryStorage):
-        def list(self, prefix):
-            raise ConnectionError("r2 down")
-
-    w._storage = _Boom()  # degraded: every other close path is gated off
+    w._storage = _R2Unreachable()  # degraded: every other close path is gated off
     status = w.poll()
     assert status["per_team"]["team_a"] == "not_eligible"
     # The BSM is gone. (`R2_DOWN` is expected to be open — the poll IS degraded;

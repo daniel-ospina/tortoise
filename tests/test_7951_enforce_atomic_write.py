@@ -401,10 +401,15 @@ def test_onboarding_writes_are_not_refused_on_a_journal_backed_lane(
     the refused write), so orgs silently never reached `complete`, the fork
     write and the completion gate stopped, and no counter fired.
 
-    The writers now take the SAME raw-handle lane the SDK's own live writes
-    use (`proj.g.query`), which #7951 records as the still-open residual. The
-    OTHER guards on that path are unchanged: the handle's #3595 operator and
-    #7174 numeric-domain refusals and its L2 bulk-wipe check all still run.
+    The writers take the SAME raw-handle lane the SDK's own live writes use
+    (`proj.g.query`). ⚠️ That lane was #7951's still-open residual; it is no
+    longer open-ended — `#9121` DECLARED this writer family (`onboarding.
+    metadata`, see `ONBOARDING_WRITE_LANE` in `onboarding/state.py`) ahead of
+    `#9079` closing the handle, so these writes stay sanctioned once the third
+    door is armed. The OTHER guards on that path are unchanged: the handle's
+    #3595 operator and #7174 numeric-domain refusals and its L2 bulk-wipe
+    check all still run; the armed-handle version of this pin lives in
+    `tests/test_9079_onboarding_declared_lane.py`.
 
     RED before the fix: the first `write_completed_step` raises
     `DirectCacheWriteRefused`. MUTATION: revert `onboarding.state._run` to
@@ -450,6 +455,18 @@ def test_the_selfhost_onboarding_lane_writes_on_a_journal_backed_proj(
 
     RED before the fix: the create-on-write MERGE raises
     `DirectCacheWriteRefused`.
+
+    ⚠️ This pin dispatches through the RAW HANDLE (`proj.g`, the THIRD door), not
+    the public `FalkorProjection.query` lane: `state._run` prefers `graph.g` when
+    the graph exposes one. Nothing here guards that door, so arming it (`#9124`)
+    changes nothing this pin can observe — the write keeps landing because `_run`
+    declares it (`#9121`). What it CANNOT tell you is whether the declaration is
+    doing its job, because it never arms the handle; that is the job of
+    `tests/test_9079_onboarding_declared_lane.py
+    ::test_the_selfhost_onboarding_lane_reaches_the_graph_with_the_guard_armed`,
+    which issues the same call with the `#9124` predicate installed. Nothing in
+    this file pins the public raw-query lane for onboarding, because `state._run`
+    no longer routes through it.
     """
     from tortoise.onboarding import selfhost
     from tortoise.onboarding import state as _os

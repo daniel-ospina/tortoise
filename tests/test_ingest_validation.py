@@ -78,6 +78,15 @@ def _points_pair(refs=("pA", "pB"), contents=("A implies B", "B")):
     ]}
 
 
+def _object_pair(refs=("oA", "oB"), names=("Object A", "Object B")):
+    """Object↔Object — the ONLY pair that keeps the operator-less direct
+    shape (#8499), so it is the pair the direct-edge rules still govern."""
+    return {"entities": [
+        {"ref": refs[0], "type": "object", "name": names[0]},
+        {"ref": refs[1], "type": "object", "name": names[1]},
+    ]}
+
+
 # ── Phase-1/2 parity (issue #1047 indicator 2) ──────────────────────
 
 class TestPhase1Phase2Parity:
@@ -299,9 +308,12 @@ class TestPhase1Phase2Parity:
             "label absent vs present": _points_pair() | {"connections": [
                 {"from": "pA", "to": "pB", "operator": "IMPL", "label": "L1"},
                 {"from": "pA", "to": "pB", "operator": "IMPL"}]},
-            "label conflict on direct path": _points_pair() | {"connections": [
-                {"from": "pA", "to": "pB", "operator": "IMPL", "label": "L1"},
-                {"from": "pA", "to": "pB", "operator": "IMPL", "label": "L2"}]},
+            "label conflict on the direct-edge path (Object↔Object)":
+                _object_pair() | {"connections": [
+                    {"from": "oA", "to": "oB", "operator": "IMPL",
+                     "label": "L1"},
+                    {"from": "oA", "to": "oB", "operator": "IMPL",
+                     "label": "L2"}]},
             "NAND absent vs bidirectional": _points_pair() | {"connections": [
                 {"from": "pA", "to": "pB", "operator": "NAND"},
                 {"from": "pA", "to": "pB", "operator": "NAND",
@@ -573,6 +585,94 @@ class TestDuplicateConnections:
         assert sdk._validate_bundle(bundle) == []
         res = sdk.ingest(bundle)
         assert res["created"]["connections"] == 2
+
+    # ── #8623: the direct-edge conflict rule is EFFECTIVE-route scoped ──
+
+    def test_label_differing_point_pair_legal(self, sdk):
+        """#8623 — two same-pair plain IMPL connections differing only in
+        ``label`` between :Points are LEGAL: the effective route is the
+        OPERATOR route (owner ruling 2026-10-13, #8499), whose `_find_operator`
+        dedup key INCLUDES ``label``, so both operators are distinct and both
+        commit.
+
+        The refused version applied the DIRECT-edge rule, which exists because
+        a direct edge MERGEs on ``(src, tgt, type)`` — the second would
+        silently overwrite the first's label. That premise does not hold on the
+        route these connections actually take, so the refusal was stricter than
+        the semantics it guards (the caller was told to migrate via
+        ``reify:true`` ×2 for a case that no longer needs it).
+        """
+        bundle = _points_pair() | {"connections": [
+            {"from": "pA", "to": "pB", "operator": "IMPL", "label": "L1"},
+            {"from": "pA", "to": "pB", "operator": "IMPL", "label": "L2"},
+        ]}
+        assert sdk._validate_bundle(bundle) == []
+        res = sdk.ingest(bundle)
+        assert res["created"]["connections"] == 2, res
+        assert res["deduped"]["connections"] == 0, res
+        # Two operators, one per label — NOT one overwriting the other.
+        labels = sorted(
+            r[0] for r in _query(
+                sdk, "MATCH (o:Point {is_operator:true}) RETURN o.label"))
+        assert labels == ["L1", "L2"], labels
+        # The endpoint-kind gate still REPORTS the reroute (never silent).
+        assert any("point_mediated_route" in w for w in res["warnings"]), \
+            res["warnings"]
+
+    def test_label_differing_point_pair_legal_with_external_endpoint(self, sdk):
+        """#8623 — the same case where ONE endpoint is a pre-existing external
+        Point and the other is a bundle-local ``points`` ref: both endpoints
+        resolve as Point-bearing (the bundle ref is minted as a plain :Point in
+        step 2, the external id is probed), so the pair is operator-mediated
+        and the differing labels are legal."""
+        existing = sdk.create_point("statement", "pre-existing point",
+                                    status="live")
+        bundle = {
+            "points": [{"ref": "pB", "kind": "statement", "content": "B"}],
+            "connections": [
+                {"from": existing["id"], "to": "pB", "operator": "IMPL",
+                 "label": "L1"},
+                {"from": existing["id"], "to": "pB", "operator": "IMPL",
+                 "label": "L2"},
+            ],
+        }
+        assert sdk._validate_bundle(bundle) == []
+        res = sdk.ingest(bundle)
+        assert res["created"]["connections"] == 2, res
+        labels = sorted(
+            r[0] for r in _query(
+                sdk, "MATCH (o:Point {is_operator:true}) RETURN o.label"))
+        assert labels == ["L1", "L2"], labels
+
+    def test_label_differing_object_pair_still_conflict(self, sdk):
+        """#8623 boundary — ``Object↔Object`` KEEPS the direct-edge rule: it is
+        the one pair that stays operator-less (#8499), so the second edge would
+        MERGE onto ``(src, tgt, type)`` and silently overwrite the first's
+        label. Rejecting is the fail-closed answer to that ambiguity."""
+        bundle = _object_pair() | {"connections": [
+            {"from": "oA", "to": "oB", "operator": "IMPL", "label": "L1"},
+            {"from": "oA", "to": "oB", "operator": "IMPL", "label": "L2"},
+        ]}
+        viols = sdk._validate_bundle(bundle)
+        assert viols, "Phase 1 accepted a direct-edge label conflict"
+        assert "conflicting" in viols[0]["message"], viols
+        with pytest.raises(ValueError):
+            sdk.ingest(bundle)
+        # Zero mutation on the rejection.
+        assert _edge_count(sdk, "IMPL") == 0
+
+    def test_identical_object_pair_duplicates_dedup_clean(self, sdk):
+        """#8623 boundary — the direct arm's CLEAN-dedup half is unchanged: two
+        identical same-pair direct edges still dedup onto one edge."""
+        bundle = _object_pair() | {"connections": [
+            {"from": "oA", "to": "oB", "operator": "IMPL"},
+            {"from": "oA", "to": "oB", "operator": "IMPL"},
+        ]}
+        assert sdk._validate_bundle(bundle) == []
+        res = sdk.ingest(bundle)
+        assert res["created"]["connections"] == 1, res
+        assert res["deduped"]["connections"] == 1, res
+        assert _edge_count(sdk, "IMPL") == 1
 
     def test_reversed_unidirectional_pair_legal(self, sdk):
         # a→b AND b→a where BOTH are unidirectional is legal (two directional

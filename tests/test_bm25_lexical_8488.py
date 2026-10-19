@@ -627,8 +627,9 @@ class TestReadPath:
         monkeypatch.delenv("TORTOISE_BM25_LEXICAL", raising=False)
 
         control_trace: list[dict] = []
-        control = sdk.tortoise_fts_query(QUERY, limit=10,
-                                         leg_trace=control_trace)
+        # ruff F841: the call's EFFECT is `control_trace`, asserted below — the
+        # return value is not read here.
+        sdk.tortoise_fts_query(QUERY, limit=10, leg_trace=control_trace)
         assert not [e for e in control_trace
                     if e.get("mechanism") == LEXICAL_MECHANISM_BM25], (
             "guard: gate OFF must never claim a BM25 lexical entry")

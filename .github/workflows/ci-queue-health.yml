@@ -1,0 +1,171 @@
+name: ci-queue-health
+
+# The REPO-LEVEL CI queue guard (#9115 acceptance 2 & 3).
+#
+# THE DEFECT THIS EXISTS FOR. On 2026-10-19 a reporting workflow
+# (`finding-provenance`) created a run every ~30 seconds from ~50 lanes and held
+# the repo's runner slots. 44-49 runs sat queued, 7 were executing, and TWELVE PR
+# heads carried ZERO check-runs (#9043 #9069 #9070 #9071 #9073 #9074 #9085 #9088
+# #9089 #9093 #9110 #9112) — `#9043 head d17d2664c5ab: check-runs 0 · workflow
+# runs 0`. The required check `python-ci-gate` cannot start without a slot, so no
+# check-run is ever created and every PR reads `WAITING-CI` for ever.
+#
+# No instrument noticed, and that is the half this workflow closes. A rail said
+# `queued`; pr-doctor said `no idle lane`; the heartbeat said
+# `ci_crit_med=21.6m`. All three are true and all three read as SLOW CI. The
+# distinction the fleet was missing — `ABSENT` (no run at this sha), `QUEUED` (a
+# run exists at this head with no slot) and `FLOOD` (the queue is held by one
+# non-PR workflow while PR work starves) — lives one level UP from any per-commit
+# reading, so `tools/ci_queue_health.py` measures it and this workflow runs it.
+#
+# WHY A POLL AND NOT AN EVENT. The condition is a STEADY STATE, not an event:
+# whatever created it, the queue is still held minutes later, and only a poll
+# sees that. Nothing fires when a queue stays deep.
+#
+# WHY IT ACTS (`--apply`). #9115 acceptance 2 asks for a guard that gives PR work
+# priority when the queue is dominated by one workflow. The governor cancels the
+# OLDEST excess QUEUED runs of a declared-trim-safe offender — never a
+# pull-request-event run (that IS the priority), never a workflow that is not on
+# the allow-list (a deploy, a publish, a post-merge validation or a backup has no
+# re-derivable replacement, so it is REPORTED and not acted on), never more than
+# `--max-cancel`, and never on an unreadable queue. It does NOT disable the
+# offender: the issue offers "auto-paused" as the alternative arm, and pausing a
+# REPORTING gate stops the gate from gating anything until something re-enables it
+# — a silent fail-open if this workflow ever stops running. Only the COMMENT arm
+# of a reporting workflow is trimmable: its annotation is re-created by the next
+# comment on that issue, so the loss is one annotation. Its issue-BODY arm is
+# never trimmed — that gate runs once per issue and a cancelled run posts nothing
+# that a later comment re-creates — and neither is the `workflow_dispatch` run that
+# is itself the documented recovery (`gh workflow run finding-provenance.yml -f
+# issue_number=<N>`).
+#
+# THE RED IS THE ALARM, AND IT CANNOT BLOCK A MERGE. The exit code follows the
+# tool's REPORTED (post-action) verdict, so a flood that still stands after the
+# governor ran exits 1 and the run is red — a governor that issued cancellations
+# has NOT made the queue healthy, and a green run for a held queue is exactly the
+# silence this workflow exists to break. A flood this invocation CLEARED exits 0
+# and prints `was CI: FLOOD(...) -> cleared N of M`. `PR-STARVED` (no PR run
+# executing, a queued PR run past the age floor, and no trim-safe offender to
+# blame) is an `::warning` at exit 0: the state is real, and there is nothing the
+# governor may cancel. `PR-UNWITNESSED` (the feed was cut at its page cap, so the
+# oldest queued runs — the end the age clause needs — were never read) is also an
+# `::warning` at exit 0: it names what was NOT measured instead of inferring
+# health. Neither can block a merge, because a `schedule`-event run is
+# a NON-CODE event: the merge rail's own `NON_CODE_EVENTS` set excludes
+# `schedule|issues|issue_comment` from the merge decision, so a red scheduled run
+# never gates a PR.
+#
+# `schedule` / `workflow_dispatch` ONLY. The tool is the single implementation;
+# run it by hand for a dry run:
+#     uv run python tools/ci_queue_health.py            # measure only
+#     uv run python tools/ci_queue_health.py --apply    # measure and unjam
+on:
+  schedule:
+    # Every 10 minutes, offset off the hour boundary: GitHub documents that
+    # scheduled events are delayed during high load, "especially at the start of
+    # each hour", so minute 0 is the worst minute to ask for. A dropped fire is
+    # not a loss — the next tick repeats the check.
+    - cron: "3,13,23,33,43,53 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Measure only (do not cancel any queued run)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  # Cancel a queued run (POST /actions/runs/{id}/cancel).
+  actions: write
+
+concurrency:
+  # Serialise, never cancel: two governors running at once would each compute the
+  # same excess set and cancel runs the other had kept.
+  group: ci-queue-health
+  cancel-in-progress: false
+
+jobs:
+  # NOT a branch-protection required context, and a non-code event, so a red here
+  # cannot block a merge — see the header.
+  queue-health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      # tools/ci_queue_health.py is stdlib-only; this pin supplies the >=3.12
+      # interpreter every tool in `tools/` requires (#5128).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Measure the queue, and unjam a trim-safe flood
+        env:
+          # `gh` reads the token from the ENVIRONMENT; Actions exposes it only as
+          # a context (#3092 — a `gh` call with no env binding fails every time).
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          set +e
+          if [ "${DRY_RUN}" = "true" ]; then
+            python3 tools/ci_queue_health.py --json > /tmp/ci-queue-health.json 2>/tmp/ci-queue-health.err
+            rc=$?
+          else
+            python3 tools/ci_queue_health.py --apply --json > /tmp/ci-queue-health.json 2>/tmp/ci-queue-health.err
+            rc=$?
+          fi
+          set -e
+          # The one-line state is the artifact the fleet reads. It is printed on
+          # stdout AND into the step summary, so it survives the run page. A
+          # one-liner on purpose: a heredoc inside a YAML block scalar is a
+          # delimiter trap (the closing token must land at column 0).
+          state="$(python3 -c "import json,sys; print(json.load(open('/tmp/ci-queue-health.json')).get('state_line','CI: UNKNOWN'))" 2>/dev/null \
+                   || echo 'CI: UNKNOWN (the tool produced no state line)')"
+          echo "$state"
+          echo "$state" >> "$GITHUB_STEP_SUMMARY"
+          # A CLEARED flood reports the POST-action reading (the tool re-measures
+          # after it cancels), so the summary would otherwise read as though no
+          # flood was ever seen. Print what it was: `was CI: FLOOD(...) -> cleared
+          # N of M`, which keeps "the queue moved" distinct from "the queue was
+          # healthy all along" — the ambiguity ISSUE 2 of the #9118 review named.
+          transition="$(python3 -c "import json; d=json.load(open('/tmp/ci-queue-health.json')); print(f\"was {d['pre_action_state_line']} -> cleared {len(d['cancelled'])} of {d['candidates']}\" if d.get('cleared') else '')" 2>/dev/null || true)"
+          if [ -n "$transition" ]; then
+            echo "$transition"
+            echo "$transition" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          {
+            echo '```json'
+            cat /tmp/ci-queue-health.json
+            echo '```'
+            echo
+            echo '```'
+            cat /tmp/ci-queue-health.err
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # An annotation, so the state is visible in the run's annotations and not
+          # only inside a summary nobody opens. The tool's exit code already follows
+          # its REPORTED verdict (1 = a FLOOD still stands, 2 = could not measure),
+          # so `rc` is a payload-derived alarm; the verdict is read as well for the
+          # PR-STARVED / PR-UNWITNESSED warnings, which are real states with no
+          # action available.
+          #
+          # ⛔ THE STATE LINE GOES IN THE MESSAGE, NEVER IN A `title=` PROPERTY.
+          # GitHub parses a workflow command's property section as `key=value`
+          # pairs separated by COMMAS, and every state line contains commas
+          # (`queued=21, pr_running=0`). `title=${state}` therefore ended the title
+          # at the first comma and silently dropped the rest: the rendered title was
+          # `CI: FLOOD(finding-provenance` — exactly the `queued=N, pr_running=0`
+          # spelling #9115 asks the fleet to see. Repo convention elsewhere is
+          # `::error::<message>`; do not try to escape the commas (P2-1 of the
+          # #9118 review).
+          verdict="$(python3 -c "import json; print(json.load(open('/tmp/ci-queue-health.json')).get('verdict','UNKNOWN'))" 2>/dev/null || echo UNKNOWN)"
+          if [ "$rc" -eq 1 ]; then
+            echo "::error::${state} — PR CI is NOT slow, it is NOT RUNNING, and it still is after this run's cancellations. See the step summary."
+          elif [ "$rc" -eq 2 ]; then
+            echo "::warning::CI: UNKNOWN — the queue could not be measured, so nothing was changed and nothing is certified healthy."
+          elif [ "$verdict" = "PR-STARVED" ]; then
+            echo "::warning::${state} — PR CI is not running: no PR-event run is executing and a queued PR run has waited past the age floor. No trim-safe offender can be blamed, so there is nothing the governor may cancel."
+          elif [ "$verdict" = "PR-UNWITNESSED" ]; then
+            echo "::warning::${state} — the queued feed was cut at the page cap while no PR-event run is executing, so PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here; raise --max-pages to read further back."
+          fi
+          echo "ci-queue-health exit=$rc (0 = OK, cleared, PR-STARVED or PR-UNWITNESSED (warned); 1 = FLOOD stands; 2 = could not measure)"
+          exit "$rc"

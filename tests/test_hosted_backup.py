@@ -1567,6 +1567,10 @@ class _FakeS3:
     def delete_object(self, Bucket, Key):
         self.objects.pop(Key, None)
 
+    def head_bucket(self, Bucket):
+        self.head_bucket_calls: list[str] = getattr(self, "head_bucket_calls", [])
+        self.head_bucket_calls.append(Bucket)
+
     def get_paginator(self, name):
         assert name == "list_objects_v2"
 
@@ -1628,6 +1632,33 @@ def test_r2storage_happy_path(monkeypatch):
     # delete removes the object
     store.delete("backups/c/d/manifest.json")
     assert store.list("backups/c/") == []
+
+
+def test_r2storage_head_bucket_is_a_bucket_scoped_probe(monkeypatch):
+    """#8422: ``head_bucket`` is the reachability probe the watcher's two-tier
+    filing depends on.
+
+    It must be BUCKET-scoped (``head_bucket(Bucket=…)``) — not the account-level
+    ``list_buckets``, which R2's S3 API does not reliably support from an
+    object-scoped key — return None on success, and RE-RAISE as a ``RuntimeError``
+    on failure so a caller cannot read a failed probe as a verdict.
+    """
+    store, fake = _r2_with_fake_boto3(monkeypatch)
+    assert store.head_bucket() is None
+    assert fake.head_bucket_calls == ["tortoise-backups"]
+
+    def _boom(Bucket):
+        raise ConnectionError("endpoint unreachable")
+
+    fake.head_bucket = _boom
+    with pytest.raises(RuntimeError, match="head_bucket failed"):
+        store.head_bucket()
+
+
+def test_memory_storage_head_bucket_is_trivially_reachable():
+    """#8422: the in-memory store is a full ``BackupStorage`` — a test double that
+    breaks ``list()`` on it is simulating the LISTING tier, not unreachability."""
+    assert MemoryStorage().head_bucket() is None
 
 
 # ── listing / retention ──────────────────────────────────────────────────────

@@ -48,8 +48,15 @@ _EVENT_KEYS = {"org_id", "event_name", "properties", "created_at"}
 class _Resp:
     status_code = 201
 
-    def __init__(self, payload=None):
+    def __init__(self, payload=None, headers=None):
         self._payload = payload if payload is not None else []
+        # A REAL httpx response carries these, and the control-plane seam reads
+        # both off every response: ``Content-Range`` is the completeness signal
+        # (#5388) and ``content`` distinguishes an empty body from an empty
+        # result set. A double missing them is not a transport the reader can be
+        # pointed at, so it would hide the page the double just served.
+        self.headers = dict(headers or {})
+        self.content = json.dumps(self._payload).encode()
 
     def json(self):
         return self._payload
@@ -527,7 +534,10 @@ def test_read_path_resolves_to_the_analytics_store_under_production_env(
     assert kwargs["headers"]["apikey"] == PROD_KEY
     assert kwargs["headers"]["Authorization"] == f"Bearer {PROD_KEY}"
     assert kwargs["params"]["event_name"] == "eq.capture_cost"
-    assert kwargs["params"]["select"] == "org_id,properties,created_at"
+    # ``id`` is carried because it is the #8151 keyset walk's CURSOR — the next
+    # page's bound is read off the last row served, so a select without it
+    # cannot advance (and the report reads the other three).
+    assert kwargs["params"]["select"] == "id,org_id,properties,created_at"
     # The window must actually DERIVE from `days`. Mutation that reds these:
     # delete the `created_at` filter (the pull then ignores `days` and returns
     # the whole table) or drop the ordering.
@@ -536,7 +546,11 @@ def test_read_path_resolves_to_the_analytics_store_under_production_env(
     age = datetime.now(UTC) - datetime.fromisoformat(stamp[4:])
     assert timedelta(days=1) - timedelta(minutes=5) <= age <= (
         timedelta(days=1) + timedelta(minutes=5)), age
-    assert kwargs["params"]["order"] == "created_at.desc"
+    # Ordered on the CURSOR, not on ``created_at`` (#8151): a walk that orders
+    # by a non-unique column can skip or repeat a timestamp boundary, and
+    # ``offset``/``Range`` paging over a window rows are still being written
+    # into serves one row twice while missing another.
+    assert kwargs["params"]["order"] == "id"
 
 
 def test_read_path_accepts_the_legacy_name_as_well(monkeypatch):

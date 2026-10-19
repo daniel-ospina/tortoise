@@ -83,6 +83,14 @@ on:
       - 'supabase/**'
   workflow_dispatch:
 
+# A DEPLOY must never be cancelled midway: a cancelled migration apply leaves
+# the schema half-migrated, which no re-run repairs deterministically. One
+# group, never cancelling — a newer push waits for the in-flight deploy instead
+# of aborting it. Bookkeeping, not a merge gate (#9115).
+concurrency:
+  group: supabase-deploy
+  cancel-in-progress: false
+
 jobs:
   # Drift visibility on push (#1095): warn-only gate so a pure supabase/**
   # push (no app code) still reports pending migrations. The BLOCK lives in

@@ -469,7 +469,7 @@ Grouped by **who reaches them**. This is the ranking that matters for cutting: e
 | `TortoiseSDK.resolve_id` | reached by no registered MCP tool; caller categories: engine | tooling, docs | **review** | no MCP tool binds it; callers: engine |
 | `TortoiseSDK.ulid` | reached by no registered MCP tool; caller categories: engine | eval-harness, tooling, docs | **review** | no MCP tool binds it; callers: engine |
 | `TortoiseSDK.annotate_ask_hits` | reached by no registered MCP tool; caller categories: engine, eval-harness, other-tooling | eval-harness, tooling, docs | **review** | no MCP tool binds it; callers: engine, eval-harness, other-tooling |
-| `TortoiseSDK.supersede_point` | reached by no registered MCP tool; caller categories: engine, other-tooling, tenant-rest | tooling, skill-docs, docs | **review** | no MCP tool binds it; callers: engine, other-tooling, tenant-rest |
+| `TortoiseSDK.supersede_point` | reached by no registered MCP tool; caller categories: engine, eval-harness, other-tooling, tenant-rest | eval-harness, tooling, skill-docs, docs | **review** | no MCP tool binds it; callers: engine, eval-harness, other-tooling, tenant-rest |
 | `TortoiseSDK.invitation_get_by_id` | reached by no registered MCP tool; caller categories: engine, tenant-rest | docs | **review** | no MCP tool binds it; callers: engine, tenant-rest |
 | `TortoiseSDK.link_source_to_entity` | reached by no registered MCP tool; caller categories: engine, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: engine, tenant-rest |
 | `TortoiseSDK.membership_create` | reached by no registered MCP tool; caller categories: engine, tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: engine, tenant-rest |

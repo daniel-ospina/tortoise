@@ -593,6 +593,13 @@ def step7() -> None:
 
 _FALKORDB_PORT = "16379"
 _FALKORDB_CONTAINER = "falkordb-tortoise"
+#: The engine this long-lived dev container runs. PINNED, never `:latest`
+#: (#8124): `falkordb/falkordb:latest` now resolves to engine 6.0.x, which
+#: PANICS the server (`reply.rs:655`, `reply_compact`) on
+#: `OPTIONAL MATCH (s) RETURN count(s) AS n, s.harness AS h` — a query shape the
+#: suite issues — and the container exits, so the failure reads as an
+#: unreachable host rather than a crash. Same engine as the CI gate (#6386).
+FALKORDB_IMAGE = "falkordb/falkordb-server:v4.20.6"
 
 
 def _container_status(name: str) -> str:
@@ -601,6 +608,18 @@ def _container_status(name: str) -> str:
         ["docker", "container", "inspect", "-f", "{{.State.Status}}", name]
     )
     return out or "missing"
+
+
+def _container_image(name: str) -> str:
+    """The image the container was CREATED from ('' when unreadable).
+
+    `docker start` never re-resolves an image: a container created before the
+    pin existed keeps its original engine ID for life (#8124). The status alone
+    therefore cannot answer "is this container pinned?" — this can.
+    """
+    return _run_output(
+        ["docker", "container", "inspect", "-f", "{{.Config.Image}}", name]
+    )
 
 
 def _port_collision(port: str) -> str | None:
@@ -619,14 +638,43 @@ def step8() -> None:
 
     status = _container_status(_FALKORDB_CONTAINER)
 
-    if status == "running":
-        _skip("container already running")
-        return
-
-    if status == "exited":
-        print("  Restarting stopped container...")
-        _run(["docker", "start", _FALKORDB_CONTAINER])
-        return
+    # #8124: an EXISTING container is the case the pin does not reach by itself.
+    # `docker run` only happens on the `missing` path, and a container created
+    # from the old floating `falkordb/falkordb:latest` keeps its engine for life
+    # (`docker start` never re-resolves an image) — under `--restart
+    # unless-stopped` that is the panicking 6.0.x engine restarted forever, on
+    # the container MOST likely to be broken (it is the one that crashed).
+    # Recreating is safe: the data dir is a bind mount, not the container's.
+    if status in ("running", "exited"):
+        created_image = _container_image(_FALKORDB_CONTAINER)
+        if not created_image:
+            # #8124 review (P3): a failure is never read as permission. `""` is
+            # `_container_image`'s "could not read" — not "it already IS the
+            # pin" — so it must not fall through to "container already
+            # running"/"Restarting stopped container" as if the engine had been
+            # confirmed. Nor is it permission to DESTROY a container whose
+            # provenance is unknown. Say what is unknown, and how to settle it.
+            print(f"  Could not read which image {_FALKORDB_CONTAINER!r} was "
+                  f"created from, so the engine pin ({FALKORDB_IMAGE}) cannot "
+                  f"be confirmed — leaving the container untouched. Check it "
+                  f"with `docker container inspect -f "
+                  f"'{{{{.Config.Image}}}}' {_FALKORDB_CONTAINER}` and run "
+                  f"`docker rm -f {_FALKORDB_CONTAINER}` if that is not the "
+                  f"pin (#8124).")
+            return
+        if created_image != FALKORDB_IMAGE:
+            print(f"  Container was created from {created_image!r}, not the "
+                  f"pinned {FALKORDB_IMAGE!r} (#8124) — recreating it on the "
+                  f"pin (data in ./data is a bind mount and is kept)...")
+            _run(["docker", "rm", "-f", _FALKORDB_CONTAINER])
+            status = "missing"
+        elif status == "running":
+            _skip("container already running")
+            return
+        else:
+            print("  Restarting stopped container...")
+            _run(["docker", "start", _FALKORDB_CONTAINER])
+            return
 
     if status not in ("missing",):
         print(f"  Removing stale container ({status})...")
@@ -655,7 +703,14 @@ def step8() -> None:
         "-p", f"127.0.0.1:{_FALKORDB_PORT}:6379",
         "-v", f"{data_dir}:/var/lib/falkordb/data",
         "-e", "REDIS_ARGS=--appendonly yes --save 60 1000 --maxmemory 512mb --maxmemory-policy noeviction",
-        "falkordb/falkordb:latest",
+        # A PINNED engine, not `falkordb/falkordb:latest` (#8124): that tag now
+        # resolves to engine 6.0.x, whose `reply.rs:655` `reply_compact` PANICS
+        # the server on `OPTIONAL MATCH (s) RETURN count(s) AS n, s.harness AS h`
+        # (aggregate + property in one projection) and exits it — this container
+        # is long-lived (`--restart unless-stopped`), so the crash would take the
+        # developer's DB down mid-session and read as an unreachable host. Pinned
+        # to the engine the CI gate runs (#6386).
+        FALKORDB_IMAGE,
     ])
     ENV_VARS["FALKORDB_PORT"] = _FALKORDB_PORT
 

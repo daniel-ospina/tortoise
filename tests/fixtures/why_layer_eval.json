@@ -1,0 +1,111 @@
+{
+  "_comment": [
+    "#3990 \u2014 the WHY-LAYER eval set. Frozen: tools/why_layer_rate.py pins this",
+    "file's sha256 and refuses to run against a different one (a changed eval set",
+    "is a NEW instrument, not a moved rate).",
+    "",
+    "Every question's gold claim is OPERATOR-MEDIATED by construction: the",
+    "seeder creates a support point, the claim, and the operator between them",
+    "through the public write path (create_operator / mitigate_operator), so the",
+    "gold operator id is the id the product minted \u2014 W2 compares identity, never",
+    "text. `mitigation: null` and `operator_label: null` are MEASURED absences",
+    "(W1 must not invent a label, W3 must not fabricate a mitigation).",
+    "",
+    "DECORRELATED BY DESIGN: `operator_label != null` and `mitigation != null`",
+    "are independent here (2 rows carry both, 2 label-only, 2 mitigation-only, 2",
+    "neither). A set where they always moved together could not attribute a W1",
+    "or a W3 failure to the right dimension.",
+    "",
+    "KNOWN LIMITATION, stated rather than implied: every row is the same SHAPE",
+    "(one evidence -> one IMPL operator -> one claim). Mixed-edge claims (the",
+    "direct-IMPL leg) and claims mediated by more than one operator are outside",
+    "the set's reach; they are pinned by tests/test_why_operator_mediation.py",
+    "instead. This instrument measures the shipped shape, not every shape.",
+    "",
+    "Abstention and verbatim grounding are NOT measured here \u2014 they belong to",
+    "tools/ask_shape_rate.py (L1/L3). Keeping them out means no question sits in",
+    "the denominator while being out of scope for the legs (no vacuous passes)."
+  ],
+  "questions": [
+    {
+      "question_id": "wl-01",
+      "question": "Why do we believe the renewal completed in March?",
+      "token": "zephyrquill",
+      "claim": "the zephyrquill contract renewed in March",
+      "support": "billing ledger shows the zephyrquill renewal charge posted",
+      "operator_type": "IMPL",
+      "operator_label": "supports",
+      "mitigation": "the ledger was reconciled by hand once"
+    },
+    {
+      "question_id": "wl-02",
+      "question": "Why do we believe the seal is defective?",
+      "token": "obsidianlatch",
+      "claim": "the obsidianlatch seal failed under load",
+      "support": "audit walked the obsidianlatch gasket after 40 cycles",
+      "operator_type": "IMPL",
+      "operator_label": null,
+      "mitigation": "the outage was a once-a-year event"
+    },
+    {
+      "question_id": "wl-03",
+      "question": "Why do we believe the vendor raised prices?",
+      "token": "harrowfen",
+      "claim": "the harrowfen vendor raised unit prices in Q2",
+      "support": "the harrowfen invoice total rose 20 percent quarter over quarter",
+      "operator_type": "IMPL",
+      "operator_label": "supports",
+      "mitigation": null
+    },
+    {
+      "question_id": "wl-04",
+      "question": "Why do we believe the migration slipped?",
+      "token": "glintmarsh",
+      "claim": "the glintmarsh migration slipped a week",
+      "support": "staging burned half the glintmarsh window on a schema conflict",
+      "operator_type": "IMPL",
+      "operator_label": null,
+      "mitigation": null
+    },
+    {
+      "question_id": "wl-05",
+      "question": "Why do we believe the design was accepted?",
+      "token": "cinderhollow",
+      "claim": "the cinderhollow design is accepted",
+      "support": "two reviewers signed off on the cinderhollow spec",
+      "operator_type": "IMPL",
+      "operator_label": "addresses",
+      "mitigation": "one sign-off was conditional on a follow-up"
+    },
+    {
+      "question_id": "wl-06",
+      "question": "Why do we believe the cache is cold on boot?",
+      "token": "frostwhistle",
+      "claim": "the frostwhistle cache is cold on boot",
+      "support": "the frostwhistle boot trace shows zero cache hits for 40 seconds",
+      "operator_type": "IMPL",
+      "operator_label": null,
+      "mitigation": "the batch window was unusually small that night"
+    },
+    {
+      "question_id": "wl-07",
+      "question": "Why do we believe the retry budget is too small?",
+      "token": "emberquay",
+      "claim": "the emberquay retry budget is too small",
+      "support": "emberquay drained its retries in nine minutes during the outage",
+      "operator_type": "IMPL",
+      "operator_label": "hasPart",
+      "mitigation": null
+    },
+    {
+      "question_id": "wl-08",
+      "question": "Why do we believe the export path is unowned?",
+      "token": "sablewick",
+      "claim": "the sablewick export path has no owner",
+      "support": "the sablewick service map lists no on-call rotation for exports",
+      "operator_type": "IMPL",
+      "operator_label": null,
+      "mitigation": null
+    }
+  ]
+}

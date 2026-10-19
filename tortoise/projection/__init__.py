@@ -676,11 +676,19 @@ _WHERE_REAL_RE = re.compile(
 #
 # This is still a LEXICAL test — it does not verify that the bracket really
 # opens a MATCH pattern, so a malformed statement is failed closed by
-# ``_mask_is_unterminated`` first. Delete-target awareness (a property map on a
-# pattern OTHER than the deleted variable) is the separate remainder #8215 and
-# is NOT claimed here (see KNOWN GAPS).
-_PROPERTY_MAP_RE = re.compile(
-    r"[\(\[]\s*:?\s*[A-Za-z_]\w*(?:\s*:\s*[A-Za-z_]\w*)*\s*\{(?!\s*[.,])"
+# ``_mask_is_unterminated`` first.
+#
+# #8215: the brace must also belong to the pattern that BINDS THE DELETED
+# VARIABLE, which is why the variable is CAPTURED here. A property map on a
+# pattern that binds something else (``MATCH (n:Point {id:$id}) WITH n MATCH
+# (m) DETACH DELETE m``) says nothing about what the DELETE removes — ``(m)``
+# binds every node — so the exemption is attributed to the target the map's
+# pattern actually binds (``_var_is_scoped``), never granted to the statement
+# as a whole. An ANONYMOUS pattern (``(:Label {…})``) captures no variable and
+# therefore scopes nothing a DELETE can name.
+_PROPERTY_MAP_VAR_RE = re.compile(
+    r"[\(\[]\s*(?P<var>[A-Za-z_]\w*)"
+    r"(?:\s*:\s*(?:[A-Za-z_]\w*|\$[A-Za-z_]\w*))*\s*\{(?!\s*[.,])"
 )
 # The START of a ``CALL { ... }`` subquery. The subquery's own braces are
 # delimiters, not a property map, and a property map INSIDE it does not scope a
@@ -782,41 +790,130 @@ def _delete_targets(text: str) -> tuple[list[str], int]:
     return _VAR_NAME_RE.findall(tail), m.start()
 
 
-def _var_is_scoped(text: str, var: str, delete_at: int) -> bool:
-    """True when ``var`` is provably a proper subset of the graph (#3007).
+#: ``WITH <ident> AS <ident>`` — a re-binding that carries a variable's
+#: targeting FORWARD (``MATCH (n:Point {id:$id}) WITH n AS m DETACH DELETE m``
+#: deletes the same single Point the ``n`` form does). The source must be a BARE
+#: identifier: an expression (``count(s) AS present``) has no pattern of its own
+#: and can carry no scoping, and the same lookbehind ``_WHERE_STOP_RE`` uses
+#: keeps a PROPERTY (``WITH n.id AS x``) from being read as a variable.
+_ALIAS_RE = re.compile(
+    r"(?<![\w.$:])([A-Za-z_]\w*)\s+AS\s+([A-Za-z_]\w*)\b", re.IGNORECASE
+)
+#: Clause keywords that TERMINATE a WHERE chunk. The negative lookbehind is the
+#: same one ``_WRITE_CLAUSE_RE`` carries: a keyword only counts at clause
+#: position, never right after a ``.`` or a word character, so a PROPERTY named
+#: like a keyword (``WHERE n.set = 1``, ``WHERE n.order = 1``) does not truncate
+#: the clause and hide the reference that scopes the delete (#7174).
+_WHERE_STOP_RE = re.compile(
+    r"(?<![\w.$:])(?:RETURN|WITH|ORDER|SKIP|LIMIT|SET|CREATE|MERGE|UNWIND|MATCH|"
+    r"OPTIONAL|FOREACH|CALL|DETACH|DELETE|REMOVE|UNION|USE|LOAD|DROP)\b",
+    re.IGNORECASE,
+)
+_WHERE_SPLIT_RE = re.compile(r"\bWHERE\b", re.IGNORECASE)
 
-    Three lexical scoping signals, each anchored to the DELETED variable:
+
+def _pattern_property_map_vars(text: str, delete_at: int) -> set[str]:
+    """Variables carrying a property map on their OWN pattern, before the DELETE.
+
+    #8215: read from the masked, CALL-stripped ``text`` and bounded at the
+    ``DETACH DELETE`` — a map that opens after the clause cannot scope the rows
+    it already deleted.
+    """
+    return {m.group("var") for m in _PROPERTY_MAP_VAR_RE.finditer(text[: max(delete_at, 0)])}
+
+
+def _scope_names(text: str, var: str, max_hops: int = 8) -> set[str]:
+    """``var`` plus every variable it is a ``WITH <src> AS <dst>`` alias OF.
+
+    #8215: the deleted NAME is not always the name the targeting construct is
+    spelled with. Following aliases source-ward keeps
+    ``MATCH (n:Point {id:$id}) WITH n AS m DETACH DELETE m`` recognised as the
+    targeted delete it is, instead of newly refusing it once the exemptions
+    became per-target. Bounded so a cycle in a malformed statement cannot hang
+    the classifier.
+    """
+    if _ALIAS_RE.search(text) is None:
+        return {var}
+    aliases = _ALIAS_RE.findall(text)
+    names = {var}
+    frontier = [var]
+    for _ in range(max_hops):
+        nxt = [src for src, dst in aliases if dst in frontier and src not in names]
+        if not nxt:
+            break
+        names.update(nxt)
+        frontier = nxt
+    return names
+
+
+def _where_scopes(text: str, name: str) -> bool:
+    """True when a WHERE clause carries a REAL reference to ``name`` (#8215).
+
+    Read per-WHERE and bounded at the next clause keyword, so a real reference
+    belonging to a DIFFERENT variable's clause cannot exempt this delete:
+    ``MATCH (n:Point {id:$id}) MATCH (m) WHERE n.id = $id DETACH DELETE m``
+    still wipes the graph. Matches the pre-#8215 spelling of the signal (a
+    property/param/CONTAINS/``IN`` reference, never a tautology) — only the
+    attribution is new.
+    """
+    ident = re.compile(r"\b" + re.escape(name) + r"\b")
+    for chunk in _WHERE_SPLIT_RE.split(text)[1:]:
+        stop = _WHERE_STOP_RE.search(chunk)
+        if stop is not None:
+            chunk = chunk[: stop.start()]
+        if ident.search(chunk) is not None and _WHERE_REAL_RE.search(chunk) is not None:
+            return True
+    return False
+
+
+def _var_is_scoped(text: str, var: str, delete_at: int) -> bool:
+    """True when ``var`` is provably a proper subset of the graph (#3007/#8215).
+
+    Five lexical scoping signals, each anchored to the DELETED variable:
 
     (a)  a LABEL on the variable's own pattern — ``MATCH (n:GraphEvent) ...
          DETACH DELETE n``;
-    (a') a LABEL PREDICATE on it — ``WHERE n:Point``; and
-    (b)  a ``WITH <var> ... LIMIT`` bound on it — ``WITH n ... LIMIT $overflow``.
+    (a') a LABEL PREDICATE on it — ``WHERE n:Point``;
+    (b)  a ``WITH <var> ... LIMIT`` bound on it — ``WITH n ... LIMIT $overflow``;
+    (c)  a PROPERTY MAP on its own pattern — ``MATCH (n:Point {id:$id})``
+         (#8215: the map must bind THIS variable, not merely appear somewhere);
+         and
+    (d)  a REAL WHERE reference to it — ``WHERE n.id = $id`` (#8215: likewise).
 
-    A label or a LIMIT that constrains a DIFFERENT variable must NOT exempt the
-    wipe: ``MATCH (x:Foo) WITH x MATCH (n) DETACH DELETE n`` and
-    ``MATCH (n) WITH n LIMIT 10 MATCH (m) DETACH DELETE m`` each still delete
-    every node. That is why the check is per-target rather than a substring
-    test over the whole statement.
+    A label, LIMIT, property map or WHERE reference that constrains a
+    DIFFERENT variable must NOT exempt the wipe: ``MATCH (x:Foo) WITH x MATCH
+    (n) DETACH DELETE n``, ``MATCH (n) WITH n LIMIT 10 MATCH (m) DETACH DELETE
+    m`` and ``MATCH (n:Point {id:$id}) WITH n MATCH (m) DETACH DELETE m`` each
+    still delete every node. That is why every signal is per-target rather than
+    a substring test over the whole statement. A ``WITH <src> AS <var>`` alias
+    chain is followed to its source (``_scope_names``) so the signal is read on
+    the name the pattern actually binds.
     """
-    name = re.escape(var)
-    if re.search(_VAR_LABEL_RE.format(var=name), text) is not None:
-        return True
-    if re.search(r"\bWHERE\s+" + name + r"\b\s*:", text, re.IGNORECASE) is not None:
-        return True
-    # Only a WITH *before* the DELETE can bound the rows it deletes.
-    for wm in _WITH_LIMIT_RE.finditer(text[:delete_at]):
-        if re.search(r"\b" + name + r"\b", wm.group(1)) is not None:
+    maps = _pattern_property_map_vars(text, delete_at)
+    for name in _scope_names(text, var):
+        if name in maps:
+            return True
+        escaped = re.escape(name)
+        if re.search(_VAR_LABEL_RE.format(var=escaped), text) is not None:
+            return True
+        if re.search(r"\bWHERE\s+" + escaped + r"\b\s*:", text, re.IGNORECASE) is not None:
+            return True
+        # Only a WITH *before* the DELETE can bound the rows it deletes.
+        for wm in _WITH_LIMIT_RE.finditer(text[:delete_at]):
+            if re.search(r"\b" + escaped + r"\b", wm.group(1)) is not None:
+                return True
+        if _where_scopes(text, name):
             return True
     return False
 
 
 def _is_bulk_wipe(cypher: str) -> bool:
-    """True when ``cypher`` may delete EVERY node of the graph (#99/#3037/#3007).
+    """True when ``cypher`` may delete EVERY node of the graph (#99/#3037/#3007/#8215).
 
-    Bulk = contains DETACH DELETE and carries no targeting construct: a
-    property map on a node/relationship pattern, a real WHERE clause, or a
-    label/LIMIT scope on the DELETED variable itself. The verdict is made on
-    structure, not on raw text — comments, string literals, backtick
+    Bulk = contains DETACH DELETE and carries no targeting construct on the
+    DELETED variable itself: a property map on ITS node/relationship pattern, a
+    real WHERE reference to it, or a label/LIMIT scope on it. The verdict is
+    made on structure, not on raw text — comments, string literals, backtick
     identifiers and ``CALL { ... }`` subqueries are blanked first, so a stray
     ``{`` in any of them cannot exempt a whole-graph wipe (#3037).
 
@@ -824,8 +921,14 @@ def _is_bulk_wipe(cypher: str) -> bool:
     ORDER BY n.seq ASC LIMIT $overflow DETACH DELETE n``) is a maintenance
     delete of a SUBGRAPH, not a whole-graph wipe — classifying it bulk made the
     event-retention cap a silent no-op on every non-test server graph. The
-    scoping must be on the DELETED variable; a label on another pattern (this
-    is the #8215 shape) does not exempt.
+    scoping must be on the DELETED variable; a label on another pattern does not
+    exempt.
+
+    #8215: the same attribution applies to the property-map and WHERE signals,
+    which used to be read over the WHOLE statement. ``MATCH (n:Point {id:$id})
+    WITH n MATCH (m) DETACH DELETE m`` therefore read as "targeted" and, on the
+    raw-query lane where L2 is the only layer, executed a whole-graph wipe on a
+    production server graph with no name check and no token.
     """
     # Fast path: the overwhelming majority of statements are reads. A DETACH
     # DELETE cannot be MASKED INTO existence, so a raw-text miss proves the
@@ -850,17 +953,13 @@ def _is_bulk_wipe(cypher: str) -> bool:
     if _mask_is_unterminated(masked):
         return True
     text = _strip_call_subqueries(masked)
-    # Property map on a node/relationship pattern => targeted
-    # (e.g. {id:$id}, {org_id:$id})
-    if _PROPERTY_MAP_RE.search(text):
-        return False
-    # Real WHERE clause (property/param/CONTAINS/IN reference) => targeted
-    m = re.search(r"WHERE\s+(.+) ", text + " ", re.IGNORECASE)
-    if m and _WHERE_REAL_RE.search(m.group(1)):
-        return False
-    # #3007: label/LIMIT scope on the DELETED variable => targeted. Every
-    # target must be scoped: `MATCH (n:L), (m) DETACH DELETE n, m` still
-    # deletes the graph (m is unconstrained), so `all`, never `any`.
+    # #3007/#8215: EVERY targeting construct — property map, WHERE reference,
+    # label, LIMIT — is read against the DELETED variable, and every target must
+    # be scoped: `MATCH (n:L), (m) DETACH DELETE n, m` still deletes the graph
+    # (m is unconstrained), so `all`, never `any`. A statement-wide substring
+    # test is exactly the #8215 defect: a property map (or WHERE reference) on a
+    # pattern that binds something OTHER than the deleted variable says nothing
+    # about what the DELETE removes.
     targets, delete_at = _delete_targets(text)
     if targets and all(_var_is_scoped(text, v, delete_at) for v in targets):  # noqa: SIM103
         return False
@@ -2645,8 +2744,8 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
 #     FIXED by #3007: the classifier is now delete-target aware (a label on the
 #     DELETED variable's own pattern, or a ``WITH <var> … LIMIT`` bound on it,
 #     exempts) and ``IN [list]`` is recognized as a real WHERE reference. A
-#     label/LIMIT on a DIFFERENT variable still does not exempt (the #8215
-#     shape), and a bare ``MATCH (n) DETACH DELETE n`` is still bulk.
+#     label/LIMIT on a DIFFERENT variable still does not exempt, and a bare
+#     ``MATCH (n) DETACH DELETE n`` is still bulk.
 #   * ``_is_bulk_wipe`` also UNDER-classified (FIXED by #3037 + #8223): a bare
 #     ``"{" in cypher`` exemption meant a whole-graph wipe whose text contains
 #     a brace (``MATCH (n) DETACH DELETE n // {``, ``CALL { MATCH (n) DETACH
@@ -2657,14 +2756,18 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
 #     unterminated literal/comment fails closed, and the brace must sit under
 #     an unclosed ``(``/``[`` behind a pattern element (``_mask_cypher_text`` /
 #     ``_strip_call_subqueries`` / ``_mask_is_unterminated`` /
-#     ``_PROPERTY_MAP_RE``). An expression map literal (``UNWIND [{a:1}]``,
+#     ``_PROPERTY_MAP_VAR_RE``). An expression map literal (``UNWIND [{a:1}]``,
 #     ``properties({a:1})``, ``keys({a:1})``, ``({a:1}).a``) no longer counts
 #     (#8223).
+#   * ``_is_bulk_wipe`` also UNDER-classified the OTHER half of that shape
+#     (FIXED by #8215): the property-map and WHERE exemptions were read over
+#     the WHOLE statement, so `MATCH (n:Point {id:$id}) WITH n MATCH (m)
+#     DETACH DELETE m` (and the ``OPTIONAL MATCH`` variant) read as "targeted"
+#     while ``(m)`` binds every node. Every signal is now attributed to the
+#     variable the DELETE names (``_var_is_scoped``), including through a
+#     ``WITH <src> AS <dst>`` alias, so a targeting construct on another
+#     pattern no longer makes a whole-graph wipe look scoped.
 #     REMAINDERS (still open):
-#       - a property map on a pattern OTHER than the deleted variable still
-#         exempts the statement (``MATCH (n:Point {id:$id}) WITH n MATCH (m)
-#         DETACH DELETE m``) — tracked: #8215. Deciding it needs a
-#         delete-target-aware classifier — the same scope decision #3007 defers.
 #       - a bare ``DELETE`` (no ``DETACH``) is not classified at all, though
 #         FalkorDB auto-detaches and ``MATCH (n) DELETE n`` deletes every node
 #         — tracked: #8256 (pre-existing; widening the classifier is its own
@@ -3148,6 +3251,30 @@ def _journal_safe_params(params, cypher=None):
 #   * `_replay_write_scope()` — opened by the replay engines (`rebuild`,
 #     `recover_from_log`, `backup.restore`, `_cmd_reconcile`), whose records
 #     came FROM the journal and must not journal again.
+#   * `_graph_metadata_write_scope(...)` — the GRAPH-METADATA lane: a write
+#     that is NOT a projection of any journal record and never becomes one,
+#     because it is graph-wide bookkeeping rather than a fact about the corpus,
+#     so a rebuild re-derives it from zero. `:EpMeta`'s monotonic epoch
+#     (`TortoiseSDK._advance_ep_version`, #9123) is its one writer today. The
+#     lane exists so a reader who assumes "every cache write is a journal
+#     projection" meets the reason at the door — and so closing the guarded
+#     handle (`#9079`) refuses a writer that has NOT declared itself instead of
+#     silently refusing the create hot path. It is a DECLARATION, not a
+#     bypass: see the two properties it claims at `_graph_metadata_write_scope`
+#     — including what those properties do NOT claim (the epoch value rides the
+#     record as each Point's `ep_dirty_at`, and the epoch is an ordering BOUND
+#     a reset inverts for a while, `#5166`).
+#   * `onboarding.metadata` (`tortoise/onboarding/state.py`, #9121) — the
+#     onboarding FLOW metadata (`:OnboardingState`, `:OnboardingStep`, the
+#     `COMPLETED_STEP` edges) is graph-resident org-level metadata, not a
+#     projection of a journalled document/point event. The replay engines that
+#     can rebuild this graph already CAPTURE-AND-RESTORE the class rather than
+#     replay it (#4641 below), which is what makes declaring it honest; the
+#     argument, the class it authorizes beyond metadata (`:Subject`, disclosed),
+#     and its recovery gap (`tortoise/backup.py`'s JSONL fallback) are stated
+#     with the writers. `:TeamMeta` is its documented sibling (#5353 below),
+#     not a vetted precedent: it holds no declaration of its own — its writers
+#     escape at (3).
 #
 # The declaration is not a bypass flag: it is a per-call `with` block (no
 # instance attribute, constructor argument or env var can set it), and the
@@ -3208,10 +3335,12 @@ _CACHE_WRITE_AUTHORIZED: ContextVar[str | None] = ContextVar(
 def _cache_write_authorized(reason: str):
     """Declare the enclosed writes a sanctioned projection of the journal.
 
-    ``reason`` is carried for the refusal message and for a test that asserts
-    the live doors declare themselves. Entry is always paired with a ``reset``
-    in a ``finally``, so a raising fold can never leave the scope armed over
-    the caller's next write.
+    ``reason`` is the value a test reads back at the write handle to prove the
+    door declared itself. It is NOT rendered into a refusal: a refusal fires
+    precisely when this var is ``None`` (`FalkorProjection.apply`, and the
+    public raw-query lane), so there is no reason in flight to print. Entry is
+    always paired with a ``reset`` in a ``finally``, so a raising fold can
+    never leave the scope armed over the caller's next write.
     """
     token = _CACHE_WRITE_AUTHORIZED.set(reason)
     try:
@@ -3228,6 +3357,59 @@ def _live_write_scope(reason: str = "live-door"):
 def _replay_write_scope():
     """The replay engines' scope: the record came FROM the journal."""
     return _cache_write_authorized("replay")
+
+
+def _graph_metadata_write_scope(reason: str = "graph-metadata"):
+    """The GRAPH-METADATA lane: a write §17.1 does not route through a journal.
+
+    §17.1 forbids a second writer of the DERIVED cache, and its remedy is
+    "project it from the record". That remedy needs a record to project, and a
+    *few* writers have none and cannot have one — they write graph-wide
+    bookkeeping whose value is not a fact about the corpus. Naming them is the
+    difference between a declared lane and an undeclared hole, so the scope
+    carries TWO obligations, and a caller must be able to state both:
+
+    1. **No journal record describes it AS GRAPH METADATA.** Nothing happened
+       to the corpus that a replay could re-apply, so a rebuild cannot
+       reconstruct it: no event writes a `:EpMeta`-shaped node, and no payload
+       key carries the counter. ⚠️ **Stated precisely, because the near-miss
+       reading is FALSE:** the epoch's *value* does ride the record — every
+       non-born-terminal `create_point` stamps it into the Point's own
+       `ep_dirty_at` (`sdk.py::_create_map`), and the replay restores that
+       stamp (`projection/entities.py`, open-set passthrough). What is
+       unjournalled is the counter itself, never every appearance of its
+       value; `tests/test_9079_ep_epoch_declared.py` pins exactly this split.
+    2. **A rebuild may reset it; nothing reconciles over its VALUE — but it is
+       an ordering BOUND, and a reset inverts that bound for a while.** No
+       reconciliation reports divergence when a rebuild drops it, and the
+       corpus is unaffected (belief recomputation is idempotent from the
+       record). What a caller may NOT claim is that no comparison exists: two
+       guards compare against the epoch. `_sweep_dirty_roots` clears a dirty
+       flag only under `n.ep_dirty_at <= $run_ep` (`sdk.py`), and `_ep_epoch()`
+       returns 0 when `:EpMeta` is absent — so after a rebuild the stamps the
+       replay restored (obligation 1) sit AHEAD of the reset counter, those
+       flags cannot be swept until the epoch re-climbs past them, and
+       `TortoiseEP._flush_cache`'s stale-run guard (`current >
+       _run_ep_version`) cannot fire in the direction it exists for over the
+       same window. That is a DELAYED sweep, not corruption, and it predates
+       this lane (`#5166` records it) — but this obligation means "the bound is
+       absorbable", not "there is no bound".
+
+    ⛔ **It is not a general-purpose "let this write through".** Both
+    obligations are properties of the WRITE, not of the caller's convenience:
+    a write that a journal record COULD describe belongs on `_live_write_scope`
+    (append first, then fold), and a write whose loss would be a data loss
+    belongs nowhere — it is a defect. `#9068` is the shape this must never
+    become: a declaration that blesses an unjournalled cache write of
+    recoverable state.
+
+    The reason is what the declaration PINS — the value a test reads back at
+    the write handle (`tests/test_9079_ep_epoch_declared.py`) — not a string
+    any refusal prints: a refusal fires when no scope is in flight, so there is
+    no reason to render. The lane is therefore discoverable from the source and
+    from its pins, and the value is stable so a reader can grep it.
+    """
+    return _cache_write_authorized(reason)
 
 
 class _GuardedGraph:

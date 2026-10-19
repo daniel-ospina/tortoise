@@ -1064,6 +1064,13 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # hermetic (synthetic books, a fake SDK) and `core` is where its
              # `core` arm lives. Pinned by
              # tests/test_ci_selection.py::test_write_op_reachability_tool_change_selects_core_not_tier1.
+             # #3990: tools/ is in NON_PYTHON_PREFIXES, so a
+             # `tools/why_layer_rate.py`-only change filtered to `changed == []`
+             # and took the docs-only early return — the why-layer instrument's
+             # own guard (tests/test_why_layer_rate.py, `core`-registered) never
+             # ran on the file it pins. Same silent-drop class as the
+             # queue_resweep / write_op_reachability entries above.
+             "tools/why_layer_rate.py",
              "tools/write_op_reachability.py",
              # #3036: oauth.py is pinned by BOTH api-registered tests
              # (test_oauth_mcp.py, test_oauth_token_fault.py, ...) and core
@@ -1379,7 +1386,48 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # Pinned by
              # tests/test_ci_selection.py::test_surface_tools_change_selects_core_not_tier1.
              "tools/surface-guard.py",
-             "tools/surface_manifest.py")
+             "tools/surface_manifest.py",
+             # #9115: the repo-level CI queue instrument. Its suite
+             # (tests/test_ci_queue_health.py) is `core`-registered, and that
+             # registration covers the TEST FILE's edits only — no SOURCE_PATTERNS
+             # row matches a `tools/` path, so without this entry a
+             # `tools/ci_queue_health.py`-only diff comes back `changed == []`,
+             # takes the docs-only early return and selects NO surface: the
+             # FLOOD classification, the governor's bounds (never a PR-event run,
+             # never a workflow outside TRIM_SAFE) and the truncation labelling
+             # would not run on the very diff that can widen them. Measured
+             # before this entry: `--changed-files tools/ci_queue_health.py` ->
+             # surfaces=[], full=False, 49 tier-1 files, test_ci_queue_health.py
+             # ABSENT. `CORE_ALSO` (not `TOOL_CARVEOUTS`) is the documented seam:
+             # the suite is hermetic and `core`-registered, so `core` is the
+             # surface that can actually run it. Pinned by
+             # tests/test_ci_selection.py::test_ci_queue_health_tool_change_selects_core_not_tier1.
+             "tools/ci_queue_health.py",
+             # #9085 review P1: `tests/test_runner_ports_6673.py` (registered
+             # `core`) carries the two #8124 guards that pin the ENGINE, and both
+             # read a file the selector did not keep:
+             #   * `apps/graph-viz/docker-compose.yml` — scanned by the compose
+             #     sweep (`COMPOSE_GLOBS` includes `apps/*/docker-compose*.yml`),
+             #     but `apps/` is in NON_PYTHON_PREFIXES and matches no
+             #     SOURCE_PATTERNS row, so a revert of that pin filtered to
+             #     `changed == []`, took the docs-only early return, and ran
+             #     tier-1 smoke only (measured: surfaces=[]).
+             #   * `docs/quickstart-selfhosted.md` — Option B's bare-container
+             #     hand-out, pinned by
+             #     test_the_selfhost_quickstart_hands_out_the_compose_pin_not_latest.
+             #     It matched the `#3329` `docs/` SOURCE_PATTERN that carries
+             #     `test_capacity_page.py` (onboarding), NOT `core`, so the
+             #     quickstart's engine pin was unguarded on the one docs diff that
+             #     can break it (measured: surfaces=['onboarding'], the guard
+             #     absent).
+             # Either way a one-line revert merged green and reddened `main` on
+             # the post-merge push — the #1349/#3332/#3616 silent-drop class, on
+             # the exact files this PR pins. Named individually because
+             # `select()` matches with `startswith`. Pinned by
+             # tests/test_ci_selection.py::
+             # test_the_engine_pin_guards_are_selected_on_the_files_they_pin.
+             "apps/graph-viz/docker-compose.yml",
+             "docs/quickstart-selfhosted.md")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",

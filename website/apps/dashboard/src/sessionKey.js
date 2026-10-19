@@ -62,20 +62,68 @@ export function isManagedKey(k) {
   return !(k.created_via === 'bootstrap')
 }
 
+// #8228: THE ROW-ALIVENESS ATOM — the ONE declaration of the dead-row
+// conditions, and the only place in this module where they are spelled.
+// Three surfaces ask "is this key row still alive for MY purpose?" and each
+// used to restate the conditions independently:
+//   1. `heldRowEmbeddable` — may this row back an EMBED? (the #4371 rule)
+//   2. `usableDurableRows` — which rows may the connect gate ROUTE to?
+//   3. `durableConnectKey`'s paste tail — which dead SOURCE should we report?
+// They coincided, and NOTHING kept them coinciding: a new dead-row condition (a
+// `disabled_by` stamp, a grace window, a new `created_via` kind) added to one
+// was invisible to the other two, surfacing as a wrong embed or a wrong routing
+// decision and never as an error — #4371's failure class one surface over.
+// `rowAlivenessAgreementExec.test.js` drives all three over one shared fixture
+// matrix and reports which surface(s) disagree with this atom.
+//
+// The atom answers WHY, not only WHETHER. The paste tail must report a DISTINCT
+// source per cause ('revoked'/'disabled'/'bootstrap'/'expiring'), and one
+// boolean cannot carry that — so the reason is the primitive and `rowAlive` is
+// its totalisation. That is what lets the cascade CONSUME the conditions
+// instead of restating them, and it is why a new arm added below is
+// automatically reported by every consumer rather than falling through to
+// `'durable'` (a dead row embedded as live: strictly worse than the duplication
+// it removes). The reason vocabulary is a closed set — the agreement test pins
+// it, so a new arm cannot reach main.jsx's paste handler unannounced.
+//
+// `'absent'` is not a stored column: it is the MISSING-ROW condition (a prefix
+// that resolves no row, or a null row). A row we cannot see is dead — never
+// embed or route on unknown.
+export function rowDeadReason(row) {
+  if (!row) return 'absent'
+  if (row.revoked_at) return 'revoked'
+  if (row.enabled === false) return 'disabled'
+  if (row.created_via === 'bootstrap') return 'bootstrap'
+  if (row.expires_at) return 'expiring'
+  return ''
+}
+
+// The atom proper: a row is alive exactly when the atom has no reason to report.
+export function rowAlive(row) {
+  return rowDeadReason(row) === ''
+}
+
 // #2246 (ADR-010): rows-source connect resolution. The API Keys table shows
 // rows the browser can MANAGE but never HOLD — GET /v1/team/keys returns
 // hashes only, so a "usable" durable row can never supply a plaintext key.
 // This predicate picks the rows the connect gate may route to as a REUSABLE
-// durable — managed (bootstrap-excluded, #2426) ∧ never-expiring (an
-// expiring key is not embed-safe: the setup command embeds a key an agent
-// authenticates with indefinitely, so the embed policy stays Never-only,
-// #2426 decision 2) ∧ ¬revoked ∧ ¬disabled (enabled absent → enabled,
+// durable — managed (bootstrap-excluded, #2426) ∧ ALIVE (#8228's atom: ¬expiring
+// — an expiring key is not embed-safe, the setup command embeds a key an agent
+// authenticates with indefinitely, so the embed policy stays Never-only, #2426
+// decision 2 — ∧ ¬revoked ∧ ¬disabled ∧ ¬bootstrap; enabled absent → enabled,
 // registry parity), most-recent first by created_at (ISO strings sort
 // lexically). Consumers use it for gate copy / routing ONLY — never to derive
 // an embeddable key.
+//
+// #8228: the conditions are NOT restated here any more — `rowAlive` carries
+// them. `isManagedKey` stays in the composition on purpose: it is the TABLE
+// predicate (which rows the API Keys page shows), a different question, and
+// keeping it means a future relaxation of it can change what the gate ROUTES to
+// without silently changing what may be EMBEDDED. Routing is therefore always a
+// SUBSET of the atom — the safety direction the agreement test pins permanently.
 export function usableDurableRows(keyRows) {
   return (keyRows || [])
-    .filter((k) => k && isManagedKey(k) && !k.expires_at && !k.revoked_at && k.enabled !== false)
+    .filter((k) => isManagedKey(k) && rowAlive(k))
     .sort((a, b) =>
       String(b.created_at || b.createdAt || '').localeCompare(String(a.created_at || a.createdAt || '')))
 }
@@ -101,23 +149,22 @@ export function usableDurableRows(keyRows) {
 // `heldRowTruthExec.test.js`, which drives BOTH entry points over the same
 // fixtures.
 //
-// Deliberately NOT expressed via `isManagedKey` (`… && !k.expires_at && …`):
+// Deliberately NOT expressed via `isManagedKey` (`… && !row.expires_at && …`):
 // isManagedKey answers a DIFFERENT question — which rows the API Keys table
 // shows — and #2426 relaxed it to bootstrap-exclusion-only, which is exactly
 // when the embed rule had to grow its own explicit `expires_at` arm. Delegating
 // here would re-couple the two, so a future table-predicate relaxation would
-// silently relax what may be embedded. `usableDurableRows` (which rows the
-// connect gate may ROUTE to) restates the same conditions a third time for the
-// same reason: routing and embedding are separate decisions. The paste tail in
-// `durableConnectKey` also walks the same conditions, but to report a DISTINCT
-// source per cause — the agreement test pins it to this rule.
+// silently relax what may be embedded.
+//
+// #8228: the conditions themselves now live in `rowDeadReason`/`rowAlive` (the
+// row-aliveness atom above) and this function is a NAMED alias of the atom, kept
+// because "embeddable" is the purpose-specific question its two drivers
+// (`durableConnectKey`'s welcome tail and main.jsx's row-truth effect) ask. The
+// routing rule (`usableDurableRows`) and the paste tail compose the SAME atom;
+// before #8228 all three re-spelled the conditions and only prose held them
+// together, so a condition added to one was invisible to the others.
 export function heldRowEmbeddable(row) {
-  if (!row) return false
-  if (row.revoked_at) return false
-  if (row.enabled === false) return false
-  if (row.created_via === 'bootstrap') return false
-  if (row.expires_at) return false
-  return true
+  return rowAlive(row)
 }
 
 // #1998 fold-in (durable connect key): the wizard connect step's universal
@@ -189,10 +236,17 @@ export function durableConnectKey(welcomeKey, apiKey, keyRows) {
   }
   const row = (keyRows || []).find((k) => k && k.key_prefix === String(apiKey).slice(0, 10))
   if (!row) return { key: '', durable: false, source: 'unknown' }
-  if (row.revoked_at) return { key: '', durable: false, source: 'revoked' }
-  if (row.enabled === false) return { key: '', durable: false, source: 'disabled' }
-  if (row.created_via === 'bootstrap') return { key: '', durable: false, source: 'bootstrap' }
-  if (row.expires_at) return { key: '', durable: false, source: 'expiring' }
+  // #8228: the cascade READS the row-aliveness atom instead of restating its
+  // conditions. Its arms used to be a fourth declaration of the same four
+  // predicates — plausible, byte-different, and unpinned against the embed rule
+  // and `usableDurableRows`. Now the reason IS the source: 'revoked' /
+  // 'disabled' / 'bootstrap' / 'expiring' keep their distinct wizard copy, and
+  // a NEW atom arm reports its own reason here without this site changing (the
+  // vocabulary pin in `rowAlivenessAgreementExec.test.js` makes that new source
+  // a deliberate decision — main.jsx's paste handler refuses ANY classification
+  // that is not 'durable', so the failure direction can only be closed).
+  const dead = rowDeadReason(row)
+  if (dead) return { key: '', durable: false, source: dead }
   return { key: apiKey, durable: true, source: 'durable' }
 }
 

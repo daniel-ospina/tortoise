@@ -108,6 +108,9 @@ from . import file_indexer  # noqa: F401 — binds the classifier/identity modul
 from .projection import FalkorProjection
 # #7951 §17.1: the single-writer scope the live doors open around their fold.
 from .projection import _live_write_scope
+# #9123 §17.1: the GRAPH-METADATA lane — a write with no journal record that
+# describes it, and whose loss a rebuild absorbs.
+from .projection import _graph_metadata_write_scope
 # #7951 review P1: the journal payload is built from the WRITE INTENT, so it
 # must state what the store will HOLD — the transport model lives in the
 # projection package (one home), not in a second copy at this call site.
@@ -6919,6 +6922,17 @@ class TortoiseSDK:
         journal on a failed append — window (a) of the contract, the one a
         replay cannot undo.
         """
+        # ── #5475 (residual): the record door is a WRITE door ──
+        # This is where a caller holding a PRE-BUILT record persists it, and the
+        # record carries its kind in its own spelling (``eventKind`` /
+        # ``object_kind``). It bypasses the create funnels by construction — the
+        # GitHub indexer's provenance writes are its callers — so without this
+        # it was one more way to install a pack (measured on the same class:
+        # ``['dev']`` → ``['dev','marketing']`` via one ``object_kind`` record).
+        # Before the append, so a refusal leaves the journal untouched and the
+        # replay cannot resurrect it. Gated against `proj`'s graph — the write
+        # TARGET — not this SDK's bound graph (see the reader's docstring).
+        self._refuse_unapproved_kinds_in_record(event, getattr(proj, "g", None))
         if journal:
             # (#7951 P1-b) Mirror `_create_entity`'s `createdAt` synthesis on
             # the journaling path, BEFORE the append (so the record and the
@@ -10724,6 +10738,15 @@ class TortoiseSDK:
         """
         proj = self._get_proj()
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        # ── #5475 (residual): an UPDATE is a WRITE, and it widened the set ──
+        # The create-side gate is at the funnels every CREATE meets, but
+        # ``pointKind`` is one of the properties ``graph_kind_namespaces``
+        # MINES, so an update that persists an unvalidated value installs the
+        # pack just as a create did — measured at HEAD: a graph recorded as
+        # ``['dev']`` became ``['dev','marketing']`` through this door alone.
+        # Gating creates and not updates left the closure property one verb
+        # away from true, which is the defect #5475 is about.
+        self._refuse_unapproved_kinds_in_props(props)
         # #329: id mutation + server-managed fields rejected
         props = _sanitize_props(props, reject_id=True,
                                 reject_belief_props=True)
@@ -15255,14 +15278,26 @@ class TortoiseSDK:
         EXCLUDED for the same reason ``create_direct_edge`` refuses them —
         silently rerouting a connection TO an operator would hide that misuse
         rather than report it.
+
+        The PROBE is ``_point_bearing_ids`` — ONE declaration of that query,
+        so the boolean question and the per-id answer (which
+        `_effective_connection_routes` needs to resolve a whole bundle in a
+        single read) cannot drift apart.
         """
+        return bool(self._point_bearing_ids(node_ids))
+
+    def _point_bearing_ids(self, node_ids: list[str]) -> set[str]:
+        """The subset of ``node_ids`` that are PLAIN ``:Point`` nodes — the
+        id-anchored half of :meth:`_point_mediated_route` (see its docstring
+        for the contract, the index rationale and the operator-endpoint
+        exclusion). Unresolvable ids simply do not come back."""
         rows = self._get_proj().g.query(
             "MATCH (p:Point) WHERE p.id IN $ids "
             "AND coalesce(p.is_operator, false) = false "
-            "RETURN count(p)",
+            "RETURN p.id",
             params={"ids": list(node_ids)},
         ).result_set
-        return bool(rows and rows[0][0])
+        return {row[0] for row in rows}
 
     @staticmethod
     def _direction_from_semantics(semantics: str) -> str | None:
@@ -16633,7 +16668,71 @@ class TortoiseSDK:
                                f"rejected (#2422)",
                 })
 
-    def _connections_conflict(self, ca: dict, cb: dict) -> bool:
+    def _effective_connection_routes(self, bundle: dict) -> list[str]:
+        """The EFFECTIVE route of EVERY connection item, positionally aligned
+        with ``bundle['connections']`` (#8623).
+
+        `_connection_route` reads the connection ITEM only — its 'direct' is a
+        REQUEST, not the final route (its own docstring says so), because the
+        endpoint-kind gate (`_point_mediated_route`, owner ruling 2026-10-13,
+        #8499) can promote it to 'operator' once the endpoints are known.
+        `ingest`'s write loop resolves refs FIRST and then promotes; a Phase-1
+        check that consumes the REQUEST instead of the EFFECTIVE route refuses
+        connections the write loop handles correctly. That is the #8623 class:
+        a same-pair label-differing pair is a duplicate CONFLICT on the direct
+        edge (whose MERGE key is ``(src, tgt, type)``) but LEGAL on the
+        operator route (whose `_find_operator` key includes ``label``).
+
+        Resolution mirrors what step 4 will see, and BOTH halves are needed:
+
+        - a bundle-local ``points`` ref has no node yet in Phase 1, so no graph
+          probe can see it — but step 2 mints it as a plain ``:Point`` and
+          step 4 resolves the ref onto that id, so it IS Point-bearing;
+        - every other endpoint is addressed by node id (`_check_endpoints`
+          enforces the id-anchoring), so it is probed in ONE read for the
+          whole bundle via ``_point_bearing_ids``.
+
+        A bundle whose refs/endpoints are already refused elsewhere (duplicate
+        ref, ghost endpoint, operator-shaped endpoint) resolves to whatever is
+        observable here; those bundles are rejected by their own checks, so the
+        only consequence is that this predicate does not fire on them.
+        """
+        conns = bundle.get("connections") or []
+        routes = [self._connection_route(c) if isinstance(c, dict) else "relation"
+                  for c in conns]
+        local_section: dict[str, str] = {}
+        for section in ("sources", "points", "entities"):
+            for item in bundle.get(section) or []:
+                if isinstance(item, dict) and isinstance(item.get("ref"), str):
+                    local_section[item["ref"]] = section
+        external: set[str] = set()
+        for conn, route in zip(conns, routes, strict=True):
+            if route != "direct":
+                continue
+            tos = conn.get("to")
+            for v in [conn.get("from"), *(tos if isinstance(tos, list) else [tos])]:
+                if isinstance(v, str) and v not in local_section:
+                    external.add(v)
+        external_points = self._point_bearing_ids(sorted(external)) \
+            if external else set()
+        effective: list[str] = []
+        for conn, route in zip(conns, routes, strict=True):
+            if route != "direct":
+                effective.append(route)
+                continue
+            tos = conn.get("to")
+            vals = [conn.get("from"), *(tos if isinstance(tos, list) else [tos])]
+            mediated = any(
+                isinstance(v, str) and (local_section[v] == "points"
+                                        if v in local_section
+                                        else v in external_points)
+                for v in vals
+            )
+            effective.append("operator" if mediated else "direct")
+        return effective
+
+    def _connections_conflict(self, ca: dict, cb: dict,
+                              route_a: str, route_b: str) -> bool:
         """§5.2.7 conflict predicate for a same from/to/operator pair.
 
         Conflicts: differing canonical direction (per op_type), differing
@@ -16641,6 +16740,17 @@ class TortoiseSDK:
         value (absent-vs-present → conflict); label-differing on the
         direct-edge path (label joins the predicate there); mitigation-reason
         conflict on same-label pairs. Identical pairs are clean dedup.
+
+        ``route_a``/``route_b`` are the EFFECTIVE routes
+        (`_effective_connection_routes`) — not the `_connection_route`
+        REQUEST — because the label arm is scoped to the edge shape the pair
+        will actually be written as (#8623). A direct edge MERGEs on
+        ``(src, tgt, type)``, so a second same-pair edge with a different
+        label would silently overwrite the first: that is why label joins the
+        predicate there. The operator route's `_find_operator` key INCLUDES
+        ``label``, so two label-differing operators are legitimately distinct
+        and both are committed (the #8623 over-refusal: a Point-bearing pair
+        promoted by the endpoint-kind gate was judged by the direct rule).
         """
         op = ca["operator"]
         if direction_flows(self._canonical_direction(op, ca.get("direction"))) != \
@@ -16659,8 +16769,7 @@ class TortoiseSDK:
         if la != lb:
             if la is None or lb is None:
                 return True  # label-absent is a DISTINCT value (cycle-14)
-            if self._connection_route(ca) == "direct" \
-                    or self._connection_route(cb) == "direct":
+            if route_a == "direct" or route_b == "direct":
                 return True  # label joins the direct-edge predicate (cycle-8)
             # both operator-routed with differing labels → LEGAL (two
             # operators; _find_operator's key includes label).
@@ -16678,9 +16787,25 @@ class TortoiseSDK:
         violations (fail-closed — _find_operator's key lacks strength, so
         acceptance would be order-dependent). Reversed-pair bidirectional
         contradictions (a→b AND b→a, IMPL/NAND) are violations.
+
+        #8623: the label arm of the conflict predicate is applied against each
+        connection's EFFECTIVE route (`_effective_connection_routes`), so a
+        same-pair label-differing pair on the OPERATOR route — which
+        `_find_operator` keys on `label` and therefore commits as two distinct
+        operators — is not a conflict. The direct-edge case (Object↔Object)
+        keeps it: there the MERGE key is (src, tgt, type) and the second edge
+        would silently overwrite the first's label.
         """
         ops = [(i, c) for i, c in enumerate(bundle.get("connections") or [])
                if isinstance(c, dict) and "operator" in c]
+        # #8623: the label arm of the conflict predicate is DIRECT-edge-scoped,
+        # so it must read the EFFECTIVE route the write loop will take — a
+        # Point-bearing pair is promoted to the operator route by the
+        # endpoint-kind gate (#8499), where a differing label is LEGAL (the
+        # operator dedup key includes `label`, so both operators commit).
+        # Resolved ONCE per bundle: the predicate is pairwise, and each probe
+        # is a graph read.
+        routes = self._effective_connection_routes(bundle)
         for a in range(len(ops)):
             for b in range(a + 1, len(ops)):
                 ia, ca = ops[a]
@@ -16689,7 +16814,7 @@ class TortoiseSDK:
                         or ca.get("to") != cb.get("to")
                         or ca["operator"] != cb["operator"]):
                     continue
-                if self._connections_conflict(ca, cb):
+                if self._connections_conflict(ca, cb, routes[ia], routes[ib]):
                     violations.append({
                         "section": "connections", "index": ib,
                         "message": f"ingest: connections[{ia}] and "
@@ -19986,16 +20111,54 @@ class TortoiseSDK:
         ``ep_dirty_at`` with the SAME epoch inside the CREATE statement that
         writes the point — instead of issuing a second, post-CREATE ``SET``
         (see create_point for why that second write is not free).
+
+        §17.1 (#9123): this MERGE is a DECLARED **graph-metadata** write, not a
+        projection of the journal — ``_graph_metadata_write_scope`` states the
+        two properties that earn it:
+
+        * **no record describes it, as graph metadata.** ``:EpMeta.ep_version``
+          is a graph-wide monotonic counter that orders EP dirty-markings
+          across processes. No journal event writes it and no event can: it is
+          not a fact about the corpus, so journalling the COUNTER would put a
+          non-fact in the log and make ``derived == replay(journal)`` depend on
+          it. ⚠️ The counter's VALUE does ride the record — as each Point's own
+          ``ep_dirty_at`` stamp, written by ``create_point``'s CREATE map and
+          restored by the replay's open-set passthrough. Unjournalled counter,
+          journalled value: both halves are true, and the next obligation is a
+          bound rather than an absence because of the second one.
+        * **a rebuild may reset it, and nothing reconciles over its value.**
+          ``rebuild`` folds journal records; ``:EpMeta`` is not one, so the
+          epoch does not come back — and no reconciliation reports divergence
+          when it does not. ⚠️ But the epoch IS an **ordering bound**, not an
+          inert hint: ``_sweep_dirty_roots`` clears a dirty flag only under
+          ``n.ep_dirty_at <= $run_ep``, and ``_ep_epoch()`` returns 0 on a graph
+          with no ``:EpMeta`` — so the stamps the replay restored sit AHEAD of
+          the reset counter, those flags stay dirty until it re-climbs past
+          them, and ``TortoiseEP._flush_cache``'s stale-run guard
+          (``current > _run_ep_version``) cannot fire in the direction it
+          exists for over the same window. A DELAYED sweep, not corruption,
+          and pre-existing (``#5166``).
+          ``tests/test_9079_ep_epoch_declared.py`` pins both halves.
+
+        Why the declaration had to exist: this statement is the most frequently
+        refused one on #9079's measuring lane (5 of 7 failures) — it runs
+        outside every scope today (``create_point`` opens its own scope around
+        its CREATE, and this write happens BEFORE it), so closing the guarded
+        handle would refuse the create hot path. The scope goes AROUND
+        ``_graph_write_with_retry`` rather than inside its lambda, so the whole
+        retry — including every re-issued attempt — runs under ONE declaration
+        and #7405/#7685's predicate is untouched.
         """
         proj = self._get_proj()
-        rows = self._graph_write_with_retry(
-            lambda: proj.g.query(
-                "MERGE (m:EpMeta) "
-                "SET m.ep_version = coalesce(m.ep_version, 0) + 1 "
-                "RETURN m.ep_version"
-            ).result_set,
-            what="_advance_ep_version MERGE(:EpMeta)",
-        )
+        with _graph_metadata_write_scope("graph-metadata:ep-epoch"):
+            rows = self._graph_write_with_retry(
+                lambda: proj.g.query(
+                    "MERGE (m:EpMeta) "
+                    "SET m.ep_version = coalesce(m.ep_version, 0) + 1 "
+                    "RETURN m.ep_version"
+                ).result_set,
+                what="_advance_ep_version MERGE(:EpMeta)",
+            )
         return int(rows[0][0]) if rows else 1
 
     def _mark_dirty(self, point_ids: list[str], *, ep_version: int | None = None,
@@ -22601,11 +22764,91 @@ class TortoiseSDK:
         return self._find_point_by_content(content, pointKind=pointKind,
                                            exclude_id=exclude_id)
 
+    def _check_checkpoint_items(self, items: Any) -> None:
+        """#8554 — refuse a malformed ``checkpoint`` item batch (fail-closed).
+
+        The item contract ``checkpoint`` documents is ``{wing, room, content}``
+        with ``content`` REQUIRED. Before #8554 nothing validated it: an item
+        whose ``content`` was ``None``/non-str reached ``_content_hash``'s
+        ``text.encode`` and escaped as a bare
+        ``AttributeError: 'NoneType' object has no attribute 'encode'`` — a
+        crash from a private helper that names neither ``checkpoint`` nor
+        ``content``, i.e. a caller error that reads as an internal bug (and an
+        absent ``content`` key escaped as a bare ``KeyError: 'content'``, a
+        non-dict item or a non-list ``items`` as a bare ``TypeError``).
+
+        Validated ONCE, here, because ``checkpoint`` reads each item's
+        ``content`` in two independent places — the tier-1 dedup loop (into
+        ``_content_hash``) and the write loop — so a per-read check would be
+        two homes that can drift.
+
+        The shape mirrors ``ingest``'s Phase-1 item check (``_check_item_shape``,
+        #902 A2): the SAME ``BundleValidationError`` carrying EVERY violation
+        (not just the first), so a caller fixes the whole batch in one pass and
+        the MCP ``tortoise_checkpoint`` wire returns
+        ``{error, code: ERR_BUNDLE_INVALID, violations}`` instead of an opaque
+        error. The "bundle" in the class name is accurate here: a checkpoint call
+        IS a batch of items whose schema is the caller's to get right.
+
+        Why fail-closed rather than the #5240 answer: there ``update_point(None)``
+        is a deliberate "no content edit" because the REPLAY fold cannot record
+        a live clear (``_revise_point``'s ``coalesce($c, n.content)``). That
+        reasoning does NOT transfer — in ``checkpoint`` ``content`` is a
+        required field, there is no edit to no-op, and skipping the item would
+        discard the caller's write with no error at all.
+        """
+        violations: list[dict] = []
+        # A tuple is accepted: it iterated fine before #8554, so refusing it
+        # would break a working caller over a container-type detail that is
+        # NOT this issue's defect. What is refused is a container that can
+        # never be a batch — ``str``/``bytes`` (each index is a character),
+        # ``dict`` (each index is a key) and any non-iterable/singleton — which
+        # before #8554 escaped as a bare
+        # ``TypeError: string indices must be integers`` / ``'NoneType' object
+        # is not iterable`` naming neither ``checkpoint`` nor ``items``.
+        if not isinstance(items, (list, tuple)):
+            # No item index exists for a bad container — ``-1`` is the
+            # "container, not item" sentinel. Every violation keeps the
+            # ``{section, index, message}`` key set the A2 wire contract pins
+            # (tests/test_failure_contract.py).
+            violations.append({
+                "section": "items", "index": -1,
+                "message": "checkpoint: items must be a list of "
+                           "{wing, room, content} items — got "
+                           f"{type(items).__name__}",
+            })
+        else:
+            for index, item in enumerate(items):
+                if not isinstance(item, dict):
+                    violations.append({
+                        "section": "items", "index": index,
+                        "message": f"checkpoint: items[{index}] must be a "
+                                   f"dict of {{wing, room, content}} — got "
+                                   f"{type(item).__name__}",
+                    })
+                    continue
+                # Same wording and same test as ingest's Phase-1 content
+                # gate (absent == None == non-str), so the two bulk surfaces
+                # cannot disagree about what a required content is.
+                content = item.get("content")
+                if content is None or not isinstance(content, str):
+                    violations.append({
+                        "section": "items", "index": index,
+                        "message": f"checkpoint: items[{index}] requires 'content'",
+                    })
+        if violations:
+            from .exceptions import BundleValidationError
+            raise BundleValidationError(violations)
+
     def checkpoint(self, items: list[dict], agent_name: str = "checkpoint",
                    threshold: float = 0.95) -> dict:
         """Session batch save — two-tier dedup (content hash + embedding similarity).
 
-        Each item: {wing, room, content}. Returns {filed: N, duplicates: M}.
+        Each item: {wing, room, content} — ``content`` is REQUIRED and must be
+        a ``str``; a missing/``None``/non-str ``content``, a non-dict item or a
+        non-list ``items`` raises ``BundleValidationError`` naming the item
+        index and ``content`` (never an ``AttributeError``/``KeyError`` from a
+        private helper — #8554). Returns {filed: N, duplicates: M}.
         threshold: cosine similarity for semantic dedup (0.0-1.0).
                    Set to 1.0 to disable semantic dedup (hash-only).
 
@@ -22617,6 +22860,11 @@ class TortoiseSDK:
         ≥ 0.95, while looser paraphrases (0.77-0.90) stay below and file
         as distinct points. Keep in sync with mcp_server.tortoise_checkpoint.
         """
+        # #8554: fail-closed BEFORE the projection is opened, before any hash,
+        # dedup read or write. One home for the item schema (see
+        # ``_check_checkpoint_items``).
+        self._check_checkpoint_items(items)
+
         from datetime import datetime, timezone
         filed, duplicates = 0, 0
         proj = self._get_proj()
@@ -22837,6 +23085,15 @@ class TortoiseSDK:
         branches) while the new path short-circuits the embedding to None —
         the SAME flag, different Event semantics on two live paths.
         """
+        # ── #5475 (residual): ``eventKind`` is CALLER-SUPPLIED here ──
+        # This FROZEN legacy branch writes it with a raw ``MERGE … SET e +=
+        # $props`` further down, bypassing every gated seam — so the approval
+        # gate is applied HERE, before the walk. Measured by the review of the
+        # #5475 change: ``ingest_corpus(dir, eventKind='marketing:meeting')`` on
+        # a ``dev``-only graph left ``['dev','marketing']``. Behaviour is
+        # otherwise unchanged (SC4): a bare / ``core:`` / approved spelling
+        # still writes, and the default ``DocumentCreated`` names no pack.
+        self._refuse_unapproved_kind("eventKind", eventKind)
         import os as _os  # noqa: I001
         import json as _json
         from pathlib import Path
@@ -28618,21 +28875,13 @@ class TortoiseSDK:
                 kind, sorted(known_kinds("pointKind")), kind,
             )
 
-    #: #5475: the general kind a writer can always fall back to, per kind
-    #: property — all CORE spellings, i.e. the anti-paralysis half of the
-    #: owner's 2026-10-17 ruling ("an 'other' or more general kind … so we
-    #: don't completely block the writer in paralyzing bureaucracy").
-    #: ``objectKind``/``subjectKind`` = ``other`` (the SDK/REST default and a
-    #: declared canonical object kind); ``eventKind`` = ``occurrence`` and
-    #: ``pointKind`` = ``statement`` (the extractor's own fallbacks);
-    #: ``documentKind`` has no declared general kind, so it names none rather
-    #: than inventing one.
-    _KIND_GENERAL_FALLBACKS: ClassVar[dict[str, str]] = {
-        "objectKind": "other",
-        "subjectKind": "other",
-        "eventKind": "occurrence",
-        "pointKind": "statement",
-    }
+    #: #5475: the general kind a writer can always fall back to now lives in
+    #: ``pack_state._KIND_GENERAL_FALLBACKS`` with the rest of the rule: the
+    #: refusal text is built there (#5475 residual — ``api.EventAPI`` is a
+    #: second gated seam, and two message builders would be two rules with one
+    #: name). Nothing in this class reads it, so it is not re-exported; a
+    #: module-level ``from .pack_state import`` here would be the import cycle
+    #: this module's lazy ``.pack_state`` imports exist to avoid.
 
     def _refuse_unapproved_kind(self, prop: str, kind) -> None:
         """#5475: the INPUT constraint — a write may not name an unapproved pack.
@@ -28713,67 +28962,68 @@ class TortoiseSDK:
         first write).
 
         Pure with respect to the graph: it decides from ``approved`` only.
+
+        The DECISION and the MESSAGE live in ``pack_state.unapproved_kind_refusal``
+        (#5475 residual): ``api.EventAPI`` is a second gated write seam that
+        holds no SDK, and a seam that built its own refusal would be a second
+        rule wearing the same name. This method stays because the SDK's own
+        callers (and the hosted commit door) reach it here.
+        """
+        from .pack_state import unapproved_kind_refusal
+        return unapproved_kind_refusal(prop, kind, approved)
+
+    def _refuse_unapproved_kinds_in_record(self, record: dict, graph=None) -> None:
+        """#5475: gate a RECORD a live door built itself, before it is persisted.
+
+        ``_refuse_unapproved_kinds_in_props`` covers the doors that hand their
+        kind as a flat keyword (``create_*`` / ``update_*``). The doors that
+        BUILD a journal record and fold it — ``_apply_and_journal`` (the live
+        door for a pre-built Object/Subject/Event record) and ``_doc_write``
+        (frontmatter → ``DocumentCreated``) — pass it in the RECORD's own
+        spelling, which is often snake_case (``object_kind``,
+        ``document_kind``), so they need the payload-shaped reader. Both spellings
+        land on the SAME node property, so a gate keyed on one is bypassable by
+        the other.
+
+        Every one of these doors appends FIRST and folds second (the journal
+        ordering contract), so a refusal raised here — before the append —
+        leaves neither store touched. Gating at the append instead
+        (``_emit_event``) is NOT equivalent: several emitters run after their
+        mutation (``PointPromoted`` / ``Dedupe*`` / ``create_operator``), where
+        a refusal could only arrive after the node was already written and
+        would split the journal from the cache.
+
+        ⛔ THE MIRROR SHAPE, stated because ``graph=`` can name a graph other
+        than this SDK's: the TARGET's set decides admission, but ``_emit_event``
+        journals through ``self``. A caller that hands over a FOREIGN
+        projection — no production caller does (``github_indexer`` passes
+        ``sdk._get_proj()``, the internal call passes its own) — can therefore
+        journal a record the JOURNAL OWNER's graph does not approve, which the
+        next ``rebuild_all`` of that graph folds (replay is ungated by design).
+        That was the pre-fix behaviour, so this is not a regression, but gating
+        the write target must not be read as closing the journal side.
         """
         from .pack_state import (
-            _ATTRIBUTABLE_BARE_KIND_KEYS,
-            approved_kind_alternatives,
-            unapproved_kind_pack,
+            payload_names_pack,
+            refuse_unapproved_kinds_in_payload,
         )
-        # The attribution flag is DERIVED from pack_state's own declaration of
-        # which keys attribute a BARE value back to a pack (today:
-        # ``eventKind``), never re-spelled here: a second copy would stop
-        # constraining a key the mining leg starts attributing — the same
-        # widening under a new name.
-        pack_ns = unapproved_kind_pack(
-            kind, approved, attribute_bare=prop in _ATTRIBUTABLE_BARE_KIND_KEYS)
-        if pack_ns is None:
-            return None
-        approved_ns = ", ".join(sorted(approved or ())) or "none"
-        alternatives = approved_kind_alternatives(kind, approved, prop=prop)
-        # The remedy is a LIST of what the caller can do (the owner ruling's
-        # third element), so the punctuation cannot drift as clauses are added.
-        # ⛔ The wording ALSO has to survive the MCP layer's error scrubber
-        # (``mcp_server._scrub_error``): its rule is ``(host=|at |to )[\w.-]+``,
-        # which -- because the alternation has no word boundary -- bites any
-        # ``at ``/``to `` SUBSTRING, i.e. "Wh**at **next" and "th**at **pack".
-        # This message crosses that boundary on every MCP tool call, and a
-        # scrubbed remedy is the one half of Option A a writer acts on. Hence
-        # "Next steps:"/"install the pack"/"for this graph", never
-        # "What next"/"that pack"/"to this graph"/"What to do". The rule is
-        # mechanical, so it is PINNED: the door tests assert the raw message is
-        # a fixed point of ``_scrub_error``.
-        remedies = [
-            "write a kind from the core vocabulary, or from a pack this graph "
-            f"HAS approved ({approved_ns})",
-        ]
-        if alternatives:
-            more = "".join(f" (or {alt!r})" for alt in alternatives[1:])
-            remedies.append(
-                "the same kind IS declared by an approved pack — write "
-                f"{alternatives[0]!r}{more}")
-        remedies.append(
-            f"with user approval, add the {pack_ns!r} ontology pack for this "
-            "graph (PUT /v1/graphs/{graph_id}/packs)")
-        what_next = "; ".join(remedies)
-        general = self._KIND_GENERAL_FALLBACKS.get(prop)
-        fallback = (
-            f" A kind you cannot classify is never blocked: the bare general "
-            f"kind {general!r} names no pack and always writes."
-            if general else
-            " A kind you cannot classify is never blocked: a bare "
-            "(un-namespaced) kind names no pack and always writes.")
-        return UnapprovedKindNamespace(
-            f"refused {prop}={kind!r}: it names the ontology pack namespace "
-            f"{pack_ns!r}, which this graph has not approved — the write was "
-            "NOT stored. Why: kinds are namespaced by ontology pack, and this "
-            "graph's approved set is mined from the kind values it already "
-            "holds, so a write naming an unapproved namespace would install "
-            "the pack by writing it — any caller could grant itself any "
-            "pack, and the namespace/kind vocabulary would balloon until it "
-            f"no longer names anything. Next steps: pick one — {what_next}. "
-            f"{fallback.strip()}",
-            prop=prop, kind=kind if isinstance(kind, str) else str(kind),
-            namespace=pack_ns, installed=approved)
+        if not (spells := payload_names_pack(record)):
+            return
+        if graph is not None:
+            # The WRITE TARGET's approval set, not this SDK's (#5475 review): a
+            # door that takes a ``proj`` argument persists into THAT graph, so
+            # reading ``self``'s set would admit an unapproved namespace into a
+            # graph that never approved it (and refuse a legitimate write the
+            # other way round). Latent today — every caller passes its own
+            # projection — which is exactly why it is fixed at the seam.
+            from tortoise.pack_state import graph_approval_namespaces
+            approved = graph_approval_namespaces(graph)
+        else:
+            # `_installed_namespaces_for_gate` is this module's SDK-aware reader
+            # (it is the one that knows a bare-``__new__`` SDK has no graph and a
+            # bound-but-unreachable graph RAISES rather than reading as no-packs).
+            approved = _installed_namespaces_for_gate(self)
+        refuse_unapproved_kinds_in_payload(record, approved, spells=spells)
 
     def _refuse_unapproved_kinds_in_props(self, props: dict) -> None:
         """Run the #5475 gate over EVERY kind property a write is carrying.
@@ -29410,6 +29660,15 @@ class TortoiseSDK:
         # #329: id + sourcePath/source_path are server-managed — reject
         props = _sanitize_props(props, reject_id=True,
                                 reject_belief_props=True)
+        # ── #5475 (residual): the UPDATE door onto every label ──
+        # ``update_entity`` is the documented tenant route onto Object /
+        # Subject / Event / Document / Source nodes, and each of those carries
+        # a kind property ``graph_kind_namespaces`` mines back into the
+        # approval set. Measured at HEAD: ``update_entity(id,
+        # objectKind='marketing:campaign')`` on a ``dev``-only graph left it
+        # ``['dev','marketing']``. Same rule, same funnel, same refusal as the
+        # create doors because it is the SAME helper.
+        self._refuse_unapproved_kinds_in_props(props)
         # #3998 (D30): the generic entity surface reaches `:Source` TOO, and its
         # per-label branch below writes caller props with a live `SET n += $p`.
         # Without this the closed :Source surface declared in
@@ -32135,6 +32394,12 @@ class TortoiseSDK:
         }
         if frontmatter.get("domain") is not None:
             ev["domain"] = str(frontmatter["domain"])
+        # ── #5475 (residual): ``document_kind`` comes from FRONTMATTER ──
+        # It is one of the properties ``graph_kind_namespaces`` mines, so an
+        # indexed file whose frontmatter says ``type: marketing:brief`` would
+        # install that pack by being indexed. Gated before ``_emit_event`` (the
+        # commit point) so a refusal leaves both stores untouched.
+        self._refuse_unapproved_kinds_in_record(ev)
         # #7951 — THE JOURNAL ORDERING CONTRACT (module top): **journal first,
         # then project.** `ev` is fully built above, so this record qualifies
         # for NEITHER contract exception (it is not a replay, and its payload
@@ -34458,6 +34723,18 @@ class TortoiseSDK:
                 (Action was dissolved in Ontology v3.0).
         """
         proj = self._get_proj()
+        # ── #5475 (residual): the SECOND writer of ``sourceKind`` ──
+        # ``create_source`` is gated at the entity funnel, but this public method
+        # auto-creates the ``:Source`` itself (``MERGE … ON CREATE SET
+        # s.sourceKind=$sk``, ``projection/edges.py``), so it was a second, ungated
+        # writer of one of the properties ``graph_kind_namespaces`` mines — a
+        # caller-chosen namespace, reachable from a public SDK method. Measured on
+        # a ``dev``-only graph: ``link_source_to_entity(url, id, 'Object',
+        # source_kind='marketing:campaign')`` left ``['dev','marketing']``.
+        # Refused BEFORE the call, not conditionally on the node's existence: a
+        # read-then-write decision here would be a race, and the value is only
+        # honoured ON CREATE, so existence is not ours to predict.
+        self._refuse_unapproved_kind("sourceKind", source_kind)
         proj.link_source_to_entity(source_url, entity_id, entity_label, source_kind)
 
     def get_org_structure(self, subject_id: str) -> dict:

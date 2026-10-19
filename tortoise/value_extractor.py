@@ -17,6 +17,7 @@ from collections.abc import Collection
 from pathlib import Path
 
 from tortoise._gate_memo import GateMemo
+from tortoise.commit_schema import EVENT_KINDS as _GATE_EVENT_KINDS
 
 # ── The value brief: compiled vocab + semantics (the #954 contract) ─────────
 
@@ -636,10 +637,12 @@ Be precise and minimal."""
 
 # ── The deterministic enforcer (the #956 contract) ─────────────────────────
 
-EVENT_KINDS = {"decision", "occurrence", "deployment", "review", "extraction",
-               "meeting", "experiment", "friction", "turn", "sessionCaptured",
-               "AgentSession", "documentCreated", "roleCreated", "pointAdded",
-               "humanApproval"}
+# §5's core event kinds, DERIVED from the Layer-1 gate's set rather than copied (#2786):
+# this literal had drifted to 15 of 16 names (missing `milestone`, the #2767 core event),
+# i.e. the exact defect class a hand-maintained mirror produces. Nothing imported this
+# copy, so the drift was inert — but a public constant that disagrees with the gate is a
+# trap for the next reader. `tests/test_kind_vocabulary_consistency.py` pins the identity.
+EVENT_KINDS: frozenset[str] = frozenset(_GATE_EVENT_KINDS)
 
 
 def validate_summary(summary: dict, vocab: Collection[str] | None = None,

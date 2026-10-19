@@ -258,6 +258,108 @@ def test_every_runbook_row_is_declared_and_every_kind_has_a_row():
         f"declared kinds with no runbook row: {sorted(ik.KIND_NAMES - set(rows))}")
 
 
+def test_the_runbook_triage_rows_describe_the_shipped_r2_tier_split():
+    """#8422: the triage rows must describe the split the CODE ships.
+
+    The runbook's §"The two R2 tiers (#3147)" table was updated when the
+    watcher gained a bucket-level HEAD, but the ALERT TAXONOMY table — the
+    surface an operator actually reads under `R2_DOWN` / `R2_UNLISTABLE` — and
+    the "Known residuals" list were left asserting the RETRACTED premise, so
+    the same file said "resolved" in one section and "accepted residual" ~400
+    lines later. Both are operator-facing claims about which surface files
+    which kind, so each is pinned here against the shipped behaviour:
+
+    * the watcher files `R2_DOWN` ONLY when its own read *and* a bucket-level
+      HEAD both fail (`backup_watcher._drive_alerts`), so "the watcher cannot
+      tell the two tiers apart" is no longer true of this build;
+    * the watcher IS a filer of `R2_UNLISTABLE` (it files it when the HEAD
+      answers), which the row's own "Filed by" side has to name; and
+    * a watcher-side listing failure is no longer *accepted* at the reachability
+      tier, so re-adding that bullet re-accepts a residual #8422 resolved.
+
+    RED (pre-fix): all three sentences were false and this test fails on each.
+    """
+    rows = _runbook_rows()
+
+    down = rows["R2_DOWN"]
+    assert "cannot tell the two tiers apart" not in down, (
+        "the R2_DOWN triage row still asserts the premise #8422 disproves — the "
+        "watcher now probes the bucket, so on a failed read the two tiers ARE "
+        "distinguishable")
+    assert "HEAD" in down.upper(), (
+        "the R2_DOWN row must name the bucket-level HEAD as the watcher's "
+        "evidence — a row that only says 'R2 read' describes the pre-#8422 "
+        "watcher")
+
+    unlistable = rows["R2_UNLISTABLE"]
+    assert "watcher" in unlistable, (
+        "the R2_UNLISTABLE row omits the watcher from its 'Filed by' side — an "
+        "operator reading it for a WATCHER-filed incident would look for the "
+        "driver's `R2_LIST_OK=0` / `storage_error` shape and find neither")
+
+    accepted = RUNBOOK.read_text(encoding="utf-8").split(
+        "## Known residuals (accepted)", 1)
+    assert len(accepted) == 2, (
+        "the runbook lost its '## Known residuals (accepted)' section — this "
+        "check would then pass vacuously")
+    residual_body = accepted[1].split("\n### ", 1)[0]
+    reaccepted = [ln.strip() for ln in residual_body.splitlines()
+                  if "ListObjects" in ln and "reachability tier" in ln]
+    assert not reaccepted, (
+        "the accepted-residuals list re-adopts the watcher mislabel #8422 "
+        f"resolved: {reaccepted} — the remaining residual is only that the "
+        "probe outcome is not recorded in the incident detail (#8472)")
+
+
+def test_the_driver_kind_owner_comment_keeps_the_ownership_conclusion_only():
+    """#8422: the bash MIRROR of the ownership split must not restate the
+    retracted rationale.
+
+    `.github/scripts/registry-cron.sh::kind_owner` and `tortoise/alert_store.py`
+    explain the SAME ownership decision in two languages, and the Python side
+    says they MUST agree. The conclusion is unchanged — the watcher may file
+    `R2_UNLISTABLE` but may not clear it (clearing is owner-gated, ADR-011) —
+    while the reason given used to be "the watcher's failing probe cannot tell
+    the two tiers apart", which is exactly the premise #8422 removed. Two
+    surfaces explaining one decision with contradictory rationales is how the
+    next reader picks the wrong one, so the reason is pinned to the probe's
+    MEASUREMENT scope rather than kept in sync by hand.
+
+    RED (pre-fix): the comment carried the retracted premise.
+    """
+    sh = DRIVER.read_text(encoding="utf-8")
+    body = sh.split("kind_owner() {", 1)
+    assert len(body) == 2, "kind_owner() moved — this guard is scanning nothing"
+    arm_end = body[1].split("esac", 1)[0]
+    lines = arm_end.splitlines()
+    arm_at = next((i for i, ln in enumerate(lines)
+                   if ln.strip().startswith("STALE|NEVER_BACKED_UP")), None)
+    assert arm_at is not None, (
+        "the watcher case arm of kind_owner() moved or lost its kind list — "
+        "this guard can no longer find the rationale it pins")
+    rationale: list[str] = []
+    for ln in reversed(lines[:arm_at]):
+        if not ln.lstrip().startswith("#"):
+            break
+        rationale.insert(0, ln.strip())
+    assert rationale, (
+        "the watcher arm of kind_owner() lost its leading comment block — the "
+        "rationale moved and this guard can no longer find it")
+    joined = " ".join(rationale)
+    assert "R2_UNLISTABLE" in joined, (
+        "the watcher arm's rationale no longer explains why it cannot clear "
+        "R2_UNLISTABLE — the paragraph moved and this guard is now weaker "
+        "than it reads")
+    assert "cannot tell the two tiers apart" not in joined, (
+        "kind_owner() still justifies the split with the premise #8422 "
+        "disproves — the watcher's HEAD DOES separate the tiers, so the reason "
+        "the watcher cannot clear is that its probe measures reachability, not "
+        "the pool's measurement")
+    assert "driver-owned" in joined, (
+        "the conclusion must stay: R2_UNLISTABLE is driver-owned for clearing "
+        "(ADR-011 gates clearing, not filing)")
+
+
 def test_the_sweep_module_docstring_points_at_the_triage_row():
     """The #661 guard's in-code documentation must name its runbook triage row.
 

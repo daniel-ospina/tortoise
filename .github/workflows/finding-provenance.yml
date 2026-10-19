@@ -38,11 +38,31 @@
 # deliberately does NOT touch the issue-level `provenance-stale` label, which
 # is the issue-body gate's state.
 #
-# COST — every comment now pays the full-history checkout before it can be
-# classified, because the classifier IS the repo's own tool and the checkout is
-# what provides it. That is deliberate: a pre-checkout grep would be a second
-# copy of the predicate, and two copies drift so the cheap one decides
-# silently.
+# COST — TWO JOBS, CHEAP FIRST (#9115). Every comment used to pay the
+# full-history checkout before it could be classified, because the classifier
+# IS the repo's own tool and the checkout is what provides it. Measured on this
+# repo 2026-10-19: of the last 100 workflow runs it triggered, 29 were this
+# workflow — the most of any workflow in the repo, 1.8x the next — and in
+# 19 of 20 sampled runs the gate step was `skipped`: ordinary discussion
+# comments that paid a full-history clone (14 s of an 18 s job) to be told
+# "not a finding". Under the #9115 flood that turned ~50 lanes' chatter into
+# 12+ concurrent runners and left the REQUIRED `python-ci-gate` with no slot.
+#
+# So the work is now split: `classify` checks out with `fetch-depth: 1` — the
+# classifier is a PURE TEXT predicate that opens no git repo — and `provenance`
+# (the only leg that needs history) runs on `needs:` only when the body IS a
+# finding. Both jobs carry an explicit `timeout-minutes`, so a wedged clone can
+# no longer hold a runner for the 360-minute default.
+#
+# ⛔ The classification is still the repo's OWN tool, never a shell `grep` in
+# front of the checkout: a second copy of the predicate drifts, and then the
+# cheap copy decides silently. The split saves the CONE, not the predicate.
+#
+# ⛔ There is deliberately NO `paths:`/`paths-ignore:` filter here. The triggers
+# are `issues`/`issue_comment`, which carry no path, and a path-filtered GATE
+# never runs — a skipped check reads as a pass to the rail. The same reason
+# keeps this workflow's `concurrency:` keyed PER UNIT (below) rather than
+# collapsed globally.
 #
 # The job runs on a VERSION-PINNED hosted label, not `ubuntu-latest`. The
 # self-hosted runners on this repo also advertise `ubuntu-latest`
@@ -100,20 +120,40 @@ permissions:
 # documented recovery path for one issue supersedes its own previous attempt.
 # `github.run_id` is the guaranteed-unique fallback for a dispatch with no
 # issue_number.
+#
+# ⛔ NOT a single global group. It was proposed for #9115 and refused: with one
+# group, a burst of comments cancels every run but the newest, and each of the
+# cancelled ones owed an annotation — the flood would stop being VISIBLE and
+# become a batch of silently ungated findings. Bounding the run COUNT is a
+# different change (batching/coalescing with a catch-up sweep); it is recorded
+# on #9115 and is not smuggled in here.
 concurrency:
   group: finding-provenance-${{ github.event.comment.id || github.event.issue.number || github.event.inputs.issue_number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
-  provenance:
+  # THE CHEAP HALF. This job only ROUTES — it never annotates, never labels and
+  # never posts, so its verdict cannot be lost by a supersede (the workflow's
+  # per-unit `concurrency:` still covers the pair). It needs no history, hence
+  # `fetch-depth: 1`: that is the whole point of the split (#9115).
+  classify:
     # Version-pinned hosted label — see the COST note above. NOT `ubuntu-latest`
     # (the self-hosted pool advertises that too), and never `self-hosted`.
     runs-on: ubuntu-24.04
+    # A shallow clone + one classification is seconds. The bound exists so a
+    # wedged runner can never hold a check slot for the 360-minute default.
+    timeout-minutes: 6
+    outputs:
+      is_finding: ${{ steps.decide.outputs.is_finding }}
+      number: ${{ steps.issue.outputs.number }}
+      kind: ${{ steps.issue.outputs.kind }}
+      comment_id: ${{ steps.issue.outputs.comment_id }}
     steps:
-      # fetch-depth 0: the base-ancestry test needs full history.
+      # fetch-depth 1: classification is a pure TEXT predicate. The ancestry
+      # test — the only thing that needs full history — lives in `provenance`.
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
       # tools/finding_provenance.py carries the inline >=3.12 guard (#5128).
       - uses: actions/setup-python@v5
         with:
@@ -163,27 +203,68 @@ jobs:
             python3 tools/finding_provenance.py --is-finding \
               "$RUNNER_TEMP/body.md" || rc=$?
             case "$rc" in
-              0) echo "run=true" >> "$GITHUB_OUTPUT" ;;
-              1) echo "run=false" >> "$GITHUB_OUTPUT"
+              0) echo "is_finding=true" >> "$GITHUB_OUTPUT" ;;
+              1) echo "is_finding=false" >> "$GITHUB_OUTPUT"
                  echo "ordinary discussion comment (no finding claim) — skipping" ;;
               *) echo "finding-provenance: classifier failed (exit $rc)"
                  exit "$rc" ;;
             esac
           elif grep -qE '^Measured at:' "$RUNNER_TEMP/body.md"; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "is_finding=true" >> "$GITHUB_OUTPUT"
           elif grep -qx 'beta-feedback' "$RUNNER_TEMP/labels.txt"; then
-            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "is_finding=false" >> "$GITHUB_OUTPUT"
             echo "beta-feedback report with no measured commit — skipping"
           elif grep -qx 'bug' "$RUNNER_TEMP/labels.txt"; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "is_finding=true" >> "$GITHUB_OUTPUT"
           else
-            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "is_finding=false" >> "$GITHUB_OUTPUT"
             echo "not a finding (no provenance line, not an internal bug) — skipping"
+          fi
+
+  # THE EXPENSIVE HALF — full history, and it only runs for a body that IS a
+  # finding. Everything that posts (label, annotation, reply) lives here, so a
+  # superseded run can never leave a half-applied verdict: the job is either
+  # skipped (not a finding) or it runs to completion and annotates.
+  provenance:
+    needs: classify
+    if: needs.classify.outputs.is_finding == 'true'
+    # Version-pinned hosted label — see the COST note above.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      # fetch-depth 0: the base-ancestry test needs full history.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # The body is RE-FETCHED rather than handed over as an artifact: it is one
+      # API call, and an artifact would put the untrusted text through a second
+      # store for no benefit. Numeric-only env, exactly as in `classify` — the
+      # body is data, never shell source (#4732).
+      - name: Resolve the issue body
+        id: issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE: ${{ needs.classify.outputs.number }}
+          COMMENT_ID: ${{ needs.classify.outputs.comment_id }}
+        run: |
+          N="$ISSUE"
+          [ -n "$N" ] || { echo "no issue number resolved"; exit 2; }
+          echo "number=$N" >> "$GITHUB_OUTPUT"
+          if [ -n "$COMMENT_ID" ]; then
+            echo "kind=comment" >> "$GITHUB_OUTPUT"
+            gh api "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID" \
+              --jq .body > "$RUNNER_TEMP/body.md"
+          else
+            echo "kind=issue" >> "$GITHUB_OUTPUT"
+            gh issue view "$N" --json body -q .body > "$RUNNER_TEMP/body.md"
           fi
 
       - name: Gate the finding's provenance
         id: gate
-        if: steps.decide.outputs.run == 'true'
         # Explicit rc capture, NOT a pipe: `cmd | tee` returns tee's status, so
         # a piped gate can never fail and the workflow becomes a no-op. The
         # tool's exit code is the gate; it is propagated here and branched on
@@ -209,7 +290,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           N: ${{ steps.issue.outputs.number }}
           KIND: ${{ steps.issue.outputs.kind }}
-          CID: ${{ github.event.comment.id }}
+          CID: ${{ needs.classify.outputs.comment_id }}
         run: |
           if [ "$KIND" = "comment" ]; then
             # Annotate THAT comment (#4732): a reply carrying its permanent
