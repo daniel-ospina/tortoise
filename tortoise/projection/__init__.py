@@ -3345,11 +3345,15 @@ def _journal_safe_params(params, cypher=None):
 #     `proj.g.delete()`) — `#9209`;
 #   * the WEBHOOK-DELIVERY store — `tortoise/webhook_delivery.py`'s
 #     `:ContextSubscription` / `:DeliveryReceipt` writes and their index DDL:
-#     the closest sibling of the lane this increment declares (a graph-native
-#     durable surface with no journal record, allocating through
-#     `event_store.next_seq` while writing its own labels through `proj.g`), and
-#     reached on the hosted lane by `hosted_api.create_subscription` ->
-#     `create_subscription(sdk._get_proj(), …)` — `#9233`;
+#     the closest sibling of the lane this increment declares, because it is a
+#     graph-native durable surface with no journal record that also READS the
+#     feed's head (`event_head_seq` -> `:GraphEventMeta.last_seq`, falling back
+#     to `max(:GraphEvent.seq)`). It allocates nothing of its own — its
+#     `:DeliveryReceipt.seq` is copied from the `:GraphEvent` it delivers — but
+#     its labels are written straight through `proj.g` with no lane, and the
+#     hosted door reaches it with the SDK's own projection
+#     (`hosted_api.create_subscription` -> `create_subscription(sdk._get_proj(),
+#     …)`) — `#9233`;
 #   * `rebuild_all`'s post-wipe SNAPSHOT-RESTORE legs (`:Batch`,
 #     `:Session` + `CONTAINS`, the onboarding state/steps/`onboards` edges,
 #     `:TeamMeta`, config entries), which the replay scope opened by this lane
