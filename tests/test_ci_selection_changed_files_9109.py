@@ -114,7 +114,10 @@ def test_a_legitimate_unknown_repo_path_gets_no_list_hint(tmp_path):
 
     A large part of the tracked tree reaches FULL through the unknown branch
     alone — `.github/workflows/ci.yml`, `uv.lock`, `Makefile`, `.mergify.yml`,
-    and every `TOOL_CARVEOUTS`-registered `tools/*.py` — and every
+    and a `TOOL_CARVEOUTS`-registered `tools/*.py` that no `SOURCE_PATTERNS` row
+    matches (`tools/ci_selection.py`; several `TOOL_CARVEOUTS` entries ARE
+    claimed — `tools/ask_spotcheck.py` → `sdk`, `tools/embedder_probe.py` →
+    `eval` — and those never reach this branch) — and every
     added/modified path in a checked-out PR is an existing file. Keying the
     list-vs-path hint on `Path(c).is_file()` therefore fired it on nearly every
     legitimate fail-closed selection and claimed a malformed invocation that had

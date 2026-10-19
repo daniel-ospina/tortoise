@@ -4272,10 +4272,12 @@ def _warn_unknown_paths(explain: dict) -> None:
     WHY THE LIST-VS-PATH HINT IS CONFINED TO A PATH OUTSIDE THE CHECKOUT: an
     unknown path is mostly a LEGITIMATE diff — most of the tracked tree that
     reaches FULL through this branch alone is real repo content
-    (`.github/workflows/ci.yml`, `uv.lock`, `Makefile`, `.mergify.yml`, and the
-    `TOOL_CARVEOUTS`-registered `tools/*.py` such as `tools/ci_selection.py` —
-    an UNREGISTERED `tools/*.py` is dropped by `_keep_changed` and never reaches
-    this branch) — and every added or modified path in a checked-out PR is an
+    (`.github/workflows/ci.yml`, `uv.lock`, `Makefile`, `.mergify.yml`, and a
+    `TOOL_CARVEOUTS`-registered `tools/*.py` that no `SOURCE_PATTERNS` row matches,
+    such as `tools/ci_selection.py` — an UNREGISTERED `tools/*.py` is dropped by
+    `_keep_changed`, and a REGISTERED-AND-claimed one is matched by the surface
+    loop, so neither reaches this branch) — and every added or modified path in a
+    checked-out PR is an
     existing file. A hint keyed on "this path exists" therefore fires on nearly
     every real fail-closed selection and asserts a malformed invocation that did
     not happen: a new plausible-but-false reading, which is the class this issue
