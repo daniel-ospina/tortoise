@@ -101,6 +101,108 @@ class TestCheckpoint:
         ).result_set
         assert events[0][0] == 1  # only one event for the single filed item
 
+    # ── #8554: the item schema is validated, not discovered by a helper ──
+
+    def test_bad_content_is_a_naming_validation_error_not_an_attributeerror(
+            self, sdk):
+        """#8554: a ``None``/non-str ``content`` must be REFUSED by name.
+
+        Measured on main @ baef47870 before the fix: every case below raised
+        ``AttributeError: '<type>' object has no attribute 'encode'`` from
+        ``_content_hash`` — a caller error that named neither ``checkpoint``
+        nor ``content``, and an absent key raised a bare ``KeyError``. The
+        escaped exception type is asserted, not just "some error": a bare
+        ``AttributeError``/``KeyError``/``TypeError`` here IS the defect.
+        """
+        from tortoise.exceptions import BundleValidationError
+
+        for bad in (None, 123, 4.5, b"bytes", ["a"], {"x": 1}, True):
+            with pytest.raises(BundleValidationError) as exc:
+                sdk.checkpoint([{"wing": "w", "room": "r", "content": bad}])
+            msg = str(exc.value)
+            assert "checkpoint" in msg, f"must name the surface: {msg}"
+            assert "items[0]" in msg, f"must name the item index: {msg}"
+            assert "content" in msg, f"must name the parameter: {msg}"
+
+        # An ABSENT content key is the same violation (not a bare KeyError) —
+        # the same "absent == None" test ingest's Phase-1 gate uses.
+        with pytest.raises(BundleValidationError, match="requires 'content'"):
+            sdk.checkpoint([{"wing": "w", "room": "r"}])
+
+    def test_every_bad_item_is_reported_and_nothing_is_written(self, sdk):
+        """The whole batch is refused in one pass, with zero partial writes.
+
+        Two homes read ``content`` (the dedup loop and the write loop), so a
+        per-read check could refuse one item and still file the rest. The
+        violations list names EVERY offender, and the graph is untouched.
+        """
+        from tortoise.exceptions import BundleValidationError
+
+        items = [
+            {"content": "a good item that must NOT be filed"},
+            {"content": None},
+            {"content": "another good item"},
+            {"content": 7},
+        ]
+        with pytest.raises(BundleValidationError) as exc:
+            sdk.checkpoint(items)
+        assert [v["index"] for v in exc.value.violations] == [1, 3]
+        for v in exc.value.violations:
+            assert {"section", "index", "message"} <= set(v)
+        assert sdk.query(kind="checkpoint-item") == [], (
+            "a refused batch must not write the valid items around the bad ones")
+
+    def test_malformed_container_and_non_dict_item_are_named(self, sdk):
+        """A non-list ``items`` / non-dict item previously escaped as a bare
+        ``TypeError`` (``'NoneType' object is not iterable``,
+        ``list indices must be integers``) — the same unvalidated-schema class."""
+        from tortoise.exceptions import BundleValidationError
+
+        for bad_items, needle in (
+            (None, "must be a list"),
+            ("not-a-batch", "must be a list"),
+            ({"content": "x"}, "must be a list"),
+        ):
+            with pytest.raises(BundleValidationError) as exc:
+                sdk.checkpoint(bad_items)
+            assert needle in str(exc.value), str(exc.value)
+            assert "checkpoint" in str(exc.value)
+
+        with pytest.raises(BundleValidationError, match=r"items\[0\] must be a dict"):
+            sdk.checkpoint([["a"]])
+
+    def test_a_tuple_batch_still_files(self, sdk):
+        """No-regression pin: a tuple of items iterated fine before #8554, so
+        the container check must not refuse it — the fix is about ``content``,
+        not about an unrelated container-type detail."""
+        result = sdk.checkpoint(({"content": "tuple batch item A"},
+                                 {"content": "tuple batch item B"}))
+        assert result == {"filed": 2, "duplicates": 0}
+
+    def test_mcp_tortoise_checkpoint_returns_a_validation_error(self, sdk,
+                                                               monkeypatch):
+        """The MCP surface a client actually calls must return
+        ``ERR_BUNDLE_INVALID`` + violations, not an internal-looking error.
+
+        ``tortoise_checkpoint`` passes the caller's item list straight through,
+        so before #8554 a client sending ``{"content": null}`` got the
+        ``_content_hash`` ``AttributeError`` back through the generic
+        ``{error}-only`` branch.
+        """
+        import tortoise.mcp_server as m
+
+        monkeypatch.setattr(m, "_get_org_sdk", lambda: sdk)
+        m._transport_mode.set("stdio")
+        try:
+            r = m.tortoise_checkpoint([{"wing": "w", "room": "r",
+                                       "content": None}])
+        finally:
+            m._transport_mode.set(None)
+        assert r["code"] == m.ERR_BUNDLE_INVALID
+        assert r["violations"][0]["index"] == 0
+        assert "requires 'content'" in r["error"]
+        assert "encode" not in r["error"], "no helper-level message may leak"
+
     # ── GAP-08: Semantic dedup ──────────────────────────────────
 
     def test_semantic_dedup_catches_near_duplicates(self, sdk):

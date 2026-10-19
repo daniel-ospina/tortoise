@@ -22662,11 +22662,91 @@ class TortoiseSDK:
         return self._find_point_by_content(content, pointKind=pointKind,
                                            exclude_id=exclude_id)
 
+    def _check_checkpoint_items(self, items: Any) -> None:
+        """#8554 — refuse a malformed ``checkpoint`` item batch (fail-closed).
+
+        The item contract ``checkpoint`` documents is ``{wing, room, content}``
+        with ``content`` REQUIRED. Before #8554 nothing validated it: an item
+        whose ``content`` was ``None``/non-str reached ``_content_hash``'s
+        ``text.encode`` and escaped as a bare
+        ``AttributeError: 'NoneType' object has no attribute 'encode'`` — a
+        crash from a private helper that names neither ``checkpoint`` nor
+        ``content``, i.e. a caller error that reads as an internal bug (and an
+        absent ``content`` key escaped as a bare ``KeyError: 'content'``, a
+        non-dict item or a non-list ``items`` as a bare ``TypeError``).
+
+        Validated ONCE, here, because ``checkpoint`` reads each item's
+        ``content`` in two independent places — the tier-1 dedup loop (into
+        ``_content_hash``) and the write loop — so a per-read check would be
+        two homes that can drift.
+
+        The shape mirrors ``ingest``'s Phase-1 item check (``_check_item_shape``,
+        #902 A2): the SAME ``BundleValidationError`` carrying EVERY violation
+        (not just the first), so a caller fixes the whole batch in one pass and
+        the MCP ``tortoise_checkpoint`` wire returns
+        ``{error, code: ERR_BUNDLE_INVALID, violations}`` instead of an opaque
+        error. The "bundle" in the class name is accurate here: a checkpoint call
+        IS a batch of items whose schema is the caller's to get right.
+
+        Why fail-closed rather than the #5240 answer: there ``update_point(None)``
+        is a deliberate "no content edit" because the REPLAY fold cannot record
+        a live clear (``_revise_point``'s ``coalesce($c, n.content)``). That
+        reasoning does NOT transfer — in ``checkpoint`` ``content`` is a
+        required field, there is no edit to no-op, and skipping the item would
+        discard the caller's write with no error at all.
+        """
+        violations: list[dict] = []
+        # A tuple is accepted: it iterated fine before #8554, so refusing it
+        # would break a working caller over a container-type detail that is
+        # NOT this issue's defect. What is refused is a container that can
+        # never be a batch — ``str``/``bytes`` (each index is a character),
+        # ``dict`` (each index is a key) and any non-iterable/singleton — which
+        # before #8554 escaped as a bare
+        # ``TypeError: string indices must be integers`` / ``'NoneType' object
+        # is not iterable`` naming neither ``checkpoint`` nor ``items``.
+        if not isinstance(items, (list, tuple)):
+            # No item index exists for a bad container — ``-1`` is the
+            # "container, not item" sentinel. Every violation keeps the
+            # ``{section, index, message}`` key set the A2 wire contract pins
+            # (tests/test_failure_contract.py).
+            violations.append({
+                "section": "items", "index": -1,
+                "message": "checkpoint: items must be a list of "
+                           "{wing, room, content} items — got "
+                           f"{type(items).__name__}",
+            })
+        else:
+            for index, item in enumerate(items):
+                if not isinstance(item, dict):
+                    violations.append({
+                        "section": "items", "index": index,
+                        "message": f"checkpoint: items[{index}] must be a "
+                                   f"dict of {{wing, room, content}} — got "
+                                   f"{type(item).__name__}",
+                    })
+                    continue
+                # Same wording and same test as ingest's Phase-1 content
+                # gate (absent == None == non-str), so the two bulk surfaces
+                # cannot disagree about what a required content is.
+                content = item.get("content")
+                if content is None or not isinstance(content, str):
+                    violations.append({
+                        "section": "items", "index": index,
+                        "message": f"checkpoint: items[{index}] requires 'content'",
+                    })
+        if violations:
+            from .exceptions import BundleValidationError
+            raise BundleValidationError(violations)
+
     def checkpoint(self, items: list[dict], agent_name: str = "checkpoint",
                    threshold: float = 0.95) -> dict:
         """Session batch save — two-tier dedup (content hash + embedding similarity).
 
-        Each item: {wing, room, content}. Returns {filed: N, duplicates: M}.
+        Each item: {wing, room, content} — ``content`` is REQUIRED and must be
+        a ``str``; a missing/``None``/non-str ``content``, a non-dict item or a
+        non-list ``items`` raises ``BundleValidationError`` naming the item
+        index and ``content`` (never an ``AttributeError``/``KeyError`` from a
+        private helper — #8554). Returns {filed: N, duplicates: M}.
         threshold: cosine similarity for semantic dedup (0.0-1.0).
                    Set to 1.0 to disable semantic dedup (hash-only).
 
@@ -22678,6 +22758,11 @@ class TortoiseSDK:
         ≥ 0.95, while looser paraphrases (0.77-0.90) stay below and file
         as distinct points. Keep in sync with mcp_server.tortoise_checkpoint.
         """
+        # #8554: fail-closed BEFORE the projection is opened, before any hash,
+        # dedup read or write. One home for the item schema (see
+        # ``_check_checkpoint_items``).
+        self._check_checkpoint_items(items)
+
         from datetime import datetime, timezone
         filed, duplicates = 0, 0
         proj = self._get_proj()
