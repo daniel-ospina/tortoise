@@ -1584,7 +1584,7 @@ def test_the_probe_names_a_memory_kill_and_an_unreadable_termination(monkeypatch
         def __init__(self, rc, out=""):
             self.returncode, self.stdout, self.stderr = rc, out, ""
 
-    monkeypatch.setattr(ec, "_docker", lambda *a, **k: _R(0, "true 137\n"))
+    monkeypatch.setattr(ec, "_docker", lambda *a, **k: _R(0, "true 137 false\n"))
     assert "KILLED FOR MEMORY" in ec._memory_kill_report("probe-x")
 
     # inspect fails (a wedged daemon, a timeout, a container removed by hand):
@@ -1722,7 +1722,8 @@ def test_the_cap_grammar_is_the_SAME_at_every_seam(tmp_path, monkeypatch):
     from tools import test_lane as tl
 
     setup = _load_setup_module()
-    for i, good in enumerate(("2G", " 2g ", "\t2G\t", "2gb", "2048mb")):
+    for i, good in enumerate(("2G", " 2g ", "\t2G\t", "2gb", "2048mb",
+                              "1t", "2tb", "1.5gb")):
         monkeypatch.setenv(MEMORY_CAP_ENV, good)
         expected = good.strip().lower()   # `.strip().lower()`, at every seam
         assert tl.container_memory_cap() == expected, good
@@ -1741,7 +1742,12 @@ def test_the_cap_grammar_is_the_SAME_at_every_seam(tmp_path, monkeypatch):
         expected = good.strip().lower()
         assert f"--memory {expected} --memory-swap {expected}" in line, (good, line)
 
-    for i, bad in enumerate(("2 g", "2\tg")):
+    # `2g\nabc` used to be ACCEPTED by the shell seam alone: `grep -E '$'` is
+    # line-anchored, so any one matching LINE accepted the whole value, while the
+    # Python seams' `\Z` refused it (#7357 review). A value with a newline must
+    # be refused at every seam — never silently normalised, and never passed to
+    # `docker run` where the refusal is opaque.
+    for i, bad in enumerate(("2 g", "2\tg", "2bb", "2g\nabc", "2g\n0")):
         monkeypatch.setenv(MEMORY_CAP_ENV, bad)
         with pytest.raises(SystemExit):
             tl.container_memory_cap()
@@ -1784,6 +1790,7 @@ _MEMORY_UNITS = {
     "k": 1 << 10, "kb": 1 << 10,
     "m": 1 << 20, "mb": 1 << 20,
     "g": 1 << 30, "gb": 1 << 30,
+    "t": 1 << 40, "tb": 1 << 40,
 }
 
 
@@ -1798,23 +1805,41 @@ def _memory_bytes(spec):
     the two keys must read the same expression and the seams' own remedy lever
     keeps working here.
     """
-    m = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*([bkmg]b?)?\s*",
+    # Docker's SUFFIX grammar exactly: one letter (`b`/`k`/`m`/`g`/`t`) or
+    # letter+`b` (`kb`/`mb`/`gb`/`tb`). `2bb` is "invalid suffix: 'bb'".
+    m = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*([bkmgt]|[kmgt]b)?\s*",
                      str(spec), re.IGNORECASE)
     if not m:
         return None
     return int(float(m.group(1)) * _MEMORY_UNITS[(m.group(2) or "").lower()])
 
 
-def _compose_falkordb_gaps(root, globs):
-    """(files, examined, uncapped, swap_mismatch) for compose FalkorDB services.
+def _is_interpolation(spec) -> bool:
+    """Whether *spec* is a compose interpolation rather than a literal.
 
-    Split out so the population and the two failure kinds are testable against a
-    temp tree (#7357 review), not only against this checkout.
+    An interpolation cannot be resolved here (the value depends on the
+    environment at `docker compose up` time), so it is compared AS WRITTEN: the
+    two keys must read the same expression, which is what makes raising the
+    shared env var move both.
+    """
+    return "${" in str(spec)
+
+
+def _compose_falkordb_gaps(root, globs):
+    """(files, examined, uncapped, swap_mismatch, bad_spec) per compose service.
+
+    Split out so the population and the failure kinds are testable against a temp
+    tree (#7357 review), not only against this checkout. FOUR distinct failure
+    kinds, because one message cannot honestly describe them all:
+    an absent cap, a cap of ZERO (docker's spelling for NO LIMIT — every `docker
+    run` seam refuses it, so this guard must not accept it), a swap mismatch, and
+    a value that is not a docker memory spec at all.
     """
     files = sorted({p for g in globs for p in root.glob(g) if p.is_file()})
     checked = 0
     uncapped = []
     swap_mismatch = []
+    bad_spec = []
     for path in files:
         data = yaml.safe_load(path.read_text()) or {}
         for name, svc in (data.get("services") or {}).items():
@@ -1828,14 +1853,30 @@ def _compose_falkordb_gaps(root, globs):
             if not limit:
                 uncapped.append(label)
                 continue
+            limit_b = _memory_bytes(limit)
+            if limit_b is None and not _is_interpolation(limit):
+                bad_spec.append(f"{label} (memory={limit!r})")
+                continue
+            if limit_b == 0:
+                # `memory: "0"` is a truthy STRING, so `if not limit` misses it
+                # — and 0 is docker's spelling for NO LIMIT, i.e. exactly the
+                # uncapped container this guard exists to prevent (#7357
+                # review, measured: `--memory 0` -> HostConfig.Memory=0).
+                uncapped.append(f"{label} (memory={limit!r} is docker's NO-LIMIT)")
+                continue
             swap = svc.get("memswap_limit")
-            limit_b, swap_b = _memory_bytes(limit), _memory_bytes(swap)
-            same = limit_b is not None and limit_b == swap_b
-            if not same and str(swap).strip() != str(limit).strip():
+            swap_b = _memory_bytes(swap)
+            if swap_b is None and not _is_interpolation(swap):
+                bad_spec.append(f"{label} (memswap_limit={swap!r})")
+                continue
+            same = (limit_b is not None and limit_b == swap_b) or (
+                _is_interpolation(limit) and str(swap).strip() == str(limit).strip()
+            )
+            if not same:
                 swap_mismatch.append(
                     f"{label} (memswap_limit={swap!r}, memory={limit!r})"
                 )
-    return files, checked, uncapped, swap_mismatch
+    return files, checked, uncapped, swap_mismatch, bad_spec
 
 
 def test_every_compose_falkordb_has_a_memory_limit():
@@ -1859,7 +1900,7 @@ def test_every_compose_falkordb_has_a_memory_limit():
     `<main>/.worktrees/<lane>`), would skip EVERY file: measured, the guard was
     green in a worktree against an uncapped `apps/graph-viz`.
     """
-    files, checked, uncapped, swap_mismatch = _compose_falkordb_gaps(
+    files, checked, uncapped, swap_mismatch, bad_spec = _compose_falkordb_gaps(
         ROOT, COMPOSE_GLOBS)
     assert files, f"no compose file matched {COMPOSE_GLOBS} — the guard is vacuous"
     assert checked, (
@@ -1876,6 +1917,10 @@ def test_every_compose_falkordb_has_a_memory_limit():
         "memswap_limit, so docker's 2x swap default applies — a swapping "
         f"FalkorDB is a minutes-long RDB reload, not a fast death (#7357): "
         f"{swap_mismatch}"
+    )
+    assert not bad_spec, (
+        "these compose FalkorDB services state a memory value that is neither a "
+        f"docker memory spec nor an interpolation (#7357): {bad_spec}"
     )
 
 
@@ -1898,22 +1943,45 @@ def test_the_compose_guard_reads_bytes_not_spelling(tmp_path):
         (d / "docker-compose.yml").write_text("\n".join(body) + "\n")
 
     globs = ("app/docker-compose*.yml",)
+
+    def _gaps():
+        _f, _c, unc, mism, bad = _compose_falkordb_gaps(tmp_path, globs)
+        return unc, mism, bad
+
     _write("2048m", "2g")
-    _files, checked, uncapped, mismatch = _compose_falkordb_gaps(tmp_path, globs)
-    assert (checked, uncapped, mismatch) == (1, [], []), (
-        f"2g and 2048m are the same 2 GiB; a byte comparison must accept "
-        f"them: {uncapped} {mismatch}"
+    assert _gaps() == ([], [], []), (
+        "2g and 2048m are the same 2 GiB (and 1t and 1099511627776 the same "
+        f"TiB); a byte comparison must accept them: {_gaps()}"
     )
+    _write("1t", "1099511627776")
+    assert _gaps() == ([], [], []), _gaps()
 
     _write("512m", "1g")
-    _files, _checked, uncapped, mismatch = _compose_falkordb_gaps(tmp_path, globs)
-    assert not uncapped and mismatch, (uncapped, mismatch)
+    unc, mism, bad = _gaps()
+    assert not unc and not bad and mism, _gaps()
 
     _write(None, "512m")
-    _files, _checked, uncapped, mismatch = _compose_falkordb_gaps(tmp_path, globs)
-    assert uncapped and not mismatch, (
+    unc, mism, bad = _gaps()
+    assert unc and not mism and not bad, (
         f"an absent cap must be reported as an absent cap, not as a swap "
-        f"mismatch: {uncapped} {mismatch}"
+        f"mismatch: {_gaps()}"
+    )
+
+    # `"0"` is a TRUTHY string, so `if not limit` misses it — and 0 is docker's
+    # spelling for NO LIMIT (#7357 review). An integer 0 was caught, the quoted
+    # string was not.
+    _write("0", "0")
+    unc, mism, bad = _gaps()
+    assert unc and not mism and not bad, (
+        f"`memory: \"0\"` is an UNCAPPED container, which is what this guard "
+        f"exists to catch: {_gaps()}"
+    )
+
+    _write("lots", "lots")
+    unc, mism, bad = _gaps()
+    assert bad and not unc and not mism, (
+        f"a value that is not a docker memory spec is neither an absent cap nor "
+        f"a swap mismatch: {_gaps()}"
     )
 
 
@@ -1936,9 +2004,9 @@ def test_the_compose_guard_keeps_a_shared_interpolation_seam(tmp_path):
         '          memory: "${FALKORDB_CONTAINER_MEMORY:-2g}"\n'
         '    memswap_limit: "${FALKORDB_CONTAINER_MEMORY:-2g}"\n'
     )
-    _files, _checked, uncapped, mismatch = _compose_falkordb_gaps(
+    _files, _checked, uncapped, mismatch, bad = _compose_falkordb_gaps(
         tmp_path, ("app/docker-compose*.yml",))
-    assert (uncapped, mismatch) == ([], []), (uncapped, mismatch)
+    assert (uncapped, mismatch, bad) == ([], [], []), (uncapped, mismatch, bad)
 
     (d / "docker-compose.yml").write_text(
         "services:\n"
@@ -1950,9 +2018,68 @@ def test_the_compose_guard_keeps_a_shared_interpolation_seam(tmp_path):
         '          memory: "${FALKORDB_CONTAINER_MEMORY:-2g}"\n'
         '    memswap_limit: "2g"\n'
     )
-    _files, _checked, uncapped, mismatch = _compose_falkordb_gaps(
+    _files, _checked, uncapped, mismatch, bad = _compose_falkordb_gaps(
         tmp_path, ("app/docker-compose*.yml",))
-    assert mismatch, (
+    assert mismatch and not bad, (
         "raising FALKORDB_CONTAINER_MEMORY must move BOTH keys, or the cap and "
         f"the swap diverge: {mismatch}"
+    )
+
+
+def test_a_probe_killed_MID_STAGE_is_explained_not_left_as_raw_stderr(monkeypatch):
+    """#7357 review: the probe's memory-kill report was attached ONLY to the
+    "never became ready" branch. The cap this module now imposes makes the likely
+    failure of a large `--n` a kill AFTER readiness — mid-stage — which raised
+    docker's raw "Container … is not running" with no cause at all: the legibility
+    gap the issue is about, on the very path the cap creates.
+    """
+    from tools import edge_census as ec
+
+    calls: list[tuple] = []
+
+    def fake(*args, **kwargs):
+        calls.append(args)
+        if args[0] == "version":
+            return ec.subprocess.CompletedProcess(args, 0, "8.0.0\n", "")
+        if args[0] == "run":
+            return ec.subprocess.CompletedProcess(args, 0, "abc123\n", "")
+        if args[0] == "exec":
+            return ec.subprocess.CompletedProcess(args, 0, "PONG\n", "")
+        if args[0] == "inspect":
+            fmt = str(args[2])
+            if "HostConfig" in fmt:
+                return ec.subprocess.CompletedProcess(args, 0, "2147483648\n", "")
+            if "OOMKilled" in fmt:
+                # dead, and killed by its own cgroup cap
+                return ec.subprocess.CompletedProcess(
+                    args, 0, "true 137 false\n", "")
+            return ec.subprocess.CompletedProcess(args, 0, "\n", "")
+        if args[0] == "rm":
+            return ec.subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(f"unexpected docker call: {args}")
+
+    # First query (the baseline read) succeeds; the CREATE then finds the
+    # container gone, exactly what an OOM kill mid-run looks like.
+    def _ping_then_die(container, *a, **k):
+        calls.append(("QUERY", container))
+        if len([c for c in calls if c[0] == "QUERY"]) > 1:
+            raise ec.CensusError(
+                f"probe query failed in {container!r}: "
+                f"Error response from daemon: Container abc is not running")
+        return None
+
+    monkeypatch.setattr(ec, "_docker", fake)
+    monkeypatch.setattr(ec, "_container_query", _ping_then_die)
+    monkeypatch.setattr(ec, "_container_used_memory",
+                        lambda _c: 1234)
+    with pytest.raises(ec.CensusError) as excinfo:
+        ec.run_probe(n=100, log=lambda _m: None)
+    msg = str(excinfo.value)
+    assert "KILLED FOR MEMORY" in msg, (
+        f"a probe killed mid-stage must name the kill, not raise docker's raw "
+        f"stderr on its own: {msg}"
+    )
+    assert "is not running" in msg, (
+        f"the engine's own error must stay — the report is APPENDED, never a "
+        f"replacement: {msg}"
     )

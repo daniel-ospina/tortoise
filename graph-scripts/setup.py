@@ -730,7 +730,7 @@ def _container_memory() -> str:
     # Group 1 is the NUMBER: docker accepts the LONG unit forms too (`2gb`,
     # `2048mb`), so the seam must not refuse a spelling docker itself accepts
     # (#7357 review) — this message is what tells an operator to raise the cap.
-    m = re.match(r"([0-9]+(?:\.[0-9]+)?)(?:[bkmg]b?)?\Z", raw)
+    m = re.match(r"([0-9]+(?:\.[0-9]+)?)(?:[bkmgt]|[kmgt]b)?\Z", raw)
     if not m:
         _fail(f"{CONTAINER_MEMORY_ENV}={raw!r} is not a docker memory spec "
               f"(e.g. 512m, 2g, 1.5g) — refusing to start the container with "

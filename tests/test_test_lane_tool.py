@@ -1694,10 +1694,26 @@ def test_reusing_an_uncapped_container_warns_instead_of_handing_it_back(
     assert "down` and retry" in err, err
     assert (name, port) == (tl.lane_name(), 16390)
 
+    # …an UNREADABLE limit is not silence either (`None` is "could not read",
+    # never "it is capped"), because this reuse path is the only place a
+    # pre-existing uncapped lane container can be caught (#7357 review — the
+    # same arm `graph-scripts/setup.py::_note_uncapped_existing` carries).
+    monkeypatch.setattr(tl, "_container_memory_limit", lambda _n: None)
+    tl.start()
+    err = capsys.readouterr().err
+    assert "could not READ the kernel memory limit" in err, err
+    assert "HostConfig.Memory" in err, (
+        f"the message must name the query that failed, so the reader can run "
+        f"it: {err}"
+    )
+    assert "WITHOUT a kernel memory cap" not in err, (
+        f"an unreadable limit must not be reported as an absent one: {err}"
+    )
+
     # A capped container warns about nothing.
     monkeypatch.setattr(tl, "_container_memory_limit", lambda _n: 2 << 30)
     tl.start()
-    assert "WITHOUT a kernel memory cap" not in capsys.readouterr().err
+    assert "kernel memory cap" not in capsys.readouterr().err
 
 
 def test_a_container_that_dies_during_the_wait_is_named_a_death_not_a_wedge(
@@ -1738,6 +1754,41 @@ def test_a_container_that_dies_during_the_wait_is_named_a_death_not_a_wedge(
         f"{msg}"
     )
 
+    # …and an UNREADABLE state is NOT a death. `container_state` keeps "docker
+    # could not answer" apart from "the container is gone" on purpose, and the
+    # `down` remedy REMOVES the container and its graphs — so guessing a death
+    # from a failed read is the mistake the absent-vs-unreadable rule exists to
+    # prevent (#7357 review).
+    states2 = iter(["running", "unknown"])
+    monkeypatch.setattr(tl, "container_state", lambda _n: next(states2, "unknown"))
+
+    def termination_answers(*a, **k):
+        # The STATE read failed, but docker ANSWERS the termination inspect: this
+        # is the dangerous shape, because `_termination_report` issues its own
+        # call and does NOT inherit the state read's failure. A daemon that
+        # recovers between the two calls answers with the container's PREVIOUS
+        # termination — so if the `unknown` arm appended that report, the message
+        # would claim the death it had just called UNKNOWN.
+        if a[0] == "inspect" and any("OOMKilled" in str(part) for part in a):
+            return _R(0, "true 137 3\n", "")
+        return _R(1, "", "deadline exceeded")
+
+    monkeypatch.setattr(tl, "_docker", termination_answers)
+    with pytest.raises(SystemExit) as e:
+        tl.start()
+    unknown = str(e.value)
+    assert "could not be READ" in unknown, unknown
+    assert "UNKNOWN" in unknown, unknown
+    assert "is a death" not in unknown, (
+        f"a failed state read is not evidence of a death, and the advice it "
+        f"carries (`down`) would destroy the container: {unknown}"
+    )
+    assert "KILLED FOR MEMORY" not in unknown, (
+        f"nothing may be asserted about a state that could not be read — the "
+        f"termination report is a SECOND docker call and can succeed even when "
+        f"the state read failed: {unknown}"
+    )
+
 
 def test_the_long_memory_unit_spellings_docker_accepts_are_accepted(monkeypatch):
     """#7357 review: docker accepts `2gb` and `2048mb` (the LONG unit forms).
@@ -1748,7 +1799,8 @@ def test_the_long_memory_unit_spellings_docker_accepts_are_accepted(monkeypatch)
     "not a POSITIVE docker memory spec". One grammar, and it is docker's."""
     from tools import edge_census as ec
 
-    for good in ("2gb", "2048mb", "512mb", "2g", "1536m", "2kb", "2b"):
+    for good in ("2gb", "2048mb", "512mb", "2g", "1536m", "2kb", "2b",
+                 "1t", "2tb", "1.5gb"):
         monkeypatch.setenv(tl.CONTAINER_MEMORY_ENV, good)
         assert tl.container_memory_cap() == good, good
         monkeypatch.setenv(ec.CONTAINER_MEMORY_ENV, good)
@@ -1771,7 +1823,7 @@ def test_a_plain_sigkill_is_not_called_a_memory_kill(monkeypatch):
     from tools import edge_census as ec
 
     def fake(*_a, **_k):
-        return _R(0, "false 137\n", "")
+        return _R(0, "false 137 false\n", "")
 
     monkeypatch.setattr(ec, "_docker", fake)
     msg = ec._memory_kill_report("probe-x")
@@ -1785,6 +1837,18 @@ def test_a_plain_sigkill_is_not_called_a_memory_kill(monkeypatch):
         f"that keeps the operator from raising a cap that was never hit: {msg}"
     )
 
-    monkeypatch.setattr(ec, "_docker", lambda *a, **k: _R(0, "true 137\n", ""))
+    monkeypatch.setattr(ec, "_docker",
+                        lambda *a, **k: _R(0, "true 137 false\n", ""))
     oom = ec._memory_kill_report("probe-x")
     assert "KILLED FOR MEMORY" in oom and "cgroup cap" in oom, oom
+
+    # A container that is STILL RUNNING reports nothing: docker keeps
+    # `OOMKilled`/`ExitCode` from the container's PREVIOUS termination, so for a
+    # live probe those facts are history, and a query error is not explained by
+    # them (#7357 review — the mirror of the `live` rule in `test_lane`).
+    monkeypatch.setattr(ec, "_docker",
+                        lambda *a, **k: _R(0, "true 137 true\n", ""))
+    assert ec._memory_kill_report("probe-x") == "", (
+        "a running probe's termination facts are HISTORY, never this query "
+        "error's cause"
+    )

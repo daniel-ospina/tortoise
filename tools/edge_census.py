@@ -466,6 +466,42 @@ def docker_available() -> bool:
         return False
 
 
+def _probe_stages(container: str, graph: str, n: int,
+                  edges: int) -> list[Stage]:
+    """Run the measurement stages in order and return the per-stage receipts.
+
+    Factored out so the probe's failure reporting can wrap the WHOLE sequence
+    (#7357): a container killed mid-run by its own cap must be explained, not
+    reported as docker's raw "is not running".
+    """
+    stages: list[Stage] = [
+        Stage("baseline (fresh instance)", _container_used_memory(container))]
+    _container_query(
+        container, graph,
+        f"UNWIND range(1,{n}) AS i CREATE (:Point {{id: 'p' + toString(i)}})")
+    stages.append(Stage("bare :Point node (label + id only)",
+                        _container_used_memory(container), n))
+    _container_query(container, graph, f"MATCH (n:Point) {_POINT_PROPS}")
+    stages.append(Stage("+ keyword-only Point props",
+                        _container_used_memory(container), n))
+    _container_query(
+        container, graph,
+        f"UNWIND range(1,{edges}) AS i "
+        f"MATCH (a:Point {{id: 'p' + toString(i)}}), "
+        f"      (b:Point {{id: 'p' + toString(i + 1)}})"
+        f"CREATE (a)-[:IMPL]->(b)")
+    stages.append(Stage("bare :IMPL edge (no properties)",
+                        _container_used_memory(container), edges))
+    _container_query(container, graph, f"MATCH ()-[r:IMPL]->() {_EDGE_ATTRS}")
+    stages.append(Stage("+ real IMPL attrs "
+                        "(direction,confidence,weight,label,batch_id)",
+                        _container_used_memory(container), edges))
+    _container_query(container, graph, f"MATCH ()-[r:IMPL]->() {_EDGE_SLOTS}")
+    stages.append(Stage("+ the four EP message slots",
+                        _container_used_memory(container), edges))
+    return stages
+
+
 def _container_used_memory(container: str) -> int:
     try:
         proc = _docker("exec", container, "redis-cli", "INFO", "memory")
@@ -533,7 +569,7 @@ DEFAULT_CONTAINER_MEMORY = "2g"
 #: Group 1 is the NUMBER: docker accepts the LONG unit forms too (`2gb`,
 #: `2048mb`), so refusing them would refuse the natural spelling of the remedy
 #: these messages print (#7357 review).
-_MEMORY_SPEC_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)(?:[bkmg]b?)?\Z")
+_MEMORY_SPEC_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)(?:[bkmgt]|[kmgt]b)?\Z")
 
 
 def _spec_is_positive(spec: str) -> bool:
@@ -592,10 +628,17 @@ def _memory_kill_report(container: str) -> str:
     container is still there to be read; if the read still fails (a wedged
     daemon, a timeout) the FAILED READ is what gets reported — a failure is not
     evidence of absence, and this module states that rule everywhere else.
+
+    A container that is still RUNNING reports NOTHING: docker keeps
+    `OOMKilled`/`ExitCode` from the container's previous termination, so for a
+    live probe those facts are HISTORY and naming them as the cause of a query
+    error would be a false diagnosis (the same rule
+    `tools/test_lane.py::_termination_report`'s `live` arm applies). The state
+    is therefore READ IN THE SAME CALL, and only a dead container is explained.
     """
     try:
         r = _docker("inspect", "--format",
-                    "{{.State.OOMKilled}} {{.State.ExitCode}}",
+                    "{{.State.OOMKilled}} {{.State.ExitCode}} {{.State.Running}}",
                     container, check=False)
     except (OSError, subprocess.SubprocessError):
         r = None
@@ -608,9 +651,11 @@ def _memory_kill_report(container: str) -> str:
             "memory kill on this host is the #7357 shape"
         )
     parts = (r.stdout or "").strip().split()
-    if len(parts) != 2:
+    if len(parts) != 3:
         return ""
-    oom, exit_code = parts
+    oom, exit_code, still_running = parts
+    if still_running.lower() == "true":
+        return ""
     if oom.lower() != "true" and exit_code != "137":
         return ""
     if oom.lower() == "true":
@@ -771,32 +816,16 @@ def run_probe(
                 + _memory_kill_report(container)
             )
 
-        stages: list[Stage] = [
-            Stage("baseline (fresh instance)",
-                  _container_used_memory(container))]
-        _container_query(
-            container, graph,
-            f"UNWIND range(1,{n}) AS i CREATE (:Point {{id: 'p' + toString(i)}})")
-        stages.append(Stage("bare :Point node (label + id only)",
-                            _container_used_memory(container), n))
-        _container_query(container, graph, f"MATCH (n:Point) {_POINT_PROPS}")
-        stages.append(Stage("+ keyword-only Point props",
-                            _container_used_memory(container), n))
-        _container_query(
-            container, graph,
-            f"UNWIND range(1,{edges}) AS i "
-            f"MATCH (a:Point {{id: 'p' + toString(i)}}), "
-            f"      (b:Point {{id: 'p' + toString(i + 1)}}) "
-            f"CREATE (a)-[:IMPL]->(b)")
-        stages.append(Stage("bare :IMPL edge (no properties)",
-                            _container_used_memory(container), edges))
-        _container_query(container, graph, f"MATCH ()-[r:IMPL]->() {_EDGE_ATTRS}")
-        stages.append(Stage("+ real IMPL attrs "
-                            "(direction,confidence,weight,label,batch_id)",
-                            _container_used_memory(container), edges))
-        _container_query(container, graph, f"MATCH ()-[r:IMPL]->() {_EDGE_SLOTS}")
-        stages.append(Stage("+ the four EP message slots",
-                            _container_used_memory(container), edges))
+        try:
+            stages = _probe_stages(container, graph, n, edges)
+        except CensusError as exc:
+            # #7357 review: the report used to be attached ONLY to the readiness
+            # branch, so a probe killed MID-RUN — which the cap this module now
+            # sets makes the likely failure of a large `--n` — raised docker's
+            # raw "Container … is not running" with no cause. That is the
+            # legibility gap the issue is about, on the very path the cap
+            # creates.
+            raise CensusError(str(exc) + _memory_kill_report(container)) from exc
     finally:
         log(f"removing container {container!r}")
         _docker("rm", "-f", container, check=False)

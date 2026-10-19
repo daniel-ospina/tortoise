@@ -229,8 +229,16 @@ FALKORDB_MEMORY="$(printf '%s' "$FALKORDB_MEMORY" | tr '[:upper:]' '[:lower:]')"
 # `2gb` would refuse the natural spelling of the remedy this action's kill
 # message prints (raise FALKORDB_CONTAINER_MEMORY), while docker accepts it
 # without complaint (#7357 review).
-if ! printf '%s' "$FALKORDB_MEMORY" | grep -Eq '^[0-9]+(\.[0-9]+)?([bkmg]b?)?$' \
-   || ! awk -v v="$FALKORDB_MEMORY" 'BEGIN { sub(/[bkmg]b?$/, "", v); exit (v + 0 > 0) ? 0 : 1 }'; then
+#
+# `([bkmgt]|[kmgt]b)` is docker's SUFFIX grammar exactly: `2g`, `2gb`, `1t`,
+# `1.5gb` are valid; `2bb` is "invalid suffix: 'bb'" to docker, so accepting it
+# here would replace a clear refusal with an opaque `docker run` error. Line
+# anchoring is also docker's: the subject must be ONE line (the Python seams'
+# `\Z`), which `grep -E '$'` is NOT — it matches per line, so `"2g\nabc"` used
+# to be accepted here and refused everywhere else (#7357 review).
+if ! printf '%s\n' "$FALKORDB_MEMORY" | grep -Eq '^[0-9]+(\.[0-9]+)?([bkmgt]|[kmgt]b)?$' \
+   || [ "$(printf '%s' "$FALKORDB_MEMORY" | wc -l)" -ne 0 ] \
+   || ! awk -v v="$FALKORDB_MEMORY" 'BEGIN { sub(/([bkmgt]|[kmgt]b)$/, "", v); exit (v + 0 > 0) ? 0 : 1 }'; then
   annotate_error "FALKORDB_CONTAINER_MEMORY=$FALKORDB_MEMORY is not a POSITIVE docker memory spec (e.g. 512m, 2g; 0 means UNLIMITED) — refusing to start an UNCAPPED container"
   exit 1
 fi

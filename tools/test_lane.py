@@ -350,13 +350,13 @@ READY_TIMEOUT = 60
 CONTAINER_MEMORY_ENV = "FALKORDB_CONTAINER_MEMORY"
 DEFAULT_CONTAINER_MEMORY = "2g"
 #: The docker memory-spec grammar (`512m`, `2g`, `1.5g`, `2gb`, `2048mb`,
-#: bytes) — the LONG form (`kb`/`mb`/`gb`) is valid to docker, so refusing it
+#: `1t`, bytes) — the LONG form (`kb`/`mb`/`gb`) is valid to docker, so refusing it
 #: would refuse the natural spelling of the very remedy these messages print
 #: ("raise FALKORDB_CONTAINER_MEMORY"). Validated at the seam because the value
 #: is interpolated into an argv: a typo must fail loudly here, not as an opaque
 #: `docker run` refusal later. Group 1 is the NUMBER, so positivity is read
 #: without re-deriving the unit (#7357 review).
-_MEMORY_SPEC_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)(?:[bkmg]b?)?\Z")
+_MEMORY_SPEC_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)(?:[bkmgt]|[kmgt]b)?\Z")
 
 
 def _spec_is_positive(spec: str) -> bool:
@@ -434,11 +434,30 @@ def _note_uncapped_existing(name: str) -> None:
     passed `--memory` keeps `HostConfig.Memory=0` for life. Those are precisely
     the neighbours the issue names as the pressure source, so handing one back
     silently is how they go on being uncapped: the whole point of the issue is
-    that the failure is not reported. Prints to STDERR because it is a warning,
-    and prints nothing when the limit cannot be read (not evidence of absence).
+    that the failure is not reported. Prints to STDERR because it is a warning.
+
+    `None` is "could not READ", and reporting it as SILENCE makes it
+    indistinguishable from "it is capped" — the same unread fact that lets an
+    uncapped container go unnoticed, and the reuse path is the ONLY place a
+    pre-existing uncapped lane container can be caught (`docker start` cannot add
+    a limit). `graph-scripts/setup.py::_note_uncapped_existing` says so for the
+    same reason (#7357 review); this is the same arm.
     """
     limit = _container_memory_limit(name)
-    if limit is not None and limit <= 0:
+    if limit is None:
+        print(
+            f"test-lane: could not READ the kernel memory limit of {name} (the "
+            f"`docker inspect --format '{_MEMORY_LIMIT_FORMAT}'` query failed — "
+            f"a wedged daemon is one reason), so whether it is capped cannot be "
+            f"confirmed; it is left alone. Check with `docker container inspect "
+            f"-f '{_MEMORY_LIMIT_FORMAT}' {name}`, and recreate it with "
+            f"{CONTAINER_MEMORY_ENV}="
+            f"{os.environ.get(CONTAINER_MEMORY_ENV) or DEFAULT_CONTAINER_MEMORY} "
+            f"(`uv run python tools/test_lane.py down` first) if it reports 0",
+            file=sys.stderr,
+        )
+        return
+    if limit <= 0:
         print(
             f"test-lane: WARNING — {name} was created WITHOUT a kernel memory "
             f"cap (HostConfig.Memory=0, #7357) and `docker start` cannot add "
@@ -1030,27 +1049,47 @@ def start(port: int | None = None) -> tuple[str, int]:
             # diagnosis: docker's OOMKilled/ExitCode would be this failure's
             # CAUSE while the message insisted they were history.
             now = container_state(name)
-            live = now == "running"
-            if live:
-                # Up, so docker's facts describe a PREVIOUS termination: they
-                # are reported as history, never as this failure's cause, and
-                # the "may be wedged" advice stays — for a live server that does
-                # not answer, restarting it IS the remedy.
-                head = (
+            if now == "running":
+                # Up, so docker's facts describe a PREVIOUS termination: they are
+                # reported as history, never as this failure's cause, and the
+                # "may be wedged" advice stays — for a live server that does not
+                # answer, restarting it IS the remedy.
+                raise SystemExit(
                     f"test-lane: {name} is running but never answered PING over "
                     f"its published host port {published} within "
                     f"{READY_TIMEOUT}s — it may be wedged: run `uv run python "
                     f"tools/test_lane.py down` and retry."
+                    + _termination_report(name, live=True)
                 )
-            else:
-                head = (
-                    f"test-lane: {name} STOPPED while waiting for its first PING "
-                    f"over its published host port {published} (within "
-                    f"{READY_TIMEOUT}s; docker now reports its state as {now!r}), "
-                    f"so this is a death, not a slow start — run `uv run python "
-                    f"tools/test_lane.py down` and retry."
+            if now == "unknown":
+                # NOTHING is asserted for an unreadable state — not even by
+                # appending `_termination_report`. Two reasons, both measured:
+                # `container_state` keeps "docker could not answer" separate from
+                # "the container is gone" ON PURPOSE, and `down` is a `rm -f` of
+                # the container AND its graphs, so guessing a death from a failed
+                # read is the destructive mistake the absent-vs-unreadable rule
+                # exists to prevent; and `_termination_report` issues its OWN
+                # `docker inspect`, so it does not inherit this read's failure — a
+                # daemon that recovers between the two calls would answer with the
+                # container's PREVIOUS termination and the message would claim the
+                # death it had just called UNKNOWN (#7357 review).
+                raise SystemExit(
+                    f"test-lane: {name} did not answer PING over its published "
+                    f"host port {published} within {READY_TIMEOUT}s AND its "
+                    f"state could not be READ (the `docker inspect` failed — a "
+                    f"wedged or unreachable daemon is one reason), so whether it "
+                    f"died or merely wedged is UNKNOWN. Check the daemon (`docker "
+                    f"info`) before running `uv run python tools/test_lane.py "
+                    f"down`, which would remove the container and its graphs."
                 )
-            raise SystemExit(head + _termination_report(name, live=live))
+            raise SystemExit(
+                f"test-lane: {name} STOPPED while waiting for its first PING "
+                f"over its published host port {published} (within "
+                f"{READY_TIMEOUT}s; docker now reports its state as {now!r}), "
+                f"so this is a death, not a slow start — run `uv run python "
+                f"tools/test_lane.py down` and retry."
+                + _termination_report(name, live=False)
+            )
         return name, published
     if state == "unknown":
         raise SystemExit(
