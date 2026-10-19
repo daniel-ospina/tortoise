@@ -27,16 +27,19 @@ This copy was the 2026-10-12 versioned handover of the ad-hoc `~/orchestrator/` 
 so the fleet could *evaluate* it. It was never the live copy. Over the following week the harness
 continued to change in three places at once:
 
-| file | agent-infra | this copy | live `~/orchestrator` |
+| file | agent-infra `main` | this copy | live `~/orchestrator` |
 |---|---|---|---|
-| `orch-loop.sh` | `d61f1587` | `41c50478` | `d61f1587` |
-| `spawn-gate.sh` | `f730dc87` | `99fd20a9` | `f730dc87` |
-| `refresh-candidates.sh` | `c12cadfc` | `dfedd12a` | `c12cadfc` |
-| `claims.sh` | `95a45308` | **absent** | `95a45308` |
-| `nonblocking-dispatch.sh` | `dc9d555a` | **absent** | `dc9d555a` |
-| `lane.sh` | `7aaa24d1` | `88b1a34b` | `7aaa24d1` |
-| `install.sh` | `9b9ba9f3` | `dccba135` | `9b9ba9f3` |
-| `selftest.sh` | `47189536` | `3b14e8e1` | `47189536` |
+| `orch-loop.sh` | `e069af29` | `a1ffab3d` | `b4b89547` |
+| `spawn-gate.sh` | `a7dba947` | `f7af7919` | `a7dba947` |
+| `refresh-candidates.sh` | `a3ac5019` | `facc9a1d` | `a3ac5019` |
+| `claims.sh` | `d1604686` | **absent** | `d1604686` |
+| `nonblocking-dispatch.sh` | `5e3fe2b1` | **absent** | `5e3fe2b1` |
+| `lane.sh` | `3dc22993` | `03400e8d` | `3dc22993` |
+| `install.sh` | `3c0d14a8` | `de2ce83a` | `db02dfb3` |
+| `selftest.sh` | `2318d1e0` | `04174f50` | `5675377c` |
+
+(Blob hashes, 8 chars, measured 2026-10-19. The live copy was blob-identical to agent-infra
+generation `2ddd5b5a1` on all eight — an unversioned copy one commit behind `main`, not a hand-fork.)
 
 Three generations of one system: every fix had to be applied by hand in three places, each box ran
 a different version, and "self-healing" was impossible because there was no authority to heal
@@ -44,10 +47,10 @@ toward. Retiring the copies is what makes one authority possible.
 
 ## What was NOT lost
 
-This copy was old, **but not strictly behind** — it was behind on five files and **ahead on
-`lane.sh`**. It had received fixes after the handover that agent-infra never got. Those that have
-been ported IN (agent-infra PR #2160) are listed first; the one that has NOT been ported is listed
-last, with its file still present here on purpose.
+This copy was old, **but not strictly behind** — it was behind the current agent-infra generation on
+all six files it had, and **ahead on fixes in four of them** that agent-infra never got. All of them
+have now been ported IN; the one that has NOT is listed last, with its file still present here on
+purpose.
 
 - `lane.sh` — `Closes #N` required; a bare `Refs #N` refused for finished work (25 of 36 open
   P0-blockers already had merged PRs; nothing re-reads an issue whose PR merged).
@@ -57,6 +60,14 @@ last, with its file still present here on purpose.
 - The `p0_merge_priority_override` rule plus its `.prio` map — a P0-blocker at the backlog head
   clears *only* the merge-priority gate. The ported version additionally refuses to clear any
   reason that is not `merge-priority*`, and the canonical suite drives that case.
+- `refresh-candidates.sh`'s `landed.txt` half and `RETRY_MAX` bound — a LANDED verdict goes to
+  `landed.txt` (never `checked.txt`, which would retire an OPEN issue from the backlog permanently
+  and invisibly), the set is named on every pass, the reaper settles CLOSED entries / releases
+  OPEN ones / keeps unreadable ones, and a candidate that never answers is bounded instead of
+  starving the pool behind it. ⛔ This one was found **late**: the first cut of this retirement
+  deleted the file while these fixes were still unported, because the retirement's "everything was
+  ported first" premise had never been checked against this file. The port now precedes the
+  deletion, and `selftest.sh` drives the behaviour.
 - `merge-one.sh` — `verdict_kind()` / `apply_verdict_marker()`: a verdict-LESS reviewer run (stall,
   crash, timeout) must not authorise a fixer. Ported, with driving tests in the canonical
   `selftest.sh` (measured cost of the bug: 7 of 7 cap-hits in one window were verdict-less and 4
