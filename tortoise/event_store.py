@@ -222,7 +222,7 @@ _SCHEMA_ATTR = "_tortoise_event_schema"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# §17.1 (#9079) — THE RECORD LANE, declared. Read this before adding a write.
+# §17.1 (#9079) — THE EVENT-STORE LANE, declared. Read this before adding a write.
 # ═══════════════════════════════════════════════════════════════════════════
 #
 # `docs/architecture/STORAGE-ARCHITECTURE.md` §17.1 (from the §2.0 owner
@@ -232,22 +232,35 @@ _SCHEMA_ATTR = "_tortoise_event_schema"
 # the fold, and `#9079` closes the third door — the projection's own write
 # handle, `proj.g`.
 #
-# This module writes the cache graph through that SAME handle, and it is on the
-# RECORD side of the split, not the cache side:
+# This module writes the cache graph through that SAME handle and is NOT a
+# projection of the JSONL journal: no journal record describes `:GraphEvent` or
+# `:GraphEventMeta`, so the fold's gate cannot authorize them and, exactly,
+# cannot recognise them at all. What it is:
 #
-#   1. `:GraphEvent` IS the durable event record. The module docstring says so
-#      — "Durable per-tenant event store — `:GraphEvent` nodes in the org's
-#      graph" — and it is what `read_after` / `poll_events` serve to a
-#      subscriber. Refusing its append would not enforce §17.1; it would
-#      refuse the record while enforcing a rule ABOUT the record.
-#   2. A rebuild does not replay these rows (#4664). The class survives a wipe
-#      the way `:TeamMeta` does — CAPTURE-AND-RESTORE, not projection:
-#      `capture_watermark(proj)` is read BEFORE `DETACH DELETE` and
-#      `reestablish_watermark(proj, carried)` writes the carried counter back
-#      after (`projection/__init__.py`, both `rebuild` and `rebuild_all`; the
-#      watermark sidecar in `rebuild_all`). So "a rebuild re-derives it" is
-#      true of the COUNTER, and false of the rows — which is exactly why the
-#      declaration is about a RECORD and not about recoverable cache state.
+#   1. A SECOND DURABLE SURFACE, living in the cache graph: `:GraphEvent` is the
+#      durable change-feed log (`read_after` / `poll_events` serve it to
+#      subscribers) and `:GraphEventMeta` is its seq allocator. A subscriber's
+#      cursor, delivery ordering and 410-on-truncation all rest on these two
+#      labels, not on any journal record. ⚠️ Stated precisely, because the
+#      flattering reading is FALSE: calling it "the record" would overstate it
+#      — it is a declared CARVEOUT, alongside `:EpMeta` (#9123) and the
+#      onboarding flow metadata (#9121), not a projection and not the truth
+#      store §17.1 means.
+#   2. NOT REBUILD-DURABLE, and this declaration does not make it so. A rebuild
+#      wipes these ROWS and does not replay them. `#4664` names exactly that
+#      behaviour and was CLOSED on 2026-09-25 as consolidated into `#5048`
+#      (also closed) — but the behaviour is still observable, measured live by
+#      `tests/test_9079_record_lane_declared.py`, so it is described here by
+#      what the code does rather than by an issue's state. Only the
+#      ALLOCATOR is carried: `capture_watermark(proj)` is read BEFORE
+#      `DETACH DELETE` and `reestablish_watermark(proj, carried)` writes the
+#      counter back after (`projection/__init__.py`, both `rebuild` and
+#      `rebuild_all`, plus the watermark sidecar in `rebuild_all`) — precisely
+#      so `next_seq` cannot re-issue a seq that was already delivered (#4653).
+#      So a rebuild keeps the store from CORRUPTING itself and does not keep
+#      it from EMPTYING. That gap is named here rather than implied, and it is
+#      the reason the lane's justification below rests on the live path, not on
+#      a durability property.
 #   3. The DDL in `ensure_event_schema` is SCHEMA, not content: index and
 #      unique-constraint creation for `:GraphEvent`, idempotent, and re-applied
 #      by `ensure_event_schema` itself (once per projection object — it
@@ -311,9 +324,12 @@ def _record_write_scope(cypher: str):
     module-level import of the projection would put the dependency in both
     directions and make the pair circular in a future import order.
 
-    The reason string is what a `DirectCacheWriteRefused` cites and what the
-    lane's test pins, so the two cannot drift about which lane authorized a
-    write.
+    The reason string is what the lane's test reads back AT THE WRITE HANDLE
+    (`tests/test_9079_record_lane_declared.py`), so the two cannot drift about
+    which lane authorized a write. It is deliberately NOT rendered into a
+    refusal: a `DirectCacheWriteRefused` fires only when NO scope is in flight,
+    so there is no reason to print — the same contract `_cache_write_authorized`
+    and `_graph_metadata_write_scope` state.
     """
     from tortoise.projection import _cache_write_authorized, _statement_writes
 
