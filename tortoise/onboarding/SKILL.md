@@ -568,10 +568,16 @@ AND for the version read, the comparison and the rewrite, so a project that
 documents the markers keeps its documentation exactly as written and still gets
 its block created or refreshed.
 
-An UNCLOSED fence is the one ambiguity, and it is refused: the installer says
-`An UNTERMINATED code fence is hiding part of this file` and exits 3 without
-writing, because the markers below it cannot be told apart from an example.
-Close the fence and re-run.
+An UNCLOSED fence is refused only where it creates the ambiguity: when the marker
+state is MALFORMED the installer says `An UNTERMINATED code fence is hiding part
+of this file` and exits 3 without writing, because the markers below the fence
+cannot be told apart from an example. With NO markers at all there is nothing to
+disambiguate — the block is appended where the file ends, which is INSIDE the
+unclosed fence, so the installer warns (`the Tortoise block will be written
+inside it and read as code, not as instructions`) instead of refusing, which
+would change what the pre-#3429 installer did. A block that already sits BELOW
+the open fence is in the same position as an append — it is replaced in place,
+inside the fence — so that case warns too. Close the fence before re-running.
 
 Never hand-edit inside markers you did not write; the next refresh discards it.
 

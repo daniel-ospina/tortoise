@@ -1504,15 +1504,7 @@ For the record, since two members of the design rest on it:
 
 > **A derived cache that is also written to directly is not derived.**
 
-**⚠️ CARVE-OUTS ARE A DECLARED CLASS, not a residual gap awaiting closure — and as of `#9079`'s declaration children there are THREE.** A *few* writes have no record to project and cannot have one: they write graph-wide bookkeeping, or a graph-native store whose value is not a fact about the corpus. Each runs under a per-call `with` over the SAME single-writer ContextVar the live and replay scopes use, and each is a **declaration, not a bypass**: on the two doors that GATE today — `FalkorProjection.apply` (which refuses unconditionally when no scope is in flight) and `FalkorProjection.query` (which refuses a mutating statement **only while no scope is in flight**, so a replay window authorizes that lane too: the third widened leg `#9210` narrows) — an undeclared writer still fails closed on `None`. ⚠️ **The THIRD door — the write handle `proj.g` these three carve-outs actually write through — is NOT armed on `main`**: that guard is `#9124`, which is why these lanes are declared first. Read the table below with that asymmetry in mind, not as "every door refuses an undeclared writer":
-
-| carve-out | lane / scope | writer | issue |
-|---|---|---|---|
-| graph metadata (`:EpMeta`) | `projection._graph_metadata_write_scope` | `TortoiseSDK._advance_ep_version` — the monotonic EP ordering counter | `#9123` |
-| onboarding flow metadata | `onboarding.state.ONBOARDING_WRITE_LANE` | the onboarding state/steps writers | `#9121` |
-| the change feed (`:GraphEvent` + its seq allocator) | `event_store.RECORD_LANE` (one funnel, `_record_write`) | the event store, reached on the SDK's hottest write path | `#9079` |
-
-**The per-file detail — including the writers that are still UNDECLARED and would be refused — lives in the inventory block above §17.1's guard in `tortoise/projection/__init__.py`**, which is the artifact a `#9124` implementer scans; keep the two in step — each row above has its own pin (`tests/test_9079_ep_epoch_declared.py`, `tests/test_9079_onboarding_declared_lane.py`, `tests/test_9079_record_lane_declared.py`, in table order).
+**⚠️ ONE PERMANENT CARVE-OUT IS DECLARED — the GRAPH-METADATA lane — and it is a declared class, not a residual gap awaiting closure.** A *few* writes have no record to project and cannot have one: they write graph-wide bookkeeping whose value is not a fact about the corpus. They run under `tortoise/projection/__init__.py::_graph_metadata_write_scope(...)`, a per-call `with` over the SAME single-writer ContextVar the live and replay scopes use — so an undeclared writer still fails closed (the gate refuses on `None`) and this is a **declaration, not a bypass**. **Its one writer today** is `TortoiseSDK._advance_ep_version` — `:EpMeta.ep_version`, the monotonic EP ordering counter (`#9123`).
 
 **The two obligations a caller must be able to state, and their exact edges:**
 

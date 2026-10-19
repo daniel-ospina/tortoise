@@ -43,10 +43,35 @@ its `if not events: continue` still treats an empty page as "caught up". Wiring
 the degraded state into the delivery/retry state machine changes a
 delivery-loss decision that `#8098` deliberately keeps in the dispatch state
 machine, so it is a follow-up, not a silent part of this fix.
+
+§17.1 — THIS MODULE DECLARES ITS OWN LANE (#9124 part 1). Every mutating
+statement here goes through the projection's write handle (`proj.g`), which since
+#9124 DETECTS a write that arrives with no declared lane. The store is a SECOND
+durable store rather than a projection of the JSONL journal, so it belongs to
+neither the live nor the replay lane:
+
+* `_graph_metadata_write_scope` for the store's own bookkeeping — the schema DDL
+  (`ensure_event_schema`), the `:GraphEventMeta` allocator (`next_seq`), the
+  append (`append_event`) and the retention purges. That lane states two
+  obligations and both hold, spelled out at `next_seq`/`append_event`: no journal
+  record describes a `:GraphEvent` row (a payload-only emit writes one with no
+  JSONL record at all — see `capture_watermark`), and a rebuild does not replay
+  the rows (#4664): it CARRIES the counter (`capture_watermark` →
+  `reestablish_watermark`) and raises `first_seq`, so a parked subscriber gets
+  the truthful 410 instead of `[]` forever. A declared truncation with a cursor
+  contract, not corruption.
+* `_replay_write_scope` for `reestablish_watermark`, which only ever runs as part
+  of a wipe+replay: the value it writes came FROM the journal's own rebuild.
+
+⚠️ The declarations are NOT a licence for the swallow: `append_event` and
+`_refresh_first_seq` still catch bare `Exception` (a store failure must never
+crash the mutation), so an UNDECLARED write here would degrade with only a
+WARNING as its trace. #9208 landed the NAMED degraded mode above; what is still
+missing is the DOOR that sets it when a write is REFUSED — that is arming the
+guarded handle (#9124 part 2), not a declaration.
 """
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 from datetime import datetime, timezone
@@ -220,154 +245,6 @@ def clear_degraded(graph_name: str | None = None) -> None:
 
 _SCHEMA_ATTR = "_tortoise_event_schema"
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# §17.1 (#9079) — THE EVENT-STORE LANE, declared. Read this before adding a write.
-# ═══════════════════════════════════════════════════════════════════════════
-#
-# `docs/architecture/STORAGE-ARCHITECTURE.md` §17.1 (from the §2.0 owner
-# ruling) splits the store in two: **Postgres/the journal is the system of
-# record; FalkorDB is a derived hot cache**, so "every write goes to the truth
-# store first, and the cache is projected from it". `#7951` enforced that at
-# the fold; `#9079` DECLARES the writers that must not be refused when the third
-# door — the projection's own write handle, `proj.g` — is closed. That door is
-# still OPEN (`#9124`, not on `main`), which is why this declaration lands
-# first: arming it without the declarations refuses the product, not the
-# violation.
-#
-# This module writes the cache graph through that SAME handle and is NOT a
-# projection of the JSONL journal: no journal record describes `:GraphEvent` or
-# `:GraphEventMeta`, so the fold's gate cannot authorize them and, exactly,
-# cannot recognise them at all. What it is:
-#
-#   1. A SECOND DURABLE SURFACE, living in the cache graph: `:GraphEvent` is the
-#      durable change-feed log (`read_after` / `poll_events` serve it to
-#      subscribers) and `:GraphEventMeta` is its seq allocator. A subscriber's
-#      cursor, delivery ordering and 410-on-truncation all rest on these two
-#      labels, not on any journal record. ⚠️ Stated precisely, because the
-#      flattering reading is FALSE: calling it "the record" would overstate it
-#      — it is a declared CARVEOUT, alongside `:EpMeta` (#9123) and the
-#      onboarding flow metadata (#9121), not a projection and not the truth
-#      store §17.1 means.
-#   2. NOT REBUILD-DURABLE, and this declaration does not make it so. A rebuild
-#      wipes these ROWS and does not replay them. `#4664` names exactly that
-#      behaviour and was CLOSED on 2026-09-25 as consolidated into `#5048`
-#      (also closed) — but the behaviour is still observable, measured live by
-#      `tests/test_9079_record_lane_declared.py`, so it is described here by
-#      what the code does rather than by an issue's state. Only the
-#      ALLOCATOR is carried: `capture_watermark(proj)` is read BEFORE
-#      `DETACH DELETE` and `reestablish_watermark(proj, carried)` writes the
-#      counter back after (`projection/__init__.py`, both `rebuild` and
-#      `rebuild_all`, plus the watermark sidecar in `rebuild_all`) — precisely
-#      so `next_seq` cannot re-issue a seq that was already delivered (#4653).
-#      So a rebuild keeps the store from CORRUPTING itself and does not keep
-#      it from EMPTYING. That gap is named here rather than implied, and it is
-#      the reason the lane's justification below rests on the live path, not on
-#      a durability property.
-#   3. The DDL in `ensure_event_schema` is SCHEMA, not content: index and
-#      unique-constraint creation for `:GraphEvent`, idempotent, and re-applied
-#      by `ensure_event_schema` itself (once per projection object — it
-#      early-returns on its own `_SCHEMA_ATTR` cache; its only call sites are
-#      `_emit_event` and `append_event`). It does NOT run ``on open``, and the
-#      rebuild lane's `_ensure_indexes` does not create these. Losing an index
-#      costs a slow scan, not a fact: they are schema-level, so a rebuild's
-#      node wipe leaves them in place, and no journal record describes one.
-#
-# ⛔ WHY THE DECLARATION IS LOAD-BEARING, not a formality. `_emit_event`
-# (`tortoise/sdk.py`) calls `ensure_event_schema` / `next_seq` /
-# `append_event` inside a fail-open `try: … except Exception`, so an unarmed
-# `proj.g` write here with the third door closed and no declaration STOPS the
-# change feed on every mutation while the caller reports success. Since `#9208`
-# landed (`3d7710975` / PR `#9227`) that stop is NAMED rather than silent —
-# `_emit_event` records `record_degraded(...)` and `poll_events` refuses with
-# `ChangeFeedDegraded` instead of answering `[]` — so the harm is no longer
-# invisible; it is still a stopped feed, which is why the writers that
-# legitimately reach the guarded handle must DECLARE themselves BEFORE the guard
-# lands rather than after. (Before that fix the same failure was silent — the
-# shape `#7951` hit on the onboarding lane.)
-#
-# ⛔ NOT A GENERAL BYPASS — its width, stated:
-#   * Per-call `with` block (`_record_write_scope`). No attribute, constructor
-#     argument or env var can set it, so a writer that does not enter it is
-#     REFUSED, not grandfathered.
-#   * Opened only for a statement THIS MODULE issues that the shared classifier
-#     (`_statement_writes`, the one the raw-query lane and `#9124`'s handle
-#     guard use) calls mutating. ⚠️ NOT a definition the three doors share:
-#     `FalkorProjection.apply` does not consult the classifier at all — the FOLD
-#     refuses unconditionally when no scope is in flight — so the classifier can
-#     only ever WIDEN what this funnel declares, never narrow the fold's
-#     refusal. (`#9124`'s guard is not on `main` yet; it is modelled in this
-#     lane's test.) The classifier is deliberately conservative, so a statement
-#     it cannot read takes the declaration too, including an unreadable read.
-#     ⚠️ WHAT THE PIN IS, stated so it is not over-read: the guard is in the
-#     SCOPE, not in a label check — this funnel does NOT verify that the
-#     statement touches `:GraphEvent`/`:GraphEventMeta`, so a future call site
-#     routed through it with a foreign label WOULD be authorized. What
-#     `tests/test_9079_record_lane_declared.py` actually pins is (a) a CENSUS at
-#     the handle — nine statement-level fragments, each identifying exactly one
-#     observed statement, all nine distinct, AND exhaustive over what the
-#     exercise observed, each observing the lane — and (b) that the lane is not
-#     a general bypass (an undeclared `:Point` write through the same armed
-#     handle is still refused). What the census CANNOT see is bounded and stated:
-#     its population is "statements naming `:GraphEvent`/`:GraphEventMeta`
-#     observed at the handle during the exercise", so a store statement that
-#     names NEITHER label — a second graph-native surface, or a bookkeeping node
-#     — is outside it, and so is a mutating path the exercise does not reach.
-#     Inside that population an ADDED statement is caught (it would be pinned by
-#     no fragment), which is the property that made this a census rather than a
-#     floor. The labels each statement writes are still held by REVIEW: a
-#     runtime label assertion would have to parse Cypher.
-#   * It authorizes nothing outside §17.1's third door: the two lower escapes
-#     (`proj.g._g.query(...)`, `proj.db.select_graph(<g>).query(...)`) stay
-#     open — they are one hop below anything a runtime signal sits on.
-#   * It does NOT claim the event store is journalled into the JSONL record
-#     too: `rebuild` restores the counter it captured, and where no watermark
-#     was captured at all (`hosted_backup._restore_event_meta`'s OLD-dump
-#     branch) the values are RE-DERIVED from the restored `:GraphEvent` log —
-#     the counter as `max(seq)`, the purge floor (`first_seq`) as `min(seq)`.
-#     That is a derivation, not a fidelity guarantee: it reconstructs what the
-#     surviving rows imply, so a truncated log yields a lower counter rather
-#     than the truthful one.
-RECORD_LANE = "event-store.record"
-
-
-def _record_write_scope(cypher: str):
-    """The §17.1 declaration for `cypher` — or a no-op scope for a read.
-
-    Lazy import on purpose. Nothing in the package imports THIS module at
-    module level — `tortoise.sdk` and `tortoise.projection`'s rebuild lanes both
-    import it function-locally — and keeping that direction one-way is what
-    leaves room for the projection to import these helpers without a cycle if it
-    ever needs to. A module-level import here would also pull the whole
-    projection package into any caller that only wants the store.
-
-    The reason string is what the lane's test reads back AT THE WRITE HANDLE
-    (`tests/test_9079_record_lane_declared.py`), so the two cannot drift about
-    which lane authorized a write. It is deliberately NOT rendered into a
-    refusal: a `DirectCacheWriteRefused` fires only when NO scope is in flight,
-    so there is no reason to print — the same contract `_cache_write_authorized`
-    and `_graph_metadata_write_scope` state.
-    """
-    from tortoise.projection import _cache_write_authorized, _statement_writes
-
-    if _statement_writes(cypher):
-        return _cache_write_authorized(RECORD_LANE)
-    return contextlib.nullcontext()
-
-
-def _record_write(g, cypher: str, params: dict | None = None):
-    """Issue a MUTATING event-store statement inside the declared lane.
-
-    The one funnel for this module's writes: `proj.g.query` on a
-    journal-backed projection is §17.1's third door, so every mutating
-    statement here goes through this function rather than calling the handle
-    directly. Reads (`read_after`, the pre-checks, the diagnostics) still call
-    `proj.g.query` directly — a read needs no declaration, and routing it
-    through a scope object would be cost for no gain.
-    """
-    with _record_write_scope(cypher):
-        return g.query(cypher, params=params)
-
 # The largest ``last_seq`` the store will carry. Two hard ceilings apply, and
 # the lower one wins:
 #
@@ -416,26 +293,32 @@ def ensure_event_schema(proj) -> None:
     """
     if getattr(proj, _SCHEMA_ATTR, False):
         return
+    # Lazy import: `tortoise.projection` imports THIS module lazily for the same
+    # reason (see its `capture_watermark` call sites), so neither direction can
+    # form an import cycle.
+    from .projection import _graph_metadata_write_scope
     g = proj.g
-    try:
-        # Exact-match index first — the constraint requires it (Pattern Research).
-        # §17.1 (#9079): DDL is schema, not cache content — declared, not
-        # refused. See RECORD_LANE above.
-        _record_write(g, "CREATE INDEX FOR (n:GraphEvent) ON (n.event_id)")
-    except Exception:  # noqa: BLE001, RUF100
-        logger.debug("event_store: event_id index may already exist")
-    try:
-        _record_write(
-            g,
-            "GRAPH.CONSTRAINT CREATE tortoise_ge_uid UNIQUE NODE GraphEvent "
-            "PROPERTIES 1 event_id"
-        )
-    except Exception:  # noqa: BLE001, RUF100
-        logger.debug("event_store: unique constraint may already exist")
-    try:
-        _record_write(g, "CREATE INDEX FOR (n:GraphEvent) ON (n.seq)")
-    except Exception:  # noqa: BLE001, RUF100
-        logger.debug("event_store: seq index may already exist")
+    # §17.1 (#9124): DDL IS GRAPH METADATA — no journal record describes an
+    # index and a rebuild recreates it, so the schema sweep declares the
+    # graph-metadata lane instead of arriving at the write handle undeclared.
+    # Same reasoning as `FalkorProjection._ensure_indexes`.
+    with _graph_metadata_write_scope("event-store-schema"):
+        try:
+            # Exact-match index first — the constraint requires it (Pattern Research).
+            g.query("CREATE INDEX FOR (n:GraphEvent) ON (n.event_id)")
+        except Exception:  # noqa: BLE001, RUF100
+            logger.debug("event_store: event_id index may already exist")
+        try:
+            g.query(
+                "GRAPH.CONSTRAINT CREATE tortoise_ge_uid UNIQUE NODE GraphEvent "
+                "PROPERTIES 1 event_id"
+            )
+        except Exception:  # noqa: BLE001, RUF100
+            logger.debug("event_store: unique constraint may already exist")
+        try:
+            g.query("CREATE INDEX FOR (n:GraphEvent) ON (n.seq)")
+        except Exception:  # noqa: BLE001, RUF100
+            logger.debug("event_store: seq index may already exist")
     setattr(proj, _SCHEMA_ATTR, True)
 
 
@@ -483,28 +366,34 @@ def next_seq(proj) -> int:
     exactly: each granted bump moves the counter, so the last legal seq is
     handed out once (the live counter test pins it).
     """
-    rows = _record_write(
-        proj.g,
-        # `ON CREATE SET m.last_seq = 0` seeds the PRE-increment value, so the
-        # one CASE below grants `1` to a fresh graph exactly as the pre-#5379
-        # `ON CREATE SET m.last_seq = 1` did; the node is never observable at 0
-        # (the seed and the SET are one query, and the counter is only ever
-        # visible through this call's RETURN, which sees the post-SET value).
-        #
-        # `prev >= 0 AND prev < $max` — never `$max > prev`. FalkorDB 4.20.x
-        # compares an int64 property holding the wrapped `-9223372036854775807`
-        # region (and a parameter as extreme as INT64_MAX) as NEITHER `<` nor
-        # `>=` against a positive constant, so the reversed form would read a
-        # negative counter as "below the cap" and grant it. The form below is
-        # verified correct for every int64 region a counter can hold (#5379).
-        "MERGE (m:GraphEventMeta) "
-        "ON CREATE SET m.last_seq = 0, m.first_seq = 1 "
-        "WITH m, m.last_seq AS prev "
-        "SET m.last_seq = CASE WHEN prev >= 0 AND prev < $max "
-        "THEN prev + 1 ELSE prev END "
-        "RETURN m.last_seq, prev >= 0 AND prev < $max AS granted",
-        params={"max": MAX_SEQ},
-    ).result_set
+    # §17.1 (#9124): the ALLOCATOR is graph metadata. Nothing happened to the
+    # corpus that a replay could re-apply — the counter is an ordering BOUND,
+    # carried across a rebuild by `capture_watermark`/`reestablish_watermark`
+    # rather than recomputed — so this declares the graph-metadata lane, the same
+    # declaration `_advance_ep_version` makes for `:EpMeta` (#9123).
+    from .projection import _graph_metadata_write_scope
+    with _graph_metadata_write_scope("event-store-seq"):
+        rows = proj.g.query(
+            # `ON CREATE SET m.last_seq = 0` seeds the PRE-increment value, so the
+            # one CASE below grants `1` to a fresh graph exactly as the pre-#5379
+            # `ON CREATE SET m.last_seq = 1` did; the node is never observable at 0
+            # (the seed and the SET are one query, and the counter is only ever
+            # visible through this call's RETURN, which sees the post-SET value).
+            #
+            # `prev >= 0 AND prev < $max` — never `$max > prev`. FalkorDB 4.20.x
+            # compares an int64 property holding the wrapped `-9223372036854775807`
+            # region (and a parameter as extreme as INT64_MAX) as NEITHER `<` nor
+            # `>=` against a positive constant, so the reversed form would read a
+            # negative counter as "below the cap" and grant it. The form below is
+            # verified correct for every int64 region a counter can hold (#5379).
+            "MERGE (m:GraphEventMeta) "
+            "ON CREATE SET m.last_seq = 0, m.first_seq = 1 "
+            "WITH m, m.last_seq AS prev "
+            "SET m.last_seq = CASE WHEN prev >= 0 AND prev < $max "
+            "THEN prev + 1 ELSE prev END "
+            "RETURN m.last_seq, prev >= 0 AND prev < $max AS granted",
+            params={"max": MAX_SEQ},
+        ).result_set
     seq, granted = rows[0] if rows else (None, None)
     # `bool` is excluded for the same reason `_validate_event_meta_entry`
     # excludes it: it is an int subclass, and a boolean counter is a corrupt
@@ -690,17 +579,21 @@ def reestablish_watermark(proj, carried_last_seq: int | None) -> int | None:
     # `first_seq` is raised, never lowered (see the docstring), and its `CASE`
     # reads the PRE-clause value — Cypher evaluates a SET clause against the
     # state before it.
-    rows = _record_write(
-        proj.g,
-        "MERGE (m:GraphEventMeta) "
-        "ON CREATE SET m.last_seq = $last, m.first_seq = $first "
-        "ON MATCH SET m.last_seq = CASE WHEN m.last_seq IS NULL "
-        "OR m.last_seq < $last THEN $last ELSE m.last_seq END, "
-        "m.first_seq = CASE WHEN m.first_seq IS NULL "
-        "OR m.first_seq < $first THEN $first ELSE m.first_seq END "
-        "RETURN m.last_seq",
-        params={"last": last_seq, "first": first_seq},
-    ).result_set
+    # §17.1 (#9124): this write only ever runs as part of a wipe+replay — the
+    # value it re-establishes came FROM the rebuild of the journal — so it
+    # declares the REPLAY lane rather than arriving at the handle undeclared.
+    from .projection import _replay_write_scope
+    with _replay_write_scope():
+        rows = proj.g.query(
+            "MERGE (m:GraphEventMeta) "
+            "ON CREATE SET m.last_seq = $last, m.first_seq = $first "
+            "ON MATCH SET m.last_seq = CASE WHEN m.last_seq IS NULL "
+            "OR m.last_seq < $last THEN $last ELSE m.last_seq END, "
+            "m.first_seq = CASE WHEN m.first_seq IS NULL "
+            "OR m.first_seq < $first THEN $first ELSE m.first_seq END "
+            "RETURN m.last_seq",
+            params={"last": last_seq, "first": first_seq},
+        ).result_set
     raw = rows[0][0] if rows else None
     # A NON-NUMERIC stored value is refused, not coerced. `bool` is excluded for
     # the same reason `_validate_event_meta_entry` excludes it. Reaching here
@@ -759,16 +652,22 @@ def append_event(proj, seq: int, type_: str, payload: dict, event_id: str,
     if existing and existing[0][0] > 0:
         logger.warning("event_store: duplicate event_id %r skipped", event_id)
         return False
+    # §17.1 (#9124): the APPEND is graph metadata, declared. The row is not a
+    # projection of a JSONL record — a payload-only emit writes one with no JSONL
+    # record at all — and a rebuild does not replay it (#4664); the module
+    # docstring states both obligations and the cursor contract (`first_seq` is
+    # raised so a parked subscriber reads a truthful 410, never `[]` forever).
+    from .projection import _graph_metadata_write_scope
     try:
-        _record_write(
-            proj.g,
-            "CREATE (e:GraphEvent {seq:$seq, ts:$ts, type:$type, "
-            "event_id:$event_id, payload:$payload})",
-            params={
-                "seq": int(seq), "ts": ts, "type": type_,
-                "event_id": event_id, "payload": json.dumps(payload, ensure_ascii=False),
-            },
-        )
+        with _graph_metadata_write_scope("event-store-append"):
+            proj.g.query(
+                "CREATE (e:GraphEvent {seq:$seq, ts:$ts, type:$type, "
+                "event_id:$event_id, payload:$payload})",
+                params={
+                    "seq": int(seq), "ts": ts, "type": type_,
+                    "event_id": event_id, "payload": json.dumps(payload, ensure_ascii=False),
+                },
+            )
         return True
     except Exception as exc:  # noqa: BLE001, RUF100
         # Belt-and-suspenders: never crash the mutation on a store write error
@@ -880,12 +779,16 @@ def purge_expired(proj, retention_days: int = 30) -> int:
     from datetime import timedelta
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=int(retention_days))).isoformat()  # noqa: UP017
-    rows = _record_write(
-        proj.g,
-        "MATCH (n:GraphEvent) WHERE n.ts < $cutoff "
-        "WITH n LIMIT 10000 DETACH DELETE n RETURN count(*)",
-        params={"cutoff": cutoff},
-    ).result_set
+    from .projection import _graph_metadata_write_scope
+    # §17.1 (#9124): RETENTION is graph metadata — the rows are the store's own
+    # bookkeeping, deleted by policy, and a rebuild recreates nothing here because
+    # it never replays them (#4664).
+    with _graph_metadata_write_scope("event-store-purge"):
+        rows = proj.g.query(
+            "MATCH (n:GraphEvent) WHERE n.ts < $cutoff "
+            "WITH n LIMIT 10000 DETACH DELETE n RETURN count(*)",
+            params={"cutoff": cutoff},
+        ).result_set
     deleted = int(rows[0][0]) if rows and rows[0][0] is not None else 0
     _refresh_first_seq(proj)
     return deleted
@@ -901,12 +804,15 @@ def purge_overflow(proj, max_events: int) -> int:
     overflow = total - int(max_events)
     if overflow <= 0:
         return 0
-    del_rows = _record_write(
-        proj.g,
-        "MATCH (n:GraphEvent) WITH n ORDER BY n.seq ASC LIMIT $overflow "
-        "DETACH DELETE n RETURN count(*)",
-        params={"overflow": overflow},
-    ).result_set
+    from .projection import _graph_metadata_write_scope
+    # §17.1 (#9124): the size-cap purge is the same graph-metadata lane as
+    # `purge_expired` above (retention by policy, never replayed by a rebuild).
+    with _graph_metadata_write_scope("event-store-purge"):
+        del_rows = proj.g.query(
+            "MATCH (n:GraphEvent) WITH n ORDER BY n.seq ASC LIMIT $overflow "
+            "DETACH DELETE n RETURN count(*)",
+            params={"overflow": overflow},
+        ).result_set
     deleted = int(del_rows[0][0]) if del_rows and del_rows[0][0] is not None else 0
     _refresh_first_seq(proj)
     return deleted
@@ -947,18 +853,21 @@ def _refresh_first_seq(proj) -> None:
     branch instead of the wrap branch. Saturation makes both out-of-domain
     inputs produce a floor above every cursor, so both answer 410.
     """
+    from .projection import _graph_metadata_write_scope
     try:  # noqa: SIM105
-        _record_write(
-            proj.g,
-            "MATCH (m:GraphEventMeta) "
-            "OPTIONAL MATCH (e:GraphEvent) "
-            "WITH m, min(e.seq) AS mn, "
-            "CASE WHEN m.last_seq < 0 THEN $max_int64 "
-            "WHEN m.last_seq + 1 < 0 THEN $max_int64 "
-            "ELSE m.last_seq + 1 END AS nxt "
-            "WITH m, coalesce(mn, nxt) AS floor "
-            "SET m.first_seq = CASE WHEN floor < 0 THEN 0 ELSE floor END",
-            params={"max_int64": MAX_INT64},
-        )
+        # §17.1 (#9124): the purge FLOOR is the same graph-metadata lane as the
+        # purge that triggers it — it describes the store, not the corpus.
+        with _graph_metadata_write_scope("event-store-purge"):
+            proj.g.query(
+                "MATCH (m:GraphEventMeta) "
+                "OPTIONAL MATCH (e:GraphEvent) "
+                "WITH m, min(e.seq) AS mn, "
+                "CASE WHEN m.last_seq < 0 THEN $max_int64 "
+                "WHEN m.last_seq + 1 < 0 THEN $max_int64 "
+                "ELSE m.last_seq + 1 END AS nxt "
+                "WITH m, coalesce(mn, nxt) AS floor "
+                "SET m.first_seq = CASE WHEN floor < 0 THEN 0 ELSE floor END",
+                params={"max_int64": MAX_INT64},
+            )
     except Exception:  # noqa: BLE001, RUF100
         pass  # best-effort watermark
