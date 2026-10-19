@@ -5699,9 +5699,9 @@ durations:
   # it. The value is this file's own whole-file EMBEDDED-lane reading in a fresh
   # worktree, stated HIGH on the #5048 precedent rather than as a measured CI
   # value — it is not a junit-sweep figure, and a sweep should replace it. Current
-  # shape at the head of this branch: 13 test FUNCTIONS (`CENSUS: 13 PASS, 1
-  # XFAIL, 14 total`, recomputed by the file's own
-  # `test_the_header_census_matches_this_file`), 29 node ids after
+  # shape at the head of this branch: 15 test FUNCTIONS (`CENSUS: 14 PASS, 1
+  # XFAIL, 15 total`, recomputed by the file's own
+  # `test_the_header_census_matches_this_file`), 30 node ids after
   # parametrisation, 1 xfail; measured 147.65 s on this host, 166.0 s in the
   # authoring run, hence the weight below. The two heavy rows are the pins
   # themselves (the SDK fixture builds a store per test, twice); the inventory
