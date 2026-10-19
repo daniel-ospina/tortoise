@@ -297,11 +297,13 @@ boxes ran normally.
 
 Three properties close that, and they are all pinned in the suite:
 
-* **Nothing in the handler Pi awaits touches the spool.** `session_start` and
-  `agent_end` only *schedule* (`setImmediate`); the health line and the replay
-  run after the handler returns. Fire-and-forget alone was not enough: an
-  `async` body runs synchronously up to its first `await`, so `void flush(…)`
-  still charged the spool scan and its turn reads to the turn's critical path.
+* **Nothing the handlers do AFTER the durable snapshot runs on the tick Pi
+  awaits.** `session_start` and `agent_end` write their snapshot inline (that is
+  the #3963 durability guarantee — a kill must not lose the turn) and then only
+  *schedule* (`setImmediate`) the health line and the replay. Fire-and-forget
+  alone was not enough: an `async` body runs synchronously up to its first
+  `await`, so `void flush(…)` still charged the spool scan and its turn reads to
+  the turn's critical path.
   `session_shutdown` is the exception by nature — Pi runs it before exit — so
   there the bounds are what protect the exit, and the *live* session is filed
   first (one `onlySessionId` pass) rather than ranked behind older entries it

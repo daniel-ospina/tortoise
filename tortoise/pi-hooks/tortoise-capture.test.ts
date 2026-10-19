@@ -955,8 +955,17 @@ function recordingServer() {
   return { fetchImpl: fetchImpl as never, sessions, posts: () => posts };
 }
 
-/** A fetch that answers with a fixed HTTP status + detail. */
-function statusFetch(status: number, detail?: string) {
+/**
+ * A fetch that answers with a fixed HTTP status + detail.
+ *
+ * `detail` is `unknown`, not `string`: the real refusal body is
+ * `{"detail": {"code": "quota_exceeded", …}}`, and `post()` serializes that
+ * OBJECT into its searchable detail string — so the object form is what the
+ * tests must model (review cycle 3 found the narrower annotation making the
+ * suite a type error in a file it asserts on, invisible only because
+ * `node --test` strips types without checking them).
+ */
+function statusFetch(status: number, detail?: string | Record<string, unknown>) {
   const calls: string[] = [];
   const fetchImpl = async (url: string) => {
     calls.push(url);
@@ -2676,6 +2685,15 @@ test("#2100: a 402 quota refusal is NAMED — BLOCKED, one attempt per pass, dur
 
   const posts = first.calls.filter((u) => /\/v1\/sessions$/.test(u));
   assert.equal(posts.length, 1, "ONE refusal stops the pass — the rest cannot succeed either");
+  // …and the pass line must not promise the continuation a quota stop does not
+  // schedule (the whole content of 90907b2d; unpinned until review cycle 3).
+  //
+  // MUTATION THAT REDS THIS: drop the `stopped === "quota"` branch → the line
+  // says "continues in the background".
+  assert.ok(
+    first.lines.some((l) => l.includes("paused 2 (quota refused; not retried in this pass)")),
+    `a quota stop schedules no continuation: ${JSON.stringify(first.lines)}`,
+  );
   assert.ok(
     first.lines.some((l) => l.includes("capture: BLOCKED (3 queued, 402 quota)")),
     `the banner must name the quota block: ${JSON.stringify(first.lines)}`,
@@ -3075,4 +3093,63 @@ test("#2100: a KEYLESS box still shows its backlog (it can never drain)", () => 
   assert.equal(health.state, "inactive");
   assert.equal(health.queued, 2);
   assert.equal(health.line, "capture: INACTIVE (no TORTOISE_API_KEY, 2 queued)");
+});
+
+// ── #2100 (review cycle 3): pin the two branches the guards rest on ────────
+
+test("#2100: a pass that ATTEMPTS nothing must not clear the block", () => {
+  // Review finding: the `attempted > 0` guard was unpinned — mutating it to
+  // `>= 0` kept the suite green, and that guard is the ONLY thing between the
+  // measured #2100 box (320 entries, ALL inside their backoff window, so a pass
+  // attempts zero) and a self-erasing marker: the next lane would print
+  // `capture: DRAINING (320 queued)` instead of the named quota block.
+  //
+  // MUTATION THAT REDS THIS: `summary.attempted >= 0` (clear on every pass).
+  const spool = tmpSpool();
+  const sid = "sess-waiting";
+  writeSpoolEntry(spool, snapshot(sid));
+  // Everything is in its backoff window: nothing is attemptable this pass.
+  const metaPath = join(spool, "entries", `${entryKey(sid)}.meta.json`);
+  const meta = JSON.parse(readFileSync(metaPath, "utf8")) as Record<string, unknown>;
+  meta.next_attempt_at_ms = Date.now() + 60_000;
+  writeFileSync(metaPath, JSON.stringify(meta));
+  writeFileSync(
+    join(spool, SPOOL_STATUS_FILE),
+    JSON.stringify({ version: 1, state: "blocked", status: 402, reason: "quota_exceeded" }),
+  );
+
+  const pi = mockPi();
+  tortoiseCapture(pi as never, hermeticDeps(mockFetch([{ ok: true }]).fetchImpl, spool));
+  return (async () => {
+    await pi.handlers.session_start(undefined, mockCtx({ entries: [], sessionId: "live" }));
+    await settle();
+    assert.equal(
+      readCaptureStatus(spool)?.state,
+      "blocked",
+      "no attempt means no new evidence — the block stands",
+    );
+    assert.equal(captureHealthLine(spool, { apiKey: "tt_x" }).state, "blocked");
+  })();
+});
+
+test("#2100: a bare 402 with no machine-readable code is still a quota block", async () => {
+  // Review finding: the `status !== 402` half of `quotaRefusal` was unpinned.
+  // It is what names the block for a 402 whose body carries no `detail.code` —
+  // a proxy/gateway 402, an older server, or a non-JSON body — which is exactly
+  // the acceptance's `402 quota` string. "Cleanup" to `if (code === undefined)
+  // return undefined` would record NO block at all for those.
+  //
+  // MUTATION THAT REDS THIS: `if (code === undefined) return undefined;`
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("sess-bare402"));
+  const bare = statusFetch(402, "quota"); // a plain-string detail, no code
+  const { lines } = await sessionStartLines(spool, bare.fetchImpl);
+
+  assert.ok(
+    lines.some((l) => l.includes("capture: BLOCKED (1 queued, 402 quota)")),
+    `a code-less 402 is still the plan's quota: ${JSON.stringify(lines)}`,
+  );
+  const recorded = readCaptureStatus(spool);
+  assert.equal(recorded?.state, "blocked");
+  assert.equal(recorded?.status, 402);
 });
