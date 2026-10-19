@@ -22,7 +22,6 @@ Flows:
 from __future__ import annotations
 
 import base64
-import contextlib
 import json
 import os
 import re
@@ -164,31 +163,54 @@ def _identity_stack() -> None:
     # waiting on the wrong server and die naming a preview this fixture never
     # started. Warm the database here instead, and gate on the same OUTCOME the
     # seed waits for — a request count is not the promise.
-    warm_deadline = time.monotonic() + 30
-    warmed = False
-    while time.monotonic() < warm_deadline:
-        with contextlib.suppress(Exception):
-            # 401 is the expected answer — the store answered, which is the
-            # point. Transports can also drop the first request while the
-            # function bundler is still settling, hence the retry.
-            urllib.request.urlopen(
-                urllib.request.Request(
-                    f"{app_url}/api/session",
-                    headers={"Cookie": "__Host-session=" + "0" * 64},
-                ),
-                timeout=10,
-            ).close()
-        if d1_sqlite_files(DASHBOARD_DIR):
-            warmed = True
-            break
-        time.sleep(0.5)
-    if not warmed:
+    # TWO conditions, both needed, and "a sqlite exists somewhere" is neither:
+    # every earlier spec in the job seeds through the SAME `.wrangler/state`
+    # tree, so that check is already true before this preview proves anything.
+    #
+    # 1. THIS preview answers `/api/session` with a routing answer (401 for a
+    #    bogus cookie) rather than a 5xx — a preview booted without `--d1
+    #    SESSIONS` answers 503, and would otherwise surface as 22 confusing
+    #    auth failures instead of naming the binding.
+    # 2. a session sqlite exists under the pinned state root, because that is
+    #    what `_seed_bff_session` waits for and writes its row into.
+    try:
+        warm_deadline = time.monotonic() + 30
+        warmed = False
+        while time.monotonic() < warm_deadline:
+            status = None
+            try:
+                # 401 is the expected answer — the store answered, which is the
+                # point. Transports can also drop the first request while the
+                # function bundler is still settling, hence the retry.
+                status = urllib.request.urlopen(
+                    urllib.request.Request(
+                        f"{app_url}/api/session",
+                        headers={"Cookie": "__Host-session=" + "0" * 64},
+                    ),
+                    timeout=10,
+                ).status
+            except urllib.error.HTTPError as exc:
+                status = exc.code
+            except Exception:
+                status = None
+            if status in (200, 401, 403) and d1_sqlite_files(DASHBOARD_DIR):
+                warmed = True
+                break
+            time.sleep(0.5)
+        if not warmed:
+            pytest.fail(
+                f"the identity preview on {app_url} is not serving the session "
+                f"store (last status {status!r}; a 5xx here usually means it is "
+                "booting without `--d1 SESSIONS`), or no D1 sqlite appeared under "
+                f"{DASHBOARD_DIR / '.wrangler'}"
+            )
+    except BaseException:
+        # This window sits BEFORE the fixture's own try/finally, and both
+        # children are their own process group (`start_new_session=True`), so an
+        # interrupt here would otherwise outlive the run.
         stop(app)
         stop(mock)
-        pytest.fail(
-            f"the identity preview on {app_url} never created a D1 sqlite under "
-            f"{DASHBOARD_DIR / '.wrangler'} — is it booting with `--d1 SESSIONS`?"
-        )
+        raise
 
     globals()["DASHBOARD_URL"] = app_url + "/"
     globals()["STACK_MOCK_URL"] = mock_url
@@ -201,8 +223,14 @@ def _identity_stack() -> None:
 
 def _session(user_id: str = "u-e2e-identity", display_name: str = "danielospinabotero") -> dict:
     """Supabase session JSON for the parent-domain cookie (mirrors
-    test_dashboard_gate's _session). ``display_name=None`` omits
-    user_metadata entirely — the email-prefix fallback branch."""
+    test_dashboard_gate's _session).
+
+    ``display_name=None`` omits ``user_metadata`` from the SEEDED session, which
+    is now only the legacy residue the app must ignore: the rendered name comes
+    from ``/api/session`` → ``/auth/v1/user``. The email-prefix fallback branch is
+    produced by the mock's ``noDisplayName`` mode instead (see
+    ``test_account_menu_email_prefix_fallback``).
+    """
     now = datetime.now(UTC)
     user = {
         "id": user_id,
@@ -580,7 +608,10 @@ def test_billing_team_context_single_team(page: Page):
     page.goto(DASHBOARD_URL)
     page.get_by_role("button", name="Billing").click()
     expect(page.get_by_role("heading", name="Billing — E2E")).to_be_visible()
-    expect(page.get_by_label("Billing team")).to_have_count(0)
+    # #2809: the selector's aria-label is "Billing organization"; asserting the
+    # retired string "Billing team" was vacuous — it matched nothing, so the
+    # count was 0 whether or not an empty selector rendered.
+    expect(page.get_by_label("Billing organization")).to_have_count(0)
 
 
 def test_recovery_banner_shows_and_routes_to_profile(page: Page):
