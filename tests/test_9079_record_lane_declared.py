@@ -235,6 +235,21 @@ def test_every_event_store_write_declares_the_record_lane(sdk_with_journal,
         "refresh_first_seq": "SET m.first_seq = CASE",
         "reestablish_watermark": "ON CREATE SET m.last_seq = $last",
     }
+    # Each fragment must identify exactly ONE statement: `any()`/membership alone
+    # would let a fragment that also matches a sibling's statement keep the
+    # census green while the REAL statement stopped being exercised — the
+    # family-keyed defect this per-statement split replaced.
+    hits = {name: {stmt for stmt, _lane in observed if fragment in stmt}
+            for name, fragment in statements.items()}
+    ambiguous = [name for name, hit in hits.items() if len(hit) != 1]
+    assert not ambiguous, (
+        "each fragment must identify exactly ONE statement; ambiguous: "
+        + " | ".join(f"{n} -> {len(hits[n])}" for n in ambiguous))
+    pinned = {next(iter(hit)) for hit in hits.values()}
+    assert len(pinned) == len(statements), (
+        f"the census must pin {len(statements)} DISTINCT statements; it pinned "
+        f"{len(pinned)} — a fragment is matching a sibling's statement")
+
     missing = [name for name, fragment in statements.items()
                if not any(fragment in s for s, _lane in observed)]
     assert not missing, (

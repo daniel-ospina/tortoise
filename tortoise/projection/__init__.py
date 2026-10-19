@@ -3324,7 +3324,11 @@ def _journal_safe_params(params, cypher=None):
 #     metadata (`#9121`);
 #   * `tortoise/event_store.RECORD_LANE` — the event store (the change-feed log
 #     and its seq allocator): a declared CARVEOUT, not a projection and not the
-#     truth store — no journal record describes it (`#9079`, answering `#9208`).
+#     truth store — no journal record describes it (`#9079`). This is `#9208`'s
+#     FIRST requirement only; its second — narrowing `_emit_event`'s bare
+#     `except Exception` swallow, so a refusal is not indistinguishable from "the
+#     feed was never configured" — is NOT in this increment, and `#9208` stays
+#     open for it.
 #
 # ⛔ STILL UNDECLARED — each would be REFUSED by (1) today:
 #
@@ -3344,20 +3348,25 @@ def _journal_safe_params(params, cypher=None):
 #     `:TeamMeta`, config entries), which the replay scope opened by this lane
 #     therefore AUTHORIZES although no record describes them — `#9210` owns
 #     narrowing that;
-# `FalkorProjection._ensure_indexes()` issues this package's largest block of
-# DDL through `proj.g` (`CREATE INDEX` / `DROP INDEX` / a full-text index and a
-# `MERGE (m:Meta …)`), and it declares nothing. Two of its call sites matter:
-# `__init__` runs it before `_bind_journal`, so it escapes only by ORDERING, and
-# TWO `hosted_api` restore paths call it after a `GRAPH.COPY` swap that restores
-# data but not schema — `_rebuild_import_indexes` and `backups_restore` — with no
-# scope in flight, on their `dump_proj = proj` fallback branch, i.e. on a
-# projection that IS journal-backed (their other branches construct a fresh
-# `FalkorProjection`, whose `_journal_backed` is False, so those are outside
-# (1)'s guard). Both wrap the call in `except Exception: log`, so a refusal
-# there is a logged no-op. `_ensure_indexes` swallows a per-statement `Exception` and only logs,
-# so under (1) that DDL would be refused and merely logged: the import endpoint
-# would report success on an index-less graph, which is the same silent-swallow
-# shape the lanes above exist to prevent. It is named here as STILL UNDECLARED
+#   * `FalkorProjection._ensure_indexes()` — this package's largest block of
+#     DDL through `proj.g` (`CREATE INDEX` / `DROP INDEX` / a full-text index
+#     and a `MERGE (m:Meta …)`), and it declares nothing. Two of its call sites
+#     matter: `__init__` runs it before `_bind_journal`, so it escapes only by
+#     ORDERING, and TWO `hosted_api` restore paths call it after a `GRAPH.COPY`
+#     swap that restores data but not schema — `_rebuild_import_indexes` and
+#     `backups_restore` — with no scope in flight, on their `dump_proj = proj`
+#     fallback branch. That branch is journal-backed only when
+#     `TORTOISE_EVENT_LOG_BASE_DIR` is set (otherwise
+#     `_resolve_event_log_path` returns None, `_bind_journal(None)` leaves
+#     `_journal_backed` at its False default, and the branch is outside (1)'s
+#     guard like the fresh-projection branches below — whose `_journal_backed`
+#     is False too). Both wrap the call in `except Exception: log`, so where the
+#     branch IS journal-backed a refusal there is a logged no-op.
+#     `_ensure_indexes` swallows a per-statement `Exception` and only logs, so
+#     under (1) that DDL would be refused and merely logged: the import endpoint
+#     would report success on an index-less graph, which is the same
+#     silent-swallow shape the lanes above exist to prevent. It is named here as
+#     STILL UNDECLARED
 # (not fixed in this increment) so (1)'s census can enumerate it.
 #
 # So (1) is NOT blocked by an unknown surface: the measurement is DONE and
