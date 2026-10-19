@@ -200,17 +200,21 @@ its edges), and a test pins that scope.
   fixing residual 6 first: give `_upsert_point_props` presence-gated `baseline_*` clauses).
 - **4** — the remaining raw-handle doors (`_sync_tags`, `_link_source`, deletes, `onboarding/state.py`,
   `onboarding/seed.py`, `hosted_api.py`, `__main__.py`, connectors), then gate the handle.
-  **LANDED SO FAR: the `onboarding` seams are DECLARED (#9121)** —
-  `onboarding/state.py::_run` and `onboarding/seed.py::_run` no longer rest on the handle being open:
-  every statement runs inside `onboarding.state.onboarding_write_scope()` (a named
-  `_live_write_scope`, §17.1 shape (a); the metadata-vs-journal argument, including why this class is
-  **not** rebuilt-from-zero-safe and rides the `#4641` rescue instead, is in that docstring). So
-  gating the handle (`#9079`) does not disable onboarding, and those two entries are no longer
-  UNDECLARED doors — they are declared live-metadata lanes. Their writes are still unjournalled: what
-  changed is that the lane says so, in one named place. **STILL OPEN on this entry:** the five
-  `eager_init_query()` call sites that CREATE `:OnboardingState` execute on
-  `proj.db.select_graph(...)` (escape (3)) and stay unjournalled AND undeclared (#9157) — the
-  declaration covers the statements issued through the two `_run` seams, not that seam.
+  **LANDED SO FAR: the `onboarding` write lane is DECLARED (#9121)** —
+  `onboarding/state.py::_run` no longer rests on the handle being open: every statement it issues
+  runs inside `_onboarding_write_scope(cypher)` (reason `ONBOARDING_WRITE_LANE =
+  "onboarding.metadata"`, §17.1 shape (a); the metadata-vs-journal argument, including why this
+  class is **not** rebuilt-from-zero-safe and rides the `#4641` rescue instead, is in the block
+  above that constant). So gating the handle (`#9079`) does not disable onboarding, and
+  `onboarding/state.py` is no longer an UNDECLARED door — it is a declared live-metadata lane. Its
+  writes are still unjournalled: what changed is that the lane says so, in one named place.
+  `onboarding/seed.py::_run` needs no declaration: its only caller (`find_subject_by_name`) issues a
+  READ and every write in that module goes through the SDK's journalled doors.
+  **STILL OPEN on this entry:** the five `eager_init_query()` call sites that CREATE
+  `:OnboardingState` (`sdk.py::org_create`; `hosted_api.py::provision_tenant`, `register_user` ×2,
+  `_eager_provision_org_graph`) execute on `proj.db.select_graph(...)` (escape (3)) and stay
+  unjournalled AND undeclared (#9157) — the declaration covers the statements issued through
+  `state._run`, not that seam. Do not close escape (3) believing the class is covered.
   **LANDED SO FAR: the `delete_point` DOOR (increment 4a)** —
   `docs/plans/2026-10-18-7951-delete-point-outbox.md`: the `EntityMutated` op=delete record is appended
   BEFORE the `DETACH DELETE`, and a failed append refuses the delete (previously an unrecorded destroy

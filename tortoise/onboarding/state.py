@@ -14,6 +14,17 @@ The module is graph-agnostic: every writer/reader takes a ``graph`` handle
 with a ``.query(cypher, **params)`` surface (FalkorProjection) returning a
 result with ``.result_set`` and ``.stats``. Importable without hosted_api
 (no circular import).
+
+§17.1 (#9121): every imperative write THIS MODULE ISSUES goes through `_run`,
+which declares the statement with `_onboarding_write_scope` before dispatch.
+⚠️ Not every write that touches an onboarding node: the eager-init statement
+built by `eager_init_query` is an imperative cache write, but it is issued by
+its CALLERS on `proj.db.select_graph(<g>)` — §17.1's escape (3) — and is
+outside this declaration (last bullet of the block below). The declaration is
+the module's ONLY dependency on `tortoise.projection`, and it is imported
+LAZILY (see the block above `ONBOARDING_WRITE_LANE`) so this module stays a
+light leaf and the dependency direction stays one-way — projection already
+imports this module, at function level.
 """
 from __future__ import annotations
 
@@ -376,90 +387,102 @@ def _org_lock(org_id: str) -> threading.Lock:
         return lock
 
 
-#: The §17.1 declaration every onboarding graph write runs inside (#9121).
-#: A NAME rather than a flag on purpose: ``_live_write_scope`` carries it into
-#: the guard's refusal message (so a refusal says WHICH lane declared itself)
-#: and into ``_CACHE_WRITE_AUTHORIZED``, which a test can READ — a write that
-#: happened ``beside`` its declaration instead of ``inside`` it then fails
-#: rather than passing quietly.
-ONBOARDING_WRITE_SCOPE = "onboarding.flow_state"
+# ── §17.1 write-lane declaration (#9121) ────────────────────
+#
+# §17.1 (`docs/architecture/STORAGE-ARCHITECTURE.md`, from the §2.0 owner
+# ruling of 2026-10-08 — the record is the truth store, FalkorDB is the
+# derived cache) requires every writer of the cache to be a PROJECTION of a
+# journal record, or to DECLARE why it is not one. This module's writers are
+# org-level FLOW METADATA, not a projection of a document/point event, so they
+# declare that here instead of reaching around the guard. Shape (b) — journal
+# them — was the alternative; the argument for (a) DECLARED, in order of
+# weight, and each leg checkable against the code:
+#
+#  1. RECOVERY IS ALREADY CAPTURE-RESTORE, NOT REPLAY. The replay engines that
+#     can rebuild this graph snapshot `:OnboardingState` / `:OnboardingStep` /
+#     the `COMPLETED_STEP` edges BEFORE the wipe and re-create them after it
+#     (`rebuild` at `_capture_onboarding_snapshot` and `recover_from_log`),
+#     exactly because these writers are raw Cypher with "no journal record ...
+#     a replay cannot re-create any of it" (the #4641 block in
+#     `tortoise/projection/__init__.py`). So a declaration does not move this
+#     class's recovery onto a path that was carrying it — the journal was never
+#     the mechanism for it. ⚠️ The matrix is NOT uniform, and the gap is stated
+#     rather than implied: `tortoise/backup.py::restore`'s JSONL fallback is a
+#     fourth replay engine with no onboarding capture, so a snapshot-less
+#     restore drops this class. That is this class's pre-existing recovery
+#     hole, not something the declaration creates or hides.
+#  2. THE WRITERS' CONTRACTS MAKE A SILENT LOSS EXPENSIVE. `fork` is set-once
+#     and never re-asked; `status` is server-owned and gate-written. Journalling
+#     them would be better if it were cheap — and (b) is the right destination —
+#     but (b) is a migration of the FLOW state machine into the record, not a
+#     line in this funnel, and it is not what unblocks `#9079`.
+#  3. CONTEXT ONLY, NOT A REASON: `:OnboardingState` / `:OnboardingStep` are the
+#     class of `:TeamMeta`, which `rebuild` documents and capture-restores the
+#     same way (the #5353 block: its writers "use a bare `CREATE` that rides no
+#     journal record"). On the eager-init lanes the two are literally one
+#     statement (`eager_init_query` appends the init fragment — scope pin 10).
+#     ⚠️ That combined statement is issued on `proj.db.select_graph(<g>)`, i.e.
+#     §17.1's escape (3) — OUTSIDE this declaration (see the last bullet below).
+#     `:TeamMeta` holds no §17.1 declaration itself; "documented and
+#     capture-restored" is what the precedent is, not a vetted write-path rule.
+#
+# ⛔ This is a declaration, not a bypass. Its width is stated rather than
+# flattered:
+#   * It is opened for a statement THIS MODULE issues that the shared
+#     classifier (`_statement_writes`, the one the RAW-QUERY door
+#     `FalkorProjection.query` uses) calls mutating. ⚠️ `FalkorProjection.apply`
+#     does not consult the classifier at all — it refuses unconditionally — so
+#     the classifier only ever WIDENS this lane. That bias is deliberately
+#     conservative (it treats anything not provably read-only as a write), so a
+#     statement it cannot read takes the declaration, INCLUDING an unreadable
+#     read. What keeps the lane honest is not the classifier but the class
+#     check, pinned in `tests/test_9079_onboarding_declared_lane.py`: every
+#     declared statement's written labels are enumerated against
+#     `:OnboardingState` / `:OnboardingStep` / `:Subject` / the two edges.
+#   * It is per-call: no attribute, constructor argument or env var can set it,
+#     so a writer that does not enter it is refused, not grandfathered.
+#   * ⚠️ The `:Subject` ANCHOR MINT IS NOT THIS LANE'S CLAIM. `write_onboards_edge`
+#     MERGEs the anchor `:Subject` as well as the metadata edge, and `:Subject`
+#     is a JOURNALLED ontology class — so on this lane an unjournalled `:Subject`
+#     can be minted (the #2194/#2295 class, already pinned as unrebuildable by
+#     `tests/test_rebuild_config_preservation.py`). This declaration does not
+#     bless that; it is named here so it is not discovered, and the fix (the
+#     seed's journalled door should be the only minter, or the anchor needs its
+#     own declaration) is tracked on `#9079`'s family.
+#   * It does NOT cover the eager-init statement on the org-graph lane, issued
+#     on `proj.db.select_graph(<g>)` — §17.1's stated escape (3), below anything
+#     a handle guard sits on.
+#
+# SEAM: `#9123` (a sibling in the same decomposition, in flight) is landing
+# `_graph_metadata_write_scope(reason)` in `tortoise/projection/__init__.py` for
+# the `:EpMeta` epoch write. This lane declares through the same primitive
+# (`_cache_write_authorized`) and should DELEGATE to that named wrapper when it
+# lands, rather than keep a second spelling of the same class. It is not created
+# here to avoid two lanes adding the same symbol to the projection module at
+# once.
+ONBOARDING_WRITE_LANE = "onboarding.metadata"
 
 
-@contextlib.contextmanager
-def onboarding_write_scope(reason: str = ONBOARDING_WRITE_SCOPE):
-    """Declare the enclosed statements this lane's OWN live writes (§17.1).
+def _onboarding_write_scope(cypher: str):
+    """The §17.1 declaration for `cypher` — or a no-op scope for a read.
 
-    ⛔ SHAPE (a) — THE DECLARED LANE, with the argument the declaration owes.
+    Lazy import on purpose: this module is documented as a light, graph-agnostic
+    leaf (`"Importable without hosted_api (no circular import)"`), and
+    `tortoise.projection` is neither small nor a dependency of every caller of
+    the state machine. The import also keeps the dependency DIRECTION one-way
+    (projection already imports this module, function-locally at
+    `_capture_onboarding_snapshot`), so a future module-level import on that side
+    cannot make this one circular.
 
-    **Not a journal projection (shape (b) is not the answer).** Every
-    statement this lane issues writes ORG-LEVEL ONBOARDING METADATA —
-    ``:OnboardingState`` / ``:OnboardingStep`` / the ``COMPLETED_STEP`` and
-    ``onboards`` edges — which is not a projection of a journalled document or
-    point event. The journal records agent MEMORY writes; no journal event
-    carries "this org's fork card was answered", so there is nothing here for
-    the fold to project.
-
-    ⚠️ **And it is NOT rebuilt-from-zero-safe — do not claim that.** Replay
-    cannot re-create the class (``#4641``: ``rg OnboardingState
-    tortoise/projection`` was zero hits before that change), so ``rebuild_all``
-    PRESERVES it OUT-OF-BAND: a pre-wipe capture into the rescue file, a
-    post-wipe restore, and a post-restore verification that reports an UNKNOWN
-    snapshot or a confirmed gap as a LOSS with *"re-run onboarding for the
-    affected org(s)"* — never as a silent re-derivation. The writers' own
-    contracts make the loss visible rather than benign (``fork`` is set-once
-    and never re-asked; ``status`` is server-owned and gate-written). That is
-    the honest second half: rebuildable only through the ``#4641`` rescue,
-    not by replay.
-
-    **Why a declaration at all.** ``#9079`` closes the raw guarded handle
-    (``proj.g.query``) to an UNDECLARED mutating statement. Every statement
-    this package issues **through** :func:`_run` (and ``seed._run``) runs
-    inside this declaration, so gating the handle cannot silently disable the
-    lane — the same shape the SDK's own live doors use
-    (``_live_write_scope("create_point")`` and friends). They journal first
-    and then declare; this lane does not journal first because it has no
-    record to append, so the declaration IS the whole of its authorization —
-    which is exactly why it has to be explicit and named rather than inherited
-    from a handle that happens to be unguarded.
-
-    ⚠️ **What this scope does NOT cover — the ``:OnboardingState`` CREATION
-    writes.** Do not read the paragraph above as "the ``onboarding`` class is
-    fully declared": it is not. Five call sites build their statement with
-    :func:`eager_init_query` and execute it on
-    ``proj.db.select_graph(<graph>)`` — escape **(3)** of the guard's own
-    three-escape inventory (``tortoise/projection/__init__.py``, *THE RESIDUAL
-    IS THREE ESCAPES*) — so they reach neither :func:`_run` nor this scope:
-
-    * ``tortoise/sdk.py::org_create`` (the SDK's org-create lane),
-    * ``tortoise/hosted_api.py::provision_tenant`` (the tenant-provision mint),
-    * ``tortoise/hosted_api.py::register_user`` — TWO sites (the self-service
-      register lane and its Supabase-mode arm),
-    * ``tortoise/hosted_api.py::_eager_provision_org_graph``.
-
-    They keep working after ``#9079`` precisely *because* they sit below the
-    handle, so the conclusion above still holds — gating the handle cannot
-    disable onboarding. But those writes are still **unjournalled AND
-    undeclared**, the one part of this class this increment does not move, and
-    they are filed as their own residual (**#9157**) rather than implied
-    closed here. A lane doing the §17.1 door inventory must not close escape
-    (3) believing onboarding is covered.
-
-    ⛔ **NOT A SWALLOW, and nothing here may become one.** This does not catch
-    ``DirectCacheWriteRefused``: the callers are fail-open
-    (``hosted_api._maybe_apply_completion`` -> ``except Exception: return
-    False``, ``mcp_server._maybe_onboarding_auto_complete`` -> ``return``,
-    ``selfhost.ensure_selfhost_onboarding_once`` best-effort), so a swallowed
-    refusal is indistinguishable from success at every call site — that IS the
-    silent regression this issue exists to prevent, not a mitigation of it. A
-    refusal must reach those callers.
-
-    The scope is a per-call ``with`` block (no instance attribute, constructor
-    argument or env var can arm it) and it always resets, so the authorization
-    cannot outlive the statement that declared it.
+    The reason string is what a `DirectCacheWriteRefused` message will cite and
+    what `tests/test_9079_onboarding_declared_lane.py` pins, so the two cannot
+    drift about which lane authorized a write.
     """
-    from tortoise.projection import _live_write_scope
-    with _live_write_scope(reason):
-        yield
+    from tortoise.projection import _cache_write_authorized, _statement_writes
+
+    if _statement_writes(cypher):
+        return _cache_write_authorized(ONBOARDING_WRITE_LANE)
+    return contextlib.nullcontext()
 
 
 def _run(graph: Any, cypher: str, params: dict[str, Any] | None = None):
@@ -469,32 +492,33 @@ def _run(graph: Any, cypher: str, params: dict[str, Any] | None = None):
     raises a ResponseError (never a TypeError), so the fallback only fires
     on a signature mismatch.
 
-    §17.1 (#9121): every statement THIS function issues runs inside
-    :func:`onboarding_write_scope` — the lane DECLARES itself instead of
-    relying on a door staying open. That is the whole of the previous
-    rationale ("through the raw handle, which #7951 records as the still-open
-    residual") replaced: the residual is ``#9079``'s to close, and this lane is
-    declared so closing it cannot silently disable onboarding. What this
-    declaration does NOT reach is stated on its own docstring (⚠️ the five
-    ``eager_init_query()`` call sites, which create ``:OnboardingState`` on
-    ``proj.db.select_graph(...)`` — escape (3), filed as ``#9157``); "every
-    onboarding write is declared" is a claim this increment does not make. The declaration
-    is unconditional (it also covers reads, which pass the guard anyway)
-    deliberately: gating it on a write-classifier would couple this seam to
-    whichever classifier the guard ends up using, and that coupling is how a
-    refusal slips through a seam that believed the statement was a read.
+    §17.1 (#9121): this is the module's ONE write funnel, and a MUTATING
+    statement run through it is DECLARED — `_onboarding_write_scope` — so
+    `#9079` closing the projection's write handle (`proj.g`, the third door)
+    refuses the second writer without refusing the product. A statement the
+    classifier can PROVE read-only is not declared; because that classifier is
+    conservative, one it cannot read IS (see the width bullet in the block
+    above). Read that block for the argument and for what the lane does NOT
+    claim.
 
-    The handle choice is unchanged, and it is the SDK's OWN live lane
-    (``proj.g.query``, where ``create_point``/``update_point`` write): the
-    public ``FalkorProjection.query`` lane is the raw lane for writers that do
-    not own the projection, and taking it here was what refused EVERY
-    onboarding write on the hosted lane. Routing through the guarded handle
-    keeps every other guard on this path — its #3595 operator, #7174
-    numeric-domain and #8479 statement-text refusals and its L2 bulk-wipe
-    check all still run."""
+    The reason string that used to live here — "we reach the raw handle because
+    the raw handle is the still-open residual" — expired with `#9079`: a writer
+    that goes around a guard because the guard is open has nothing left to
+    stand on once the guard closes. Going around it was never the design; it
+    was the absence of a decision. Read the block above `ONBOARDING_WRITE_LANE`
+    for the declaration that replaces it.
+
+    ⛔ Do NOT make this tolerant of `DirectCacheWriteRefused`. Every caller of
+    this module is FAIL-OPEN — `hosted_api._maybe_apply_completion` →
+    `except Exception: return False`, `mcp_server
+    ._maybe_onboarding_auto_complete` → `return`,
+    `selfhost.ensure_selfhost_onboarding_once` best-effort — so a swallowed
+    refusal is indistinguishable from success at every call site and orgs would
+    silently never reach ``complete``. That regression already happened once
+    (`#7951`); the declaration is what keeps it from happening again."""
     params = params or {}
-    with onboarding_write_scope():
-        raw = getattr(graph, "g", None)  # FalkorProjection -> its raw handle
+    raw = getattr(graph, "g", None)  # FalkorProjection -> its raw handle
+    with _onboarding_write_scope(cypher):
         if raw is not None and hasattr(raw, "query"):
             return raw.query(cypher, params=params)
         try:

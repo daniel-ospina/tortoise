@@ -615,6 +615,98 @@ def test_purge_overflow_is_still_refused_without_a_target_scope():
     assert proj.g._g.wipes() == [], "the refused wipe must not reach the graph"
 
 
+# ── #8215: the exemptions are attributed to the DELETED variable ───────────
+#
+# #3037/#8223 anchored the property-map exemption to a pattern ELEMENT but not
+# to the DELETE TARGET, so a genuine property map on a pattern that binds some
+# OTHER variable still exempted the statement. `MATCH (m)` binds m to EVERY
+# node, so each form below deletes the whole graph — and L2
+# (`_assert_test_graph`) is the only layer on the raw-query lane, so such a
+# statement reached a production server graph with no name check and no token.
+# The same defect lived in the WHERE signal (a reference on another variable),
+# which is why one delete-target-aware classifier answers both directions
+# instead of two drifting heuristics.
+_TARGET_ELSEWHERE_STATEMENTS = [
+    # The issue's indicator (1) verbatim — a whole-graph wipe.
+    "MATCH (n:Point {id:$id}) WITH n MATCH (m) DETACH DELETE m",
+    # The variant the issue names (OPTIONAL MATCH) — same shape, same wipe.
+    "MATCH (n:Point {id:$id}) OPTIONAL MATCH (m) DETACH DELETE m",
+    # The same defect in the WHERE signal: the real reference scopes `n`,
+    # which nothing deletes, while `m` stays every-node.
+    "MATCH (n:Point {id:$id}) MATCH (m) WHERE n.id = $id DETACH DELETE m",
+    # An ANONYMOUS property map binds no variable, so it scopes nothing.
+    "MATCH (:Point {id:$id}), (n) DETACH DELETE n",
+    # A scoped and an unscoped target in one clause: `all`, never `any`.
+    "MATCH (a:Point {id:$id}), (m) DETACH DELETE a, m",
+    # A pattern map AFTER the delete cannot scope rows already deleted.
+    "MATCH (n) DETACH DELETE n WITH n MATCH (m:Point {id:$id})",
+    # Alias resolution must not become an escape hatch: the alias SOURCE is
+    # unscoped (first), or the map's pattern binds a variable the DELETE does
+    # not name (second) — the target stays unscoped in both.
+    "MATCH (x:Point {id:$id}) WITH x AS n MATCH (m) DETACH DELETE m",
+    "MATCH (m) WITH m AS n MATCH (x:Point {id:$id}) DETACH DELETE n",
+]
+
+
+@pytest.mark.parametrize("statement", _TARGET_ELSEWHERE_STATEMENTS)
+def test_property_map_on_another_pattern_is_still_a_bulk_wipe(statement):
+    """Indicator (1)+(2): a property map (or WHERE reference) that does not
+    bind the DELETED variable must not exempt the wipe. Every statement here
+    returned ``False`` ("targeted") before the fix."""
+    from tortoise.projection import _is_bulk_wipe
+
+    assert _is_bulk_wipe(statement) is True, statement
+
+
+@pytest.mark.parametrize("statement", [
+    # Indicator (3): the legitimate single-pattern targeted delete, unchanged.
+    "MATCH (n:Point {id:$id}) DETACH DELETE n",
+    "MATCH (n:Meta {key:$key}) DETACH DELETE n",
+    "MATCH (a)-[r:IMPL {idx:0}]->(b) DETACH DELETE r",
+    "MATCH (n:Point {id:$id}) WHERE n.id = $id DETACH DELETE n",
+    # NO NEW FALSE REFUSAL: the deleted NAME can differ from the name the map
+    # is spelled on (`WITH n AS m`), and the alias chain can be longer. These
+    # are targeted deletes and must stay targeted — a blanket per-target rule
+    # that ignored aliases would newly refuse them.
+    "MATCH (n:Point {id:$id}) WITH n AS m DETACH DELETE m",
+    "MATCH (n:Point {id:$id}) WITH n AS a, a AS b DETACH DELETE b",
+])
+def test_target_attributed_exemption_keeps_real_targeted_deletes(statement):
+    """Indicator (3): attributing the exemption to the deleted variable must not
+    turn a real targeted delete into a refused one."""
+    from tortoise.projection import _is_bulk_wipe
+
+    assert _is_bulk_wipe(statement) is False, statement
+
+
+@pytest.mark.parametrize("statement", _TARGET_ELSEWHERE_STATEMENTS)
+def test_property_map_on_another_pattern_is_refused_by_the_guard(statement):
+    """Indicators (1)+(3) end-to-end through BOTH L2 call sites on a non-test
+    SERVER graph: the classifier verdict must reach ``_assert_test_graph``, so
+    the wipe is refused before any graph I/O."""
+    proj = _bare_projection(graph_name="prod_tortoise", embedded=False)
+    proj.g = _GuardedGraph(_RecordingGraph(), proj)
+    with pytest.raises(RuntimeError, match="non-test graph"):
+        proj.query(statement)
+    with pytest.raises(RuntimeError, match="non-test graph"):
+        proj.g.query(statement)
+    assert proj.g.wipes() == [], "a refused wipe must not reach the graph"
+
+
+@pytest.mark.parametrize("statement", [
+    "MATCH (n:Point {id:$id}) DETACH DELETE n",
+    "MATCH (n:Point {id:$id}) WITH n AS m DETACH DELETE m",
+])
+def test_target_attributed_exemption_reaches_the_graph(statement):
+    """The other side of the attribution: a targeted delete still EXECUTES on a
+    non-test server graph — it is not refused by the stricter classifier."""
+    proj = _bare_projection(graph_name="team_x", embedded=False)
+    proj.g = _GuardedGraph(_RecordingGraph(), proj)
+    proj.query(statement)
+    proj.g.query(statement)
+    assert len(proj.g._g.queries) == 2, "a targeted delete must reach the graph"
+
+
 @pytest.mark.parametrize("statement", [
     "MATCH (n) DETACH DELETE n // {",
     "CALL { MATCH (n) DETACH DELETE n }",

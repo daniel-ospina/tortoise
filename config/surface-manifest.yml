@@ -5746,7 +5746,7 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.supersede_point.
-  dependency: 'reached by no registered MCP tool; caller categories: engine, other-tooling, tenant-rest'
+  dependency: 'reached by no registered MCP tool; caller categories: engine, eval-harness, other-tooling, tenant-rest'
   lifecycle: active
   used_by: tooling, skill-docs, docs
   recommendation: review

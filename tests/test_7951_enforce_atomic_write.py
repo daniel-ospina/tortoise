@@ -402,17 +402,14 @@ def test_onboarding_writes_are_not_refused_on_a_journal_backed_lane(
     write and the completion gate stopped, and no counter fired.
 
     The writers take the SAME raw-handle lane the SDK's own live writes use
-    (`proj.g.query`), and — since #9121 — they DECLARE that lane:
-    `onboarding.state._run` runs every statement inside
-    `onboarding_write_scope()` (a named `_live_write_scope`, shape (a), with
-    the metadata-vs-journal argument in its docstring). This pin therefore no
-    longer rests on the handle being UNGUARDED: `#9079` closes the handle to
-    an undeclared mutating statement and this lane authorizes itself, so
-    onboarding keeps writing when that lands
-    (`test_9121_onboarding_declared_lane.py` asserts the same against the
-    guard armed). The OTHER guards on that path are unchanged: the handle's
+    (`proj.g.query`). ⚠️ That lane was #7951's still-open residual; it is no
+    longer open-ended — `#9121` DECLARED this writer family (`onboarding.
+    metadata`, see `ONBOARDING_WRITE_LANE` in `onboarding/state.py`) ahead of
+    `#9079` closing the handle, so these writes stay sanctioned once the third
+    door is armed. The OTHER guards on that path are unchanged: the handle's
     #3595 operator and #7174 numeric-domain refusals and its L2 bulk-wipe
-    check all still run.
+    check all still run; the armed-handle version of this pin lives in
+    `tests/test_9079_onboarding_declared_lane.py`.
 
     RED before the fix: the first `write_completed_step` raises
     `DirectCacheWriteRefused`. MUTATION: revert `onboarding.state._run` to
@@ -455,13 +452,21 @@ def test_the_selfhost_onboarding_lane_writes_on_a_journal_backed_proj(
     `state.ensure_onboarding_state_node` on the same journal-backed
     projection, from `ensure_selfhost_onboarding_once` — best-effort and
     never-raise, so a refusal here is exactly as silent as the hosted one.
-    Since #9121 that write DECLARES itself (`onboarding_write_scope`, the
-    same declaration the hosted lane uses — `selfhost` reaches the graph
-    through `state._run`, so one declaration covers both lanes), which is why
-    it survives `#9079` closing the raw write handle.
 
     RED before the fix: the create-on-write MERGE raises
     `DirectCacheWriteRefused`.
+
+    ⚠️ This pin dispatches through the RAW HANDLE (`proj.g`, the THIRD door), not
+    the public `FalkorProjection.query` lane: `state._run` prefers `graph.g` when
+    the graph exposes one. Nothing here guards that door, so arming it (`#9124`)
+    changes nothing this pin can observe — the write keeps landing because `_run`
+    declares it (`#9121`). What it CANNOT tell you is whether the declaration is
+    doing its job, because it never arms the handle; that is the job of
+    `tests/test_9079_onboarding_declared_lane.py
+    ::test_the_selfhost_onboarding_lane_reaches_the_graph_with_the_guard_armed`,
+    which issues the same call with the `#9124` predicate installed. Nothing in
+    this file pins the public raw-query lane for onboarding, because `state._run`
+    no longer routes through it.
     """
     from tortoise.onboarding import selfhost
     from tortoise.onboarding import state as _os

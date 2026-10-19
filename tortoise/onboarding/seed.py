@@ -137,26 +137,29 @@ def _run(handle: Any, cypher: str, params: dict[str, Any] | None = None):
     raises (never a TypeError), so the fallback only fires on a signature
     mismatch.
 
-    §17.1 (#7951, #9121): the public ``FalkorProjection.query`` lane refuses a
-    mutating statement on a journal-backed projection; this handle is
-    duck-typed and shared with the write-path callers of this module, so it
-    takes the same raw-handle lane ``onboarding.state._run`` does. The lane is
-    DECLARED there (``onboarding.state.onboarding_write_scope`` — shape (a),
-    with the metadata-vs-journal argument in its docstring), and this primitive
-    declares itself the same way: gating on a write-classifier instead would
-    couple the seam to whichever classifier the guard uses, so a future write
-    added here would be refused by ``#9079`` without this file being touched.
-    Reads are unaffected either way (they pass the guard)."""
+    §17.1 (#7951/#9121): the public ``FalkorProjection.query`` lane refuses a
+    mutating statement on a journal-backed projection. This primitive is a
+    duck-typed helper whose sole caller (``find_subject_by_name``, below) issues a
+    READ, so its raw-handle preference is a leftover from the pre-declaration era,
+    not a write path.
+
+    ⛔ It is NOT a §17.1 declaration, and it must not be read as one. The
+    onboarding lane's declaration lives in ``onboarding.state._run`` (see
+    ``ONBOARDING_WRITE_LANE`` there); this module writes through the SDK's
+    journalled doors (``create_subject`` / ``create_edge``), so a mutating
+    statement added to THIS primitive is a NEW unjournaled writer: it gets no
+    authorization from the onboarding declaration, and on a journal-backed
+    projection whose handle guard is armed it is refused rather than silently
+    written. Declare it where its class is argued — do not point at a
+    docstring for a lane this call does not enter."""
     params = params or {}
-    from .state import onboarding_write_scope
-    with onboarding_write_scope("onboarding.seed"):
-        raw = getattr(handle, "g", None)  # FalkorProjection -> its raw handle
-        if raw is not None and hasattr(raw, "query"):
-            return raw.query(cypher, params=params)
-        try:
-            return handle.query(cypher, **params)
-        except TypeError:
-            return handle.query(cypher, params=params)
+    raw = getattr(handle, "g", None)  # FalkorProjection -> its raw handle
+    if raw is not None and hasattr(raw, "query"):
+        return raw.query(cypher, params=params)
+    try:
+        return handle.query(cypher, **params)
+    except TypeError:
+        return handle.query(cypher, params=params)
 
 
 def find_subject_by_name(handle: Any, name: str) -> dict[str, Any] | None:
