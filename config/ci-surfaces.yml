@@ -81,14 +81,14 @@ surfaces:
   # #9068 review P1: DUAL-REGISTERED with `core` (below) AND `onboarding`, plus
   # `ep` / `eval` / `sdk` — the six-surface set. The
   # door INVENTORY this file pins (`_gate_call_sites`) walks ALL of
-  # `tortoise/**`, and THREE of the thirteen doors it inventories live in
+  # `tortoise/**`, and THREE of the declared doors it inventories live in
   # `tortoise/hosted_api.py` (`commit_session`, `create_object`,
   # `create_subject`) — an EXACT `api` SOURCE_PATTERN match that REPLACES the
   # `core` fallback in `select()` (`core` is added only when NOTHING named
   # matched). Measured before this arm:
   # `--changed-files tortoise/hosted_api.py` → surfaces=['api','onboarding']
   # with `test_9068_pack_gate_residuals.py` ABSENT, so a hosted_api-only PR
-  # that added a FOURTEENTH gate call site (or moved one of the three) merged
+  # that added a NEW gate call site (or moved one of the three) merged
   # GREEN with `_DOORS` stale, and only reddened `main` on the next full-matrix
   # run — the #1349/#3332/#3616 silent-drop class, on the file where the two
   # `#8380` REST doors landed. `tortoise/__main__.py` is the same shape (it is
@@ -3667,7 +3667,7 @@ surfaces:
   # reason as the sibling above. `_gate_call_sites` scans ALL of `tortoise/**`,
   # and `tortoise/analyze.py` / `dream.py` / `ranking.py` select `ep`, REPLACING
   # the `core` fallback — so without this arm an `ep`-only change could add a
-  # FOURTEENTH #5475 gate call site while `_DOORS` stayed stale and green (the
+  # NEW #5475 gate call site while `_DOORS` stayed stale and green (the
   # #1349/#3332/#3616 silent-drop class). Pinned over the whole scanned
   # population by `test_9068_pack_gate_residuals.py::
   # test_the_inventory_runs_on_a_diff_to_every_module_it_scans`.
@@ -3849,7 +3849,7 @@ surfaces:
   # (above), and `ep` / `eval` / `sdk` — the six surfaces a module the #5475 door
   # inventory scans can resolve to. `tortoise/hosted_api.py` is an EXACT
   # `api`+`onboarding` SOURCE_PATTERN match that REPLACES the `core` fallback —
-  # so on a `hosted_api.py`-only diff (where three of the thirteen doors live)
+  # so on a `hosted_api.py`-only diff (where three of the declared doors live)
   # the inventory would not run at all. Full rationale in the `api` entry;
   # pinned over the whole scanned population by
   # `test_9068_pack_gate_residuals.py::
@@ -4143,7 +4143,7 @@ surfaces:
   # sibling above. `_gate_call_sites` scans ALL of `tortoise/**`, and
   # `tortoise/ask_lane.py` / `crypto.py` / `ids.py` / `models.py` / `reader.py` /
   # `retrieval.py` / `schemas.py` select `sdk`, REPLACING the `core` fallback —
-  # so an `sdk`-only change could add a FOURTEENTH #5475 gate call site while
+  # so an `sdk`-only change could add a NEW #5475 gate call site while
   # `_DOORS` stayed stale and green (the #1349/#3332/#3616 silent-drop class).
   # Pinned over the whole scanned population by
   # `test_9068_pack_gate_residuals.py::
@@ -4454,7 +4454,7 @@ surfaces:
   # #9068 (the OTHER door inventory) / review P1: same arm, same reason as the
   # sibling above. `_gate_call_sites` scans ALL of `tortoise/**`, and
   # `tortoise/cross_lens.py` / `embeddings.py` select `eval`, REPLACING the
-  # `core` fallback — so an `eval`-only change could add a FOURTEENTH #5475 gate
+  # `core` fallback — so an `eval`-only change could add a NEW #5475 gate
   # call site while `_DOORS` stayed stale and green (the #1349/#3332/#3616
   # silent-drop class). Pinned over the whole scanned population by
   # `test_9068_pack_gate_residuals.py::
