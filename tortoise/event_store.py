@@ -301,10 +301,13 @@ _SCHEMA_ATTR = "_tortoise_event_schema"
 #     of this store's mutating statements at the handle, each observing the
 #     lane, and (b) that the lane is not a general bypass (an undeclared
 #     `:Point` write through the same armed handle is still refused). The
-#     label set is held by REVIEW of the call sites, not by a runtime check —
-#     a deliberate trade: a runtime label assertion here would have to parse
-#     Cypher, and the statement census already fails when a new mutating shape
-#     appears.
+#     label set is therefore held by REVIEW of the call sites, not by a runtime
+#     check, and the trade is stated rather than glossed: the census fails when
+#     one of the pinned shapes changes or stops being exercised, and it fails
+#     when a pinned shape loses its lane — but an ADDED mutating statement is
+#     caught only if it names `:GraphEvent`/`:GraphEventMeta` (the lane
+#     assertion's filter) or by review. A runtime label assertion would have to
+#     parse Cypher; that is why this is a review obligation and not a claim.
 #   * It authorizes nothing outside §17.1's third door: the two lower escapes
 #     (`proj.g._g.query(...)`, `proj.db.select_graph(<g>).query(...)`) stay
 #     open — they are one hop below anything a runtime signal sits on.
