@@ -11,7 +11,7 @@ Option (a) recorded on ``#2817``). The issue's own targets are:
 
 This file pins the flat-field shape and the arithmetic. The prose→value
 DERIVATION is deliberately absent here: it is ``#2817``'s S5 normalizer
-(``tortoise/value_normalizer.py``, held branch ``feat/2817-value-normalizer``).
+(``tortoise/value_normalizer.py``).
 Identity scoping — two same-named money entities under different parents
 staying distinct — is ``#2730`` and is NOT papered over here (design §4).
 

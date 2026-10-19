@@ -38,7 +38,7 @@ aboutObjects: tortoise
 | 2 | Layout & hierarchy | ✅ (wizard steps, Settings tab, Setup guide) | Epic body "The human steps, defined" (W1) + R2-10 (Settings single-owner) + R2-11 (7th tab named) |
 | 3 | Copy & messaging | ✅ (org name, fork card, fusion choice copy, Organization sweep) | Epic body: org-name required (W1), fork nudge-not-force copy, fusion consequence-visible copy (M10), Organization terminology (decided) |
 | 4 | Subscription gating | ✅ (fork = presentation, never billing gate) | Epic body "Fork-dependent behavior" + R2-7 (fork stored, nudge-not-force) |
-| 5 | Visual affordances | ✅ (fork card, Setup guide card, pending-invites affordance) | Epic body (dismissible card, GitHub-style pending affordance) |
+| 5 | Visual affordances | ✅ (fork card, Setup guide card, pending-invites affordance) | Epic body + row "Affordance: setup card" below (the Settings Setup guide is the counted checklist card; the Overview next action is one next step + a CTA, with no dismissal) + GitHub-style pending affordance |
 | 6 | Responsive behavior | ❌ (no novel mobile-specific surfaces; dashboard is desktop-first) | — |
 
 All 6 classes touched except responsive — the epic's embedded decisions cover them. No P0-consequence decisions (no data loss / security / irreversible) — the gate proceeds without escalation (human-input-framework).
@@ -57,7 +57,7 @@ All 6 classes touched except responsive — the epic's embedded decisions cover 
 | 3 | Copy: terminology | "Organization" everywhere user-facing (never team/workspace); API/teams table name stays | Issue "Terminology — Organization (decided)" |
 | 4 | Gating | Fork is NEVER a billing gate; invites may require paid plan but surfaced at invite-time, not fork consequence | Issue "Fork-dependent behavior" |
 | 5 | Affordance: fork | Once per org, after org-create, before agent flow arms | Issue "Fork card (once, per org...)" |
-| 5 | Affordance: setup card | Dashboard renders the SAME state as a dismissible checklist card; disappears when complete | Issue step 8 + W9 |
+| 5 | Affordance: setup card | Dashboard renders the SAME state on both of its doors — the Settings Setup guide is the counted checklist card, and the decision recorded for THAT door is "collapse to compact status **or** dismissible-hide with a re-open path when complete" (row "Layout: Setup guide"); the Overview next action mirrors that state as ONE next step + a CTA into the guide — never a counted checklist of its own, and **the Overview door carries no dismissal** (the shipped `SetupGuideCard` collapses to a status today and implements no hide). **Corrected 2026-10 (#9013 review):** this row previously read "the SAME state as a dismissible checklist card" naming no door, then denied a dismissal for both doors in one breath while attributing a dismissible-hide to the Settings one; every dismissal claim now names the door that owns it | Issue step 8 + W9 |
 | 5 | Affordance: pending invites | Subtle affordance in team switcher (GitHub-style); admin resend/expire (Slack-style) | Issue invite section |
 | 6 | Responsive | Not applicable — no novel mobile surfaces (dashboard desktop-first) | — |
 

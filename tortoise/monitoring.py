@@ -965,24 +965,7 @@ def egress_bytes_by_org() -> dict[str, int]:
     here: it is a PATH label, so it appears under whichever org incurred the
     unrouted traffic, never as a key of this org-keyed dict.)
     """
-    totals: dict[str, int] = {}
-    for family in EGRESS_BYTES.collect():
-        for sample in family.samples:
-            # Read ONLY the byte counter. The created series of the client the
-            # lock resolves is ``<name>_created``, so the second operand is not
-            # reachable there — it is kept so that a client naming it
-            # ``_created_total`` could not have its creation TIMESTAMP summed
-            # as byte counts.
-            if (not sample.name.endswith("_total")
-                    or sample.name.endswith("_created_total")):
-                continue
-            org = sample.labels.get("org")
-            if org is None:
-                # A family that lost the org label is skipped, never recorded as
-                # an org literally named ``None``.
-                continue
-            totals[org] = totals.get(org, 0) + int(sample.value)
-    return totals
+    return _sum_by_label(EGRESS_BYTES, "org", cast=int)
 
 
 def _reset_egress() -> None:
@@ -1184,20 +1167,11 @@ def _sum_compute_by_org(metric) -> dict[str, float]:
     """Sum one org-labelled compute counter's samples, keyed by org.
 
     Derived from ``collect()`` rather than a second tally, so a snapshot cannot
-    drift from the metric. The ``_created`` series is skipped so a creation
-    TIMESTAMP can never be summed as a duration/count.
+    drift from the metric. Shares ONE extraction with the egress reader
+    (``_sum_by_label``) — #5045's point is that a dimension differs in its unit
+    and its attribution key, never in how a labelled counter is read.
     """
-    totals: dict[str, float] = {}
-    for family in metric.collect():
-        for sample in family.samples:
-            if (not sample.name.endswith("_total")
-                    or sample.name.endswith("_created_total")):
-                continue
-            org = sample.labels.get("org")
-            if org is None:
-                continue
-            totals[org] = totals.get(org, 0.0) + float(sample.value)
-    return totals
+    return _sum_by_label(metric, "org", cast=float)
 
 
 def compute_by_org() -> dict[str, dict[str, float]]:
@@ -1395,6 +1369,44 @@ def record_analytics_outcome(outcome: str) -> None:
     ANALYTICS_OUTCOME_COUNT.labels(outcome=outcome).inc()
 
 
+def _sum_by_label(metric, label: str, *, cast=float) -> dict:
+    """SUM one labelled counter's samples per *label* value (#5045).
+
+    The org-attributed dimensions (``egress``, ``compute``) are counters with a
+    SECOND label — a route class, an origin axis — so their per-org figure is a
+    sum ACROSS those other labels. That is a different operation from
+    :func:`_collect_by_label`'s one-sample-per-label read of a single-label
+    family (which keeps the last sample and would silently drop every path but
+    one), so the two stay separate rather than being merged into a helper whose
+    name promises one behaviour and whose caller needs the other.
+
+    ONE implementation for both dimensions: #5045's point is that a dimension
+    differs in its unit and its attribution key, never in how a labelled counter
+    is read. ``cast`` is the only per-dimension difference (bytes are integer;
+    seconds are float).
+
+    The ``_created`` series is skipped so a creation TIMESTAMP can never be
+    summed as a measurement, and a family that lost the ``label`` label is
+    skipped rather than recorded under a literal ``None`` key.
+    """
+    totals: dict = {}
+    for family in metric.collect():
+        for sample in family.samples:
+            # Read ONLY the measurement counter. The created series of the client
+            # the lock resolves is ``<name>_created``, so the second operand is
+            # not reachable there — it is kept so that a client naming it
+            # ``_created_total`` could not have its creation TIMESTAMP summed as
+            # a measurement.
+            if (not sample.name.endswith("_total")
+                    or sample.name.endswith("_created_total")):
+                continue
+            value = sample.labels.get(label)
+            if value is None:
+                continue
+            totals[value] = totals.get(value, cast(0)) + cast(sample.value)
+    return totals
+
+
 def _collect_by_label(metric, label: str, *, sample_suffix: str = "_total") -> dict[str, int]:
     """In-process snapshot of one labelled metric family, keyed by *label*.
 
@@ -1404,6 +1416,10 @@ def _collect_by_label(metric, label: str, *, sample_suffix: str = "_total") -> d
     counter-shaped helpers read a Gauge as 0 — the bug class #4493 fixes.
 
     ``sample_suffix=None`` matches the bare family name (Gauge).
+
+    ⚠️ This KEEPS the last sample per label value and therefore assumes ONE
+    sample per label — true for these single-label families, false for the
+    multi-label org counters, which use :func:`_sum_by_label`.
     """
     counts: dict[str, int] = {}
     for family in metric.collect():

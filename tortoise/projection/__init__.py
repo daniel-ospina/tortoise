@@ -3390,6 +3390,7 @@ from tortoise.live import (  # noqa: E402
     VACUITY_BELIEF,
     _live_only,
     _terminal_excluded,
+    epistemic_disjunction,  # #7927: graph-wide SVBP factor read
 )
 from tortoise.security import ENTITY_TYPE_LABELS  # noqa: E402  #4997
 
@@ -3438,7 +3439,16 @@ _POINT_RANGE_INDEX_PROPS: tuple[str, ...] = (
 _RANGE_INDEX_LABEL_PROPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Subject", ("id", "name")),
     ("Object", ("id", "name")),
-    ("Event", ("eventId",)),
+    # #7927: ``id`` added to Event. Every epistemic read anchors on ``id``
+    # (``live.epistemic_labels_of``, the ranker sweeps, the BFS frontier legs),
+    # and Event carried only an ``eventId`` index — so the id-anchored Event
+    # leg of a sweep was a FULL LABEL SCAN on the hot rerank path (measured
+    # 2.3 ms at 5k Events, ~linear in the label population) for every result
+    # set that resolved no Point/Subject/Object, which includes the common
+    # document search. Same single-prop string index Subject/Object already
+    # carry — not the #522 kind-field / composite class the note below
+    # declines.
+    ("Event", ("eventId", "id")),
     # canonicalUrl (#5012 S0b): the S0a canonical
     # identity S0b resolves against, so the resolver
     # is an index seek, not a label scan.
@@ -14060,6 +14070,13 @@ class FalkorProjection(
         ("Object", "id", "RANGE"),
         ("Object", "name", "RANGE"),
         ("Event", "eventId", "RANGE"),
+        # #7927: ``:Event(id)`` must be REQUIRED, not merely created — the
+        # exact #8400 trap three entries above. Every epistemic read anchors a
+        # swept node on ``id`` (``live.epistemic_labels_of``, the ranker
+        # sweeps, the BFS frontier legs); without this entry a pre-#7927 graph
+        # reads current, the sweep is skipped forever, and the Event leg stays
+        # the full-label scan this index removes.
+        ("Event", "id", "RANGE"),
         ("Source", "id", "RANGE"),
         ("Source", "url", "RANGE"),
         ("Source", "canonicalUrl", "RANGE"),
@@ -15845,11 +15862,30 @@ class FalkorProjection(
         # whose inputs all retract becomes degenerate and is excluded below).
         # #780: draft claims never appear as inputs; draft operators' edges
         # are excluded too.
+        # #7927: DEPRECATED SURFACE, WIDENED NOT DELETED. This graph-wide
+        # SVBP extractor has no PRODUCTION caller (the interactive path runs
+        # the local affected closure, #395) but it does have live callers —
+        # ``graph-scripts/profile_395_local_ep.py`` and the EP draft-filter
+        # tests — so retirement is deferred rather than half-done here. While
+        # it exists it must agree with the engine: ``c`` is a TRAVERSAL
+        # position, so the claim an operator consumes may be a
+        # :Subject/:Object/:Event belief (§7813). The operator side stays
+        # :Point (every operator is a Point). The four-label predicate comes
+        # from ``live.epistemic_disjunction``, never a hand-spelled literal.
         input_rows = self.g.query(
-            "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
+            "MATCH (o:Point)-[r:IMPL|NAND]->(c) "
             "WHERE o.is_operator = true "
+            f"AND {epistemic_disjunction('c')} "
             f"AND {_terminal_excluded('c.status')} "
             f"{draft_c} {draft_o} "
+            # #7927: the returned claim id is consumed as an ``id`` (the
+            # factor's input list), so a node with no ``id`` — a keyless legacy
+            # :Event — would arrive as ``None`` and still count toward
+            # ``len(input_ids) >= 2``, a PHANTOM input in the factor math.
+            # Coalescing would substitute an ``eventId`` value that is not an
+            # ``id`` (#8538), so the identity-less population is held to what
+            # the pre-widening label predicate admitted.
+            "AND c.id IS NOT NULL "
             "RETURN o.id, c.id "
             "ORDER BY o.id, c.id"
         ).result_set

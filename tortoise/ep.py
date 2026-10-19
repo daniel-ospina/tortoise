@@ -21,6 +21,7 @@ from .live import (
     _terminal_excluded,
     direction_flows,
     epistemic_disjunction,
+    epistemic_identity,
     epistemic_label_queries,
     TERMINAL_EXCLUDED_STATUSES,
 )
@@ -1798,7 +1799,10 @@ class TortoiseEP:
         # variance is the WIDTH OF THE DECLARED PRIOR, not a measured
         # contention, and it reads ``contested=False`` on every other
         # canonical surface (annotate_ep_batch / why / rankers /
-        # ``sdk._review_prune``). Applying the 0.04 posterior bar to a prior
+        # ``sdk._review_prune`` — of which annotate_ep_batch and why are
+        # themselves ``:Point``-anchored, so for an ENTITY the agreement below
+        # is untestable; see the per-label gate note further down). Applying
+        # the 0.04 posterior bar to a prior
         # width listed the same node as contested here while those four read
         # it unmeasured — the residual #2206/#3276-class disagreement THIS
         # gate closes (an explicitly declared prior wider than the bar, e.g.
@@ -1815,20 +1819,126 @@ class TortoiseEP:
         # it). Only the declared-baseline state is removed; ``unmeasured``
         # keeps its deliberate listing. See ``sdk._review_prune`` for the
         # sibling scan that ALSO requires measurement.
-        from .search_engine import ep_prior_only_cypher
-        rows = self.g.query(
-            "MATCH (n:Point) "
-            "WHERE n.is_operator = false "
-            f"  AND {_terminal_excluded('n.status')} "
-            f"  AND NOT {ep_prior_only_cypher('n')} "
-            "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
-            "     coalesce(n.posterior_beta, n.ep_beta, 1.0) AS b "
-            "WITH n, a, b, (a*b)/((a+b)*(a+b)*(a+b+1)) AS v "
-            "WHERE v > $t RETURN n.id, n.content, a, b, v ORDER BY v DESC",
-            params={"t": variance_threshold},
-        ).result_set
-        return [{"id": r[0], "content": r[1], "alpha": r[2],
-                 "beta": r[3], "variance": r[4]} for r in rows]
+        from .search_engine import ep_measured_cypher, ep_prior_only_cypher
+        # #7927: ``n`` is the SUBJECT of this scan — contested claims are
+        # enumerated GRAPH-WIDE (no id anchor to index), so the labels come
+        # from the shared ``live.EPISTEMIC_LABELS`` declaration and one
+        # label-anchored scan runs per label (each label keeps its own scan
+        # instead of degenerating into a bare all-node walk). Never a
+        # hand-spelled label literal.
+        #
+        # ``is_operator`` must admit UNSET as well as false — a
+        # :Subject/:Object/:Event carries no ``is_operator`` at all, so a bare
+        # ``= false`` drops every non-Point belief by NULL rather than by the
+        # predicate it states.
+        #
+        # PER-LABEL PERSISTED-POSTERIOR GATE. An earlier version of this note
+        # OVERCLAIMED it — re-measure before trusting any sentence here.
+        # The "unmeasured live claim MUST list" rule (the :169 pin) is the CLAIM
+        # rule and stays exactly as it was for ``:Point``. Entity labels differ
+        # in ONE respect: ``create_entity`` rejects belief props, so a
+        # STRUCTURALLY-ONLY entity has no persisted prior at all and its
+        # Beta(1,1) fallback sits at the MAXIMUM possible variance
+        # (1/12 = 0.0833) — every such node on the graph would list, forever, at
+        # the top of a variance-descending report. So an entity lists only once
+        # SOME posterior was persisted on it.
+        #
+        # WHAT THIS GATE IS, STATED BECAUSE AN EARLIER VERSION OF THIS COMMENT
+        # OVERCLAIMED IT: it separates "wired into at least one factor" from
+        # "structurally orphaned" — NOT "informative" from "uninformative".
+        # The claim that "nothing would ever measure them" is FALSE since #7902
+        # widened the EP factor extraction: a non-Point endpoint of a factor is
+        # measured, which ``test_7902_write_path_label_widening::
+        # test_operator_non_point_input_is_ep_live`` asserts by reading the
+        # neighbour's posterior back — and ``_affected_claims`` resolves a
+        # non-Point SEED too, so an entity reached only as a seed is measured as
+        # well. A
+        # measured-but-evidence-free entity reaches a SYMMETRIC posterior
+        # (α=β, measured 1.26/1.26 → variance 0.071), which is over the 0.04 bar
+        # and DOES list — consistent with every other surface, which reads such
+        # a node as measured-with-a-wide-posterior rather than unmeasured.
+        # Narrowing further would mean gating on posterior ASYMMETRY or on a
+        # persisted measurement marker: a semantic change to this report's
+        # contract that would silently reclassify ``:Point`` rows too, so it is
+        # deliberately NOT taken inside a read-widening change.
+        #
+        # RECORDED ENTITY DIVERGENCES (so the "agreement" claimed above is not
+        # read as covering them). A MEASURED :Subject/:Object/:Event belief
+        # lists HERE and cannot list on: ``sdk._review_prune`` (``MATCH
+        # (n:Point)``, noted in place), ``why.py``'s cyphers (``:Point``-only,
+        # noted in place at the ranking read that depends on them), and
+        # ``search_engine.annotate_ep_batch`` (``:Point``-anchored for both the
+        # id anchor and the evidence reads, additionally gated at its only
+        # search call site by ``entity_type == "point"``). Each is a separate
+        # read surface outside #7927's six; do NOT "harmonize" one of them by
+        # analogy without deciding which surface the entity belongs on.
+        #
+        # NON-OPERATOR predicate (review, P2 — two reviewers). ``is_operator``
+        # ALONE now lies on the Point leg: the pre-#7927 form was a bare
+        # ``= false``, so a legacy ``op_type``-only operator (#2205/#943 — a
+        # Point carrying ``op_type`` and NO ``is_operator``) was excluded by
+        # NULL. Admitting UNSET, as the entity labels need, silently re-admitted
+        # exactly that class, and with NO measured gate on Point a legacy
+        # operator coalesces to Beta(1,1) (v = 1/12) and sorts to the TOP of a
+        # report about claims — an operator is not a claim. So this uses the
+        # CANONICAL non-operator predicate (``sdk._operator_scope_clauses``,
+        # #7108; ``_graph_claim_count`` in this file spells it the same way):
+        # both halves are load-bearing, and the UNSET admission is only the
+        # first.
+        rows: list = []
+        for _label in EPISTEMIC_LABELS:
+            conds = [
+                "(n.is_operator IS NULL OR n.is_operator = false)",
+                "n.op_type IS NULL",
+                _terminal_excluded("n.status"),
+                f"NOT {ep_prior_only_cypher('n')}",
+            ]
+            if _label != EPISTEMIC_LABELS[0]:
+                # The canonical measurement predicate (#3276), not a re-spelling:
+                # composed with the prior-only conjunct above it is exactly
+                # ``ep_measured_cypher``, and spelling it out here is how this
+                # function's OWN subject — the #3415/#2206/#3276 "contested
+                # here, unmeasured there" disagreement — gets reintroduced by
+                # the next edit to either term.
+                conds.append(ep_measured_cypher("n"))
+            rows.extend(self.g.query(
+                f"MATCH (n:{_label}) "
+                "WHERE " + " AND ".join(conds) + " "
+                "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
+                "     coalesce(n.posterior_beta, n.ep_beta, 1.0) AS b "
+                "WITH n, a, b, (a*b)/((a+b)*(a+b)*(a+b+1)) AS v "
+                # Entity labels store their text in name/title — a Point's
+                # ``content``-only read returned None for them.
+                "WHERE v > $t "
+                # ``:Event`` writers stamp ``id`` (``entities._upsert_event``
+                # sets it "for edge matching") but key on ``eventId``, so the
+                # coalesce keeps the row ADDRESSABLE. The dedupe below keys on
+                # ``id(n)``, not on this value — see its own note.
+                f"RETURN {epistemic_identity('n')}, id(n), "
+                "       a, b, v, "
+                "       coalesce(n.content, n.name, n.title, n.label, '')",
+                params={"t": variance_threshold},
+            ).result_set)
+        # A multi-labelled node (``:Point:Object`` — ``update_point``'s promote
+        # arm mints one) is returned by MORE THAN ONE sweep: collapse, first-wins,
+        # so it is listed once (the Point leg runs first and is the label the
+        # claim rule applies to).
+        # The dedupe key is the INTERNAL node id (``row[1]``), which is unique.
+        # The returned identity (``row[0]``) is not: ``id`` is a tested-colliding
+        # property — ``_event_guarded_merge``'s suffix branch leaves ``id`` at
+        # the candidate while ``eventId`` takes the suffix, so two distinct
+        # Events coalesce to the SAME value and a value-keyed dedupe would drop
+        # one of them from the report (measured: two rows collapsed to one).
+        by_nid: dict[object, list] = {}
+        for row in rows:
+            by_nid.setdefault(row[1], row)
+        # A per-label ``ORDER BY`` cannot order the MERGED set, and Cypher row
+        # order across four queries never decides an order — sort here,
+        # variance-descending with an identity tiebreak for determinism.
+        ordered = sorted(by_nid.values(),
+                         key=lambda r: (-float(r[4]), str(r[0]), str(r[1])))
+        return [{"id": r[0], "content": r[5], "alpha": r[2],
+                 "beta": r[3], "variance": r[4]} for r in ordered]
 
     def invalidate_messages(self, point_ids: list[str] | None = None) -> int:
         """Drop graph-persisted EP message state (epic 903-C4, #1242).

@@ -98,6 +98,32 @@ def test_architecture_docs_declare_the_required_frontmatter() -> None:
     )
 
 
+def test_ops_docs_declare_the_required_frontmatter() -> None:
+    """#5045 review P2: every ``docs/ops/*.md`` declares its affiliation.
+
+    ``docs/ops/`` is a directory whose own convention is stronger than the rule
+    (all ten pre-existing files carry ``title``, ``type``, ``domain``,
+    ``doc_status``, ``subjects.team``, ``aboutSubjects``, ``aboutObjects``,
+    ``created``, ``updated``), yet nothing pinned it — so a new operator doc
+    (``cost-dimensions.md``) landed with NO frontmatter at all and merged green,
+    leaving the two subjects and the object that block exists to carry recorded
+    nowhere. Same shape as the ``docs/architecture/`` arm above.
+
+    Non-vacuity: at the pre-fix tree ``docs/ops/cost-dimensions.md`` starts at
+    ``# Cost dimensions …``, so this reds on it.
+    """
+    paths = sorted((ROOT / "docs" / "ops").glob("*.md"))
+    assert paths, "docs/ops/ has no markdown files — re-point this guard"
+    failures = {
+        str(path.relative_to(ROOT)): _missing(path)
+        for path in paths
+        if _missing(path)
+    }
+    assert not failures, (
+        f"docs/ops/*.md missing required affiliation frontmatter: {failures}"
+    )
+
+
 #: `ONTOLOGY.md`'s rule for itself. It is a fact of that file alone; a companion
 #: that repeats it asserts an approval gate that was never established for it.
 ONTOLOGY_OWNER_GATE = (

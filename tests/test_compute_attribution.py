@@ -623,13 +623,17 @@ class TestModuleStructure:
 
         A second writer would fork the unit, the attribution key and the
         cardinality cap — the exact drift #4490's shape note forbids.
+
+        The DECLARATION module is not a caller: ``tortoise/cost_dimensions.py``
+        (#5045) names the families to declare their labels and cardinality
+        policy, which is quoting a metric rather than writing one.
         """
         root = pathlib.Path(monitoring.__file__).resolve().parent
         families = ("COMPUTE_REQUESTS", "COMPUTE_WALL_SECONDS",
                     "COMPUTE_CPU_SECONDS", "COMPUTE_REQUEST_SECONDS")
         offenders = []
         for source in sorted(root.rglob("*.py")):
-            if source.name == "monitoring.py":
+            if source.name in ("monitoring.py", "cost_dimensions.py"):
                 continue
             text = source.read_text(encoding="utf-8")
             if any(name in text for name in families):

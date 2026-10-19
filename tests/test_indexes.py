@@ -36,7 +36,7 @@ EXPECTED_RANGE_EMBEDDED = {
     # (its range key is url, below) and no :Document index is created.
     "Subject": ["id", "name"],
     "Object": ["id", "name"],
-    "Event": ["eventId"],
+    "Event": ["eventId", "id"],  # #7927: ``id`` — every epistemic read anchors on it
     "Source": ["id", "url"],
     # #2600: actor-filtered session reads (list_sessions?actor_user_id) must
     # be an index seek on both lanes — plain string single-prop RANGE index
@@ -165,6 +165,28 @@ def test_indexes_idempotent_reinit():
     idx = _range_indexes(p2)
     assert "Point" in idx and "Subject" in idx and "Source" in idx
     p2.close()
+
+
+def test_event_id_index_is_required_so_an_existing_graph_gets_it():
+    """#7927: a DECLARED index that is not also REQUIRED is a no-op on every
+    already-indexed graph — ``_ensure_indexes`` returns early when
+    ``_schema_is_current()`` is True (#4465/#8400). ``:Event(id)`` is what the
+    epistemic sweeps anchor on, so the gate must notice it is missing.
+    """
+    db_path = f"{tempfile.mkdtemp(prefix='tt_evid_')}/t.db"
+    p1 = FalkorProjection(db_path, allow_nonstandard_path=True)
+    try:
+        assert "RANGE" in _range_indexes(p1)["Event"].get("id", []), \
+            "fresh graph never got the :Event(id) index"
+        p1.g.query("DROP INDEX ON :Event(id)")
+        assert p1._schema_is_current() is False, (
+            "a graph missing :Event(id) still reads CURRENT — the #4465 early "
+            "return would skip the sweep that creates it, forever")
+        p1._ensure_indexes()  # the sweep the gate just unblocked
+        assert "RANGE" in _range_indexes(p1)["Event"].get("id", []), \
+            "the sweep did not recreate :Event(id)"
+    finally:
+        p1.close()
 
 
 # ── Task 2: _resolve_entity union helper ─────────────────────────────────

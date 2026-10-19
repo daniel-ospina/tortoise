@@ -27,8 +27,8 @@ aboutObjects: tortoise
 | 6 | **Agent install skill (SKILL.md)** (W2 — successor to AGENT_ONBOARDING.md; reads onboarding state → self-adjudicates → installs → reports; M8: archive old prompt + deployed copy, never two live scripts) | Internal (skill) | Both | Skill lint + integration (state read/write) | Skill exists at defined path; reads OnboardingState; writes progress back; old prompt archived (no two live scripts); no harness-chooser UI dependency (components archived, not deleted) | Two live onboarding scripts (M8 violation — drift); skill reads stale/absent node; skill doesn't report back; archived chooser components resurrected as dependency |
 | 7 | **Seed — two Subjects** (W3 — Organization Subject/organization + User Subject/naturalPerson linked `memberOf`; anchor data: hosted pulls JWT user_id/email/app_metadata + teams.name, email-prefix name derivation (display_name NOT exposed), self-hosted asks two prompts; MERGE on `{name}` WITH collision check — existing same-name Subject not this org/user → disambiguation asked, never silent merge; org_id/user_id stable refs for the check) | DB (graph) | Write | Integration (docker lane) + hosted-e2e + unit (ontology) | Files exactly 2 Subjects (never Object/Statement); correct subclasses (organization/naturalPerson); linked `memberOf` (§3.6); person→naturalPerson normalization (subjectKind free-string today); name confirmed when not email-derived; never invents identity (ask for gaps); **collision check before MERGE (same-name Subject not this org/user → disambiguation; never silently merge distinct identities)** | Wrong kind filed (Object instead of Subject — B1 regression); anchors not linked memberOf; typo'd name fragments anchor; normalization misses existing person; silently derives placeholder name; **silent merge of distinct same-name identities (collision check skipped)** |
 | 8 | **Decide nudge** (W3 — after anchors, nudges one real `tortoise-decide`: options→criteria→findings→IMPL/NAND→EP ranking) | Internal (skill/workflow) | Both | Integration (existing decide tests) + walk-through | Nudge happens after anchors filed (not before); one real decision (not demo); EP ranking produced; completion fork-aware — **self fork: two Subjects + one decide + agent connected (R2-4/B2); build fork: org-anchor Subject + connected + catalog-presented-once (decide NOT required); compact: org-anchor Subject + harness-connected (seed-lite)** (P1 fix — not a single self-only gate) | Nudge skipped or fired without anchors; demo/mock decision; completion set without decide; decide flow broken by seed changes; decide-attempted-failed not recorded (distinct from dismissed) |
-| 9 | **Overview calm** (W4 — Overview = connection status + memory digest + next action; ZERO feature toggles; stat cards relocate) | UI | Out | Hosted-e2e + ux-verification | Exactly 3 elements; zero toggles; all sources (github_connected, github_indexed, github_docs_indexed, session_recording) reachable only via Settings → Memory sources | Toggle leaks onto Overview (calm regression); stat cards missing after relocation; loading/empty states broken |
-| 10 | **Settings tab (owner)** (W4 — new org Settings tab: Memory sources + GitHub connect + Setup guide + capture view/delete homes; W6/W9 are consumers) | UI/DB | Both | Hosted-e2e + integration (toggle persistence) | Settings = 7th tab; sources moved here; toggles persist to onboarding state/teams; GitHub connect works from Settings; Setup guide lives here | Parallel-merge conflict surface (W4 owns, W6/W9 consume — single-owner rule R2-10); toggle state drift; GitHub connect broken from new location |
+| 9 | **Overview calm** (W4 — Overview = connection status + memory digest + next action; ZERO feature toggles; stat cards relocate) | UI | Out | Hosted-e2e + ux-verification | Exactly 3 elements; zero toggles; all sources (github_connected, github_indexed, github_docs_indexed, session_recording) reachable only via Settings → Memory sources; the **next-action element renders the same graph-held state as the Settings Setup guide** — the scope's W5 dashboard mirror, as ONE calm next step plus a CTA into that guide (one next step, never a counted checklist — the checklist is surface 10's), so a resumed setup is visible where the user lands | Toggle leaks onto Overview (calm regression); stat cards missing after relocation; loading/empty states broken; next action never appears after a partial setup, points at a step the graph does not hold as complete, or renders a second, independently-tracked setup list (a checklist of its own) instead of the same `OnboardingState` (`completed_steps` is a read projection, never a second store) |
+| 10 | **Settings tab (owner)** (W4 — new org Settings tab: Memory sources + GitHub connect + Setup guide + capture view/delete homes; W6/W9 are consumers) | UI/DB | Both | Hosted-e2e + integration (toggle persistence) | Settings = 7th tab; sources moved here; toggles persist to onboarding state/teams; GitHub connect works from Settings; Setup guide lives here — the counted N-of-M setup checklist, its collapse-when-complete and its re-open path are all this surface's (surface 9 mirrors the same graph-held state as one next step + a CTA into it) | Parallel-merge conflict surface (W4 owns, W6/W9 consume — single-owner rule R2-10); toggle state drift; GitHub connect broken from new location |
 | 11 | **Capture disclosure** (W6 — self-use path: first-capture announced in-conversation; Settings view/delete; `DELETE /v1/sessions/{id}` + capture-receipt cleanup; team-member authz until W10) | API (HTTP) | Both | Integration + hosted-e2e | DELETE /v1/sessions/{id} removes session + receipt; announcement fires on first capture; view/delete in Settings; builds on #1927 default-ON (NO re-gate — off-switch stays quiet 409) | Re-introduces consent gate (W6 regression vs #1927); delete orphans graph data (receipt not cleaned); authz leak (member deletes another's session); announcement never fires |
 | 12 | **Invite-accept fusion** (W7 — extends existing /v1/invites*, /v1/invites/info, /v1/invites/accept, pending; three-path fusion choice + OTP on BOTH mismatch-override paths (fuse AND accept-with-mismatch); atomic new-user account+membership; pending-invites affordance; admin resend/expire; 403→3-path = additive response contract with Accept: application/vnd.tortoise.onboarding+json;version=2 opt-in, legacy default 403 byte-unchanged; SECURITY DEFINER RPC + per-IP/per-email rate caps + token single-use; capacity/1-free-team 402 explicit) | API (HTTP) + Auth | Both | Integration + contract + hosted-e2e (most failure-prone surface) | Existing accept mechanics preserved (M6 — do NOT re-create); mismatch same person → 3-path choice (fuse default, never silent); OTP before EITHER mismatch-override (privilege-accumulation vector); new user → atomic account+membership; permissions per-account consequence visible in choice copy; invitee inline setup writes member_progress (user-scoped, never advances org-level steps; skipping never fakes org-level completion) | Fusion without OTP (security regression M10); silent auto-accept on mismatch; atomic accept non-atomic (account created, membership fails); invite endpoints regressed; privilege accumulation via fusing both accounts' keys; accept-with-mismatch OTP-free (invite-hijack); legacy 403 callers broken (opt-in missing); member_progress fakes org-level completion |
 | 13 | **Builder capability catalog** (W8 — pullable indexers+extractors registry extending tool_registry.py; catalog endpoint; presented once on build path; W8b per-module note sweep: session recorder, session extractor, document indexer, future document extractor) | API (MCP/HTTP) | Out | Unit + integration + contract | Registry endpoint returns indexers+extractors (accurate, pullable); catalog shown once on build path; every module carries code-level catalog reference; extends tool_registry (no new infra — R2-9) | Registry stale (module added without catalog ref — W8b sweep misses); endpoint 404/empty; catalog re-presents on every build-path visit; modules missing references |
@@ -54,6 +54,64 @@ aboutObjects: tortoise
 - **Test layer notes (repo reality):** docker lane (`TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix'`) for graph surfaces; hosted-e2e (tests/e2e/hosted, pytest-playwright) for dashboard surfaces; contract tests where an API shape must be pinned; manual/browser for 6-harness install + walk-through.
 - **Failure modes needing explicit test cases:** two simultaneous org-creates (surface 3); two simultaneous invite-accepts same token (surface 12); delete session during capture (surface 11); fork re-ask after completion (surface 4).
 
+## Capability Traceability (scope Customer Value Map → surfaces)
+
+The map's first indicator is that **every in-scope capability maps to at least one surface, with a test layer** — so the
+mapping is written down here rather than left to be inferred from a surface's parenthetical. Each row names the surface
+whose contract covers the capability, and that surface's `Test Layer` column is the layer the capability is verified at.
+
+| Scoped capability (`03-scope.md` §2) | Surface(s) | Verified at (each surface's own `Test Layer`, verbatim) |
+|---|---|---|
+| W1 wizard shrink | 16 | Hosted-e2e + manual/browser |
+| W1 org-name step | 3 | Integration (docker lane) + hosted-e2e |
+| W2 universal command | 5, 6 | 5: Contract + integration (config-write dry-run) + manual (all 6) · 6: Skill lint + integration (state read/write) |
+| W2 fork card | 4 | Hosted-e2e + unit (state key) |
+| W3 seed | 7 | Integration (docker lane) + hosted-e2e + unit (ontology) |
+| W3 decide nudge | 8 | Integration (existing decide tests) + walk-through |
+| W4 Overview calm | 9 | Hosted-e2e + ux-verification |
+| W4 Settings tab | 10 | Hosted-e2e + integration (toggle persistence) |
+| W5 graph-held state | 1, 2, 17 | 1: Integration (docker lane) + unit (idempotency) · 2: Integration (docker lane) + regression on existing `/v1/onboarding/state` tests · 17: Hosted-e2e (full journey) + walk-through |
+| W5 setup card | 9, 10, 17 | 9: Hosted-e2e + ux-verification · 10: Hosted-e2e + integration (toggle persistence) · 17: Hosted-e2e (full journey) + walk-through |
+| W6 capture disclosure | 11 | Integration + hosted-e2e |
+| W7 invite-accept | 12 | Integration + contract + hosted-e2e (most failure-prone surface) |
+| W7 fusion | 12 | Integration + contract + hosted-e2e (most failure-prone surface) |
+| W8 builder catalog | 13 | Unit + integration + contract |
+| W9 trigger/entry | 1, 3, 10 | 1: Integration (docker lane) + unit (idempotency) · 3: Integration (docker lane) + hosted-e2e · 10: Hosted-e2e + integration (toggle persistence) |
+| W11 telemetry | 14 | Integration + regression (analytics.py existing tests) |
+| W12 self-hosted | 15 | Integration (self-host lane) + manual |
+
+Four rows are worth stating because they are the ones a reader would otherwise have to infer, and each is deliberate:
+
+- **W5 setup card** has no surface of its own — it is a *rendering* of `OnboardingState`, so it lives inside other
+  surfaces' contracts rather than beside them. On surface 9 it is the next-action element: the same graph-held state,
+  shown as one next step plus a CTA into the guide. On surface 10 it is the counted checklist itself, with its
+  collapse-when-complete and its re-open path in Settings — the same state, never a second list. The third is surface 17,
+  whose friction test is what checks the promise it makes (progress is never a mystery). (`05-ux-decisions.md`
+  "Affordance: setup card" + "Layout: Setup guide" — the re-open path is the latter row's claim; `06-plan.md:184`).
+- **W9 trigger/entry** is a property of three surfaces, not one: org-create fires it (surface 3), the state node is what
+  every entry door reads (surface 1), and the Settings Setup guide is one of those doors (surface 10 — its own row names
+  W9 as a consumer, and the scope's W9 includes "Settings Setup guide idempotent re-entry"). A separate surface would
+  have duplicated surface 3's transaction contract.
+- **W7 fusion** shares surface 12 with invite-accept because the two are one flow; what distinguishes it is the OTP guard on
+  both mismatch-override paths, which is surface 12's privilege-accumulation failure mode.
+- **W2 universal command** covers two surfaces because the capability is both the command (surface 5) and the skill it
+  installs (surface 6); the document's own E2E-5 row exercises 5 and 6, and its verification-checklist row is literally
+  "5-6 install command + skill".
+
+Each rationale above cites its surfaces in the explicit **`surface N`** form, and
+`tests/test_test_design_1992_traceability.py` fails a row that does not cite every surface its rationale names in that
+form — this paragraph is the contract the guard reads, so keep the citations explicit (a bare `9` or `(10)` is prose,
+not a citation).
+
+**The `Verified at` column is a copy, not a source:** when a surface's `Test Layer` above changes, re-copy that cell — a
+stale quote here reads as authoritative. `tests/test_test_design_1992_traceability.py`
+(`test_every_capability_quotes_its_surfaces_test_layer_verbatim`) fails the row whose quote drifts, so the re-copy is
+enforced rather than trusted: change a `Test Layer` and this table's cell must change in the same edit.
+
+Between the rows above and the surface table, the mapping holds in both directions: every one of the 17 capabilities has
+at least one surface, and every one of the 17 surfaces is reachable from at least one capability — surface 6 via W2 universal command
+(5, 6).
+
 ## E2E Traceability (scope high-level E2E → surfaces)
 
 | Scope E2E | Surfaces exercised |
@@ -63,13 +121,22 @@ aboutObjects: tortoise
 | E2E-3 org-name capture | 3, 16 |
 | E2E-4 ontology-precise seed | 7, 15 |
 | E2E-5 agent install 6 harnesses | 5, 6 |
-| E2E-6 graph-held resumption | 1, 2, 10 |
+| E2E-6 graph-held resumption | 1, 2, 9, 10 |
 | E2E-7 invite fusion | 12 |
 | E2E-8 atomic new-user accept | 1, 12 |
 | E2E-9 builder catalog | 13 |
 | E2E-10 self-hosted | 15 |
 | E2E-11 capture disclosure | 11 |
 | E2E-12 cross-W journey | 1-17 (all) |
+
+Surface **14 (onboarding telemetry)** is the one surface with no E2E scenario of its own, and this is stated
+deliberately rather than left to the catch-all: its W11 events (`onboarding_seed_complete`, `onboarding_decide_complete`)
+fire at the seed and decide write paths that **E2E-1** and **E2E-12** walk, so only the **E2E-12** row covers it. Every
+other surface is named by at least one *specific* row — `tests/test_test_design_1992_traceability.py`
+(`test_every_surface_is_exercised_by_a_specific_e2e_row`) splices the `1-17 (all)` catch-all out before comparing, so a
+row that loses a surface fails instead of hiding behind the catch-all, and surface 14 is the single documented exception.
+The plan's `DE2E-N` headers copy these cells (`06-plan.md` §7) and the same module pins them
+(`test_the_plans_de2e_surface_refs_are_the_maps_e2e_rows`).
 
 ## Verification Checklist (for child issues)
 
@@ -79,7 +146,7 @@ aboutObjects: tortoise
 | 3-4 org-create + fork | integration + hosted-e2e | name required; onboarding fires at org-create; fork once-per-org, nudge-not-force; free-user org-B 402 upgrade surface surfaced (never silent — P1); compact paid-tier-only; org B never re-asks fork card (inherits per-user default) |
 | 5-6 install command + skill | contract + integration + manual | all 6 harnesses covered; self-adjudication correct; old prompt archived |
 | 7-8 seed + decide | integration + hosted-e2e + walk-through | 2 Subjects linked memberOf; never Object/Statement; completion = aha not dismissal |
-| 9-10 overview + settings | hosted-e2e + ux-verification | 3 elements zero toggles; sources only in Settings; single-owner merge discipline |
+| 9-10 overview + settings | hosted-e2e + ux-verification | 3 elements zero toggles; sources only in Settings; single-owner merge discipline; Overview next action renders the same graph-held state as the Settings Setup guide (one next step + CTA, never a counted checklist of its own — `completed_steps` is a read projection, never a second store) |
 | 11 capture disclosure | integration + hosted-e2e | delete cleans session+receipt; no consent re-gate (#1927 preserved) |
 | 12 invite fusion | integration + contract + hosted-e2e | 3-path choice; OTP BOTH mismatch paths; atomic new-user accept; legacy-403 byte-unchanged w/o v2 opt-in; member_progress never fakes org completion; inline skippable invitee setup; pending-invites + admin resend/expire |
 | 13 builder catalog | unit + integration + contract | registry pullable + accurate; module notes present; catalog-presented once (step-edge) |

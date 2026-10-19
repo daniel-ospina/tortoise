@@ -34,8 +34,16 @@ so consumers never read it as an exact total (#1258 conf 58).
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
+
+from tortoise.live import (  # #7927: traversal-position widening + the ONE
+    # two-key identity declaration (``EPISTEMIC_ID_KEYS``) every widened
+    # surface must resolve through.
+    epistemic_disjunction,
+    epistemic_identity,
+)
 
 # resolve_tier precedence: explicit credibilityTier (T0-T4) > sourceKind
 # tier-form (T0-T4) > registry default > None (neutral). The Source-level check
@@ -45,6 +53,8 @@ from dataclasses import dataclass, field
 # computed dynamically so runtime register_source_kind_default() mappings are
 # honored (SOURCE_KIND_DEFAULTS non-None entries are exactly T0-T4 by default).
 from tortoise.source_credibility import SOURCE_KIND_DEFAULTS, TIER_PRIORS
+
+_log = logging.getLogger(__name__)
 
 # Cypher list literal of canonical tier forms, e.g. ['T0', 'T1', 'T2', 'T3', 'T4'].
 _TIER_LIT = str(sorted(TIER_PRIORS))
@@ -222,6 +232,57 @@ def _count(proj, query: str, params: dict | None = None) -> int:
     return r.result_set[0][0] if r.result_set else 0
 
 
+def _node_pattern(alias: str, keys: dict[str, object]) -> str | None:
+    """``(m {id:…, eventId:…})`` — every key the node carries, or None.
+
+    Rendering EVERY present key is necessary but not sufficient: a pattern with
+    FEWER keys matches a SUPERSET, and the common case is exactly that (every
+    ``:Point``/``:Subject``/``:Object`` is id-only). Two nodes may also share
+    every key value, and an int id renders byte-identically to the string id
+    beside it — so no property pattern can prove "this is that node".
+
+    The proof therefore belongs to the CALLER, against the edge it is about to
+    rewrite, using internal node ids (see ``audit_graph``'s
+    ``_legacy_repair``): a pattern verified only by counting matching NODES was
+    both too weak (emitted a statement for a twin) and too strong (refused an
+    exact repair because an unrelated node of another label shared the id).
+    """
+    present = {k: v for k, v in keys.items() if v is not None}
+    if not present:
+        return None
+    rendered = ", ".join(f"{k}:{_quoted(v)}" for k, v in present.items())
+    return f"({alias} {{{rendered}}})"
+
+
+def _quoted(value: object) -> str:
+    """Render ``value`` as a single-quoted literal safe to EMBED in a ``fix``.
+
+    Every repair string in this module is a fresh statement a caller may paste
+    and run (that is what a ``fix`` IS), so a graph value inside one has to be
+    a LITERAL, not raw text (#7927 review). An id is caller-supplied
+    (``create_point(..., id=…)`` accepts any string) or ingest-supplied, so
+    without this an ordinary id containing an apostrophe (``claim-o'brien``)
+    makes the emitted repair a ``ResponseError`` — the same
+    emitted-but-unapplicable repair the key-agnostic MATCH below exists to
+    close — and a crafted one can widen or truncate the statement. Measured on
+    the embedded engine: ``'cla\\'im-1'`` round-trips exactly, while a bare
+    ``'cla'im-1'`` is a ResponseError.
+
+    Both escape orders are NOT equivalent: ``\\`` must be escaped FIRST, or an
+    escaped backslash left in front of a quote re-opens the literal. Control
+    characters are escaped the same way (a raw newline is not inside a legal
+    Cypher string). The result is also a legal PYTHON literal, which is why the
+    three SDK-call suggestions can use the same helper.
+    """
+    text = (str(value)
+            .replace("\\", "\\\\")
+            .replace("'", "\\'")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t"))
+    return "'" + text + "'"
+
+
 def _rows(proj, query: str, params: dict | None = None) -> list:
     r = proj.g.query(query, params=params or {})
     return r.result_set if r else []
@@ -280,6 +341,52 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         check_capped[check_id] = capped
 
     # ── 0. Count nodes/edges in scope ──────────────────────────────
+    # #7927 — SCOPE OF THIS SURFACE, recorded here rather than left as an
+    # accident of history. Owner ruling #7813 made confidence propagate across
+    # :Point / :Subject / :Object / :Event; the question below is which of
+    # THOSE the audit must see, and the answer is not the same for every check.
+    #
+    # STAYS ``:Point``-ONLY (deliberate, and a widening here would be a
+    # regression, not a fix):
+    #
+    #   * this count block and every ``pointKind``-scoped leg — ``pointKind``
+    #     is a POINT-only property, so an entity is addressable only by
+    #     dropping the scope filter the caller asked for;
+    #   * checks 1 and 2 (missing_sourceKind / missing_sourceDate) audit
+    #     point-level provenance annotations that non-Point labels do not
+    #     carry at all. Admitting them would flag EVERY Subject/Object/Event
+    #     as a legacy provenance gap — a false positive generated by the
+    #     widening itself;
+    #   * check 3 (superseded_no_edge) is :Point-anchored on BOTH sides: its
+    #     subject is a superseded claim and a supersession write mints Points,
+    #     so the replacement it looks for is a Point too;
+    #   * check 8 (inverted_validity_window) reads ``validFrom``/``validTo``,
+    #     also Point-level window properties — an entity carries neither, so
+    #     "absent bound" reads as an open interval and the check has nothing
+    #     to say about it.
+    #
+    # WIDENED (#7927), because these are WIRING checks and #7902 made a
+    # :Subject/:Object/:Event a legal operator endpoint: the endpoint / traversal
+    # positions of checks 4, 5, 6, 6b and 7 now admit the four labels through
+    # ``live.epistemic_disjunction``. Leaving them ``:Point``-only was a FALSE
+    # CLEAN, not a scope choice: a NAND operator whose only target is a
+    # :Subject reported ``mitigation_recommended: 0`` — an integrity result that
+    # is indistinguishable from a true one, which is the failure mode a read
+    # path is not allowed to have (#6146). The anchored/scoped operand of each
+    # check (the operator, the superseded point) stays a ``:Point`` — it is the
+    # node whose ``pointKind`` and provenance the check is about.
+    #
+    # CONSEQUENCE OF THE SPLIT, for a consumer of ``check_counts``: the widened
+    # checks are NO LONGER a subset of the counted universe (``node_count`` /
+    # ``edge_count`` stay Point-only), so a check can report a finding whose
+    # node is outside the count. That is the intended shape — the count answers
+    # "how big is the Point wiring graph", the checks answer "is the wiring
+    # broken" — and reading one as a density of the other is the mistake this
+    # sentence exists to prevent.
+    #
+    # If entity labels need provenance coverage of their own, that is a NEW
+    # check keyed on the entity label's provenance edges — not these widened
+    # until they report everyone.
     node_count = _count(
         proj, f"MATCH (n:Point) WHERE {_kinds_w('n')} RETURN count(n)",
         params=params,
@@ -332,9 +439,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "(extractedFrom)"),
             # Point-level sourceKind is legacy — tier the SOURCE node instead
             # (#398); see the missing_sourceKind_source check (7).
-            fix=("wire provenance + tier the source: create_source(url, kind, "  # noqa: UP031
-                 "tier=...) then MATCH (ev:Point {id:'%s'}), (s:Source "
-                 "{url:'...'}) CREATE (ev)-[:extractedFrom]->(s)" % ev_id),
+            fix=("wire provenance + tier the source: create_source(url, kind, "
+                 "tier=...) then MATCH (ev:Point {id:" + _quoted(ev_id) + "}), "
+                 "(s:Source {url:'...'}) CREATE (ev)-[:extractedFrom]->(s)"),
             legacy=True,
         )
         for op_id, ev_id, ev_content in rows1
@@ -361,7 +468,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             severity="low",
             node_id=str(ev_id),
             detail=f"'{ev_content}' has sourceKind={sk} but no sourceDate",
-            fix=f"MATCH (n:Point {{id:'{ev_id}'}}) SET n.sourceDate = '2026-01-01'",
+            fix=f"MATCH (n:Point {{id:{_quoted(ev_id)}}}) "
+                "SET n.sourceDate = '2026-01-01'",
         )
         for ev_id, ev_content, sk in rows2
     ], count2)
@@ -393,8 +501,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             severity="high",
             node_id=str(nid),
             detail=f"Superseded point '{content}' has no :CORRECTS edge from its replacement",
-            fix=(f"Link the replacement: tortoise_supersede('{nid}', '<new_id>') "
-                 f"or MATCH (old:Point {{id:'{nid}'}}), "
+            fix=(f"Link the replacement: tortoise_supersede({_quoted(nid)}, '<new_id>') "
+                 f"or MATCH (old:Point {{id:{_quoted(nid)}}}), "
                  f"(new:Point {{id:'<replacement>'}}) CREATE (new)-[:CORRECTS]->(old)"),
         )
         for nid, content in rows3
@@ -412,8 +520,11 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # the re-binding MATCH below unless a `WITH` separates them, so this check
         # returned the UNFILTERED count (measured 11508 vs the true 47).
         "WITH sup\n"
-        "MATCH (sup)<-[r:IMPL|NAND]-(active:Point) "
-        "WHERE (active.status IS NULL OR active.status = 'live')\n"
+        "MATCH (sup)<-[r:IMPL|NAND]-(active) "
+        # #7927: ``active`` is a TRAVERSAL position — the live node still
+        # wiring into a superseded claim may be a :Subject/:Object/:Event.
+        f"WHERE {epistemic_disjunction('active')} "
+        "AND (active.status IS NULL OR active.status = 'live')\n"
         "RETURN count(DISTINCT r)",
         params=params,
     )
@@ -422,9 +533,16 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         f"MATCH (sup:Point) WHERE {sup4_w}\n"
         # #6976: load-bearing `WITH sup` — see the count4 note above.
         "WITH sup\n"
-        "MATCH (sup)<-[r:IMPL|NAND]-(active:Point) "
-        "WHERE (active.status IS NULL OR active.status = 'live')\n"
-        f"RETURN DISTINCT sup.id, sup.content, type(r), active.id LIMIT {SAMPLE_LIMIT}",
+        "MATCH (sup)<-[r:IMPL|NAND]-(active) "
+        f"WHERE {epistemic_disjunction('active')} "
+        "AND (active.status IS NULL OR active.status = 'live')\n"
+        # #7927: the widened endpoint's identity, coalesced — it is rendered
+        # into the message and the guidance ("mark X as superseded too"), never
+        # re-anchored as an ``id``, so this is the place ``epistemic_identity``
+        # IS right (unlike an id-keyed frontier, #8538).
+        "RETURN DISTINCT sup.id, sup.content, type(r), "
+        f"{epistemic_identity('active')}, active.id "
+        f"LIMIT {SAMPLE_LIMIT}",
         params=params,
     )
     _record("superseded_active_edges", [
@@ -433,10 +551,24 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             severity="medium",
             node_id=str(sup_id),
             detail=(f"Superseded '{sup_content}' has active {edge_type} edge "
-                    f"from {active_id}"),
-            fix=f"Remove edges into '{sup_id}' or mark {active_id} as superseded too",
+                    f"from {active_id if active_id is not None else '<no id or eventId>'}"
+                    + ("" if active_id is not None else
+                       " — that endpoint carries no identity, so it cannot be "
+                       "named by the repair; remove the edges by hand")),
+            # ``_quoted(None)`` renders the literal ``'None'`` — a phantom
+            # identity that can even address a real node whose id is "None", so
+            # an unaddressable endpoint contributes NO clause rather than one.
+            # ``tortoise_supersede`` resolves BY ``id``, so naming the
+            # coalesced value would hand it a value that is not an id (failing)
+            # or its TWIN (colliding). The clause is therefore display-only when
+            # the identity is not the node's own ``id``.
+            fix=(f"Remove edges into {_quoted(sup_id)}" + (
+                f" or mark {_quoted(active_id)} as superseded too"
+                if (active_id is not None and active_id == active_nid_value)
+                else (f" then supersede the node displayed as {_quoted(active_id)}"
+                      if active_id is not None else ""))),
         )
-        for sup_id, sup_content, edge_type, active_id in rows4
+        for sup_id, sup_content, edge_type, active_id, active_nid_value in rows4
     ], count4)
 
     # ── 5. impl_instead_of_nand (low, advisory heuristic) ──────────
@@ -446,22 +578,48 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     # advisory heuristic: word-boundary matched (Python-side — the embedded
     # Cypher engine has no regex), advisory-only fix string. Unit = distinct
     # (src, tgt) pairs.
+    # #7927: the text may live on ``content`` (Point) or ``name``/``title``
+    # (entity), so the keyword match reads the coalesced text — a
+    # ``content``-only read made every entity target invisible here.
     kw_clauses = " OR ".join(
-        f"toLower(tgt.content) CONTAINS '{kw}'" for kw in CONTRADICTION_KEYWORDS
+        f"toLower(coalesce(tgt.content, tgt.name, tgt.title, '')) CONTAINS '{kw}'"
+        for kw in CONTRADICTION_KEYWORDS
     )
     rows5 = _rows(
         proj,
-        f"MATCH (src:Point)-[e:IMPL]->(tgt:Point)\n"
-        f"WHERE {_op_in_kinds('src', 'tgt')} AND ({kw_clauses}) "
-        "AND tgt.is_operator = false\n"
-        f"RETURN src.id, tgt.id, tgt.content LIMIT {CHECK5_FETCH_LIMIT}",
+        # #7927: both endpoints are TRAVERSAL positions (an IMPL claim and its
+        # target may each be a :Subject/:Object/:Event, #7902), and the
+        # non-operator predicate is the CANONICAL one — a bare
+        # ``tgt.is_operator = false`` drops an entity by NULL.
+        "MATCH (src)-[e:IMPL]->(tgt)\n"
+        f"WHERE {epistemic_disjunction('src')} "
+        f"AND {epistemic_disjunction('tgt')} "
+        f"AND {_op_in_kinds('src', 'tgt')} AND ({kw_clauses}) "
+        "AND (tgt.is_operator IS NULL OR tgt.is_operator = false) "
+        "AND tgt.op_type IS NULL\n"
+        # #7927: the emitted FIX interpolates these ids, so the identity must be
+        # the node's real key. ``_upsert_event`` sets ``id == eventId``, so an
+        # in-tree Event is fine — but a legacy / out-of-tree Event may be keyed
+        # on ``eventId`` only (the #7936 residual ``consistency.py`` describes),
+        # and ``id:'None'`` in a repair string addresses nothing. Same identity
+        # ``ep.get_contested_claims`` coalesces.
+        # The emitted repair is an SDK CALL (``create_operator`` resolves its
+        # endpoints by ``id``), so this leg returns the ``id``s — and the
+        # internal node id, which is UNIQUE, for the dedupe below. A coalesced
+        # identity is neither: ``id`` is not unique (``_event_guarded_merge``'s
+        # suffix branch leaves ``id`` at the candidate while ``eventId`` takes
+        # the suffix) and an ``eventId`` is not an ``id`` the call can resolve.
+        "RETURN src.id, tgt.id, "
+        "coalesce(tgt.content, tgt.name, tgt.title, ''), "
+        "id(src), id(tgt) "
+        f"LIMIT {CHECK5_FETCH_LIMIT}",
         params=params,
     )
     patterns5 = [re.compile(rf"\b{re.escape(kw)}\b") for kw in CONTRADICTION_KEYWORDS]
     issues5: list[AuditIssue] = []
-    seen5: set[tuple[str, str]] = set()
+    seen5: set[tuple[int, int]] = set()
     count5 = 0
-    for src_id, tgt_id, tgt_content in rows5:
+    for src_id, tgt_id, tgt_content, src_nid, tgt_nid in rows5:
         low = (tgt_content or "").lower()
         hit = next(
             (kw for kw, pat in zip(CONTRADICTION_KEYWORDS, patterns5) if pat.search(low)),  # noqa: B905
@@ -469,21 +627,39 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         )
         if hit is None:
             continue
-        key = (str(src_id), str(tgt_id))
+        # Dedupe on the INTERNAL node id: a shared ``id`` value is a tested
+        # shape (see ``_node_pattern``), and keying on it would drop a genuine
+        # second edge as a duplicate of the first.
+        key = (src_nid, tgt_nid)
         if key in seen5:
             continue
         seen5.add(key)
         count5 += 1
         if len(issues5) < SAMPLE_LIMIT:
+            # ``create_operator`` resolves endpoints by ``id`` — an endpoint
+            # keyed on ``eventId`` alone cannot be named by the repair, so it
+            # gets NO statement rather than one that raises
+            # (``Points [...] do not exist``) or, worse, names its TWIN.
+            if src_id is None or tgt_id is None:
+                fix, suffix = "", (
+                    " — an endpoint has no `id`, and the repair is id-keyed, so "
+                    "it cannot name that endpoint; convert by hand")
+            else:
+                fix, suffix = (
+                    "Verify semantic contradiction BEFORE converting — if "
+                    f"confirmed: tortoise_create_operator('NAND', {_quoted(src_id)}, "
+                    f"[{_quoted(tgt_id)}])"), ""
             issues5.append(AuditIssue(
                 issue_type="impl_instead_of_nand",
                 severity="low",
-                node_id=str(src_id),
-                detail=(f"IMPL edge {src_id} → '{str(tgt_content)[:80]}' "
-                        f"(keyword: '{hit}') — verify whether NAND applies"),
-                fix=f"Verify semantic contradiction BEFORE converting — if "
-                    f"confirmed: tortoise_create_operator('NAND', '{src_id}', "
-                    f"['{tgt_id}'])",
+                # A None id must not be rendered as the literal "None": that is
+                # a phantom identity that can address a real node whose id is
+                # "None" if a consumer feeds ``node_id`` back into a lookup.
+                node_id=(str(src_id) if src_id is not None else "<no id>"),
+                detail=(f"IMPL edge {src_id if src_id is not None else '<no id>'} "
+                        f"→ '{str(tgt_content)[:80]}' "
+                        f"(keyword: '{hit}') — verify whether NAND applies{suffix}"),
+                fix=fix,
             ))
     # conf 58: count5 is an UPPER-BOUNDED fetch sample (LIMIT
     # CHECK5_FETCH_LIMIT candidates, word-boundary filtered Python-side) — not
@@ -498,8 +674,12 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     conf_w = f"op.confidence <= {MITIGATION_CONF_THRESHOLD}"
     count6 = _count(
         proj,
-        f"MATCH (op:Point {{is_operator: true}})-[:IMPL|NAND]->(tgt:Point)\n"
-        f"WHERE {_op_in_kinds('op', 'tgt')} AND {conf_w}\n"
+        # #7927: ``tgt`` is a TRAVERSAL position — a mitigated operator's target
+        # may be a :Subject/:Object/:Event (#7902), and a Point-only read
+        # reported a false CLEAN for it.
+        "MATCH (op:Point {is_operator: true})-[:IMPL|NAND]->(tgt)\n"
+        f"WHERE {epistemic_disjunction('tgt')} "
+        f"AND {_op_in_kinds('op', 'tgt')} AND {conf_w}\n"
         "OPTIONAL MATCH (op)-[mit:mitigated_by]->(:Point)\n"
         "WITH DISTINCT op, tgt, mit WHERE mit IS NULL\n"
         "RETURN count(*)",
@@ -507,11 +687,17 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     )
     rows6 = _rows(
         proj,
-        f"MATCH (op:Point {{is_operator: true}})-[:IMPL|NAND]->(tgt:Point)\n"
-        f"WHERE {_op_in_kinds('op', 'tgt')} AND {conf_w}\n"
+        # #7927: ``tgt`` is a TRAVERSAL position — a mitigated operator's target
+        # may be a :Subject/:Object/:Event (#7902), and a Point-only read
+        # reported a false CLEAN for it.
+        "MATCH (op:Point {is_operator: true})-[:IMPL|NAND]->(tgt)\n"
+        f"WHERE {epistemic_disjunction('tgt')} "
+        f"AND {_op_in_kinds('op', 'tgt')} AND {conf_w}\n"
         "OPTIONAL MATCH (op)-[mit:mitigated_by]->(:Point)\n"
         "WITH DISTINCT op, tgt, mit WHERE mit IS NULL\n"
-        f"RETURN op.id, op.confidence, tgt.content LIMIT {SAMPLE_LIMIT}",
+        "RETURN op.id, op.confidence, "
+        "coalesce(tgt.content, tgt.name, tgt.title, '') "
+        f"LIMIT {SAMPLE_LIMIT}",
         params=params,
     )
     _record("mitigation_recommended", [
@@ -524,7 +710,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # strength= is the SDK/MCP kwarg — sanctioned band [0.10, 0.50],
             # 0.50 = strongest dampening (single source: tortoise/weights.py
             # module docstring, #2315); the skill's relevance-attack range.
-            fix=(f"tortoise_mitigate_operator('{op_id}', 'Relevant because...', "
+            fix=(f"tortoise_mitigate_operator({_quoted(op_id)}, 'Relevant because...', "
                  "strength=0.3)"),
         )
         for op_id, conf, tgt_content in rows6
@@ -535,31 +721,126 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     # `mitigated_by`. Surfaced for migration, never treated as coverage.
     count6b = _count(
         proj,
-        f"MATCH (op:Point {{is_operator: true}})-[mit:mitigates]->(m:Point)\n"
-        f"WHERE {_op_in_kinds('op', 'm')}\n"
+        "MATCH (op:Point {is_operator: true})-[mit:mitigates]->(m)\n"
+        f"WHERE {epistemic_disjunction('m')} AND {_op_in_kinds('op', 'm')}\n"
         "RETURN count(DISTINCT mit)",
         params=params,
     )
     rows6b = _rows(
         proj,
-        f"MATCH (op:Point {{is_operator: true}})-[mit:mitigates]->(m:Point)\n"
-        f"WHERE {_op_in_kinds('op', 'm')}\n"
-        f"RETURN DISTINCT op.id, m.id, m.content LIMIT {SAMPLE_LIMIT}",
+        "MATCH (op:Point {is_operator: true})-[mit:mitigates]->(m)\n"
+        f"WHERE {epistemic_disjunction('m')} AND {_op_in_kinds('op', 'm')}\n"
+        # #7927: ``m`` may be an :Event keyed on ``eventId`` with no ``id``
+        # (legacy / out-of-tree — ``_upsert_event`` sets both), so BOTH keys are
+        # returned and the repair is rendered against whichever one the node
+        # actually carries. Coalescing the value and matching it key-agnostic
+        # was not enough: ``coalesce(m.id, m.eventId) = 'X'`` equates two
+        # DIFFERENT properties, so the repair could also address an unrelated
+        # node that happens to carry ``X`` under the other key (a reachable
+        # shape — ``consistency._graph_view`` models ``:Event {eventId:'X'}``
+        # alongside ``:Event {id:'X'}``, #8879).
+        #
+        # The INTERNAL node ids come along for the verification below: they are
+        # the only thing that says "this is the row's node" (a property value
+        # cannot — two nodes may share every key value, and an int id and a
+        # string id render identically through ``_quoted``).
+        "RETURN DISTINCT op.id, m.id, m.eventId, "
+        "coalesce(m.content, m.name, m.title, ''), id(op), id(m) "
+        f"LIMIT {SAMPLE_LIMIT}",
         params=params,
     )
-    _record("legacy_mitigates_edge", [
-        AuditIssue(
+
+    def _legacy_repair(op_id, m_id, m_eid, op_nid, m_nid) -> tuple[str, str]:
+        """``(fix, detail_suffix)`` addressing EXACTLY the edge the issue names.
+
+        A repair is EMITTED ONLY IF it can be verified to touch one edge, and
+        it is verified by its own edge pattern — not by counting nodes: a
+        property pattern matches a SUPERSET when a node carries fewer keys than
+        its twin (every ``:Point`` is id-only), two nodes may share every key
+        value, and an int id renders byte-identically to the string id beside
+        it. Measured failures of the shape-only check: one issue's statement
+        repairing a different edge (twin ops, int/string twins, id-only vs
+        two-key), and exact repairs REFUSED because an unrelated node of another
+        label shared the id.
+
+        So the read-back asks the only question that matters — does this
+        statement resolve to the row's ONE edge, between the row's two nodes —
+        and the answer must be ``count(r) == 1`` with both endpoint internal ids
+        equal to the row's. Internal ids are used for the CHECK, never written
+        into the repair: they do not survive ``GRAPH.COPY``/rebuild, so an
+        emitted one could stop matching later.
+
+        ``MERGE``, not ``CREATE``: this check reports a state a PARTIALLY
+        applied migration leaves behind (both edges present on the same pair),
+        and two parallel direct edges between one pair share a single message
+        slot (``ep._affected_factors``) — the repair must not mint the second.
+        """
+        if op_id is None:
+            return "", (" — the operator carries no `id`, so the edge cannot be "
+                        "named; repair by hand")
+        target = _node_pattern("m", {"id": m_id, "eventId": m_eid})
+        if target is None:
+            return "", (" — the endpoint carries neither `id` nor `eventId`, so "
+                        "no statement can address it; repair by hand")
+        statement = (f"MATCH (op:Point {{id:{_quoted(op_id)}}})-[r:mitigates]->"
+                     f"{target}")
+        try:
+            rows = proj.g.query(
+                f"{statement} RETURN count(r), collect(id(op)), collect(id(m))"
+            ).result_set
+        except Exception as exc:  # an unverifiable repair is a refused one
+            _log.warning(
+                "legacy_mitigates_edge: repair verification failed for %r: %s",
+                statement, exc)
+            return "", (" — the repair could not be verified against the graph; "
+                        "repair by hand")
+        if not rows or rows[0][0] == 0:
+            # Zero is its OWN cause, not a narrower verdict. Two of them:
+            # ``_quoted`` renders every id as a string literal, so a non-string
+            # id can never be re-addressed by the emitted pattern (the RENDERER
+            # cannot see it — measured, and the reason a numeric id needs this
+            # branch); or the graph changed between the row read and this check,
+            # since ``audit_graph`` takes no snapshot. The diagnosis is computed
+            # from the values in hand, not asserted — naming a cause the run did
+            # not measure is the defect this branch exists to fix.
+            non_string = any(
+                value is not None and not isinstance(value, str)
+                for value in (op_id, m_id, m_eid))
+            if non_string:
+                reason = ("the row's id is not a string, so it cannot be "
+                          "re-rendered as a literal")
+            else:
+                reason = ("the repair matches no edge — the graph may have "
+                          "changed since this issue was read")
+            return "", f" — the repair addresses no edge: {reason}; repair by hand"
+        if rows[0][0] != 1:
+            return "", (" — the repair matches more than the one edge this "
+                        "issue describes; repair by hand")
+        op_ids, m_ids = rows[0][1], rows[0][2]
+        if op_ids != [op_nid] or m_ids != [m_nid]:
+            return "", (" — the repair resolves to a DIFFERENT node pair than "
+                        "this edge (a key value is shared with another node); "
+                        "repair by hand")
+        return f"{statement} DELETE r MERGE (op)-[:mitigated_by]->(m)", ""
+
+    def _legacy_issue(op_id, m_id, m_eid, m_content, op_nid, m_nid) -> AuditIssue:
+        fix, suffix = _legacy_repair(op_id, m_id, m_eid, op_nid, m_nid)
+        shown_op = op_id if op_id is not None else "<no id>"
+        return AuditIssue(
             issue_type="legacy_mitigates_edge",
             severity="low",
-            node_id=str(op_id),
-            detail=(f"Legacy mitigates edge {op_id} -[:mitigates]-> "
-                    f"'{m_content}' — migrate to mitigated_by"),
-            fix=(f"MATCH (op:Point {{id:'{op_id}'}})-[r:mitigates]->"
-                 f"(m:Point {{id:'{m_id}'}}) DELETE r "
-                 f"CREATE (op)-[:mitigated_by]->(m)"),
+            # A None id must never be rendered as the literal "None": that is a
+            # phantom identity that can address a real node whose id is "None".
+            node_id=str(shown_op),
+            detail=(f"Legacy mitigates edge {shown_op} -[:mitigates]-> "
+                    f"'{m_content}' — migrate to mitigated_by{suffix}"),
+            fix=fix,
             legacy=True,
         )
-        for op_id, m_id, m_content in rows6b
+
+    _record("legacy_mitigates_edge", [
+        _legacy_issue(op_id, m_id, m_eid, m_content, op_nid, m_nid)
+        for op_id, m_id, m_eid, m_content, op_nid, m_nid in rows6b
     ], count6b, legacy=True)
 
     # ── 7. missing_sourceKind_source (medium, #1158) ──────────────
@@ -579,19 +860,26 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     )
     count7 = _count(
         proj,
-        f"MATCH (op:Point {{is_operator: true}})-[:IMPL|NAND]->(ev:Point)"
+        # #7927: ``ev`` is a TRAVERSAL position (the evidence claim may be a
+        # :Subject/:Object/:Event). ``src`` stays ``:Source`` — the tiering
+        # predicate below is about the SOURCE, not the claim.
+        "MATCH (op:Point {is_operator: true})-[:IMPL|NAND]->(ev)"
         "-[:extractedFrom]->(src:Source)\n"
-        f"WHERE {_op_in_kinds('op', 'ev')} AND {source_untiered_w}\n"
+        f"WHERE {epistemic_disjunction('ev')} "
+        f"AND {_op_in_kinds('op', 'ev')} AND {source_untiered_w}\n"
         "WITH DISTINCT src, ev\n"
         "RETURN count(*)",
         params=params,
     )
     rows7 = _rows(
         proj,
-        f"MATCH (op:Point {{is_operator: true}})-[:IMPL|NAND]->(ev:Point)"
+        "MATCH (op:Point {is_operator: true})-[:IMPL|NAND]->(ev)"
         "-[:extractedFrom]->(src:Source)\n"
-        f"WHERE {_op_in_kinds('op', 'ev')} AND {source_untiered_w}\n"
-        f"RETURN DISTINCT src.url, ev.id, ev.content LIMIT {SAMPLE_LIMIT}",
+        f"WHERE {epistemic_disjunction('ev')} "
+        f"AND {_op_in_kinds('op', 'ev')} AND {source_untiered_w}\n"
+        "RETURN DISTINCT src.url, "
+        "coalesce(ev.content, ev.name, ev.title, '') "
+        f"LIMIT {SAMPLE_LIMIT}",
         params=params,
     )
     _record("missing_sourceKind_source", [
@@ -602,10 +890,11 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             detail=(f"Source '{src_url}' (backing evidence '{ev_content}') "
                     "resolves to a NEUTRAL tier (no explicit credibilityTier / "
                     "tier-form or registry-tiered sourceKind)"),
-            fix=(f"tier the source: tortoise_set_source_tier('{src_url}', "
-                 f"'T0'..'T4') or create_source('{src_url}', kind, tier=...)"),
+            fix=(f"tier the source: tortoise_set_source_tier({_quoted(src_url)}, "
+                 f"'T0'..'T4') or create_source({_quoted(src_url)}, kind, "
+                 f"tier=...)"),
         )
-        for src_url, ev_id, ev_content in rows7
+        for src_url, ev_content in rows7
     ], count7)
 
     # ── 8. inverted_validity_window (high, #5361) ──────────────────
@@ -673,7 +962,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                                 f"(validFrom {w_from!r} > validTo {w_to!r}) — no "
                                 "instant is covered, so temporal queries cannot "
                                 "see it"),
-                        fix=(f"Repair the window: tortoise_update_point('{wid}', "
+                        fix=(f"Repair the window: tortoise_update_point({_quoted(wid)}, "
                              "{'validTo': '<at-or-after validFrom>'})"),
                     ))
         if len(window_rows) < CHECK8_PAGE:

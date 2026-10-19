@@ -395,6 +395,33 @@ def _assemble_dig_deeper(by_id: dict[str, dict]) -> None:
             block["dig_deeper"] = pointers[:W4_MAX_DIG_DEEPER]
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# #7927 RESIDUAL — THE ``:Point``-ONLY SCOPE OF THIS FILE IS DELIBERATE AND
+# PENDING A LANE, NOT AN ACCIDENT OF HISTORY. EVERY read in this block is
+# Point-anchored: the two support reads below, the conflicts read, the
+# tradeoffs read, and the supersession read
+# (``search_engine.fetch_point_epistemic_state``). The EXISTENCE ANCHOR among
+# them is ``_EP_CYPHER``.
+#
+# WHAT A PARTIAL WIDENING DOES, stated as the mechanism rather than as a maxim,
+# because the mechanism is what a reader will test their observation against.
+# ``_EP_CYPHER`` runs FIRST and its ids become ``existing_ids``. Every dependent
+# read still runs and still folds its rows into ``blocks`` — so a widened
+# conflicts read DOES return rows. They are discarded at the END: the output
+# loop in ``assemble_why_blocks`` skips every id absent from ``existing_ids``.
+# So widening one dependent read alone changes no output, and it can look like
+# the widening "did not work" rather than like the anchor was not widened.
+#
+# CONSEQUENCE, recorded rather than implied: a non-Point belief is absent from
+# the why layer, while ``ranking.resolve_contested_relevance`` — widened by
+# #7927 — can fire ``W4_CONTESTED_BOOST`` on a conflict this file will not
+# render. The same note lives on that function, which is where the divergence is
+# actually experienced. The residual is the anchor plus those five dependent
+# reads, tracked on #7927 as its own lane: widening the anchor is a new
+# why-layer contract (block shape, per-label text fields, the ``:Event``
+# ``eventStatus`` vocabulary), not a read widening.
+# ══════════════════════════════════════════════════════════════════════════
+
 # Support-chain queries (bounded). Operator-mediated: the operator's INPUT
 # source at idx 0 (the evidence/statement that implies the target through the
 # operator — create_operator writes source → INPUT idx0 → op → IMPL → target).

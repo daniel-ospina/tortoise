@@ -5,8 +5,7 @@ WS-C design, owner-approved; its Option (a) ruling of 2026-10-07 is recorded on
 ``#2817``). This module is the **consume** half of the design's §7.2 step 5 —
 the sum-and-ratio traversal the grounded requirement needs. It is deliberately
 NOT the prose→value derivation: that is the S5 normalizer owned by ``#2817``
-(``tortoise/value_normalizer.py`` on the held ``feat/2817-value-normalizer``
-branch). Nothing here parses text.
+(``tortoise/value_normalizer.py``). Nothing here parses text.
 
 Shape (design §2.1, §2.4 — a value is a FLAT field on the entity that owns it):
 

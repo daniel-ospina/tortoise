@@ -345,7 +345,10 @@ def _live_only(clause: str, include_draft: bool = False) -> str:
             NEVER re-included (#2422).
 
     Legacy nodes without a stored status are LIVE (the entity write path
-    defaults ``coalesce($st, n.status, 'live')``), hence the NULL checks.
+    defaults ``coalesce($st, n.status, 'live')``), hence the NULL checks. This
+    is also why an EPISTEMIC-LABEL widening (#7927) needs no per-label status
+    branch: ``:Event`` stores ``eventStatus`` and no ``status`` at all, so it
+    reads LIVE here exactly as a legacy Point does.
     """
     terminal = _terminal_excluded(clause)
     if include_draft:
@@ -375,15 +378,87 @@ def _live_only(clause: str, include_draft: bool = False) -> str:
 #     LABEL. Dropping the label is the obvious widening and is a straight
 #     regression: the indexes are per-(label, property), so a bare
 #     ``MATCH (n {id:$id})`` has NO index anchor and full-scans on every EP
-#     read (#7853 owner measurement). Point/Subject/Object each carry an
-#     ``id`` RANGE index; Event carries one on ``eventId`` only, so an
-#     Event addressed by ``id`` is unindexed today under EITHER shape.
+#     read (#7853 owner measurement). Point/Subject/Object/Event each carry an
+#     ``id`` RANGE index (Event joined them in #7927 — it carried only
+#     ``eventId``, so an Event addressed by ``id`` full-scanned).
+#
+#     Use ``epistemic_sweep`` for the sweep itself: resolve the labels PRESENT
+#     (``epistemic_labels_of``) and run the anchored query only for those. An
+#     unconditional four-label sweep is what breached the #395 AC5 latency
+#     bound (0.73s -> 1.50s against a 1.2s limit) — a Point-only id set must
+#     stay ONE anchored read.
+#
+# ``:Event`` writers stamp ``eventStatus`` and do not FOLD ``status`` (its
+# lifecycle has no status fold — ``consistency._STATUS_COMPARED_LABELS``), though
+# a writer-supplied ``status`` can still land, because ``_EVENT_HANDLED`` omits
+# the key (``projection/entities.py`` says so, and ``_promote_incident_operators``
+# reads it). That does NOT need a
+# per-label branch on a widened leg: ``_live_only`` treats an ABSENT status as
+# LIVE (``_terminal_excluded``'s NULL check), so an Event passes the same
+# predicate a Point does, and the draft filter is a no-op for it by
+# construction rather than by a special case (#7927).
+#
+# The BOUND on that claim, stated so a future status word cannot quietly widen
+# it: the widened legs apply the POINT vocabulary (``TERMINAL_EXCLUDED_STATUSES``
+# — the superset), bypassing ``search_engine._status_vocab_for``, which is the
+# declared owner of the "which family excludes what" decision. That is
+# behaviour-preserving TODAY because ``OBJECT_TERMINAL_STATUSES`` and
+# ``SUBJECT_TERMINAL_STATUSES`` are subsets of the Point set and no entity writer
+# sets the legacy ``outdated`` flag — so the predicate cannot drop a live entity.
+# A family-ONLY terminal word (the #1423/#3301 class) would be admitted as LIVE
+# on every widened leg; wire the legs through ``_status_vocab_for`` then.
 # ══════════════════════════════════════════════════════════════════════════
 
 #: The four labels on which confidence propagates (#7813 ruling). Ordered
 #: Point-first: the Point query is the hot path and stays the first, indexed
 #: lookup in every id-anchored sweep.
 EPISTEMIC_LABELS = ("Point", "Subject", "Object", "Event")
+
+#: The keys an epistemic node's identity may live under, in resolution order
+#: (#7927). ONE declaration for a question three widened surfaces ask —
+#: ``audit``'s legacy-edge repair, ``ep.get_contested_claims`` and
+#: ``ranking.resolve_contested_relevance`` — each of which used to spell
+#: ``coalesce(id, eventId)`` inline with nothing pinning them together.
+#:
+#: ``id`` FIRST, deliberately, and it DIVERGES from
+#: ``projection._CANONICAL_ENTITY_ID_PROPS`` (which names ``eventId`` as the
+#: Event family's PRIMARY identity key) and from
+#: ``consistency._graph_view_key`` (eventId first for ``Event``): those answer
+#: "which key identifies this node for the graph view", this answers "which key
+#: does a READ hand back". ``id`` is the right answer for the second because the
+#: belief fold addresses an Event's belief BY ``id`` (#7936), and
+#: ``session_indexer`` writes ``eventId`` only — which is the case the second key
+#: exists for.
+#:
+#: ⛔ The coalesced value is NOT a unique identity, and must not be used as one.
+#: ``_upsert_event`` sets ``id = eid`` on the plain path, but
+#: ``_event_guarded_merge``'s SUFFIX branch MERGEs on the suffixed ``eventId``
+#: while ``id`` keeps the CANDIDATE — so two distinct Events both coalesce to the
+#: candidate value. The cross-key shape ``consistency`` already models (#8879:
+#: ``:Event {id:'X'}`` beside ``:Event {eventId:'X'}``) collides the same way.
+#: Use this for DISPLAY and for handing a value back to a caller; use ``id(n)``
+#: (the internal node id) for every COMPARISON (a self-reference guard) and every
+#: DEDUPE key. Both bugs are recorded: a value-collision silently dropped a real
+#: counter-claim, and a value-collision dedupe dropped a distinct Event row.
+EPISTEMIC_ID_KEYS = ("id", "eventId")
+
+
+def epistemic_identity(alias: str) -> str:
+    """Cypher expression: ``alias``'s identity, whatever key it lives under.
+
+    Use wherever a widened surface COMPARES or RETURNS an identity. Do not use
+    it where the value will be fed back into an ``{id: …}`` anchor: an identity
+    that came from ``eventId`` is not an ``id``, and an id-keyed frontier cannot
+    follow it (the ``navigation._node_identity`` lesson, #8538) — such a leg must
+    require ``alias.id`` instead, which is what the widened BFS/factor returns
+    do (see ``analyze._bfs_select_operators``).
+    """
+    if len(EPISTEMIC_ID_KEYS) == 1:
+        return f"{alias}.{EPISTEMIC_ID_KEYS[0]}"
+    return "coalesce(" + ", ".join(
+        f"{alias}.{key}" for key in EPISTEMIC_ID_KEYS) + ")"
+
+
 
 
 def epistemic_disjunction(alias: str) -> str:
@@ -410,6 +485,79 @@ def epistemic_label_queries(template: str) -> list[str]:
     on an id-anchored node so the per-(label, property) range index is used.
     """
     return [template.replace("{label}", label) for label in EPISTEMIC_LABELS]
+
+
+def epistemic_labels_of(graph, ids) -> list[str]:
+    """Epistemic labels PRESENT among ``ids`` — one batched query per label.
+
+    ``graph`` is the Falkor graph handle (``projection.g``), not the
+    projection wrapper.
+
+    The NARROWING half of an id-anchored read (#7927): rather than running
+    every id-anchored query once per label, resolve which labels actually
+    occur and sweep only those. A Point-only id set (the overwhelming
+    majority of EP reads) costs ONE query, not four.
+
+    Resolution is FIRST-WINS in ``EPISTEMIC_LABELS`` order (Point first — the
+    hot path) and MULTI-LABEL AWARE: a ``:Point:Object`` node
+    (``update_point``'s promote arm mints one) resolves as ``Point`` and is
+    still matched by a ``(n:Point)``-anchored query, so keeping either of its
+    labels is correct. Only labels that actually resolved one of ``ids`` are
+    returned, and the scan stops as soon as every id is accounted for.
+
+    Returns at least ``EPISTEMIC_LABELS[0]`` so a caller's anchored query still
+    runs for an id matching no epistemic label — exactly the pre-widening
+    shape, which found nothing for such an id.
+    """
+    queries = dict(zip(
+        EPISTEMIC_LABELS,
+        epistemic_label_queries(
+            "MATCH (n:{label}) WHERE n.id IN $ids RETURN n.id"),
+        strict=True))
+    unresolved = list(dict.fromkeys(ids))
+    present: list[str] = []
+    for label in EPISTEMIC_LABELS:
+        if not unresolved:
+            break
+        rows = graph.query(
+            queries[label], params={"ids": unresolved}).result_set
+        found = {r[0] for r in rows} & set(unresolved)
+        if found:
+            present.append(label)
+            unresolved = [i for i in unresolved if i not in found]
+    return present or [EPISTEMIC_LABELS[0]]
+
+
+def epistemic_sweep(graph, template: str, params: dict | None = None, *,
+                   ids=None, labels=None) -> list:
+    """Run an ID-ANCHORED template once per PRESENT epistemic label; merge rows.
+
+    The single consumer-side entry point for an id-anchored multi-label read
+    (#7927) — it composes the two primitives above rather than restating them:
+    ``epistemic_label_queries`` expands the template, ``epistemic_labels_of``
+    narrows the sweep to the labels actually present.
+
+    ``graph`` is the Falkor graph handle (``projection.g``). ``ids`` defaults
+    to ``params["ids"]`` (the convention every caller here follows);
+    ``labels`` overrides the resolution when a caller already resolved them for
+    this hop.
+
+    DEDUPE CONTRACT: rows are PER LABEL, so a multi-labelled node
+    (``:Point:Object`` — ``update_point``'s promote arm mints one) can be
+    returned more than once. Key the result by node id, or dedupe — a
+    list-shaped consumer that does neither will double-count.
+    """
+    params = params or {}
+    if ids is None:
+        ids = list(params.get("ids") or [])
+    if labels is None:
+        labels = epistemic_labels_of(graph, ids)
+    rows: list = []
+    for label, query in zip(
+            EPISTEMIC_LABELS, epistemic_label_queries(template), strict=True):
+        if label in labels:
+            rows.extend(graph.query(query, params=params).result_set)
+    return rows
 
 
 # ══════════════════════════════════════════════════════════════════════════

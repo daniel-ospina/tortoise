@@ -798,6 +798,17 @@ def test_no_redirect_stems_registry_exact():
         # on the addition is the pin working as designed, so the stem is
         # DECLARED here rather than exempted.
         "test_5097_capture_source_replay",
+        # #8488: the in-process Okapi BM25 lexical arm. The module carries
+        # module-level `pytestmark = pytest.mark.embedded_only`, so the
+        # exemption's load-bearing reason is the SKIP (a URI-set lane skips
+        # every case) *and* the REDIRECT (its fixtures build embedded SDKs and
+        # assert the shipped read's own fusion, which a server lane would
+        # certify without exercising). The third leg of the three-way mirror:
+        # config/ci-surfaces.yml:carve_out and TEST_NO_REDIRECT_STEMS were
+        # registered with the PR — this pin reding on the addition is the pin
+        # working as designed, so the stem is DECLARED here rather than
+        # exempted.
+        "test_bm25_lexical_8488",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "

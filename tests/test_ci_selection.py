@@ -1973,6 +1973,64 @@ def test_source_currency_tool_change_selects_core_not_tier1():
     assert set(r["test_files"]) != _tier1()
 
 
+def test_cost_coverage_audit_tool_change_selects_core_not_tier1():
+    # #5045 review P1: tools/cost_coverage_audit.py IS the instrument the
+    # cost-dimension registry rests on, and tests/test_cost_dimensions.py is the
+    # only thing that pins it (`core` + `api` registered). Without the CORE_ALSO
+    # entry the flat "tools/" NON_PYTHON_PREFIXES entry swallowed the path, so a
+    # tool-only change selected NO surface and fell back to tier-1 smoke — whose
+    # 46-file set does not contain the pin. Measured before the entry:
+    # `select(["tools/cost_coverage_audit.py"])` -> surfaces=[], full=False,
+    # test_cost_dimensions.py absent, so DELETING a check from `audit()` (or
+    # narrowing `_NOT_PRODUCTION`, or restoring a predicate the module argues
+    # against) merged green: the registry quietly stopped being verified on the
+    # one PR class that can weaken it. Same #1349/#3332/#3616 silent-drop class
+    # as tools/drift-guard.py and tools/test_lane.py above.
+    # Mutation check: removing the CORE_ALSO entry fails the asserts below.
+    r = _sel(["tools/cost_coverage_audit.py"])
+    assert r["full"] is False, r
+    assert "core" in r["surfaces"], r
+    assert "test_cost_dimensions.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
+
+
+def test_cost_dimension_ledger_migrations_select_core():
+    # #5045 review P1 (the ledger half): `check_ledger` verifies the declared
+    # columns and SQL functions against the migration TEXT, and `supabase/` is a
+    # flat NON_PYTHON_PREFIXES entry — so a migration-only change that renames a
+    # metering column or an RPC selected NO surface and the ledger check never ran
+    # on the file carrying the DDL it verifies (the #8744 shape). The doc that
+    # states what the audit enforces is the same kind of subject: a docs-only edit
+    # of it selected nothing, so its claims could drift from the audit's code with
+    # every pin green.
+    #
+    # Mutation check: removing any of these CORE_ALSO entries fails its arm.
+    root = Path(__file__).resolve().parents[1]
+    for changed in (
+        "supabase/migrations/0014_metering_records.sql",
+        "supabase/migrations/20260813000002_metering_nodes_written.sql",
+        "supabase/migrations/20260829000001_metering_ask_columns.sql",
+        "supabase/migrations/20260915000001_tenancy_team_to_org.sql",
+        "supabase/migrations/20260917000001_metering_capture_cost.sql",
+        "supabase/migrations/20260918000001_metering_period_window.sql",
+        "supabase/migrations/20260927000001_metering_unmetered_increments.sql",
+        "supabase/migrations/20261001000001_metering_capture_tokens.sql",
+        "supabase/migrations/20261001000004_metering_embedding_columns.sql",
+        "supabase/migrations/20261001000005_metering_graph_storage.sql",
+        "supabase/migrations/20261010000001_metering_period_end_refresh.sql",
+        "supabase/migrations/20261013000001_metering_retrieval_columns.sql",
+        "docs/ops/cost-dimensions.md",
+    ):
+        assert (root / changed).exists(), f"guarded ledger subject is gone: {changed}"
+        r = _sel([changed])
+        assert r["full"] is False, (changed, r)
+        assert "core" in r["surfaces"], (changed, r)
+        assert "test_cost_dimensions.py" in r["test_files"], (
+            f"a change to {changed} does not run tests/test_cost_dimensions.py, so "
+            "the ledger gate cannot fire on the DDL it verifies (#5045 review)"
+        )
+
+
 def test_test_lane_tool_change_selects_core_not_tier1():
     # #5084 review P1: tools/test_lane.py owns tests/test_test_lane_tool.py
     # (`core`). Without the CORE_ALSO entry the flat "tools/"

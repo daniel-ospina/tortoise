@@ -30,7 +30,7 @@ This epic's deploy surface is **web dashboard + hosted API + served agent skill*
 | 3 | Org-name capture | 3, 16 | `test_one_free_org_entitlement.py`, `test_free_team_entitlement.py` + wizard | ✅ PASS |
 | 4 | Ontology-precise seed | 7, 15 | `test_onboarding_seed.py`, `test_onboarding_seed_endpoint.py` | ⚠️ **PARTIAL** — 53 of 54 pass; one test has never passed under load (D1). Its graph-state assertions do hold on a quiet host |
 | 5 | Agent install across harnesses | 5, 6 | `test_installer_agents_block_3429.py`, `test_served_skills.py`, `test_served_skill_byte_parity.py`, `test_installer_preserves_foreign_skill_content.py` | ⚠️ PASS at the automated layer — the six-harness manual walk (surface 5's manual leg) was not run |
-| 6 | Graph-held state resumption | 1, 2, 10 | `test_onboarding_state*.py` (6 files) | ✅ PASS |
+| 6 | Graph-held state resumption | 1, 2, 9, 10 | `test_onboarding_state*.py` (6 files) for the graph state; surfaces 9/10's render is E2E-2's browser walk + `overviewSettings.test.js` (8/8, row 2) | ✅ PASS at the automated layer — the graph-state suites for 1/2, E2E-2's render evidence for 9/10; no browser leg was re-run for this row |
 | 7 | Invite fusion (most failure-prone) | 12 | `test_invite_fusion_http.py`, `test_invites_http.py`, `test_invites_email_http.py` | ✅ PASS |
 | 8 | Atomic new-user accept | 1, 12 | same as E2E-7 (atomic path assertions) | ✅ PASS |
 | 9 | Builder catalog | 13 | `test_capabilities_endpoint.py`, `test_capability_catalog.py` | ✅ PASS |

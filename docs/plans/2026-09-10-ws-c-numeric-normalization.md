@@ -4,7 +4,7 @@ type: engineering
 domain: platform
 doc_status: draft
 created: 2026-09-10
-updated: 2026-10-07
+updated: 2026-10-18
 ownedBy: epistemic-team
 subjects.team: epistemic-team
 aboutObjects: tortoise-extractor, tortoise-commit-schema, tortoise-projection
@@ -14,13 +14,25 @@ governingAgreement: "#2817"
 
 # WS-C — Numeric values as structural fields on an entity
 
-**Parent:** #2820 (WS-C — state & value model) · **Issue:** #2817 · **Status:** design v2 — **approved by the owner and merged** (`6e947045b` via #2950; §7.1 corrected by #7611). This is the **v3 correction** from the #2817 scoping run, with the **owner's 2026-10-07 decision (Option (a))** folded into §2.3.
+**Parent:** #2820 (WS-C — state & value model) · **Issue:** #2817 · **Status:** design v2 — **approved by the owner and merged** (`6e947045b` via #2950; §7.1 corrected by #7611). This is the **v3 correction** from the #2817 scoping run, with the **owner's 2026-10-07 decision (Option (a))** folded into §2.3. **v4 (2026-10-18): citation re-verification at `cdf30ed8e` + §7.2 step 3's derive half recorded as landed — see the v4 note below.**
 **Feeds:** #2782 (money representation) · **Related:** #2813, #2795, #2818, #2730, #2725, #2687, #2453, #2747, #3011
 
 > #2820's gate requires owner approval of a written design before implementation. This is that design.
-> **Nothing here is implemented.** In §7.1, **S1/S2 need declaration, not approval**. **S3** (the HTTP
-> validator) needs **no change either**, under the owner's 2026-10-07 decision: the field is
-> **server-written**, and never through the `Point` model, so that model is untouched (§2.3, §3/OD5).
+> In §7.1, **S1/S2 need declaration, not approval**. **S3** (the HTTP validator) needs **no change
+> either**, under the owner's 2026-10-07 decision: the field is **server-written**, and never through
+> the `Point` model, so that model is untouched (§2.3, §3/OD5).
+> **Update (v4):** two of §7.2's steps have landed, and nothing else has. **Step 5** (the consume half —
+> sum and ratio) is `tortoise/money.py` (#2782, PR #8641) together with the five declared fields on the
+> Point lane (**#2782, PR #8976 — MERGED 2026-10-18**, merge commit `ef405bd3e`; the projection's Point
+> property list now takes its money keys from `MONEY_VALUE_FIELDS`). **Step 3's DERIVE half** is
+> `tortoise/value_normalizer.py` (#2817): an
+> abstention-first, money-only prose→value derivation that emits step 5's five fields and **implements
+> §4's exclusions as executable policy** (no separator ladder, no magnitude table, no bare-symbol
+> currency). Its WRITE wiring is **unblocked** by that declaration and is left to a follow-up rather
+> than ridden on this PR (the write path is a behaviour change on the live extraction lane and needs
+> its own review), and **step 3 is not a licence to
+> re-open §4** — the parser-first reading of #2817's original title is foreclosed by the Option (a)
+> ruling recorded in §2.3.
 
 **Revision note (v2, 2026-10-06).** v1 was written parser-first: it made a locale-aware numeric parser the
 foundation and reified each value as a tagged union of five `valueKind`s. **That foundation is withdrawn.**
@@ -66,8 +78,9 @@ compare, sum or threshold them **as stored values**. The engine can tell that tw
 nothing compares either against the source turn.
 
 The only structured-value precedent is the **date gate**: `_valid_iso_date`
-(`tortoise/extractor_v2.py:969`), mirrored by `Point._iso_date_prefix`
-(`tortoise/commit_schema.py:547`). It is the never-guess posture this design adopts.
+(`tortoise/extractor_v2.py:1266` — measured at `79f7afde8`; the v3-era `:1161` is
+``cdf30ed8e`` and no longer lands), mirrored by `Point._iso_date_prefix`
+(`tortoise/commit_schema.py:559`). It is the never-guess posture this design adopts.
 
 **The grounded requirement (#2782, verbatim):** *"tranche released / 75% of tranche 1 spent → tranche 2
 unlocks"* — a **sum and a ratio against a threshold**.
@@ -420,7 +433,25 @@ The work cannot begin at the derivation. The dependency order is:
 2. **Declare the field** on the accepted schema: the Point property list. (The HTTP `Point` model is
    **untouched** — the field is server-written, §7.1/S3.) No behaviour change.
 3. **Derive and validate** — the value is computed from the raw text and kept **traceable** to the words
-   it came from; an ambiguous form produces **no typed value** (§2.3, §6/T3). ⚠️ *(v3: this step
+   it came from; an ambiguous form produces **no typed value** (§2.3, §6/T3).
+   ✅ **Landed (money) — `tortoise/value_normalizer.py` (#2817).** `normalize_money()` returns
+   `money_props(...)` (so the value is already Layer-1 valid) or one reason from the closed
+   `DROP_REASONS` set; `normalize_money_props(text, warnings=…)` is the S5 call pattern (drop ⇒ a
+   warning, never silence). The abstraction it deliberately does **not** have is §4's: any separator
+   (`1.234`, `1,234`, `1.234,56`, `800.00`, `1 234`) drops as `ambiguous_separator`, magnitude words
+   drop as `magnitude_word`, a bare `$`/`¥`/`€`/`£` (or a word-shaped ISO code such as `ALL`/`PEN`/
+   `TOP`) is `ambiguous_currency_symbol`, an adjacent sign is `signed_amount` (no sign convention is
+   defined in §3), and percent / multiplier / range / qualifier forms carry their own reason — i.e.
+   **"not representable → prose only"** is the shipped answer for the four failure modes that are pure
+   reading problems — 1 (separator), 2 (magnitude), 3 (percent/multiple), 5 (range/qualifier). Mode 4
+   (symbol collision) is **disambiguated rather than dropped**: an explicit ISO code or a
+   disambiguated prefix (`R$`→BRL, `US$`→USD) types, while a bare symbol *and* a word-shaped code
+   (`ALL`/`PEN`/`AMD`/`PHP`) drop as ambiguous. Modes 6 (exponent), 7 (verbatim) and 8 (`asOf`) are the
+   ones it TYPES, each pinned by its own test. Its write wiring (adding the props to `pt_entry`) is
+   NOT done **in this PR**, and the reason is now scope rather than dependency: step 2's declaration
+   **landed** (`ef405bd3e`, #8976), so the write is unblocked and is the immediate follow-up (a
+   behaviour change on the live extraction lane, which needs its own review rather than a rider).
+   ⚠️ *(v3: this step
    previously read "…and checked against the words it came from (§2.3)". That check is not proposed by
    this design — the owner decided so on 2026-10-07 (§2.3). Detecting a misread already in `content` is
    #2684's property, not this step's.)*
@@ -455,16 +486,38 @@ compares nothing against the source turn. Detection is #2684's property and is n
 revision was written — a docs-only change moves no code, so they hold until a code change touches those
 files. The two `~/.swarm/research/…` entries below are machine-local, outside this repo):**
 
-- `docs/ONTOLOGY.md` §11 (v3.2, #398) — derived-value cache doctrine (`Derived values may be CACHED, never
-  authoritative … the derivation is the truth, the cache is a performance artifact`, `:1515`); §4.1
-  Point (`:844`).
-- `tortoise/extractor_v2.py` — `VALUE_FIDELITY_RULE:324`, `_s2s4_rules:393`, `_granularity_text:914`,
-  `_render_master:719`, `_valid_iso_date:969`, `run_s1:980`, `OUTPUT_CONTRACT:1201`,
-  `_verbatim_match:2552`, `_fact_value_contradiction:2743`, `_resolve_source_turn:5592`,
-  `execute_embed:5804`, supersession record `:6134-6140`, `pt_entry:6160`.
-- `tortoise/extractor_v2.py` — the **existing value-identity engine** the corrected §1 names:
-  `_num_word_value:3176`, `_value_signature:3202`, `_UNIT_WORDS:3853`, `_value_bindings:3859`,
-  `distinguishing_difference:4974`, and its live call sites `:4959`, `:4965`, `:5075-5076`.
+- `docs/ONTOLOGY.md` — derived-value cache doctrine (`Derived values may be CACHED, never
+  authoritative … the derivation is the truth, the cache is a performance artifact`, `:1381` — was
+  cited as `:1515`, which does not exist; the file is 1,398 lines; the v4 pass measured `:1376`/1,393,
+  since moved by `main`); §4.1 Point (`:389` — was `:844`, a blank line inside §4.8).
+- ⚠️ **v4 — the `extractor_v2.py` and `commit_schema.py` bullets in THIS list are re-pinned at
+  `79f7afde8`.** A branch-head measurement, NOT a claim about "current": `main` rewrites
+  `extractor_v2.py` constantly, which is exactly how the first v4 pass shipped numbers that were
+  uniformly stale by the merge target (`cdf30ed8e`'s numbers were measured on a 9,605-line file;
+  `79f7afde8`'s is **9,712 lines**). The `cdf30ed8e` values are kept in parentheses so the drift is
+  auditable and a reader can tell which sha a number came from. **The bullets below that are not
+  marked with a sha — `sdk.py`, `projection/entities.py`, `mcp_server.py`, `tool_registry.py`,
+  `hosted_api.py`, `retrieval.py`, the eval graders — were NOT re-verified in this lane (#2817 owns the
+  value layer), and one of them (`docs/ONTOLOGY.md:1515`) was in fact wrong until review corrected
+  it.** So this list — not the inline references in §1–§7 — is the authority for `extractor_v2.py` /
+  `commit_schema.py` line numbers. Those inline references are v3-era except the two this document's
+  own argument turns on (`_valid_iso_date`, `Point._iso_date_prefix`), which are corrected in place.
+- `tortoise/extractor_v2.py` (re-pinned at `79f7afde8`) — `VALUE_FIDELITY_RULE:408` (unchanged; was
+  `:324` in v3), `_s2s4_rules:477` (unchanged; was `:393`), `_granularity_text:1207` (was `:1102`, and
+  `:914` in v3), `_render_master:979` (was `:907`, and `:719` in v3), `_valid_iso_date:1266` (was
+  `:1161`, and `:969` in v3), `run_s1:1277` (was `:1172`, `:980` in v3), `OUTPUT_CONTRACT:1498` (was
+  `:1393`, `:1201` in v3), `_verbatim_match:3075` (was `:2968`, `:2552` in v3),
+  `_fact_value_contradiction:3266` (was `:3159`, `:2743` in v3), `_resolve_source_turn:6276` (was
+  `:6169`, `:5592` in v3), `execute_embed:6488` (was `:6381`, `:5804` in v3), supersession records
+  `:6532` / `:6625` (was `:6425` / `:6518`), `pt_entry:6844` / `:7054` (was `:6737` / `:6947`, `:6160`
+  in v3). ⚠️ The `cdf30ed8e` numbers in the parentheses were themselves stale by the time this PR was
+  merged; the pattern repeats because `main` owns this file.
+- `tortoise/extractor_v2.py` — the **existing value-identity engine** the corrected §1 names
+  (re-pinned at `79f7afde8`): `_num_word_value:3824` (was `:3717`, `:3176` in v3), `_value_signature:3850`
+  (was `:3743`, `:3202` in v3), `_UNIT_WORDS:4501` (was `:4394`, `:3853` in v3), `_value_bindings:4507`
+  (was `:4400`, `:3859` in v3), `distinguishing_difference:5622` (was `:5515`, `:4974` in v3), and its
+  live call sites `_value_signature` at `:4495`, `:5607`, `:5723-5724`, `_value_bindings` at `:3397`,
+  `:5613` (the `cdf30ed8e` call-site numbers `:4388` / `:5500` / `:5616-5617` / `:5506` no longer land).
 - `docs/epics/2026-08-20-1509-extractor-v3/00-scope.md:28` (owner decision) — *"never create a parallel
   layer doing the same thing with redundant machinery (debugging nightmare)"*, applied as precedent by
   `tortoise/vet_gate.py:31-32`. Any check built on this design **reuses** `distinguishing_difference`; a
@@ -472,9 +525,14 @@ files. The two `~/.swarm/research/…` entries below are machine-local, outside 
 - `tests/eval/write_path/` — the sealed-gold number-word fixture (`fixtures/wp01_quarry_debug.json:68`,
   `generate_corpus.py:216,240`, `gold/wp01_quarry_debug.gold.json:176,318`), used to measure the
   `_resolve_source_turn` anti-correlation recorded on #2684.
-- `tortoise/commit_schema.py` — `class Point:500` (`extra="forbid"` `:503`), `_iso_date_prefix:547`,
-  `_point_canonical:1322`, `canonical_payload:1366`, `compute_client_commit_id:1431`,
-  `point_content_id:1452`.
+- `tortoise/commit_schema.py` (re-pinned at `79f7afde8`; the `cdf30ed8e` values are in parentheses) —
+  `class Point:512` (was `:512` — this half had already been corrected by the #8976/#8988 pass; `:505`
+  in v4's first cut, `:500` in v3), `extra="forbid"` `:515` (was `:515`; `:508`/`:503`),
+  `_iso_date_prefix:559` (was `:559`; `:552`/`:547`), `_point_canonical:1338` (was `:1338`;
+  `:1331`/`:1322`), `canonical_payload:1382` (was `:1382`; `:1375`/`:1366`),
+  `compute_client_commit_id:1447` (was `:1447`; `:1440`/`:1431`), `point_content_id:1468` (was
+  `:1468`; `:1461`/`:1452`). **`commit_schema.py` did not move between `cdf30ed8e` and `79f7afde8`,
+  which is what made the stale `extractor_v2.py` half easy to miss.**
 - `tortoise/sdk.py` — `_sanitize_props:2596`, FalkorDB primitives note `:2768-2777`, `TortoiseSDK.create_point:4937`,
   props CREATE-map write `:5397-5399`, `_extract_session_v2:6956` (create_point call `:7257`).
 - `tortoise/projection/entities.py` — `_persist_extra_props:758`, `_upsert_point_props:801`, Point prop list

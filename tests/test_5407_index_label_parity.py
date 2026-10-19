@@ -179,6 +179,35 @@ def test_the_required_index_sets_also_cover_every_served_label() -> None:
         _assert_covered(SERVED_LABELS, _required_labels(indexes), kind)
 
 
+def test_every_declared_range_index_is_also_REQUIRED() -> None:
+    """PROPERTY-level coverage of the required set — the (label, prop) pairs.
+
+    ``test_the_required_index_sets_also_cover_every_served_label`` above is
+    LABEL-granular, so it cannot see a newly declared property whose index is
+    merely created and never REQUIRED — and that is the #4465/#8400 trap
+    exactly: ``_ensure_indexes`` returns early when ``_schema_is_current()`` is
+    True, so on an EXISTING graph the new index is never created and the
+    declaration is a no-op. Found in review (#7927): ``("Event", "id")`` was
+    added to ``_RANGE_INDEX_LABEL_PROPS`` and not to
+    ``_REQUIRED_RANGE_INDEXES``, which every test in this suite still passed
+    because they all build a FRESH database.
+    """
+    declared = {(label, prop)
+                for label, props in _RANGE_INDEX_LABEL_PROPS for prop in props}
+    # The Point set is declared by its own constant (the #3154 composite/
+    # boolean-index repair path owns it), and the two Session keys are created
+    # by dedicated statements — all three are REQUIRED already; assert only
+    # that nothing DECLARED is missing from the required set.
+    required = {(label, prop)
+                for label, prop, kind in FalkorProjection._REQUIRED_RANGE_INDEXES
+                if kind == "RANGE"}
+    missing = declared - required
+    assert not missing, (
+        f"declared but NOT required, so an existing graph never gets them: "
+        f"{sorted(missing)}. Add the (label, prop, 'RANGE') entry to "
+        f"FalkorProjection._REQUIRED_RANGE_INDEXES (#4465/#8400).")
+
+
 def test_ensure_indexes_iterates_the_declarations_not_literals() -> None:
     """The label sets must be *read from* the declarations, not re-inlined."""
     iterated = _iterated_names()

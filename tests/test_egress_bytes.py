@@ -418,11 +418,17 @@ class TestWriter:
 
         A second writer would fork the unit, the attribution key and the
         cardinality cap — the exact drift #4491's shape note forbids.
+
+        The DECLARATION module is not a caller: ``tortoise/cost_dimensions.py``
+        (#5045) names the metric in order to declare its labels and cardinality
+        policy, and quoting a metric is not writing one — the same exclusion
+        ``session_retrofit_audit`` makes for a declaration module that quotes a
+        writer shape without being a writer.
         """
         root = pathlib.Path(monitoring.__file__).resolve().parent
         offenders = []
         for source in sorted(root.rglob("*.py")):
-            if source.name == "monitoring.py":
+            if source.name in ("monitoring.py", "cost_dimensions.py"):
                 continue
             text = source.read_text(encoding="utf-8")
             if "EGRESS_BYTES" in text or "EGRESS_RESPONSE_BYTES" in text:

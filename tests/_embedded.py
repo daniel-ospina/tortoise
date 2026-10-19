@@ -308,6 +308,11 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # routing without redirect exemption flips its embedded constructions to
     # the server lane on an out-of-band URI run).
     "test_4921_construct_lock",
+    # #8488: the in-process Okapi BM25 lexical arm — module-level
+    # ``pytest.mark.embedded_only`` (its subject is the embedded lane and the
+    # shipped read's own fusion), so it is exempt from the docker redirect and
+    # routed to the URI-unset carve-out job.
+    "test_bm25_lexical_8488",
     "test_backup_e2e",
     "test_config",
     "test_embedded_concurrency",
