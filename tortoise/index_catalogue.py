@@ -36,24 +36,39 @@ engine has been observed to report one) is TOKENISED, never substring-tested.
 from __future__ import annotations
 
 __all__ = [
+    "catalogue_cell",
     "index_catalogue_has_field",
     "index_row_has_field",
     "indexed_field_names",
 ]
 
 
-def _cell(row, index: int):
-    """``row[index]`` for a catalogue row, or ``None`` when absent.
+def catalogue_cell(row, index: int):
+    """``row[index]`` for a ``CALL db.indexes()`` row, or ``None`` when absent.
 
     A row can be shorter than expected (or not a sequence at all) on an engine
     whose catalogue shape differs, and a presence question must answer "not
     index-bearing" for such a row rather than raise inside a caller that (in
     the repair sweep's case) is wrapped in a bare ``except Exception``.
+
+    PUBLIC because this is the repo's single catalogue-row CELL ACCESSOR, and a caller that
+    needs the row anyway must import it rather than copy it: one accessor per row, so
+    ``graph_key_restore.py`` cannot drift on how a cell is read.
+
+    The ACCESSOR is the shared invariant — not the whole reader. ``graph_key_restore.py``
+    carries its own ``_properties_column_names`` for the ``properties`` column on purpose: a
+    binary-safe client hands a cell over as ``bytes``, and ``indexed_field_names`` renders
+    that as the repr (``b'[embedding]'``) rather than the name. Do not "align" the two — they
+    decode different shapes, for a stated reason.
     """
     try:
         return row[index]
     except (TypeError, IndexError, KeyError):
         return None
+
+
+#: The in-module name, kept so this module's own call sites read as before.
+_cell = catalogue_cell
 
 
 def indexed_field_names(row) -> tuple[str, ...]:

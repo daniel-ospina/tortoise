@@ -102,6 +102,54 @@ That is the "we cannot tell load from death" half of the report, and it survives
 has **no progress signal, no timeout and no distinguishing log line**. The permanent wedge does
 not.
 
+## 3a. The fix this evidence implies — drop the index before the DUMP (#7846, 2026-10-18)
+
+§3 says the index is what the restore costs, and §4a says the index travels INSIDE the graph
+key's serialized payload. Together those two facts name the fix: **the index must be off the
+graph before the `DUMP`**, not after it. A restore of an index-free payload has no index to
+rebuild, so the block §3 measures does not happen; the index is then re-created from the
+definition the catalogue reported, and the re-created definition is verified against it.
+
+That is what `tortoise/graph_key_restore.py::restore_graph_key_safe` now does (read → drop →
+DUMP/DEL/RESTORE → re-create → verify), and
+`restore_graph_key(index_guard=...)` REFUSES an index-bearing graph before any destructive step
+rather than issuing the restore above. Measured on `falkordb/falkordb:latest` (graph module
+42201, `drop_first.py`, a bystander `PING` polled on its own socket throughout):
+
+| arm, 20 000 × 384 nodes | RESTORE step | worst bystander `PING` | index after |
+|---|---|---|---|
+| raw `restore_graph_key` (index in the payload) | 2.955 s | **2 899.4 ms** | `OPERATIONAL`, KNN 3 |
+| `restore_graph_key_safe` (drop-first) | **0.069 s** | **69.4 ms** | `OPERATIONAL`, KNN 3 (definition verified) |
+
+⇒ ~43× faster RESTORE, and the instance-wide outage drops from ~2.9 s to ~70 ms. Every number
+in this table is read from the committed `drop-first-42201-20000.log` — not a range across runs
+and not an ad-hoc run.
+
+⚠️ **How the bystander's number is taken, because it changes what it means.** Its socket
+timeout is deliberately ABOVE the longest block measured, so ONE probe spans the block and its
+latency IS the outage. That matters: `redis-py`'s default `Retry` lists `TimeoutError` in
+`supported_errors`, so with a 1 s socket timeout a PING that hits a 3 s block is retried
+internally and the call RETURNS with the retry-summed wall time — a true number that cannot
+distinguish one 3 s stall from four 0.8 s ones. The first revision of this harness did exactly
+that, which is why the committed logs were regenerated (#8965 review cycle 2).
+Two more readings from the same runs (`drop-first-42201-20000.log`, `drop-first-42201-5000.log`):
+
+- **Re-creating the index does NOT re-block the instance.** The safe path's TOTAL elapsed time
+  is 3.324 s at 20 000 nodes — the index build is the bulk of it — yet the bystander's worst
+  `PING` across the whole call is 69.4 ms, because `CREATE VECTOR INDEX` enqueues the build
+  instead of running it inside the command. The cost is the same; what changes is that it is no
+  longer a serving-thread block.
+- **The refusal costs nothing.** On the indexed graph the guard fired with
+  `{'dump': 0, 'delete': 0, 'restore': 0}` destructive calls, and the graph was left with all
+  20 000 nodes, its `OPERATIONAL` index and its KNN answers intact.
+- **The effect is not size-specific** — 5 000 nodes shows the same shape (0.599 s → 0.036 s;
+  bystander 521.1 ms → 12.1 ms), which is why the regression test asserts the *sequence* rather
+  than a duration: at the test's 3 000 nodes both arms are far inside any bound CI can afford.
+
+⚠️ **Scope of this fix.** It makes a graph-key DUMP/RESTORE of an indexed graph safe. It does
+NOT make the engine serve during any other index-bearing operation, and it does not wire itself
+into the product — see criterion 5 in §5.
+
 ## 4. The crash (#8270) — found while proving criterion 4, and reproducible on the CI pin
 
 Criterion 4 asks whether the index survives a restore or is silently dropped. A **same-name**
@@ -172,9 +220,9 @@ shard would answer vector search with an empty result does not hold on any engin
 
 | # | Criterion | Status |
 |---|---|---|
-| 1 | the restore completes in bounded time with an observable rebuild, or fails with an explicit error | **Partly — upstream for the rebuild, MET at our boundary for the bound and the error.** The rebuild is still not observable and still emits nothing. A caller using `tortoise/graph_key_restore.py` now owns the bound (`bound_s`) and gets a typed, measured error instead of a socket timeout |
-| 2 | the instance continues to serve other graphs throughout the restore | **UNMET — upstream.** It blocks for the whole rebuild (2 497.7 ms at 30 000 nodes, measured). The driver now MEASURES that outage per restore (`blocked_ms`) instead of leaving it inferred |
-| 3 | a regression test does dump → delete → restore on an index-bearing graph and asserts the server still answers `PING` | **MET — `tests/test_indexed_graph_key_restore_7846.py`** (docker lane; the populated index is a precondition, so it cannot pass vacuously) |
+| 1 | the restore completes in bounded time with an observable rebuild, or fails with an explicit error | **MET for a caller that adopts `restore_graph_key_safe`** — it never issues an index-bearing RESTORE at all (drop-first, §3a: 0.069 s vs 2.955 s at 20 000 nodes), so there is no rebuild to observe; the bound (`bound_s`, default 90 s, below the client socket timeout) turns a wedged restore into a typed, measured error instead of a socket timeout. **Upstream, unchanged** for anything else: the engine still emits no progress and no log line |
+| 2 | the instance continues to serve other graphs throughout the restore | **MET BY THE SAFE PATH, UNMET BY THE ENGINE.** An index-free payload has no index to rebuild, so the serving thread is not blocked: measured worst bystander `PING` 69.4 ms through a safe restore, against 2 899.4 ms through a raw one (§3a). The engine side is unchanged — any OTHER index-bearing operation still blocks it for its duration. ⚠️ **OTHER graphs, not THIS one**: drop-first leaves the graph being restored with NO vector index between the `DROP` and the completed re-`CREATE`, so vector search on IT returns no neighbours for that window — and unless the caller passes `index_ready`, the return does not wait for the rebuilt index's build (the report says `index_ready=None`, unproven, so the index may still answer PARTIAL neighbours) |
+| 3 | a regression test does dump → delete → restore on an index-bearing graph and asserts the server still answers `PING` | **MET — `tests/test_indexed_graph_key_restore_7846.py`** (docker lane; the populated index is a precondition, so it cannot pass vacuously). The safe path has its own test there, which additionally asserts the index was ABSENT when it was re-created — the mutation detector for "skip the drop", at any graph size |
 | 4 | the fate of the index across a restore is documented and asserted | **MET — PRESERVED, payload-carried** (§4). Asserted same-name in the regression test; the cross-name proof runs OUTSIDE CI because on the pinned engine it is the crash trigger |
 | 5 | the failure mode is distinguishable from load | **MET ONLY FOR A CALLER THAT ADOPTS THE MODULE — and no production call site adopts it yet.** Upstream unchanged: the engine still emits no progress, no timeout and no log line, so an instance blocked by a rebuild and a genuinely dead one look identical from a bare client. `tortoise/graph_key_restore.py` watches from a second connection and separates them: a witness PING that never answers plus a port that still ACCEPTS a TCP connection is *blocked (not load, not a crash)*; a REFUSED port is *the process died* (#8270). Two different errors, two different recoveries. ⚠️ Nothing in the product calls `restore_graph_key` (`rg` finds the module and its tests, no caller), so the restore production actually performs — `tortoise/hosted_backup.py::_graph_copy_with_restore_bound`, a bounded `GRAPH.COPY` swap (delete live → copy temp → live) — is **UNWITNESSED**: it has an explicit read bound and still makes no second-connection measurement, so for the wired path this criterion stays **UNMET** |
 
@@ -186,7 +234,9 @@ adopts it**: it turns "the instance answered nothing for as long as my socket wo
 measurement with a cause, and the regression test asserts the outage it measures is the
 restore's own (it ends when the restore does, and is no longer than it). That is a
 capability, not a landing: **no production call site adopts the driver yet**, and the wired
-restore path (`hosted_backup`'s `GRAPH.COPY`) is unwitnessed.
+restore path (`hosted_backup`'s `GRAPH.COPY`) is unwitnessed. `restore_graph_key_safe` — the
+index-safe path §3a describes — has no caller either: landing it is what THIS change does;
+adopting it in the restore the product actually performs is the remaining step.
 
 ## 6. Two defects to route, and why they are not one
 
@@ -254,6 +304,10 @@ TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' \
     uv run pytest tests/test_indexed_graph_key_restore_7846.py -v
 # the driver's own branches, no server needed:
 uv run pytest tests/test_7846_restore_is_not_silent.py -v
+# the index-safe path and its refusal guard, no server needed:
+uv run pytest tests/test_7846_index_safe_restore_guard.py -v
+# the drop-first measurement (§3a) — needs a throwaway engine, persistence OFF:
+#   python docs/evidence/7846-indexed-graph-restore/drop_first.py 16413 20000
 ```
 
 ## 9. Committed logs
@@ -273,3 +327,19 @@ Raw stdout / raw engine output of the scripts above, from the runs quoted in thi
 | `crash-variant-deleted-42006.log` | control: source deleted first → survived |
 | `crash-variant-noindex-42006.log` | control: no vector index → survived |
 | `crash-report-isolated-kept-42006.log` | the engine's own bug report for the crash |
+| `drop-first-42201-20000.log` | §3a: guard + raw + drop-first, 20 000 nodes, graph module 42201 |
+| `drop-first-42201-5000.log` | §3a at 5 000 nodes — the shape is not size-specific |
+
+⚠️ **Provenance, stated because it is not self-evident from the files.** The two
+`drop-first-*.log` files are raw stdout of `drop_first.py`, which prints NO engine header.
+The `verify-*.log` files do: their first line is a self-describing `{"start": {label, port,
+redis_version, graph_module, …}}` record. The `evict-cost-*.log` files carry the same record,
+but NOT on line 1 — it sits on line 5, under a four-line stderr `DeprecationWarning` — so read
+the record, do not assume its position.
+
+So the engine identity for the two `drop-first-*.log` files (`falkordb/falkordb:latest`, graph
+module 42201) is **operator-asserted in this document and NOT recorded in the commit**; do not
+read those logs as evidence for the image. Re-running
+`python docs/evidence/7846-indexed-graph-restore/drop_first.py <port> 20000` against a known
+image reproduces the arm from scratch.
+

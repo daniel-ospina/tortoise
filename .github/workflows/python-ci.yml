@@ -1436,18 +1436,25 @@ jobs:
           #      hand-maintained artifact. The old a/b lists were balanced when
           #      written (#4711) and were never rechecked.
           #
-          # #9017 re-cut both rows from a MEASURED map (2026-10-18): the
-          # committed rows had rotted and 28 of the 64 leg files still carried an
-          # `# unmeasured` placeholder, so the legs had drifted to 23.42m (b) /
-          # 13.30m (a) — a 1.76:1 split that was invisible to the packer because
-          # its INPUT was wrong, not its algorithm (#6137's lesson, different
-          # cause; the full method, the calibration caveat and the per-file
-          # readings are in config/ci-surfaces.yml, in the #9017 block before
-          # `slow_files:`). That pair is the PRE-FIX reading; on the map this
-          # change commits those same two leg SETS weigh 21.36m / 13.30m, and
-          # the re-cut below takes them to 17.41m / 17.45m.
-          # They are the LPT legs of `slow_files - carve_out` on the committed
-          # `durations` map — 32 and 33 files at 17.408m / 17.453m; each row is a
+          # #9017 re-cut both rows from the CI's OWN per-test junit (2026-10-18,
+          # run 39165691659): the committed map had rotted — 28 of the 64 leg
+          # files of that measurement (29 of today's 65) carried an `# unmeasured`
+          # placeholder — so a first pass re-measured
+          # locally and got the wrong answer, because this repo's host runs a
+          # fleet and local CPU seconds inflate non-uniformly under that load
+          # (`test_index_cli` measured 338s of local CPU for 25s of CI time).
+          # The junit column is authoritative and is what the rows now carry. The
+          # full method and the per-file numbers are in config/ci-surfaces.yml, in
+          # the #9017 block before `slow_files:`.
+          # WHAT IT BOUGHT, stated as the measurement rather than the hope: the
+          # legs this replaces measure 17.06m / 20.82m on the same junit, so the
+          # re-cut takes the critical leg 20.82m -> 18.95m (-1.88m, -9.0%); the pair
+          # that stood BEFORE #9035 was 17.98m / 19.90m, i.e. -4.8% against that.
+          # The ceiling is arithmetic: a perfect split of the 37.88m pool is
+          # 18.94m, and the pre#9017 split was already within 0.97m of it — so the
+          # remaining lever is the POOL, not the cut.
+          # These are the LPT legs of `slow_files - carve_out` on the committed
+          # `durations` map — 33 and 32 files at 18.945m / 18.933m; each row is a
           # partition of the set. RECOMPUTE them from `durations` before quoting
           # them: they rot on every re-cut, and this comment has now been wrong
           # twice for that reason. (History, condensed: the first cut packed 43
@@ -1458,7 +1465,7 @@ jobs:
           # (`test_slow_leg_bounds_clear_the_committed_work` pins it), because
           # a leg that outruns its watchdog is killed mid-suite and reports a
           # red — the trap the #3239 budget was written for when these legs'
-          # committed weight was 2.84 min rather than the 17.41 min it is now.
+          # committed weight was 2.84 min rather than the 18.95 min it is now.
           #
           # That drift is why these lists should be COMPUTED, not committed —
           # `push_legs()` already LPT-packs the fast halves from `durations`.
@@ -1468,30 +1475,31 @@ jobs:
           # legs is #6137's design decision and is not pre-empted here.
           - half: a
             files: >-
-              test_index_cli eval/write_path/test_write_path_runner test_battery_setup
-              test_skip_guard test_embedded_evidence test_sdk_group3 test_battery_r1_seed
-              test_platform_seams test_source_inheritance_own test_epic903_warmstart
-              eval/why_suite/test_why_suite_benchmark test_mcp_http test_import_endpoint
-              test_extractor_v2 test_sdk test_epic903_modes test_ingest_bundle
-              test_epic903_fixtures test_ep_selector test_projection test_markers
-              test_rebuild_parity_fail_loud_3585 test_graph_diagnostics
-              test_ingest_validation test_event_provenance
-              test_consistency_divergence_5011 test_search_engine_gaps
-              test_enumeration_surfaces test_indexes test_framework_middleware
-              test_graphcopy_boolean_index_3154 test_write_verb
+              test_surface_manifest test_hosted_api test_capture_session
+              test_platform_seams eval/why_suite/test_why_suite_benchmark
+              eval/harness/test_harness_benchmark test_commit_endpoint
+              test_relationships_bounded test_skip_guard test_embedded_evidence
+              test_epic903_scheduler test_mcp_http eval/retrieval/test_gate_1349
+              test_ingest_v2_consolidation test_import_endpoint test_ep_selector
+              test_extractor_v2 test_abuse_integration test_hosted_volunteer_context
+              test_projection test_ep_sources test_ingest_mode test_event_provenance
+              test_cli_context test_control_plane test_write_verb test_ingest_validation
+              test_about_edges test_enumeration_surfaces test_framework_middleware
+              test_operator_idempotency_4971 test_indexes
+              test_graphcopy_boolean_index_3154
           - half: b
             files: >-
-              test_ci_selection test_surface_manifest test_hosted_api test_index_directory
-              test_pack_shipping_wheel test_capture_session test_commit_endpoint
-              test_ingest test_billing test_backfill_sources eval/retrieval/test_gate_1349
-              test_client_surface eval/harness/test_harness_benchmark
-              eval/retrieval/test_run test_relationships_bounded test_dr_endpoints
-              test_epic903_scheduler test_abuse_integration test_oauth_mcp
-              test_expand_relationships_6976 test_ingest_v2_consolidation test_ep_sources
-              test_hosted_volunteer_context test_control_plane test_dream test_ingest_mode
-              test_unjournaled_mutation_class test_cli_context test_about_edges
-              test_operator_idempotency_4971 test_mcp_route_challenge
-              test_3311_multilabel_status_vocab test_monitoring
+              test_ci_selection test_battery_setup eval/write_path/test_write_path_runner
+              test_source_inheritance_own eval/retrieval/test_run test_epic903_warmstart
+              test_pack_shipping_wheel test_monitoring test_battery_r1_seed test_billing
+              test_dr_endpoints test_epic903_modes test_graph_diagnostics
+              test_epic903_fixtures test_index_cli test_sdk test_index_directory
+              test_client_surface test_ingest_bundle test_oauth_mcp
+              test_rebuild_parity_fail_loud_3585 test_consistency_divergence_5011
+              test_dream test_markers test_ingest test_expand_relationships_6976
+              test_unjournaled_mutation_class test_sdk_group3 test_search_engine_gaps
+              test_3311_multilabel_status_vocab test_mcp_route_challenge
+              test_backfill_sources
     name: test-slow (${{ matrix.half }})
     # #3239: OUTER cap, strictly above the in-step watchdog below — that kill
     # is the one that PRINTS the pass/fail counts (#798); a runner-level cap
@@ -1504,8 +1512,8 @@ jobs:
     # #5285 then added the fail-loud rebuild suite to `slow_files` and re-cut
     # BOTH rows by LPT off the committed map; #2125 added
     # `test_framework_middleware` to leg a. #9017 re-cut both rows again from a
-    # MEASURED map: the rows now carry 17.41m / 17.45m, so the watchdog holds at 40m
-    # (2.29x the heavier leg) against a 34.91m floor. The literals did NOT move
+    # MEASURED map: the rows now carry 18.95m / 18.93m (CI junit), so the watchdog
+    # holds at 40m (2.11x the heavier leg) against a 37.89m floor. The literals did NOT move
     # with the re-cut — 40m already cleared the measured heavier leg — which is
     # the guard working, not a coincidence to rely on.
     #
@@ -1768,13 +1776,13 @@ jobs:
           # tests/test_ci_selection.py::test_test_slow_job_carries_junitxml_manifest_guard).
           # #3239: the in-step watchdog must CLEAR the leg's committed weight
           # by tools/ci_selection.WATCHDOG_HEADROOM — the same floor the fast
-          # shards derive their budget from. The heavier leg carries 17.45m
-          # (#9017 re-cut both rows from a MEASURED map — see
+          # shards derive their budget from. The heavier leg carries 18.95m
+          # (#9017 re-cut both rows from the CI junit — see
           # config/ci-surfaces.yml's #9017 block; the rows before it carried
-          # 14.808m / 14.443m, and the map they were packed from understated the
-          # work by 1.76:1 between the legs) and this
-          # literal is 40m, i.e. 2.29x the 2.0x minimum
-          # the headroom floor requires (34.91m); it was 10m
+          # 14.808m / 14.443m off a stale map, and the legs that map produced
+          # measure 17.98m / 19.90m against CI's own per-test junit) and this
+          # literal is 40m, i.e. 2.11x the 2.0x minimum
+          # the headroom floor requires (37.89m); it was 10m
           # when the legs' committed weight was 2.84m (the measured pytest step
           # was 4.70m, which does not enter the headroom arithmetic). Re-deriving
           # the budget when the leg set moves is
