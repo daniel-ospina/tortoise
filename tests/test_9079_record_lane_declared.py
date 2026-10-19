@@ -18,10 +18,12 @@ and refusing them is a REGRESSION, not enforcement:
    living in the cache graph — the change-feed log (`:GraphEvent`) and its seq
    allocator (`:GraphEventMeta`) — which no journal record describes, so the
    fold's gate cannot even recognise it. Refusing its append does not protect
-   the record; it DELETES the change feed, and it does so SILENTLY:
-   `tortoise/sdk.py::_emit_event` calls this store inside
-   `except Exception: _logger.warning("event emission failed … continuing")`, so
-   a refusal here stops every graph event with only a warning line. ⚠️ The lane
+   the record; it STOPS the change feed. `tortoise/sdk.py::_emit_event` calls
+   this store inside a fail-open `try: … except Exception`, so a refusal there
+   lets the mutation report success with no event written; since `#9208`/`#9227`
+   landed that stop is NAMED (`record_degraded`, and `poll_events` raises
+   `ChangeFeedDegraded` rather than answering `[]`), so the harm is visible —
+   but the feed is still stopped. ⚠️ The lane
    is a declared CARVEOUT, not a claim of rebuild durability: a rebuild wipes
    these ROWS and does not replay them — the behaviour `#4664` names, CLOSED on
    2026-09-25 as consolidated into the also-closed `#5048` and STILL observable

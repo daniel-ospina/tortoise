@@ -1280,8 +1280,9 @@ surfaces:
   #     does NOT consider it (the `dump_proj = proj` restore paths appear in the
   #     source inventory as a CLAIM about what is still undeclared, not as a
   #     subject any test here drives), so an `api` row would run the file on
-  #     diffs it cannot observe — the over-broad registration the `#9121` entry
-  #     below warns about.
+  #     diffs it cannot observe — the over-broad registration the `#9123` entry
+  #     above warns about (the `#9121` entries below are the OPPOSITE precedent:
+  #     they multi-register because their subjects span those surfaces).
   # `core` is also what satisfies `--integrity`'s "every test file is
   # classified" rule: without this row `uv run python tools/ci_selection.py
   # --integrity` exits 1 with `manifest drift:
