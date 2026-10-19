@@ -310,10 +310,19 @@ def test_default_graph_namespace_cell_names_the_org_namespace_not_legacy_team():
         "MINTER that writes it — `agent_signup`'s registry branch stores "
         "`org_{org_id}` there, so the node is named through the function, never "
         "as a bare deriver")
-    assert "and the registry `kind='default'` node" not in flat_clause, (
-        "the registry `kind='default'` node must not be listed as one more "
-        "`org_{org_id}` deriver: `sdk.org_create` writes that same node KIND "
-        "with `org_{name}`, so the artifact alone does not decide the shape")
+    # A literal ban on ONE bare spelling is the defect, not the guard: measured
+    # on this cell, re-listing the node beside the functions with a comma
+    # instead of "and" — "`agent_signup` (including the registry `kind='default'`
+    # node it writes), the registry `kind='default'` node, the Supabase-lane
+    # `create_org` …" — left every cell assertion GREEN, because the minter form
+    # survives and the banned phrase is the "and" spelling. So bound the number
+    # of MENTIONS instead, exactly as the row does below: one, the minter one.
+    assert flat_clause.count("the registry `kind='default'` node") == 1, (
+        "the clause must mention the registry `kind='default'` node exactly "
+        "ONCE — inside the minter parenthetical, which is the only attribution "
+        "that is true. A second mention lists the node as one more "
+        "`org_{org_id}` deriver, and `sdk.org_create` writes that same node "
+        "KIND with `org_{name}`, so the node kind is not the discriminator")
     assert "so the path, never the node kind, decides" in flat_clause, (
         "the clause must say the NODE KIND is not the discriminator — without "
         "it a reader resolving a registry default node has `org_{org_id}` from "
@@ -558,6 +567,17 @@ def test_coarse_isolation_row_cites_live_migration_anchors():
     assert "sdk.org_create" in row_name_half, (
         "the row's `org_{name}` half must name `sdk.org_create` as that shape's "
         "only source")
+    # …and `stored` is as load-bearing in the ROW as it is in the cell, for the
+    # same reason: `hosted_api`'s create_org duplicate-name replay re-derives
+    # `f"org_{name}".replace(' ', '_')` outside `sdk.org_create`, so an
+    # unqualified "only on sdk.org_create" is false. The word was pinned on the
+    # cell clause only (measured: the row rewritten to "`org_{name}` is derived
+    # only by `sdk.org_create`" — the exact false claim this PR corrects — kept
+    # the whole row test green). The row is a single line, so no flattening.
+    assert re.search(r"stored only by\s+`?sdk\.org_create", row, re.I), (
+        "the row must say `org_{name}` is STORED only by `sdk.org_create`, not "
+        "derived only there: the create_org duplicate-name replay derives the "
+        "same shape, so an unqualified 'only' is a false claim")
     # (`the lane does` is asserted as a negative on the CELL only. The row never
     # carried that phrase — its pre-#9052 wording is "Which lane mints the
     # graph decides the shape" — so a row-level `"the lane does" not in row`
