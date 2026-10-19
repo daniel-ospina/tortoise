@@ -101,6 +101,19 @@ function evalFlag(expr, names, args) {
   return fn(...args)
 }
 
+/** The identifier a component's RENDER GATE uses in the JSX — the `{flag && (`
+ * immediately in front of `<Component`. Returns the name so the guard can
+ * evaluate the flag's REAL initializer; throws when the gate is an inline
+ * expression (unliftable) or the component is not rendered at all (the #9170
+ * P1 closed circle deleted both the gate and the opener, so "not found" is a
+ * failure, never a skip). */
+function renderGateIdent(src, component) {
+  const re = new RegExp(`\\{\\s*([A-Za-z_$][\\w$]*)\\s*&&\\s*\\(\\s*<${component}\\b`)
+  const m = re.exec(src)
+  assert.ok(m, `expected ${component} to render behind a named gate \`{flag && <${component}\``)
+  return m[1]
+}
+
 // Both spellings the dashboard uses: JSX `aria-modal="true"` and the
 // createElement modules' `'aria-modal': 'true'`. Deliberately NOT the bare word —
 // `dialogFocus.js` and this change's own comments discuss aria-modal in prose
@@ -125,6 +138,9 @@ test('#8670: the tripwire extractors are not a no-op', () => {
   assert.equal(count('a a a', 'a'), 3)
   assert.equal(count('a', 'ZZ'), 0)
   assert.throws(() => windowFrom('nope', 'START', 5), /expected source to contain/)
+  assert.equal(renderGateIdent('{gateX && (\n  <Thing prop={1} />', 'Thing'), 'gateX')
+  assert.throws(() => renderGateIdent('{gateX && (<Other />', 'Thing'), /expected Thing to render behind a named gate/)
+  assert.throws(() => renderGateIdent('{a && b && (<Thing />', 'Thing'), /expected Thing to render behind a named gate/)
   assert.match('role="dialog" aria-modal="true"', ariaModalRe())
   assert.match("h('div', { 'aria-modal': 'true' })", ariaModalRe())
   assert.doesNotMatch('the aria-modal family owes containment', ariaModalRe())
@@ -308,8 +324,84 @@ test('#8670: the inert effect cannot outlive its dialog (page-lockout guard)', (
   // `tab === 'profile' && authMode === 'session' && identityInv &&
   // !identityInv.unsupported`. The effect's OWNER (this component) stays mounted
   // through every one of those flips, so a bare open-bit key leaks `inert`.
-  assert.match(mainJsx, /\{deleteAccountArmed && \(/,
-    'the account-deletion card must RENDER from the same flag its inert effect is keyed on')
+  // THE REGRESSION PIN first, EXECUTED: `DeleteAccountSection` owns BOTH the
+  // `Delete account` opener and the dialog (`accountDeletion.js` renders
+  // `open ? <backdrop> : null` after the button), so a render gate that includes
+  // the open-bit is a closed circle — the only setter of `deleteAccountOpen =
+  // true` is a prop of the component that would then not render. #9170 review P1:
+  // that shipped in an earlier commit and the Profile tab lost its entire
+  // delete-account home (heading, warning copy, the only opener) while the
+  // dialog's inert effect could never run.
+  //
+  // The gate is read off the JSX rather than named here, so the pin survives a
+  // rename and cannot be satisfied by a comment; it must be a `const` identifier
+  // so its REAL initializer can be evaluated — that is the half a source regex
+  // cannot decide.
+  const accountGateName = renderGateIdent(mainJsx, 'DeleteAccountSection')
+  assert.notEqual(accountGateName, 'deleteAccountArmed',
+    'the card must not render from the open-bit-carrying effect flag')
+  assert.doesNotMatch(mainJsx, /\{deleteAccountArmed && \(/,
+    'the account-deletion card must render from its GATE, not from the effect flag')
+  const accountGate = constExpr(mainJsx, accountGateName)
+  const accountGateAt = (over = {}) => evalFlag(
+    accountGate,
+    ['tab', 'authMode', 'identityInv', 'deleteAccountOpen'],
+    Object.entries({
+      tab: 'profile',
+      authMode: 'session',
+      identityInv: { login_methods: 1, unsupported: false },
+      deleteAccountOpen: false,
+      ...over,
+    }).map(([, v]) => v))
+  // CLOSED is the state the opener must be reachable from. Pre-fix (the gate WAS
+  // the armed flag) this evaluated to `false`.
+  assert.equal(accountGateAt(), true,
+    'the Delete account home (and its only opener) must render with the dialog CLOSED — a gate that reads the open-bit is a closed circle')
+  assert.equal(accountGateAt({ deleteAccountOpen: true }), true,
+    'the card stays mounted while its dialog is open')
+  assert.equal(accountGateAt({ tab: 'overview' }), false,
+    'the gate still excludes every other tab')
+  assert.equal(accountGateAt({ authMode: 'apikey' }), false,
+    'the gate still excludes the API-key auth mode')
+  assert.equal(accountGateAt({ identityInv: null }), false,
+    'the gate still follows an identity read landing null')
+  assert.equal(accountGateAt({ identityInv: { unsupported: true } }), false,
+    'the gate still excludes the unsupported-identity arm')
+
+  // ── and the EFFECT's flag is the gate PLUS the open-bit ──
+  // Its non-open terms are the gate itself (evaluated here from that same
+  // initializer, so the two cannot drift), so a gate flip still clears the flag
+  // and the effect cleans up (the page-lockout guard); the open-bit makes a
+  // dismissal clear it as well.
+  const accountFlag = constExpr(mainJsx, 'deleteAccountArmed')
+  assert.match(accountFlag, new RegExp(`(?:^|\\W)${accountGateName}\\b`),
+    'the inert flag must be derived from the render gate, not re-implement it')
+  assert.match(accountFlag, /deleteAccountOpen/,
+    'the inert flag must add the open-bit to the gate — otherwise the effect never re-runs on close')
+  const accountArmed = (over = {}) => evalFlag(
+    accountFlag,
+    ['tab', 'authMode', 'identityInv', 'deleteAccountOpen', accountGateName],
+    [...Object.values({
+      tab: 'profile',
+      authMode: 'session',
+      identityInv: { login_methods: 1, unsupported: false },
+      deleteAccountOpen: true,
+      ...over,
+    }), accountGateAt(over)])
+  assert.equal(accountArmed(), true, 'the literal: an open Delete-account dialog on Profile')
+  // The card UNMOUNTS if any gate condition flips — the flag must clear with it.
+  assert.equal(accountArmed({ tab: 'overview' }), false,
+    'leaving the Profile tab unmounts the card — the flag must clear (page-lockout guard)')
+  // The MEASURED one: `fetchIdentity()` re-runs on window focus and fails CLOSED
+  // to `setIdentityInv(null)` — no navigation, no click, dialog gone.
+  assert.equal(accountArmed({ identityInv: null }), false,
+    'an identity read landing null unmounts the card — the flag must clear (page-lockout guard)')
+  assert.equal(accountArmed({ identityInv: { unsupported: true } }), false,
+    'the unsupported-identity arm does not render the card')
+  assert.equal(accountArmed({ authMode: 'apikey' }), false,
+    'the API-key auth mode does not render the card')
+  assert.equal(accountArmed({ deleteAccountOpen: false }), false, 'closed dialog')
+
   assert.match(mainJsx, /\{tab === 'settings' && team && \(/,
     'GithubDisconnectControl renders under the Settings tab gate — that gate belongs to its flag')
   const githubFlag = constExpr(mainJsx, 'githubDisconnectArmed')
@@ -328,30 +420,6 @@ test('#8670: the inert effect cannot outlive its dialog (page-lockout guard)', (
   assert.equal(githubArmed({ team: null }), false,
     'an org transition unmounts SettingsTab — the flag must clear (page-lockout guard)')
   assert.equal(githubArmed({ githubDisconnect: { open: false } }), false, 'closed dialog')
-
-  const accountFlag = constExpr(mainJsx, 'deleteAccountArmed')
-  const accountArmed = (over = {}) => evalFlag(
-    accountFlag,
-    ['tab', 'authMode', 'identityInv', 'deleteAccountOpen'],
-    Object.entries({
-      tab: 'profile',
-      authMode: 'session',
-      identityInv: { login_methods: 1, unsupported: false },
-      deleteAccountOpen: true,
-      ...over,
-    }).map(([, v]) => v))
-  assert.equal(accountArmed(), true, 'the literal: an open Delete-account dialog on Profile')
-  assert.equal(accountArmed({ tab: 'overview' }), false,
-    'leaving the Profile tab unmounts the card — the flag must clear (page-lockout guard)')
-  // The MEASURED one: `fetchIdentity()` re-runs on window focus and fails CLOSED
-  // to `setIdentityInv(null)` — no navigation, no click, dialog gone.
-  assert.equal(accountArmed({ identityInv: null }), false,
-    'an identity read landing null unmounts the card — the flag must clear (page-lockout guard)')
-  assert.equal(accountArmed({ identityInv: { unsupported: true } }), false,
-    'the unsupported-identity arm does not render the card')
-  assert.equal(accountArmed({ authMode: 'apikey' }), false,
-    'the API-key auth mode does not render the card')
-  assert.equal(accountArmed({ deleteAccountOpen: false }), false, 'closed dialog')
 
   // The predicates the flags are built from must be the LIVE ones: a flag that
   // re-implemented the role test locally would pass the scenarios above while

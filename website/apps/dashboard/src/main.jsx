@@ -1591,8 +1591,8 @@ function App() {
   const githubDisconnectInertRef = React.useRef(null)
   // #8670 (a11y): the inert effect itself is declared BELOW, next to the other
   // derived containment flags (`githubDisconnectArmed` / `deleteAccountArmed`) —
-  // it must be keyed on a flag that also carries the dialog's render gate, and
-  // that flag can only be declared after `tab` / `team` / `authMode`.
+  // it must be keyed on a flag that carries BOTH the dialog's render gate and the
+  // open-bit, and that flag can only be declared after `tab` / `team` / `authMode`.
   // #4029 (a11y) applied to #4946: while the disconnect request is in flight
   // BOTH dialog buttons are disabled, which drops focus to <body>. Reclaim it
   // for the dialog container (tabIndex -1), guarded on activeElement === body so
@@ -2700,8 +2700,23 @@ function claimIntentInFlight() {
   // later `const` is the #2709 TDZ class `tdzDepsTripwire.test.js` guards.
   const githubDisconnectArmed = tab === 'settings' && !!team
     && githubDisconnect.open
-  const deleteAccountArmed = tab === 'profile' && authMode === 'session'
-    && !!identityInv && !identityInv.unsupported && deleteAccountOpen
+  // #9170 review P1: TWO questions, not one. `DeleteAccountSection` renders its
+  // OWNER and its dialog in the same component (`accountDeletion.js`: the
+  // `Delete account` button, then `open ? <backdrop> : null`), so the card's
+  // render gate must NOT read the open-bit: the only setter of
+  // `deleteAccountOpen = true` is a prop of the very component that would then
+  // not render — a closed circle that lost the Profile tab's whole delete-account
+  // home (heading, warning copy and the only opener) with the dialog
+  // un-containerable because it could never mount.
+  //
+  // The GATE answers "may this card exist here" (the tab/auth/identity chain) and
+  // is what the JSX renders from. The FLAG answers "is the dialog open" for the
+  // inert effect below — it adds the open-bit so the effect still cleans up on
+  // close, while its other four conditions keep it keyed on the gate's flips too
+  // (see the page-wide-lockout note above).
+  const deleteAccountGate = tab === 'profile' && authMode === 'session'
+    && !!identityInv && !identityInv.unsupported
+  const deleteAccountArmed = deleteAccountGate && deleteAccountOpen
   React.useEffect(() => {
     if (!githubDisconnectArmed || typeof document === 'undefined') return undefined
     const el = githubDisconnectDialogRef.current
@@ -11322,12 +11337,17 @@ function claimIntentInFlight() {
         {/* #4029: personal-account deletion lives on the Profile tab and only
             for a real SESSION account — a key-login has no auth account to
             delete (the server answers `unsupported` in registry mode). */}
-        {/* #8670 review P1: the card renders from the SAME derived flag its
-            inert effect is keyed on (`deleteAccountArmed`), so a flip of ANY
-            condition in the gate — the tab, the auth mode, or an identity read
-            landing null — cleans the effect up instead of stranding `inert` on
-            the page with no dialog to release it. */}
-        {deleteAccountArmed && (
+        {/* #4029/#8670: the card renders from the GATE (`deleteAccountGate`) —
+            the tab/auth/identity chain only, never the open-bit. It is also one
+            condition WIDER than `deleteAccountArmed`, the flag the inert effect
+            is keyed on, so a flip of ANY gate condition — the tab, the auth
+            mode, or an identity read landing null — clears the flag too and the
+            effect cleans up instead of stranding `inert` on the page with no
+            dialog left to release it. Rendering from the flag itself would be a
+            closed circle: this component owns both the `Delete account` opener
+            and the dialog, so its only opener could never mount before it was
+            already open (#9170 review P1). */}
+        {deleteAccountGate && (
           <DeleteAccountSection
             open={deleteAccountOpen}
             busy={deleteAccountBusy}
