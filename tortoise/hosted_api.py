@@ -8134,12 +8134,13 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
 
 
 def _graph_unavailable() -> HTTPException:
-    """#3773: fail-closed 503 for a saturated / bound-missed data-plane offload.
+    """#3773: fail-closed 503 for a saturated / bound-missed GRAPH-lane offload
+    (a data-plane helper or a registry read, #3718).
 
     Deliberately NOT ``_control_plane_unavailable``: that body's copy is
     sign-in specific and would mislead a client retrying a graph write. A
-    graph helper that could not get a worker is a service-capacity failure,
-    and the write did not happen — retryable.
+    helper that could not get a worker is a service-capacity failure, and the
+    work did not happen — retryable.
 
     Deliberately distinct from ``org_graph_unavailable`` (a TENANCY/access
     failure on the activation scorecard, activation_scorecard.py): this one
@@ -8174,11 +8175,12 @@ async def _graph_offload(fn, *, op: str, timeout: float | None = None):
     ``_GRAPH_LIST_OFFLOAD_CHUNK``), or a healthy-but-large fan-out will cross
     the bound and its worker will be abandoned still holding a pool slot.
 
-    A mode-agnostic call keeps THIS lane's bound and ``_graph_unavailable``
-    copy even when the submitted callable short-circuits to PostgREST (the org
-    switcher's ``_graph_list_for`` on a Supabase deployment): one op, one bound,
-    one copy per call site. The callable itself still branches on the mode
-    first, so that lane never builds a graph handle it will not use.
+    A mode-agnostic op name, not a per-mode one: ``_graph_list_for`` is the same
+    callable on both lanes, and the LANE is chosen by the caller by mode (#3718)
+    — registry reads submit here, Supabase/PostgREST listings submit through
+    ``_cp_offload``, so each leg gets the bound and the 503 copy of the
+    dependency it actually uses. The callable still branches on the mode first,
+    so neither lane builds a handle it will not use.
 
     Thin hosted-side wrapper over the #3498 seam (``_cp_offload`` ->
     ``monitoring.run_control_plane_call``) on the dedicated ``graph`` pool.
@@ -18275,11 +18277,13 @@ async def _org_node(org_id: str) -> dict | None:
         return await _cp_offload(
             lambda: _sb_org(get_control_plane(), org_id), op="org_by_id")
     # #3718: the registry lane stays INLINE and declared residual (#2446) — the
-    # same auth-path registry read class as `_membership_role`, where
-    # off-loading produced a WRONG ANSWER (an EMPTY member list). The switcher
-    # therefore still issues N of these on the loop; its LISTING half is the
-    # part burned down (see `list_my_orgs`). Removing this from
-    # `_KNOWN_INLINE_HELPER_RESIDUAL` without burning it down would hide it.
+    # same registry read class as `_membership_role`, where off-loading was
+    # measured to produce a WRONG ANSWER (an EMPTY member list in
+    # `test_invites_http.py::TestExpiredInviteReMint`). That measurement was
+    # taken on `_membership_role`'s read; THIS helper's membership in the class
+    # is an inference (same Team/Membership registry read, same connection, same
+    # thread-visibility question), recorded as such on #2446. Do not off-load it
+    # without reproducing the measurement for THIS read.
     sdk = _registry_anchor()
     rows = sdk._get_registry().query(
         "MATCH (t:Team {id:$id}) RETURN properties(t)",
@@ -18351,8 +18355,11 @@ async def list_my_orgs(user: dict = Depends(get_current_user)):  # noqa: B008
 
     #765 (plan Task 8 reader inventory): graph_list resolves via the
     mode-aware SDK (Supabase → teams.graph_name derivation via the seam;
-    registry → Graph nodes), so this endpoint never touches the registry in
-    Supabase mode."""
+    registry → Graph nodes). The mode branch that keeps this endpoint off the
+    registry in Supabase mode is NOT the callee's short-circuit — it is the
+    call-site branch in ``_graph_list_for`` plus the LANE choice above, because
+    ``_registry_anchor()`` binds eagerly, before ``graph_list`` could consult
+    the mode (#3718)."""
     memberships = await _user_memberships(user["user_id"])
     resolved = []
     for m in memberships:
@@ -18387,10 +18394,22 @@ async def list_my_orgs(user: dict = Depends(get_current_user)):  # noqa: B008
     # handle builds plus 9 ``CREATE INDEX`` each.
     healthy = [m["org_id"] for m, org in resolved
                if org.get("suspended_at") is None]
+    # #3718: the LANE is chosen on the loop, by MODE, before anything touches a
+    # handle. A Supabase listing is a PostgREST read and belongs on the
+    # control-plane lane: one chunk there is up to 24 sequential PostgREST round
+    # trips (organizations + default + custom graphs per org), and the graph
+    # lane's bound is the COLD-PROJECTION allowance (30 s), which a degraded
+    # control plane could consume — after which the 503 names a service that is
+    # not in this path at all (`graph_unavailable`) and the abandoned worker
+    # keeps issuing the chunk's remaining calls while holding a graph slot,
+    # turning a control-plane slowdown into data-plane unavailability.
+    from tortoise.supabase_control import is_supabase_enabled
+
+    offload = _cp_offload if is_supabase_enabled() else _graph_offload
     graphs_by_org: dict[str, list[dict]] = {}
     for start in range(0, len(healthy), _GRAPH_LIST_OFFLOAD_CHUNK):
         chunk = healthy[start:start + _GRAPH_LIST_OFFLOAD_CHUNK]
-        graphs_by_org.update(await _graph_offload(
+        graphs_by_org.update(await offload(
             lambda chunk=chunk: {
                 org_id: _graph_list_for(org_id) for org_id in chunk},
             op="graph_list"))

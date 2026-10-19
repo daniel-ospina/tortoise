@@ -52,7 +52,8 @@ reuse the process-lifetime ``_registry_anchor()``, so no per-org construction
 happens in the worker — the one anchor build on this request path belongs to
 ``_org_node``, which stays inline and declared here.
 Its membership scan and per-org Team read stay inline — #2446 records a
-MEASURED thread-dependence for that auth-path registry read class — so
+thread-dependence MEASURED on `_membership_role`'s read, and these two are the
+same registry-read class by inference (the relay there marks it) — so
 ``_user_memberships`` and ``_org_node`` REMAIN in
 ``_KNOWN_INLINE_HELPER_RESIDUAL``. EVERY OTHER async body in
 the module that still runs sync FalkorDB I/O inline is enumerated in
@@ -436,9 +437,10 @@ def test_read_route_does_not_freeze_the_event_loop(client, monkeypatch):
 # this change started from it issued 2N+1 sync registry reads on the loop for N
 # memberships: the membership scan, one Team read per membership (``_org_node``)
 # and one ``graph_list`` per membership. The LISTING half is burned down here
-# (``ceil(N/8)`` off-loop submissions); the two auth-path registry reads stay
-# inline as declared residual because #2446 records a MEASURED thread-dependence
-# for that read class. All three reach the registry through ``_get_registry()``,
+# (``ceil(N/8)`` off-loop submissions); the two registry reads stay
+# inline as declared residual because #2446 records a thread-dependence MEASURED
+# on `_membership_role`'s read, with these two in the same class by inference.
+# All three reach the registry through ``_get_registry()``,
 # so ONE probe on that seam sees the whole path — no per-handler
 # instrumentation, and no reliance on how each read is spelled.
 #
@@ -722,6 +724,32 @@ def test_org_switcher_listing_never_builds_a_graph_handle_in_supabase_mode(
     monkeypatch.setattr(ha_mod, "_registry_anchor", _explode)
 
     assert ha_mod._graph_list_for("org-x") == [{"graph_id": "org-x-pg"}]
+
+    # ROUTE level, not just the helper: the contract this pins is the endpoint's
+    # ("never touches the registry in Supabase mode"). `_org_node` and
+    # `_user_memberships` branch on the mode themselves, and the submission lane
+    # is chosen on the loop, so the whole path must stay FalcorDB-free.
+    monkeypatch.setattr(
+        sb, "user_memberships",
+        lambda cp, uid: [{"org_id": "org-x", "role": "owner"}])
+    monkeypatch.setattr(
+        sb, "org_by_id",
+        lambda cp, org_id: {"id": org_id, "name": "X", "tier": "free"})
+    monkeypatch.setattr(
+        sb, "graph_metadata",
+        lambda cp, org_id: [{"graph_id": f"{org_id}-pg", "kind": "default"}])
+
+    async def _inline(fn, *, op, **_kwargs):
+        return fn()
+
+    monkeypatch.setattr(ha_mod, "_cp_offload", _inline)
+
+    rows = asyncio.run(ha_mod.list_my_orgs({"user_id": "u-3718"}))
+
+    assert [(r["org_id"], r["graph_count"], r["default_graph_id"])
+            for r in rows] == [("org-x", 1, "org-x-pg")], (
+        f"the Supabase-mode switcher did not answer from the control plane: "
+        f"{rows!r} (#3718)")
 
 
 # ── AST inventory pin: the sync-FalkorDB-on-the-loop class ─────────────────
