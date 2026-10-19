@@ -46,8 +46,11 @@ control-plane legs via ``_cp_offload`` — so it is no longer in
 ``_KNOWN_INLINE_ROUTE_RESIDUAL``. ``list_my_orgs`` (``GET /v1/organizations``,
 the switcher every client reads on app load) joined it in the #3718 burn-down,
 for its LISTING half only: the per-org graph listings now run over
-``_graph_offload`` in chunks, with their SDK construction inside the worker, so
-the route body left the declared residual for ``_OFFLOADED_ASYNC_BODIES``.
+``_graph_offload`` in chunks, so the route body left the declared residual for
+``_OFFLOADED_ASYNC_BODIES``. Note WHERE the handle comes from: the listings
+reuse the process-lifetime ``_registry_anchor()``, so no per-org construction
+happens in the worker — the one anchor build on this request path belongs to
+``_org_node``, which stays inline and declared here.
 Its membership scan and per-org Team read stay inline — #2446 records a
 MEASURED thread-dependence for that auth-path registry read class — so
 ``_user_memberships`` and ``_org_node`` REMAIN in
@@ -441,10 +444,12 @@ def test_read_route_does_not_freeze_the_event_loop(client, monkeypatch):
 #
 # BOUNDARY, stated rather than implied (the module header's rule): this pin is
 # MECHANISM-scoped, not request-ownership-scoped. ``_RequestScopedProbe`` above
-# can only own SDKs built on the main thread, and the off-loaded listing builds
-# its SDK inside the worker (that IS the fix), so the switcher cannot be a
-# ``_READ_CASES`` entry and cannot use the tick-counting harness — adding it
-# there would fail with "graph seam was never reached" for the correct
+# can only own SDKs built on the main thread, and the listing's registry read is
+# off-loaded — it runs on a worker thread through the process-lifetime
+# ``_registry_anchor()`` (no construction of its own; in Supabase mode no graph
+# handle at all) — so the switcher cannot be a ``_READ_CASES`` entry and cannot
+# use the tick-counting harness: the blocking read never happens on the loop, so
+# adding it there would fail with "graph seam was never reached" for the correct
 # implementation. ``_RegistryReadProbe`` therefore patches ``_get_registry`` at
 # CLASS level and records, per query, whether the caller had a running loop.
 # That class-level patch also sees daemon-thread sweeps
@@ -688,6 +693,37 @@ def test_org_switcher_listing_is_chunked_and_loses_no_row(client, monkeypatch):
         f"default graph for them (#3718)")
 
 
+def test_org_switcher_listing_never_builds_a_graph_handle_in_supabase_mode(
+        monkeypatch):
+    """#3718: the listing's mode branch must be at the CALL SITE.
+
+    ``_registry_anchor()`` builds (and eagerly attaches) a FalkorDB handle
+    BEFORE ``graph_list`` would consult the mode. Leaving the branch to the
+    callee therefore made ``GET /v1/organizations`` — the first read every
+    client makes — need a live graph server to resolve orgs that live entirely
+    in PostgREST, and raise a raw ``ConnectionError`` (a 500, not the lane's
+    503) when that server was down. Measured on the anchor shape with
+    ``TORTOISE_CONTROL_PLANE=supabase`` and an unreachable graph URI.
+    """
+    import tortoise.hosted_api as ha_mod
+    import tortoise.supabase_control as sb
+
+    monkeypatch.setattr(sb, "is_supabase_enabled", lambda: True)
+    monkeypatch.setattr(sb, "get_control_plane", lambda: "cp")
+    monkeypatch.setattr(
+        sb, "graph_metadata",
+        lambda cp, org_id: [{"graph_id": f"{org_id}-pg"}])
+
+    def _explode():
+        raise AssertionError(
+            "the listing built a FalkorDB registry handle in Supabase mode — "
+            "the mode branch is missing at the call site (#3718)")
+
+    monkeypatch.setattr(ha_mod, "_registry_anchor", _explode)
+
+    assert ha_mod._graph_list_for("org-x") == [{"graph_id": "org-x-pg"}]
+
+
 # ── AST inventory pin: the sync-FalkorDB-on-the-loop class ─────────────────
 #
 # The #2988 pin in `test_health_ready_nonblocking.py` matches one handler and
@@ -814,11 +850,13 @@ _OFFLOADED_ASYNC_BODIES = frozenset({
     "backups_purge", "backups_rebaseline", "backups_drill",
     "backups_drill_scheduled",
     # #3718: the org switcher's LISTING half. Its per-org graph listings build
-    # their SDK inside the ``_graph_offload`` worker (chunked), so no graph seam
-    # and no construction remain on the loop. Its membership scan and per-org
-    # Team read stay INLINE under #2446 (`_user_memberships` / `_org_node` are
-    # in ``_KNOWN_INLINE_HELPER_RESIDUAL``), which is why those two names are
-    # NOT here. Behavioural pins:
+    # NO handle of their own (they reuse the process-lifetime
+    # ``_registry_anchor()``) and the route body has no graph seam, so the set's
+    # "no seam, no construction the scan can see" holds for the right reason.
+    # The one anchor build on this request path is ``_org_node``'s, and that
+    # helper stays INLINE under #2446 — which is why `_user_memberships` /
+    # `_org_node` are in ``_KNOWN_INLINE_HELPER_RESIDUAL`` and NOT here.
+    # Behavioural pins:
     # ``test_org_switcher_listing_runs_off_the_loop`` and
     # ``test_org_switcher_listing_is_chunked_and_loses_no_row``.
     "list_my_orgs",

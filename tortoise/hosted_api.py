@@ -8079,11 +8079,14 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
 
     ``pool`` (#3669, #3773, #7678) selects the worker pool: ``"auth"``
     (default), ``"telemetry"`` for best-effort work, ``"oauth"`` for the
-    attacker-reachable OAuth client-resolution lane, ``"graph"`` for the
-    DATA-PLANE graph helpers (kept off auth capacity; see
-    ``_graph_offload``, which passes its own ``unavailable`` factory), or
-    ``"org"`` (#7678) for the org-create lane's sequential gate reads and
-    provision write.
+    attacker-reachable OAuth client-resolution lane, ``"graph"`` for the graph
+    helpers — data-plane (``_data_sdk``'s connect, ``_check_org_limit``) AND
+    registry reads, since ``_get_registry()`` uses the same connection — kept
+    off auth capacity; see ``_graph_offload``, which passes its own
+    ``unavailable`` factory and is the only sanctioned way onto that pool.
+    Routing a registry read to ``"auth"`` here hands it the sign-in 503 copy
+    (#3718). Or ``"org"`` (#7678) for the org-create lane's sequential gate
+    reads and provision write.
 
     ``unavailable`` (#3669) overrides the fail-closed error FACTORY. The
     auth/REST lane keeps the repo-standard 503 ``control_plane_unavailable``;
@@ -8155,7 +8158,7 @@ def _graph_unavailable() -> HTTPException:
 
 
 async def _graph_offload(fn, *, op: str, timeout: float | None = None):
-    """#3773: run ONE synchronous DATA-PLANE graph helper off the event loop.
+    """#3773: run ONE synchronous graph helper (data-plane OR registry) off loop.
 
     REGISTRY reads belong here too (#3718): ``_get_registry()`` uses the
     existing db connection rather than opening a second one, so a registry
@@ -8172,10 +8175,10 @@ async def _graph_offload(fn, *, op: str, timeout: float | None = None):
     the bound and its worker will be abandoned still holding a pool slot.
 
     A mode-agnostic call keeps THIS lane's bound and ``_graph_unavailable``
-    copy even when the callee short-circuits to PostgREST (``graph_list`` on a
-    Supabase deployment) — one op, one bound, one copy, accepted rather than
-    split per mode, because the call site cannot know the mode without asking
-    the same question the callee asks.
+    copy even when the submitted callable short-circuits to PostgREST (the org
+    switcher's ``_graph_list_for`` on a Supabase deployment): one op, one bound,
+    one copy per call site. The callable itself still branches on the mode
+    first, so that lane never builds a graph handle it will not use.
 
     Thin hosted-side wrapper over the #3498 seam (``_cp_offload`` ->
     ``monitoring.run_control_plane_call``) on the dedicated ``graph`` pool.
@@ -18166,15 +18169,16 @@ async def _user_memberships(user_id: str) -> list[dict]:
         return await _cp_offload(
             lambda: _sb_memberships(get_control_plane(), user_id),
             op="user_memberships")
-    # #3718: the registry lane stays INLINE and declared residual (#2446), for
-    # the same reason `_membership_role` does — this is the auth path's
-    # registry Membership read, the class where off-loading produced a WRONG
-    # ANSWER (an EMPTY member list in
-    # `test_invites_http.py::TestExpiredInviteReMint`), i.e. thread-dependence
-    # that is tracked debt rather than a silent lock. The switcher's LISTING
-    # half is burned down instead (`list_my_orgs`); this read is not, on
-    # purpose, and leaving it out of
-    # `_KNOWN_INLINE_HELPER_RESIDUAL` would hide that.
+    # #3718: this stays INLINE and declared residual (#2446) — the same
+    # registry-Membership read CLASS as the auth path's `_membership_role`,
+    # where off-loading was measured to produce a WRONG ANSWER (an EMPTY member
+    # list in `test_invites_http.py::TestExpiredInviteReMint`). NOTE the
+    # inference: that measurement was taken on `_membership_role`'s read, NOT on
+    # this one — this helper's membership in the class is inferred (same label,
+    # same connection, same thread-visibility question), which is why the
+    # deferral is recorded on #2446 with the measurement quoted and the
+    # inference marked, rather than restated here as measured. Do not off-load
+    # it without reproducing that measurement for THIS query.
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
         "MATCH (m:Membership {user_id:$uid, status:'active'}) "
@@ -18220,12 +18224,28 @@ async def _membership_org(user_id: str, org_id: str) -> dict | None:
 def _graph_list_for(org_id: str) -> list[dict]:
     """One org's graph listing (#3718: blocking registry/PostgREST read).
 
-    Uses the process-lifetime ``_registry_anchor()``, not a fresh
-    ``_make_sdk(namespace="registry")``: the anchor is the documented pattern
-    for registry reads (#1607 — a fresh handle is GC'd with close-on-GC +
-    SHUTDOWN NOSAVE), and it avoids paying ``_ensure_registry_indexes``' 9
+    The MODE BRANCH is here, not left to ``graph_list``'s own short-circuit:
+    in Supabase mode ``_registry_anchor()`` would build (and eagerly attach)
+    a FalkorDB handle BEFORE the callee ever consulted the mode, so the
+    switcher — the first read every client makes — would need a live graph
+    server to resolve orgs that live entirely in PostgREST, and raise a raw
+    ``ConnectionError`` (a 500, not even the lane's 503) when it is down.
+    Reading the mode first keeps the handler's contract ("this endpoint never
+    touches the registry in Supabase mode") true.
+
+    The FalkorDB leg uses the process-lifetime ``_registry_anchor()``, not a
+    fresh ``_make_sdk(namespace="registry")``: the anchor is the documented
+    pattern for registry reads (#1607 — a fresh handle is GC'd with close-on-GC
+    + SHUTDOWN NOSAVE), and it avoids paying ``_ensure_registry_indexes``' 9
     ``CREATE INDEX`` statements once per org while an offload slot is held.
     """
+    from tortoise.supabase_control import (
+        get_control_plane,
+        graph_metadata,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        return graph_metadata(get_control_plane(), org_id)
     return _registry_anchor().graph_list(org_id)
 
 
