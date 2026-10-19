@@ -349,10 +349,14 @@ READY_TIMEOUT = 60
 #: 96-146 s RDB reload the issue records rather than a fast failure.
 CONTAINER_MEMORY_ENV = "FALKORDB_CONTAINER_MEMORY"
 DEFAULT_CONTAINER_MEMORY = "2g"
-#: The docker memory-spec grammar (`512m`, `2g`, `1.5g`, bytes). Validated at
-#: the seam because the value is interpolated into an argv: a typo must fail
-#: loudly here, not as an opaque `docker run` refusal later.
-_MEMORY_SPEC_RE = re.compile(r"[0-9]+(?:\.[0-9]+)?[bkmg]?\Z")
+#: The docker memory-spec grammar (`512m`, `2g`, `1.5g`, `2gb`, `2048mb`,
+#: bytes) — the LONG form (`kb`/`mb`/`gb`) is valid to docker, so refusing it
+#: would refuse the natural spelling of the very remedy these messages print
+#: ("raise FALKORDB_CONTAINER_MEMORY"). Validated at the seam because the value
+#: is interpolated into an argv: a typo must fail loudly here, not as an opaque
+#: `docker run` refusal later. Group 1 is the NUMBER, so positivity is read
+#: without re-deriving the unit (#7357 review).
+_MEMORY_SPEC_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)(?:[bkmg]b?)?\Z")
 
 
 def _spec_is_positive(spec: str) -> bool:
@@ -363,8 +367,8 @@ def _spec_is_positive(spec: str) -> bool:
     about, reached by the one value a reader would type to "disable" the cap.
     The grammar alone accepts it, so the ZERO case is refused separately.
     """
-    number = spec[:-1] if spec[-1] in "bkmg" else spec
-    return float(number) > 0
+    m = _MEMORY_SPEC_RE.match(spec)
+    return bool(m) and float(m.group(1)) > 0
 
 
 def container_memory_cap() -> str:
@@ -495,14 +499,30 @@ def _termination_report(name: str, *, live: bool) -> str:
             f"so check {CONTAINER_MEMORY_ENV} and the host before re-running.)"
         )
     if killed:
+        if oom.lower() == "true":
+            cause = (
+                f"by the kernel under host memory pressure, or by its own "
+                f"cgroup cap ({CONTAINER_MEMORY_ENV}="
+                f"{os.environ.get(CONTAINER_MEMORY_ENV) or DEFAULT_CONTAINER_MEMORY})"
+            )
+            verdict = "KILLED FOR MEMORY"
+        else:
+            # `ExitCode=137` WITHOUT `OOMKilled=true` is a plain SIGKILL, and a
+            # cgroup-cap kill is exactly what DOES set OOMKilled — so naming the
+            # cap here would contradict the evidence in the same sentence.
+            cause = (
+                "by a SIGKILL from outside the container — its own cgroup cap "
+                "did not fire (that sets OOMKilled=true), so the pressure was "
+                "host-level and never reached this container's OOM flag, or "
+                "another process killed it"
+            )
+            verdict = "SIGKILLED (ExitCode=137)"
         return (
-            f" The container was KILLED FOR MEMORY (OOMKilled={oom}, "
+            f" The container was {verdict} (OOMKilled={oom}, "
             f"ExitCode={exit_code}, RestartCount={restarts}): it did not hang, "
-            f"it was terminated — by the kernel under host memory pressure, or "
-            f"by its own cgroup cap ({CONTAINER_MEMORY_ENV}="
-            f"{os.environ.get(CONTAINER_MEMORY_ENV) or DEFAULT_CONTAINER_MEMORY}). "
-            f"Nothing the client retried could have succeeded, and this being "
-            f"invisible is what made it read as a wedged database."
+            f"it was terminated {cause}. Nothing the client retried could have "
+            f"succeeded, and this being invisible is what made it read as a "
+            f"wedged database."
         )
     if restarted:
         return (
@@ -1002,19 +1022,35 @@ def start(port: int | None = None) -> tuple[str, int]:
             )
         _note_uncapped_existing(name)
         if not _wait_ready(name, published):
-            # #7357: `live=True` — the container is Up, so docker's
-            # OOMKilled/ExitCode/RestartCount describe a PREVIOUS termination.
-            # They are reported as history (never as this failure's cause), and
-            # the "may be wedged" advice stays: for a live server that does not
-            # answer, restarting it IS the remedy — the history only says why it
-            # may have died before.
-            raise SystemExit(
-                f"test-lane: {name} is running but never answered PING over its "
-                f"published host port {published} within {READY_TIMEOUT}s — it "
-                f"may be wedged: run `uv run python "
-                f"tools/test_lane.py down` and retry."
-                + _termination_report(name, live=True)
-            )
+            # #7357: `live` is decided by a state read taken HERE, after the
+            # wait — not by the one that opened this branch. `_wait_ready` waits
+            # up to READY_TIMEOUT (60 s) of failed PINGs, and the container can
+            # DIE inside that window (the memory-pressure case this issue is
+            # about). Reporting the stale "it is Up now" would then invert the
+            # diagnosis: docker's OOMKilled/ExitCode would be this failure's
+            # CAUSE while the message insisted they were history.
+            now = container_state(name)
+            live = now == "running"
+            if live:
+                # Up, so docker's facts describe a PREVIOUS termination: they
+                # are reported as history, never as this failure's cause, and
+                # the "may be wedged" advice stays — for a live server that does
+                # not answer, restarting it IS the remedy.
+                head = (
+                    f"test-lane: {name} is running but never answered PING over "
+                    f"its published host port {published} within "
+                    f"{READY_TIMEOUT}s — it may be wedged: run `uv run python "
+                    f"tools/test_lane.py down` and retry."
+                )
+            else:
+                head = (
+                    f"test-lane: {name} STOPPED while waiting for its first PING "
+                    f"over its published host port {published} (within "
+                    f"{READY_TIMEOUT}s; docker now reports its state as {now!r}), "
+                    f"so this is a death, not a slow start — run `uv run python "
+                    f"tools/test_lane.py down` and retry."
+                )
+            raise SystemExit(head + _termination_report(name, live=live))
         return name, published
     if state == "unknown":
         raise SystemExit(

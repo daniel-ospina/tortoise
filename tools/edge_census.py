@@ -530,7 +530,10 @@ _PROBE_LABEL = "edge-census-probe=1"
 #: HOST and take the canonical graph instance down with it.
 CONTAINER_MEMORY_ENV = "FALKORDB_CONTAINER_MEMORY"
 DEFAULT_CONTAINER_MEMORY = "2g"
-_MEMORY_SPEC_RE = re.compile(r"[0-9]+(?:\.[0-9]+)?[bkmg]?\Z")
+#: Group 1 is the NUMBER: docker accepts the LONG unit forms too (`2gb`,
+#: `2048mb`), so refusing them would refuse the natural spelling of the remedy
+#: these messages print (#7357 review).
+_MEMORY_SPEC_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)(?:[bkmg]b?)?\Z")
 
 
 def _spec_is_positive(spec: str) -> bool:
@@ -539,8 +542,8 @@ def _spec_is_positive(spec: str) -> bool:
     `0` (and `0g`, `0.0g`, …) means NO limit to docker — the uncapped container
     #7357 is about — so the grammar alone is not enough.
     """
-    number = spec[:-1] if spec[-1] in "bkmg" else spec
-    return float(number) > 0
+    m = _MEMORY_SPEC_RE.match(spec)
+    return bool(m) and float(m.group(1)) > 0
 
 
 def container_memory_cap() -> str:
@@ -610,12 +613,23 @@ def _memory_kill_report(container: str) -> str:
     oom, exit_code = parts
     if oom.lower() != "true" and exit_code != "137":
         return ""
+    if oom.lower() == "true":
+        # A cgroup-cap kill sets OOMKilled=true, so naming the cap here is
+        # exactly what the evidence shows.
+        return (
+            f" — it was KILLED FOR MEMORY (OOMKilled={oom}, "
+            f"ExitCode={exit_code}), not wedged: the host was out of memory or "
+            f"the cgroup cap ({CONTAINER_MEMORY_ENV}="
+            f"{os.environ.get(CONTAINER_MEMORY_ENV) or DEFAULT_CONTAINER_MEMORY}) "
+            f"was reached. Raise the cap for a larger n rather than re-running"
+        )
     return (
-        f" — it was KILLED FOR MEMORY (OOMKilled={oom}, ExitCode={exit_code}), "
-        f"not wedged: the host was out of memory or the cgroup cap "
-        f"({CONTAINER_MEMORY_ENV}="
+        f" — it was SIGKILLED (OOMKilled={oom}, ExitCode={exit_code}), not "
+        f"wedged: its own cgroup cap ({CONTAINER_MEMORY_ENV}="
         f"{os.environ.get(CONTAINER_MEMORY_ENV) or DEFAULT_CONTAINER_MEMORY}) "
-        f"was reached. Raise the cap for a larger n rather than re-running"
+        f"did NOT fire — that sets OOMKilled=true — so the signal came from "
+        f"outside the container, most likely host-level pressure. Check free "
+        f"memory before re-running with a smaller n"
     )
 
 #: The engine the probe container runs. It used to be a floating

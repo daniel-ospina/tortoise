@@ -224,8 +224,13 @@ FALKORDB_MEMORY="$(printf '%s' "$FALKORDB_MEMORY" | tr '[:upper:]' '[:lower:]')"
 # docker's spelling for NO LIMIT — the uncapped container #7357 is about, via the
 # one value a reader would type to "disable" the cap. (No backticks in this
 # string: inside double quotes bash would run the token as a command.)
-if ! printf '%s' "$FALKORDB_MEMORY" | grep -Eq '^[0-9]+(\.[0-9]+)?[bkmg]?$' \
-   || ! awk -v v="${FALKORDB_MEMORY%[bkmg]}" 'BEGIN { exit (v + 0 > 0) ? 0 : 1 }'; then
+#
+# The grammar accepts docker's LONG unit forms too (`kb`/`mb`/`gb`): refusing
+# `2gb` would refuse the natural spelling of the remedy this action's kill
+# message prints (raise FALKORDB_CONTAINER_MEMORY), while docker accepts it
+# without complaint (#7357 review).
+if ! printf '%s' "$FALKORDB_MEMORY" | grep -Eq '^[0-9]+(\.[0-9]+)?([bkmg]b?)?$' \
+   || ! awk -v v="$FALKORDB_MEMORY" 'BEGIN { sub(/[bkmg]b?$/, "", v); exit (v + 0 > 0) ? 0 : 1 }'; then
   annotate_error "FALKORDB_CONTAINER_MEMORY=$FALKORDB_MEMORY is not a POSITIVE docker memory spec (e.g. 512m, 2g; 0 means UNLIMITED) — refusing to start an UNCAPPED container"
   exit 1
 fi
@@ -308,7 +313,8 @@ start() {
 # termination_note <name> — a suffix explaining why the health gate failed
 # (#7357), or "" when there is nothing measured to say. Three cases, all from
 # docker itself and never inferred from the connection error:
-#   * OOMKilled/ExitCode 137  -> KILLED FOR MEMORY (kernel, or this cgroup cap);
+#   * OOMKilled=true          -> KILLED FOR MEMORY (host pressure, or this cap);
+#   * ExitCode 137 alone      -> SIGKILLED from OUTSIDE (no OOM event inside);
 #   * docker's own "No such object" -> the container no longer EXISTS, so it
 #     crashed or was killed rather than starting slowly;
 #   * any other inspect failure -> its termination could not be READ, so the
@@ -333,8 +339,13 @@ termination_note() {
   fi
   oom="${facts%% *}"
   code="${facts##* }"
-  if [ "$oom" = "true" ] || [ "$code" = "137" ]; then
-    printf '%s' " — it was KILLED FOR MEMORY (OOMKilled=$oom, ExitCode=$code), not unhealthy: raise FALKORDB_CONTAINER_MEMORY (now $FALKORDB_MEMORY) or reduce the job's graph load"
+  if [ "$oom" = "true" ]; then
+    printf '%s' " — it was KILLED FOR MEMORY (OOMKilled=$oom, ExitCode=$code), not unhealthy: this container's own cgroup cap (now $FALKORDB_MEMORY) or host-level pressure ended it, so raise FALKORDB_CONTAINER_MEMORY or reduce the job's graph load"
+  elif [ "$code" = "137" ]; then
+    # 137 WITHOUT OOMKilled=true is a plain SIGKILL: the cgroup cap sets
+    # OOMKilled=true, so naming the cap here would contradict this sentence's
+    # own evidence (#7357 review).
+    printf '%s' " — it was SIGKILLED (OOMKilled=$oom, ExitCode=$code), not unhealthy: this container's own cgroup cap did NOT fire (that sets OOMKilled=true), so the signal came from outside it — most likely host-level memory pressure. Check the runner's free memory before raising FALKORDB_CONTAINER_MEMORY (now $FALKORDB_MEMORY)"
   fi
 }
 

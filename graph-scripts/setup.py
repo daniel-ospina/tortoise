@@ -727,12 +727,15 @@ def _container_memory() -> str:
     """
     raw = (os.environ.get(CONTAINER_MEMORY_ENV)
            or DEFAULT_CONTAINER_MEMORY).strip().lower()
-    number = raw[:-1] if raw[-1:] in "bkmg" else raw
-    if not re.match(r"[0-9]+(?:\.[0-9]+)?[bkmg]?\Z", raw):
+    # Group 1 is the NUMBER: docker accepts the LONG unit forms too (`2gb`,
+    # `2048mb`), so the seam must not refuse a spelling docker itself accepts
+    # (#7357 review) — this message is what tells an operator to raise the cap.
+    m = re.match(r"([0-9]+(?:\.[0-9]+)?)(?:[bkmg]b?)?\Z", raw)
+    if not m:
         _fail(f"{CONTAINER_MEMORY_ENV}={raw!r} is not a docker memory spec "
               f"(e.g. 512m, 2g, 1.5g) — refusing to start the container with "
               f"an unparseable cap (default {DEFAULT_CONTAINER_MEMORY})")
-    if not number or float(number) <= 0:
+    if float(m.group(1)) <= 0:
         _fail(f"{CONTAINER_MEMORY_ENV}={raw!r} is a ZERO cap, which docker "
               f"reads as UNLIMITED — refusing to start an uncapped container "
               f"(default {DEFAULT_CONTAINER_MEMORY})")

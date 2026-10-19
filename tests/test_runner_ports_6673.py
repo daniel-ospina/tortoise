@@ -1722,18 +1722,24 @@ def test_the_cap_grammar_is_the_SAME_at_every_seam(tmp_path, monkeypatch):
     from tools import test_lane as tl
 
     setup = _load_setup_module()
-    for i, good in enumerate(("2G", " 2g ", "\t2G\t")):
+    for i, good in enumerate(("2G", " 2g ", "\t2G\t", "2gb", "2048mb")):
         monkeypatch.setenv(MEMORY_CAP_ENV, good)
-        assert tl.container_memory_cap() == "2g", good
-        assert ec.container_memory_cap() == "2g", good
-        assert setup._container_memory() == "2g", good
+        expected = good.strip().lower()   # `.strip().lower()`, at every seam
+        assert tl.container_memory_cap() == expected, good
+        assert ec.container_memory_cap() == expected, good
+        assert setup._container_memory() == expected, good
         result, log = _run_ci_provision(tmp_path / f"ok{i}", mode="healthy",
                                         cap=good)
         out = result.stdout + result.stderr
         assert result.returncode == 0, (good, out)
         line = next(ln for ln in log.read_text().splitlines()
                     if ln.startswith("run "))
-        assert "--memory 2g --memory-swap 2g" in line, (good, line)
+        # `2gb`/`2048mb` are docker-valid LONG units, so they reach the argv as
+        # written (docker normalises them); the short forms normalise to `2g`
+        # (#7357 review). The point pinned here is that ALL FOUR seams accept
+        # the same set — never that they rewrite the value to one spelling.
+        expected = good.strip().lower()
+        assert f"--memory {expected} --memory-swap {expected}" in line, (good, line)
 
     for i, bad in enumerate(("2 g", "2\tg")):
         monkeypatch.setenv(MEMORY_CAP_ENV, bad)
@@ -1771,6 +1777,67 @@ def test_the_ci_provision_refuses_a_zero_cap(tmp_path):
     )
 
 
+#: Docker memory-spec unit multipliers, exactly the spellings docker accepts
+#: (`b`, `k`/`kb`, `m`/`mb`, `g`/`gb`).
+_MEMORY_UNITS = {
+    "": 1, "b": 1,
+    "k": 1 << 10, "kb": 1 << 10,
+    "m": 1 << 20, "mb": 1 << 20,
+    "g": 1 << 30, "gb": 1 << 30,
+}
+
+
+def _memory_bytes(spec):
+    """Bytes for a literal docker memory spec, or None for anything else.
+
+    #7357 review: `2g` and `2048m` are the SAME 2 GiB (measured: `docker create
+    --memory 2048m --memory-swap 2048m` -> Memory=2147483648), so comparing the
+    strings turns one correct configuration into a false red whose message
+    misstates the condition. A compose INTERPOLATION (`${VAR:-2g}`) is not a
+    literal and returns None — that case is settled by raw equality instead, so
+    the two keys must read the same expression and the seams' own remedy lever
+    keeps working here.
+    """
+    m = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*([bkmg]b?)?\s*",
+                     str(spec), re.IGNORECASE)
+    if not m:
+        return None
+    return int(float(m.group(1)) * _MEMORY_UNITS[(m.group(2) or "").lower()])
+
+
+def _compose_falkordb_gaps(root, globs):
+    """(files, examined, uncapped, swap_mismatch) for compose FalkorDB services.
+
+    Split out so the population and the two failure kinds are testable against a
+    temp tree (#7357 review), not only against this checkout.
+    """
+    files = sorted({p for g in globs for p in root.glob(g) if p.is_file()})
+    checked = 0
+    uncapped = []
+    swap_mismatch = []
+    for path in files:
+        data = yaml.safe_load(path.read_text()) or {}
+        for name, svc in (data.get("services") or {}).items():
+            svc = svc or {}
+            if "falkordb" not in str(svc.get("image", "")).lower():
+                continue
+            checked += 1
+            label = f"{path.relative_to(root)}:{name}"
+            limit = (((svc.get("deploy") or {}).get("resources") or {})
+                     .get("limits") or {}).get("memory")
+            if not limit:
+                uncapped.append(label)
+                continue
+            swap = svc.get("memswap_limit")
+            limit_b, swap_b = _memory_bytes(limit), _memory_bytes(swap)
+            same = limit_b is not None and limit_b == swap_b
+            if not same and str(swap).strip() != str(limit).strip():
+                swap_mismatch.append(
+                    f"{label} (memswap_limit={swap!r}, memory={limit!r})"
+                )
+    return files, checked, uncapped, swap_mismatch
+
+
 def test_every_compose_falkordb_has_a_memory_limit():
     """The invariant the cap comments claim: NO compose service in this repo
     starts a FalkorDB without a `memory` AND an equal `memswap_limit`.
@@ -1792,44 +1859,100 @@ def test_every_compose_falkordb_has_a_memory_limit():
     `<main>/.worktrees/<lane>`), would skip EVERY file: measured, the guard was
     green in a worktree against an uncapped `apps/graph-viz`.
     """
-    compose_files = sorted({p for g in COMPOSE_GLOBS for p in ROOT.glob(g)
-                            if p.is_file()})
-    assert compose_files, (
-        f"no compose file matched {COMPOSE_GLOBS} — the guard is vacuous"
-    )
-    checked = 0
-    missing = []
-    for path in compose_files:
-        data = yaml.safe_load(path.read_text()) or {}
-        for name, svc in (data.get("services") or {}).items():
-            svc = svc or {}
-            if "falkordb" not in str(svc.get("image", "")).lower():
-                continue
-            checked += 1
-            limit = (((svc.get("deploy") or {}).get("resources") or {})
-                     .get("limits") or {}).get("memory")
-            if not limit:
-                missing.append(f"{path.relative_to(ROOT)}:{name}")
-                continue
-            # #7357 review F5: memory alone leaves docker's 2x SWAP default,
-            # which is the minutes-long reload this cap exists to avoid — so
-            # the compose files must pin `memswap_limit` to the same value.
-            # Compose INTERPOLATION is compared as written, so the two keys must
-            # read the same `${FALKORDB_CONTAINER_MEMORY:-…}` expression: that
-            # is what makes the seams' own remedy lever (`raise
-            # FALKORDB_CONTAINER_MEMORY`) work here as well.
-            swap = svc.get("memswap_limit")
-            if str(swap).strip() != str(limit).strip():
-                missing.append(
-                    f"{path.relative_to(ROOT)}:{name} (memswap_limit="
-                    f"{swap!r}, memory={limit!r})"
-                )
+    files, checked, uncapped, swap_mismatch = _compose_falkordb_gaps(
+        ROOT, COMPOSE_GLOBS)
+    assert files, f"no compose file matched {COMPOSE_GLOBS} — the guard is vacuous"
     assert checked, (
-        f"not one FalkorDB service was examined across {len(compose_files)} "
-        f"compose file(s) — the guard no longer covers what it exists for"
+        f"not one FalkorDB service was examined across {len(files)} compose "
+        f"file(s) — the guard no longer covers what it exists for"
     )
-    assert not missing, (
+    assert not uncapped, (
         "these compose FalkorDB services have no kernel memory limit, so one "
         "runaway instance can swap the host and starve the canonical graph "
-        f"(#7357): {missing}"
+        f"(#7357): {uncapped}"
+    )
+    assert not swap_mismatch, (
+        "these compose FalkorDB services pin a memory limit but NOT an equal "
+        "memswap_limit, so docker's 2x swap default applies — a swapping "
+        f"FalkorDB is a minutes-long RDB reload, not a fast death (#7357): "
+        f"{swap_mismatch}"
+    )
+
+
+def test_the_compose_guard_reads_bytes_not_spelling(tmp_path):
+    """#7357 review: `memory: 2048m` with `memswap_limit: 2g` IS a correct
+    configuration — the guard used to fail it as "no kernel memory limit", a
+    false red that also misstated the condition. Bytes are compared, and the two
+    failure kinds have their own messages: a MISSING cap is not a SWAP mismatch.
+    """
+    def _write(memory, swap):
+        d = tmp_path / "app"
+        d.mkdir(parents=True, exist_ok=True)
+        body = ["services:", "  falkordb:",
+                "    image: falkordb/falkordb-server:v4.20.6"]
+        if memory is not None:
+            body += ["    deploy:", "      resources:", "        limits:",
+                     f'          memory: "{memory}"']
+        if swap is not None:
+            body += [f'    memswap_limit: "{swap}"']
+        (d / "docker-compose.yml").write_text("\n".join(body) + "\n")
+
+    globs = ("app/docker-compose*.yml",)
+    _write("2048m", "2g")
+    _files, checked, uncapped, mismatch = _compose_falkordb_gaps(tmp_path, globs)
+    assert (checked, uncapped, mismatch) == (1, [], []), (
+        f"2g and 2048m are the same 2 GiB; a byte comparison must accept "
+        f"them: {uncapped} {mismatch}"
+    )
+
+    _write("512m", "1g")
+    _files, _checked, uncapped, mismatch = _compose_falkordb_gaps(tmp_path, globs)
+    assert not uncapped and mismatch, (uncapped, mismatch)
+
+    _write(None, "512m")
+    _files, _checked, uncapped, mismatch = _compose_falkordb_gaps(tmp_path, globs)
+    assert uncapped and not mismatch, (
+        f"an absent cap must be reported as an absent cap, not as a swap "
+        f"mismatch: {uncapped} {mismatch}"
+    )
+
+
+def test_the_compose_guard_keeps_a_shared_interpolation_seam(tmp_path):
+    """The remedy these messages print is `raise FALKORDB_CONTAINER_MEMORY`, so
+    a compose service must be able to take BOTH keys from that ONE env var
+    (`${FALKORDB_CONTAINER_MEMORY:-2g}`). An interpolation is not a literal, so
+    the comparison falls back to raw equality — two different expressions (even
+    if they resolve to the same bytes) are a real mismatch, because the operator
+    raising the env var would cap memory and swap differently."""
+    d = tmp_path / "app"
+    d.mkdir()
+    (d / "docker-compose.yml").write_text(
+        "services:\n"
+        "  falkordb:\n"
+        "    image: falkordb/falkordb-server:v4.20.6\n"
+        "    deploy:\n"
+        "      resources:\n"
+        "        limits:\n"
+        '          memory: "${FALKORDB_CONTAINER_MEMORY:-2g}"\n'
+        '    memswap_limit: "${FALKORDB_CONTAINER_MEMORY:-2g}"\n'
+    )
+    _files, _checked, uncapped, mismatch = _compose_falkordb_gaps(
+        tmp_path, ("app/docker-compose*.yml",))
+    assert (uncapped, mismatch) == ([], []), (uncapped, mismatch)
+
+    (d / "docker-compose.yml").write_text(
+        "services:\n"
+        "  falkordb:\n"
+        "    image: falkordb/falkordb-server:v4.20.6\n"
+        "    deploy:\n"
+        "      resources:\n"
+        "        limits:\n"
+        '          memory: "${FALKORDB_CONTAINER_MEMORY:-2g}"\n'
+        '    memswap_limit: "2g"\n'
+    )
+    _files, _checked, uncapped, mismatch = _compose_falkordb_gaps(
+        tmp_path, ("app/docker-compose*.yml",))
+    assert mismatch, (
+        "raising FALKORDB_CONTAINER_MEMORY must move BOTH keys, or the cap and "
+        f"the swap diverge: {mismatch}"
     )
