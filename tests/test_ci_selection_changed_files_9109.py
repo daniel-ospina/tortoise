@@ -16,8 +16,9 @@ documented inline invocation — `config/ci-surfaces.yml` documents several
 "the argument is an existing file" would refuse all of them. So these pins are:
 
   * the SELECTION is unchanged for every invocation (stdout byte-identical);
-  * the diagnostic fires exactly when the FULL matrix came from unknown paths,
-    names them, and offers the stdin remedy;
+  * the diagnostic fires exactly when `select()` RECORDED a fail-closed cause —
+    naming the unknown paths, or the blast-radius cause (a shared module, a
+    linter policy) — and offers the stdin remedy for a list file;
   * a documented single-path inline invocation stays SILENT — that is the
     discriminator the refusal proposal would have destroyed.
 
@@ -242,30 +243,47 @@ def test_an_unknown_path_that_is_not_a_file_still_says_why_without_the_list_hint
 
 
 def test_a_shared_module_full_selection_does_not_claim_unknown_paths(tmp_path):
-    """FULL from a SHARED_MODULE is not a mistake and must stay quiet — the
-    diagnostic is keyed on the REASON recorded by `select()`, never inferred
-    from `full == true`, which several legitimate causes produce."""
+    """FULL from a SHARED_MODULE names THAT cause, and never borrows the
+    unknown-path explanation.
+
+    The diagnostic is keyed on the reasons `select()` RECORDED, never inferred
+    from `full == true`, which several legitimate causes produce. A shared
+    module is one of them: the file is read by the whole matrix, so the FULL is
+    its blast radius — the "(NOT a statement that this diff touches
+    everything)" reading is suppressed, because for this path it really does.
+
+    `tortoise/projection/__init__.py` is the case worth pinning HERE because it
+    is a `SHARED_MODULES` entry the `tortoise/` core fallback also claims, so
+    `unknown` is empty and the cause is the only reason recorded. A shared
+    module the surface patterns do NOT claim is
+    `test_a_shared_module_that_no_pattern_claims_is_not_called_unknown`.
+    """
     proc = _run(["--changed-files", "tortoise/projection/__init__.py",
                  "--event", "pull_request"], cwd=tmp_path)
 
     assert proc.returncode == 0, proc.stderr
     assert '"full": true' in proc.stdout, proc.stdout
+    assert "SHARED_MODULES path changed" in proc.stderr, (
+        f"a shared-module FULL selection must NAME that cause: {proc.stderr}")
     assert "unknown to every SOURCE_PATTERN" not in proc.stderr, (
         f"a shared-module FULL selection must not be explained as unknown: "
         f"{proc.stderr}")
+    assert "NOT a statement that this diff touches everything" not in proc.stderr, (
+        f"a shared module's blast radius IS the matrix, so the inverted claim "
+        f"must not be printed: {proc.stderr}")
 
 
 def test_a_shared_module_beside_an_unknown_path_still_names_the_unknown(tmp_path):
     """The diagnostic names the UNKNOWN PATH even when the FULL verdict is
     over-determined (#9109 review P2).
 
-    `SHARED_MODULES` and a linter-policy path each return `_full_selection` on
+    `SHARED_MODULES` and a linter-policy file each make the selection FULL on
     their own, and they used to return BEFORE the unknown-path scan ran — so a
     changed set carrying both a shared module and an unrecognised path came back
     FULL and SILENT, and the one path the caller needed to be told about was the
-    one nothing mentioned. Every cause is now recorded, so the unknown paths are
-    still listed. Pinned on both over-determining causes, because they are two
-    separate returns.
+    one nothing mentioned. Every cause is recorded now, so the unknown paths are
+    still listed alongside the blast-radius cause. Pinned on both causes because
+    they are computed from different predicates and could regress independently.
     """
     for over_determining in ("tortoise/projection/__init__.py",
                              ".markdownlint.json"):
@@ -307,3 +325,48 @@ def test_a_shared_module_that_no_pattern_claims_is_not_called_unknown(tmp_path):
             f"{shared} IS a statement that the diff touches everything — the "
             f"inverted claim must not be printed for it: {proc.stderr}")
         assert "FULL matrix because" in proc.stderr, proc.stderr
+
+
+def test_explain_records_the_reasons_list_for_every_fail_closed_cause():
+    """`explain`'s recorded contract, pinned so a caller cannot be surprised.
+
+    The documented shape is `{"reasons": [...]}` — EVERY cause of this call's
+    FULL matrix, in scan order — plus the `reason`/`unknown` pair ONLY for the
+    unknown-path arm. The distinction is load-bearing: a legitimate FULL
+    selection with no unknown path at all (a shared module the patterns also
+    claim, a linter-policy file) records `reasons` and NOTHING else, so a caller
+    that reads `explain["reason"]` as soon as `explain` is non-empty would raise
+    `KeyError` on the most ordinary dependency-bump diff.
+    """
+    from tools import ci_selection as cs
+
+    manifest = cs.load_manifest()
+
+    def _explain(*paths: str) -> dict:
+        recorded: dict = {}
+        cs.select(list(paths), "pull_request", manifest, explain=recorded)
+        return recorded
+
+    assert _explain("tortoise/projection/__init__.py") == {
+        "reasons": ["shared-module"]}, (
+        "a SHARED_MODULES path the surface patterns also claim records the cause "
+        "and nothing else — no `reason`, no `unknown`")
+    # `_is_linter_policy_path` claims by BASENAME under any surface prefix, so
+    # this arm needs no file on disk. The only TRACKED linter-policy file
+    # (`.markdownlint-cli2.jsonc`) is unknown to every SOURCE_PATTERN as well, so
+    # it cannot exercise the cause in isolation; the unknown arm is below.
+    assert _explain("battery/.markdownlint.json") == {
+        "reasons": ["linter-policy"]}
+
+    unknown = _explain("tools/ci_selection.py")
+    assert unknown["reasons"] == ["unknown-paths"]
+    assert unknown["reason"] == "unknown-paths"
+    assert unknown["unknown"] == ["tools/ci_selection.py"]
+
+    over_determined = _explain("pyproject.toml")
+    assert over_determined["reasons"] == ["shared-module", "unknown-paths"], (
+        "every cause is recorded, and the blast-radius cause comes first")
+    assert over_determined["reason"] == "unknown-paths"
+
+    assert _explain("tortoise/audit.py") == {}, (
+        "a selection that did not fail closed has no reason to record")

@@ -1949,19 +1949,31 @@ def select(changed_files: list[str], event: str, manifest: dict,
     """Selection for a changed-path list.
 
     *explain*, when passed a dict, is filled with WHY a fail-closed answer was
-    chosen — `{"reason": "unknown-paths", "unknown": [...]}` — so `main()` can
-    say so on stderr. It is a SIDE CHANNEL on purpose: the returned dict is the
-    artifact schema (`.ci-selection/selection.json`) and is asserted verbatim up
-    and down this suite, so a reason field inside it would be a migration; and
-    the reason must not be re-derived by the caller, which is how the
-    diagnostic would drift from the decision it describes (#9109). It is
-    CLEARED on entry, so a caller may reuse one dict across calls.
+    chosen, so `main()` can say it on stderr. The contract is:
+
+        {"reasons": [<cause>, ...]}
+
+    — EVERY cause of THIS call's FULL matrix, in scan order — plus
+    `"reason": "unknown-paths"` and `"unknown": [...]` ONLY when
+    `"unknown-paths"` is among them. `reasons` is the authoritative field: a
+    legitimate FULL selection with no unknown path at all (a `SHARED_MODULES`
+    entry the surface patterns also claim, a linter-policy file) records
+    `reasons` and nothing else, so a caller that reads `explain["reason"]` once
+    `explain` is non-empty raises `KeyError` on the most ordinary
+    dependency-bump diff. Read `reasons`.
+
+    It is a SIDE CHANNEL on purpose: the returned dict is the artifact schema
+    (`.ci-selection/selection.json`) and is asserted verbatim up and down this
+    suite, so a reason field inside it would be a migration; and the reason must
+    not be re-derived by the caller, which is how the diagnostic would drift
+    from the decision it describes (#9109). It is CLEARED on entry, so a caller
+    may reuse one dict across calls.
     """
     if explain is not None:
-        # A caller may reuse one dict across calls; the reason it holds is only
-        # ever about THIS call (review P3). Nothing sets a reason outside the
-        # unknown branch, so clearing here makes "empty unless a fail-closed
-        # reason was recorded" true by construction.
+        # A caller may reuse one dict across calls, and what it holds is only
+        # ever about THIS call — so empty it here. That makes "empty unless THIS
+        # call failed closed, in which case it names every cause" true by
+        # construction, whatever a previous call recorded.
         explain.clear()
     slow = set(manifest.get("slow_files", []))
     # #1371: slow files run ONLY in the test-slow job — never in the fast
@@ -2078,6 +2090,20 @@ def select(changed_files: list[str], event: str, manifest: dict,
     # `.github/workflows/…` files) are genuinely unknown to the surface patterns,
     # so the mislabel is reachable from the most ordinary legit-full diff.
     shared_cause = any(c.startswith(SHARED_MODULES) for c in changed)
+    # Linter POLICY is a FULL cause of its own (#7435 review P1), recorded here
+    # rather than in a return of its own: a `.markdownlint*`/`.lycheeignore`/
+    # `lychee.toml` file changes the linting OUTCOME of every doc beneath it, so
+    # the selection must be the WHOLE matrix — the only selection containing
+    # `tests/test_docs_lint_baseline.py`, whose committed-policy pin is what
+    # makes a config edit move the snapshot. `_keep_changed` only stops such a
+    # path being DROPPED as an unknown prefix; it does NOT stop the match loop
+    # above CLAIMING it. Measured: with the claim alone,
+    # `battery/.markdownlint.json` -> surfaces=['battery'] and
+    # `tools/longmem_eval/.markdownlint.json` -> ['eval'], and neither leg runs
+    # the pin — so the policy edit landed with the snapshot unmoved, which is
+    # the very hole the pin exists to close. A shared module means the same
+    # thing ("this path's blast radius is not its own directory"), and BOTH are
+    # fulfilled by the single `if reasons:` return below.
     lint_cause = any(_is_linter_policy_path(c) for c in changed)
     reasons: list[str] = []
     if shared_cause:
@@ -2103,25 +2129,11 @@ def select(changed_files: list[str], event: str, manifest: dict,
                 explain["unknown"] = list(unknown)
         return _full_selection(manifest, slow)
 
-    # Shared module -> full
-    if shared_cause:
-        return _full_selection(manifest, slow)
-
-    # Linter POLICY -> full (#7435 review P1). A `.markdownlint*`/`.lycheeignore`/
-    # `lychee.toml` file changes the linting OUTCOME of every doc beneath it, so
-    # the selection must be the WHOLE matrix — the only selection containing
-    # `tests/test_docs_lint_baseline.py`, whose committed-policy pin is what makes
-    # a config edit move the snapshot.
-    #
-    # `_keep_changed` above only stops such a path being DROPPED as an unknown
-    # prefix; it does NOT stop the match loop in the scan above CLAIMING it. Measured: with
-    # the claim alone, `battery/.markdownlint.json` → surfaces=['battery'] and
-    # `tools/longmem_eval/.markdownlint.json` → ['eval'], and neither leg runs the
-    # pin — so the policy edit landed with the snapshot unmoved, which is the very
-    # hole the pin exists to close. Placed with SHARED_MODULES because both mean
-    # "this path's blast radius is not its own directory".
-    if lint_cause:
-        return _full_selection(manifest, slow)
+    # No separate `SHARED_MODULES` / linter-policy returns here: both causes were
+    # appended to `reasons` above, so the `if reasons:` return already answered
+    # for them. Two such branches used to sit right here and were unreachable —
+    # `reasons` is non-empty exactly when one of those causes holds — so they
+    # read as live decisions when the decision had already been taken.
 
     # Test-file changes select their owning surface
     for c in changed:
