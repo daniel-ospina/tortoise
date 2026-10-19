@@ -26,7 +26,7 @@ the one thing the old T was really protecting:
 Three primary arms on the SAME C2-shaped pool (item-bound 40, the wave's
 window), plus two variant arms measured on it too —
 ``post_2978_assembly_value_marked`` (value-critical claims marked, which makes
-the value-FIRST ORDERING measurable — retention is already 4/4 unmarked) and
+the value-MARK CENSUS measurable — retention is already 4/4 unmarked) and
 ``provenance_free_assembly`` (provenance stripped, the product ask-lane shape —
 §SCOPE NOTE). Five arm records in the receipt, not three:
 
@@ -40,6 +40,13 @@ the value-FIRST ORDERING measurable — retention is already 4/4 unmarked) and
   ``post_2978_assembly``  ``assemble_context`` fed by
                         ``package_evidence_pool`` (the A6 arm,
                         ``TORTOISE_LME_EVIDENCE_ASSEMBLY``).
+
+⚠️ ORDERING is not observable in this receipt (D3 #9092): the hit TYPE picks
+the package tier and the #1763/#1945 value mark only breaks ties INSIDE a
+tier, while ``_slot_census`` records counts and text containment — never an
+id order. So these arms measure the mark CENSUS and the slot bound, not which
+package led the window; the ordering contract is pinned hermetically in
+``tests/test_evidence_assembly.py``.
 
 WHAT IT IS NOT
 --------------
@@ -251,8 +258,11 @@ _OTHER_STATEMENTS = (
     ("o8", "the user's laptop is a 14-inch model", "s9"),
 )
 
-#: The value-first mark provider the EVAL injects
-#: (``evidence.mark_for_question``): the precise classes drive the ordering.
+#: The mark provider the EVAL injects (``evidence.mark_for_question``): the
+#: precise classes are what the #1763/#1945 classes name. What this pool
+#: MEASURES is the value-mark CENSUS (``value_first_packages``) — under D3
+#: (#9092) the mark is a within-tier tiebreak, NOT the ordering key (the hit
+#: type is), and this order-blind receipt cannot see order at all.
 _VALUE_MARK_CLASSES = ("answer_string", "verbatim", "raw_chunk")
 
 
@@ -476,8 +486,10 @@ def build_c2_pool() -> tuple[list[dict[str, Any]], dict[str, Any]]:
 
 def _value_mark_provider(h: dict) -> dict[str, bool]:
     """The eval's read-time mark provider, reduced to what this pool needs: the
-    value-critical statements carry the precise (verbatim) class — the #1763/
-    #1945 value-first tier the assembly orders on."""
+    value-critical statements carry the precise (verbatim) classes — the #1763/
+    #1945 value-mark CENSUS this arm reports. ⚠️ D3 (#9092): the mark does NOT
+    pick the package tier (the hit type does) — it only breaks ties inside a
+    tier, so this provider cannot be read as "the ordering" any more."""
     marks = {cls: False for cls in _VALUE_MARK_CLASSES}
     marks["source_session"] = bool(h.get("has_answer"))
     if h.get("_bound_fact") == FACT_VALUE:
@@ -585,6 +597,15 @@ def measure() -> dict[str, Any]:
     # no-regression leg: a duplicate-free, provenance-bearing pool must come
     # back BYTE-IDENTICAL (same ids, same order) from the arm, so flipping it
     # ON cannot regress a single-evidence question.
+    #
+    # ⚠️ SCOPE LIMIT (D3 #9092): this pool is built from ``_point`` only, so
+    # every hit is a STATEMENT and ``ids_identical`` is trivially true — the
+    # control cannot observe the hit-type REGROUP (which under D3 reorders a
+    # pool that ranks a raw chunk above a statement, by design). It therefore
+    # measures "statement-only pools are untouched", not the tier-scoped
+    # no-regression clause. Widening it needs a chunk ranked ABOVE a
+    # statement, which turns ``ids_identical`` False by design and requires
+    # re-cutting the frozen receipt — tracked in #9114.
     clean = [
         _point(
             f"c{i}",

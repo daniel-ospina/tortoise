@@ -18417,12 +18417,14 @@ class TortoiseSDK:
         for pid in point_ids:
             p = self.get_point(pid)
             before[pid] = p.get("confidence", 0.5) if p else 0.5
-        # #344: conscious opt-out from the fail-closed gate — the gate is
-        # graph-wide (no anchors/factors are passed, so it would audit every
-        # evidence point); this run's epistemic content is fully carried by
-        # the Beta(10,1) evidence prior on the decision Point; the approval
-        # path deliberately opts out (never a silent swallow; the gate stays
-        # on for every explicit compute_confidence()).
+        # #344: conscious opt-out from the fail-closed gate. #7739 scoped the
+        # no-arg gate to the dirty roots and their closure (it is no longer
+        # graph-wide), and this call still passes no anchors/factors — but the
+        # opt-out stands on its own reason, not on the old scope: this run's
+        # epistemic content is fully carried by the Beta(10,1) evidence prior
+        # on the decision Point, so there is no uncalibrated evidence input to
+        # demand. Deliberate, never a silent swallow, and it does not relax the
+        # gate for any other caller: each one opts out explicitly or not at all.
         self.compute_confidence(evidence={decision_id: (10, 1)},
                                 require_calibration=False)
         deltas = {}
@@ -20186,13 +20188,18 @@ class TortoiseSDK:
                   mode="full" ONLY when ``mode`` is None (I1 rule 2).
             max_hops: EP subgraph expansion (keep ≥2 — contract with
                       _mark_dirty).
-            require_calibration: gate the EP run on calibration state —
-                  raises CalibrationError when evidence-kind points are
-                  uncalibrated (#1157). None (default) resolves to the shared
-                  posture, TORTOISE_EP_REQUIRE_CALIBRATION (default True —
-                  fail-closed, post-#344; set it to "0" to opt out). Dream
-                  WRITES n.confidence,
-                  so it must never silently run uncalibrated EP (#7478).
+            require_calibration: gate the EP run on calibration state.
+                  ``mode="local"`` scopes the gate to the seeds the pass hands
+                  ``ep.run`` plus the dirty roots (#7739) — an unrelated point
+                  elsewhere in the graph does not refuse the drain.
+                  ``full`` stays whole-graph by contract and ``stale-first``
+                  keeps the whole-graph posture (its window is chosen inside
+                  the pass), so those two still refuse a foreign point.
+                  None (default) resolves to the shared posture,
+                  TORTOISE_EP_REQUIRE_CALIBRATION (default True — fail-closed,
+                  post-#344; set it to "0" to opt out). Dream WRITES
+                  n.confidence, so it must never silently run uncalibrated EP
+                  (#7478).
             stamp_dreamed_at: when False, the pass never writes
                   lastDreamedAt (epic 903-C2) — the read-triggered
                   lazy-consistency paths (get_confidence /
@@ -20264,22 +20271,38 @@ class TortoiseSDK:
         # (persists n.confidence); same posture as compute_confidence.
         if require_calibration is None:
             require_calibration = _ep_require_calibration_default()
-        if require_calibration:
-            self._ensure_calibrated("dream")
         # #1163 (multi-process EP): merge graph-persisted dirty roots into
         # the in-memory set so a fresh SDK (HTTP request scope, hosted dream
         # worker) runs the same local EP the writing process would (the W1
         # write-context rule below then resolves to local). Best-effort and
         # skipped when the in-memory set already covers the state.
+        #
+        # #7739: hydration now runs BEFORE the gate, because the gate's scope
+        # depends on the roots the resolved mode will seed (and the mode's
+        # own auto-selection depends on them). Still fail-closed BEFORE any
+        # EP work below.
         self._hydrate_dirty_roots()
         resolved = self._resolve_dream_mode(mode, full)
+        if require_calibration and resolved != "local":
+            # #7739 boundary, deliberate: ``full`` is whole-graph by contract,
+            # and a ``stale-first`` window is selected INSIDE the pass
+            # (Dreamer.dream_window), so deriving its scope here would be a
+            # second copy of the scheduler's derivation — exactly the
+            # gate/run drift #7739 removes. Both keep the pre-#7739 posture.
+            #
+            # ``local`` is gated INSIDE ``_dream_local`` instead: its scope is
+            # the SEED SET the pass hands to ``ep.run``, known only after the
+            # pass selects operators (``ep.run`` re-expands ``max_hops`` from
+            # them — see ``Dreamer.dream(before_run=…)``).
+            self._ensure_calibrated("dream")
         if budget is not None and budget <= 0:
             # I1: budget=0 → no-op result, not an error. No EP, no stamps.
             return self._dream_noop(resolved)
         dreamer = self._get_dreamer()
         if resolved == "local":
             return self._dream_local(dreamer, max_hops, stamp_dreamed_at,
-                                     budget, warm_start)
+                                     budget, warm_start,
+                                     require_calibration=require_calibration)
         if resolved == "stale-first":
             return self._dream_stale_first(dreamer, max_hops, budget,
                                            warm_start)
@@ -20515,8 +20538,19 @@ class TortoiseSDK:
         self._dream_metrics["last_pass_no_op_reason"] = "no_ep_factors"
 
     def _dream_local(self, dreamer, max_hops: int, stamp_dreamed_at: bool,
-                     budget: int | None, warm_start: bool = True) -> dict:
+                     budget: int | None, warm_start: bool = True, *,
+                     require_calibration: bool) -> dict:
         """Local mode (W1): EP over the dirty roots. I1 local key-set.
+
+        ``require_calibration`` (#7739) installs the shared calibration gate as
+        the pass's own ``before_run`` hook: it is evaluated on the SEED IDS the
+        selector chose for ``ep.run`` — not on the roots' own closure, which is
+        NARROWER than the run (``ep.run`` re-expands ``max_hops`` from those
+        seeds; measured one extra hop at ``max_hops=3``). The roots are added to
+        the scope explicitly because a root is a point this pass was asked to
+        recompute and ``_affected_claims``'s factor-participant rule (#5566)
+        would otherwise drop a root that forms no factor. The gate fires before
+        any EP work, so a raise leaves the graph untouched.
 
         Dirty-root clearing keeps the #395-era retention semantics (roots in
         the affected set are cleared; roots OUTSIDE the dreamed subgraph
@@ -20539,11 +20573,23 @@ class TortoiseSDK:
             dreamer._last_selection_stats = {}
             return {"mode": "local", "iterations": 0, "converged": True,
                     "affected_claims": [], "budget_used": 0, "coverage": 0.0}
+
+        def _gate(seed_ids: list[str]) -> None:
+            # #7739: scope = every point this pass can consume — the seeds
+            # ``ep.run`` receives plus everything reachable from them at
+            # ``max_hops``, unioned with the roots (which the run seeds and
+            # ``_affected_claims`` may not admit, #5566).
+            self._ensure_calibrated(
+                "dream",
+                scope=lambda: set(anchors)
+                | self._ep_run_scope(seed_ids, max_hops))
+
         result = dreamer.dream(
             anchors, max_hops=max_hops,
             stamp_dreamed_at=stamp_dreamed_at,
             op_cap=budget if budget is not None else 200,
             warm_start=warm_start,
+            before_run=_gate if require_calibration else None,
         )
         affected = set(result.get("affected_claims", []))
         # #3139: fail closed BEFORE any dirty-root mutation — a silent no-op
@@ -21036,7 +21082,10 @@ class TortoiseSDK:
             rel_filter: edge types for BFS — "IMPL", "NAND", or "IMPL|NAND" (default).
             direction: IMPL edge traversal direction — "incoming", "outgoing", or "both" (default).
             require_calibration: fail-closed gate — raises CalibrationError
-                when evidence points are uncalibrated. None (default) resolves
+                when an uncalibrated evidence point the SELECTION can consume
+                is found (anchors/factors: the run's consumed set; no-arg: the
+                dirty roots and their closure, #7739) — not for an unrelated
+                point elsewhere in the graph. None (default) resolves
                 to the shared TORTOISE_EP_REQUIRE_CALIBRATION posture
                 (default "1" → True fail-closed, post-#344). Pass False
                 explicitly to opt out and run EP on topology alone (the #7478
@@ -21081,8 +21130,8 @@ class TortoiseSDK:
             require_calibration = _ep_require_calibration_default()
         # #7739: the gate runs AFTER the selection (below), against the SAME
         # selection the run consumes — but still fail-closed BEFORE ep.run().
-        # The no-arg (dirty-roots) branch below keeps the whole-graph scope:
-        # it has no selection to derive and its behaviour is unchanged here.
+        # The no-arg (dirty-roots) branch below is scoped the same way, to the
+        # dirty roots and their closure.
         if factors is not None:
             operator_ids = [f if isinstance(f, str) else f[0] for f in factors]
             if not operator_ids:
@@ -21129,27 +21178,38 @@ class TortoiseSDK:
             iterations, converged = ep.run(
                 operator_ids, max_hops=max_hops, evidence=run_evidence)
         else:
-            # #7739: this path has no computed selection (the run set is the
-            # dirty roots), so the gate keeps its pre-#7739 WHOLE-GRAPH scope.
-            # Unchanged here, and gated before _hydrate_dirty_roots so the
-            # raise fires before the no-dirty-roots early return, exactly as
-            # the pre-#7739 gate did.
+            # #7739: the no-arg path's selection is the dirty roots and their
+            # closure, so the gate is scoped to exactly that — a foreign
+            # uncalibrated point (another lane's) no longer freezes a caller
+            # whose own run reaches nothing that is uncalibrated. Roots are
+            # captured BEFORE the gate so the scope and the run below seed the
+            # SAME set; they are also included in the scope explicitly because
+            # a root is a point this run was asked to recompute, and
+            # ``_affected_claims``'s factor-participant rule (#5566) drops a
+            # root that forms no factor.
+            #
+            # Ordering (unchanged in effect): hydration runs first because it
+            # supplies the roots; a graph with no dirty roots still returns
+            # ``no_dirty_roots`` without gating — a run that consumes nothing
+            # cannot be frozen by calibration. #1163 (multi-process EP): the
+            # hydration is what lets a fresh request-scoped SDK run the same
+            # local EP the writing process would (the HTTP no-arg acceptance).
+            self._hydrate_dirty_roots()
+            roots = list(self._dirty_roots)
+            if not roots:
+                return _report({"iterations": 0, "converged": True,
+                                "confidences": {}, "diagnostic": "no_dirty_roots"})
             if require_calibration:
-                self._ensure_calibrated("compute_confidence")
+                self._ensure_calibrated(
+                    "compute_confidence",
+                    scope=lambda: set(roots)
+                    | self._ep_run_scope(roots, None))
             # ── No-arg (#395 AC8 + delta C): LOCAL EP over the affected
             # subgraph — dirty roots seed a max_hops=None run over the exact
             # affected closure; NO global extract_svbp_factors() scan (AC2 —
             # the epic-903 refactor regressed this no-arg path to a
             # whole-graph extract+run; restored to the #395 local contract,
             # #1162). Clean graph → 'no_dirty_roots' (AC8).
-            # #1163 (multi-process EP): hydrate graph-persisted dirty roots
-            # first — a fresh request-scoped SDK must run the same local EP
-            # the writing process would (the HTTP no-arg acceptance).
-            self._hydrate_dirty_roots()
-            roots = list(self._dirty_roots)
-            if not roots:
-                return _report({"iterations": 0, "converged": True,
-                                "confidences": {}, "diagnostic": "no_dirty_roots"})
             # Bounded fail-safe pass (dream, max_hops=2) FIRST — preserves the
             # dirty-clear/retry lifecycle (#85); then the exact local pass
             # (max_hops=None). Roots are captured BEFORE the dream so the
@@ -21521,7 +21581,10 @@ class TortoiseSDK:
         Calibration posture (#1157): the lazy dream path WRITES n.confidence
         and the read returns belief numbers — both must be gated on
         calibration like compute_confidence. require_calibration=True raises
-        CalibrationError when evidence-kind points are uncalibrated; None
+        CalibrationError when THIS CLAIM is uncalibrated (the read puts only
+        this claim in a natural parameter, #7739) and, when the claim is a
+        dirty root, when the lazy dream consumes an uncalibrated point — never
+        for an unrelated point elsewhere in the graph. None
         (default) resolves to the shared TORTOISE_EP_REQUIRE_CALIBRATION
         posture (default True — fail-closed, post-#344; set
         TORTOISE_EP_REQUIRE_CALIBRATION to "0" to opt out).
@@ -21529,7 +21592,16 @@ class TortoiseSDK:
         if require_calibration is None:
             require_calibration = _ep_require_calibration_default()
         if require_calibration:
-            self._ensure_calibrated("get_confidence")
+            # #7739: the read itself consumes exactly ONE claim —
+            # ``ep.compute_confidence`` just reads that node's params — so the
+            # gate is scoped to the claim. Scoping it to the claim's NEIGHBOUR
+            # HOOD would over-block: a connected point the read never puts in
+            # a natural parameter would freeze a per-claim read. When the claim
+            # is a dirty root, the lazy dream below runs EP over the dirty
+            # roots and gates ITSELF on the seeds it will consume (fail-closed
+            # where it matters). An uncalibrated CLAIM still raises: narrowing
+            # the scope never excuses the thing asked for.
+            self._ensure_calibrated("get_confidence", scope={claim_id})
         if claim_id in self._dirty_roots:
             self.dream(dirty_only=True,
                        require_calibration=require_calibration,
@@ -22257,8 +22329,14 @@ class TortoiseSDK:
                 only when the graph already has at least one uncalibrated
                 evidence point — so a fully calibrated graph (the common
                 case) pays NOTHING for scoping. ``None`` (default) keeps the
-                whole-graph posture for callers without a computed selection
-                (dream, get_confidence, the no-arg compute_confidence path).
+                whole-graph posture where that is the honest answer: a
+                ``full`` dream consumes the whole graph by contract, and a
+                ``stale-first`` window is chosen INSIDE the pass, so a
+                gate-side copy of its selection would be a second derivation
+                of the same window (the gate/run drift #7739 removes).
+                Every other EP surface passes a scope — anchored/factor
+                ``compute_confidence``, the no-arg dirty-roots path,
+                ``dream(mode="local")``, and ``get_confidence``.
                 An EMPTY set is a real scope (nothing reachable → nothing to
                 gate) and is never treated as ``None``.
         """

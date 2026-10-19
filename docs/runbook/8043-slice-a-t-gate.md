@@ -81,12 +81,17 @@ forced True, which removes exactly the one `continue` #2978 added).
 | `pre_2978` *(reconstructed)* | 40 | **24 (60.0%)** | **16 (40.0%)** | **0/4** |
 | `post_2978` *(shipped predicate)* | 40 | 0 | **40 (100.0%)** | **0/4** |
 | `post_2978_assembly` (**A6 arm ON**) | 14 | 0 | **2** (= 1 + `max_verbatim`) | **4/4** |
-| `post_2978_assembly_value_marked` | 14 | 0 | 2 | 4/4 (value-first: 4 packages) |
+| `post_2978_assembly_value_marked` | 14 | 0 | 2 | 4/4 (value-mark census: 4 packages) |
 | `provenance_free_assembly` (**#8658** shape) | 24 | 0 | **12** | 4/4 |
 
-Control: a duplicate-free, provenance-bearing pool of 8 facts comes back
-**byte-identical** from the arm (0 collapsed, same ids, same order) — the
-no-regression leg.
+Control: a duplicate-free, provenance-bearing pool of 8 **statement** facts
+comes back **byte-identical** from the arm (0 collapsed, same ids, same
+order) — the no-regression leg for statement-only pools. ⚠️ Scope (D3 #9092):
+this pool is `_point`-only, so it cannot observe the hit-type regroup — a
+pool that ranks a raw chunk above a statement IS reordered by tier, by
+design, and the tier-scoped clause plus the ordering pins live in
+`tests/test_evidence_assembly.py`. Widening this control needs a re-cut
+receipt (#9114).
 
 ### What the numbers say
 
@@ -160,7 +165,7 @@ The wave doc's §6 acceptance line and §8 status are marked accordingly (§9 of
 
 | Leg | Statement | State |
 |---|---|---|
-| **T-1** *(structural)* | On a **provenance-bearing** C2-shaped pool, the shipped window admits **no** content-less slot; the A6/A8 assembly holds any one fact to `≤ 1 + max_verbatim` slots; **no** value-critical claim is lost; a duplicate-free pool is returned byte-identically. (The provenance-free ask-lane shape is measured separately at 12 slots — #8658.) | **RUN** — this document + the receipt + `tests/longmem_eval/test_slice_a_flood_bound.py`. |
+| **T-1** *(structural)* | On a **provenance-bearing** C2-shaped pool, the shipped window admits **no** content-less slot; the A6/A8 assembly holds any one fact to `≤ 1 + max_verbatim` slots; **no** value-critical claim is lost; a duplicate-free pool is returned byte-identically **when it is already ordered by hit type** (D3 #9092 — a mixed pool is regrouped by tier by design, and this receipt is order-blind; the ordering pins are hermetic, #9114 owns widening the control). (The provenance-free ask-lane shape is measured separately at 12 slots — #8658.) | **RUN** — this document + the receipt + `tests/longmem_eval/test_slice_a_flood_bound.py`. |
 | **T-2** *(end-to-end, post-#2978)* | Same frozen reader + judge on the frozen 50 qids: the A6 arm **ON vs OFF**, reported as an **ON/OFF delta against the post-#2978 OFF arm** (never against C1's 0.780). | **NOT RUN here** — re-homed, §4.4. |
 
 **Why T-1 is the right re-specification and not a substitute dressed up as
@@ -176,8 +181,9 @@ nothing regresses on withdrawal") — and the arms **are** OFF everywhere
 (re-measured §1). It was **not** taken, deliberately:
 
 * withdrawing would reverse a delivered, evidence-backed, hermetically tested
-  capability (`docs/scoping/2026-09-09-evidence-assembly-wave.md` §4; 25 tests
-  in `tests/test_evidence_assembly.py` + the guard here) **on the grounds that a
+  capability (`docs/scoping/2026-09-09-evidence-assembly-wave.md` §4; the
+  hermetic suite in `tests/test_evidence_assembly.py` + the guard here)
+  **on the grounds that a
   measurement was hard to run** — the easy path, not the good one;
 * the measurement is not hard any more: `TORTOISE_LME_EVIDENCE_ASSEMBLY` is
   **read only at retrieval time** — one read site, `tools/longmem_eval/

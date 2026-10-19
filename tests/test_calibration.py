@@ -480,15 +480,192 @@ def test_outdated_flag_point_does_not_block(sdk):
     assert isinstance(result, dict)
 
 
-def test_no_arg_gate_keeps_whole_graph_scope(sdk):
-    """#7739 regression pin: the no-arg (dirty-roots) path stays graph-wide.
+def _make_foreign(sdk, point_id):
+    """Make a point look like one another lane left behind (#7739).
 
-    It has no computed selection to derive, so its pre-#7739 posture is
-    unchanged — a foreign uncalibrated point still raises THERE. This PR
-    scopes only the selections it can actually derive.
+    It stays in the graph — and therefore in ``calibrate_summary()`` — but is
+    NOT a dirty root: the ``ep_dirty`` flag is cleared in the graph and the
+    in-memory hot set drops it. That is the measured state of the #7739
+    blockers: they are live, uncalibrated, and (mostly) not pending work for
+    the caller whose run they used to freeze.
     """
-    _anchored_subgraph(sdk)
-    sdk.create_point("statement", "Foreign uncalibrated", status="live")
+    sdk._dirty_roots.discard(point_id)
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.ep_dirty = null",
+        params={"id": point_id})
+
+
+def test_no_arg_gate_scopes_to_the_dirty_roots(sdk):
+    """#7739: a FOREIGN uncalibrated point no longer freezes the no-arg run.
+
+    The no-arg path's selection IS the dirty roots and their closure, so the
+    gate is evaluated against exactly that. A point outside it — not a dirty
+    root, reachable from nothing here — must not raise, exactly as the
+    anchored path already behaves. Pre-#7739 this path kept the whole-graph
+    posture and the caller was frozen.
+    """
+    a, _b, _op = _anchored_subgraph(sdk)  # my own calibrated dirty roots
+    foreign = sdk.create_point("statement", "Foreign uncalibrated",
+                               status="live")
+    _make_foreign(sdk, foreign["id"])
+
+    result = sdk.compute_confidence(require_calibration=True)
+    assert a["id"] in result["confidences"]
+
+
+def test_no_arg_gate_still_raises_for_an_uncalibrated_dirty_root(sdk):
+    """#7739: the guard is NOT weakened on the no-arg path.
+
+    A dirty root is a point this run was explicitly asked to recompute, so it
+    stays in the gate's scope: narrowing the scope never excuses the run's
+    own seed. ``require_calibration=False`` remains the only bypass.
+    """
+    sdk.create_point("statement", "Uncalibrated root", status="live")
 
     with pytest.raises(CalibrationError, match="uncalibrated"):
         sdk.compute_confidence(require_calibration=True)
+
+    # The documented opt-out is untouched, and it does not gate.
+    assert isinstance(
+        sdk.compute_confidence(require_calibration=False), dict)
+
+
+def test_dream_local_scopes_to_the_dirty_roots(sdk):
+    """#7739: a LOCAL dream is scoped to the roots it seeds.
+
+    ``dream(dirty_only=True, mode="local")`` is the write-drain path; a
+    foreign uncalibrated point must not refuse the drain.
+    """
+    _anchored_subgraph(sdk)
+    foreign = sdk.create_point("statement", "Foreign uncalibrated",
+                               status="live")
+    _make_foreign(sdk, foreign["id"])
+
+    result = sdk.dream(dirty_only=True, mode="local",
+                       require_calibration=True)
+    assert result["mode"] == "local"
+
+
+def test_dream_local_still_raises_for_an_uncalibrated_root(sdk):
+    """#7739: a local dream still fails closed on its own uncalibrated root."""
+    sdk.create_point("statement", "Uncalibrated root", status="live")
+
+    with pytest.raises(CalibrationError, match=r"dream.*uncalibrated"):
+        sdk.dream(dirty_only=True, mode="local", require_calibration=True)
+
+
+def test_dream_local_gate_covers_the_passs_reexpansion(sdk):
+    """#7739: the LOCAL dream's scope is the SEED SET the pass runs, not the
+    roots' own closure.
+
+    ``Dreamer.dream`` selects operators within ``max_hops`` of the roots and
+    ``ep.run`` then re-expands ``max_hops`` from THOSE seeds, so the pass
+    consumes claims OUTSIDE the roots' own closure — measured on a plain
+    operator chain at ``max_hops=3``: consumed reaches hop 6 while the roots'
+    closure stops at hop 5, and at ``max_hops=4`` two hops. A gate scoped to
+    the roots' closure therefore lets an uncalibrated point inside the pass's
+    REAL consumed set run ungated, which is the #7478 defect the gate exists
+    to prevent. The gate is evaluated on the seed ids the pass hands to
+    ``ep.run`` (``Dreamer.dream(before_run=...)``), so the two cannot drift.
+    """
+    # Chain of 7 claims; hops 1-6 calibrated, hop 6 UNcalibrated. Only hop 0
+    # is a dirty root, so the remaining points look like another lane's work.
+    chain = []
+    for i in range(7):
+        chain.append(sdk.create_point(
+            "statement", f"hop {i}", status="live",
+            credibility="gold" if i < 6 else None))
+    for i in range(len(chain) - 1):
+        sdk.create_operator("IMPL", chain[i]["id"], [chain[i + 1]["id"]])
+    for p in chain[1:]:
+        _make_foreign(sdk, p["id"])
+
+    target = chain[6]
+    # Precondition of the test: the re-expanded point is OUTSIDE the roots'
+    # own closure. If this ever stops holding the test is vacuous, so pin it.
+    assert target["id"] not in sdk._ep_run_scope([chain[0]["id"]], 3)
+
+    with pytest.raises(CalibrationError, match="dream") as exc:
+        sdk.dream(dirty_only=True, mode="local", max_hops=3,
+                  require_calibration=True)
+    assert target["id"] in str(exc.value), (
+        "the gate must fail closed on a point the pass consumes")
+
+    # …and the pass really does consume it — this is the write the gate is
+    # protecting, so the scope above is not merely conservative.
+    sdk.dream(dirty_only=True, mode="local", max_hops=3,
+              require_calibration=False)
+    assert target["id"] in sdk._get_ep()._last_affected
+
+
+def test_dream_whole_graph_modes_keep_whole_graph_scope(sdk):
+    """#7739 boundary, pinned deliberately: ``full`` and ``stale-first`` stay
+    whole-graph.
+
+    ``full`` is whole-graph by contract. A ``stale-first`` window is SELECTED
+    inside the pass (``Dreamer.dream_window``: staleness ranking ∪ dirty
+    roots, and a never-dreamed graph degenerates to the whole graph), so
+    scoping it at the gate would require a second copy of the scheduler's
+    window derivation — exactly the gate/run drift #7739 exists to remove.
+    A foreign uncalibrated point therefore still refuses both modes. This is
+    a stated boundary, not an oversight.
+    """
+    _anchored_subgraph(sdk)
+    foreign = sdk.create_point("statement", "Foreign uncalibrated",
+                               status="live")
+    _make_foreign(sdk, foreign["id"])
+
+    for mode in ("full", "stale-first"):
+        with pytest.raises(CalibrationError, match="dream"):
+            sdk.dream(mode=mode, require_calibration=True)
+
+
+def test_get_confidence_scopes_to_the_claim(sdk):
+    """#7739: a per-claim read is gated on the claim it reads — and ONLY on it.
+
+    ``get_confidence`` puts exactly one claim in a natural parameter
+    (``ep.compute_confidence`` reads that node), so a foreign point must not
+    freeze the read even when it is CONNECTED to the claim through a factor
+    the read never evaluates. That connected case is the discriminating one:
+    an isolated foreign point is outside every closure, so it would pass even
+    with a neighbourhood-wide scope. An uncalibrated CLAIM still raises (the
+    guard is kept; only its scope narrows), and a dirty claim still gets its
+    lazy dream gated on the pass's own seeds.
+    """
+    mine = sdk.create_point("statement", "Mine calibrated",
+                            credibility="gold", status="live")
+    foreign = sdk.create_point("statement", "Foreign uncalibrated",
+                               status="live")
+    sdk.create_operator("IMPL", mine["id"], [foreign["id"]])
+    # The claim is clean (no lazy dream) and the foreign point is not a dirty
+    # root: the read must answer from the claim's own params.
+    _make_foreign(sdk, foreign["id"])
+    _make_foreign(sdk, mine["id"])
+
+    result = sdk.get_confidence(mine["id"], require_calibration=True)
+    assert "mean" in result
+
+    uncal = sdk.create_point("statement", "Uncalibrated claim",
+                             status="live")
+    with pytest.raises(CalibrationError,
+                       match=r"get_confidence.*uncalibrated"):
+        sdk.get_confidence(uncal["id"], require_calibration=True)
+
+
+def test_get_confidence_dirty_claim_still_gates_its_dream(sdk):
+    """#7739: a DIRTY claim's lazy dream is still gated on what it consumes.
+
+    Narrowing the read's own scope must not become a hole in the write path:
+    when the claim is a dirty root, ``get_confidence`` dreams, and that pass
+    consumes the connected uncalibrated point — so it must refuse, naming it.
+    """
+    mine = sdk.create_point("statement", "Mine calibrated",
+                            credibility="gold", status="live")
+    foreign = sdk.create_point("statement", "Foreign uncalibrated",
+                               status="live")
+    sdk.create_operator("IMPL", mine["id"], [foreign["id"]])
+    assert mine["id"] in sdk._dirty_roots
+
+    with pytest.raises(CalibrationError, match="dream") as exc:
+        sdk.get_confidence(mine["id"], require_calibration=True)
+    assert foreign["id"] in str(exc.value)
