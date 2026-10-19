@@ -147,8 +147,9 @@ dedup, D3 hit-type ordering — value/verbatim-first until #9092, since then:
 statement Points → turn Points → raw chunks, the value mark breaking ties
 inside a tier), tri-state eval arm
 `TORTOISE_LME_EVIDENCE_ASSEMBLY` (fail-safe OFF) + ask-lane
-`TORTOISE_ASK_EVIDENCE_ASSEMBLY`. 23 hermetic tests + adversarial
-regressions; docker suites green.
+`TORTOISE_ASK_EVIDENCE_ASSEMBLY`. The hermetic suite in
+`tests/test_evidence_assembly.py` + adversarial regressions; docker suites
+green.
 
 ### Fresh-context review findings + fixes (all merged with #2687)
 

@@ -181,8 +181,9 @@ nothing regresses on withdrawal") — and the arms **are** OFF everywhere
 (re-measured §1). It was **not** taken, deliberately:
 
 * withdrawing would reverse a delivered, evidence-backed, hermetically tested
-  capability (`docs/scoping/2026-09-09-evidence-assembly-wave.md` §4; 25 tests
-  in `tests/test_evidence_assembly.py` + the guard here) **on the grounds that a
+  capability (`docs/scoping/2026-09-09-evidence-assembly-wave.md` §4; the
+  hermetic suite in `tests/test_evidence_assembly.py` + the guard here)
+  **on the grounds that a
   measurement was hard to run** — the easy path, not the good one;
 * the measurement is not hard any more: `TORTOISE_LME_EVIDENCE_ASSEMBLY` is
   **read only at retrieval time** — one read site, `tools/longmem_eval/
