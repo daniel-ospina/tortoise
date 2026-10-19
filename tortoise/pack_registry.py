@@ -79,6 +79,17 @@ CANONICAL_EVENT_KINDS = frozenset({
     # so the bare name has ONE canonical identity, and so the miner's
     # `event_kind="milestone"` write is declared.
     "milestone",
+    # #2786 (AF-1): these four are ONTOLOGY §5 core event kinds, and the Layer-1
+    # gate has always ACCEPTED them (`commit_schema.EVENT_KINDS`), but they were
+    # missing here — the pack-facing half of the vocabulary — so a pack could not
+    # reference them (`nearMisses`/`equivalentTo`/chain steps) and
+    # `PackRegistry._all_known_kinds()` could not resolve them. Measured at
+    # `4d9a0ddef`: `EVENT_KINDS - CANONICAL_EVENT_KINDS` = exactly this set.
+    # §5 declares all four (`turn` = capture turn records, `occurrence` = generic
+    # extracted occurrence, `AgentSession` = the canonical session-capture kind,
+    # `humanApproval` = the #531 approval event), so there is no doc-side fix —
+    # this set was the stale layer. Guard: tests/test_kind_vocabulary_consistency.py.
+    "AgentSession", "humanApproval", "occurrence", "turn",
 })
 
 CANONICAL_POINT_KINDS = frozenset({
