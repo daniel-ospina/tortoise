@@ -408,6 +408,22 @@ def test_an_unverifiable_append_is_reported_as_unverified_not_as_a_loss(
         f"first_stage={state['first_stage']!r}")
     assert state["lost"] == 2, "both failures are losses, so both are counted"
 
+    # AND THE CONSUMER SEES BOTH (#9208 review): keeping `first_stage` in the
+    # state is only worth anything if the one surface a caller can act on
+    # reports it. Reporting the latest alone would discard the diagnosis this
+    # field was added to preserve.
+    with pytest.raises(ChangeFeedDegraded) as excinfo:
+        sdk.poll_events()
+    detail = str(excinfo.value)
+    assert "The FIRST failure on this graph was at stage 'append-unverified'" in detail, (
+        "the 503 detail must carry the first diagnosis beside the latest; "
+        f"got: {detail[:400]}")
+    assert "stage 'append'" in detail, (
+        "the LATEST diagnosis must still be named, and named as the latest")
+    assert "row really is gone" in detail and "unverifiable" not in detail.split(
+        "The FIRST failure")[0], (
+            "the first clause must quote the FIRST error, not the latest one")
+
 
 def test_the_emit_hook_never_raises_even_when_the_recorder_fails(
         armed_sdk, monkeypatch):
@@ -530,8 +546,18 @@ def test_the_degraded_state_is_atomic_across_threads():
     threads_n, per_thread = 8, 60
     new_keys = 40
     start = threading.Barrier(threads_n + 2)  # workers + resizer + this thread
+    # ⚠️ A THIRD gate, because `assert seen` was a race (#9208 review): the
+    # reporter loop only starts after `start.wait()` returns, so on a fast lane
+    # (Linux, where these increments cost ~1 ms not ~190 ms) the writers can
+    # finish their whole workload before the main thread is scheduled again —
+    # and a CORRECT implementation would then fail on `seen == []`. Writers
+    # hold here until the reporter has taken its first sample, so the first
+    # sample is deterministic AND the rest run concurrently with real writes.
+    sampled = threading.Event()
+
     def record() -> None:
         start.wait()
+        sampled.wait()
         for _ in range(per_thread):
             event_store.record_degraded(proj, "append", "PointAdded", None,
                                         RuntimeError("lost"))
@@ -539,6 +565,7 @@ def test_the_degraded_state_is_atomic_across_threads():
     def mint_keys() -> None:
         """New (store, graph) keys — a RESIZE while the reporter iterates."""
         start.wait()
+        sampled.wait()
         for i in range(new_keys):
             event_store.record_degraded(
                 SimpleNamespace(_path=f"/resize-{i}.db", _host=None,
@@ -552,7 +579,8 @@ def test_the_degraded_state_is_atomic_across_threads():
     resizer = threading.Thread(target=mint_keys)
     resizer.start()
     start.wait()  # release every thread at once
-    seen = []
+    seen = [len(event_store.degraded_graphs())]  # the gate's first sample
+    sampled.set()
     while any(t.is_alive() for t in (*workers, resizer)):
         try:
             seen.append(len(event_store.degraded_graphs()))
@@ -564,7 +592,9 @@ def test_the_degraded_state_is_atomic_across_threads():
     for t in (*workers, resizer):
         t.join()
 
-    assert seen, "the reporter must have run while the writers did"
+    assert seen, (
+        "the reporter must have run while the writers did — it is gated on its "
+        "own first sample, so this cannot lose the race to a fast lane")
     state = event_store.degraded(proj)
     assert state["lost"] == threads_n * per_thread, (
         "every loss must be counted — the count is quoted to the consumer as "
@@ -573,26 +603,44 @@ def test_the_degraded_state_is_atomic_across_threads():
     event_store.clear_degraded()
 
 
-def test_the_store_identity_is_one_key_however_the_path_is_spelled():
+def test_the_store_identity_is_one_key_however_the_path_is_spelled(tmp_path):
     """One database reached through two spellings is ONE store (#9208 review).
 
-    A symlinked deployment directory, a `~`-spelled home and a `.`-relative
-    path are the same file. Keyed on the raw string, the state SPLITS: a refused
-    write recorded under one spelling leaves a poll through the other answering
-    `[]` over the lost event — the silence this module exists to break. The
-    canonicalisation is the repo's own (`realpath(abspath(expanduser()))`, cf.
-    `projection._prewipe_db_path_identity` and `fallback_snapshot.snapshot_key`).
+    A symlinked deployment directory, a `..`-segment spelling and a
+    `~`-spelled home are the same file. Keyed on the raw string, the state
+    SPLITS: a refused write recorded under one spelling leaves a poll through
+    the other answering `[]` over the lost event — the silence this module
+    exists to break. The canonicalisation is the repo's own
+    (`realpath(abspath(expanduser()))`, cf. `projection._prewipe_db_path_identity`
+    and `fallback_snapshot.snapshot_key`).
+
+    ⚠️ EVERY SPELLING HERE IS BUILT SO IT IS FALSIFIABLE, which cost this test
+    its first version (#9208 review): `str(Path("/tmp") / ".." / "/tmp" / "one.db")`
+    is `'/tmp/one.db'` — pathlib DISCARDS the left side when the right operand is
+    absolute — so the assertion compared a string to itself and would have passed
+    for an identity function. The `..` form is a literal string, and the symlink
+    is a real one created below.
     """
     from types import SimpleNamespace
 
     def key(path):
         return event_store._graph_key(
-            SimpleNamespace(_path=path, _host=None, graph_name="tortoise", db=None))
+            SimpleNamespace(_path=str(path), _host=None, graph_name="tortoise",
+                            db=None))
 
-    spelling = str(Path("/tmp") / ".." / "/tmp" / "one.db")
-    assert key(spelling) == key("/tmp/one.db"), (
-        "a `.`/`..`-relative spelling of one database must not key apart: "
-        f"{key(spelling)!r} != {key('/tmp/one.db')!r}")
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    link_dir = tmp_path / "link"
+    link_dir.symlink_to(real_dir, target_is_directory=True)
+    assert key(link_dir / "one.db") == key(real_dir / "one.db"), (
+        "a symlinked deployment directory must key as the database it names: "
+        f"{key(link_dir / 'one.db')!r} != {key(real_dir / 'one.db')!r}")
+
+    dotted = f"{tmp_path}/sub/../one.db"
+    assert key(dotted) == key(tmp_path / "one.db"), (
+        "a `..`-segment spelling of one database must not key apart: "
+        f"{key(dotted)!r} != {key(tmp_path / 'one.db')!r}")
+
     assert key("~/feed.db") == key(str(Path("~").expanduser() / "feed.db")), (
         "a `~`-spelled path must key as the database it names")
     assert key(":memory:") != key(str(Path(":memory:").absolute())), (
