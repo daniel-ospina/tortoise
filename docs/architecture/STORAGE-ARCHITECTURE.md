@@ -1504,7 +1504,7 @@ For the record, since two members of the design rest on it:
 
 > **A derived cache that is also written to directly is not derived.**
 
-**⚠️ CARVE-OUTS ARE A DECLARED CLASS, not a residual gap awaiting closure — and as of `#9079`'s declaration children there are THREE.** A *few* writes have no record to project and cannot have one: they write graph-wide bookkeeping, or a graph-native store whose value is not a fact about the corpus. Each runs under a per-call `with` over the SAME single-writer ContextVar the live and replay scopes use — so an undeclared writer still fails closed (the gate refuses on `None`) and each is a **declaration, not a bypass**:
+**⚠️ CARVE-OUTS ARE A DECLARED CLASS, not a residual gap awaiting closure — and as of `#9079`'s declaration children there are THREE.** A *few* writes have no record to project and cannot have one: they write graph-wide bookkeeping, or a graph-native store whose value is not a fact about the corpus. Each runs under a per-call `with` over the SAME single-writer ContextVar the live and replay scopes use, and each is a **declaration, not a bypass**: on the two doors that GATE today — `FalkorProjection.apply` (which refuses unconditionally when no scope is in flight) and `FalkorProjection.query` (which refuses a mutating statement) — an undeclared writer still fails closed on `None`. ⚠️ **The THIRD door — the write handle `proj.g` these three carve-outs actually write through — is NOT armed on `main`**: that guard is `#9124`, which is why these lanes are declared first. Read the table below with that asymmetry in mind, not as "every door refuses an undeclared writer":
 
 | carve-out | lane / scope | writer | issue |
 |---|---|---|---|
