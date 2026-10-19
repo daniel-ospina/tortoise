@@ -922,6 +922,26 @@ class BackupStorage(Protocol):
     def list(self, prefix: str) -> list[str]: ...
     def delete(self, key: str) -> None: ...
     def create_if_not_exists(self, key: str, data: bytes) -> bool: ...
+    def head_bucket(self) -> None:
+        """Bucket-scoped reachability probe: return normally iff the substrate ANSWERED.
+
+        #8422: the ONE thing an object/prefix operation cannot tell you. A
+        ``list()`` failure conflates "the store does not answer" (network, DNS,
+        revoked key) with "the store answers but this credential may not list"
+        — two DR tiers that need different recovery evidence (#3147). A
+        bucket-scoped HEAD is answered BEFORE any prefix or key is consulted, so
+        a caller that sees it return has positive evidence the substrate is
+        REACHABLE and the failure it just hit belongs to the listing/measurement
+        tier.
+
+        Raise on failure (never return a bool): every implementation already
+        normalises its errors to an exception, and a boolean would let a caller
+        read "not implemented" as "reachable". A store that cannot probe at all
+        should simply not define this method — callers treat its ABSENCE as "no
+        evidence", which is the conservative direction (see
+        ``backup_watcher._r2_bucket_reachable``).
+        """
+        ...
 
 
 def _r2_endpoint_from_env() -> str:
@@ -1072,6 +1092,25 @@ class R2Storage:
         except Exception as e:
             raise RuntimeError(f"R2 list failed for {prefix}: {e}") from e
 
+    def head_bucket(self) -> None:
+        """Bucket-scoped HEAD — the reachability tier's own probe (#8422).
+
+        Deliberately NOT the account-level ``list_buckets``: R2's S3 API does
+        not reliably support it from an object-scoped access key (the same
+        reason the DR driver uses ``aws s3api head-bucket``,
+        ``.github/scripts/registry-cron.sh``). Bucket-scoped means the call is
+        answered by the bucket endpoint before any PREFIX or KEY is consulted,
+        so it is the reachability question and not the listing one.
+
+        Raises (never returns a bool) so a caller cannot mistake a failure for
+        a verdict: ``backup_watcher`` treats "returned" as the only positive
+        evidence and files the unlistable tier on it.
+        """
+        try:
+            self._s3().head_bucket(Bucket=self._bucket)
+        except Exception as e:
+            raise RuntimeError(f"R2 head_bucket failed for {self._bucket}: {e}") from e
+
     def delete(self, key: str) -> None:
         try:
             self._s3().delete_object(Bucket=self._bucket, Key=key)
@@ -1104,6 +1143,15 @@ class MemoryStorage:
             return False
         self._objects[key] = data
         return True
+
+    def head_bucket(self) -> None:
+        """Trivially reachable — an in-memory store has no substrate to answer.
+
+        Present so a test double is a full ``BackupStorage``: a watcher test that
+        breaks ``list()`` on a ``MemoryStorage`` subclass is simulating the
+        LISTING tier, which is exactly the distinction #8422 is about. A double
+        that wants to simulate unreachability overrides this to raise.
+        """
 
 
 # ── #2319 bucket-lock immutability + second-region mirror ────────────────────

@@ -61,10 +61,11 @@ class EventAPI:
 
         ⛔ THE BOUND, stated so this is not read as "the write path is closed":
         this gates a write that HAS a graph handle. ``rebuild_all`` folds a
-        journal directly and stays ungated BY DESIGN — the journal is the truth,
-        so a record already in it must reproduce faithfully; refusing at replay
-        would make a committed record unfoldable, which is strictly worse than
-        the widening. Two consequences follow, both recorded rather than
+        journal directly and stays ungated BY DESIGN — a record already in the
+        journal must reproduce faithfully; refusing at replay would make a
+        committed record unfoldable, which is strictly worse than the
+        widening. ``docs/durability-posture.md`` is the durability authority for
+        that choice. Two consequences follow, both recorded rather than
         papered over: a record already in a legacy journal still widens the
         graph when rebuilt, and a ``projection``-less lane
         (``EventAPI(log, projection=None)`` — no PRODUCTION caller; the only two

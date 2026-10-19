@@ -171,7 +171,10 @@ KIND_R2_DOWN = "R2_DOWN"
 #: app reports a ``storage_error``. A NEW key: no live dedup object or open issue
 #: existed under it, so there is nothing to migrate. Distinct from
 #: :data:`KIND_R2_DOWN` because the two need different recovery evidence and so
-#: have different owners (see the module docstring).
+#: have different owners (see the module docstring). Filed by the driver's
+#: listing leg, by the app's ``storage_error``, and — since #8422 — by the watcher
+#: when its own read fails while a bucket-level HEAD ANSWERS, which is what makes
+#: its filing tier-exact instead of reachability-labelled.
 KIND_R2_UNLISTABLE = "R2_UNLISTABLE"
 KIND_APP_DOWN = "APP_DOWN"
 KIND_WATCHER_DOWN = "WATCHER_DOWN"
