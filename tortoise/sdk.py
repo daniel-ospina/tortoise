@@ -2740,9 +2740,11 @@ _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
 # `tests/test_event_store.py::test_content_edit_emits_nothing` and restated in
 # `docs/event-catalog.md`. #2353 asks for `PointRevised` in this store, so the
 # addition is drawn as an **opt-in** one at the emit hook below (`_emit_event`)
-# rather than by adding the type here: the default stream stays byte-identical,
-# and the semantic change feed (`tortoise/change_feed.py`) is what consumes the
-# revisions once an operator switches it on.
+# rather than by adding the type here: the default emit SET stays unchanged (no
+# new types), and the semantic change feed (`tortoise/change_feed.py`) is what
+# consumes the revisions once an operator switches it on. The default stream is
+# NOT byte-identical — the hard-delete `PointRetracted` payload carries the
+# unconditional `deleted` marker (`_deleted_point_payload`).
 _GRAPH_EVENT_TYPES = frozenset({
     "PointAdded",
     "OperatorAdded",
@@ -6714,8 +6716,10 @@ class TortoiseSDK:
         # see `_GRAPH_EVENT_TYPES` above. It reaches the store only under the
         # change-feed switch, which is also what makes a poll able to report
         # before→after for content, validity and status. Off (the default) the
-        # emitted events, and therefore `poll_events`' response, are
-        # byte-identical to before this change.
+        # emitted SET is unchanged — no `PointRevised` row — so `poll_events`'
+        # response SHAPE is unchanged. It is NOT byte-identical: the hard-delete
+        # `PointRetracted` payload carries the `deleted` marker unconditionally
+        # (`_deleted_point_payload`).
         if type_ in _GRAPH_EVENT_TYPES or (
                 type_ == "PointRevised" and _change_feed_enabled()):
             # #2600: copy FIRST — a caller-reused payload dict must never
