@@ -192,6 +192,15 @@ def test_span_in_window_unresolvable_dates_degrade_to_no_bound():
     assert _span_in_window(span, None, "recency", "7", None) == span
 
 
+def test_span_in_window_qualifies_an_unpadded_session_date():
+    """An unpadded session date is the same calendar day, so a bound must
+    qualify it — reading it as undated drops the session and makes a partial
+    span look fully covered (which suppresses the fire)."""
+    dates = {"padded": "2023/04/10 (Mon) 17:50", "unpadded": "2023/4/9"}
+    assert _span_in_window(frozenset(dates), dates, "recency", "7", None) == \
+        frozenset(dates)
+
+
 def test_span_in_window_drops_undated_sessions_only_when_a_bound_applies():
     """An undated session cannot be proven in-window, so a bound drops it —
     while an UNBOUNDED qualification keeps it (no date required)."""
@@ -219,6 +228,10 @@ def test_facet_window_bounds_resolution():
         "2023-04-03", "2023-04-10")
     assert facet_window_bounds("recency", "7", None, None) is None
     assert facet_window_bounds("recency", "seven", None, PRODUCER_DATES) is None
+    # a MISSING day count is unresolvable → NO BOUND. Coercing it to 0 would
+    # build the narrowest possible window (``qdate`` alone) and empty the span.
+    assert facet_window_bounds("recency", None, None, PRODUCER_DATES) is None
+    assert facet_window_bounds("recency", "  ", None, PRODUCER_DATES) is None
     # a negative day count can never invert the window
     assert facet_window_bounds("recency", "-7", None, PRODUCER_DATES) == (
         "2023-04-10", "2023-04-10")
@@ -232,7 +245,13 @@ def test_calendar_date_normalizes_both_shapes_and_rejects_the_rest():
     assert _calendar_date("2026-09-01") == "2026-09-01"
     assert _calendar_date("2026-09-01T00:00:00Z") == "2026-09-01"
     assert _calendar_date("2023/05/20 (Sat) 03:29") == "2023-05-20"
-    for undated in (None, "", "   ", "early May", "2026-13-45"):
+    # UNPADDED month/day is the same calendar date — treating it as undated
+    # would drop that session from every bounded span (a silent partial
+    # census is the failure this module exists to remove)
+    assert _calendar_date("2023/4/9") == "2023-04-09"
+    assert _calendar_date("2023-4-9") == "2023-04-09"
+    for undated in (None, "", "   ", "early May", "2026-13-45",
+                    "2023/04/105", "2026-09"):
         assert _calendar_date(undated) is None, undated
 
 

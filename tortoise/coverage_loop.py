@@ -93,15 +93,14 @@ _UNIT_DAYS = {"day": 1, "week": 7, "month": 30}
 #: in: ISO (``2026-09-01`` / ``2026-09-01T00:00:00Z``) and — measured on the
 #: frozen LongMemEval dataset, 23,867/23,867 values, #3011 — the ingest
 #: producer's ``haystack_dates``/``createdAt`` shape ``2023/05/20 (Sat) 03:29``.
+#: Month/day are ``\d{1,2}``: an UNPADDED ``2023/4/9`` is the same calendar
+#: date, and reading it as undated would drop that session from a bounded span
+#: (the session-level version of the #8710 defect). The trailing ``(?!\d)``
+#: keeps a 3-digit day from being truncated to two.
 #: Same shape token as ``tortoise/subgraph_render.py``'s parser; duplicated
 #: rather than imported because that module pulls the eval harness in and this
 #: one is a stdlib-only leaf at import time (see ``_session_of``).
-_CALENDAR_DATE_RE = re.compile(r"^(\d{4})[-/](\d{2})[-/](\d{2})")
-
-#: Fallback date (mirrors the eval seam) — anchors month-day interval bounds
-#: whose year the query does not carry (never used by the eval which passes
-#: question dates; kept for product-side determinism).
-_DEFAULT_YEAR = 2026
+_CALENDAR_DATE_RE = re.compile(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?!\d)")
 
 
 @dataclass(frozen=True)
@@ -164,7 +163,8 @@ def _calendar_date(value: object) -> str | None:
         return None
     year, month, day = match.groups()
     try:
-        return date.fromisoformat(f"{year}-{month}-{day}").isoformat()
+        return date.fromisoformat(
+            f"{int(year):04d}-{int(month):02d}-{int(day):02d}").isoformat()
     except ValueError:
         return None
 
@@ -175,9 +175,11 @@ def facet_window_bounds(kind: str | None, start: str | None, end: str | None,
     """Resolve a detected date bound into an inclusive ISO ``(lo, hi)``
     window — THE single source of truth for the R5 window arithmetic.
 
-    The span qualification (:func:`_span_in_window`) and the routed
-    point-level qualification (#2569) both resolve through THIS function, so
-    the two can never disagree about what "in window" means.
+    :func:`_span_in_window` is its ONLY consumer in ``tortoise/`` — the
+    routed point-level twin on the eval seam
+    (``tools/longmem_eval/retrieve.py::_apply_time_window``) does NOT resolve
+    through it and still compares RAW session dates, so that half of the
+    temporal facet stays dead on the producer's date shape (#9182).
 
     * ``interval`` — ``(start, end)`` as calendar dates, ordered (a reversed
       "between A and B" still means the window the question named rather
@@ -203,8 +205,17 @@ def facet_window_bounds(kind: str | None, start: str | None, end: str | None,
             return None
         return (lo, hi) if lo <= hi else (hi, lo)
     if kind == "recency":
+        # A MISSING day count is unresolvable, and unresolvable means NO BOUND:
+        # coercing it to 0 built the NARROWEST possible window (``qdate``
+        # alone), a hard one-day filter that empties the span — the exact
+        # "never matches-nothing" failure the rule above forbids.
+        if start is None or not str(start).strip():
+            return None
         try:
-            n_days = max(0, int(start or 0))
+            # A negative count is clamped to 0 so it can never INVERT the
+            # window (the product path cannot emit one: ``_DATE_RECENCY_RE``
+            # is ``\d+``).
+            n_days = max(0, int(start))
         except (TypeError, ValueError):
             return None
         known = [d for d in (_calendar_date(v)
@@ -272,7 +283,7 @@ def facet_census(proj: Any, query: str, *,
     yields [] (no facets → the check can never fire → the caller keeps the
     ORIGINAL pool byte-identical).
 
-    ``session_dates``: {session_id: ISO-date} over the query's haystack —
+    ``session_dates``: {session_id: date-string} over the query's haystack —
     when provided AND the query text carries an interval/recency bound, each
     anchor's span is date-qualified to the in-window sessions (the §4 P0
     date-range facet) through the SHARED :func:`facet_window_bounds`
