@@ -1706,6 +1706,15 @@ surfaces:
   # above.
   - test_install_queue_reconcile_schedule.py
   - test_ci_check_repair.py
+  # #9115: the REPO-LEVEL CI queue state — `FLOOD(<workflow>, queued=N,
+  # pr_running=0)`, deliberately distinct from the per-sha `ABSENT` (no run at
+  # this head) and `QUEUED` (a run exists at the head with no slot) that
+  # tools/ci_verdict.py and tools/ci_check_repair.py own. Hermetic: every run
+  # feed is injected, so it needs no DB, no network and no `gh`. Same surface as
+  # its queue/rail siblings above, and it is the sibling of
+  # test_ci_check_repair.py because the two instruments share the reading that
+  # turns a queued context from PENDING into STARVED.
+  - test_ci_queue_health.py
   # #8375 item 1: the "no required check at this PR head" repair — a scheduled
   # workflow, a local fallback launcher, and a launchd installer, all sharing one
   # stdlib tool. Same surface as its queue/rail siblings above: it pins

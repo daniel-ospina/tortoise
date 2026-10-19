@@ -75,6 +75,79 @@ def test_queued_run_is_pending_too():
     assert plan.pending == ["docs"] and not plan.actionable
 
 
+# ── STARVED: a QUEUED run is not "pending" when the repo is in a FLOOD #9115 ──
+
+def test_a_queued_run_is_starved_only_under_a_measured_repo_flood():
+    """The same per-head shape is ordinary on a busy runner — the flood decides."""
+    checks = [check(c) for c in REQUIRED if c != "docs"]
+    runs = [run(10, "ci.yml", "queued")]
+
+    quiet = R.classify(pr(), checks, runs, REQUIRED, EMITTERS, max_attempts=3,
+                       queue_flood=False)
+    assert quiet.pending == ["docs"] and quiet.starved == []
+
+    flooded = R.classify(pr(), checks, runs, REQUIRED, EMITTERS, max_attempts=3,
+                         queue_flood=True)
+    # still PENDING (it drives the reopen deferral) AND named as STARVED
+    assert flooded.pending == ["docs"]
+    assert flooded.starved == ["docs"]
+    # a starved context is never repaired: no rerun, no reopen, not "actionable"
+    assert flooded.rerun == [] and flooded.missing_run == []
+    assert not flooded.actionable
+    # ...but it must still be REPORTED, or a starved head goes silent
+    assert flooded.needs_report
+
+
+def test_a_run_that_has_actually_started_is_not_starved_under_a_flood():
+    """`queued` beside `in_progress` means a slot WAS granted."""
+    checks = [check(c) for c in REQUIRED if c != "python-ci-gate"]
+    runs = [run(10, "python-ci.yml", "queued"), run(11, "python-ci.yml", "in_progress")]
+    plan = R.classify(pr(), checks, runs, REQUIRED, EMITTERS, max_attempts=3,
+                      queue_flood=True)
+    assert plan.pending == ["python-ci-gate"] and plan.starved == []
+
+
+def test_a_starved_context_is_recorded_and_repaired_by_nothing(monkeypatch):
+    """No per-PR action can create a runner slot, so none may be attempted."""
+    checks = [check(c) for c in REQUIRED if c != "docs"]
+    plan = R.classify(pr(), checks, [run(10, "ci.yml", "queued")], REQUIRED, EMITTERS,
+                      max_attempts=3, queue_flood=True)
+    monkeypatch.setattr(R, "_rerun", lambda *a, **k: pytest.fail("a starved head must not be re-run"))
+    monkeypatch.setattr(R, "_reopen", lambda *a, **k: pytest.fail("a starved head must not be reopened"))
+    code, recs = R.report([plan], apply=True, trigger_ok=True, repo="o/r", cooldown_min=60)
+    assert code == 0
+    assert recs[0]["starved"] == ["docs"]
+    assert recs[0]["rerun"] == [] and recs[0]["reopened"] is False
+
+
+def test_a_starved_head_is_not_deferred_as_though_CI_were_about_to_report():
+    """It must be reported as a QUEUE problem, not folded into in-flight deferral."""
+    checks = [check(c) for c in REQUIRED if c != "docs"]
+    plan = R.classify(pr(), checks, [run(10, "ci.yml", "queued")], REQUIRED, EMITTERS,
+                      max_attempts=3, queue_flood=True)
+    assert plan.in_flight == ["ci"]        # it IS non-completed...
+    assert plan.starved == ["docs"]        # ...and the report says WHY
+
+
+def test_the_queue_reading_degrades_to_no_flood_when_it_cannot_be_read(monkeypatch):
+    """A failed queue read must not invent a flood, and must not fail the pass."""
+    import tools.ci_queue_health as Q
+
+    def boom(*a, **k):
+        raise Q.MeasureError("gh api 500")
+
+    monkeypatch.setattr(Q, "read_health", boom)
+    assert R.read_queue_health("o/r") is None
+
+
+def test_the_queue_reading_is_the_repo_level_state(monkeypatch):
+    import tools.ci_queue_health as Q
+
+    health = Q.classify_queue([], [], None)
+    monkeypatch.setattr(Q, "read_health", lambda repo: health)
+    assert R.read_queue_health("o/r") is health
+
+
 def test_all_required_present_means_no_plan_at_all():
     checks = [check(c) for c in REQUIRED]
     plan = R.classify(pr(), checks, [run(1, "ci.yml", "completed", "success")],
