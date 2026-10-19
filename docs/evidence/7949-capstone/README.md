@@ -6,16 +6,23 @@ doc_status: final
 created: 2026-10-19
 subjects.team: epistemic-team
 aboutSubjects: Tortoise extractor v4
-aboutObjects: "#7949, #9080, #9075, #9076, #9077, #5199, #7947, EXTRACTOR-V4-ARCHITECTURE.md"
+aboutObjects: "#7949, #9080, #9075, #9076, #9077, #9116, #5199, #7947, EXTRACTOR-V4-ARCHITECTURE.md"
 ---
 
 # Capstone evidence — `#7949` / `#9080` (extractor-v4, E1–E5)
 
-**Measured at:** `717355e67` on branch `feat/9080-tm` (2026-10-19). Worktree dirty:
-only the files this bundle adds (`docs/evidence/7949-capstone/**`,
+**Measured at:** `717355e67` on branch `feat/9080-tm` (2026-10-19). Scope of this
+branch: the files this bundle adds (`docs/evidence/7949-capstone/**`,
 `tools/capstone_verdict_check.py`, `tests/test_7949_capstone_verdict_check.py`,
-`config/ci-surfaces.yml`); **no product source under `tortoise/` is modified**, which
-is what makes the E4 row's "no monkeypatch" clause possible at all.
+`config/ci-surfaces.yml`) plus the surface re-cut the new caller forces
+(`config/surface-manifest.yml`, `docs/product/mcp-sdk-surface.md`). **No product
+source under `tortoise/` is modified** — `git diff --stat origin/main...HEAD --
+ tortoise/` is empty (two inert lint edits that an earlier commit carried in
+`tortoise/search_engine.py` / `tests/test_bm25_lexical_8488.py` are the same fixes
+#9085 already landed on main, so they were dropped in the merge rather than
+re-applied), which is what makes the E4 row's "no monkeypatch" clause possible at
+all. The one-line `tortoise/sdk.py` receipt construction this bundle reasons about is
+read, not changed.
 
 **Decision being proved:** the epic's own closing rule — *"Close this epic only when
 E1–E5 all have evidence attached to this issue — not when the children close. A child
@@ -99,20 +106,29 @@ The body's figures are pinned to `9037c7a7b`. Re-measured at `717355e67`:
    `sdk._extract_session_v2` (`sdk.py:9698`) → `extractor_v2.extract_session_v2`
    (`extractor_v2.py:7611`), which calls, in one pass:
 
-   | step | call site | witness the probe reads |
-   |---|---|---|
-   | S0 READ | `_edus_from_conversation` `:7719` | `stats["edus"]`, `stats["chunks"]` |
-   | S1 NARRATE | `run_s1` `:7752` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` |
-   | S2.1 EXTRACT | `run_s2` `:7776` | `by_stage["s2"]`, item counts |
-   | S2.2 VET | `_run_vet_pass` `:7805` | `result["vet"]` |
-   | S2.3 CLASSIFY | `_apply_classify_kinds` `:7821` | `result["classify_later"]` |
-   | S3 RESOLVE | `search_graph` `:7837` | `result["search"]` |
-   | S5 CONNECT | `execute_embed` `:8057` (+ `run_s4` `:7858` gap filler) | `stats["s4_merge"]` |
-   | S6 COMMIT | `execute_embed` payload | `result["payload"]` |
+   | step | call site | witness the probe reads | on the receipt? |
+   |---|---|---|---|
+   | S0 READ | `_edus_from_conversation` `:7719` | `stats["edus"]`, `stats["chunks"]` | ✅ |
+   | S1 NARRATE | `run_s1` `:7752` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
+   | S2.1 EXTRACT | `run_s2` `:7776` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
+   | S2.2 VET | `_run_vet_pass` `:7805` | `result["vet"]` | ❌ **#9116** |
+   | S2.3 CLASSIFY | `_apply_classify_kinds` `:7821` | `result["classify_later"]` | ❌ **#9116** |
+   | S3 RESOLVE | `search_graph` `:7837` | `result["search"]` | ❌ **#9116** |
+   | S5 CONNECT | `execute_embed` `:8057` (+ `run_s4` `:7858` gap filler) | `stats["s4_merge"]` | ✅ (gap-filler counters — see the labelling note below) |
+   | S6 COMMIT | `execute_embed` payload | `result["payload"]` | ❌ **#9116** |
 
    So the capstone drives the **real entry point**, which is what the epic's phrase *"the
    pipeline running end to end"* demands — it does not compose the step functions, the
-   construction the issue forbids.
+   construction the issue forbids. The pipeline RUNS all eight; the four `❌` rows are
+   steps the probe cannot WITNESS **through that entry point**, because
+   `capture_session`'s receipt carries `stats` and nothing else (#9116). The probe reads
+   those four keys anyway so the observation is complete the day the seam lands; today
+   they are reported unobserved and G5 refuses, attributed to the instrument.
+
+   ⚠️ S5's witness is the **S4 gap-filler's** counters (`stats["s4_merge"]`, populated by
+   `_rollup_llm(..., "s4")`), not a counter emitted by S5 itself, so a pass whose
+   `execute_embed` did not run can still report S5 observed. That is a labelling
+   limitation of the surface, recorded here rather than presented as a measurement.
 4. **Dependency status at this head — all five re-queried, all OPEN**
    (first read was rate-limited mid-lane, `gh` HTTP 403 / `gh-rest: gh-limit … FAILED`;
    re-read after the reset, before the PR):
@@ -124,10 +140,16 @@ The body's figures are pinned to `9037c7a7b`. Re-measured at `717355e67`:
    | `#9077` | E4 on the real extraction leg — wired AND persisted, no monkeypatch | **OPEN** |
    | `#5199` | the version anchor stops at Points — `:Object`/`:Event` not version-scoped | **OPEN** |
    | `#7947` | the raw-vs-narrative measurement — D3's falsifier | **OPEN** |
+   | `#9116` | the run's G5 cannot observe 4 of its 8 steps — `capture_session`'s receipt carries no step surface | **OPEN** |
 
    `#9075` is a precondition for the whole table (it is G0). ⚠️ A row moves to
    `RED`/`GREEN` only by RE-RUNNING the probe and producing the artifact — never by
    reading an issue's state, even when that state is CLOSED.
+
+   `#9116` is not a row's blocker, it is the **run's**: the five rows above cannot be
+   measured at all until the probe can WITNESS a step (see *What this bundle does NOT
+   establish* and the Reproduce note). A table is only as reachable as the run that
+   emits it.
 
 ## Why the steps are observed, never wrapped
 
@@ -153,6 +175,15 @@ refuses) — an honest finding for `#7949`, never a guess.
   limit: it closes *inference* (green rows with no artifact), not forgery.
 - **Nothing about the five dependencies beyond their `state`** — that they are OPEN is a
   fresh read, but *why* each is open is the issue body's decomposition, not re-derived.
+- **Nothing reachable by a run.** The eight-step observation is **currently unreachable**
+  on `capture_session`'s receipt: `tortoise/sdk.py` assembles the receipt from `meta` +
+  `extracted` (no `extraction` key), so the probe's `captured.get("extraction") or
+  captured` hands `observe_steps` the receipt itself, which carries none of `result["vet"]`,
+  `result["classify_later"]`, `result["search"]`, `result["payload"]`. Those four steps are
+  therefore reported **unobserved** and the run refuses at G5 for EVERY input, once G0
+  lands. A COMPLETED run — hence any row that could ever be measured — waits on `#9116`
+  as well as `#9075`. This is a property of the caller's receipt, not of §4.4 or of the
+  pipeline: the steps RUN, the surface the probe is handed does not say so.
 
 ## Reproduce
 
@@ -161,7 +192,11 @@ refuses) — an honest finding for `#7949`, never a guess.
 TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest \
     tests/test_7949_capstone_verdict_check.py -q -p no:cacheprovider
 
-# the real run, once #9075 lands and a provider key + a searchable backend exist:
+# the real run, once #9075 lands AND #9116 lands AND a provider key + a searchable
+# backend exist. #9116 is a second precondition, not a detail: the observation
+# surface the probe reads is not on `capture_session`'s receipt yet, so a run today
+# refuses at G5 with S2.2/S2.3/S3/S6 unobserved (see "What this bundle does NOT
+# establish"). Re-running before it lands reproduces the REFUSED table, not a verdict.
 python docs/evidence/7949-capstone/probes/capstone_run.py \
     --prereg <pre-registration commit> --corpus <pre-registered corpus> \
     | tee docs/evidence/7949-capstone/capstone.log
