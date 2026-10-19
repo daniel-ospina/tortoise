@@ -783,8 +783,7 @@ def test_the_inventory_runs_on_a_diff_to_every_module_it_scans() -> None:
     can add a door is a change to ANY module — not only to the modules
     that happen to hold the declared doors today. Registration is per SURFACE,
     and a NAMED ``SOURCE_PATTERNS`` match REPLACES the ``core`` fallback that was
-    this
-    file's original arm: ``tortoise/hosted_api.py`` resolves to ``api`` +
+    this file's original arm: ``tortoise/hosted_api.py`` resolves to ``api`` +
     ``onboarding`` (where THREE of the declared doors live), ``tortoise/dream.py``
     / ``analyze.py`` / ``ranking.py`` to ``ep``, ``tortoise/ids.py`` /
     ``models.py`` / ``ask_lane.py`` / ``crypto.py`` / ``reader.py`` /
