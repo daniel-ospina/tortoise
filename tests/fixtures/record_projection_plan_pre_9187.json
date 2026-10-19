@@ -1,0 +1,123 @@
+{
+ "_comment": "The (sql, params) set record_projection.replay_plan emitted at ecc7bc8ca, the commit BEFORE PR #9194 added start_seq. Regenerate only with a deliberate, reviewed plan change; this is the regression pin for #9187's additive-default claim.",
+ "generated_from_commit": "ecc7bc8ca",
+ "graph_id": "graph-1",
+ "note": "start_seq did not exist at that commit; the plan below is therefore the default-position plan.",
+ "org_id": "org-1",
+ "plan": [
+  [
+   "INSERT INTO public.node_identity (org_id, graph_id, node_label, node_key) VALUES (%s, %s, %s, %s) ON CONFLICT (org_id, graph_id, node_label, node_key) DO NOTHING",
+   [
+    "org-1",
+    "graph-1",
+    "Point",
+    "p1"
+   ]
+  ],
+  [
+   "INSERT INTO public.point (org_id, graph_id, node_label, node_key, id, content, point_kind, props) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (org_id, graph_id, node_key) DO UPDATE SET id = EXCLUDED.id, content = EXCLUDED.content, point_kind = EXCLUDED.point_kind, props = point.props || EXCLUDED.props",
+   [
+    "org-1",
+    "graph-1",
+    "Point",
+    "p1",
+    "p1",
+    "a claim",
+    "claim",
+    "{}"
+   ]
+  ],
+  [
+   "INSERT INTO public.journal_event (org_id, graph_id, seq, event_type, payload, recorded_at) VALUES (%s, %s, %s, %s, %s, COALESCE(%s::timestamptz, now())) ON CONFLICT (org_id, graph_id, seq) DO NOTHING",
+   [
+    "org-1",
+    "graph-1",
+    1,
+    "PointAdded",
+    "{\"id\": \"p1\", \"point\": {\"id\": \"p1\", \"content\": \"a claim\", \"pointKind\": \"claim\", \"ep_alpha\": 1.0, \"ep_beta\": 1.0}}",
+    "2026-10-14T00:00:00Z"
+   ]
+  ],
+  [
+   "INSERT INTO public.node_identity (org_id, graph_id, node_label, node_key) VALUES (%s, %s, %s, %s) ON CONFLICT (org_id, graph_id, node_label, node_key) DO NOTHING",
+   [
+    "org-1",
+    "graph-1",
+    "Object",
+    "a document"
+   ]
+  ],
+  [
+   "INSERT INTO public.object (org_id, graph_id, node_label, node_key, id, name, object_kind, props) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (org_id, graph_id, node_key) DO UPDATE SET id = EXCLUDED.id, name = EXCLUDED.name, object_kind = EXCLUDED.object_kind, props = object.props || EXCLUDED.props",
+   [
+    "org-1",
+    "graph-1",
+    "Object",
+    "a document",
+    "o1",
+    "a document",
+    "document",
+    "{}"
+   ]
+  ],
+  [
+   "INSERT INTO public.journal_event (org_id, graph_id, seq, event_type, payload, recorded_at) VALUES (%s, %s, %s, %s, %s, COALESCE(%s::timestamptz, now())) ON CONFLICT (org_id, graph_id, seq) DO NOTHING",
+   [
+    "org-1",
+    "graph-1",
+    2,
+    "ObjectRegistered",
+    "{\"id\": \"o1\", \"name\": \"a document\", \"objectKind\": \"document\"}",
+    "2026-10-14T00:00:01Z"
+   ]
+  ],
+  [
+   "UPDATE public.point SET id = %s, content = %s WHERE org_id = %s AND graph_id = %s AND node_key = %s",
+   [
+    "p1",
+    "a revised claim",
+    "org-1",
+    "graph-1",
+    "p1"
+   ]
+  ],
+  [
+   "INSERT INTO public.journal_event (org_id, graph_id, seq, event_type, payload, recorded_at) VALUES (%s, %s, %s, %s, %s, COALESCE(%s::timestamptz, now())) ON CONFLICT (org_id, graph_id, seq) DO NOTHING",
+   [
+    "org-1",
+    "graph-1",
+    3,
+    "PointRevised",
+    "{\"id\": \"p1\", \"new_content\": \"a revised claim\"}",
+    "2026-10-14T00:00:02Z"
+   ]
+  ]
+ ],
+ "records": [
+  {
+   "id": "p1",
+   "point": {
+    "content": "a claim",
+    "ep_alpha": 1.0,
+    "ep_beta": 1.0,
+    "id": "p1",
+    "pointKind": "claim"
+   },
+   "ts": "2026-10-14T00:00:00Z",
+   "type": "PointAdded"
+  },
+  {
+   "id": "o1",
+   "name": "a document",
+   "objectKind": "document",
+   "ts": "2026-10-14T00:00:01Z",
+   "type": "ObjectRegistered"
+  },
+  {
+   "id": "p1",
+   "new_content": "a revised claim",
+   "ts": "2026-10-14T00:00:02Z",
+   "type": "PointRevised"
+  }
+ ]
+}

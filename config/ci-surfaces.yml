@@ -127,6 +127,19 @@ surfaces:
   # subjects span `projection/` (core), `sdk.py`, `api.py` (api),
   # `backup.py`/`consistency.py`/`mining.py` (core), and `__main__.py` (api).
   - test_7951_enforce_atomic_write.py
+  # #9122 (§17.1 raw `:Event` writers): MULTI-REGISTERED on `api`, `core` and
+  # `sdk`, and each row is load-bearing for a DIFFERENT subject — verified by
+  # re-running `select()` with the row withheld:
+  #   * `api` — `tortoise/hosted_api.py` (the hosted ingest caller) selects
+  #     `api`; a `core`-only registration is ABSENT from that 333-file set.
+  #   * `core` — `tortoise/session_indexer.py` (the CLI this suite drives)
+  #     selects `core`; a lone `sdk` row would drop it there.
+  #   * `sdk` — explicit, mirroring the #7951 door suites on the same subject.
+  # An exact SOURCE_PATTERNS match REPLACES the `core` fallback in `select()`,
+  # which is why one row cannot cover the others (the #1349/#2938/#3154 class).
+  # NOTE `tortoise/sdk.py` alone selects the FULL matrix, so the `sdk` row is
+  # not what makes an sdk.py-only change run this suite.
+  - test_9079_event_writers_journal.py
   # #9121 (§17.1 write-lane DECLARATION): MULTI-REGISTERED with `onboarding`,
   # `core`, `api` and `sdk`. The suite pins a declaration in
   # `tortoise/onboarding/state.py` (onboarding) that the HOSTED callers
@@ -1437,6 +1450,19 @@ surfaces:
   # `sdk.py` are this guard's subjects; an `sdk.py`-only change selects the
   # full matrix, and a `projection/`-only change falls through to `core`.
   - test_7951_enforce_atomic_write.py
+  # #9122 (§17.1 raw `:Event` writers): MULTI-REGISTERED on `api`, `core` and
+  # `sdk`, and each row is load-bearing for a DIFFERENT subject — verified by
+  # re-running `select()` with the row withheld:
+  #   * `api` — `tortoise/hosted_api.py` (the hosted ingest caller) selects
+  #     `api`; a `core`-only registration is ABSENT from that 333-file set.
+  #   * `core` — `tortoise/session_indexer.py` (the CLI this suite drives)
+  #     selects `core`; a lone `sdk` row would drop it there.
+  #   * `sdk` — explicit, mirroring the #7951 door suites on the same subject.
+  # An exact SOURCE_PATTERNS match REPLACES the `core` fallback in `select()`,
+  # which is why one row cannot cover the others (the #1349/#2938/#3154 class).
+  # NOTE `tortoise/sdk.py` alone selects the FULL matrix, so the `sdk` row is
+  # not what makes an sdk.py-only change run this suite.
+  - test_9079_event_writers_journal.py
   # #9121 (§17.1 write-lane DECLARATION): MULTI-REGISTERED with `onboarding`,
   # `core`, `api` and `sdk`. The suite pins a declaration in
   # `tortoise/onboarding/state.py` (onboarding) that the HOSTED callers
@@ -1606,6 +1632,21 @@ surfaces:
   # `supabase/tests/pglite/validate.mjs` (the #7968 convention: the SQL half
   # lives in the harness that has a Postgres, this file stays hermetic).
   - test_record_projection.py
+  # #9187 (epic #7879, #9078's foundation child): the RECORD-WRITE SEAM — the one
+  # production boundary that drives `record_projection.replay` on the caller's
+  # transaction, with its arming surface (`TORTOISE_RECORD_DSN`, default OFF),
+  # its named `not-armed` outcome and its position watermark. Registered against
+  # `core` for the same reason as `test_record_projection.py` directly above:
+  # BOTH its inputs are `core`-selected — `tortoise/record_writer.py` and
+  # `tortoise/record_projection.py` match no named SOURCE_PATTERN (the `core`
+  # fallback). NOTE the one input that is NOT `core`: `tortoise/status_vocabulary.py`
+  # also matches no SOURCE_PATTERN, so a change to it alone still falls through to
+  # `core` — but the seam only READS the recorded terms, so a vocabulary change is
+  # covered here for the parity assertion and nowhere else. DB-free by
+  # construction: every connection is a recording fake, so the file needs no
+  # graph, no URI and no carve-out registration. Its live-engine half is #9188,
+  # not here.
+  - test_record_writer_seam.py
   # #7968 / PR #8179 review P1: guards the org-erasure wiring — `purge_org_control_plane`
   # must route the organizations delete through the `purge_org_record` RPC
   # (migration 20261012000005), which sets app.record_journal_purge so the
@@ -4119,6 +4160,19 @@ surfaces:
   # test_the_inventory_runs_on_a_diff_to_every_module_it_scans`.
   - test_9068_pack_gate_residuals.py
   - test_7951_enforce_atomic_write.py
+  # #9122 (§17.1 raw `:Event` writers): MULTI-REGISTERED on `api`, `core` and
+  # `sdk`, and each row is load-bearing for a DIFFERENT subject — verified by
+  # re-running `select()` with the row withheld:
+  #   * `api` — `tortoise/hosted_api.py` (the hosted ingest caller) selects
+  #     `api`; a `core`-only registration is ABSENT from that 333-file set.
+  #   * `core` — `tortoise/session_indexer.py` (the CLI this suite drives)
+  #     selects `core`; a lone `sdk` row would drop it there.
+  #   * `sdk` — explicit, mirroring the #7951 door suites on the same subject.
+  # An exact SOURCE_PATTERNS match REPLACES the `core` fallback in `select()`,
+  # which is why one row cannot cover the others (the #1349/#2938/#3154 class).
+  # NOTE `tortoise/sdk.py` alone selects the FULL matrix, so the `sdk` row is
+  # not what makes an sdk.py-only change run this suite.
+  - test_9079_event_writers_journal.py
   # #9121 (§17.1 write-lane DECLARATION): MULTI-REGISTERED with `onboarding`,
   # `core`, `api` and `sdk`. The suite pins a declaration in
   # `tortoise/onboarding/state.py` (onboarding) that the HOSTED callers

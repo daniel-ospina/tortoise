@@ -46,6 +46,7 @@ from tools.ask_spotcheck import (  # noqa: E402, RUF100
     _strip_annotations,
     _superseded_live_state,
     load_supersession_cases,
+    main,
     run_distilled_leg,
     seed_distilled_corpus,
 )
@@ -331,3 +332,177 @@ def test_mutation_dropping_the_supersession_turns_the_d8_gate_red(
     assert report["ok"] is False, (
         "a corpus whose supersession was lost MUST fail the D8 gate — "
         "otherwise the gate passes on any corpus at all")
+
+
+# ── 6. the claim-detection is RENDER-SHAPE independent ───────────────────
+#
+# The planted corpus is single-line, but ``--supersession-fixture`` accepts an
+# arbitrary corpus and a stored claim may carry a BLANK line. The renderer's
+# ``_fence_body`` leaves a blank continuation line blank and fences the rest, so
+# such a hit used to split on the ``"\n\n"`` block join AND carry a fence marker
+# inside its body — both of which defeated the claim-text match, making a
+# superseded claim served LIVE read as an unobservable one. The gate must be
+# independent of that shape.
+
+_MULTI_PARA_OLD = ("I live in Lisbon.\n\nI moved here from Madrid last "
+                   "spring.")
+
+
+def _multi_paragraph_case() -> dict:
+    """The first planted case with its OLD claim re-authored as two paragraphs.
+
+    The first paragraph is the original claim text, so the case stays
+    retrievable by the same question — only the RENDER SHAPE under test
+    changes, not what the reader is asked or what the store holds.
+    """
+    case = json.loads(json.dumps(load_supersession_cases()[0]))
+    case["old_claim"]["text"] = _MULTI_PARA_OLD
+    return case
+
+
+def test_a_multi_paragraph_claim_stays_one_block_and_matches_through_the_renderer():
+    """The PRODUCT renderer, not a hand-written block: ``render_context``
+    fences the body and preserves the blank line, so this pins the fix against
+    the real render shape rather than against the test's idea of it."""
+    from tortoise.retrieval import _BODY_FENCE, render_context
+
+    hit = {
+        "id": "old-1", "content": _MULTI_PARA_OLD, "session_id": "s1",
+        "session_date": "2023-03-02", "speaker": "user",
+        "valid_from": "2023-03-02", "valid_to": "2023-05-20",
+        "superseded_by": {"content_snippet": "I live in Porto."},
+    }
+    evidence = render_context([hit])
+    # Precondition: the rendered body IS fenced and IS multi-paragraph — i.e.
+    # the naive whole-string test really is defeated on this shape.
+    assert _BODY_FENCE in evidence, evidence
+    assert len(evidence.split("\n\n")) > 1, evidence
+
+    # ONE hit ⇒ ONE block, even though its body carries a blank line.
+    assert len(_evidence_blocks(evidence)) == 1, _evidence_blocks(evidence)
+    # The claim is observed, and observed as FLAGGED (never as live).
+    assert _superseded_live_state(evidence, _MULTI_PARA_OLD) == (
+        True, False, True), evidence
+
+
+def test_a_multi_paragraph_claim_served_live_is_a_hard_failure(monkeypatch):
+    """End to end, through the real lane and renderer: lose the supersession on
+    a MULTI-PARAGRAPH claim and the D8 gate must still go RED.
+
+    On the pre-fix block split this case read ``seen == 0``, so the gate went
+    red for the WRONG reason (an unobserved claim) and the ``rendered_live``
+    half — the actual violation — was never measured.
+    """
+    _install_reader(monkeypatch)
+    report = run_distilled_leg(
+        cases=[_multi_paragraph_case()], judge=MockJudge(),
+        mutate=lambda sdk: sdk._get_proj().g.query(
+            "MATCH (a:Point)-[r:CORRECTS]->(b:Point) DELETE r "
+            "WITH b SET b.status = 'live', b.validTo = null, b.expiredAt = null"),
+    )
+    assert report["superseded_live"]["seen"] == 1, report
+    assert report["superseded_live"]["rendered_live"] == 1, report
+    assert report["ok"] is False, report
+
+
+def test_a_multi_paragraph_claim_rendered_flagged_passes(monkeypatch):
+    """The green half of the same shape: a multi-paragraph superseded claim IS
+    observed and IS flagged, so the gate passes for the measured reason."""
+    _install_reader(monkeypatch)
+    report = run_distilled_leg(cases=[_multi_paragraph_case()], judge=MockJudge())
+    assert report["superseded_live"] == {
+        "seen": 1, "rendered_live": 0, "n": 1, "rate": 0.0}, report
+    assert report["cases"][0]["arms"]["distilled"]["flagged"] is True, report
+    assert report["ok"] is True, report
+
+
+# ── 7. an UNOBSERVED claim is never a pass (no exclusion bypass) ──────────
+
+def test_an_unobserved_claim_fails_closed_rather_than_passing(monkeypatch):
+    """D8's promise is *"flagged or EXCLUDED"*, and an excluded superseded claim
+    produces the same observable as a retrieval miss: ``seen == 0``.
+
+    The landed gate refuses that ambiguity in the fail-closed direction — an
+    unobserved claim was not shown to be flagged, it was merely not seen — and
+    this test is the pin on that polarity. It goes red for any implementation
+    that turns ``seen == 0`` into a PASS by inferring an exclusion from the
+    matcher's own silence (the rival #9125 head did exactly that: a superseded
+    claim served live in a multi-line body and missed by the text matcher was
+    scored ``excluded: true`` and the run exited 0)."""
+    _install_reader(monkeypatch)
+
+    def _drop_the_distilled_claims(sdk) -> None:
+        sdk._get_proj().g.query(
+            "MATCH (p:Point) WHERE p.is_episodic = false DETACH DELETE p")
+
+    report = run_distilled_leg(
+        cases=[load_supersession_cases()[0]], judge=MockJudge(),
+        mutate=_drop_the_distilled_claims)
+    assert report["superseded_live"]["seen"] == 0, report
+    assert report["superseded_live"]["rendered_live"] == 0, report
+    assert report["ok"] is False, (
+        "a claim the instrument could not observe MUST fail the gate — "
+        "an unmeasured gate is never a pass")
+
+
+# ── 8. the leg is key-free ONLY on an explicit mock judge ────────────────
+
+_PROVIDER_KEYS = ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+                  "GEMINI_API_KEY", "TORTOISE_LME_JUDGE_MODEL",
+                  "TORTOISE_SPOTCHECK_JUDGE")
+
+
+def test_the_distilled_leg_is_key_free_only_with_an_explicit_mock_judge(
+        monkeypatch, capsys):
+    """The landed leg called ``_require_judge_key()`` unconditionally, so the D8
+    gate could not be run in CI at all (no provider key there). The opt-out is
+    ``TORTOISE_SPOTCHECK_JUDGE=mock`` — explicit, and the composition path's
+    #2071 fail-fast is untouched by it (see
+    ``test_composition_leg_keeps_its_judge_key_fail_fast``)."""
+    _install_reader(monkeypatch)
+    for key in _PROVIDER_KEYS:
+        monkeypatch.delenv(key, raising=False)
+
+    # No mock, no key ⇒ exit 2 BEFORE any case is graded.
+    assert main(["--distilled"]) == 2
+    refused = capsys.readouterr()
+    assert "DISTILLED_JSON" not in refused.out, refused.out
+    assert "judge" in refused.err.lower(), refused.err
+
+    # ⛔ The opt-out is NARROW — it must be spelled `mock`. Anything merely
+    # truthy is refused, because a truthy-but-unintended value (`1`, `true`)
+    # grading with `MockJudge` would print PASS and a DISTILLED_JSON {"ok": true}
+    # from a MOCK containment score — a fake gate that reads green and is
+    # exactly the "an unmeasured gate is never a pass" hazard this leg closes.
+    # Pinned here rather than trusted to the docstring: a bare-truthiness
+    # implementation passes the two cases above (measured, #9125 review).
+    # Surrounding whitespace IS tolerated on purpose (`strip()` — a shell can
+    # hand us `mock `), which is why the spellings below exclude it.
+    for misspelled in ("1", "true", "yes", "MOCKISH", "mocky"):
+        monkeypatch.setenv("TORTOISE_SPOTCHECK_JUDGE", misspelled)
+        rc = main(["--distilled"])
+        stray = capsys.readouterr()
+        assert rc == 2, (misspelled, rc, stray.out[:200])
+        assert "DISTILLED_JSON" not in stray.out, (misspelled, stray.out)
+
+    # Explicit mock ⇒ the leg runs key-free and reports its number.
+    monkeypatch.setenv("TORTOISE_SPOTCHECK_JUDGE", "mock")
+    assert main(["--distilled"]) == 0
+    out = capsys.readouterr().out
+    payload = [ln for ln in out.splitlines() if ln.startswith("DISTILLED_JSON ")]
+    assert len(payload) == 1, out
+    parsed = json.loads(payload[0][len("DISTILLED_JSON "):])
+    assert parsed["ok"] is True, parsed
+    assert parsed["judge_model"], parsed
+
+
+def test_composition_leg_keeps_its_judge_key_fail_fast(monkeypatch, capsys):
+    """#2071's fail-fast is NOT widened by the distilled leg's mock opt-out:
+    the 21-question path refuses without a provider key even when
+    ``TORTOISE_SPOTCHECK_JUDGE=mock`` is set."""
+    for key in _PROVIDER_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("TORTOISE_SPOTCHECK_JUDGE", "mock")
+    assert main([]) == 2
+    captured = capsys.readouterr()
+    assert "judge" in captured.err.lower(), captured.err

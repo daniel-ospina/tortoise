@@ -23,6 +23,15 @@ doc:
    storable, no DERIVED/VOLATILE property is ever stored as authority.
 4. Exact-SQL evidence for the shapes above (the emitted statements are asserted,
    not merely executed).
+5. **TENANCY IS PER CALL (#9192).** `(org_id, graph_id)` are REQUIRED keyword
+   arguments of every entry point here — there is no ambient tenant, no
+   environment fallback and no ContextVar at this layer. A process serving
+   several tenant graphs (the hosted lane builds one SDK per tenant graph, and
+   its capture executor is process-wide) must not be able to file one tenant's
+   rows under another: the row would be well-formed and the FK to
+   `public.graphs` only checks that the graph exists, so nothing would raise.
+   Two legs: two tenants in one process never cross-write, and a caller that
+   cannot name its tenant REFUSES rather than inheriting one.
 
 WHY THE PLACEMENT TABLE IS IMPORTED, NOT RE-DECLARED. `#7968`'s
 `tests/test_record_schema_placement.py` already parses §17.5 and resolves its
@@ -258,15 +267,20 @@ def test_points_merged_is_refused_not_approximated():
 # ════════════════════════════════════════════════════════════════════════════
 
 
-def _plan_for_everything() -> list[rp.Statement]:
-    records = [
+def _everything_records() -> list[dict[str, Any]]:
+    """One record per declared type — the plan every leg below is asserted on."""
+    records: list[dict[str, Any]] = [
         {"type": t, "ts": "2026-10-12T00:00:00Z", **payload}
         for t, payload in _MINIMAL_RECORDS.items()
     ]
     records.append({"type": "EntityMutated", "ts": "T", "id": "p1",
                     "label": "Point", "op": "restatus",
                     "state": {"status": "live"}})
-    return rp.replay_plan(records, org_id="o", graph_id="g")
+    return records
+
+
+def _plan_for_everything() -> list[rp.Statement]:
+    return rp.replay_plan(_everything_records(), org_id="o", graph_id="g")
 
 
 def test_replay_plan_is_deterministic():
@@ -1201,3 +1215,97 @@ def test_every_type_a_producer_emits_has_a_record_mutation():
         "mutation — a NEW producer must red this suite (Interface A's total "
         "clause), or the silent skip returns"
     )
+
+
+# ---------------------------------------------------------------------------
+# TENANCY (#9192) — the pair comes from the CALL, never from the process
+# ---------------------------------------------------------------------------
+
+#: Two tenants, distinct in BOTH coordinates, so a plan that mixes the graph
+#: while keeping the org is caught too.
+_TENANT_A = ("org_a", "graph_a")
+_TENANT_B = ("org_b", "graph_b")
+
+
+def _every_param(plan: list[rp.Statement]) -> list[Any]:
+    """Every bound parameter of a plan, flattened.
+
+    Tenancy is asserted over the WHOLE plan rather than a sampled statement:
+    one statement built from a different tenant is the cross-tenant write, and
+    it would sit next to 73 correct ones.
+    """
+    return [param for statement in plan for param in statement.params]
+
+
+def test_two_tenants_in_one_process_do_not_cross_write():
+    """#9192: writing for A then for B never lets A's tenant reach B's rows.
+
+    This is the leg that stops the regression, and the shape of the failure is
+    why it is asserted exhaustively. A process that serves several tenant
+    graphs and resolves its tenant from anything ambient (env, a module global,
+    a ContextVar set at a pool thread's top level) files tenant A's rows under
+    tenant B **without raising**: the row is well-formed and the FK to
+    `public.graphs` only checks that the graph exists. Nothing downstream can
+    detect it — only the write site can, so the write site is where it is pinned.
+    """
+    plan_a = rp.replay_plan(_everything_records(), org_id=_TENANT_A[0],
+                            graph_id=_TENANT_A[1])
+    plan_b = rp.replay_plan(_everything_records(), org_id=_TENANT_B[0],
+                            graph_id=_TENANT_B[1])
+
+    # Non-vacuity: a plan that emitted nothing would satisfy "does not carry B".
+    assert plan_a, "the record set materialized no statements — the leg is vacuous"
+    # The statement SHAPES are tenant-independent, so tenancy is the only thing
+    # that may differ between the two plans. A tenant baked into SQL text (which
+    # no parameter check would see) shows up here.
+    assert [s.sql for s in plan_a] == [s.sql for s in plan_b]
+
+    for plan, tenant, other in ((plan_a, _TENANT_A, _TENANT_B),
+                                (plan_b, _TENANT_B, _TENANT_A)):
+        for statement in plan:
+            assert tenant[0] in statement.params and tenant[1] in statement.params, (
+                f"{statement.sql[:80]!r} does not bind the tenant it was asked "
+                f"for ({tenant}) — a statement can escape tenancy"
+            )
+        params = _every_param(plan)
+        assert other[0] not in params, (
+            f"{other[0]} leaked into the plan written for {tenant[0]}"
+        )
+        assert other[1] not in params, (
+            f"{other[1]} leaked into the plan written for {tenant[1]}"
+        )
+
+
+def test_a_write_that_cannot_name_its_tenant_refuses_instead_of_falling_back(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """#9192 ask 2: no ambient tenant exists, so an unnamed one cannot be armed.
+
+    The refusal is the whole safety property. A fallback is not a mitigation on
+    the process this has to hold on: env (and any module-level default) is
+    process-global, so ONE fallback value is tenant B's tenant while the process
+    is serving tenant A. The entry points therefore take the pair as required
+    keyword arguments, and the environment is never consulted — asserted with
+    the pair present, since an absent env cannot distinguish "not read" from
+    "read and empty".
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "env_org")
+    monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "env_graph")
+
+    record = {"type": "PointAdded", "ts": "T", "id": "p1",
+              "point": dict(_SNAPSHOT)}
+
+    # Every entry point: an unnamed tenant is refused, not defaulted.
+    with pytest.raises(TypeError):
+        rp.mutations_for(record)
+    with pytest.raises(TypeError):
+        rp.replay_plan([record])
+    with pytest.raises(TypeError):
+        rp.replay([record], None)
+
+    # And a NAMED tenant is the one that lands — the env pair is not read even
+    # as a fallback for the coordinate the caller did supply.
+    plan = rp.replay_plan([record], org_id=_TENANT_A[0], graph_id=_TENANT_A[1])
+    assert _every_param(plan), "the plan bound no parameters — the leg is vacuous"
+    params = _every_param(plan)
+    assert "env_org" not in params and "env_graph" not in params
