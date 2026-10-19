@@ -15,16 +15,15 @@ aboutObjects: "#7949, #9080, #9075, #9076, #9077, #9116, #5199, #7947, EXTRACTOR
 branch: the files this bundle adds (`docs/evidence/7949-capstone/**`,
 `tools/capstone_verdict_check.py`, `tests/test_7949_capstone_verdict_check.py`,
 `config/ci-surfaces.yml`) plus the surface re-cut the new caller forces
-(`config/surface-manifest.yml`, `docs/product/mcp-sdk-surface.md`) — and, from
-clearing two `main`-reds this lane inherited, one doc citation remap
-(`docs/engineering/auth/consent-identity-bridge.md`) and two COMMENT rewrites
-(`tortoise/api.py`, `tortoise/commit_schema.py`: the #9158 durability-claim
-pin). **Nothing under `tortoise/` changes behaviour and nothing instruments
-the extractor** — the two edits are comment text, so the E4 row's "no
-monkeypatch" clause still holds on the fact that matters: no wrapper, spy or
-step-composition is installed anywhere in the measured path. The one-line
-`tortoise/sdk.py` receipt construction this bundle reasons about is read, not
-changed.
+(`config/surface-manifest.yml`, `docs/product/mcp-sdk-surface.md`).
+**Nothing under `tortoise/` changes behaviour and nothing instruments the
+extractor** — this bundle installs no wrapper, spy or step-composition anywhere
+in the measured path, so the E4 row's "no monkeypatch" clause holds on the fact
+that matters. The one-line `tortoise/sdk.py` receipt construction this bundle
+reasons about is read, not changed. (An earlier draft of this paragraph also
+claimed a citation remap in `docs/engineering/auth/consent-identity-bridge.md`
+and two comment rewrites under `tortoise/`; `main` carries equivalent fixes for
+all three, so they are NOT part of this bundle and are no longer claimed here.)
 
 **Decision being proved:** the epic's own closing rule — *"Close this epic only when
 E1–E5 all have evidence attached to this issue — not when the children close. A child

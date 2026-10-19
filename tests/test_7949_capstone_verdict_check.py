@@ -303,7 +303,11 @@ def test_green_row_whose_evidence_predates_the_preregistration_is_a_finding(
     rec = _record()
     _green(rec)
     rec["prereg"]["sha"] = child
-    rec["rows"][0]["sha"] = parent        # measured BEFORE the thresholds froze
+    # Every row is stamped with the ONE run head (V3 resolves each of them
+    # against `repo`, so a row still carrying this checkout's HEAD would red on
+    # V3 for the wrong reason), and that head predates the thresholds.
+    for row in rec["rows"]:
+        row["sha"] = parent
     findings = cvc.check(rec, repo=repo, require_green=False)
     codes = [code for code, _w, _m in findings.items]
     assert codes == ["V5"], findings.render()
@@ -321,7 +325,24 @@ def test_green_row_with_a_sha_that_does_not_resolve_is_a_finding():
     rec = _record()
     _green(rec)
     rec["rows"][0]["sha"] = "0" * 40
-    assert "V5" in _codes(rec)
+    assert "V3" in _codes(rec)
+
+
+def test_a_NON_GREEN_row_whose_sha_does_not_resolve_is_a_finding():
+    """REGRESSION (#9089 review). The resolve check lived inside the GREEN
+    branch, so it ran on ZERO rows of the shipped table — which is 0/5 green.
+
+    Non-vacuity: five rows stamped ``"0"*40`` returned no findings at all
+    before the fix, while the tool printed "5/5 rows carry an evidence
+    artifact + sha". A row whose stamped commit cannot be resolved has
+    provenance nobody can re-derive, whatever its verdict says.
+    """
+    rec = _record()
+    for row in rec["rows"]:
+        row["sha"] = "0" * 40
+    codes = _codes(rec)
+    assert codes.count("V3") == 5, codes
+    assert "V5" not in codes, codes
 
 
 def test_green_row_with_an_unparseable_sha_is_a_finding():
@@ -365,6 +386,41 @@ def test_measured_row_on_a_different_corpus_is_a_finding():
     _green(rec)
     rec["rows"][0]["corpus_sha256"] = "b" * 64
     assert "V7" in _codes(rec)
+
+
+def test_a_measured_row_against_a_log_with_no_corpus_sha_is_a_finding():
+    """REGRESSION (#9089 review): the compare used to be SKIPPED when the log
+    carried no corpus sha (``and corpus.get("sha256")``), so a measured row
+    naming ANY corpus passed against a log that names none.
+
+    Non-vacuity: a GREEN row with ``corpus_sha256="b"*64`` against a log whose
+    ``corpus.sha256`` is null returned no finding before the fix. "Two corpora
+    cannot share one verdict" is unenforceable where nobody wrote down which
+    corpus ran — so the absence IS the finding.
+    """
+    rec = _record()
+    _green(rec)
+    rec["corpus"] = {"path": "corpus.json", "sha256": None, "turns": None}
+    rec["rows"][0]["corpus_sha256"] = "b" * 64
+    assert "V7" in _codes(rec)
+
+
+def test_a_measured_E4_with_the_4_edge_denominator_is_a_finding():
+    """E4's row says it *fails if the denominator is 4* — the historical defect
+    merged 4 of the 15 reachable edges, so a 4 is the defect re-appearing.
+
+    The probe computed `denominator_is_the_4_edge_defect` and used it only in a
+    NOTE, so a measured E4 with denominator 4 passed the gate (#9089 review).
+    """
+    rec = _record()
+    _green(rec)
+    e4 = rec["rows"][3]
+    e4.update(verdict="GREEN", evidence_kind="measurement",
+              evidence=rec["rows"][0]["evidence"], numerator=3, denominator=4,
+              blocked_by=None, corpus_sha256="a" * 64)
+    assert "V10" in _codes(rec)
+    # E1 (denominator 50) on the same record is not the defect
+    assert "V10" not in _codes(_record())
 
 
 def test_sibling_denominator_disagreement_is_a_finding():
@@ -638,6 +694,34 @@ def test_a_green_branch_is_unreachable_until_9116_lands(tmp_path, monkeypatch):
     assert set(cvc.STEPS) - set(receipt) == set(probe.UNOBSERVABLE_STEPS)
 
 
+def test_a_completed_run_does_not_blame_the_preregistration_it_just_read():
+    """REGRESSION (#9089 review): G6 is reached only after G0 READ the frozen
+    pre-registration, yet its rows said `evidence_kind="refusal"` and E1/E2
+    named `#9075` as the blocker — telling the next lane that the
+    pre-registration is still missing and calling a measurement a refusal.
+
+    G6 itself is unreachable while #9116 leaves the receipt witnessless, which
+    is why the row construction is a pure function: a fix that lives only
+    inside dead code is a fix nothing can pin.
+    """
+    rows = probe.completed_rows(
+        head="a" * 40, corpus_sha="b" * 64,
+        receipt=probe.e4_receipt({"s4_merge": {"s2_items": 15,
+                                               "kept_from_s2": 14}}))
+    assert [r["criterion"] for r in rows] == ["E1", "E2", "E3", "E4", "E5"]
+    assert {r["evidence_kind"] for r in rows} == {"measurement"}, rows
+    by_id = {r["criterion"]: r for r in rows}
+    assert by_id["E1"]["blocked_by"] == probe.ALSO_BLOCKED_BY["E1"]
+    assert by_id["E2"]["blocked_by"] == probe.ALSO_BLOCKED_BY["E2"]
+    assert all(r["blocked_by"] != "#9075" or r["criterion"] not in ("E1", "E2")
+               for r in rows)
+    assert {r["sha"] for r in rows} == {"a" * 40}
+    assert {r["corpus_sha256"] for r in rows} == {"b" * 64}
+    # The sibling link stays (E1/E2 share one corpus) and E4 carries its receipt.
+    assert by_id["E1"]["sibling"] == "E2" and by_id["E2"]["sibling"] == "E1"
+    assert "14/15" in by_id["E4"]["note"], by_id["E4"]["note"]
+
+
 def test_e4_receipt_flags_the_four_edge_denominator():
     """E4's row fails when the denominator is 4 — the historical defect."""
     receipt = probe.e4_receipt({"s4_merge": {"s2_items": 4, "kept_from_s2": 4}})
@@ -708,8 +792,10 @@ def _frozen_prereg(**over) -> dict:
 def _read_prereg_ok(monkeypatch, record: dict | None = None) -> None:
     """G0 PASSES, so the run reaches G1+ — the half no test used to reach."""
     fixed = record if record is not None else _frozen_prereg()
+    # The reader takes the commit the rows are STAMPED with (``head``), not the
+    # worktree's: G0's ancestry test resolves against what was measured.
     monkeypatch.setattr(probe, "read_preregistration",
-                        lambda _sha, _artifact: (fixed, ""))
+                        lambda _sha, _artifact, _head=None: (fixed, ""))
 
 
 def test_post_g0_refusals_record_the_preregistration_as_read(tmp_path, monkeypatch):
@@ -951,8 +1037,14 @@ def test_a_free_text_head_override_is_refused_before_it_is_stamped(tmp_path):
     assert "not a commit sha" in record["run"]["reason"]
     assert record["head"] != "not-a-sha", (
         "an unvalidated override reached the shipped record")
-    assert record["head"] == "unknown"
-    assert {row["sha"] for row in record["rows"]} == {"unknown"}
+    # The refusal IS a fact measured at THIS checkout, so it carries the
+    # worktree's HEAD — not the string "unknown". A refusal table is piped over
+    # the committed evidence file by the acceptance command (`| tee`), so a
+    # stamp `git cat-file` cannot resolve would replace the shipped log with a
+    # table this repo's own gate (V3) reds.
+    assert record["head"] == HEAD, record["head"]
+    assert {row["sha"] for row in record["rows"]} == {HEAD}
+    assert not [c for c in _codes(record) if c in ("V3", "V4", "V6")], _codes(record)
 
 
 def test_a_head_that_does_not_resolve_is_refused(tmp_path):
@@ -971,7 +1063,8 @@ def test_a_head_that_does_not_resolve_is_refused(tmp_path):
     assert code == 2, code
     record = cvc.extract_block(out.read_text())
     assert "does not resolve" in record["run"]["reason"]
-    assert record["head"] == "unknown"
+    assert record["head"] == HEAD, record["head"]
+    assert "V3" not in _codes(record), _codes(record)
 
 
 def test_a_resolvable_head_override_is_what_the_rows_are_stamped_with(tmp_path):
@@ -1012,6 +1105,39 @@ def test_read_preregistration_refuses_an_unknown_sha():
         "0" * 40, Path("docs/evidence/7949-capstone/preregistration.json"))
     assert record is None
     assert "does not resolve" in why
+
+
+def test_prereg_ancestry_is_resolved_against_the_measured_head(
+        tmp_path, monkeypatch):
+    """REGRESSION (#9089 review): G0 resolved ancestry against ``rev-parse
+    HEAD``, never against the commit the rows are stamped with.
+
+    With ``--head <older commit>`` the two differ, and the old form then
+    accepted a pre-registration committed AFTER the measured commit — emitting
+    a table whose every row is stamped with a pre-threshold commit, exactly the
+    state V5's "evidence PREDATES the pre-registration" rule refuses.
+
+    Non-vacuity: the pre-fix reader returns the record (G0 PASSES) for this
+    pair; the assertion below reds on it.
+    """
+    repo, parent, _child = _ancestry_pair(tmp_path)
+    (repo / "docs/evidence/7949-capstone/preregistration.json").write_text(
+        json.dumps(_frozen_prereg()))
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "prereg"],
+                   check=True)
+    frozen = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                            capture_output=True, text=True,
+                            check=True).stdout.strip()
+    # `_git` shells out against `ROOT`; monkeypatch restores it for the rest of
+    # the suite (a bare assignment here poisoned every later test's git calls).
+    monkeypatch.setattr(probe, "ROOT", repo)
+    record, why = probe.read_preregistration(
+        frozen, Path("docs/evidence/7949-capstone/preregistration.json"),
+        parent)
+    assert record is None, ("a pre-registration committed AFTER the measured "
+                            "head must not pass G0")
+    assert "not an ancestor" in why, why
 
 
 def test_read_preregistration_refuses_a_commit_without_the_artifact():

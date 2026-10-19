@@ -33,6 +33,7 @@ green off closed children, with no artifact at all. This closes that.
     V1  root schema is ``capstone-verdict-v1``
     V2  exactly five rows, ids E1..E5, one each — no missing, no duplicate
     V3  per-row required fields; verdict/evidence_kind in vocabulary; sha shape
+        AND resolvability — every row, whatever its verdict
     V4  every row's evidence path exists (repo-relative, no escape)
     V5  GREEN requires: evidence_kind=measurement, 0 < numerator <= denominator,
         blocked_by null, sha resolvable AND not predating the pre-registration,
@@ -41,10 +42,12 @@ green off closed children, with no artifact at all. This closes that.
         a ``refusal`` row must cite a capstone log that carries that row
     V7  a measurement row's ``corpus_sha256`` equals the log's corpus sha —
         "every green row cites an evidence file whose before/after denominators
-        are the same corpus"
+        are the same corpus" — and the LOG must name a corpus to compare with
     V8  a row naming a ``sibling`` must match that sibling's numerator AND
         denominator — the denominators are carried, not restated
     V9  --require-green (the EPIC's closing rule): 5/5 GREEN
+    V10 a MEASURED E4 whose denominator is 4 is the historical 4-edge defect
+        re-appearing, not a measurement
 
 Exit codes: 0 = clean, 1 = findings, 2 = usage / unreadable log. Without
 ``--require-green`` an honest all-blocked table is CLEAN (exit 0): the epic is
@@ -145,7 +148,7 @@ def _is_ancestor(repo: Path, maybe_ancestor: str, of: str) -> bool:
 
 def check(record: dict, *, repo: Path,
           require_green: bool) -> Findings:
-    """Apply V1–V9 to a parsed verdict table.
+    """Apply V1–V10 to a parsed verdict table.
 
     ``repo`` is the checkout the evidence paths and shas are resolved against —
     the ONLY input besides the record. (A ``log_path`` parameter used to be
@@ -210,6 +213,20 @@ def check(record: dict, *, repo: Path,
         if not (isinstance(sha, str) and _SHA_RE.match(sha)):
             f.add("V3", where, f"sha {sha!r} is not a commit sha — every row "
                                "is measured AT a sha")
+        elif not _is_git_repo(repo):
+            f.add("V3", where, "cannot verify the evidence sha: not a "
+                               "git work tree")
+        elif not _resolves(repo, sha):
+            # ⛔ EVERY row, not only the green ones (#9089 review). The resolve
+            # check used to sit inside the GREEN branch, and the shipped table
+            # is 0/5 green — so the property this tool advertises ("a sha that
+            # RESOLVES") was enforced on zero rows of the artifact it blesses.
+            # Measured before the fix: five rows stamped `"0"*40` returned NO
+            # findings. A row stamped at a sha this repo cannot resolve has
+            # provenance that cannot be re-derived, whatever its verdict is.
+            f.add("V3", where, f"evidence sha {sha} does not resolve in this "
+                               "repo — a row's provenance must be "
+                               "re-derivable from the tree it ships with")
 
         # ── V4 the artifact must exist ────────────────────────────────────
         evidence = row.get("evidence")
@@ -263,12 +280,10 @@ def check(record: dict, *, repo: Path,
                                    f"{', '.join(missing)} — the epic measures "
                                    "the pipeline end to end, not a step probe")
             if sha and isinstance(sha, str) and _SHA_RE.match(sha):
-                if not _is_git_repo(repo):
-                    f.add("V5", where, "cannot verify the evidence sha: not a "
-                                       "git work tree")
-                elif not _resolves(repo, sha):
-                    f.add("V5", where, f"evidence sha {sha} does not resolve "
-                                       "in this repo")
+                # Shape + resolvability are V3's (checked for EVERY row there);
+                # what V5 adds is the ANCESTRY of that resolved sha.
+                if not _is_git_repo(repo) or not _resolves(repo, sha):
+                    pass
                 elif prereg_sha is None:
                     f.add("V5", where, "GREEN with no frozen pre-registration "
                                        "sha — the verdict would be measured "
@@ -315,13 +330,39 @@ def check(record: dict, *, repo: Path,
                 f.add("V7", where, "a measured row must carry corpus_sha256 — "
                                    "the before/after denominators have to be "
                                    "the same corpus")
-            elif corpus.get("sha256") and row_corpus != corpus.get("sha256"):
+            elif not corpus.get("sha256"):
+                # ⛔ The comparison used to be SKIPPED when the log carried no
+                # corpus sha (``and corpus.get("sha256")``), so a measured row
+                # could name ANY corpus and pass — measured: a GREEN row whose
+                # corpus_sha256 was `b*64` against a log whose corpus.sha256
+                # was null returned no finding. "Two corpora cannot share one
+                # verdict" is unenforceable exactly where nobody wrote down
+                # which corpus ran, so that absence is the finding.
+                f.add("V7", where, "a measured row needs the LOG to identify "
+                                   "its corpus (corpus.sha256 is null) — "
+                                   "without it the row's corpus cannot be "
+                                   "checked against anything")
+            elif row_corpus != corpus.get("sha256"):
                 f.add("V7", where, f"corpus_sha256 {row_corpus!r} != the log's "
                                    f"{corpus.get('sha256')!r} — two corpora "
                                    "cannot share one verdict")
         elif row_corpus and corpus.get("sha256") and \
                 row_corpus != corpus.get("sha256"):
             f.add("V7", where, "corpus_sha256 disagrees with the log's corpus")
+
+    # ── V10 E4's own failing condition ────────────────────────────────
+    # E4's row says it *"fails if the denominator is 4"*: the historical
+    # defect merged 4 of the 15 edges reachable on the real extraction leg.
+    # The probe computes `denominator_is_the_4_edge_defect` and used it only in
+    # a NOTE, so the defect could reappear inside a measured E4 and this gate
+    # still called the table sound.
+    e4 = by_id.get("E4")
+    if e4 is not None and e4.get("verdict") in ("GREEN", "RED") \
+            and e4.get("denominator") == 4:
+        f.add("V10", "rows[E4]", "E4 measured with denominator 4 — that is "
+                                    "the historical 4-edge defect (the merge "
+                                    "ran over 4 of the reachable edges), not "
+                                    "a measurement of the criterion")
 
     # ── V8 denominators carried, not restated ────────────────────────────
     for cid, row in by_id.items():

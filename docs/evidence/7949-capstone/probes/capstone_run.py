@@ -295,6 +295,50 @@ def refused_rows(reason: str, *, prereg_ok: bool) -> list[dict]:
     return rows
 
 
+def completed_rows(*, head: str, corpus_sha: str,
+                   receipt: dict) -> list[dict]:
+    """The 5 rows of a COMPLETED run (G6).
+
+    ⛔ Reached ONLY after G0 read the frozen pre-registration, so no row here
+    can be blaming it. The pre-fix rows said ``evidence_kind="refusal"`` and
+    ``blocked_by=OWNERS[cid]`` — i.e. E1/E2 named ``#9075``, the
+    pre-registration issue this run had just read successfully — on a run that
+    completed every step. That calls a measurement a refusal and sends the next
+    lane to a landed issue instead of the measurement lane (#9089 review), the
+    exact misattribution ``ALSO_BLOCKED_BY`` exists to prevent.
+
+    Factored out of ``main()`` because G6 is unreachable while #9116 keeps the
+    receipt witnessless: a fix that only lives inside dead code is a fix
+    nothing can pin.
+    """
+    rows: list[dict] = []
+    for cid in ("E1", "E2", "E3", "E4", "E5"):
+        owner = ALSO_BLOCKED_BY.get(cid, OWNERS[cid])
+        rows.append({
+            "criterion": cid, "verdict": "BLOCKED",
+            "evidence_kind": "measurement",
+            "evidence": str(EVIDENCE_DIR / "capstone.log"), "sha": head,
+            "numerator": None, "denominator": None, "corpus_sha256": corpus_sha,
+            "sibling": None, "blocked_by": owner,
+            "note": "the run completed all eight steps; this criterion's "
+                    "evidence artifact is still owned by " + owner,
+        })
+        if cid in ALSO_BLOCKED_BY:
+            rows[-1]["note"] += (f" / the pre-registration half is "
+                                 f"{OWNERS[cid]}")
+        rows[-1]["sibling"] = "E2" if cid == "E1" else ("E1" if cid == "E2"
+                                                       else None)
+    for row in rows:
+        if row["criterion"] == "E4":
+            row["note"] += (f"; receipt carried: kept_from_s2="
+                            f"{receipt['numerator']}/"
+                            f"{receipt['denominator']}"
+                            + (", denominator is the 4-edge defect"
+                               if receipt["denominator_is_the_4_edge_defect"]
+                               else ""))
+    return rows
+
+
 def emit_log(*, head: str, prereg: dict, corpus: dict, run: dict,
              rows: list[dict], out: Path | None) -> str:
     """Render the run log — human record on top, machine table at the bottom."""
@@ -363,35 +407,53 @@ def resolve_head(override: str | None) -> tuple[str, str]:
 
     Returns ``(head, error)``; ``error`` is empty exactly when ``head`` is
     usable. With no override the worktree's ``HEAD`` is used as before.
+
+    ⛔ On an UNUSABLE override ``head`` is the worktree's ``HEAD``, never the
+    string ``"unknown"``: the refusal still emits a TABLE, and the acceptance
+    command pipes that table over the committed evidence file, so a stamp no
+    git rev-parse can resolve would replace the shipped log with one this
+    repo's own gate (V3) reds. The refusal IS a fact measured at this
+    checkout, so that is the sha it carries; the rejected override survives in
+    the refusal reason.
     """
     if override is None:
         return _git("rev-parse", "HEAD").stdout.strip() or "unknown", ""
     if not HEAD_SHA_RE.match(override):
-        return "unknown", (
+        return _git("rev-parse", "HEAD").stdout.strip() or "unknown", (
             f"--head {override!r} is not a commit sha (7-40 lowercase hex "
             "digits) — every row is stamped with it and V5 resolves the "
             "pre-registration's ancestry against it, so a free-text override "
             "would make the provenance chain unattributable")
     if _git("cat-file", "-e", f"{override}^{{commit}}").returncode != 0:
-        return "unknown", (
+        return _git("rev-parse", "HEAD").stdout.strip() or "unknown", (
             f"--head {override!r} does not resolve to a commit in this repo — "
             "an unresolvable sha cannot be the commit this run was measured "
             "at (pass the full sha, or drop --head to use the worktree HEAD)")
     return override, ""
 
 
-def read_preregistration(sha: str, artifact: Path) -> tuple[dict | None, str]:
+def read_preregistration(sha: str, artifact: Path,
+                         head: str | None = None) -> tuple[dict | None, str]:
     """Read the pre-registration AS IT WAS at ``sha`` — never from the worktree.
 
     Reading it out of the frozen commit is the whole property: a threshold
     edited after the numbers are in is not a pre-registration, and a worktree
     read would happily serve that edit.
+
+    ``head`` is the commit the rows are STAMPED with (``resolve_head``'s
+    result); ancestry is resolved against it, never against the worktree's
+    ``HEAD``. With ``--head <tag-commit>`` the two differ, and the old
+    worktree-HEAD form then accepted a pre-registration committed AFTER the
+    measured commit — emitting a table whose every row is stamped with a
+    pre-threshold commit, which is exactly the state V5's "evidence PREDATES
+    the pre-registration" rule exists to refuse (#9089 review).
     """
     if _git("cat-file", "-e", f"{sha}^{{commit}}").returncode != 0:
         return None, f"pre-registration commit {sha!r} does not resolve in this repo"
-    head = _git("rev-parse", "HEAD").stdout.strip()
-    if head and _git("merge-base", "--is-ancestor", sha, head).returncode != 0:
-        return None, (f"pre-registration {sha} is not an ancestor of HEAD {head} "
+    measured = head or _git("rev-parse", "HEAD").stdout.strip()
+    if measured and _git("merge-base", "--is-ancestor", sha,
+                        measured).returncode != 0:
+        return None, (f"pre-registration {sha} is not an ancestor of {measured} "
                       "— thresholds must be fixed before the run, not on a "
                       "branch the run cannot see")
     blob = _git("show", f"{sha}:{artifact.as_posix()}")
@@ -542,9 +604,11 @@ def main(argv: list[str] | None = None) -> int:
     if head_error:
         return refuse(head_error, prereg_ok=False, code=2)
 
-    # G0 — the pre-registration (FAIL-CLOSED, before any model call)
+    # G0 — the pre-registration (FAIL-CLOSED, before any model call).
+    # `head` is threaded in: G0's ancestry test is about the commit the evidence
+    # is stamped with, which `--head` can move off the worktree HEAD.
     prereg_record, why = read_preregistration(
-        args.prereg, Path(args.prereg_artifact))
+        args.prereg, Path(args.prereg_artifact), head)
     if prereg_record is None:
         return refuse(why, prereg_ok=False, code=2)
 
@@ -642,29 +706,8 @@ def main(argv: list[str] | None = None) -> int:
             prereg_ok=True, code=5, corpus=corpus)
 
     # G6 — per-criterion evidence
-    rows: list[dict] = []
-    for cid in ("E1", "E2", "E3", "E4", "E5"):
-        rows.append({
-            "criterion": cid, "verdict": "BLOCKED", "evidence_kind": "refusal",
-            "evidence": str(EVIDENCE_DIR / "capstone.log"), "sha": head,
-            "numerator": None, "denominator": None, "corpus_sha256": sha,
-            "sibling": None, "blocked_by": OWNERS[cid],
-            "note": "the run completed all eight steps; this criterion's "
-                    "evidence artifact is still owned by " + OWNERS[cid],
-        })
-        if cid in ALSO_BLOCKED_BY:
-            rows[-1]["note"] += f" / {ALSO_BLOCKED_BY[cid]}"
-        rows[-1]["sibling"] = "E2" if cid == "E1" else ("E1" if cid == "E2"
-                                                       else None)
     receipt = e4_receipt(result.get("stats") or {})
-    for row in rows:
-        if row["criterion"] == "E4":
-            row["note"] += (f"; receipt carried: kept_from_s2="
-                            f"{receipt['numerator']}/"
-                            f"{receipt['denominator']}"
-                            + (", denominator is the 4-edge defect"
-                               if receipt["denominator_is_the_4_edge_defect"]
-                               else ""))
+    rows = completed_rows(head=head, corpus_sha=sha, receipt=receipt)
     sys.stdout.write(emit_log(
         head=head,
         prereg={"sha": args.prereg, "status": "OK",
