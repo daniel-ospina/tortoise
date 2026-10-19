@@ -345,5 +345,22 @@ clear. The recorded marker is only trusted while something is still pending, so
 a quota that has since lifted, or a spool another leg has drained, cannot keep
 claiming a block — nothing pending reads `OK` and clears the marker.
 
-The Python leg's `flush_spool` is unchanged: it runs on explicit commands
-(`session capture`, `session drain`), not on the Pi turn path.
+The Python leg's `flush_spool` carries no attempt cap or budget of its own: it
+runs on explicit commands (`session capture`, `session drain`), never on a turn
+path — `claude-hooks/session-start.sh` backgrounds the drain with
+`nohup … >/dev/null 2>&1 &`, which is why this defect was Pi-only. It shares
+everything else with the Pi leg, because both write the same spool **and the
+same `<spool>/status.json`**: the same named `blocked` state (same two 402
+categories, classified by STATUS and the server's code, never by prose) and the
+same health line, byte for byte (a parity test executes this TypeScript against
+a directory the Python leg wrote). That is deliberate — two records, or two
+spellings, would let the two surfaces of one box disagree about whether it is
+blocked, which is the false PASS #2100 removes.
+
+Operators reach the same line from the CLI: `tortoise session health` prints it
+(local-only, no credential, always exits 0 — the blocked box is exactly the one
+that must be able to answer), `tortoise doctor` carries it as a `Capture spool`
+row (`❌` blocked, `⚠️` unreadable, `ℹ️` draining/inactive — a pending capture on
+a live box and a keyless install are normal states, and painting them as
+warnings is how a real block gets ignored), and a hand-run `session drain` prints
+it to stderr when the spool is blocked or unreadable.

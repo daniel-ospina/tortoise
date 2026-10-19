@@ -276,6 +276,113 @@ def test_5153_served_document_pins_the_canonical_mcp_key_variable():
         ".env.example must name the open Pi reflect-hook dependency (#1117)")
 
 
+def test_8169_onboarding_documents_the_support_direction_of_strength():
+    """#8169: the advice taught only how to WEAKEN an operator.
+
+    Every operator-strength move this document carried was a dampener
+    (`tortoise_mitigate_operator`, strength 0.10–0.50), so an agent holding
+    evidence that SUPPORTED a connection had no documented move — the gap
+    that left #6151's supporter half with no surface to write to. The
+    mechanism itself was already there (#6151 owner ruling → PR #8181:
+    `tortoise/weights.py::annotation_factor`, a symmetric 0.5–2.0 multiplier
+    where an unset rating is exactly 1.0); what was missing HERE was the
+    instruction to use it, because `tortoise_annotate_operator` read like a
+    cosmetic note rather than the positive counterpart to dampening.
+
+    Two things are pinned together, because either alone is the defect:
+    the branch must exist, AND it must not be confused with #2315 — the
+    `never > 0.50` rule governs `mitigation_strength`, not the annotation
+    multiplier, so a document that merged the two would re-open a settled
+    decision instead of documenting one.
+
+    Canonical only: the mirror is pinned byte-identical by
+    `test_m8_deploy_mirror_matches_canonical`, so this covers both copies.
+    """
+    skill = LIVE_SKILL.read_text(encoding="utf-8")
+
+    # The weakening branch must survive: this change ADDS a direction.
+    start = skill.index("5. **Mitigate, don't NAND, for fit.**")
+    step = skill[start:skill.index("\n6. **Options can IMPL/NAND each other**")]
+    assert "tortoise_mitigate_operator" in step
+    assert "never >0.50" in step, (
+        "the mitigation band is #2315's ruling and must stay stated")
+
+    # The supporting branch, sliced so a claim made elsewhere in a 900-line
+    # document cannot satisfy it.
+    heading = "Rating semantics — the SUPPORT direction"
+    assert heading in step, (
+        "step 5 must carry the positive counterpart to mitigating — rating "
+        "the operator to make a connection count MORE (#8169)")
+    rating = step[step.index(heading):]
+    # Phrases below are matched against a WHITESPACE-FOLDED view: the document
+    # is hard-wrapped at ~78 columns, so any multi-word phrase straddles a
+    # newline and a raw substring test silently never matches.
+    flat = " ".join(rating.split())
+    assert "annotation_factor" in rating, (
+        "the rating band must name its single source in tortoise/weights.py")
+    assert "#2315" in rating, (
+        "the band must separate itself from #2315's never >0.50 dampener "
+        "rule — the two multipliers are different mechanisms")
+    assert "neutral (factor 1.0)" in flat, (
+        "an unset rating is exactly neutral and the paragraph must SAY so — "
+        "the bare `1.0` is satisfied by `(base 1.0)` in the bounds sentence, "
+        "so a deleted neutrality clause stayed green")
+    # Anchored on the PHRASE (and on a `\b`, so #2315's `0.50` cannot stand in
+    # for it), not on the bare number. `"0.5"` is a substring of the
+    # `never > 0.50` text this same slice is REQUIRED to carry four lines up,
+    # so a bare `"0.5" in rating` stayed green with the worst-edge sentence
+    # deleted — the assertion whose message is "the 0.5 edge must be stated"
+    # never tested that, and a one-sided band would have passed.
+    assert re.search(r"worst rating is 0\.5\b", flat), (
+        "the band's WORST edge (0.5) must be stated where the band is defined, "
+        "or the document implies a gain-only multiplier")
+    assert re.search(r"best is 2\.0\b", flat), (
+        "the band's BEST edge (2.0) must be stated where the band is defined")
+
+    # The bounds must be DIRECTIONAL, and the compression must be stated for
+    # BOTH directions. `annotation_factor` is applied before the [0.1, 10.0]
+    # clamp, so on an operator-targeting NAND (base 16.0) the ceiling absorbs
+    # the GAIN entirely (16.0 * 2.0 clamps to 10.0 — nothing to gain) AND
+    # compresses the dampening: only a factor below 10.0/16.0 = 0.625 clears
+    # the ceiling, so a mild down-rating moves nothing and the worst rating
+    # lands at 8.0, a ~20% cut rather than the nominal 50%. Two earlier
+    # revisions of the paragraph were false here and stayed green because the
+    # test pinned the wrong claim: "not at all" (direction-blind) and then
+    # "only the GAIN is squeezed" (magnitude-blind). `weights.py:121-131`
+    # states the true shape — "exact near the bottom of the range and
+    # compresses as the base approaches the ceiling".
+    assert "RAISING" in flat, (
+        "the NAND bound must be scoped to RAISING the weight — the clamp "
+        "absorbs gain only on a plain NAND, so a direction-blind bound is false")
+    assert "gains nothing" in flat, (
+        "the ceiling's effect on the GAIN must be stated: a better rating on an "
+        "operator-targeting NAND cannot raise it")
+    assert "16.0 × 0.625 = 10.0" in flat, (
+        "the absorption threshold must be stated: 16.0 × 0.625 = 10.0, so any "
+        "factor at or above 0.625 is clamped and a mild down-rating is inert "
+        "— without it the paragraph implies every down-rating lands")
+    assert "16.0 × 0.5 = 8.0" in flat, (
+        "the worked worst case must be stated: 16.0 × 0.5 = 8.0, i.e. a ~20% "
+        "cut from the clamped 10.0, not the nominal 50%")
+    assert "compresses" in flat, (
+        "the ceiling compresses the band's EFFECT as the base approaches it "
+        "(weights.py:121-131); a symmetric-band claim without the compression "
+        "is false on a NAND")
+    assert "only the gain" not in flat.lower(), (
+        "the clamp squeezes the DAMPENING too — 'only the GAIN is squeezed' is "
+        "false on a 16.0 base, where a mild down-rating is absorbed and the "
+        "worst lands at 8.0 instead of 4.0")
+
+    # `annotate_operator` takes FOUR required dimensions, not two — a doc that
+    # names only bias/precision sends the caller at a TypeError. Asserted in
+    # `rating` (the band's own paragraph), so the dimensions are stated where
+    # the instruction to rate lives, not merely somewhere in step 5.
+    for dim in ("bias", "precision", "consistency", "directness"):
+        assert dim in rating, (
+            f"annotate_operator requires {dim!r}; the rating paragraph must "
+            "name all four")
+
+
 def _installer_skills() -> list[str]:
     """The served installer's `SKILLS=(...)` payload set."""
     installer = (REPO_ROOT / "website" / "apps" / "dashboard" / "public"

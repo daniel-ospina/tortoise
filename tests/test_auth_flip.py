@@ -924,12 +924,73 @@ class TestSessionKeyMintConcurrency:
             done.set()
 
         t = threading.Thread(target=_mint, daemon=True)
-        t.start()
-        assert not done.wait(timeout=0.75), \
-            f"mint proceeded while the team lock was held (wrapping missing?): {outcome}"
-        lock.release()
+        # ⛔ The `try` opens IMMEDIATELY after the acquire — before `t.start()`,
+        # which can raise `RuntimeError: can't start new thread` on a loaded
+        # box. This is a PROCESS-GLOBAL lock (`_ORG_MINT_LOCKS`), so ANY failure
+        # between acquire and release leaves it held for the rest of the pytest
+        # process and every later mint for this team blocks forever. Measured
+        # 2026-10-19 (main run 39264762684 `test (a)`, plus 39235544056 /
+        # 39254836130 / 39255746368 on `test (c)`): exactly that deadlock was
+        # the whole 20m watchdog — a 23.5m job that owned `ci_crit_med` on main.
+        # A failing assertion must not be able to take the shard with it.
+        try:
+            t.start()
+            assert not done.wait(timeout=0.75), \
+                f"mint proceeded while the team lock was held (wrapping missing?): {outcome}"
+        finally:
+            lock.release()
         assert done.wait(timeout=10), "mint blocked forever after lock release"
         assert outcome.get("ok") is True, f"mint failed after release: {outcome}"
+        assert len(fake.tables["api_keys"]) == 1
+
+    def test_supabase_held_team_lock_refuses_instead_of_hanging(
+            self, monkeypatch, rest_client, authed_user):
+        """The SUPABASE lane's held lock must also FAIL CLOSED (503), bounded.
+
+        The registry lane has the behavioural twin in
+        `test_session_key_http.py`; without this, the bounded acquire could be
+        reverted on ONE lane and every behavioural guard would stay green
+        (`test_no_bare_mint_lock_scope_entry` is the static net across both).
+
+        Mutation: `with _org_mint_lock(tid)` instead of
+        `async with _org_mint_lock_bounded(tid)` here and this hangs until its
+        `--timeout` mark rather than returning the refusal.
+        """
+        import asyncio
+
+        from fastapi import HTTPException
+
+        import tortoise.hosted_api as ha
+        from tortoise.hosted_api import _ORG_MINT_LOCK_MESSAGE, _org_mint_lock
+
+        async def _noop(*_a, **_k):
+            return None
+
+        _, fake = rest_client
+        tid = "team-free-001"
+        fake.seed("org_memberships",
+                  [_membership_row(user_id=_USER1, org_id=tid)])
+        monkeypatch.setattr(ha, "_async_audit", _noop)
+        monkeypatch.setattr(ha, "_abuse_evaluate_keys", _noop)
+        monkeypatch.setattr(ha, "_ORG_MINT_LOCK_TIMEOUT_S", 0.25)
+
+        lock = _org_mint_lock(tid)
+        lock.acquire()
+        try:
+            with pytest.raises(HTTPException) as exc:
+                asyncio.run(ha._session_key_supabase(
+                    {"purpose": "recovery"}, None, {"user_id": _USER1}))
+        finally:
+            lock.release()
+        assert exc.value.status_code == 503, exc.value.detail
+        assert exc.value.detail == _ORG_MINT_LOCK_MESSAGE, exc.value.detail
+        assert (exc.value.headers or {}).get("Retry-After") == "5", \
+            exc.value.headers
+        # Fail-closed: the refusal wrote nothing.
+        assert fake.tables["api_keys"] == []
+        # The lock is not poisoned once the holder lets go.
+        asyncio.run(ha._session_key_supabase(
+            {"purpose": "recovery"}, None, {"user_id": _USER1}))
         assert len(fake.tables["api_keys"]) == 1
 
     @pytest.mark.timeout(15)

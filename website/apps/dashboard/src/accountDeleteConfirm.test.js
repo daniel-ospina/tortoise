@@ -255,6 +255,10 @@ async function wiringProbe(open) {
     remember: (ref) => { calls.remember += 1; if (ref) ref.current = { focus() {} } },
     restore: (ref) => { calls.restore += 1; if (ref) ref.current = null },
     restoreRef: { current: null },
+    // #8670: the containment pair — the JSX hands the dialog node down as a ref
+    // prop and the close path releases the inert background before restoring.
+    dialogRef: { current: null },
+    inertRef: { current: null },
     done: () => { calls.done += 1; return Promise.resolve() },
   }
   const probes = await probeTags(mainJsx, {
@@ -273,6 +277,10 @@ async function wiringProbe(open) {
       rememberFocusedTrigger: 'globalThis.__acctWiring.remember',
       restoreFocus: 'globalThis.__acctWiring.restore',
       deleteAccountRestoreRef: 'globalThis.__acctWiring.restoreRef',
+      deleteAccountDialogRef: 'globalThis.__acctWiring.dialogRef',
+      // #8670: the close path releases the inert background before restoring
+      // focus (a no-op stub here — the ORDER is pinned by the source tripwire).
+      deleteAccountInertRef: 'globalThis.__acctWiring.inertRef',
     },
   })
   assert.equal(probes.length, 1, 'main.jsx must render exactly one <DeleteAccountSection .../>')

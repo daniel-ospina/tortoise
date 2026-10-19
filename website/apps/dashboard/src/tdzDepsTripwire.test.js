@@ -370,12 +370,21 @@ test('#3726: the analyzer sees EXACTLY these hook deps arrays in main.jsx', () =
   // deleted, changed or added deps ENTRY reddens (falsifiability test below).
   assert.deepEqual(found, [
   "active, ms",
+  // #8670: the captured-session delete dialog's background-inert effect, keyed
+  // on the DERIVED "the card actually renders" flag — the id alone stays set
+  // after the row leaves the list, which would leak the `inert` mark.
+  "sessionDeleteArmed",
   "text",
   "text, onCopied",
+  // #8670: the GitHub-disconnect busy-focus reclaim (the inert effect moved
+  // below, onto the derived `githubDisconnectArmed` flag).
   "githubDisconnect.open, githubDisconnect.busy",
+  // #8670: the account-deletion busy-focus reclaim, same split as above.
   "deleteAccountOpen, deleteAccountBusy",
   "apiKey",
   "keysLoaded, keysLoadNonce",
+  // #8670: the key-create dialog's containment effect.
+  "keyModalOpen",
   "",
   "",
   "welcomeMode, authed",
@@ -386,9 +395,20 @@ test('#3726: the analyzer sees EXACTLY these hook deps arrays in main.jsx', () =
   "",
   "tab",
   "",
+  // #8670: the two MODULE dialogs' containment effects. Their cards live in the
+  // hook-free githubDisconnect.js / accountDeletion.js modules, so the effects are
+  // here — keyed on DERIVED flags that model each card's WHOLE render gate (the
+  // Settings/Profile tab, `team`, `authMode`, `identityInv`), because those gates
+  // unmount the card without touching the open-bit and this component stays
+  // mounted, so a bare-open key would never clean up.
+  "githubDisconnectArmed",
+  "deleteAccountArmed",
   "tab, team, checking, authed, welcomeMode, deepLinkTick",
   "reposLoaded, onboarding, reposList, currentOrgId, reposLoadFailed",
   "accountMenuOpen",
+  // #8670: the graph-delete dialog's containment effect — keyed on the derived
+  // armed flag for the same reason as sessionDeleteArmed above.
+  "graphDeleteArmed",
   // #2728: the dialog's background-inert effect, keyed on the graph it holds.
   "packsGraphId",
   "createTeamOpen",
@@ -419,6 +439,10 @@ test('#3726: the analyzer sees EXACTLY these hook deps arrays in main.jsx', () =
   // the DOCUMENT while the dialog is open (a keydown whose target is outside the
   // modal never reaches the modal's own handler), and focus is MOVED on each
   // state transition (a reconciled control never honours `autoFocus`).
+  // #8670 adds a THIRD MemorySources dialog effect in the same shape: the
+  // coming-soon dialog's containment (keyed on `comingSoonKey` alone), so this
+  // expression appears twice — once for containment, once for focus.
+  "comingSoonKey",
   "comingSoonKey",
   "comingSoonKey, comingSoonStatus",
   ])

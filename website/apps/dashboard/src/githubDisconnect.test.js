@@ -356,6 +356,7 @@ async function renderGithubSection(connected, state) {
     onConnectGithub: () => {}, github: { busy: false }, githubError: '',
     githubDisconnect: state,
     onOpenGithubDisconnect: () => {}, onCloseGithubDisconnect: () => {}, onConfirmGithubDisconnect: () => {},
+    githubDisconnectDialogRef: { current: null },
   }
   const [{ html }] = await evalExpressions([`(${GH_SECTION})`], {
     imports: MAIN_IMPORTS,
@@ -370,6 +371,10 @@ async function renderGithubSection(connected, state) {
       onOpenGithubDisconnect: 'globalThis.__gdSection.onOpenGithubDisconnect',
       onCloseGithubDisconnect: 'globalThis.__gdSection.onCloseGithubDisconnect',
       onConfirmGithubDisconnect: 'globalThis.__gdSection.onConfirmGithubDisconnect',
+      // #8670: the containment pair. The JSX hands the dialog node down as a ref
+      // prop; the inert effect that consumes it lives in main.jsx (this module
+      // stays hook-free) and is pinned by the #8670 source tripwire.
+      githubDisconnectDialogRef: 'globalThis.__gdSection.githubDisconnectDialogRef',
     },
   })
   return html
@@ -411,6 +416,9 @@ async function wiringProbe(state, connected = true) {
     open: () => { calls.open += 1 },
     close: () => { calls.close += 1 },
     confirm: () => { calls.confirm += 1 },
+    // #8670: the containment pair — the JSX hands the dialog node down as a ref
+    // prop (the inert effect that consumes it lives in main.jsx).
+    dialogRef: { current: null },
   }
   const probes = await probeTags(mainJsx, {
     tag: 'GithubDisconnectControl',
@@ -421,6 +429,7 @@ async function wiringProbe(state, connected = true) {
       onOpenGithubDisconnect: 'globalThis.__gdWiring.open',
       onCloseGithubDisconnect: 'globalThis.__gdWiring.close',
       onConfirmGithubDisconnect: 'globalThis.__gdWiring.confirm',
+      githubDisconnectDialogRef: 'globalThis.__gdWiring.dialogRef',
     },
   })
   assert.equal(probes.length, 1, 'main.jsx must render exactly one <GithubDisconnectControl .../>')
@@ -434,6 +443,10 @@ test('#4946 wiring: each action prop IS its own handler (identity, not just coun
   assert.equal(props.onOpen, globalThis.__gdWiring.open, 'onOpen must BE the open handler')
   assert.equal(props.onClose, globalThis.__gdWiring.close, 'onClose must BE the close handler')
   assert.equal(props.onConfirm, globalThis.__gdWiring.confirm, 'onConfirm must BE the confirm handler')
+  // #8670: the card's node reaches the module, which the inert effect in main.jsx
+  // needs — without it the background is never made inert.
+  assert.equal(props.dialogRef, globalThis.__gdWiring.dialogRef,
+    'the dialog ref must be forwarded to the control (the #8670 inert effect depends on it)')
 })
 
 test('#4946 wiring: the control\'s props are driven by the disconnect state, not literals', async () => {
@@ -553,14 +566,22 @@ test('#4946 wiring: a failed disconnect keeps the dialog open with the reason (E
 
 /** Run the open/close handlers against a capturing setter and focus spies. */
 async function runOpenClose({ restoreReturns = {}, result = null } = {}) {
-  const calls = { remember: 0, restore: 0 }
+  const calls = { remember: 0, restore: 0, release: 0 }
+  // #8670: the ORDER is the a11y contract — an element inside an inert subtree is
+  // not focusable, so a restore that runs before the release silently no-ops
+  // (#2577). Recording the sequence is what makes that observable.
+  const order = []
   const states = []
   globalThis.__gdFocus = {
     remember: () => { calls.remember += 1 },
     // `'restore' in …` (not `?? {}`) so an explicit `null` return — the
     // detached-opener case — is honoured rather than swallowed by nullish
     // coalescing.
-    restore: () => { calls.restore += 1; return 'restore' in restoreReturns ? restoreReturns.restore : {} },
+    restore: () => { calls.restore += 1; order.push('restore'); return 'restore' in restoreReturns ? restoreReturns.restore : {} },
+    release: () => { calls.release += 1; order.push('release') },
+    // `current` is the release returned by `applyBackgroundInert` while a dialog
+    // is open; the close path runs it (and is a no-op once it is consumed).
+    inertRef: { current: () => { calls.release += 1; order.push('release') } },
   }
   globalThis.__gdSetState = (v) => {
     states.push(typeof v === 'function' ? v({ open: false, busy: true, error: 'e', result: 'r' }) : v)
@@ -575,9 +596,10 @@ async function runOpenClose({ restoreReturns = {}, result = null } = {}) {
       setGithubDisconnect: 'globalThis.__gdSetState',
       githubDisconnect: JSON.stringify({ result }),
       githubDisconnectRestoreRef: '{}',
+      githubDisconnectInertRef: 'globalThis.__gdFocus.inertRef',
     },
   })
-  return { openFn, closeFn, calls, states }
+  return { openFn, closeFn, calls, states, order }
 }
 
 test('#4946 (a11y) wiring: opening captures the trigger and actually opens (EXECUTED)', async () => {
@@ -587,6 +609,18 @@ test('#4946 (a11y) wiring: opening captures the trigger and actually opens (EXEC
   assert.equal(calls.restore, 0, 'opening must not restore focus')
   assert.deepEqual(states[0], { open: true, busy: true, error: '', result: null },
     'opening must set open and clear stale error/result — a no-op leaves the dialog unopenable')
+})
+
+test('#8670 (a11y) wiring: closing RELEASES the inert background before restoring focus (EXECUTED)', async () => {
+  // #8670's indicator 4, executed rather than grepped: the disconnect dialog now
+  // marks the page behind it `inert`, and an element inside an inert subtree is
+  // not focusable — so a restore that ran first would silently no-op and leave
+  // focus on <body>. This asserts the observed SEQUENCE.
+  const { closeFn, calls, order } = await runOpenClose()
+  closeFn()
+  assert.equal(calls.release, 1, 'the close must release the background inert exactly once')
+  assert.deepEqual(order, ['release', 'restore'],
+    'the inert background must be released BEFORE the focus restore (#2577)')
 })
 
 test('#4946 (a11y) wiring: closing restores focus and fully resets state (EXECUTED)', async () => {

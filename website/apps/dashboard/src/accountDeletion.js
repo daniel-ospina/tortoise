@@ -20,6 +20,7 @@
 // Two actions only: a confirm CTA, and a cancel that is a real exit — the
 // parent closes the popup with no request and no state change.
 import React from 'react'
+import { containTabFocus } from './dialogFocus.js'
 
 export const DELETE_ACCOUNT_WARNING =
   "Deleting your personal account will also delete any teams for which you're the only owner"
@@ -58,7 +59,7 @@ function hardDeleteLabel(iso) {
 }
 
 export function DeleteAccountSection({
-  open, busy, error, result, onOpen, onCancel, onConfirm, onDone,
+  open, busy, error, result, onOpen, onCancel, onConfirm, onDone, dialogRef,
 }) {
   const h = React.createElement
   const support = h('a', { href: `mailto:${SUPPORT_EMAIL}` }, SUPPORT_EMAIL)
@@ -151,8 +152,21 @@ export function DeleteAccountSection({
             'aria-modal': 'true',
             'aria-label': 'Delete account',
             tabIndex: -1,
+            // #8670 (a11y): the #2577 APG containment set. `dialogRef` is the
+            // PARENT's (main.jsx) — it holds the `applyBackgroundInert` release,
+            // because every close path is the parent's state and the release must
+            // run BEFORE `restoreFocus` (an inert element is not focusable,
+            // #2577). This module stays hook-free on purpose: its `node --test`
+            // guard invokes it as a plain function, so a hook here would throw
+            // "Invalid hook call".
+            ref: dialogRef,
             onClick: (e) => e.stopPropagation(),
-            onKeyDown: (e) => { if (e.key === 'Escape' && !busy) onCancel() },
+            onKeyDown: (e) => {
+              // The module's own half of containment — it reads its container off
+              // the event, so it needs no hook and no prop.
+              if (e.key === 'Tab') { if (containTabFocus(e.currentTarget, { shiftKey: e.shiftKey })) e.preventDefault() }
+              else if (e.key === 'Escape' && !busy) onCancel()
+            },
           },
           content,
         ),

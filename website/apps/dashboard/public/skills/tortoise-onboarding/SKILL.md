@@ -920,8 +920,10 @@ cannot reach the graph (never decide against a dead connection):
    produce signal.
 5. **Mitigate, don't NAND, for fit.** When a finding is true but matters
    less, express it on the OPERATOR with `tortoise_mitigate_operator`
-   (strength 0.10–0.50), never NAND the option for a bad fit. Annotate bias /
-   precision with `tortoise_annotate_operator` when useful.
+   (strength 0.10–0.50), never NAND the option for a bad fit. When you can
+   grade how much the connection contributes, rate it with
+   `tortoise_annotate_operator` (bias, precision, consistency, directness —
+   all four are required arguments).
 
    **Mitigation semantics (single source: tortoise/weights.py module
    docstring, #2315):** `strength` is the graded DAMPENER of the
@@ -934,6 +936,31 @@ cannot reach the graph (never decide against a dead connection):
    calibrated like any other decision part (omit `credibility` → system
    starting belief medium; pass it → set-by-author). EP reads
    `mitigation_strength` via `compute_operator_weight`.
+
+   **Rating semantics — the SUPPORT direction (#6151 owner ruling, PR #8181;
+   single source: `tortoise/weights.py` → `annotation_factor`).** Rating an
+   operator is not a cosmetic note: its four dimensions — `bias`, `precision`,
+   `consistency`, `directness`, all FOUR required arguments — combine into a
+   symmetric, bounded multiplier on the operator's EP weight, so a well-rated
+   connection counts for MORE than an unrated one and the worst-rated for
+   less. Unset is exactly neutral (factor 1.0) and is the default; the worst
+   rating is 0.5 and the best is 2.0. So *"this connection is sound and
+   should count more"* is expressed by RATING the operator — the counterpart
+   to `mitigate_operator`'s dampening, and it needs no source. `bias` is
+   INVERTED (a one-sided source counts for less). Two bounds: the factor
+   multiplies the base weight and the result is then clamped to [0.1, 10.0],
+   so it applies in full to an ordinary IMPL (base 1.0), but only partly to a
+   NAND when RAISING the weight (base 8.0 → 16.0 clamps to 10.0, a 1.25× gain
+   at best) and gains nothing on a NAND whose target is itself an operator —
+   its neutral 16.0 already sits on the ceiling, so a better rating cannot
+   raise it. The band keeps its symmetry, but its EFFECT compresses as the
+   base approaches the ceiling, in BOTH directions: with no mitigation on that
+   16.0 base the clamp absorbs every factor at or above 0.625 (16.0 × 0.625 =
+   10.0), so a mild downgrade moves nothing, and even the worst rating only
+   reaches 16.0 × 0.5 = 8.0 — a ~20% cut, not the nominal 50%. And never use a
+   rating to disagree with a connection — that is NAND's job. #2315's
+   `never > 0.50` rule is untouched: it governs mitigation strength, not this
+   multiplier.
 6. **Options can IMPL/NAND each other** — two go well together (IMPL), three
    are mutually exclusive (NAND).
 7. **Rank + sanity-check.** Run `tortoise_compute_confidence` (anchors = the

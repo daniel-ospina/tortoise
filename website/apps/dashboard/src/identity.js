@@ -46,9 +46,18 @@ export function reauthStale(lastSignInAt, windowS = 900, nowMs = Date.now()) {
   return (nowMs - t) / 1000 > windowS
 }
 
-// created_by namespace classifier for the keys tier display (server already
-// filters; this labels rows for the UI): uuid → user-minted; anon-/reg-/st_/
-// client/NULL → agent/bootstrap.
+// created_by namespace classifier for a keys tier display: uuid → user-minted;
+// anon-/reg-/st_/client/NULL → agent/bootstrap.
+// #8709 (measured 2026-10-19, `5a19c88ec`): the server does NOT slice this
+// payload per caller — GET /v1/team/keys is member-open (#1828) and returns
+// EVERY org row with `created_via` + `created_by` to a session face
+// (`hosted_api.py:12187`, `:12236-12262`; `_require_keys_manage` admits
+// sessions, `:6335-6349`). The earlier "server already filters" claim was
+// false, so any own-row surface must filter client-side — on the HOLDER rule
+// (`created_via === 'bootstrap' && created_by === <caller id>`), never on
+// `created_by` alone (`MEMORY.md` — the minter is not the holder). #8692's
+// `keys.read.own` is the server-side slicing that will make this a payload
+// seam, not a client filter.
 export function createdByTierClass(createdBy) {
   const s = String(createdBy || '')
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) return 'user'

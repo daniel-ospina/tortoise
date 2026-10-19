@@ -52,7 +52,9 @@ own tests and is deliberately untouched by this change.
 """
 
 import itertools
+import math
 import os
+import types
 import uuid
 
 import pytest
@@ -61,7 +63,9 @@ from tortoise.weights import (
     ANNOTATION_FACTOR_MAX,
     ANNOTATION_FACTOR_MIN,
     ANNOTATION_TERM_NEUTRAL,
+    NAND_BASE_WEIGHT,
     annotation_factor,
+    compute_operator_weight,
 )
 
 # ── pure-function properties (no graph needed) ────────────────────────────────
@@ -172,6 +176,125 @@ def test_the_band_is_symmetric_and_bounded():
         for v in (0.0, 0.5, 1.0):
             f = annotation_factor(bias, v, v, v)
             assert ANNOTATION_FACTOR_MIN - 1e-12 <= f <= ANNOTATION_FACTOR_MAX + 1e-12
+
+
+# ── the documented bounds, pinned against the real weight path ────────────────
+#
+# `compute_operator_weight` applies, in order: the NAND base (8.0) → ×2 when
+# the target is itself an operator → `annotation_factor` → mitigation → the
+# final `[0.1, 10.0]` clamp. So an operator-targeting NAND sits at a NEUTRAL
+# 16.0 — already ON the ceiling — and the onboarding skill
+# (`tortoise/onboarding/SKILL.md`, step 5) documents the consequence.
+#
+# Two revisions of that paragraph stated it wrongly and both stayed green,
+# because nothing in this module pinned this arithmetic: first "not at all"
+# (the dampening is live on that base), then "only the GAIN is squeezed" (the
+# dampening is compressed too, and far more). These assertions are the anchor
+# the prose is checked against; the prose side lives in
+# `tests/test_onboarding_variants.py::test_8169_onboarding_documents_the_support_direction_of_strength`.
+CEILING = 10.0
+FLOOR = 0.1
+
+
+def _rating(q):
+    """The four dimensions whose mean quality term is exactly ``q``.
+
+    ``bias`` enters INVERTED (`1 - bias`), so this is `(1 - q, q, q, q)` —
+    which makes `_rating(0.5)` the unrated/neutral reading, `_rating(1.0)` the
+    best and `_rating(0.0)` the worst.
+    """
+    return (1.0 - q, q, q, q)
+
+
+class _FakeProjection:
+    """The three-query shape `compute_operator_weight` reads, canned.
+
+    Call order (with `use_dynamic=False`): the operator row, then the count of
+    operator targets of its edges, then the mitigation rows.
+    """
+
+    def __init__(self, op_type, rating, op_targets=1, mitigations=()):
+        self.g = self
+        self._rows = [
+            [[op_type, *rating]],
+            [[op_targets]],
+            [[m] for m in mitigations],
+        ]
+
+    def query(self, cypher, params=None):
+        return types.SimpleNamespace(result_set=self._rows.pop(0))
+
+
+def _weight(op_type, rating, *, op_targets=1, mitigations=()):
+    return compute_operator_weight(
+        _FakeProjection(op_type, rating, op_targets, mitigations), "op")
+
+
+def test_the_documented_ceiling_absorbs_the_band_by_magnitude_not_direction():
+    """Pin the bounds the onboarding document states, on the real weight path.
+
+    Failing state: the document's numbers and the engine disagree — someone
+    "fixes" either one alone. The prose claims, verbatim: full band on an
+    ordinary IMPL (base 1.0); on a plain NAND the gain is capped at 1.25×
+    while the dampening is exact; on an operator-targeting NAND the gain is
+    absorbed ENTIRELY and the dampening is compressed too, with 0.625 as the
+    factor threshold (16.0 × 0.625 = 10.0) and 8.0 the worst reachable weight.
+
+    Reachable: the real `compute_operator_weight`, fed the same row shape the
+    graph returns. Mutation (RED): move `w *= annotation_factor(...)` after the
+    clamp, drop the ×2 operator-targeting step, or change `NAND_BASE_WEIGHT`.
+    """
+    assert NAND_BASE_WEIGHT == 8.0, (
+        "the document's 8.0 → 16.0 → 10.0 arithmetic is derived from this base")
+
+    # An ordinary IMPL (base 1.0, target NOT an operator) gets the band in
+    # FULL — both edges, unclipped.
+    assert _weight("IMPL", _rating(0.5), op_targets=0) == pytest.approx(1.0)
+    assert _weight("IMPL", _rating(1.0), op_targets=0) == pytest.approx(2.0)
+    assert _weight("IMPL", _rating(0.0), op_targets=0) == pytest.approx(0.5)
+
+    # A plain NAND (8.0): the GAIN is capped at 1.25× (16.0 → 10.0) while the
+    # dampening stays exact (4.0, no clamp).
+    assert _weight("NAND", _rating(1.0), op_targets=0) == pytest.approx(CEILING)
+    assert _weight("NAND", _rating(0.0), op_targets=0) == pytest.approx(4.0)
+
+    # An operator-targeting NAND: 8.0 × 2.0 = 16.0 at neutral — on the ceiling.
+    assert _weight("NAND", _rating(0.5)) == pytest.approx(CEILING)
+    assert _weight("NAND", _rating(1.0)) == pytest.approx(CEILING), (
+        "a BEST rating raised an operator-targeting NAND off the ceiling; the "
+        "document says the gain there is absorbed entirely")
+    # A mild down-rating (q = 0.4 → factor ≈ 0.871, unclamped 13.9) is FULLY
+    # absorbed: pinned as NO movement, not as an inequality — the revision that
+    # said "a worse one still reduces it" was false exactly here.
+    assert _weight("NAND", _rating(0.4)) == pytest.approx(CEILING), (
+        "a mild down-rating moved an operator-targeting NAND; the ceiling "
+        "absorbs it (16.0 × 0.871 ≈ 13.9 still clamps to 10.0)")
+
+    # The absorption threshold is in the FACTOR: 10.0 / 16.0 = 0.625.
+    q_edge = 0.5 + math.log2(0.625) / 2
+    assert annotation_factor(*_rating(q_edge)) == pytest.approx(0.625)
+    assert _weight("NAND", _rating(q_edge + 0.02)) == pytest.approx(CEILING), (
+        "a factor just ABOVE 0.625 should still be clamped to the ceiling")
+    assert _weight("NAND", _rating(q_edge - 0.02)) < CEILING, (
+        "a factor just BELOW 0.625 must clear the ceiling, or the dampening "
+        "is not merely compressed but dead")
+    # The worst rating is the only place the half lands, and it still lands 20%
+    # below the ceiling rather than 50%.
+    assert _weight("NAND", _rating(0.0)) == pytest.approx(8.0)
+
+    # A mitigation below the annotation RESTORES headroom — the reason the
+    # document scopes its claim to "no mitigation on that 16.0 base":
+    # 16.0 × 2.0 × 0.5 = 16.0 → 10.0 against a neutral 16.0 × 0.5 = 8.0.
+    assert _weight("NAND", _rating(0.5), mitigations=(0.50,)) == pytest.approx(8.0)
+    assert _weight("NAND", _rating(1.0), mitigations=(0.50,)) == pytest.approx(CEILING)
+
+    # Nothing escapes the documented [0.1, 10.0] range on any reading.
+    for op_type in ("IMPL", "NAND"):
+        for op_targets in (0, 1):
+            for q in (0.0, 0.25, 0.5, 0.75, 1.0):
+                w = _weight(op_type, _rating(q), op_targets=op_targets)
+                assert FLOOR <= w <= CEILING, (
+                    f"{op_type} (op_targets={op_targets}) at q={q} escaped: {w}")
 
 
 def test_three_good_ratings_are_not_a_penalty():
