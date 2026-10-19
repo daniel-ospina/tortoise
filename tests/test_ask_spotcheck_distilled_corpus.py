@@ -469,6 +469,22 @@ def test_the_distilled_leg_is_key_free_only_with_an_explicit_mock_judge(
     assert "DISTILLED_JSON" not in refused.out, refused.out
     assert "judge" in refused.err.lower(), refused.err
 
+    # ⛔ The opt-out is NARROW — it must be spelled `mock`. Anything merely
+    # truthy is refused, because a truthy-but-unintended value (`1`, `true`)
+    # grading with `MockJudge` would print PASS and a DISTILLED_JSON {"ok": true}
+    # from a MOCK containment score — a fake gate that reads green and is
+    # exactly the "an unmeasured gate is never a pass" hazard this leg closes.
+    # Pinned here rather than trusted to the docstring: a bare-truthiness
+    # implementation passes the two cases above (measured, #9125 review).
+    # Surrounding whitespace IS tolerated on purpose (`strip()` — a shell can
+    # hand us `mock `), which is why the spellings below exclude it.
+    for misspelled in ("1", "true", "yes", "MOCKISH", "mocky"):
+        monkeypatch.setenv("TORTOISE_SPOTCHECK_JUDGE", misspelled)
+        rc = main(["--distilled"])
+        stray = capsys.readouterr()
+        assert rc == 2, (misspelled, rc, stray.out[:200])
+        assert "DISTILLED_JSON" not in stray.out, (misspelled, stray.out)
+
     # Explicit mock ⇒ the leg runs key-free and reports its number.
     monkeypatch.setenv("TORTOISE_SPOTCHECK_JUDGE", "mock")
     assert main(["--distilled"]) == 0
