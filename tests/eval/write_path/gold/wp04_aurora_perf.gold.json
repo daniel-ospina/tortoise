@@ -72,6 +72,40 @@
       }
     }
   ],
+  "planted_qualifiers": [
+    {
+      "bound_claim": "wp04_aurora_perf_u_02",
+      "class": "hedge",
+      "id": "wp04_aurora_perf_q_01",
+      "notes": "correlation framing (not causation) of the release/spike link",
+      "planted_turn": 3,
+      "verbatim_qualifier": "correlates with"
+    },
+    {
+      "bound_claim": "wp04_aurora_perf_u_08",
+      "class": "hedge",
+      "id": "wp04_aurora_perf_q_02",
+      "notes": "marks the daily request volume as approximate",
+      "planted_turn": 11,
+      "verbatim_qualifier": "about"
+    },
+    {
+      "bound_claim": "wp04_aurora_perf_u_09",
+      "class": "scope",
+      "id": "wp04_aurora_perf_q_03",
+      "notes": "flag stays off until the perf-review gate; bounds when the rollout is live",
+      "planted_turn": 13,
+      "verbatim_qualifier": "until the perf review signs off"
+    },
+    {
+      "bound_claim": "wp04_aurora_perf_u_12",
+      "class": "hedge",
+      "id": "wp04_aurora_perf_q_04",
+      "notes": "hedges the predicted p95 recovery target",
+      "planted_turn": 19,
+      "verbatim_qualifier": "Realistically"
+    }
+  ],
   "planted_units": [
     {
       "depth_bucket": "early",

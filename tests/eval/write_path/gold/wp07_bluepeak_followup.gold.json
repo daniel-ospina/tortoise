@@ -73,6 +73,31 @@
       }
     }
   ],
+  "planted_qualifiers": [
+    {
+      "bound_claim": "wp07_bluepeak_followup_u_01",
+      "class": "hedge",
+      "id": "wp07_bluepeak_followup_q_01",
+      "notes": "marks the duplicate window as approximate",
+      "planted_turn": 1,
+      "verbatim_qualifier": "about"
+    },
+    {
+      "class": "hedge",
+      "id": "wp07_bluepeak_followup_q_02",
+      "notes": "presents the flag-raced-renewal claim as a hypothesis; that claim is the operator NEGATE target, not a planted unit",
+      "planted_turn": 5,
+      "verbatim_qualifier": "My first hypothesis is"
+    },
+    {
+      "bound_claim": "wp07_bluepeak_followup_u_07",
+      "class": "stance",
+      "id": "wp07_bluepeak_followup_q_03",
+      "notes": "recommendation framing of the thirty-second grace decision",
+      "planted_turn": 15,
+      "verbatim_qualifier": "I would size"
+    }
+  ],
   "planted_units": [
     {
       "depth_bucket": "early",

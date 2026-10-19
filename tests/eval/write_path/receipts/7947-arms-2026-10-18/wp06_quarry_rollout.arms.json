@@ -1,0 +1,1477 @@
+{
+  "model_id": "deepseek/deepseek-v4-flash",
+  "chunk_size": 50,
+  "session_date": "2026-10-10",
+  "chunks": 1,
+  "errors": [],
+  "stories": {
+    "raw": "0: user: Let us decide the rollout for the quarry lease fix. The lease-before-claim change is merged and the staging matrix is green. We have until the October freeze to ship it to the Halcyon queue, so this is a today decision, not a next-week one.\n1: assistant: Two levers shape the rollout: scope, all shards at once versus one shard at a time, and reversibility, a kill flag we can pull versus a canary we watch. Which do you want to decide on data?\n2: user: Data first. I want to run the chaos harness against both rollout shapes before we pick. Same fault set, four shards, killed workers mid-claim.\n3: assistant: The all-at-once shape is the lease fix enabled fleet-wide behind one global kill flag. The per-shard shape enables it shard by shard over a week, each shard watched before the next one flips.\n4: user: My worry with any shape is the stall coming back. If we flip mid-rollout and the flip glitches, we could re-enter the duplicate-processing race while the queue drains.\n5: assistant: The original stall was a no-lease bug, not a flip bug, but the glitch scenario is fair to test. The chaos harness covers it: it kills workers, it does not toggle flags.\n6: user: Right, and I want the harness to prove the boundary case: two workers claiming one batch at the exact moment a region toggles.\n7: assistant: That boundary is the lease CAS: only the owner can complete, so a second claim attempt fails at compare-and-swap regardless of what toggles around it.\n8: user: That is my read too: the race only re-enters when two workers can claim one batch, and the lease makes that impossible no matter how we roll out.\n9: assistant: Hypothesis recorded. The chaos run either confirms it at the shard boundary or it does not, scope independence is the claim under test.\n10: user: If the run confirms it, all-at-once is tempting: one day of rollout instead of a week of canary watching.\n11: assistant: All-at-once buys the shortest exposure window and the flag is the reversibility backstop. Per-shard buys a smaller blast radius per flip. The chaos numbers should decide.\n12: user: The chaos run just finished. We killed a lease-holding worker mid-batch on four shards and every batch was claimed exactly once after the expiry, no duplicates anywhere. It took longer than expected because I queued it behind the nightly embedding job.\n13: assistant: So the chaos run supports the claim that the race cannot re-enter once the lease is held, rollout scope does not change the guarantee.\n14: user: Then I am not going to argue for a week of canary watching. Scope is settled by the data. My shift ends at six, so if the flip lands today I want the runbook link in the channel.\n15: assistant: Scope settled: the lease guarantee is scope-independent. That leaves reversibility: one global flag versus per-service flags.\n16: user: We ship the lease fix all-at-once behind a single global kill flag. One flag is one switch to pull, and the chaos run says the fix itself cannot re-race.\n17: assistant: Decision recorded: all-at-once rollout behind the global kill flag, watch the queue drain after the flip, pull the flag on any regression.\n18: user: And who drives the flip? I would rather it be one person with the runbook open, not a group chat decision at 2am.\n19: assistant: One driver with the runbook. Maya is the natural driver for the flip, she owns the ingest queue service and ran the staging matrix.\n20: user: Cutoff stays September 30 as agreed, and the lease migration already landed ahead of Friday's maintenance window.\n21: assistant: Rollout plan: all-at-once behind the global kill flag, driver Maya, cutoff unchanged, migration landed before Friday. Shall I open the rollout PR?",
+    "narrative": "We believed the lease-before-claim fix could be rolled out either all-at-once or shard-by-shard, and that the choice should be made on data rather than intuition.\n\nOn 2026-10-10 the chaos harness settled it: killing a lease-holding worker mid-batch across four shards produced exactly one claim per batch after lease expiry, with no duplicates anywhere.\n\nThat confirmed the hypothesis under test \u2014 the duplicate-processing race cannot re-enter once the lease is held, because the lease CAS lets only the owner complete, so a second claim fails at compare-and-swap regardless of what toggles around it.\n\nThe guarantee is therefore scope-independent, which undermines the case for a week of canary watching and supports the shortest exposure window.\n\nThe decision: ship the lease fix all-at-once behind a single global kill flag, with the flag as the reversibility backstop and the queue drain watched after the flip, pulling the flag on any regression.\n\nThe user's worry that a mid-rollout flip glitch could re-enter the stall was tested and tempered \u2014 the original stall was a no-lease bug, not a flip bug, and the chaos run showed the race cannot re-enter once the lease is held.\n\nOne flag was chosen over per-service flags because one switch is one thing to pull.\n\nOperationally: Maya drives the flip, as owner of the ingest queue service and runner of the staging matrix, working from the runbook with the link posted in the channel \u2014 one driver, not a group-chat decision.\n\nThe cutoff stays September 30 as agreed, and the lease migration already landed ahead of Friday's maintenance window.\n\nThe October freeze is the deadline that made this a same-day decision."
+  },
+  "story_sha": {
+    "raw": "d05fc889f482ed7c",
+    "narrative": "0844bfff632dff4f"
+  },
+  "story_chars": {
+    "raw": 3697,
+    "narrative": 1667
+  },
+  "embed_list": {
+    "raw": {
+      "entities": [
+        {
+          "name": "quarry lease fix",
+          "kind": "dev:code",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Lease-before-claim change; merged, staging matrix green; to ship to the Halcyon queue before the October freeze"
+        },
+        {
+          "name": "Halcyon queue",
+          "kind": "core:other",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "The queue the lease fix ships to"
+        },
+        {
+          "name": "chaos harness",
+          "kind": "core:tool",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Kills workers mid-claim; does not toggle flags"
+        },
+        {
+          "name": "global kill flag",
+          "kind": "core:other",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Single reversibility switch for the all-at-once rollout"
+        },
+        {
+          "name": "lease CAS",
+          "kind": "core:other",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Only the owner can complete; second claim fails at compare-and-swap"
+        },
+        {
+          "name": "ingest queue service",
+          "kind": "core:other",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Service Maya owns"
+        },
+        {
+          "name": "Maya",
+          "kind": "core:naturalPerson",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Owns the ingest queue service; ran the staging matrix; driver for the flip"
+        },
+        {
+          "name": "rollout runbook",
+          "kind": "dev:runbook",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "To be linked in the channel; the driver keeps it open during the flip"
+        },
+        {
+          "name": "lease migration",
+          "kind": "core:other",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Already landed ahead of Friday's maintenance window"
+        }
+      ],
+      "events": [
+        {
+          "content": "The chaos run finished: a lease-holding worker was killed mid-batch on four shards and every batch was claimed exactly once after expiry, with no duplicates",
+          "eventKind": "core:experiment",
+          "about_entities": [
+            "chaos harness",
+            "quarry lease fix"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "chaos harness",
+                "kind": "core:tool",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "quarry lease fix",
+                "kind": "core:code",
+                "confidence": 0.6
+              }
+            ]
+          }
+        },
+        {
+          "content": "Decision: ship the lease fix all-at-once behind a single global kill flag, watch the queue drain after the flip, and pull the flag on any regression",
+          "eventKind": "core:decision",
+          "about_entities": [
+            "quarry lease fix",
+            "global kill flag",
+            "Halcyon queue"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "quarry lease fix",
+                "kind": "dev:code",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "global kill flag",
+                "kind": "core:other",
+                "confidence": 0.8
+              }
+            ]
+          }
+        },
+        {
+          "content": "Decision: one driver with the runbook open drives the flip, and Maya is the driver",
+          "eventKind": "core:decision",
+          "about_entities": [
+            "Maya",
+            "rollout runbook",
+            "quarry lease fix"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "Maya",
+                "kind": "core:naturalPerson",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "rollout runbook",
+                "kind": "dev:runbook",
+                "confidence": 0.8
+              }
+            ]
+          }
+        },
+        {
+          "content": "The lease migration landed ahead of Friday's maintenance window",
+          "eventKind": "core:occurrence",
+          "about_entities": [
+            "lease migration"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "lease migration",
+                "kind": "core:other",
+                "confidence": 0.8
+              }
+            ]
+          }
+        }
+      ],
+      "points": [
+        {
+          "content": "The lease-before-claim change is merged and the staging matrix is green, and it must ship to the Halcyon queue before the October freeze",
+          "pointKind": "statement",
+          "about_entities": [
+            "quarry lease fix",
+            "Halcyon queue"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "quarry lease fix",
+                "kind": "dev:code",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "Halcyon queue",
+                "kind": "core:other",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The lease-before-claim change is merged and the staging matrix is green. We have until the October freeze to ship it to the Halcyon queue",
+          "search_keys": [
+            "lease-before-claim merged",
+            "staging matrix green",
+            "October freeze",
+            "Halcyon queue"
+          ],
+          "source_turn_id": 0
+        },
+        {
+          "content": "The rollout decision is made on data: run the chaos harness against both rollout shapes before picking",
+          "pointKind": "statement",
+          "about_entities": [
+            "chaos harness",
+            "quarry lease fix"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "chaos harness",
+                "kind": "core:tool",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Data first. I want to run the chaos harness against both rollout shapes before we pick.",
+          "search_keys": [
+            "data first",
+            "chaos harness both shapes",
+            "decide on data"
+          ],
+          "source_turn_id": 2
+        },
+        {
+          "content": "The chaos harness test uses the same fault set, four shards, and killed workers mid-claim",
+          "pointKind": "statement",
+          "about_entities": [
+            "chaos harness"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "chaos harness",
+                "kind": "core:tool",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Same fault set, four shards, killed workers mid-claim.",
+          "search_keys": [
+            "four shards",
+            "fault set",
+            "killed workers mid-claim"
+          ],
+          "source_turn_id": 2
+        },
+        {
+          "content": "The all-at-once rollout shape enables the lease fix fleet-wide behind one global kill flag; the per-shard shape enables it shard by shard over a week, each shard watched before the next flips",
+          "pointKind": "statement",
+          "about_entities": [
+            "quarry lease fix",
+            "global kill flag"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "quarry lease fix",
+                "kind": "dev:code",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "global kill flag",
+                "kind": "core:other",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The all-at-once shape is the lease fix enabled fleet-wide behind one global kill flag. The per-shard shape enables it shard by shard over a week",
+          "search_keys": [
+            "all-at-once shape",
+            "per-shard shape",
+            "one week canary"
+          ],
+          "source_turn_id": 3
+        },
+        {
+          "content": "Risk: flipping mid-rollout could glitch and re-enter the duplicate-processing race while the queue drains",
+          "pointKind": "statement",
+          "about_entities": [
+            "quarry lease fix",
+            "Halcyon queue"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "quarry lease fix",
+                "kind": "dev:code",
+                "confidence": 0.7
+              }
+            ],
+            "object": [
+              {
+                "name": "Halcyon queue",
+                "kind": "core:other",
+                "confidence": 0.6
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "If we flip mid-rollout and the flip glitches, we could re-enter the duplicate-processing race while the queue drains.",
+          "search_keys": [
+            "flip glitch",
+            "duplicate-processing race",
+            "stall coming back"
+          ],
+          "source_turn_id": 4
+        },
+        {
+          "content": "The original stall was a no-lease bug, not a flip bug",
+          "pointKind": "statement",
+          "about_entities": [
+            "quarry lease fix"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "quarry lease fix",
+                "kind": "dev:code",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The original stall was a no-lease bug, not a flip bug",
+          "search_keys": [
+            "no-lease bug",
+            "original stall cause",
+            "not a flip bug"
+          ],
+          "source_turn_id": 5
+        },
+        {
+          "content": "The chaos harness kills workers but does not toggle flags",
+          "pointKind": "statement",
+          "about_entities": [
+            "chaos harness"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "chaos harness",
+                "kind": "core:tool",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The chaos harness covers it: it kills workers, it does not toggle flags.",
+          "search_keys": [
+            "harness does not toggle flags",
+            "kills workers"
+          ],
+          "source_turn_id": 5
+        },
+        {
+          "content": "The boundary case to prove is two workers claiming one batch at the exact moment a region toggles",
+          "pointKind": "statement",
+          "about_entities": [
+            "chaos harness",
+            "lease CAS"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "chaos harness",
+                "kind": "core:tool",
+                "confidence": 0.7
+              }
+            ],
+            "object": [
+              {
+                "name": "lease CAS",
+                "kind": "core:other",
+                "confidence": 0.6
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "I want the harness to prove the boundary case: two workers claiming one batch at the exact moment a region toggles.",
+          "search_keys": [
+            "boundary case",
+            "two workers one batch",
+            "region toggles"
+          ],
+          "source_turn_id": 6
+        },
+        {
+          "content": "The lease CAS means only the owner can complete, so a second claim attempt fails at compare-and-swap regardless of what toggles around it",
+          "pointKind": "statement",
+          "about_entities": [
+            "lease CAS"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "lease CAS",
+                "kind": "core:other",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "That boundary is the lease CAS: only the owner can complete, so a second claim attempt fails at compare-and-swap regardless of what toggles around it.",
+          "search_keys": [
+            "lease CAS",
+            "compare-and-swap",
+            "only the owner can complete"
+          ],
+          "source_turn_id": 7
+        },
+        {
+          "content": "The race only re-enters when two workers can claim one batch, and the lease makes that impossible no matter how the rollout is done",
+          "pointKind": "statement",
+          "about_entities": [
+            "lease CAS",
+            "quarry lease fix"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "lease CAS",
+                "kind": "core:other",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "the race only re-enters when two workers can claim one batch, and the lease makes that impossible no matter how we roll out.",
+          "search_keys": [
+            "race re-entry",
+            "scope independence",
+            "lease prevents double claim"
+          ],
+          "source_turn_id": 8
+        },
+        {
+          "content": "The hypothesis under test is scope independence: the chaos run either confirms the lease guarantee at the shard boundary or it does not",
+          "pointKind": "statement",
+          "about_entities": [
+            "chaos harness",
+            "lease CAS"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "chaos harness",
+                "kind": "core:tool",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The chaos run either confirms it at the shard boundary or it does not, scope independence is the claim under test.",
+          "search_keys": [
+            "scope independence",
+            "hypothesis",
+            "shard boundary"
+          ],
+          "source_turn_id": 9
+        },
+        {
+          "content": "All-at-once buys the shortest exposure window with the flag as the reversibility backstop; per-shard buys a smaller blast radius per flip",
+          "pointKind": "statement",
+          "about_entities": [
+            "global kill flag",
+            "quarry lease fix"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "global kill flag",
+                "kind": "core:other",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "All-at-once buys the shortest exposure window and the flag is the reversibility backstop. Per-shard buys a smaller blast radius per flip.",
+          "search_keys": [
+            "shortest exposure window",
+            "blast radius",
+            "reversibility backstop"
+          ],
+          "source_turn_id": 11
+        },
+        {
+          "content": "The chaos run killed a lease-holding worker mid-batch on four shards and every batch was claimed exactly once after expiry, with no duplicates anywhere",
+          "pointKind": "statement",
+          "about_entities": [
+            "chaos harness",
+            "quarry lease fix"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "chaos harness",
+                "kind": "core:tool",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "quarry lease fix",
+                "kind": "dev:code",
+                "confidence": 0.6
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "We killed a lease-holding worker mid-batch on four shards and every batch was claimed exactly once after the expiry, no duplicates anywhere.",
+          "search_keys": [
+            "claimed exactly once",
+            "no duplicates",
+            "four shards",
+            "expiry"
+          ],
+          "source_turn_id": 12
+        },
+        {
+          "content": "The chaos run supports the claim that the race cannot re-enter once the lease is held, and rollout scope does not change the guarantee",
+          "pointKind": "statement",
+          "about_entities": [
+            "chaos harness",
+            "lease CAS"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "chaos harness",
+                "kind": "core:tool",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "the chaos run supports the claim that the race cannot re-enter once the lease is held, rollout scope does not change the guarantee.",
+          "search_keys": [
+            "scope-independent guarantee",
+            "race cannot re-enter",
+            "lease held"
+          ],
+          "source_turn_id": 13
+        },
+        {
+          "content": "Scope is settled by the data: no week of canary watching",
+          "pointKind": "statement",
+          "about_entities": [
+            "quarry lease fix"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "quarry lease fix",
+                "kind": "dev:code",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Then I am not going to argue for a week of canary watching. Scope is settled by the data.",
+          "search_keys": [
+            "scope settled",
+            "no canary week"
+          ],
+          "source_turn_id": 14
+        },
+        {
+          "content": "The user's shift ends at six, and if the flip lands today the runbook link should be in the channel",
+          "pointKind": "statement",
+          "about_entities": [
+            "rollout runbook",
+            "quarry lease fix"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "rollout runbook",
+                "kind": "dev:runbook",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "A",
+          "quote": "My shift ends at six, so if the flip lands today I want the runbook link in the channel.",
+          "search_keys": [
+            "shift ends at six",
+            "6pm",
+            "runbook link in channel"
+          ],
+          "source_turn_id": 14
+        },
+        {
+          "content": "Ship the lease fix all-at-once behind a single global kill flag, because one flag is one switch to pull and the chaos run says the fix itself cannot re-race",
+          "pointKind": "statement",
+          "about_entities": [
+            "quarry lease fix",
+            "global kill flag",
+            "chaos harness"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "quarry lease fix",
+                "kind": "dev:code",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "global kill flag",
+                "kind": "core:other",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "We ship the lease fix all-at-once behind a single global kill flag. One flag is one switch to pull, and the chaos run says the fix itself cannot re-race.",
+          "search_keys": [
+            "all-at-once rollout",
+            "single global kill flag",
+            "one switch to pull"
+          ],
+          "source_turn_id": 16
+        },
+        {
+          "content": "The rollout watches the queue drain after the flip and pulls the flag on any regression",
+          "pointKind": "statement",
+          "about_entities": [
+            "global kill flag",
+            "Halcyon queue"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "global kill flag",
+                "kind": "core:other",
+                "confidence": 0.7
+              }
+            ],
+            "object": [
+              {
+                "name": "Halcyon queue",
+                "kind": "core:other",
+                "confidence": 0.6
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "watch the queue drain after the flip, pull the flag on any regression.",
+          "search_keys": [
+            "watch queue drain",
+            "pull flag on regression"
+          ],
+          "source_turn_id": 17
+        },
+        {
+          "content": "One person with the runbook open drives the flip, not a group chat decision at 2am",
+          "pointKind": "statement",
+          "about_entities": [
+            "rollout runbook",
+            "quarry lease fix"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "rollout runbook",
+                "kind": "dev:runbook",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "I would rather it be one person with the runbook open, not a group chat decision at 2am.",
+          "search_keys": [
+            "one driver",
+            "runbook open",
+            "not a group chat decision"
+          ],
+          "source_turn_id": 18
+        },
+        {
+          "content": "Maya is the driver for the flip; she owns the ingest queue service and ran the staging matrix",
+          "pointKind": "statement",
+          "about_entities": [
+            "Maya",
+            "ingest queue service",
+            "quarry lease fix"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "Maya",
+                "kind": "core:naturalPerson",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "ingest queue service",
+                "kind": "core:other",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Maya is the natural driver for the flip, she owns the ingest queue service and ran the staging matrix.",
+          "search_keys": [
+            "Maya driver",
+            "ingest queue owner",
+            "ran staging matrix"
+          ],
+          "source_turn_id": 19
+        },
+        {
+          "content": "The cutoff stays September 30 as agreed",
+          "pointKind": "statement",
+          "about_entities": [
+            "quarry lease fix"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "quarry lease fix",
+                "kind": "dev:code",
+                "confidence": 0.6
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Cutoff stays September 30 as agreed",
+          "search_keys": [
+            "September 30 cutoff",
+            "cutoff unchanged"
+          ],
+          "source_turn_id": 20
+        },
+        {
+          "content": "The lease migration already landed ahead of Friday's maintenance window",
+          "pointKind": "statement",
+          "about_entities": [
+            "lease migration"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "lease migration",
+                "kind": "core:other",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "the lease migration already landed ahead of Friday's maintenance window.",
+          "search_keys": [
+            "lease migration landed",
+            "Friday maintenance window"
+          ],
+          "source_turn_id": 20
+        }
+      ],
+      "operators": [
+        {
+          "src": "The chaos run killed a lease-holding worker mid-batch on four shards and every batch was claimed exactly once after expiry, with no duplicates anywhere",
+          "dst": "Risk: flipping mid-rollout could glitch and re-enter the duplicate-processing race while the queue drains",
+          "op_type": "MITIGATES",
+          "target_edge": {
+            "src": "Risk: flipping mid-rollout could glitch and re-enter the duplicate-processing race while the queue drains",
+            "dst": "Ship the lease fix all-at-once behind a single global kill flag, because one flag is one switch to pull and the chaos run says the fix itself cannot re-race",
+            "op_type": "IMPL"
+          },
+          "strength": 0.5
+        },
+        {
+          "src": "The chaos run supports the claim that the race cannot re-enter once the lease is held, and rollout scope does not change the guarantee",
+          "dst": "Risk: flipping mid-rollout could glitch and re-enter the duplicate-processing race while the queue drains",
+          "op_type": "NAND"
+        }
+      ],
+      "chain_notes": [
+        {
+          "chain": "epicToCode",
+          "finding": "The lease fix is a code change with no epic/issue layer in the story",
+          "action": "warned",
+          "note": "No epic or issue entities were invented; the code change stands alone"
+        }
+      ],
+      "link_before_create": [
+        {
+          "searched_for": "quarry lease fix",
+          "found": false,
+          "note": "No prior entity for the lease fix in the story"
+        },
+        {
+          "searched_for": "chaos harness",
+          "found": false,
+          "note": "New tool reference"
+        },
+        {
+          "searched_for": "Maya",
+          "found": false,
+          "note": "New person reference"
+        },
+        {
+          "searched_for": "global kill flag",
+          "found": false,
+          "note": "New rollout mechanism"
+        },
+        {
+          "searched_for": "lease CAS",
+          "found": false,
+          "note": "New mechanism reference"
+        }
+      ],
+      "retractions": []
+    },
+    "narrative": {
+      "entities": [
+        {
+          "name": "the lease-before-claim fix",
+          "kind": "dev:code",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "The lease-before-claim change, merged and green on the staging matrix; the subject of the rollout decision."
+        },
+        {
+          "name": "the chaos harness",
+          "kind": "core:tool",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Fault-injection harness that kills workers mid-claim; used to test rollout shapes."
+        },
+        {
+          "name": "the lease CAS",
+          "kind": "dev:code",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Compare-and-swap on the lease: only the owner can complete, so a second claim fails."
+        },
+        {
+          "name": "the global kill flag",
+          "kind": "core:tool",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Single global switch that reverts the lease fix; the reversibility backstop."
+        },
+        {
+          "name": "the per-service flags",
+          "kind": "core:tool",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Rejected alternative reversibility mechanism \u2014 many switches to pull."
+        },
+        {
+          "name": "the runbook",
+          "kind": "dev:runbook",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Operational instructions the flip driver works from; link posted in the channel."
+        },
+        {
+          "name": "the ingest queue service",
+          "kind": "core:other",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "The service Maya owns; the queue whose drain is watched after the flip."
+        },
+        {
+          "name": "Maya",
+          "kind": "core:naturalPerson",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Owner of the ingest queue service and runner of the staging matrix; drives the flip."
+        },
+        {
+          "name": "the lease migration",
+          "kind": "dev:code",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Already landed ahead of Friday's maintenance window."
+        },
+        {
+          "name": "the October freeze",
+          "kind": "core:target",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Deadline that made the rollout a same-day decision."
+        },
+        {
+          "name": "the September 30 cutoff",
+          "kind": "core:target",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Cutoff stays September 30 as agreed."
+        }
+      ],
+      "events": [
+        {
+          "content": "The chaos harness run killed a lease-holding worker mid-batch across four shards and every batch was claimed exactly once after lease expiry, with no duplicates anywhere",
+          "eventKind": "core:experiment",
+          "about_entities": [
+            "the chaos harness",
+            "the lease-before-claim fix"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the chaos harness",
+                "kind": "core:tool",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "the lease-before-claim fix",
+                "kind": "core:code",
+                "confidence": 0.6
+              }
+            ]
+          }
+        },
+        {
+          "content": "The decision to ship the lease fix all-at-once behind a single global kill flag, watching the queue drain after the flip and pulling the flag on any regression",
+          "eventKind": "core:decision",
+          "about_entities": [
+            "the lease-before-claim fix",
+            "the global kill flag",
+            "the ingest queue service"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the lease-before-claim fix",
+                "kind": "dev:code",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "the global kill flag",
+                "kind": "core:tool",
+                "confidence": 0.8
+              }
+            ]
+          }
+        },
+        {
+          "content": "The lease migration landed ahead of Friday's maintenance window",
+          "eventKind": "core:occurrence",
+          "about_entities": [
+            "the lease migration"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the lease migration",
+                "kind": "dev:code",
+                "confidence": 0.8
+              }
+            ]
+          }
+        }
+      ],
+      "points": [
+        {
+          "content": "The lease-before-claim fix could be rolled out either all-at-once or shard-by-shard, and the choice should be made on data rather than intuition",
+          "pointKind": "statement",
+          "about_entities": [
+            "the lease-before-claim fix"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "the lease-before-claim fix",
+                "kind": "dev:code",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "We believed the lease-before-claim fix could be rolled out either all-at-once or shard-by-shard, and that the choice should be made on data rather than intuition.",
+          "search_keys": [
+            "rollout shapes",
+            "all-at-once vs shard-by-shard",
+            "data-driven rollout choice",
+            "lease fix rollout options"
+          ],
+          "source_turn_id": 0
+        },
+        {
+          "content": "Killing a lease-holding worker mid-batch across four shards produced exactly one claim per batch after lease expiry, with no duplicates anywhere",
+          "pointKind": "statement",
+          "about_entities": [
+            "the chaos harness",
+            "the lease-before-claim fix"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the chaos harness",
+                "kind": "core:tool",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "the lease-before-claim fix",
+                "kind": "dev:code",
+                "confidence": 0.6
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "killing a lease-holding worker mid-batch across four shards produced exactly one claim per batch after lease expiry, with no duplicates anywhere",
+          "search_keys": [
+            "chaos run results",
+            "four shards",
+            "one claim per batch",
+            "no duplicates",
+            "lease expiry"
+          ],
+          "source_turn_id": 12
+        },
+        {
+          "content": "The duplicate-processing race cannot re-enter once the lease is held, because the lease CAS lets only the owner complete, so a second claim fails at compare-and-swap regardless of what toggles around it",
+          "pointKind": "statement",
+          "about_entities": [
+            "the lease CAS",
+            "the lease-before-claim fix"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "the lease CAS",
+                "kind": "dev:code",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "the duplicate-processing race cannot re-enter once the lease is held, because the lease CAS lets only the owner complete, so a second claim fails at compare-and-swap regardless of what toggles around it",
+          "search_keys": [
+            "lease CAS",
+            "compare-and-swap",
+            "race cannot re-enter",
+            "duplicate-processing race"
+          ],
+          "source_turn_id": 8
+        },
+        {
+          "content": "The lease guarantee is scope-independent, which undermines the case for a week of canary watching and supports the shortest exposure window",
+          "pointKind": "statement",
+          "about_entities": [
+            "the lease-before-claim fix"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the lease-before-claim fix",
+                "kind": "dev:code",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The guarantee is therefore scope-independent, which undermines the case for a week of canary watching and supports the shortest exposure window.",
+          "search_keys": [
+            "scope-independent guarantee",
+            "canary watching",
+            "shortest exposure window",
+            "rollout scope"
+          ],
+          "source_turn_id": 14
+        },
+        {
+          "content": "Ship the lease fix all-at-once behind a single global kill flag, with the flag as the reversibility backstop and the queue drain watched after the flip, pulling the flag on any regression",
+          "pointKind": "statement",
+          "about_entities": [
+            "the lease-before-claim fix",
+            "the global kill flag",
+            "the ingest queue service"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the lease-before-claim fix",
+                "kind": "dev:code",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "the global kill flag",
+                "kind": "core:tool",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "We ship the lease fix all-at-once behind a single global kill flag. One flag is one switch to pull, and the chaos run says the fix itself cannot re-race.",
+          "search_keys": [
+            "all-at-once rollout",
+            "global kill flag",
+            "reversibility backstop",
+            "queue drain",
+            "pull the flag on regression"
+          ],
+          "source_turn_id": 16
+        },
+        {
+          "content": "The worry that a mid-rollout flip glitch could re-enter the stall was tempered: the original stall was a no-lease bug, not a flip bug, and the chaos run showed the race cannot re-enter once the lease is held",
+          "pointKind": "statement",
+          "about_entities": [
+            "the lease-before-claim fix",
+            "the chaos harness"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the lease-before-claim fix",
+                "kind": "dev:code",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The user's worry that a mid-rollout flip glitch could re-enter the stall was tested and tempered \u2014 the original stall was a no-lease bug, not a flip bug, and the chaos run showed the race cannot re-enter once the lease is held.",
+          "search_keys": [
+            "flip glitch worry",
+            "original stall",
+            "no-lease bug",
+            "re-enter the stall"
+          ],
+          "source_turn_id": 5
+        },
+        {
+          "content": "One global flag was chosen over per-service flags because one switch is one thing to pull",
+          "pointKind": "statement",
+          "about_entities": [
+            "the global kill flag",
+            "the per-service flags"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the global kill flag",
+                "kind": "core:tool",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "the per-service flags",
+                "kind": "core:tool",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "One flag was chosen over per-service flags because one switch is one thing to pull.",
+          "search_keys": [
+            "one flag vs per-service flags",
+            "single switch",
+            "reversibility choice"
+          ],
+          "source_turn_id": 16
+        },
+        {
+          "content": "Maya drives the flip, as owner of the ingest queue service and runner of the staging matrix, working from the runbook with the link posted in the channel \u2014 one driver, not a group-chat decision",
+          "pointKind": "statement",
+          "about_entities": [
+            "Maya",
+            "the ingest queue service",
+            "the runbook"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "Maya",
+                "kind": "core:naturalPerson",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "the runbook",
+                "kind": "dev:runbook",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Maya drives the flip, as owner of the ingest queue service and runner of the staging matrix, working from the runbook with the link posted in the channel \u2014 one driver, not a group-chat decision.",
+          "search_keys": [
+            "Maya drives the flip",
+            "flip driver",
+            "runbook link in channel",
+            "one driver"
+          ],
+          "source_turn_id": 19
+        },
+        {
+          "content": "The cutoff stays September 30 as agreed",
+          "pointKind": "statement",
+          "about_entities": [
+            "the September 30 cutoff"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the September 30 cutoff",
+                "kind": "core:target",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The cutoff stays September 30 as agreed",
+          "search_keys": [
+            "September 30 cutoff",
+            "cutoff date",
+            "agreed cutoff"
+          ],
+          "source_turn_id": 20
+        },
+        {
+          "content": "The lease migration already landed ahead of Friday's maintenance window",
+          "pointKind": "statement",
+          "about_entities": [
+            "the lease migration"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the lease migration",
+                "kind": "dev:code",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "the lease migration already landed ahead of Friday's maintenance window",
+          "search_keys": [
+            "lease migration landed",
+            "Friday maintenance window",
+            "migration ahead of window"
+          ],
+          "source_turn_id": 20
+        },
+        {
+          "content": "The October freeze is the deadline that made the rollout a same-day decision",
+          "pointKind": "statement",
+          "about_entities": [
+            "the October freeze",
+            "the lease-before-claim fix"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the October freeze",
+                "kind": "core:target",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The October freeze is the deadline that made this a same-day decision.",
+          "search_keys": [
+            "October freeze",
+            "deadline",
+            "same-day decision"
+          ],
+          "source_turn_id": 0
+        }
+      ],
+      "operators": [
+        {
+          "src": "Killing a lease-holding worker mid-batch across four shards produced exactly one claim per batch after lease expiry, with no duplicates anywhere",
+          "dst": "The duplicate-processing race cannot re-enter once the lease is held, because the lease CAS lets only the owner complete, so a second claim fails at compare-and-swap regardless of what toggles around it",
+          "op_type": "IMPL"
+        },
+        {
+          "src": "The duplicate-processing race cannot re-enter once the lease is held, because the lease CAS lets only the owner complete, so a second claim fails at compare-and-swap regardless of what toggles around it",
+          "dst": "The lease guarantee is scope-independent, which undermines the case for a week of canary watching and supports the shortest exposure window",
+          "op_type": "IMPL"
+        },
+        {
+          "src": "The lease guarantee is scope-independent, which undermines the case for a week of canary watching and supports the shortest exposure window",
+          "dst": "Ship the lease fix all-at-once behind a single global kill flag, with the flag as the reversibility backstop and the queue drain watched after the flip, pulling the flag on any regression",
+          "op_type": "IMPL"
+        },
+        {
+          "src": "The worry that a mid-rollout flip glitch could re-enter the stall was tempered: the original stall was a no-lease bug, not a flip bug, and the chaos run showed the race cannot re-enter once the lease is held",
+          "dst": "The duplicate-processing race cannot re-enter once the lease is held, because the lease CAS lets only the owner complete, so a second claim fails at compare-and-swap regardless of what toggles around it",
+          "op_type": "MITIGATES",
+          "target_edge": {
+            "src": "The duplicate-processing race cannot re-enter once the lease is held, because the lease CAS lets only the owner complete, so a second claim fails at compare-and-swap regardless of what toggles around it",
+            "dst": "The lease guarantee is scope-independent, which undermines the case for a week of canary watching and supports the shortest exposure window",
+            "op_type": "IMPL"
+          },
+          "strength": 0.3
+        }
+      ],
+      "chain_notes": [
+        {
+          "chain": "epicToCode",
+          "finding": "The rollout decision references the lease fix and the lease migration as code artifacts without an epic or issue above them",
+          "action": "warned",
+          "note": "No epic/issue entities exist in the story; code-level entities kept as-is rather than inventing decomposition."
+        }
+      ],
+      "link_before_create": [
+        {
+          "searched_for": "lease-before-claim fix",
+          "found": false,
+          "note": "No prior entity for the lease fix in the graph."
+        },
+        {
+          "searched_for": "chaos harness",
+          "found": false,
+          "note": "No prior tool entity for the chaos harness."
+        },
+        {
+          "searched_for": "global kill flag",
+          "found": false,
+          "note": "No prior flag entity."
+        },
+        {
+          "searched_for": "Maya",
+          "found": false,
+          "note": "No prior natural-person entity for Maya."
+        },
+        {
+          "searched_for": "October freeze",
+          "found": false,
+          "note": "No prior target entity for the October freeze."
+        },
+        {
+          "searched_for": "September 30 cutoff",
+          "found": false,
+          "note": "No prior target entity for the cutoff."
+        }
+      ],
+      "retractions": []
+    }
+  },
+  "s2_stats": {
+    "raw": {
+      "attempts": 1,
+      "retries": 0,
+      "last_class": null,
+      "truncated": false,
+      "finish_reason": "stop",
+      "prompt_tokens": 9230,
+      "completion_tokens": 4276,
+      "cost": {
+        "calls": 1,
+        "prompt_tokens": 9230,
+        "completion_tokens": 4276,
+        "calls_without_cost": 1,
+        "by_route": {
+          "deepseek-direct": {
+            "deepseek-v4-flash": {
+              "calls": 1,
+              "prompt_tokens": 9230,
+              "completion_tokens": 4276,
+              "cost_usd": 0.0,
+              "calls_without_cost": 1,
+              "calls_without_usage": 0,
+              "calls_without_tokens": 0,
+              "usage_present": true
+            }
+          }
+        }
+      },
+      "recovery": {
+        "s2_out_tokens": 4276
+      }
+    },
+    "narrative": {
+      "attempts": 1,
+      "retries": 0,
+      "last_class": null,
+      "truncated": false,
+      "finish_reason": "stop",
+      "prompt_tokens": 8728,
+      "completion_tokens": 3263,
+      "cost": {
+        "calls": 1,
+        "prompt_tokens": 8728,
+        "completion_tokens": 3263,
+        "calls_without_cost": 1,
+        "by_route": {
+          "deepseek-direct": {
+            "deepseek-v4-flash": {
+              "calls": 1,
+              "prompt_tokens": 8728,
+              "completion_tokens": 3263,
+              "cost_usd": 0.0,
+              "calls_without_cost": 1,
+              "calls_without_usage": 0,
+              "calls_without_tokens": 0,
+              "usage_present": true
+            }
+          }
+        }
+      },
+      "recovery": {
+        "s2_out_tokens": 3263
+      }
+    }
+  },
+  "s2_errors": {},
+  "s2_seconds": {
+    "raw": 13.2,
+    "narrative": 10.3
+  },
+  "session_id": "wp06_quarry_rollout",
+  "turns": 22,
+  "seconds": 25.7
+}

@@ -551,6 +551,7 @@ def validate_gold(gold: dict, fixture: dict | None = None) -> list[str]:
                     "salient_units",
                     "distractor_leakage_tolerance",
                     "planted_operators",
+                    "planted_qualifiers",
                 }
             ),
             "gold",
@@ -571,6 +572,7 @@ def validate_gold(gold: dict, fixture: dict | None = None) -> list[str]:
         _validate_hazards(gold, fixture, issues)
         _validate_salient_units(gold, issues)
         _validate_planted_operators(gold, fixture, issues)
+        _validate_planted_qualifiers(gold, fixture, issues)
         tolerance = _expect_int(
             gold, "distractor_leakage_tolerance", "gold", issues, minimum=1
         )
@@ -717,6 +719,106 @@ def _validate_planted_operators(gold: dict, fixture: dict | None, issues: list[s
                     f"substring of conversation[{planted_turn - 1}] content "
                     "(fixture/gold drift)"
                 )
+
+
+# ── Planted qualifiers — the hedge/scope/stance gold (#7947) ───────────────
+
+#: The qualifier classes the raw-vs-narrative falsifier scores against.  Fixed by
+#: the pre-registration on `#7947`: a hedge is scored against hedge markers, a
+#: scope against scope, a stance against stance — so `class` is NOT a free-form
+#: label.  The scorer looks the value up in its own marker table and would
+#: silently mis-score a new class name.
+PLANTED_QUALIFIER_CLASS_VALUES = frozenset({"hedge", "scope", "stance"})
+
+#: Allowed sub-keys of one planted qualifier.
+_PLANTED_QUALIFIER_KEYS = frozenset(
+    {"id", "planted_turn", "verbatim_qualifier", "class", "bound_claim", "notes"}
+)
+
+
+def _validate_planted_qualifiers(
+    gold: dict, fixture: dict | None, issues: list[str]
+) -> None:
+    """Validate the sealed gold's ``planted_qualifiers`` section.
+
+    OPTIONAL — the golds that predate `#7947` carry none.  When present it is a
+    list of planted hedging / scope / stance qualifiers: the information a
+    claim's CONFIDENCE depends on, which the raw-vs-narrative measurement
+    scores for survival.
+
+    Two invariants are enforced here rather than at scoring time, because a
+    violation would produce a plausible-looking number instead of an error:
+
+    * **the verbatim qualifier must ground in its own fixture turn** (the same
+      normalized-substring discipline as ``planted_units`` and operator
+      anchors) — a qualifier that drifted from the fixture would be scored as
+      *lost* by both arms and read as a finding about the arms;
+    * **``bound_claim``, when present, must name a planted unit in THIS gold** —
+      the scorer binds the qualifier to that claim's content words, so a
+      dangling id would silently degrade the qualifier to the unbound path.
+
+    ``bound_claim`` is deliberately optional: a qualifier can ride on a clause
+    that no planted unit carries (a warrant, a hypothesis, a scope limit), and
+    the measurement records those as the *unbound* subset.
+    """
+    qualifiers = gold.get("planted_qualifiers")
+    if qualifiers is None:
+        return
+    if not isinstance(qualifiers, list):
+        issues.append(
+            "gold.planted_qualifiers: expected a list, got "
+            f"{type(qualifiers).__name__}"
+        )
+        return
+    unit_ids = {
+        unit.get("id") for unit in (gold.get("planted_units") or []) if isinstance(unit, dict)
+    }
+    seen_ids: set[str] = set()
+    for i, qualifier in enumerate(qualifiers):
+        where = f"gold.planted_qualifiers[{i}]"
+        _require_mapping(qualifier, where, issues)
+        if not isinstance(qualifier, dict):
+            continue
+        _reject_unknown_keys(qualifier, _PLANTED_QUALIFIER_KEYS, where, issues)
+        q_id = _expect_str(qualifier, "id", where, issues)
+        if q_id is not None:
+            if q_id in seen_ids:
+                issues.append(f"{where}.id: duplicate planted-qualifier id {q_id!r}")
+            seen_ids.add(q_id)
+        planted_turn = _expect_int(qualifier, "planted_turn", where, issues, minimum=1)
+        _expect_enum(qualifier, "class", PLANTED_QUALIFIER_CLASS_VALUES, where, issues)
+        anchor = _expect_str(qualifier, "verbatim_qualifier", where, issues)
+        # ⛔ Type-check BEFORE the membership test: `bound_claim` is looked up in a
+        # set, so a non-hashable value (a list, a dict) raises TypeError out of a
+        # validator instead of returning an issue — a crash where a verdict belongs.
+        bound_claim = qualifier.get("bound_claim")
+        if bound_claim is not None and not isinstance(bound_claim, str):
+            issues.append(
+                f"{where}.bound_claim: expected a planted-unit id (a string), got "
+                f"{type(bound_claim).__name__}")
+            bound_claim = None
+        if bound_claim is not None and bound_claim not in unit_ids:
+            issues.append(
+                f"{where}.bound_claim: {bound_claim!r} names no planted unit in this "
+                "gold — the scorer would fall back to the qualifier's own words"
+            )
+        if anchor is None or planted_turn is None or fixture is None:
+            continue
+        turn = _safe_turn(fixture, planted_turn, where, issues)
+        if turn is None:
+            continue
+        content = turn.get("content")
+        if not isinstance(content, str):
+            issues.append(
+                f"{where}.verbatim_qualifier: fixture turn {planted_turn - 1} content "
+                "is not a string (fixture malformed); cannot verify grounding"
+            )
+            continue
+        if not anchor_present(anchor, content):
+            issues.append(
+                f"{where}.verbatim_qualifier: {anchor!r} is not a normalized substring "
+                f"of conversation[{planted_turn - 1}] content (fixture/gold drift)"
+            )
 
 
 def validate_planted_operators_cross_session(

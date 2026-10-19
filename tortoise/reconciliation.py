@@ -33,6 +33,8 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 
+from .stored_form import STORED_VECTOR_PROPS, is_verbatim, narrow_to_stored_width
+
 #: How many divergent keys a report carries verbatim. The COUNTS are the
 #: contract; the sample exists so an operator can look, and is bounded so a
 #: wholesale divergence does not build an unbounded payload.
@@ -56,6 +58,17 @@ def _canonical(value: object) -> object:
     (``tortoise/consistency.py``'s ``_values_equal`` is the precedent for the
     journal half), and silently adopting a tolerance here would hide small
     drifts this check exists to surface.
+
+    ⛔ EXACT, WITH ONE STORAGE-FORM EXCEPTION THAT IS NOT A TOLERANCE. A vector
+    property is held by the cache at the engine's ``float32`` width while the
+    record holds the ``float64`` it was given, so an exact comparison of a
+    FAITHFUL projection compares two different numbers and can never go green
+    (#8615, measured: record ``[0.1, 0.2]`` vs cache
+    ``[0.10000000149011612, 0.20000000298023224]``). :func:`_props_agree`
+    narrows the TRUTH side to the width the projection writes — the same
+    numbers in the store's own representation, not a magnitude anyone chose —
+    and still compares EXACTLY. See :mod:`tortoise.stored_form` for the rule,
+    why it is not a tolerance, and why the cache side is not narrowed.
     """
     if isinstance(value, dict):
         return tuple(sorted((str(k), _canonical(v)) for k, v in value.items()))
@@ -64,6 +77,39 @@ def _canonical(value: object) -> object:
     if isinstance(value, (list, tuple)):
         return tuple(_canonical(v) for v in value)
     return value
+
+
+def _props_agree(prop: str, truth_props: Mapping, cache_props: Mapping) -> bool:
+    """Do the two sides hold this property's value in agreement?
+
+    Both properties are PRESENT on both sides (the caller checks presence
+    first — a ``None`` and an absence are a divergence, not agreement).
+
+    Exact by default. For a property in :data:`STORED_VECTOR_PROPS` the truth
+    value is narrowed to the width the cache stores before the exact
+    comparison, UNLESS either side declares ``embedding_verbatim`` — in which
+    case the value is stored un-narrowed and is compared exactly (#8615).
+
+    The CACHE side is never narrowed: the acceptance window is the exact
+    rounding of the RECORD's value, a single point rather than the band a
+    two-sided narrowing would allow (see :mod:`tortoise.stored_form`). Both
+    sides must be sequences for the narrowing to apply — a scalar under a
+    vector property name is not a vector, and the exact comparison above has
+    already decided it.
+    """
+    truth_value = truth_props[prop]
+    cache_value = cache_props[prop]
+    if _canonical(truth_value) == _canonical(cache_value):
+        return True
+    if prop not in STORED_VECTOR_PROPS or is_verbatim(truth_props, cache_props):
+        return False
+    if not isinstance(truth_value, (list, tuple)) \
+            or not isinstance(cache_value, (list, tuple)):
+        return False
+    narrowed = narrow_to_stored_width(truth_value)
+    # `None` means the truth value is not a numeric vector: the store could not
+    # have narrowed it either, so the exact comparison stands.
+    return narrowed is not None and _canonical(narrowed) == _canonical(cache_value)
 
 
 @dataclass(frozen=True)
@@ -158,8 +204,7 @@ def reconcile_views(truth: Mapping[str, Mapping], cache: Mapping[str, Mapping],
             # divergence (`set(keys)` differs), not `None == None`.
             for prop in set(truth_props) | set(cache_props):
                 if (prop not in truth_props or prop not in cache_props
-                        or _canonical(truth_props[prop])
-                        != _canonical(cache_props[prop])):
+                        or not _props_agree(prop, truth_props, cache_props)):
                     field_mismatches += 1
         elif not _equal_view(truth_props, cache_props):
             # An uncomparable per-key value cannot be counted field by field;
@@ -184,12 +229,18 @@ def reconcile_views(truth: Mapping[str, Mapping], cache: Mapping[str, Mapping],
 
 
 def _equal_view(a: object, b: object) -> bool:
-    """Whole-view equality, on the same canonical form ``reconcile_views`` uses."""
+    """Whole-view equality, on the same per-property rule ``reconcile_views`` uses.
+
+    Routed through :func:`_props_agree` rather than a second comparison, so the
+    storage-form narrowing cannot exist on one path and not the other — the
+    drift that would let the full reconciliation and ``divergent_key_count``
+    disagree about the same two views.
+    """
     if not isinstance(a, Mapping) or not isinstance(b, Mapping):
         return a == b
     if set(a) != set(b):
         return False
-    return all(_canonical(a[k]) == _canonical(b[k]) for k in a)
+    return all(_props_agree(k, a, b) for k in a)
 
 
 def reconcile(record_reader: Callable[[], Mapping[str, Mapping]],

@@ -91,6 +91,7 @@ from .residency import (
     declare_residency,
 )
 from .security import validate_rel_type
+from .stored_form import STORED_VECTOR_PROPS, VERBATIM_MARKER, is_verbatim
 
 __all__ = [
     "ADDITIONAL_PRIMARY_COLUMNS",
@@ -125,6 +126,7 @@ __all__ = [
     "record_plan",
     "relation_from_row",
     "relation_statement",
+    "stored_vector_props",
 ]
 
 #: label → record table (the layer tables `#7968` built).
@@ -643,23 +645,41 @@ def _rows(cur: Any, sql: str, params: Sequence[Any]) -> list[dict[str, Any]]:
 # ════════════════════════════════════════════════════════════════════════════
 
 
+def stored_vector_props() -> frozenset[str]:
+    """The property names this projection writes through the store's width.
+
+    Re-exported from :mod:`tortoise.stored_form` so a caller can ask the
+    PROJECTION what it narrows without importing the low-level seam, and so
+    :func:`node_statement` and ``tortoise.reconciliation`` cannot disagree
+    about which properties the cache holds at a different width (#8615).
+    """
+    return STORED_VECTOR_PROPS
+
+
 def node_statement(node: RecordNode) -> Statement:
     """Materialize ONE node — `MERGE` by the contract key, `SET` the record.
 
-    The embedding is written as its own clause because the graph stores a
-    VECTOR (`vecf32`) while a caller-owned one is stored verbatim
-    (`Point.embedding_verbatim`, both PRIMARY `#5004`).
+    The vector properties are written as their own clauses because the graph
+    stores a VECTOR (`vecf32`) while a caller-owned one is stored verbatim
+    (`Point.embedding_verbatim`, both PRIMARY `#5004`). WHICH properties those
+    are, and when the narrowing applies, is read from
+    :mod:`tortoise.stored_form` — the one spelling this writer shares with the
+    record↔cache check (#8615), so a widened or narrowed writer cannot leave
+    the check comparing a form nobody writes.
     """
     key_prop = KEY_PROPERTY[node.label]
     props = dict(node.props)
-    embedding = props.pop("embedding", None)
-    verbatim = bool(props.pop("embedding_verbatim", False))
+    verbatim = is_verbatim(props)
+    props.pop(VERBATIM_MARKER, None)
     cypher = f"MERGE (n:{node.label} {{{key_prop}:$key}}) SET n += $props"
     params: dict[str, Any] = {"key": node.key, "props": props}
-    if embedding is not None:
-        form = "$embedding" if verbatim else "vecf32($embedding)"
-        cypher += f", n.embedding = {form}"
-        params["embedding"] = embedding
+    for prop in sorted(STORED_VECTOR_PROPS):
+        vector = props.pop(prop, None)
+        if vector is None:
+            continue
+        form = f"${prop}" if verbatim else f"vecf32(${prop})"
+        cypher += f", n.{prop} = {form}"
+        params[prop] = vector
     if verbatim:
         # The marker is PRIMARY and the graph writes it as its own clause
         # (`projection/entities.py`), so it is carried in BOTH branches — with
@@ -667,7 +687,7 @@ def node_statement(node: RecordNode) -> Statement:
         # cache POORER than the record, and the marker is the authority on the
         # storage FORM: a caller-owned float64 vector would lose its flag and
         # the next journaled re-emit would narrow it through `vecf32` (#5004).
-        props["embedding_verbatim"] = True
+        props[VERBATIM_MARKER] = True
     return Statement(cypher=cypher, params=params)
 
 

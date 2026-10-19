@@ -1453,3 +1453,156 @@ class TestDoctorPiSeamFreshness:
         assert "bytes differ" in row, (
             "the path merely LOOKS like a command; the detail names none, so "
             "it must survive: " + row)
+
+
+class TestCaptureSpoolHealthRow:
+    """agent-infra#2100 — a quota-blocked box must be visible in the ONE health report an
+    operator already runs.
+
+    The measured failure: a cloud cell's capture spool held 320+ queued uploads,
+    every one `waiting on backoff` against an exhausted graph allowance (402).
+    The box could not run a lane at all, and nothing in `doctor` said why —
+    "Capture hooks ✅" is true on a box that refuses every capture.
+
+    The ICON is what carries the consequence: `fails = sum(icon == "❌")` and
+    `_cmd_doctor` returns `0 if fails == 0 else 1`, while ⚠️/ℹ️ exit 0. A test
+    that asserts only the ROW TEXT leaves the severity free to be downgraded to
+    ⚠️, which would make a quota-blocked box merely warn (exit 0) on the very
+    report this acceptance criterion names — so every state here pins its icon.
+    """
+
+    @staticmethod
+    def _configured(monkeypatch, tmp_path):
+        """A CONFIGURED box (a credential exists), so `INACTIVE` is not the
+        answer and the state under test is the spool's own."""
+        import os
+
+        from tortoise import config as _config
+
+        monkeypatch.setattr(
+            _config, "DEFAULT_DB_PATH",
+            os.path.join(str(tmp_path), ".tortoise", "tortoise.db"))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_doctor_test")
+
+    def test_a_blocked_spool_is_reported_with_its_count_status_and_icon(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """MUTATION THAT REDS THIS: drop the `Capture spool` row (doctor reports
+        the installed seam and says nothing about the refusal), or downgrade a
+        BLOCKED line to ⚠️ (the report then exits 0 on a refused box)."""
+        from tortoise import capture_spool as sp
+
+        self._configured(monkeypatch, tmp_path)
+        root = sp.spool_dir()
+        for i in range(5):
+            sp.write_spool_entry(root, sp.Snapshot(
+                session_id=f"doctor-{i}",
+                turns=[{"role": "user", "content": "hi"}],
+                source="s.jsonl", machine_id="m" * 64, harness="claude"))
+        sp.flush_spool(
+            root,
+            lambda payload: sp.PostOutcome(ok=False, status=402, detail="quota"),
+            now=1000.0)
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+        assert "capture: BLOCKED (5 queued, 402 quota)" in out, out
+        assert "❌ Capture spool" in out, out
+
+    def test_an_UNREADABLE_spool_warns_and_is_not_counted_as_a_pass(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """A check that could not RUN is not a passing check. An `else "✅"` arm
+        rendered `UNREADABLE` GREEN — the same "cannot read → healthy" false
+        PASS the state exists to prevent, one level up in the one report an
+        operator runs.
+
+        MUTATION THAT REDS THIS: restore `else "✅"` (or test only for BLOCKED)
+        → an unreadable spool reports a passing check."""
+        import os
+        import stat
+
+        from tortoise import capture_spool as sp
+
+        self._configured(monkeypatch, tmp_path)
+        root = sp.spool_dir()
+        (root / "entries").mkdir(parents=True, exist_ok=True)
+        (root / "entries").chmod(0o000)
+        try:
+            if os.access(root / "entries", os.R_OK):  # root ignores mode bits
+                pytest.skip("running as root")
+            _run_doctor([])
+            out = capsys.readouterr().out
+            assert "capture: UNREADABLE (cannot list" in out, out
+            assert "✅ Capture spool" not in out, out
+            assert "⚠️ Capture spool" in out, out
+        finally:
+            (root / "entries").chmod(stat.S_IRWXU)
+
+    def test_an_ordinary_spool_is_reported_as_a_pass(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """Positive control: the row must not cry BLOCKED — or even warn — on a
+        healthy box, or an operator learns to ignore it.
+
+        MUTATION THAT REDS THIS: make the row unconditional (always BLOCKED, or
+        a non-✅ severity regardless of the line) → the report becomes noise and
+        a real block stops standing out."""
+        from tortoise import capture_spool as sp
+
+        self._configured(monkeypatch, tmp_path)
+        sp.spool_dir()  # the spool is created lazily; an empty one is `ok`
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+        assert "capture: OK (0 queued)" in out, out
+        assert "✅ Capture spool" in out, out
+        assert "BLOCKED" not in out, out
+
+    def test_a_DRAINING_or_INACTIVE_spool_is_information_not_a_warning(
+            self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """The alert-fatigue half, and the reason neither state may be ⚠️:
+
+        * `DRAINING` is the NORMAL state of a box that is mid-session — the
+          running session's own entry is deliberately unfiled until shutdown —
+          and an agent running `tortoise doctor` from inside a lane IS that box.
+        * a KEYLESS box is a normal install; capture is off by choice, and the
+          existing `Session capture` row already reports that with ℹ️ for the
+          same reason (#3615).
+
+        Painting either as "1 warn" trains the operator to ignore the row, which
+        is exactly how a real BLOCKED line gets missed.
+
+        MUTATION THAT REDS THIS: map DRAINING or INACTIVE to ⚠️/✅.
+        """
+        import os
+
+        from tortoise import capture_spool as sp
+        from tortoise import config as _config
+
+        monkeypatch.setattr(
+            _config, "DEFAULT_DB_PATH",
+            os.path.join(str(tmp_path), ".tortoise", "tortoise.db"))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+
+        root = sp.spool_dir()
+        sp.write_spool_entry(root, sp.Snapshot(
+            session_id="live-session",
+            turns=[{"role": "user", "content": "hi"}],
+            source="s.jsonl", machine_id="m" * 64, harness="claude"))
+
+        _run_doctor([])
+        out = capsys.readouterr().out
+        # Keyless + one pending capture: the credential is the state that wins,
+        # and the count is still named.
+        assert "capture: INACTIVE (no TORTOISE_API_KEY, 1 queued)" in out, out
+        assert "ℹ️ Capture spool" in out, out
+        assert "⚠️ Capture spool" not in out, out
+        assert "❌ Capture spool" not in out, out
+
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_doctor_test")
+        _run_doctor([])
+        out = capsys.readouterr().out
+        assert "capture: DRAINING (1 queued)" in out, out
+        assert "ℹ️ Capture spool" in out, out
+        assert "⚠️ Capture spool" not in out, out
+        assert "❌ Capture spool" not in out, out

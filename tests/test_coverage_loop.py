@@ -34,7 +34,9 @@ Hermetic contract proven here (default OFF; no LLM, no network):
         expansion pass),
   * (e) the never-fire rules: open-ended questions (no countable facet)
         and complete single-session spans never fire; an out-of-window
-        date-qualified span never fires,
+        date-qualified span never fires — and a recency bound does fire on
+        the ingest producer's real ``2023/04/10 (Mon) 17:50`` date shape
+        (#8710: it raised ``TypeError`` and the fail-open wrapper hid it),
   * (f) fail-open: any loop failure keeps the ORIGINAL pool byte-identical.
 
 Runs against a live FalkorDB (docker lane) on a DEDICATED per-test graph
@@ -476,6 +478,33 @@ def test_date_qualified_out_of_window_span_never_fires(seeded_sdk):
     assert on["coverage_loop_stats"]["loop_iterations"] == 0, (
         "an out-of-window date-qualified span must not fire the loop")
     assert on["coverage_loop_stats"]["loop_fired_facet"] is None
+
+
+# ── (d2) the producer date shape — the #8710 fire path ────────────────────
+
+def test_recency_window_qualifies_on_the_producer_date_shape(seeded_sdk):
+    """#8710 end-to-end: the ONLY shape the dataset emits for
+    ``haystack_dates`` is ``2023/04/10 (Mon) 17:50`` (#3011 — 23,867/23,867
+    values, zero ISO). On that shape the pre-#8710 recency branch raised
+    ``TypeError`` out of the census, the eval's fail-open wrapper swallowed
+    it, and the loop silently no-opped for the whole "last N days/weeks/
+    months" class — the temporal facet was dead where it matters. The
+    fixture above dates its sessions in ISO, which is exactly why the
+    defect shipped; here the dates arrive in the producer's shape and the
+    census must still fire on the under-covered span."""
+    from tools.longmem_eval.retrieve import retrieve_for_question
+    q = _question(
+        "in the last 7 days how much did the road bike repairs cost me",
+        haystack_dates=["2023/04/10 (Mon) 17:50",
+                        "2023/04/05 (Wed) 11:00"])
+    on = retrieve_for_question(seeded_sdk, q, ks=(5,), top_k=10,
+                               pool_size=60, coverage_loop=True)
+    stats = on["coverage_loop_stats"]
+    assert stats["loop_fired_facet"] == f"entity:{ENTITY_ANCHOR}", (
+        "a recency-bounded aggregation question must qualify its span and "
+        "fire on the producer's date shape (pre-#8710 it raised TypeError "
+        "and the fail-open wrapper hid it)")
+    assert stats["loop_iterations"] == 1
 
 
 # ── (e) fail-open: any failure keeps the ORIGINAL pool ────────────────────

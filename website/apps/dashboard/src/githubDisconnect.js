@@ -22,6 +22,7 @@
 // new GitHub authorization to reconnect — is the cosmetic behaviour #1924
 // removed, so this string, not the button, is the safeguard.
 import React from 'react'
+import { containTabFocus } from './dialogFocus.js'
 
 export const GITHUB_DISCONNECT_CONSEQUENCE =
   "Disconnecting revokes Tortoise's access to GitHub and clears the stored token. "
@@ -119,7 +120,7 @@ function focusDialogContainer(e) {
  * switches the dialog to the outcome panel; `error` keeps it open on a failed
  * request so the retry is armed.
  */
-export function GithubDisconnectControl({ connected, open, busy, error, result, onOpen, onClose, onConfirm }) {
+export function GithubDisconnectControl({ connected, open, busy, error, result, onOpen, onClose, onConfirm, dialogRef }) {
   const h = React.createElement
   // A trailing `display:flex` row rather than `.new-key-actions`, which
   // `index.css` scopes to the destructive `.graph-delete-modal` / wide
@@ -190,8 +191,21 @@ export function GithubDisconnectControl({ connected, open, busy, error, result, 
             'aria-modal': 'true',
             'aria-label': 'Disconnect GitHub',
             tabIndex: -1,
+            // #8670 (a11y): the #2577 APG containment set. `dialogRef` is the
+            // PARENT's (main.jsx) — it holds the `applyBackgroundInert` release
+            // there because every close path lives in the parent's state, and the
+            // release must run BEFORE `restoreFocus` (an inert element is not
+            // focusable, #2577). This module stays hook-free on purpose: its
+            // `node --test` guard invokes it as a plain function, and a hook
+            // would throw "Invalid hook call" outside a render.
+            ref: dialogRef,
             onClick: (e) => e.stopPropagation(),
-            onKeyDown: (e) => { if (e.key === 'Escape' && !busy) onClose() },
+            onKeyDown: (e) => {
+              // Containment is the module's own half — no hook needed, it reads
+              // its container off the event.
+              if (e.key === 'Tab') { if (containTabFocus(e.currentTarget, { shiftKey: e.shiftKey })) e.preventDefault() }
+              else if (e.key === 'Escape' && !busy) onClose()
+            },
           },
           content,
         ),

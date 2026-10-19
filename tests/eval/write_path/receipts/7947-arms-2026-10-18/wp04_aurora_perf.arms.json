@@ -1,0 +1,1448 @@
+{
+  "model_id": "deepseek/deepseek-v4-flash",
+  "chunk_size": 50,
+  "session_date": "2026-10-10",
+  "chunks": 1,
+  "errors": [],
+  "stories": {
+    "raw": "0: user: Let us look at the aurora dashboard latency. The p95 on the load endpoint has been creeping up all week and it hit 4.2 seconds yesterday afternoon, which is way past what the customer-facing SLO allows.\n1: assistant: 4.2 seconds at p95 is an order of magnitude past the dashboard target. When did the creep start relative to the recent deploys?\n2: user: The spike correlates with the October 5 release, the one that added the related-memory sidebar. Before that release the p95 was comfortably under a second. Also, thanks for the lunch recommendation, the ramen place was great.\n3: assistant: So the sidebar feature is the prime suspect. What does the request path do when it renders the related items?\n4: user: For every visible memory row the dashboard fires one embedding lookup to rank the related items, so a page with forty rows issues forty separate calls. The N+1 embedding calls are what blew up the p95.\n5: assistant: Forty sequential embedding calls per page is the whole story. The embedding service is fast, but forty round-trips at even twenty milliseconds each is nearly a second before any ranking happens.\n6: user: Right, and then the ranking runs on top of that. I want to batch the lookup into a single call per page instead of one call per row, the embedding service supports a batch endpoint.\n7: assistant: Batch the lookup to one call per page. The other lever is caching, do the sidebar queries repeat across requests from the same team?\n8: user: They repeat constantly, the same dashboards get opened all day by the same account managers. We should cache the embedding results in memory with a ten minute TTL and refresh them ahead of the next view.\n9: assistant: In-memory cache with a ten-minute TTL plus refresh-ahead covers the repeat-view pattern. What is the read volume the cache has to sustain?\n10: user: The dashboard serves about forty thousand load requests per day across all customers, and the sidebar fires on most of them. That is the volume we need to absorb.\n11: assistant: Forty thousand requests a day with sidebar lookups on most of them. A ten-minute TTL cache will absorb nearly all of the repeat traffic, the batch call only runs on a cache miss.\n12: user: Exactly. And I want to ship this behind a flag so we can compare the p95 before and after without a full rollout. The flag defaults off until the perf review signs off.\n13: assistant: Flag-gated rollout with the perf review as the gate. Who runs the perf review for aurora these days?\n14: user: Felix runs the dashboard perf review since he owns the frontend budget. He flagged the sidebar as a risk in the design review, I should have listened. The design review ran long but the notes were thorough.\n15: assistant: Felix owns the frontend perf review. One risk with the cache: stale related items if the underlying memory changes between refreshes. How do you want to handle invalidation?\n16: user: Invalidate the cache entry for a team whenever a write lands in that team's graph. Writes are rare compared to reads, so the invalidation traffic is tiny.\n17: assistant: Write-triggered invalidation per team. That keeps the ten-minute TTL as a backstop rather than the primary consistency mechanism.\n18: user: Yes. Realistically this gets the p95 back under 800 milliseconds, which is the number we promised the account teams. Honestly I am glad we finally measured it, the dashboard has been getting slower for months and nobody could point at one cause.\n19: assistant: Target under 800 milliseconds at p95. Summary: batch the embedding lookup per page, ten-minute TTL in-memory cache with refresh-ahead, write-triggered invalidation, flag-gated rollout. Want me to draft the implementation plan?",
+    "narrative": "## Narrative: Aurora dashboard latency \u2014 root cause and remediation plan (2026-10-10)\n\n**State change.** The aurora dashboard's load endpoint p95, comfortably under one second before the October 5 release, crept up all week and hit **4.2 seconds** on the afternoon of 2026-10-09 \u2014 an order of magnitude past the customer-facing SLO.\n\nThe October 5 release, which added the related-memory sidebar, is the prime suspect and the correlation is the evidence.\n\n**Root cause (preserved exactly).** For every visible memory row the dashboard fires one embedding lookup to rank related items, so a page with forty rows issues **forty separate calls**.\n\nThe N+1 embedding calls blew up the p95: forty round-trips at even twenty milliseconds each is nearly a second before any ranking runs, and ranking runs on top of that.\n\n**Chosen remediation (decided 2026-10-10).**\n- **Batch the lookup** into a single call per page \u2014 the embedding service supports a batch endpoint.\n\n- **In-memory cache with a ten-minute TTL plus refresh-ahead**, justified by the repeat-view pattern: the same dashboards are opened all day by the same account managers.\n\n- **Write-triggered invalidation per team** \u2014 invalidate a team's cache entry whenever a write lands in that team's graph.\n\nWrites are rare versus reads, so invalidation traffic is tiny; this makes the ten-minute TTL a backstop rather than the primary consistency mechanism.\n\n- **Flag-gated rollout**, flag defaulting off until the perf review signs off, so p95 can be compared before and after without a full rollout.\n\n**Target.** Get p95 back **under 800 milliseconds** \u2014 the number promised to the account teams.\n\n**Volume context.** The dashboard serves about **forty thousand load requests per day** across all customers, with the sidebar firing on most of them; the cache must absorb that volume, and the batch call only runs on a cache miss.\n\n**People / ownership.** **Felix** runs the aurora dashboard perf review (he owns the frontend budget).\n\nHe had flagged the sidebar as a risk in the design review \u2014 a warning not heeded, now acknowledged.\n\n**Durable belief.** The dashboard had been getting slower for months with no single identifiable cause; measuring it finally localized the problem.\n\nThe lesson: latency creep without a named cause is a signal to measure, not to wait."
+  },
+  "story_sha": {
+    "raw": "f557771ccebc3098",
+    "narrative": "f98bfd5948124bc7"
+  },
+  "story_chars": {
+    "raw": 3712,
+    "narrative": 2323
+  },
+  "embed_list": {
+    "raw": {
+      "entities": [
+        {
+          "name": "aurora dashboard",
+          "kind": "product-strategy:product",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Dashboard product whose load endpoint p95 latency regressed"
+        },
+        {
+          "name": "related-memory sidebar",
+          "kind": "product-strategy:feature",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Feature added in the October 5 release; fires per-row embedding lookups"
+        },
+        {
+          "name": "dashboard load endpoint",
+          "kind": "product-strategy:feature",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Endpoint whose p95 hit 4.2 seconds"
+        },
+        {
+          "name": "embedding service",
+          "kind": "core:tool",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Supports a batch endpoint; source of N+1 calls"
+        },
+        {
+          "name": "dashboard perf review",
+          "kind": "core:workflow",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Gate for the flag rollout; run by Felix"
+        },
+        {
+          "name": "Felix",
+          "kind": "core:naturalPerson",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Owns the frontend budget and runs the dashboard perf review"
+        },
+        {
+          "name": "account teams",
+          "kind": "product-strategy:customerSegment",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Promised p95 under 800 milliseconds"
+        }
+      ],
+      "events": [
+        {
+          "content": "The aurora dashboard load endpoint p95 hit 4.2 seconds, far past the customer-facing SLO",
+          "eventKind": "core:occurrence",
+          "about_entities": [
+            "aurora dashboard",
+            "dashboard load endpoint"
+          ],
+          "startedAt": "2026-10-09",
+          "slots": {
+            "subject": [
+              {
+                "name": "aurora dashboard",
+                "kind": "product-strategy:product",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "dashboard load endpoint",
+                "kind": "product-strategy:feature",
+                "confidence": 0.8
+              }
+            ]
+          }
+        },
+        {
+          "content": "The October 5 release added the related-memory sidebar and the p95 spike correlates with it",
+          "eventKind": "core:deployment",
+          "about_entities": [
+            "related-memory sidebar",
+            "aurora dashboard"
+          ],
+          "startedAt": "2026-10-05",
+          "slots": {
+            "subject": [
+              {
+                "name": "related-memory sidebar",
+                "kind": "product-strategy:feature",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "aurora dashboard",
+                "kind": "product-strategy:product",
+                "confidence": 0.7
+              }
+            ]
+          }
+        },
+        {
+          "content": "Felix flagged the sidebar as a risk in the design review",
+          "eventKind": "core:review",
+          "about_entities": [
+            "Felix",
+            "related-memory sidebar"
+          ],
+          "startedAt": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "Felix",
+                "kind": "core:naturalPerson",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "related-memory sidebar",
+                "kind": "product-strategy:feature",
+                "confidence": 0.9
+              }
+            ]
+          }
+        }
+      ],
+      "points": [
+        {
+          "content": "The aurora dashboard load endpoint p95 hit 4.2 seconds, far past what the customer-facing SLO allows",
+          "pointKind": "statement",
+          "about_entities": [
+            "aurora dashboard",
+            "dashboard load endpoint"
+          ],
+          "when": "2026-10-09",
+          "slots": {
+            "subject": [
+              {
+                "name": "aurora dashboard",
+                "kind": "product-strategy:product",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "dashboard load endpoint",
+                "kind": "product-strategy:feature",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The p95 on the load endpoint has been creeping up all week and it hit 4.2 seconds yesterday afternoon, which is way past what the customer-facing SLO allows.",
+          "search_keys": [
+            "p95 latency",
+            "4.2 seconds",
+            "load endpoint SLO",
+            "dashboard latency"
+          ],
+          "source_turn_id": 0
+        },
+        {
+          "content": "The p95 spike correlates with the October 5 release that added the related-memory sidebar; before that release the p95 was comfortably under a second",
+          "pointKind": "statement",
+          "about_entities": [
+            "aurora dashboard",
+            "related-memory sidebar"
+          ],
+          "when": "2026-10-05",
+          "slots": {
+            "subject": [
+              {
+                "name": "related-memory sidebar",
+                "kind": "product-strategy:feature",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "aurora dashboard",
+                "kind": "product-strategy:product",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The spike correlates with the October 5 release, the one that added the related-memory sidebar. Before that release the p95 was comfortably under a second.",
+          "search_keys": [
+            "October 5 release",
+            "related-memory sidebar",
+            "latency regression cause",
+            "under a second"
+          ],
+          "source_turn_id": 2
+        },
+        {
+          "content": "The dashboard fires one embedding lookup per visible memory row, so a page with forty rows issues forty separate calls; the N+1 embedding calls blew up the p95",
+          "pointKind": "statement",
+          "about_entities": [
+            "aurora dashboard",
+            "related-memory sidebar",
+            "embedding service"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "related-memory sidebar",
+                "kind": "product-strategy:feature",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "embedding service",
+                "kind": "core:tool",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "For every visible memory row the dashboard fires one embedding lookup to rank the related items, so a page with forty rows issues forty separate calls. The N+1 embedding calls are what blew up the p95.",
+          "search_keys": [
+            "N+1 embedding calls",
+            "forty rows",
+            "per-row lookup",
+            "root cause"
+          ],
+          "source_turn_id": 4
+        },
+        {
+          "content": "Batch the embedding lookup into a single call per page instead of one call per row, using the embedding service's batch endpoint",
+          "pointKind": "statement",
+          "about_entities": [
+            "embedding service",
+            "related-memory sidebar"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "embedding service",
+                "kind": "core:tool",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "related-memory sidebar",
+                "kind": "product-strategy:feature",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "I want to batch the lookup into a single call per page instead of one call per row, the embedding service supports a batch endpoint.",
+          "search_keys": [
+            "batch embedding lookup",
+            "single call per page",
+            "batch endpoint"
+          ],
+          "source_turn_id": 6
+        },
+        {
+          "content": "Cache the embedding results in memory with a ten minute TTL and refresh them ahead of the next view",
+          "pointKind": "statement",
+          "about_entities": [
+            "aurora dashboard",
+            "embedding service"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "aurora dashboard",
+                "kind": "product-strategy:product",
+                "confidence": 0.7
+              }
+            ],
+            "object": [
+              {
+                "name": "embedding service",
+                "kind": "core:tool",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "We should cache the embedding results in memory with a ten minute TTL and refresh them ahead of the next view.",
+          "search_keys": [
+            "ten minute TTL",
+            "in-memory cache",
+            "refresh-ahead",
+            "embedding cache"
+          ],
+          "source_turn_id": 8
+        },
+        {
+          "content": "The dashboard serves about forty thousand load requests per day across all customers, with the sidebar firing on most of them",
+          "pointKind": "statement",
+          "about_entities": [
+            "aurora dashboard",
+            "related-memory sidebar"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "aurora dashboard",
+                "kind": "product-strategy:product",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "related-memory sidebar",
+                "kind": "product-strategy:feature",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The dashboard serves about forty thousand load requests per day across all customers, and the sidebar fires on most of them.",
+          "search_keys": [
+            "forty thousand requests per day",
+            "read volume",
+            "load requests"
+          ],
+          "source_turn_id": 10
+        },
+        {
+          "content": "Ship the latency fix behind a flag that defaults off until the perf review signs off, so p95 can be compared before and after without a full rollout",
+          "pointKind": "statement",
+          "about_entities": [
+            "aurora dashboard",
+            "dashboard perf review"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "aurora dashboard",
+                "kind": "product-strategy:product",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "dashboard perf review",
+                "kind": "core:workflow",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "I want to ship this behind a flag so we can compare the p95 before and after without a full rollout. The flag defaults off until the perf review signs off.",
+          "search_keys": [
+            "flag-gated rollout",
+            "flag defaults off",
+            "perf review sign-off"
+          ],
+          "source_turn_id": 12
+        },
+        {
+          "content": "Felix runs the dashboard perf review since he owns the frontend budget",
+          "pointKind": "statement",
+          "about_entities": [
+            "Felix",
+            "dashboard perf review"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "Felix",
+                "kind": "core:naturalPerson",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "dashboard perf review",
+                "kind": "core:workflow",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Felix runs the dashboard perf review since he owns the frontend budget.",
+          "search_keys": [
+            "Felix",
+            "perf review owner",
+            "frontend budget"
+          ],
+          "source_turn_id": 14
+        },
+        {
+          "content": "Felix flagged the sidebar as a risk in the design review",
+          "pointKind": "statement",
+          "about_entities": [
+            "Felix",
+            "related-memory sidebar"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "Felix",
+                "kind": "core:naturalPerson",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "related-memory sidebar",
+                "kind": "product-strategy:feature",
+                "confidence": 0.9
+              }
+            ],
+            "event": [
+              {
+                "name": "Felix flagged the sidebar as a risk in the design review",
+                "kind": "core:review",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "He flagged the sidebar as a risk in the design review, I should have listened.",
+          "search_keys": [
+            "sidebar risk",
+            "design review warning",
+            "Felix flagged"
+          ],
+          "source_turn_id": 14
+        },
+        {
+          "content": "Caching embedding results risks stale related items if the underlying memory changes between refreshes",
+          "pointKind": "statement",
+          "about_entities": [
+            "related-memory sidebar",
+            "embedding service"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "related-memory sidebar",
+                "kind": "product-strategy:feature",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "embedding service",
+                "kind": "core:tool",
+                "confidence": 0.6
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "One risk with the cache: stale related items if the underlying memory changes between refreshes.",
+          "search_keys": [
+            "stale related items",
+            "cache staleness risk",
+            "invalidation"
+          ],
+          "source_turn_id": 15
+        },
+        {
+          "content": "Invalidate the cache entry for a team whenever a write lands in that team's graph; writes are rare compared to reads so invalidation traffic is tiny",
+          "pointKind": "statement",
+          "about_entities": [
+            "aurora dashboard"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "aurora dashboard",
+                "kind": "product-strategy:product",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Invalidate the cache entry for a team whenever a write lands in that team's graph. Writes are rare compared to reads, so the invalidation traffic is tiny.",
+          "search_keys": [
+            "write-triggered invalidation",
+            "per-team invalidation",
+            "cache invalidation"
+          ],
+          "source_turn_id": 16
+        },
+        {
+          "content": "The fix is expected to get the p95 back under 800 milliseconds, the number promised to the account teams",
+          "pointKind": "statement",
+          "about_entities": [
+            "aurora dashboard",
+            "account teams"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "aurora dashboard",
+                "kind": "product-strategy:product",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "account teams",
+                "kind": "product-strategy:customerSegment",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Realistically this gets the p95 back under 800 milliseconds, which is the number we promised the account teams.",
+          "search_keys": [
+            "800 milliseconds",
+            "p95 target",
+            "promised latency"
+          ],
+          "source_turn_id": 18
+        }
+      ],
+      "operators": [
+        {
+          "src": "Batch the embedding lookup into a single call per page instead of one call per row, using the embedding service's batch endpoint",
+          "dst": "The dashboard fires one embedding lookup per visible memory row, so a page with forty rows issues forty separate calls; the N+1 embedding calls blew up the p95",
+          "op_type": "MITIGATES",
+          "target_edge": {
+            "src": "The dashboard fires one embedding lookup per visible memory row, so a page with forty rows issues forty separate calls; the N+1 embedding calls blew up the p95",
+            "dst": "The aurora dashboard load endpoint p95 hit 4.2 seconds, far past what the customer-facing SLO allows",
+            "op_type": "IMPL"
+          },
+          "strength": 0.5
+        },
+        {
+          "src": "Cache the embedding results in memory with a ten minute TTL and refresh them ahead of the next view",
+          "dst": "The dashboard fires one embedding lookup per visible memory row, so a page with forty rows issues forty separate calls; the N+1 embedding calls blew up the p95",
+          "op_type": "MITIGATES",
+          "target_edge": {
+            "src": "The dashboard fires one embedding lookup per visible memory row, so a page with forty rows issues forty separate calls; the N+1 embedding calls blew up the p95",
+            "dst": "The aurora dashboard load endpoint p95 hit 4.2 seconds, far past what the customer-facing SLO allows",
+            "op_type": "IMPL"
+          },
+          "strength": 0.3
+        },
+        {
+          "src": "Invalidate the cache entry for a team whenever a write lands in that team's graph; writes are rare compared to reads so invalidation traffic is tiny",
+          "dst": "Caching embedding results risks stale related items if the underlying memory changes between refreshes",
+          "op_type": "MITIGATES",
+          "target_edge": {
+            "src": "Cache the embedding results in memory with a ten minute TTL and refresh them ahead of the next view",
+            "dst": "The dashboard fires one embedding lookup per visible memory row, so a page with forty rows issues forty separate calls; the N+1 embedding calls blew up the p95",
+            "op_type": "MITIGATES"
+          },
+          "strength": 0.5
+        }
+      ],
+      "chain_notes": [
+        {
+          "chain": "productDelivery",
+          "finding": "The related-memory sidebar is a feature and the load endpoint is a feature; the latency work is a fix on the feature, not a new chain position",
+          "action": "warned",
+          "note": "No JTBD/useCase/requirement entities were stated; mapped the sidebar and endpoint as features and left the chain above them unpopulated rather than inventing entities"
+        }
+      ],
+      "link_before_create": [
+        {
+          "searched_for": "aurora dashboard",
+          "found": false,
+          "note": "No prior entity for the dashboard in the provided context"
+        },
+        {
+          "searched_for": "related-memory sidebar",
+          "found": false,
+          "note": "New feature entity"
+        },
+        {
+          "searched_for": "dashboard perf review",
+          "found": false,
+          "note": "New workflow entity"
+        },
+        {
+          "searched_for": "Felix",
+          "found": false,
+          "note": "New natural person entity"
+        }
+      ],
+      "retractions": []
+    },
+    "narrative": {
+      "entities": [
+        {
+          "name": "aurora dashboard",
+          "kind": "product-strategy:product",
+          "lifecycle": "unchanged",
+          "supersedes": null,
+          "note": "Customer-facing dashboard whose load endpoint p95 regressed"
+        },
+        {
+          "name": "related-memory sidebar",
+          "kind": "product-strategy:feature",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Feature added in the October 5 release; prime suspect for the latency regression"
+        },
+        {
+          "name": "aurora dashboard load endpoint",
+          "kind": "product-strategy:feature",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Endpoint whose p95 hit 4.2 seconds on 2026-10-09"
+        },
+        {
+          "name": "embedding service",
+          "kind": "core:tool",
+          "lifecycle": "unchanged",
+          "supersedes": null,
+          "note": "Supports a batch endpoint used by the remediation"
+        },
+        {
+          "name": "Felix",
+          "kind": "core:naturalPerson",
+          "lifecycle": "unchanged",
+          "supersedes": null,
+          "note": "Owns the frontend budget and runs the aurora dashboard perf review"
+        },
+        {
+          "name": "aurora dashboard perf review",
+          "kind": "core:workflow",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Gate for turning the rollout flag on"
+        },
+        {
+          "name": "account teams",
+          "kind": "product-strategy:customerSegment",
+          "lifecycle": "unchanged",
+          "supersedes": null,
+          "note": "Were promised p95 under 800 milliseconds"
+        },
+        {
+          "name": "account managers",
+          "kind": "product-strategy:customerSegment",
+          "lifecycle": "unchanged",
+          "supersedes": null,
+          "note": "Open the same dashboards all day, driving the repeat-view pattern"
+        }
+      ],
+      "events": [
+        {
+          "content": "The aurora dashboard load endpoint p95 hit 4.2 seconds on the afternoon of 2026-10-09",
+          "eventKind": "core:occurrence",
+          "about_entities": [
+            "aurora dashboard load endpoint",
+            "aurora dashboard"
+          ],
+          "startedAt": "2026-10-09",
+          "slots": {
+            "subject": [
+              {
+                "name": "aurora dashboard load endpoint",
+                "kind": "product-strategy:feature",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "aurora dashboard",
+                "kind": "product-strategy:product",
+                "confidence": 0.7
+              }
+            ]
+          }
+        },
+        {
+          "content": "The October 5 release added the related-memory sidebar to the aurora dashboard",
+          "eventKind": "core:deployment",
+          "about_entities": [
+            "related-memory sidebar",
+            "aurora dashboard"
+          ],
+          "startedAt": "2026-10-05",
+          "slots": {
+            "subject": [
+              {
+                "name": "aurora dashboard",
+                "kind": "product-strategy:product",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "related-memory sidebar",
+                "kind": "product-strategy:feature",
+                "confidence": 0.9
+              }
+            ]
+          }
+        },
+        {
+          "content": "The remediation plan for the aurora dashboard latency was decided: batch the embedding lookup per page, ten-minute TTL in-memory cache with refresh-ahead, write-triggered invalidation per team, and flag-gated rollout",
+          "eventKind": "core:decision",
+          "about_entities": [
+            "aurora dashboard",
+            "related-memory sidebar",
+            "embedding service",
+            "aurora dashboard perf review"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "aurora dashboard",
+                "kind": "product-strategy:product",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "related-memory sidebar",
+                "kind": "product-strategy:feature",
+                "confidence": 0.7
+              }
+            ]
+          }
+        },
+        {
+          "content": "Felix flagged the related-memory sidebar as a risk in the design review before the latency regression",
+          "eventKind": "core:review",
+          "about_entities": [
+            "Felix",
+            "related-memory sidebar"
+          ],
+          "startedAt": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "Felix",
+                "kind": "core:naturalPerson",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "related-memory sidebar",
+                "kind": "product-strategy:feature",
+                "confidence": 0.8
+              }
+            ]
+          }
+        }
+      ],
+      "points": [
+        {
+          "content": "The aurora dashboard load endpoint p95 hit 4.2 seconds on the afternoon of 2026-10-09, an order of magnitude past the customer-facing SLO",
+          "pointKind": "statement",
+          "about_entities": [
+            "aurora dashboard load endpoint",
+            "aurora dashboard"
+          ],
+          "when": "2026-10-09",
+          "slots": {
+            "subject": [
+              {
+                "name": "aurora dashboard load endpoint",
+                "kind": "product-strategy:feature",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "aurora dashboard",
+                "kind": "product-strategy:product",
+                "confidence": 0.6
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The p95 on the load endpoint has been creeping up all week and it hit 4.2 seconds yesterday afternoon, which is way past what the customer-facing SLO allows.",
+          "search_keys": [
+            "p95 4.2 seconds",
+            "aurora dashboard latency",
+            "load endpoint SLO breach",
+            "4.2 seconds p95"
+          ],
+          "source_turn_id": 0
+        },
+        {
+          "content": "Before the October 5 release the aurora dashboard load endpoint p95 was comfortably under a second",
+          "pointKind": "statement",
+          "about_entities": [
+            "aurora dashboard load endpoint",
+            "aurora dashboard"
+          ],
+          "when": "2026-10-05",
+          "slots": {
+            "subject": [
+              {
+                "name": "aurora dashboard load endpoint",
+                "kind": "product-strategy:feature",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Before that release the p95 was comfortably under a second.",
+          "search_keys": [
+            "under a second p95",
+            "baseline latency",
+            "pre-release p95"
+          ],
+          "source_turn_id": 2
+        },
+        {
+          "content": "The p95 spike correlates with the October 5 release that added the related-memory sidebar, making the sidebar the prime suspect",
+          "pointKind": "statement",
+          "about_entities": [
+            "related-memory sidebar",
+            "aurora dashboard"
+          ],
+          "when": "2026-10-05",
+          "slots": {
+            "subject": [
+              {
+                "name": "related-memory sidebar",
+                "kind": "product-strategy:feature",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "aurora dashboard",
+                "kind": "product-strategy:product",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The spike correlates with the October 5 release, the one that added the related-memory sidebar.",
+          "search_keys": [
+            "October 5 release",
+            "sidebar regression",
+            "latency correlation"
+          ],
+          "source_turn_id": 2
+        },
+        {
+          "content": "For every visible memory row the aurora dashboard fires one embedding lookup to rank related items, so a page with forty rows issues forty separate calls",
+          "pointKind": "statement",
+          "about_entities": [
+            "aurora dashboard",
+            "related-memory sidebar",
+            "embedding service"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "aurora dashboard",
+                "kind": "product-strategy:product",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "embedding service",
+                "kind": "core:tool",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "For every visible memory row the dashboard fires one embedding lookup to rank the related items, so a page with forty rows issues forty separate calls.",
+          "search_keys": [
+            "N+1 embedding calls",
+            "forty separate calls",
+            "per-row embedding lookup"
+          ],
+          "source_turn_id": 4
+        },
+        {
+          "content": "The N+1 embedding calls blew up the p95: forty round-trips at even twenty milliseconds each is nearly a second before any ranking runs, and ranking runs on top of that",
+          "pointKind": "statement",
+          "about_entities": [
+            "aurora dashboard load endpoint",
+            "embedding service"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "embedding service",
+                "kind": "core:tool",
+                "confidence": 0.7
+              }
+            ],
+            "object": [
+              {
+                "name": "aurora dashboard load endpoint",
+                "kind": "product-strategy:feature",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The N+1 embedding calls are what blew up the p95.",
+          "search_keys": [
+            "N+1 root cause",
+            "forty round-trips",
+            "twenty milliseconds per call"
+          ],
+          "source_turn_id": 4
+        },
+        {
+          "content": "The remediation batches the embedding lookup into a single call per page instead of one call per row, using the embedding service's batch endpoint",
+          "pointKind": "statement",
+          "about_entities": [
+            "aurora dashboard",
+            "embedding service"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "aurora dashboard",
+                "kind": "product-strategy:product",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "embedding service",
+                "kind": "core:tool",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "I want to batch the lookup into a single call per page instead of one call per row, the embedding service supports a batch endpoint.",
+          "search_keys": [
+            "batch embedding lookup",
+            "single call per page",
+            "batch endpoint"
+          ],
+          "source_turn_id": 6
+        },
+        {
+          "content": "The remediation caches embedding results in memory with a ten minute TTL and refresh-ahead, justified by the repeat-view pattern of the same dashboards opened all day by the same account managers",
+          "pointKind": "statement",
+          "about_entities": [
+            "aurora dashboard",
+            "account managers"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "aurora dashboard",
+                "kind": "product-strategy:product",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "account managers",
+                "kind": "product-strategy:customerSegment",
+                "confidence": 0.6
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "We should cache the embedding results in memory with a ten minute TTL and refresh them ahead of the next view.",
+          "search_keys": [
+            "ten minute TTL",
+            "in-memory cache",
+            "refresh-ahead",
+            "repeat-view pattern"
+          ],
+          "source_turn_id": 8
+        },
+        {
+          "content": "The cache entry for a team is invalidated whenever a write lands in that team's graph; writes are rare versus reads so invalidation traffic is tiny",
+          "pointKind": "statement",
+          "about_entities": [
+            "aurora dashboard"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "aurora dashboard",
+                "kind": "product-strategy:product",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Invalidate the cache entry for a team whenever a write lands in that team's graph. Writes are rare compared to reads, so the invalidation traffic is tiny.",
+          "search_keys": [
+            "write-triggered invalidation",
+            "per-team invalidation",
+            "cache invalidation"
+          ],
+          "source_turn_id": 16
+        },
+        {
+          "content": "Write-triggered invalidation per team keeps the ten-minute TTL as a backstop rather than the primary consistency mechanism",
+          "pointKind": "statement",
+          "about_entities": [
+            "aurora dashboard"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "aurora dashboard",
+                "kind": "product-strategy:product",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "That keeps the ten-minute TTL as a backstop rather than the primary consistency mechanism.",
+          "search_keys": [
+            "TTL backstop",
+            "consistency mechanism",
+            "invalidation primary"
+          ],
+          "source_turn_id": 17
+        },
+        {
+          "content": "The remediation ships behind a flag that defaults off until the perf review signs off, so p95 can be compared before and after without a full rollout",
+          "pointKind": "statement",
+          "about_entities": [
+            "aurora dashboard",
+            "aurora dashboard perf review"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "aurora dashboard",
+                "kind": "product-strategy:product",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "aurora dashboard perf review",
+                "kind": "core:workflow",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "I want to ship this behind a flag so we can compare the p95 before and after without a full rollout. The flag defaults off until the perf review signs off.",
+          "search_keys": [
+            "flag-gated rollout",
+            "flag defaults off",
+            "perf review sign-off"
+          ],
+          "source_turn_id": 12
+        },
+        {
+          "content": "The target is to get the aurora dashboard p95 back under 800 milliseconds, the number promised to the account teams",
+          "pointKind": "statement",
+          "about_entities": [
+            "aurora dashboard load endpoint",
+            "account teams"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "aurora dashboard load endpoint",
+                "kind": "product-strategy:feature",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "account teams",
+                "kind": "product-strategy:customerSegment",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Realistically this gets the p95 back under 800 milliseconds, which is the number we promised the account teams.",
+          "search_keys": [
+            "under 800 milliseconds",
+            "p95 target",
+            "promised latency"
+          ],
+          "source_turn_id": 18
+        },
+        {
+          "content": "The aurora dashboard serves about forty thousand load requests per day across all customers, with the sidebar firing on most of them",
+          "pointKind": "statement",
+          "about_entities": [
+            "aurora dashboard",
+            "related-memory sidebar"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "aurora dashboard",
+                "kind": "product-strategy:product",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "related-memory sidebar",
+                "kind": "product-strategy:feature",
+                "confidence": 0.6
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The dashboard serves about forty thousand load requests per day across all customers, and the sidebar fires on most of them.",
+          "search_keys": [
+            "forty thousand requests per day",
+            "read volume",
+            "daily load requests"
+          ],
+          "source_turn_id": 10
+        },
+        {
+          "content": "The batch call only runs on a cache miss; the ten-minute TTL cache absorbs nearly all of the repeat traffic",
+          "pointKind": "statement",
+          "about_entities": [
+            "aurora dashboard",
+            "embedding service"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "aurora dashboard",
+                "kind": "product-strategy:product",
+                "confidence": 0.7
+              }
+            ],
+            "object": [
+              {
+                "name": "embedding service",
+                "kind": "core:tool",
+                "confidence": 0.6
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "A ten-minute TTL cache will absorb nearly all of the repeat traffic, the batch call only runs on a cache miss.",
+          "search_keys": [
+            "cache miss batch call",
+            "repeat traffic absorbed"
+          ],
+          "source_turn_id": 11
+        },
+        {
+          "content": "Felix runs the aurora dashboard perf review since he owns the frontend budget",
+          "pointKind": "statement",
+          "about_entities": [
+            "Felix",
+            "aurora dashboard perf review"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "Felix",
+                "kind": "core:naturalPerson",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "aurora dashboard perf review",
+                "kind": "core:workflow",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Felix runs the dashboard perf review since he owns the frontend budget.",
+          "search_keys": [
+            "Felix perf review",
+            "frontend budget owner",
+            "dashboard perf review owner"
+          ],
+          "source_turn_id": 14
+        },
+        {
+          "content": "Felix had flagged the related-memory sidebar as a risk in the design review, a warning that was not heeded",
+          "pointKind": "statement",
+          "about_entities": [
+            "Felix",
+            "related-memory sidebar"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "Felix",
+                "kind": "core:naturalPerson",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "related-memory sidebar",
+                "kind": "product-strategy:feature",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "He flagged the sidebar as a risk in the design review, I should have listened.",
+          "search_keys": [
+            "sidebar risk warning",
+            "design review risk",
+            "unheeded warning"
+          ],
+          "source_turn_id": 14
+        },
+        {
+          "content": "The aurora dashboard had been getting slower for months with no single identifiable cause; measuring it finally localized the problem",
+          "pointKind": "statement",
+          "about_entities": [
+            "aurora dashboard"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "aurora dashboard",
+                "kind": "product-strategy:product",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "the dashboard has been getting slower for months and nobody could point at one cause.",
+          "search_keys": [
+            "slow creep months",
+            "no single cause",
+            "measurement localized problem"
+          ],
+          "source_turn_id": 18
+        },
+        {
+          "content": "Latency creep without a named cause is a signal to measure, not to wait",
+          "pointKind": "statement",
+          "about_entities": [
+            "aurora dashboard"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "aurora dashboard",
+                "kind": "product-strategy:product",
+                "confidence": 0.5
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Honestly I am glad we finally measured it, the dashboard has been getting slower for months and nobody could point at one cause.",
+          "search_keys": [
+            "measure don't wait",
+            "latency creep lesson",
+            "measure latency"
+          ],
+          "source_turn_id": 18
+        }
+      ],
+      "operators": [
+        {
+          "src": "The N+1 embedding calls blew up the p95: forty round-trips at even twenty milliseconds each is nearly a second before any ranking runs, and ranking runs on top of that",
+          "dst": "The p95 spike correlates with the October 5 release that added the related-memory sidebar, making the sidebar the prime suspect",
+          "op_type": "IMPL"
+        },
+        {
+          "src": "The remediation batches the embedding lookup into a single call per page instead of one call per row, using the embedding service's batch endpoint",
+          "dst": "The N+1 embedding calls blew up the p95: forty round-trips at even twenty milliseconds each is nearly a second before any ranking runs, and ranking runs on top of that",
+          "op_type": "MITIGATES",
+          "target_edge": {
+            "src": "The N+1 embedding calls blew up the p95: forty round-trips at even twenty milliseconds each is nearly a second before any ranking runs, and ranking runs on top of that",
+            "dst": "The p95 spike correlates with the October 5 release that added the related-memory sidebar, making the sidebar the prime suspect",
+            "op_type": "IMPL"
+          },
+          "strength": 0.5
+        },
+        {
+          "src": "The remediation caches embedding results in memory with a ten minute TTL and refresh-ahead, justified by the repeat-view pattern of the same dashboards opened all day by the same account managers",
+          "dst": "The N+1 embedding calls blew up the p95: forty round-trips at even twenty milliseconds each is nearly a second before any ranking runs, and ranking runs on top of that",
+          "op_type": "MITIGATES",
+          "target_edge": {
+            "src": "The N+1 embedding calls blew up the p95: forty round-trips at even twenty milliseconds each is nearly a second before any ranking runs, and ranking runs on top of that",
+            "dst": "The p95 spike correlates with the October 5 release that added the related-memory sidebar, making the sidebar the prime suspect",
+            "op_type": "IMPL"
+          },
+          "strength": 0.3
+        },
+        {
+          "src": "The cache entry for a team is invalidated whenever a write lands in that team's graph; writes are rare versus reads so invalidation traffic is tiny",
+          "dst": "The remediation caches embedding results in memory with a ten minute TTL and refresh-ahead, justified by the repeat-view pattern of the same dashboards opened all day by the same account managers",
+          "op_type": "IMPL"
+        }
+      ],
+      "chain_notes": [
+        {
+          "chain": "productDelivery",
+          "finding": "The related-memory sidebar is a feature of the aurora dashboard product; the remediation points attach to the feature and its load endpoint rather than to a customer directly",
+          "action": "repaired",
+          "note": "Customer segment (account teams/account managers) connected to the promised latency target and repeat-view pattern, not to architecture"
+        }
+      ],
+      "link_before_create": [
+        {
+          "searched_for": "aurora dashboard",
+          "found": false,
+          "note": "No prior entity in this session's graph context; created as product-strategy:product"
+        },
+        {
+          "searched_for": "related-memory sidebar",
+          "found": false,
+          "note": "New feature introduced by the October 5 release"
+        },
+        {
+          "searched_for": "aurora dashboard latency remediation",
+          "found": false,
+          "note": "No prior remediation point; created fresh"
+        },
+        {
+          "searched_for": "Felix",
+          "found": false,
+          "note": "New natural person in this session"
+        }
+      ],
+      "retractions": []
+    }
+  },
+  "s2_stats": {
+    "raw": {
+      "attempts": 1,
+      "retries": 0,
+      "last_class": null,
+      "truncated": false,
+      "finish_reason": "stop",
+      "prompt_tokens": 9154,
+      "completion_tokens": 3213,
+      "cost": {
+        "calls": 1,
+        "prompt_tokens": 9154,
+        "completion_tokens": 3213,
+        "calls_without_cost": 1,
+        "by_route": {
+          "deepseek-direct": {
+            "deepseek-v4-flash": {
+              "calls": 1,
+              "prompt_tokens": 9154,
+              "completion_tokens": 3213,
+              "cost_usd": 0.0,
+              "calls_without_cost": 1,
+              "calls_without_usage": 0,
+              "calls_without_tokens": 0,
+              "usage_present": true
+            }
+          }
+        }
+      },
+      "recovery": {
+        "s2_out_tokens": 3213
+      }
+    },
+    "narrative": {
+      "attempts": 1,
+      "retries": 0,
+      "last_class": null,
+      "truncated": false,
+      "finish_reason": "stop",
+      "prompt_tokens": 8849,
+      "completion_tokens": 4187,
+      "cost": {
+        "calls": 1,
+        "prompt_tokens": 8849,
+        "completion_tokens": 4187,
+        "calls_without_cost": 1,
+        "by_route": {
+          "deepseek-direct": {
+            "deepseek-v4-flash": {
+              "calls": 1,
+              "prompt_tokens": 8849,
+              "completion_tokens": 4187,
+              "cost_usd": 0.0,
+              "calls_without_cost": 1,
+              "calls_without_usage": 0,
+              "calls_without_tokens": 0,
+              "usage_present": true
+            }
+          }
+        }
+      },
+      "recovery": {
+        "s2_out_tokens": 4187
+      }
+    }
+  },
+  "s2_errors": {},
+  "s2_seconds": {
+    "raw": 10.2,
+    "narrative": 12.9
+  },
+  "session_id": "wp04_aurora_perf",
+  "turns": 20,
+  "seconds": 25.9
+}

@@ -44,6 +44,38 @@
       }
     }
   ],
+  "planted_qualifiers": [
+    {
+      "class": "hedge",
+      "id": "wp06_quarry_rollout_q_01",
+      "notes": "marks the scope-independence claim as the speaker's interpretation; that claim is an operator endpoint, not a planted unit",
+      "planted_turn": 9,
+      "verbatim_qualifier": "That is my read too"
+    },
+    {
+      "bound_claim": "wp06_quarry_rollout_u_06",
+      "class": "stance",
+      "id": "wp06_quarry_rollout_q_02",
+      "notes": "speaker's attitude toward all-at-once rollout, qualifying the speed-benefit claim",
+      "planted_turn": 11,
+      "verbatim_qualifier": "tempting"
+    },
+    {
+      "bound_claim": "wp06_quarry_rollout_u_07",
+      "class": "stance",
+      "id": "wp06_quarry_rollout_q_03",
+      "notes": "preference framing of the single-driver decision",
+      "planted_turn": 19,
+      "verbatim_qualifier": "I would rather"
+    },
+    {
+      "class": "stance",
+      "id": "wp06_quarry_rollout_q_04",
+      "notes": "warrant (prior agreement) for keeping the September 30 cutoff; that cutoff is not a planted unit in this session",
+      "planted_turn": 21,
+      "verbatim_qualifier": "as agreed"
+    }
+  ],
   "planted_units": [
     {
       "depth_bucket": "early",
