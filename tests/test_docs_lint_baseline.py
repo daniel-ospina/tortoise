@@ -1718,8 +1718,20 @@ def test_snapshot_contents_are_pinned_so_an_entry_cannot_be_swapped():
     # burned DOWN by one. Removing an entry changes the snapshot exactly as much
     # as adding one, which is why this digest moves — and it is the direction the
     # doctrine wants (`update` after every fix; the count may only fall).
+    # 2026-10-19 (#9193): REMOVED again, not appended, and this time the entry
+    # removal had landed without its two bookkeeping numbers. `ecc7bc8ca` (#9071)
+    # dropped the MD018 + MD040 entries for `tests/eval/write_path/README.md`
+    # (both genuinely fixed — `markdownlint-cli2@0.23.3` on that file reports
+    # `0 issues`), which is the doctrine's direction, but left
+    # `snapshot.counts.markdownlint` at 3299 against a 3297-entry list and left
+    # THIS pin at the pre-removal digest. A required check fails closed on the
+    # pair (`docs`: "…says 3299 markdownlint entries but carries 3297 — the
+    # snapshot is corrupt"), and this test is the second half of the same red: the
+    # count and the digest must move in the SAME change as the deletion, or the
+    # snapshot stops describing itself. Ceiling stays 3300 (it is a ceiling, not
+    # an exact count) and #7534 still owns the burn-down.
     assert _canonical_digest(baseline["markdownlint"]) == (
-        "1cc55fcd90f4cea146b6d546bc4b79fdebeef2e86defad9305f0ad87fe9fea17"
+        "7a563e5fd489cfc5d6acb26e35d43ce2bc4e9e66932dff6c4647122625cc08fb"
     ), "the markdownlint snapshot contents changed — a swap is not a re-baseline"
     assert _canonical_digest(baseline["lychee"]) == (
         "42efc6c28d6efc385ad49dc59c443f2954220ca9b5eb34e9e66b9f71de38c2db"
