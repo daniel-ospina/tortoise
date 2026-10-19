@@ -235,6 +235,13 @@ def test_a_create_path_is_not_refused_for_its_epoch_write(sdk_with_journal,
     against the guard it exists for instead of resting on prose. It is
     deliberately NOT a full guard simulation: the rest of the statement class is
     #9124's to declare (see the measurement in that issue's thread).
+
+    BOTH create paths the issue's verification checklist names are exercised
+    (`create_point` and one entity create), and the entity half is not decoration:
+    it pins that an entity create issues NO `:EpMeta` statement at all, so arming
+    the guard cannot reach it — if a later change made `create_entity` advance the
+    epoch (as `_mark_dirty` would), this fails on `refused` instead of shipping an
+    undeclared write.
     """
     from tortoise.projection import (
         DirectCacheWriteRefused,
@@ -263,6 +270,17 @@ def test_a_create_path_is_not_refused_for_its_epoch_write(sdk_with_journal,
         "would refuse every create path: " + " | ".join(c[:120] for c in refused))
     assert point["id"]
     assert _epoch(sdk._get_proj()) == 1
+
+    entity = sdk.create_entity("subject", "Alice")
+    assert entity["node"]["id"], "the entity create must still land"
+    assert refused == [], (
+        "an ENTITY create issued an unauthorized `:EpMeta` write — it does not "
+        "advance the epoch today (no `_mark_dirty`), so this means a new epoch "
+        "writer appeared without a declaration: "
+        + " | ".join(c[:120] for c in refused))
+    assert _epoch(sdk._get_proj()) == 1, (
+        "the entity create must not advance the epoch — it is not a Point and "
+        f"marks nothing dirty; observed={_epoch(sdk._get_proj())}")
 
 
 # ── the semantics the declaration claims ─────────────────────────────────
