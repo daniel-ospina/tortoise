@@ -2069,28 +2069,42 @@ def select(changed_files: list[str], event: str, manifest: dict,
                 found = True
         if not found:
             unknown.append(c)
+    # EVERY cause of a fail-closed FULL matrix is recorded, not just the first
+    # one found (#9109 review P1 on this branch). A `SHARED_MODULES` member or a
+    # linter-policy file is FULL because its blast radius IS the whole matrix, so
+    # labelling one of those "unknown to every SOURCE_PATTERN … NOT a statement
+    # that this diff touches everything" inverts its meaning — and 4 of the 19
+    # shared-module entries (`pyproject.toml`, `requirements.txt`, the
+    # `.github/workflows/…` files) are genuinely unknown to the surface patterns,
+    # so the mislabel is reachable from the most ordinary legit-full diff.
+    shared_cause = any(c.startswith(SHARED_MODULES) for c in changed)
+    lint_cause = any(_is_linter_policy_path(c) for c in changed)
+    reasons: list[str] = []
+    if shared_cause:
+        reasons.append("shared-module")
+    if lint_cause:
+        reasons.append("linter-policy")
     if unknown:
-        # New/unknown path -> fail-closed full matrix (scope v5 decision 1).
-        # The ANSWER is right and deliberate; the DEFECT (#9109) is that it is
-        # indistinguishable from a legitimate full selection (push, schedule, a
-        # shared module), so a caller who passed a list FILE as a changed file
-        # reads "this diff selects everything" instead of "my argument was
-        # wrong". Record the reason so `main()` can say it out loud; the
-        # selection itself is unchanged.
+        reasons.append("unknown-paths")
+    if reasons:
+        # The ANSWER is right and deliberate (scope v5 decision 1); the DEFECT
+        # (#9109) is that it is indistinguishable from a legitimate full
+        # selection, so a caller who passed a list FILE as a changed file reads
+        # "this diff selects everything" instead of "my argument was wrong".
+        # Record EVERY reason so `main()` can say it out loud; the selection
+        # itself is unchanged.
         if explain is not None:
-            explain["reason"] = "unknown-paths"
-            explain["unknown"] = list(unknown)
+            explain["reasons"] = reasons
+            if unknown:
+                # `reason`/`unknown` stay the unknown-path pair the diagnostic
+                # keys on; `reasons` is what keeps the message truthful when
+                # another cause is also present.
+                explain["reason"] = "unknown-paths"
+                explain["unknown"] = list(unknown)
         return _full_selection(manifest, slow)
 
-    # Shared module / linter POLICY -> full. These two are evaluated AFTER the
-    # unknown-path block above so that a changed set carrying BOTH a shared
-    # module (or a lint policy file) and an unrecognised path still NAMES the
-    # unrecognised path: returning here first left that diagnostic silent, and
-    # the whole point of #9109 is that a FULL matrix says WHY it is full (#9109
-    # review P2). The selection itself is identical either way — both branches
-    # and the unknown branch all return `_full_selection`.
     # Shared module -> full
-    if any(c.startswith(SHARED_MODULES) for c in changed):
+    if shared_cause:
         return _full_selection(manifest, slow)
 
     # Linter POLICY -> full (#7435 review P1). A `.markdownlint*`/`.lycheeignore`/
@@ -2100,13 +2114,13 @@ def select(changed_files: list[str], event: str, manifest: dict,
     # a config edit move the snapshot.
     #
     # `_keep_changed` above only stops such a path being DROPPED as an unknown
-    # prefix; it does NOT stop the match loop below CLAIMING it. Measured: with
+    # prefix; it does NOT stop the match loop in the scan above CLAIMING it. Measured: with
     # the claim alone, `battery/.markdownlint.json` → surfaces=['battery'] and
     # `tools/longmem_eval/.markdownlint.json` → ['eval'], and neither leg runs the
     # pin — so the policy edit landed with the snapshot unmoved, which is the very
     # hole the pin exists to close. Placed with SHARED_MODULES because both mean
     # "this path's blast radius is not its own directory".
-    if any(_is_linter_policy_path(c) for c in changed):
+    if lint_cause:
         return _full_selection(manifest, slow)
 
     # Test-file changes select their owning surface
@@ -4250,15 +4264,44 @@ def _warn_unknown_paths(explain: dict) -> None:
     shape is not read as closed. The remedy is the same for all of them: pass
     the list on stdin.
     """
-    if explain.get("reason") != "unknown-paths":
+    reasons = explain.get("reasons") or ([explain["reason"]]
+                                        if explain.get("reason") else [])
+    if not reasons:
         return
     unknown = explain.get("unknown") or []
-    print(
-        f"ci_selection: FULL matrix because {len(unknown)} changed path(s) are "
-        "unknown to every SOURCE_PATTERN — fail-closed by design (the unknown "
-        "branch returns _full_selection(); see this module's docstring), NOT a "
-        "statement that this diff touches everything:",
-        file=sys.stderr)
+    # A cause OTHER than the unknown-path branch also produced this FULL matrix,
+    # and it must not be described as a mistake: those paths are FULL because
+    # their blast radius IS everything (#9109 review P1). Stated FIRST, so the
+    # unknown-path sentence is never borrowed to explain them — and the inverted
+    # "NOT a statement that this diff touches everything" is suppressed entirely
+    # when such a cause is present, because for these paths the diff DOES touch
+    # everything.
+    other = [r for r in reasons if r != "unknown-paths"]
+    causes = {
+        "shared-module": (
+            "a SHARED_MODULES path changed — that file is read by the whole "
+            "matrix, so the FULL selection is the BLAST RADIUS, not a malformed "
+            "argument"),
+        "linter-policy": (
+            "a linter-POLICY file changed — it changes the lint outcome of every "
+            "doc beneath it, so the FULL selection is the BLAST RADIUS, not a "
+            "malformed argument"),
+    }
+    for r in other:
+        print(f"ci_selection: FULL matrix because {causes.get(r, r)} (#9109).",
+              file=sys.stderr)
+    if unknown:
+        if other:
+            print(
+                f"ci_selection: additionally, {len(unknown)} changed path(s) are "
+                "not matched by any SOURCE_PATTERN:", file=sys.stderr)
+        else:
+            print(
+                f"ci_selection: FULL matrix because {len(unknown)} changed path(s) "
+                "are unknown to every SOURCE_PATTERN — fail-closed by design (the "
+                "unknown branch returns _full_selection(); see this module's "
+                "docstring), NOT a statement that this diff touches everything:",
+                file=sys.stderr)
     outside: list[str] = []
     for c in unknown:
         mark = ""

@@ -256,16 +256,16 @@ def test_a_shared_module_full_selection_does_not_claim_unknown_paths(tmp_path):
 
 
 def test_a_shared_module_beside_an_unknown_path_still_names_the_unknown(tmp_path):
-    """The diagnostic fires for the UNKNOWN PATH even when the FULL verdict is
+    """The diagnostic names the UNKNOWN PATH even when the FULL verdict is
     over-determined (#9109 review P2).
 
     `SHARED_MODULES` and a linter-policy path each return `_full_selection` on
     their own, and they used to return BEFORE the unknown-path scan ran — so a
     changed set carrying both a shared module and an unrecognised path came back
     FULL and SILENT, and the one path the caller needed to be told about was the
-    one nothing mentioned. Both early returns now sit after the recording, so the
-    reason survives. Pinned on both over-determining causes, because they are two
-    separate returns and only fixing one would leave the other silent.
+    one nothing mentioned. Every cause is now recorded, so the unknown paths are
+    still listed. Pinned on both over-determining causes, because they are two
+    separate returns.
     """
     for over_determining in ("tortoise/projection/__init__.py",
                              ".markdownlint.json"):
@@ -278,8 +278,32 @@ def test_a_shared_module_beside_an_unknown_path_still_names_the_unknown(tmp_path
 
         assert proc.returncode == 0, proc.stderr
         assert '"full": true' in proc.stdout, proc.stdout
-        assert "unknown to every SOURCE_PATTERN" in proc.stderr, (
-            f"{over_determining} pre-empted the unknown-path diagnostic: "
+        assert "/var/tmp/9109-not-a-repo-file.txt" in proc.stderr, (
+            f"{over_determining} pre-empted the unknown-path listing: "
             f"{proc.stderr or '(silent)'}")
-        assert "9109-not-a-repo-file.txt" in proc.stderr, (
-            f"the message must NAME the unknown path: {proc.stderr}")
+
+
+def test_a_shared_module_that_no_pattern_claims_is_not_called_unknown(tmp_path):
+    """A `SHARED_MODULES` entry the surface patterns do not match is FULL because
+    its BLAST RADIUS is the matrix — never because the argument was malformed
+    (#9109 review P1 on this branch).
+
+    4 of the 19 shared-module entries are unknown to every `SOURCE_PATTERNS` row
+    (`pyproject.toml`, `requirements.txt`, the `.github/workflows/...` files), so
+    falling into the unknown-path diagnostic for them states the exact inverse of
+    the truth: it denies that the diff touches everything, for the one shape that
+    touches everything. Before this fix these printed the unknown-path sentence;
+    the truthful answer names the shared-module cause and drops the inverted
+    claim. Measured vectors are real repo paths, not invented ones.
+    """
+    for shared in ("pyproject.toml", ".github/workflows/python-ci.yml"):
+        proc = _run(["--changed-files", shared, "--event", "pull_request"],
+                    cwd=tmp_path)
+
+        assert proc.returncode == 0, proc.stderr
+        assert '"full": true' in proc.stdout, proc.stdout
+        assert "SHARED_MODULES path changed" in proc.stderr, proc.stderr
+        assert "NOT a statement that this diff touches everything" not in proc.stderr, (
+            f"{shared} IS a statement that the diff touches everything — the "
+            f"inverted claim must not be printed for it: {proc.stderr}")
+        assert "FULL matrix because" in proc.stderr, proc.stderr
