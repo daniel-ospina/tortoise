@@ -1976,28 +1976,23 @@ def test_write_op_reachability_guard_runs_on_every_surface_it_pins():
     assert "test_write_op_reachability.py" in r["test_files"], r
 
 
-def test_orchestrator_harness_change_selects_core_not_tier1():
-    # operations/orchestrator-harness/*.sh own tests/test_orchestrator_harness.py
-    # (`core`): the shipped-block pins for lane.sh's heredoc, merged-not-closed.sh's
-    # paged enumeration, refresh-candidates.sh's pool/checked contract and
-    # orch-loop.sh's P0 merge-priority override.
+def test_retired_orchestrator_harness_does_not_select_the_removed_suite():
+    # RETIRED 2026-10-19. The harness moved to agent-infra/scripts/orchestrator-harness/
+    # (single source of truth) and tests/test_orchestrator_harness.py was retired WITH the
+    # copy it drove, after its coverage for the ported instrument moved to
+    # agent-infra/scripts/orchestrator-harness/merged-not-closed.test.sh.
     #
-    # #8469 review P1: `operations/` is a flat NON_PYTHON_PREFIXES entry and no
-    # SOURCE_PATTERNS row matches the harness scripts, so an operations-only diff
-    # came back with `changed == []` and took the docs-only early return — the
-    # guard never ran on the file it guards. Registering the test under `core` is
-    # NOT sufficient: a name in a surface's test_files only runs when that surface
-    # is already selected, and an operations-only diff selects none.
-    #
-    # Measured before the CORE_ALSO entry: `_sel(["operations/orchestrator-harness/
-    # lane.sh"])` -> surfaces=[], full=False, test_files 33, harness test absent.
-    # CORE_ALSO (not TOOL_CARVEOUTS) is the deliberate choice: the suite is
-    # hermetic and sub-second, so selecting `core` runs it at the lowest CI cost.
-    # Mutation check: removing the CORE_ALSO entry fails assert 1 below.
-    r = _sel(["operations/orchestrator-harness/merged-not-closed.sh"])
-    assert "core" in r["surfaces"], r
-    assert "test_orchestrator_harness.py" in r["test_files"], r
-    assert r["full"] is False, r
+    # The CORE_ALSO entry that used to select it is removed in the same change. This pins the
+    # removal from the SELECTOR's side: a stale mapping would schedule a suite that no longer
+    # exists (a silent no-op at best) and would hide the retirement from anyone reading the map.
+    # Enforcement that no script reappears under the retired path lives in
+    # .github/workflows/harness-single-source.yml (tools/check-harness-fork.sh).
+    r = _sel(["operations/orchestrator-harness/lane.sh"])
+    assert "test_orchestrator_harness.py" not in r["test_files"], r
+    # The pointer README must still be the thing that is there, so a change to it is a docs change
+    # rather than a dropped script change.
+    r2 = _sel(["operations/orchestrator-harness/README.md"])
+    assert "test_orchestrator_harness.py" not in r2["test_files"], r2
 
 
 def test_queue_dispatch_and_fleet_state_change_select_core_not_tier1():

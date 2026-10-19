@@ -1,0 +1,60 @@
+name: harness single source
+
+# The orchestrator harness lives in agent-infra/scripts/orchestrator-harness/ and NOWHERE else.
+# `operations/orchestrator-harness/` here is a pointer (see its README).
+#
+# This job is the enforcement half of that retirement. Measured 2026-10-19, before consolidation,
+# the SAME eight files existed in three copies that agreed on almost nothing — this repo's copy was
+# a generation behind on all six files it did carry and was missing two entirely. Every fix had to
+# be hand-applied in 3-4 places, and the live copy had no git at all, so "which commit is this box
+# running?" had no answer.
+#
+# A pointer is the intended state. A harness script is a fork. This check fails on the fork and
+# exits 2 (never 0) when it cannot tell — a gate that checks nothing is not a pass.
+
+on:
+  pull_request:
+    paths:
+      - 'operations/orchestrator-harness/**'
+      - 'tools/check-harness-fork.sh'
+      - '.github/workflows/harness-single-source.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'operations/orchestrator-harness/**'
+  workflow_dispatch:
+
+jobs:
+  no-harness-copy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: operations/orchestrator-harness is a POINTER, not a copy
+        run: bash tools/check-harness-fork.sh operations/orchestrator-harness
+
+      - name: NON-VACUITY — a planted script is refused
+        # A guard nobody has seen fire is indistinguishable from a guard that cannot fire.
+        run: |
+          set -euo pipefail
+          printf '#!/bin/sh\n' > operations/orchestrator-harness/lane.sh
+          rc=0
+          bash tools/check-harness-fork.sh operations/orchestrator-harness || rc=$?
+          rm -f operations/orchestrator-harness/lane.sh
+          [ "$rc" -eq 1 ] || { echo "FAIL: a reappearing harness script must exit 1, got $rc"; exit 1; }
+
+      - name: NON-VACUITY — a missing pointer directory is UNKNOWN, not a pass
+        run: |
+          set -euo pipefail
+          rc=0
+          bash tools/check-harness-fork.sh /nonexistent-retired-path || rc=$?
+          [ "$rc" -eq 2 ] || { echo "FAIL: an uncheckable location must exit 2, got $rc"; exit 1; }
+
+      - name: the canonical copy is reachable (the pointer names a live location)
+        run: |
+          set -euo pipefail
+          # Not a content comparison — tortoise CI has no business cloning agent-infra on every PR.
+          # What it CAN assert is that the pointer tells the truth about WHERE the harness is, so a
+          # future renaming of the canonical path is caught here rather than by a confused operator.
+          grep -q 'agent-infra.*scripts/orchestrator-harness' operations/orchestrator-harness/README.md \
+            || { echo "FAIL: the pointer no longer names agent-infra/scripts/orchestrator-harness/"; exit 1; }

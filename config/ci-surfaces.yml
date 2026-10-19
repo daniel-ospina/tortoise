@@ -2033,11 +2033,11 @@ surfaces:
   - test_collision_preflight.py
   - test_vector_write_seam_4520.py
   - test_who_is_on.py  # #4256: "who is on #N?" verb — local-only branches/worktrees included
-  # #8469 review: the orchestrator harness's shipped shell scripts. Hermetic (stub `gh`, temp
-  # dirs; no DB, no network), and the only guard on `merged-not-closed.sh`/`lane.sh`/
-  # `refresh-candidates.sh` — an `operations/**`-only diff selects no surface at all, so this
-  # file is what makes the PR's own change run a pytest leg (the #1349 silent-drop class).
-  - test_orchestrator_harness.py
+  # RETIRED 2026-10-19: test_orchestrator_harness.py drove operations/orchestrator-harness/,
+  # which moved to agent-infra/scripts/orchestrator-harness/. The suite was retired with the copy
+  # (its coverage for the ported instrument now lives in agent-infra's merged-not-closed.test.sh),
+  # so it MUST NOT stay registered here: a stale registration schedules a test file that no longer
+  # exists and hides the retirement from anyone reading this surface.
   # #4290: the finding-provenance gate — a finding must name the tree it was
   # measured against, and a stale measurement fails (ancestry, not equality).
   # Hermetic (temp git repo; no DB), so it pins no api/engine surface: `core`
@@ -6756,7 +6756,6 @@ durations:
   test_5142_ontology_record.py: 3.7
   test_direction_storage_7852.py: 5.4
   test_incident_kinds.py: 4.0
-  test_orchestrator_harness.py: 23.3
   # #8093: unmeasured — a file ADDED BY A PR has no CI junit measurement (the
   # refresher samples push-to-main runs only), so it carries the flat default
   # exactly as an absent key would (the #3419/#2788 rule). Do NOT substitute a
