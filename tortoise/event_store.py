@@ -291,10 +291,14 @@ _SCHEMA_ATTR = "_tortoise_event_schema"
 #     argument or env var can set it, so a writer that does not enter it is
 #     REFUSED, not grandfathered.
 #   * Opened only for a statement THIS MODULE issues that the shared classifier
-#     (`_statement_writes`, the same one the fold's parameter gate and the
-#     raw-query lane use) calls mutating — so the three doors cannot disagree
-#     about what a write is. That classifier is conservative, so a statement it
-#     cannot read takes the declaration too, including an unreadable read.
+#     (`_statement_writes`, the one the raw-query lane and `#9124`'s handle
+#     guard use) calls mutating. ⚠️ NOT a definition the three doors share:
+#     `FalkorProjection.apply` does not consult the classifier at all — the FOLD
+#     refuses unconditionally when no scope is in flight — so the classifier can
+#     only ever WIDEN what this funnel declares, never narrow the fold's
+#     refusal. (`#9124`'s guard is not on `main` yet; it is modelled in this
+#     lane's test.) The classifier is deliberately conservative, so a statement
+#     it cannot read takes the declaration too, including an unreadable read.
 #     ⚠️ WHAT THE PIN IS, stated so it is not over-read: the guard is in the
 #     SCOPE, not in a label check — this funnel does NOT verify that the
 #     statement touches `:GraphEvent`/`:GraphEventMeta`, so a future call site
