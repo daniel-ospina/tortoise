@@ -330,7 +330,8 @@ surface an operator (or a lane log that produced 259 B) reads:
 capture: OK (0 queued)
 capture: DRAINING (12 queued)
 capture: BLOCKED (320 queued, 402 quota)
-capture: INACTIVE (no TORTOISE_API_KEY)
+capture: INACTIVE (no TORTOISE_API_KEY, 3 queued)
+capture: UNREADABLE (cannot list …/capture-spool/entries)
 ```
 
 `queued` is **pending** work — recomputed from the spool on every call as

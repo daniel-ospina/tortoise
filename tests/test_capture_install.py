@@ -3532,7 +3532,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: SHIPPED bytes and so compares equal by construction.  Edit the artifact, move
 #: the generation, update this pair — all three in one commit.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    5, "5016104d2d017aa532a64e624bdc84098f1c21051532a970ccb4d15c773673ae")
+    5, "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -3543,7 +3543,7 @@ _PINNED_PI_SEAM_INSTALL_CONTRACT = (
 _GENERATION_DIGESTS = {
     3: "1f653d9b93775149c93838e6c9fbf70b44702341ac94e12f67ddb6480a8f0580",
     4: "cc8e496c03449d28f229cb1474e68c789f81d4d473c3f3a25156e1981ddaf498",
-    5: "5016104d2d017aa532a64e624bdc84098f1c21051532a970ccb4d15c773673ae",
+    5: "5b8e434f69f03127ff49787a5584e0c595343dad4a75533ebd3b845d4149aa8e",
 }
 
 

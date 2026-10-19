@@ -906,7 +906,7 @@ export interface QuotaRefusal {
 }
 
 /** The per-box capture state a health line reports (#2100). */
-export type CaptureState = "ok" | "draining" | "blocked" | "inactive";
+export type CaptureState = "ok" | "draining" | "blocked" | "inactive" | "unreadable";
 
 /** What `status.json` holds. Advisory: it records the LAST refusal this leg saw;
  *  the health line always recomputes `queued` from the spool and treats an empty
@@ -2131,13 +2131,21 @@ function statusPathFor(dir: string): string {
  * not mutate the spool it is describing — a health check that deletes things is
  * its own defect — and it must not append a ledger line per session to a spool
  * it cannot read.
+ * @returns the pending count, or `undefined` when the spool cannot be LISTED
+ *   (any error other than ENOENT). An unreadable directory is NOT an empty one
+ *   — the same rule `listSpoolEntries` follows with `DISCARD_SPOOL_UNREADABLE`,
+ *   and the reason it matters here is that a transient EACCES/EMFILE read as
+ *   "nothing pending" would both print `OK` and let the self-heal OVERWRITE the
+ *   durable block marker with `ok` (found in review cycle 2).
  */
-export function countPendingEntries(dir: string): number {
+export function countPendingEntries(dir: string): number | undefined {
   let names: string[];
   try {
     names = readdirSync(entriesDir(dir));
-  } catch {
-    return 0; // unreadable / absent: a count we cannot take is not a count
+  } catch (err) {
+    // ENOENT is an absent spool: nothing has been captured, which IS empty.
+    if ((err as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return 0;
+    return undefined; // unreadable is not empty
   }
   let pending = 0;
   for (const name of names) {
@@ -2198,13 +2206,26 @@ export function writeCaptureStatus(dir: string, status: CaptureStatus): void {
  * cannot keep claiming a block. Nothing pending is always `ok` (nothing is
  * blocked), and the marker is cleared when that is observed — including when
  * every remaining entry turned TERMINAL, which is a refusal with no quota
- * behind it.
+ * behind it. A spool that cannot be LISTED is `unreadable` and is never
+ * reported as empty, nor healed.
  */
 export function captureHealthLine(
   dir: string,
   opts: { apiKey?: string } = {},
 ): { state: CaptureState; queued: number; status?: number; line: string } {
-  const queued = countPendingEntries(dir);
+  const pending = countPendingEntries(dir);
+  if (pending === undefined) {
+    // A spool we cannot list is UNKNOWN, not empty. Reporting `OK` here would be
+    // a false pass on the acceptance's own surface, and it would also let the
+    // self-heal below destroy a durable block marker that a later, readable
+    // process still needs.
+    return {
+      state: "unreadable",
+      queued: 0,
+      line: `capture: UNREADABLE (cannot list ${entriesDir(dir)})`,
+    };
+  }
+  const queued = pending;
   let recorded = readCaptureStatus(dir);
   if (queued === 0 && recorded && recorded.state !== "ok") {
     // Self-healing: the block is over (or another leg filed everything). Never
@@ -2213,7 +2234,14 @@ export function captureHealthLine(
     writeCaptureStatus(dir, recorded);
   }
   if (opts.apiKey === "") {
-    return { state: "inactive", queued, line: "capture: INACTIVE (no TORTOISE_API_KEY)" };
+    // The count is NOT dropped here: a keyless box is exactly the box whose
+    // spool grows forever (nothing can file it), so the backlog must stay
+    // visible on the line that explains why.
+    return {
+      state: "inactive",
+      queued,
+      line: `capture: INACTIVE (no TORTOISE_API_KEY, ${queued} queued)`,
+    };
   }
   // A marker we cannot UNDERSTAND is not a marker — the same rule this file
   // applies to `terminal_failure` and to a corrupt backoff window. A hand-edited
@@ -2319,8 +2347,21 @@ function warn(message: string): void {
   console.warn(`[tortoise-capture] ${message}`);
 }
 
-/** Report a flush outcome — success lines on 2xx, every discard named. */
-function reportFlush(summary: FlushSummary, where: string): void {
+/**
+ * Report a flush outcome — success lines on 2xx, every discard named.
+ *
+ * `continuing` says whether a follow-up pass is actually scheduled. It is a
+ * PARAMETER, not a guess: the line is the operator's only account of what the
+ * drain will do next, and both `session_shutdown` (the process is exiting) and
+ * the last pass of a spent chain schedule nothing — a claim that the drain
+ * "continues in the background" there is a false statement on exactly the
+ * surface #2100 is about.
+ */
+function reportFlush(
+  summary: FlushSummary,
+  where: string,
+  opts: { continuing?: boolean } = {},
+): void {
   // Deferrals are reported too: a quota-blocked spool is otherwise a steady
   // state that logs NOTHING while captures sit unfiled (#4714 review). A
   // terminal-only spool is the same shape (#7708).
@@ -2339,7 +2380,9 @@ function reportFlush(summary: FlushSummary, where: string): void {
         (summary.remaining > 0
           ? summary.stopped === "quota"
             ? `, paused ${summary.remaining} (quota refused; not retried in this pass)`
-            : `, paused ${summary.remaining} (${summary.stopped ?? "budget"}; continues in the background)`
+            : opts.continuing
+              ? `, paused ${summary.remaining} (${summary.stopped ?? "budget"}; continues in the background)`
+              : `, paused ${summary.remaining} (${summary.stopped ?? "budget"}; left for the next opportunity)`
           : ""),
     );
   }
@@ -2438,6 +2481,7 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
    */
   const recordOutcome = (summary: FlushSummary): void => {
     try {
+      const previous = readCaptureStatus(spoolDir);
       if (summary.quota) {
         writeCaptureStatus(spoolDir, {
           version: 1,
@@ -2447,26 +2491,34 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
           ...(summary.quota.detail ? { detail: summary.quota.detail.slice(0, 500) } : {}),
           updated_at: new Date().toISOString(),
         });
-      } else if (summary.filed > 0) {
-        // The server accepted a capture: whatever refusal was recorded is over.
+      } else if (summary.attempted > 0) {
+        // Some POST was ATTEMPTED and none of them was refused for quota, so the
+        // recorded cause is superseded: the marker is the LAST OBSERVED
+        // 402, not a permanent verdict. Without this, a box that was
+        // quota-blocked yesterday and is now `ECONNREFUSED`/500ing keeps
+        // telling its operator to buy points — the same misdiagnosis as #2100
+        // in mirror image (found in review cycle 2; `updated_at` was written
+        // and never read).
         //
-        // Known imprecision, stated rather than hidden: a REPLAY of an
-        // already-existing session is accepted WITHOUT the points gate
-        // (`hosted_api`: `if (not session_existed or retry_failed_capture) and
-        // not store_only`), so this 2xx is not by itself proof the allowance
-        // lifted. The window it opens is one pass wide and self-correcting —
-        // the health line only says `BLOCKED` while entries are still PENDING
-        // (a replay-filed entry is not pending), and the very next NEW capture
-        // is refused again if the quota is still gone. The alternative (never
-        // clearing on a 2xx) is worse: a `BLOCKED` nobody can clear hides a
-        // lifted quota and leaves the operator chasing a resolved condition.
+        // Note what this does NOT claim: a REPLAY 2xx is accepted without the
+        // points gate (`hosted_api`: `if (not session_existed or
+        // retry_failed_capture) and not store_only`), so a 2xx is evidence the
+        // server accepted a capture, not proof the allowance lifted. The window
+        // is one pass wide: a still-exhausted quota refuses the NEXT attempt
+        // and re-marks it in the same pass that attempted it.
         writeCaptureStatus(spoolDir, {
           version: 1,
           state: "ok",
           updated_at: new Date().toISOString(),
         });
       }
-      if (summary.quota) log(captureHealthLine(spoolDir, { apiKey: cfg.apiKey }).line);
+      // Say the state out loud whenever it MOVED: the start-of-session line was
+      // printed from the marker this pass has just superseded, and leaving that
+      // as the last thing the lane logged is the misdiagnosis the supersede
+      // exists to prevent.
+      if (summary.quota || (previous?.state === "blocked" && summary.attempted > 0)) {
+        log(captureHealthLine(spoolDir, { apiKey: cfg.apiKey }).line);
+      }
     } catch (err) {
       warn(`spool status error: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -2495,9 +2547,14 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
       ...filter,
     })
       .then((summary) => {
-        reportFlush(summary, where);
+        // The report is told whether a continuation is ACTUALLY scheduled — it
+        // runs before the decision, so asking it to guess produced "continues in
+        // the background" on the last pass of a spent chain (#2100 review 2).
+        const willChain =
+          summary.remaining > 0 && !summary.quota && chain + 1 < FLUSH_MAX_CHAIN;
+        reportFlush(summary, where, { continuing: willChain });
         recordOutcome(summary);
-        if (summary.remaining > 0 && !summary.quota && chain + 1 < FLUSH_MAX_CHAIN) {
+        if (willChain) {
           const timer = setTimeout(
             () => drain(where, filter, chain + 1),
             FLUSH_FOLLOW_UP_DELAY_MS,
@@ -2632,8 +2689,10 @@ export default function tortoiseCapture(pi: ExtensionAPI, deps: CaptureDeps = {}
       if (filedTotal > 0) {
         log(`captured session(s) → ${cfg.apiUrl} (filed ${filedTotal})`);
       }
-      if (liveSummary) reportFlush(liveSummary, "session_shutdown (live session)");
-      reportFlush(summary, "session_shutdown");
+      if (liveSummary) reportFlush(liveSummary, "session_shutdown (live session)", { continuing: false });
+      // No continuation exists on this path — the process is exiting, so the
+      // un-attempted entries are left for the NEXT session, and the line says so.
+      reportFlush(summary, "session_shutdown", { continuing: false });
       // The general pass is the LATER evidence, so it writes last (a quota
       // refusal it saw must win over the live session's 2xx).
       if (liveSummary) recordOutcome(liveSummary);
