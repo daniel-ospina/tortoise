@@ -175,6 +175,16 @@ _ENTITY_MATCH_COLUMNS: dict[str, tuple[str, ...]] = {
 #: ``_emit_event`` owns these envelope keys; they are never node properties.
 ENVELOPE_KEYS: frozenset[str] = frozenset({
     "type", "ts", "event_id", "initiated_by", "projection_version", "seq",
+    # ⚠️ `agent_id` is DELIBERATELY NOT here, though the record must not keep it
+    # as a NODE prop: this set is not only a props set — `_journal_row` filters
+    # the DURABLE `public.journal_event.payload` through it, while the JSONL
+    # journal keeps `agent_id` (`sdk._journal_record_payload` subtracts
+    # `_JOURNAL_ENVELOPE_KEYS`, which does not name it). Adding it here truncated
+    # the record's own event stream on every API-door record — a NEW divergence
+    # between the two journals, introduced by the fix whose premise is that they
+    # must not diverge (#9078 review). The props strip is `_RECORD_ONLY_KEYS`'
+    # job, and `test_agent_id_is_dropped_like_the_fold_drops_it` is the leg that
+    # keeps it.
 })
 
 #: The journal's record-type vocabulary. Sourced from the graph fold's own
@@ -386,7 +396,10 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
     # The `…Added` / `…Promoted` / dedup record types all carry a FULL point
     # snapshot (`payload["point"]`), which is what the graph fold indexes too
     # (`_apply_one`'s `points[p["id"]] = p`), so the record projects the same
-    # dict the fold does. `id` rides the envelope, not the snapshot.
+    # dict the fold does. `id` rides the envelope OR the snapshot, and this
+    # module reads both carriers (`_key_value`'s `fallback`): the capture writer
+    # emits `PointAdded` with the id ONLY in `payload["point"]` (#9078, measured
+    # on the live door).
     "PointAdded": Mutation(
         NodeSnapshot(Node("point", "Point", "id"), path="point", key_from="id"),
         note="full snapshot under `point`; identity keys are record-only and "
@@ -409,12 +422,51 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
         NodeSnapshot(Node("point", "Point", "id"), path="point", key_from="id"),
     ),
     "EntityBindingRefused": Mutation(
-        NodeSnapshot(Node("point", "Point", "id"), path="point", key_from="id"),
+        # AUDIT-ONLY — no record effect, and that is a DECISION, not an omission.
+        # The graph folds this type NOWHERE (`projection/__init__.py::
+        # _NO_PROJECTION_FOLD`, #1370: "a refused/suspected subject binding is an
+        # AUDIT record — the edge it declined to write must NOT be replayed from
+        # it"), so a Point mutation here materialized a row no writer ever
+        # created: an ungated upsert on a fresh graph produces a stub point whose
+        # props are the refusal's forensics (#9078 review, measured — 3 such rows
+        # in one capture). The producer is FLAT anyway
+        # (`subject_binding._journal_refusal`: `id=point_id, point_id=..., role=...`),
+        # so the previous `path="point"` declaration refused every real write
+        # while the fixture's invented carrier kept the suite green.
+        NoRecordEffect(
+            "#1370 — an audit record: the graph folds it nowhere, so the record "
+            "must not invent the point it declined to bind. The event stream "
+            "keeps the refusal (journal_event), and the point's own write "
+            "records carry its state."),
     ),
     # #902/A10: batch_id (+ content_hash / mitigates_operator_id /
     # mitigation_strength) restore, replayed from the batch snapshot.
     "BatchIdStamped": Mutation(
-        NodeSnapshot(Node("point", "Point", "id"), path="point", key_from="id"),
+        # FLAT: `sdk._emit_event(_BATCH_ID_RECORD_TYPE, id=point_id, **extra)`
+        # carries the batch props on the envelope, never under a `point`. A
+        # schema-refused prop (`content_hash`) is DROPPED by `_split_properties`,
+        # not raised — see its docstring. A PATCH, never a snapshot: the graph
+        # folds this type NOWHERE (`projection/__init__.py::_NO_PROJECTION_FOLD`
+        # — #902/A10 restores it in pass-2b with `MATCH (p:Point {id:$pid}) SET
+        # p.batch_id = $bid`, a MATCH that cannot create), so an upsert here
+        # invented the row. It is the same defect as `EntityBindingRefused`
+        # above, and it is reachable: #9187 replays SEGMENTS (`first_seq=41`), so
+        # a stamp whose `PointAdded` sits outside the segment is the ordinary
+        # case, not a corner. A patch stores the §17.5-PRIMARY `batch_id` and is
+        # a 0-row no-op when the point is genuinely absent — the fold's verdict.
+        #
+        # ⚠️ An explicit allow-list, NOT `from_payload=None`. The producer emits a
+        # WIDER flat payload (`sdk._emit_batch_id_record`: `content_hash`,
+        # `mitigates_operator_id`, `mitigation_strength`), and pass-2b restores the
+        # stamp with `SET p.batch_id = $bid` and nothing else — so
+        # `mitigates_operator_id` would land in `point.props` as a key no journal
+        # replay ever writes, and a record-sourced rebuild copies the tail verbatim
+        # (`cache_projection._props_from_row`). Same defect class as `agent_id`
+        # above (#9200 review, P2). `content_hash` is schema-refused and
+        # `mitigates_operator_id` is folded nowhere, so neither may pass;
+        # `mitigation_strength` is a real `public.point` column.
+        NodePatch(Node("point", "Point", "id"), key_from="id",
+                  from_payload=frozenset({"batch_id", "mitigation_strength"})),
     ),
     # ⚠️ `new_content` is the journal's own name for the revised `content`; it
     # is NOT a node property of that name, so it is renamed rather than written
@@ -575,7 +627,11 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
     "DocumentCreated": Mutation(
         NodeSnapshot(Node("source", "Source", "url"), path=None, key_from="url",
                      drop=frozenset({"content", "doc_status", "docStatus",
-                                     "objectKind", "object_kind"})),
+                                     "objectKind", "object_kind",
+                                     # `projection/entities.py`: these "ride the
+                                     # DocumentCreated event and must never
+                                     # persist as node props".
+                                     "source_url", "suppress_embedding"})),
         note="§9.3/§9.5 Q3 — a document is a `:Source`; the retired "
              "`content`/`doc_status`/`objectKind` props have no column AND are "
              "scrubbed by the graph fold (`_upsert_document`), so storing them "
@@ -818,6 +874,17 @@ def snake(prop: str) -> str:
 #: failure Interface A forbids.
 _RECORD_ONLY_KEYS: frozenset[str] = frozenset({
     "type", "ts", "event_id", "initiated_by", "projection_version", "seq",
+    # #9078 review: the graph's ONE global skip-set (`projection/entities.py::
+    # _META_KEYS`) strips `agent_id` before it reaches a node, so a record that
+    # kept it wrote a props key a journal replay never does — and a
+    # record-sourced rebuild copies the props tail VERBATIM
+    # (`cache_projection._props_from_row`), so the two rebuild paths diverged on
+    # every API-door record. ⚠️ `actor_user_id` is DELIBERATELY NOT here: §17.5
+    # places it as a PRIMARY record property, so the record stores it even
+    # though the cache node does not carry it (the record is the truth; the
+    # cache is the projection). `test_record_projection`'s storable-primary leg
+    # is what keeps that distinction honest.
+    "agent_id",
     "point", "contains_session", "keep_id", "merge_ids", "corrects",
     # #5097 review P2: the capture path's STUB-COMPLETION discriminator. It
     # selects `_upsert_source`'s write behaviour (suppresses the ON CREATE
@@ -905,9 +972,20 @@ def _split_properties(
     """
     cols = columns[table]
     refused_here = refused.get(table, frozenset())
+    # ⚠️ PER-TABLE, because §17.5 places `actor_user_id` as a PRIMARY property of
+    # the EPISODIC (session) layer ONLY, and `session` is the one table with the
+    # column. Everywhere else the graph's global skip-set (`projection/entities.py::
+    # _META_KEYS`, "rebuild replay must NOT leak it as a node property") strips
+    # it, so a record that kept it in the props tail made a journal replay and a
+    # record-sourced rebuild disagree about the same node (#9078 review). It
+    # cannot go in `_RECORD_ONLY_KEYS`: that would drop the Session PRIMARY the
+    # storable-property pin exists to protect.
+    table_columns_here = columns.get(table, frozenset())
     col_values: dict[str, Any] = {}
     tail: dict[str, Any] = {}
     for prop, value in props.items():
+        if prop in _STORED_ONLY_IF_COLUMNED and prop not in table_columns_here:
+            continue
         if prop in drop:
             continue
         column = snake(prop)
@@ -936,13 +1014,23 @@ def _node_table(node: Node, columns: Mapping[str, frozenset[str]]) -> str:
     return node.table
 
 
-def _key_value(node: Node, payload: Mapping[str, Any], key_from: str) -> str:
+def _key_value(node: Node, payload: Mapping[str, Any], key_from: str,
+               *, fallback: Mapping[str, Any] | None = None) -> str:
     """The node key, and the schema's own pin that it is the label's key.
 
     A record whose key column is absent cannot be projected: the schema's
     `chk_*_node_key_is_contract_key` would refuse the write anyway, and a
     `node_key = <NULL>` comparison is SQL NULL (not FALSE), so the failure
     would be silent. Fail here instead, where the record is known.
+
+    *fallback* is the record's own SNAPSHOT (`record[effect.path]`), consulted
+    only when the envelope carries no usable key. Measured on #9078's lane: the
+    capture writer emits `PointAdded`/`PointPromoted` with the id ONLY inside
+    `payload["point"]` and no envelope `id` at all, while the comment on
+    `RECORD_MUTATIONS` asserts the opposite ("`id` rides the envelope, not the
+    snapshot"). The graph fold read `inner = event.get("point") or event` all
+    along, so the snapshot was always a legitimate source. Reading the envelope
+    FIRST keeps every producer that does carry the id byte-identical.
     """
     value = payload.get(key_from)
     if value is None and key_from in ("event_id", "eventId"):
@@ -950,6 +1038,29 @@ def _key_value(node: Node, payload: Mapping[str, Any], key_from: str) -> str:
         # MERGE key is `inner.get("id") or inner.get("eventId")`); the
         # envelope `event_id` is a per-record ULID and must never be used.
         value = payload.get("eventId") or payload.get("id")
+    # A `:Source`'s MERGE key is `url`, and `_upsert_source` resolves it as
+    # `raw_key = url or sid` — so a document record that names its identity `id`
+    # (the `EventAPI.add_document` shape: `id=doc_id`, no `url`) keys the node by
+    # that id LIVE. The record must key the row the SAME way, or every ingested
+    # document is refused and the record loses it (#9078).
+    #
+    # ⚠️ The gate is ABSENCE (`key_from not in payload`), never unusability. A
+    # `url` that is PRESENT but unusable (`""`, `None`) means the producer named
+    # an identity it cannot express, and there are two ways to be wrong about it:
+    # resolving `id` while the *props* still carry the unusable `url` emits a row
+    # whose `node_key` and `url` column disagree — refused by the schema's own
+    # `chk_source_node_key_is_contract_key`, AFTER the `node_identity` insert has
+    # already run inside the caller's transaction — and silently repairing the
+    # column instead would store a `url` the producer never emitted, hiding its
+    # bug. Refuse here, where the record is known (this docstring's rule).
+    # Absence is the one shape that is a real producer: `add_document` emits `id`
+    # and no `url` at all.
+    if key_from == "url" and key_from not in payload:
+        value = payload.get("id")
+    if fallback is not None and (not isinstance(value, str) or not value):
+        value = fallback.get(key_from)
+        if value is None and key_from in ("event_id", "eventId"):
+            value = fallback.get("eventId") or fallback.get("id")
     if not isinstance(value, str) or not value:
         raise RecordProjectionError(
             f"record has no usable {key_from!r} key for {node.label} "
@@ -1297,6 +1408,37 @@ def _op_dispatch_statements(
     )
 
 
+#: Record properties that are authority ONLY where the table has a column for
+#: them. `actor_user_id` is §17.5-PRIMARY on the Episodic (session) layer and
+#: nowhere else; the graph's `_META_KEYS` skip-set strips it from every other
+#: node, so storing it in another table's props tail would make a record-sourced
+#: rebuild diverge from a journal replay (see `_split_properties`).
+_STORED_ONLY_IF_COLUMNED = frozenset({"actor_user_id"})
+
+#: The envelope name a producer may NEST its node under instead of flattening it.
+#: ONE entry, because only one exists: the fold unwraps exactly this carrier —
+#: `inner = event.get("event", event)` (`projection/entities.py`, and the same
+#: shape in `projection/__init__.py`) — and `ConversationMiner` is the producer
+#: that uses it. Do NOT widen this list speculatively: an entry no fold reads
+#: would materialize a row the folder never makes, which is the case the
+#: snapshot guard below exists to prevent.
+_NESTED_NODE_CARRIERS = ("event",)
+
+
+def _nested_node_carrier(record: Mapping[str, Any],
+                         key_from: str) -> Mapping[str, Any] | None:
+    """The nested mapping that CARRIES *key_from*, or None.
+
+    Only consulted when the envelope itself cannot be keyed, so it can widen the
+    accepted producer shapes and never re-point a record that already resolves.
+    """
+    for name in _NESTED_NODE_CARRIERS:
+        nested = record.get(name)
+        if isinstance(nested, Mapping) and nested.get(key_from) is not None:
+            return nested
+    return None
+
+
 def mutations_for(
     record: Mapping[str, Any],
     *,
@@ -1340,21 +1482,41 @@ def mutations_for(
     if isinstance(effect, NodeSnapshot):
         node = effect.node
         _node_table(node, columns)
-        key = _key_value(node, record, effect.key_from)
-        props: dict[str, Any] = {}
-        if effect.path is None:
-            props = {k: v for k, v in record.items() if k not in _RECORD_ONLY_KEYS}
+        snapshot = record.get(effect.path) if effect.path is not None else None
+        if effect.path is not None and not isinstance(snapshot, Mapping):
+            raise RecordProjectionError(
+                f"{record_type!r} carries no `{effect.path}` snapshot to "
+                "project — registering from a record that does not carry "
+                "the node would materialize a row the journal never wrote"
+            )
+        # Envelope key FIRST (every producer that carries one is unchanged),
+        # then the snapshot's — the capture writer puts the id ONLY in the
+        # snapshot (#9078, measured; see `_key_value`).
+        try:
+            key = _key_value(
+                node, record, effect.key_from,
+                fallback=snapshot if isinstance(snapshot, Mapping) else None)
+        except RecordProjectionError:
+            # A producer may NEST its node under its own envelope key instead of
+            # flattening it — `ConversationMiner` emits
+            # `{type: "EventRecorded", event: {...}}`, and the fold handles both
+            # carriers explicitly (`projection/entities.py`: "Handles both nested
+            # (…event:{eventId:…}) and flat (eventId at top level) formats
+            # transparently"). Without this leg every mined event was refused
+            # (#9078 review, measured) — the record would lose them in silence.
+            nested = _nested_node_carrier(record, effect.key_from) if effect.path is None else None
+            if nested is None:
+                raise
+            key = _key_value(node, nested, effect.key_from)
+            props = {k: v for k, v in nested.items() if k not in _RECORD_ONLY_KEYS}
             props.setdefault(effect.key_from, key)
         else:
-            snapshot = record.get(effect.path)
-            if not isinstance(snapshot, Mapping):
-                raise RecordProjectionError(
-                    f"{record_type!r} carries no `{effect.path}` snapshot to "
-                    "project — registering from a record that does not carry "
-                    "the node would materialize a row the journal never wrote"
-                )
-            props = {k: v for k, v in snapshot.items() if k not in _RECORD_ONLY_KEYS}
-            props[effect.key_from] = key
+            if effect.path is None:
+                props = {k: v for k, v in record.items() if k not in _RECORD_ONLY_KEYS}
+                props.setdefault(effect.key_from, key)
+            else:
+                props = {k: v for k, v in snapshot.items() if k not in _RECORD_ONLY_KEYS}
+                props[effect.key_from] = key
         col_values, tail = _split_properties(node.table, props, columns=columns,
                                             refused=refused, drop=effect.drop)
         if node.key_column not in col_values:

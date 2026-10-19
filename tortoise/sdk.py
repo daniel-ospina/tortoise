@@ -107,7 +107,7 @@ from .retrieval_metering import metered_query as _metered_query
 from . import file_indexer  # noqa: F401 — binds the classifier/identity module (§4.4); sourceKind registration is registry-owned (source_credibility.SOURCE_KIND_DEFAULTS)
 from .projection import FalkorProjection
 # #7951 §17.1: the single-writer scope the live doors open around their fold.
-from .projection import _live_write_scope
+from .projection import _declares_live_write_lane, _live_write_scope
 # #9123 §17.1: the GRAPH-METADATA lane — a write with no journal record that
 # describes it, and whose loss a rebuild absorbs.
 from .projection import _graph_metadata_write_scope
@@ -2740,9 +2740,11 @@ _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
 # `tests/test_event_store.py::test_content_edit_emits_nothing` and restated in
 # `docs/event-catalog.md`. #2353 asks for `PointRevised` in this store, so the
 # addition is drawn as an **opt-in** one at the emit hook below (`_emit_event`)
-# rather than by adding the type here: the default stream stays byte-identical,
-# and the semantic change feed (`tortoise/change_feed.py`) is what consumes the
-# revisions once an operator switches it on.
+# rather than by adding the type here: the default emit SET stays unchanged (no
+# new types), and the semantic change feed (`tortoise/change_feed.py`) is what
+# consumes the revisions once an operator switches it on. The default stream is
+# NOT byte-identical — the hard-delete `PointRetracted` payload carries the
+# unconditional `deleted` marker (`_deleted_point_payload`).
 _GRAPH_EVENT_TYPES = frozenset({
     "PointAdded",
     "OperatorAdded",
@@ -5007,13 +5009,18 @@ def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
         # #2350 (E-prec): the precision block owes every read path the same
         # 3-state end the primary decoration carries — the embedded fallback
         # must not relabel an ended-unknown window as still-true.
-        if (st.get("valid_from") or st.get("valid_to")
+        # #9201: presence is the BOUND's, not the precision's. A present-but-
+        # unorderable bound resolves to precision ``None``, so each gate reads
+        # its end's presence datum and the key is emitted as ``null`` —
+        # dropping it here is the cross-surface drift #2350 review P2 removed.
+        if (st.get("valid_from_present") or st.get("valid_from")
+                or st.get("valid_to") or st.get("valid_to_present")
                 or st.get("valid_from_precision")
                 or st.get("valid_to_precision")):
-            if st.get("valid_from_precision"):
-                r["valid_from_precision"] = st["valid_from_precision"]
-            if st.get("valid_to_precision"):
-                r["valid_to_precision"] = st["valid_to_precision"]
+            if st.get("valid_from_precision") or st.get("valid_from_present"):
+                r["valid_from_precision"] = st.get("valid_from_precision") or None
+            if st.get("valid_to_precision") or st.get("valid_to_present"):
+                r["valid_to_precision"] = st.get("valid_to_precision") or None
             r["end_state"] = st.get("end_state") or _resolve_end_state(
                 st.get("valid_to"), st.get("valid_to_precision"))
         # #4889: same additive subject field as SearchResult.to_dict.
@@ -6548,6 +6555,19 @@ class TortoiseSDK:
         Types are validated against the EventCodec registry (unknown → ValueError).
         Events live in THIS SDK's graph namespace (the org partition).
 
+        #9208: when a change-feed write for THIS graph has been REFUSED or lost,
+        this REFUSES (``event_store.ChangeFeedDegraded``) instead of returning a
+        page. A short page is not a distinguishable answer: a subscriber cannot
+        read it as "the stream is broken" rather than "nothing happened", which
+        is how a dead `:GraphEvent` feed used to report success. The state is
+        keyed by store+graph and lives in process memory (a peer process cannot
+        see it, and the store is exactly where the notice could not be written);
+        it is cleared only by calling ``event_store.clear_degraded(<graph>)``
+        INSIDE THAT PROCESS. There is no REST/MCP/CLI acknowledgement surface
+        yet, so the raise says so rather than prescribing to an HTTP client a
+        call it cannot make, and ``event_store.degraded_graphs()`` is what
+        ``GET /health`` reports it from (``change_feed``).
+
         #2353: when ``TORTOISE_CHANGE_FEED`` is truthy the response ALSO carries
         ``changes`` — the same page folded into per-claim semantic deltas with
         before/after (``tortoise/change_feed.py``), so "what changed for claim X
@@ -6559,8 +6579,7 @@ class TortoiseSDK:
         gained the ``deleted`` marker unconditionally, and this reply relays that
         row verbatim under ``events`` (see ``config/surface-manifest.yml``).
         """
-        from .event_store import read_after
-
+        from .event_store import ChangeFeedDegraded, degraded, read_after
         after_seq = 0 if after is None else self._decode_cursor(after)
         if types:
             from .shared_state.events import event_types
@@ -6575,6 +6594,46 @@ class TortoiseSDK:
         # per process, so steady-state polls are read-only. Best-effort — a
         # purge failure never blocks the poll.
         self._maybe_purge_events(proj)
+        # #9208: THIS graph's change-feed write was REFUSED or lost, so a short
+        # page cannot be told from a quiet stream. Refusing to answer is the
+        # whole point of the named degraded state: the alternative is returning
+        # success over a dead feed, which is the silent deletion §17.1's third
+        # door must never be allowed to produce.
+        #
+        # AFTER the purge deliberately: retention is housekeeping (a DELETE of
+        # old rows), not an emit, and the state persists until an explicit
+        # `clear_degraded` — so refusing before the purge would stop retention
+        # for as long as the graph stayed degraded (indefinitely, in a worker
+        # that has no one to acknowledge it) and let `:GraphEvent` grow
+        # unbounded on a graph nobody can poll. The purge cannot change the
+        # answer: it is `try`-wrapped and never raises.
+        state = degraded(proj)
+        if state is not None:
+            # ⚠️ THE REMEDY IS ADDRESSED TO THE OPERATOR, NOT TO THIS CALLER
+            # (#9208 review): the recipient here is an HTTP client, and the
+            # acknowledgement is a Python call in the process that OBSERVED the
+            # loss — one the client cannot make, and a peer process cannot make
+            # either (the state is process memory). Naming the call to the client
+            # prescribed an action it had no way to perform; naming the exits
+            # (in-process clear, or restart this worker) plus where the state is
+            # visible does not.
+            raise ChangeFeedDegraded(
+                "the :GraphEvent change feed for graph "
+                f"{state['graph']!r} is DEGRADED: a change-feed write was "
+                f"refused or lost at stage {state['stage']!r} for event type "
+                f"{state['event_type']!r} ({state['error']}); {state['lost']} "
+                "event(s) are unaccounted for, so this poll cannot "
+                "distinguish a quiet stream from a dead one and will not "
+                "answer as if it could. Fix the store first (the refusal "
+                "message names the cause — e.g. an undeclared write under "
+                "§17.1). Then an OPERATOR acknowledges the loss: this state "
+                "lives in the memory of the process that observed it, so it "
+                "cannot be cleared by this API client or by a peer process — "
+                "clear it with `tortoise.event_store.clear_degraded(<graph "
+                "name>)` inside that worker, or restart that worker. "
+                "`GET /health` reports it under `change_feed`, so the worker "
+                "holding it can be found. The missing events are NOT recovered "
+                "by a later successful write (#9208)")
         # Expired-cursor check: a NON-ZERO cursor pointing below the graph's
         # min seq was purged/compacted. after_seq == 0 is the "from the start"
         # sentinel (after=None) — it never expires, it just returns all
@@ -6637,7 +6696,11 @@ class TortoiseSDK:
         """Unified event emission: JSONL rebuild log (#548) + graph event store (#432).
 
         Both stores are best-effort — failures log and continue (never crash
-        the mutation).
+        the mutation). #9208: the graph event store's failures are also
+        RECORDED as a NAMED degraded state (`event_store.degraded()`) that
+        `poll_events` refuses to answer over, so "the feed stopped" is not
+        indistinguishable from "nothing happened" at the only place a consumer
+        can see it.
 
         **Return value (the #7951 commit signal):** ``True`` when the record was
         appended to a configured JSONL journal, ``False`` when a configured
@@ -6709,8 +6772,10 @@ class TortoiseSDK:
         # see `_GRAPH_EVENT_TYPES` above. It reaches the store only under the
         # change-feed switch, which is also what makes a poll able to report
         # before→after for content, validity and status. Off (the default) the
-        # emitted events, and therefore `poll_events`' response, are
-        # byte-identical to before this change.
+        # emitted SET is unchanged — no `PointRevised` row — so `poll_events`'
+        # response SHAPE is unchanged. It is NOT byte-identical: the hard-delete
+        # `PointRetracted` payload carries the `deleted` marker unconditionally
+        # (`_deleted_point_payload`).
         if type_ in _GRAPH_EVENT_TYPES or (
                 type_ == "PointRevised" and _change_feed_enabled()):
             # #2600: copy FIRST — a caller-reused payload dict must never
@@ -6731,14 +6796,58 @@ class TortoiseSDK:
                     graph_payload = {}
             if actor is not None:
                 graph_payload["actor_user_id"] = actor
+            # #9208: bound BEFORE the try so the handler below cannot raise
+            # `NameError` on the one path where `_get_proj()` (or the import)
+            # is itself what failed — an exception in an exception handler
+            # would break the write this leg exists to keep best-effort.
+            proj = None
             try:
                 from .event_store import append_event, ensure_event_schema, next_seq
                 proj = self._get_proj()
                 ensure_event_schema(proj)
                 seq = next_seq(proj)
                 append_event(proj, seq, type_, graph_payload, self.ulid())
-            except Exception:  # noqa: BLE001, RUF100
-                _logger.warning("event emission failed for %s — continuing", type_)
+            except Exception as exc:  # noqa: BLE001, RUF100
+                # #9208: this leg stays BEST-EFFORT — `_emit_event` is the
+                # outbox's commit signal for the JSONL journal below, and a
+                # raise here would make a broken change-feed store report a
+                # FAILED mutation (several doors emit after their cache write).
+                # It must not be SILENT, though: §17.1's third door refusing
+                # one of these writes used to reach only a WARNING, so the feed
+                # stopped while `poll_events` kept answering `[]` — a quiet
+                # stream and a dead one, the same reply. The loss is recorded
+                # as the named degraded state the feed's CONSUMER can see.
+                #
+                # The recorder is itself `try`-wrapped: its import is from the
+                # very module named above as a possible failure (`_emit_event`
+                # may have got here because `tortoise.event_store` failed to
+                # exec, and an import that raised is re-executed), and a raise
+                # INSIDE this handler would escape `_emit_event` and defeat the
+                # best-effort contract it is here to preserve.
+                try:
+                    from .event_store import record_degraded
+                    if proj is None:
+                        # No projection ⇒ no graph to key the state to, and a
+                        # reader would hit the same `_get_proj()` failure rather
+                        # than a successful poll, so nothing can be hidden here.
+                        # Logged loudly, not filed under a bucket no reader reads.
+                        _logger.warning(
+                            "event emission failed for %s and the projection "
+                            "could not be resolved, so the change feed's "
+                            "degraded state cannot be attributed: %s: %s",
+                            type_, type(exc).__name__, exc)
+                    else:
+                        state = record_degraded(proj, "emit", type_, None, exc)
+                        _logger.warning(
+                            "event emission failed for %s — the change feed is "
+                            "DEGRADED (%s lost, %s: %s); poll_events will "
+                            "refuse to answer until this is acknowledged "
+                            "(#9208)",
+                            type_, state["lost"], type(exc).__name__, exc)
+                except Exception:  # noqa: BLE001, RUF100
+                    _logger.exception(
+                        "event emission failed for %s — and recording the "
+                        "degraded state failed too (#9208)", type_)
 
         # ── JSONL event log (#548) ─────────────────────────────────
         if point is None and id is None:
@@ -7980,9 +8089,12 @@ class TortoiseSDK:
             raise WriteNotLandedError(pid, getattr(proj, "graph_name", None))
         # #7951 §17.1: the cache write runs inside the live-write scope — the
         # door declares itself to the guard, and every statement below runs
-        # strictly AFTER the append above. (The scope is documentary on the
-        # raw handle: the §17.1 guard covers `FalkorProjection.apply`/`.query`,
-        # and the raw handle's remaining sites are the recorded residual.)
+        # strictly AFTER the append above. Since #9124 the declaration is
+        # LOAD-BEARING rather than documentary: the §17.1 guard now covers the
+        # raw guarded handle too (`proj.g`), which is the handle this `CREATE`
+        # uses, so without the scope an armed handle refuses the create hot
+        # path. The declaration is a lane, not an exemption — the append above
+        # is the commit point and every write here follows it.
         with _live_write_scope("create_point"):
             self._graph_write_with_retry(
                 lambda: proj.g.query(
@@ -11193,12 +11305,17 @@ class TortoiseSDK:
         # `test_the_promote_arm_stays_apply_first_a_recorded_deviation` and
         # `test_a_refused_promote_journals_no_revision`.
         #
-        # ⛔ NOT ROUTED THROUGH THE FOLD YET. The writes below still go through
-        # the raw guarded handle, so no `_live_write_scope` is opened here: the
-        # §17.1 guard covers `FalkorProjection.apply`/`.query`, and a scope
-        # around a raw handle would authorize nothing (the same statement
-        # `create_point`'s scope makes about itself). Moving these writes onto
-        # the fold is increment 3, and that is when this door declares itself.
+        # ⛔ NOT ROUTED THROUGH THE FOLD YET, AND STILL UNDECLARED (#9124).
+        # The non-promote writes below go through the raw guarded handle, whose
+        # §17.1 door now DETECTS an undeclared write (#9124 part 1), so this
+        # door is one of the measured remainder in
+        # `tests/test_9124_declared_live_doors.py`'s MIXED-ARM inventory. It
+        # cannot declare `_live_write_scope` yet, for the reason the promote arm
+        # below states: the SAME write region serves an arm whose record is
+        # stated only AFTER its guarded write, so a scope placed here would
+        # authorize that arm too. Moving these writes onto the fold — and
+        # deciding the promote arm with them — is part 2 (#9124), and that is
+        # when this door declares itself.
         # #1904: content_hash is derived from content — keep it out of the
         # event record (mirrors create_point's snapshot strip at emit).
         # #4208: the vector this path just DERIVED from the content is stripped
@@ -11588,11 +11705,21 @@ class TortoiseSDK:
                              new_content=props.get("content"), **emit_props)
         return result
 
+    @_declares_live_write_lane("delete_point")
     def delete_point(self, id: str) -> bool:
         """Delete a Point and its relationships. Returns True if found.
 
         Implementation behind delete(id) — the consolidated Point/entity
         delete (epic #888 W2).
+
+        §17.1 LANE (#9124): JOURNAL-FIRST, declared. The `EntityMutated
+        op=delete` record is appended BEFORE the `DETACH DELETE` (the outbox
+        ordering below), and every mutating statement in this method follows
+        that append — so the whole method is the live lane's write region and
+        carries `@_declares_live_write_lane`. That ordering is not merely
+        stated here: `tests/test_9124_declared_live_doors.py` re-derives it from
+        the source for every declared door, so a write added above the append
+        reddens there rather than silently widening the lane.
 
         Raises ``WriteNotLandedError`` (``operation="delete_point"``) instead of
         returning when the §17.1 outbox refuses the destruction: either the
@@ -11922,9 +12049,16 @@ class TortoiseSDK:
                     f"call retract_point({point_id!r}) instead."
                 ) from None
 
+    @_declares_live_write_lane("invalidate_point")
     def invalidate_point(self, id: str, corrected_by_id: str,
                          *, valid_to_precision: str | None = None) -> dict:
         """Mark a Point outdated, linked to its replacement via CORRECTS edge.
+
+        §17.1 LANE (#9124): JOURNAL-FIRST, declared. The `PointInvalidated`
+        record is appended before the terminal stamp and the `CORRECTS` merge
+        ("validated-emit-then-mutate" below), so every mutating statement in
+        this method follows the append and the method carries
+        `@_declares_live_write_lane`.
 
         Validation contract (#330/#2498) — all checks run BEFORE any write so
         a failure can never leave a partial graph state:
@@ -12087,10 +12221,27 @@ class TortoiseSDK:
             return self.supersede_point(old_id, new_id)
         return self.invalidate_point(old_id, new_id)
 
+    @_declares_live_write_lane("supersede_point")
     def supersede_point(self, old_id: str, new_id: str,
                         *, valid_from: str | None = None,
                         valid_to_precision: str | None = None) -> dict:
         """Atomically replace old Point with new — CORRECTS edge + outdated flag + edge transfer.
+
+        §17.1 LANE (#9124): JOURNAL-FIRST, declared — with ONE stated residual
+        that this declaration does NOT close. The `PointSuperseded` record is
+        appended before any mutating statement (all ~15 of them follow it), so
+        the method carries `@_declares_live_write_lane`. The residual is that
+        the append's RETURN is not checked here, so a FAILED append still
+        proceeds to the cache: the lane is honest about ORDER and says nothing
+        about CONFIRMATION. The doors that gate on a per-call append outcome do
+        so ARM BY ARM, not door by door: `create_point` and `update_point`'s
+        NON-promote arm raise `WriteNotLandedError` on `_record_committed is
+        False`, and `delete_point` gates on `_delete_committed =
+        _journal_entity_mutation(...)`. `update_point`'s PROMOTE arm (its record
+        is emitted after the write, return discarded), `invalidate_point` and
+        `retract_point` discard the append's return exactly as this door does,
+        so the same residual is carried by FOUR doors, not one. Closing it is
+        part 2 of #9124 (it changes the failure contract, not the order).
 
         E6 (#1538) D2 — bi-temporal validity windows: the supersession ALSO
         stamps the old point's window END (``validTo`` = the successor's
@@ -12807,8 +12958,23 @@ class TortoiseSDK:
             "edges_transferred": transferred,
         }
 
+    @_declares_live_write_lane("retract_point")
     def retract_point(self, id: str) -> dict:
         """Tombstone-retract a Point: status='retracted' (point stays in graph).
+
+        §17.1 LANE (#9124): JOURNAL-FIRST, declared. `PointRetracted` is
+        appended before the CAS `SET` ("append-before-mutation" below), and the
+        method's every mutating statement follows it, so the method carries
+        `@_declares_live_write_lane`.
+
+        ⚠️ ORDER is what the declaration guarantees; CONFIRMATION is not. The
+        append's return is discarded here, so a FAILED append still retracts the
+        cache node and reports success — measured on this branch by forcing
+        `_emit_event` to return False: the point came back `status='retracted'`.
+        Only `create_point`, `update_point`'s non-promote arm and `delete_point`
+        gate on their append's return; `invalidate_point`, this door and
+        `supersede_point` do not. That residual is part 2 of #9124 (it changes
+        the failure contract).
 
         #432: retraction is a TERMINAL state transition, not a deletion — the
         projection keeps the point with status='retracted' and default query
@@ -26078,10 +26244,20 @@ class TortoiseSDK:
                 expired_at=point_state.get(pid, {}).get("expired_at")
                 or pt.get("expiredAt") or "",
                 # #2350 (E-prec): the precision block rides the SAME decoration
-                # as the window fields above. ``end_state`` falls back to the
-                # raw props when the batch decoration ran on a graph the
-                # precision fetch could not reach — so a window is never
-                # silently relabelled ``open``.
+                # as the window fields above. ⚠️ ``end_state``/precision are
+                # read from ``point_state`` ONLY — when the batch decoration
+                # query fails or skips the id, ``point_state`` has no entry and
+                # the whole window block (fields + precision) is absent on this
+                # surface, not relabelled ``open`` (#9201 review P3: the old
+                # "falls back to the raw props" comment described a fallback
+                # that cannot fire — ``pt`` carries no window column).
+                # #9201: each end's presence rides along — a present-but-
+                # unorderable bound yields precision ``None``, so the block's
+                # presence needs its own datum (see ``SearchResult.to_dict``).
+                valid_from_present=bool(
+                    point_state.get(pid, {}).get("valid_from_present")),
+                valid_to_present=bool(
+                    point_state.get(pid, {}).get("valid_to_present")),
                 valid_from_precision=(
                     point_state.get(pid, {}).get("valid_from_precision")
                     or pt.get("validFromPrecision") or ""),
