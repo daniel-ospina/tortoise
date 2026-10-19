@@ -2429,7 +2429,6 @@ from tests._signal_hygiene import harness_sigalrm_integrity  # noqa: E402, F401
 # the operator-invoked backlog sweep is `tools/tmpdir_sweep.py`.
 from tests._tmpdir_hygiene import track_tempfile_artifacts  # noqa: E402, F401
 
-
 # ── #9208: per-test isolation of the change feed's PROCESS-GLOBAL state ────
 # `event_store._DEGRADED` is process memory keyed by (store identity, graph),
 # and a refused `:GraphEvent` write latches it until an explicit
@@ -2440,20 +2439,48 @@ from tests._tmpdir_hygiene import track_tempfile_artifacts  # noqa: E402, F401
 # several files: the first armed-door/refusal test on it would refuse every
 # later `poll_events` IN THE PROCESS (#9208 review).
 #
-# Autouse and function-scoped, clearing on BOTH sides: before, so each test
-# starts from "healthy" (a peer's latch cannot change what this test observes);
-# after, so a test that degrades a feed on purpose does not poison the rest of
-# the shard. Imported lazily and defensively — this must never be the reason a
-# suite that does not touch the event store fails to run.
+# Autouse and function-scoped. It CLEARS on both sides, so each test starts from
+# "healthy" and a test that degrades a feed on purpose does not poison the rest
+# of the shard — and it FAILS LOUDLY, naming the polluter, when it finds state
+# left behind by the previous test (#9208 review). The loud half is the point: a
+# silent pre-clear would also hide the regression MEMORY.md's `[silent-loss]`
+# entry records — a process-global latch reddened 21 unrelated tests because
+# nothing said which test had set it. Isolation for the honest case, attribution
+# for the broken one.
+#
+# ⚠️ The pre-test state can also come from a SESSION/MODULE-scoped fixture's
+# setup (those instantiate BEFORE a function-scoped fixture), so the message says
+# "earlier setup" rather than accusing the named test outright.
+#
+# Imported lazily and defensively — this must never be the reason a suite that
+# does not touch the event store fails to run.
+_LAST_TEST_NODEID = "(none yet)"
+
+
 @pytest.fixture(autouse=True)
-def _change_feed_state_isolation():
+def _change_feed_state_isolation(request):
+    global _LAST_TEST_NODEID
     try:
         from tortoise import event_store as _event_store
     except Exception:  # pragma: no cover — importable everywhere in this suite
         yield
         return
-    _event_store.clear_degraded()
+    leftover = _event_store.degraded_graphs()
+    if leftover:
+        # Clear BEFORE failing: a setup failure must not cascade the same red
+        # through every remaining test in the shard.
+        _event_store.clear_degraded()
+        graphs = sorted({row["graph"] for row in leftover})
+        pytest.fail(
+            "a degraded change feed leaked into this test — left by earlier "
+            f"setup (last completed test: {_LAST_TEST_NODEID}): {graphs}. The "
+            "state is PROCESS-GLOBAL and refuses `poll_events` for those graphs "
+            "(#9208), so a test that degrades a feed on purpose must "
+            "`event_store.clear_degraded()` in a finally — otherwise it reddens "
+            "unrelated tests later in the shard, which is the failure mode "
+            "MEMORY.md records as `[silent-loss]`.")
     try:
         yield
     finally:
         _event_store.clear_degraded()
+        _LAST_TEST_NODEID = request.node.nodeid

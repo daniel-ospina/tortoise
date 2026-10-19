@@ -39,8 +39,8 @@ be told "nothing happened" over lost events.**
 
 ⚠️ AND ONE CONSUMER IS NOT COVERED, named rather than implied: the webhook
 delivery sweep (`webhook_delivery.dispatch_pending`) reads `read_after`
-directly, so
-its `if not events: continue` still treats an empty page as "caught up". Wiring
+directly, so its `if not events: continue` still treats an empty page as
+"caught up". Wiring
 the degraded state into the delivery/retry state machine changes a
 delivery-loss decision that `#8098` deliberately keeps in the dispatch state
 machine, so it is a follow-up, not a silent part of this fix.
@@ -238,7 +238,16 @@ def record_degraded(proj, stage: str, event_type: str, event_id: str | None,
 
 
 def degraded(proj) -> dict[str, Any] | None:
-    """This graph's named degraded state, or ``None`` when its feed is healthy."""
+    """This graph's named degraded state, or ``None`` when its feed is healthy.
+
+    Deliberately LOCK-FREE, unlike the three writers under `_DEGRADED_LOCK`: a
+    single `dict.get` is atomic under the GIL and under free-threaded CPython's
+    per-object dict locks, and `record_degraded` PUBLISHES a freshly built dict
+    (never mutates one in place), so a reader here always sees a whole state.
+    Taking the lock would also serialise every `poll_events` call against an
+    emitting thread's error path for no gain. Keep it that way: this is a single
+    lookup, NOT a read-modify-write (the writers are the read-modify-writes).
+    """
     return _DEGRADED.get(_graph_key(proj))
 
 
