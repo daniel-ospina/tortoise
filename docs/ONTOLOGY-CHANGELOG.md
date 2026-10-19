@@ -983,3 +983,33 @@ moved here.
 The table lists the status-notes taken out of the model body, not every line the
 split moved — the complete text of the split is the commit that made it. Each
 row's *Where* names the section the quoted text was in *before* the removal.
+
+---
+
+## §4.7 — a validity start that names no instant (#6140, 2026-10-19)
+
+The read path and the write path disagreed about a stored `validFrom` that names no instant. The
+read path (`get_historical_knowledge`'s `_covers`) gated the start on presence alone and then
+ORDERED the value, so an empty value keyed after every parseable instant and the window covered
+nothing: a dated query answered `status="absent"` for a claim genuinely in force. The write path
+already treated the value as absent.
+
+Ruling (owner, 2026-10-11): *"A and C (c should be a warning)"* —
+
+- **A** — a start that names no instant means **no start recorded**, so the window is unbounded
+  below. The read path now requires ORDERABILITY before a start bounds anything, which is the same
+  answer the write path gave.
+- **C** — the write boundary **warns** when a caller supplies such a value, and stores it: a
+  warning, never a refusal, because a refusal would make a legacy point impossible to update or
+  supersede until its window was repaired.
+
+**OVERRIDES:** the comparable agent-memory products surveyed for this decision (Zep/Graphiti, Mem0,
+Cognee) fall back to the record's creation time when a validity start is missing — we do not,
+because §4.7 already forbids inventing a start from the write clock. Reading B was put to the owner
+as a reopen of that rule and refused.
+
+The model rule this settled is in §4.7; this entry is the record of how it got there. Two residuals
+of the same family were filed rather than absorbed: an unparseable start still reports
+`valid_from_precision: "day"` on the read surfaces (#9201, #2350's field semantics), and a
+present-but-unparseable `validTo` covers every later instant while still reporting
+`end_state: "known"` (#9202, the END side, untouched by this ruling).

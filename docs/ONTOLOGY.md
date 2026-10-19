@@ -626,7 +626,7 @@ window, independent of when Tortoise learned it. Canonical pair:
 
 | Slot | Canonical name | Standard | Notes |
 |------|----------------|----------|-------|
-| start | `validFrom` | `prov:generatedAtTime` | Populated by the date-carrying write paths — the hosted commit path sets it from the payload `when`, mining W-4 from the session frontmatter date (§4.1). An undated session stamps **no** `validFrom` at all (`ConversationMiner._temporal_wire`, #3654), so an **absent** `validFrom` means an **open/unbounded start** (`get_historical_knowledge`) — the write wall clock is never borrowed as a start. **A value that names no instant inherits the same reading** (**#6140**, owner ruling 2026-10-11 — see the note under the coverage boundary below): `""` and `"TBD"` are *no start recorded*, not a lower bound, so the window is open below; the write boundary **warns** when it is asked to store one (option C, as ruled — a warning, never a refusal, so a legacy point stays supersedable) and the read path skips the lower bound rather than ordering an unorderable key. `create_point`'s base CREATE map seeds no `validFrom`; caller props — including `validFrom` — are appended to it, so `create_point` itself never **synthesizes** a clock-stamped start either. The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp |
+| start | `validFrom` | `prov:generatedAtTime` | Populated by the date-carrying write paths — the hosted commit path sets it from the payload `when`, mining W-4 from the session frontmatter date (§4.1). An undated session stamps **no** `validFrom` at all (`ConversationMiner._temporal_wire`, #3654), so an **absent** `validFrom` means an **open/unbounded start** (`get_historical_knowledge`) — the write wall clock is never borrowed as a start. **A value that names no instant inherits the same reading** — *no start recorded*, not a lower bound, so the window is unbounded below (see the note under the coverage boundary below): the read path skips an unorderable lower bound, and the write boundary **warns** about such a value and stores it anyway, so a legacy point stays supersedable. `create_point`'s base CREATE map seeds no `validFrom`; caller props — including `validFrom` — are appended to it, so `create_point` itself never **synthesizes** a clock-stamped start either. The `validFrom` → `createdAt` chain is a **render fallback** (`_render_date`), never a create-time stamp |
 | end | `validTo` | `prov:invalidatedAtTime` | On **supersession** set to the successor's `validFrom` **when the successor carries one** — the **contiguous Graphiti (Zep) window intent: the old fact stops being true when the new one starts being true** (`supersede_point`, E6 #1538). An **undated** successor (absent `validFrom` ⇒ open start, row above) falls back to its `createdAt`, then to `now` — so the old `validTo` lands on the successor's `createdAt` and the windows **overlap** rather than being exactly contiguous. Exact contiguity requires a successor `validFrom` (`valid_from` kwarg → successor `validFrom` → successor `createdAt` → `now`). The kwarg is a **claim**, not an unconditional override: when the successor carries a stored `validFrom` the two must be **parseable** timestamps naming the **same instant** (compared by instant via `_created_sort_key`, the measure `_covers` uses), else `supersede_point` raises `ValueError` **before any mutation** — a disagreeing kwarg would otherwise gap or overlap the chain (#3980). The kwarg is the sole source for an undated successor **unless it names no instant** — a STRING kwarg that is unparseable falls through to the successor's `createdAt`, and that fallback itself requires an orderable value and otherwise lands on `now` (#5360). **The resolved end is additionally checked against the PREDECESSOR's own `validFrom`**: when BOTH order to an instant and the end is strictly earlier ⇒ `ValueError` before any mutation (#4021), because an inverted window (`validTo < validFrom`) is satisfied by **no** query instant, so the predecessor would be silently unreachable from every read surface — equality (a zero-length predecessor window) remains legal. An **unorderable** bound on either side is NOT compared even so: it names no instant, so a refusal would rest on a lexicographic accident rather than a comparison — the orderability residual is closed on the write path (#5360), except the deliberately-exempt NUMERIC `valid_from` kwarg (whose `str()` form `_covers` still cannot order). `invalidate_point` instead stamps `validTo = now` (no successor ⇒ no contiguity), and refuses with `ValueError` when a stored `validFrom` is after `now` — `retract_point` is the window-agnostic route (#5358) |
 
 > **The coverage boundary is stated here because it was not (#7818).** The read
@@ -674,27 +674,24 @@ window, independent of when Tortoise learned it. Canonical pair:
 >   would turn every already-persisted single-instant belief into a claim that was
 >   never true at any instant, with no way for a reader to tell.
 >
-> **A start that names no instant is an OPEN start (#6140).** **OVERRIDES:** the
-> comparable agent-memory products surveyed for this decision (Zep/Graphiti,
-> Mem0, Cognee — all fall back to the record's creation time) — the
-> owner ruled on 2026-10-11 ("A and C (c should be a warning)") that an
-> empty/unparseable `validFrom` means *no start recorded*, so the window is open
-> below and the write clock is **never** borrowed as a start. Reading B
-> (`createdAt`) would have reversed the rule stated in this very section, so it
-> was a **reopen** rather than a bug fix — it was put to the owner and refused.
-> The write boundary **warns** about such a value (option C, as ruled — a
-> warning, never a refusal, so a legacy point stays supersedable), and the read
-> path must not order the value: binding it would make the window cover
-> **nothing** (`_created_sort_key` buckets text after every instant) and report
-> honest absence for a claim genuinely in force. Pinned by
-> `tests/test_validity_windows.py`::`test_a_start_naming_no_instant_leaves_the_window_open`
-> and `::test_restore_read_path_treats_falsey_but_present_valid_from_as_present`
-> (part b). The END is deliberately **not** symmetric, and NOT YET FLAGGED: an
-> unorderable `validTo` covers every later instant and reports `end_state:
-> "known"` (the `END_UNKNOWN` marker needs an ABSENT end plus an `"unknown"`
-> declaration), so nothing in the reply says the window is unbounded. That is a
-> pre-existing residual of the END side, tracked on **#9202**; the START's
-> precision residual is **#9201**.
+> **A start that names no instant means no start was recorded.** A stored
+> `validFrom` that `_created_sort_key` cannot order — an empty value, or text
+> that is not an instant — is not a lower bound. The window runs from the
+> beginning of time, which is the same answer an absent property gives, and the
+> write clock is **never** borrowed as a start. The read path therefore skips the
+> lower bound rather than ordering the value: binding it would put such a window
+> after every parseable instant, so it would cover **nothing** and a dated query
+> would report honest absence for a claim genuinely in force. The write boundary
+> **warns** when a caller supplies such a value and stores it anyway — a warning,
+> never a refusal, because a legacy point must stay supersedable until its window
+> is repaired. Rationale and the ruling behind it: `ONTOLOGY-CHANGELOG.md`.
+> Pinned by `tests/test_validity_windows.py`
+> (`test_a_start_naming_no_instant_leaves_the_window_open`,
+> `test_restore_read_path_treats_falsey_but_present_valid_from_as_present` part b).
+> The END is deliberately **not** symmetric and not flagged: an unorderable
+> `validTo` covers every later instant and still reports `end_state: "known"`
+> (the `END_UNKNOWN` marker requires an absent end plus an `"unknown"`
+> declaration), so no reply field says the window is unbounded.
 >
 **Per-end precision and the 3-state end (#2350, E-prec).** The window pair
 above carries an **additive** precision layer: `validFromPrecision` /
