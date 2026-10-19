@@ -458,12 +458,15 @@ def test_the_selfhost_onboarding_lane_writes_on_a_journal_backed_proj(
 
     ⚠️ This pin dispatches through the RAW HANDLE (`proj.g`, the THIRD door), not
     the public `FalkorProjection.query` lane: `state._run` prefers `graph.g` when
-    the graph exposes one, so this pin will begin refusing/failing the moment
-    `#9124` arms that handle. The armed-handle version of the same path is
+    the graph exposes one. Nothing here guards that door, so arming it (`#9124`)
+    changes nothing this pin can observe — the write keeps landing because `_run`
+    declares it (`#9121`). What it CANNOT tell you is whether the declaration is
+    doing its job, because it never arms the handle; that is the job of
     `tests/test_9079_onboarding_declared_lane.py
-    ::test_the_selfhost_onboarding_lane_reaches_the_graph_with_the_guard_armed`
-    (`#9121`). Nothing in this file pins the public raw-query lane for onboarding,
-    because `state._run` no longer routes through it.
+    ::test_the_selfhost_onboarding_lane_reaches_the_graph_with_the_guard_armed`,
+    which issues the same call with the `#9124` predicate installed. Nothing in
+    this file pins the public raw-query lane for onboarding, because `state._run`
+    no longer routes through it.
     """
     from tortoise.onboarding import selfhost
     from tortoise.onboarding import state as _os

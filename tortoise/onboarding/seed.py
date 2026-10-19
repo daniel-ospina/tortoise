@@ -138,9 +138,10 @@ def _run(handle: Any, cypher: str, params: dict[str, Any] | None = None):
     mismatch.
 
     §17.1 (#7951/#9121): the public ``FalkorProjection.query`` lane refuses a
-    mutating statement on a journal-backed projection. This primitive is
-    duck-typed and shared with the write-path callers of this module, so it
-    still prefers the raw handle when the injected object exposes one.
+    mutating statement on a journal-backed projection. This primitive is a
+    duck-typed helper whose sole caller (``find_subject_by_name``, below) issues a
+    READ, so its raw-handle preference is a leftover from the pre-declaration era,
+    not a write path.
 
     ⛔ It is NOT a §17.1 declaration, and it must not be read as one. The
     onboarding lane's declaration lives in ``onboarding.state._run`` (see

@@ -569,10 +569,12 @@ def test_the_selfhost_onboarding_lane_reaches_the_graph_with_the_guard_armed(
 
     The pre-existing `#7951` pin for this lane
     (`test_the_selfhost_onboarding_lane_writes_on_a_journal_backed_proj`) reaches
-    the graph through the SAME raw handle (`proj.g`, the third door), so once
-    `#9124` arms that handle it will be refused too — it cannot see a refusal
-    today only because nothing guards that door yet. This pin differs in WHAT it
-    asserts (the walk completes with the guard armed), not in which lane it takes.
+    the graph through the SAME raw handle (`proj.g`, the third door), but it never
+    arms that door, so it cannot tell a declared write from an undeclared one.
+    What it would see once `#9124` arms the handle is a walk that still completes —
+    because `_run` declares the statement, which is the property THIS pin actually
+    tests: the same call with the `#9124` predicate installed must still reach the
+    graph, and must be refused if the declaration is removed.
     """
     from tortoise.onboarding import selfhost
     from tortoise.onboarding import state as _os
