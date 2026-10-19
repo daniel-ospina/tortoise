@@ -1840,12 +1840,12 @@ CONTROL_PLANE_OAUTH_BACKLOG = 64
 #: open); the REST ``/v1/events`` and ``/v1/dream`` handlers' SDK open also
 #: submits here, and so does the org switcher's chunked graph LISTING (#3718:
 #: one submission per ``_GRAPH_LIST_OFFLOAD_CHUNK`` orgs, on the cached
-#: ``_registry_anchor()`` handle. That listing's Supabase mode is a PostgREST
-#: read and submits on the ``auth`` pool instead, in smaller chunks —
-#: ``_GRAPH_LIST_CONTROL_PLANE_CHUNK``, sized for this pool's own bound). The
-#: write-triggered ``_dream_worker`` does
-#: NOT (it builds
-#: inside the ``_DREAM_EXECUTOR`` item). The graph-bound ``_data_sdk`` path
+#: ``_registry_anchor()`` handle). That listing's Supabase mode is a PostgREST
+#: read and submits on the ``auth`` pool instead, in smaller chunks sized for
+#: THAT pool's 10 s bound rather than this one's
+#: (``_GRAPH_LIST_CONTROL_PLANE_CHUNK``). The write-triggered ``_dream_worker``
+#: does NOT (it builds inside the ``_DREAM_EXECUTOR`` item). The graph-bound
+#: ``_data_sdk`` path
 #: reaches a blocking CONTROL-plane PostgREST read (``_assert_graph_owned`` ->
 #: ``get_control_plane().query("graphs")``), so a control-plane stall parks a
 #: graph slot here and a bound miss on that read reports ``graph_unavailable``.

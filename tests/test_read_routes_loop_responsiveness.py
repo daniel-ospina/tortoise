@@ -45,12 +45,14 @@ off-loaded too — the registry legs via ``asyncio.to_thread``, the Supabase
 control-plane legs via ``_cp_offload`` — so it is no longer in
 ``_KNOWN_INLINE_ROUTE_RESIDUAL``. ``list_my_orgs`` (``GET /v1/organizations``,
 the switcher every client reads on app load) joined it in the #3718 burn-down,
-for its LISTING half only: the per-org graph listings now run over
-``_graph_offload`` in chunks, so the route body left the declared residual for
-``_OFFLOADED_ASYNC_BODIES``. Note WHERE the handle comes from: the listings
-reuse the process-lifetime ``_registry_anchor()``, so no per-org construction
-happens in the worker — the one anchor build on this request path belongs to
-``_org_node``, which stays inline and declared here.
+for its LISTING half only: the per-org graph listings now run OFF the loop in
+chunks on the MODE's lane — registry → ``_graph_offload``,
+``_GRAPH_LIST_OFFLOAD_CHUNK`` orgs per submission, reading the
+process-lifetime ``_registry_anchor()`` (no per-org construction in the
+worker); Supabase → ``_cp_offload``, ``_GRAPH_LIST_CONTROL_PLANE_CHUNK`` orgs,
+a PostgREST read that builds NO graph handle at all. So the route body left the
+declared residual for ``_OFFLOADED_ASYNC_BODIES``. The one anchor build on the
+REGISTRY path belongs to ``_org_node``, which stays inline and declared here.
 Its membership scan and per-org Team read stay inline — #2446 records a
 thread-dependence MEASURED on `_membership_role`'s read, and these two are the
 same registry-read class by inference (the relay there marks it) — so
@@ -437,9 +439,10 @@ def test_read_route_does_not_freeze_the_event_loop(client, monkeypatch):
 # this change started from it issued 2N+1 sync registry reads on the loop for N
 # memberships: the membership scan, one Team read per membership (``_org_node``)
 # and one ``graph_list`` per membership. The LISTING half is burned down here
-# (``ceil(N/8)`` off-loop submissions); the two registry reads stay
-# inline as declared residual because #2446 records a thread-dependence MEASURED
-# on `_membership_role`'s read, with these two in the same class by inference.
+# (``ceil(N / the lane's chunk)`` off-loop submissions); the two registry reads
+# stay inline as declared residual because #2446 records a thread-dependence
+# MEASURED on `_membership_role`'s read, with these two in the same class by
+# inference.
 # All three reach the registry through ``_get_registry()``,
 # so ONE probe on that seam sees the whole path — no per-handler
 # instrumentation, and no reliance on how each read is spelled.
@@ -946,16 +949,21 @@ _OFFLOADED_ASYNC_BODIES = frozenset({
     "backups_create", "backups_restore", "backups_sweep",
     "backups_purge", "backups_rebaseline", "backups_drill",
     "backups_drill_scheduled",
-    # #3718: the org switcher's LISTING half. Its per-org graph listings build
-    # NO handle of their own (they reuse the process-lifetime
-    # ``_registry_anchor()``) and the route body has no graph seam, so the set's
-    # "no seam, no construction the scan can see" holds for the right reason.
-    # The one anchor build on this request path is ``_org_node``'s, and that
-    # helper stays INLINE under #2446 — which is why `_user_memberships` /
+    # #3718: the org switcher's LISTING half. On the REGISTRY path its per-org
+    # listings build NO handle of their own (they reuse the process-lifetime
+    # ``_registry_anchor()``); on the SUPABASE path the read is PostgREST and
+    # builds no graph handle at all. Either way the body reaches its FalkorDB
+    # seam through the per-mode lane alias (``offload``, declared as a boundary
+    # above) and through ``_graph_list_for`` (declared as a graph seam), so the
+    # set's "no seam, no construction the scan can see" holds for the right
+    # reason — and would fail if either went back inline (verified both ways).
+    # The one anchor build on the REGISTRY request path is ``_org_node``'s, and
+    # that helper stays INLINE under #2446 — which is why `_user_memberships` /
     # `_org_node` are in ``_KNOWN_INLINE_HELPER_RESIDUAL`` and NOT here.
     # Behavioural pins:
-    # ``test_org_switcher_listing_runs_off_the_loop`` and
-    # ``test_org_switcher_listing_is_chunked_and_loses_no_row``.
+    # ``test_org_switcher_listing_runs_off_the_loop``,
+    # ``test_org_switcher_listing_is_chunked_and_loses_no_row`` and
+    # ``test_org_switcher_listing_never_builds_a_graph_handle_in_supabase_mode``.
     "list_my_orgs",
 })
 
@@ -1463,6 +1471,57 @@ def test_on_loop_sdk_construction_residual_is_named_head_on():
     assert set(_OFFLOADED_ASYNC_BODIES_WITH_ON_LOOP_SDK_CONSTRUCTION) <= set(construction), (
         "a declared on-loop SDK-construction body is not flagged by the scan "
         "at all — the declaration has gone vacuous (#4660)")
+
+
+def test_lane_alias_is_only_ever_bound_to_a_real_offload_seam():
+    """#3718: the bare name ``offload`` in the boundary set must stay honest.
+
+    ``offload`` is the switcher's per-MODE lane alias and the only
+    non-underscore, non-imported member of ``_OFFLOAD_BOUNDARY_CALLEES``.
+    Membership is matched on the call's NAME alone, with no scope, so if any
+    future body in ``hosted_api`` binds ``offload`` to something that is NOT an
+    offload seam, that body's sync I/O is skipped by both scans for free — a
+    silent hole in the guard the alias exists to keep honest. Pin the binding
+    sites instead of trusting the reader.
+    """
+    assert "offload" in _OFFLOAD_BOUNDARY_CALLEES, (
+        "the switcher's per-mode lane alias is no longer declared a boundary — "
+        "its `_graph_list_for` call now reads as on-loop I/O (#3718)")
+    seams = {"_cp_offload", "_graph_offload"}
+    assigned: list[tuple[int, str]] = []
+    for node in ast.walk(ast.parse(HOSTED_API.read_text())):
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and node.value:
+            targets, value = [node.target], node.value
+        else:
+            continue
+        # Target names, POSITIONALLY: the alias is assigned in a tuple
+        # (`offload, chunk_size = _cp_offload, <constant>`), so pairing by
+        # index is what tells the seam from the chunk constant beside it.
+        if len(targets) == 1 and isinstance(targets[0], (ast.Tuple, ast.List)):
+            tgt_names = [e.id if isinstance(e, ast.Name) else None
+                         for e in targets[0].elts]
+        else:
+            tgt_names = [t.id if isinstance(t, ast.Name) else None
+                         for t in targets]
+        if "offload" not in tgt_names:
+            continue
+        values = (value.elts if isinstance(value, (ast.Tuple, ast.List))
+                  else [value])
+        if len(values) != len(tgt_names):
+            values = [value] * len(tgt_names)
+        for name, v in zip(tgt_names, values, strict=True):
+            if name == "offload":
+                assigned.append((node.lineno, _callee_name(v)))
+    assert assigned, (
+        "the `offload` alias is gone from hosted_api — if the lane choice was "
+        "rewritten, re-derive this pin rather than deleting it (#3718)")
+    bad = [(line, name) for line, name in assigned if name not in seams]
+    assert not bad, (
+        f"`offload` is bound to something that is not an offload seam at "
+        f"{bad!r} — the boundary set matches on the bare name, so that body's "
+        f"sync I/O would be skipped by BOTH scans (#3718)")
 
 
 def test_residual_names_still_exist():

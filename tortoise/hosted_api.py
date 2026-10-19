@@ -8139,13 +8139,17 @@ def _graph_unavailable() -> HTTPException:
 
     Deliberately NOT ``_control_plane_unavailable``: that body's copy is
     sign-in specific and would mislead a client retrying a graph write. A
-    helper that could not get a worker is a service-capacity failure, and the
-    work did not happen — retryable.
+    helper that could not get a worker is a service-capacity failure: a
+    submission that never ran did NO work (retryable), while one abandoned at
+    the bound — ``bound_miss_running``, the case the chunking rationale cites —
+    may still complete in its worker (CPython #87185: the timeout cancels the
+    await, never the thread). So do not retry a MUTATING call on this code
+    without checking first; a read is safe to retry.
 
     Deliberately distinct from ``org_graph_unavailable`` (a TENANCY/access
     failure on the activation scorecard, activation_scorecard.py): this one
-    means only that the offload could not get a worker, so the request is
-    retryable. The code is body-only today — no client maps it yet (the REST
+    means only that the offload did not complete inside the lane's budget, so
+    the request may be retried. The code is body-only today — no client maps it yet (the REST
     write lane is consumed by agents/SDKs, which treat any 5xx as retryable);
     the dashboard renders a 503 on the auth lane, not this one.
     """
@@ -18364,10 +18368,10 @@ async def list_my_orgs(user: dict = Depends(get_current_user)):  # noqa: B008
     mode-aware SDK (Supabase → teams.graph_name derivation via the seam;
     registry → Graph nodes). The mode branch that keeps this endpoint off the
     registry in Supabase mode is NOT the callee's short-circuit — it is the
-    call-site branch in ``_graph_list_for`` — NOT the callee's short-circuit,
-    because ``_registry_anchor()`` binds eagerly, before ``graph_list`` could
-    consult the mode (#3718) — together with the lane-and-chunk choice on the
-    loop below (registry → ``_graph_offload``, Supabase → ``_cp_offload``)."""
+    call-site branch in ``_graph_list_for`` (#3718), together with the
+    lane-and-chunk choice made on the loop below, because ``_registry_anchor()``
+    binds eagerly and would be built before ``graph_list`` could consult the
+    mode."""
     memberships = await _user_memberships(user["user_id"])
     resolved = []
     for m in memberships:
