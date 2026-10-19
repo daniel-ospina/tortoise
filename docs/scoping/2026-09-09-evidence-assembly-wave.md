@@ -143,7 +143,9 @@ honest residual).
 Slice A landed on main as #2687 (commit 2935e17a7 → squash b3ed420d9):
 `package_evidence_pool` in tortoise/retrieval.py (two-pass collapse of a
 point + its own source chunks/turns into ONE slot, cross-item near-dupe
-dedup, value/verbatim-first ordering), tri-state eval arm
+dedup, D3 hit-type ordering — value/verbatim-first until #9092, since then:
+statement Points → turn Points → raw chunks, the value mark breaking ties
+inside a tier), tri-state eval arm
 `TORTOISE_LME_EVIDENCE_ASSEMBLY` (fail-safe OFF) + ask-lane
 `TORTOISE_ASK_EVIDENCE_ASSEMBLY`. 23 hermetic tests + adversarial
 regressions; docker suites green.
@@ -224,7 +226,7 @@ receipts this document's §7 names lived in one lane's `.worktrees/opt/
 
 | Leg | Statement | State |
 |---|---|---|
-| **T-1** structural | on a C2-shaped pool the shipped window admits **0** content-less slots; the assembly holds any one fact to `≤ 1 + max_verbatim` slots; **no** value-critical claim is lost; a duplicate-free pool returns byte-identically | **RUN** — measured on the shipped `assemble_context` / `package_evidence_pool`: pre-#2978 60.0% content-less + 40% of the window on ONE fact; post-#2978 **0** content-less but **100%** of the window on that one fact (i.e. #2978 alone does **not** bound the flood); assembly ON **2** slots + **4/4** value-critical claims |
+| **T-1** structural | on a C2-shaped pool the shipped window admits **0** content-less slots; the assembly holds any one fact to `≤ 1 + max_verbatim` slots; **no** value-critical claim is lost; a duplicate-free pool returns byte-identically **when it is already ordered by hit type** (D3 #9092 — a pool ranking a raw chunk above a statement is regrouped by tier, by design; statement-only pools are the receipt's control) | **RUN** — measured on the shipped `assemble_context` / `package_evidence_pool`: pre-#2978 60.0% content-less + 40% of the window on ONE fact; post-#2978 **0** content-less but **100%** of the window on that one fact (i.e. #2978 alone does **not** bound the flood); assembly ON **2** slots + **4/4** value-critical claims |
 | **T-2** end-to-end | same frozen reader/judge on the frozen 50 qids, `TORTOISE_LME_EVIDENCE_ASSEMBLY` **ON vs OFF**, reported as a delta against the **post-#2978 OFF arm** (never against C1's 0.780) | **NOT RUN** — re-homed to the end-to-end run in **#8486** (0 extra ingest: the arm is not in the run fingerprint). Recorded there, so the gate has an owner until it runs |
 
 The two arms are **not retired**: they are OFF everywhere (nothing ships on an

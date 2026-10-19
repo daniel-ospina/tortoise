@@ -218,9 +218,18 @@ def test_value_critical_claims_survive_the_collapse(receipt: dict) -> None:
     assert "leaves this arm's ids/order unchanged" in verdict["why"], verdict["why"]
 
 
-def test_marked_arm_orders_the_value_claims_first(receipt: dict) -> None:
-    """With the eval's read-time value marks the value-class packages lead —
-    the ordering contract, measured (4 value-first packages)."""
+def test_marked_arm_carries_the_value_class_census(receipt: dict) -> None:
+    """With the eval's read-time value marks, 4 packages carry the #1763/#1945
+    value class — a MARK CENSUS, not an ordering fact.
+
+    Renamed from ``test_marked_arm_orders_the_value_claims_first`` (#9092):
+    under D3 the hit TYPE picks the package tier and the mark only breaks ties
+    INSIDE a tier, and this receipt is order-blind by construction
+    (``_slot_census`` records counts + text containment, never an id order).
+    So this test cannot measure the ordering contract its old name asserted;
+    the ordering is pinned hermetically in
+    ``tests/test_evidence_assembly.py`` (tier key + the unmarked regroup).
+    """
     marked = receipt["arms"]["post_2978_assembly_value_marked"]
     assert marked["package_stats"]["value_first_packages"] == 4
     plain = receipt["arms"]["post_2978_assembly"]

@@ -4,9 +4,10 @@ HERMETIC tests (no graph, no model, no IO): the product pure function
 ``tortoise/retrieval.py::package_evidence_pool`` collapses a distilled
 point's OWN source raw chunks/turns into ONE package entry (point + ≤ one
 verbatim ref), dedups cross-item near-dupe statements restating the same
-fact to one slot, and orders the surviving packages value/verbatim-marked
-first with relevance order preserved within a tier. The docker-lane half
-(the eval arm markers on ``retrieve_for_question`` outcomes + the ask
+fact to one slot, and orders the surviving packages by D3 hit-type tier
+(statement Points, then turn Points, then raw chunks) with the #1763/#1945
+value mark and then relevance order preserved WITHIN a tier. The docker-lane
+half (the eval arm markers on ``retrieve_for_question`` outcomes + the ask
 lane knob default) is exercised by the existing docker suites
 (test_retrieval.py / test_eval_* / test_ask_retrieval_levers.py) — this
 file runs the IDENTICAL pure logic offline (the single-source-of-truth
@@ -29,9 +30,14 @@ Design contract under test (docs/scoping/2026-09-09-evidence-assembly-wave.md
         lane defaults the knob OFF; the OFF path never invokes packaging
         (byte-identical),
   * (e) no-dupe no-regression — on a duplicate-free pool with no value
-        marks the ON path returns the input BYTE-IDENTICAL (same ids,
-        same order) — flipping the arm ON cannot regress single-evidence
-        questions,
+        marks the ON path preserves pool order WITHIN each hit-type tier
+        (statement < turn < chunk), and returns the input BYTE-IDENTICAL
+        (same ids, same order) when the pool is ALREADY tier-ordered. It
+        does NOT preserve GLOBAL pool order: a source hit ranked above a
+        statement is regrouped below it by design (D3, #9092) — pinned by
+        ``test_unmarked_mixed_type_pool_regroups_by_hit_type``. So the
+        no-regression claim is tier-scoped, not "any duplicate-free pool
+        comes back untouched",
   * value safety — a same-frame DIFFERENT-VALUE claim ("cost 300" vs
         "cost 400") never collapses (the aggregation numerator Slice B
         protects),
@@ -356,8 +362,11 @@ def test_verbatim_marked_point_leads_window_over_higher_ranked_unmarked():
 
 
 def test_answer_string_class_orders_within_marked_tier():
-    """Marked packages (all value tiers) keep pool relevance order between
-    themselves; unmarked packages follow as a second tier."""
+    """D3 (#9092): the value mark is a tiebreak INSIDE the statement tier, not
+    a tier of its own — marked statements keep pool relevance order between
+    themselves and lead the UNMARKED statements (there is no separate
+    unmarked tier any more; every anchor here is a statement, so the hit-type
+    key is constant and the mark decides)."""
     pool = [
         _point("pt:low-verbatim", "the tea set from cousin Rachel cost 300",
                quote="cost 300 dollars"),
@@ -482,13 +491,17 @@ def test_ask_lane_knob_failsafe_off_by_default():
 
 
 # ── (e) no-dupe no-regression: the ON path is byte-identical when there is
-#      nothing to package ──────────────────────────────────────────────────
+#      nothing to package AND the pool is already tier-ordered ──────────────
 
 def test_no_duplicate_no_value_marks_returns_byte_identical_pool():
     """A duplicate-free pool with no value marks passes through BYTE-
-    IDENTICAL (same ids, same order, same dicts) — flipping the arm ON
-    cannot regress single-evidence questions (the hermetic no-regression
-    proof that would license a default-ON decision)."""
+    IDENTICAL (same ids, same order, same dicts) — flipping the arm ON cannot
+    regress single-evidence questions **whose pool is already tier-ordered**.
+    Scope (D3, #9092): the fixture is deliberately tier-aligned (all points,
+    ranks 0-2, ahead of the chunks, ranks 3-4), so the hit-type key is a no-op
+    here. A mixed pool IS regrouped by hit type — that is by design, and it is
+    measured by ``test_unmarked_mixed_type_pool_regroups_by_hit_type`` rather
+    than asserted away here."""
     pool = [
         _point("pt:1", "the road bike repairs cost 300 dollars",
                session="sA", date="2025-06-01"),
@@ -507,6 +520,36 @@ def test_no_duplicate_no_value_marks_returns_byte_identical_pool():
     assert stats["collapsed_duplicates"] == 0
     assert stats["verbatim_refs_kept"] == 0
     assert stats["package_items"] == stats["pool_items"]
+
+
+def test_unmarked_mixed_type_pool_regroups_by_hit_type():
+    """D3 (#9092): the hit TYPE is the PRIMARY key, so an UNMARKED pool that
+    lists a raw chunk above its statements is regrouped — the statements lead
+    in their own pool order, then the chunk — even though nothing collapsed
+    and no mark was supplied.
+
+    This is the deliberate reorder that SCOPES contract (e): ``mark_for=None``
+    (the ask-lane call) is not "pure collapse + ordering-by-rank" any more.
+    Measured with NO mark to confound it — every tier-crossing test above
+    carries a ``raw_chunk``/``verbatim`` mark, which cannot show this.
+    RED on the pre-#9092 ``(mark, rank)`` key, which returned the input order.
+    """
+    pool = [
+        _chunk("lme:0:c1", ["User: the garden fence needs repainting "
+                             "before the winter"]),
+        _point("pt:1", "the road bike repairs cost 300 dollars"),
+        _point("pt:2", "the tea set from cousin Rachel cost 300 dollars"),
+    ]
+    packaged, stats = package_evidence_pool(pool, mark_for=None)
+    # the statements lead IN POOL ORDER (rank 1 then 2), then the chunk (rank 0)
+    assert [h["id"] for h in packaged] == ["pt:1", "pt:2", "lme:0:c1"]
+    # a REGROUP, never a collapse: same items, nothing dropped, no refs kept
+    assert sorted(h["id"] for h in packaged) == ["lme:0:c1", "pt:1", "pt:2"]
+    assert stats["collapsed_duplicates"] == 0
+    assert stats["verbatim_refs_kept"] == 0
+    assert stats["package_items"] == stats["pool_items"]
+    # the value-mark census is 0 — the reorder is hit-type-only
+    assert stats["value_first_packages"] == 0
 
 
 def test_membership_is_a_subset_of_the_pool():

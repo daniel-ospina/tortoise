@@ -1847,8 +1847,19 @@ def _is_turn_point(h: dict) -> bool:
     ⚠️ DELIBERATELY BROADER than ``session_reinjection._TURN_SHAPE_FILTER``,
     which needs BOTH conjuncts. This OR classifies a non-turn ``event``
     point (the hosted demo/dashboard seed, which writes no ``is_episodic``)
-    as a turn; that is harmless for the collapse/slot decision here but it
-    is NOT the predicate the C4 fetch may use — see the constant for why.
+    as a turn. That is NOT harmless any more, and this docstring said it was
+    until #9092: D3 made the predicate an ORDERING key as well as a
+    collapse/slot key (``_package_type_tier``), so every ``point_kind ==
+    "event"`` hit — including that demo/dashboard seed — is filed in the
+    MIDDLE (turn) tier and ordered BEHIND every distilled statement. That is
+    intended: an ``event`` point is verbatim-event-shaped, not a distilled
+    claim, so it belongs with the turns rather than leading the window — and
+    the tier only DEMOTES it, never drops it (membership and the pool recall
+    surface are untouched). The conjunct predicate stays the rule for the C4
+    FETCH; the tier deliberately reuses this broad OR so the sort tier is the
+    exact complement of the pass-1/pass-2 partition (a narrower predicate
+    here would file a hit that pass 2 treats as a SOURCE in the statement
+    tier — see ``_package_type_tier``).
     """
     return (h.get("point_kind") == TURN_POINT_KIND
             or bool(_ROLE_PREFIX_RE.match(str(h.get("content") or ""))))
@@ -1964,7 +1975,18 @@ _PACKAGE_TYPE_CHUNK = 2
 def _package_type_tier(h: dict) -> int:
     """D3 (#2281): the anchor's HIT-TYPE tier — statement < turn Point <
     raw chunk. This is the primary ordering key; the anchor's pool rank never
-    crosses a tier boundary."""
+    crosses a tier boundary.
+
+    ⚠️ The turn leg reuses :func:`_is_turn_point`, which is deliberately
+    broader than the C4 fetch's conjunct predicate (any ``point_kind ==
+    "event"`` counts, including the hosted demo/dashboard seed that writes no
+    ``is_episodic``). That breadth is REQUIRED here: pass 2 partitions
+    ``sources`` with the same predicate, so a narrower tier predicate would
+    file a hit that pass 2 treats as a source in the STATEMENT tier and the
+    sort key would disagree with the package membership. The consequence —
+    a non-turn ``event`` point is demoted behind the statements — is
+    deliberate and stated on ``_is_turn_point``.
+    """
     if is_raw_chunk(h):
         return _PACKAGE_TYPE_CHUNK
     if _is_turn_point(h):

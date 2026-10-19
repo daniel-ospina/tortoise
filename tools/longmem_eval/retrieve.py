@@ -1350,7 +1350,10 @@ def retrieve_for_question(
     # (product, pure): a distilled point's OWN source raw chunks/turns
     # collapse into ONE package (point + ≤ one verbatim source ref), cross-
     # item near-dupe points restating the same fact dedupe to one slot, and
-    # the package orders exact-value/verbatim-marked items first. The pool
+    # the package orders by D3 hit-type tier — distilled statement Points,
+    # then verbatim source turn Points, then raw chunks — with the #1763/#1945
+    # value mark breaking ties INSIDE a tier (#9092; it no longer picks the
+    # tier, so a raw_chunk-marked chunk is ordered among chunks). The pool
     # recall surface (``ret["hits"]``, ``evidence_recall@k``) is UNCHANGED —
     # packaging only shapes what ``assemble_context`` hands the reader (the
     # measured context is ``reader_evidence@k`` / ``reader_surface@k``). The
