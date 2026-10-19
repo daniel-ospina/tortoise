@@ -670,10 +670,12 @@ def read_queue_health(repo: str):
             # The tool is invoked as `python3 tools/ci_check_repair.py`, so the
             # script's own directory (not the repo root) is sys.path[0].
             sys.path.insert(0, root)
-        from tools import ci_queue_health  # noqa: PLC0415 — optional dependency
+        # optional dependency
+        from tools import ci_queue_health
 
         return ci_queue_health.read_health(repo)
-    except Exception:  # noqa: BLE001 — a queue read must never fail the repair pass
+    except Exception:
+        # a queue read must never fail the repair pass
         return None
 
 
