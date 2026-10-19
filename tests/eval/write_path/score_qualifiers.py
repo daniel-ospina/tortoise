@@ -440,9 +440,23 @@ def evaluate_branches(delta_loss_pp: float | None, delta_precision_pp: float | N
             # labelling that cell "branch 1's condition was MET but SUPPRESSED"
             # asserts a route the rule's own inputs contradict, while overwriting
             # the route that IS available (branch 2 met, not certifiable).
+            # ⛔ THE FLAG AND THE FIRE MUST BE DISJOINT. With BOTH legs met, a clean
+            # narrative and a dirty raw receipt, the Δloss leg publishes a genuine
+            # (conservative) fire WHILE the P/R leg is withheld — and a flag that
+            # ignored `fires` made `verdict_label` announce "SUPPRESSED … not a
+            # finding" under a console line that had just printed "FIRES", and
+            # persisted `branch_1_fires: true` beside a "suppressed" verdict string.
+            # So: the flag is for a fire that did NOT happen; a withheld leg beside a
+            # published fire is recorded separately and named, never as suppression.
             "falsifier_suppressed_by_contamination":
-                (loss_leg and narrative_dirty)
-                or (pr_leg and (narrative_dirty or raw_dirty)),
+                (not fires) and ((loss_leg and narrative_dirty)
+                                 or (pr_leg and (narrative_dirty or raw_dirty))),
+            "withheld_legs": [
+                leg for leg, withheld in (
+                    ("delta_loss", loss_leg and narrative_dirty),
+                    ("precision_recall", pr_leg and (narrative_dirty or raw_dirty)),
+                ) if withheld
+            ],
             # WHICH arm withheld the fire. The two are not interchangeable: a
             # narrative receipt overstates the delta, a raw one can overstate the
             # PRECISION drop. One label for both would name a cause the run does not
@@ -461,6 +475,12 @@ def suppression_log(verdict: dict) -> list[str]:
     and :func:`verdict_label` are derived from the same ``falsifier_suppressed_by``
     field — and a test pins the text against the arm in both directions.
     """
+    if verdict.get("withheld_legs") and verdict["branch_1_fires"]:
+        return [
+            "  \u26a0\ufe0f branch 1 FIRES on the Δloss leg; the P/R leg was withheld (a receipt"
+            " is incomplete),",
+            "     so the fire does not rest on it. Not a suppression — the fire stands.",
+        ]
     if not verdict.get("falsifier_suppressed_by_contamination"):
         return []
     if verdict.get("falsifier_suppressed_by") == "raw":
@@ -487,6 +507,11 @@ def verdict_label(verdict: dict) -> str:
     records a route the flags contradict. This is the label a reader audits, so it
     must agree with the console, case by case.
     """
+    if verdict["branch_1_fires"]:
+        if verdict.get("withheld_legs"):
+            return ("the falsifier FIRES (branch 1, carried by Δloss; the P/R leg was "
+                    "withheld — a receipt is incomplete, so the fire does not rest on it)")
+        return "the falsifier FIRES (branch 1)"
     if verdict.get("falsifier_suppressed_by_contamination"):
         if verdict.get("falsifier_suppressed_by") == "raw":
             return ("branch 1's condition was MET but SUPPRESSED: the raw receipt is "
@@ -495,6 +520,8 @@ def verdict_label(verdict: dict) -> str:
         return ("branch 1's condition was MET but SUPPRESSED: the narrative receipt is "
                 "incomplete and would overstate the delta")
     if verdict["branch_1_fires"]:
+        # unreachable while the fire branch above returns first; kept as the
+        # explicit fallback so the ordering cannot silently change meaning
         return "the falsifier FIRES (branch 1)"
     if verdict.get("scoring_input_incomplete"):
         # Deliberately AFTER the fire: a fire carried by the Δloss leg is real

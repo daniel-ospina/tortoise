@@ -1403,10 +1403,21 @@ that is a different statement:
 - **The decisiveness of a repeat is itself unallocated.** A pre-registered single run is the run the rule was
   written against; a repeat is evidence, not a replacement. Had run 2 been clean, that would have been an
   argument for reopening the question — it is not, because it is not clean.
-- ⚠️ **The one directional bias we can name FLATTERS the narrative.** `wp07`'s truncated raw arm can only
-  drop claims, so raw's loss is **overstated** and Δ = narrative − raw is **under**stated: the true holdout
-  Δ is ≥ +10 pp, and one qualifier moving in that cell puts it at +20 pp — past branch 1. **So the parity
-  reading is not a conservative one; it is the most favourable reading the data allows.**
+- ⚠️ **The one incomplete receipt biases the two LEGS in OPPOSITE directions, so "the bias flatters the
+  narrative" was only half the story.** `wp07`'s truncated raw arm drops a tail of claims, and the two legs
+  react to that differently:
+  - **Δloss (pro-narrative).** Dropping claims can only remove opportunities to count a loss, so raw's loss
+    is **overstated** and Δ = narrative − raw is **under**stated: the true holdout Δ is ≥ +10 pp, and one
+    qualifier moving in that cell puts it at +20 pp — past branch 1.
+  - **Δprecision (contra-narrative).** Precision is a RATIO, so dropping a tail of *unmatched* claims
+    **raises** raw precision (78/119 = 65.5% → 78/109 = 71.6%), which **lowers** Δprecision (63.1 − 71.6 =
+    −8.5 pp) and pushes branch 1 the other way. That is why the scorer's contamination gate is one-sided per
+    LEG: only a dirty narrative receipt suppresses the loss leg, while the P/R leg is suppressed by a dirty
+    receipt in either arm.
+
+  **So the parity reading is not conservative, and it is not uniformly flattering either** — one channel
+  flatters the narrative and the other works against it, on the same receipt. The honest statement is that
+  the run cannot be certified in either direction, which is what the verdict records.
 
 **⛔ Why neither run can settle it — and the first reason is a defect in the REGISTRATION, not in the run:**
 
@@ -1432,8 +1443,9 @@ failure of the work** — it is the question, not the answer, that turned out to
 
 **What the two runs DO establish, stated at the strength the instrument supports:** *within the shipped shape
 (narrative + raw vs raw alone), the two arms are indistinguishable at this n* — pooled 52.0% vs 48.0% in
-run 2, 80.0% vs 48.0% in run 1, and **the one directional bias we can name favours the narrative** (the
-truncated raw arm can only overstate raw's loss, so Δ is understated). That is **not** evidence that a
+run 2, 80.0% vs 48.0% in run 1, and **the incomplete raw receipt biases the two legs in opposite directions**
+(its dropped tail overstates raw's loss, understating Δ, while the same dropped tail of unmatched claims raises
+raw's precision, overstating the precision drop — see the per-leg note above). That is **not** evidence that a
 narrative could replace the raw, and it is **not** an established "no degradation": the holdout's bound subset
 is +16.7 pp the wrong way.
 Given the instrument, **neither parity nor superiority is established.** §S2.4's raw-fact layer and §10's

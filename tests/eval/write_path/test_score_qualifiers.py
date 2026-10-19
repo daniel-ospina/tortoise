@@ -249,6 +249,23 @@ def test_a_partial_raw_receipt_cannot_fire_branch_1_off_the_precision_leg():
     assert loss_fire["branch_1_fires"] is True
     assert loss_fire["falsifier_suppressed_by_contamination"] is False
 
+    # ⛔ BOTH legs met, clean narrative, dirty raw: the Δloss fire is GENUINE and
+    # must publish — the flag describes a fire that did NOT happen, so it must be
+    # False here even though the P/R leg was withheld. Otherwise the label says
+    # "SUPPRESSED … not a finding" under a console line that just printed "FIRES",
+    # and `branch_1_fires: true` is persisted beside a suppressed verdict.
+    both = evaluate_branches(20.0, -15.0, 0.0, contaminated=dirty_raw)
+    assert both["branch_1_fires"] is True, "a conservative Δloss fire was discarded"
+    assert both["falsifier_suppressed_by_contamination"] is False, (
+        "the suppression flag is not disjoint from the fire")
+    assert both["withheld_legs"] == ["precision_recall"], both["withheld_legs"]
+    label = verdict_label(both)
+    assert label.startswith("the falsifier FIRES"), label
+    assert "SUPPRESSED" not in label
+    log = "\n".join(sq.suppression_log(both))
+    assert "WAS SUPPRESSED" not in log, log
+    assert "withheld" in log and "the fire stands" in log, log
+
 
 def test_the_console_printer_names_the_arm_that_suppressed_the_fire():
     """The LOG must agree with `verdict_label`, not just the returned dict.
