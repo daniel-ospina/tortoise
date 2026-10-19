@@ -1955,8 +1955,15 @@ def select(changed_files: list[str], event: str, manifest: dict,
     artifact schema (`.ci-selection/selection.json`) and is asserted verbatim up
     and down this suite, so a reason field inside it would be a migration; and
     the reason must not be re-derived by the caller, which is how the
-    diagnostic would drift from the decision it describes (#9109).
+    diagnostic would drift from the decision it describes (#9109). It is
+    CLEARED on entry, so a caller may reuse one dict across calls.
     """
+    if explain is not None:
+        # A caller may reuse one dict across calls; the reason it holds is only
+        # ever about THIS call (review P3). Nothing sets a reason outside the
+        # unknown branch, so clearing here makes "empty unless a fail-closed
+        # reason was recorded" true by construction.
+        explain.clear()
     slow = set(manifest.get("slow_files", []))
     # #1371: slow files run ONLY in the test-slow job — never in the fast
     # gate's tier-1/tier-2 selections (they are already covered there).
@@ -4207,24 +4214,64 @@ def _warn_unknown_paths(explain: dict) -> None:
     keeps the argument contract, keeps stdout byte-identical, and makes the
     fail-closed answer SELF-DESCRIBING instead. A caller that ignores stderr
     still gets exactly the selection it got before.
+
+    WHAT THE FIRST VERSION GOT WRONG (review P1, fixed here): it appended the
+    list-vs-path hint to EVERY unknown path that happened to exist on disk. But
+    an unknown path is mostly a LEGITIMATE diff — 137 of the 3,634 tracked paths
+    reach FULL through this branch alone (`.github/workflows/ci.yml`, `uv.lock`,
+    `tools/*.py`, `Makefile`, `.mergify.yml`, …), and every added or modified
+    path in a checked-out PR is an existing file. So the hint fired on nearly
+    every real fail-closed selection and asserted a malformed invocation that
+    had not happened — a new plausible-but-false reading, which is the class
+    this issue is about. The hint is now confined to the shape an operator's
+    list file actually takes: an existing file OUTSIDE the checkout (`/tmp/c.txt`
+    in the measured case). A repo path is a changed path by definition, so the
+    generic explanation is all it gets.
     """
     if explain.get("reason") != "unknown-paths":
         return
     unknown = explain.get("unknown") or []
     print(
         f"ci_selection: FULL matrix because {len(unknown)} changed path(s) are "
-        "unknown to every SOURCE_PATTERN — fail-closed by design (scope v5 "
-        "decision 1), NOT a statement that this diff touches everything:",
+        "unknown to every SOURCE_PATTERN — fail-closed by design (the unknown "
+        "branch returns _full_selection(); see this module's docstring), NOT a "
+        "statement that this diff touches everything:",
         file=sys.stderr)
+    outside: list[str] = []
     for c in unknown:
-        exists = "  [this path EXISTS — if it is a file CONTAINING the list, " \
-                 "pass its contents instead]" if Path(c).is_file() else ""
-        print(f"  - {c}{exists}", file=sys.stderr)
-    print(
-        "--changed-files takes the newline-separated LIST, not a path to it: "
-        "use `--changed-files -` with the list on stdin, or pass it inline "
-        "(#9109).",
-        file=sys.stderr)
+        if _is_outside_repo_file(c):
+            outside.append(c)
+        print(f"  - {c}", file=sys.stderr)
+    if outside:
+        print(
+            "  ^ file(s) OUTSIDE the checkout. `--changed-files` takes the "
+            "newline-separated LIST, not a path to it — if one of these is a "
+            "file CONTAINING the list, pass its contents instead "
+            "(`--changed-files -` with the list on stdin) (#9109).",
+            file=sys.stderr)
+
+
+def _is_outside_repo_file(c: str) -> bool:
+    """True when *c* is an existing file OUTSIDE the checkout.
+
+    That is the shape of an operator's list file (`/tmp/c.txt`), and the only
+    evidence this tool has that the argument might have been meant as a path to
+    a list. A repo-relative path is a changed path whatever else it is, so it is
+    deliberately NOT eligible — that discrimination is the whole fix for the
+    review P1 above.
+    """
+    p = Path(c)
+    if not p.is_file():
+        return False
+    # abspath, NOT resolve(): a repo-relative symlink that points outside the
+    # checkout is still a repo path, and `resolve()` would relabel it as an
+    # outside file and hint at it. The question here is where the PATH is, not
+    # where its target is.
+    try:
+        Path(os.path.abspath(p)).relative_to(Path(os.path.abspath(REPO)))
+    except ValueError:
+        return True
+    return False
 
 
 def main() -> int:
