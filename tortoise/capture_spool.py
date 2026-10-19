@@ -49,6 +49,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import NamedTuple
 
 from tortoise.session_attribution import sanitize_attribution_field
 
@@ -68,30 +69,55 @@ __all__ = [
     "PostOutcome",
     "Snapshot",
     "backoff_delay",
+    "capture_health_line",
     "capture_key",
+    "capture_status_path",
     "classify_failure",
     "clear_terminal_failure",
     "content_digest",
+    "count_pending_captures",
     "entry_key",
     "flush_spool",
     "is_probe_session_id",
     "is_spooled",
     "list_spool_metas",
+    "quota_refusal",
+    "read_capture_status",
     "read_discards",
     "read_spool_meta",
     "read_spool_turns",
     "remove_spool_entry",
     "reset_terminal_entries",
     "spool_dir",
+    "write_capture_status",
     "write_spool_entry",
 ]
 
+# The spool is CAPPED, not sampled (agent-infra#2100): these two ceilings are what bound the
+# per-turn synchronous prune, so a backlogged spool can never make a turn's own
+# work grow without limit. They are deliberately NOT lowered to the measured
+# incident's size — a blocked box's captures are the user's data, and evicting
+# them to make a number look better is the data loss the retry policy exists to
+# avoid. Both legs share the directory and a parity test pins the pair equal.
 SPOOL_MAX_ENTRIES = 1000
 SPOOL_MAX_TOTAL_BYTES = 256 * 1024 * 1024
 # Must exceed the SERVER's legal maximum, or a legal capture is discarded as
 # oversized: 500 turns x 5000 chars x up to 4 UTF-8 bytes/char ~= 10 MB, plus
 # the envelope. (A 4 MiB ceiling silently discarded legal CJK sessions.)
 SPOOL_MAX_ENTRY_BYTES = 16 * 1024 * 1024
+#: The durable per-box capture STATUS record, in the spool ROOT (agent-infra#2100).
+#: ONE file for BOTH legs — the Pi leg (`SPOOL_STATUS_FILE`) writes and reads this
+#: same name with the same shape, and both legs share one spool directory, so a
+#: second record would let the two surfaces of one box disagree about whether it
+#: is blocked (the false PASS agent-infra#2100 exists to remove).
+CAPTURE_STATUS_FILE = "status.json"
+#: The server's machine-readable 402 categories. #4614 made the 402 carry one
+#: precisely because capture clients are FORBIDDEN from prose-matching the
+#: message; the Pi leg names the same two (`QUOTA_EXCEEDED_CODE`,
+#: `COHORT_COST_CAP_CODE`), so the operator reads the same cause from either.
+QUOTA_EXCEEDED_CODE = "quota_exceeded"
+COHORT_COST_CAP_CODE = "cohort_cost_cap"
+_REFUSAL_CODES = (QUOTA_EXCEEDED_CODE, COHORT_COST_CAP_CODE)
 RETRY_BASE_SECONDS = 30
 RETRY_MAX_SECONDS = 6 * 60 * 60
 # `attempts` is clamped to this before `backoff_delay` computes 2**(n-1): the
@@ -231,6 +257,19 @@ class FlushSummary:
     # reaching the silent steady state `held_by_backoff` was added to close
     # (#4714); the data-loss consequence of deletion is what #7708 closes.
     terminal: int = 0
+    #: agent-infra#2100: how many refusals this pass identified as QUOTA refusals
+    #: (402, or a body carrying one of the server's 402 categories). The
+    #: difference between "the network is flaky" and "this box's graph allowance
+    #: is exhausted": only the second keeps refusing until a human acts, which is
+    #: what makes the backlog a named ``capture: BLOCKED (n queued, 402 quota)``
+    #: state rather than a growing silent queue.
+    quota_refusals: int = 0
+    #: agent-infra#2100: the IDENTITY of the last quota refusal this pass saw
+    #: (``{"status", "code", "detail"}``) — the count above says HOW MANY, this
+    #: says WHICH cause, which is what the durable record and the BLOCKED line
+    #: need (the org's spend cap must not read as a plan quota). Mirrors the Pi
+    #: leg's ``summary.quota``.
+    quota: dict | None = None
     discarded: list[dict] = field(default_factory=list)
     outcomes: dict[str, PostOutcome] = field(default_factory=dict)
 
@@ -428,6 +467,34 @@ def classify_failure(status: int | float | None, detail: str = "") -> str:
     if status == 409:
         return "retry"
     return "permanent"
+
+
+def quota_refusal(outcome: PostOutcome) -> dict | None:
+    """The QUOTA refusal this failed POST represents, or ``None`` (agent-infra#2100).
+
+    :func:`classify_failure` deliberately keeps 402 TRANSIENT (the identical
+    capture succeeds once a node frees) — that verdict is unchanged, and this is
+    the OTHER question, asked for REPORTING: a 402 (or a body carrying one of the
+    server's 402 categories — ``quota_exceeded`` for the plan allowance,
+    ``cohort_cost_cap`` for the org's spend cap) is the ORGANIZATION's refusal,
+    not this payload's. Naming it is what turns a silent backlog into
+    ``capture: BLOCKED (n queued, 402 quota)``.
+
+    The STATUS (and the server's own machine-readable CODE) is the contract,
+    never the message: #4614 made the 402 carry a category precisely because
+    the client ships independently of the server's prose.
+    """
+    detail = outcome.detail if isinstance(outcome.detail, str) else ""
+    code = next((c for c in _REFUSAL_CODES if c in detail), None)
+    status = outcome.status
+    if status != 402 and code is None:
+        return None
+    refusal: dict = {"status": status if status is not None else 402}
+    if code is not None:
+        refusal["code"] = code
+    if detail:
+        refusal["detail"] = detail
+    return refusal
 
 
 def backoff_delay(attempts: int) -> int:
@@ -1489,6 +1556,236 @@ def prune_spool(root: Path, keep_session_id: str | None, bounds: Bounds = DEFAUL
     return discards
 
 
+# ── Per-box capture health (agent-infra#2100) ────────────────────────────────────────
+
+
+def _entry_is_filed(meta: dict) -> bool:
+    """Whether this entry's CURRENT content and lane are already on the wire.
+
+    ONE predicate: the skip path and the health count must agree about what
+    "queued" means, or the health line reports captures that the drain would
+    already skip (or omits ones it will retry). Both sides go through the SAME
+    normalisers the payload uses, so a stored falsy/foreign value can never
+    disagree with the wire (see #7708 and #4714 amplification).
+    """
+    return bool(
+        meta.get("filed_key")
+        and meta.get("filed_key") == meta.get("capture_key")
+        and _normalise_lane(meta.get("filed_lane"))
+        == _normalise_lane(meta.get("capture_lane"))
+        and meta.get("filed_stamp") == _finite_instant(meta.get("client_captured_at"))
+    )
+
+
+def capture_status_path(root: Path) -> Path:
+    """The durable per-box capture status record, in the spool ROOT.
+
+    In the root (never in ``entries/``) so it is neither an entry nor counted
+    against the byte ceiling — the same placement the Pi leg uses, because both
+    legs share one directory and one file.
+    """
+    return root / CAPTURE_STATUS_FILE
+
+
+def read_capture_status(root: Path) -> dict | None:
+    """The last recorded per-box status, or ``None`` when there is no usable one.
+
+    A TOTAL read: absent, unreadable, or malformed is "nothing recorded", never
+    a crash — health checks must be able to answer "no record" rather than
+    failing on a torn file. A record we cannot UNDERSTAND is not a marker
+    either; :func:`capture_health_line` re-validates every field it trusts.
+    """
+    try:
+        record = json.loads(capture_status_path(root).read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def write_capture_status(root: Path, record: dict) -> None:
+    """Best-effort durable write: a health write must never break a flush."""
+    with contextlib.suppress(OSError, TypeError, ValueError):
+        _atomic_write(capture_status_path(root),
+                      json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+
+
+def count_pending_captures(root: Path) -> int | None:
+    """Pending captures on this box — what a drain would still try, or ``None``.
+
+    "Pending" is what the drain would still attempt: an entry that is neither
+    TERMINAL (kept forever, never retried — #7708) nor FILED (the server already
+    accepted exactly this content; the entry is kept, not unlinked). Counting
+    raw metas counts OCCUPANCY: on a normal box every filed session stays in
+    ``entries/`` until the ceiling evicts it, so an occupancy count reads
+    ``DRAINING (n)`` on a perfectly healthy box and can never self-clear a stale
+    ``blocked`` marker.
+
+    ``None`` means the spool could not be LISTED — ``EACCES``, ``ENOTDIR``,
+    ``EMFILE``. An unreadable directory is NOT an empty one: folding the two
+    together is how a box that could file nothing came to report
+    ``capture: OK``, the false PASS agent-infra#2100 removes (and it is the same
+    rule the drain's own ``DISCARD_SPOOL_UNREADABLE`` follows).
+
+    Deliberately NOT :func:`list_spool_metas`: that one is the drain's scanner
+    and REPAIRS as it reads (recording discards, quarantining what it cannot
+    parse). A health line printed on every drain must not mutate the spool it
+    describes.
+    """
+    try:
+        names = os.listdir(_entries_dir(root))
+    except FileNotFoundError:
+        # A fresh install: nothing has been captured, which IS empty.
+        return 0
+    except OSError:
+        return None
+    pending = 0
+    for name in names:
+        if not name.endswith(".meta.json"):
+            continue
+        try:
+            meta = json.loads((_entries_dir(root) / name).read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError):
+            # A meta we cannot read is UNKNOWABLE, not absent: count it
+            # conservatively (it may be waiting) and leave the repair to the
+            # drain's own scan.
+            pending += 1
+            continue
+        if not isinstance(meta, dict):
+            pending += 1
+            continue
+        if _terminal_marker(meta) is not None:
+            continue
+        if _entry_is_filed(meta):
+            continue
+        pending += 1
+    return pending
+
+
+class CaptureHealth(NamedTuple):
+    """The per-box answer: the state, the count, the refusal, and the LINE."""
+
+    state: str
+    queued: int
+    status: int | None
+    line: str
+
+
+def _refusal_label(reason: object) -> str:
+    """The cause word in the ``BLOCKED`` line.
+
+    ``quota`` is the plain-plan-allowance reading and the string operator docs
+    and agent-infra#2100's acceptance name, so an unlabelled 402 stays exactly that. A
+    DIFFERENT recorded category is named as itself: the server's 402 has two
+    categories and reading the org's SPEND CAP as "out of plan allowance" sends
+    the owner to buy a plan that cannot lift it (``tortoise/cohort_cost.py``).
+    """
+    if not reason or reason in (QUOTA_EXCEEDED_CODE, "402"):
+        return "quota"
+    return str(reason)
+
+
+def capture_health_line(root: Path, *, api_key: str | None = None) -> CaptureHealth:
+    """The ONE per-box health line (agent-infra#2100), byte-identical to the Pi leg's.
+
+    An operator (or `tortoise doctor`, or whoever reads the lane log after it
+    produced 259 B) must be able to tell a BLOCKED box from an idle one, and the
+    two legs must not disagree about the box they share — a checker may run
+    either, so the spelling is pinned by a cross-leg parity test that executes
+    the real TypeScript against this same directory.
+
+    ``OK`` / ``DRAINING`` / ``BLOCKED`` / ``INACTIVE`` / ``UNREADABLE`` are five
+    DIFFERENT answers on purpose: "nothing to file", "waiting", "refused",
+    "capture is off", and "could not look" must never read alike.
+
+    ``api_key`` is a TRI-state: ``None`` (the caller cannot know — do not claim
+    INACTIVE), ``""`` (this box has no credential, so nothing can ever file:
+    the backlog is reported WITH that cause), or a non-empty placeholder.
+
+    ``queued`` is recomputed from the spool on every call, and the recorded
+    marker is trusted only while entries are still waiting — so a marker left
+    behind by a quota that has since lifted, or by the Pi leg draining the same
+    directory, cannot keep claiming a block. Nothing pending is always ``ok``,
+    and the marker is CLEARED when that is observed: a one-way latch that
+    reported ``BLOCKED`` forever on a box that was filing perfectly is how an
+    operator learns to ignore the line.
+    """
+    pending = count_pending_captures(root)
+    if pending is None:
+        return CaptureHealth(
+            "unreadable", 0, None,
+            f"capture: UNREADABLE (cannot list {_entries_dir(root)})")
+    queued = pending
+    recorded = read_capture_status(root)
+    if queued == 0 and recorded is not None and recorded.get("state") != "ok":
+        # Self-healing: the block is over (or the other leg filed everything).
+        # Never keep a stale verdict on disk that no evidence supports.
+        recorded = {"version": 1, "state": "ok", "queued": 0,
+                    "updated_at": _now_iso()}
+        write_capture_status(root, recorded)
+    if api_key == "":
+        # The count is NOT dropped here: a keyless box is exactly the box whose
+        # spool grows forever (nothing can file it), so the backlog stays on the
+        # line that explains why.
+        return CaptureHealth(
+            "inactive", queued, None,
+            f"capture: INACTIVE (no TORTOISE_API_KEY, {queued} queued)")
+    status = recorded.get("status") if recorded is not None else None
+    blocked_status = (
+        status
+        if (recorded is not None and recorded.get("state") == "blocked"
+            and isinstance(status, int) and not isinstance(status, bool)
+            and status > 0)
+        else None
+    )
+    if blocked_status is not None and queued > 0:
+        return CaptureHealth(
+            "blocked", queued, blocked_status,
+            f"capture: BLOCKED ({queued} queued, {blocked_status} "
+            f"{_refusal_label(recorded.get('reason'))})")
+    if queued > 0:
+        return CaptureHealth("draining", queued, None,
+                             f"capture: DRAINING ({queued} queued)")
+    return CaptureHealth("ok", 0, None, "capture: OK (0 queued)")
+
+
+def _record_capture_status(root: Path, summary: FlushSummary) -> None:
+    """Persist what this flush OBSERVED (agent-infra#2100).
+
+    The record is the LAST refusal a leg saw, never a permanent verdict, so only
+    two things are written:
+
+    * a QUOTA refusal turns the box ``blocked`` (durable, so the NEXT process —
+      every lane is one — does not have to re-POST to learn why), and
+    * any pass that ATTEMPTED a POST and was not refused for quota SUPERSEDES
+      it: without that, a box that was quota-blocked yesterday and is now
+      ``ECONNREFUSED``/500ing keeps telling its operator to buy points — the
+      same misdiagnosis as agent-infra#2100 in mirror image.
+
+    A pass that attempted nothing writes nothing: an entry inside its backoff
+    window was not retried, so the earlier refusal is still the last thing known
+    about it. ``draining``/``inactive``/``unreadable`` are DERIVED from the
+    spool and the credential on each line, never stored.
+    """
+    quota = summary.quota
+    if quota is not None:
+        status = quota.get("status")
+        record: dict = {
+            "version": 1,
+            "state": "blocked",
+            "reason": quota.get("code") or (str(status) if status is not None else None),
+            "updated_at": _now_iso(),
+        }
+        if status is not None:
+            record["status"] = status
+        detail = quota.get("detail")
+        if isinstance(detail, str) and detail:
+            record["detail"] = detail[:500]
+        write_capture_status(root, record)
+    elif summary.attempted > 0:
+        write_capture_status(
+            root, {"version": 1, "state": "ok", "updated_at": _now_iso()})
+
+
 # ── Replay ─────────────────────────────────────────────────────────────────
 
 PostFn = Callable[[dict], PostOutcome]
@@ -1547,6 +1844,11 @@ def flush_spool(
                     now_ms + backoff_delay(retry_meta["attempts"]) * 1000)
                 _write_meta(root, retry_meta)
             summary.deferred += 1
+    # agent-infra#2100: record the box's state durably AFTER the loop, so every reader (the
+    # drain line, `tortoise session health`, `pr-doctor`) sees the same answer
+    # whether or not it observed the failing POST itself.
+    with contextlib.suppress(Exception):
+        _record_capture_status(root, summary)
     return summary
 
 
@@ -1651,26 +1953,16 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         # "not terminal" so a corrupt value can never strand the entry (#8531).
         summary.terminal += 1
         return
-    if (meta.get("filed_key") and meta.get("filed_key") == meta.get("capture_key")
-            # #7708: BOTH sides through ONE normaliser. A stored falsy lane
-            # (`""`/`0`/`false`/`[]`) normalises to the SAME `None` the payload
-            # drops, so the skip agrees with the wire; comparing the raw value
-            # made `"" != None` and the entry re-POSTed its whole transcript on
-            # EVERY drain, forever (#4714).
-            and _normalise_lane(meta.get("filed_lane"))
-            == _normalise_lane(meta.get("capture_lane"))
-            # Compared against the SAME normalisation the payload uses: the wire
-            # carries `_finite_instant(...)`, so comparing the RAW disk value here
-            # can never match for a value the guards refuse — and since the drain
-            # never rewrites the meta, such an entry would re-POST its full
-            # transcript on EVERY drain, forever (#4714 amplification).
-            and meta.get("filed_stamp") == _finite_instant(meta.get("client_captured_at"))):
+    if _entry_is_filed(meta):
         # #3516 §B: `filed_key` is CONTENT-derived, so on its own it says the
         # content was delivered — not that the LANE was. An entry filed
         # lane-less and then upgraded must be re-posted, or the lane is
         # stranded and a working hook reads as not-live. `filed_lane` records
         # the lane the 2xx actually carried; entries filed before this field
         # existed have neither lane nor filed_lane, so they compare equal.
+        # #7708: BOTH sides go through ONE normaliser (see `_entry_is_filed`),
+        # so a stored falsy lane agrees with the `None` the payload drops
+        # rather than re-POSTing the whole transcript on every drain.
         summary.skipped += 1
         return
     window = _backoff_ms(meta)
@@ -1875,10 +2167,18 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
             now_ms,
         ))
         return
+    quota = quota_refusal(outcome)
+    if quota is not None:
+        # agent-infra#2100: a QUOTA refusal is NAMED, not merely counted as ``deferred``. A 402
+        # is the org's graph allowance (or the server's own 402 category) — a
+        # state no amount of retrying clears, so it is what turns the backlog
+        # into ``capture: BLOCKED (n queued, 402 quota)``.
+        summary.quota = quota
+        summary.quota_refusals += 1
     # Re-read before the backoff write-back for the same reason as the CAS
     # above: never clobber newer turns written while the POST was in flight.
     pending = read_spool_meta(root, sid) or meta
-    if pending.get("filed_key") and pending.get("filed_key") == pending.get("capture_key"):
+    if _entry_is_filed(pending):
         # A CONCURRENT flush already filed this exact content while our POST was
         # in flight. Re-arming the backoff here would attach a window to content
         # that was never refused — and since `write_spool_entry` now CARRIES the
