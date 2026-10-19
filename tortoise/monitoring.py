@@ -1836,7 +1836,10 @@ CONTROL_PLANE_OAUTH_BACKLOG = 64
 #: Occupancy disclosure (the #3669-cycle-2 "not hidden" rule): each WRITE
 #: consumes TWO sequential submissions here (the quota count, then the SDK
 #: open); the REST ``/v1/events`` and ``/v1/dream`` handlers' SDK open also
-#: submits here. The write-triggered ``_dream_worker`` does NOT (it builds
+#: submits here, and so does the org switcher's chunked graph LISTING (#3718:
+#: one submission per ``_GRAPH_LIST_OFFLOAD_CHUNK`` orgs, on the cached
+#: ``_registry_anchor()`` handle). The write-triggered ``_dream_worker`` does
+#: NOT (it builds
 #: inside the ``_DREAM_EXECUTOR`` item). The graph-bound ``_data_sdk`` path
 #: reaches a blocking CONTROL-plane PostgREST read (``_assert_graph_owned`` ->
 #: ``get_control_plane().query("graphs")``), so a control-plane stall parks a

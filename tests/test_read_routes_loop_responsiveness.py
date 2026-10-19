@@ -658,12 +658,22 @@ def test_org_switcher_listing_is_chunked_and_loses_no_row(client, monkeypatch):
     assert response.status_code == 200, response.text[:300]
     expected_chunks = -(-(MULTI_ORG_COUNT + 1)
                         // ha_mod._GRAPH_LIST_OFFLOAD_CHUNK)
-    assert len(ops) == expected_chunks, (
-        f"the listing used {len(ops)} submission(s) for "
+    # The expectation is derived from the constant under test, so it moves WITH
+    # it — assert the PREMISE too, or raising the constant to "bigger than any
+    # real user" would make this pin certify the very unbounded submission it
+    # exists to forbid (expected == actual == 1).
+    assert expected_chunks >= 2, (
+        f"this pin's premise is broken: {MULTI_ORG_COUNT + 1} orgs span only "
+        f"{expected_chunks} chunk(s) of {ha_mod._GRAPH_LIST_OFFLOAD_CHUNK} — "
+        f"raise MULTI_ORG_COUNT above the chunk size (or lower the chunk "
+        f"size) so the loop is actually walked (#3718)")
+    listings = ops.count("graph_list")
+    assert listings == expected_chunks, (
+        f"the listing used {listings} submission(s) for "
         f"{MULTI_ORG_COUNT + 1} healthy orgs, expected {expected_chunks} "
         f"chunk(s) of {ha_mod._GRAPH_LIST_OFFLOAD_CHUNK} — one unbounded "
         f"submission puts an uncapped fan-out under a single wait bound "
-        f"(#3718)")
+        f"(#3718); ops seen: {ops!r}")
 
     rows = response.json()
     assert len(rows) == MULTI_ORG_COUNT + 1, (
@@ -869,12 +879,6 @@ _KNOWN_INLINE_ROUTE_RESIDUAL = frozenset({
     "list_packs", "list_trash", "rescind_invite", "search",
     "session_context", "topic_summary", "upload_pack_manifest",
     "volunteer_context",
-    # #3718: `list_my_orgs` (GET /v1/organizations, the switcher every client
-    # reads on app load) BURNED DOWN ITS LISTING HALF — the per-org graph
-    # listings run off the loop, chunked, so the route left this residual. Its
-    # membership scan and per-org Team read remain inline through helpers that
-    # are declared residual themselves (#2446).
-    # `test_org_switcher_listing_runs_off_the_loop` is the behavioural pin.
 })
 
 #: Non-route async bodies with inline sync FalkorDB I/O — the per-request auth

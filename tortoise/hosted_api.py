@@ -8164,6 +8164,19 @@ async def _graph_offload(fn, *, op: str, timeout: float | None = None):
     ``auth`` pool — that is the PostgREST lane's seam, and a bound miss there
     returns the sign-in 503 copy.
 
+    ONE CALLABLE per submission, but the callable may run a BOUNDED fan-out
+    (#3718's org switcher submits one callable that lists several orgs). The
+    wait bound covers the WHOLE submission, not one round trip, so an uncapped
+    fan-out is out of contract: a caller that fans out must chunk it (see
+    ``_GRAPH_LIST_OFFLOAD_CHUNK``), or a healthy-but-large fan-out will cross
+    the bound and its worker will be abandoned still holding a pool slot.
+
+    A mode-agnostic call keeps THIS lane's bound and ``_graph_unavailable``
+    copy even when the callee short-circuits to PostgREST (``graph_list`` on a
+    Supabase deployment) — one op, one bound, one copy, accepted rather than
+    split per mode, because the call site cannot know the mode without asking
+    the same question the callee asks.
+
     Thin hosted-side wrapper over the #3498 seam (``_cp_offload`` ->
     ``monitoring.run_control_plane_call``) on the dedicated ``graph`` pool.
     The off-loaded unit is a graph helper (``_data_sdk``'s connect / embedded
@@ -18205,8 +18218,15 @@ async def _membership_org(user_id: str, org_id: str) -> dict | None:
 
 
 def _graph_list_for(org_id: str) -> list[dict]:
-    """One org's graph listing (#3718: blocking registry/PostgREST read)."""
-    return _make_sdk(namespace="registry").graph_list(org_id)
+    """One org's graph listing (#3718: blocking registry/PostgREST read).
+
+    Uses the process-lifetime ``_registry_anchor()``, not a fresh
+    ``_make_sdk(namespace="registry")``: the anchor is the documented pattern
+    for registry reads (#1607 — a fresh handle is GC'd with close-on-GC +
+    SHUTDOWN NOSAVE), and it avoids paying ``_ensure_registry_indexes``' 9
+    ``CREATE INDEX`` statements once per org while an offload slot is held.
+    """
+    return _registry_anchor().graph_list(org_id)
 
 
 #: Orgs per ``_graph_offload`` submission when the switcher lists graphs.
@@ -18214,6 +18234,7 @@ def _graph_list_for(org_id: str) -> list[dict]:
 #: rather than left at "every org the user belongs to" — see the chunking
 #: rationale in ``list_my_orgs`` (#3718).
 _GRAPH_LIST_OFFLOAD_CHUNK = 8
+
 
 async def _org_node(org_id: str) -> dict | None:
     """Org node/properties for session endpoints (E5/E6/E7/E8).
@@ -18334,6 +18355,16 @@ async def list_my_orgs(user: dict = Depends(get_current_user)):  # noqa: B008
     # large-but-healthy fan-out would cross it — and a bound miss abandons a
     # worker that keeps holding its graph-pool slot until it returns (CPython
     # #87185). Chunks keep each submission's fan-out small and predictable.
+    #
+    # WHY NOT `asyncio.to_thread` (the read-half house style), reviewed and
+    # declined: the module's own seam note records that to_thread's SHARED
+    # default executor is the starvation path (#3060, `_submit_off_loop`), and
+    # the graph lane's bound is the truth-telling one for a graph read
+    # (``_graph_unavailable``, not the sign-in copy). The cost concern that
+    # motivated the objection — a chunk holding one of eight graph slots while
+    # it works — is answered at its source instead: `_graph_list_for` uses the
+    # CACHED ``_registry_anchor()``, so a submission is N cheap reads, not N
+    # handle builds plus 9 ``CREATE INDEX`` each.
     healthy = [m["org_id"] for m, org in resolved
                if org.get("suspended_at") is None]
     graphs_by_org: dict[str, list[dict]] = {}
