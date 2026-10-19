@@ -81,7 +81,14 @@ import time
 import uuid
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[3]          # repo root
+# ``parents`` is indexed from the FILE: [0]=probes, [1]=7949-capstone,
+# [2]=evidence, [3]=docs, [4]=<repo>. ``parents[3]`` is ``<repo>/docs`` — the
+# off-by-one was masked only because every git call is subdirectory-safe, and
+# any later ``ROOT / <repo-relative path>`` join (the shape
+# ``capstone_verdict_check.check`` already uses with ``repo / ev_path``) would
+# silently resolve under ``docs/``. Pinned by
+# tests/test_7949_capstone_verdict_check.py::test_root_is_the_repo_root.
+ROOT = Path(__file__).resolve().parents[4]          # repo root
 EVIDENCE_DIR = Path("docs/evidence/7949-capstone")
 DEFAULT_PREREG_ARTIFACT = EVIDENCE_DIR / "preregistration.json"
 
@@ -194,33 +201,6 @@ def e4_receipt(stats: dict) -> dict:
         "verbatim_reemissions": merge.get("verbatim_reemissions"),
         "added_by_s4": merge.get("added_by_s4"),
         "denominator_is_the_4_edge_defect": den == 4,
-    }
-
-
-def e3_census_from_rows(rows: list[dict]) -> dict:
-    """E3's census over a graph read: does every derived node carry its anchor?
-
-    The denominator is EVERY derived node the run wrote (``:Point``,
-    ``:Object``, ``:Event``) — the anchor's scope is all three (#5199; the
-    `extractedFrom`/`references` split in STORAGE-ARCHITECTURE.md §9.6). A node
-    whose ``sourceVersion`` is null/absent is unanchored, and ONE unanchored
-    derived node fails the criterion: "are these about the content we now
-    hold?" is a question about every node, not about the average.
-    """
-    unanchored: list[dict] = []
-    by_label: dict[str, int] = {}
-    for row in rows:
-        label = str(row.get("label") or "?")
-        by_label[label] = by_label.get(label, 0) + 1
-        anchor = row.get("sourceVersion")
-        if anchor in (None, "", 0):
-            unanchored.append({"label": label, "id": row.get("id")})
-    return {
-        "numerator": len(rows) - len(unanchored),
-        "denominator": len(rows),
-        "by_label": by_label,
-        "unanchored": unanchored[:25],
-        "unanchored_total": len(unanchored),
     }
 
 
@@ -391,11 +371,6 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--prereg-artifact", default=str(DEFAULT_PREREG_ARTIFACT),
                     help=f"path of the pre-registration record (default "
                          f"{DEFAULT_PREREG_ARTIFACT})")
-    ap.add_argument("--e1e2-evidence", default=None,
-                    help="the #9076 E1/E2 evidence JSON (numerator/denominator "
-                         "on the same corpus)")
-    ap.add_argument("--e5-evidence", default=None,
-                    help="the #7947 falsifier record written back into §10")
     ap.add_argument("--out", default=None,
                     help="also write the log here (stdout always gets it)")
     ap.add_argument("--head", default=None, help="override the measured sha")
@@ -410,10 +385,22 @@ def main(argv: list[str] | None = None) -> int:
 
     def refuse(reason: str, *, prereg_ok: bool, code: int,
                prereg: dict | None = None, corpus: dict | None = None) -> int:
+        """Record a refusal as a verdict table and return the gate's exit code.
+
+        ``prereg_ok`` is not a label for the reason — it IS "G0 read the
+        pre-registration successfully". Every gate after G0 passes True, so the
+        recorded ``prereg.status`` must follow the SAME fact: only the G0
+        refusal may write ``ABSENT``. Writing ``ABSENT`` on a G1–G5 refusal
+        would tell the next lane that `#9075` is still open when the run had
+        already read the frozen thresholds. Pinned by
+        tests/test_7949_capstone_verdict_check.py::
+        test_post_g0_refusals_record_the_preregistration_as_read.
+        """
         rows = refused_rows(reason, prereg_ok=prereg_ok)
         text = emit_log(
             head=head,
-            prereg=prereg or {"sha": args.prereg, "status": "ABSENT",
+            prereg=prereg or {"sha": args.prereg,
+                              "status": "OK" if prereg_ok else "ABSENT",
                               "artifact": args.prereg_artifact},
             corpus=corpus or {"path": args.corpus, "sha256": None, "turns": None},
             run={"status": "REFUSED", "reason": reason, "steps_observed": [],
@@ -434,18 +421,22 @@ def main(argv: list[str] | None = None) -> int:
         return refuse(f"corpus {args.corpus} does not exist", prereg_ok=True,
                       code=2)
     sha = corpus_sha256(corpus_path)
+    # The sha is COMPUTED, so every G1 refusal below carries it: a refusal that
+    # discards a sha it already has leaves the log saying "no corpus" about a
+    # corpus it read (the row's denominator would be unattributable later).
+    corpus = {"path": args.corpus, "sha256": sha, "turns": None}
     frozen = prereg_record.get("corpus") or {}
     if frozen.get("sha256") and frozen["sha256"] != sha:
         return refuse(
             f"corpus sha256 {sha} != the pre-registered {frozen['sha256']} — "
             "a run on a different corpus cannot decide a threshold frozen "
-            "against this one", prereg_ok=True, code=2)
+            "against this one", prereg_ok=True, code=2, corpus=corpus)
     try:
         turns = load_corpus(corpus_path)
     except (ValueError, json.JSONDecodeError) as e:
         return refuse(f"corpus is an INPUT error, not retried: {e}",
-                      prereg_ok=True, code=2)
-    corpus = {"path": args.corpus, "sha256": sha, "turns": len(turns)}
+                      prereg_ok=True, code=2, corpus=corpus)
+    corpus["turns"] = len(turns)
     if frozen.get("items") and int(frozen["items"]) != len(turns):
         return refuse(
             f"corpus has {len(turns)} turns, the pre-registration froze "
