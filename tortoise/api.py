@@ -67,13 +67,12 @@ class EventAPI:
         the widening. Two consequences follow, both recorded rather than
         papered over: a record already in a legacy journal still widens the
         graph when rebuilt, and a ``projection``-less lane
-        (``EventAPI(log, projection=None)`` — no production caller; the two sites
-        that do it are the ``__main__`` demo subcommand and ``m0.py``'s fold
-        demo) would
-        journal a kind for that replay to fold. Neither is a caller-controlled
-        escalation from a live tenant; both are why #8982's replay half is
-        pinned as a STATEMENT by ``TestReplayIsDeliberatelyUngated5475`` rather
-        than as a gate.
+        (``EventAPI(log, projection=None)`` — no PRODUCTION caller; the only two
+        sites that construct one are the ``__main__`` demo subcommand and
+        ``m0.py``'s fold demo) journals a kind for that replay to fold. Neither
+        is a caller-controlled escalation from a live tenant; both are why
+        #8982's replay half is pinned as a STATEMENT by
+        ``TestReplayIsDeliberatelyUngated5475`` rather than as a gate.
 
         It runs BEFORE ``self.log.append`` in ``_emit``, and that ordering is
         load-bearing: the append is this seam's COMMIT POINT (the journal IS the
@@ -84,8 +83,18 @@ class EventAPI:
         One approval-set read per CALL (not per kind property): the read is a
         whole-graph scan (``graph_installed_namespaces``' own COST note), and a
         capture that names several kinds must not pay it once per spelling. It
-        is not paid at all for a payload that names no pack — the cheap
-        ``kind_named_packs`` pre-check runs first, exactly as at the SDK doors.
+        is not paid at all for a payload the cheap ``kind_named_packs``
+        pre-check clears — every ``core:`` kind, and a bare kind no catalog pack
+        declares. ⚠️ An ATTRIBUTABLE bare kind (``eventKind='AgentSession'``,
+        the extractor's own spelling) does NOT clear it: that leg may attribute
+        the bare kind to a pack that declares it, so it pays the read. See
+        #8977.
+
+        A graph handle that is bound but UNREADABLE raises (an outage must never
+        read as "no packs" and silently widen the gate) — so this adds a graph
+        READ to writes that previously did none. That is fail-closed and the
+        fold would fail on that outage anyway, but it is a new dependency, not
+        the note above's "no read".
 
         A ``projection``-less lane (``EventAPI(log, projection=None)``) has NO
         graph in scope: this gate abstains there rather than reading an approval

@@ -1906,9 +1906,11 @@ class TestJournalSeamRefusesUnapprovedPacks5475:
     def test_projection_less_lane_still_journals(self, tmp_path):
         """A ``projection=None`` lane has no graph to widen — it must not raise.
 
-        ``EventAPI`` is constructed projection-less by extraction lanes whose
-        graph write happens elsewhere (replay). The gate has no graph handle
-        there, so it abstains rather than inventing an approval set.
+        ``EventAPI`` is constructed projection-less ONLY by the two demo sites
+        (``__main__``'s demo subcommand and ``m0.py``'s fold demo) — no
+        production lane does, and ``ingest``/``docs_miner``/``mining``/``sdk``
+        all pass a projection. The gate has no graph handle there, so it
+        abstains rather than inventing an approval set.
         """
         from tortoise.api import EventAPI
         from tortoise.log import EventLog
