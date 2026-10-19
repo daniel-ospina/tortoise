@@ -101,7 +101,7 @@ import io
 import re
 import sys
 import tokenize
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 _TESTS_ROOT = Path(__file__).resolve().parent
 _REPO_ROOT = _TESTS_ROOT.parent
@@ -110,7 +110,7 @@ _REPO_ROOT = _TESTS_ROOT.parent
 def _iter_test_module_paths() -> list[Path]:
     """Every test module in the tree, at ANY depth (#9061).
 
-    A non-recursive `glob("test_*.py")` plus `e2e/` covered 1003 of the 1075
+    A non-recursive `glob("test_*.py")` plus `e2e/` reached 1004 of the 1076
     test modules and stated no boundary, so `tests/longmem_eval/`,
     `tests/e2e/auth/`, `tests/e2e/hosted/`, `tests/eval/…`, `tests/bench/` were
     all silently outside a guard whose whole purpose is to notice a mutation
@@ -285,10 +285,10 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_search_engine.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_session_capture_e2e.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     # #9061: keyed by tests/-relative path — this module lives in tests/e2e/,
-    # so a bare-name key resolved only through the compatibility fallback in
-    # _is_declared, which would hand the declaration to any future same-named
-    # file once this one moved (test_declaration_keys_are_unambiguous now reds
-    # on exactly that).
+    # and a bare-name key matched it only because a lookup fallback stripped
+    # the directory, which authorizes ANY same-named file in any directory (the
+    # fallback is gone; `test_declaration_path_rejects_undeclared` pins that a
+    # subdirectory twin is not authorized).
     "e2e/test_billing_upgrade.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     # ── DELIBERATE_URI: fixtures/tests that force the docker lane directly ──
     "test_consolidation_4way.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
@@ -620,19 +620,50 @@ def _exempt_stems() -> frozenset[str]:
             TEST_NO_REDIRECT_STEMS)
 
 
-def _is_exempt_module(path: Path) -> bool:
-    """True only for the carve-out MODULE itself — `tests/<stem>.py`, top level.
+def _exempt_paths() -> frozenset[Path]:
+    """The exempt MODULES: each carve-out STEM resolved to ONE path (#9061).
 
-    The exempt set is a list of carve-out STEMS, and a stem is not a path.
-    Matching on `path.stem` made the exemption follow the NAME into any
-    subdirectory the moment the scan went recursive: `tests/bench/test_smoke_embedded.py`
-    inherited the exemption of the carve-out `tests/test_smoke_embedded.py`
-    and was silently outside both guards, for a reason ("carve-out modules run
-    in the URI-less lane and never co-run with docker-lane files") that is
-    false of a bench module. The exemption's stated rationale is a property of
-    THE MODULE the carve-out registry names, so it is granted by path.
+    The exempt set is a list of carve-out STEMS, and a stem is not a path. Two
+    wrong answers were available here, and both were live at some point:
+
+    * matching on `path.stem` let the exemption follow the NAME into any
+      directory, so a same-named module anywhere was silently outside both
+      guards; and
+    * assuming `tests/<stem>.py` dropped the exemption of every carve-out whose
+      module does not sit at the top level — `test_smoke_embedded` is
+      `tests/bench/test_smoke_embedded.py`: it is in `config/ci-surfaces.yml`'s
+      carve-out set (`a carve_out file is excluded from EVERY docker leg`) and
+      `tests/_embedded.py` names it as a stem precisely because "tests/bench
+      rides the P2 flip via the push_extra distribution, so its URI job must
+      keep the file embedded". A stem-only predicate called that file exempt;
+      a top-level-only predicate called it scanned. Neither read the registry.
+
+    So the stem is RESOLVED: the top-level module when one exists, otherwise
+    the module the registry's stem names. A stem that resolves to more than one
+    module is ambiguous, and `test_every_carve_out_stem_resolves_to_one_module`
+    reds on it — that is what keeps a same-stem file in another directory from
+    inheriting the exemption.
     """
-    return "/" not in _scan_key(path) and path.stem in _exempt_stems()
+    by_stem: dict[str, list[Path]] = {}
+    for p in _iter_test_module_paths():
+        by_stem.setdefault(p.stem, []).append(p)
+    exempt: set[Path] = set()
+    for stem in _exempt_stems():
+        top = _TESTS_ROOT / f"{stem}.py"
+        exempt.update([top] if top.is_file() else by_stem.get(stem, []))
+    return frozenset(exempt)
+
+
+def _is_exempt_module(path: Path) -> bool:
+    """True only for the carve-out MODULE the registry names (#9061).
+
+    By PATH, never by name: the exemption's stated rationale ("carve-out
+    modules run in the URI-less lane and never co-run with docker-lane files")
+    is a property of one module, so it is granted to that module and to nothing
+    that merely shares its name. `_exempt_paths` resolves the registry; this is
+    the single-path reading of it.
+    """
+    return path in _exempt_paths()
 
 
 def _scanned_modules():
@@ -640,9 +671,13 @@ def _scanned_modules():
 
     Both guards read this, so they cannot narrow independently, and
     `test_both_guards_scan_the_recursive_population` pins the population to the
-    recursive enumeration (#9061)."""
+    recursive enumeration (#9061).
+
+    The exempt set is resolved ONCE here: resolving per module would re-glob
+    the tree 1076 times."""
+    exempt = _exempt_paths()
     for f in _iter_test_module_paths():
-        if _is_exempt_module(f):
+        if f in exempt:
             continue
         yield _scan_key(f), f.read_text(encoding="utf-8")
 
@@ -662,18 +697,16 @@ def _is_declared(fname: str, line: str) -> bool:
     mutation line is declared when the file's DELIBERATE_URI_MUTATIONS
     entry exists and at least one declared regex matches the line.
 
-    *fname* is a `tests/`-relative key (`longmem_eval/test_vector_arm.py`) or,
-    for a top-level module, its bare name — both are accepted so the 99
-    existing entries did not need rewriting. `test_declaration_keys_are_
-    unambiguous` reds if a bare name ever matches more than one module."""
+    *fname* is the `tests/`-relative key (`longmem_eval/test_vector_arm.py`),
+    which for a top-level module IS its bare name — so the 98 pre-#9061 bare
+    entries keep working without a second lookup path. There is deliberately NO
+    bare-name fallback: it was tried, and it re-opened cross-file laundering —
+    `sub/test_config.py` matched the declaration written for
+    `tests/test_config.py`, so a declaration for one file authorized any
+    same-named file in any directory. `test_declaration_keys_are_unambiguous`
+    keeps bare keys honest; `test_declaration_path_rejects_undeclared` pins that
+    a same-named subdirectory module is NOT authorized."""
     declared = DELIBERATE_URI_MUTATIONS.get(fname)
-    if declared is None:
-        # Back-compat: the 99 pre-#9061 entries are keyed by BARE NAME (the old
-        # scan yielded `f.name`). A subdirectory module therefore still matches
-        # its bare-name entry — sound only because
-        # `test_declaration_keys_are_unambiguous` reds if one bare name stands
-        # for two modules.
-        declared = DELIBERATE_URI_MUTATIONS.get(PurePosixPath(fname).name)
     return bool(declared) and any(re.search(p, line) for p in declared)
 
 
@@ -732,7 +765,7 @@ def test_both_guards_scan_the_recursive_population():
       * that seam IS the recursive enumeration minus the carve-out modules.
     """
     expected = {_scan_key(p) for p in _iter_test_module_paths()
-                if not _is_exempt_module(p)}
+                if p not in _exempt_paths()}
     restored = {name for name, _src in _non_exempt_test_files()}
     assert restored == expected, (
         "the restoration guard's population drifted from the recursive scan "
@@ -769,32 +802,70 @@ def test_both_guards_consume_the_one_population(monkeypatch):
 def test_a_subdirectory_module_cannot_inherit_a_carve_out_exemption():
     """#9061: the exempt set is a list of STEMS; a stem is not a path.
 
-    Matching on `path.stem` let `tests/bench/test_smoke_embedded.py` inherit
-    the carve-out exemption of `tests/test_smoke_embedded.py` the moment the
-    scan went recursive — silently outside both guards, justified by a
-    rationale that is false of a bench module. Exemptions are granted to the
-    MODULE the registry names, so the exemption must be by path.
+    Matching on `path.stem` exempted ANY module whose name appeared in the
+    carve-out registry, so the moment the scan went recursive a new same-named
+    file in any directory was silently outside both guards. The exemption is a
+    property of the module the registry NAMES, so it is granted by path — and
+    the stem is RESOLVED to that module rather than assumed to be top-level
+    (`test_smoke_embedded` is `tests/bench/test_smoke_embedded.py`: a predicate
+    of `tests/<stem>.py` would have revoked a live carve-out exemption instead
+    of fixing the inheritance).
     """
-    population = {name for name, _src in _non_exempt_test_files()}
-    assert "bench/test_smoke_embedded.py" in population, (
-        "a subdirectory module inherited a carve-out exemption by STEM — the "
-        "exemption must apply only to `tests/<stem>.py` (#9061)")
-    # …and no exempt stem may exempt a subdirectory module at all.
-    collided = sorted(p.name for p in _iter_test_module_paths()
-                      if _scan_key(p) not in population
-                      and "/" in _scan_key(p))
-    assert not collided, (
-        f"subdirectory modules excluded by a stem collision: {collided}")
+    stack = _TESTS_ROOT / "bench" / "test_smoke_embedded.py"
+    assert stack.is_file(), "the module this pin reads has moved"
+    assert _is_exempt_module(stack), (
+        "the module the carve-out registry names by stem lost its exemption — "
+        "`test_smoke_embedded` resolves to tests/bench/, not to a top-level "
+        "file (#9061)")
+    # …and the NAME buys nothing in another directory: a same-stem module
+    # elsewhere does not inherit it (nothing resolves by name any more).
+    for other in ("mini_beir", "eval/retrieval"):
+        intruder = _TESTS_ROOT / other / "test_smoke_embedded.py"
+        assert not _is_exempt_module(intruder), (
+            f"a module in {other}/ inherited the carve-out exemption by STEM "
+            "— the exemption must be granted by path (#9061)")
+    assert not _is_exempt_module(stack.parent / "test_embedded_lifecycle.py"), (
+        "a sibling module in the carve-out's directory must not inherit its "
+        "exemption")
+
+
+def test_every_carve_out_stem_resolves_to_one_module():
+    """Every exempt stem must name exactly ONE module — the registry's target.
+
+    `_exempt_paths` resolves a stem to the module the carve-out registry names,
+    and that is only sound while the resolution is UNAMBIGUOUS: a stem matching
+    two modules (a top-level file plus an `e2e/` twin, say) must red here
+    instead of silently exempting both. A stem naming NO module is a dead entry
+    — the exemption it claims is granted to nothing, which reads as registered
+    coverage in `TEST_NO_REDIRECT_STEMS` while doing no work.
+    """
+    by_stem: dict[str, list[str]] = {}
+    for p in _iter_test_module_paths():
+        by_stem.setdefault(p.stem, []).append(_scan_key(p))
+    exempt = _exempt_stems()
+    ambiguous = {s: by_stem[s] for s in exempt if len(by_stem.get(s, [])) > 1}
+    assert not ambiguous, (
+        "carve-out stem(s) resolving to more than one module — the exemption "
+        "would land on the wrong file: "
+        + "; ".join(f"{s} -> {v}" for s, v in sorted(ambiguous.items())))
+    dead = sorted(s for s in exempt if s not in by_stem)
+    assert not dead, (
+        f"carve-out stem(s) naming no test module: {dead} — a dead exemption "
+        "looks like registered coverage and does no work")
+    # …and the resolution must reach the module the stem names, not skip it.
+    assert (_TESTS_ROOT / "bench" / "test_smoke_embedded.py") in _exempt_paths(), (
+        "`test_smoke_embedded` resolves to tests/bench/ — the resolved exempt "
+        "set must contain it (#9061)")
 
 
 def test_declaration_keys_are_unambiguous():
     """A bare-name key must match exactly ONE module.
 
-    Keys are looked up by `tests/`-relative path, but the 99 pre-#9061 entries
-    are bare names. A bare name that matches two modules (e.g. a top-level file
-    and an `e2e/` twin) would let a declaration written for one silently
-    authorize the other — the same "green for the wrong reason" failure the
-    census exists to catch, one level up.
+    Keys are looked up by `tests/`-relative key, which for a top-level module IS
+    its bare name, so the 98 pre-#9061 entries need no second lookup path. The
+    hazard a bare name still carries is REASSIGNMENT: a key written for
+    `tests/test_foo.py` keeps its name when that file is deleted and a
+    `tests/sub/test_foo.py` appears, and nothing about the string changes.
     """
     by_name: dict[str, list[str]] = {}
     for p in _iter_test_module_paths():
@@ -807,15 +878,13 @@ def test_declaration_keys_are_unambiguous():
         + "; ".join(f"{k} -> {ambiguous[k]}" for k in offenders))
     # …and a bare key must still BE the top-level module it was written for.
     # `by_name` catches a key that matches two paths TODAY; it cannot see a
-    # reassignment: delete `tests/test_foo.py`, add `tests/sub/test_foo.py`, and
-    # the fallback in `_is_declared` silently re-targets the declaration at a
-    # file nobody declared.
+    # reassignment, and a bare key whose module is gone matches NO site at all —
+    # a dead declaration that reads as coverage while authorizing nothing.
     moved = sorted(k for k in DELIBERATE_URI_MUTATIONS
                    if "/" not in k and not (_TESTS_ROOT / k).is_file())
     assert not moved, (
         "bare-name declaration key(s) whose top-level module no longer exists "
-        "— the fallback would hand the declaration to a same-named file "
-        f"elsewhere: {moved}")
+        f"— dead declarations: {moved}")
 
 
 def test_the_cost_skip_cannot_hide_a_uri_agnostic_leak():
@@ -823,13 +892,15 @@ def test_the_cost_skip_cannot_hide_a_uri_agnostic_leak():
     check, which does not depend on the URI string.
 
     The guard skips a module that mentions neither `TORTOISE_DB_URI` nor a bare
-    `pytest.MonkeyPatch()` — that skip is what makes scanning the whole tree
-    affordable (296s -> 78s for this test). A URI-ONLY skip is wrong: a fixture
-    that sets some OTHER variable through a bare MonkeyPatch and never calls
-    `.undo()` leaks exactly like the #2062 pop did, and its source contains no
-    URI at all. So the fixture below is a real violation with no URI in it — if
-    the skip is ever narrowed back to the URI alone, this reports nothing and
-    the test reds.
+    `pytest.MonkeyPatch()` — that skip is what keeps scanning the whole tree
+    affordable inside the 300s per-test timeout (measured 2026-10-19 on this
+    host: the restoration guard 119.2s with the skip vs 156.4s without, over
+    the same population; load-dependent, so read the ratio, not the absolute).
+    A URI-ONLY skip is still wrong: a fixture that sets some OTHER variable
+    through a bare MonkeyPatch and never calls `.undo()` leaks exactly like the
+    #2062 pop did, and its source contains no URI at all. So the fixture below
+    is a real violation with no URI in it — if the skip is ever narrowed back
+    to the URI alone, this reports nothing and the test reds.
     """
     src = (
         "import pytest\n"
@@ -1174,12 +1245,17 @@ def _restoration_violations(files) -> list[str]:
     violations: list[str] = []
     for fname, src in files:
         # #9061: `_scope_map` (tokenize plus a per-line bracket scan) is the
-        # whole cost of this guard, so it must run on modules that can hold a
-        # violation, not on the size of the tree. Measured on this host, over
-        # the 810 modules the skip excludes: 51.4s without the skip, 2.8s with
-        # it (`test_uri_mutations_restored`: ~296s -> 21-91s depending on fleet
-        # load). Those numbers are load-dependent; the RATIO is what makes
-        # scanning the whole tree affordable. Cost scales with SITES.
+        # whole cost of this guard, so it has to run on the modules that can
+        # hold a violation, not on the size of the tree. Measured on this host
+        # 2026-10-19, over the 1026-module population: the guard costs 119.2s
+        # with this skip against 156.4s without it, and the 777 modules it
+        # excludes cost ~54s in total on their own. Those absolute numbers are
+        # LOAD-DEPENDENT (this is a shared box — an earlier measurement of the
+        # same guard read 296s); the ratio is what makes scanning the whole
+        # tree affordable. The skip STAYS, and the reason is headroom, not the
+        # ratio: the whole file measured 221s and 261s on two runs here against
+        # the 300s per-test timeout, so the no-skip scan would sit on the
+        # limit. Cost scales with SITES.
         #
         # BOTH strings are required here: the bare-instance check below
         # (`pytest.MonkeyPatch()` without `.undo()`) is URI-AGNOSTIC — a fixture
@@ -1942,6 +2018,14 @@ def test_declaration_path_rejects_undeclared():
         "test_hosted_api.py", 'monkeypatch.delenv("TORTOISE_DB_URI")')
     assert _is_declared(
         "test_directional_impl.py", 'os.environ["TORTOISE_DB_URI"] = _uri')
+    # #9061: a declaration is bound to ONE module. Before the bare-name lookup
+    # fallback was removed, a same-named module in a subdirectory inherited its
+    # top-level twin's declaration — a declaration written for one file
+    # authorizing another, which is the census's own failure class one level up.
+    assert not _is_declared(
+        "sub/test_config.py", 'monkeypatch.delenv("TORTOISE_DB_URI")')
+    assert not _is_declared(
+        "e2e/test_config.py", 'monkeypatch.delenv("TORTOISE_DB_URI")')
 
 
 def test_restoration_exemption_boundary():
