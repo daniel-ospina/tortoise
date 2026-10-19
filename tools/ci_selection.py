@@ -1944,7 +1944,19 @@ def _full_selection(manifest: dict, slow: set[str]) -> dict:
             "slow_selected": sorted(slow - carve)}
 
 
-def select(changed_files: list[str], event: str, manifest: dict) -> dict:
+def select(changed_files: list[str], event: str, manifest: dict,
+           explain: dict | None = None) -> dict:
+    """Selection for a changed-path list.
+
+    *explain*, when passed a dict, is filled with WHY a fail-closed answer was
+    chosen — `{"reason": "unknown-paths", "unknown": [...]}` — so `main()` can
+    say
+    so on stderr. It is a SIDE CHANNEL on purpose: the returned dict is the
+    artifact schema (`.ci-selection/selection.json`) and is asserted verbatim up
+    and down this suite, so a reason field inside it would be a migration; and
+    the reason must not be re-derived by the caller, which is how the
+    diagnostic would drift from the decision it describes (#9109).
+    """
     slow = set(manifest.get("slow_files", []))
     # #1371: slow files run ONLY in the test-slow job — never in the fast
     # gate's tier-1/tier-2 selections (they are already covered there).
@@ -2072,7 +2084,16 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
         if not found:
             unknown.append(c)
     if unknown:
-        # New/unknown path -> fail-closed full matrix (scope v5 decision 1)
+        # New/unknown path -> fail-closed full matrix (scope v5 decision 1).
+        # The ANSWER is right and deliberate; the DEFECT (#9109) is that it is
+        # indistinguishable from a legitimate full selection (push, schedule, a
+        # shared module), so a caller who passed a list FILE as a changed file
+        # reads "this diff selects everything" instead of "my argument was
+        # wrong". Record the reason so `main()` can say it out loud; the
+        # selection itself is unchanged.
+        if explain is not None:
+            explain["reason"] = "unknown-paths"
+            explain["unknown"] = list(unknown)
         return _full_selection(manifest, slow)
 
     # Test-file changes select their owning surface
@@ -4160,6 +4181,52 @@ def _manifest_contract_issues(manifest: dict) -> list[str]:
     return red
 
 
+def _warn_unknown_paths(explain: dict) -> None:
+    """Say on STDERR why a fail-closed FULL matrix was chosen (#9109).
+
+    The failure this prevents is a MEASUREMENT one. `--changed-files` takes the
+    newline-separated LIST, not a path to it; passing a path made the path
+    itself a changed file, which no SOURCE_PATTERN knows, so the selection took
+    the deliberate fail-closed FULL-matrix branch (scope v5 decision 1) and
+    reported `full=true, surfaces=[all]`. That answer is indistinguishable from
+    a legitimate full selection — a push, a schedule, a shared module — so it
+    was read as "a docs-only diff selects FULL, not tier1-only" in a live PR's
+    CI-registration rationale, and that statement is simply false for the diff
+    (the same list on stdin selects `core`).
+
+    WHY A WARNING AND NOT A REFUSAL (the issue's first proposal): the single
+    path form is an ALLOWED, DOCUMENTED inline invocation. At least six places in
+    this repo pass a REAL repo path inline and take its surfaces —
+    `config/ci-surfaces.yml:74/95/1299/1358/1614` and
+    `docs/plans/2026-09-14-3467-...:187` — and one further example
+    (`config/ci-surfaces.yml`, the `--changed-files <path>` line) uses a
+    placeholder rather than a path. A refusal keyed on "the argument is an
+    existing file" refuses all six, which is the issue's OWN target 2 ("100%
+    of the documented invocations unchanged") failing. The ambiguity between `a
+    one-item list` and `a path to a list` has no syntactic answer, so this
+    keeps the argument contract, keeps stdout byte-identical, and makes the
+    fail-closed answer SELF-DESCRIBING instead. A caller that ignores stderr
+    still gets exactly the selection it got before.
+    """
+    if explain.get("reason") != "unknown-paths":
+        return
+    unknown = explain.get("unknown") or []
+    print(
+        f"ci_selection: FULL matrix because {len(unknown)} changed path(s) are "
+        "unknown to every SOURCE_PATTERN — fail-closed by design (scope v5 "
+        "decision 1), NOT a statement that this diff touches everything:",
+        file=sys.stderr)
+    for c in unknown:
+        exists = "  [this path EXISTS — if it is a file CONTAINING the list, " \
+                 "pass its contents instead]" if Path(c).is_file() else ""
+        print(f"  - {c}{exists}", file=sys.stderr)
+    print(
+        "--changed-files takes the newline-separated LIST, not a path to it: "
+        "use `--changed-files -` with the list on stdin, or pass it inline "
+        "(#9109).",
+        file=sys.stderr)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--changed-files", default="", help="newline-separated changed files")
@@ -4292,7 +4359,9 @@ def main() -> int:
     changed = [l.strip() for l in args.changed_files.splitlines() if l.strip()]  # noqa: E741
     if args.changed_files == "-":
         changed = [l.strip() for l in sys.stdin.read().splitlines() if l.strip()]  # noqa: E741
-    result = select(changed, args.event, manifest)
+    explain: dict = {}
+    result = select(changed, args.event, manifest, explain=explain)
+    _warn_unknown_paths(explain)
 
     # Audit artifact (scope v5 decision 1): replayable selection record.
     artifact = {

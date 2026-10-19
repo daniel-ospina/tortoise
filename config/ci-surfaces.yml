@@ -2321,6 +2321,15 @@ surfaces:
   - test_destructive_wipe_guard.py
   - test_session_attribution.py
   - test_ci_selection.py
+  # #9109: `--changed-files <path>` used to answer the fail-closed FULL matrix
+  # silently — indistinguishable from a legitimate full selection, and it was
+  # quoted as "this docs-only diff selects everything" in a live PR. The pin is
+  # the stderr diagnostic that now says which unknown path caused it. Registered
+  # in `core` beside the tool's own suite so it is CLASSIFIED at all (integrity
+  # refuses an unregistered test file) and runs whenever a `core`-tier selection
+  # is taken; `tools/ci_selection.py` is a SHARED_MODULE, so editing the tool
+  # also selects FULL, where this pin runs too.
+  - test_ci_selection_changed_files_9109.py
   # #6144: the required-status-check set is declared in THREE places — live
   # branch protection, `.mergify.yml`'s queue_conditions/merge_conditions, and
   # `.github/settings.yml`. Nothing read two of them: `.mergify.yml` stated the
