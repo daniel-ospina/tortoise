@@ -15,14 +15,207 @@ on `event_id` (duplicate append) → logs and skips (never crashes the
 mutation) — `event_id` is a server-side ULID, so a collision is a retry
 artifact, never legitimate data. `read_after` additionally dedups (defense in
 depth).
+
+⛔ EVERY OTHER LOSS IS NAMED (#9208). A store write that is REFUSED (e.g.
+§17.1's third door refusing an undeclared write) or that fails for any other
+reason must never be swallowed into the same no-op as a duplicate: the feed
+would simply stop while `poll_events` kept answering `[]`, making "quiet" and
+"dead" the same reply. Such a failure is recorded here as a NAMED degraded
+state (`record_degraded`/`degraded`), and `poll_events` REFUSES to answer while
+it is set. The state is deliberately NOT cleared by a later successful write:
+the events in the gap never reached the store, so a subscriber parked below
+them would silently under-read forever. Acknowledging it is explicit
+(`clear_degraded`).
+
+⚠️ TWO SCOPES, STATED so neither is over-read. It is keyed by STORE + GRAPH
+(the `:GraphEvent` namespace IS the org partition, so one tenant's dead feed
+must not refuse another tenant's poll, and two databases are two stores even
+under one name), and it lives in PROCESS MEMORY — a peer process cannot see it,
+and a peer process cannot ACKNOWLEDGE it either (the acknowledgement is a Python
+call in the process that observed the loss; from outside, the only exit is a
+restart of that worker). What it does guarantee is the property the issue
+targets — **a `poll_events` caller in a process that emitted for a graph cannot
+be told "nothing happened" over lost events.**
+
+⚠️ AND ONE CONSUMER IS NOT COVERED, named rather than implied: the webhook
+delivery sweep (`webhook_delivery.deliver_due`) reads `read_after` directly, so
+its `if not events: continue` still treats an empty page as "caught up". Wiring
+the degraded state into the delivery/retry state machine changes a
+delivery-loss decision that `#8098` deliberately keeps in the dispatch state
+machine, so it is a follow-up, not a silent part of this fix.
 """
 from __future__ import annotations
 
 import json
 import logging
 from datetime import datetime, timezone
+from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+class ChangeFeedDegraded(RuntimeError):
+    """The `:GraphEvent` change feed is KNOWN-INCOMPLETE in this process.
+
+    A NAMED degraded mode (#9208), the shape `#8577`'s capture drain uses,
+    rather than a silent no-op. Raised by `poll_events` when a change-feed
+    write has been refused or lost: a short page is then indistinguishable from
+    a quiet stream, so answering at all would report success over lost events.
+
+    The alternative the issue also allowed — letting the refusal propagate out
+    of the emitting door — was rejected because `_emit_event` is best-effort BY
+    CONTRACT and many doors emit AFTER their cache write (`delete_point`,
+    `promote_point`, the dedupe folds), so a raise there would report a failed
+    mutation that actually landed. The FEED's consumer is the party that can
+    act on a dead feed, so the signal belongs there.
+    """
+
+
+#: The named degraded state of a GRAPH's change feed (#9208), keyed by
+#: ``(store identity, graph name)``. Empty = no change-feed write has been
+#: refused/lost in this process. A dict per store+graph, not a bool, so the
+#: refusal can NAME the diagnosis instead of only the symptom.
+#:
+#: KEYED BY STORE + GRAPH, not process-global. The `:GraphEvent` store is
+#: per-graph (the namespace IS the org partition), so a dead feed on one tenant
+#: must not refuse another tenant's poll; and the identity half is needed because
+#: the graph name alone does not name a STORE — two embedded databases both called
+#: `tortoise` are different stores. A process-global flag also latched a whole
+#: session on any deliberate, expected refusal (a suite driving the #5379
+#: allocator ceiling on purpose), which is the same over-read in the other
+#: direction.
+_DEGRADED: dict[tuple[str, str], dict[str, Any]] = {}
+
+
+def _store_identity(proj) -> str:
+    """Which STORE this projection talks to — its file, or its HOST:PORT.
+
+    The PORT is part of the identity, not decoration. One host can carry several
+    FalkorDB servers, and this repo's own environment runs two on loopback —
+    `localhost:6379` (the test matrix) and `localhost:16379` (canonical/dev) —
+    both with the default graph name `tortoise`. Keyed on the host alone, a
+    refused write on one would permanently refuse `poll_events` on the other.
+
+    The port is read from the connection pool, the same seam
+    `tests/_embedded._projection_host` uses: `FalkorProjection` records `_host`
+    but not `_port`, and the client keeps it in
+    `connection.connection_pool.connection_kwargs`. Every step is `getattr`-guarded
+    because callers reach here with lightweight projection stubs, and `None`
+    simply degrades to the host-only key rather than raising from an error path.
+    """
+    path = getattr(proj, "_path", None)
+    if path:
+        return f"file:{path}"
+    host = getattr(proj, "_host", None)
+    if not host:
+        return ""
+    port = getattr(proj, "_port", None)
+    if port is None:
+        pool = getattr(getattr(getattr(proj, "db", None), "connection", None),
+                       "connection_pool", None)
+        kwargs = getattr(pool, "connection_kwargs", None)
+        port = kwargs.get("port") if isinstance(kwargs, dict) else None
+    return f"host:{host}:{port}" if port is not None else f"host:{host}"
+
+
+def _graph_key(proj) -> tuple[str, str]:
+    """The store partition key: (store identity, graph name)."""
+    return (_store_identity(proj), str(getattr(proj, "graph_name", None) or ""))
+
+
+def record_degraded(proj, stage: str, event_type: str, event_id: str | None,
+                    exc: BaseException) -> dict[str, Any]:
+    """Record that a `:GraphEvent` write was refused or lost (#9208).
+
+    `stage` names the statement that failed, because the defects share a symptom
+    but not a diagnosis — and a reader must be told WHICH one it is, not only
+    that something went wrong:
+
+    * ``"emit"`` — the hook's own leg (the `seq` allocator, the schema DDL);
+    * ``"append"`` — the row write, and the store PROVABLY does not hold it
+      (the post-failure re-read found nothing), so the event is LOST;
+    * ``"append-unverified"`` — the row write failed AND the store could not be
+      read back, so the row may or may not have landed. Reported as a guess
+      about nothing would be the same collapse this function exists to undo.
+
+    ``lost`` counts the events this graph has lost in this process; it only ever
+    grows, matching the fact that those rows can never be delivered.
+
+    Called from BOTH swallows (`TortoiseSDK._emit_event` and `append_event`) so
+    the two cannot record different diagnoses for the same failure, and so a
+    reader has one place to look.
+    """
+    key = _graph_key(proj)
+    previous = _DEGRADED.get(key)
+    state = {
+        "graph": key[1],
+        "stage": stage,
+        "event_type": event_type,
+        "event_id": event_id,
+        "error": f"{type(exc).__name__}: {exc}"[:400],
+        "lost": 1 if previous is None else int(previous["lost"]) + 1,
+    }
+    _DEGRADED[key] = state
+    return state
+
+
+def degraded(proj) -> dict[str, Any] | None:
+    """This graph's named degraded state, or ``None`` when its feed is healthy."""
+    return _DEGRADED.get(_graph_key(proj))
+
+
+def degraded_graphs() -> list[dict[str, Any]]:
+    """EVERY degraded feed in this process — the read side for surface reports.
+
+    `degraded(proj)` needs a projection, which a reporting surface (``/health``)
+    does not have; the key is `(store, graph)` and only a projection can compute
+    it, so the listing carries `store` alongside the state. Copies, never the
+    live dicts, so a reporter cannot mutate the state by holding one.
+
+    Sorted by `(store, graph)` so a report is stable across calls (a dict order
+    would make an operator diff meaningless).
+    """
+    return [
+        {
+            "store": store,
+            "graph": state["graph"],
+            "stage": state["stage"],
+            "event_type": state["event_type"],
+            "lost": state["lost"],
+            "error": state["error"],
+        }
+        for (store, _graph), state in sorted(_DEGRADED.items())
+    ]
+
+
+def clear_degraded(graph_name: str | None = None) -> None:
+    """Acknowledge the loss and re-enable polling (#9208).
+
+    Explicit on purpose: the events in the gap were never written, so a
+    successful write afterwards does not repair them — clearing on success
+    would restore the silence the state exists to break. An operator (or a
+    replay from the tail) is the acknowledgement.
+
+    ``graph_name=None`` clears EVERY store+graph in this process (the operator's
+    "I have dealt with this", and the test suite's isolation); naming one graph
+    clears that graph in every store.
+
+    ⚠️ THIS IS A PYTHON CALL IN THE PROCESS THAT HOLDS THE STATE, and there is
+    no REST/MCP/CLI surface for it yet (#9208's recorded residual): the state is
+    process memory, so a peer process — including an operator's shell on the same
+    host — cannot clear it, and neither can the HTTP client that receives the
+    503. The exits are (a) this call inside that process, or (b) restarting that
+    worker. `degraded_graphs()` is what makes the state visible from outside
+    (``GET /health`` → ``change_feed``), so an operator can at least SEE which
+    worker needs it.
+    """
+    if graph_name is None:
+        _DEGRADED.clear()
+        return
+    for key, state in list(_DEGRADED.items()):
+        if state["graph"] == str(graph_name):
+            _DEGRADED.pop(key, None)
+
 
 _SCHEMA_ATTR = "_tortoise_event_schema"
 
@@ -391,6 +584,12 @@ def append_event(proj, seq: int, type_: str, payload: dict, event_id: str,
     `payload` is the bare domain dict (JSON string); type/event_id/ts live as
     node properties (canonical) — codec encode/decode wiring is deferred to
     the first-upcaster task (#432 Task 4, plan-review P2).
+
+    ``False`` therefore means ONE of two things, and the caller must not read it
+    as "nothing happened": a duplicate (no loss) or a REFUSED/failed write (this
+    event is LOST). The second is recorded as the named degraded state (#9208)
+    that ``degraded()`` reports and ``poll_events`` refuses to answer over; it is
+    not raised, because `_emit_event` is best-effort by contract.
     """
     ensure_event_schema(proj)
     ts = ts or _iso_now()
@@ -416,11 +615,67 @@ def append_event(proj, seq: int, type_: str, payload: dict, event_id: str,
             },
         )
         return True
-    except Exception:  # noqa: BLE001, RUF100
-        # Belt-and-suspenders: if the store's unique constraint fired (or any
-        # other write error), never crash the mutation — the read path dedups.
-        logger.warning("event_store: append failed for event_id %r — skipped", event_id)
+    except Exception as exc:  # noqa: BLE001, RUF100
+        # Belt-and-suspenders: never crash the mutation on a store write error
+        # — the read path dedups, and `_emit_event` is best-effort by contract.
+        #
+        # #9208: but it must NOT be indistinguishable from the duplicate skip
+        # above. A duplicate loses NOTHING (the row is already there); any
+        # other error loses THIS event, and swallowing it whole left the feed
+        # dead while `poll_events` kept answering `[]` — the exact silent
+        # deletion §17.1's third door must not produce. So the two are told
+        # apart by what the store actually holds, and only a real loss is
+        # recorded as the named degraded state.
+        verified = _event_row_exists(proj, event_id)
+        if verified is True:
+            # The unique constraint fired on a retried `event_id`: the row we
+            # would have written is already in the store, so nothing is lost.
+            logger.warning(
+                "event_store: duplicate event_id %r skipped", event_id)
+            return False
+        if verified is None:
+            # The row write failed AND the read-back failed: neither "lost" nor
+            # "landed" is provable, so the state names the UNCERTAINTY rather
+            # than asserting a loss nobody can confirm.
+            state = record_degraded(proj, "append-unverified", type_,
+                                    event_id, exc)
+            logger.warning(
+                "event_store: append failed for event_id %r and the store could "
+                "not be read back — the change feed is DEGRADED (%s "
+                "unverified, %s: %s); poll_events will refuse to answer until "
+                "this is acknowledged (#9208)",
+                event_id, state["lost"], type(exc).__name__, exc)
+            return False
+        state = record_degraded(proj, "append", type_, event_id, exc)
+        logger.warning(
+            "event_store: append failed for event_id %r — the change feed is "
+            "DEGRADED (%s lost, %s: %s); poll_events will refuse to answer "
+            "until this is acknowledged (#9208)",
+            event_id, state["lost"], type(exc).__name__, exc)
         return False
+
+
+def _event_row_exists(proj, event_id: str) -> bool | None:
+    """Does the store already hold this `event_id`? (#9208's loss discriminator)
+
+    TRI-state on purpose. ``True`` = the row is there, so a failed write lost
+    nothing (the unique-constraint race). ``False`` = the store was read and does
+    NOT hold it, so this event is provably lost. ``None`` = the read itself
+    failed, so neither claim is available.
+
+    Collapsing ``None`` into ``False`` would report "lost" for a transient read
+    error on a store that may have committed — a permanent refusal over an
+    unproven loss. Collapsing it into ``True`` is the opposite lie. The caller
+    names the third outcome instead.
+    """
+    try:
+        rows = proj.g.query(
+            "MATCH (e:GraphEvent {event_id:$id}) RETURN count(e)",
+            params={"id": event_id},
+        ).result_set
+    except Exception:  # noqa: BLE001, RUF100
+        return None
+    return bool(rows and rows[0][0] > 0)
 
 
 def read_after(proj, after_seq: int, types: list[str] | None = None,
