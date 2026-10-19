@@ -3060,6 +3060,17 @@ def _journal_safe_params(params, cypher=None):
 #   * `_replay_write_scope()` — opened by the replay engines (`rebuild`,
 #     `recover_from_log`, `backup.restore`, `_cmd_reconcile`), whose records
 #     came FROM the journal and must not journal again.
+#   * `onboarding.metadata` (`tortoise/onboarding/state.py`, #9121) — the
+#     onboarding FLOW metadata (`:OnboardingState`, `:OnboardingStep`, the
+#     `COMPLETED_STEP` edges) is graph-resident org-level metadata, not a
+#     projection of a journalled document/point event. The replay engines that
+#     can rebuild this graph already CAPTURE-AND-RESTORE the class rather than
+#     replay it (#4641 below), which is what makes declaring it honest; the
+#     argument, the class it authorizes beyond metadata (`:Subject`, disclosed),
+#     and its recovery gap (`tortoise/backup.py`'s JSONL fallback) are stated
+#     with the writers. `:TeamMeta` is its documented sibling (#5353 below),
+#     not a vetted precedent: it holds no declaration of its own — its writers
+#     escape at (3).
 #
 # The declaration is not a bypass flag: it is a per-call `with` block (no
 # instance attribute, constructor argument or env var can set it), and the

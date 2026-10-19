@@ -137,14 +137,20 @@ def _run(handle: Any, cypher: str, params: dict[str, Any] | None = None):
     raises (never a TypeError), so the fallback only fires on a signature
     mismatch.
 
-    §17.1 (#7951): the public ``FalkorProjection.query`` lane refuses a
-    mutating statement on a journal-backed projection; this handle is
+    §17.1 (#7951/#9121): the public ``FalkorProjection.query`` lane refuses a
+    mutating statement on a journal-backed projection. This primitive is
     duck-typed and shared with the write-path callers of this module, so it
-    takes the same raw-handle lane ``onboarding.state._run`` does (see that
-    docstring for why: these are unjournaled live writes, class (a) of
-    #7951's work list, and the public lane refused them on the hosted graph).
-    Reads are unaffected either way; routing here keeps a future write added
-    to this primitive from silently refusing."""
+    still prefers the raw handle when the injected object exposes one.
+
+    ⛔ It is NOT a §17.1 declaration, and it must not be read as one. The
+    onboarding lane's declaration lives in ``onboarding.state._run`` (see
+    ``ONBOARDING_WRITE_LANE`` there); this module writes through the SDK's
+    journalled doors (``create_subject`` / ``create_edge``), so a mutating
+    statement added to THIS primitive is a NEW unjournaled writer: it gets no
+    authorization from the onboarding declaration, and on a journal-backed
+    projection whose handle guard is armed it is refused rather than silently
+    written. Declare it where its class is argued — do not point at a
+    docstring for a lane this call does not enter."""
     params = params or {}
     raw = getattr(handle, "g", None)  # FalkorProjection -> its raw handle
     if raw is not None and hasattr(raw, "query"):

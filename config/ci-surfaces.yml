@@ -90,6 +90,15 @@ surfaces:
   # subjects span `projection/` (core), `sdk.py`, `api.py` (api),
   # `backup.py`/`consistency.py`/`mining.py` (core), and `__main__.py` (api).
   - test_7951_enforce_atomic_write.py
+  # #9121 (§17.1 write-lane DECLARATION): MULTI-REGISTERED with `onboarding`,
+  # `core`, `api` and `sdk`. The suite pins a declaration in
+  # `tortoise/onboarding/state.py` (onboarding) that the HOSTED callers
+  # (`tortoise/hosted_api.py` -> api), the journal-backed projection the SDK
+  # builds (`tortoise/projection/` -> core) and `TortoiseSDK(...)` (sdk) must all
+  # keep working. Each of those is an EXACT SOURCE_PATTERNS match that REPLACES
+  # the `core` fallback in `select()`, so a change to any ONE of them alone would
+  # otherwise run this suite never — the #1349/#2938/#3154 silent-drop class.
+  - test_9079_onboarding_declared_lane.py
   - test_7951_create_point_outbox.py
   # #7951 (increment 2, the revision door): `update_point` appends its
   # `PointRevised` record BEFORE the cache write. Same subjects as the
@@ -1184,6 +1193,15 @@ surfaces:
   # `sdk.py` are this guard's subjects; an `sdk.py`-only change selects the
   # full matrix, and a `projection/`-only change falls through to `core`.
   - test_7951_enforce_atomic_write.py
+  # #9121 (§17.1 write-lane DECLARATION): MULTI-REGISTERED with `onboarding`,
+  # `core`, `api` and `sdk`. The suite pins a declaration in
+  # `tortoise/onboarding/state.py` (onboarding) that the HOSTED callers
+  # (`tortoise/hosted_api.py` -> api), the journal-backed projection the SDK
+  # builds (`tortoise/projection/` -> core) and `TortoiseSDK(...)` (sdk) must all
+  # keep working. Each of those is an EXACT SOURCE_PATTERNS match that REPLACES
+  # the `core` fallback in `select()`, so a change to any ONE of them alone would
+  # otherwise run this suite never — the #1349/#2938/#3154 silent-drop class.
+  - test_9079_onboarding_declared_lane.py
   - test_7951_create_point_outbox.py
   # #7951 (increment 2, the revision door): `update_point` appends its
   # `PointRevised` record BEFORE the cache write. Same subjects as the
@@ -3211,6 +3229,15 @@ surfaces:
   # select `onboarding`, REPLACING the `core` fallback — so without this arm an
   # `onboarding`-only change could add an unclassified `.apply` door silently
   # (the #1349/#2938 silent-drop class; full rationale in the `api` entry).
+  # #9121 (§17.1 write-lane DECLARATION): MULTI-REGISTERED with `onboarding`,
+  # `core`, `api` and `sdk`. The suite pins a declaration in
+  # `tortoise/onboarding/state.py` (onboarding) that the HOSTED callers
+  # (`tortoise/hosted_api.py` -> api), the journal-backed projection the SDK
+  # builds (`tortoise/projection/` -> core) and `TortoiseSDK(...)` (sdk) must all
+  # keep working. Each of those is an EXACT SOURCE_PATTERNS match that REPLACES
+  # the `core` fallback in `select()`, so a change to any ONE of them alone would
+  # otherwise run this suite never — the #1349/#2938/#3154 silent-drop class.
+  - test_9079_onboarding_declared_lane.py
   - test_7951_write_doors.py
   - test_7951_enforce_atomic_write.py
   - test_7951_create_point_outbox.py
@@ -3489,6 +3516,15 @@ surfaces:
   # #1349/#2938 silent-drop class; full rationale in the `api` entry).
   - test_7951_write_doors.py
   - test_7951_enforce_atomic_write.py
+  # #9121 (§17.1 write-lane DECLARATION): MULTI-REGISTERED with `onboarding`,
+  # `core`, `api` and `sdk`. The suite pins a declaration in
+  # `tortoise/onboarding/state.py` (onboarding) that the HOSTED callers
+  # (`tortoise/hosted_api.py` -> api), the journal-backed projection the SDK
+  # builds (`tortoise/projection/` -> core) and `TortoiseSDK(...)` (sdk) must all
+  # keep working. Each of those is an EXACT SOURCE_PATTERNS match that REPLACES
+  # the `core` fallback in `select()`, so a change to any ONE of them alone would
+  # otherwise run this suite never — the #1349/#2938/#3154 silent-drop class.
+  - test_9079_onboarding_declared_lane.py
   - test_7951_create_point_outbox.py
   # #7951 (increment 2, the revision door): `update_point` appends its
   # `PointRevised` record BEFORE the cache write. Same subjects as the

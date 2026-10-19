@@ -401,10 +401,15 @@ def test_onboarding_writes_are_not_refused_on_a_journal_backed_lane(
     the refused write), so orgs silently never reached `complete`, the fork
     write and the completion gate stopped, and no counter fired.
 
-    The writers now take the SAME raw-handle lane the SDK's own live writes
-    use (`proj.g.query`), which #7951 records as the still-open residual. The
-    OTHER guards on that path are unchanged: the handle's #3595 operator and
-    #7174 numeric-domain refusals and its L2 bulk-wipe check all still run.
+    The writers take the SAME raw-handle lane the SDK's own live writes use
+    (`proj.g.query`). ⚠️ That lane was #7951's still-open residual; it is no
+    longer open-ended — `#9121` DECLARED this writer family (`onboarding.
+    metadata`, see `ONBOARDING_WRITE_LANE` in `onboarding/state.py`) ahead of
+    `#9079` closing the handle, so these writes stay sanctioned once the third
+    door is armed. The OTHER guards on that path are unchanged: the handle's
+    #3595 operator and #7174 numeric-domain refusals and its L2 bulk-wipe
+    check all still run; the armed-handle version of this pin lives in
+    `tests/test_9079_onboarding_declared_lane.py`.
 
     RED before the fix: the first `write_completed_step` raises
     `DirectCacheWriteRefused`. MUTATION: revert `onboarding.state._run` to
@@ -450,6 +455,12 @@ def test_the_selfhost_onboarding_lane_writes_on_a_journal_backed_proj(
 
     RED before the fix: the create-on-write MERGE raises
     `DirectCacheWriteRefused`.
+
+    ⚠️ This pin exercises the PUBLIC raw-query lane, so it cannot see a THIRD-door
+    (`proj.g` handle) refusal at all. The armed-handle version of this lane is
+    `tests/test_9079_onboarding_declared_lane.py
+    ::test_the_selfhost_onboarding_lane_reaches_the_graph_with_the_guard_armed`
+    (`#9121`); keep both — this one pins the public lane, that one the handle.
     """
     from tortoise.onboarding import selfhost
     from tortoise.onboarding import state as _os
