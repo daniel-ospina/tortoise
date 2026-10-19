@@ -115,15 +115,21 @@ def _identity_stack() -> None:
 
     mock_env = os.environ.copy()
     mock_env["MOCK_PORT"] = str(mock_port)
-    mock = subprocess.Popen([node, str(SUPABASE_MOCK)], env=mock_env,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            start_new_session=True)
-    if not wait_for_port(mock_port):
-        stop(mock)
-        pytest.fail(f"the Supabase mock never listened on {mock_port}")
 
+    # ONE guard for the whole setup phase, starting at the FIRST spawn: both
+    # children are their own process group (`start_new_session=True`), so an
+    # interrupt during either readiness wait — the exact moment a human or the
+    # job's step timeout interrupts a hanging preview — would otherwise leave
+    # them running with nothing to reap them.
+    mock = None
     app = None
     try:
+        mock = subprocess.Popen([node, str(SUPABASE_MOCK)], env=mock_env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+        if not wait_for_port(mock_port):
+            pytest.fail(f"the Supabase mock never listened on {mock_port}")
+
         app = subprocess.Popen(
             [wrangler, "pages", "dev", "dist",
              "--port", str(app_port), "--ip", "127.0.0.1",
@@ -144,40 +150,30 @@ def _identity_stack() -> None:
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-    except BaseException:
-        # The mock is already running; an OSError here would otherwise orphan
-        # its process group for the rest of the session.
-        if app is not None:
-            stop(app)
-        stop(mock)
-        raise
-    if not wait_for_port(app_port):
-        stop(app)
-        stop(mock)
-        pytest.fail(f"wrangler pages dev never listened on {app_port}")
+        if not wait_for_port(app_port):
+            pytest.fail(f"wrangler pages dev never listened on {app_port}")
 
-    # Materialise the preview's D1 BEFORE the first seed. `_seed_bff_session`
-    # waits for a sqlite to appear, but its budget starts from the seed and it
-    # polls the SHARED `test_session_login_flow.DASHBOARD_URL` (which this module
-    # does not rebind), so on a clean checkout the first test would spend 30 s
-    # waiting on the wrong server and die naming a preview this fixture never
-    # started. Warm the database here instead, and gate on the same OUTCOME the
-    # seed waits for — a request count is not the promise.
-    # TWO conditions, both needed, and "a sqlite exists somewhere" is neither:
-    # every earlier spec in the job seeds through the SAME `.wrangler/state`
-    # tree, so that check is already true before this preview proves anything.
-    #
-    # 1. THIS preview answers `/api/session` with a routing answer (401 for a
-    #    bogus cookie) rather than a 5xx — a preview booted without `--d1
-    #    SESSIONS` answers 503, and would otherwise surface as 22 confusing
-    #    auth failures instead of naming the binding.
-    # 2. a session sqlite exists under the pinned state root, because that is
-    #    what `_seed_bff_session` waits for and writes its row into.
-    try:
+        # Materialise the preview's D1 BEFORE the first seed. `_seed_bff_session`
+        # waits for a sqlite to appear, but its budget starts from the seed and
+        # it polls the SHARED `test_session_login_flow.DASHBOARD_URL` (which this
+        # module does not rebind), so on a clean checkout the first test would
+        # spend 30 s waiting on the wrong server and die naming a preview this
+        # fixture never started.
+        #
+        # TWO conditions, and "a sqlite exists somewhere" is neither: every
+        # earlier spec in the job seeds through the SAME `.wrangler/state` tree,
+        # so that check is already true before this preview proves anything.
+        #
+        # 1. THIS preview answers `/api/session` with a routing answer (401 for a
+        #    bogus cookie) rather than a 5xx — a preview booted without `--d1
+        #    SESSIONS` answers 503, and would otherwise surface as 22 confusing
+        #    auth failures instead of naming the binding.
+        # 2. a session sqlite exists under the pinned state root, because that is
+        #    what `_seed_bff_session` waits for and writes its row into.
         warm_deadline = time.monotonic() + 30
         warmed = False
+        status: int | None = None
         while time.monotonic() < warm_deadline:
-            status = None
             try:
                 # 401 is the expected answer — the store answered, which is the
                 # point. Transports can also drop the first request while the
@@ -205,11 +201,10 @@ def _identity_stack() -> None:
                 f"{DASHBOARD_DIR / '.wrangler'}"
             )
     except BaseException:
-        # This window sits BEFORE the fixture's own try/finally, and both
-        # children are their own process group (`start_new_session=True`), so an
-        # interrupt here would otherwise outlive the run.
-        stop(app)
-        stop(mock)
+        if app is not None:
+            stop(app)
+        if mock is not None:
+            stop(mock)
         raise
 
     globals()["DASHBOARD_URL"] = app_url + "/"
@@ -262,7 +257,13 @@ def _seed(page: Page, display_name: str | None = "danielospinabotero") -> None:
     """
     payload = _session(display_name=display_name)
     sub = payload["user"]["id"]
-    _seed_local_session_cookie(page, sub, payload, access_token=_jwt(sub))
+    # `origin=` is load-bearing: without it the cookie is scoped to the SHARED
+    # `test_session_login_flow.DASHBOARD_URL`, not to the preview this module
+    # boots. That works today only because cookies are host-scoped and the port
+    # differs — so a `DASHBOARD_URL` override with a different HOST would send
+    # every request back to `/auth`, the exact failure this file exists to test.
+    _seed_local_session_cookie(page, sub, payload, access_token=_jwt(sub),
+                               origin=globals()["DASHBOARD_URL"])
 
 
 def _inventory(login_methods: int = 1, linking: bool = True) -> dict:

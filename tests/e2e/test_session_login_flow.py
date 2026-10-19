@@ -336,7 +336,8 @@ def _preflight_local_servers() -> None:
 def _seed_local_session_cookie(page: Page, user_id: str,
                               session: dict | None = None,
                               parent_domain: bool = True,
-                              access_token: str = "seed-access-token") -> None:
+                              access_token: str = "seed-access-token",
+                              origin: str | None = None) -> None:
     """Seed a LIVE BFF session for the LOCAL preview origin (#2731, #4054).
 
     What the gate actually requires (read off the real code): an HttpOnly
@@ -365,7 +366,15 @@ def _seed_local_session_cookie(page: Page, user_id: str,
     When ``session`` is given, ``user_id`` is IGNORED (the dict's own
     ``user.id`` is what the cookie carries); otherwise the standard
     ``_session_json(user_id)`` is used.
+
+    #2809: ``origin`` overrides this module's ``DASHBOARD_URL`` for the cookie
+    scope. A spec that boots its OWN preview on a runtime-picked port must pass
+    it — the default would scope the cookie to this module's constant instead,
+    and the pairing works today only because cookies are HOST-scoped (a port
+    mismatch is invisible), so a ``DASHBOARD_URL`` override that changes the
+    HOST silently sends every request back to ``/auth``.
     """
+    origin = origin or DASHBOARD_URL
     payload = session if session is not None else _session_json(user_id)
     value = urllib.parse.quote(json.dumps(payload))
     bff_user_id = (payload.get("user") or {}).get("id") or user_id
@@ -382,14 +391,14 @@ def _seed_local_session_cookie(page: Page, user_id: str,
     cdp.send("Network.setCookie", {
         "name": SESSION_COOKIE,
         "value": handle,
-        "url": DASHBOARD_URL,
+        "url": origin,
         "path": "/",
         "secure": True,
         "httpOnly": True,
         "sameSite": "Lax",
     })
     cookies = [
-        {"name": "sb-tortoise-auth-token", "value": value, "url": DASHBOARD_URL},
+        {"name": "sb-tortoise-auth-token", "value": value, "url": origin},
     ]
     if parent_domain:
         cookies.append({"name": "sb-tortoise-auth-token", "value": value,
