@@ -4306,9 +4306,15 @@ def _warn_unknown_paths(explain: dict) -> None:
               file=sys.stderr)
     if unknown:
         if other:
+            # "the SAME path(s)", not "additionally": when a shared-module or
+            # lint-policy path is itself unrecognised (pyproject.toml, a root
+            # `.markdownlint*`), the list below repeats the very path line 1 just
+            # explained, and "additionally" invites the reader to suspect a
+            # second, different path in a diff that has one (#9109 review).
             print(
-                f"ci_selection: additionally, {len(unknown)} changed path(s) are "
-                "not matched by any SOURCE_PATTERN:", file=sys.stderr)
+                f"ci_selection: the same path(s) are also not matched by any "
+                f"SOURCE_PATTERN ({len(unknown)} changed path(s), which would "
+                "force the FULL selection on their own):", file=sys.stderr)
         else:
             print(
                 f"ci_selection: FULL matrix because {len(unknown)} changed path(s) "
