@@ -1127,8 +1127,13 @@ def graph_installed_namespaces(sdk: TortoiseSDK, *,
     graph with no marker is unaffected, so #2714's contract holds verbatim for
     every graph that exists today.
 
-    Thin wrapper over ``resolved_pack_set`` (#2728): this is the single read
-    core, so the approval set and the introspection surface cannot drift.
+    Thin wrapper over ``resolved_pack_set`` (#2728), which is itself a thin
+    wrapper over ``resolved_pack_set_for_graph`` — THE read core. Both entry
+    points (this one and the graph-handle reader ``graph_approval_namespaces``)
+    delegate to it one line down, so the approval set and the introspection
+    surface cannot drift; a THIRD derivation is exactly the drift this note
+    forbids (adding a reader is two lines, never a re-implementation of the
+    records ∪ data union).
 
     Graph-unreachable RAISES (same posture as ``get_tenant_packs``: an
     outage must never read as "this graph has no packs" and silently widen
@@ -1454,8 +1459,8 @@ _KIND_GENERAL_FALLBACKS: dict[str, str] = {
 }
 
 
-def payload_names_pack(payload) -> bool:
-    """Cheap pre-check: could this record payload name an ontology pack?
+def payload_names_pack(payload) -> tuple[tuple[str, str], ...]:
+    """The ``(kind PROPERTY, value)`` pairs that NAME a pack — the cheap pre-check.
 
     The whole-graph approval read is the expensive half of the write gate
     (``graph_installed_namespaces``' COST note: 8 property scans, ~6 ms at 300
@@ -1463,13 +1468,21 @@ def payload_names_pack(payload) -> bool:
     and has nothing to refuse, so it must not pay for that read — which is the
     overwhelming majority of journal records (every core kind, every
     ``core:Project``-spelled extraction result, every ``PointRetracted``).
+
+    Returns the pairs rather than a bool ON PURPOSE: the caller passes them
+    straight to ``refuse_unapproved_kinds_in_payload``, so the payload is walked
+    and ``kind_named_packs`` is evaluated ONCE. A separate bool pre-check would
+    walk and classify a second time, and any future change to one half and not
+    the other would silently turn the pre-check into a skip (the #5475 review of
+    this diff). Empty tuple = nothing names a pack = no read needed.
     """
-    return any(
-        kind_named_packs(kind, attribute_bare=prop in _ATTRIBUTABLE_BARE_KIND_KEYS)
-        for prop, kind in kind_spellings_in_payload(payload))
+    return tuple(
+        (prop, kind) for prop, kind in kind_spellings_in_payload(payload)
+        if kind_named_packs(
+            kind, attribute_bare=prop in _ATTRIBUTABLE_BARE_KIND_KEYS))
 
 
-def refuse_unapproved_kinds_in_payload(payload, approved) -> None:
+def refuse_unapproved_kinds_in_payload(payload, approved, *, spells=None) -> None:
     """Raise the #5475 refusal for the first kind in ``payload`` that names a
     pack this graph has not approved; return ``None`` when every spelling is
     admissible.
@@ -1482,14 +1495,13 @@ def refuse_unapproved_kinds_in_payload(payload, approved) -> None:
     that hands its kind as a flat keyword), which mines the same key set.
 
     The caller passes ``approved`` because it is the caller that decides WHEN to
-    pay for the read (and the read happens once per call, not once per kind —
-    ``payload_names_pack`` is the cheap pre-check that decides whether the read
-    is needed at all).
+    pay for the read (the read happens once per call, not once per kind), and
+    ``spells`` — the pairs ``payload_names_pack`` already computed — so a caller
+    that did the cheap pre-check does not walk the payload twice.
     """
-    for prop, kind in kind_spellings_in_payload(payload):
-        if not kind_named_packs(
-                kind, attribute_bare=prop in _ATTRIBUTABLE_BARE_KIND_KEYS):
-            continue
+    if spells is None:
+        spells = payload_names_pack(payload)
+    for prop, kind in spells:
         exc = unapproved_kind_refusal(prop, kind, approved)
         if exc is not None:
             raise exc

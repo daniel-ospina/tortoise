@@ -1860,9 +1860,12 @@ class TestJournalSeamRefusesUnapprovedPacks5475:
         _seed_install(sdk, DEV)
         api = _event_api(sdk, tmp_path)
         before = graph_installed_namespaces(sdk)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError) as excinfo:
             api.add_event("ev-uses", "occurrence",
                           uses=[{"name": "stub", "kind": MARKETING_OBJECT}])
+        assert MARKETING in str(excinfo.value), (
+            "the refusal must NAME the pack, not merely raise (a differently "
+            "broken gate would satisfy a bare raises())")
         assert graph_installed_namespaces(sdk) == before
 
     def test_approved_and_general_kinds_still_write(self, sdk, tmp_path):
@@ -1885,12 +1888,20 @@ class TestJournalSeamRefusesUnapprovedPacks5475:
         """#2714 indicator 3 at the journal seam.
 
         FAIL-ON: ``None`` (no records) read as an empty approval set.
-        REACHABLE: zero ``:PackInstall`` rows, asserted.
+        REACHABLE: zero ``:PackInstall`` rows, asserted — and the POST-CONDITION
+        reads the FOLDED NODE's kind, because ``graph_installed_namespaces``
+        returns ``None`` on this branch whether or not the write landed, so
+        asserting on it would be true by construction (reported by the #5475
+        review for the twin of this test).
         """
         assert graph_installed_namespaces(sdk) is None
         api = _event_api(sdk, tmp_path)
         api.add_object("ungated journal object", MARKETING_OBJECT)
         assert graph_installed_namespaces(sdk) is None
+        rows = sdk._get_proj().g.query(
+            "MATCH (o:Object) WHERE o.objectKind = $k RETURN o.id",
+            params={"k": MARKETING_OBJECT}).result_set
+        assert rows, "the ungated (no-records) arm must actually WRITE"
 
     def test_projection_less_lane_still_journals(self, tmp_path):
         """A ``projection=None`` lane has no graph to widen — it must not raise.
@@ -2015,12 +2026,13 @@ class TestRecordBuildingSeamsRefuseUnapprovedPacks5475:
         _seed_install(sdk, DEV)
         api = _event_api(sdk, tmp_path, "mining")
         committed = _journal_types_event_api(api)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError) as excinfo:
             ConversationMiner._emit_event(api, {
                 "eventId": "mining-event-1",
                 "eventKind": "agent-ops:ruleRevised",
                 "subject": "probe",
             })
+        assert "agent-ops" in str(excinfo.value)
         assert _journal_types_event_api(api) == committed
         assert graph_installed_namespaces(sdk) == frozenset({DEV})
 
@@ -2079,3 +2091,91 @@ class TestSecondWritersOfAKindProperty5475:
         sdk.link_source_to_entity("https://example.test/dev-kind", target["id"],
                                   "Object", source_kind="dev:epic")
         assert graph_installed_namespaces(sdk) == frozenset({DEV})
+
+
+class TestReplayIsDeliberatelyUngated5475:
+    """: #8982's second acceptance half — the REPLAY boundary is stated AND pinned.
+
+    Refusing at ``rebuild_all`` would make a committed record unfoldable, which
+    is strictly worse than the widening it prevents: the journal is the truth.
+    So replay MUST stay ungated, and this pins it — the test that would catch a
+    future refactor moving the gate into ``FalkorProjection.apply`` (where it
+    would refuse every rebuild of a journal written before the gate existed).
+    """
+
+    def test_rebuild_reproduces_an_unapproved_namespace_without_refusing(
+            self, sdk, tmp_path):
+        """A legacy journal record naming an unapproved pack must reproduce.
+
+        The record is written STRAIGHT to the journal (``log.append``),
+        bypassing ``EventAPI._emit`` — that is exactly what a journal written
+        before this gate existed looks like, and what a projection-less lane
+        produces today.
+
+        FAIL-ON: the gate is moved into the fold (``projection.apply``) or into
+        ``rebuild``, so the rebuild raises ``UnapprovedKindNamespace`` and the
+        graph comes back missing a record the journal holds.
+        REACHABLE: the graph is genuinely gated to ``dev`` (asserted) and the
+        record genuinely names ``marketing``, so a gated replay WOULD refuse —
+        the assertion is not vacuous.
+        """
+        import json
+
+        from tortoise.log import EventLog
+
+        _seed_install(sdk, DEV)
+        assert graph_installed_namespaces(sdk) == frozenset({DEV})
+        log_path = tmp_path / "legacy.jsonl"
+        log = EventLog(str(log_path))
+        record = {
+            "event_id": "legacy-1",
+            "ts": "2026-01-01T00:00:00Z",
+            "type": "ObjectRegistered",
+            "initiated_by": "extractor",
+            "id": "legacy-object-1",
+            "name": "a legacy object",
+            "object_kind": MARKETING_OBJECT,
+            "createdAt": "2026-01-01T00:00:00Z",
+        }
+        log.append(record)
+        assert json.loads(log_path.read_text().splitlines()[0])["id"] == (
+            "legacy-object-1")
+
+        sdk._get_proj().rebuild_all(str(tmp_path), confirm_destructive=True)
+
+        rows = sdk._get_proj().g.query(
+            "MATCH (o:Object) WHERE o.id = 'legacy-object-1' "
+            "RETURN o.objectKind").result_set
+        assert rows and rows[0][0] == MARKETING_OBJECT, (
+            "the rebuilder must reproduce a journal record the live gate would "
+            "have refused — refusing here would lose a committed write")
+        # …and that replay is what can widen the set, which is why the write
+        # doors refuse BEFORE the append rather than after.
+        assert MARKETING in (graph_installed_namespaces(sdk) or frozenset())
+
+
+class TestIngestCorpusEventKind5475:
+    """``ingest_corpus(eventKind=...)`` is caller-supplied and writes RAW Cypher.
+
+    It never meets a gated seam (``MERGE … SET e += $props``), so it was one
+    more way to install a pack from a public SDK method — reported by the review
+    of this change with the measurement
+    ``ingest_corpus(dir, eventKind='marketing:meeting')`` on a ``dev``-only
+    graph leaving ``['dev','marketing']``.
+    """
+
+    def test_ingest_corpus_refuses_an_unapproved_event_kind(self, sdk, tmp_path):
+        """FAIL-ON (measured pre-fix): accepted, and the set widens.
+
+        REACHABLE: the graph is gated to ``dev`` and the kind is a real
+        marketing event kind, so the widening was observable.
+        """
+        _seed_install(sdk, DEV)
+        corpus = tmp_path / "corpus"
+        corpus.mkdir()
+        (corpus / "a.md").write_text("# a session\n\nbody\n")
+        before = graph_installed_namespaces(sdk)
+        with pytest.raises(ValueError) as excinfo:
+            sdk.ingest_corpus(str(corpus), eventKind=MARKETING_OBJECT)
+        assert MARKETING in str(excinfo.value)
+        assert graph_installed_namespaces(sdk) == before

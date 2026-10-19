@@ -67,7 +67,9 @@ class EventAPI:
         the widening. Two consequences follow, both recorded rather than
         papered over: a record already in a legacy journal still widens the
         graph when rebuilt, and a ``projection``-less lane
-        (``EventAPI(log, projection=None)`` — no production caller today) would
+        (``EventAPI(log, projection=None)`` — no production caller; the two sites
+        that do it are the ``__main__`` demo subcommand and ``m0.py``'s fold
+        demo) would
         journal a kind for that replay to fold. Neither is a caller-controlled
         escalation from a live tenant; both are why #8982's replay half is a
         STATEMENT here, not a test.
@@ -98,10 +100,10 @@ class EventAPI:
             payload_names_pack,
             refuse_unapproved_kinds_in_payload,
         )
-        if not payload_names_pack(payload):
+        if not (spells := payload_names_pack(payload)):
             return
         refuse_unapproved_kinds_in_payload(
-            payload, graph_approval_namespaces(g))
+            payload, graph_approval_namespaces(g), spells=spells)
 
     def _emit(self, type_: str, *, corrects=None, actor: str | None = None,
               **payload) -> dict:

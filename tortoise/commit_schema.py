@@ -213,12 +213,15 @@ def compile_vocab(packs_dir: Path | str | None = None,
     ``sdk._apply_and_journal``, ``sdk._doc_write`` and ``mining``'s own
     emitter — each BEFORE its journal append (formerly #8982).
     ⛔ That is NOT every write into a mined property — do not read it as one.
-    Still outside it: ``entities[].kind`` has no Layer-1 membership test
-    (#5202, open); replay/``rebuild_all`` is deliberately ungated (the journal
-    is the truth, so a record already in it reproduces faithfully); a
-    projection-less ``EventAPI`` lane would journal a kind for the replay to
-    fold; and raw-Cypher / offline re-typing writers
-    (``tortoise/migrate_kinds.py``, ``tortoise/retype.py``) never meet a door.
+    Still outside it (#9068 carries the measurements): ``entities[].kind`` has no
+    Layer-1 membership test (#5202, open); replay/``rebuild_all`` is
+    deliberately ungated (the journal is the truth, so a record already in it
+    reproduces faithfully); and a set of writers never meets a door at all —
+    ``sdk.ingest_corpus(eventKind=...)``'s raw ``SET e += $props``,
+    ``tortoise/pipeline.py``'s ``SET p.kind = <pipeline_key>`` (which also shows
+    the mining leg conflates an ontology kind with any ``kind``), the connectors'
+    direct ``proj.apply`` on a journal-less projection, and raw-Cypher / offline
+    re-typing (``tortoise/migrate_kinds.py``, ``tortoise/retype.py``).
     This function still gates the vocab it is GIVEN; it does not make the write
     path's object kinds closed-vocab.
 

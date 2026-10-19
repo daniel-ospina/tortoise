@@ -22761,6 +22761,15 @@ class TortoiseSDK:
         branches) while the new path short-circuits the embedding to None —
         the SAME flag, different Event semantics on two live paths.
         """
+        # ── #5475 (residual): ``eventKind`` is CALLER-SUPPLIED here ──
+        # This FROZEN legacy branch writes it with a raw ``MERGE … SET e +=
+        # $props`` further down, bypassing every gated seam — so the approval
+        # gate is applied HERE, before the walk. Measured by the review of the
+        # #5475 change: ``ingest_corpus(dir, eventKind='marketing:meeting')`` on
+        # a ``dev``-only graph left ``['dev','marketing']``. Behaviour is
+        # otherwise unchanged (SC4): a bare / ``core:`` / approved spelling
+        # still writes, and the default ``DocumentCreated`` names no pack.
+        self._refuse_unapproved_kind("eventKind", eventKind)
         import os as _os  # noqa: I001
         import json as _json
         from pathlib import Path
@@ -28549,13 +28558,13 @@ class TortoiseSDK:
             payload_names_pack,
             refuse_unapproved_kinds_in_payload,
         )
-        if not payload_names_pack(record):
+        if not (spells := payload_names_pack(record)):
             return
         # `_installed_namespaces_for_gate` is this module's SDK-aware reader
         # (it is the one that knows a bare-``__new__`` SDK has no graph and a
         # bound-but-unreachable graph RAISES rather than reading as no-packs).
         refuse_unapproved_kinds_in_payload(
-            record, _installed_namespaces_for_gate(self))
+            record, _installed_namespaces_for_gate(self), spells=spells)
 
     def _refuse_unapproved_kinds_in_props(self, props: dict) -> None:
         """Run the #5475 gate over EVERY kind property a write is carrying.
