@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -1273,8 +1274,15 @@ def test_refresh_durations_on_the_real_manifest_of_record() -> None:
     # PyYAML is a second implementation of the same parse, so the completeness
     # check survives without a number that can go stale.
     assert set(entries_before) == set(yaml.safe_load(before)["durations"])
+    # The stamp must be FRESH: the manifest gate rejects a `captured_at` older
+    # than 21 days, so the hardcoded "2026-09-28T00:00:00Z" that used to live
+    # here turned this test red on 2026-10-19 with nothing in the tree changed
+    # (measured: integrity_problems -> "captured 21 days ago ... past the
+    # 21-day bound"). The value itself is not asserted anywhere below — only
+    # that the refresh re-stamps it with something the gate accepts.
+    captured = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     new_text, stats = ci_timing.render_refreshed_manifest(
-        before, {"test_bridge_table.py": 123.4}, "2026-09-28T00:00:00Z")
+        before, {"test_bridge_table.py": 123.4}, captured)
     # `manifest_keys` and `carried_forward` are BOTH computed from the INPUT
     # parse (`before`), so on their own they cannot fail when the refresh drops
     # an entry from the OUTPUT — asserting only these two is a tautology. They
@@ -1294,6 +1302,11 @@ def test_refresh_durations_on_the_real_manifest_of_record() -> None:
     assert set(entries_after) == set(yaml.safe_load(new_text)["durations"])
     assert "  test_bridge_table.py: 123.4" in new_text
     assert "# #3395: per-file CI wall time" in new_text
+    # The fresh stamp must actually REACH the output — without this the comment
+    # above would claim a property the test does not assert (the input manifest's
+    # own stamp is already fresh, so a renderer that IGNORED ``captured_at``
+    # would still satisfy every other line here).
+    assert f'durations_captured_at: "{captured}"' in new_text
     assert ci_timing.validate_refreshed_manifest(new_text) == []
     # ... and the FULL `--integrity` gate, not just its duration subset: the
     # refresh must not tilt the push halves or unclassify a file (#3395).

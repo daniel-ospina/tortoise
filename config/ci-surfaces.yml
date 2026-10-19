@@ -1875,6 +1875,13 @@ surfaces:
   - test_embed_metering.py   # #4488: the tally/middleware/hook + the registry-lane writer/reader (dual with `api`/`eval`)
   - test_retrieval_metering.py   # #4489: the tally/middleware/hook + the registry-lane writer/reader (dual with `api`)
   - test_embedder_provision.py
+  # #3990: the why block must name the operator that mediates a support (id +
+  # type + Layer-3 label) plus any mitigation on it. `tortoise/why.py` selects
+  # `core` and nothing else, so this is the surface its guard has to live on —
+  # registered on `ep` it would never run for the file it pins (measured:
+  # select(['tortoise/why.py'], 'pull_request') -> ['core']).
+  - test_why_operator_mediation.py
+  - test_why_layer_rate.py  # #3990: the why-layer rate instrument (W0/W1/W2/W3 + M4/M5/M6 movement control); `tools/why_layer_rate.py` is in ci_selection.CORE_ALSO so a tool-only diff selects `core` too
   - test_embedding_model_required.py   # #4861: the REQUIRED-embedder contract (core: embeddings.py + exceptions.py)
   - test_hermetic_egress_guard.py  # #4387: pins the suite-wide egress guard installed by tests/conftest.py — a conftest change already forces `full`, so this registration exists to keep the guard's own file in the surface it protects
   - test_embedded_evidence.py
@@ -5389,6 +5396,16 @@ durations:
   test_invite_fusion_http.py: 12.2
   test_signup_token_revoke.py: 4.0
   test_w4_why_enrichment.py: 4.0
+  test_why_operator_mediation.py: 4.5  # #3990 measured locally (9 tests, embedded graphs)
+  test_why_layer_rate.py: 22.0  # #3990 measured locally (15 tests; each movement control seeds a fresh graph)
+  #3400 trap: files ADDED BY A MAIN PUSH carry no junit row until the next
+  # refresh, which dropped `durations` coverage to 89.9% (below the 90% floor)
+  # and reds `ci_selection.py --integrity` on EVERY PR (python-ci.yml's required
+  # manifest-integrity job). Local embedded/docker-lane readings, measured at
+  # this branch head as the sum of testcase/@time over all tests:
+  test_7951_enforce_atomic_write.py: 7.4  # #7951: 19 tests, 7.39s wall (measured at the rebase head; refresh from the first post-merge run)
+  test_9079_onboarding_declared_lane.py: 3.6  # #9079: 14 tests, 3.63s wall (same convention)
+  test_write_op_reachability.py: 3.3  # #8135: 43 tests + 1 xfail, 3.25s wall (same convention)
   test_capture_loop_responsiveness.py: 10.2
   # #2988/#3243: AST pins plus behavioural tests that park real daemon-pool
   # workers on threading.Event gates and drive a reachable cold-start through

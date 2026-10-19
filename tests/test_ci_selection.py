@@ -1854,6 +1854,26 @@ def test_write_op_reachability_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_why_layer_instrument_selects_its_guards_on_every_vector():
+    # #3990: `tortoise/why.py` selects `core` and NOTHING else on a PR, and
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry, so a
+    # `tools/why_layer_rate.py`-only diff came back with `changed == []` and took
+    # the docs-only early return (`select()` returned NO surface). Either way the
+    # two guards added for the why-layer operator leg would never run on the
+    # files they pin — the #1349/#2938/#3332 silent-drop class the neighbouring
+    # tests record. Registered under `core` (the surface why.py selects) plus a
+    # CORE_ALSO row for the tool.
+    # Mutation check: dropping the CORE_ALSO row fails the tool assert; moving
+    # either test off `core` fails the why.py assert.
+    for changed in (["tortoise/why.py"], ["tools/why_layer_rate.py"],
+                    ["tests/fixtures/why_layer_eval.json"]):
+        r = _sel(changed)
+        assert r["full"] is False, (changed, r)
+        assert "core" in r["surfaces"], (changed, r)
+        assert "test_why_operator_mediation.py" in r["test_files"], (changed, r)
+        assert "test_why_layer_rate.py" in r["test_files"], (changed, r)
+
+
 def test_write_op_reachability_guard_runs_on_every_surface_it_pins():
     # #4495 review P1: tests/test_write_op_reachability.py pins THREE modules and
     # they do not all select the same surface — so a single registration arm is

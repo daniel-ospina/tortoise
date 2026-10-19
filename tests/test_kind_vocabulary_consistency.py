@@ -221,7 +221,7 @@ def test_point_axis_runtime_exception_is_exactly_two_names():
     private literal would otherwise stay invisible — the equality leg sees doc == the union and
     the pack leg only inspects events.
     """
-    assert CORE_POINT_KINDS - CANONICAL_POINT_KINDS == {"humanApproval", "event"}, (
+    assert {"humanApproval", "event"} == CORE_POINT_KINDS - CANONICAL_POINT_KINDS, (
         "the gate-only point kinds changed; §5 + the #1013 ruling admit exactly two "
         f"(got {sorted(CORE_POINT_KINDS - CANONICAL_POINT_KINDS)})")
     # `event` is the size-1 live divergence: gate-accepted, pack-unresolvable, and rejected by
