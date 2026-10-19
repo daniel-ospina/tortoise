@@ -382,8 +382,11 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
         ONE reader entry + dedups cross-item near-duplicate facts, so
         the resolved-item reader window admits distinct facts instead of
         flooding on duplicates. PURE function (package_evidence_pool)
-        — recall surface unchanged, hermetic no-dupe tests prove the
-        ON path is byte-identical on duplicate-free pools.
+        — recall surface unchanged; the hermetic no-dupe tests prove the
+        ON path is byte-identical on duplicate-free pools **that are
+        already ordered by hit type** (D3 #9092: statement → turn →
+        chunk). A pool mixing those types is REGROUPED by tier — never by
+        the value mark, which only breaks ties inside a tier.
         ⚠️ **On THIS lane the own-source leg is currently INERT (#8658):**
         the product search path does not put ``quote`` / ``source_turn_id``
         on a hit, so pass 2 (a point's own source chunks/turns) never
@@ -530,15 +533,18 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
             "TORTOISE_ASK_EVIDENCE_BOOST", True)       # A5, default ON
         # A8 (Slice A #2683): the evidence-package assembly arm —
         # ``TORTOISE_ASK_EVIDENCE_ASSEMBLY`` (default OFF — fail-safe,
-        # the #1745 default decision; hermetic no-dupe tests prove the
-        # ON path is byte-identical to OFF when no near-duplicates
-        # exist). ⚠️ This lane's own-source leg is inert today (#8658) —
+        # the #1745 default decision; the hermetic no-dupe tests prove the
+        # ON path is byte-identical to OFF when no near-duplicates exist
+        # AND the pool is already tier-ordered — D3 #9092 regroups a pool
+        # that mixes hit types: statements first, then turn Points, then
+        # raw chunks). ⚠️ This lane's own-source leg is inert today (#8658) —
         # see the arm's docstring above and
         # docs/runbook/8043-slice-a-t-gate.md §2 for the measured cost.
         # mark_for=None = the stored-``has_answer`` fallback
         # (source-session class only) — product graphs carry zero value
-        # marks, so the package is pure collapse+ordering-by-rank on
-        # real graphs (never a silent mark-driven reorder).
+        # marks, so the package is pure collapse + D3 hit-type ordering on
+        # real graphs (never a silent mark-driven reorder — but NOT
+        # ordering-by-rank either, which is what #9092 replaced).
         evidence_assembly = ask_env_bool(
             "TORTOISE_ASK_EVIDENCE_ASSEMBLY", False)
         from tortoise.retrieval import (  # noqa: I001
@@ -628,10 +634,12 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
             # capped reader window admits distinct facts instead of
             # flooding on duplicates. Recall surface unchanged; the
             # package shapes only what ``assemble_context`` hands the
-            # reader. Env-gated OFF by default (fail-safe); hermetic
+            # reader. Env-gated OFF by default (fail-safe); the hermetic
             # tests in tests/test_evidence_assembly.py prove the ON
             # path is byte-identical when the pool has no
-            # near-duplicates.
+            # near-duplicates AND already lists statements before turns
+            # before chunks (D3 #9092 — a mixed pool is regrouped by hit
+            # type, never by the value mark).
             if evidence_assembly:
                 deduped, _pkg_stats = package_evidence_pool(
                     deduped, mark_for=None)

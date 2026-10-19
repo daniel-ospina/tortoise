@@ -39,6 +39,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from collections.abc import Callable
 
 from .live import epistemic_label_queries  # #7853: id-anchored label sweep
 
@@ -183,12 +184,26 @@ class Dreamer:
               stamp_dreamed_at: bool = True,
               trivial_stamp: bool = True,
               op_cap: int = 200,
-              warm_start: bool = True) -> dict:
+              warm_start: bool = True,
+              before_run: Callable[[list[str]], None] | None = None) -> dict:
         """Run EP over the subgraph reachable from ``anchors``.
 
         Reuses the fast-path selector (analyze._bfs_select_operators, capped
         at 200 operators) and TortoiseEP.run with batch I/O. Returns
         {iterations, converged, affected_claims}.
+
+        ``before_run`` (#7739): called with the run's SEED IDS — the operators
+        the selector chose plus the direct-edge factor endpoints — AFTER the
+        selection and BEFORE ``ep.run``/any write (it fires even when the
+        selection is EMPTY, so the caller can still gate the anchors it was
+        asked to dream). The SDK uses it to evaluate the calibration gate
+        against exactly what the pass is about to consume: ``ep.run``
+        re-expands ``max_hops`` from those seeds, so a gate derived from the
+        ANCHORS' own closure is narrower than the run
+        (measured: one extra hop at ``max_hops=3`` on a chain) and would let an
+        uncalibrated point inside the consumed set run ungated. Passing the
+        seeds through this hook keeps one selection and one derivation, which
+        is why the gate cannot drift from the pass.
 
         Epic 903-C2 (#1240) — freshness write-back:
         - The per-claim confidence write-back loop is replaced by a SINGLE
@@ -210,9 +225,11 @@ class Dreamer:
         legacy behavior.
 
         #1157 calibration: this is an EP WRITE surface (persists
-        n.confidence). Callers must gate on calibration state BEFORE calling
-        (the SDK surface does via require_calibration → CalibrationError);
-        do not invoke Dreamer directly with uncalibrated graphs.
+        n.confidence). Callers must ensure the graph is gated before an EP
+        write happens: the SDK passes ``before_run`` (gate evaluated on the
+        seeds this pass will run, still fail-closed before any write), and
+        the whole-graph modes are gated by the SDK before the call. Do not
+        invoke Dreamer directly with uncalibrated graphs and no ``before_run``.
 
         ``op_cap`` (epic 903-C6, #1244): the BFS operator-selection cap for
         this pass. ``budget=None`` on the SDK surface resolves to the
@@ -234,12 +251,12 @@ class Dreamer:
             self._snapshot_ep_epoch()
             proj = self._sdk._get_proj()
             from .analyze import _bfs_select_operators
+            stats: dict = {}
             operator_ids, factor_anchors = _bfs_select_operators(
                 proj, anchors, max_hops=max_hops, rel_filter="IMPL|NAND",
                 direction=direction, op_cap=op_cap,
-                stats=self._last_selection_stats,
+                stats=stats,
             )
-            self._last_operator_count = len(operator_ids)
             # A9 (epic #902 §5.6): the selection set ALSO carries direct-edge
             # factor anchors — a direct-edge-only subgraph yields ZERO
             # operator ids but a non-empty direct-factor selection. ep.run
@@ -254,6 +271,21 @@ class Dreamer:
             # deterministic — operator_ids is a set, hash-randomized across
             # processes; harmless: EP factors are order-independent and
             # affected_claims is a set)
+            # #7739: the caller's gate (the SDK calibration gate) runs here —
+            # on the seeds ``ep.run`` is about to receive, after the ONE
+            # selection this pass performs, and BEFORE any EP work or write.
+            # Fail-closed: raising here leaves the graph untouched. It fires
+            # even for an EMPTY selection: a dream asked to recompute an
+            # uncalibrated anchor must still refuse (the pre-#7739 posture),
+            # even though the empty-seed branch below only trivially stamps.
+            if before_run is not None:
+                before_run(seed_ids)
+            # Only a pass that got PAST the gate publishes its selection
+            # report (#7739 review, #6211's hazard in reverse): a refused pass
+            # runs no EP and writes no metrics, so leaving a count/stats here
+            # would describe a pass that never ran.
+            self._last_operator_count = len(operator_ids)
+            self._last_selection_stats = stats
             if not seed_ids:
                 # Epic 903-C2 (#1240): operator-less anchors (isolated claims
                 # with no operators AND no direct edges). There is no EP to
