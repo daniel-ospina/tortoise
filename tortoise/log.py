@@ -606,6 +606,7 @@ def _reinit_append_locks_after_fork() -> None:
     global _APPEND_LOCKS_GUARD
     _APPEND_LOCKS.clear()
     _FLOCK_UNHEALTHY.clear()
+    _POSITION_CACHE_DEAD.clear()
     _APPEND_LOCKS_GUARD = threading.Lock()
 
 
@@ -835,9 +836,66 @@ _COUNT_MAY_RAISE = (OSError, MemoryError, RecursionError)
 #: a sidecar written by a different reader is a miss rather than a misreading.
 _POSITION_VERSION = 1
 
+# How long a journal whose sidecar could not be MAINTAINED stops being recounted
+# on the append path. The sidecar is the ONLY thing that makes the count O(1) on
+# a journal another writer keeps moving, so a sidecar that cannot be written
+# (a directory at its path, a read-only data dir, ENOSPC, EMFILE) turns every
+# append into an O(journal) recount — the count holds the whole journal in RSS —
+# taken INSIDE the append's critical section, on a journal that is unbounded
+# (#9025). The append's whole job is the record; the position must not make it
+# quadratic. So a failed cache write marks the path DEAD for this long and the
+# append path reports ``None`` (a named absence, never a guess) instead of
+# recounting; an explicit ``position()`` still recounts, because a measurement
+# the caller asked for is not the hot path. The mark EXPIRES rather than being
+# sticky, so a fixed permission or a freed directory recovers by itself, and one
+# WARNING per episode is the signal an operator needs (a per-append one is noise
+# they cannot act on). Keyed by resolved journal path, like
+# ``_FLOCK_UNHEALTHY``; single assignments, so the GIL is enough.
+_POSITION_CACHE_DEAD_FOR_S = 30.0
+_POSITION_CACHE_DEAD: dict[str, float] = {}
+
 
 def _position_cache_path(path: Path) -> Path:
     return path.with_name(path.name + POSITION_SUFFIX)
+
+
+def _position_cache_dead(key: str) -> bool:
+    """Whether *key*'s sidecar failed to be maintained inside the retry window.
+
+    Expiring on read (like ``_FLOCK_UNHEALTHY``) is what keeps the degradation
+    bounded AND self-healing: past the window the next append recounts once,
+    which either proves a position and repairs the cache or re-marks the path.
+    """
+    stamp = _POSITION_CACHE_DEAD.get(key)
+    if stamp is None:
+        return False
+    if time.monotonic() - stamp < _POSITION_CACHE_DEAD_FOR_S:
+        return True
+    _POSITION_CACHE_DEAD.pop(key, None)
+    return False
+
+
+def _mark_position_cache_dead(key: str, path: Path, exc: BaseException) -> None:
+    """Record a failed sidecar maintenance, and SAY SO once per episode.
+
+    WARNING, unlike the per-append DEBUG in ``EventLog._refresh_position_cache``:
+    this branch is not one missed optimization but a standing one — every append
+    to this journal now reports an unproven position, which is the ``seq``
+    coverage the whole position mechanism exists to provide. An operator has to
+    be able to see that. Repeats inside the same episode stay at DEBUG, so the
+    one line is not buried under a per-append warning.
+    """
+    first = not _position_cache_dead(key)
+    _POSITION_CACHE_DEAD[key] = time.monotonic()
+    if first:
+        logging.getLogger(__name__).warning(
+            "EventLog %s: the position cache beside it cannot be written (%s: "
+            "%s), so this journal's records report NO position for the next "
+            "%.0fs — recounting the journal on every append would hold it in "
+            "memory inside the append's lock, and a journal is unbounded. "
+            "Fix the sidecar path (a read-only data dir, a directory in the "
+            "way, a full disk) and the positions come back by themselves.",
+            path, type(exc).__name__, exc, _POSITION_CACHE_DEAD_FOR_S)
 
 
 def _journal_state(f) -> tuple[int, int]:
@@ -1045,14 +1103,17 @@ class EventLog:
         ``None`` means the append SUCCEEDED but its position is NOT PROVEN,
         and it is a NAMED absence, never a guess — a caller that writes
         ``journal_event`` must leave that row unwritten rather than fabricate
-        a ``seq``. FIVE states produce it, and holding the lock does not exclude
-        any of the other four — the lock speaks only to the state that names it.
+        a ``seq``. SIX states produce it, and holding the lock does not exclude
+        any of the other five — the lock speaks only to the state that names it.
 
         * the tail could not be SIZED, so the record may not have started on a
           clean line (``_seal_prefix`` returned ``None``). The record is
           appended, but whether a later replay counts it as a record is
           unknown, so nothing is claimed and nothing is cached. A healthy lock
-          and a successful write do NOT rule this out — a flaky mount does;
+          and a successful write do NOT rule this out — a flaky mount does. It
+          is also REPORTED at WARNING: it is the one state where a record can be
+          silently absent from the replay, and nothing after the write can tell
+          whether the seal was needed;
         * the cross-process lock could not be taken (a wedged peer, or a
           platform with no advisory locks — ``_lock_exclusive`` says so);
         * the journal could not be READ, so its records could not be counted
@@ -1068,7 +1129,12 @@ class EventLog:
         * a ``fstat`` failed — before the write (no count is possible) or after
           it (no witness for the offset). Two syscalls, two states, and the
           post-write one is the case where the record is durable and its
-          position is simply unknown.
+          position is simply unknown;
+        * the sidecar could not be MAINTAINED and its ``_POSITION_CACHE_DEAD``
+          window is live, so counting was REFUSED rather than paid (see THE
+          OTHER SHAPE below). This one is deliberate and self-healing: it is
+          what keeps an unwritable cache from making every append an O(journal)
+          read, and it lapses on its own.
 
         Note the AMPLIFICATION of the LOCK state: one bounded wait stamps the
         path UNHEALTHY for ``_FLOCK_UNHEALTHY_FOR_S`` (30 s), and every append
@@ -1107,11 +1173,20 @@ class EventLog:
         the next append recounts from scratch. While the journal stays large
         that is a repeatable recount -> degrade cycle. The fix is a
         checkpointed counter with a tail reader (count only what follows a
-        recorded offset), which is #9252, not a knob here. The SAME issue owns
-        the shape where the sidecar cannot be WRITTEN at all (a read-only data
-        dir, ENOSPC, a directory at the sidecar path): `_cache_fd` is
-        re-attempted on every append, so every append then takes that recount
-        under the lock — one DEBUG line is the only signal.
+        recorded offset), which is #9252, not a knob here.
+
+        THE OTHER SHAPE, a sidecar that cannot be WRITTEN at all (a read-only
+        data dir, ENOSPC, a directory at the sidecar path), is bounded HERE
+        rather than deferred: `_refresh_position_cache` marks the path with
+        ``_POSITION_CACHE_DEAD`` for ``_POSITION_CACHE_DEAD_FOR_S`` and logs ONE
+        warning, and while that mark is live an append does NOT recount — it
+        reports ``None``. Without the mark every append by a writer without a
+        memo (one ``EventLog`` per request, the hosted shape) would read the
+        whole journal into RSS inside this critical section, for ever, which is
+        the quadratic capture path #9190 must not trade for a ``seq``. The mark
+        EXPIRES, so a repaired sidecar recovers by itself (one recount per
+        window until then), and an explicit :meth:`position` still recounts
+        immediately — a measurement the caller asked for is not the hot path.
 
         A miss happens on the first append against a journal with no sidecar
         yet (a restart, or a journal that never carried one), after a
@@ -1156,12 +1231,32 @@ class EventLog:
             # `_records_before` its guards do not cover): both of its remaining
             # inputs are guarded, so nothing here can lose the record before it is
             # written.
-            count = (self._records_before(size, mtime_ns)
+            # ``respect_dead_cache``: a sidecar that cannot be WRITTEN is not
+            # merely a missed optimization — it would force this recount on
+            # every append (see `_POSITION_CACHE_DEAD`), so while it is dead
+            # the position is a named absence instead. The record still lands.
+            count = (self._records_before(size, mtime_ns, respect_dead_cache=True)
                      if locked and size is not None else None)
             position = None if count is None else count + 1
             seal = self._seal_prefix(f)
             payload = ((seal or "") + record).encode("utf-8")
             _write_record(f.fileno(), payload)
+            if seal is None:
+                # The tail could not be SIZED, so it was never examined, and the
+                # record was written without a seal. If the previous writer was
+                # killed mid-record, this record is now glued onto that
+                # fragment: the merged line is malformed and FINAL, and the next
+                # replay skips it — so the record this call reports as written
+                # is silently absent from the replay. Nothing here can repair
+                # that (the bytes are gone into a line a replay refuses), which
+                # is exactly why it must be SAID rather than inferred from a
+                # later discrepancy.
+                logging.getLogger(__name__).warning(
+                    "EventLog %s: the journal's tail could not be sized, so the "
+                    "record just appended carries NO seal: if the previous "
+                    "writer was killed mid-record, this record is glued onto "
+                    "that fragment and the next replay will skip BOTH. No "
+                    "position is reported for this record.", self.path)
             if position is not None and seal is None:
                 # The tail could not be examined, so "this record adds exactly
                 # one to the count" is unproven even though the write landed:
@@ -1221,23 +1316,47 @@ class EventLog:
         next time and never a wrong number, so swallowing here cannot hide a
         wrong count — only the missed optimization.
 
-        DEBUG, not WARNING: a full disk or a read-only data mount makes this fire
-        on every append, and a per-append warning is noise an operator cannot act
-        on. Interposed exceptions are still visible with logging enabled.
+        ONLY an ``OSError`` marks the path DEAD (``_POSITION_CACHE_DEAD``): that
+        is the shape where the sidecar PATH is unusable — EACCES on the
+        directory, EISDIR, ENOSPC, a FIFO — and where leaving it unmarked would
+        turn every later append into an O(journal) recount inside the append's
+        lock. An allocation failure (``MemoryError`` building the memo or the
+        payload) says nothing about the cache path and must NOT stop the next
+        append from using it, so it is swallowed here without marking anything.
+
+        DEBUG, not WARNING, for a failure that RECURS: a full disk or a
+        read-only data mount makes this fire on every append, and a per-append
+        warning is noise an operator cannot act on. The ONE actionable signal is
+        emitted by :func:`_mark_position_cache_dead` the first time a path goes
+        dead, which is also what stops the append path from recounting the
+        journal on every append while the sidecar stays unwritable.
         """
-        try:
-            # The memo is the FIRST thing set and lives inside this guard: it is
-            # the only statement after the record lands that is not itself a
-            # syscall, so a `MemoryError` building the tuple would otherwise
-            # report failure for a durable record, and the caller's retry would
-            # duplicate it. Setting it before the write also means a failed
-            # write still leaves the count known (the next append rewrites).
+        # The memo is set FIRST, and it is set even when the cache write below
+        # fails: it is the only statement here that is not a syscall, so a
+        # `MemoryError` building the tuple must not report failure for a durable
+        # record (the caller's retry would duplicate it), and a failed write
+        # still leaves the count known. Suppressed rather than fatal — the same
+        # guard `_records_before` uses for the same allocation.
+        with contextlib.suppress(*_COUNT_MAY_RAISE):
             self._position_memo = (os.fspath(self.path), size, mtime_ns, records)
+        try:
             _write_position_cache(self._cache_fd(key), records, size, mtime_ns)
+        except OSError as exc:
+            # The sidecar PATH is unusable. Mark it, so the append path stops
+            # paying a recount it cannot amortise until the path is fixed.
+            _mark_position_cache_dead(key, self.path, exc)
+            logging.getLogger(__name__).debug(
+                "EventLog %s: position cache not written", self.path,
+                exc_info=True)
         except Exception:                  # blanket ON PURPOSE — see the docstring
             logging.getLogger(__name__).debug(
                 "EventLog %s: position cache not written", self.path,
                 exc_info=True)
+        else:
+            # A cache that just answered is not dead: clear the mark at once, so
+            # a repaired sidecar does not keep the positions away for a whole
+            # retry window (the mark's only other exit is expiry).
+            _POSITION_CACHE_DEAD.pop(key, None)
 
     def _cache_fd(self, key: str) -> int:
         """An open descriptor for the sidecar, kept for this instance.
@@ -1252,8 +1371,11 @@ class EventLog:
         in the way), because that is the honest report from here: this method's
         only caller is `_refresh_position_cache`, which is TOTALLY guarded and
         runs AFTER the record has landed — so the exception is logged at DEBUG
-        and cannot reach the append. The failure is not memoised, so a fixed
-        permission or a freed descriptor recovers by itself.
+        and cannot reach the append. The OPEN is retried on every append (it is
+        a single failing syscall, and retrying it is what lets a fixed
+        permission recover without a restart); what is NOT retried per append is
+        the O(journal) recount it would otherwise force — that is
+        `_POSITION_CACHE_DEAD`, marked by the caller.
 
         Lifetime: ``weakref.finalize`` closes it when the instance is collected
         (CPython refcounting makes that the common case; a reference cycle
@@ -1289,7 +1411,8 @@ class EventLog:
         self._cache_fd_finalizer = weakref.finalize(self, _close_quietly, fd)
         return fd
 
-    def _records_before(self, size: int, mtime_ns: int) -> int | None:
+    def _records_before(self, size: int, mtime_ns: int, *,
+                        respect_dead_cache: bool = False) -> int | None:
         """How many records the journal holds, for this file state — or ``None``.
 
         Memo, then cache, then the journal — each step validated by the
@@ -1310,6 +1433,16 @@ class EventLog:
         never turn into an append failure — the record's own write is what this
         path is for, and it had no read dependency before the position existed
         — so the caller reports an unproven position and still appends.
+
+        ``respect_dead_cache`` is the APPEND path's flag (``position()`` leaves
+        it off): while this journal's sidecar is in its ``_POSITION_CACHE_DEAD``
+        window, the recount is REFUSED instead of paid. That is the difference
+        between a bounded degradation and an O(n^2) capture path: with the
+        sidecar unwritable, every append by a writer without a memo would
+        otherwise read the whole journal into memory inside the append's lock,
+        for ever, on a journal that is unbounded (#9025). ``None`` here means
+        "no proven position" — the same contract as an unreadable journal, and
+        the record still lands.
         """
         raw = os.fspath(self.path)
         memo = getattr(self, "_position_memo", None)
@@ -1320,6 +1453,11 @@ class EventLog:
                                       size, mtime_ns)
         if cached is not None:
             count: int | None = cached
+        elif respect_dead_cache and _position_cache_dead(self._lock_key()):
+            # The sidecar is dead right now (see `_POSITION_CACHE_DEAD`): the
+            # count would cost an O(journal) read on the append path, in the
+            # append's critical section. Unproven position, record lands.
+            return None
         else:
             try:
                 count = _count_records(self.path)
@@ -1381,6 +1519,13 @@ class EventLog:
         position cache through — but only when it holds the cross-process lock
         AND the journal still holds the state it counted (in the degraded window,
         or when the journal moved under the count, it leaves the cache alone).
+
+        Unlike :meth:`append` it RECOUNTS even while the journal's sidecar is in
+        its ``_POSITION_CACHE_DEAD`` window: the append path declines that cost
+        because it runs on every write, whereas this is an explicit measurement
+        whose caller asked for a number. A successful one also repairs the
+        cache, which clears the mark early and hands the appends their positions
+        back.
 
         :raises OSError: the journal exists but could not be opened, stat'ed or
             read (a read-only journal raises here — this method needs the

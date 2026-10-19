@@ -663,6 +663,103 @@ def test_a_failed_cache_write_costs_the_cache_not_the_record(
     assert EventLog(path).append({"n": 4}) == 5
 
 
+def test_a_dead_sidecar_stops_the_recount_instead_of_paying_it_per_append(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """An unwritable sidecar must not make every append an O(journal) read.
+
+    The sidecar is the ONLY thing that makes the count O(1) on a journal another
+    writer keeps moving. With it dead, a writer that holds no memo — one
+    `EventLog` per request, the hosted shape — would otherwise read the WHOLE
+    journal into memory inside the append's critical section, on EVERY append,
+    on a journal that is explicitly unbounded (#9025). The measured cost is
+    ~0.18 s and ~8x the journal in RSS per MiB, so the shape this replaces is
+    O(n^2) on the capture path with the journal's own lock held.
+
+    So while the path is marked dead the append REFUSES the recount and reports
+    an unproven position: `None`, a named absence, never a guess — and the
+    record still lands. `_count_records` is made to raise, so a recount here is
+    a FAILURE rather than an unobserved extra pass.
+    """
+    path = tmp_path / "events.jsonl"
+    assert [EventLog(path).append({"n": i}) for i in range(2)] == [1, 2]
+    _cache(path).unlink()
+    _cache(path).mkdir()                 # the sidecar cannot be written (EISDIR)
+
+    # The FIRST append after the cache broke still pays ONE recount: the mark is
+    # created by the failed write, i.e. after the count it already took.
+    assert EventLog(path).append({"n": 2}) == 3
+
+    monkeypatch.setattr(log_mod, "_count_records",
+                        lambda _p: (_ for _ in ()).throw(
+                            AssertionError("the journal was recounted")))
+    for n in (3, 4):
+        assert EventLog(path).append({"n": n}) is None, (
+            "a dead sidecar put an O(journal) recount back on the append path")
+
+    assert [r["n"] for r in read_for_replay(EventLog(path))] == [0, 1, 2, 3, 4]
+    assert _cache(path).is_dir(), "the test's broken sidecar was replaced"
+
+
+def test_a_dead_sidecar_is_reported_once_per_episode(
+        tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    """The degradation is REPORTABLE, and it does not become per-append noise.
+
+    A DEBUG line per append is invisible to an operator, and this is not one
+    missed optimization: every record to this journal now has no `seq`, which is
+    the coverage the whole position mechanism exists to provide. One WARNING per
+    episode is the signal; repeats stay at DEBUG, so the actionable line is not
+    buried under the appends it describes.
+    """
+    path = tmp_path / "events.jsonl"
+    assert [EventLog(path).append({"n": i}) for i in range(2)] == [1, 2]
+    _cache(path).unlink()
+    _cache(path).mkdir()
+
+    with caplog.at_level(logging.WARNING, logger=log_mod.__name__):
+        for n in range(2, 5):
+            EventLog(path).append({"n": n})
+
+    warnings = [r for r in caplog.records
+                if r.levelno >= logging.WARNING
+                and "cannot be written" in r.getMessage()
+                and str(path) in r.getMessage()]
+    assert len(warnings) == 1, (
+        f"expected ONE warning for a dead sidecar, got {len(warnings)}: "
+        f"{[r.getMessage() for r in warnings]}")
+    assert "NO position" in warnings[0].getMessage()
+    assert "30s" in warnings[0].getMessage(), (
+        "the warning does not say how long the positions stay absent: "
+        f"{warnings[0].getMessage()}")
+
+
+def test_a_dead_sidecar_is_retried_after_its_window_and_recovers(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The mark EXPIRES, so a repaired sidecar needs no restart.
+
+    Refusing the recount for ever would turn a one-minute permission fix into a
+    permanent loss of positions. Past the window the next append recounts ONCE,
+    which either proves a position and rewrites the cache or re-marks the path —
+    bounded regeneration, not a sticky flag.
+    """
+    monkeypatch.setattr(log_mod, "_POSITION_CACHE_DEAD_FOR_S", 0.0)
+    path = tmp_path / "events.jsonl"
+    assert [EventLog(path).append({"n": i}) for i in range(2)] == [1, 2]
+    _cache(path).unlink()
+    _cache(path).mkdir()
+    assert EventLog(path).append({"n": 2}) == 3         # marks the path dead
+
+    _cache(path).rmdir()                                 # someone fixed it
+    assert EventLog(path).append({"n": 3}) == 4, (
+        "an expired mark still refused the recount: the positions never return")
+    assert _cache(path).exists(), "the cache was not repaired by the retry"
+    # ...and the mark is cleared by the successful write, not merely expired: a
+    # fresh writer answers from the cache on its first append.
+    monkeypatch.setattr(log_mod, "_count_records",
+                        lambda _p: (_ for _ in ()).throw(
+                            AssertionError("the repaired cache was not used")))
+    assert EventLog(path).append({"n": 4}) == 5
+
+
 def test_a_re_key_whose_sidecar_cannot_be_opened_keeps_no_stale_descriptor(
         tmp_path: Path):
     """A failed re-key must forget the OLD journal's descriptor, not keep serving it.
@@ -780,6 +877,44 @@ def test_an_unexaminable_tail_reports_no_position__and_caches_nothing(
     assert EventLog(path).append({"next": 1}) == 2
 
 
+def test_an_unexaminable_tail_is_reported_when_the_record_lands(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture):
+    """The one state that can lose a record SILENTLY has to say so at the write.
+
+    `_seal_prefix` returns `None` only when the tail could not be SIZED. The
+    record is then written with no seal, and if the previous writer was killed
+    mid-record it is glued onto that fragment: the merged line is malformed and
+    FINAL, so the next replay skips BOTH and the record this call just wrote is
+    absent from the replay. Nothing later can distinguish that from a clean
+    write, so the loss is only ever visible at the point of the write — an
+    inference from a missing record afterwards is exactly what an operator does
+    not get. WARNING, once, with the record still landing.
+    """
+    path = tmp_path / "events.jsonl"
+    path.write_text('{"n": 0', encoding="utf-8")        # a torn tail to glue onto
+    log = EventLog(path)
+    real_seal = EventLog._seal_prefix
+    monkeypatch.setattr(EventLog, "_seal_prefix", lambda self, f: None)
+
+    with caplog.at_level(logging.WARNING, logger=log_mod.__name__):
+        assert log.append({"ours": 1}) is None, (
+            "a position was reported for a record that may have been glued on")
+    reported = [r for r in caplog.records if "carries NO seal" in r.getMessage()]
+    assert len(reported) == 1, (
+        "a possible silent record loss was not reported once: "
+        f"{[r.getMessage() for r in caplog.records]}")
+    assert str(path) in reported[0].getMessage()
+
+    # A PROVEN seal says nothing: the warning is about the unexaminable tail, not
+    # about appending in general.
+    caplog.clear()
+    monkeypatch.setattr(EventLog, "_seal_prefix", real_seal)
+    with caplog.at_level(logging.WARNING, logger=log_mod.__name__):
+        assert EventLog(path).append({"next": 1}) is not None
+    assert not [r for r in caplog.records if "carries NO seal" in r.getMessage()]
+
+
 def test_an_unexaminable_tail_is_not_reported_as_a_clean_one(tmp_path: Path):
     """The seal's own failure branch — `None`, never `""`.
 
@@ -864,8 +999,16 @@ def test_a_special_file_at_the_cache_path_does_not_wedge_the_append(
     # The read side must not block; the write side must fail fast (ENXIO).
     assert log.append({"n": 1}) == 2, "the append blocked on a FIFO sidecar"
 
-    # ...and a fresh instance's READ must not block either.
-    assert EventLog(path).append({"n": 2}) == 3
+    # ...and a fresh instance's READ must not block either. Its position is
+    # proven by ONE recount (taken before the failed write marks the path).
+    assert EventLog(path).append({"n": 2}) == 3, (
+        "a fresh writer's read blocked on, or lost its position to, a FIFO")
+    # The next fresh writer is in the `_POSITION_CACHE_DEAD` window the FIFO
+    # opened, so it reports a NAMED ABSENCE instead of an O(journal) recount
+    # (see `test_a_dead_sidecar_stops_the_recount_instead_of_paying_it_per_append`).
+    assert EventLog(path).append({"n": 3}) is None, (
+        "a fresh writer paid a recount against a sidecar the FIFO made dead")
+    assert [r["n"] for r in read_for_replay(EventLog(path))] == [0, 1, 2, 3]
 
 
 def test_a_fifo_with_a_reader_costs_the_cache_not_the_record(tmp_path: Path):
