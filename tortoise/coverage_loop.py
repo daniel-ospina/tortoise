@@ -97,10 +97,20 @@ _UNIT_DAYS = {"day": 1, "week": 7, "month": 30}
 #: date, and reading it as undated would drop that session from a bounded span
 #: (the session-level version of the #8710 defect). The trailing ``(?!\d)``
 #: keeps a 3-digit day from being truncated to two.
-#: Same shape token as ``tortoise/subgraph_render.py``'s parser; duplicated
-#: rather than imported because that module pulls the eval harness in and this
-#: one is a stdlib-only leaf at import time (see ``_session_of``).
+#: The PREFIX shape is the one ``tortoise/subgraph_render.py`` and
+#: ``TortoiseSDK._iso_date10`` parse as well; those two stay padded-only, so
+#: they have not been widened here — duplicated rather than imported because
+#: subgraph_render pulls the eval harness in and this one is a stdlib-only leaf
+#: at import time (see ``_session_of``).
 _CALENDAR_DATE_RE = re.compile(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?!\d)")
+
+#: The ingest lane's "no date" marker (``tools/longmem_eval/ingest.UNDATED_SENTINEL``)
+#: — a POSITIVE date value that means UNDATED, in every ISO spelling of its
+#: calendar date. Mirrors ``tortoise/subgraph_render.py`` and
+#: ``TortoiseSDK._iso_date10``, which both special-case it for the same reason:
+#: a fabricated 1970 date is worse than no date, and as a BOUND it turns an
+#: unresolvable input into a window that matches (or excludes) everything.
+_UNDATED_SENTINEL_DATE = "1970-01-01"
 
 
 @dataclass(frozen=True)
@@ -163,17 +173,21 @@ def _calendar_date(value: object) -> str | None:
         return None
     year, month, day = match.groups()
     try:
-        return date.fromisoformat(
+        iso = date.fromisoformat(
             f"{int(year):04d}-{int(month):02d}-{int(day):02d}").isoformat()
     except ValueError:
         return None
+    # The sentinel's date itself (any offset spelling) is "no date" — the rule
+    # ``TortoiseSDK._iso_date10`` and ``subgraph_render`` already apply.
+    return None if iso == _UNDATED_SENTINEL_DATE else iso
 
 
 def facet_window_bounds(kind: str | None, start: str | None, end: str | None,
                         session_dates: dict[str, str] | None = None,
                         ) -> tuple[str, str] | None:
     """Resolve a detected date bound into an inclusive ISO ``(lo, hi)``
-    window — THE single source of truth for the R5 window arithmetic.
+    window — THE single source of truth for the CENSUS's window arithmetic
+    (:func:`facet_census` and everything it date-qualifies).
 
     :func:`_span_in_window` is its ONLY consumer in ``tortoise/`` — the
     routed point-level twin on the eval seam
@@ -197,7 +211,8 @@ def facet_window_bounds(kind: str | None, start: str | None, end: str | None,
     "unbounded", NEVER "matches nothing", because a degenerate hard filter
     silently kills the facet (the pre-#8710 recency branch raised ``TypeError``
     on the raw ISO string and the interval branch compared strings, so the
-    whole temporal facet was dead on the producer's ``2023/05/20 (Sat)" shape).
+    whole temporal facet was dead on the producer's ``2023/05/20 (Sat) 03:29``
+    shape).
     """
     if kind == "interval":
         lo, hi = _calendar_date(start), _calendar_date(end)
@@ -211,20 +226,24 @@ def facet_window_bounds(kind: str | None, start: str | None, end: str | None,
         # "never matches-nothing" failure the rule above forbids.
         if start is None or not str(start).strip():
             return None
-        try:
-            # A negative count is clamped to 0 so it can never INVERT the
-            # window (the product path cannot emit one: ``_DATE_RECENCY_RE``
-            # is ``\d+``).
-            n_days = max(0, int(start))
-        except (TypeError, ValueError):
-            return None
         known = [d for d in (_calendar_date(v)
                              for v in (session_dates or {}).values()) if d]
         if not known:
             return None
-        qdate = date.fromisoformat(max(known))
-        return ((qdate - timedelta(days=n_days)).isoformat(),
-                qdate.isoformat())
+        try:
+            # A negative count is clamped to 0 so it can never INVERT the
+            # window (the product path cannot emit one: ``_DATE_RECENCY_RE``
+            # is ``\d+``). An UNREPRESENTABLE one is unresolvable, not fatal:
+            # "in the last 99999999999999999999 days" reaches here from real
+            # question text, and the contract is ``None``, never a raise (the
+            # same guard ``assembly.resolve_relative_anchor`` applies to the
+            # same input).
+            n_days = max(0, int(start))
+            qdate = date.fromisoformat(max(known))
+            return ((qdate - timedelta(days=n_days)).isoformat(),
+                    qdate.isoformat())
+        except (OverflowError, TypeError, ValueError):
+            return None
     return None
 
 

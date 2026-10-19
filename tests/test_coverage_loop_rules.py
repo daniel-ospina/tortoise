@@ -232,6 +232,11 @@ def test_facet_window_bounds_resolution():
     # build the narrowest possible window (``qdate`` alone) and empty the span.
     assert facet_window_bounds("recency", None, None, PRODUCER_DATES) is None
     assert facet_window_bounds("recency", "  ", None, PRODUCER_DATES) is None
+    # an UNREPRESENTABLE day count is unresolvable, not fatal — `\d+` means
+    # real question text reaches here (assembly.resolve_relative_anchor guards
+    # the identical input the same way)
+    assert facet_window_bounds("recency", "99999999999999999999", None,
+                               PRODUCER_DATES) is None
     # a negative day count can never invert the window
     assert facet_window_bounds("recency", "-7", None, PRODUCER_DATES) == (
         "2023-04-10", "2023-04-10")
@@ -250,6 +255,13 @@ def test_calendar_date_normalizes_both_shapes_and_rejects_the_rest():
     # census is the failure this module exists to remove)
     assert _calendar_date("2023/4/9") == "2023-04-09"
     assert _calendar_date("2023-4-9") == "2023-04-09"
+    # the ingest UN dated sentinel is a POSITIVE date meaning "no date" in
+    # every ISO spelling — as a bound it would qualify (or exclude) everything
+    for sentinel in ("1970-01-01", "1970-01-01T00:00:00Z",
+                     "1970-01-01T00:00:00+00:00"):
+        assert _calendar_date(sentinel) is None, sentinel
+    assert facet_window_bounds("recency", "7", None,
+                               {"s": "1970-01-01T00:00:00Z"}) is None
     for undated in (None, "", "   ", "early May", "2026-13-45",
                     "2023/04/105", "2026-09"):
         assert _calendar_date(undated) is None, undated
