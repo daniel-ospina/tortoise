@@ -153,7 +153,10 @@ when docker reports them. Two limits, stated: an EXISTING container keeps the
 limits it was created with — docker cannot change them on ``start``, so the
 reuse path WARNS when that container has no cap and ``down`` + ``start``
 recreates it (as with the image pin) — and a value above the host's real
-headroom still dies (it just dies alone).
+headroom still dies (it just dies alone). A container that has already STOPPED
+has those facts read and reported on stderr BEFORE it is removed: this tool sets
+no ``--restart`` policy, so a kill leaves the container ``exited`` and the
+stale-container branch is the one path a memory kill actually takes.
 
 CONTRACT — THE TARGET IS NOT A PARAMETER
 ----------------------------------------
@@ -384,9 +387,15 @@ def container_memory_cap() -> str:
     return raw
 
 
-def _memory_cap_args() -> list[str]:
-    """`--memory`/`--memory-swap` for `docker run` — the pair, never one."""
-    cap = container_memory_cap()
+def _memory_cap_args(cap: str | None = None) -> list[str]:
+    """`--memory`/`--memory-swap` for `docker run` — the pair, never one.
+
+    *cap* is the value `start()` already validated at the TOP of the call (a
+    guard is only as good as its ordering — see the ordering note there); when
+    omitted it is read and validated here, which is what a direct caller (and
+    the seam test) wants.
+    """
+    cap = cap if cap is not None else container_memory_cap()
     return ["--memory", cap, "--memory-swap", cap]
 
 
@@ -910,13 +919,22 @@ def start(port: int | None = None) -> tuple[str, int]:
 
     A requested port is validated FIRST — before `container_state` and before
     the stale-container `docker rm` — so an invalid value cannot reach docker at
-    all (a guard is only as good as its ordering).
+    all (a guard is only as good as its ordering). The memory cap is validated
+    there too, for exactly the same reason (#7357 review F8): it used to be read
+    at the `docker run` call site, i.e. AFTER a stopped lane container had
+    already been `docker rm -f`'d — so a typo destroyed the lane's graphs and
+    then refused to replace the container.
     """
     if port is not None and not (0 < port < 65536):
         raise SystemExit(f"test-lane: --port {port} is not a valid TCP port")
     # #8124: validated FIRST, for the same reason the port is — a floating tag
     # must fail before the orphan sweep and before any container is touched.
     image = assert_pinned_image(IMAGE)
+    # #7357 review F8: validated FIRST — before the orphan sweep, before
+    # `container_state`, and above all before the stale-container `docker rm -f`
+    # below. An unusable cap must refuse while the container (and the graphs in
+    # it) still exist, not after the removal it would never replace.
+    cap = container_memory_cap()
     # #8180: the call site that makes ownership reaping actually BITE. Every lane
     # that starts sweeps containers whose owning worktree is gone, so a lane
     # closed without `down` (measured: `cmux workspace close` never runs it)
@@ -1009,12 +1027,27 @@ def start(port: int | None = None) -> tuple[str, int]:
         # name that makes the `docker run` below fail with "name already in
         # use", which reads as a run problem rather than the removal problem
         # it is.
+        # #7357 review: docker's termination facts are read BEFORE the removal.
+        # `rm -f` destroys the only evidence of WHY the container stopped, and
+        # an OOM-killed lane container takes exactly THIS path: the container is
+        # created with no `--restart` policy, so a kill leaves it `exited`, never
+        # `running` — the reuse branch above never sees it. Without this read the
+        # next `start()` silently removed, recreated and continued, and the
+        # operator never learned the cap (or host pressure) had killed it. Same
+        # evidence-before-`rm -f` rule the fresh path below states for itself.
+        # The ownership guard runs FIRST, so an unmanaged name is refused before
+        # any docker call (read or removal).
+        _assert_removal_allowed(name)
+        prior = _termination_report(name, live=False)
         outcome = _remove_and_describe(name)
         if outcome.startswith("FAILED"):
             raise SystemExit(
                 f"test-lane: {name} exists, is not running, and could not be "
                 f"removed — refusing to start over it ({outcome})"
             )
+        if prior:
+            print(f"test-lane: {name} had stopped before this start{prior}",
+                  file=sys.stderr)
 
     chosen = port if port is not None else pick_port()
     r = _docker(
@@ -1027,7 +1060,8 @@ def start(port: int | None = None) -> tuple[str, int]:
         # #7357: the KERNEL cap (see CONTAINER_MEMORY_ENV). `--init` and the
         # cap are independent: one reaps orphaned children, the other bounds
         # what a runaway instance can take from every neighbour on the host.
-        *_memory_cap_args(),
+        # `cap` was validated at the TOP of this function (ordering note there).
+        *_memory_cap_args(cap),
         "-p", f"127.0.0.1:{chosen}:6379",
         "-e", "REDIS_ARGS=--appendonly no --save ''",
         # #8071: engine parity with the SHARED instance (see the module
@@ -1084,13 +1118,10 @@ def start(port: int | None = None) -> tuple[str, int]:
     return name, published
 
 
-def _remove_and_describe(name: str) -> str:
-    """Remove a container this tool just created, and say what actually
-    happened — a cleanup whose result is unread is how a running container with
-    a reserved port survives to make every later `start()` refuse.
-
-    Guarded like every other removal intent, so "no removal bypasses the
-    ownership check" is true of the whole module and not just of `stop()`.
+def _assert_removal_allowed(name: str) -> None:
+    """The ownership guard EVERY removal intent must pass, factored out so a
+    read that precedes a removal cannot reach docker for a container this tool
+    does not own (and so the rule lives in one place instead of at call sites).
     """
     if not is_managed(name):
         raise SystemExit(f"test-lane: refusing to remove unmanaged {name!r}")
@@ -1103,6 +1134,17 @@ def _remove_and_describe(name: str) -> str:
             f"test-lane: refusing to remove {name!r} — this worktree's container "
             f"is {lane_name()!r}; a peer lane's database is not ours to delete"
         )
+
+
+def _remove_and_describe(name: str) -> str:
+    """Remove a container this tool just created, and say what actually
+    happened — a cleanup whose result is unread is how a running container with
+    a reserved port survives to make every later `start()` refuse.
+
+    Guarded like every other removal intent, so "no removal bypasses the
+    ownership check" is true of the whole module and not just of `stop()`.
+    """
+    _assert_removal_allowed(name)
     rm = _docker("rm", "-f", name)
     return ("removed it" if rm.returncode == 0
             else "FAILED to remove it — check `docker ps -a`")

@@ -1514,6 +1514,34 @@ def test_the_memory_cap_seam_refuses_a_malformed_or_zero_value(monkeypatch):
         assert tl.CONTAINER_MEMORY_ENV in str(e.value), (bad, str(e.value))
 
 
+def test_the_memory_cap_is_validated_before_any_container_is_touched(
+        lane, monkeypatch):
+    """#7357 review F8: a guard is only as good as its ORDERING.
+
+    `_memory_cap_args()` raises `SystemExit` on a bad value, and it used to be
+    evaluated at the `docker run` call site — i.e. AFTER the stale-container
+    `docker rm -f` (`_remove_and_describe`). So
+    `FALKORDB_CONTAINER_MEMORY=0` (docker's spelling for UNLIMITED) REMOVED the
+    lane's stopped container, destroying its graphs, and only then refused to
+    start a replacement. Same failure class as the `--port` one this file
+    already paid for: the refusal is correct, the ordering made it destructive.
+    Every seam below the validation is booby-trapped, so this test fails if the
+    check is ever moved back down.
+    """
+    def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
+        raise AssertionError("docker was called before cap validation")
+
+    monkeypatch.setattr(tl, "reap_orphans", _boom)
+    monkeypatch.setattr(tl, "container_state", _boom)
+    monkeypatch.setattr(tl, "_remove_and_describe", _boom)
+    monkeypatch.setattr(tl, "_docker", _boom)
+    for bad in ("0", "0g", "0.0m", "2 gigs"):
+        monkeypatch.setenv(tl.CONTAINER_MEMORY_ENV, bad)
+        with pytest.raises(SystemExit) as exc:
+            tl.start()
+        assert tl.CONTAINER_MEMORY_ENV in str(exc.value), (bad, str(exc.value))
+
+
 def test_a_container_killed_for_memory_is_reported_not_called_wedged(
         lane, monkeypatch):
     """#7357's legibility half: the same failure used to read "it may be wedged:
@@ -1537,6 +1565,51 @@ def test_a_container_killed_for_memory_is_reported_not_called_wedged(
     assert "KILLED FOR MEMORY" in msg, msg
     assert "OOMKilled=true" in msg and "ExitCode=137" in msg, msg
     assert "RestartCount=3" in msg, msg
+
+
+def test_a_stale_killed_container_is_named_BEFORE_it_is_removed(
+        lane, monkeypatch, capsys):
+    """#7357 review: the evidence must be read before the ONLY path an OOM-killed
+    lane container takes is allowed to destroy it.
+
+    The lane container is created with no `--restart` policy, so a kill leaves
+    it `exited` — not `running` — i.e. on the stale-container branch, which used
+    to `docker rm -f` it with no read at all. The next `start()` then silently
+    recreated it and continued, and the operator never learned the cap (or host
+    pressure) had killed it: the legibility half this change exists for, absent
+    on the path the kill actually leaves.
+    """
+    monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
+    monkeypatch.setattr(tl, "pick_port", lambda *a, **k: 16390)
+    monkeypatch.setattr(tl, "_wait_ready", lambda *a, **k: False)
+    seen: list = []
+
+    def fake(*a, **k):
+        seen.append(a)
+        if a[0] == "inspect":
+            return _R(0, "true 137 2\n", "")
+        return _R(0, "deadbeef\n", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    with pytest.raises(SystemExit):
+        tl.start()
+    kinds = [a[0] for a in seen]
+    assert kinds.index("inspect") < kinds.index("rm"), (
+        f"docker's termination facts must be read BEFORE `docker rm -f` — "
+        f"`rm` destroys them: {seen}"
+    )
+    err = capsys.readouterr().err
+    assert "had stopped before this start" in err, err
+    assert "KILLED FOR MEMORY" in err, err
+    assert "OOMKilled=true" in err and "ExitCode=137" in err, err
+
+    # …and a container that merely stopped cleanly says nothing (no false alarm)
+    # while still being replaced.
+    monkeypatch.setattr(tl, "_docker",
+                        lambda *a, **k: _R(0, "false 0 0\n", ""))
+    with pytest.raises(SystemExit):
+        tl.start()
+    assert "had stopped before this start" not in capsys.readouterr().err
 
 
 def test_a_reused_container_reports_prior_termination_as_history_not_cause(

@@ -31,11 +31,19 @@ services:
     # `memswap_limit` EQUALS the cap on purpose: docker's default swap is 2x
     # memory, and a swapping FalkorDB is a minutes-long RDB reload instead of a
     # fast, isolated death (measured: memory-only -> Swap=2x; with this -> equal).
+    #
+    # BOTH values read the SAME `FALKORDB_CONTAINER_MEMORY` seam every other
+    # in-repo launcher reads, so the remedy the kill messages print ("raise
+    # FALKORDB_CONTAINER_MEMORY") is a lever HERE too instead of "edit this
+    # file" (#7357 review F9). ⚠️ 2g is deliberately NOT the root compose
+    # sidecar's 8g: that number exists for the V3 benchmark ingest (4.2-4.8 GB
+    # heap, #1733) — a workload this viz DB does not run. If this service ever
+    # carries that ingest, raise the env var (or this default) the same way.
     deploy:
       resources:
         limits:
-          memory: 2g
-    memswap_limit: 2g
+          memory: ${FALKORDB_CONTAINER_MEMORY:-2g}
+    memswap_limit: ${FALKORDB_CONTAINER_MEMORY:-2g}
     # `unless-stopped`, NOT the bounded `on-failure:5` used for the long-lived dev
     # container in `graph-scripts/setup.py`: this one is a developer convenience
     # whose header promises `docker compose up -d` starts FalkorDB, and

@@ -196,11 +196,30 @@ PORT_FILE="$(mktemp)"
 # i.e. the container may swap, which turns a fast isolated death into a
 # minutes-long RDB reload. Raise FALKORDB_CONTAINER_MEMORY for a job that
 # genuinely needs more; a malformed value is refused, never silently dropped.
-# NORMALIZED first, so this seam shares ONE grammar with the Python seams
-# (which `.strip().lower()`): docker parses units case-insensitively, so `2G`
-# is valid and must not fail the job here while it passes everywhere else.
+#
+# ⚠️ THE 2g DEFAULT IS PROVISIONAL, AND IT IS NOT THE LANE'S CEILING. These
+# containers carry `REDIS_ARGS` of `--requirepass falkordb --save ''` — NO
+# `--maxmemory` at all — so before this cap their only ceiling was the HOST's.
+# The shared docker lane's `maxmemory 2GiB` (which makes 2g a no-op for
+# `tools/test_lane.py`) therefore says NOTHING about this seam: a CI leg whose
+# graph RSS reached >2g used to succeed and is now SIGKILLed mid-suite. No
+# measurement settles it yet (#7357 review, UNVERIFIED); to settle it, read
+# `memory.peak` from the heaviest provisioning job's container (cgroup v2:
+# `/sys/fs/cgroup/.../memory.peak`) or `docker stats --no-stream` during the
+# longest `python-ci` leg. Comfortably below 2g -> this default stands; at or
+# above -> raise it per job. A kill is not silent either way: the health gate's
+# `termination_note` names it and prints the remedy.
+#
+# TRIMMED AT THE ENDS ONLY (`.strip()`), then lowercased — the SAME grammar as
+# the three Python seams: docker parses units case-insensitively, so `2G` and
+# `" 2g "` are valid everywhere, while `"2 g"` is refused EVERYWHERE. The
+# earlier `tr -d '[:space:]'` deleted INNER whitespace too, so `"2 g"` was
+# silently normalised to `2g` in CI and refused in every lane — one env var, two
+# contracts (#7357 review F7).
 FALKORDB_MEMORY="${FALKORDB_CONTAINER_MEMORY:-2g}"
-FALKORDB_MEMORY="$(printf '%s' "$FALKORDB_MEMORY" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+FALKORDB_MEMORY="${FALKORDB_MEMORY#"${FALKORDB_MEMORY%%[![:space:]]*}"}"
+FALKORDB_MEMORY="${FALKORDB_MEMORY%"${FALKORDB_MEMORY##*[![:space:]]}"}"
+FALKORDB_MEMORY="$(printf '%s' "$FALKORDB_MEMORY" | tr '[:upper:]' '[:lower:]')"
 # Grammar first, then the ZERO case: a memory spec of 0 is not a tiny cap, it is
 # docker's spelling for NO LIMIT — the uncapped container #7357 is about, via the
 # one value a reader would type to "disable" the cap. (No backticks in this

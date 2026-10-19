@@ -628,7 +628,7 @@ def _run_provision(tmp_path: Path, *, run_id: str = "42", legacy: str = "true",
                    repo_owner: str = ""
                    ) -> tuple[subprocess.CompletedProcess, Path, Path]:
     bindir = tmp_path / "bin"
-    bindir.mkdir(exist_ok=True)
+    bindir.mkdir(parents=True, exist_ok=True)
     (bindir / "docker").write_text(STUB_DOCKER)
     (bindir / "docker").chmod(0o755)
     # per-call scratch paths: a shared GITHUB_ENV would be truncated by the
@@ -786,7 +786,7 @@ def test_provision_cleans_up_its_own_containers_when_it_fails(tmp_path):
 
 def test_teardown_removes_only_the_recorded_containers(tmp_path):
     bindir = tmp_path / "bin"
-    bindir.mkdir(exist_ok=True)
+    bindir.mkdir(parents=True, exist_ok=True)
     (bindir / "docker").write_text(STUB_DOCKER)
     (bindir / "docker").chmod(0o755)
     calls = tmp_path / "td-calls"
@@ -1467,7 +1467,7 @@ def _run_ci_provision(tmp_path, *, mode: str, cap: str | None = None,
     docker's own wording when the case is genuinely an absence).
     """
     bindir = tmp_path / "bin"
-    bindir.mkdir(exist_ok=True)
+    bindir.mkdir(parents=True, exist_ok=True)
     log = tmp_path / "docker.log"
     stub = bindir / "docker"
     if mode == "healthy":
@@ -1651,6 +1651,109 @@ def test_the_dev_installer_reports_an_existing_uncapped_container(monkeypatch, c
     assert "WITHOUT a kernel memory cap" not in capsys.readouterr().out
 
 
+def test_the_dev_installer_says_when_the_memory_limit_cannot_be_READ(
+        monkeypatch, capsys):
+    """#7357 review F9: `None` from `_container_memory_limit` is "could not
+    READ", never "it is capped" — and reporting it as SILENCE makes the two
+    indistinguishable, which is how an uncapped container goes unnoticed. The
+    same function already names its other unreadable fact (the image pin), so
+    this arm does too, with the command that would settle it."""
+    setup = _load_setup_module()
+    monkeypatch.setenv(MEMORY_CAP_ENV, MEMORY_CAP_DEFAULT)
+    monkeypatch.setattr(setup, "MODE", "docker")
+    monkeypatch.setattr(setup, "_container_status", lambda _n: "running")
+    monkeypatch.setattr(setup, "_container_image", lambda _n: setup.FALKORDB_IMAGE)
+    monkeypatch.setattr(setup, "_container_memory_limit", lambda _n: None)
+    setup.step8()
+    out = capsys.readouterr().out
+    assert "Could not read the kernel memory limit" in out, out
+    assert "HostConfig.Memory" in out, (
+        f"the message must name the query that failed, so the reader can run "
+        f"it: {out}"
+    )
+    assert "WITHOUT a kernel memory cap" not in out, (
+        f"an unreadable limit must NOT be reported as an absent one: {out}"
+    )
+
+
+def test_the_dev_installer_refuses_a_bad_cap_before_removing_anything(monkeypatch):
+    """#7357 review F8: a guard is only as good as its ORDERING.
+
+    `_container_memory()` used to be called at the `docker run` call site — i.e.
+    AFTER the stale-container `docker rm -f` and after the port-collision prompt
+    that can `docker kill` a NEIGHBOUR. So `FALKORDB_CONTAINER_MEMORY=0` (which
+    docker reads as UNLIMITED) destroyed the stopped dev container and only then
+    refused to start a replacement. Both destructive seams are booby-trapped
+    here, so this test fails if the validation ever moves back below them.
+    """
+    setup = _load_setup_module()
+    calls: list[list[str]] = []
+
+    def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
+        raise AssertionError("docker was called before cap validation")
+
+    monkeypatch.setattr(setup, "MODE", "docker")
+    monkeypatch.setattr(setup, "_container_status", _boom)
+    monkeypatch.setattr(setup, "_container_image", _boom)
+    monkeypatch.setattr(setup, "_port_collision", _boom)
+    monkeypatch.setattr(setup, "_run", lambda cmd, **kw: calls.append(cmd))
+    for bad in ("0", "0g", "2 gigs"):
+        monkeypatch.setenv(MEMORY_CAP_ENV, bad)
+        with pytest.raises(SystemExit):
+            setup.step8()
+    assert calls == [], (
+        f"a bad cap must refuse BEFORE any docker command (a `docker rm -f` in "
+        f"here destroys the container it then refuses to replace): {calls}"
+    )
+
+
+def test_the_cap_grammar_is_the_SAME_at_every_seam(tmp_path, monkeypatch):
+    """#7357 review F7: ONE env var, ONE grammar.
+
+    The three Python seams read the value with `.strip().lower()`, so `2G` and
+    `" 2g "` are accepted and `"2 g"` is REFUSED. The shell seam normalised with
+    `tr -d '[:space:]'`, which deleted INNER whitespace too — so `"2 g"` was
+    silently rewritten to `2g` in CI and refused in every lane. One env var,
+    two contracts: a value that works in CI reds nowhere, which is the wrong
+    half of a disagreement. Pinned at the argv docker really gets, on BOTH
+    spellings, so the seams cannot drift back apart.
+    """
+    from tools import edge_census as ec
+    from tools import test_lane as tl
+
+    setup = _load_setup_module()
+    for i, good in enumerate(("2G", " 2g ", "\t2G\t")):
+        monkeypatch.setenv(MEMORY_CAP_ENV, good)
+        assert tl.container_memory_cap() == "2g", good
+        assert ec.container_memory_cap() == "2g", good
+        assert setup._container_memory() == "2g", good
+        result, log = _run_ci_provision(tmp_path / f"ok{i}", mode="healthy",
+                                        cap=good)
+        out = result.stdout + result.stderr
+        assert result.returncode == 0, (good, out)
+        line = next(ln for ln in log.read_text().splitlines()
+                    if ln.startswith("run "))
+        assert "--memory 2g --memory-swap 2g" in line, (good, line)
+
+    for i, bad in enumerate(("2 g", "2\tg")):
+        monkeypatch.setenv(MEMORY_CAP_ENV, bad)
+        with pytest.raises(SystemExit):
+            tl.container_memory_cap()
+        with pytest.raises(ec.CensusError):
+            ec.container_memory_cap()
+        with pytest.raises(SystemExit):
+            setup._container_memory()
+        result, log = _run_ci_provision(tmp_path / f"bad{i}", mode="healthy",
+                                        cap=bad)
+        out = result.stdout + result.stderr
+        assert result.returncode != 0, (bad, out)
+        assert "POSITIVE docker memory spec" in out, (bad, out)
+        assert "run " not in log.read_text(), (
+            f"{bad!r} was silently normalised into a usable cap: "
+            f"{log.read_text()}"
+        )
+
+
 def test_the_ci_provision_refuses_a_zero_cap(tmp_path):
     """The CI seam refuses a zero cap too — the shell validator's zero arm."""
     result, log = _run_ci_provision(tmp_path, mode="healthy", cap="0")
@@ -1670,31 +1773,61 @@ def test_the_ci_provision_refuses_a_zero_cap(tmp_path):
 
 def test_every_compose_falkordb_has_a_memory_limit():
     """The invariant the cap comments claim: NO compose service in this repo
-    starts a FalkorDB without a limit. `deploy.resources.limits.memory` IS
-    applied by `docker compose up` (measured, compose 2.40.3 — #7357)."""
+    starts a FalkorDB without a `memory` AND an equal `memswap_limit`.
+    `deploy.resources.limits.memory` IS applied by `docker compose up`
+    (measured, compose 2.40.3 — #7357).
+
+    Swap equality is enforced ONLY on the compose files here and on the five
+    `docker run` seams in this file (`--memory` + `--memory-swap`, equal); a
+    service with a memory limit and docker's 2x swap default still pages the
+    host for minutes, which is the mechanism the cap exists to remove.
+
+    ANTI-VACUITY (#7357 review): without the population assertions below, a
+    glob that stops matching (a compose file moves, `apps/*/` is renamed) or a
+    service whose image string stops matching leaves `missing == []` and this
+    guard passes having read NOTHING — the exact silent-coverage-loss the
+    sibling `test_published_falkordb_compose_ports_bind_loopback` documents and
+    guards against. Not `rglob`-ed, so the `.worktrees/` filter the sibling does
+    not carry would be dead code HERE and, in a fleet lane (where `ROOT` IS
+    `<main>/.worktrees/<lane>`), would skip EVERY file: measured, the guard was
+    green in a worktree against an uncapped `apps/graph-viz`.
+    """
+    compose_files = sorted({p for g in COMPOSE_GLOBS for p in ROOT.glob(g)
+                            if p.is_file()})
+    assert compose_files, (
+        f"no compose file matched {COMPOSE_GLOBS} — the guard is vacuous"
+    )
+    checked = 0
     missing = []
-    for pattern in COMPOSE_GLOBS:
-        for path in ROOT.glob(pattern):
-            if ".worktrees" in path.parts:
+    for path in compose_files:
+        data = yaml.safe_load(path.read_text()) or {}
+        for name, svc in (data.get("services") or {}).items():
+            svc = svc or {}
+            if "falkordb" not in str(svc.get("image", "")).lower():
                 continue
-            data = yaml.safe_load(path.read_text()) or {}
-            for name, svc in (data.get("services") or {}).items():
-                if "falkordb" not in str((svc or {}).get("image", "")):
-                    continue
-                limit = (((svc.get("deploy") or {}).get("resources") or {})
-                         .get("limits") or {}).get("memory")
-                if not limit:
-                    missing.append(f"{path.relative_to(ROOT)}:{name}")
-                    continue
-                # #7357 review F5: memory alone leaves docker's 2x SWAP default,
-                # which is the minutes-long reload this cap exists to avoid — so
-                # the compose files must pin `memswap_limit` to the same value.
-                swap = svc.get("memswap_limit")
-                if str(swap).strip() != str(limit).strip():
-                    missing.append(
-                        f"{path.relative_to(ROOT)}:{name} (memswap_limit="
-                        f"{swap!r}, memory={limit!r})"
-                    )
+            checked += 1
+            limit = (((svc.get("deploy") or {}).get("resources") or {})
+                     .get("limits") or {}).get("memory")
+            if not limit:
+                missing.append(f"{path.relative_to(ROOT)}:{name}")
+                continue
+            # #7357 review F5: memory alone leaves docker's 2x SWAP default,
+            # which is the minutes-long reload this cap exists to avoid — so
+            # the compose files must pin `memswap_limit` to the same value.
+            # Compose INTERPOLATION is compared as written, so the two keys must
+            # read the same `${FALKORDB_CONTAINER_MEMORY:-…}` expression: that
+            # is what makes the seams' own remedy lever (`raise
+            # FALKORDB_CONTAINER_MEMORY`) work here as well.
+            swap = svc.get("memswap_limit")
+            if str(swap).strip() != str(limit).strip():
+                missing.append(
+                    f"{path.relative_to(ROOT)}:{name} (memswap_limit="
+                    f"{swap!r}, memory={limit!r})"
+                )
+    assert checked, (
+        f"not one FalkorDB service was examined across {len(compose_files)} "
+        f"compose file(s) — the guard no longer covers what it exists for"
+    )
     assert not missing, (
         "these compose FalkorDB services have no kernel memory limit, so one "
         "runaway instance can swap the host and starve the canonical graph "

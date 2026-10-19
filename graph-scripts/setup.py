@@ -656,6 +656,11 @@ def _container_image(name: str) -> str:
     )
 
 
+#: `docker container inspect --format` for the cgroup memory limit (#7357).
+#: `0` is docker's spelling for NO LIMIT.
+_MEMORY_LIMIT_FORMAT = "{{.HostConfig.Memory}}"
+
+
 def _container_memory_limit(name: str) -> int | None:
     """The container's cgroup memory limit in BYTES, or None when unreadable.
 
@@ -664,7 +669,7 @@ def _container_memory_limit(name: str) -> int | None:
     LIMIT, and it is what every container created before this cap reports.
     """
     out = _run_output(
-        ["docker", "container", "inspect", "-f", "{{.HostConfig.Memory}}",
+        ["docker", "container", "inspect", "-f", _MEMORY_LIMIT_FORMAT,
          name]
     )
     try:
@@ -689,6 +694,18 @@ def _note_uncapped_existing() -> None:
               f"one — `docker rm -f {_FALKORDB_CONTAINER}` and re-run this "
               f"step to apply {CONTAINER_MEMORY_ENV} (data in ./data is a "
               f"bind mount and is kept).")
+    elif current is None:
+        # #7357 review F9: `None` is "could not READ", and reporting it as
+        # silence makes it indistinguishable from "it is capped" — the same
+        # unread fact that leaves an uncapped container unnoticed. The caller
+        # above already says what it could not read (the image pin), so this one
+        # names the failed query and the command that would settle it.
+        probe = f"docker container inspect -f '{_MEMORY_LIMIT_FORMAT}'"
+        print(f"  Could not read the kernel memory limit of "
+              f"{_FALKORDB_CONTAINER!r} (the `{probe}` query failed), so "
+              f"whether it is capped cannot be confirmed — leaving it alone. "
+              f"Check it with `{probe} {_FALKORDB_CONTAINER}` and run `docker "
+              f"rm -f {_FALKORDB_CONTAINER}` if it reports 0 (#7357).")
 
 
 def _port_collision(port: str) -> str | None:
@@ -726,6 +743,15 @@ def step8() -> None:
     if MODE != "docker":
         _skip("lite mode")
         return
+
+    # #7357 review F8: the cap is validated FIRST — before `_container_status`,
+    # before the stale-container `docker rm -f`, and before the port-collision
+    # prompt that can `docker kill` ANOTHER container. It used to be read at the
+    # `docker run` call site, so a typo (or `0`, which docker reads as UNLIMITED)
+    # destroyed the stopped dev container — and possibly a neighbour — and only
+    # then refused to start the replacement. A guard is only as good as its
+    # ordering.
+    cap = _container_memory()
 
     status = _container_status(_FALKORDB_CONTAINER)
 
@@ -788,7 +814,7 @@ def step8() -> None:
     # Start
     data_dir = PROJECT / "data"
     data_dir.mkdir(exist_ok=True)
-    cap = _container_memory()
+    # `cap` was validated at the TOP of this function (ordering note there).
 
     _run([
         "docker", "run", "-d",
