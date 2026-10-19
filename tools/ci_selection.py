@@ -2045,26 +2045,6 @@ def select(changed_files: list[str], event: str, manifest: dict,
                 "slow_run": False, "carve_out_run": False,
                 "slow_selected": []}
 
-    # Shared module -> full
-    if any(c.startswith(SHARED_MODULES) for c in changed):
-        return _full_selection(manifest, slow)
-
-    # Linter POLICY -> full (#7435 review P1). A `.markdownlint*`/`.lycheeignore`/
-    # `lychee.toml` file changes the linting OUTCOME of every doc beneath it, so
-    # the selection must be the WHOLE matrix — the only selection containing
-    # `tests/test_docs_lint_baseline.py`, whose committed-policy pin is what makes
-    # a config edit move the snapshot.
-    #
-    # `_keep_changed` above only stops such a path being DROPPED as an unknown
-    # prefix; it does NOT stop the match loop below CLAIMING it. Measured: with
-    # the claim alone, `battery/.markdownlint.json` → surfaces=['battery'] and
-    # `tools/longmem_eval/.markdownlint.json` → ['eval'], and neither leg runs the
-    # pin — so the policy edit landed with the snapshot unmoved, which is the very
-    # hole the pin exists to close. Placed with SHARED_MODULES because both mean
-    # "this path's blast radius is not its own directory".
-    if any(_is_linter_policy_path(c) for c in changed):
-        return _full_selection(manifest, slow)
-
     matched: set[str] = set()
     unknown: list[str] = []
     for c in changed:
@@ -2100,6 +2080,33 @@ def select(changed_files: list[str], event: str, manifest: dict,
         if explain is not None:
             explain["reason"] = "unknown-paths"
             explain["unknown"] = list(unknown)
+        return _full_selection(manifest, slow)
+
+    # Shared module / linter POLICY -> full. These two are evaluated AFTER the
+    # unknown-path block above so that a changed set carrying BOTH a shared
+    # module (or a lint policy file) and an unrecognised path still NAMES the
+    # unrecognised path: returning here first left that diagnostic silent, and
+    # the whole point of #9109 is that a FULL matrix says WHY it is full (#9109
+    # review P2). The selection itself is identical either way — both branches
+    # and the unknown branch all return `_full_selection`.
+    # Shared module -> full
+    if any(c.startswith(SHARED_MODULES) for c in changed):
+        return _full_selection(manifest, slow)
+
+    # Linter POLICY -> full (#7435 review P1). A `.markdownlint*`/`.lycheeignore`/
+    # `lychee.toml` file changes the linting OUTCOME of every doc beneath it, so
+    # the selection must be the WHOLE matrix — the only selection containing
+    # `tests/test_docs_lint_baseline.py`, whose committed-policy pin is what makes
+    # a config edit move the snapshot.
+    #
+    # `_keep_changed` above only stops such a path being DROPPED as an unknown
+    # prefix; it does NOT stop the match loop below CLAIMING it. Measured: with
+    # the claim alone, `battery/.markdownlint.json` → surfaces=['battery'] and
+    # `tools/longmem_eval/.markdownlint.json` → ['eval'], and neither leg runs the
+    # pin — so the policy edit landed with the snapshot unmoved, which is the very
+    # hole the pin exists to close. Placed with SHARED_MODULES because both mean
+    # "this path's blast radius is not its own directory".
+    if any(_is_linter_policy_path(c) for c in changed):
         return _full_selection(manifest, slow)
 
     # Test-file changes select their owning surface

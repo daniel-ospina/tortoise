@@ -253,3 +253,33 @@ def test_a_shared_module_full_selection_does_not_claim_unknown_paths(tmp_path):
     assert "unknown to every SOURCE_PATTERN" not in proc.stderr, (
         f"a shared-module FULL selection must not be explained as unknown: "
         f"{proc.stderr}")
+
+
+def test_a_shared_module_beside_an_unknown_path_still_names_the_unknown(tmp_path):
+    """The diagnostic fires for the UNKNOWN PATH even when the FULL verdict is
+    over-determined (#9109 review P2).
+
+    `SHARED_MODULES` and a linter-policy path each return `_full_selection` on
+    their own, and they used to return BEFORE the unknown-path scan ran — so a
+    changed set carrying both a shared module and an unrecognised path came back
+    FULL and SILENT, and the one path the caller needed to be told about was the
+    one nothing mentioned. Both early returns now sit after the recording, so the
+    reason survives. Pinned on both over-determining causes, because they are two
+    separate returns and only fixing one would leave the other silent.
+    """
+    for over_determining in ("tortoise/projection/__init__.py",
+                             ".markdownlint.json"):
+        # `--changed-files` takes ONE value: a list FILE, or newline-separated
+        # paths inline (the file form is what the #9109 mis-invocation looked
+        # like, so both shapes are exercised across this module).
+        proc = _run(["--changed-files",
+                     over_determining + "\n/var/tmp/9109-not-a-repo-file.txt",
+                     "--event", "pull_request"], cwd=tmp_path)
+
+        assert proc.returncode == 0, proc.stderr
+        assert '"full": true' in proc.stdout, proc.stdout
+        assert "unknown to every SOURCE_PATTERN" in proc.stderr, (
+            f"{over_determining} pre-empted the unknown-path diagnostic: "
+            f"{proc.stderr or '(silent)'}")
+        assert "9109-not-a-repo-file.txt" in proc.stderr, (
+            f"the message must NAME the unknown path: {proc.stderr}")
