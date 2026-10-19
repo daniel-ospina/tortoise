@@ -643,6 +643,15 @@ class SearchResult:
     valid_from_precision: str = ""
     valid_to_precision: str = ""
     end_state: str = ""
+    # #9201: each END's PRESENCE, separate from its precision. A present-but-
+    # unorderable bound (``validFrom=""``/``"TBD"``) resolves to precision
+    # ``None`` — it names no instant — but the point still carries that bound,
+    # and the block must still report ``null`` so this surface agrees with
+    # ``assembly``/``get_historical_knowledge`` (both of which always carry the
+    # null). The presence datum is what a truthiness gate cannot infer once the
+    # precision stops standing in for it. Never emitted themselves.
+    valid_from_present: bool = False
+    valid_to_present: bool = False
     subject: dict | None = None  # {id, name, kind} | None — ≤1 hop, fail-closed (D10)
     # #4889: the fail-loud counterpart to an absent ``subject``. Emitted only
     # when the whole batch resolved no subject AND the graph has no
@@ -726,15 +735,22 @@ class SearchResult:
         # still-true window (``open``) is never confused with one whose end is
         # un-datable (``unknown``). ``valid_from_precision`` is INCLUDED in the
         # gate: a falsey-but-present start (``""``) is a real bound for the
-        # ONE read-projection home, so the resolved ``day`` must reach the
+        # ONE read-projection home, so the resolved value must reach the
         # wire — gating on a truthy ``valid_from`` alone silently dropped the
         # block on that surface only (the cross-surface drift of #2350).
-        if (self.valid_from or self.valid_to or self.valid_to_precision
-                or self.valid_from_precision):
-            if self.valid_from_precision:
-                d["valid_from_precision"] = self.valid_from_precision
-            if self.valid_to_precision:
-                d["valid_to_precision"] = self.valid_to_precision
+        #
+        # #9201: the presence halves. A present-but-unorderable bound resolves
+        # to precision ``None`` (it names no instant), so the precision can no
+        # longer stand in for presence: the key is emitted with ``None``, which
+        # is what ``assembly`` / ``get_historical_knowledge`` report for it.
+        # An ABSENT bound (the open-end shape) still emits no key at all.
+        if (self.valid_from_present or self.valid_from or self.valid_to
+                or self.valid_to_present
+                or self.valid_to_precision or self.valid_from_precision):
+            if self.valid_from_precision or self.valid_from_present:
+                d["valid_from_precision"] = self.valid_from_precision or None
+            if self.valid_to_precision or self.valid_to_present:
+                d["valid_to_precision"] = self.valid_to_precision or None
             if self.end_state:
                 d["end_state"] = self.end_state
         if self.subject:
@@ -3959,6 +3975,15 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             st.setdefault("valid_from_precision", _wf["valid_from_precision"])
             st.setdefault("valid_to_precision", _wf["valid_to_precision"])
             st.setdefault("end_state", _wf["end_state"])
+            # #9201: each end's presence, carried separately from its
+            # precision. A present-but-unorderable bound resolves to precision
+            # ``None``, so the resolved precision can no longer double as "this
+            # point has that bound" — the surface's emit gate would then drop
+            # the key here only (the #2350 review-P2 drift, now on both ends).
+            # The raw column is the presence datum; ``row[2] or None`` below
+            # normalises a falsey bound for the promoted WINDOW field only.
+            st.setdefault("valid_from_present", row[2] is not None)
+            st.setdefault("valid_to_present", row[3] is not None)
             old_id, old_content, old_created = row[5], row[6], row[7]
             new_id, new_status, new_content, new_created = row[8], row[9], row[10], row[11]
             if old_id and old_id not in {s["id"] for s in st["supersedes"]}:
