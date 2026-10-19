@@ -28,6 +28,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -41,6 +42,7 @@ if not os.environ.get("RUN_DASHBOARD_E2E"):
     pytest.skip("dashboard e2e: opt-in via RUN_DASHBOARD_E2E=1", allow_module_level=True)
 
 from tests.e2e.auth.bff_test_helpers import (
+    d1_sqlite_files,
     dashboard_persist_args,
     ensure_dashboard_dist,
     pick_free_port,
@@ -104,9 +106,13 @@ def _identity_stack() -> None:
     node = shutil.which("node")
     wrangler = shutil.which("wrangler")
     if not node or not wrangler:
-        pytest.fail("node + wrangler are required for the dashboard identity e2e "
+        # `pytest.exit`, not `pytest.fail`: this is a module-scoped autouse
+        # fixture, so a `fail` would be repeated once per test (22 errors for
+        # one missing tool). Same precedent as
+        # `test_session_login_flow.py`'s server fixture.
+        pytest.exit("node + wrangler are required for the dashboard identity e2e "
                     "(the suite must not silently skip: it is the only browser-level "
-                    "coverage of the account-menu identity block)")
+                    "coverage of the account-menu identity block)", returncode=1)
 
     mock_env = os.environ.copy()
     mock_env["MOCK_PORT"] = str(mock_port)
@@ -151,20 +157,38 @@ def _identity_stack() -> None:
         stop(mock)
         pytest.fail(f"wrangler pages dev never listened on {app_port}")
 
-    # Materialise the preview's D1 BEFORE the first seed: `_seed_bff_session`
-    # waits for a sqlite to appear and its 30 s budget starts from the seed, so
-    # on a clean checkout the very first test would spend that budget waiting
-    # for a file this preview is about to create. One request that touches the
-    # session store is enough (the status is irrelevant — 401 is expected).
-    with contextlib.suppress(urllib.error.HTTPError):
-        # 401 is the expected answer — the store answered, which is the point.
-        urllib.request.urlopen(
-            urllib.request.Request(
-                f"{app_url}/api/session",
-                headers={"Cookie": "__Host-session=" + "0" * 64},
-            ),
-            timeout=20,
-        ).close()
+    # Materialise the preview's D1 BEFORE the first seed. `_seed_bff_session`
+    # waits for a sqlite to appear, but its budget starts from the seed and it
+    # polls the SHARED `test_session_login_flow.DASHBOARD_URL` (which this module
+    # does not rebind), so on a clean checkout the first test would spend 30 s
+    # waiting on the wrong server and die naming a preview this fixture never
+    # started. Warm the database here instead, and gate on the same OUTCOME the
+    # seed waits for — a request count is not the promise.
+    warm_deadline = time.monotonic() + 30
+    warmed = False
+    while time.monotonic() < warm_deadline:
+        with contextlib.suppress(Exception):
+            # 401 is the expected answer — the store answered, which is the
+            # point. Transports can also drop the first request while the
+            # function bundler is still settling, hence the retry.
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    f"{app_url}/api/session",
+                    headers={"Cookie": "__Host-session=" + "0" * 64},
+                ),
+                timeout=10,
+            ).close()
+        if d1_sqlite_files(DASHBOARD_DIR):
+            warmed = True
+            break
+        time.sleep(0.5)
+    if not warmed:
+        stop(app)
+        stop(mock)
+        pytest.fail(
+            f"the identity preview on {app_url} never created a D1 sqlite under "
+            f"{DASHBOARD_DIR / '.wrangler'} — is it booting with `--d1 SESSIONS`?"
+        )
 
     globals()["DASHBOARD_URL"] = app_url + "/"
     globals()["STACK_MOCK_URL"] = mock_url
@@ -1029,7 +1053,14 @@ def test_durable_create_on_selected_team_lands_on_selected_team(page: Page) -> N
     # the POST right after opening the button, which was true only while the
     # button minted directly — a dialog-race, not a mint failure.
     page.get_by_role("button", name="+ New key").click()
-    page.get_by_role("button", name="Create key").click()
+    # A sync-API route handler only runs while a Playwright command is pumping,
+    # so the click must be WAITED ON: without this the assert below can read
+    # `created_keys` before the handler has been dispatched into.
+    with page.expect_response(
+        lambda r: r.request.method == "POST" and "/v1/team/keys" in r.url,
+        timeout=15_000,
+    ):
+        page.get_by_role("button", name="Create key").click()
     # the POST carried ?org_id=team_b (rule 4) and the shown-once plaintext
     # card renders
     assert created_keys, "createKey POST must fire"

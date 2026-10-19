@@ -2015,10 +2015,6 @@ jobs:
           kill $(cat /tmp/wrangler-app.pid) 2>/dev/null || true
           pkill -f 'wrangler.*8788' 2>/dev/null || true
           pkill -f 'wrangler.*8790' 2>/dev/null || true
-          # #2809: the identity spec spawns its own preview on a runtime-picked
-          # port, so a port-specific pattern cannot match it — kill by the
-          # command shape the spec uses.
-          pkill -f 'wrangler pages dev' 2>/dev/null || true
           pkill workerd 2>/dev/null || true
           true
 
@@ -2196,6 +2192,11 @@ jobs:
           kill $(cat /tmp/wrangler-dash.pid) 2>/dev/null || true
           pkill -f 'wrangler.*8788' 2>/dev/null || true
           pkill -f 'wrangler.*8790' 2>/dev/null || true
+          # #2809: the identity spec spawns its OWN preview on a runtime-picked
+          # port, so the port patterns above cannot match it — kill by the
+          # command shape it uses. This is the hard-kill/timeout backstop; the
+          # spec's own `finally` covers the normal path.
+          pkill -f 'wrangler pages dev' 2>/dev/null || true
           pkill workerd 2>/dev/null || true
           true
 
