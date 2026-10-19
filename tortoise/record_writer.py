@@ -421,9 +421,10 @@ def write_records(
     """One-call form of :meth:`RecordWriter.write` — the chokepoint's entry point.
 
     Same contract, same outcomes, same failures. Constructing a
-    :class:`RecordWriter` once and reusing it is equivalent and avoids
-    re-resolving the DSN per call; this function exists so a caller with no
-    seam object to hold does not have to invent one.
+    :class:`RecordWriter` once and reusing it is equivalent — the DSN is
+    resolved per call either way, so a late arming is seen by both spellings —
+    and this function exists so a caller with no seam object to hold does not
+    have to invent one.
     """
     return (writer or RecordWriter()).write(
         records, org_id=org_id, graph_id=graph_id, first_seq=first_seq, conn=conn,
