@@ -1718,10 +1718,11 @@ def test_snapshot_contents_are_pinned_so_an_entry_cannot_be_swapped():
     # burned DOWN by one. Removing an entry changes the snapshot exactly as much
     # as adding one, which is why this digest moves — and it is the direction the
     # doctrine wants (`update` after every fix; the count may only fall).
-    #
-    # 2026-10-19 (#9193): burned down by TWO more, from the same cause one file
-    # over. #9071 fixed `tests/eval/write_path/README.md`'s MD040 + MD018 and
-    # REMOVED both entries so the ceiling followed the code — but it left
+    # 2026-10-19 (#9193): burned down by TWO more, not appended, and this time the
+    # entry removal had landed without its two bookkeeping numbers. `ecc7bc8ca`
+    # (#9071) fixed `tests/eval/write_path/README.md`'s MD040 + MD018
+    # (verified — `markdownlint-cli2@0.23.3` on that file reports `0 issues`) and
+    # REMOVED both entries so the ceiling followed the code, but it left
     # `snapshot.counts.markdownlint` at 3299 while the list held 3297, and left
     # this digest pointing at the pre-burn-down contents. Both inconsistencies
     # are hard errors (`load_baseline` refuses a counts/lists mismatch), so the

@@ -767,12 +767,90 @@ class TestSessionKeyMintConcurrency:
             done.set()
 
         t = threading.Thread(target=_mint, daemon=True)
-        t.start()
-        assert not done.wait(timeout=0.75), \
-            f"registry mint proceeded while the team lock was held (wrapping missing?): {outcome}"
-        lock.release()
+        # ⛔ The `try` opens IMMEDIATELY after the acquire — before
+        # `threading.Thread(...)`/`t.start()`, which can raise
+        # `RuntimeError: can't start new thread` on a loaded box. This is a
+        # PROCESS-GLOBAL lock (`_ORG_MINT_LOCKS`), so ANY failure between acquire
+        # and release leaves it held for the rest of the pytest process and every
+        # later mint for this team blocks forever. Measured 2026-10-19 (main run
+        # 39264762684 `test (a)`, plus 39235544056/39254836130/39255746368 on
+        # `test (c)`): exactly that deadlock was the whole 20m watchdog — a 23.5m
+        # job that owned `ci_crit_med` on main. A failing assertion must not be
+        # able to take the shard with it.
+        try:
+            t.start()
+            assert not done.wait(timeout=0.75), \
+                f"registry mint proceeded while the team lock was held (wrapping missing?): {outcome}"
+        finally:
+            lock.release()
         assert done.wait(timeout=10), "registry mint blocked forever after release"
         assert outcome.get("ok") is True, f"registry mint failed: {outcome}"
+        assert _count_active_keys(reg, tid) == 1
+
+    def test_held_team_lock_refuses_the_mint_instead_of_hanging(self, client,
+                                                                reg,
+                                                                monkeypatch):
+        """A held team lock must FAIL CLOSED (503) within a BOUNDED wait.
+
+        Mutation: revert `async with _org_mint_lock_bounded(tid)` to
+        `with _org_mint_lock(tid)` (an unbounded `acquire()`) and this test
+        hangs until its `--timeout` — because the wait it must never do is the
+        wait that cost a CI shard 20 minutes.
+
+        Why this is the load-bearing regression guard: the mint runs on an
+        `async def` endpoint, so the thread that blocks on this lock is the
+        EVENT LOOP. An unbounded acquire therefore converts one leaked/wedged
+        lock owner into a total stall of the process, which is precisely how
+        the 2026-10-19 shard died (stack dump: `hosted_api.py ... in_session_key`
+        -> `with _org_mint_lock(tid)`, twice, in two different shards).
+        """
+        import asyncio
+
+        from fastapi import HTTPException
+
+        import tortoise.hosted_api as ha
+        from tortoise.hosted_api import _ORG_MINT_LOCK_MESSAGE, _org_mint_lock
+
+        async def _noop(*_a, **_k):
+            return None
+
+        tid = "team-a"
+        _seed_team(reg, tid)
+        _seed_membership(reg, tid, _U1, "owner")
+        monkeypatch.setattr(ha, "_async_audit", _noop)
+        monkeypatch.setattr(ha, "_abuse_evaluate_keys", _noop)
+        # Shrink the production bound so the test spends milliseconds, not 10s.
+        # The PROPERTY under test is "bounded, not unbounded"; the magnitude is
+        # not the assertion. (This patches the module read that `asynccontextmanager`
+        # makes at call time — a refactor to a default argument would disarm it,
+        # and the test would then simply take 10s and still pass, so it fails
+        # safe rather than silently inverting.)
+        monkeypatch.setattr(ha, "_ORG_MINT_LOCK_TIMEOUT_S", 0.25)
+
+        lock = _org_mint_lock(tid)
+        lock.acquire()
+        try:
+            with pytest.raises(HTTPException) as exc:
+                asyncio.run(ha.session_key({"purpose": "recovery"}, None,
+                                           {"user_id": _U1}))
+        finally:
+            lock.release()
+        # The DETAIL is asserted, not just the status: this route legitimately
+        # returns OTHER 503s (control-plane unavailability, the session-auth
+        # retry), so a bare status check would let any of them satisfy the
+        # "the lock refused" claim.
+        assert exc.value.status_code == 503, exc.value.detail
+        assert exc.value.detail == _ORG_MINT_LOCK_MESSAGE, exc.value.detail
+        # A retryable-busy refusal, not an outage (#3284's contract).
+        assert (exc.value.headers or {}).get("Retry-After") == "5", \
+            exc.value.headers
+        # Fail-closed means NOTHING was minted: the refusal is the cap-safety
+        # property, not merely an error response.
+        assert _count_active_keys(reg, tid) == 0
+        # And the lock is usable again once the holder lets go — the bound is
+        # not a one-shot poison.
+        asyncio.run(ha.session_key({"purpose": "recovery"}, None,
+                                   {"user_id": _U1}))
         assert _count_active_keys(reg, tid) == 1
 
     def test_concurrent_recovery_mints_stay_at_cap(self, client, reg):

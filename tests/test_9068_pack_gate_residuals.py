@@ -1,9 +1,9 @@
 """#9068 — the write paths that never meet a #5475 gated door, MEASURED.
 
 `#5475`'s closure property is **a write may not widen the graph's approved
-pack set**. At this branch's base that property is enforced at these THIRTEEN
-doors and no others — stated as doors rather than as a cardinality, because a
-count is the part that goes stale:
+pack set**. At this branch's base that property is enforced at the doors
+declared in `_DOORS` below and no others — stated as doors rather than as a
+cardinality, because a count is the part that goes stale:
 
 * the SDK point door (`sdk.create_point`) and the SDK entity funnel
   (`sdk._create_entity`, which `create_object`/`create_subject`/`create_event`/
@@ -13,6 +13,15 @@ count is the part that goes stale:
   (its `sourceKind` keyword) and `sdk.ingest_corpus` (its `eventKind` keyword);
 * the record-building doors that journal-then-fold — `sdk._apply_and_journal`
   and `sdk._doc_write`;
+* the raw-`:Event` record half (`sdk._journal_event_raw_write`, #9122) — the
+  door `_event_raw_write_door` journals through before its handle write. It
+  **NARROWS** the writable set rather than adding an approved path: the journal
+  is a DURABLE carrier (`document_kind` rides frontmatter into
+  `pack_state._KIND_PROP_SPELLINGS`), and replay is ungated by design, so
+  journalling an unapproved namespace would let a rebuild re-install it after
+  the node was deleted or the pack un-declared. The gate therefore runs BEFORE
+  the append, and `test_the_record_door_gates_before_the_append` measures that
+  ordering instead of taking this bullet's word for it;
 * the journal-first seam every pipeline writes through — `api.EventAPI._emit`
   (`#8982`) and `mining.ConversationMiner._emit_event`;
 * the hosted commit door's pre-validation (`hosted_api.commit_session`), and the
@@ -20,7 +29,7 @@ count is the part that goes stale:
   `hosted_api.create_subject`, via `_require_approved_kind`, #8380).
 
 "And no others" is not prose either: `test_the_door_inventory_is_the_declared_doors_and_no_others`
-re-derives the inventory from the #5475 gate CALL SITES by AST, so a FOURTEENTH
+re-derives the inventory from the #5475 gate CALL SITES by AST, so a NEW
 door reds this suite instead of silently falsifying this paragraph — and
 `test_the_gate_helper_vocabulary_is_complete` reds it when a new gate HELPER
 appears, which is the failure this file only missed once: `#9070` introduced
@@ -62,10 +71,10 @@ looking, and several writers still widen the set today. `#9068` records that;
 this module makes it a *measurement* instead of prose, so the claim's true
 scope is executable and cannot drift back:
 
-* **CENSUS: 12 PASS, 2 XFAIL, 14 total** — recomputed from this file's own AST
+* **CENSUS: 13 PASS, 2 XFAIL, 15 total** — recomputed from this file's own AST
   by `test_the_header_census_matches_this_file`, so this paragraph cannot drift
-  again (it did: it said "six" while the file defined nine). The twelve pin the
-  SCOPE and the pin MECHANIC — the door inventory (below); the completeness of
+  again (it did: it said "six" while the file defined nine). The passing tests
+  pin the SCOPE and the pin MECHANIC — the door inventory (below); the completeness of
   the gate vocabulary that inventory is derived from; that vocabulary's
   DECIDABILITY in both directions (`…decides_both_directions`, and
   `…does_not_match_outside_the_family` so a `.*` "fix" cannot pass); its
@@ -74,7 +83,8 @@ scope is executable and cannot drift back:
   fail-closed mechanics the two pins rest on (including the fixture's USE of
   them, not only the type hierarchy); the SELECTION of this file on a diff to
   every module the inventory walks; this census itself; the gated door refusing
-  (and moving nothing); the deliberate data-mining leg the gate's back-compat
+  (and moving nothing); the record door gating BEFORE the append (#9211, the
+  newest inventory row); the deliberate data-mining leg the gate's back-compat
   rests on; and the **declared** departure (offline re-typing), which PASSES
   because it is the posture rather than a defect;
 * the two XFAILs are `xfail(strict=True, raises=AssertionError)` on the **fixed**
@@ -176,7 +186,7 @@ inventory walks can resolve to (``core``, DUAL-REGISTERED with ``api``,
 ``tests/test_7951_write_doors.py`` carries), beside the pack tests it reads.
 The extra arms are not decoration: the inventory walks ALL of ``tortoise/**``,
 and a NAMED surface match REPLACES the ``core`` fallback in
-``tools/ci_selection.py::select`` — so three of the thirteen doors live in
+``tools/ci_selection.py::select`` — so three of the declared doors live in
 ``tortoise/hosted_api.py`` (``api``+``onboarding``), and a
 ``tortoise/dream.py`` / ``tortoise/ids.py`` / ``tortoise/embeddings.py`` diff
 resolves to ``ep`` / ``sdk`` / ``eval`` with no ``core`` arm at all. Without
@@ -444,11 +454,13 @@ _NON_GATE_APPROVAL_DEFS: dict[str, str] = {
 }
 
 #: The doors the module docstring states — that header's inventory, executable.
-#: THIRTEEN at this base: the two SDK create funnels, the two UPDATE doors, the
-#: two second-writers of a mined property, the two record-building doors, the two
-#: journal-first emitters, the commit-door pre-check and the two REST doors
-#: (`#9070` landed the update/journal seams; `#8380` the REST pair). "And no
-#: others" is a claim about the BASE: the day a new gate CALL SITE — or a new
+#: At this base: the two SDK create funnels, the two UPDATE doors, the two
+#: second-writers of a mined property, the two record-building doors, the
+#: raw-`:Event` record half (#9122), the two journal-first emitters, the
+#: commit-door pre-check and the two REST doors (`#9070` landed the update/
+#: journal seams; `#8380` the REST pair; `#9122` the record half, which NARROWS
+#: rather than widens and is pinned by `…the_record_door_gates_before_the_append`).
+#: "And no others" is a claim about the BASE: the day a new gate CALL SITE — or a new
 #: gate HELPER, see `_GATE_VOCABULARY` — lands, this reds and the header has to
 #: be updated in the same PR, which is the point. A paragraph asserting a scope
 #: nobody checks back is the drift that #6139/#7551 hit from the manifest side
@@ -462,6 +474,7 @@ _DOORS: frozenset[str] = frozenset({
     "tortoise/sdk.py:TortoiseSDK._apply_and_journal",
     "tortoise/sdk.py:TortoiseSDK._create_entity",
     "tortoise/sdk.py:TortoiseSDK._doc_write",
+    "tortoise/sdk.py:TortoiseSDK._journal_event_raw_write",
     "tortoise/sdk.py:TortoiseSDK._update_entity",
     "tortoise/sdk.py:TortoiseSDK.create_point",
     "tortoise/sdk.py:TortoiseSDK.ingest_corpus",
@@ -579,9 +592,9 @@ def test_the_door_inventory_is_the_declared_doors_and_no_others() -> None:
     """The header's scope claim, made executable — "these doors and no others".
 
     A door is a function that CALLS a #5475 gate helper; a call inside another
-    helper is composition, so it is excluded by leaf name. If a fourteenth gate
-    call site lands, this reds and the header must be updated in the same PR
-    rather than left asserting a scope the source no longer has.
+    helper is composition, so it is excluded by leaf name. If a NEW gate call
+    site lands, this reds and the header must be updated in the same PR rather
+    than left asserting a scope the source no longer has.
     """
     doors = {
         key for key in _gate_call_sites()
@@ -767,11 +780,11 @@ def test_the_inventory_runs_on_a_diff_to_every_module_it_scans() -> None:
     """A guard the diff that falsifies it does not RUN is not a guard.
 
     ``_gate_call_sites`` walks **every** ``tortoise/**/*.py``, so the change that
-    can add a fourteenth door is a change to ANY module — not only to the four
-    that happen to hold the thirteen today. Registration is per SURFACE, and a
-    NAMED ``SOURCE_PATTERNS`` match REPLACES the ``core`` fallback that was this
-    file's original arm: ``tortoise/hosted_api.py`` resolves to ``api`` +
-    ``onboarding`` (where THREE of the thirteen doors live), ``tortoise/dream.py``
+    can add a door is a change to ANY module — not only to the modules
+    that happen to hold the declared doors today. Registration is per SURFACE,
+    and a NAMED ``SOURCE_PATTERNS`` match REPLACES the ``core`` fallback that was
+    this file's original arm: ``tortoise/hosted_api.py`` resolves to ``api`` +
+    ``onboarding`` (where THREE of the declared doors live), ``tortoise/dream.py``
     / ``analyze.py`` / ``ranking.py`` to ``ep``, ``tortoise/ids.py`` /
     ``models.py`` / ``ask_lane.py`` / ``crypto.py`` / ``reader.py`` /
     ``retrieval.py`` / ``schemas.py`` to ``sdk``, and ``tortoise/cross_lens.py`` /
@@ -816,7 +829,7 @@ def test_the_inventory_runs_on_a_diff_to_every_module_it_scans() -> None:
 
     assert not missing, (
         "a diff to a module this inventory scans does not SELECT this file, so "
-        "a fourteenth door (or a moved one) there would merge green: "
+        "a new door (or a moved one) there would merge green: "
         + "; ".join(f"{surfaces} ({len(mods)}): {', '.join(mods)}"
                     for surfaces, mods in by_surface.items())
         + ". Register this file on that surface in config/ci-surfaces.yml (the "
@@ -914,6 +927,78 @@ def test_a_live_door_refuses_an_unapproved_pack_and_moves_nothing(
 
     assert _approved(sdk) == frozenset({"dev"}), (
         "the refusal must land before the write: the approved set is unmoved")
+
+
+def test_the_record_door_gates_before_the_append(tmp_path: Path) -> None:
+    """The record door is a GATE, not the inventory widening — measured (#9211).
+
+    `_journal_event_raw_write` (``sdk._event_raw_write_door``'s record half,
+    #9122) is the newest row in `_DOORS`, and a row in that inventory has to
+    answer the question the inventory exists to ask: does this door **widen**
+    the approved set, or does it gate a path that was widening before? The
+    answer is the second, and it is not a reading of the code — the journal is
+    a durable carrier (`document_kind` rides frontmatter into
+    ``pack_state._KIND_PROP_SPELLINGS``) and replay is ungated by design, so a
+    record is a WRITE for #5475's purposes.
+
+    Two halves, and the second is what makes the first falsifiable:
+
+    * an unapproved namespace is REFUSED, and the refusal lands BEFORE the
+      append — the journal file is still empty afterwards. A gate placed after
+      the append would leave the widening durable, which is the defect this
+      door's comment at ``sdk.py`` names;
+    * an APPROVED namespaced kind still appends exactly one record, so the pin
+      cannot be satisfied by a door that refuses everything (the vacuity
+      control the sibling pins carry).
+
+    Journal-backed on purpose (unlike `dev_only_sdk`): with no journal configured
+    ``_journal_entity_event`` appends nothing, so "nothing was appended" would
+    be true of a gate that ran LAST as well, and the ordering claim would be
+    vacuous. `tests/test_9079_event_writers_journal.py` pins the same ordering
+    one level up, through `ingest_corpus` and a monkeypatched gate; this is the
+    unit-level pin against the REAL gate, so the two are complementary.
+    """
+    events = tmp_path / "events"
+    events.mkdir()
+    journal = events / "events.jsonl"
+    sdk = TortoiseSDK(str(tmp_path / "record-door.db"),
+                      event_log_path=str(journal))
+    try:
+        pack_state.set_graph_packs(sdk, packs=[dict(p) for p in _DEV_ONLY])
+        approved = pack_state.graph_installed_namespaces(sdk)
+        if approved != frozenset({"dev"}):
+            raise _PreconditionNotMet(
+                "fixture precondition: the graph must start approved for 'dev' "
+                f"only, got {sorted(approved or ())}")
+
+        def _lines() -> list[str]:
+            return journal.read_text(encoding="utf-8").splitlines() \
+                if journal.exists() else []
+
+        assert _lines() == [], "precondition: the journal starts empty"
+        with pytest.raises(UnapprovedKindNamespace):
+            sdk._journal_event_raw_write(
+                "evt-unapproved-1",
+                {"documentKind": "marketing:contentPerformance"},
+                graph=sdk._get_proj().g)
+        assert _lines() == [], (
+            "the kind gate must refuse BEFORE the append: a record in the "
+            "journal is a DURABLE widening (replay is ungated by design), so a "
+            "refusal that lands after it leaves the very state #5475 forbids")
+        assert _approved(sdk) == frozenset({"dev"})
+
+        committed = sdk._journal_event_raw_write(
+            "evt-approved-1", {"documentKind": "dev:contentBrief"},
+            graph=sdk._get_proj().g)
+
+        assert committed is not False, (
+            "an approved namespaced kind must still journal — a door that "
+            "refused this would satisfy the assertion above vacuously")
+        assert len(_lines()) == 1, (
+            f"expected exactly one appended record, got {_lines()!r}")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
 
 
 # ── The deliberate back-compat the gate rests on (#2714 indicator 2) ──────
