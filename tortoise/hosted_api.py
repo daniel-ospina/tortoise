@@ -5463,6 +5463,45 @@ _READY_PROBE = HealthProbe(
     lambda: _probe_db(), timeout=DB_PROBE_HARD_TIMEOUT, fresh_only=True)
 
 
+def _change_feed_health() -> dict:
+    """#9208: degraded `:GraphEvent` feeds, as `/health` reports them.
+
+    The degraded state is PROCESS MEMORY and its only acknowledgement is a
+    Python call inside the process that holds it, so without a report here the
+    state is invisible from outside: `GET /v1/events` 503s for one tenant and
+    nothing else on the box says why or which worker. This block is that
+    report — it makes the state FINDABLE.
+
+    It deliberately does NOT fold into `status`, unlike `db` and
+    `backup_watcher`: those answer "is THIS PROCESS able to serve", while a
+    degraded feed is one graph's store refusing writes. Folding it would fail a
+    deploy's liveness/readiness over a single tenant's graph and (worse)
+    restart-loop the worker that holds the only acknowledgement path.
+
+    It carries NO graph names or store identities, only counts per stage. This
+    endpoint is unauthenticated; tenant graph names are not ours to publish, and
+    the operator who needs the name gets it from the authenticated 503 detail,
+    from `event_store.degraded_graphs()` inside the worker, or from the boot
+    logs. Never raises: a health path must always answer.
+    """
+    try:
+        from tortoise.event_store import degraded_graphs
+
+        rows = degraded_graphs()
+    except Exception as exc:  # liveness must answer, always
+        return {"degraded": False, "feeds": 0, "stages": [],
+                "error": str(exc)[:200]}
+    stages: dict[str, int] = {}
+    for row in rows:
+        stages[row["stage"]] = stages.get(row["stage"], 0) + 1
+    return {
+        "degraded": bool(rows),
+        "feeds": len(rows),
+        "stages": [{"stage": k, "feeds": v} for k, v in sorted(stages.items())],
+        "error": None,
+    }
+
+
 def _backup_watcher_health() -> dict:
     """#2877: backup-watcher liveness for /health.
 
@@ -5574,6 +5613,14 @@ async def health():
     so on a host where a watcher was expected, ``{"state": "disabled", "ok":
     true, "expected": true}`` reads as "wanted, and not running" — the
     operator's cue to check the boot log for the reason.
+
+    Change-feed check (#9208): ``change_feed`` reports how many graphs' event
+    feeds are DEGRADED in this process — the ONLY way that state is visible from
+    outside, because it is process memory whose acknowledgement is a Python call
+    inside the process. It does NOT fold into ``status`` (see
+    ``_change_feed_health``): a single tenant's refused store write is not this
+    process's liveness, and restarting the worker over it would destroy the only
+    place the acknowledgement can be made.
     """
     try:
         db = _HEALTH_PROBE.snapshot()
@@ -5590,7 +5637,7 @@ async def health():
     watcher = _backup_watcher_health()
     return {"status": "ok" if (db.get("ok") and watcher["ok"]) else "degraded",
             "db": db, "probe": probe_meta, "loop_stale_ms": loop_age_ms,
-            "backup_watcher": watcher}
+            "backup_watcher": watcher, "change_feed": _change_feed_health()}
 
 
 @app.get("/health/ready")

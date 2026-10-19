@@ -6553,9 +6553,13 @@ class TortoiseSDK:
         page. A short page is not a distinguishable answer: a subscriber cannot
         read it as "the stream is broken" rather than "nothing happened", which
         is how a dead `:GraphEvent` feed used to report success. The state is
-        keyed by graph and lives in process memory (a peer process cannot see it,
-        and the store is exactly where the notice could not be written); it is
-        cleared only by ``event_store.clear_degraded(<graph>)``.
+        keyed by store+graph and lives in process memory (a peer process cannot
+        see it, and the store is exactly where the notice could not be written);
+        it is cleared only by calling ``event_store.clear_degraded(<graph>)``
+        INSIDE THAT PROCESS. There is no REST/MCP/CLI acknowledgement surface
+        yet, so the raise says so rather than prescribing to an HTTP client a
+        call it cannot make, and ``event_store.degraded_graphs()`` is what
+        ``GET /health`` reports it from (``change_feed``).
 
         #2353: when ``TORTOISE_CHANGE_FEED`` is truthy the response ALSO carries
         ``changes`` — the same page folded into per-claim semantic deltas with
@@ -6598,6 +6602,14 @@ class TortoiseSDK:
         # answer: it is `try`-wrapped and never raises.
         state = degraded(proj)
         if state is not None:
+            # ⚠️ THE REMEDY IS ADDRESSED TO THE OPERATOR, NOT TO THIS CALLER
+            # (#9208 review): the recipient here is an HTTP client, and the
+            # acknowledgement is a Python call in the process that OBSERVED the
+            # loss — one the client cannot make, and a peer process cannot make
+            # either (the state is process memory). Naming the call to the client
+            # prescribed an action it had no way to perform; naming the exits
+            # (in-process clear, or restart this worker) plus where the state is
+            # visible does not.
             raise ChangeFeedDegraded(
                 "the :GraphEvent change feed for graph "
                 f"{state['graph']!r} is DEGRADED: a change-feed write was "
@@ -6605,12 +6617,16 @@ class TortoiseSDK:
                 f"{state['event_type']!r} ({state['error']}); {state['lost']} "
                 "event(s) are unaccounted for, so this poll cannot "
                 "distinguish a quiet stream from a dead one and will not "
-                "answer as if it could. Fix the store (the refusal message "
-                "names the cause — e.g. an undeclared write under §17.1), "
-                "then acknowledge the loss with "
-                "tortoise.event_store.clear_degraded(<graph name>) — the "
-                "missing events are NOT recovered by a later successful "
-                "write (#9208)")
+                "answer as if it could. Fix the store first (the refusal "
+                "message names the cause — e.g. an undeclared write under "
+                "§17.1). Then an OPERATOR acknowledges the loss: this state "
+                "lives in the memory of the process that observed it, so it "
+                "cannot be cleared by this API client or by a peer process — "
+                "clear it with `tortoise.event_store.clear_degraded(<graph "
+                "name>)` inside that worker, or restart that worker. "
+                "`GET /health` reports it under `change_feed`, so the worker "
+                "holding it can be found. The missing events are NOT recovered "
+                "by a later successful write (#9208)")
         # Expired-cursor check: a NON-ZERO cursor pointing below the graph's
         # min seq was purged/compacted. after_seq == 0 is the "from the start"
         # sentinel (after=None) — it never expires, it just returns all

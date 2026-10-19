@@ -273,8 +273,18 @@ not recovered by a later successful write. The stage is part of the diagnosis:
 `append` means the store was read and provably does not hold the row, while
 `append-unverified` means the read-back also failed, so "lost" is a guess the
 state refuses to make. Over HTTP the state is a **503** carrying that detail
-verbatim, not a bare 500. It is process memory: a peer process cannot see it,
-which is stated rather than assumed, and one consumer — the webhook delivery
+verbatim, not a bare 500. It is process memory: a peer process cannot see it —
+and, the other half of the same scope, a peer process cannot ACKNOWLEDGE it
+either. No REST/MCP/CLI surface for the acknowledgement exists yet, so the remedy
+is an operator clearing it inside the process that observed the loss
+(`event_store.clear_degraded(<graph>)`) or restarting that worker; the 503 detail
+says exactly that rather than prescribing to an HTTP client a call it cannot
+make. `event_store.degraded_graphs()` backs a `change_feed` block on
+`GET /health` — counts per stage, no graph names (that endpoint is
+unauthenticated) and deliberately **not** folded into `status`, because one
+tenant's refused store write is not this process's liveness and folding it would
+restart-loop the worker that holds the only acknowledgement path. It is what
+makes the state findable from outside at all. One consumer — the webhook delivery
 sweep, which reads `read_after` directly — is NOT covered and is named as a
 follow-up rather than implied covered.
 

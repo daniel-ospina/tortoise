@@ -30,12 +30,12 @@ them would silently under-read forever. Acknowledging it is explicit
 ⚠️ TWO SCOPES, STATED so neither is over-read. It is keyed by STORE + GRAPH
 (the `:GraphEvent` namespace IS the org partition, so one tenant's dead feed
 must not refuse another tenant's poll, and two databases are two stores even
-under one name), and it lives in PROCESS MEMORY — a peer process cannot see it.
-That is a real residual, not an oversight: when the door is refusing these
-writes, the store is exactly where the notice cannot be written. What it does
-guarantee is the property the issue targets — **a `poll_events` caller in a
-process that emitted for a graph cannot be told "nothing happened" over lost
-events.**
+under one name), and it lives in PROCESS MEMORY — a peer process cannot see it,
+and a peer process cannot ACKNOWLEDGE it either (the acknowledgement is a Python
+call in the process that observed the loss; from outside, the only exit is a
+restart of that worker). What it does guarantee is the property the issue
+targets — **a `poll_events` caller in a process that emitted for a graph cannot
+be told "nothing happened" over lost events.**
 
 ⚠️ AND ONE CONSUMER IS NOT COVERED, named rather than implied: the webhook
 delivery sweep (`webhook_delivery.deliver_due`) reads `read_after` directly, so
@@ -164,6 +164,30 @@ def degraded(proj) -> dict[str, Any] | None:
     return _DEGRADED.get(_graph_key(proj))
 
 
+def degraded_graphs() -> list[dict[str, Any]]:
+    """EVERY degraded feed in this process — the read side for surface reports.
+
+    `degraded(proj)` needs a projection, which a reporting surface (``/health``)
+    does not have; the key is `(store, graph)` and only a projection can compute
+    it, so the listing carries `store` alongside the state. Copies, never the
+    live dicts, so a reporter cannot mutate the state by holding one.
+
+    Sorted by `(store, graph)` so a report is stable across calls (a dict order
+    would make an operator diff meaningless).
+    """
+    return [
+        {
+            "store": store,
+            "graph": state["graph"],
+            "stage": state["stage"],
+            "event_type": state["event_type"],
+            "lost": state["lost"],
+            "error": state["error"],
+        }
+        for (store, _graph), state in sorted(_DEGRADED.items())
+    ]
+
+
 def clear_degraded(graph_name: str | None = None) -> None:
     """Acknowledge the loss and re-enable polling (#9208).
 
@@ -175,6 +199,15 @@ def clear_degraded(graph_name: str | None = None) -> None:
     ``graph_name=None`` clears EVERY store+graph in this process (the operator's
     "I have dealt with this", and the test suite's isolation); naming one graph
     clears that graph in every store.
+
+    ⚠️ THIS IS A PYTHON CALL IN THE PROCESS THAT HOLDS THE STATE, and there is
+    no REST/MCP/CLI surface for it yet (#9208's recorded residual): the state is
+    process memory, so a peer process — including an operator's shell on the same
+    host — cannot clear it, and neither can the HTTP client that receives the
+    503. The exits are (a) this call inside that process, or (b) restarting that
+    worker. `degraded_graphs()` is what makes the state visible from outside
+    (``GET /health`` → ``change_feed``), so an operator can at least SEE which
+    worker needs it.
     """
     if graph_name is None:
         _DEGRADED.clear()

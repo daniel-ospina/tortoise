@@ -251,6 +251,59 @@ def test_a_healthy_feed_answers_and_leaves_a_row(armed_sdk):
     assert reply["next_cursor"]
 
 
+def test_the_refusal_tells_the_OPERATOR_what_to_do_not_the_caller(
+        armed_sdk, monkeypatch):
+    """`degraded_graphs()` is the /health read seam, and the raise addresses
+    the operator — not the client that cannot act (#9208 review).
+
+    The state is process memory whose only acknowledgement is a Python call
+    inside the process that observed the loss. Two consequences, both pinned
+    here:
+
+    * a reporting surface with no projection to hand (``/health``) needs the
+      state in LIST form — keyed by (store, graph), which only a projection can
+      compute, so the listing must carry the store itself;
+    * the 503 detail an HTTP client receives must not prescribe that call to the
+      client. It names the exits (in-process clear, or restart this worker) and
+      says the client cannot make them.
+    """
+    sdk = armed_sdk
+    assert event_store.degraded_graphs() == [], (
+        "a healthy process reports NO degraded feeds")
+
+    _refuse_the_store_leg(monkeypatch)
+    sdk.create_point("statement", "lost while the store leg was refused")
+
+    rows = event_store.degraded_graphs()
+    assert len(rows) == 1, rows
+    assert rows[0]["graph"] == sdk._get_proj().graph_name
+    assert rows[0]["stage"] == "emit"
+    assert rows[0]["lost"] == 1
+    assert rows[0]["store"], "the listing must name the store, not only the graph"
+
+    # A copy, never the live dict: a reporter must not be able to rewrite the
+    # state by holding it.
+    rows[0]["stage"] = "append"
+    rows[0]["lost"] = 999
+    assert event_store.degraded_graphs()[0]["stage"] == "emit"
+    assert event_store.degraded(sdk._get_proj())["lost"] == 1
+
+    with pytest.raises(ChangeFeedDegraded) as excinfo:
+        sdk.poll_events()
+    detail = str(excinfo.value)
+    assert "OPERATOR" in detail, (
+        "the remedy must be addressed to the operator; the recipient of this "
+        f"raise is a client: {detail[:300]}")
+    assert "restart that worker" in detail, (
+        "an unreachable worker's only exit is a restart, and the message must "
+        "name it")
+    assert "cannot be cleared by this API client" in detail, (
+        "the message must not read as an instruction the client can follow")
+
+    event_store.clear_degraded()
+    assert event_store.degraded_graphs() == []
+
+
 def test_a_later_success_does_not_un_degrade_the_feed(armed_sdk, monkeypatch):
     """The gap is permanent, so the signal must not clear itself on recovery.
 
@@ -381,6 +434,48 @@ def test_the_store_identity_includes_the_server_PORT():
         stub(path="/b.db"))
 
 
+def test_a_real_projection_reports_the_store_identity_the_key_uses(tmp_path):
+    """The `_store_identity` seam against a REAL projection, in BOTH lanes.
+
+    The unit pin above hand-builds the client shape it reads
+    (`db.connection.connection_pool.connection_kwargs['port']`) — the same
+    presumption `tests/_embedded._projection_host` makes — so a divergence
+    between that stub and the real client would keep the PORT out of the key
+    while the unit pin stayed green. This reads the identity off a projection
+    the SDK actually built:
+
+    * embedded lane → `file:<path>`, i.e. two databases really do key apart;
+    * server lane (#1647 test redirect discards the explicit path) →
+      `host:<host>:<port>` with a NON-`None` port RESOLVED FROM THE REAL POOL.
+      `None` here is the #9208 regression this test exists to catch: keyed on the
+      host alone, this repo's two loopback servers (`:6379` test matrix,
+      `:16379` canonical/dev) — both defaulting to the graph name `tortoise` —
+      would share one degraded key, so a refusal on one would permanently refuse
+      the other's polls.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    sdk = TortoiseSDK(str(tmp_path / "identity.db"),
+                      event_log_path=str(tmp_path / "identity.jsonl"))
+    try:
+        proj = sdk._get_proj()
+        identity = event_store._store_identity(proj)
+        if proj._path:
+            assert identity == f"file:{proj._path}", (
+                "an embedded projection's identity is its database FILE, "
+                f"got {identity!r}")
+            return
+        pool = proj.db.connection.connection_pool
+        port = pool.connection_kwargs["port"]
+        assert port is not None, "the real client must carry the port"
+        assert identity == f"host:{proj._host}:{port}", (
+            "the store identity must carry the PORT read from the REAL "
+            f"connection pool; got {identity!r} for host={proj._host!r}, "
+            f"port={port!r}")
+    finally:
+        sdk.close()
+
+
 def test_an_unconfigured_feed_is_not_degraded(armed_sdk):
     """A refusal must not be confused with "the feed was never written to".
 
@@ -412,7 +507,13 @@ def test_a_dead_feed_on_one_graph_does_not_refuse_another(tmp_path, monkeypatch)
     dead = TortoiseSDK(db_path, event_log_path=journal, graph_name="tenant_a")
     healthy = TortoiseSDK(db_path, event_log_path=journal, graph_name="tenant_b")
     try:
-        assert dead._get_proj()._path == healthy._get_proj()._path, (
+        # Asserted through the code's OWN identity seam, not `_path`: under a
+        # URI-set session (#1647's test redirect) BOTH projections are host-mode
+        # (`_path is None`) on the SAME server, so `_path == _path` is
+        # `None == None` — true, and pinning nothing. `_store_identity` is the
+        # half this test is about, and it names one store in either lane.
+        assert (event_store._store_identity(dead._get_proj())
+                == event_store._store_identity(healthy._get_proj())), (
             "the two SDKs must share ONE store, or this test cannot tell a "
             "per-store key from a per-graph one")
 
@@ -442,6 +543,19 @@ def test_two_stores_under_one_graph_name_do_not_share_a_state(tmp_path,
     environment runs exactly that shape (the test matrix and the canonical/dev
     FalkorDB both default to the graph name `tortoise`). Keyed on the graph name
     alone, a refused write on one permanently refuses the other's poll.
+
+    ⚠️ EMBEDDED LANE ONLY, and gated on it EXPLICITLY. Two `db_path`s are two
+    stores only when each one is honoured. Under `TORTOISE_DB_URI` — the lane
+    CI's `test` shards run — `FalkorProjection.__init__`'s #1647 test redirect
+    DISCARDS an explicit path for a non-exempt stem
+    (`tests/_embedded.py::TEST_NO_REDIRECT_STEMS`) and connects to the server,
+    re-deriving a graph name per path. Both SDKs would then be ONE store with
+    TWO derived names: the shape this test exists to distinguish from
+    "two stores", and every assertion below would pass while the store half of
+    the key went unpinned. Skipping is the honest answer — the store half is
+    pinned lane-agnostically by
+    `test_a_real_projection_reports_the_store_identity_the_key_uses` and by the
+    `_store_identity` unit pin above.
     """
     from tortoise.sdk import TortoiseSDK
 
@@ -452,6 +566,11 @@ def test_two_stores_under_one_graph_name_do_not_share_a_state(tmp_path,
                           event_log_path=str(tmp_path / "two.jsonl"),
                           graph_name="tortoise")
     try:
+        if dead._get_proj()._path is None or healthy._get_proj()._path is None:
+            pytest.skip(
+                "the two-stores shape is embedded-only: this session has "
+                "TORTOISE_DB_URI set, so the #1647 test redirect discarded "
+                "both explicit paths and put both SDKs on ONE server store")
         assert dead._get_proj()._path != healthy._get_proj()._path
 
         _refuse_the_store_leg(monkeypatch)
