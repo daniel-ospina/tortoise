@@ -1,7 +1,7 @@
 """#9068 — the write paths that never meet a #5475 gated door, MEASURED.
 
 `#5475`'s closure property is **a write may not widen the graph's approved
-pack set**. At this branch's base that property is enforced at these THIRTEEN
+pack set**. At this branch's base that property is enforced at these NINETEEN
 doors and no others — stated as doors rather than as a cardinality, because a
 count is the part that goes stale:
 
@@ -14,13 +14,19 @@ count is the part that goes stale:
 * the record-building doors that journal-then-fold — `sdk._apply_and_journal`
   and `sdk._doc_write`;
 * the journal-first seam every pipeline writes through — `api.EventAPI._emit`
-  (`#8982`) and `mining.ConversationMiner._emit_event`;
+  (`#8982`), `mining.ConversationMiner._emit_event` and
+  `sdk._journal_event_raw_write` (`#9197`);
 * the hosted commit door's pre-validation (`hosted_api.commit_session`), and the
   two `POST /v1/{objects,subjects}` doors (`hosted_api.create_object` /
-  `hosted_api.create_subject`, via `_require_approved_kind`, #8380).
+  `hosted_api.create_subject`, via `_require_approved_kind`, #8380);
+* the connector folds that write into a JOURNAL-LESS projection, where the cache
+  is the store (#9068) — `connectors/github.py`'s `ingest` and
+  `_fold_webhook_event`, `connectors/linear.py`'s `ingest`, and
+  `connectors/slack.py`'s `ingest` and `_fold_webhook_event`, each through the
+  shared `connectors._gate_kinds` helper.
 
 "And no others" is not prose either: `test_the_door_inventory_is_the_declared_doors_and_no_others`
-re-derives the inventory from the #5475 gate CALL SITES by AST, so a FOURTEENTH
+re-derives the inventory from the #5475 gate CALL SITES by AST, so a TWENTIETH
 door reds this suite instead of silently falsifying this paragraph — and
 `test_the_gate_helper_vocabulary_is_complete` reds it when a new gate HELPER
 appears, which is the failure this file only missed once: `#9070` introduced
@@ -62,9 +68,9 @@ looking, and several writers still widen the set today. `#9068` records that;
 this module makes it a *measurement* instead of prose, so the claim's true
 scope is executable and cannot drift back:
 
-* **CENSUS: 12 PASS, 2 XFAIL, 14 total** — recomputed from this file's own AST
+* **CENSUS: 13 PASS, 1 XFAIL, 14 total** — recomputed from this file's own AST
   by `test_the_header_census_matches_this_file`, so this paragraph cannot drift
-  again (it did: it said "six" while the file defined nine). The twelve pin the
+  again (it did: it said "six" while the file defined nine). The thirteen pin the
   SCOPE and the pin MECHANIC — the door inventory (below); the completeness of
   the gate vocabulary that inventory is derived from; that vocabulary's
   DECIDABILITY in both directions (`…decides_both_directions`, and
@@ -77,12 +83,12 @@ scope is executable and cannot drift back:
   (and moving nothing); the deliberate data-mining leg the gate's back-compat
   rests on; and the **declared** departure (offline re-typing), which PASSES
   because it is the posture rather than a defect;
-* the two XFAILs are `xfail(strict=True, raises=AssertionError)` on the **fixed**
-  behaviour of the two residuals nothing is currently fixing, so closing either
-  one XPASSes its pin and FAILS the suite on purpose rather than letting the pin
+* the one XFAIL is `xfail(strict=True, raises=AssertionError)` on the **fixed**
+  behaviour of the one residual nothing is currently fixing, so closing it
+  XPASSes its pin and FAILS the suite on purpose rather than letting the pin
   rot — the idiom `tests/test_url_keyed_source_write_4649.py` uses for `#5048`.
 
-Both pins are ``xfail(strict=True, raises=AssertionError)``, and each half of
+That pin is ``xfail(strict=True, raises=AssertionError)``, and each half of
 that marker is load-bearing: ``strict`` alone reacts to the ASSERTION, so a pin
 body that raised for ANY other reason would be recorded as an expected failure
 forever — pytest swallows such a raise even when it comes from a FIXTURE, not
@@ -100,24 +106,17 @@ delete the pin), and a pin whose precondition or seam silently changed shape
 reds the suite instead of staying green and stale.
 
 The approved set is `:PackInstall` records **∪** the namespaces mined out of
-the graph's own data (`pack_state.graph_kind_namespaces`, 8 node properties,
-label-agnostic). So "a write widened the set" is a one-line, observable fact:
+the graph's own data (`pack_state.graph_kind_namespaces`, 8 node properties —
+label-agnostic for the seven QUALIFIED spellings, and scoped to the ontology
+labels for the bare `kind` slot since #9068). So "a write widened the set" is a
+one-line, observable fact:
 read the set before, perform ONE write, read it after.
 
 ## What is measured here, and what is only NAMED
 
 **Widening at HEAD, pinned here** (nothing is fixing these):
 
-1. **`:Pipeline.kind` is a mined property** — `pipeline._write_pipeline` writes
-   ``SET p.kind = $kind`` with the pipeline KEY as the value, and
-   `graph_kind_namespaces` scans `kind` label-agnostically, so a procedural
-   config row grants its namespace. Gating the writer alone is not available
-   (the key IS a real ``ns:kind`` spelling, so a gate there would refuse
-   legitimate pipeline edits), and dropping `kind` from the scanned keys
-   narrows the back-compat union — so this is a **decision about the pipeline
-   model**, recorded on `#9068`, not a mechanical patch. **XFAIL.**
-
-2. **A bare fold on a journal-less projection** — `connectors/github.py` folds
+1. **A bare fold on a journal-less projection** — `connectors/github.py` folds
    records with ``proj.apply(...)`` (kind ``pm:issue`` from `github_map`), and
    `FalkorProjection.apply` refuses a direct fold only when ``_journal_backed``
    — correctly, since with no journal there is no truth store for the cache to
@@ -125,6 +124,15 @@ read the set before, perform ONE write, read it after.
    The fix must reuse `pack_state`'s ONE read core rather than re-deriving
    "records ∪ data" a second time (that re-derivation is the drift
    `graph_installed_namespaces` exists to prevent). **XFAIL.**
+
+**Closed AT THIS HEAD, so no longer pinned as a widening** — `#9068` itself
+resolved residual 1 without a pipeline-model change: the reader no longer mines
+the bare `kind` slot off a non-ontology label (`pack_state._LABEL_SCOPED_KIND_KEYS`
+/ `_ONTOLOGY_LABELS`), so `:Pipeline`'s key grants its namespace to nothing.
+`test_a_pipeline_row_does_not_grant_its_namespace` is now an ordinary passing
+pin. That narrowing DOES drop `venture` from a graph whose only kind-bearing
+node is a pipeline — the #2714 indicator-2 cost, stated in
+`docs/EXPANSION_PACKS.md` rather than left implicit.
 
 **Closed upstream at this base, and NOT re-pinned here** — `#9070` landed and
 gates the eight seams this module previously only NAMED. This module does not
@@ -393,8 +401,12 @@ def test_the_header_census_matches_this_file() -> None:
 #: whose NAME is in the gate vocabulary and reds when one is unregistered. That
 #: guard exists because the call-site scan is only as complete as this list:
 #: `#9070` added `_refuse_unapproved_kinds_in_record`, and every door behind it
-#: was invisible to this scan until the name was registered here.
+#: was invisible to this scan until the name was registered here. `_gate_kinds`
+#: (#9068) is the same case in the other direction: its NAME is outside
+#: `_GATE_VOCABULARY`, so without this entry the scan reports the HELPER as a
+#: door and its five connector call sites — the actual doors — stay invisible.
 _GATE_HELPERS: frozenset[str] = frozenset({
+    "_gate_kinds",
     "_refuse_unapproved_kind",
     "_refuse_unapproved_kinds",
     "_refuse_unapproved_kinds_in_props",
@@ -410,8 +422,9 @@ _GATE_HELPERS: frozenset[str] = frozenset({
 #: so a new helper cannot arrive unannounced. Anything matching this that is not
 #: in `_GATE_HELPERS` reds `test_the_gate_helper_vocabulary_is_complete`.
 #:
-#: All THREE families are open on the right (`\w*`), and the `(?:.*_)?` prefix
-#: admits any spelling that keeps the words — `_guard_unapproved_kinds` matches.
+#: All FOUR families are open on the right (`\w*`, or the family's own spelling),
+#: and the `(?:.*_)?` prefix admits any spelling that keeps the words —
+#: `_guard_unapproved_kinds` matches.
 #: The third family used to be anchored to the singular spelling, so
 #: `_require_approved_kinds` — the natural plural, and the family
 #: `_refuse_unapproved_kinds` already uses — was returned by NEITHER guard: the
@@ -423,8 +436,14 @@ _GATE_HELPERS: frozenset[str] = frozenset({
 #: `unapproved`/`approved_kind` but drops the verb (`_deny_unapproved_kinds`) is
 #: caught by `test_no_approval_decision_hides_behind_an_unrecognised_name`, which
 #: fails CLOSED over the broad word match rather than trusting this pattern.
+#:
+#: `gate_kinds` is the fourth family (#9068): `connectors._gate_kinds` is a gate
+#: COMPOSER whose name carries neither `unapproved` nor `approved_kind`, so the
+#: word-based guards cannot see it and the call-site scan would report the
+#: HELPER as a door while its five connector call sites stayed invisible.
 _GATE_VOCABULARY = re.compile(
-    r"^(?:.*_)?(?:refuse_unapproved\w*|unapproved_kind\w*|require_approved_kind\w*)$")
+    r"^(?:.*_)?(?:refuse_unapproved\w*|unapproved_kind\w*|require_approved_kind\w*"
+    r"|gate_kinds)$")
 
 #: The broad word match the RENAME guard keys on (deliberately wider than
 #: `_GATE_VOCABULARY`): every DEF whose name carries these words is either a
@@ -444,10 +463,12 @@ _NON_GATE_APPROVAL_DEFS: dict[str, str] = {
 }
 
 #: The doors the module docstring states — that header's inventory, executable.
-#: THIRTEEN at this base: the two SDK create funnels, the two UPDATE doors, the
-#: two second-writers of a mined property, the two record-building doors, the two
-#: journal-first emitters, the commit-door pre-check and the two REST doors
-#: (`#9070` landed the update/journal seams; `#8380` the REST pair). "And no
+#: NINETEEN at this base: the two SDK create funnels, the two UPDATE doors, the
+#: two second-writers of a mined property, the three journal-first emitters, the
+#: two record-building doors, the commit-door pre-check, the two REST doors
+#: (`#9070` landed the update/journal seams; `#8380` the REST pair; `#9197`
+#: `_journal_event_raw_write`), and the five connector folds gated by `#9068`.
+#: "And no
 #: others" is a claim about the BASE: the day a new gate CALL SITE — or a new
 #: gate HELPER, see `_GATE_VOCABULARY` — lands, this reds and the header has to
 #: be updated in the same PR, which is the point. A paragraph asserting a scope
@@ -455,6 +476,11 @@ _NON_GATE_APPROVAL_DEFS: dict[str, str] = {
 #: and that this module exists to close.
 _DOORS: frozenset[str] = frozenset({
     "tortoise/api.py:EventAPI._emit",
+    "tortoise/connectors/github.py:GitHubConnector._fold_webhook_event",
+    "tortoise/connectors/github.py:GitHubConnector.ingest",
+    "tortoise/connectors/linear.py:LinearConnector.ingest",
+    "tortoise/connectors/slack.py:SlackConnector._fold_webhook_event",
+    "tortoise/connectors/slack.py:SlackConnector.ingest",
     "tortoise/hosted_api.py:commit_session",
     "tortoise/hosted_api.py:create_object",
     "tortoise/hosted_api.py:create_subject",
@@ -462,6 +488,7 @@ _DOORS: frozenset[str] = frozenset({
     "tortoise/sdk.py:TortoiseSDK._apply_and_journal",
     "tortoise/sdk.py:TortoiseSDK._create_entity",
     "tortoise/sdk.py:TortoiseSDK._doc_write",
+    "tortoise/sdk.py:TortoiseSDK._journal_event_raw_write",
     "tortoise/sdk.py:TortoiseSDK._update_entity",
     "tortoise/sdk.py:TortoiseSDK.create_point",
     "tortoise/sdk.py:TortoiseSDK.ingest_corpus",
@@ -948,15 +975,11 @@ def test_the_data_leg_keeps_existing_vocabulary_writable(
 # ── Residual 1: :Pipeline.kind is a mined property ────────────────────────
 
 
-# `raises=AssertionError`: ONLY the widening assertion below may xfail this
-# pin. A refusal outside `_REFUSAL`, or any other failure at the seam, is
-# reported FAILED by `_attempt_write` — never recorded as an expected failure.
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "#9068 residual 1 — `pipeline._write_pipeline` persists the pipeline KEY "
-    "into the mined `kind` property (`SET p.kind=$kind`) and "
-    "`pack_state.graph_kind_namespaces` scans `kind` label-agnostically, so a "
-    ":Pipeline row grants its namespace; the fix is a decision about the "
-    "pipeline model, recorded on #9068"))
+# `#9068` residual 1 is FIXED at this head, so this pin is no longer an xfail:
+# the mining leg reads the bare `kind` slot only off ontology labels, and a
+# `:Pipeline` is not one. It stays here as the behavioural pin on the closure
+# (the writer still stores its key in `kind`, which is why the fix had to be in
+# the READER). Reverting `_LABEL_SCOPED_KIND_KEYS` reds it.
 def test_a_pipeline_row_does_not_grant_its_namespace(
         dev_only_sdk: TortoiseSDK) -> None:
     """(1) Failing value is the approval set gaining ``venture``; (2) the

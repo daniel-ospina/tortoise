@@ -8,10 +8,14 @@ Usage:
     python3 tortoise/migrate_kinds.py
     python3 tortoise/migrate_kinds.py --dry-run
 
-⛔ THE ONE LIVE WRITER THAT DELIBERATELY BYPASSES THE #5475 APPROVED-PACK
-GATE (#9068) — stated here because the PR that closed #5475 says "the write
-path is closed", and a reader taking that literally would try to gate this and
-break it.
+⛔ THE ONE LIVE WRITER THAT DELIBERATELY WIDENS THE #5475 APPROVED-PACK SET
+(#9068) — stated here because the PR that closed #5475 says "the write path is
+closed", and a reader taking that literally would try to gate this and break it.
+(One other writer is deliberately ungated WITHOUT widening: `pipeline.py`'s
+`SET p.kind` stores a pipeline key the mining leg no longer reads as an
+ontology kind — see `docs/EXPANSION_PACKS.md`. `sdk._emit_event` is ungated too,
+for a different reason: it appends a payload describing a mutation that has
+already written its node. This is the one that intentionally ADDS a namespace.)
 
 ``_do_migrate`` ``SET``s a kind PROPERTY with raw Cypher (``proj.g.query``,
 label-scoped, one statement per ``MIGRATIONS`` row), which no door screens.

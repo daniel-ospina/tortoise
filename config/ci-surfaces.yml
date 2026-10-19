@@ -5628,6 +5628,15 @@ durations:
   # keeps this out of the cold HF-model-load cost class. Refresh from the first
   # post-merge run.
   test_write_doors_9068.py: 2.0
+  # durations refresher samples push-to-main runs only — and an absent row packs
+  # it at the flat 2.0s default, dropping `duration_coverage_issues()` under the
+  # 90% floor. Locally measured 8.0s for 27 tests on the embedded lane
+  # (2026-10-19, this head — the row previously said 3.5s / 12 tests, a count and
+  # weight the file outgrew as the connector and webhook arms were added); the
+  # tests that let a fold LAND request the suite's
+  # `force_embedder_on` stub, which is what keeps this out of the cold
+  # HF-model-load cost class. Refresh from the first post-merge run.
+  test_write_doors_9068.py: 8.0
   test_value_extractor.py: 39.0
   test_venture_pack.py: 2.0  # unmeasured — new in #3419; no sweep has collected it, so it carries the flat default exactly as an absent key would, which is main's own weight for it. Do NOT substitute a local timing here: a measured-on-this-box 67.2 was recorded first, and it is a SHARD-LAYOUT input, so it moved tests/test_tortoise_search.py into the same shard as tests/test_subject_layer_read_surfaces_4889.py and exposed a pre-existing embedded-lane isolation leak (#3750 family) that main's grouping keeps apart. A weight that does not model CI must not be used to decide what runs together.
   # #2729: same rule as the entry directly above — unmeasured, carries the flat

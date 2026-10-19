@@ -520,6 +520,23 @@ grant the `venture` pack; the fix is in the reader, not in the pipeline writer
 (the key is a real pipeline name, so gating that writer would start refusing
 legitimate pipeline edits).
 
+⚠️ **Upgrade effect, stated because it NARROWS a back-compat union**
+(`#2714` indicator 2): a graph that holds `:PackInstall` records and whose ONLY
+kind-bearing node for a namespace is a `:Pipeline` row loses that namespace from
+the approval set — writes naming it become refusals until the pack is installed
+(`PUT /v1/graphs/{graph_id}/packs`). The `p.kind` write is deliberately left in
+place (dropping it is a pipeline-model change: every stored override carries the
+property, and nothing in the repo reads it), so this narrowing is a property of
+the READER on both new and existing rows, not of the write.
+
+⚠️ **The connector gate is per CALL SITE, not at the projection seam.**
+`FalkorProjection.apply` still gates a direct fold only when `_journal_backed`,
+so a THIRD-PARTY connector — or any caller outside `tortoise/connectors/` — that
+folds straight into a journal-less projection is still ungated. That gap is
+measured and pinned (`tests/test_9068_pack_gate_residuals.py`'s
+`test_a_journal_less_fold_does_not_widen_the_approval_set`, an XFAIL on the
+fixed behaviour), not claimed closed here.
+
 **Deliberately NOT gated — and why:**
 
 | Writer | Why it is not gated |
@@ -528,7 +545,8 @@ legitimate pipeline edits).
 | `migrate_kinds.py` (raw Cypher over a live graph) | An **operator act**: a deliberate re-typing of the graph's own historical rows, with every target spelling a reviewed literal in the file. It is the sanctioned way a pack namespace enters data written *before* the pack existed, so widening the mined set is the point of the run — a gate would refuse the very row the migration exists to rewrite. |
 | `retype.py` / `tools/retype_snapshot.py` | Offline: they transform a dump and never touch a live graph. They enforce the target kind against the **declared vocabulary** instead (`RetypeError`). |
 | `hosted_api._seed_demo_graph` | Raw Cypher for the sample content, but every kind it writes is a **bare** literal from the reviewed `_DEMO_*` tables (`observation`, `statement`, `event`, `workflow`) plus the `AgentSession` event kind. A bare kind names no pack, so it cannot widen the approved set. |
-| `_emit_event` (post-mutation payload append) | The pre-write doors are gated instead. The mutations it describes (`PointPromoted`, `Dedupe*`, `create_operator`) have already written their node, so a refusal at the append could only split the journal from the cache. |
+| `sdk._emit_event` (post-mutation payload append) | The pre-write doors are gated instead. The mutations it describes (`PointPromoted`, `Dedupe*`, `create_operator`) have already written their node, so a refusal at the append could only split the journal from the cache. NOT to be confused with `mining.ConversationMiner._emit_event`, which builds its own `EventRecorded` envelope and IS gated before its append (#5475/#8982). |
+| `FalkorProjection.apply` on a journal-less projection | The #9068 gate sits at the five connector CALL SITES, not at this sink (see the per-call-site caveat above). A third-party connector folding directly is still ungated, and that residual is pinned as an XFAIL rather than declared closed. |
 | `pipeline.py`'s `SET p.kind = <pipeline_key>` | The value is a real namespaced **pipeline key** (`venture:deal`), not a pack kind — gating the writer would start refusing legitimate pipeline edits. What had to change was the READER: the mining leg no longer treats a bare `kind` on `:Pipeline`/`:Graph` as an ontology kind (#9068, above), so this write stays ungated and no longer widens the approved set. |
 
 A re-typing that DOES need a namespace the graph has not approved is an

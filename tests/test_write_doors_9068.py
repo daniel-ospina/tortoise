@@ -184,10 +184,21 @@ class TestGenericKindIsNotAnOntologyKind:
         """
         assert set(_LABEL_SCOPED_KIND_KEYS) == {"kind"}, (
             "only the GENERIC `kind` slot is label-scoped")
+        # EXACT, not a subset (#9068 review P2): a subset assertion accepts any
+        # ADDITION, so a new ontology label added to the canonical declaration
+        # would leave `_ONTOLOGY_LABELS` behind and silently stop mining its
+        # legacy `kind` values (#2714 indicator 2 inverted). `security`'s map is
+        # the declaration a new query-serving label must extend.
+        from tortoise.security import ENTITY_TYPE_LABELS
+        declared = set(ENTITY_TYPE_LABELS.values())
         names = set(_ONTOLOGY_LABELS)
-        assert {"Object", "Point", "Event", "Subject", "Source"} <= names, (
-            "the five live kind-carrying entity classes must all be scoped in, "
-            "or their legacy `kind` values stop being writable")
+        assert names == declared | {"Document"}, (
+            f"`_ONTOLOGY_LABELS` drifted from the live declaration: it has "
+            f"{sorted(names - declared - {'Document'})} that `security.ENTITY_TYPE_LABELS` "
+            f"does not, and is missing {sorted(declared - names)}. The five live "
+            "kind-carrying classes must all be scoped in or their legacy `kind` "
+            "values stop being writable; `Document` is the retired D10 label a "
+            "restored pre-v3.15 dump can still carry")
         assert "Pipeline" not in names and "Graph" not in names, (
             "the labels whose `kind` is their OWN identity must never be "
             "treated as ontology carriers")
@@ -538,6 +549,10 @@ class TestSdkLiveDoorsAreGated:
 
         FAIL-ON: ``_apply_and_journal`` folds without asking (the record gate
         is removed, or reduced to the camel-only props gate).
+        ⚠️ At THIS branch's merge base that door is already gated (#5475/#9070),
+        so the test passes there — it is a REGRESSION pin for the indexer path,
+        not the fail-on pin. The fail-on pin is
+        ``tests/test_vocab_gating_by_graph.py::TestRecordBuildingSeamsRefuseUnapprovedPacks5475::test_apply_and_journal_refuses_before_the_append``.
         REACHABLE: the record is built by the REAL mapper (no hand-written
         dict), the refusal names ``pm``, and the pass-control below lands the
         same record once ``pm`` is approved.
@@ -592,6 +607,9 @@ class TestSdkLiveDoorsAreGated:
 
         FAIL-ON: the update door is ungated, so the namespaced kind is
         persisted and ``marketing`` joins the approved set.
+        ⚠️ At THIS branch's merge base that door is already gated (#9070), so
+        the test passes there — it is a REGRESSION pin, not the fail-on pin:
+        ``tests/test_vocab_gating_by_graph.py::TestUpdateDoorsRefuseUnapprovedPacks5475::test_update_point_refuses_an_unapproved_namespace``.
         REACHABLE: the point is created on the SAME graph first (so the refusal
         is about the update and not a missing node), and the control below
         updates with a bare kind on the same graph and succeeds.
@@ -625,6 +643,9 @@ class TestSdkLiveDoorsAreGated:
 
         FAIL-ON: ``_emit`` appends + folds an unvalidated ``object_kind``, so
         ``marketing`` joins a ``dev``-only graph's approved set.
+        ⚠️ At THIS branch's merge base that seam is already gated (#5475/#8982),
+        so the test passes there — it is a REGRESSION pin; the fail-on pin is
+        ``tests/test_vocab_gating_by_graph.py::TestJournalSeamRefusesUnapprovedPacks5475``.
         REACHABLE: the SAME door writes a bare core kind successfully right
         after (``object_kind='other'``), so the refusal is the gate and not a
         broken emitter.
@@ -704,6 +725,9 @@ class TestPropsDoorsScreenTheFoldAliases:
 
         FAIL-ON: the update door is ungated (the props are persisted and the
         namespace joins the approved set).
+        ⚠️ At THIS branch's merge base ``_update_entity`` is already gated
+        (#9070), so the test passes there — it is a REGRESSION pin; the fail-on
+        pin is the UPDATE-door test above.
         REACHABLE: the Object is created on the SAME graph first, and the
         CONTROL updates it with a bare kind and the value is read back.
         """
@@ -736,6 +760,9 @@ class TestPropsDoorsScreenTheFoldAliases:
         doors the closure statement used to list as ungated.
 
         FAIL-ON: the door is ungated.
+        ⚠️ At THIS branch's merge base the door is already gated (#5475), so
+        the test passes there — it is a REGRESSION pin; the fail-on pin is
+        ``tests/test_vocab_gating_by_graph.py::TestSecondWritersOfAKindProperty5475::test_link_source_to_entity_refuses_an_unapproved_namespace``.
         REACHABLE: the CONTROL links the same source with a bare kind and the
         ``sourceKind`` is read back off the ``:Source`` node.
         """
@@ -1108,8 +1135,10 @@ class TestUngatedReTypingIsStated:
         REACHABLE: it reads the REAL source of the module that performs the
         rewrite and requires the two properties that make it safe: it is
         offline (no graph connection, no writes) and it REFUSES an
-        off-vocabulary kind (``RetypeError``), which is the validation that
-        stands in for a gate here.
+        off-vocabulary kind (``RetypeError``) — which is the validation that
+        stands in for a gate here. The refusal is EXERCISED, not asserted by
+        substring (#9068 review P2: `"RetypeError" in module_src` would pass on
+        a module that merely mentioned the name).
         """
         from tortoise import retype
 
@@ -1120,7 +1149,15 @@ class TestUngatedReTypingIsStated:
         assert "Kind legality" in module_src, (
             "the vocabulary check is what replaces the gate — it must be "
             "stated, not implied")
-        assert "RetypeError" in module_src
+        # BEHAVIOUR, not prose: an off-vocabulary target kind is refused.
+        dump = {"nodes": [{"dump_id": 1, "labels": ["Point"],
+                           "props": {"id": "p1", "pointKind": "statement"}}]}
+        with pytest.raises(retype.RetypeError) as excinfo:
+            retype.build_plan(
+                dump, [{"key": "p1", "label": "Object",
+                        "kind": "definitely:notAKind"}])
+        assert "vocabulary" in str(excinfo.value), (
+            "the refusal must name the vocabulary as the reason")
         # The CLI wrapper is where an operator would accidentally point it at a
         # live graph, so the offline promise must be stated THERE too.
         cli_src = (Path(__file__).resolve().parent.parent
