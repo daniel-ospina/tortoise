@@ -314,6 +314,17 @@ _VALID_EDGE_PREDICATES = frozenset({
 })
 
 
+#: The predicates `create_about_edge` accepts — the about* family, hoisted out
+#: of the verb so the §17.1 lane's write set (#9195) can NAME it instead of
+#: re-spelling the literal in the suite. Deliberately NOT the same constant as
+#: `_ABOUT_REPLAY_RELS` above: that one describes what an `EventRecorded`
+#: record may carry, and coupling the two would let a replay-set edit change
+#: which edge types the verb accepts.
+_VALID_ABOUT_EDGE_PREDICATES = frozenset({
+    'aboutSubject', 'aboutObject', 'aboutEvent', 'aboutPoint', 'aboutDocument',
+})
+
+
 # Every structural predicate a WRITER accepts — the union of the three
 # structural write surfaces this module owns:
 #   * create_edge            -> `_VALID_EDGE_PREDICATES`
@@ -327,6 +338,20 @@ _VALID_EDGE_PREDICATES = frozenset({
 # predicate added to any single writer moves the answer with it.
 STRUCTURAL_WRITE_PREDICATES = frozenset(
     _VALID_EDGE_PREDICATES | set(STRUCTURAL_REL_LABELS)
+)
+
+
+#: Every predicate the §17.1 STRUCTURAL-EDGE lane (#9195) can WRITE — the union
+#: of the two declared mints' allow-lists (`create_edge` →
+#: `_VALID_EDGE_PREDICATES`, `create_about_edge` → `_VALID_ABOUT_EDGE_PREDICATES`).
+#: The suite partitions THIS set against `structural_edge_carrier`, so a
+#: predicate accepted by either mint and classified by neither half is a red
+#: test rather than a silent widening (`aboutPoint` is the one member the
+#: generic verb does not accept — #9195 review P2-1).
+#: ⚠️ Neither verb reads this constant to VALIDATE input: it is the lane's
+#: surface for auditors, not a shared allow-list (widening it widens nothing).
+STRUCTURAL_EDGE_LANE_PREDICATES = frozenset(
+    _VALID_EDGE_PREDICATES | _VALID_ABOUT_EDGE_PREDICATES
 )
 
 
@@ -640,7 +665,9 @@ def source_change_notices(g, source_refs, current_versions: dict[str, str] | Non
 # uses, `proj.g.query` — into the writers that legitimately reach it FIRST, and
 # `#9124` is the guard that lands last. This is the FOURTH and last declaration
 # child (`#9123` the `:EpMeta` epoch, `#9121` onboarding metadata, `#9122` the
-# raw `:Event` writers).
+# raw `:Event` writers) — ⚠️ "last declaration child" is NOT "#9124 may arm":
+# the about NAME lane and the provenance lane listed under WHAT THIS LANE DOES
+# NOT COVER are still unscoped, so `#9124` must census (or scope) them first.
 #
 # WHAT THE WRITES ARE. `create_edge` and `create_about_edge` each issue exactly
 # ONE mutating statement,
@@ -694,7 +721,7 @@ def source_change_notices(g, source_refs, current_versions: dict[str, str] | Non
 #     …)`, `extractedFrom=…`) — and NOT when it is a bare assertion on a node
 #     whose record never held it.
 #   * **no carrier emitted by this lane** — every other predicate in
-#     `_VALID_EDGE_PREDICATES` (`related`, `dependsOn`, `ownedBy`, `managedBy`,
+#     `STRUCTURAL_EDGE_LANE_PREDICATES` (`related`, `dependsOn`, `ownedBy`, `managedBy`,
 #     `authoredBy`, `memberOf`, `hasMember`, `holdsRole`, `reportsTo`,
 #     `participatesIn`, `hasPart`, `performs`, `produces`, `uses`,
 #     `wasDerivedFrom`, `references`, `aboutSource`, `aboutAction`). MEASURED at
@@ -1436,9 +1463,11 @@ class _EdgeHandlers:
         
         Returns True if edge was created.
         """
-        valid = {'aboutSubject', 'aboutObject', 'aboutEvent', 'aboutPoint', 'aboutDocument'}
+        valid = _VALID_ABOUT_EDGE_PREDICATES
         if edge_type not in valid:
-            raise ValueError(f"Invalid about edge type: {edge_type}. Must be one of {valid}")
+            raise ValueError(
+                f"Invalid about edge type: {edge_type}. Must be one of "
+                f"{sorted(valid)}")
         
         # Resolve endpoints via index-backed labeled lookups (issue #327).
         # Source predicate is id-only; target is id OR eventId (legacy OR-set),

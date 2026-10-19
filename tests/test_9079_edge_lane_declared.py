@@ -74,8 +74,10 @@ from tortoise.projection import (
     _statement_writes,
 )
 from tortoise.projection.edges import (
+    _VALID_ABOUT_EDGE_PREDICATES,
     _VALID_EDGE_PREDICATES,
     DERIVABLE_STRUCTURAL_RELS,
+    STRUCTURAL_EDGE_LANE_PREDICATES,
     STRUCTURAL_EDGE_WRITE_LANE,
     structural_edge_carrier,
 )
@@ -87,11 +89,17 @@ DECLARED_VERBS = (
     "create_owned_by", "create_managed_by", "create_authored_by",
 )
 
-#: The predicates this lane can write. Pinned as a LITERAL partition of
-#: `_VALID_EDGE_PREDICATES` so a predicate added to (or moved between) the two
-#: halves is a visible diff in this file rather than a silent widening.
+#: The predicates this lane can write — the union of BOTH declared mints'
+#: allow-lists (`create_edge` + `create_about_edge`), not just the generic
+#: verb's. Pinned as a LITERAL partition of `STRUCTURAL_EDGE_LANE_PREDICATES`
+#: so a predicate added to (or moved between) the two halves is a visible diff
+#: in this file rather than a silent widening.
+#: ⚠️ `aboutPoint` is accepted by `create_about_edge` ONLY, so pinning against
+#: `_VALID_EDGE_PREDICATES` alone left its carrier answer unpinned (#9195
+#: review P2-1).
 SNAPSHOT_CARRIED = frozenset({
-    "aboutSubject", "aboutObject", "aboutEvent", "aboutDocument",
+    "aboutSubject", "aboutObject", "aboutEvent", "aboutPoint",
+    "aboutDocument",
 })
 #: No carrier is EMITTED from this lane, so a rebuild drops these edges. The
 #: name says "emitted", not "exists": the replay engine has a carrier
@@ -187,8 +195,7 @@ def _walk_the_edge_lane(proj, endpoints) -> None:
         target = endpoints["doc"] if predicate == "aboutDocument" \
             else endpoints["target"]
         proj.create_edge(endpoints["source"], target, predicate)
-    for about_type in ("aboutSubject", "aboutObject", "aboutEvent",
-                       "aboutPoint", "aboutDocument"):
+    for about_type in sorted(_VALID_ABOUT_EDGE_PREDICATES):
         target = endpoints["doc"] if about_type == "aboutDocument" \
             else endpoints["target"]
         proj.create_about_edge(endpoints["source"], target, about_type)
@@ -216,10 +223,11 @@ def test_every_edge_mint_declares_its_lane(sdk_with_journal, monkeypatch):
     _walk_the_edge_lane(proj, endpoints)
 
     writes = [(c, r) for c, r, w in seen if w]
-    assert len(writes) >= len(_VALID_EDGE_PREDICATES), (
-        f"the walk issued {len(writes)} mutating statement(s) for "
-        f"{len(_VALID_EDGE_PREDICATES)} predicates; the lane no longer funnels "
-        "every mint through the declared statement, so this pin has gone stale"
+    assert len(writes) >= len(STRUCTURAL_EDGE_LANE_PREDICATES), (
+        f"the walk issued {len(writes)} mutating statement(s) for the lane's "
+        f"{len(STRUCTURAL_EDGE_LANE_PREDICATES)} writable predicates; the lane "
+        "no longer funnels every mint through the declared statement, so this "
+        "pin has gone stale"
     )
     undeclared = [c for c, r in writes if r is None]
     assert not undeclared, (
@@ -235,27 +243,36 @@ def test_every_edge_mint_declares_its_lane(sdk_with_journal, monkeypatch):
     )
 
 
-def test_a_read_on_this_path_is_not_declared(sdk_with_journal, monkeypatch):
-    """The scope wraps the MUTATING statement, not the verb.
+@pytest.mark.parametrize("mint", ["create_edge", "create_about_edge"])
+def test_a_read_on_this_path_is_not_declared(sdk_with_journal, monkeypatch, mint):
+    """The scope wraps the MUTATING statement, not the verb — for EACH declared
+    mint, not just the generic one.
 
-    `create_edge` resolves both endpoints, and (for `ownedBy`) walks a bounded
-    cycle probe, BEFORE it writes. Those are reads, and declaring them would
-    widen the lane over statements it does not own — the direction that turns a
-    declaration into a blanket scope.
+    Both verbs resolve their endpoints (`MATCH`es) — and `create_edge` walks a
+    bounded `ownedBy` cycle probe — BEFORE they write. Those are reads, and
+    declaring them would widen the lane over statements it does not own — the
+    direction that turns a declaration into a blanket scope. ⚠️ Pinning only
+    `create_edge` left the twin mint free to be widened silently (#9195 review
+    P2-2): wrapping all of `create_about_edge` in the scope, `_resolve_entity`
+    reads included, used to leave this suite green.
     """
     proj = sdk_with_journal._get_proj()
     endpoints = _endpoints(sdk_with_journal)
 
     seen = _instrument(monkeypatch, refuse=False)
-    proj.create_edge(endpoints["source"], endpoints["target"], "ownedBy")
+    if mint == "create_edge":
+        proj.create_edge(endpoints["source"], endpoints["target"], "ownedBy")
+    else:
+        assert proj.create_about_edge(
+            endpoints["source"], endpoints["target"], "aboutObject") is True
 
     reads = [(c, r) for c, r, w in seen if not w]
     assert reads, "the walk issued no read — this pin would be vacuous"
     declared_reads = [(c, r) for c, r in reads if r is not None]
     assert not declared_reads, (
         "a statement the CLASSIFIER called read-only ran inside the lane's "
-        "write declaration, i.e. the scope is wrapped around the verb (or the "
-        f"method) instead of around its write: {declared_reads}"
+        f"write declaration ({mint}), i.e. the scope is wrapped around the "
+        f"verb (or the method) instead of around its write: {declared_reads}"
     )
 
 
@@ -768,22 +785,36 @@ def test_the_lane_states_its_carrier_per_relation():
     `about*` family is snapshot-derivable (`DERIVABLE_STRUCTURAL_RELS` ←
     `entities._upsert_point_edges`). `structural_edge_carrier` must answer from
     that ONE set, and the two halves must partition the predicates this lane can
-    write — so a new predicate, or a change to what replay resurrects, is a
-    visible diff here.
+    write — `STRUCTURAL_EDGE_LANE_PREDICATES`, the union of BOTH declared
+    mints' allow-lists, NOT `_VALID_EDGE_PREDICATES` alone (that set is
+    `create_edge`'s and misses `aboutPoint`, which `create_about_edge` accepts —
+    a partition over it left that predicate's answer unpinned) — so a new
+    predicate, or a change to what replay resurrects, is a visible diff here.
 
     ⚠️ A `None` here means "no carrier is EMITTED from this verb", NOT "no
     replay carrier can exist": the engine's `DirectEdgeCreated` fold restores
     these very edges when a record describes them (measured), so the gap is the
     emission.
     """
-    assert set(_VALID_EDGE_PREDICATES) == SNAPSHOT_CARRIED | NO_CARRIER_EMITTED, (
+    assert STRUCTURAL_EDGE_LANE_PREDICATES == (
+        _VALID_EDGE_PREDICATES | _VALID_ABOUT_EDGE_PREDICATES
+    ), (
+        "the lane's write set is no longer the union of its two mints' "
+        "allow-lists — whoever widened one of the verbs must say so here"
+    )
+    assert _VALID_EDGE_PREDICATES | {"aboutPoint"} == STRUCTURAL_EDGE_LANE_PREDICATES, (
+        "`aboutPoint` is the ONLY predicate the about mint adds to the generic "
+        "verb's set; a new one must be classified into a carrier half below"
+    )
+    assert set(STRUCTURAL_EDGE_LANE_PREDICATES) == SNAPSHOT_CARRIED | NO_CARRIER_EMITTED, (
         "the pinned partition no longer covers the predicates this lane can "
-        f"write: uncovered={sorted(set(_VALID_EDGE_PREDICATES) - SNAPSHOT_CARRIED - NO_CARRIER_EMITTED)} "
-        f"stale={sorted((SNAPSHOT_CARRIED | NO_CARRIER_EMITTED) - set(_VALID_EDGE_PREDICATES))}"
+        f"write: uncovered={sorted(set(STRUCTURAL_EDGE_LANE_PREDICATES) - SNAPSHOT_CARRIED - NO_CARRIER_EMITTED)} "
+        f"stale={sorted((SNAPSHOT_CARRIED | NO_CARRIER_EMITTED) - set(STRUCTURAL_EDGE_LANE_PREDICATES))}"
     )
     assert not (SNAPSHOT_CARRIED & NO_CARRIER_EMITTED)
 
-    assert set(_VALID_EDGE_PREDICATES) & DERIVABLE_STRUCTURAL_RELS == SNAPSHOT_CARRIED, (
+    assert (set(STRUCTURAL_EDGE_LANE_PREDICATES) & DERIVABLE_STRUCTURAL_RELS
+            == SNAPSHOT_CARRIED), (
         "the snapshot-carried half must be exactly the intersection with the "
         "set the replay engines read — a hand-written second table would drift "
         "from what replay actually resurrects"
@@ -791,6 +822,11 @@ def test_the_lane_states_its_carrier_per_relation():
 
     for rel in SNAPSHOT_CARRIED:
         assert structural_edge_carrier(rel) == "endpoint-snapshot", rel
+    assert structural_edge_carrier("aboutPoint") == "endpoint-snapshot", (
+        "`aboutPoint` is snapshot-carried (`aboutEntities`) AND writable by "
+        "this lane (`create_about_edge`); its answer must never fall through "
+        "the partition because the generic verb does not accept it"
+    )
     for rel in NO_CARRIER_EMITTED:
         assert structural_edge_carrier(rel) is None, (
             f"`{rel}` is classified as emitting no carrier, but the lane claims "
