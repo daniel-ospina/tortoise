@@ -1011,6 +1011,7 @@ as a reopen of that rule and refused.
 The model rule this settled is in §4.7; this entry is the record of how it got there. Two residuals
 of the same family were filed rather than absorbed: an unparseable start still reported
 `valid_from_precision: "day"` on the read surfaces (that residual is now **closed by #9201**,
-which requires orderability before any precision is reported; #2350 carries the field semantics),
+which requires orderability before the legacy `day` default applies — a caller-declared token
+still wins; #2350 carries the field semantics),
 and a present-but-unparseable `validTo` covers every later instant while still reporting
 `end_state: "known"` (#9202, the END side, untouched by this ruling).

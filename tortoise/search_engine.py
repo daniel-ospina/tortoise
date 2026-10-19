@@ -3962,11 +3962,14 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             # from ``get_historical_knowledge``/``assembly``. The bounds are
             # passed RAW: ``window_read_fields``' presence gate is
             # ``is not None``, so a falsey-but-present bound — ``""``, ``0`` —
-            # is a REAL bound and its key is still emitted. Since #9201 an
-            # unorderable bound reports precision ``None`` on BOTH ends, which
-            # is how this surface stops disagreeing with the #6140 start gate
-            # in ``sdk._covers`` (an unorderable start is an OPEN start there):
-            # neither invents a precision for a value it cannot order.
+            # is a REAL bound and its key is still emitted. Since #9201 a bound
+            # with NO declared precision that cannot be ordered reports ``None``
+            # on BOTH ends — a caller-declared token still wins, because it is an
+            # assertion rather than a derivation (``effective_precision`` returns
+            # it before the orderability test). That is how this surface stops
+            # disagreeing with the #6140 start gate in ``sdk._covers`` (an
+            # unorderable start is an OPEN start there): neither derives a
+            # precision from a value it cannot order.
             # Pre-normalizing with
             # ``or None`` here made the same stored window read ``day`` in
             # assembly / ``get_historical_knowledge`` and ``None`` here — the
