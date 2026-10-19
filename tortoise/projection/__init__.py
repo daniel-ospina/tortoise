@@ -3275,14 +3275,22 @@ def _journal_safe_params(params, cypher=None):
 #     with the writers. `:TeamMeta` is its documented sibling (#5353 below),
 #     not a vetted precedent: it holds no declaration of its own — its writers
 #     escape at (3).
-#     ⚠️ THIS OPENER APPENDS NOTHING, and that is the one way it differs from
-#     the two above: the onboarding graph is org-level FLOW metadata, so no
-#     journal event exists whose fold would produce it — the declaration IS
-#     the whole of this lane's authorization (`_onboarding_write_scope` in
-#     `tortoise/onboarding/state.py`). Read the "append first, fold second"
-#     invariant above as describing the SDK's LIVE DOORS, **not every opener
-#     of this scope**; an opener that does append is journal-first, and one
-#     that does not still has to declare (as this one does).
+#     ⚠️ THIS OPENER APPENDS NOTHING. It is not the only one: the two lanes
+#     directly above append nothing either (`_replay_write_scope`'s records
+#     came FROM the journal and must not journal twice;
+#     `_graph_metadata_write_scope`'s writes never become a journal record at
+#     all). What makes this a lane of its own is how its state is RECOVERED:
+#     it is neither a fold of a record (the live doors) nor rebuild-from-zero
+#     bookkeeping (graph metadata) — it is org-level FLOW metadata that a
+#     rebuild cannot re-derive, which is why the replay engines
+#     CAPTURE-AND-RESTORE the class instead (#4641 below) rather than replay
+#     it. So no journal event exists whose fold would produce it, and the
+#     declaration IS the whole of this lane's authorization
+#     (`_onboarding_write_scope` in `tortoise/onboarding/state.py`). Read the
+#     "append first, fold second" invariant above as describing the SDK's LIVE
+#     DOORS, **not every opener of this scope**; an opener that does append is
+#     journal-first, and one that does not still has to declare (as this one
+#     does).
 #     ⚠️ And it does not cover the whole onboarding class: the five
 #     `eager_init_query()` call sites that CREATE `:OnboardingState` execute on
 #     `proj.db.select_graph(...)` — escape (3) below — so those writes remain

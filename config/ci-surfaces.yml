@@ -129,14 +129,18 @@ surfaces:
   - test_7951_enforce_atomic_write.py
   # #9121 residual: the seam the §17.1 declaration does NOT cover — the five
   # `eager_init_query()` call sites that CREATE `:OnboardingState` on
-  # `proj.db.select_graph(...)` (escape (3)). Its subjects are
-  # `tortoise/onboarding/state.py` (the note, `onboarding` surface),
-  # `tortoise/projection/__init__.py` (the opener inventory that ENFORCES the
-  # rule -> full matrix, SHARED_MODULES), and the two files that hold the call
-  # sites (`sdk.py`/`hosted_api.py` -> full matrix). Registered on `api` AND
-  # `onboarding` because either match REPLACES the `core` fallback (the
-  # #1349/#2938 silent-drop class); the pins are source-structural, so there is
-  # no graph fixture to keep in sync with `test_9079_onboarding_declared_lane.py`.
+  # `proj.db.select_graph(...)` (escape (3)). Its subjects resolve like this:
+  # `tortoise/onboarding/state.py` -> `onboarding` (the note),
+  # `tortoise/projection/__init__.py` -> SHARED_MODULES, full matrix (the
+  # opener inventory that ENFORCES the rule), `tortoise/sdk.py` ->
+  # SHARED_MODULES, full matrix, `tortoise/hosted_api.py` -> the `api` surface
+  # (tier-2, NOT a shared module), and `config/ci-surfaces.yml` -> `core` (this
+  # suite reads the manifest, so an edit to the registration is the one change
+  # that can disable it — and it selects `core` and nothing else). Registered on
+  # `api`, `onboarding` AND `core` because a named match REPLACES the `core`
+  # fallback (the #1349/#2938 silent-drop class); the pins are
+  # source-structural, so there is no graph fixture to keep in sync with
+  # `test_9079_onboarding_declared_lane.py`.
   - test_9121_onboarding_residual_pins.py
   # #9121 (§17.1 write-lane DECLARATION): MULTI-REGISTERED with `onboarding`,
   # `core`, `api` and `sdk`. The suite pins a declaration in
@@ -1448,6 +1452,13 @@ surfaces:
   # `sdk.py` are this guard's subjects; an `sdk.py`-only change selects the
   # full matrix, and a `projection/`-only change falls through to `core`.
   - test_7951_enforce_atomic_write.py
+  # #9121 residual (#9150 review): the `core` arm exists because this suite
+  # READS `config/ci-surfaces.yml` (`load_manifest()` in its selection pin), and
+  # a diff to that file selects `core` and nothing else — so without this arm
+  # the one change class that can silently disable the pin is the one that never
+  # runs it. Same reason the sibling `test_9079_onboarding_declared_lane.py`
+  # below carries a `core` arm.
+  - test_9121_onboarding_residual_pins.py
   # #9121 (§17.1 write-lane DECLARATION): MULTI-REGISTERED with `onboarding`,
   # `core`, `api` and `sdk`. The suite pins a declaration in
   # `tortoise/onboarding/state.py` (onboarding) that the HOSTED callers
@@ -5155,7 +5166,7 @@ uri_requiring:
 push_extra: []
 durations_captured_at: "2026-10-17T15:43:47Z"
 durations:
-  test_9121_onboarding_residual_pins.py: 2.0  # unmeasured — new in #9121; no sweep has collected it, so it carries the flat default for an unmeasured file (same convention as test_prod_csp_monitor.py / test_venture_pack.py). Do NOT substitute a local timing: the file's own carve-out run is ~11s on this box, but the map is a SHARD-LAYOUT input modelling CI, and a locally measured weight that does not model CI must not decide what runs together. Measured 2026-10-19: 11 cases, source-structural only (no graph fixture). `test_9079_onboarding_declared_lane.py` already carries a measured row in the #3400-trap block below (3.6) — do NOT add a second key here; a duplicate mapping key is refused by `tools/registry_integrity.py` and silently keeps the LAST value (#5373).
+  test_9121_onboarding_residual_pins.py: 2.0  # unmeasured — new in #9121; no sweep has collected it, so it carries the flat default for an unmeasured file (same convention as test_prod_csp_monitor.py / test_venture_pack.py). Do NOT substitute a local timing: the file's own carve-out run is ~11s on this box, but the map is a SHARD-LAYOUT input modelling CI, and a locally measured weight that does not model CI must not decide what runs together. Measured 2026-10-19: 12 cases, source-structural only (no graph fixture). `test_9079_onboarding_declared_lane.py` already carries a measured row in the #3400-trap block below (3.6) — do NOT add a second key here; a duplicate mapping key is refused by `tools/registry_integrity.py` and silently keeps the LAST value (#5373).
 # #3395: per-file CI wall time (seconds), swept from the junit artifacts of four
 # completed 2026-09-22 runs rather than entered by hand — two push-to-main runs
 # (35770984825 at b8ded3646, 35779482728 at 45aa52f70) and two runs of branch

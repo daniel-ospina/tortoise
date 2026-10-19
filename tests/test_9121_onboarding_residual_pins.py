@@ -20,15 +20,24 @@ so each assertion has a way to fail:
 * a SIXTH `eager_init_query()` site appearing anywhere in the SDK / hosted API
   fails `test_the_note_and_the_ast_inventory_agree` (the note would be stale);
 * a site being DELETED (or migrated off `select_graph`) fails
-  `test_every_eager_init_site_issues_its_statement_on_the_escape_three_handle`;
+  `test_every_eager_init_site_issues_its_statement_on_the_escape_three_handle`,
+  which now ASSERTS THE LINKAGE — the statement must be issued by a `query(...)`
+  call on the handle the same function bound from `select_graph(...)`. The two
+  wrong closures red it: `proj.g.query(...)` (the §17.1 violation this file
+  exists to see) and `state._run(...)` (the honest fix, which would leave the
+  note describing a gap that no longer exists);
 * the day one of those sites is DECLARED — the honest fix, `#9157` —
-  `test_no_eager_init_site_declares_itself_yet` turns RED, so the note, the
-  guard's opener inventory and this file have to move together instead of
-  drifting back to a universal ("every onboarding write is declared") that the
-  escape disproves;
+  `test_no_eager_init_site_declares_itself_yet` turns RED *when the declaration
+  is a `with` in the same function*, so the note, the guard's opener inventory
+  and this file have to move together instead of drifting back to a universal
+  ("every onboarding write is declared") that the escape disproves. The
+  `_run` route opens its scope in another file and is caught by the linkage
+  pin above;
 * the fact that the detector is *capable* of firing is not argued, it is
   executed: `test_the_declaration_detector_can_fail` runs it over a synthetic
-  declaration and requires a hit.
+  declaration **for every recorded opener** and requires a hit, and
+  `test_the_issuance_detector_reds_on_the_guarded_handle_and_on_run` does the
+  same for the linkage pin over the two closure shapes.
 
 The claim these pins protect, stated in the terms of the code: every statement
 this package issues **through `state._run`** runs inside the declaration; the
@@ -89,10 +98,27 @@ def _mint_sites_from_its_owner() -> set[tuple[str, str]]:
 
 #: The primitives that OPEN a §17.1 declaration. A `with` over any of these is
 #: what "declared" means; a site that acquires one has left the residual.
+#: Every scope opener `tortoise/projection/__init__.py` defines is listed ON
+#: PURPOSE — an earlier revision named only the three onboarding-ish ones, so
+#: closing the residual through `_graph_metadata_write_scope(...)` (the
+#: graph-metadata lane, and the shape `onboarding/state.py`'s SEAM block names)
+#: left every pin green. `test_the_declaration_detector_can_fail` runs the
+#: detector over EACH member, so a new opener cannot silently reopen the hole
+#: without also failing that instrument check's recorded list below.
+#:
+#: ⚠️ Scope of what this detects: a `with` in the SAME function. The likeliest
+#: shape of the honest fix (#9157) is routing the statement through
+#: `onboarding/state.py::_run`, which opens its scope in ANOTHER file — that
+#: route is caught by
+#: `test_every_eager_init_site_issues_its_statement_on_the_escape_three_handle`,
+#: which reds when the statement stops being issued on the `select_graph`
+#: handle (including when it is handed to `_run`).
 _DECLARATION_PRIMITIVES = (
     "_onboarding_write_scope",
     "_cache_write_authorized",
     "_live_write_scope",
+    "_replay_write_scope",
+    "_graph_metadata_write_scope",
 )
 
 #: (file, enclosing function) -> how many `eager_init_query()` statements that
@@ -144,6 +170,76 @@ def _named(nodes, names: tuple[str, ...]) -> bool:
             if isinstance(node, ast.Attribute) and node.attr in names:
                 return True
     return False
+
+
+def _escape_handle_names(enclosing: ast.AST) -> set[str]:
+    """Names bound from a `select_graph(...)` call inside `enclosing`."""
+    handles: set[str] = set()
+    for sub in ast.walk(enclosing):
+        if (
+            isinstance(sub, ast.Assign)
+            and isinstance(sub.value, ast.Call)
+            and getattr(sub.value.func, "attr", None) == "select_graph"
+        ):
+            for target in sub.targets:
+                handles |= _bound_names(target)
+    return handles
+
+
+def _statement_sinks(
+    enclosing: ast.AST, issued: set[str]
+) -> list[tuple[int, str, str | None, tuple[str, ...]]]:
+    """Every call the statement text FLOWS INTO, as `enclosing` reads it.
+
+    `(lineno, callee, receiver, statement names)` — `callee` is the source form
+    of the call's `func` (`handle.query`, `proj.g.query`, `_os._run`), and
+    `receiver` is the plain name it is called on, or `None` when the receiver
+    is an expression (that is itself the signal: `proj.g.query(...)` leaves the
+    escape handle). This is what makes the claim "issued on the
+    `select_graph` handle" checkable: an earlier revision only asserted that
+    SOME `select_graph(...)` existed in the function and that the statement was
+    bound to SOME name, so it stayed green under both mutations it claimed to
+    catch (`proj.g.query(...)`, and `_run(proj, _init_q, ...)`).
+    """
+    sinks: list[tuple[int, str, str | None, tuple[str, ...]]] = []
+    for call in ast.walk(enclosing):
+        if not isinstance(call, ast.Call):
+            continue
+        used: set[str] = set()
+        for arg in call.args:
+            used |= {n.id for n in ast.walk(arg) if isinstance(n, ast.Name)}
+        for kw in call.keywords:
+            if kw.value is not None:
+                used |= {n.id for n in ast.walk(kw.value) if isinstance(n, ast.Name)}
+        passed = used & issued
+        if not passed:
+            continue
+        receiver: str | None = None
+        if isinstance(call.func, ast.Attribute):
+            callee = ast.unparse(call.func)
+            if isinstance(call.func.value, ast.Name):
+                receiver = call.func.value.id
+        elif isinstance(call.func, ast.Name):
+            callee = call.func.id
+        else:
+            callee = ast.unparse(call.func)
+        sinks.append((call.lineno, callee, receiver, tuple(sorted(passed))))
+    return sinks
+
+
+def _not_on_the_escape_handle(
+    enclosing: ast.AST, issued: set[str], handles: set[str]
+) -> list[str]:
+    """Sinks where the statement leaves the `select_graph` handle, rendered."""
+    offenders: list[str] = []
+    for lineno, callee, receiver, passed in _statement_sinks(enclosing, issued):
+        if callee.rsplit(".", 1)[-1] == "query" and receiver in handles:
+            continue
+        offenders.append(
+            f"line {lineno}: {callee}({', '.join(passed)}) — "
+            f"escape-(3) handle(s): {sorted(handles)}"
+        )
+    return offenders
 
 
 def _eager_init_sites() -> dict[tuple[str, str], int]:
@@ -259,13 +355,18 @@ def test_the_note_and_the_ast_inventory_agree():
 
 # ── what the sites DO, and the coupling to the honest fix (#9157) ─────────
 def test_every_eager_init_site_issues_its_statement_on_the_escape_three_handle():
-    """Each site binds a `select_graph(...)` handle and issues the statement on it.
+    """Each site issues the statement ON a `select_graph(...)`-bound handle.
 
     This is the assertion that gives the note its meaning: `eager_init_query`
     only PRODUCES text, so the seam is "issued below the guarded handle" only
-    while every caller does that. A site that migrates to the guarded handle
-    (or to `_run`) fails here, so the residual cannot be closed in code while
-    the docstrings still describe it.
+    while every caller does that — and only while the statement is issued on
+    the handle it resolves in the SAME function. The linkage is asserted, not
+    its neighbourhood: an earlier revision checked only that the enclosing
+    function mentioned `select_graph(...)` somewhere, which stayed green when
+    the statement moved to `proj.g.query(...)` (the §17.1 violation this file
+    exists to see) or to `state._run(...)` (the honest #9157 fix) while an
+    unrelated handle binding remained. Both of those now RED here, so the
+    residual cannot be closed in code while the docstrings still describe it.
     """
     for rel in ("tortoise/sdk.py", "tortoise/hosted_api.py"):
         tree, parents = _parse(rel)
@@ -278,35 +379,89 @@ def test_every_eager_init_site_issues_its_statement_on_the_escape_three_handle()
                 continue
             enclosing = _enclosing_function(node, parents)
             assert enclosing is not None
-            select_graphs = [
-                call for call in ast.walk(enclosing)
-                if isinstance(call, ast.Call)
-                and getattr(call.func, "attr", None) == "select_graph"
-            ]
-            assert select_graphs, (
+            handles = _escape_handle_names(enclosing)
+            assert handles, (
                 f"{rel}:{node.lineno} ({enclosing.name}) builds an eager-init "
-                "statement but no longer resolves a `select_graph(...)` handle — "
-                "the escape-(3) description in `onboarding/state.py` and in the "
-                "guard's inventory is now wrong (#9157)"
+                "statement but nothing in the function binds a `select_graph(...)` "
+                "handle by name — the escape-(3) description in "
+                "`onboarding/state.py` and in the guard's inventory is now wrong "
+                "(#9157)"
             )
             issued = _bound_names(node.targets[0]) if len(node.targets) == 1 else set()
             assert issued, (
                 f"{rel}:{node.lineno} binds the statement to something this walk "
                 "cannot read — the inventory would silently skip it"
             )
-            bound_by_select_graph = set()
-            for sub in ast.walk(enclosing):
-                if (
-                    isinstance(sub, ast.Assign)
-                    and isinstance(sub.value, ast.Call)
-                    and getattr(sub.value.func, "attr", None) == "select_graph"
-                ):
-                    for target in sub.targets:
-                        bound_by_select_graph |= _bound_names(target)
-            assert bound_by_select_graph, (
-                f"{rel}:{node.lineno} ({enclosing.name}) issues the eager-init "
-                "statement but nothing in the function binds a `select_graph` "
-                "handle by name — re-derive the residual, do not assume it"
+            sinks = _statement_sinks(enclosing, issued)
+            assert sinks, (
+                f"{rel}:{node.lineno} ({enclosing.name}) binds the eager-init "
+                f"statement to {sorted(issued)} but nothing in the function "
+                "consumes it — re-derive the residual rather than assuming it"
+            )
+            offenders = _not_on_the_escape_handle(enclosing, issued, handles)
+            assert not offenders, (
+                f"{rel}:{node.lineno} ({enclosing.name}) no longer issues the "
+                f"eager-init statement on the escape-(3) handle: {offenders}. "
+                "The residual is moving (#9157): update, in the same change, the "
+                "note in `tortoise/onboarding/state.py`, the opener inventory in "
+                "`tortoise/projection/__init__.py`, and this pin"
+            )
+
+
+def test_the_issuance_detector_reds_on_the_guarded_handle_and_on_run():
+    """The instrument check for the pin above — it must RED on the two closures.
+
+    Written because the pin it guards is worthless if it cannot fire: the
+    previous revision passed on both of these mutations (proved in the review),
+    because it never linked the statement to the handle. Both snippets below are
+    the STATEMENT used correctly, changed only in where it is issued.
+    """
+    cases = {
+        # The escape-(3) shape, as production issues it today: NOT an offender.
+        "on_the_escape_handle": (
+            """
+            def site(proj, _init_q, _init_p):
+                handle = proj.db.select_graph("g")
+                handle.query(_init_q, params=_init_p)
+            """,
+            [],
+        ),
+        # Closed the WRONG way: the guarded handle, i.e. the §17.1 violation.
+        "on_the_guarded_handle": (
+            """
+            def site(proj, _init_q, _init_p):
+                handle = proj.db.select_graph("g")
+                proj.g.query(_init_q, params=_init_p)
+            """,
+            ["proj.g.query(_init_p, _init_q)"],
+        ),
+        # Closed the honest way (#9157) — but then the note is stale.
+        "through_the_run_funnel": (
+            """
+            def site(proj, _init_q, _init_p):
+                handle = proj.db.select_graph("g")
+                _os._run(handle, _init_q, _init_p)
+            """,
+            ["_os._run(_init_p, _init_q)"],
+        ),
+    }
+    for name, (source, expected) in cases.items():
+        tree = ast.parse(textwrap.dedent(source))
+        func = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "site"
+        )
+        issued = {"_init_q", "_init_p"}
+        handles = _escape_handle_names(func)
+        offenders = _not_on_the_escape_handle(func, issued, handles)
+        assert len(offenders) == len(expected), (
+            f"the issuance detector is {'blind' if expected else 'crying wolf'} on "
+            f"the {name!r} shape: expected {expected}, got {offenders}"
+        )
+        for fragment in expected:
+            assert any(fragment in offender for offender in offenders), (
+                f"the {name!r} shape did not produce an offender naming "
+                f"{fragment!r}: {offenders}"
             )
 
 
@@ -341,11 +496,18 @@ def test_no_eager_init_site_declares_itself_yet():
     """THE COUPLING: today no escape-(3) function opens a §17.1 declaration.
 
     This is the assertion the deleted runtime probe only *claimed* to make. It
-    turns RED the day `#9157` lands — wrapping any of the five sites in
-    `_onboarding_write_scope(...)` / `_cache_write_authorized(...)` makes the
-    enclosing function appear here — which is precisely when the note in
-    `onboarding/state.py`, the opener inventory in `projection/__init__.py` and
-    this file must change together.
+    turns RED the day `#9157` lands by putting a `with` over ANY scope opener
+    (`_DECLARATION_PRIMITIVES`) into `sdk.py` / `hosted_api.py` around one of
+    the five sites — which is precisely when the note in `onboarding/state.py`,
+    the opener inventory in `projection/__init__.py` and this file must change
+    together.
+
+    ⚠️ What this does NOT see: the honest fix may instead route the statement
+    through `onboarding/state.py::_run`, which opens the scope in ANOTHER file.
+    No `with` appears here in that shape, so this pin stays green — and
+    `test_every_eager_init_site_issues_its_statement_on_the_escape_three_handle`
+    is the pin that reds for it (the statement stops being issued on the
+    `select_graph` handle). Both are needed; neither alone is the coupling.
     """
     declared: dict[str, set[str]] = {}
     for rel in ("tortoise/sdk.py", "tortoise/hosted_api.py"):
@@ -368,29 +530,34 @@ def test_no_eager_init_site_declares_itself_yet():
 
 
 def test_the_declaration_detector_can_fail():
-    """The instrument check: `_declaring_functions` must SEE a declaration.
+    """The instrument check: `_declaring_functions` must SEE every declaration.
 
     Without this, `test_no_eager_init_site_declares_itself_yet` would also pass
     if the detector were broken (a renamed helper, a `with` form it stopped
-    matching) — an instrument that cannot fail is not evidence.
+    matching) — an instrument that cannot fail is not evidence. It is run over
+    EACH recorded opener: an earlier revision exercised only
+    `_onboarding_write_scope`, so closing the residual through
+    `_graph_metadata_write_scope(...)` left every pin green.
     """
-    snippet = textwrap.dedent(
-        """
-        def org_create(proj, cypher):
-            with _onboarding_write_scope(cypher):
-                return proj.db.select_graph("g").query(cypher)
-        """
-    )
-    tree = ast.parse(snippet)
-    parents = {
-        child: node
-        for node in ast.walk(tree)
-        for child in ast.iter_child_nodes(node)
-    }
-    assert _declaring_functions(tree, parents) == {"org_create"}, (
-        "the declaration detector no longer recognises a `with` over a §17.1 "
-        "primitive — every residual pin in this file would pass vacuously"
-    )
+    for primitive in _DECLARATION_PRIMITIVES:
+        snippet = textwrap.dedent(
+            f"""
+            def org_create(proj, cypher):
+                with {primitive}(cypher):
+                    return proj.db.select_graph("g").query(cypher)
+            """
+        )
+        tree = ast.parse(snippet)
+        parents = {
+            child: node
+            for node in ast.walk(tree)
+            for child in ast.iter_child_nodes(node)
+        }
+        assert _declaring_functions(tree, parents) == {"org_create"}, (
+            f"the declaration detector no longer recognises a `with` over "
+            f"{primitive}() — a site closed through that opener would leave "
+            "every residual pin in this file green while the note went stale"
+        )
 
 
 # ── the guard's own opener inventory ─────────────────────────────────────
@@ -511,6 +678,11 @@ def test_a_diff_to_the_note_itself_selects_this_file():
     #1349/#2938 silent-drop class). The population is the set of files this
     suite actually reads, derived from the pins above rather than from a copy of
     the registration.
+
+    `config/ci-surfaces.yml` is IN the population: this suite reads it (through
+    `load_manifest()`), and it is the one file whose edit silently disables the
+    pin — a registration change resolves to `core` and nothing else, so the
+    change class that breaks this file is the one that must run it.
     """
     from tools.ci_selection import load_manifest, select
 
@@ -522,6 +694,7 @@ def test_a_diff_to_the_note_itself_selects_this_file():
         "tortoise/projection/__init__.py",
         "tortoise/sdk.py",
         "tortoise/hosted_api.py",
+        "config/ci-surfaces.yml",
     ):
         sel = select([subject], "pull_request", manifest)
         selected = (sel["full"] or sel["test_files"] == "ALL"
