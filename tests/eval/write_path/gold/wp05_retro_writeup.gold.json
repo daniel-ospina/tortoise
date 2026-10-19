@@ -58,6 +58,31 @@
       }
     }
   ],
+  "planted_qualifiers": [
+    {
+      "bound_claim": "wp05_retro_writeup_u_01",
+      "class": "hedge",
+      "id": "wp05_retro_writeup_q_01",
+      "notes": "marks the outage duration as approximate",
+      "planted_turn": 1,
+      "verbatim_qualifier": "about"
+    },
+    {
+      "class": "stance",
+      "id": "wp05_retro_writeup_q_02",
+      "notes": "speaker's endorsement of the two follow-up decisions (u_07, u_08); no single planted unit carries the endorsed claim",
+      "planted_turn": 11,
+      "verbatim_qualifier": "they are both good"
+    },
+    {
+      "bound_claim": "wp05_retro_writeup_u_13",
+      "class": "stance",
+      "id": "wp05_retro_writeup_q_03",
+      "notes": "cites the prior decision as warrant for opt-out publication",
+      "planted_turn": 17,
+      "verbatim_qualifier": "that was the decision after the August incident"
+    }
+  ],
   "planted_units": [
     {
       "depth_bucket": "early",

@@ -662,6 +662,229 @@ WP07 = {
 
 AUTHORED_SESSIONS = [WP01, WP02, WP03, WP04, WP05, WP06, WP07]
 
+#: Planted qualifier gold (`#7947`) — the hedge / scope / stance annotations the
+#: raw-vs-narrative measurement scores against, keyed by session and attached to
+#: the specs below so the GENERATOR owns the sealed gold.  A qualifier is the
+#: information a claim's CONFIDENCE depends on; the falsifier asks whether the S1
+#: narrative loses it relative to the raw turns.
+#:
+#: Annotations are read off the fixture transcript (never off an arm's output —
+#: the arms had not run when they were written).  ``bound_claim`` is the planted
+#: unit whose claim the qualifier rides on, and is ABSENT where no planted unit
+#: carries that claim: a warrant ("as agreed"), a hypothesis, or a scope limit on
+#: a clause.  Those are the measurement's *unbound* subset, declared as such
+#: rather than quietly dropped.
+_PLANTED_QUALIFIERS: dict[str, list[dict]] = {
+    "wp01_quarry_debug": [
+        {
+            "id": "q_01",
+            "planted_turn": 6,
+            "verbatim_qualifier": "probably",
+            "class": "hedge",
+            "bound_claim": "u_04",
+            "notes": "hedges the assistant's bypass hypothesis on the retry path",
+        },
+        {
+            "id": "q_02",
+            "planted_turn": 13,
+            "verbatim_qualifier": "I would rather",
+            "class": "stance",
+            "bound_claim": "u_09",
+            "notes": "preference framing of the sixty-second-backoff decision; softer than a directive",
+        },
+        {
+            "id": "q_03",
+            "planted_turn": 17,
+            "verbatim_qualifier": "about",
+            "class": "hedge",
+            "bound_claim": "u_13",
+            "notes": "marks the Halcyon re-ingest magnitude as approximate",
+        },
+    ],
+    "wp02_lumen_refactor": [
+        {
+            "id": "q_01",
+            "planted_turn": 1,
+            "verbatim_qualifier": "the team signed off last Friday",
+            "class": "stance",
+            "bound_claim": "u_01",
+            "notes": "team sign-off is the warrant for the per-graph migration decision; also planted as fact u_02 / hazard h_01",
+        },
+        {
+            "id": "q_02",
+            "planted_turn": 3,
+            "verbatim_qualifier": "let me double check",
+            "class": "hedge",
+            "notes": "flags uncertainty about the platform tt_ prefix premise that grounds the tt_ decision (u_03); the premise is not itself a planted unit",
+        },
+        {
+            "id": "q_03",
+            "planted_turn": 18,
+            "verbatim_qualifier": "risky",
+            "class": "stance",
+            "notes": "assistant's risk framing of a single-commit flip; motivates, but is not, the two-phase deploy decision (u_10)",
+        },
+        {
+            "id": "q_04",
+            "planted_turn": 21,
+            "verbatim_qualifier": "Only the admin screen",
+            "class": "scope",
+            "notes": "scopes the remaining team-token-shape usage to one component; no planted unit carries that claim",
+        },
+    ],
+    "wp03_ember_design": [
+        {
+            "id": "q_01",
+            "planted_turn": 3,
+            "verbatim_qualifier": "mostly",
+            "class": "hedge",
+            "notes": "weakens the claim that on-call load falls on the platform team (not exclusively); that claim is not a planted unit",
+        },
+        {
+            "id": "q_02",
+            "planted_turn": 5,
+            "verbatim_qualifier": "Roughly",
+            "class": "hedge",
+            "bound_claim": "u_02",
+            "notes": "marks the unactionable-page share as approximate",
+        },
+        {
+            "id": "q_03",
+            "planted_turn": 17,
+            "verbatim_qualifier": "which I agree with",
+            "class": "stance",
+            "bound_claim": "u_09",
+            "notes": "speaker endorses Aisha's human-owned-declarations suggestion",
+        },
+        {
+            "id": "q_04",
+            "planted_turn": 21,
+            "verbatim_qualifier": "before we expand",
+            "class": "scope",
+            "notes": "limits expansion of ownership-based routing until the first two weeks are watched; the stance 'Tomas wants' rides on the same clause",
+        },
+    ],
+    "wp04_aurora_perf": [
+        {
+            "id": "q_01",
+            "planted_turn": 3,
+            "verbatim_qualifier": "correlates with",
+            "class": "hedge",
+            "bound_claim": "u_02",
+            "notes": "correlation framing (not causation) of the release/spike link",
+        },
+        {
+            "id": "q_02",
+            "planted_turn": 11,
+            "verbatim_qualifier": "about",
+            "class": "hedge",
+            "bound_claim": "u_08",
+            "notes": "marks the daily request volume as approximate",
+        },
+        {
+            "id": "q_03",
+            "planted_turn": 13,
+            "verbatim_qualifier": "until the perf review signs off",
+            "class": "scope",
+            "bound_claim": "u_09",
+            "notes": "flag stays off until the perf-review gate; bounds when the rollout is live",
+        },
+        {
+            "id": "q_04",
+            "planted_turn": 19,
+            "verbatim_qualifier": "Realistically",
+            "class": "hedge",
+            "bound_claim": "u_12",
+            "notes": "hedges the predicted p95 recovery target",
+        },
+    ],
+    "wp05_retro_writeup": [
+        {
+            "id": "q_01",
+            "planted_turn": 1,
+            "verbatim_qualifier": "about",
+            "class": "hedge",
+            "bound_claim": "u_01",
+            "notes": "marks the outage duration as approximate",
+        },
+        {
+            "id": "q_02",
+            "planted_turn": 11,
+            "verbatim_qualifier": "they are both good",
+            "class": "stance",
+            "notes": "speaker's endorsement of the two follow-up decisions (u_07, u_08); no single planted unit carries the endorsed claim",
+        },
+        {
+            "id": "q_03",
+            "planted_turn": 17,
+            "verbatim_qualifier": "that was the decision after the August incident",
+            "class": "stance",
+            "bound_claim": "u_13",
+            "notes": "cites the prior decision as warrant for opt-out publication",
+        },
+    ],
+    "wp06_quarry_rollout": [
+        {
+            "id": "q_01",
+            "planted_turn": 9,
+            "verbatim_qualifier": "That is my read too",
+            "class": "hedge",
+            "notes": "marks the scope-independence claim as the speaker's interpretation; that claim is an operator endpoint, not a planted unit",
+        },
+        {
+            "id": "q_02",
+            "planted_turn": 11,
+            "verbatim_qualifier": "tempting",
+            "class": "stance",
+            "bound_claim": "u_06",
+            "notes": "speaker's attitude toward all-at-once rollout, qualifying the speed-benefit claim",
+        },
+        {
+            "id": "q_03",
+            "planted_turn": 19,
+            "verbatim_qualifier": "I would rather",
+            "class": "stance",
+            "bound_claim": "u_07",
+            "notes": "preference framing of the single-driver decision",
+        },
+        {
+            "id": "q_04",
+            "planted_turn": 21,
+            "verbatim_qualifier": "as agreed",
+            "class": "stance",
+            "notes": "warrant (prior agreement) for keeping the September 30 cutoff; that cutoff is not a planted unit in this session",
+        },
+    ],
+    "wp07_bluepeak_followup": [
+        {
+            "id": "q_01",
+            "planted_turn": 1,
+            "verbatim_qualifier": "about",
+            "class": "hedge",
+            "bound_claim": "u_01",
+            "notes": "marks the duplicate window as approximate",
+        },
+        {
+            "id": "q_02",
+            "planted_turn": 5,
+            "verbatim_qualifier": "My first hypothesis is",
+            "class": "hedge",
+            "notes": "presents the flag-raced-renewal claim as a hypothesis; that claim is the operator NEGATE target, not a planted unit",
+        },
+        {
+            "id": "q_03",
+            "planted_turn": 15,
+            "verbatim_qualifier": "I would size",
+            "class": "stance",
+            "bound_claim": "u_07",
+            "notes": "recommendation framing of the thirty-second grace decision",
+        },
+    ],
+}
+
+for _spec in AUTHORED_SESSIONS:
+    _spec["planted_qualifiers"] = _PLANTED_QUALIFIERS[_spec["session_id"]]
+
 
 # ── Rendering ───────────────────────────────────────────────────────────────
 
@@ -778,7 +1001,78 @@ def _build_session_docs(spec: dict) -> tuple[dict, dict]:
     planted_operators = _build_planted_operators(spec, turns, n_turns, prefix)
     if planted_operators:
         gold["planted_operators"] = planted_operators
+    planted_qualifiers = _build_planted_qualifiers(spec, turns, n_turns, prefix,
+                                                   planted_units)
+    if planted_qualifiers:
+        gold["planted_qualifiers"] = planted_qualifiers
     return fixture, gold
+
+
+def _build_planted_qualifiers(spec: dict, turns: list[dict], n_turns: int,
+                              prefix: str, planted_units: list[dict]) -> list[dict]:
+    """Derive the sealed ``planted_qualifiers`` gold section for one session.
+
+    Issue `#7947`.  Each spec entry is one planted hedge / scope / stance, plus
+    the OWN-session turn it was spoken on and (optionally) the planted unit whose
+    claim it qualifies.  Three invariants are enforced at generation time, because
+    each of them would otherwise produce a plausible-looking score instead of an
+    error:
+
+    * the ``verbatim_qualifier`` must ground in its turn (normalized substring),
+      or the drift is reported as a qualifier *lost* by both arms;
+    * ``class`` must be one of the scorer's marker classes — the measurement's
+      marker table is keyed by it, so a new name would silently score nothing;
+    * ``bound_claim``, when given, must name a unit this session actually plants,
+      or the qualifier falls back to its own words undetected.
+
+    Emitted ids are globally unique via the session-stem prefix
+    (``wp01_quarry_debug_q_01``), like every other gold id.
+    """
+    qualifiers = spec.get("planted_qualifiers") or []
+    if not isinstance(qualifiers, list):
+        raise ValueError(f"{prefix}: planted_qualifiers must be a list")
+    unit_ids = {unit["id"] for unit in planted_units}
+    rendered: list[dict] = []
+    for qualifier in qualifiers:
+        qualifier_id = qualifier["id"]
+        planted_turn = qualifier["planted_turn"]
+        if not (1 <= planted_turn <= n_turns):
+            raise ValueError(
+                f"{prefix}: qualifier {qualifier_id} planted_turn {planted_turn} "
+                f"out of range for {n_turns} turns"
+            )
+        anchor = qualifier["verbatim_qualifier"]
+        content = turns[planted_turn - 1]["content"]
+        if not schema.anchor_present(anchor, content):
+            raise ValueError(
+                f"{prefix}: qualifier {qualifier_id} verbatim_qualifier {anchor!r} is "
+                f"NOT a normalized substring of turn {planted_turn}:\n    {content[:200]}"
+            )
+        q_class = qualifier["class"]
+        if q_class not in schema.PLANTED_QUALIFIER_CLASS_VALUES:
+            raise ValueError(
+                f"{prefix}: qualifier {qualifier_id} class {q_class!r} is not one of "
+                f"{sorted(schema.PLANTED_QUALIFIER_CLASS_VALUES)}"
+            )
+        entry = {
+            "id": f"{prefix}_{qualifier_id}",
+            "planted_turn": planted_turn,
+            "verbatim_qualifier": anchor,
+            "class": q_class,
+        }
+        bound = qualifier.get("bound_claim")
+        if bound is not None:
+            bound_id = f"{prefix}_{bound}"
+            if bound_id not in unit_ids:
+                raise ValueError(
+                    f"{prefix}: qualifier {qualifier_id} bound_claim {bound!r} names no "
+                    "planted unit in this session"
+                )
+            entry["bound_claim"] = bound_id
+        if qualifier.get("notes"):
+            entry["notes"] = qualifier["notes"]
+        rendered.append(entry)
+    return rendered
 
 
 def _build_planted_operators(spec: dict, turns: list[dict], n_turns: int,

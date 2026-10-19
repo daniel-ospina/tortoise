@@ -1661,6 +1661,33 @@ def test_docs_lint_baseline_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_e1_e2_evidence_bundle_change_selects_core_not_the_docs_only_return():
+    # #9076: the E1+E2 evidence bundle (`docs/evidence/7949-capstone/` — the probe,
+    # the corpus JSON + builder, the evidence log) and its structural checker
+    # (`tools/e1_e2_census_check.py`) own `tests/test_e1_e2_measurement.py`,
+    # registered `core`. MEASURED before the CORE_ALSO entries: all three paths
+    # returned `surfaces=[]`, `full=False`, 50 files — `docs/` and `tools/` are
+    # flat NON_PYTHON_PREFIXES entries, so the changed list came back empty and
+    # select() took the docs-only early return (tier-1 smoke). The pin ran there
+    # only because this PR dual-registers it in `tier1`; `tier1` is a CURATED
+    # list, so the guard's owning surface was nominal and one tier1 edit from
+    # dropping it silently. These asserts are on the `core` arm, which is what the
+    # entries create: after the change, `surfaces=['core']` and the pin is present.
+    # Mutation check: removing either CORE_ALSO entry restores `surfaces=[]` and
+    # fails the FIRST assert (`"core" in r["surfaces"]`), which is the one that
+    # names the owning surface. The second assert (`full is False`) still PASSES on
+    # the docs-only early return, which returns `full: False` — the mutation is
+    # caught by the surface assert, not by that one (#9110 review P3).
+    for path in ("docs/evidence/7949-capstone/probes/e1_e2_probe.py",
+                 "docs/evidence/7949-capstone/corpus/e1e2_corpus.json",
+                 "docs/evidence/7949-capstone/e1-e2.log",
+                 "tools/e1_e2_census_check.py"):
+        r = _sel([path])
+        assert "core" in r["surfaces"], (path, r["surfaces"])
+        assert r["full"] is False, (path, r)
+        assert "test_e1_e2_measurement.py" in r["test_files"], (path, r)
+
+
 def test_supabase_control_change_selects_the_org_purge_rpc_guard():
     # #7968 / PR #8179 review P1: `purge_org_control_plane` lives in
     # `tortoise/supabase_control.py`, which IS a SOURCE_PATTERNS["api"] entry —
@@ -6034,6 +6061,60 @@ def test_surface_audit_maps_tortoise_api_source_as_api_pin(tmp_path):
     report = _audit(_audit_manifest(api=["test_imports_api.py"]), repo)
     assert "tortoise/api.py" not in [g["path"] for g in report["coverage_gaps"]]
     assert "tortoise/api.py" not in [r["path"] for r in report["uncovered"]]
+
+
+def test_write_path_measurement_source_edit_selects_eval():
+    """#7947 review P1: editing the scorer must run the tests that pin the rule.
+
+    `score_qualifiers.py` (and `raw_vs_narrative.py`, `generate_corpus.py`,
+    `schema.py`, and every `gold/*.json`) live under `tests/eval/write_path/`
+    and NONE of them is named `test_*.py`, so before the `tests/eval/write_path/`
+    SOURCE_PATTERNS entry a change to them matched no pattern and fell to the
+    `tests/` -> `core` fallback. `test_score_qualifiers.py` and
+    `test_write_path_corpus.py` are registered on `eval` ONLY, so the tests
+    that pin the pre-registered decision rule (`MARKERS` / `BAND_PP` /
+    `classify()` / `evaluate_branches()`) and the corpus counts §10 publishes a
+    verdict on ran on NO diff-selected leg — every published number could move
+    with every gate green. Registering the TEST file in
+    config/ci-surfaces.yml does not fix this half: selection is driven by
+    SOURCE_PATTERNS.
+
+    `core` must stay too (CORE_ALSO): `test_extractor_v2.py` imports
+    `tests.eval.write_path.runner` and `test_salience_labels_4917.py` reads
+    `tests/eval/write_path/salience_labels.jsonl`, so an `eval`-only match
+    would trade one silent drop for another.
+
+    Watched RED before the entry existed (`surfaces == ['core']`, neither pin
+    in `test_files`), GREEN after — mutation-real, not a tautology: deleting
+    the SOURCE_PATTERNS entry reproduces the red.
+    """
+    cases = (
+        # the rule itself — the decisive one: `evaluate_branches`/`verdict_label`
+        "tests/eval/write_path/score_qualifiers.py",
+        # the instrument's calibration inputs
+        "tests/eval/write_path/raw_vs_narrative.py",
+        # the generator whose output the pinned counts are read off
+        "tests/eval/write_path/generate_corpus.py",
+        # a hand-edited sealed gold — the scenario `[gold]` in MEMORY.md warns about
+        "tests/eval/write_path/gold/wp01_quarry_debug.gold.json",
+    )
+    for changed in cases:
+        r = _sel([changed])
+        assert r["full"] is False
+        assert r["surfaces"] == ["core", "eval"], (
+            f"a write-path measurement source edit ({changed}) must select the "
+            f"`eval` surface that owns its pinning tests (and keep `core`, whose "
+            f"tests read the same sources); got {r['surfaces']}")
+        selected = set(r["test_files"]) | set(r["slow_selected"])
+        assert "eval/write_path/test_score_qualifiers.py" in selected, (
+            f"the test that pins the pre-registered rule must run on {changed}; "
+            f"selected {sorted(selected)}")
+        assert "eval/write_path/test_write_path_corpus.py" in selected, (
+            f"the corpus counts §10's verdict is computed on must be pinned on "
+            f"{changed}; selected {sorted(selected)}")
+        assert "test_extractor_v2.py" in selected, (
+            "the core-registered importer of tests.eval.write_path.runner must "
+            f"still run on {changed}; selected {sorted(selected)}")
 
 
 def test_tortoise_api_change_selects_api_and_core():

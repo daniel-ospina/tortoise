@@ -41,7 +41,7 @@ Each open decision was run through the mandated sequence: **contradiction test f
 | **`aboutObject`: stored edge vs derived join** | No contradiction — no decision mandates materialization | **no** | ✅ **MEASURED + RULED: KEEP the stored edge.** The primary search path **does not** read it, but **four CUSTOMER-CALLABLE sites do** (`belief_timeline`, `topic_summarize`, `recall_subgraph`, `search(order_by="graph")` — §13.8 question 2) plus two default-ON ingestion sites → deriving would silently break four public surfaces. **Owner 2026-09-23: the remaining unknown — *are those tools ever called?* — is unanswerable pre-launch, so the question is DEFERRED, not decided.** Keep for now; optimise with users. |
 | **Fan-out caps** | No contradiction; the field converges (Hindsight caps at **200** *and* carries a timeout that drops the whole arm); ⚠️ **the bound is explicit rather than implicit** | **no** | ✅ **ADOPTED at 200** (owner, 2026-09-23: *"fine on adding the cap"*). **Above our current worst hub (123), so it binds nothing today and cannot lose data now** — a guard rail against runaway fan-out, **not** an optimisation. Refine with real usage. See `STORAGE-ARCHITECTURE.md` §11.5. |
 | **Keep the epistemic + entity connection layer** | No contradiction — it *is* the product. The field's cost-driven default (Hindsight derives instead of storing) points the other way. | ruled | ✅ **KEPT — owner, 2026-09-23.** Cheap because edges are **property-free** and Postgres holds them **on disk** (~3 MB ≈ $0.0004/mo). **`OVERRIDES:` posted on `#4333`** — never cut this layer to save money. See `STORAGE-ARCHITECTURE.md` §11. |
-| **D3: raw vs narrative** | No contradiction (D3 is provisional) | **no** | ✅ The owner already approved the measurement. **The measurement decides** — not a gate |
+| **D3: raw vs narrative** | No contradiction (D3 stays provisional) | **no** | ✅ The owner already approved the measurement. **The measurement decides — not a gate** — and it has: **STILL PROVISIONAL, 2026-10-18**, because the run cannot test the falsifier as built and its decisive arm ran partially (`#7947`; `EXTRACTOR-V4-ARCHITECTURE.md` §9 + §10). **No owner verdict was needed, and none was taken** |
 
 **Deliberately NOT marked:** our class-based `Source` deviates from PROV (§9.2 of the storage doc), but modelling a source/document as a node is **not** against the industry default — GraphRAG, Graphiti and Hindsight all anchor to a document node. Deviation noted; **no `OVERRIDES:`** because it is not a departure from practice.
 
@@ -214,7 +214,7 @@ revision, which is what this file is for.
 - `EXTRACTOR-V4-ARCHITECTURE.md:1338` — | `aboutObject`: stored edge vs derived join | No contradiction — no decision mandates materialization | no | ✅ MEASURED + RULED: KEEP the stored edge. The primary search path does not re…
 - `EXTRACTOR-V4-ARCHITECTURE.md:1339` — | Fan-out caps | No contradiction; the field converges (Hindsight caps at 200 and carries a timeout that drops the whole arm); ⚠️ the bound is explicit rather than implicit | no | ✅ ADOPT…
 - `EXTRACTOR-V4-ARCHITECTURE.md:1340` — | Keep the epistemic + entity connection layer | No contradiction — it is the product. The field's cost-driven default (Hindsight derives instead of storing) points the other way. | ruled…
-- `EXTRACTOR-V4-ARCHITECTURE.md:1341` — | D3: raw vs narrative | No contradiction (D3 is provisional) | no | ✅ The owner already approved the measurement. The measurement decides — not a gate |
+- `EXTRACTOR-V4-ARCHITECTURE.md:1341` — | D3: raw vs narrative | No contradiction (D3 is provisional) | no | ✅ The owner already approved the measurement. The measurement decides — not a gate |  ⚠️ **the live row now reads "D3 stays provisional"**: the measurement ran and could not decide it (`#7947`; the section below), so the *authority* half of this row still stands and its *action* half changed on 2026-10-18.
 - `EXTRACTOR-V4-ARCHITECTURE.md:1343` — Deliberately NOT marked: our class-based `Source` deviates from PROV (§9.2 of the storage doc), but modelling a source/document as a node is not against the industry default — GraphRAG, G…
 - `EXTRACTOR-V4-ARCHITECTURE.md:1345` — ⚠️ The "decision ledger" does not exist in this repo. `docs/plans/2026-09-22-2814-rebuild-config-durability.md:316` records it: "the 'decision ledger' earlier drafts named does not exist …
 
@@ -532,3 +532,107 @@ that was itself a heading cannot collide with this file's own outline.
 
 - **16.4 ⭐ O4 applied — what "merge near-duplicates" means here, bounded by the evidence**
   - \- ⛔ A merge must NEVER happen across a difference in: a number or quantity, a named entity, a language, a negation, a condition, a load-bearing connective whose role changes across the pa…
+
+---
+
+## D3 measured, and it stays provisional (2026-10-18, `#7947`)
+
+**What changed.** `D3` was measured twice and **remains PROVISIONAL**. The two runs reach that by different
+routes: **run 1 (the run the registration fixed, written before any data) lands in branch 3 by the rule's own
+terms** (Δ = −60 pp is neither "fired" nor "near parity"), and **run 2 meets branch 2 literally but cannot
+certify it** (its decisive raw arm is `partial`). The registration has no branch for "parity met,
+uncertifiable" — inventing one and calling it branch 3 would misdescribe the rule, so the scorer records
+`branch 2 met, not certifiable; branch 3 not reached` and only branch 3's *effect* is adopted. The design statements are in `EXTRACTOR-V4-ARCHITECTURE.md` §9 (the D3 row) and §10 (both
+runs, the limits, and what would settle it); this is the record of how the verdict was reached.
+
+**Why no owner verdict was needed.** The protocol run above (2026-09-23) already settled that: *"D3: raw vs
+narrative … needs the owner: **no** … The measurement decides — not a gate."* A question raised on `#7947`
+asking for the owner's reading of run 1's 32 pp pooled gap was **sent back** by the owner (`#7947` comment
+`6103751497`, 2026-10-11) with the standing rule *"if the research settles it, ACT on it and do not ask"*. The
+canon settles the **authority** question in that protocol row; the verdict is the **measurement's** to give, and
+what it gave is *"not answerable as designed"* — a statement about the registered design (the first reason
+below), not a judgement attributed to the instrument.
+
+**Two runs, and the verdict does not depend on picking one.** Run 1 (2026-10-10) put the holdout Δ(loss) at
+−60 pp, which the registration's third branch (*anything else → stays provisional*) absorbs — so the
+pre-registered run already returns "provisional" with no extra rule. The run was therefore
+**repeated** — identical protocol, corpus, gold, pinned model, chunking — on 2026-10-18, this time committing
+per-session arm receipts so the scoring is re-runnable offline. The repeat put the holdout Δ at **+10.0 pp**
+with Δprecision **+0.8 pp**, which *literally* satisfies branch 2 (|Δ| ≤ 10 pp, P/R within ±5 pp).
+
+**⛔ Three independent reasons that literal reading is not a settlement, each sufficient:**
+
+1. **The REGISTRATION specified a design that cannot test the falsifier** — this is a defect of the question,
+   not a discovery about the run. §S2.1 had recorded on 2026-09-23 that the code passes the raw alongside the
+   story, and the registration therefore compares *narrative + raw* against *raw alone* with the same `edus`:
+   `render_s2_prompt()` appends the full raw transcript to the prompt for **both** arms, so they differ only in
+   the `story` slot. A narrative that dropped a hedge would still
+   have it in the transcript. The harness measures *what the narrative adds to raw* — D3-Option 4's shipped
+   shape — and **not** whether a narrative could replace raw.
+2. **The decisive arm ran partially.** `wp07` raw carries `partial: true` (rung-4 partial-accept, tail dropped)
+   and supplies 3 of the holdout's 6 raw losses; one qualifier there turns +10.0 pp into +20 pp and fires
+   branch 1. A branch cannot be certified on an extract the extractor marks incomplete.
+3. **n = 25 (10 holdout) is narrower than the effect it must resolve,** and the bound-qualifier subset flips
+   sign between halves (+16.7 pp on the holdout, −10.0 pp on tuning). Repeating the run does not settle it either: the
+   registration fixes ONE run (and it is run 1, whose holdout Δ is −60 pp), so a repeat is evidence rather
+   than a replacement — and in any case the two runs return **opposite** statuses from the same rule.
+
+**The replication's separate finding is about magnitude, and it is real.** The falsifier did not fire on the
+registered metric in either run — *and as built it could not have: both arms carry the raw transcript, so a
+narrative-borne loss has nowhere to show up* — and the narrative's pooled loss was identical both times (48.0%, 12/25) — but
+that pooled match is a NET (the narrative's per-session loss moved in 6 of 7 sessions, −1,−1,−1,0,+1,+1,+1), and
+the **raw** arm moved 28 pp on the same corpus (80.0% → 52.0% loss; 54.4% → 78.9% recall), so run 1's 32 pp gap
+does not replicate. ⚠️ **Confound declared, not hidden:** `main` advanced 8 days between the runs, so the
+run-to-run swing cannot be attributed to sampling alone; the *within-run* comparison is unaffected because both
+arms ran the same code.
+
+**Registered work that did not happen, recorded rather than dropped:** the judge-arbitration pass over the
+decisive `flattened` cases; the repeat-run variance check; the **secondary fleet-session arm** (§2 of the
+registration, "drawn and listed by id at first run"); the six-outcome taxonomy reduced to three (so
+`weakened`/`strengthened` score as `preserved`); and the environment pins — which the harness now persists into each receipt, but which **these two runs' receipts do not carry**, so their environment is testimony, not artifact.
+
+**What would settle it:** two arms that differ only in the **carrier** — narrative-with-transcript-suppressed
+vs raw-with-transcript-suppressed — on clean (non-`partial`) receipts, with ~100 annotated **bound** qualifiers
+**and** independent sessions (a run-level shift, not qualifier sampling, is what moved 28 pp here). Recorded in
+§10.
+
+**Not touched.** Raw stays the source. Its argument is independent of qualifier loss (a summary cannot see
+prior state; re-extraction is always from raw, §10) and §2.4's raw-fact layer is untouched by this result.
+
+### What the review cycles corrected in the measurement's own instruments (2026-10-18/19)
+
+Recorded here because each one changed a CLAIM about the numbers, not a number: no committed figure was
+re-derived (run 2 still regenerates byte-identically — now pinned by a test, not by prose).
+
+- **The lexical instrument's error direction was stated one-sidedly, and it is two-sided.** The module
+  docstring and the emitted `instrument.note` both said the marker test "can only under-credit preservation".
+  It can also **over-credit** it: `marker_present` is an unbounded substring test, so `"commonly"` satisfies
+  scope's `"only"` and a `flattened` cell reads as `preserved` — understating loss, and not arm-neutrally (the
+  arm emitting more claim text gets more chances to contain a mid-word hit). Corrected in the module, in the
+  emitted note (both committed score files carry the corrected note; run 1's by hand, since its receipts are
+  gone), and in §10's limits, with a test asserting no committed `preserved` cell rests on a mid-word hit.
+  Word-bounding the table would remove the class, but that is a REGISTERED-instrument change, so it belongs in
+  a newly registered run rather than a silent re-scoring of these two.
+- **S1 failures were written into the receipt and read by nothing.** `build_inputs()` swallows a per-chunk S1
+  raise into `errors` and carries on, and `run_s1` was called without `stats`, so a length-capped summary
+  (S1's documented tail-drop) left no trace at all — a narrative story missing a chunk could therefore move
+  the decision cell while `branch_2_certified` stayed true. The harness now records `s1_stats` and prints the
+  S1 errors, and the scorer consumes both **on the narrative arm only** (S1 builds that arm's input; the raw
+  arm's is the transcript). This is the same "the flag was in the receipt, unread" defect the cycle before
+  fixed for S2, one stage earlier.
+- **The rule's own tests reached no CI surface.** `test_score_qualifiers.py` was registered nowhere
+  (`manifest-integrity` reds on drift), and because `tests/eval/write_path/` was not a `SOURCE_PATTERNS`
+  entry, a `score_qualifiers.py`-only change selected `core` — which registers none of the tests pinning the
+  rule, the corpus counts or the artifact. Both halves are now registered (`eval`, plus `core` via
+  `CORE_ALSO`) and pinned by `test_write_path_measurement_source_edit_selects_eval`.
+- **A delta that does not EXIST was read as a delta that PASSES — and, before that, crashed the scorer.** Two
+  defects on the same input (an arm that emits no claims): `parity` accepted a missing P/R delta
+  (`all(d is None or abs(d) <= tol)`), so Δloss 0 with precision/recall `None` — every qualifier `absent` on
+  both sides — certified branch 2 and `verdict_label` recorded D3 as **settled** off two empty extracts, with
+  no contamination flag tripped (`partial`/`truncated`/`s2_error` are clean: the output is EMPTY, not
+  incomplete); and the decision-input print formatted the three deltas unconditionally, so the same run raised
+  `TypeError: unsupported format string passed to NoneType.__format__` *before* the artifact was written.
+  `main()` now refuses a split with no precision delta (exit 2, message), every delta renders `n/a`, and a
+  missing delta makes the verdict `no branch matched — scoring input incomplete`. No committed figure changes:
+  run 2 still regenerates byte-identically (the artifact pin is what proves it), and the fix is pinned by
+  four tests that fail on the pre-fix code (two of them on the `TypeError`, verified by reverting the module).

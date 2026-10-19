@@ -1,0 +1,120 @@
+E1E2-PROBE 1
+sha=c2544f54f143e53ff5489b137ce1e9a52d3ed370
+corpus=e1e2_corpus.json corpus_sha256=e78d306ccb4bce73459c5c22b61122140ba860b1108d3eba2ebecb661cbdfe6b objects=25 points=115
+preg_embed_sha=1da0eb14a940faaeab921244cc95e4d842368ade233671a866e2f67563fb18f8 mint_skip_embed_sha=bd615d83d35b8d5559783a03e4878e45a06e83b2b777d1cc6abb1fefbf3f075c
+prereg=UNPREREGISTERED artifact=docs/evidence/7949-capstone/preregistration.json
+mint_skip dropped_objects=9 stripped_references=9 statements_left_unreferenced=9
+scored_arm=after-vet-shipped
+arm=before counterfactual=no scored=no preg_objects=25 preg_points=115 preg_embed_sha=1da0eb14a940faaeab921244cc95e4d842368ade233671a866e2f67563fb18f8
+arm=before metric=objects total=25 numerator=15 denominator=25 share=0.600000
+arm=before metric=real_facts count=90 points=115
+arm=before metric=state_value_points points=34 values=42
+arm=before metric=state_value_literals matches=[["count", "4668"], ["count", "4648"], ["count", "3849"], ["count", "3929"], ["count", "206"], ["count", "211"], ["count", "465"], ["count", "3775"], ["count", "38"], ["count", "2779"], ["percent", "62 percent"], ["count", "62"], ["spelled-quantity", "four workers"], ["spelled-quantity", "two workers"], ["spelled-quantity", "sixty second"], ["date", "October 15"], ["count", "15"], ["date", "September 30"], ["count", "30"], ["spelled-quantity", "four hours"], ["count", "401"], ["spelled-quantity", "ninety days"], ["spelled-quantity", "twelve times"], ["spelled-quantity", "three weeks"], ["spelled-quantity", "thirty percent"], ["date", "October 2"], ["measure", "4.2 seconds"], ["date", "October 5"], ["spelled-quantity", "forty rows"], ["spelled-quantity", "ten minute"], ["count", "800"], ["spelled-quantity", "three hours"], ["count", "12"], ["date", "November 2"], ["date", "November 9"], ["percent", "99.9 percent"], ["count", "99"], ["spelled-quantity", "two workers"], ["spelled-quantity", "six minutes"], ["spelled-quantity", "two hours"], ["spelled-quantity", "Eleven seconds"], ["spelled-quantity", "thirty seconds"]]
+arm=before metric=atomic_points atomic=114 fused=1
+arm=before metric=vet pass=s2 enabled=no arbiter=n/a candidates=0 discarded=0 by_outcome={} mechanical={}
+arm=before metric=vet pass=union enabled=no arbiter=n/a candidates=0 discarded=0 by_outcome={} mechanical={}
+arm=before metric=vet-downgrades count=0
+arm=before pipeline_stages=S1,S2.1,S4 model_calls=3 errors=0
+arm=after-vet-shipped counterfactual=no scored=yes preg_objects=25 preg_points=115 preg_embed_sha=1da0eb14a940faaeab921244cc95e4d842368ade233671a866e2f67563fb18f8
+arm=after-vet-shipped metric=objects total=25 numerator=15 denominator=25 share=0.600000
+arm=after-vet-shipped metric=real_facts count=90 points=115
+arm=after-vet-shipped metric=state_value_points points=34 values=42
+arm=after-vet-shipped metric=state_value_literals matches=[["count", "4668"], ["count", "4648"], ["count", "3849"], ["count", "3929"], ["count", "206"], ["count", "211"], ["count", "465"], ["count", "3775"], ["count", "38"], ["count", "2779"], ["percent", "62 percent"], ["count", "62"], ["spelled-quantity", "four workers"], ["spelled-quantity", "two workers"], ["spelled-quantity", "sixty second"], ["date", "October 15"], ["count", "15"], ["date", "September 30"], ["count", "30"], ["spelled-quantity", "four hours"], ["count", "401"], ["spelled-quantity", "ninety days"], ["spelled-quantity", "twelve times"], ["spelled-quantity", "three weeks"], ["spelled-quantity", "thirty percent"], ["date", "October 2"], ["measure", "4.2 seconds"], ["date", "October 5"], ["spelled-quantity", "forty rows"], ["spelled-quantity", "ten minute"], ["count", "800"], ["spelled-quantity", "three hours"], ["count", "12"], ["date", "November 2"], ["date", "November 9"], ["percent", "99.9 percent"], ["count", "99"], ["spelled-quantity", "two workers"], ["spelled-quantity", "six minutes"], ["spelled-quantity", "two hours"], ["spelled-quantity", "Eleven seconds"], ["spelled-quantity", "thirty seconds"]]
+arm=after-vet-shipped metric=atomic_points atomic=114 fused=1
+arm=after-vet-shipped metric=vet pass=s2 enabled=yes arbiter=none candidates=140 discarded=3 by_outcome={"DISCARD": 3, "KEEP": 137} mechanical={"by_rule": {"value.identifier_only.hash": 0, "value.identifier_only.path": 1, "value.identifier_only.reference": 2, "value.identifier_only.uuid": 0}, "enabled": true, "fired": 3, "overridden": 0}
+arm=after-vet-shipped metric=vet pass=union enabled=yes arbiter=none candidates=140 discarded=3 by_outcome={"DISCARD": 3, "KEEP": 137} mechanical={"by_rule": {"value.identifier_only.hash": 0, "value.identifier_only.path": 1, "value.identifier_only.reference": 2, "value.identifier_only.uuid": 0}, "enabled": true, "fired": 3, "overridden": 0}
+arm=after-vet-shipped metric=vet-downgrades count=6
+arm=after-vet-shipped vet-warning=vet: entity 'tests/test_frontmatter_validator.py' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-shipped vet-warning=vet: entity 'PR #465' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-shipped vet-warning=vet: entity 'issue #3775' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-shipped vet-warning=vet: 3 discard(s) downgraded to KEEP
+arm=after-vet-shipped vet-warning=vet: entity 'tests/test_frontmatter_validator.py' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-shipped vet-warning=vet: entity 'PR #465' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-shipped vet-warning=vet: entity 'issue #3775' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-shipped vet-warning=vet: 3 discard(s) downgraded to KEEP
+arm=after-vet-shipped pipeline_stages=S1,S2.1,S4 model_calls=3 errors=0
+arm=after-vet-arbiter counterfactual=yes scored=no preg_objects=25 preg_points=115 preg_embed_sha=1da0eb14a940faaeab921244cc95e4d842368ade233671a866e2f67563fb18f8
+arm=after-vet-arbiter metric=objects total=25 numerator=15 denominator=25 share=0.600000
+arm=after-vet-arbiter metric=real_facts count=90 points=115
+arm=after-vet-arbiter metric=state_value_points points=34 values=42
+arm=after-vet-arbiter metric=state_value_literals matches=[["count", "4668"], ["count", "4648"], ["count", "3849"], ["count", "3929"], ["count", "206"], ["count", "211"], ["count", "465"], ["count", "3775"], ["count", "38"], ["count", "2779"], ["percent", "62 percent"], ["count", "62"], ["spelled-quantity", "four workers"], ["spelled-quantity", "two workers"], ["spelled-quantity", "sixty second"], ["date", "October 15"], ["count", "15"], ["date", "September 30"], ["count", "30"], ["spelled-quantity", "four hours"], ["count", "401"], ["spelled-quantity", "ninety days"], ["spelled-quantity", "twelve times"], ["spelled-quantity", "three weeks"], ["spelled-quantity", "thirty percent"], ["date", "October 2"], ["measure", "4.2 seconds"], ["date", "October 5"], ["spelled-quantity", "forty rows"], ["spelled-quantity", "ten minute"], ["count", "800"], ["spelled-quantity", "three hours"], ["count", "12"], ["date", "November 2"], ["date", "November 9"], ["percent", "99.9 percent"], ["count", "99"], ["spelled-quantity", "two workers"], ["spelled-quantity", "six minutes"], ["spelled-quantity", "two hours"], ["spelled-quantity", "Eleven seconds"], ["spelled-quantity", "thirty seconds"]]
+arm=after-vet-arbiter metric=atomic_points atomic=114 fused=1
+arm=after-vet-arbiter metric=vet pass=s2 enabled=yes arbiter=present candidates=140 discarded=12 by_outcome={"DISCARD": 12, "KEEP": 128} mechanical={"by_rule": {"value.identifier_only.hash": 0, "value.identifier_only.path": 1, "value.identifier_only.reference": 2, "value.identifier_only.uuid": 0}, "enabled": true, "fired": 3, "overridden": 0}
+arm=after-vet-arbiter metric=vet pass=union enabled=yes arbiter=present candidates=140 discarded=12 by_outcome={"DISCARD": 12, "KEEP": 128} mechanical={"by_rule": {"value.identifier_only.hash": 0, "value.identifier_only.path": 1, "value.identifier_only.reference": 2, "value.identifier_only.uuid": 0}, "enabled": true, "fired": 3, "overridden": 0}
+arm=after-vet-arbiter metric=vet-downgrades count=24
+arm=after-vet-arbiter vet-warning=vet: entity 'the timeout command' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-arbiter vet-warning=vet: entity 'the staging-only constraint' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-arbiter vet-warning=vet: entity 'the lane ownership rule' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-arbiter vet-warning=vet: entity 'the parity harness' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-arbiter vet-warning=vet: entity 'the vocabulary-pinned test' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-arbiter vet-warning=vet: entity 'the local route store gap' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-arbiter vet-warning=vet: entity 'the agent-infra workflow-lock issue' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-arbiter vet-warning=vet: entity 'the five previously ungrouped methods' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-arbiter vet-warning=vet: entity 'the declared adversarial acceptance criterion' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-arbiter vet-warning=vet: entity 'tests/test_frontmatter_validator.py' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-arbiter vet-warning=vet: entity 'PR #465' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-arbiter vet-warning=vet: entity 'issue #3775' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-arbiter vet-warning=vet: 12 discard(s) downgraded to KEEP
+arm=after-vet-arbiter vet-warning=vet: entity 'the timeout command' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-arbiter vet-warning=vet: entity 'the staging-only constraint' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-arbiter vet-warning=vet: entity 'the lane ownership rule' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-arbiter vet-warning=vet: entity 'the parity harness' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-arbiter vet-warning=vet: entity 'the vocabulary-pinned test' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-arbiter vet-warning=vet: entity 'the local route store gap' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-arbiter vet-warning=vet: entity 'the agent-infra workflow-lock issue' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-arbiter vet-warning=vet: entity 'the five previously ungrouped methods' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-arbiter vet-warning=vet: entity 'the declared adversarial acceptance criterion' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-arbiter vet-warning=vet: entity 'tests/test_frontmatter_validator.py' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-arbiter vet-warning=vet: entity 'PR #465' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-arbiter vet-warning=vet: entity 'issue #3775' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=after-vet-arbiter vet-warning=vet: 12 discard(s) downgraded to KEEP
+arm=after-vet-arbiter pipeline_stages=S1,S2.1,S4 model_calls=3 errors=0
+arm=counterfactual-mint-skip counterfactual=yes scored=no preg_objects=16 preg_points=115 preg_embed_sha=bd615d83d35b8d5559783a03e4878e45a06e83b2b777d1cc6abb1fefbf3f075c
+arm=counterfactual-mint-skip metric=objects total=16 numerator=6 denominator=16 share=0.375000
+arm=counterfactual-mint-skip metric=real_facts count=90 points=115
+arm=counterfactual-mint-skip metric=state_value_points points=34 values=42
+arm=counterfactual-mint-skip metric=state_value_literals matches=[["count", "4668"], ["count", "4648"], ["count", "3849"], ["count", "3929"], ["count", "206"], ["count", "211"], ["count", "465"], ["count", "3775"], ["count", "38"], ["count", "2779"], ["percent", "62 percent"], ["count", "62"], ["spelled-quantity", "four workers"], ["spelled-quantity", "two workers"], ["spelled-quantity", "sixty second"], ["date", "October 15"], ["count", "15"], ["date", "September 30"], ["count", "30"], ["spelled-quantity", "four hours"], ["count", "401"], ["spelled-quantity", "ninety days"], ["spelled-quantity", "twelve times"], ["spelled-quantity", "three weeks"], ["spelled-quantity", "thirty percent"], ["date", "October 2"], ["measure", "4.2 seconds"], ["date", "October 5"], ["spelled-quantity", "forty rows"], ["spelled-quantity", "ten minute"], ["count", "800"], ["spelled-quantity", "three hours"], ["count", "12"], ["date", "November 2"], ["date", "November 9"], ["percent", "99.9 percent"], ["count", "99"], ["spelled-quantity", "two workers"], ["spelled-quantity", "six minutes"], ["spelled-quantity", "two hours"], ["spelled-quantity", "Eleven seconds"], ["spelled-quantity", "thirty seconds"]]
+arm=counterfactual-mint-skip metric=atomic_points atomic=114 fused=1
+arm=counterfactual-mint-skip metric=vet pass=s2 enabled=yes arbiter=none candidates=131 discarded=3 by_outcome={"DISCARD": 3, "KEEP": 128} mechanical={"by_rule": {"value.identifier_only.hash": 0, "value.identifier_only.path": 1, "value.identifier_only.reference": 2, "value.identifier_only.uuid": 0}, "enabled": true, "fired": 3, "overridden": 0}
+arm=counterfactual-mint-skip metric=vet pass=union enabled=yes arbiter=none candidates=131 discarded=3 by_outcome={"DISCARD": 3, "KEEP": 128} mechanical={"by_rule": {"value.identifier_only.hash": 0, "value.identifier_only.path": 1, "value.identifier_only.reference": 2, "value.identifier_only.uuid": 0}, "enabled": true, "fired": 3, "overridden": 0}
+arm=counterfactual-mint-skip metric=vet-downgrades count=6
+arm=counterfactual-mint-skip dropped kind=object name=the timeout command cause=mint-time-transform
+arm=counterfactual-mint-skip dropped kind=object name=the staging-only constraint cause=mint-time-transform
+arm=counterfactual-mint-skip dropped kind=object name=the lane ownership rule cause=mint-time-transform
+arm=counterfactual-mint-skip dropped kind=object name=the parity harness cause=mint-time-transform
+arm=counterfactual-mint-skip dropped kind=object name=the vocabulary-pinned test cause=mint-time-transform
+arm=counterfactual-mint-skip dropped kind=object name=the local route store gap cause=mint-time-transform
+arm=counterfactual-mint-skip dropped kind=object name=the agent-infra workflow-lock issue cause=mint-time-transform
+arm=counterfactual-mint-skip dropped kind=object name=the five previously ungrouped methods cause=mint-time-transform
+arm=counterfactual-mint-skip dropped kind=object name=the declared adversarial acceptance criterion cause=mint-time-transform
+arm=counterfactual-mint-skip vet-warning=vet: entity 'tests/test_frontmatter_validator.py' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=counterfactual-mint-skip vet-warning=vet: entity 'PR #465' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=counterfactual-mint-skip vet-warning=vet: entity 'issue #3775' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=counterfactual-mint-skip vet-warning=vet: 3 discard(s) downgraded to KEEP
+arm=counterfactual-mint-skip vet-warning=vet: entity 'tests/test_frontmatter_validator.py' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=counterfactual-mint-skip vet-warning=vet: entity 'PR #465' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=counterfactual-mint-skip vet-warning=vet: entity 'issue #3775' was DISCARDed but is referenced by a surviving candidate — kept (Layer-1 referential integrity)
+arm=counterfactual-mint-skip vet-warning=vet: 3 discard(s) downgraded to KEEP
+arm=counterfactual-mint-skip pipeline_stages=S1,S2.1,S4 model_calls=3 errors=0
+coverage rows=25 in_scope=15 positively_classified=9 undetected_classes=branch_name,code_fragment,repo_slug,section_marker,symbol_name
+coverage class=branch_name rows=1 dd_positive=0 value_gate=0
+coverage class=code_fragment rows=1 dd_positive=0 value_gate=0
+coverage class=definite_description rows=15 dd_positive=9 value_gate=0
+coverage class=file_path rows=1 dd_positive=0 value_gate=1
+coverage class=pr_or_issue_number rows=2 dd_positive=0 value_gate=2
+coverage class=repo_slug rows=1 dd_positive=0 value_gate=0
+coverage class=section_marker rows=1 dd_positive=0 value_gate=0
+coverage class=symbol_name rows=3 dd_positive=0 value_gate=0
+split-implemented=no note=SPLIT is absent from vet_gate's O4 vocabulary, so §S2.2 Level-1 q2 cannot be satisfied by any arm here
+prereg_e1_threshold=n/a
+prereg_e2_floor=not-consumed note=the E2 criteria are no-loss (after >= before), which satisfies any stated floor
+e1 before_share=0.600000 after_share=0.600000 reduction=-0.000000 threshold=n/a observed=NO_REDUCTION verdict=UNPREREGISTERED
+e1-control before_real_facts=90 after_real_facts=90 verdict=UNPREREGISTERED
+e2-state before=42 after=42 before_points=34 after_points=34 verdict=UNPREREGISTERED
+e2-atomic before=114 after=114 fused_after=1 verdict=UNPREREGISTERED
+e2-atomic fused content='TortoiseSDK.ask and TortoiseSDK.ask_assembled do not exist; they were removed by #3849 / P' units=2 cause=SPLIT-not-implemented
+counterfactual arm=after-vet-arbiter reduction=0.000000 real_facts=90 state_values=42 note=NOT SCORED (mechanism absent from production)
+counterfactual arm=counterfactual-mint-skip reduction=0.225000 real_facts=90 state_values=42 note=NOT SCORED (mechanism absent from production)
+control variant=unreferenced-definite-descriptions arm=after-vet-arbiter stripped_objects=9 stripped_references=9 objects=16 the_prefix=6 share=0.375000 real_facts=90 removed=9 removed_names=["the timeout command", "the staging-only constraint", "the lane ownership rule", "the parity harness", "the vocabulary-pinned test", "the local route store gap", "the agent-infra workflow-lock issue", "the five previously ungrouped methods", "the declared adversarial acceptance criterion"] note=the same Objects the referenced corpus keeps are REMOVED when nothing references them, so the 0.0 pp is a corpus property (every Object wired to its statement), not a property of S2.2
+result=UNPREREGISTERED
+exit=3

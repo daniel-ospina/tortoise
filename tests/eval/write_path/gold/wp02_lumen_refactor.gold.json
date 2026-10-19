@@ -44,6 +44,37 @@
       }
     }
   ],
+  "planted_qualifiers": [
+    {
+      "bound_claim": "wp02_lumen_refactor_u_01",
+      "class": "stance",
+      "id": "wp02_lumen_refactor_q_01",
+      "notes": "team sign-off is the warrant for the per-graph migration decision; also planted as fact u_02 / hazard h_01",
+      "planted_turn": 1,
+      "verbatim_qualifier": "the team signed off last Friday"
+    },
+    {
+      "class": "hedge",
+      "id": "wp02_lumen_refactor_q_02",
+      "notes": "flags uncertainty about the platform tt_ prefix premise that grounds the tt_ decision (u_03); the premise is not itself a planted unit",
+      "planted_turn": 3,
+      "verbatim_qualifier": "let me double check"
+    },
+    {
+      "class": "stance",
+      "id": "wp02_lumen_refactor_q_03",
+      "notes": "assistant's risk framing of a single-commit flip; motivates, but is not, the two-phase deploy decision (u_10)",
+      "planted_turn": 18,
+      "verbatim_qualifier": "risky"
+    },
+    {
+      "class": "scope",
+      "id": "wp02_lumen_refactor_q_04",
+      "notes": "scopes the remaining team-token-shape usage to one component; no planted unit carries that claim",
+      "planted_turn": 21,
+      "verbatim_qualifier": "Only the admin screen"
+    }
+  ],
   "planted_units": [
     {
       "depth_bucket": "early",

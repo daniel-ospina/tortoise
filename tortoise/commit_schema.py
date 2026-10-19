@@ -215,9 +215,10 @@ def compile_vocab(packs_dir: Path | str | None = None,
     ⛔ That is NOT every write into a mined property — do not read it as one.
     Still outside it (#9068 carries the measurements): ``entities[].kind`` has no
     Layer-1 membership test (#5202, open); replay/``rebuild_all`` is
-    deliberately ungated (a record already in the journal reproduces
-    faithfully; ``docs/durability-posture.md`` is the authority for that
-    choice); and a set of writers never meets a door at all —
+    deliberately ungated (the journal is the RECONSTRUCTION SOURCE — never a
+    durability authority, which lives only in ``docs/durability-posture.md`` —
+    so a record already in it reproduces faithfully); and a set of writers
+    never meets a door at all —
     ``tortoise/pipeline.py``'s ``SET p.kind = <pipeline_key>`` (which also shows
     the mining leg conflates an ontology kind with any ``kind``), the connectors'
     direct ``proj.apply`` on a journal-less projection, and raw-Cypher / offline

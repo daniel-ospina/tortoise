@@ -1,3 +1,9 @@
+# #8615 — re-measured AFTER the stored-form fix (tortoise/stored_form.py):
+# Measured at: feat/8615-tm@c495de1ab055e834561678eda7b2a69dc3f269f1 on 2026-10-19 (dirty: the #8615 diff applied)
+# Environment: private test-lane FalkorDB (tools/test_lane.py) + throwaway postgres:16 on 127.0.0.1:15499,
+#   the shipped 39-record fixture, the shipped projection/reader/rebuild — the issue's own reproduction.
+# Paste of the run as printed. No expectation block: an expected-value header above a run's own
+#   transcript makes measured-vs-expected unverifiable for a later reader.
 #4997: vector search on test_cap7950_e2e is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject'] (indexed: ['Point']) — those reads silently full-scan. This is the gap that decision V1 (STORAGE-ARCHITECTURE.md §12.1c) governs; indexing those labels is NOT done here.
 journal records read: 39
 record projection: replayed 39 journal records → 60 record mutations (0 declared no-op)
@@ -9,12 +15,12 @@ cache node counts (live read): [('Event', 1), ('Meta', 1), ('Object', 1), ('Poin
 hot read for Point 'p1': [['p1']]
 bounded rebuild declaration: coverage=partial
 unwritten record key 'Point:p1' covered-by-declaration=False → residency=not-hot
-RECONCILE (after a record-sourced rebuild): record vs cache: 1 divergent of 7 checked (missing_in_cache=0, extra_in_cache=0, field_mismatches=1)
+RECONCILE (after a record-sourced rebuild): record vs cache: 0 divergent of 7 checked (missing_in_cache=0, extra_in_cache=0, field_mismatches=0)
 ARMED FOLD (proj.apply):          refused (DirectCacheWriteRefused)
 ARMED RAW HANDLE (proj.g.query):  SUCCEEDED (direct cache write)
-RECONCILE (after a DIRECT raw-handle cache write): record vs cache: 2 divergent of 8 checked (missing_in_cache=0, extra_in_cache=1, field_mismatches=1)
+RECONCILE (after a DIRECT raw-handle cache write): record vs cache: 1 divergent of 8 checked (missing_in_cache=0, extra_in_cache=1, field_mismatches=0)
 second-writer signature -> extra_in_cache=1
 ARMED RAW HANDLE MUTATION:        Point:p1 gained an unauthorized property (Point.second_writer_marker)
-RECONCILE (after a DIRECT raw-handle property WRITE): record vs cache: 2 divergent of 8 checked (missing_in_cache=0, extra_in_cache=1, field_mismatches=2)
-field-mutation signature -> field_mismatches=2
+RECONCILE (after a DIRECT raw-handle property WRITE): record vs cache: 2 divergent of 8 checked (missing_in_cache=0, extra_in_cache=1, field_mismatches=1)
+field-mutation signature -> field_mismatches=1
 CHAIN RESULT: journal -> record -> cache COMPLETED with the shipped modules

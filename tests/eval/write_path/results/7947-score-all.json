@@ -1,0 +1,1101 @@
+{
+  "instrument": {
+    "kind": "deterministic-same-class-markers",
+    "markers": {
+      "hedge": [
+        "probably",
+        "maybe",
+        "might",
+        "may ",
+        "perhaps",
+        "i think",
+        "i believe",
+        "roughly",
+        "about ",
+        "mostly",
+        "seems",
+        "appears",
+        "suggests",
+        "likely",
+        "uncertain",
+        "not sure",
+        "as far as i recall",
+        "hypothesis",
+        "tentativ",
+        "circumstantial",
+        "correlates with",
+        "realistically",
+        "my read",
+        "i'd guess",
+        "i would guess",
+        "believe",
+        "assume",
+        "assumption",
+        "plausible",
+        "possibl",
+        "could be",
+        "suspect",
+        "impression",
+        "no evidence",
+        "double check",
+        "double-check",
+        "verify",
+        "unconfirmed"
+      ],
+      "scope": [
+        "only",
+        "just ",
+        "except",
+        "until",
+        "before ",
+        "not for",
+        "limited to",
+        "as long as",
+        "provided",
+        "unless",
+        "in scope",
+        "out of scope",
+        "on my machine",
+        "hosted lane",
+        "eu region",
+        "single ",
+        "one ",
+        "prior to"
+      ],
+      "stance": [
+        "agree",
+        "agreed",
+        "push back",
+        "comfortable",
+        "risky",
+        "tempting",
+        "rather",
+        "signed off",
+        "decision",
+        "concern",
+        "worried",
+        "prefer",
+        "wants",
+        "against",
+        "support",
+        "oppose",
+        "review",
+        "accepted",
+        "rejected",
+        "endorse",
+        "sign-off",
+        "signoff"
+      ]
+    },
+    "claim_present_threshold": 0.6,
+    "marker_scope": "matched claim only (not the whole output)",
+    "note": "TWO-SIDED: under-credits preservation when the marker vocabulary is missing (a preserved hedge reads as flattened), and OVER-credits it when an unbounded substring match hits mid-word (e.g. 'commonly' matches scope's 'only'), which understates loss; the over-credit is not arm-neutral (more claim text = more chances) \u2014 flattened stays the arbitrable class"
+  },
+  "aggregate": {
+    "raw": {
+      "n": 25,
+      "loss": 20,
+      "loss_rate": 0.8,
+      "flattened": 4,
+      "absent": 16,
+      "matched": 9,
+      "distortion_rate": 0.4444444444444444,
+      "points": 76
+    },
+    "narrative": {
+      "n": 25,
+      "loss": 12,
+      "loss_rate": 0.48,
+      "flattened": 5,
+      "absent": 7,
+      "matched": 18,
+      "distortion_rate": 0.2777777777777778,
+      "points": 124
+    }
+  },
+  "precision_recall": [
+    {
+      "session_id": "wp01_quarry_debug",
+      "arm": "raw",
+      "planted_units": 16,
+      "recalled": 8,
+      "recall": 0.5,
+      "claims_emitted": 18,
+      "claims_hit": 15,
+      "precision": 0.8333333333333334
+    },
+    {
+      "session_id": "wp01_quarry_debug",
+      "arm": "narrative",
+      "planted_units": 16,
+      "recalled": 13,
+      "recall": 0.8125,
+      "claims_emitted": 22,
+      "claims_hit": 14,
+      "precision": 0.6363636363636364
+    },
+    {
+      "session_id": "wp02_lumen_refactor",
+      "arm": "raw",
+      "planted_units": 13,
+      "recalled": 10,
+      "recall": 0.7692307692307693,
+      "claims_emitted": 20,
+      "claims_hit": 13,
+      "precision": 0.65
+    },
+    {
+      "session_id": "wp02_lumen_refactor",
+      "arm": "narrative",
+      "planted_units": 13,
+      "recalled": 11,
+      "recall": 0.8461538461538461,
+      "claims_emitted": 29,
+      "claims_hit": 15,
+      "precision": 0.5172413793103449
+    },
+    {
+      "session_id": "wp03_ember_design",
+      "arm": "raw",
+      "planted_units": 15,
+      "recalled": 6,
+      "recall": 0.4,
+      "claims_emitted": 18,
+      "claims_hit": 10,
+      "precision": 0.5555555555555556
+    },
+    {
+      "session_id": "wp03_ember_design",
+      "arm": "narrative",
+      "planted_units": 15,
+      "recalled": 14,
+      "recall": 0.9333333333333333,
+      "claims_emitted": 24,
+      "claims_hit": 18,
+      "precision": 0.75
+    },
+    {
+      "session_id": "wp04_aurora_perf",
+      "arm": "raw",
+      "planted_units": 13,
+      "recalled": 11,
+      "recall": 0.8461538461538461,
+      "claims_emitted": 15,
+      "claims_hit": 12,
+      "precision": 0.8
+    },
+    {
+      "session_id": "wp04_aurora_perf",
+      "arm": "narrative",
+      "planted_units": 13,
+      "recalled": 12,
+      "recall": 0.9230769230769231,
+      "claims_emitted": 16,
+      "claims_hit": 14,
+      "precision": 0.875
+    },
+    {
+      "session_id": "wp05_retro_writeup",
+      "arm": "raw",
+      "planted_units": 15,
+      "recalled": 8,
+      "recall": 0.5333333333333333,
+      "claims_emitted": 19,
+      "claims_hit": 12,
+      "precision": 0.631578947368421
+    },
+    {
+      "session_id": "wp05_retro_writeup",
+      "arm": "narrative",
+      "planted_units": 15,
+      "recalled": 13,
+      "recall": 0.8666666666666667,
+      "claims_emitted": 25,
+      "claims_hit": 18,
+      "precision": 0.72
+    },
+    {
+      "session_id": "wp06_quarry_rollout",
+      "arm": "raw",
+      "planted_units": 9,
+      "recalled": 3,
+      "recall": 0.3333333333333333,
+      "claims_emitted": 9,
+      "claims_hit": 4,
+      "precision": 0.4444444444444444
+    },
+    {
+      "session_id": "wp06_quarry_rollout",
+      "arm": "narrative",
+      "planted_units": 9,
+      "recalled": 3,
+      "recall": 0.3333333333333333,
+      "claims_emitted": 15,
+      "claims_hit": 5,
+      "precision": 0.3333333333333333
+    },
+    {
+      "session_id": "wp07_bluepeak_followup",
+      "arm": "raw",
+      "planted_units": 9,
+      "recalled": 3,
+      "recall": 0.3333333333333333,
+      "claims_emitted": 14,
+      "claims_hit": 5,
+      "precision": 0.35714285714285715
+    },
+    {
+      "session_id": "wp07_bluepeak_followup",
+      "arm": "narrative",
+      "planted_units": 9,
+      "recalled": 6,
+      "recall": 0.6666666666666666,
+      "claims_emitted": 21,
+      "claims_hit": 7,
+      "precision": 0.3333333333333333
+    }
+  ],
+  "delta_pp": -32.00000000000001,
+  "delta_distortion_pp": -16.666666666666664,
+  "band_pp": 10,
+  "per_session": {
+    "wp01_quarry_debug": {
+      "raw": {
+        "session_id": "wp01_quarry_debug",
+        "arm": "raw",
+        "n_qualifiers": 3,
+        "preserved": 1,
+        "flattened": 1,
+        "absent": 1,
+        "matched": 2,
+        "distortion_rate": 0.5,
+        "loss": 2,
+        "loss_rate": 0.6666666666666666,
+        "points": 12,
+        "operators": 6,
+        "rows": [
+          {
+            "id": "wp01_quarry_debug_q_01",
+            "class": "hedge",
+            "bound_claim": "wp01_quarry_debug_u_04",
+            "verbatim_qualifier": "probably",
+            "claim_present": false,
+            "marker_present": false,
+            "outcome": "absent",
+            "matching_claims": 0,
+            "matched_excerpt": "",
+            "anchor_words_total": 7
+          },
+          {
+            "id": "wp01_quarry_debug_q_02",
+            "class": "stance",
+            "bound_claim": "wp01_quarry_debug_u_09",
+            "verbatim_qualifier": "I would rather",
+            "claim_present": true,
+            "marker_present": false,
+            "outcome": "flattened",
+            "matching_claims": 2,
+            "matched_excerpt": "the non owner worker should retry the batch after a sixty second backoff  then re check the lease  if the lease expired and the owner never completed  the batch becomes claimable again  \n  src   the non owner worker shou",
+            "anchor_words_total": 6
+          },
+          {
+            "id": "wp01_quarry_debug_q_03",
+            "class": "hedge",
+            "bound_claim": "wp01_quarry_debug_u_13",
+            "verbatim_qualifier": "about",
+            "claim_present": true,
+            "marker_present": true,
+            "outcome": "preserved",
+            "matching_claims": 2,
+            "matched_excerpt": "the halcyon re ingest covers about twelve million events  which is twenty four hundred batches end to end  \n  src   the backfill cutoff is set at september 30 to avoid re ingesting events that already landed after the in",
+            "anchor_words_total": 4
+          }
+        ]
+      },
+      "narrative": {
+        "session_id": "wp01_quarry_debug",
+        "arm": "narrative",
+        "n_qualifiers": 3,
+        "preserved": 1,
+        "flattened": 2,
+        "absent": 0,
+        "matched": 3,
+        "distortion_rate": 0.6666666666666666,
+        "loss": 2,
+        "loss_rate": 0.6666666666666666,
+        "points": 21,
+        "operators": 1,
+        "rows": [
+          {
+            "id": "wp01_quarry_debug_q_01",
+            "class": "hedge",
+            "bound_claim": "wp01_quarry_debug_u_04",
+            "verbatim_qualifier": "probably",
+            "claim_present": true,
+            "marker_present": false,
+            "outcome": "flattened",
+            "matching_claims": 2,
+            "matched_excerpt": "the retry loop added in the batch runner bypassed the batch ownership check  so two workers could claim the same batch and each mark its own copy complete \n  src   the fix is to make each batch claim a single owner lease",
+            "anchor_words_total": 7
+          },
+          {
+            "id": "wp01_quarry_debug_q_02",
+            "class": "stance",
+            "bound_claim": "wp01_quarry_debug_u_09",
+            "verbatim_qualifier": "I would rather",
+            "claim_present": true,
+            "marker_present": false,
+            "outcome": "flattened",
+            "matching_claims": 1,
+            "matched_excerpt": "the non owner worker skips and retries after a sixty second backoff  then re checks the lease  if the lease expired and the owner never completed  the batch becomes claimable again  giving crash recovery for free",
+            "anchor_words_total": 6
+          },
+          {
+            "id": "wp01_quarry_debug_q_03",
+            "class": "hedge",
+            "bound_claim": "wp01_quarry_debug_u_13",
+            "verbatim_qualifier": "about",
+            "claim_present": true,
+            "marker_present": true,
+            "outcome": "preserved",
+            "matching_claims": 1,
+            "matched_excerpt": "the re ingest covers about twelve million events for halcyon  which is twenty four hundred batches end to end",
+            "anchor_words_total": 4
+          }
+        ]
+      }
+    },
+    "wp02_lumen_refactor": {
+      "raw": {
+        "session_id": "wp02_lumen_refactor",
+        "arm": "raw",
+        "n_qualifiers": 4,
+        "preserved": 1,
+        "flattened": 0,
+        "absent": 3,
+        "matched": 1,
+        "distortion_rate": 0.0,
+        "loss": 3,
+        "loss_rate": 0.75,
+        "points": 15,
+        "operators": 5,
+        "rows": [
+          {
+            "id": "wp02_lumen_refactor_q_01",
+            "class": "stance",
+            "bound_claim": "wp02_lumen_refactor_u_01",
+            "verbatim_qualifier": "the team signed off last Friday",
+            "claim_present": false,
+            "marker_present": false,
+            "outcome": "absent",
+            "matching_claims": 0,
+            "matched_excerpt": "",
+            "anchor_words_total": 7
+          },
+          {
+            "id": "wp02_lumen_refactor_q_02",
+            "class": "hedge",
+            "bound_claim": null,
+            "verbatim_qualifier": "let me double check",
+            "claim_present": false,
+            "marker_present": false,
+            "outcome": "absent",
+            "matching_claims": 0,
+            "matched_excerpt": "",
+            "anchor_words_total": 3
+          },
+          {
+            "id": "wp02_lumen_refactor_q_03",
+            "class": "stance",
+            "bound_claim": null,
+            "verbatim_qualifier": "risky",
+            "claim_present": false,
+            "marker_present": false,
+            "outcome": "absent",
+            "matching_claims": 0,
+            "matched_excerpt": "",
+            "anchor_words_total": 1
+          },
+          {
+            "id": "wp02_lumen_refactor_q_04",
+            "class": "scope",
+            "bound_claim": null,
+            "verbatim_qualifier": "Only the admin screen",
+            "claim_present": true,
+            "marker_present": true,
+            "outcome": "preserved",
+            "matching_claims": 1,
+            "matched_excerpt": "only the admin screen still assumes a team token shape  it renders the team token on the settings page and will be replaced with a per graph key table ",
+            "anchor_words_total": 2
+          }
+        ]
+      },
+      "narrative": {
+        "session_id": "wp02_lumen_refactor",
+        "arm": "narrative",
+        "n_qualifiers": 4,
+        "preserved": 1,
+        "flattened": 2,
+        "absent": 1,
+        "matched": 3,
+        "distortion_rate": 0.6666666666666666,
+        "loss": 3,
+        "loss_rate": 0.75,
+        "points": 23,
+        "operators": 6,
+        "rows": [
+          {
+            "id": "wp02_lumen_refactor_q_01",
+            "class": "stance",
+            "bound_claim": "wp02_lumen_refactor_u_01",
+            "verbatim_qualifier": "the team signed off last Friday",
+            "claim_present": true,
+            "marker_present": false,
+            "outcome": "flattened",
+            "matching_claims": 1,
+            "matched_excerpt": "lumen auth is moving from team scoped tokens to per graph api keys ",
+            "anchor_words_total": 7
+          },
+          {
+            "id": "wp02_lumen_refactor_q_02",
+            "class": "hedge",
+            "bound_claim": null,
+            "verbatim_qualifier": "let me double check",
+            "claim_present": false,
+            "marker_present": false,
+            "outcome": "absent",
+            "matching_claims": 0,
+            "matched_excerpt": "",
+            "anchor_words_total": 3
+          },
+          {
+            "id": "wp02_lumen_refactor_q_03",
+            "class": "stance",
+            "bound_claim": null,
+            "verbatim_qualifier": "risky",
+            "claim_present": true,
+            "marker_present": true,
+            "outcome": "preserved",
+            "matching_claims": 2,
+            "matched_excerpt": "a single commit flip is rejected as too risky because the change touches issuance  resolution  and enforcement  \n  src   a single commit flip is rejected as too risky because the change touches issuance  resolution  and ",
+            "anchor_words_total": 1
+          },
+          {
+            "id": "wp02_lumen_refactor_q_04",
+            "class": "scope",
+            "bound_claim": null,
+            "verbatim_qualifier": "Only the admin screen",
+            "claim_present": true,
+            "marker_present": false,
+            "outcome": "flattened",
+            "matching_claims": 1,
+            "matched_excerpt": "the admin screen will be replaced with a per graph key table ",
+            "anchor_words_total": 2
+          }
+        ]
+      }
+    },
+    "wp03_ember_design": {
+      "raw": {
+        "session_id": "wp03_ember_design",
+        "arm": "raw",
+        "n_qualifiers": 4,
+        "preserved": 0,
+        "flattened": 0,
+        "absent": 4,
+        "matched": 0,
+        "distortion_rate": null,
+        "loss": 4,
+        "loss_rate": 1.0,
+        "points": 12,
+        "operators": 6,
+        "rows": [
+          {
+            "id": "wp03_ember_design_q_01",
+            "class": "hedge",
+            "bound_claim": null,
+            "verbatim_qualifier": "mostly",
+            "claim_present": false,
+            "marker_present": false,
+            "outcome": "absent",
+            "matching_claims": 0,
+            "matched_excerpt": "",
+            "anchor_words_total": 1
+          },
+          {
+            "id": "wp03_ember_design_q_02",
+            "class": "hedge",
+            "bound_claim": "wp03_ember_design_u_02",
+            "verbatim_qualifier": "Roughly",
+            "claim_present": false,
+            "marker_present": false,
+            "outcome": "absent",
+            "matching_claims": 0,
+            "matched_excerpt": "",
+            "anchor_words_total": 4
+          },
+          {
+            "id": "wp03_ember_design_q_03",
+            "class": "stance",
+            "bound_claim": "wp03_ember_design_u_09",
+            "verbatim_qualifier": "which I agree with",
+            "claim_present": false,
+            "marker_present": false,
+            "outcome": "absent",
+            "matching_claims": 0,
+            "matched_excerpt": "",
+            "anchor_words_total": 8
+          },
+          {
+            "id": "wp03_ember_design_q_04",
+            "class": "scope",
+            "bound_claim": null,
+            "verbatim_qualifier": "before we expand",
+            "claim_present": false,
+            "marker_present": false,
+            "outcome": "absent",
+            "matching_claims": 0,
+            "matched_excerpt": "",
+            "anchor_words_total": 2
+          }
+        ]
+      },
+      "narrative": {
+        "session_id": "wp03_ember_design",
+        "arm": "narrative",
+        "n_qualifiers": 4,
+        "preserved": 2,
+        "flattened": 0,
+        "absent": 2,
+        "matched": 2,
+        "distortion_rate": 0.0,
+        "loss": 2,
+        "loss_rate": 0.5,
+        "points": 18,
+        "operators": 6,
+        "rows": [
+          {
+            "id": "wp03_ember_design_q_01",
+            "class": "hedge",
+            "bound_claim": null,
+            "verbatim_qualifier": "mostly",
+            "claim_present": false,
+            "marker_present": false,
+            "outcome": "absent",
+            "matching_claims": 0,
+            "matched_excerpt": "",
+            "anchor_words_total": 1
+          },
+          {
+            "id": "wp03_ember_design_q_02",
+            "class": "hedge",
+            "bound_claim": "wp03_ember_design_u_02",
+            "verbatim_qualifier": "Roughly",
+            "claim_present": true,
+            "marker_present": true,
+            "outcome": "preserved",
+            "matching_claims": 3,
+            "matched_excerpt": "about thirty percent of alerts are unactionable because the ownership lookup fails   the page references a service but no owner \n routing by the lumen ownership table supports the four pages per week goal because the own",
+            "anchor_words_total": 4
+          },
+          {
+            "id": "wp03_ember_design_q_03",
+            "class": "stance",
+            "bound_claim": "wp03_ember_design_u_09",
+            "verbatim_qualifier": "which I agree with",
+            "claim_present": true,
+            "marker_present": true,
+            "outcome": "preserved",
+            "matching_claims": 1,
+            "matched_excerpt": "window declarations stay human owned rather than automated   aisha s suggestion  agreed  and coverage has been solid since the slo review",
+            "anchor_words_total": 8
+          },
+          {
+            "id": "wp03_ember_design_q_04",
+            "class": "scope",
+            "bound_claim": null,
+            "verbatim_qualifier": "before we expand",
+            "claim_present": false,
+            "marker_present": false,
+            "outcome": "absent",
+            "matching_claims": 0,
+            "matched_excerpt": "",
+            "anchor_words_total": 2
+          }
+        ]
+      }
+    },
+    "wp04_aurora_perf": {
+      "raw": {
+        "session_id": "wp04_aurora_perf",
+        "arm": "raw",
+        "n_qualifiers": 4,
+        "preserved": 3,
+        "flattened": 1,
+        "absent": 0,
+        "matched": 4,
+        "distortion_rate": 0.25,
+        "loss": 1,
+        "loss_rate": 0.25,
+        "points": 12,
+        "operators": 3,
+        "rows": [
+          {
+            "id": "wp04_aurora_perf_q_01",
+            "class": "hedge",
+            "bound_claim": "wp04_aurora_perf_u_02",
+            "verbatim_qualifier": "correlates with",
+            "claim_present": true,
+            "marker_present": true,
+            "outcome": "preserved",
+            "matching_claims": 1,
+            "matched_excerpt": "the p95 latency spike correlates with the october 5 release that added the related memory sidebar  before that release the p95 was comfortably under a second ",
+            "anchor_words_total": 4
+          },
+          {
+            "id": "wp04_aurora_perf_q_02",
+            "class": "hedge",
+            "bound_claim": "wp04_aurora_perf_u_08",
+            "verbatim_qualifier": "about",
+            "claim_present": true,
+            "marker_present": true,
+            "outcome": "preserved",
+            "matching_claims": 1,
+            "matched_excerpt": "the dashboard serves about forty thousand load requests per day across all customers  and the sidebar fires on most of them ",
+            "anchor_words_total": 6
+          },
+          {
+            "id": "wp04_aurora_perf_q_03",
+            "class": "scope",
+            "bound_claim": "wp04_aurora_perf_u_09",
+            "verbatim_qualifier": "until the perf review signs off",
+            "claim_present": true,
+            "marker_present": true,
+            "outcome": "preserved",
+            "matching_claims": 1,
+            "matched_excerpt": "ship the sidebar performance fix behind a flag so the p95 can be compared before and after without a full rollout  the flag defaults off until the perf review signs off ",
+            "anchor_words_total": 3
+          },
+          {
+            "id": "wp04_aurora_perf_q_04",
+            "class": "hedge",
+            "bound_claim": "wp04_aurora_perf_u_12",
+            "verbatim_qualifier": "Realistically",
+            "claim_present": true,
+            "marker_present": false,
+            "outcome": "flattened",
+            "matching_claims": 1,
+            "matched_excerpt": "the target is to get the p95 back under 800 milliseconds  the number promised to the account teams ",
+            "anchor_words_total": 6
+          }
+        ]
+      },
+      "narrative": {
+        "session_id": "wp04_aurora_perf",
+        "arm": "narrative",
+        "n_qualifiers": 4,
+        "preserved": 3,
+        "flattened": 1,
+        "absent": 0,
+        "matched": 4,
+        "distortion_rate": 0.25,
+        "loss": 1,
+        "loss_rate": 0.25,
+        "points": 13,
+        "operators": 3,
+        "rows": [
+          {
+            "id": "wp04_aurora_perf_q_01",
+            "class": "hedge",
+            "bound_claim": "wp04_aurora_perf_u_02",
+            "verbatim_qualifier": "correlates with",
+            "claim_present": true,
+            "marker_present": true,
+            "outcome": "preserved",
+            "matching_claims": 1,
+            "matched_excerpt": "the latency spike correlates with the october 5 release  which added the related memory sidebar  before that release p95 was comfortably under one second ",
+            "anchor_words_total": 4
+          },
+          {
+            "id": "wp04_aurora_perf_q_02",
+            "class": "hedge",
+            "bound_claim": "wp04_aurora_perf_u_08",
+            "verbatim_qualifier": "about",
+            "claim_present": true,
+            "marker_present": true,
+            "outcome": "preserved",
+            "matching_claims": 1,
+            "matched_excerpt": "the dashboard serves about forty thousand load requests per day across all customers  with the sidebar firing on most of them ",
+            "anchor_words_total": 6
+          },
+          {
+            "id": "wp04_aurora_perf_q_03",
+            "class": "scope",
+            "bound_claim": "wp04_aurora_perf_u_09",
+            "verbatim_qualifier": "until the perf review signs off",
+            "claim_present": true,
+            "marker_present": true,
+            "outcome": "preserved",
+            "matching_claims": 1,
+            "matched_excerpt": "ship the change behind a flag so p95 can be compared before and after without a full rollout  the flag defaults off until the perf review signs off ",
+            "anchor_words_total": 3
+          },
+          {
+            "id": "wp04_aurora_perf_q_04",
+            "class": "hedge",
+            "bound_claim": "wp04_aurora_perf_u_12",
+            "verbatim_qualifier": "Realistically",
+            "claim_present": true,
+            "marker_present": false,
+            "outcome": "flattened",
+            "matching_claims": 1,
+            "matched_excerpt": "get p95 back under 800 milliseconds   the number promised to the account teams ",
+            "anchor_words_total": 6
+          }
+        ]
+      }
+    },
+    "wp05_retro_writeup": {
+      "raw": {
+        "session_id": "wp05_retro_writeup",
+        "arm": "raw",
+        "n_qualifiers": 3,
+        "preserved": 0,
+        "flattened": 1,
+        "absent": 2,
+        "matched": 1,
+        "distortion_rate": 1.0,
+        "loss": 3,
+        "loss_rate": 1.0,
+        "points": 11,
+        "operators": 8,
+        "rows": [
+          {
+            "id": "wp05_retro_writeup_q_01",
+            "class": "hedge",
+            "bound_claim": "wp05_retro_writeup_u_01",
+            "verbatim_qualifier": "about",
+            "claim_present": false,
+            "marker_present": false,
+            "outcome": "absent",
+            "matching_claims": 0,
+            "matched_excerpt": "",
+            "anchor_words_total": 7
+          },
+          {
+            "id": "wp05_retro_writeup_q_02",
+            "class": "stance",
+            "bound_claim": null,
+            "verbatim_qualifier": "they are both good",
+            "claim_present": false,
+            "marker_present": false,
+            "outcome": "absent",
+            "matching_claims": 0,
+            "matched_excerpt": "",
+            "anchor_words_total": 1
+          },
+          {
+            "id": "wp05_retro_writeup_q_03",
+            "class": "stance",
+            "bound_claim": "wp05_retro_writeup_u_13",
+            "verbatim_qualifier": "that was the decision after the August incident",
+            "claim_present": true,
+            "marker_present": false,
+            "outcome": "flattened",
+            "matching_claims": 1,
+            "matched_excerpt": "incident writeups are published company wide with opt out default  policy from august incident ",
+            "anchor_words_total": 5
+          }
+        ]
+      },
+      "narrative": {
+        "session_id": "wp05_retro_writeup",
+        "arm": "narrative",
+        "n_qualifiers": 3,
+        "preserved": 2,
+        "flattened": 0,
+        "absent": 1,
+        "matched": 2,
+        "distortion_rate": 0.0,
+        "loss": 1,
+        "loss_rate": 0.3333333333333333,
+        "points": 18,
+        "operators": 7,
+        "rows": [
+          {
+            "id": "wp05_retro_writeup_q_01",
+            "class": "hedge",
+            "bound_claim": "wp05_retro_writeup_u_01",
+            "verbatim_qualifier": "about",
+            "claim_present": true,
+            "marker_present": true,
+            "outcome": "preserved",
+            "matching_claims": 3,
+            "matched_excerpt": "the bluepeak search outage ran from 9 12am to 12 53pm on 2026 10 05  about three hours and forty one minutes of degraded search  \n  src   the config was rolled back to the previous partition at 12 40pm and traffic normal",
+            "anchor_words_total": 7
+          },
+          {
+            "id": "wp05_retro_writeup_q_02",
+            "class": "stance",
+            "bound_claim": null,
+            "verbatim_qualifier": "they are both good",
+            "claim_present": false,
+            "marker_present": false,
+            "outcome": "absent",
+            "matching_claims": 0,
+            "matched_excerpt": "",
+            "anchor_words_total": 1
+          },
+          {
+            "id": "wp05_retro_writeup_q_03",
+            "class": "stance",
+            "bound_claim": "wp05_retro_writeup_u_13",
+            "verbatim_qualifier": "that was the decision after the August incident",
+            "claim_present": true,
+            "marker_present": true,
+            "outcome": "preserved",
+            "matching_claims": 1,
+            "matched_excerpt": "the retro will be published company wide  incident writeups are opt out by default  the decision made after the august incident ",
+            "anchor_words_total": 5
+          }
+        ]
+      }
+    },
+    "wp06_quarry_rollout": {
+      "raw": {
+        "session_id": "wp06_quarry_rollout",
+        "arm": "raw",
+        "n_qualifiers": 4,
+        "preserved": 0,
+        "flattened": 0,
+        "absent": 4,
+        "matched": 0,
+        "distortion_rate": null,
+        "loss": 4,
+        "loss_rate": 1.0,
+        "points": 4,
+        "operators": 5,
+        "rows": [
+          {
+            "id": "wp06_quarry_rollout_q_01",
+            "class": "hedge",
+            "bound_claim": null,
+            "verbatim_qualifier": "That is my read too",
+            "claim_present": false,
+            "marker_present": false,
+            "outcome": "absent",
+            "matching_claims": 0,
+            "matched_excerpt": "",
+            "anchor_words_total": 1
+          },
+          {
+            "id": "wp06_quarry_rollout_q_02",
+            "class": "stance",
+            "bound_claim": "wp06_quarry_rollout_u_06",
+            "verbatim_qualifier": "tempting",
+            "claim_present": false,
+            "marker_present": false,
+            "outcome": "absent",
+            "matching_claims": 0,
+            "matched_excerpt": "",
+            "anchor_words_total": 7
+          },
+          {
+            "id": "wp06_quarry_rollout_q_03",
+            "class": "stance",
+            "bound_claim": "wp06_quarry_rollout_u_07",
+            "verbatim_qualifier": "I would rather",
+            "claim_present": false,
+            "marker_present": false,
+            "outcome": "absent",
+            "matching_claims": 0,
+            "matched_excerpt": "",
+            "anchor_words_total": 4
+          },
+          {
+            "id": "wp06_quarry_rollout_q_04",
+            "class": "stance",
+            "bound_claim": null,
+            "verbatim_qualifier": "as agreed",
+            "claim_present": false,
+            "marker_present": false,
+            "outcome": "absent",
+            "matching_claims": 0,
+            "matched_excerpt": "",
+            "anchor_words_total": 1
+          }
+        ]
+      },
+      "narrative": {
+        "session_id": "wp06_quarry_rollout",
+        "arm": "narrative",
+        "n_qualifiers": 4,
+        "preserved": 2,
+        "flattened": 0,
+        "absent": 2,
+        "matched": 2,
+        "distortion_rate": 0.0,
+        "loss": 2,
+        "loss_rate": 0.5,
+        "points": 12,
+        "operators": 3,
+        "rows": [
+          {
+            "id": "wp06_quarry_rollout_q_01",
+            "class": "hedge",
+            "bound_claim": null,
+            "verbatim_qualifier": "That is my read too",
+            "claim_present": false,
+            "marker_present": false,
+            "outcome": "absent",
+            "matching_claims": 0,
+            "matched_excerpt": "",
+            "anchor_words_total": 1
+          },
+          {
+            "id": "wp06_quarry_rollout_q_02",
+            "class": "stance",
+            "bound_claim": "wp06_quarry_rollout_u_06",
+            "verbatim_qualifier": "tempting",
+            "claim_present": true,
+            "marker_present": true,
+            "outcome": "preserved",
+            "matching_claims": 2,
+            "matched_excerpt": "all at once buys the shortest exposure window  one day vs  one week of canary watching  per shard buys a smaller blast radius per flip  \n  src   the chaos run supports the claim that the duplicate processing race cannot ",
+            "anchor_words_total": 7
+          },
+          {
+            "id": "wp06_quarry_rollout_q_03",
+            "class": "stance",
+            "bound_claim": "wp06_quarry_rollout_u_07",
+            "verbatim_qualifier": "I would rather",
+            "claim_present": false,
+            "marker_present": false,
+            "outcome": "absent",
+            "matching_claims": 0,
+            "matched_excerpt": "",
+            "anchor_words_total": 4
+          },
+          {
+            "id": "wp06_quarry_rollout_q_04",
+            "class": "stance",
+            "bound_claim": null,
+            "verbatim_qualifier": "as agreed",
+            "claim_present": true,
+            "marker_present": true,
+            "outcome": "preserved",
+            "matching_claims": 1,
+            "matched_excerpt": "the rollout cutoff stays 2026 09 30 as agreed ",
+            "anchor_words_total": 1
+          }
+        ]
+      }
+    },
+    "wp07_bluepeak_followup": {
+      "raw": {
+        "session_id": "wp07_bluepeak_followup",
+        "arm": "raw",
+        "n_qualifiers": 3,
+        "preserved": 0,
+        "flattened": 1,
+        "absent": 2,
+        "matched": 1,
+        "distortion_rate": 1.0,
+        "loss": 3,
+        "loss_rate": 1.0,
+        "points": 10,
+        "operators": 4,
+        "rows": [
+          {
+            "id": "wp07_bluepeak_followup_q_01",
+            "class": "hedge",
+            "bound_claim": "wp07_bluepeak_followup_u_01",
+            "verbatim_qualifier": "about",
+            "claim_present": false,
+            "marker_present": false,
+            "outcome": "absent",
+            "matching_claims": 0,
+            "matched_excerpt": "",
+            "anchor_words_total": 7
+          },
+          {
+            "id": "wp07_bluepeak_followup_q_02",
+            "class": "hedge",
+            "bound_claim": null,
+            "verbatim_qualifier": "My first hypothesis is",
+            "claim_present": false,
+            "marker_present": false,
+            "outcome": "absent",
+            "matching_claims": 0,
+            "matched_excerpt": "",
+            "anchor_words_total": 2
+          },
+          {
+            "id": "wp07_bluepeak_followup_q_03",
+            "class": "stance",
+            "bound_claim": "wp07_bluepeak_followup_u_07",
+            "verbatim_qualifier": "I would size",
+            "claim_present": true,
+            "marker_present": false,
+            "outcome": "flattened",
+            "matching_claims": 2,
+            "matched_excerpt": "size the grace to thirty seconds and log any expiry that lands inside it  \n  src   size the grace to thirty seconds and log any expiry that lands inside it   dst   clock skew between regions can make lease expiry unsafe ",
+            "anchor_words_total": 4
+          }
+        ]
+      },
+      "narrative": {
+        "session_id": "wp07_bluepeak_followup",
+        "arm": "narrative",
+        "n_qualifiers": 3,
+        "preserved": 2,
+        "flattened": 0,
+        "absent": 1,
+        "matched": 2,
+        "distortion_rate": 0.0,
+        "loss": 1,
+        "loss_rate": 0.3333333333333333,
+        "points": 19,
+        "operators": 2,
+        "rows": [
+          {
+            "id": "wp07_bluepeak_followup_q_01",
+            "class": "hedge",
+            "bound_claim": "wp07_bluepeak_followup_u_01",
+            "verbatim_qualifier": "about",
+            "claim_present": true,
+            "marker_present": true,
+            "outcome": "preserved",
+            "matching_claims": 1,
+            "matched_excerpt": "duplicate claims appeared on the hydrate queue in the bluepeak region for about six minutes overnight",
+            "anchor_words_total": 7
+          },
+          {
+            "id": "wp07_bluepeak_followup_q_02",
+            "class": "hedge",
+            "bound_claim": null,
+            "verbatim_qualifier": "My first hypothesis is",
+            "claim_present": false,
+            "marker_present": false,
+            "outcome": "absent",
+            "matching_claims": 0,
+            "matched_excerpt": "",
+            "anchor_words_total": 2
+          },
+          {
+            "id": "wp07_bluepeak_followup_q_03",
+            "class": "stance",
+            "bound_claim": "wp07_bluepeak_followup_u_07",
+            "verbatim_qualifier": "I would size",
+            "claim_present": true,
+            "marker_present": true,
+            "outcome": "preserved",
+            "matching_claims": 1,
+            "matched_excerpt": "the grace window is sized to thirty seconds  chosen against the worst observed inter region drift of eleven seconds",
+            "anchor_words_total": 4
+          }
+        ]
+      }
+    }
+  }
+}

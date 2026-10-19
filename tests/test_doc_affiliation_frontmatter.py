@@ -159,3 +159,23 @@ def test_architecture_changelogs_do_not_assert_the_ontology_owner_gate() -> None
         "gate, which was never established for it and contradicts a changelog's "
         "purpose: " + ", ".join(offenders)
     )
+
+
+def test_the_e1_e2_evidence_bundle_declares_its_affiliation() -> None:
+    """#9110 review P2: the evidence bundle landed with no frontmatter at all.
+
+    ``docs/evidence/7950-capstone/README.md`` — the bundle this one copies — carries
+    the full document-conventions block, and AGENTS.md's Documentation Filing
+    Protocol requires it of every ``docs/`` file. The epic/issue affiliation is
+    exactly the metadata an evidence artifact exists to carry.
+
+    Non-vacuity: at the pre-fix tree ``E1-E2.md`` opens at ``# E1 + E2 on one run``,
+    so this reds on it.
+    """
+    bundle = ROOT / "docs/evidence/7949-capstone/E1-E2.md"
+    assert bundle.exists(), "the E1+E2 evidence bundle moved — re-point this guard"
+    missing = _missing(bundle)
+    assert not missing, (
+        f"docs/evidence/7949-capstone/E1-E2.md must declare {missing} — the "
+        "AGENTS.md doc-filing rule and the convention of the bundle it copies."
+    )

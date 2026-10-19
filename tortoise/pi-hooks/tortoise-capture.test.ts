@@ -38,6 +38,8 @@ import {
   RETRY_MAX_MS,
   FLUSH_MAX_ATTEMPTS,
   FLUSH_MAX_CHAIN,
+  SPOOL_MAX_ENTRIES,
+  SPOOL_MAX_TOTAL_BYTES,
   SPOOL_STATUS_FILE,
   TRUNCATION_SENTINEL,
   TURN_MAX_CHARS,
@@ -3152,4 +3154,23 @@ test("#2100: a bare 402 with no machine-readable code is still a quota block", a
   const recorded = readCaptureStatus(spool);
   assert.equal(recorded?.state, "blocked");
   assert.equal(recorded?.status, 402);
+});
+
+test("#2100: the SHIPPED ceilings are finite and identical on both legs", () => {
+  // The drop-oldest test above supplies its OWN bounds, so both shipped
+  // constants could become Infinity and every suite would stay green — the
+  // mechanism pinned, the BOUND unpinned. The two legs share one spool
+  // directory, so they must also agree on the numbers: a divergence would evict
+  // different captures depending on which harness wrote last, and a test on the
+  // other leg (`tests/test_capture_spool.py`, which imports these two values
+  // through a `node --experimental-strip-types` driver) pins the same pair.
+  //
+  // The values are deliberately NOT lowered to the size of the measured
+  // incident (#2100): a blocked box's captures are the user's data, and
+  // evicting them to make a count look better destroys exactly what the retry
+  // policy exists to keep. The defect was the INLINE flush, not the ceiling.
+  //
+  // MUTATION THAT REDS THIS: raise either ceiling here only.
+  assert.equal(SPOOL_MAX_ENTRIES, 1000);
+  assert.equal(SPOOL_MAX_TOTAL_BYTES, 256 * 1024 * 1024);
 });

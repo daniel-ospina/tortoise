@@ -60,8 +60,14 @@ test('#2577: dialogFocus exports the containment helpers', () => {
 })
 
 test('#2577: all four dialogs wrap Tab/Shift+Tab via containTabFocus', () => {
-  assert.equal(count(mainJsx, 'containTabFocus(e.currentTarget'), 3,
-    'create-team + reveal-key + configured-packs must each call containTabFocus on Tab')
+  // #8670 added the remainder of the family (captured-session delete, key-create,
+  // graph delete, integration coming-soon), so this is the family TOTAL in
+  // main.jsx: #2577's three + #2728's packs dialog + those four. The per-surface
+  // pins for the remainder live in dialogContainmentRemainderTripwire.test.js —
+  // this count is the tripwire that a new aria-modal call site cannot land
+  // unwired without reddening a test.
+  assert.equal(count(mainJsx, 'containTabFocus(e.currentTarget'), 7,
+    'create-team + reveal-key + configured-packs + the four #8670 surfaces must each call containTabFocus on Tab')
   // anchored on each dialog's own identity, not on attribute adjacency: a new
   // attribute must not be able to red this wiring pin
   assert.ok(mainJsx.includes('ref={createTeamDialogRef}'), 'create-team inert ref present')
@@ -100,7 +106,13 @@ test('#2577: all four dialogs wrap Tab/Shift+Tab via containTabFocus', () => {
 })
 
 test('#2577: all four dialogs make the background inert while open, cleanup-guarded', () => {
-  assert.equal(count(mainJsx, 'applyBackgroundInert(el, document)'), 3)
+  // Family total (see the Tab count above): #2577's three + #2728's packs dialog
+  // + the four #8670 surfaces in this file's JSX … plus the TWO #8670 dialogs
+  // whose card lives in a hook-free module (githubDisconnect.js /
+  // accountDeletion.js): their inert effect is the parent's, so it lands here.
+  // Tab containment for those two is the module's own half and is pinned by
+  // dialogContainmentRemainderTripwire.test.js.
+  assert.equal(count(mainJsx, 'applyBackgroundInert(el, document)'), 9)
   assert.equal(count(profileJsx, 'applyBackgroundInert(el, document)'), 1)
   // each effect is guarded on a real document (node/SSR) and returns a
   // cleanup — a missing cleanup leaves the page inert forever

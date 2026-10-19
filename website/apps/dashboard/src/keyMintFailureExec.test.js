@@ -399,10 +399,17 @@ function dismissEnv(newKey, keyCopied, confirmReturn) {
   const closed = []
   const prompts = []
   const fed = []
+  // #8670: `dismissKeyModal` now owns the containment close path, so the two
+  // refs it releases/restores are stub deps. `restored` records that the close
+  // still hands focus back after releasing the inert background.
+  const restored = []
   const deps = {
     newKey,
     keyCopied,
     revealablePlaintext,
+    keyModalInertRef: { current: null },
+    keyModalRestoreRef: { current: null },
+    restoreFocus: (ref) => { restored.push(ref) },
     window: { confirm: (msg) => { prompts.push(msg); return confirmReturn } },
     setWizardDurableKey: (v) => fed.push(v),
     setKeyModalOpen: (v) => closed.push(v),
@@ -412,7 +419,7 @@ function dismissEnv(newKey, keyCopied, confirmReturn) {
     setKeyCopyFailed: () => {},
     setKeyModalCapNotice: () => {},
   }
-  return { closed, prompts, fed, deps, confirmed: () => prompts.length, dismissKeyModal: build(deps, ['function dismissKeyModal']).dismissKeyModal }
+  return { closed, prompts, fed, restored, deps, confirmed: () => prompts.length, dismissKeyModal: build(deps, ['function dismissKeyModal']).dismissKeyModal }
 }
 
 test('#4330: Done without a copy cannot silently destroy a shown-once key', () => {
@@ -431,6 +438,10 @@ test('#4330: Done without a copy cannot silently destroy a shown-once key', () =
   const accepted = dismissEnv('tt_live_key', false, true)
   accepted.dismissKeyModal()
   assert.deepEqual(accepted.closed, [false], 'a confirmed dismiss closes the modal')
+  // #8670: the dismiss is also the containment close path — it must hand focus
+  // back to the "+ New key" opener (#2392), which the inert wiring made
+  // necessary rather than optional (the card now takes focus on open).
+  assert.equal(accepted.restored.length, 1, 'a confirmed dismiss restores focus to the opener')
 
   const alreadyCopied = dismissEnv('tt_live_key', true, false)
   alreadyCopied.dismissKeyModal()
