@@ -28686,6 +28686,16 @@ class TortoiseSDK:
         mutation (``PointPromoted`` / ``Dedupe*`` / ``create_operator``), where
         a refusal could only arrive after the node was already written and
         would split the journal from the cache.
+
+        ⛔ THE MIRROR SHAPE, stated because ``graph=`` can name a graph other
+        than this SDK's: the TARGET's set decides admission, but ``_emit_event``
+        journals through ``self``. A caller that hands over a FOREIGN
+        projection — no production caller does (``github_indexer`` passes
+        ``sdk._get_proj()``, the internal call passes its own) — can therefore
+        journal a record the JOURNAL OWNER's graph does not approve, which the
+        next ``rebuild_all`` of that graph folds (replay is ungated by design).
+        That was the pre-fix behaviour, so this is not a regression, but gating
+        the write target must not be read as closing the journal side.
         """
         from .pack_state import (
             payload_names_pack,

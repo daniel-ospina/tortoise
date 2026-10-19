@@ -85,10 +85,11 @@ class EventAPI:
         capture that names several kinds must not pay it once per spelling. It
         is not paid at all for a payload the cheap ``kind_named_packs``
         pre-check clears — every ``core:`` kind, and a bare kind no catalog pack
-        declares. ⚠️ An ATTRIBUTABLE bare kind (``eventKind='AgentSession'``,
-        the extractor's own spelling) does NOT clear it: that leg may attribute
-        the bare kind to a pack that declares it, so it pays the read. See
-        #8977.
+        declares (``eventKind='AgentSession'`` is one of those: it clears, so the
+        extractor's default capture pays NO read). ⚠️ A bare kind a pack DOES
+        declare (``eventKind='ruleRevised'``, agent-ops) does not clear it — that
+        leg may attribute the bare kind to the declaring pack, so it pays the
+        read. See #8977.
 
         A graph handle that is bound but UNREADABLE raises (an outage must never
         read as "no packs" and silently widen the gate) — so this adds a graph
