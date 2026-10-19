@@ -530,16 +530,27 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']',
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # #9122/#9197's second writer (`python -m tortoise.session_indexer`).
-    # `_run_indexer` re-sets `TORTOISE_DB_URI` to its CURRENT value purely so
-    # `monkeypatch` has something to restore: `session_indexer.main()` writes
-    # the var DIRECTLY from `--db`, which monkeypatch would otherwise never undo,
-    # leaking a dead endpoint into every module collected after this one. The
-    # set is a no-op value-wise and is NOT a lane flip — the URI that is already
-    # set is the INPUT the explicit `--db` must beat, so the intent is
-    # DELIBERATE_URI. Declared because the census counts every matching line and
-    # cannot tell a restore-recording set from a lane-forcing one.
+    # `_run_indexer` re-sets `TORTOISE_DB_URI` to its OWN CURRENT VALUE — a
+    # self-read identity — purely so `monkeypatch` has an undo entry to
+    # register: `session_indexer.main()` writes the var DIRECTLY
+    # (`tortoise/session_indexer.py:691` and `:714`), which monkeypatch would
+    # never undo, leaking a dead endpoint into every module collected after this
+    # one.
+    #
+    # It flips NO lane here, and this file's intents do not have a category for
+    # that: the fixture stubs `tortoise.sdk.TortoiseSDK` to return the shared
+    # `sdk_with_journal` and calls `_get_proj()` BEFORE `main()`, so the
+    # `--db` value `main()` writes is never read by anything. The row carries
+    # the DELIBERATE_URI label only because the census requires every mutation
+    # line to be declared and has no restoration intent; the `--db`-precedence
+    # assertion lives in the #1349 arm, not here. Do not read it as evidence
+    # that `--db` precedence is pinned in this module.
+    #
+    # The regex pins the CONTINUATION shape (`, <newline>`), so a future
+    # value-bearing `setenv("TORTOISE_DB_URI", <live uri>)` in this growing file
+    # still reds instead of being excused by this entry.
     "test_9079_event_writers_journal.py": [
-        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*$'],
     # The arm's `--db` scoping tests (#1349 isolation): an explicit `--db` must
     # beat a stale `TORTOISE_DB_URI`, so the stale value is set to a DIFFERENT
     # endpoint and then the store's own `_temporary_env_var` proves the scoped
