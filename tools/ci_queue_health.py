@@ -46,10 +46,13 @@ FIVE STATES, DELIBERATELY NOT INTERCHANGEABLE
               ``OK`` (the fail-open the truncation residual of the #9118 review
               names), and not ``PR-STARVED`` either (the wait was not measured).
               WARNED about, never acted on, exit 0 — see the truncation note below.
-              `tools/ci_check_repair.py` deliberately does NOT treat it as a flood
-              (`queue_flood` keys on `FLOOD` alone): an unread window is not a
-              measured flood, and inferring STARVED from it would be the same
-              inference this state exists to refuse.
+              `tools/ci_check_repair.py` deliberately does NOT treat it as
+              starvation (`QueueHealth.starves_pr` is False here): an unread window
+              is not a measured starvation, and inferring STARVED from it would be
+              the same inference this state exists to refuse. `FLOOD` and
+              `PR-STARVED` ARE measured starvation — the same "PR CI is not running"
+              reality, differing only in whether an action is available — so both
+              reach the per-PR report (#9118 review, the late-stage blind spot).
 
 The truncation note, MEASURED rather than assumed (it is what makes
 PR-UNWITNESSED necessary):
@@ -104,19 +107,31 @@ bounds make that safe rather than destructive:
   * **Only a declared-trim-safe workflow is trimmed, and only for the EVENTS
     the allow-list justifies.** ``TRIM_SAFE`` below names the workflows whose
     queued runs a governor may drop; ``TRIM_SAFE_EVENTS`` names, per workflow,
-    the event types that are droppable (an automatic annotation can be
-    re-requested — a ``workflow_dispatch`` run IS the re-request, so cancelling
-    it would cancel the documented recovery). An offender that is not listed —
-    or one listed with no declared events — is REPORTED and not acted on: a
-    governor that cancels any workflow's queued runs could throw away a deploy,
-    a publish or a post-merge validation, which is a worse failure than the
-    flood.
+    the event types that are droppable. Both are narrower than "a reporting
+    workflow", because the justification is a RECOVERABLE loss, not a low-value
+    run:
+      * an ``issue_comment`` run's annotation is re-created by the next comment
+        on that issue — that is the loss this allow-list accepts, and it is the
+        ONLY arm trimmed;
+      * an ``issues`` (issue-BODY) run is NOT droppable: `finding-provenance`
+        fires it once, on `types: [opened]`, a cancelled run posts NOTHING, and
+        no later comment re-gates the body (the comment gate deliberately leaves
+        the issue-level ``provenance-stale`` label alone). Its verdict is
+        therefore unrecoverable, and the dispatch recovery's issue number is not
+        carried in the cancel log;
+      * a ``workflow_dispatch`` run IS the documented recovery, so cancelling it
+        would cancel the replacement.
+    An offender that is not listed — or one listed with no declared events — is
+    REPORTED and not acted on: a governor that cancels any workflow's queued
+    runs could throw away a deploy, a publish or a post-merge validation, which
+    is a worse failure than the flood.
   * **The action is bounded and logged.** One line per cancelled run, a summary
     line, and ``--max-cancel`` caps the blast radius per invocation. Nothing is
     disabled: the issue offers "auto-paused" as the alternative arm, and a
     paused *reporting* gate stops gating findings until something re-enables it
     — a silent fail-open if this tool ever stops running. Cancelling a queued
-    duplicate loses a notification; disabling the gate loses the gate.
+    COMMENT annotation loses one annotation the next comment re-creates;
+    disabling the gate loses the gate.
 
 An UNKNOWN verdict never acts. Neither does ``OK``: the governor only ever
 removes load, and there is no load to remove when the queue is healthy.
@@ -199,6 +214,15 @@ EXIT_FOR = {
     UNKNOWN: EXIT_UNMEASURABLE,
 }
 
+#: The verdicts that name a MEASURED PR starvation: PR work has a queued run that
+#: has waited past the age floor and nothing of it is executing. They differ only
+#: in whether an action is available (FLOOD has a trim-safe offender, PR-STARVED
+#: does not), which is NOT a difference in what the per-PR report is looking at,
+#: so both — and only these two — are threaded into `ci_check_repair`. A verdict
+#: that is NOT in this set (OK, UNKNOWN, PR-UNWITNESSED) must never produce a
+#: per-PR STARVED claim: each of those leaves starvation unmeasured or disproved.
+STARVING_VERDICTS = frozenset({FLOOD, PR_STARVED})
+
 REPO_DEFAULT = "daniel-ospina/tortoise"
 GH_BIN = os.environ.get("GH_BIN") or shutil.which("gh") or "gh"
 
@@ -218,26 +242,34 @@ PR_EVENTS = frozenset({"pull_request", "pull_request_target", "merge_group"})
 
 #: Workflows whose QUEUED runs the governor may trim, each with the loss it
 #: accepts. This is a reviewed allow-list ON PURPOSE: `finding-provenance` is
-#: the measured offender, its verdict is re-derivable on demand
-#: (`gh workflow run finding-provenance.yml -f issue_number=<N>`, documented in
-#: that workflow's own header), and a dropped run costs one un-posted annotation
-#: that the issue's author can re-request. A deploy, a publish, a post-merge
-#: validation or a backup has no such recovery path, so none of them may ever be
-#: trimmed — an offender this tool cannot safely trim is REPORTED instead.
+#: the measured offender, and a dropped COMMENT run costs one un-posted comment
+#: annotation that the next comment on that issue re-creates. A deploy, a publish,
+#: a post-merge validation or a backup has no such recovery path, so none of them
+#: may ever be trimmed — an offender this tool cannot safely trim is REPORTED
+#: instead.
 TRIM_SAFE = frozenset({"finding-provenance"})
 
 #: The EVENTS whose queued runs the allow-list above actually justifies trimming,
 #: declared PER WORKFLOW so the scope is argued where the workflow is named
-#: (ISSUE 2 of the #9118 review). `finding-provenance` fires on `issues`,
-#: `issue_comment` and `workflow_dispatch`: the first two are automatic
-#: annotations whose loss the author can undo by commenting again, whereas
-#: `workflow_dispatch` IS that re-request — a deliberate human action — and this
-#: tool PRINTS it as the recovery (`gh workflow run finding-provenance.yml -f
-#: issue_number=<N>`), so trimming it would cancel the replacement. A workflow in
-#: `TRIM_SAFE` with no entry here trims NOTHING: an undeclared scope fails closed
-#: rather than defaulting to "every non-PR event".
+#: (ISSUE 2 of the #9118 review), and narrowed to the arms whose loss is RECOVERABLE
+#: (the #9118 P1: "duplicate" is not the property that makes a run trimmable).
+#: `finding-provenance` fires on `issues`, `issue_comment` and `workflow_dispatch`:
+#:   * `issue_comment` — the annotation is re-created by the next comment on that
+#:     issue, so a trimmed run costs one comment annotation. TRIMMABLE.
+#:   * `issues` — the issue-BODY gate, fired only on `types: [opened]`; it annotates
+#:     the ISSUE and owns the issue-level `provenance-stale` label, and the comment
+#:     gate deliberately does not touch that label. A cancelled run posts NOTHING,
+#:     so no comment re-creates it: the loss is a gate verdict that never lands, and
+#:     the only recovery is a `workflow_dispatch` whose `issue_number` the cancel
+#:     log does not carry. NOT trimmable, even though these runs are the OLDEST in a
+#:     comment-driven flood and would be trimmed first by created_at alone.
+#:   * `workflow_dispatch` — that IS the documented recovery (`gh workflow run
+#:     finding-provenance.yml -f issue_number=<N>`), so trimming it would cancel the
+#:     replacement. NOT trimmable.
+#: A workflow in `TRIM_SAFE` with no entry here trims NOTHING: an undeclared scope
+#: fails closed rather than defaulting to "every non-PR event".
 TRIM_SAFE_EVENTS: dict[str, frozenset[str]] = {
-    "finding-provenance": frozenset({"issues", "issue_comment"}),
+    "finding-provenance": frozenset({"issue_comment"}),
 }
 
 #: Feed reads stop here. The queue is bounded by GitHub's own concurrency
@@ -329,6 +361,19 @@ class QueueHealth:
             f"CI: {self.verdict}(queued={self.queued_total}, "
             f"pr_running={self.pr_running}, pr_queued={self.pr_queued})"
         )
+
+    @property
+    def starves_pr(self) -> bool:
+        """True when this reading names MEASURED PR starvation (FLOOD or PR-STARVED).
+
+        The single seam `tools/ci_check_repair.py` keys its per-PR STARVED state on,
+        so the two instruments cannot disagree about whether PR CI is running: both
+        verdicts witness a queued PR run past the age floor with nothing executing.
+        They differ only in whether the governor has something to trim, which is not
+        what the per-PR report is asking. Everything else (OK, UNKNOWN,
+        PR-UNWITNESSED) leaves starvation unmeasured or disproved and is False.
+        """
+        return self.verdict in STARVING_VERDICTS
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -589,9 +634,11 @@ def classify_queue(
     if offender is not None and offender in TRIM_SAFE and allowed_events:
         # OLDEST first, keep the NEWEST `keep` CANDIDATE runs, cap at `max_cancel`.
         # A candidate is a queued run of the named offender whose EVENT the
-        # allow-list justifies: never a PR event (that is the priority), and never
+        # allow-list justifies: never a PR event (that is the priority), never
         # `workflow_dispatch` (that IS the documented recovery — trimming it would
-        # cancel the replacement the tool itself prescribes).
+        # cancel the replacement the tool itself prescribes), and never `issues`
+        # (the issue-BODY gate fires once per issue, and a cancelled run posts
+        # nothing that a later comment re-creates — an unrecoverable verdict).
         offender_runs = sorted(
             (run for run in queued if run.name == offender and run.event in allowed_events),
             key=lambda run: (run.created_at, run.id),
@@ -859,8 +906,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(
                 "  → PR CI is NOT slow, it is NOT RUNNING: the required "
                 "`python-ci-gate` cannot start without a slot. Re-run this tool with "
-                "--apply to unjam a trim-safe offender; a queued run that is trimmed "
-                "can be re-requested with "
+                "--apply to unjam a trim-safe offender. Only its `issue_comment` runs "
+                "are trimmed, and a trimmed comment annotation is re-created by the "
+                "next comment on that issue; the manual equivalent is "
                 "`gh workflow run finding-provenance.yml -f issue_number=<N>`."
             )
 

@@ -38,12 +38,13 @@ from tools import ci_queue_health as Q
 NOW = datetime(2026, 10, 19, 3, 30, 0, tzinfo=UTC)
 
 
-def run(rid, name, event="issues", age_seconds=600, created_at=None):
+def run(rid, name, event="issue_comment", age_seconds=600, created_at=None):
     stamp = created_at or (NOW - timedelta(seconds=age_seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
     return Q.QueuedRun(id=rid, name=name, event=event, created_at=stamp)
 
 
-def flood_queued(count=12, name="finding-provenance", age_seconds=600, start=1000, event="issues"):
+def flood_queued(count=12, name="finding-provenance", age_seconds=600, start=1000,
+                 event="issue_comment"):
     """`count` queued runs of one workflow — the #9115 shape.
 
     Ids ascend with CREATION TIME (the oldest is `start`, the newest is
@@ -226,18 +227,66 @@ def test_only_declared_trim_safe_workflows_are_in_the_allow_list():
 
 
 def test_the_trim_SCOPE_is_declared_per_workflow():
-    """An event the allow-list does not justify is not a candidate (ISSUE 2, #9118).
+    """Only the RECOVERABLE arm is a candidate (ISSUE 2, then P1, of the #9118 review).
 
     `finding-provenance` fires on `issues`, `issue_comment` and `workflow_dispatch`.
-    The first two are automatic annotations the author can re-request by commenting
-    again; `workflow_dispatch` IS that re-request, and it is the exact command this
-    tool prints as the recovery — so it must never be trimmed.
+    `issue_comment` is the ONLY arm whose loss a later event re-creates: the next
+    comment on that issue re-annotates it. The issue-BODY gate runs once
+    (`types: [opened]`), a cancelled run posts nothing, and the comment gate
+    deliberately does not touch the issue-level `provenance-stale` label — so a
+    trimmed body run is a gate verdict that never lands, not a duplicate. And
+    `workflow_dispatch` IS the recovery command this tool prints.
     """
     assert dict(Q.TRIM_SAFE_EVENTS) == {
-        "finding-provenance": frozenset({"issues", "issue_comment"})
+        "finding-provenance": frozenset({"issue_comment"})
     }
-    assert "workflow_dispatch" not in Q.TRIM_SAFE_EVENTS["finding-provenance"]
+    for excluded in ("issues", "workflow_dispatch"):
+        assert excluded not in Q.TRIM_SAFE_EVENTS["finding-provenance"]
     assert set(Q.TRIM_SAFE_EVENTS) <= set(Q.TRIM_SAFE)
+
+
+def test_governor_never_trims_an_issue_body_gate_run():
+    """P1 of the #9118 final review: the body arm's loss is NOT recoverable.
+
+    The body gate fires once per issue and annotates the ISSUE (owning the
+    issue-level `provenance-stale` label); the comment gate explicitly leaves that
+    label alone, so no later comment re-creates a cancelled body verdict, and the
+    dispatch recovery's issue number is not in the cancel log. In a comment-driven
+    flood the `issues` runs are the OLDEST entries of the pooled candidate list, so
+    a name-keyed predicate trimmed them FIRST — preferentially dropping the one
+    arm whose loss cannot be undone. The `issue_comment` runs must be trimmed
+    instead, and the reason must say the body runs were left alone.
+    """
+    body = flood_queued(12, event="issues", start=500, age_seconds=900)   # oldest
+    comment = flood_queued(12, event="issue_comment", start=1000, age_seconds=300)
+    health = classify(body + comment + starving_pr_runs(1), keep=5)
+    assert health.verdict == Q.FLOOD
+    assert health.trimmable
+    assert all(r.event == "issue_comment" for r in health.trimmable)
+    assert not ({r.id for r in health.trimmable} & {r.id for r in body})
+    assert any("NOT trimmed" in reason and "issues" in reason
+               for reason in health.reasons)
+
+
+def test_the_starvation_seam_is_the_two_measured_verdicts_only():
+    """`starves_pr` is the ONE vocabulary the two instruments share (#9118).
+
+    FLOOD and PR-STARVED both witness a queued PR run past the age floor with
+    nothing executing; they differ only in whether a trim-safe offender exists.
+    OK, UNKNOWN and PR-UNWITNESSED do not witness it, and must never be threaded
+    into `ci_check_repair` as starvation.
+    """
+    assert frozenset({Q.FLOOD, Q.PR_STARVED}) == Q.STARVING_VERDICTS
+    assert classify(flood_queued(12) + starving_pr_runs(1)).starves_pr is True
+    assert classify(starving_pr_runs(20) + flood_queued(6)).starves_pr is True
+    assert classify(flood_queued(4)).starves_pr is False
+    assert classify(flood_queued(4), truncated=True).starves_pr is False
+    unknown = Q.QueueHealth(
+        verdict=Q.UNKNOWN, queued_total=0, in_progress_total=0,
+        dominant_workflow=None, dominant_queued=0, pr_running=0, pr_queued=0,
+        oldest_pr_queued_age_seconds=None,
+    )
+    assert unknown.starves_pr is False
 
 
 def test_governor_never_trims_the_workflow_dispatch_recovery_run():
