@@ -9,12 +9,12 @@ writes that still never met a door, and this file pins each of them:
    bare ``kind`` property label-agnostically, and ``:Pipeline`` stores its
    namespaced pipeline KEY there (``pipeline._write_pipeline``), so
    materialising a ``venture:deal`` override granted the ``venture`` pack:
-   measured at HEAD, ``['dev']`` → ``['dev', 'venture']``.
+   measured at the merge base (pre-fix), ``['dev']`` → ``['dev', 'venture']``.
 2. **A connector's bare ``proj.apply`` fold.** ``FalkorProjection.apply``
    refuses a direct fold only on a JOURNAL-BACKED projection (§17.1), where the
    cache is a derived image; on a journal-less projection the cache IS the
-   store and the fold is a real write — measured at HEAD, github's
-   ``object_kind='pm:issue'`` widened a ``dev``-only graph with ``pm``.
+   store and the fold is a real write — measured at the merge base (pre-fix),
+   github's ``object_kind='pm:issue'`` widened a ``dev``-only graph with ``pm``.
 3. **The deliberately-ungated re-typing writers.** ``migrate_kinds`` (raw
    Cypher over a live graph) and ``retype`` (a dump, offline) widen by DESIGN;
    #9068 requires that to be STATED rather than implied, so the statement is

@@ -465,8 +465,14 @@ property:** the SDK entity funnel (`_create_entity`), the point door
 `sdk._apply_and_journal` (the door the **GitHub indexer** writes through —
 `issue_to_object` carries `object_kind='pm:issue'`, so an ungated chokepoint
 let the polling entry point install `pm` on a `dev`-only graph), `sdk._doc_write`,
-the conversation miner's emitter (`mining._emit_event`), `link_source_to_entity`,
-and the REST object/subject/commit doors. The refusal
+`sdk.ingest_corpus` (its `eventKind` keyword on a raw-Cypher writer),
+`sdk._journal_event_raw_write` (the raw `:Event` seam, #9197),
+the conversation miner's emitter (`mining.ConversationMiner._emit_event`),
+`link_source_to_entity`,
+and the REST object/subject/commit doors. That list is the human-readable
+summary; the EXECUTABLE inventory — and the one to read before adding a door —
+is `tests/test_9068_pack_gate_residuals.py::_DOORS` (19 doors at this head),
+which a new gate call site reds rather than silently widening. The refusal
 is an **input constraint**: a *namespaced* kind may only use a namespace the
 resolved set already holds, and an unapproved spelling is REJECTED (422 /
 `UnapprovedKindNamespace`), never silently normalised — a rewrite would store a
@@ -520,6 +526,16 @@ grant the `venture` pack; the fix is in the reader, not in the pipeline writer
 (the key is a real pipeline name, so gating that writer would start refusing
 legitimate pipeline edits).
 
+**Decision (relayed to #9068):** this is **Option A's READER half** — the
+mining leg stops treating the slot as ontology-owned. The other half of A
+(dropping the duplicate `p.kind` write) is deliberately NOT taken here: it
+cannot pay the upgrade cost below, because every already-stored `:Pipeline` row
+carries `kind` and the scoped reader ignores it whether or not new rows keep
+writing it. The two halves have identical upgrade cost, so the write-drop is a
+pipeline-model clean-up (removing a duplicate of `pipelineKey`), not a security
+control — and nothing in the repo reads `:Pipeline.kind`. `pipeline._write_pipeline`
+now says so at the write site.
+
 ⚠️ **Upgrade effect, stated because it NARROWS a back-compat union**
 (`#2714` indicator 2): a graph that holds `:PackInstall` records and whose ONLY
 kind-bearing node for a namespace is a `:Pipeline` row loses that namespace from
@@ -544,7 +560,7 @@ fixed behaviour), not claimed closed here.
 | `rebuild_all` / `recover_from_log` (replay) | The record came FROM the journal. Refusing at replay would make a committed record unfoldable — strictly worse than the widening. |
 | `migrate_kinds.py` (raw Cypher over a live graph) | An **operator act**: a deliberate re-typing of the graph's own historical rows, with every target spelling a reviewed literal in the file. It is the sanctioned way a pack namespace enters data written *before* the pack existed, so widening the mined set is the point of the run — a gate would refuse the very row the migration exists to rewrite. |
 | `retype.py` / `tools/retype_snapshot.py` | Offline: they transform a dump and never touch a live graph. They enforce the target kind against the **declared vocabulary** instead (`RetypeError`). |
-| `hosted_api._seed_demo_graph` | Raw Cypher for the sample content, but every kind it writes is a **bare** literal from the reviewed `_DEMO_*` tables (`observation`, `statement`, `event`, `workflow`) plus the `AgentSession` event kind. A bare kind names no pack, so it cannot widen the approved set. |
+| `hosted_api._seed_demo_graph` | Raw Cypher for the sample content, but every kind it writes is a **bare** `pointKind` literal from the reviewed `_DEMO_*` tables (`observation`, `statement`, `event`, `workflow`). A bare `pointKind` names no pack, so it cannot widen the approved set. (Note the asymmetry: a bare **`eventKind`** IS attributable, `_ATTRIBUTABLE_BARE_KIND_KEYS` — this writer sets none.) |
 | `sdk._emit_event` (post-mutation payload append) | The pre-write doors are gated instead. The mutations it describes (`PointPromoted`, `Dedupe*`, `create_operator`) have already written their node, so a refusal at the append could only split the journal from the cache. NOT to be confused with `mining.ConversationMiner._emit_event`, which builds its own `EventRecorded` envelope and IS gated before its append (#5475/#8982). |
 | `FalkorProjection.apply` on a journal-less projection | The #9068 gate sits at the five connector CALL SITES, not at this sink (see the per-call-site caveat above). A third-party connector folding directly is still ungated, and that residual is pinned as an XFAIL rather than declared closed. |
 | `pipeline.py`'s `SET p.kind = <pipeline_key>` | The value is a real namespaced **pipeline key** (`venture:deal`), not a pack kind — gating the writer would start refusing legitimate pipeline edits. What had to change was the READER: the mining leg no longer treats a bare `kind` on `:Pipeline`/`:Graph` as an ontology kind (#9068, above), so this write stays ungated and no longer widens the approved set. |

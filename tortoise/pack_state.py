@@ -593,10 +593,13 @@ _ATTRIBUTABLE_BARE_KIND_KEYS: tuple[str, ...] = ("eventKind",)
 #: ``actionKind``), so a value under one of them can only have been written as
 #: an ontology kind. The bare ``kind`` key is different: ``kind`` is a generic
 #: classification slot that OTHER models in the same graph own for their own
-#: identity, and two of them write a NAMESPACED string into it —
-#: ``:Pipeline`` (``pipeline._write_pipeline`` stores the pipeline KEY, and
-#: pipeline keys are namespaced by convention: ``venture:deal``) and
-#: ``:Graph`` (``kind='default'``).
+#: identity, and each owns it differently: ``:Pipeline`` writes a NAMESPACED
+#: string into it (``pipeline._write_pipeline`` stores the pipeline KEY, and
+#: pipeline keys are namespaced by convention: ``venture:deal``), while
+#: ``:Graph`` owns the slot with a package-independent value of its own
+#: (``'default'`` / ``'custom'``, e.g. ``sdk._graph_create`` and
+#: ``hosted_api``). Either way the slot is not ontology-owned, so a mining pass
+#: must not read an ontology kind out of it on those labels.
 #:
 #: Reading ``kind`` off those labels CONFLATED a pipeline key with an ontology
 #: kind: materialising a graph override for ``venture:deal`` put ``venture``

@@ -215,10 +215,11 @@ def compile_vocab(packs_dir: Path | str | None = None,
     snake-spelling leg of the ``create_*`` props screen (the camel-only screen
     missed ``props={"object_kind": …}``) and the connector folds (``github`` /
     ``linear`` / ``slack`` ``ingest`` + both webhook arms, gated as a BATCH
-    before the first ``apply``). #9068 also RE-PINS two doors that already
-    refused at #8982 (``sdk._apply_and_journal`` and
-    ``sdk.link_source_to_entity``'s ``sourceKind`` leg) as regressions, rather
-    than newly closing them.
+    before the first ``apply``). #9068 also RE-PINS five doors as regressions
+    rather than newly closing them — the three #8982 seams
+    (``sdk._apply_and_journal``, ``api.EventAPI._emit`` and
+    ``sdk.link_source_to_entity``'s ``sourceKind`` leg) and the two #8968
+    UPDATE doors (``update_point`` / ``_update_entity``).
     ⛔ That is NOT every write into a mined property — do not read it as one.
     Still outside it (#9068 carries the measurements): ``entities[].kind`` has no
     Layer-1 membership test (#5202, open); replay/``rebuild_all`` is

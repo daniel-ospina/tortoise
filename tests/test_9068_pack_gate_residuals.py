@@ -116,14 +116,18 @@ read the set before, perform ONE write, read it after.
 
 **Widening at HEAD, pinned here** (nothing is fixing these):
 
-1. **A bare fold on a journal-less projection** — `connectors/github.py` folds
-   records with ``proj.apply(...)`` (kind ``pm:issue`` from `github_map`), and
+1. **A bare fold STRAIGHT into a journal-less projection** — a THIRD-PARTY
+   connector, or any caller outside `tortoise/connectors/`, can still fold with
+   ``proj.apply(...)`` (kind ``pm:issue`` from `github_map`), and
    `FalkorProjection.apply` refuses a direct fold only when ``_journal_backed``
    — correctly, since with no journal there is no truth store for the cache to
    be ahead of. So on a journal-less projection the kind is persisted ungated.
-   The fix must reuse `pack_state`'s ONE read core rather than re-deriving
-   "records ∪ data" a second time (that re-derivation is the drift
-   `graph_installed_namespaces` exists to prevent). **XFAIL.**
+   The five IN-REPO connectors no longer take this path: `#9068` gates each
+   batch through `connectors._gate_kinds` before its first ``apply`` (see
+   `docs/EXPANSION_PACKS.md`), so what survives here is the SEAM, not the
+   shipped connectors. The fix must reuse `pack_state`'s ONE read core rather
+   than re-deriving "records ∪ data" a second time (that re-derivation is the
+   drift `graph_installed_namespaces` exists to prevent). **XFAIL.**
 
 **Closed AT THIS HEAD, so no longer pinned as a widening** — `#9068` itself
 resolved residual 1 without a pipeline-model change: the reader no longer mines
@@ -972,7 +976,7 @@ def test_the_data_leg_keeps_existing_vocabulary_writable(
         "data already holds (#2714 indicator 2)")
 
 
-# ── Residual 1: :Pipeline.kind is a mined property ────────────────────────
+# ── Residual 1: :Pipeline.kind is a mined property — FIXED at this head ──
 
 
 # `#9068` residual 1 is FIXED at this head, so this pin is no longer an xfail:
@@ -997,7 +1001,7 @@ def test_a_pipeline_row_does_not_grant_its_namespace(
         "must not install the `venture` pack")
 
 
-# ── Residual 2: a bare fold on a journal-less projection ──────────────────
+# ── Residual 2: a fold straight into a journal-less projection (still open) ───
 
 
 # `raises=AssertionError`: same mechanic as residual 1's pin — only the
