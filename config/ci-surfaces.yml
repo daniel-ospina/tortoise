@@ -102,6 +102,17 @@ surfaces:
   # subjects span `projection/` (core), `sdk.py`, `api.py` (api),
   # `backup.py`/`consistency.py`/`mining.py` (core), and `__main__.py` (api).
   - test_7951_enforce_atomic_write.py
+  # #9121: the onboarding lane DECLARES itself (§17.1 shape (a)) so `#9079`
+  # closing the raw write handle cannot silently disable onboarding. Its
+  # subjects are `tortoise/onboarding/{state,seed,selfhost}.py` (the
+  # `onboarding` surface), the §17.1 predicate in `projection/__init__.py`
+  # (which selects the FULL matrix), and the fail-open callers
+  # `hosted_api._maybe_apply_completion` / `mcp_server._maybe_onboarding_auto_complete`
+  # (`hosted_api.py` selects `api` + `onboarding`, `mcp_server.py` the full
+  # matrix). DUAL-REGISTERED on `api` and `onboarding`: either match REPLACES
+  # the `core` fallback, so a one-surface entry would leave the guard asleep on
+  # the other lane's diff (the #1349/#2938 silent-drop class).
+  - test_9121_onboarding_declared_lane.py
   - test_7951_create_point_outbox.py
   # #7951 (increment 2, the revision door): `update_point` appends its
   # `PointRevised` record BEFORE the cache write. Same subjects as the
@@ -3685,6 +3696,13 @@ surfaces:
   # (the #1349/#2938 silent-drop class; full rationale in the `api` entry).
   - test_7951_write_doors.py
   - test_7951_enforce_atomic_write.py
+  # #9121: the onboarding lane's §17.1 DECLARATION — `tortoise/onboarding/*.py`
+  # selects THIS surface (replacing the `core` fallback), so this arm is what
+  # runs the declaration's own guard on an onboarding-only diff
+  # (`state._run` / `seed._run` are the two raw-handle seams it pins).
+  # DUAL-REGISTERED with `api`, where the fail-open completion callers live
+  # (`hosted_api.py` also selects `onboarding`, a full-matrix file does not).
+  - test_9121_onboarding_declared_lane.py
   - test_7951_create_point_outbox.py
   # #7951 (increment 2, the revision door): `update_point` appends its
   # `PointRevised` record BEFORE the cache write. Same subjects as the
@@ -5850,6 +5868,7 @@ durations:
   test_session_key.py: 0.1
   test_probe_reset_inflight_4608.py: 36.0
   test_prod_csp_monitor.py: 2.0  # unmeasured — new in #4762; no sweep has collected it, so it carries the flat default for an unmeasured file (same convention as test_workflow_gh_token.py / test_venture_pack.py). Do NOT substitute a local timing: this file's own call time is ~2.6s on this box, but the map is a SHARD-LAYOUT input modelling CI, and a locally measured weight that does not model CI must not decide what runs together.
+  test_9121_onboarding_declared_lane.py: 2.0  # unmeasured — new in #9121; no sweep has collected it, so it carries the flat default for an unmeasured file (same convention as test_venture_pack.py / test_prod_csp_monitor.py). Do NOT substitute a local timing: the file's own embedded-lane run is ~7.9s on this box, but the map is a SHARD-LAYOUT input modelling CI, and a locally measured weight that does not model CI must not decide what runs together. This row also restores the #3400 coverage floor, which measured 836/929 = 89.99% at HEAD (below the 90% floor, i.e. the `manifest-integrity` leg could not pass on main independently of this change).
   test_sparse.py: 0.6
   test_subgraph_pure.py: 0.6
   test_supplementary.py: 0.2

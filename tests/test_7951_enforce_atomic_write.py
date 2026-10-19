@@ -401,10 +401,18 @@ def test_onboarding_writes_are_not_refused_on_a_journal_backed_lane(
     the refused write), so orgs silently never reached `complete`, the fork
     write and the completion gate stopped, and no counter fired.
 
-    The writers now take the SAME raw-handle lane the SDK's own live writes
-    use (`proj.g.query`), which #7951 records as the still-open residual. The
-    OTHER guards on that path are unchanged: the handle's #3595 operator and
-    #7174 numeric-domain refusals and its L2 bulk-wipe check all still run.
+    The writers take the SAME raw-handle lane the SDK's own live writes use
+    (`proj.g.query`), and — since #9121 — they DECLARE that lane:
+    `onboarding.state._run` runs every statement inside
+    `onboarding_write_scope()` (a named `_live_write_scope`, shape (a), with
+    the metadata-vs-journal argument in its docstring). This pin therefore no
+    longer rests on the handle being UNGUARDED: `#9079` closes the handle to
+    an undeclared mutating statement and this lane authorizes itself, so
+    onboarding keeps writing when that lands
+    (`test_9121_onboarding_declared_lane.py` asserts the same against the
+    guard armed). The OTHER guards on that path are unchanged: the handle's
+    #3595 operator and #7174 numeric-domain refusals and its L2 bulk-wipe
+    check all still run.
 
     RED before the fix: the first `write_completed_step` raises
     `DirectCacheWriteRefused`. MUTATION: revert `onboarding.state._run` to
@@ -447,6 +455,10 @@ def test_the_selfhost_onboarding_lane_writes_on_a_journal_backed_proj(
     `state.ensure_onboarding_state_node` on the same journal-backed
     projection, from `ensure_selfhost_onboarding_once` — best-effort and
     never-raise, so a refusal here is exactly as silent as the hosted one.
+    Since #9121 that write DECLARES itself (`onboarding_write_scope`, the
+    same declaration the hosted lane uses — `selfhost` reaches the graph
+    through `state._run`, so one declaration covers both lanes), which is why
+    it survives `#9079` closing the raw write handle.
 
     RED before the fix: the create-on-write MERGE raises
     `DirectCacheWriteRefused`.

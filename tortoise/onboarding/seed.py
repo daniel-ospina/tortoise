@@ -137,22 +137,26 @@ def _run(handle: Any, cypher: str, params: dict[str, Any] | None = None):
     raises (never a TypeError), so the fallback only fires on a signature
     mismatch.
 
-    §17.1 (#7951): the public ``FalkorProjection.query`` lane refuses a
+    §17.1 (#7951, #9121): the public ``FalkorProjection.query`` lane refuses a
     mutating statement on a journal-backed projection; this handle is
     duck-typed and shared with the write-path callers of this module, so it
-    takes the same raw-handle lane ``onboarding.state._run`` does (see that
-    docstring for why: these are unjournaled live writes, class (a) of
-    #7951's work list, and the public lane refused them on the hosted graph).
-    Reads are unaffected either way; routing here keeps a future write added
-    to this primitive from silently refusing."""
+    takes the same raw-handle lane ``onboarding.state._run`` does. The lane is
+    DECLARED there (``onboarding.state.onboarding_write_scope`` — shape (a),
+    with the metadata-vs-journal argument in its docstring), and this primitive
+    declares itself the same way: gating on a write-classifier instead would
+    couple the seam to whichever classifier the guard uses, so a future write
+    added here would be refused by ``#9079`` without this file being touched.
+    Reads are unaffected either way (they pass the guard)."""
     params = params or {}
-    raw = getattr(handle, "g", None)  # FalkorProjection -> its raw handle
-    if raw is not None and hasattr(raw, "query"):
-        return raw.query(cypher, params=params)
-    try:
-        return handle.query(cypher, **params)
-    except TypeError:
-        return handle.query(cypher, params=params)
+    from .state import onboarding_write_scope
+    with onboarding_write_scope("onboarding.seed"):
+        raw = getattr(handle, "g", None)  # FalkorProjection -> its raw handle
+        if raw is not None and hasattr(raw, "query"):
+            return raw.query(cypher, params=params)
+        try:
+            return handle.query(cypher, **params)
+        except TypeError:
+            return handle.query(cypher, params=params)
 
 
 def find_subject_by_name(handle: Any, name: str) -> dict[str, Any] | None:

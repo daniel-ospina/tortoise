@@ -17,6 +17,7 @@ result with ``.result_set`` and ``.stats``. Importable without hosted_api
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import threading
@@ -375,6 +376,69 @@ def _org_lock(org_id: str) -> threading.Lock:
         return lock
 
 
+#: The §17.1 declaration every onboarding graph write runs inside (#9121).
+#: A NAME rather than a flag on purpose: ``_live_write_scope`` carries it into
+#: the guard's refusal message (so a refusal says WHICH lane declared itself)
+#: and into ``_CACHE_WRITE_AUTHORIZED``, which a test can READ — a write that
+#: happened ``beside`` its declaration instead of ``inside`` it then fails
+#: rather than passing quietly.
+ONBOARDING_WRITE_SCOPE = "onboarding.flow_state"
+
+
+@contextlib.contextmanager
+def onboarding_write_scope(reason: str = ONBOARDING_WRITE_SCOPE):
+    """Declare the enclosed statements this lane's OWN live writes (§17.1).
+
+    ⛔ SHAPE (a) — THE DECLARED LANE, with the argument the declaration owes.
+
+    **Not a journal projection (shape (b) is not the answer).** Every
+    statement this lane issues writes ORG-LEVEL ONBOARDING METADATA —
+    ``:OnboardingState`` / ``:OnboardingStep`` / the ``COMPLETED_STEP`` and
+    ``onboards`` edges — which is not a projection of a journalled document or
+    point event. The journal records agent MEMORY writes; no journal event
+    carries "this org's fork card was answered", so there is nothing here for
+    the fold to project.
+
+    ⚠️ **And it is NOT rebuilt-from-zero-safe — do not claim that.** Replay
+    cannot re-create the class (``#4641``: ``rg OnboardingState
+    tortoise/projection`` was zero hits before that change), so ``rebuild_all``
+    PRESERVES it OUT-OF-BAND: a pre-wipe capture into the rescue file, a
+    post-wipe restore, and a post-restore verification that reports an UNKNOWN
+    snapshot or a confirmed gap as a LOSS with *"re-run onboarding for the
+    affected org(s)"* — never as a silent re-derivation. The writers' own
+    contracts make the loss visible rather than benign (``fork`` is set-once
+    and never re-asked; ``status`` is server-owned and gate-written). That is
+    the honest second half: rebuildable only through the ``#4641`` rescue,
+    not by replay.
+
+    **Why a declaration at all.** ``#9079`` closes the raw guarded handle
+    (``proj.g.query``) to an UNDECLARED mutating statement. Every onboarding
+    write funnels through :func:`_run`, so this scope is the single point that
+    declares the lane — the same shape the SDK's own live doors use
+    (``_live_write_scope("create_point")`` and friends). They journal first
+    and then declare; this lane does not journal first because it has no
+    record to append, so the declaration IS the whole of its authorization —
+    which is exactly why it has to be explicit and named rather than inherited
+    from a handle that happens to be unguarded.
+
+    ⛔ **NOT A SWALLOW, and nothing here may become one.** This does not catch
+    ``DirectCacheWriteRefused``: the callers are fail-open
+    (``hosted_api._maybe_apply_completion`` -> ``except Exception: return
+    False``, ``mcp_server._maybe_onboarding_auto_complete`` -> ``return``,
+    ``selfhost.ensure_selfhost_onboarding_once`` best-effort), so a swallowed
+    refusal is indistinguishable from success at every call site — that IS the
+    silent regression this issue exists to prevent, not a mitigation of it. A
+    refusal must reach those callers.
+
+    The scope is a per-call ``with`` block (no instance attribute, constructor
+    argument or env var can arm it) and it always resets, so the authorization
+    cannot outlive the statement that declared it.
+    """
+    from tortoise.projection import _live_write_scope
+    with _live_write_scope(reason):
+        yield
+
+
 def _run(graph: Any, cypher: str, params: dict[str, Any] | None = None):
     """Run a query on the injected graph handle — tolerant of both the
     FalkorProjection surface (``.query(cypher, **params)``) and the raw
@@ -382,31 +446,34 @@ def _run(graph: Any, cypher: str, params: dict[str, Any] | None = None):
     raises a ResponseError (never a TypeError), so the fallback only fires
     on a signature mismatch.
 
-    §17.1 (#7951): a *journal-backed* projection refuses a mutating statement
-    on the PUBLIC ``FalkorProjection.query`` lane (``DirectCacheWriteRefused``).
-    The onboarding writers are the plain **unjournaled live writes** #7951's
-    work list records as class (a) — the remaining work, not an enforcing
-    increment — so they must reach the cache the way the SDK's OWN live writes
-    do: through the raw graph handle (``proj.g.query``), which #7951 records as
-    the still-open residual (that handle is *also* the SDK's live write path —
-    ``create_point``/``update_point`` — so a blanket refusal there would break
-    the product, not a violation of it). Taking the public lane here refused
-    EVERY onboarding write on the hosted lane, and the callers are fail-open
-    (``hosted_api._maybe_apply_completion`` -> ``except Exception: return
-    False``, ``mcp_server._maybe_onboarding_auto_complete`` -> ``return``, and
-    ``selfhost.ensure_selfhost_onboarding_once`` is best-effort), so the
-    regression was SILENT — orgs never reached ``complete``. Routing through
-    the raw handle keeps every other guard on this path (the guarded handle's
-    own #3595 operator and #7174 numeric-domain refusals and its L2 bulk-wipe
-    check all still run)."""
+    §17.1 (#9121): every statement runs inside
+    :func:`onboarding_write_scope` — the lane DECLARES itself instead of
+    relying on a door staying open. That is the whole of the previous
+    rationale ("through the raw handle, which #7951 records as the still-open
+    residual") replaced: the residual is ``#9079``'s to close, and this lane is
+    declared so closing it cannot silently disable onboarding. The declaration
+    is unconditional (it also covers reads, which pass the guard anyway)
+    deliberately: gating it on a write-classifier would couple this seam to
+    whichever classifier the guard ends up using, and that coupling is how a
+    refusal slips through a seam that believed the statement was a read.
+
+    The handle choice is unchanged, and it is the SDK's OWN live lane
+    (``proj.g.query``, where ``create_point``/``update_point`` write): the
+    public ``FalkorProjection.query`` lane is the raw lane for writers that do
+    not own the projection, and taking it here was what refused EVERY
+    onboarding write on the hosted lane. Routing through the guarded handle
+    keeps every other guard on this path — its #3595 operator, #7174
+    numeric-domain and #8479 statement-text refusals and its L2 bulk-wipe
+    check all still run."""
     params = params or {}
-    raw = getattr(graph, "g", None)  # FalkorProjection -> its raw handle
-    if raw is not None and hasattr(raw, "query"):
-        return raw.query(cypher, params=params)
-    try:
-        return graph.query(cypher, **params)
-    except TypeError:
-        return graph.query(cypher, params=params)
+    with onboarding_write_scope():
+        raw = getattr(graph, "g", None)  # FalkorProjection -> its raw handle
+        if raw is not None and hasattr(raw, "query"):
+            return raw.query(cypher, params=params)
+        try:
+            return graph.query(cypher, **params)
+        except TypeError:
+            return graph.query(cypher, params=params)
 
 
 def _relations_created(result) -> int:
