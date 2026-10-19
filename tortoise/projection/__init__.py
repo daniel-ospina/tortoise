@@ -3321,10 +3321,14 @@ def _journal_safe_params(params, cypher=None):
 #   * `_graph_metadata_write_scope` — the `:EpMeta` epoch (`#9123`);
 #   * `tortoise/onboarding/state.ONBOARDING_WRITE_LANE` — the onboarding flow
 #     metadata (`#9121`);
-#   * `tortoise/event_store.RECORD_LANE` — the durable event store, which is
-#     the RECORD rather than a projection of it (`#9079`);
-#   * the SDK's structural-edge lane (`edges.py::create_edge` and friends),
-#     filed as `#9195` and NOT yet declared.
+#   * `tortoise/event_store.RECORD_LANE` — the event store (the change-feed log
+#     and its seq allocator): a declared CARVEOUT, not a projection and not the
+#     truth store — no journal record describes it (`#9079`);
+#   * the SDK's structural-edge lane —
+#     `tortoise/projection/edges.py::_EdgeHandlers.create_edge` and its three
+#     typed wrappers (`create_owned_by` / `create_managed_by` /
+#     `create_authored_by`), reached by `TortoiseSDK.create_edge` — filed as
+#     `#9195` and NOT yet declared.
 #
 # So (1) is not "blocked by an unknown surface" any more — what remains before
 # it can be refused is the edge lane plus a measurement pass over the SDK's

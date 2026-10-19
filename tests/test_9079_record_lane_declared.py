@@ -1,5 +1,5 @@
-"""#9079 §17.1 — the writers that reach `proj.g` declare themselves: the RECORD
-store and the two REPLAY engines.
+"""#9079 §17.1 — the writers that reach `proj.g` declare themselves: the EVENT
+STORE and the two REPLAY engines.
 
 `docs/architecture/STORAGE-ARCHITECTURE.md` §17.1 (the §2.0 owner ruling) splits
 the store: the journal is the system of record, the graph is a derived cache, so
@@ -12,13 +12,18 @@ Two writer classes reached that handle with NO declaration, and this suite pins
 both. Neither is a violation of §17.1; both are writers the door will refuse,
 and refusing them is a REGRESSION, not enforcement:
 
-1. **The event store is the RECORD** (`tortoise/event_store.py`). Its
-   `:GraphEvent` nodes ARE the durable event log (`read_after` / `poll_events`
-   serve them) and `:GraphEventMeta` is their seq allocator, so refusing its
-   append enforces a rule ABOUT the record against the record itself. It would
-   also fail SILENTLY: `tortoise/sdk.py::_emit_event` calls this store inside
+1. **The event store** (`tortoise/event_store.py`) is a second DURABLE surface
+   living in the cache graph — the change-feed log (`:GraphEvent`) and its seq
+   allocator (`:GraphEventMeta`) — which no journal record describes, so the
+   fold's gate cannot even recognise it. Refusing its append does not protect
+   the record; it DELETES the change feed, and it does so SILENTLY:
+   `tortoise/sdk.py::_emit_event` calls this store inside
    `except Exception: _logger.warning("event emission failed … continuing")`, so
-   a refusal here stops every graph event with only a warning line.
+   a refusal here stops every graph event with only a warning line. ⚠️ The lane
+   is a declared CARVEOUT, not a claim of rebuild durability: a rebuild wipes
+   these ROWS and does not replay them — the behaviour `#4664` names, CLOSED on
+   2026-09-25 as consolidated into the also-closed `#5048` and STILL observable
+   here (the last test measures it) — with only the allocator carried forward.
 2. **The replay engines** (`FalkorProjection.rebuild_all`,
    `.rebuild_from_record`). Their sibling `rebuild` has opened
    `_replay_write_scope()` since `#7951` (`with _replay_write_scope():
@@ -28,17 +33,18 @@ and refusing them is a REGRESSION, not enforcement:
 
 What this suite pins, and why each assertion is not prose:
 
-* every MUTATING statement the record store issues observes a named lane AT THE
+* every MUTATING statement the event store issues observes a named lane AT THE
   HANDLE — recorded from inside the handle, so a caller that merely succeeds
   today cannot pass;
 * an ARMED third door (the guard's own predicate, reproduced verbatim) does not
-  refuse the record and does not refuse either replay engine — while it still
-  refuses an undeclared `:Point` write through the same handle, so a lane cannot
-  be cited as a reason to widen the guard (the `#9068` shape);
-* the class the record lane claims is really capture-and-restore, not replay: a
-  rebuild carries the `:GraphEventMeta` counter forward and does NOT replay the
-  `:GraphEvent` rows (#4664) — so the claim is "the record's home survives a
-  wipe by being carried", never "the rows are re-derived from the journal".
+  refuse the event store and does not refuse either replay engine — while it
+  still refuses an undeclared `:Point` write through the same handle, so a lane
+  cannot be cited as a reason to widen the guard (the `#9068` shape);
+* the lane claims NO rebuild durability, and the suite says which half survives:
+  a rebuild carries the `:GraphEventMeta` counter forward (so `next_seq` cannot
+  re-issue a delivered seq) and DESTROYS the `:GraphEvent` rows without
+  replaying them — so the claim is "the allocator is carried, the log is not",
+  never "the record survives a rebuild".
 
 It does not arm `#9124`'s guard (that child is not on `main`). `_GuardProbe`
 reproduces the guard's PREDICATE — journal-backed + no declaration in flight + a
@@ -70,7 +76,10 @@ from tortoise.projection import (
 )
 
 #: The declared lane name, pinned as a literal: a lane that renames itself
-#: silently is a lane a future reader cannot find from the refusal message.
+#: silently is a lane the next reader cannot find — the name is what THIS SUITE
+#: reads back at the write handle and what a source grep turns up. (A
+#: `DirectCacheWriteRefused` deliberately does not render it: a refusal fires
+#: only when NO scope is in flight, so there is no reason to print.)
 RECORD_LANE = "event-store.record"
 
 #: Index/constraint statements. `FalkorProjection.__init__` and this store's
@@ -157,8 +166,14 @@ def _exercise_the_store(sdk) -> None:
 
     create_point reaches `ensure_event_schema` (DDL) → `next_seq` (MERGE
     `:GraphEventMeta`) → `append_event` (CREATE `:GraphEvent`); the purge path
-    reaches both DELETEs and `_refresh_first_seq`; the watermark path reaches
+    reaches BOTH deletes and `_refresh_first_seq`; the watermark path reaches
     the monotone MERGE.
+
+    ⚠️ Order matters, and it is why the log is re-seeded between the two
+    purges: `purge_expired(retention_days=0)` deletes EVERY event, so a
+    `purge_overflow` immediately after finds `total == 0` and returns BEFORE
+    issuing its own delete — leaving that statement unpinned while the suite
+    still looked green.
     """
     from tortoise.event_store import (
         capture_watermark,
@@ -168,10 +183,16 @@ def _exercise_the_store(sdk) -> None:
     )
 
     proj = sdk._get_proj()
-    sdk.create_point("fact", "an event the record lane must be able to store")
+    sdk.create_point("fact", "an event the event-store lane must be able to store")
     sdk.create_point("fact", "a second event, so the seq allocator bumps twice")
     purge_expired(proj, retention_days=0)
-    purge_overflow(proj, max_events=0)
+    # Re-seed so `purge_overflow` actually computes an overflow and issues its
+    # DELETE — otherwise that statement is never exercised (see the note above).
+    sdk.create_point("fact", "an event for the size-cap purge")
+    purged_by_cap = purge_overflow(proj, max_events=0)
+    assert purged_by_cap == 1, (
+        "the size-cap purge must actually run — with an empty log it returns "
+        f"early and its DELETE is never exercised; observed={purged_by_cap}")
     reestablish_watermark(proj, capture_watermark(proj).get("last_seq"))
 
 
@@ -206,7 +227,8 @@ def test_every_event_store_write_declares_the_record_lane(sdk_with_journal,
     classes = {
         "allocator": lambda s: "MERGE (m:GraphEventMeta)" in s,
         "append": lambda s: "CREATE (e:GraphEvent" in s,
-        "purge": lambda s: "DETACH DELETE" in s,
+        "purge_expired": lambda s: "n.ts < $cutoff" in s and "DETACH DELETE" in s,
+        "purge_overflow": lambda s: "ORDER BY n.seq ASC" in s,
         "schema": lambda s: _is_ddl(s) and "GraphEvent" in s,
     }
     missing = [name for name, match in classes.items()
@@ -217,13 +239,14 @@ def test_every_event_store_write_declares_the_record_lane(sdk_with_journal,
         + " | ".join(s[:80] for s, _lane in observed))
 
 
-def test_an_armed_guard_does_not_refuse_the_record(sdk_with_journal,
-                                                   monkeypatch):
+def test_an_armed_guard_does_not_refuse_the_event_store(sdk_with_journal,
+                                                       monkeypatch):
     """The indicator that matters for #9079: the SDK's writes still succeed.
 
     The guard's predicate is armed verbatim over the handle. The declaration is
-    what keeps a create from dying on the record's own write — and a create that
-    died here would be invisible, because `_emit_event` swallows the exception.
+    what keeps a create from dying on the event store's own append — and a
+    create that died here would be invisible, because `_emit_event` swallows
+    the exception.
     """
     from tortoise.event_store import read_after
 
@@ -234,7 +257,7 @@ def test_an_armed_guard_does_not_refuse_the_record(sdk_with_journal,
     assert point["id"]
     assert probe.refused == [], (
         "the event store did not declare itself, so arming the third door "
-        "refuses the record: "
+        "refuses its own append: "
         + " | ".join(s[:120] for s in probe.refused))
 
     proj = sdk_with_journal._get_proj()
@@ -249,15 +272,30 @@ def test_an_armed_guard_does_not_refuse_the_record(sdk_with_journal,
 
 
 def test_the_declaration_is_not_a_global_bypass(sdk_with_journal, monkeypatch):
-    """A declared lane is a lane, not an open handle: an undeclared writer is
-    still refused by the very same armed guard.
+    """A declared lane is a lane, not an open handle: after a DECLARED write
+    the authorization is closed again, and an undeclared writer is refused by
+    the very same armed guard.
 
     Without this, `event-store.record` could be cited as a reason to widen the
     guard ("some writers do not journal, so do not close the door"), which is
-    the licence `#9068` records as the failure shape to avoid.
+    the licence `#9068` records as the failure shape to avoid. The declared
+    write runs FIRST on purpose: it is what makes this a test about the lane's
+    WIDTH — a scope that leaked (stayed set past its `with`) would authorize
+    the following `:Point` write and this fails — rather than a test about the
+    probe's own refusal.
     """
     probe = _GuardProbe(armed=True).install(monkeypatch)
-    proj = sdk_with_journal._get_proj()
+    sdk = sdk_with_journal
+    proj = sdk._get_proj()
+
+    # A real DECLARED write through the same armed handle: it must land, and
+    # the lane must close when its `with` exits.
+    point = sdk.create_point("fact", "a declared write, then a probe of the width")
+    assert point["id"]
+    assert _CACHE_WRITE_AUTHORIZED.get() is None, (
+        "the lane leaked: after the declared write the authorization is still "
+        f"{_CACHE_WRITE_AUTHORIZED.get()!r}, so any later write would be "
+        "authorized — a sticky scope is the global-bypass failure shape")
 
     with pytest.raises(DirectCacheWriteRefused):
         proj.g.query("CREATE (n:Point {id:'undeclared-demo'})")
@@ -287,7 +325,7 @@ def test_the_journal_replay_runs_inside_the_replay_scope(sdk_with_journal,
     # The point is created BEFORE the probe is armed on purpose: this test is
     # about the REPLAY engine, so a red here localizes to the replay scope and
     # not to the record lane (`create_point` emits a graph event, which is
-    # `test_an_armed_guard_does_not_refuse_the_record`'s subject).
+    # `test_an_armed_guard_does_not_refuse_the_event_store`'s subject).
     sdk.create_point("fact", "a point the journal replay must reproduce")
     probe = _GuardProbe(armed=True).install(monkeypatch)
 
@@ -340,13 +378,15 @@ def test_the_record_projection_runs_inside_the_replay_scope(sdk_with_journal,
 
 def test_the_counter_is_carried_across_a_rebuild_and_the_rows_are_not_replayed(
         sdk_with_journal):
-    """The class is capture-and-restore, NOT a journal projection.
+    """The ALLOCATOR is carried; the ROWS are destroyed and not replayed.
 
-    Stated precisely because the flattering reading is FALSE both ways: the
-    `:GraphEventMeta` counter survives the wipe (carried by
-    `capture_watermark`/`reestablish_watermark`, which is what makes the lane
-    honest), while the `:GraphEvent` ROWS are not replayed (#4664) — so a
-    rebuild does not re-derive the record from the journal.
+    Stated precisely because the flattering reading is false: this lane does
+    NOT make the store rebuild-durable. Only `:GraphEventMeta.last_seq` is
+    capture-and-restored (`capture_watermark` before the wipe,
+    `reestablish_watermark` after) so `next_seq` cannot re-issue a delivered
+    seq (#4653); the `:GraphEvent` rows are wiped and are NOT replayed (#4664).
+    If the rows ever come back from a rebuild this assertion flips, and the
+    lane's stated scope should then be updated to say so.
     """
     from tortoise.event_store import capture_watermark, read_after
 
