@@ -220,13 +220,14 @@ def compile_vocab(packs_dir: Path | str | None = None,
     ⛔ That is NOT every write into a mined property — do not read it as one.
     Still outside it (#9068 carries the measurements): ``entities[].kind`` has no
     Layer-1 membership test (#5202, open); replay/``rebuild_all`` is
-    deliberately ungated (the journal is the truth, so a record already in it
-    reproduces faithfully); and a set of writers never meets a door at all —
-    ``tortoise/pipeline.py``'s ``SET p.kind = <pipeline_key>`` (still ungated,
-    and harmless to the approval set since #9068 scopes the mining leg's bare
-    ``kind`` read to the ontology labels — a pipeline KEY is not an ontology
-    kind) and raw-Cypher / offline re-typing (``tortoise/migrate_kinds.py``,
-    ``tortoise/retype.py``).
+    deliberately ungated (the journal is the RECONSTRUCTION SOURCE — never a
+    durability authority, which lives only in ``docs/durability-posture.md`` —
+    so a record already in it reproduces faithfully); and a set of writers
+    never meets a door at all — ``tortoise/pipeline.py``'s
+    ``SET p.kind = <pipeline_key>`` (still ungated, and harmless to the approval
+    set since #9068 scopes the mining leg's bare ``kind`` read to the ontology
+    labels — a pipeline KEY is not an ontology kind) and raw-Cypher / offline
+    re-typing (``tortoise/migrate_kinds.py``, ``tortoise/retype.py``).
     (``sdk.ingest_corpus`` writes its remaining fields with raw Cypher too, but
     its one mined input — ``eventKind`` — IS gated, and the rest are snake-case
     keys ``graph_kind_namespaces`` does not mine, so it is not a widening path.)

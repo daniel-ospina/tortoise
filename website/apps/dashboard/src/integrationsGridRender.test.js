@@ -145,8 +145,17 @@ test('#3513: the coming-soon dialog carries the pinned modal contract', () => {
   assert.match(src, /role="dialog"/, 'role=dialog')
   assert.match(src, /aria-modal="true"/, 'aria-modal')
   assert.match(src, /aria-labelledby="integration-modal-title"/, 'labelled by the heading')
-  assert.match(src, /onKeyDown=\{\(e\) => \{ if \(e\.key === 'Escape'\) closeComingSoon\(\) \}\}/,
+  // #8670: the handler now dispatches Tab (containment) AND Escape. The
+  // Escape branch is unchanged in behaviour — closeComingSoon still runs on it —
+  // and the `else if` keeps Tab from falling through to it.
+  assert.match(src,
+    /onKeyDown=\{\(e\) => \{[\s\S]{0,700}?else if \(e\.key === 'Escape'\) closeComingSoon\(\)/,
     'Escape closes')
+  // #8670: and the card owes the APG containment pair — a modal that announces
+  // itself as one must contain its tab sequence.
+  assert.match(src,
+    /onKeyDown=\{\(e\) => \{[\s\S]{0,700}?if \(e\.key === 'Tab'\) \{ if \(containTabFocus\(e\.currentTarget, \{ shiftKey: e\.shiftKey \}\)\) e\.preventDefault\(\) \}/,
+    'Tab/Shift+Tab wrap inside the dialog (#8670, the #2577 containment set)')
   assert.match(src, /autoFocus\s*\n\s*ref=\{comingSoonCloseRef\}/,
     'initial focus moves into the dialog (Close autoFocuses, #3513)')
   // #3514 review P2: the recorded/failed controls do NOT get focus from

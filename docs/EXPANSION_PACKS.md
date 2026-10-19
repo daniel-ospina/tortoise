@@ -453,7 +453,7 @@ not be read"* — never as the claim that everything is already on the graph.
 
 ### The write-gate closure — which writes are gated, and which are not (#5475/#9068)
 
-#5475's closure property is **no write may widen a graph's approved pack set**.
+The closure property from #5475 is **no write may widen a graph's approved pack set**.
 That property is worth reading precisely, because the surfaces it does *not*
 cover are deliberate and a reader who takes "the write path is closed" literally
 will either trust a guarantee that is broader than the code, or try to "fix" one

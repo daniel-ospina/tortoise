@@ -103,8 +103,33 @@ describe('sanitizeObjectKey', () => {
     ['del char', 'x\x7f.png', 'x_.png'],
     ['spaces', 'my file.png', 'my_file.png'],
     ['dots only', '..', ''],
+    // #8908 — storage rejects a non-ASCII key entirely.
+    ['typographic apostrophe', 'AI\u2019s new bottleneck.png', 'AI_s_new_bottleneck.png'],
+    ['en dash', 'memory\u2013systems.png', 'memory_systems.png'],
+    ['accents', 'caf\u00e9 cr\u00e8me.PNG', 'caf_cr_me.PNG'],
+    ['cjk', '\u5f52\u6863.png', '_.png'],
+    ['cyrillic', '\u043f\u0430\u043c\u044f\u0442\u044c.png', '_.png'],
+    ['emoji', 'cover-\u{1f600}.png', 'cover-_.png'],
   ])('%s → %j', (_name, input, expected) => {
     expect(sanitizeObjectKey(input)).toBe(expected);
+  });
+
+  it('always yields a key storage accepts, for every input shape', () => {
+    // The invariant #8908 was filed for: the output is ASCII-only, so it can
+    // never hit `Invalid key` in the bucket. Driven by the resolver, not by a
+    // hand-listed set of characters.
+    const inputs = [
+      'photo.png', '../../x.png', 'my file.png', 'AI\u2019s new bottleneck.png',
+      'caf\u00e9 cr\u00e8me.PNG', '\u5f52\u6863/\u56fe\u7247.png', 'cover-\u{1f600}.png',
+      '\u043f\u0430\u043c\u044f\u0442\u044c\u2014\u0430\u0433\u0435\u043d\u0442\u0430.webp',
+      'a\u0000\u0001\u007f.png', '..', '.', '', 'x'.repeat(300) + '.png',
+    ];
+    for (const input of inputs) {
+      const key = sanitizeObjectKey(input);
+      expect(key).toMatch(/^[A-Za-z0-9._-]*$/);
+      // A non-empty key must still round-trip through a URL path intact.
+      if (key) expect(encodeURIComponent(key)).toBe(key);
+    }
   });
 
   it('never contains traversal or separator sequences', () => {

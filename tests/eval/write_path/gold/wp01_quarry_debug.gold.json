@@ -70,6 +70,32 @@
       }
     }
   ],
+  "planted_qualifiers": [
+    {
+      "bound_claim": "wp01_quarry_debug_u_04",
+      "class": "hedge",
+      "id": "wp01_quarry_debug_q_01",
+      "notes": "hedges the assistant's bypass hypothesis on the retry path",
+      "planted_turn": 6,
+      "verbatim_qualifier": "probably"
+    },
+    {
+      "bound_claim": "wp01_quarry_debug_u_09",
+      "class": "stance",
+      "id": "wp01_quarry_debug_q_02",
+      "notes": "preference framing of the sixty-second-backoff decision; softer than a directive",
+      "planted_turn": 13,
+      "verbatim_qualifier": "I would rather"
+    },
+    {
+      "bound_claim": "wp01_quarry_debug_u_13",
+      "class": "hedge",
+      "id": "wp01_quarry_debug_q_03",
+      "notes": "marks the Halcyon re-ingest magnitude as approximate",
+      "planted_turn": 17,
+      "verbatim_qualifier": "about"
+    }
+  ],
   "planted_units": [
     {
       "depth_bucket": "early",

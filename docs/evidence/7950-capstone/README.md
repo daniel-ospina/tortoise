@@ -36,7 +36,7 @@ property that makes it safe is **`derived = replay(journal)`**. **§17** is the 
 | # | criterion | verdict | deciding artifact | homed |
 |---|---|---|---|---|
 | **S1** | every write goes to the truth store first; the cache is projected from it | ⛔ **NOT-GREEN** | `s1-bypass-probe.log`: an **armed** journal-backed projection refuses `apply` but lets `proj.g.query` write the cache directly (0 journal records) | **`#7951`** (OPEN) |
-| **S2** | truth↔cache divergence is OBSERVED, not assumed | ⛔ **NOT-GREEN** | `s2-wiring-census.log`: `reconcile` / `record_projection.replay` / `read_record_view` / `rebuild_from_record` all have **0 production call sites**; and `e2e-chain-probe.log`: a clean record-sourced rebuild is `field_mismatches=1` (the `vecf32` narrowing — `#8615`) | **`#7951`** + **`#7970`** + **`#8615`** (OPEN) |
+| **S2** | truth↔cache divergence is OBSERVED, not assumed | ⛔ **NOT-GREEN** | `s2-wiring-census.log`: `reconcile` / `record_projection.replay` / `read_record_view` / `rebuild_from_record` all have **0 production call sites**. The measured half is clean since `#8615`: `e2e-chain-probe.log`'s clean record-sourced rebuild is `0 divergent of 7 checked (field_mismatches=0)`, and **both** second-writer signatures still register | **`#7951`** + **`#7970`** (OPEN); the comparison rule for vector-valued properties is **CLOSED** on **`#8615`** |
 | **S3** | ⭐ the completeness marker works | ✅ **GREEN** | `s3-s4-named-tests.log` + live bounded rebuild in `e2e-chain-probe.log` (`Point:p1` → `not-hot`) | `#7952` (CLOSED) |
 | **S4** | a residency miss is not an insufficiency | ✅ **GREEN** | `s3-s4-unit-tests.log`: 30 router tests; residency outranks sufficiency | `#7953` (CLOSED) |
 | **S5** | derived/volatile fields are NOT in the system of record | ✅ **GREEN** | `s5-s6-pglite-validate.log` (`20261012000001_record_schema.sql PASSED`, incl. the `subject.props.status` refusal) | `#8263` (CLOSED) |
@@ -73,21 +73,26 @@ cache node counts (live read): [('Event', 1), ('Meta', 1), ('Object', 1), ('Poin
 hot read for Point 'p1': [['p1']]
 bounded rebuild declaration: coverage=partial
 unwritten record key 'Point:p1' covered-by-declaration=False → residency=not-hot
-RECONCILE (after a record-sourced rebuild): record vs cache: 1 divergent of 7 checked (missing_in_cache=0, extra_in_cache=0, field_mismatches=1)
+RECONCILE (after a record-sourced rebuild): record vs cache: 0 divergent of 7 checked (missing_in_cache=0, extra_in_cache=0, field_mismatches=0)
 ARMED FOLD (proj.apply):          refused (DirectCacheWriteRefused)
 ARMED RAW HANDLE (proj.g.query):  SUCCEEDED (direct cache write)
-RECONCILE (after a DIRECT raw-handle cache write): record vs cache: 2 divergent of 8 checked (missing_in_cache=0, extra_in_cache=1, field_mismatches=1)
+RECONCILE (after a DIRECT raw-handle cache write): record vs cache: 1 divergent of 8 checked (missing_in_cache=0, extra_in_cache=1, field_mismatches=0)
 second-writer signature -> extra_in_cache=1
 ARMED RAW HANDLE MUTATION:        Point:p1 gained an unauthorized property (Point.second_writer_marker)
-RECONCILE (after a DIRECT raw-handle property WRITE): record vs cache: 2 divergent of 8 checked (missing_in_cache=0, extra_in_cache=1, field_mismatches=2)
-field-mutation signature -> field_mismatches=2
+RECONCILE (after a DIRECT raw-handle property WRITE): record vs cache: 2 divergent of 8 checked (missing_in_cache=0, extra_in_cache=1, field_mismatches=1)
+field-mutation signature -> field_mismatches=1
 CHAIN RESULT: journal -> record -> cache COMPLETED with the shipped modules
 ```
 
-**Verbatim from `e2e-chain-probe.log`, except the first line only:** the shipped live engine prints a
-`#4997` advisory — *"vector search on `test_cap7950_e2e` is unindexed for label(s) ['Event',
-'Object', 'Source', 'Subject']"* — which is present verbatim in the log and omitted from the
-headline block above.
+**Verbatim from `e2e-chain-probe.log`, except the log's 6-line `#` provenance header block and the
+`#4997` advisory line** (both are `#`-comments with no probe output; the advisory is *"vector search
+on `test_cap7950_e2e` is unindexed for label(s) ['Event', 'Object', 'Source', 'Subject']"* and is
+present verbatim in the log). Every non-comment line below the header is the log's own output.
+
+**Re-measured for `#8615`:** the four `RECONCILE` lines and the `field-mutation signature` line come
+from the log refreshed on the fixed tree (the `#8615` diff applied, same fixture and environment —
+the log's own header records the head and the lane); the rest of the run is unchanged from the
+original measurement.
 
 **Raw output:** `e2e-chain-probe.log`; bootstrap: `probes/e2e_postgres_bootstrap.py`.
 
@@ -95,7 +100,9 @@ headline block above.
 reader that returned `{}` for every key would make `field_mismatches` **structurally zero** —
 `reconcile_views` compares two per-key mappings field by field, and two empty mappings always agree
 — leaving the run proving key-set agreement only. With the actual maps the field half is measurable,
-and it reports a real divergence (see S2).
+and it is measured in both directions: a clean record-sourced rebuild agrees on **every** field
+(`field_mismatches=0`), and a **mutation** of an existing node's property is still caught
+(`field_mismatches=1`, see S2).
 
 **What this proves, and what it does not.**
 
@@ -105,12 +112,14 @@ and it reports a real divergence (see S2).
   `not-hot`.
 - ✅ `reconciliation.reconcile` **detects a second writer on real data**, on both halves: a direct
   raw-handle node write reports `extra_in_cache=1` (the §17.1 key-set signature) and a direct
-  raw-handle **property** write reports `field_mismatches=2` (the value signature).
-- ⛔ A **clean** record-sourced rebuild is **not** zero-divergence: `field_mismatches=1` — the
-  `vecf32` narrowing of `Point:p1.embedding` (record `[0.1, 0.2]` float64, cache
-  `[0.10000000149011612, 0.20000000298023224]` float32). This is a **comparison-rule decision the
-  module defers**, not a wiring gap; recorded on **`#8615`**. It is why S2 stays NOT-GREEN even
-  after the wiring lands.
+  raw-handle **property** write reports `field_mismatches=1` (the value signature).
+- ✅ A **clean** record-sourced rebuild is **zero-divergence in both halves**: `0 divergent of 7
+  checked (missing_in_cache=0, extra_in_cache=0, field_mismatches=0)`. Pre-fix it reported
+  `field_mismatches=1` — the `vecf32` narrowing of `Point:p1.embedding` (record `[0.1, 0.2]`
+  float64 vs cache `[0.10000000149011612, 0.20000000298023224]` float32) counted as a value
+  divergence. `#8615` closed that by comparing a declared vector property at the store's stored
+  width (`tortoise/stored_form.py`), one-sided so the accepted set stays the single point
+  `f32(record)`.
 - ⛔ It is **driven by hand**. In the product, neither `record_projection.replay`, nor
   `read_record_view`, nor `rebuild_from_record`, nor `reconcile` has a single production caller
   (`s2-wiring-census.log`). The chain is **built**, not **wired**.
@@ -199,19 +208,21 @@ But a check that is never run observes nothing. `reconcile()`'s own docstring na
 *"until the record's own read path exists (#7970) and the cache is projected one way from it
 (#7971)."* There is no scheduled/continuous runner.
 
-**A second, independent reason S2 cannot go green — the field half.** With readers carrying the real
-property maps, a **clean** record-sourced rebuild reports `field_mismatches=1`: `Point:p1.embedding`
-is `[0.1, 0.2]` (float64) in the record and `[0.10000000149011612, 0.20000000298023224]` in the
-cache, because `node_statement` writes a non-verbatim embedding as `vecf32` (`#5004`) while
-`reconciliation._canonical` compares numbers **exactly, by design** (its docstring defers a tolerance
-to "a separate decision with its own recorded bounds"). So `reconcile()` can never report a clean
-cache for a node carrying a non-verbatim embedding, and a genuine vector-field divergence is
-indistinguishable from that narrowing. **This is a decision the module defers, not a wiring gap**
-— recorded and homed on **`#8615`**.
+**The field half — closed on `#8615`.** With readers carrying the real property maps, a **clean**
+record-sourced rebuild now reports `field_mismatches=0`: `Point:p1.embedding` is `[0.1, 0.2]`
+(float64) in the record and `[0.10000000149011612, 0.20000000298023224]` in the cache, because
+`node_statement` writes a non-verbatim embedding as `vecf32` (`#5004`). The comparison rule now
+compares a declared vector property **at the store's stored width** (`tortoise/stored_form.py`) —
+one-sided, so the accepted set is the single point `f32(record)`, not a tolerance, and a flag on
+either side (`embedding_verbatim`) forces exactness. A genuine vector divergence is therefore still
+detectable: the probe's second-writer **property** write reports `field_mismatches=1`, so the value
+signature did not go quiet. **This is why S2's remaining blocker is the wiring half only** — the
+comparison rule is no longer one of the reasons S2 cannot go green.
 
 **Missing:** a running reconciliation — the record reader and its wiring. **Homed: `#7951`**
 (the chokepoint the reconciliation is evidence for) and **`#7970`** (the record read path,
-OPEN/deferred by §2.0). The comparison rule for vector-valued properties is homed on **`#8615`**.
+OPEN/deferred by §2.0). The comparison rule for vector-valued properties is **CLOSED** on
+**`#8615`**.
 
 ---
 
@@ -386,7 +397,7 @@ Recorded here because the proof touches the affected surface.
 | # | blocker |
 |---|---|
 | **S1** | enforcement on the raw-handle lane (`proj.g.query`) + the atomic write → **`#7951`** (OPEN) |
-| **S2** | a running reconciliation: the record reader + the chokepoint wiring → **`#7951`** + **`#7970`** (OPEN); the comparison rule for vector-valued properties (a clean rebuild reports `field_mismatches=1`) → **`#8615`** (OPEN) |
+| **S2** | a running reconciliation: the record reader + the chokepoint wiring → **`#7951`** + **`#7970`** (OPEN); the comparison rule for vector-valued properties is **CLOSED** on **`#8615`** (a clean rebuild now reports `field_mismatches=0`, a second-writer property write still reports `field_mismatches=1`) |
 | **S6 caveat** | live legacy-id normalisation (W1b) → **no issue home** |
 
 Not blocking, recorded: the marker is off by default under a `complete` declaration (§2.0's

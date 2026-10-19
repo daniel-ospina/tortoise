@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -1079,8 +1080,13 @@ def test_refresh_durations_on_the_real_manifest_adds_a_pending_file() -> None:
     target = pending[0]
     # A real stamp: `integrity_problems` treats a PRESENT-but-unparseable
     # `durations_captured_at` as red, and this test asserts the full gate is green.
+    # It must also be a CURRENT one: the validator reds a map older than 21 days
+    # (`tools/ci_manifest.py::staleness`), so a literal is a time bomb that goes off
+    # for every lane on the twenty-second day — the same defect `:1278` records for
+    # the other site, which is why this one derives its stamp too.
+    captured = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     new_text, stats = ci_timing.render_refreshed_manifest(
-        before, {target: 4.34}, "2026-10-07T00:00:00Z")
+        before, {target: 4.34}, captured)
     assert stats["added_keys"] == 1
     assert f"  {target}: 4.3" in new_text
     _, entries_before = ci_timing._locate_durations_block(before.split("\n"))
@@ -1273,8 +1279,15 @@ def test_refresh_durations_on_the_real_manifest_of_record() -> None:
     # PyYAML is a second implementation of the same parse, so the completeness
     # check survives without a number that can go stale.
     assert set(entries_before) == set(yaml.safe_load(before)["durations"])
+    # The stamp must be FRESH: the manifest gate rejects a `captured_at` older
+    # than 21 days, so the hardcoded "2026-09-28T00:00:00Z" that used to live
+    # here turned this test red on 2026-10-19 with nothing in the tree changed
+    # (measured: integrity_problems -> "captured 21 days ago ... past the
+    # 21-day bound"). The value itself is not asserted anywhere below — only
+    # that the refresh re-stamps it with something the gate accepts.
+    captured = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     new_text, stats = ci_timing.render_refreshed_manifest(
-        before, {"test_bridge_table.py": 123.4}, "2026-09-28T00:00:00Z")
+        before, {"test_bridge_table.py": 123.4}, captured)
     # `manifest_keys` and `carried_forward` are BOTH computed from the INPUT
     # parse (`before`), so on their own they cannot fail when the refresh drops
     # an entry from the OUTPUT — asserting only these two is a tautology. They
@@ -1294,6 +1307,11 @@ def test_refresh_durations_on_the_real_manifest_of_record() -> None:
     assert set(entries_after) == set(yaml.safe_load(new_text)["durations"])
     assert "  test_bridge_table.py: 123.4" in new_text
     assert "# #3395: per-file CI wall time" in new_text
+    # The fresh stamp must actually REACH the output — without this the comment
+    # above would claim a property the test does not assert (the input manifest's
+    # own stamp is already fresh, so a renderer that IGNORED ``captured_at``
+    # would still satisfy every other line here).
+    assert f'durations_captured_at: "{captured}"' in new_text
     assert ci_timing.validate_refreshed_manifest(new_text) == []
     # ... and the FULL `--integrity` gate, not just its duration subset: the
     # refresh must not tilt the push halves or unclassify a file (#3395).
@@ -1563,7 +1581,19 @@ def test_integrity_problems_promotes_a_present_but_unparseable_stamp() -> None:
     problems = ci_timing.integrity_problems(rendered)
     assert any("not a parseable timestamp" in p for p in problems), problems
     # Absence is still the notice-only class: no stamp key, no problem.
-    assert ci_timing.integrity_problems(before) == []
+    #
+    # The key must actually be ABSENT for that to be what this line proves. It
+    # used to assert over `before` — the committed manifest — which carries a
+    # `durations_captured_at`, so the assertion took the FRESHNESS branch and the
+    # absence branch was never executed: the comment described a property the test
+    # could not reach. Strip the key and assert on the stripped manifest.
+    absent = yaml.safe_load(before)
+    absent.pop(ci_timing.DURATIONS_CAPTURED_AT, None)
+    absent_text = yaml.safe_dump(absent, sort_keys=False)
+    assert ci_timing.DURATIONS_CAPTURED_AT not in absent_text, (
+        "the absence case must be built by REMOVING the stamp, not by trusting "
+        "the committed manifest's age")
+    assert ci_timing.integrity_problems(absent_text) == []
 
 
 def test_ci_timing_docstring_no_longer_claims_it_never_gates_ci() -> None:
@@ -2582,7 +2612,16 @@ def test_push_extra_enters_the_full_selection_pool(tmp_path, monkeypatch, capsys
 
     plain = run(base, "base")
     bumped = run(with_extra, "extra")
-    assert bumped - plain == 1234.0, (
+    # `pytest.approx`, not `==`: the totals are float sums over ~930 manifest
+    # rows, so the exact delta is only exact while the pool's magnitudes happen
+    # to line up. Adding ONE durations row anywhere in the file (e.g. #8135's
+    # `test_b7_runbook_ok_semantics_8135.py: 2.0`) shifted the operands enough
+    # that `8315.7 - 7081.7` came back 1233.9999999999995 and this read
+    # `1233.9999999999995 != 1234.0` — a red on a registration that has nothing
+    # to do with the property under test. The default relative tolerance
+    # (1e-6 ⇒ ±0.0012) still cannot be satisfied unless `push_extra`'s weight
+    # really enters the pool, so the differential property is unchanged.
+    assert bumped - plain == pytest.approx(1234.0), (
         "push_extra weight must enter the full-selection pool — otherwise the "
         "counted shards run files the denominator omits"
     )

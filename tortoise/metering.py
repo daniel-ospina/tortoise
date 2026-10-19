@@ -1287,7 +1287,10 @@ def get_write_op_yield(org_id: str) -> dict:
     ``hosted_api.py:8651``), the LIVE capture lane ``_capture_session_impl``
     behind ``POST /v1/sessions`` and the ``tortoise_session_capture`` MCP tool
     (``hosted_api.py:13709``), and every MCP tool write
-    (``mcp_server.py:1550``).
+    (``_quota_gated``'s ``record_write_ops(org_id, tier=…)`` call in
+    ``mcp_server.py`` — named by SYMBOL, not by line number: the line pointer
+    that used to sit here went stale the moment #8135 inserted ~130 lines
+    above it, #9093 review P3).
 
     A genuine ``r = 0`` does exist — a dedup re-commit, a supersede-only delta,
     a replay, a hold commit all add no net-new node — but it is

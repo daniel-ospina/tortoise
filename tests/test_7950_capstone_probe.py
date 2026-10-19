@@ -207,3 +207,102 @@ def test_placeholder_maps_cannot_see_a_field_mutation():
     report = reconcile_views(placeholder, dict(placeholder))
     assert report.field_mismatches == 0
     assert report.divergent == 0
+
+
+# --------------------------------------------------------------------------
+# #8615 review finding (P2): the evidence README quotes the log VERBATIM, so a
+# re-measured log must drag the quote with it. The PR rewrote
+# `e2e-chain-probe.log`'s reconcile numbers (field_mismatches 1/1/2 → 0/1/1) and
+# left the README — the artifact S2's verdict is read from — asserting the old
+# numbers and homing a decision it had just closed. Nothing pinned the two
+# together, which is exactly why these tests exist.
+# --------------------------------------------------------------------------
+
+_README_7950 = _REPO_ROOT / "docs" / "evidence" / "7950-capstone" / "README.md"
+_E2E_LOG = _REPO_ROOT / "docs" / "evidence" / "7950-capstone" / "e2e-chain-probe.log"
+
+
+def _readme_text() -> str:
+    return _README_7950.read_text(encoding="utf-8")
+
+
+def _quoted_run_lines() -> list[str]:
+    """The probe-OUTPUT lines the README quotes in its ``console`` block.
+
+    The block opens with the invocation (``$ …`` plus its continued line) and
+    the rest is the probe's stdout. Only stdout is quotable-from-the-log, so the
+    invocation lines are dropped here rather than in the assertion.
+    """
+    text = _readme_text()
+    first_output = text.index("journal records read: 39")
+    block_start = text.rindex("```console", 0, first_output)
+    block_end = text.index("```", first_output)
+    lines = text[block_start:block_end].splitlines()[1:]
+    return [ln for ln in lines if ln.strip() and not ln.lstrip().startswith("$")
+            and not ln.startswith("    ")]
+
+
+def test_the_evidence_readme_quotes_the_log_it_cites_verbatim():
+    """Every quoted run line must exist in `e2e-chain-probe.log`, exactly.
+
+    Pre-fix (#8615's own PR rewrote the log's reconcile lines) this fails with
+    four missing lines: the README still carried `field_mismatches=1` /
+    `=2` and `2 divergent of 8` where the log says `field_mismatches=0` / `=1`
+    and `1 divergent of 8`. The README calls the block "verbatim", so a stale
+    quote is a false claim about its own evidence, not a formatting nit.
+    """
+    log_lines = set(_E2E_LOG.read_text(encoding="utf-8").splitlines())
+    quoted = _quoted_run_lines()
+    assert quoted, "the README no longer quotes the end-to-end run at all"
+    missing = [ln for ln in quoted if ln not in log_lines]
+    assert not missing, (
+        "docs/evidence/7950-capstone/README.md quotes probe output that does not "
+        "exist in e2e-chain-probe.log — re-quote the block from the log after "
+        "re-measuring:\n" + "\n".join(missing)
+    )
+
+
+def test_the_s2_verdict_reads_the_clean_rebuild_the_log_now_shows():
+    """S2's deciding artifact must cite the measurement its log actually holds.
+
+    The field half is what `#8615` closed: a clean record-sourced rebuild is
+    `field_mismatches=0`, while a second-writer property mutation still reports
+    `1`. Pre-fix the S2 row claimed `field_mismatches=1` "the `vecf32` narrowing"
+    and homed `#8615` as OPEN — the opposite of the log in the same directory.
+    """
+    readme = _readme_text()
+    verdict_rows = [ln for ln in readme.splitlines() if ln.startswith("| **S2** |")]
+    assert len(verdict_rows) == 2, "expected exactly one S2 verdict row and one S2 blocker row"
+
+    verdict = next(ln for ln in verdict_rows if "divergence is OBSERVED" in ln)
+    assert "field_mismatches=0" in verdict, (
+        "the S2 verdict row must cite the clean rebuild the log now measures: "
+        + verdict
+    )
+
+    blocker = next(ln for ln in verdict_rows if "running reconciliation" in ln)
+    # The field half is CLOSED; the row may record that, but must not re-home it
+    # as the open blocker.
+    assert "`#8615` (OPEN)" not in blocker and "#8615`** (OPEN)" not in blocker, (
+        "the S2 blocker row still homes the closed comparison-rule decision as "
+        "OPEN: " + blocker
+    )
+
+
+def test_the_readme_no_longer_asserts_the_field_half_is_an_open_s2_blocker():
+    """The prose that explained `field_mismatches=1` as a deferral is now false.
+
+    Pre-fix the README carried a section titled *"A second, independent reason S2
+    cannot go green — the field half"* (and the "except the first line only"
+    verbatim caveat, which the log's header block also invalidates). Both are
+    claims about the pre-fix behaviour `#8615` removes.
+    """
+    readme = _readme_text()
+    assert "second, independent reason S2 cannot go green" not in readme, (
+        "the README still argues the field half is an independent reason S2 "
+        "cannot go green; `#8615` closed it"
+    )
+    assert "except the first line only" not in readme, (
+        "the README's verbatim caveat no longer describes the log (it carries a "
+        "provenance header block)"
+    )

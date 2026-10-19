@@ -74,6 +74,13 @@ THE CONTRACT
   and a concurrent remover taking the intended sha can cancel out in the
   multiset), so the residual case is documented and pinned by a test rather than
   claimed impossible; see the plan's "Residual race" note.
+* **``discover`` is the recovery path's OTHER half (#8423).** ``recover <sha>``
+  restores a lost entry but needs the sha, and the state that needs it is the
+  one where the sha is invisible: a peer's bare ``pop``/``drop`` removed the
+  register row, so ``git stash list`` shows nothing. ``discover`` lists the
+  unreachable, stash-shaped commits that no lane ref pins and the register no
+  longer enumerates — with their files and the ``recover`` invocation — so the
+  #3147 repair is one command instead of a hand-rolled ``git fsck | grep``.
 * **``check`` is fail-closed**: exit 0 when a bare ``git stash pop`` in this
   worktree would take THIS lane's own entry; exit 1 when it would take a FOREIGN
   entry — a peer lane's, identified by the ``[<lane-key>]`` marker this tool
@@ -107,6 +114,7 @@ USAGE
     python tools/lane_stash.py pop 1              # apply by sha, keep the shared entry
     python tools/lane_stash.py check              # 0 = a bare pop here is safe
     python tools/lane_stash.py prune --apply      # reclaim pinned/applied register entries
+    python tools/lane_stash.py discover           # find an entry that fell out of the register
     python tools/lane_stash.py recover <sha>      # the #2654 repair recipe (this lane's own entry)
 
 Exit codes: 0 ok (including "nothing to stash", matching ``git stash push``);
@@ -1036,7 +1044,376 @@ def _entry_ownership(row: dict, key: str, own_shas: set[str]) -> tuple[str, str]
     return "unknown", ""
 
 
-# ── commands ────────────────────────────────────────────────────────────────
+# ── lost-entry discovery (`discover`, #8423) ────────────────────────────────
+#
+# WHY IT EXISTS: `pop`/`check` stop a lane from TAKING a peer's entry, and
+# `recover <sha>` restores one that was dropped — but `recover` needs the SHA, and
+# the state that needs it is exactly the state where the sha is invisible: a
+# concurrent lane's bare `git stash pop`/`drop` removed the register row, so
+# `git stash list` shows nothing and no lane ref names the object. #3147 was only
+# repaired by hand — `git fsck --unreachable --no-reflogs | grep commit`, then
+# eyeballing `WIP on <branch>` subjects — and that recipe is in no skill, no doc
+# and no flag. This command is that recipe.
+#
+# THE ORACLE, measured on git 2.50.1 (looked for, not assumed):
+#
+#   * A BARE `git stash push` (i.e. not through this tool) pins nothing and marks
+#     nothing. After a `pop`/`drop` removes the reflog row, the commit survives in
+#     the object DB and `git fsck` still enumerates it — as `dangling commit` on
+#     the default invocation and as `unreachable commit` under `--unreachable`.
+#     BOTH prefixes are parsed, so a git that changes which word it prints cannot
+#     hide the work.
+#   * A stash commit is a MERGE with 2 parents (HEAD + index) or 3 with `-u`/`-a`
+#     (+ the untracked commit), and its second parent's subject is always
+#     `index on <branch>: <sha> <subject>`. A commit orphaned by an amend, reset
+#     or rebase has 1 parent; a real merge has 2 but not that second-parent
+#     subject. So the shape test is parent-count AND (the index marker OR a
+#     stash-shaped `WIP on|On <branch>:` subject). The subject fallback is a
+#     DELIBERATE recall trade: it can list a user commit literally titled e.g.
+#     "On the origin of species:", and the precision gate is `recover` — which
+#     refuses to STORE such a candidate unless the operator asserts it with `-m`
+#     (checked there, not here: `discover` is read-only, `recover` writes the
+#     repo-global register).
+#   * An object a lane REF pins is REACHABLE, so `fsck` never offers it: pinned
+#     entries cannot appear here at all. Register rows are subtracted as well,
+#     and that subtraction is load-bearing: under `--no-reflogs` git reports a
+#     register entry below `@{0}` as unreachable while `git stash list` still
+#     shows it as LIVE, and offering `recover` on a live peer entry re-opens the
+#     #8051 adoption door.
+#
+# DISCOVERY IS DELIBERATELY RECALL-FIRST; `recover` IS THE PRECISION GATE. An
+# entry that only matches the SUBJECT path is still listed — a false positive costs
+# one printed line plus `recover`'s own refusal (its second-parent SHAPE check),
+# while a false NEGATIVE is the lost work this command exists to surface. The
+# refusal is only real because `cmd_recover` grew that check: before it, a 2-parent
+# merge with a stash-like subject passed the parent-count and subject tests and was
+# STORED into the repo-global register.
+
+#: Shas per `git log --no-walk` argv. A post-rebase repo can hold thousands of
+#: unreachable commits, and a per-sha `log`/`rev-list` pair would make `discover`
+#: take minutes; batching keeps it at one call per 500 shas and stays far below
+#: ARG_MAX (41 bytes per sha).
+DISCOVER_BATCH = 500
+#: File names printed per entry; the remainder is counted, not dumped.
+DISCOVER_MAX_FILES = 10
+
+
+def _unreachable_commit_shas(thorough: bool = False) -> list[str]:
+    """Every commit `git fsck` reports as unreachable — deduped, in fsck's order.
+
+    `--no-reflogs` is the #3147/#8423 recipe and is kept deliberately: it stops
+    reflogs from being roots, which is what surfaces an entry whose reflog row went
+    away through expiry rather than through a `drop`.
+
+    `--connectivity-only` by default, MEASURED on this repo: 4.8 s vs 79 s for the
+    full walk over 14,795 unreachable objects / 4,093 unreachable commits (a
+    recovery command you don't run because it takes 80 s is a command that doesn't
+    exist). On a HEALTHY repo the commit set is identical — verified on a temp repo
+    with 25 unreachable commits from amends, resets and dropped stashes: both modes
+    returned the same 25. They DIVERGE only where the object DB is already BROKEN
+    (this repo has a `missing commit`, which stops the full walk's traversal): there
+    the two modes disagreed on 10 commits, none of them stash-shaped. `thorough`
+    (`--thorough`) is the full walk for exactly that state.
+
+    A non-zero rc with NO parsed commit is a STATE error, never "nothing is lost":
+    collapsing "could not read" into "no lost entries" is the same fail-open the
+    rest of this module refuses.
+    """
+    cmd = ["fsck", "--unreachable", "--no-reflogs", "--no-progress"]
+    if not thorough:
+        cmd.append("--connectivity-only")
+    cp = _git(*cmd, check=False)
+    shas: list[str] = []
+    seen: set[str] = set()
+    for line in cp.stdout.splitlines():
+        parts = line.split()
+        # `dangling commit <sha>` (default fsck) / `unreachable commit <sha>`
+        # (`--unreachable`) are the two words git uses for the same object. Blobs
+        # and trees are irrelevant: only a commit can be a stash entry.
+        if (
+            len(parts) == 3
+            and parts[1] == "commit"
+            and parts[0] in ("dangling", "unreachable")
+            and parts[2] not in seen
+        ):
+            seen.add(parts[2])
+            shas.append(parts[2])
+    if cp.returncode != 0:
+        if not shas:
+            raise LaneStashError(
+                "could not enumerate unreachable commits (`git fsck --unreachable "
+                f"--no-reflogs` failed): {(cp.stderr or cp.stdout).strip() or f'rc={cp.returncode}'}"
+            )
+        # A PARTIAL walk must say so: fsck exits non-zero on a broken object DB (a
+        # `missing commit`, as this repo has) and can stop early, so the listing may
+        # be incomplete — reporting it silently would hide exactly the lost work a
+        # lane came here for.
+        sys.stderr.write(
+            f"warning: `git fsck` exited {cp.returncode}, so this walk may be incomplete — "
+            f"re-check with `{'--thorough' if not thorough else 'a manual git fsck'}` if the "
+            "entry you are looking for is not listed\n"
+        )
+    return shas
+
+
+def _filter_existing_commits(shas: list[str]) -> list[str]:
+    """``shas`` narrowed to the ones still present as COMMIT objects — one call.
+
+    `git log --no-walk <batch>` is ALL-OR-NOTHING: one sha that a concurrent `gc`
+    removed between `fsck` and the read makes the whole batch exit 128 (measured),
+    which would fail ``discover`` in exactly the fleet that runs prunes. So the
+    filter is the batch's repair path, not its happy path: `cat-file --batch-check`
+    answers for every sha on stdin in one process and marks a vanished one
+    ``missing``, so the retry keeps everything that still exists.
+    """
+    cp = _git("cat-file", "--batch-check", stdin="\n".join(shas) + "\n", check=False)
+    if cp.returncode != 0:
+        raise LaneStashError(
+            "could not re-check the unreachable commits (`git cat-file --batch-check` "
+            f"failed): {(cp.stderr or cp.stdout).strip() or f'rc={cp.returncode}'}"
+        )
+    alive: set[str] = set()
+    for line in cp.stdout.splitlines():
+        parts = line.split()
+        # `<sha> commit <size>` / `<sha> missing`
+        if len(parts) >= 2 and parts[1] == "commit":
+            alive.add(parts[0])
+    return [sha for sha in shas if sha in alive]
+
+
+def _commit_meta(shas: list[str]) -> dict[str, dict]:
+    """``{sha: {parents, epoch, date, subject}}`` for ``shas`` — one git call per batch.
+
+    ``%x00`` separates the fields and ``%s`` is LAST, so a subject containing
+    spaces (every stash subject does) survives the split. A sha that a concurrent
+    `gc` removed between `fsck` and this call is dropped, not fatal — see
+    :func:`_filter_existing_commits`.
+
+    ``epoch`` (``%ct``) is carried beside the ISO date because ``%cI`` strings from
+    different UTC offsets do not sort chronologically as text, and "newest first"
+    is load-bearing: a lane looks for the entry it lost a minute ago at the top.
+    """
+    meta: dict[str, dict] = {}
+    for i in range(0, len(shas), DISCOVER_BATCH):
+        chunk = shas[i:i + DISCOVER_BATCH]
+        cp = _git(
+            "log", "--no-walk", "--format=%H%x00%P%x00%ct%x00%cI%x00%s", *chunk,
+            check=False,
+        )
+        if cp.returncode != 0:
+            chunk = _filter_existing_commits(chunk)
+            if not chunk:
+                continue
+            cp = _git(
+                "log", "--no-walk", "--format=%H%x00%P%x00%ct%x00%cI%x00%s", *chunk,
+                check=False,
+            )
+            if cp.returncode != 0:
+                raise LaneStashError(
+                    "could not read the unreachable commits (`git log --no-walk` failed): "
+                    f"{(cp.stderr or cp.stdout).strip() or f'rc={cp.returncode}'}"
+                )
+        for line in cp.stdout.splitlines():
+            parts = line.split("\0", 4)
+            if len(parts) < 5:
+                continue
+            meta[parts[0]] = {
+                "parents": parts[1].split(),
+                "epoch": int(parts[2]) if parts[2].isdigit() else 0,
+                "date": parts[3],
+                "subject": parts[4],
+            }
+    return meta
+
+
+def _looks_like_stash(meta: dict, parent2_subjects: dict[str, str]) -> bool:
+    """Whether an unreachable commit carries a stash commit's shape.
+
+    2 parents (HEAD + index) or 3 (+ untracked), AND a second parent that is the
+    ``index on <branch>: ...`` commit every ``git stash push`` writes. The subject
+    test is an ADDITIONAL accept path, never the primary one, because a false
+    NEGATIVE is the lost work this command exists to surface.
+
+    The price of that recall is a printed line, and the precision gate is
+    ``cmd_recover``'s own second-parent SHAPE check: a subject-only candidate is
+    listed here but REFUSED there unless the operator asserts it with ``-m`` (the
+    form the printed recipe carries). That refusal is a real gate — without it a
+    2-parent merge titled ``WIP on feat/x: ...`` and no index parent was STORED
+    into the repo-global register, which is why the shape check lives in
+    ``cmd_recover`` and not only in this listing.
+    """
+    parents = meta["parents"]
+    if len(parents) not in (2, 3):
+        return False
+    if parent2_subjects.get(parents[1], "").startswith("index on "):
+        return True
+    return bool(re.match(r"^(?:WIP on|On) .+:", meta["subject"]))
+
+
+def _lost_entries(thorough: bool = False) -> list[dict]:
+    """Unreachable, stash-shaped, and named by neither the register nor a lane ref.
+
+    Newest first. A register read that FAILS is propagated, never treated as an
+    empty register: without it a live peer's entry is indistinguishable from a lost
+    one, and the instruction printed for a lost entry is ``recover`` — the adoption
+    door (#8773 review P1).
+
+    What a listed entry IS, exactly: an object no ref names and the register no
+    longer enumerates. That covers BOTH the harm (a peer's ``pop`` took it) and the
+    benign case (some worktree applied it and dropped the row). Nothing in the
+    object DB records WHICH worktree applied it, so the output claims only the
+    former is possible-by-construction, never that every entry is lost work — a
+    bare ``git stash pop`` leaves no trace either way, and asserting otherwise would
+    be the kind of invented state this module refuses elsewhere.
+    """
+    shas = _unreachable_commit_shas(thorough)
+    if not shas:
+        return []
+    meta = _commit_meta(shas)
+    parent2 = {
+        m["parents"][1] for m in meta.values() if len(m["parents"]) >= 2
+    }
+    parent2_subjects = {sha: m["subject"] for sha, m in _commit_meta(sorted(parent2)).items()}
+    live = {r["sha"] for r in _shared_register()}
+    lost: list[dict] = []
+    for sha, m in meta.items():
+        if sha in live or not _looks_like_stash(m, parent2_subjects):
+            continue
+        # No "branch" key: the branch is carried by the SUBJECT that is printed
+        # (`WIP on <branch>: ...` / `On <branch>: ...`), so a separate field would be
+        # computed and never read — and an output that showed a branch the subject
+        # does not is the kind of second source of truth this module avoids.
+        lost.append({
+            "sha": sha,
+            "epoch": m["epoch"],
+            "date": m["date"],
+            "subject": m["subject"],
+            "lane": _subject_lane_key(m["subject"]),
+        })
+    # Newest first, on the EPOCH: `%cI` strings from different UTC offsets do not
+    # sort chronologically as text, and a lane looking for the entry it lost a
+    # minute ago must find it at the top.
+    lost.sort(key=lambda e: (e["epoch"], e["sha"]), reverse=True)
+    return lost
+
+
+def _entry_files(sha: str) -> list[str] | None:
+    """The paths an entry touches, UNTRACKED INCLUDED — what was actually lost.
+
+    ``--include-untracked`` is the only form that lists a `-u`/`-a` stash's untracked
+    files (measured); the plain form and then the raw first-parent diff are
+    fallbacks so an older git lists the tracked changes instead of nothing.
+
+    ``None`` (every form failed) is DISTINCT from ``[]`` (readable, no changes):
+    reporting an empty list as "no files" for a pruned object would claim the entry
+    touched nothing, which is a different — and false — statement.
+    """
+    for args in (
+        ("stash", "show", "--include-untracked", "--name-only", sha),
+        ("stash", "show", "--name-only", sha),
+        ("diff", "--name-only", f"{sha}^1", sha),
+    ):
+        cp = _git(*args, check=False)
+        if cp.returncode == 0:
+            return [ln for ln in cp.stdout.splitlines() if ln.strip()]
+    return None
+
+
+def _entry_parents_readable(sha: str) -> bool:
+    """Can `recover` — and the `git stash store` behind it — actually TAKE this entry?
+
+    Not every listed entry is recoverable: in a partially pruned object DB the entry's
+    parent commit can be gone while the entry itself still enumerates. Both write paths
+    then fail on that missing parent, and neither `-m` nor anything else can rescue it:
+    `cmd_recover` reads the parents first (``git rev-list --parents`` exits 128) and
+    `git stash store` refuses a commit whose parents it cannot read (measured on a stash
+    whose index parent was removed: ``fatal: '<sha>' is not a stash-like commit``,
+    rc=128). So the probe is recover's own first step, run HERE rather than promised —
+    otherwise a lane follows a printed recipe, watches it fail, and concludes the work
+    is gone. This is the state `--thorough` exists for.
+    """
+    return _git("rev-list", "--parents", "-n", "1", sha, check=False).returncode == 0
+
+
+def _discover_verdict(entry: dict, key: str) -> tuple[str, str | None]:
+    """``(owner, restore line or None)`` for a lost entry — what this lane may act on.
+
+    The ownership input is the entry's OWN message marker, not the branch: a bare
+    push carries neither, and a branch names a branch rather than a lane. A recipe
+    is printed ONLY where `recover` will act on it, and it never advertises work
+    that is not this lane's: an own-marked entry recovers bare (``provably_own``),
+    an unattributable one recovers with ``-m`` (the operator's assertion), and a
+    PEER's marked entry gets NO recipe at all — `cmd_recover` refuses it by design,
+    and a lane that followed a printed restore line here would be restoring
+    another lane's work (the same adoption door #8051 closed).
+    """
+    marker = entry["lane"]
+    if marker == key:
+        # `recover` accepts an own-marked entry without `-m` (`provably_own`), so the
+        # printed line is the exact command that works.
+        return (
+            "THIS lane (its message carries this lane's marker)",
+            f"python tools/lane_stash.py recover {entry['sha']}",
+        )
+    if marker is not None:
+        return (
+            f"lane {marker!r} — NOT this lane; refused here by design: `recover` will "
+            "not act on it, so only that lane's own worktree can restore it",
+            None,
+        )
+    return (
+        "unattributable — a bare `git stash push` writes no lane marker",
+        f'python tools/lane_stash.py recover {entry["sha"]} -m "<why this entry is yours>"',
+    )
+
+
+
+def cmd_discover(args: argparse.Namespace) -> int:
+    """List stash entries that fell OUT of the register — the #3147 recovery entry point.
+
+    Read-only: it never applies, stores, pins or drops anything, so it is safe to run
+    in a live lane (and safe to run WHILE a peer is stashing). Its output is the input
+    to `recover`, which is where ownership is asserted and enforced.
+    """
+    key = lane_key()
+    lost = _lost_entries(args.thorough)
+    if not lost:
+        print("no lost stash entries — every unreachable stash commit is either in the "
+              "shared register or pinned by a lane ref"
+              + ("" if args.thorough else
+                 " (fast walk; re-run with --thorough if the repo reports missing objects)"))
+        return 0
+    limit = args.limit if args.limit and args.limit > 0 else len(lost)
+    print(f"lost stash entries ({len(lost)}): unreachable and named by NO lane ref, so "
+          "`git stash list` does not show them — either a peer's bare `pop` took one, "
+          "or a worktree applied and dropped it")
+    for entry in lost[:limit]:
+        files = _entry_files(entry["sha"])
+        owner, restore = _discover_verdict(entry, key)
+        print(f"\n  {entry['sha'][:12]}  {entry['date']}  {entry['subject']}")
+        if files is None:
+            print("    files: (could not read — the entry's trees may be partially pruned)")
+        elif not files:
+            print("    files: (no file changes)")
+        else:
+            shown = files[:DISCOVER_MAX_FILES]
+            more = len(files) - len(shown)
+            tail = f" (+{more} more)" if more else ""
+            print(f"    files ({len(files)}): {', '.join(shown)}{tail}")
+        print(f"    owner: {owner}")
+        if restore is not None and _entry_parents_readable(entry["sha"]):
+            print(f"    restore: {restore}")
+        elif restore is not None:
+            # The recipe is only ever one `recover` will ACCEPT. Here it would not:
+            # a parent commit cannot be read, so `git stash store` refuses the entry.
+            print("    restore: NONE — this entry's parent commits cannot be read (its "
+                  "objects are partially pruned), and `git stash store` refuses a commit "
+                  "whose parents it cannot read (measured rc=128), so `recover` cannot "
+                  "take it; salvage the files it still has by hand")
+    if len(lost) > limit:
+        print(f"\n{len(lost) - limit} more not shown — raise --limit (0 = no limit)")
+    return 0
+
 
 def cmd_push(args: argparse.Namespace) -> int:
     root = repo_root()
@@ -1437,18 +1814,47 @@ def cmd_recover(args: argparse.Namespace) -> int:
     # `git stash pop` takes it (#8773 review P1). `cat-file -t` above already
     # proved the name resolves unambiguously.
     args.sha = _out("rev-parse", args.sha)
-    parents = _out("rev-list", "--parents", "-n", "1", args.sha).split()
+    parents_cp = _git("rev-list", "--parents", "-n", "1", args.sha, check=False)
+    if parents_cp.returncode != 0:
+        # Fail as a STATE error (exit 2) with the real reason, not as an opaque
+        # `git failed (rc=128)`: nothing here — not even `-m` — can make a store work
+        # on a commit whose parents cannot be read (`git stash store` refuses it).
+        why = (parents_cp.stderr or parents_cp.stdout or "git rev-list failed").strip()
+        raise LaneStashError(
+            f"cannot read {args.sha[:12]}'s parents ({why}) — a commit whose parents cannot "
+            "be read is refused by `git stash store` (measured rc=128), so an entry in a "
+            "partially pruned object DB cannot be recovered by this command; salvage the "
+            "files it still has by hand"
+        )
+    parents = parents_cp.stdout.split()
     subject = _out("log", "-1", "--format=%s", args.sha)
     commit_subject = subject
     # A stash commit has 2 parents (HEAD + index) or 3 with `-u`/`-a` (the
     # untracked tree). A plain commit has 1; a 2-parent merge has 2 and would
-    # pass a parent count alone, so the SUBJECT must also look like a stash
-    # unless the operator asserts it with -m (an explicit human claim, which is
-    # the only thing that lets a store of a rescued entry proceed).
+    # pass a parent count alone, so the SHAPE (the second parent is the
+    # `index on ...` commit, checked below) and the SUBJECT must also look like a
+    # stash unless the operator asserts it with -m (an explicit human claim, which
+    # is the only thing that lets a store of a rescued entry proceed).
     if len(parents) not in (3, 4):
         raise LaneStashError(
             f"{args.sha} has {len(parents) - 1} parent(s); a stash commit has 2 (HEAD + "
             "index) or 3 (with -u/-a), so this is not a stash entry"
+        )
+    # The SHAPE, not only the parent COUNT: every `git stash push` writes its second
+    # parent as the `index on <branch>: ...` commit, so a 2-parent merge without one
+    # is a merge — or any unrelated object that `discover`'s recall-first SUBJECT
+    # path surfaced. This check belongs HERE and not only in `discover`: `recover`
+    # STORES what it accepts into the repo-GLOBAL register (and pins it to this
+    # lane), so a listing-only gate would let a false positive into every lane's
+    # register. `-m` overrides it exactly as it overrides the subject heuristic
+    # below: the operator's explicit assertion is the gate that remains, and it is
+    # the one the printed recipe asks for.
+    index_subject = _out("log", "-1", "--format=%s", parents[2])
+    if not args.message and not index_subject.startswith("index on "):
+        raise LaneStashError(
+            f"{args.sha}'s second parent ({index_subject!r}) is not a stash's "
+            "'index on <branch>: ...' commit, so this cannot be shown to be a stash "
+            "entry — pass -m <message> to assert it explicitly"
         )
     if not args.message and not _subject_branch(subject):
         raise LaneStashError(
@@ -1923,6 +2329,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("check", help="would a bare `git stash pop` here take foreign work?")
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_check)
+
+    sp = sub.add_parser(
+        "discover",
+        help="list stash entries that fell OUT of the register (unpinned) with their files",
+    )
+    sp.add_argument(
+        "--limit", type=int, default=20,
+        help="max entries to print (default 20; 0 = no limit)",
+    )
+    sp.add_argument(
+        "--thorough", action="store_true",
+        help="full object walk instead of the fast --connectivity-only one "
+             "(~16x slower; use when the repo reports missing/corrupt objects)",
+    )
+    sp.set_defaults(func=cmd_discover)
 
     sp = sub.add_parser("recover", help="restore a dropped stash commit to the register AND pin it")
     sp.add_argument("sha")

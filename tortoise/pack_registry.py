@@ -79,6 +79,26 @@ CANONICAL_EVENT_KINDS = frozenset({
     # so the bare name has ONE canonical identity, and so the miner's
     # `event_kind="milestone"` write is declared.
     "milestone",
+    # #2786 (AF-1): these four are ONTOLOGY §5 core event kinds, and the Layer-1
+    # gate has always ACCEPTED them (`commit_schema.EVENT_KINDS`), but they were
+    # missing here — the pack-facing half of the vocabulary — so a pack could not
+    # reference them (`nearMisses`/`equivalentTo`/chain steps) and
+    # `PackRegistry._all_known_kinds()` could not resolve them. Measured at
+    # `4d9a0ddef`: `EVENT_KINDS - CANONICAL_EVENT_KINDS` = exactly this set.
+    # §5 declares all four (`turn` = capture turn records, `occurrence` = generic
+    # extracted occurrence, `AgentSession` = the canonical session-capture kind,
+    # `humanApproval` = the #531 approval event), so there is no doc-side fix —
+    # this set was the stale layer. Guard: tests/test_kind_vocabulary_consistency.py.
+    #
+    # ⚠ Not only a widening — these four names also become RESERVED, which is worth
+    # knowing before adding the next one: (a) a pack that *declares* one of them in
+    # its `ontology.eventKinds` is now refused ("already in canonical vocabulary —
+    # no need to register", the pre-existing rule every canonical kind already
+    # follows), and a manifest with an error is dropped by `load_all()`; (b) `tortoise
+    # pack new` refuses them as namespaces (`_cmd_pack_new` lower-cases the canonical
+    # set). No in-repo pack declares any of the four, so the blast radius is
+    # third-party manifests — #2786 records the compatibility edge.
+    "AgentSession", "humanApproval", "occurrence", "turn",
 })
 
 CANONICAL_POINT_KINDS = frozenset({

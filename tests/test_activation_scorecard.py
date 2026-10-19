@@ -2854,3 +2854,9 @@ def test_operator_client_prefers_flag_over_env_and_writes_out(
              "--operator-key", "from-flag", "--out", str(out)])
     assert seen["key"] == "from-flag"
     assert json.loads(out.read_text()) == payload
+
+# The B7 runbook's `status == "ok"` pin lives in its own hermetic file —
+# tests/test_b7_runbook_ok_semantics_8135.py — because a runbook-only diff runs
+# tier1 ONLY, and this suite is registered on `api`/`core` but not `tier1`, so a
+# pin here was asleep on the one change that can break it (review P1; same
+# #8614/#8701 shape as test_fly_secret_drift.py).

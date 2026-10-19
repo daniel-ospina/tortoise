@@ -41,6 +41,7 @@ from .incident_kinds import (
     KIND_METADATA_LOST,
     KIND_NEVER_BACKED_UP,
     KIND_R2_DOWN,
+    KIND_R2_UNLISTABLE,
     KIND_STALE,
 )
 
@@ -66,6 +67,50 @@ def _org_prefixes(storage) -> list[str]:
         if len(parts) >= 2 and parts[0] == "backups" and parts[1]:
             orgs.add(parts[1])
     return sorted(orgs)
+
+
+def _r2_bucket_reachable(storage) -> bool:
+    """Did R2 ANSWER a bucket-scoped probe? (#8422)
+
+    The watcher's own R2 read is ``list()`` (``list-objects-v2``), which fails
+    for BOTH of the DR vocabulary's tiers (#3147): the substrate does not answer
+    (``R2_DOWN``) and the substrate answers but this credential/prefix cannot be
+    listed (``R2_UNLISTABLE``). Filing the first for the second is a
+    reachability-labelled incident for a permission fault, and the two tiers
+    need different recovery evidence, so the label decides who can clear it.
+
+    ``head_bucket`` is the discriminator: a bucket-scoped HEAD is answered by the
+    bucket endpoint before any prefix or key is consulted, so it returns ONLY
+    when the substrate actually answered. It is the SAME probe the DR driver
+    uses for the same question (``aws s3api head-bucket`` in
+    ``.github/scripts/registry-cron.sh``), so the two surfaces cannot disagree
+    about which tier a given failure belongs to.
+
+    Returns ``True`` ONLY on that positive evidence. Absence of the method (an
+    older/custom store) and any raise both return ``False`` — the conservative
+    direction: we have no evidence the substrate answered, so the filing stays
+    on the reachability tier, i.e. exactly the pre-#8422 behaviour. The change
+    can therefore only ever RELABEL a failure it has positive evidence about.
+
+    Note the boundary this probe cannot cross: a store that refuses the HEAD for
+    a *permission* reason is indistinguishable from one that does not answer —
+    that ambiguity IS the reachability tier's definition ("no probe reaches the
+    substrate"), not a gap in this call.
+    """
+    probe = getattr(storage, "head_bucket", None)
+    if probe is None:
+        # No probe to run: keep the tier we can defend on the evidence we have.
+        logger.warning(
+            "R2 reachability probe unavailable (store has no head_bucket) — "
+            "filing the failure at the reachability tier"
+        )
+        return False
+    try:
+        probe()
+        return True
+    except Exception as e:  # any failure means "no positive evidence"
+        logger.warning("R2 reachability probe failed: %s", e)
+        return False
 
 
 def _parse_backup_ts(token: str) -> datetime | None:
@@ -500,6 +545,12 @@ class BackupWatcher:
 
     def _poll_inner(self, now: datetime) -> dict[str, Any]:
         # ── R2 read (the only external read the daemon makes). ──
+        # #8422: `r2_reachable` is the REACHABILITY tier's own evidence, measured
+        # per poll: a completed read proves it on the healthy path, the
+        # bucket-level HEAD proves it on the failed one (see
+        # `_r2_bucket_reachable`). Pre-bound so the alert legs below can never
+        # read an unbound name on a path this method does not anticipate.
+        r2_reachable: bool | None = None
         try:
             r2_orgs = _org_prefixes(self._storage)
             # (The `ops/state.json` read that used to sit here was dead — the
@@ -524,6 +575,10 @@ class BackupWatcher:
                 if k.endswith("/state.json") and len(k.split("/")) == 4
             ]
             r2_ok = True
+            # A completed read IS a reachability observation (the read itself
+            # reached the substrate), so the tier leg below can clear R2_DOWN on
+            # it without needing the bucket probe.
+            r2_reachable = True
             # Cache the last-known-good surface for degraded polls.
             self._known_newest = newest_by_org
             self._known_state_orgs = state_orgs
@@ -533,6 +588,15 @@ class BackupWatcher:
             if not self._known_good:
                 self._last_status = {"unknown": True, "r2_ok": False}
                 return self._last_status
+            # #8422: a FAILED read is ambiguous between the two R2 tiers, so ask
+            # the bucket-level probe which one this is BEFORE evaluating the
+            # cached surface. Measured here (not in the alert leg) because it is
+            # a property of THIS poll's failure: the read failed, and the probe
+            # says whether the substrate answered anyway. `_r2_bucket_reachable`
+            # is False when there is no evidence, which keeps the reachability
+            # tier — the pre-#8422 label — so nothing is relabelled without
+            # evidence.
+            r2_reachable = _r2_bucket_reachable(self._storage)
             # Degraded from known-good: evaluate from the CACHED surface (review
             # P1-2 — never reclassify from an empty cache; that fabricates stale).
             r2_orgs = list(self._last_status.get("per_team", {}).keys())
@@ -754,6 +818,7 @@ class BackupWatcher:
             # org universe-shrink and `r2_ok` gates every archive-derived resolve.
             self._drive_alerts(
                 status, r2_ok,
+                r2_reachable=r2_reachable,
                 prev_per_team=prev_per_team,
                 census_confirmed=census_confirmed,
             )
@@ -906,7 +971,8 @@ class BackupWatcher:
             return False
 
     def _drive_alerts(self, status: dict[str, Any], r2_ok: bool | None,
-                      *, prev_per_team: set[str] | None = None,
+                      *, r2_reachable: bool | None = None,
+                      prev_per_team: set[str] | None = None,
                       census_confirmed: bool = False) -> None:
         """#3031: drive the alert store — fail-soft, never at the heartbeat's expense.
 
@@ -937,6 +1003,15 @@ class BackupWatcher:
         ``not_eligible`` arm's resolves stay UNGATED (eligibility is a
         control-plane fact, not an R2 measurement). The org universe-shrink
         additionally requires ``census_confirmed``.
+
+        #8422 — ``r2_reachable`` is the REACHABILITY tier's own evidence, and it
+        is what keeps the two R2 kinds (#3147) off each other's probe. It is
+        ``True`` when a completed read proved the substrate answered, or when the
+        bucket-level HEAD did on a failed read; ``False`` when the failure stands
+        unanswered; ``None`` when the caller did not measure it (a direct caller
+        that only knows ``r2_ok``), which reads as "not reachable" and therefore
+        keeps the pre-#8422 filing. The two legs below use it as the ONLY
+        discriminator between ``R2_DOWN`` and ``R2_UNLISTABLE``.
         """
         try:
             r2_confirmed = r2_ok is True
@@ -1116,23 +1191,36 @@ class BackupWatcher:
                     if not self._alert_leg("resolve_incident", KIND_BACKUP_SET_MISSING, org):
                         pending_bsm.add(org)
                 self._last_backup_set_missing = cur_bsm | pending_bsm
-            # R2_DOWN: emit while degraded-from-known-good, resolve when healthy.
-            # #3147: the kind's meaning is NARROWED to the reachability tier (the
-            # substrate does not answer), and its owner is this WATCHER — the one
-            # surface whose own R2 read is the reachability evidence. So this leg
-            # is now a legitimate open+resolve pair rather than an open the owner
-            # (the driver) had to close. The unlistable tier (R2 answers but the
-            # pool cannot be listed, R2_LIST_OK=0) is the DRIVER's R2_UNLISTABLE;
-            # this probe cannot discriminate it, so on FAILURE the watcher files
-            # the reachability tier (a named residual — see the runbook).
-            # Its own guard kept for symmetry with the other legs; the outer
-            # `except` below remains as a backstop for structural errors (a
-            # malformed status dict), and per-leg containment means it is now
-            # only reached for defects rather than for an ordinary store failure.
-            if r2_ok is False:
-                self._alert_leg("open_incident", KIND_R2_DOWN)
-            else:
+            # ── the two R2 tiers (#3147), filed from their OWN evidence (#8422) ──
+            # Each kind maps to exactly one recovery condition and one evidence
+            # tier, so each leg is driven by the probe that covers ITS condition:
+            #
+            #   R2_DOWN       (reachability, watcher-owned) — recovery = the
+            #                 substrate ANSWERS a probe. `r2_reachable` is that
+            #                 observation: a completed read proves it, and on a
+            #                 FAILED read the bucket-level HEAD does. So this leg
+            #                 clears on a positive HEAD even while the listing
+            #                 still fails — that remaining failure is the OTHER
+            #                 tier's, and leaving R2_DOWN open beside it would
+            #                 strand a kind whose condition is satisfied.
+            #   R2_UNLISTABLE (listing/measurement, DRIVER-owned) — the watcher
+            #                 may FILE it (filing has never been owner-gated) on
+            #                 the positive evidence that R2 answered while this
+            #                 surface's pool read failed, but it must never CLEAR
+            #                 it: the recovery evidence is the driver's whole-pool
+            #                 measurement, which is the one thing the watcher does
+            #                 not make. The store refuses the resolve on authority
+            #                 (ADR-011); we do not even attempt it.
+            #
+            # Before #8422 the watcher had only the failing read, so it filed the
+            # reachability tier for a listing/permission fault — a mislabelled
+            # incident whose recovery evidence did not match the fault.
+            if r2_ok is not False or r2_reachable is True:
                 self._alert_leg("resolve_incident", KIND_R2_DOWN)
+            else:
+                self._alert_leg("open_incident", KIND_R2_DOWN)
+            if r2_ok is False and r2_reachable is True:
+                self._alert_leg("open_incident", KIND_R2_UNLISTABLE)
         except Exception:
             logger.exception(
                 "alert store legs failed — heartbeat unaffected (a broken "

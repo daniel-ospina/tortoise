@@ -1367,3 +1367,130 @@ def test_cross_session_operator_endpoint_must_resolve(tmp_path) -> None:
         gold, {s: corpus.load_fixture(s, root=tmp_path) for s in corpus.session_ids(tmp_path)}
     )
     assert any("unknown session" in i for i in issues), issues
+
+
+# ── Planted qualifier gold (#7947) ──────────────────────────────────────────
+
+
+def test_every_session_carries_planted_qualifier_gold() -> None:
+    """`#7947`'s measurement needs hedge/scope/stance ground truth in EVERY
+    session, and all three classes present across the corpus.
+
+    Not a stylistic check: the falsifier scores qualifier survival per class, so
+    a session with no qualifier gold contributes nothing to the scored surface
+    while still counting in the session denominator, and a missing class silently
+    drops that axis from the result."""
+    classes: set[str] = set()
+    for session_id in COMMITTED_SESSIONS:
+        gold = corpus.load_gold(session_id)
+        qualifiers = gold.get("planted_qualifiers")
+        assert qualifiers, f"{session_id}: no planted_qualifiers gold"
+        classes |= {q["class"] for q in qualifiers}
+    assert classes == schema.PLANTED_QUALIFIER_CLASS_VALUES, classes
+
+
+def test_planted_qualifier_counts_the_measurement_quotes() -> None:
+    """`#7947`'s write-up states n = 25 (10 holdout) and "9 of 25 unbound".
+
+    Those are not decoration: the decision input is the HOLDOUT delta, and one
+    holdout qualifier IS 10 pp — the width of the whole registered band. So a
+    change to the annotation table silently changes what the published verdict
+    was computed on, and every other gate stays green (gold re-renders,
+    `generate_corpus --check` passes, the baselines are byte-identical). This test
+    is the pin: if the corpus is meant to change, the write-up's numbers change in
+    the same commit, deliberately.
+    """
+    tuning = ("wp01_quarry_debug", "wp02_lumen_refactor", "wp03_ember_design",
+              "wp04_aurora_perf")
+    holdout = ("wp05_retro_writeup", "wp06_quarry_rollout", "wp07_bluepeak_followup")
+    counts = {sid: len(corpus.load_gold(sid).get("planted_qualifiers") or [])
+              for sid in COMMITTED_SESSIONS}
+    assert sum(counts[s] for s in tuning) == 15, counts
+    assert sum(counts[s] for s in holdout) == 10, counts
+    assert sum(counts.values()) == 25, counts
+    unbound = sum(
+        1 for sid in COMMITTED_SESSIONS
+        for q in corpus.load_gold(sid).get("planted_qualifiers") or []
+        if not q.get("bound_claim"))
+    assert unbound == 9, f"unbound qualifiers: {unbound} (the write-up says 9 of 25)"
+
+
+def test_planted_qualifier_anchor_drift_is_rejected() -> None:
+    """A qualifier whose `verbatim_qualifier` is not in its planted turn is a
+    fixture/gold drift error — the same rule planted_units and operator anchors
+    follow.
+
+    It is enforced at generation/validation time because the failure is otherwise
+    silent AND directional: a qualifier the fixture no longer says would be scored
+    as *lost* by both arms and reported as a finding about the arms."""
+    session_id = COMMITTED_SESSIONS[0]
+    gold = corpus.load_gold(session_id)
+    fixture = corpus.load_fixture(session_id)
+    qualifier = dict(gold["planted_qualifiers"][0])
+    qualifier["verbatim_qualifier"] = "a phrase no fixture turn contains"
+    issues = schema.validate_gold({**gold, "planted_qualifiers": [qualifier]}, fixture=fixture)
+    assert any("verbatim_qualifier" in i and "not a normalized substring" in i
+               for i in issues), issues
+
+
+def test_planted_qualifier_rejects_unknown_class_and_dangling_bound_claim() -> None:
+    """`class` is a key into the scorer's marker table and `bound_claim` is an id
+    lookup — neither may be free-form, or the score degrades silently."""
+    session_id = COMMITTED_SESSIONS[0]
+    gold = corpus.load_gold(session_id)
+    fixture = corpus.load_fixture(session_id)
+    qualifier = dict(gold["planted_qualifiers"][0])
+
+    bad_class = {**qualifier, "class": "HEDGE"}
+    issues = schema.validate_gold({**gold, "planted_qualifiers": [bad_class]}, fixture=fixture)
+    assert any("class" in i and "expected one of" in i for i in issues), issues
+
+    dangling = {**qualifier, "bound_claim": f"{session_id}_u_99"}
+    issues = schema.validate_gold({**gold, "planted_qualifiers": [dangling]}, fixture=fixture)
+    assert any("bound_claim" in i and "names no planted unit" in i for i in issues), issues
+
+    # ⛔ A NON-STRING `bound_claim` must produce an ISSUE, not a `TypeError`. The check
+    # tests membership in a set, so a list or a dict would raise out of a validator
+    # instead of returning a verdict — the type check has to come FIRST.
+    for bad in (["u_01"], {"u_01": 1}, 7, 3.5):
+        bad_claim = {**qualifier, "bound_claim": bad}
+        issues = schema.validate_gold({**gold, "planted_qualifiers": [bad_claim]},
+                                      fixture=fixture)
+        assert any("bound_claim" in i and "expected a planted-unit id" in i for i in issues), (
+            bad, issues)
+
+
+def test_generator_rejects_a_qualifier_that_does_not_ground() -> None:
+    """The generator enforces the same invariants at build time, so a bad
+    annotation fails the render instead of shipping and scoring as data."""
+    spec = {
+        "session_id": "wp01_quarry_debug",
+        "harness": "claude-code",
+        "scenario": "t",
+        "turns": [{"role": "user", "content": "timeout is probably not on macOS"}],
+        "units": [{"id": "u_01", "kind": "decision", "verbatim_anchor": "timeout",
+                   "notability": "salient", "planted_turn": 1,
+                   "survival": {"accepts_rephrase_linked": True,
+                                "provenance_required": True,
+                                "ep_update_required": False}}],
+        "distractors": [],
+        "hazards": [],
+        "planted_qualifiers": [
+            {"id": "q_01", "planted_turn": 1, "verbatim_qualifier": "definitely", "class": "hedge"}
+        ],
+    }
+    with pytest.raises(ValueError, match="verbatim_qualifier"):
+        generate_corpus._build_session_docs(spec)
+
+    spec["planted_qualifiers"] = [
+        {"id": "q_01", "planted_turn": 1, "verbatim_qualifier": "probably", "class": "hedge",
+         "bound_claim": "u_99"}
+    ]
+    with pytest.raises(ValueError, match="bound_claim"):
+        generate_corpus._build_session_docs(spec)
+
+    spec["planted_qualifiers"] = [
+        {"id": "q_01", "planted_turn": 1, "verbatim_qualifier": "probably", "class": "certainty"}
+    ]
+    with pytest.raises(ValueError, match="class"):
+        generate_corpus._build_session_docs(spec)

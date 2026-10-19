@@ -17,10 +17,14 @@ shape / `_manifest.json` / judge-blindness line-refs).
 
 ## Layout
 
-```
+```text
 tests/eval/write_path/
   generate_corpus.py        # deterministic corpus generator + authoring spec
   schema.py                 # canonical fixture/gold/baseline schemas + validators
+  raw_vs_narrative.py       # #7947: the two-arm harness (story=raw vs story=narrative)
+  score_qualifiers.py       # #7947: the pre-registered scorer + branch rule (pure
+                            #   `evaluate_branches`, so the boundary is unit-tested)
+  results/                  # committed score files (run 1 is NOT re-derivable; run 2 is)
   corpus.py                 # paths, fixtures_hash, manifest verification, pending baseline
   fixtures/<session>.json         # {session_id, harness, conversation} ONLY
   gold/<session>.gold.json        # SEALED — the entire answer key
@@ -28,9 +32,38 @@ tests/eval/write_path/
   baselines/main.json             # committed PRODUCT-lane baseline (posture llm)
   baselines/m2.json               # committed CI-lane baseline (posture m2, deterministic)
   receipts/                       # validated run receipts (llm + m2 lanes)
+  receipts/7947-arms-2026-10-18/  # #7947: 7 sessions x 2 arms, per-session receipts
   salience_labels.jsonl           # #4917: OWNER-confirmed not-an-entity name labels
   test_write_path_corpus.py       # contract tests (S4/S15)
+  test_score_qualifiers.py        # #7947: the rule, the guards, and the artifact pin
 ```
+
+⛔ **`results/7947-score-replication-2026-10-18.json` is pinned by a test, not by
+prose.** The PR body and §10 publish
+`score_qualifiers.py --arms-dir receipts/7947-arms-2026-10-18` as the reproducer, so
+`test_the_committed_score_artifact_regenerates_byte_identically` runs it and asserts
+the written file equals the committed one byte for byte. Editing `MARKERS`, the 0.6
+claim-match threshold or `classify()` therefore reds CI instead of silently revising
+every figure §10 quotes. (`results/7947-score-all.json` — run 1 — cannot be pinned that
+way: its receipts were never retained, so it is a record, not a derivation.)
+
+⛔ **An unscorable run is REFUSED, not settled.** Two reachable defects fixed here,
+both about a delta that does not EXIST: a MISSING precision/recall delta used to
+satisfy the parity tolerance (`all(d is None or …)`), so two arms that each emitted
+zero claims — `precision = hits / 0` is None, Δloss is 0 because every qualifier is
+`absent` on both sides — certified branch 2 and the artifact recorded D3 as
+**settled**; and the unconditional `Δprecision={v:+.1f}` format string raised
+`TypeError` on that same run *before* `write_text()`, so no artifact existed at all.
+Now `main()` exits 2 when a split has no precision delta, every delta renders `n/a`,
+and any missing delta makes the verdict `no branch matched — scoring input
+incomplete` (a route `verdict_label` always had and nothing reached).
+
+Both files live under `tests/eval/write_path/`, which is registered as a
+`SOURCE_PATTERNS` entry of the `eval` surface (`tools/ci_selection.py`) precisely so a
+change to the harness, the scorer, the generator or a sealed `gold/*.json` selects the
+surface that owns their pinning tests (plus `core`, whose `test_extractor_v2.py` and
+`test_salience_labels_4917.py` read these sources). Registering the TEST file in
+`config/ci-surfaces.yml` only classifies it; selection is driven by that table.
 
 **`salience_labels.jsonl` is not a fixture of this corpus** — it is the
 **owner-sourced ground truth** for the write path's salience gate (25 real
@@ -113,6 +146,26 @@ the session-capture boundary set (`claude`, `claude-desktop`, `claude-web`,
   NEGATE remain thin (1 and 2 instances), and the corpus plants only the
   kinds the write path already supports — it measures recall, not the F1/F2
   ontology mapping.
+* `planted_qualifiers` — **(issue #7947)** the hedge/scope/stance ground truth the
+  raw-vs-narrative measurement scores: `{id, planted_turn, verbatim_qualifier,
+  class ∈ hedge|scope|stance, bound_claim?, notes}`. 25 across the corpus (15
+  tuning / 10 holdout, of which 9 carry no `bound_claim`), pinned by
+  `test_planted_qualifier_counts_the_measurement_quotes` because the write-up's
+  published verdict is computed on exactly those denominators.
+  ⛔ **GENERATOR-OWNED — never hand-edit the gold to add or change a qualifier.**
+  The section is derived from `generate_corpus._PLANTED_QUALIFIERS` and validated
+  by `schema._validate_planted_qualifiers`, which fails closed on the ways a
+  hand-edit goes wrong at gold level: the section is not a list, an entry is not an
+  object, an unknown key, a missing/non-string `verbatim_qualifier`, an `id` that is
+  not a string or that repeats, a `planted_turn` that is not an in-range int, a turn
+  whose content is not a string, an anchor that is not verbatim (normalized) in its
+  planted turn, an unknown `class`, and a `bound_claim` that is not a string or names
+  no planted unit of this gold. (No count is given on purpose — the list is the
+  contract, and a count silently goes stale.) This is not hypothetical: `#7947`'s first lane hand-added
+  `planted_qualifiers` straight into the sealed gold, which reddened **18** tests
+  (`_reject_unknown_keys`, `test_generator_is_byte_idempotent`,
+  `test_fixtures_hash_covers_fixture_and_gold_files`) and had to be undone by
+  making the section generator-owned. Add a row to the table instead.
 * `salient_units` — 1:1 with `planted_units`, carrying **point-level**
   `survival` semantics (the unit of analysis is the POINT — the
   research-brief/plan write-path unit assumption; NOT eval-spec §5's
@@ -127,8 +180,8 @@ the session-capture boundary set (`claude`, `claude-desktop`, `claude-web`,
 * `distractor_leakage_tolerance: 1` — research-recommended ≤1/run (gbrain
   measured 1/86); supersedes the epic's literal "zero" wording.
 
-**Baseline (DM-5):** TWO posture-keyed committed baselines (posture split,
-#2098 round 2): `baselines/main.json` = the PRODUCT lane (extractor posture
+**Baseline (DM-5):** TWO posture-keyed committed baselines (the posture split of #2098
+round 2): `baselines/main.json` = the PRODUCT lane (extractor posture
 `llm`, real v2 extractor — the number the W4 gate / W7 publication consume,
 gated manually at bless with `justification`), and `baselines/m2.json` = the
 deterministic CI lane (extractor posture `m2`, TORTOISE_SESSION_EXTRACTOR=m2

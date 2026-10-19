@@ -435,6 +435,13 @@ export const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp'
  * Contract (plan §4 / issue #1793): basename only, strip `..`, `/`,
  * backslash from filenames. Also strips control chars + spaces so the key
  * round-trips through URL encoding cleanly.
+ *
+ * Everything left that is not `[A-Za-z0-9._-]` becomes `_` (#8908). Storage
+ * rejects a key with a non-ASCII byte outright (`Invalid key`), so a file
+ * named after a headline — `AI’s new bottleneck.png`, whose apostrophe is
+ * U+2019 — failed to upload with no hint about why. Mapping to ASCII here
+ * keeps the key valid for every input instead of rejecting a filename the
+ * user cannot see anything wrong with.
  */
 export function sanitizeObjectKey(filename: string): string {
   // Basename only — strips any directory components (Windows + POSIX).
@@ -442,8 +449,12 @@ export function sanitizeObjectKey(filename: string): string {
   // Remove any residual path-traversal sequences.
   base = base.replace(/\.\./g, '');
   base = base.replace(/[/\\]/g, '');
-  // Control chars + whitespace → underscore (URL-safe keys).
-  base = base.replace(/[\x00-\x1f\x7f\s]/g, '_');
+  // Every run outside the storage key alphabet → ONE underscore: control
+  // chars, whitespace, non-ASCII letters, typographic punctuation, emoji.
+  // Collapsing the run is what keeps `café crème.PNG` at `caf_cr_me.PNG`
+  // rather than `caf__cr_me.PNG`, and a CJK name at `_.png` rather than
+  // `______.png` (#8908).
+  base = base.replace(/[^A-Za-z0-9._-]+/g, '_');
   return base;
 }
 

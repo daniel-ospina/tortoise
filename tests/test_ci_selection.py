@@ -9,6 +9,7 @@ carve-out so tools/longmem_eval/ etc. select the eval surface).
 from __future__ import annotations
 
 import ast
+import copy
 import json
 import os
 import re
@@ -144,6 +145,14 @@ def test_docs_scanning_gates_stay_in_tier1():
         "surface, so a diff that ONLY adds the copy runs tier1 only; without "
         "this registration the fourth copy merges green (#4309 class)"
     )
+    assert "test_b7_runbook_ok_semantics_8135.py" in tier1, (
+        "#8135 review (P1): the B7 operator runbook's `status == \"ok\"` pin "
+        "reads docs/runbook/b7-activation-scorecard.md — `docs/` is in "
+        "NON_PYTHON_PREFIXES and the runbook matches no SOURCE_PATTERNS "
+        "entry, so a runbook-only diff runs tier1 only; without this "
+        "registration the pre-#8135 sentence (or a dropped #9084 plain-dict "
+        "clause) merges green (#4309 class, same as #8614)"
+    )
 
 
 def test_fly_secret_drift_gate_runs_on_a_runbook_only_diff():
@@ -170,6 +179,35 @@ def test_fly_secret_drift_gate_runs_on_a_runbook_only_diff():
         "a docs/infra-runbook.md-only diff must select the guards that bind its "
         "prose (`test_fly_secret_drift.py`) — otherwise a docs-only edit that "
         "re-breaks a claim it pins merges green (#8614 review, #4309 class)"
+    )
+
+
+def test_b7_runbook_ok_semantics_gate_runs_on_a_runbook_only_diff():
+    """#8135 review (P1, two reviews): the runbook's `ok` pin must run on the runbook.
+
+    `tests/test_b7_runbook_ok_semantics_8135.py` binds the claim
+    `docs/runbook/b7-activation-scorecard.md` makes about
+    `mcp_tool_call.status == "ok"` — the claim #8135 corrected after it had
+    already drifted once (#3675). `docs/` is in NON_PYTHON_PREFIXES and the
+    runbook matches no SOURCE_PATTERNS entry, so a runbook-only diff filters to
+    `changed == []` and takes the docs-only early return — tier1 ONLY.
+
+    The pin used to live in `tests/test_activation_scorecard.py`, registered on
+    `api` and `core` but NOT in `tier1`, so it was asleep on the one change that
+    can break it: re-introducing "means only that the tool did not raise", or
+    deleting the #9084 plain-dict clause, in a docs-only PR merged green.
+    Dropping the tier1 entry moves the pin back into that hole (#4309 silent-drop
+    class; the #8614 shape one runbook over).
+    """
+    r = _sel(["docs/runbook/b7-activation-scorecard.md"])
+    assert r["full"] is False
+    assert r["surfaces"] == []
+    assert "test_b7_runbook_ok_semantics_8135.py" in r["test_files"], (
+        "a docs/runbook/b7-activation-scorecard.md-only diff must select the "
+        "pin that binds its prose (test_b7_runbook_ok_semantics_8135.py) — "
+        "otherwise a docs-only edit that re-teaches the pre-#8135 meaning of "
+        "`ok`, or drops the #9084 boundary, merges green (#8135 review P1, "
+        "#4309 class)"
     )
 
 
@@ -1365,6 +1403,52 @@ def test_the_session_declaration_guard_runs_on_its_docs_subjects_too():
         )
 
 
+def test_kind_vocabulary_guard_runs_on_a_docs_only_ontology_edit():
+    """#2786: the §5 vocabulary guard IS selected by a docs-only ONTOLOGY edit.
+
+    `tests/test_kind_vocabulary_consistency.py` reads `docs/ONTOLOGY.md` §5 as its
+    canonical source, so a docs-only §5 edit must run it. A review of PR #9146
+    raised this as a P1 (`ci-selection-gap`): "the file is not in tier1, so a
+    docs-only ONTOLOGY edit never runs it". **Measured false** at `547411b27` with
+    this selector — `select(['docs/ONTOLOGY.md'])` → `surfaces=['core']` with the
+    guard in `test_files`.
+
+    The premise was wrong: `docs/ONTOLOGY.md` is in `CORE_ALSO` (the #3554 entry,
+    the #1349/#3332/#3616 silent-drop remedy), so the docs path survives
+    `_keep_changed`, `core` is selected, and the docs-only tier-1 early return is
+    never reached. `tier1` registration is therefore NOT the remedy here: it would
+    add ~3 s to every PR for coverage the `core` leg already provides.
+
+    The residual risk that WOULD be real — `docs/ONTOLOGY.md` dropping out of
+    `CORE_ALSO`, which reverts every doc-anchored guard in this file's family to a
+    tier-1-only run — is what this pin holds (and
+    `test_the_session_declaration_guard_runs_on_its_docs_subjects_too` pins the
+    same mechanism for the #3554 guard).
+    """
+    r = _sel(["docs/ONTOLOGY.md"])
+    assert r["full"] is False
+    assert r["surfaces"] == ["core"], (
+        f"a docs-only docs/ONTOLOGY.md edit selects {r['surfaces']} — `core` is "
+        "lost, so the §5 vocabulary guard would fall back to tier-1 smoke and "
+        "never run on the doc it exists to pin (CORE_ALSO entry removed?)"
+    )
+    assert "test_kind_vocabulary_consistency.py" in r["test_files"], (
+        "a docs-only docs/ONTOLOGY.md edit does not run "
+        "tests/test_kind_vocabulary_consistency.py, so a §5 drop/addition/rename "
+        "merges green (#2786, #4309 class)"
+    )
+
+    # Non-vacuous: the same selection loses the guard the moment its `core`
+    # registration is dropped, so the assertion above is not satisfied by any file.
+    stripped = copy.deepcopy(load_manifest())
+    stripped["surfaces"]["core"] = [
+        t for t in stripped["surfaces"]["core"]
+        if t != "test_kind_vocabulary_consistency.py"
+    ]
+    assert "test_kind_vocabulary_consistency.py" not in select(
+        ["docs/ONTOLOGY.md"], "pull_request", stripped)["test_files"]
+
+
 def test_session_import_change_selects_the_window_guard():
     """#3575 P1-A: `tortoise/session_import/` maps to no named surface, so a
     parsers.py change selects `core` via the fallback. The window guard must be
@@ -1575,6 +1659,33 @@ def test_docs_lint_baseline_tool_change_selects_core_not_tier1():
     assert "core" in r["surfaces"], r
     assert "test_docs_lint_baseline.py" in r["test_files"], r
     assert r["full"] is False, r
+
+
+def test_e1_e2_evidence_bundle_change_selects_core_not_the_docs_only_return():
+    # #9076: the E1+E2 evidence bundle (`docs/evidence/7949-capstone/` — the probe,
+    # the corpus JSON + builder, the evidence log) and its structural checker
+    # (`tools/e1_e2_census_check.py`) own `tests/test_e1_e2_measurement.py`,
+    # registered `core`. MEASURED before the CORE_ALSO entries: all three paths
+    # returned `surfaces=[]`, `full=False`, 50 files — `docs/` and `tools/` are
+    # flat NON_PYTHON_PREFIXES entries, so the changed list came back empty and
+    # select() took the docs-only early return (tier-1 smoke). The pin ran there
+    # only because this PR dual-registers it in `tier1`; `tier1` is a CURATED
+    # list, so the guard's owning surface was nominal and one tier1 edit from
+    # dropping it silently. These asserts are on the `core` arm, which is what the
+    # entries create: after the change, `surfaces=['core']` and the pin is present.
+    # Mutation check: removing either CORE_ALSO entry restores `surfaces=[]` and
+    # fails the FIRST assert (`"core" in r["surfaces"]`), which is the one that
+    # names the owning surface. The second assert (`full is False`) still PASSES on
+    # the docs-only early return, which returns `full: False` — the mutation is
+    # caught by the surface assert, not by that one (#9110 review P3).
+    for path in ("docs/evidence/7949-capstone/probes/e1_e2_probe.py",
+                 "docs/evidence/7949-capstone/corpus/e1e2_corpus.json",
+                 "docs/evidence/7949-capstone/e1-e2.log",
+                 "tools/e1_e2_census_check.py"):
+        r = _sel([path])
+        assert "core" in r["surfaces"], (path, r["surfaces"])
+        assert r["full"] is False, (path, r)
+        assert "test_e1_e2_measurement.py" in r["test_files"], (path, r)
 
 
 def test_supabase_control_change_selects_the_org_purge_rpc_guard():
@@ -1817,6 +1928,26 @@ def test_write_op_reachability_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_why_layer_instrument_selects_its_guards_on_every_vector():
+    # #3990: `tortoise/why.py` selects `core` and NOTHING else on a PR, and
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry, so a
+    # `tools/why_layer_rate.py`-only diff came back with `changed == []` and took
+    # the docs-only early return (`select()` returned NO surface). Either way the
+    # two guards added for the why-layer operator leg would never run on the
+    # files they pin — the #1349/#2938/#3332 silent-drop class the neighbouring
+    # tests record. Registered under `core` (the surface why.py selects) plus a
+    # CORE_ALSO row for the tool.
+    # Mutation check: dropping the CORE_ALSO row fails the tool assert; moving
+    # either test off `core` fails the why.py assert.
+    for changed in (["tortoise/why.py"], ["tools/why_layer_rate.py"],
+                    ["tests/fixtures/why_layer_eval.json"]):
+        r = _sel(changed)
+        assert r["full"] is False, (changed, r)
+        assert "core" in r["surfaces"], (changed, r)
+        assert "test_why_operator_mediation.py" in r["test_files"], (changed, r)
+        assert "test_why_layer_rate.py" in r["test_files"], (changed, r)
+
+
 def test_write_op_reachability_guard_runs_on_every_surface_it_pins():
     # #4495 review P1: tests/test_write_op_reachability.py pins THREE modules and
     # they do not all select the same surface — so a single registration arm is
@@ -1970,6 +2101,32 @@ def test_install_queue_reconcile_schedule_tool_change_selects_core_not_tier1():
     r = _sel(["tools/install-queue-reconcile-schedule.sh"])
     assert "core" in r["surfaces"], r
     assert "test_install_queue_reconcile_schedule.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
+def test_ci_queue_health_tool_change_selects_core_not_tier1():
+    # tools/ci_queue_health.py owns tests/test_ci_queue_health.py (the hermetic
+    # cases pinning the FLOOD classification — a deep queue of PR runs is not a
+    # flood, a reporting workflow holding the queue is — the governor's bounds
+    # (never a pull-request-event run, never a workflow outside TRIM_SAFE), and
+    # the truncation labelling).
+    #
+    # Without its CORE_ALSO entry this is the #1349/#3332/#3616 silent-drop
+    # class: `tools/` is a flat NON_PYTHON_PREFIXES entry, so a tool-only change
+    # came back with `changed == []` and took the docs-only early return —
+    # `select()` returned NO surface and the guard never ran on the file it
+    # guards.
+    #
+    # Measured before the fix: `_sel(["tools/ci_queue_health.py"])` ->
+    # surfaces=[], full=False, test_ci_queue_health.py absent.
+    #
+    # CORE_ALSO (not TOOL_CARVEOUTS) is the deliberate choice: the suite is
+    # hermetic and `core`-registered, so selecting `core` runs it at the lowest
+    # CI cost. Mutation check: removing the CORE_ALSO entry selects no surface,
+    # so assert 1 below fails.
+    r = _sel(["tools/ci_queue_health.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_ci_queue_health.py" in r["test_files"], r
     assert r["full"] is False, r
 
 
@@ -5904,6 +6061,60 @@ def test_surface_audit_maps_tortoise_api_source_as_api_pin(tmp_path):
     report = _audit(_audit_manifest(api=["test_imports_api.py"]), repo)
     assert "tortoise/api.py" not in [g["path"] for g in report["coverage_gaps"]]
     assert "tortoise/api.py" not in [r["path"] for r in report["uncovered"]]
+
+
+def test_write_path_measurement_source_edit_selects_eval():
+    """#7947 review P1: editing the scorer must run the tests that pin the rule.
+
+    `score_qualifiers.py` (and `raw_vs_narrative.py`, `generate_corpus.py`,
+    `schema.py`, and every `gold/*.json`) live under `tests/eval/write_path/`
+    and NONE of them is named `test_*.py`, so before the `tests/eval/write_path/`
+    SOURCE_PATTERNS entry a change to them matched no pattern and fell to the
+    `tests/` -> `core` fallback. `test_score_qualifiers.py` and
+    `test_write_path_corpus.py` are registered on `eval` ONLY, so the tests
+    that pin the pre-registered decision rule (`MARKERS` / `BAND_PP` /
+    `classify()` / `evaluate_branches()`) and the corpus counts §10 publishes a
+    verdict on ran on NO diff-selected leg — every published number could move
+    with every gate green. Registering the TEST file in
+    config/ci-surfaces.yml does not fix this half: selection is driven by
+    SOURCE_PATTERNS.
+
+    `core` must stay too (CORE_ALSO): `test_extractor_v2.py` imports
+    `tests.eval.write_path.runner` and `test_salience_labels_4917.py` reads
+    `tests/eval/write_path/salience_labels.jsonl`, so an `eval`-only match
+    would trade one silent drop for another.
+
+    Watched RED before the entry existed (`surfaces == ['core']`, neither pin
+    in `test_files`), GREEN after — mutation-real, not a tautology: deleting
+    the SOURCE_PATTERNS entry reproduces the red.
+    """
+    cases = (
+        # the rule itself — the decisive one: `evaluate_branches`/`verdict_label`
+        "tests/eval/write_path/score_qualifiers.py",
+        # the instrument's calibration inputs
+        "tests/eval/write_path/raw_vs_narrative.py",
+        # the generator whose output the pinned counts are read off
+        "tests/eval/write_path/generate_corpus.py",
+        # a hand-edited sealed gold — the scenario `[gold]` in MEMORY.md warns about
+        "tests/eval/write_path/gold/wp01_quarry_debug.gold.json",
+    )
+    for changed in cases:
+        r = _sel([changed])
+        assert r["full"] is False
+        assert r["surfaces"] == ["core", "eval"], (
+            f"a write-path measurement source edit ({changed}) must select the "
+            f"`eval` surface that owns its pinning tests (and keep `core`, whose "
+            f"tests read the same sources); got {r['surfaces']}")
+        selected = set(r["test_files"]) | set(r["slow_selected"])
+        assert "eval/write_path/test_score_qualifiers.py" in selected, (
+            f"the test that pins the pre-registered rule must run on {changed}; "
+            f"selected {sorted(selected)}")
+        assert "eval/write_path/test_write_path_corpus.py" in selected, (
+            f"the corpus counts §10's verdict is computed on must be pinned on "
+            f"{changed}; selected {sorted(selected)}")
+        assert "test_extractor_v2.py" in selected, (
+            "the core-registered importer of tests.eval.write_path.runner must "
+            f"still run on {changed}; selected {sorted(selected)}")
 
 
 def test_tortoise_api_change_selects_api_and_core():

@@ -44,8 +44,11 @@ const sessionDeleteFlow = sliceBetween(
 // The modal itself — from its render gate. Scoping matters: the GRAPH delete
 // modal in the same file shares the gate helper and several literals, so a
 // file-wide `assert.match` would false-pass on the graph flow.
+//
+// #8670 review P1: the gate is the DERIVED flag, not `confirmSessionId`, so the
+// inert effect's dependency and the render condition are literally one value.
 const sessionModal = sliceBetween(
-  '{confirmSessionId && (() => {',
+  '{sessionDeleteArmed && (() => {',
   'function SessionTranscriptPanel(',
   'captured-session delete modal')
 
@@ -81,7 +84,7 @@ test("#3885(e): the confirm button is gated on the typed word via the shared del
   assert.match(sessionModal, /onDeleteSession\(ds\.id\)/,
     'the destructive call must run only from the gated modal path')
   // The destructive call must NOT appear anywhere in the arming half.
-  assert.doesNotMatch(sessionDeleteFlow.slice(0, sessionDeleteFlow.indexOf('{confirmSessionId && (() => {')), /onDeleteSession\(/,
+  assert.doesNotMatch(sessionDeleteFlow.slice(0, sessionDeleteFlow.indexOf('{sessionDeleteArmed && (() => {')), /onDeleteSession\(/,
     'no destructive call may sit before the modal gate')
 })
 
@@ -130,8 +133,8 @@ test('#3885(e): a failed delete renders its reason INSIDE the armed dialog (revi
   // null once its session leaves the live list while `confirmSessionId` stays
   // set, and a `!confirmSessionId` gate would then suppress the reason with no
   // surface left to show it (review P3-2b).
-  assert.match(mainJsx, /const sessionDeleteArmed = !!confirmSessionId && sessions\.some\(\(x\) => String\(x\.id\) === confirmSessionId\)/,
-    'the page-copy gate must derive from the dialog that actually renders, not from confirmSessionId alone')
+  assert.match(mainJsx, /const sessionDeleteArmed = !sessionsLoading && !!state && sessionsOn && sessionsLoaded\s*\n\s*&& !!confirmSessionId && sessions\.some\(\(x\) => String\(x\.id\) === confirmSessionId\)/,
+    'the page-copy gate must derive from the dialog that actually renders — its WHOLE render gate, not confirmSessionId alone')
   assert.match(mainJsx, /\{sessionsActionError && !sessionDeleteArmed && \(/,
     'the page-level banner must yield to the in-dialog copy while the dialog is really armed')
 })
