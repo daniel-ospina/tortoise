@@ -15,6 +15,8 @@ related:
     note: "Embedded AOF default is opt-in — documented and pinned, never a production path."
   - issue: 2880
     note: "Self-hosted off-box copy — the rule below is not yet met without it."
+  - issue: 9208
+    note: "A REFUSED change-feed write is disclosed as a named degraded state, not a silent `[]`."
 ---
 
 # Durability Posture — the one authority
@@ -256,6 +258,19 @@ would only relabel the same truncation. The pre-wipe purge floor is therefore
 LOST, which is why the backup/restore sibling
 (`hosted_backup._restore_event_meta`, #3902) does carry it: there the
 `:GraphEvent` rows are copied, so the floor is there to be carried.
+
+**A write the store REFUSES is disclosed the same way a truncated one is
+(#9208).** `first_seq` tells a subscriber its cursor expired; a refused
+`append_event`/`next_seq` used to tell it nothing at all — the row was lost,
+`poll_events` kept answering `[]`, and "the feed is dead" read exactly like
+"nothing happened" (measured on #9124's armed door: a `create_point` left 0
+`:GraphEvent` rows and returned success). The loss is now recorded as a NAMED
+degraded state (`event_store.degraded()`), per store+graph, and `poll_events`
+RAISES `event_store.ChangeFeedDegraded` rather than return a page that cannot be
+read as "lost" — `event_store.clear_degraded(<graph>)` is the explicit
+acknowledgement, because the events in the gap never reached the store and are
+not recovered by a later successful write. It is process memory: a peer process
+cannot see it, which is stated rather than assumed.
 
 **The counter's domain is `0 .. MAX_SEQ`, and the ceiling is `2**53 - 1`, not
 INT64_MAX.** `ensure_event_schema` indexes `:GraphEvent.seq`, and FalkorDB

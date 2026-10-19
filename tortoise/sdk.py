@@ -6548,6 +6548,15 @@ class TortoiseSDK:
         Types are validated against the EventCodec registry (unknown → ValueError).
         Events live in THIS SDK's graph namespace (the org partition).
 
+        #9208: when a change-feed write for THIS graph has been REFUSED or lost,
+        this REFUSES (``event_store.ChangeFeedDegraded``) instead of returning a
+        page. A short page is not a distinguishable answer: a subscriber cannot
+        read it as "the stream is broken" rather than "nothing happened", which
+        is how a dead `:GraphEvent` feed used to report success. The state is
+        keyed by graph and lives in process memory (a peer process cannot see it,
+        and the store is exactly where the notice could not be written); it is
+        cleared only by ``event_store.clear_degraded(<graph>)``.
+
         #2353: when ``TORTOISE_CHANGE_FEED`` is truthy the response ALSO carries
         ``changes`` — the same page folded into per-claim semantic deltas with
         before/after (``tortoise/change_feed.py``), so "what changed for claim X
@@ -6559,8 +6568,7 @@ class TortoiseSDK:
         gained the ``deleted`` marker unconditionally, and this reply relays that
         row verbatim under ``events`` (see ``config/surface-manifest.yml``).
         """
-        from .event_store import read_after
-
+        from .event_store import ChangeFeedDegraded, degraded, read_after
         after_seq = 0 if after is None else self._decode_cursor(after)
         if types:
             from .shared_state.events import event_types
@@ -6570,6 +6578,27 @@ class TortoiseSDK:
             if unknown:
                 raise ValueError(f"unknown event type: {unknown[0]}")
         proj = self._get_proj()
+        # #9208: THIS graph's change-feed write was REFUSED or lost, so a short
+        # page cannot be told from a quiet stream. Refusing to answer is the
+        # whole point of the named degraded state: the alternative is returning
+        # success over a dead feed, which is the silent deletion §17.1's third
+        # door must never be allowed to produce. Before the purge below, because
+        # a writer that cannot emit must not be handed more writes to lose.
+        state = degraded(proj)
+        if state is not None:
+            raise ChangeFeedDegraded(
+                "the :GraphEvent change feed for graph "
+                f"{state['graph']!r} is DEGRADED: a change-feed write was "
+                f"refused or lost at stage {state['stage']!r} for event type "
+                f"{state['event_type']!r} ({state['error']}); {state['lost']} "
+                "event(s) never reached the store, so this poll cannot "
+                "distinguish a quiet stream from a dead one and will not "
+                "answer as if it could. Fix the store (the refusal message "
+                "names the cause — e.g. an undeclared write under §17.1), "
+                "then acknowledge the loss with "
+                "tortoise.event_store.clear_degraded(<graph name>) — the "
+                "missing events are NOT recovered by a later successful "
+                "write (#9208)")
         # Lazy retention (plan-review P2 / Task 6 readOnlyHint tension):
         # maintenance purge at most once per TORTOISE_EVENT_RETENTION_INTERVAL
         # per process, so steady-state polls are read-only. Best-effort — a
@@ -6637,7 +6666,11 @@ class TortoiseSDK:
         """Unified event emission: JSONL rebuild log (#548) + graph event store (#432).
 
         Both stores are best-effort — failures log and continue (never crash
-        the mutation).
+        the mutation). #9208: the graph event store's failures are also
+        RECORDED as a NAMED degraded state (`event_store.degraded()`) that
+        `poll_events` refuses to answer over, so "the feed stopped" is not
+        indistinguishable from "nothing happened" at the only place a consumer
+        can see it.
 
         **Return value (the #7951 commit signal):** ``True`` when the record was
         appended to a configured JSONL journal, ``False`` when a configured
@@ -6731,14 +6764,34 @@ class TortoiseSDK:
                     graph_payload = {}
             if actor is not None:
                 graph_payload["actor_user_id"] = actor
+            # #9208: bound BEFORE the try so the handler below cannot raise
+            # `NameError` on the one path where `_get_proj()` (or the import)
+            # is itself what failed — an exception in an exception handler
+            # would break the write this leg exists to keep best-effort.
+            proj = None
             try:
                 from .event_store import append_event, ensure_event_schema, next_seq
                 proj = self._get_proj()
                 ensure_event_schema(proj)
                 seq = next_seq(proj)
                 append_event(proj, seq, type_, graph_payload, self.ulid())
-            except Exception:  # noqa: BLE001, RUF100
-                _logger.warning("event emission failed for %s — continuing", type_)
+            except Exception as exc:  # noqa: BLE001, RUF100
+                # #9208: this leg stays BEST-EFFORT — `_emit_event` is the
+                # outbox's commit signal for the JSONL journal below, and a
+                # raise here would make a broken change-feed store report a
+                # FAILED mutation (several doors emit after their cache write).
+                # It must not be SILENT, though: §17.1's third door refusing
+                # one of these writes used to reach only a WARNING, so the feed
+                # stopped while `poll_events` kept answering `[]` — a quiet
+                # stream and a dead one, the same reply. The loss is recorded
+                # as the named degraded state the feed's CONSUMER can see.
+                from .event_store import record_degraded
+                state = record_degraded(proj, "emit", type_, None, exc)
+                _logger.warning(
+                    "event emission failed for %s — the change feed is "
+                    "DEGRADED (%s lost, %s: %s); poll_events will refuse to "
+                    "answer until this is acknowledged (#9208)",
+                    type_, state["lost"], type(exc).__name__, exc)
 
         # ── JSONL event log (#548) ─────────────────────────────────
         if point is None and id is None:
