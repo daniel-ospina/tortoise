@@ -1240,6 +1240,144 @@ def get_ask_usage(org_id: str) -> dict:
         return _zero_view(period.label, period)
 
 
+# ── Stock/flow conversion: nodes per billed write op (#4495) ────────────────
+#
+# WHY. The price book publishes a monthly write-op FLOW
+# (`included_write_ops_per_month`) and a permanent node STOCK cap
+# (`max_graph_nodes`, enforced as a WRITE REFUSAL). The two were set with no
+# designed relationship, so the stock can refuse the writes the flow was sold
+# for (#4495). The conversion between the axes is `r` = net-new non-episodic
+# nodes per billed write op, and it is the ONE input that decides whether a
+# tier's allowance is deliverable at all (`pricing.allowance_reachability`).
+#
+# `r` has been RECORDED on every increment since epic #909 §4.4/W-4 — the
+# `nodes_written` column sits beside `write_ops` in both lanes
+# (registry: the `MeteringRecord` MERGE; Supabase: the `metering_increment`
+# RPC) — and was never READ for this question. Three prior hand-derived tables
+# on #4495 disagreed because they could not consult it. This is the read side.
+#
+# INDEPENDENT OF BILLING, BY CONSTRUCTION: nothing here prices, caps, throttles
+# or refuses. It is a measurement of work already done.
+
+
+def get_write_op_yield(org_id: str) -> dict:
+    """Net-new non-episodic nodes PER BILLED WRITE OP for the current period.
+
+    Returns ``{write_ops, nodes_written, nodes_per_op, measured,
+    nodes_attribution, period, period_start, period_end}``.
+
+    ``measured`` is True ONLY when a yield was actually RECORDED. It is False in
+    all four other cases, and ``nodes_attribution`` says which one:
+
+    - ``"absent"`` — no ledger row, or a row with no write ops yet: nobody has
+      written, so this org says nothing;
+    - ``"unattributed"`` — write ops were BILLED but no node yield was
+      recorded (`nodes_written == 0`);
+    - ``"read_error"`` — the ledger row could not be read;
+    - ``"period_error"`` — the billing WINDOW could not be resolved, so the
+      ledger was never consulted. It is a different fault (a subscription
+      anchor, ``_current_period``'s deliberate raise, #3981) and an operator
+      sent to "the ledger" for it would be looking in the wrong place.
+
+    ⛔ ``nodes_per_op`` is ``None`` — NEVER 0 — whenever ``measured`` is False,
+    and for ``"unattributed"`` that is the WHOLE POINT. The ledger cannot tell a
+    genuine zero yield from an unrecorded one, because three write paths bill a
+    write op while leaving ``nodes_written`` at its 0 default:
+    ``POST /v1/points`` (one point, ``nodes_written=1`` is NOT passed —
+    ``hosted_api.py:8651``), the LIVE capture lane ``_capture_session_impl``
+    behind ``POST /v1/sessions`` and the ``tortoise_session_capture`` MCP tool
+    (``hosted_api.py:13709``), and every MCP tool write
+    (``mcp_server.py:1550``).
+
+    A genuine ``r = 0`` does exist — a dedup re-commit, a supersede-only delta,
+    a replay, a hold commit all add no net-new node — but it is
+    indistinguishable here from the unrecorded shape above, so a reader must
+    NOT turn ``write_ops > 0, nodes_written == 0`` into "this org consumes no
+    stock": that is absence reported as a measurement, and it would manufacture
+    a REACHABLE verdict for the very org whose yield went unrecorded.
+    ``r = 0`` may only be supplied as an explicit hypothetical
+    (``pricing.allowance_reachability(tier, 0)``).
+
+    ⚠️ Where a yield IS recorded it is still a LOWER BOUND on the true yield
+    (those three paths contribute ops but no nodes), so measured ``r`` is ≤
+    true ``r`` and the measured REACHABILITY is an UPPER bound: reality is at
+    most this good, and the defect it measures (#4495) is at least as large as
+    the reading says.
+
+    A read failure degrades to the unmeasured view with ``nodes_attribution =
+    "read_error"`` (never 0 yield, never a claim of absence) and never 500s —
+    the same posture as ``get_ask_usage``.
+    """
+    def _view(write_ops: int, nodes_written: int, label: str,
+              period: MeteringPeriod | None = None,
+              read_ok: bool = True, period_ok: bool = True) -> dict:
+        if not period_ok:
+            attribution = "period_error"
+        elif not read_ok:
+            attribution = "read_error"
+        elif write_ops <= 0:
+            attribution = "absent"
+        elif nodes_written <= 0:
+            attribution = "unattributed"
+        else:
+            attribution = "recorded"
+        measured = attribution == "recorded"
+        return {
+            "write_ops": write_ops,
+            "nodes_written": nodes_written,
+            "nodes_per_op": (nodes_written / write_ops) if measured else None,
+            "measured": measured,
+            "nodes_attribution": attribution,
+            "period": label,
+            "period_start": period.start_iso if period else None,
+            "period_end": period.end_iso if period else None,
+        }
+
+    if not org_id:
+        return _view(0, 0, _display_period_label())
+    try:
+        period = _current_period(org_id)
+    except Exception as e:
+        # #923 posture: an unresolvable WINDOW has no row to read, so the
+        # degradation is the unmeasured view — never a month key and never 0.
+        # #3981: the raise is a deliberate SIGNAL about the org's subscription
+        # anchor, and it is NOT the same fault as an unreadable ledger.
+        _logger.warning(
+            "write-op yield: billing window unresolvable: team=%s error=%s",
+            org_id, e,
+        )
+        return _view(0, 0, _display_period_label(), period_ok=False)
+    try:
+        if _supabase_mode():
+            from tortoise.supabase_control import (  # noqa: I001
+                get_control_plane, metering_get_write_op_counters,
+            )
+            row = metering_get_write_op_counters(
+                get_control_plane(), org_id, period.start_iso)
+            return _view(int(row.get("write_ops") or 0),
+                         int(row.get("nodes_written") or 0),
+                         period.label, period)
+        sdk = _reg_sdk()
+        reg = sdk._get_registry()
+        rows = reg.query(
+            "MATCH (m:MeteringRecord {org_id: $tid, period_start: $pstart}) "
+            "RETURN m.write_ops, m.nodes_written",
+            params={"tid": org_id, "pstart": period.start_iso},
+        ).result_set
+        if not rows:
+            return _view(0, 0, period.label, period)
+        return _view(int(rows[0][0] or 0), int(rows[0][1] or 0),
+                     period.label, period)
+    except Exception as e:
+        # A failed READ is not an absent row: reporting it as "no write ops"
+        # would send an operator to look for writes that may exist.
+        _logger.warning(
+            "write-op yield query failed (degrading to unmeasured view): "
+            "team=%s period=%s error=%s", org_id, period.label, e,
+        )
+        return _view(0, 0, period.label, period, read_ok=False)
+
+
 # ── Embed lane: per-org ENCODE workload (#4488) ─────────────────────────────
 #
 # WHY. The ask/capture lanes record LLM PROVIDER work, which has a billable

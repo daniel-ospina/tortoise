@@ -604,6 +604,20 @@ surfaces:
   # `core` entry covers the engine path: the primitive also serves
   # `tortoise/sdk.py::TortoiseSDK.capture_session`, and `tortoise/sdk.py` is a
   # SHARED_MODULE (so an sdk.py change selects the full matrix regardless).
+  # #4495: the write-op allowance's stock/flow conversion — the instrument that
+  # measures `nodes_per_op` against the published cap. DUAL-REGISTERED (`api` +
+  # `core`) per the #2938 convention, and the `api` arm is load-bearing: the
+  # guard pins `metering.get_write_op_yield` (tortoise/metering.py) and
+  # `supabase_control.metering_get_write_op_counters`
+  # (tortoise/supabase_control.py), BOTH exact `api` SOURCE_PATTERNS entries, and
+  # a named-surface match REPLACES the `core` fallback in `select()` — so a
+  # metering.py-only or supabase_control.py-only PR (the attribution rule, the
+  # counters reader) would select `api` and never run the guard that pins them.
+  # The `core` entry covers the arithmetic half (`tortoise/pricing.py` matches no
+  # SOURCE_PATTERNS row and falls through to `core`); see its comment there.
+  # Mutation check: deleting this line fails
+  # tests/test_ci_selection.py::test_write_op_reachability_guard_runs_on_every_surface_it_pins.
+  - test_write_op_reachability.py
   - test_write_session_and_turns_3551.py
   # #3554: the `:Session` write-schema declaration (tortoise/session_schema.py)
   # and its writer inventory + D9 retrofit instrument
@@ -2071,6 +2085,14 @@ surfaces:
   # SHARED_MODULE, so an sdk.py-only change already runs the full matrix.
   - test_capture_validfrom_3945.py
   - test_v4_declared_mechanisms.py
+  # #4495: `pricing.allowance_reachability` — cap vs allowance quantised at the
+  # node boundary — lives in tortoise/pricing.py, which matches no SOURCE_PATTERNS
+  # row and therefore falls through to `core`. DUAL-REGISTERED with `api` (the
+  # metering/supabase halves of the same guard select `api`); a core-only entry
+  # would never run this file on a metering.py-only PR. Mutation check: deleting
+  # this line fails
+  # tests/test_ci_selection.py::test_write_op_reachability_guard_runs_on_every_surface_it_pins.
+  - test_write_op_reachability.py
   - test_write_session_and_turns_3551.py  # #3551: the shared _write_session_and_turns primitive (Session MERGE + turn store); dual: api
   # #3554: the `:Session` write-schema declaration + its writer inventory/D9
   # retrofit instrument; dual: api (the inventory predicate scans hosted_api.py).

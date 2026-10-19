@@ -52,10 +52,11 @@ needs no client_id paste.
    `cursor://anysphere.cursor-mcp/oauth/callback` on its exthost path. It is a
    deliberate **allowlist**: registration is all-or-nothing (one rejected entry
    costs the client its `client_id`, and with it every sign-in path), and the
-   consent page hands the code over by navigating to the raw value, so a scheme
-   a browser executes (`javascript:`, `data:`) must never be registrable. A
-   fragment is refused for every scheme (RFC 6749 §3.1.2) — tested as the raw
-   `#` delimiter, so a bare trailing `#` (an empty fragment) is refused too.
+   consent page hands the code over by navigating the target **rebuilt from the
+   registered URI** (#3443), so a scheme a browser executes (`javascript:`,
+   `data:`) must never be registrable. A fragment is refused for every scheme
+   (RFC 6749 §3.1.2) — tested as the raw `#` delimiter, so a bare trailing `#`
+   (an empty fragment) is refused too.
 
    **`redirect_uri` matching (#2846).** For **loopback** redirect URIs the port
    is ignored when matching the registered value (RFC 8252 §7.3 — a native
@@ -66,11 +67,37 @@ needs no client_id paste.
    `localhost` and `127.0.0.1` are different hosts. A URI containing a raw
    backslash is refused at registration **and** at validation: WHATWG ends the
    authority at a backslash for special schemes but `urlsplit` does not, so the
-   two parsers disagree about the host, and the code is delivered by navigating
-   the browser to the raw string. Control characters are refused too, as defence
-   in depth rather than because they are differential — `urlsplit` strips
-   `\t`/`\r`/`\n` just as a browser does, and a browser refuses, percent-encodes,
-   or (at the input's leading/trailing edge) strips the others.
+   two parsers disagree about the host. Control characters are refused too, as
+   defence in depth rather than because they are differential — `urlsplit` strips
+   `\t`/`\r`/`\n` just as a browser does, and a browser refuses,
+   percent-encodes, or (at the input's leading/trailing edge) strips the others.
+   **C1 controls (U+0080-U+009F) are deliberately NOT refused** — the predicate
+   is "C0 + DEL", never "all control characters". Review measured 0
+   authority-boundary divergences across 7,623 single-insertion and 57,212 fuzz
+   candidates without a backslash, so it is a **recorded boundary**, not an
+   unexamined gap; widening `_unsafe_redirect_uri_bytes` is a one-line change if
+   that measurement is ever challenged.
+
+   **What the browser is actually sent to (#3443).** The gate above is a
+   denylist, and it used to BE the boundary: `redirectBack` navigated the raw
+   `redirect_uri`, so the AS and the browser had to agree on every byte of the
+   request. The destination is now **rebuilt from the matched REGISTERED URI**
+   (`_canonical_redirect_target`) with only the **port** taken from the request
+   — the single component RFC 8252 §7.3 permits to vary — and that is the value
+   the page navigates (embedded as `redirect_target`, returned alongside the
+   code by `POST /oauth/consent`) and the value echoed into the `error=`
+   redirect on the pre-consent failure path. Nothing the request sends reaches
+   the browser except the **port's digits** — no presented scheme, host,
+   userinfo, path, query or fragment does — so a parser differential cannot move
+   the host whatever the
+   two parsers disagree about, and the byte gate becomes defence in depth
+   rather than the boundary. It is **not** retired: the rebuild trusts the
+   registered URI, so those bytes must still be refused at registration (a
+   differential string in a client row would be navigated with the server's own
+   blessing), and refusing them on the request side keeps "the two parsers
+   cannot disagree" a property of the composed path. The code itself stays
+   bound to the **presented** `redirect_uri` (RFC 6749 §4.1.3 exact match at
+   `/oauth/token`), unchanged.
 3. The branded consent page (D2 — one custom HTML page reusing the
    signup/signin pattern) signs the user in via supabase-js and confirms.
    The browser session JWT is verified server-side with the **existing JWKS

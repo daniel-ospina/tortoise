@@ -153,13 +153,19 @@ def _vendored_bundle() -> Path:
     return files[0]
 
 
-def _render_page() -> str:
+def _render_page(redirect_uri: str = "https://client.example/cb",
+                 redirect_target: str | None = None) -> str:
     """Render the consent page with the pure renderer (no app boot).
 
     Note: the load-time URL is supplied to the DRIVER (`_run(..., search=...)`),
     not here — `consent_page_html` takes no URL. A `search` parameter on this
     renderer would be inert, and a caller reaching for it to build a
     ``?error=…`` case would silently exercise a clean load.
+
+    ``redirect_target`` defaults to ``redirect_uri`` (what the server sends when
+    nothing varies); a caller passes them apart to pin WHICH one the page
+    navigates — that difference is the only way the #3443 assertion below can
+    discriminate.
     """
     sys.path.insert(0, str(REPO_ROOT))
     from tortoise.oauth import consent_page_html
@@ -169,13 +175,15 @@ def _render_page() -> str:
         scope="mcp",
         params={
             "client_id": "client-1",
-            "redirect_uri": "https://client.example/cb",
+            "redirect_uri": redirect_uri,
             "response_type": "code",
             "state": "st-1",
             "code_challenge": "chal",
             "code_challenge_method": "S256",
             "scope": "mcp",
             "resource": "",
+            "redirect_target": (redirect_uri if redirect_target is None
+                                else redirect_target),
             "client_name": "test-connector",
         },
         supabase_url="https://proj.supabase.co",
@@ -805,6 +813,83 @@ def test_inv11_return_target_is_canonicalised_with_a_control() -> None:
     ctl = _run("return_target", page=guard_off, search=hostile)
     assert "code" in ctl["innerTransients"], (
         f"the control did not echo the transient — the assertion is vacuous: {ctl}"
+    )
+
+
+# ── #3443: the navigation target is the SERVER's rebuild ────────────────────
+
+def test_3443_navigation_uses_the_server_built_target_with_a_raw_guard_control() -> None:
+    """#3443 — `redirectBack` navigates the URL the SERVER built from the
+    validated registered URI, never the request string the page also carries.
+
+    The fixture differs in host CASE — precisely the difference the server's
+    rebuild is allowed to make, since the authority is re-emitted from the
+    REGISTERED uri — so a page that still navigated `PARAMS.redirect_uri` is
+    distinguishable here, and the guard-removed control proves it by restoring
+    the raw lookup and observing the raw bytes.
+
+    Both navigations `redirectBack` can take are covered: the deny path (no
+    server round trip, so the page-scoped `redirect_target` is the ONLY source)
+    and the mint response (`POST /oauth/consent` returns the target alongside
+    the code, which the page prefers), plus the version-skew fallback where the
+    response omits it — and the fail-closed arm where the page carries none at
+    all, which must NOT navigate.
+    """
+    raw = "https://CLIENT.example/cb"
+    target = "https://client.example/cb"
+    page = _render_page(redirect_uri=raw, redirect_target=target)
+
+    # ── the three arms that must navigate, and to WHAT ────────────────────
+    # (a) deny: no POST, so this is the page-scoped value alone
+    deny = _run("deny", page=page)
+    assert deny["navs"], f"the deny path did not navigate: {deny}"
+    assert deny["assign"] == target + "?error=access_denied&state=st-1", deny
+    assert deny["minted"] == 0, (
+        "the deny path reached /oauth/consent — this arm no longer pins the "
+        f"no-round-trip source: {deny['minted']}"
+    )
+    # (b) the mint response carries the target, and the page PREFERS it over the
+    # page-scoped one. The two values are made to DIFFER here, because passing
+    # the same string in both places cannot distinguish "read
+    # `payload.redirect_target`" from "read `PARAMS.redirect_target`" — the
+    # assertion would stay green with the response value dropped or mis-wired.
+    minted_target = "https://client.example/cb-from-the-mint"
+    minted = _run("consent_code", page=page, previewOk=True, consentOk=True,
+                  consentTarget=minted_target)
+    assert minted["minted"] == 1, f"the mint POST never happened: {minted}"
+    assert minted["assign"] == minted_target + "?code=code-1&state=st-1", (
+        f"the page did not prefer the mint response's redirect_target over the "
+        f"page-scoped one: {minted['assign']}"
+    )
+    # (c) version skew: an API that does not return the field yet falls back to
+    # the page's target — never to the raw string
+    skew = _run("consent_code", page=page, previewOk=True, consentOk=True)
+    assert skew["assign"] == target + "?code=code-1&state=st-1", skew
+
+    for arm, out in (("deny", deny), ("mint", minted), ("skew", skew)):
+        assert "CLIENT.example" not in out["assign"], (
+            f"the {arm} arm navigated the RAW request string: {out['assign']}"
+        )
+
+    # ── fail-closed: no server target, no navigation ──────────────────────
+    # The server never sends this (the handler refuses a request whose target it
+    # cannot rebuild), which is why it is pinned here rather than left to the
+    # request path: `undefined` would resolve as a RELATIVE url and deliver the
+    # code to this page's own origin.
+    blank = _run("deny", page=_render_page(redirect_uri=raw, redirect_target=""))
+    assert blank["navs"] == [], f"navigated with no server-built target: {blank}"
+    assert blank["errorVisible"] is True, blank
+    assert blank["errorText"].strip(), (
+        f"the refusal was rendered but carried no message: {blank}"
+    )
+
+    # ── the control that makes the three assertions above discriminating ──
+    guard_off = page.replace("const dest = target || PARAMS.redirect_target;",
+                             "const dest = target || PARAMS.redirect_uri;")
+    ctl = _run("deny", page=guard_off)
+    assert "CLIENT.example" in ctl["assign"], (
+        f"the control did not navigate the raw string — the assertion is "
+        f"vacuous: {ctl['assign']}"
     )
 
 
@@ -1772,6 +1857,16 @@ function fetchImpl(input, init) {
     // affordance is the consent view's own entry (see `consent_after_terminal`).
     return jsonResponse({ org_id: 'org-1', org_name: 'Org One' }, 200);
   }
+  if (url.indexOf('/oauth/consent') >= 0 && (init && init.method) === 'POST' && opts.consentOk) {
+    // #3443: the MINT response, which is what the page prefers as the
+    // navigation target. `consentTarget` is left out when the caller wants the
+    // page-scoped fallback (a page/API version skew mid-deploy).
+    const minted = { code: 'code-1', state: 'st-1' };
+    if (opts.consentTarget !== undefined && opts.consentTarget !== null) {
+      minted.redirect_target = opts.consentTarget;
+    }
+    return jsonResponse(minted, 200);
+  }
   return jsonResponse({}, 200);
 }
 
@@ -2049,6 +2144,39 @@ function innerTarget(assignUrl) {
     out.errorVisible = els['error'] ? els['error'].classList.contains('visible') : false;
     out.retrySigninVisible = els['btn-retry-signin']
       ? String(els['btn-retry-signin'].style.display) : null;
+  } else if (scenario === 'deny' || scenario === 'consent_code') {
+    // #3443: both navigations `redirectBack` can take. `deny` is the path with
+    // no server round trip (so PARAMS.redirect_target is the only source);
+    // `consent_code` drives the REAL mint POST and its response, which the page
+    // prefers.
+    if (scenario === 'consent_code') {
+      await sleep(60);   // let createClient()'s _initialize settle
+      // A session through the page's OWN storage adapter (as
+      // `consent_after_terminal` seeds it), so `btn-auth`'s own handler runs.
+      await q('cookieStorage.setItem(COOKIE_NAME, JSON.stringify(' +
+        '{access_token:"a",refresh_token:"r",expires_at:9999999999,' +
+        'token_type:"bearer",user:{id:"u1"}}));');
+      await q('runConsentFlow()');
+      await waitFor(function () {
+        return !!(els['btn-auth'] && !els['btn-auth'].disabled);
+      }, 3000);
+      await q('document.getElementById("btn-auth").onclick()');
+    } else {
+      await sleep(60);
+      await q('document.getElementById("btn-deny").onclick()');
+    }
+    await waitFor(function () {
+      return navs.length > 0 ||
+             !!(els['error'] && els['error'].classList.contains('visible'));
+    }, 3000);
+    await sleep(20);
+    out.navs = navs.slice();
+    out.assign = navs.length ? navs[navs.length - 1] : null;
+    out.minted = fetchCalls.filter(function (c) {
+      return c.url.indexOf('/oauth/consent') >= 0 && c.method === 'POST';
+    }).length;
+    out.errorVisible = els['error'] ? els['error'].classList.contains('visible') : false;
+    out.errorText = els['error'] ? String(els['error'].textContent) : '';
   } else if (scenario === 'email_after_terminal') {
     // #5734: the affordance is a sibling of #error, OUTSIDE both views, so a
     // message that does not imply a retry has to DROP it — otherwise it stays on

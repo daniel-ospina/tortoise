@@ -1748,6 +1748,62 @@ def test_graph_census_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_write_op_reachability_tool_change_selects_core_not_tier1():
+    # #4495 review P2: tools/write_op_reachability.py is the CLI that reports the
+    # write-op allowance's stock/flow conversion, and its guard
+    # (tests/test_write_op_reachability.py) is `core`+`api` registered.
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row
+    # matches the tool, so a CLI-only diff came back with `changed == []` and
+    # took the docs-only early return: `select()` returned NO surface, so the
+    # exit-code contract (0 stated-yield / 1 unreachable / 2 not-measurable /
+    # 3 measured-uncertified), the UNCERTIFIED rule and the absence rule would
+    # never run on the PR editing the CLI. Registering the test under `core` does
+    # not help — a name in a surface's test_files only runs when that surface is
+    # already selected. Same #1349/#3332/#3616 silent-drop class as the
+    # tools/graph_census.py case above: an instrument that makes an uncounted
+    # class visible must not be invisible to CI selection itself.
+    #
+    # Measured before the CORE_ALSO entry: `_sel(["tools/write_op_reachability.py"])`
+    # -> surfaces=[], full=False, test_write_op_reachability.py absent.
+    # CORE_ALSO (not TOOL_CARVEOUTS) is the deliberate choice: the guard is
+    # hermetic (synthetic books, a fake SDK) and `core` is where its core arm
+    # lives.
+    # Mutation check: removing the CORE_ALSO entry fails assert 2 below.
+    r = _sel(["tools/write_op_reachability.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_write_op_reachability.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
+def test_write_op_reachability_guard_runs_on_every_surface_it_pins():
+    # #4495 review P1: tests/test_write_op_reachability.py pins THREE modules and
+    # they do not all select the same surface — so a single registration arm is
+    # inert for part of the file:
+    #
+    #   tortoise/pricing.py            -> core  (no SOURCE_PATTERNS row)
+    #   tortoise/metering.py           -> api   (exact SOURCE_PATTERNS["api"])
+    #   tortoise/supabase_control.py   -> api   (exact SOURCE_PATTERNS["api"])
+    #
+    # A named-surface match REPLACES the `core` fallback, so with a `core`-only
+    # registration a metering.py-only PR (the `get_write_op_yield` attribution
+    # rule) or a supabase_control.py-only PR (the counters reader) selected `api`
+    # and never ran this guard — the #2938/#3154/#4367 silent-drop class, and the
+    # same lesson test_supabase_control_change_selects_the_org_purge_rpc_guard
+    # records. Hence DUAL registration.
+    # Mutation check: deleting the `api` arm fails the loop below; deleting the
+    # `core` arm fails the pricing.py assert.
+    for api_source in ("tortoise/metering.py", "tortoise/supabase_control.py"):
+        r = _sel([api_source])
+        assert r["full"] is False, (api_source, r)
+        assert "api" in r["surfaces"], (api_source, r)
+        assert "test_write_op_reachability.py" in r["test_files"], (api_source, r)
+    r = _sel(["tortoise/pricing.py"])
+    assert r["full"] is False, r
+    assert "core" in r["surfaces"], r
+    assert "test_write_op_reachability.py" in r["test_files"], r
+
+
 def test_orchestrator_harness_change_selects_core_not_tier1():
     # operations/orchestrator-harness/*.sh own tests/test_orchestrator_harness.py
     # (`core`): the shipped-block pins for lane.sh's heredoc, merged-not-closed.sh's

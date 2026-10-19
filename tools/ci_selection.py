@@ -1020,6 +1020,23 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # already falls through to `core`). Pinned by
              # tests/test_ci_selection.py::test_graph_census_tool_change_selects_core_not_tier1.
              "tools/graph_census.py",
+             # #4495 review P2: tools/write_op_reachability.py is the CLI that
+             # reports the write-op allowance's stock/flow conversion, and its
+             # guard (tests/test_write_op_reachability.py) is `core`+`api`
+             # registered — but `tools/` is swallowed by NON_PYTHON_PREFIXES and
+             # no SOURCE_PATTERNS entry matches the tool, so a CLI-only change
+             # selected NO surface, took the docs-only early return and fell back
+             # to tier-1 smoke: the exit-code contract (0 stated-yield / 1
+             # unreachable / 2 not-measurable / 3 measured-uncertified), the
+             # UNCERTIFIED rule and the absence rule would never run on the PR
+             # editing the CLI — the instrument that makes an uncounted class
+             # visible must not be invisible to CI selection itself. Same
+             # #1349/#3332/#3616 silent-drop class as tools/graph_census.py
+             # above. CORE_ALSO (not TOOL_CARVEOUTS) because the guard is
+             # hermetic (synthetic books, a fake SDK) and `core` is where its
+             # `core` arm lives. Pinned by
+             # tests/test_ci_selection.py::test_write_op_reachability_tool_change_selects_core_not_tier1.
+             "tools/write_op_reachability.py",
              # #3036: oauth.py is pinned by BOTH api-registered tests
              # (test_oauth_mcp.py, test_oauth_token_fault.py, ...) and core
              # (test_control_plane_offload_3498.py), so the SOURCE_PATTERNS
