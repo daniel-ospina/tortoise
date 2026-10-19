@@ -691,10 +691,19 @@ class TestLoopbackPortAgnostic:
         """The GET /oauth/authorize leg must also accept it (it validates
         through the same helper). On rejection it redirects with ``error=``.
 
-        Also asserts the presented URI actually reached the rendered page's
-        embedded PARAMS — that embedding is what `redirectBack` later navigates
-        to, so a validation pass that silently dropped it would still fail the
-        real journey."""
+        Also asserts the ephemeral port reached the rendered page as BOTH of the
+        two keys the page carries (#3443): `redirect_target`, the server-built URL
+        `redirectBack` navigates, AND the raw `redirect_uri` the page posts back
+        for validation. With this PORTLESS registration the two VALUES are
+        byte-identical, so a bare substring check for one (`"localhost:3118" in
+        r.text`) cannot tell "both embedded" from "only one embedded" — each key
+        is therefore asserted on its own line. The end-to-end discrimination of
+        the NAVIGATION (a presented host differing in case from the registered
+        one, so the two values differ) is
+        `TestCanonicalRedirectTarget::test_authorize_page_carries_the_rebuilt_target`
+        in this file, not this test; the end-to-end page NAVIGATION itself is
+        `tests/test_oauth_consent_pkce.py::test_3443_navigation_uses_the_server_built_target_with_a_raw_guard_control`,
+        which runs the page under node."""
         tc, _ = api_client
         reg = _register_client(tc, redirect_uris=[self.PORTLESS])
         r = tc.get("/oauth/authorize", params={
@@ -707,6 +716,17 @@ class TestLoopbackPortAgnostic:
         assert r.status_code == 200, r.text
         assert "error=" not in r.headers.get("location", "")
         assert "localhost:3118" in r.text
+        # The two PARAMS entries, each asserted separately: the rebuild equals the presented string
+        # here (a portless registration), so only the KEY distinguishes "both embedded" from
+        # "one embedded". A page that dropped the server-built target reds the first.
+        assert '"redirect_target": "http://localhost:3118/callback"' in r.text, (
+            "the page no longer carries the server-built redirect_target as its own PARAMS key — "
+            "`redirectBack` would have nothing (or only the raw param) to navigate (#3443)"
+        )
+        assert '"redirect_uri": "http://localhost:3118/callback"' in r.text, (
+            "the page no longer carries the raw redirect_uri — /oauth/consent would then mint a "
+            "code with no bound value for /oauth/token's exact-match check"
+        )
 
     def test_authorize_page_rejects_different_path(self, api_client):
         """GET-level negative control, mirroring the consent-side one."""
@@ -898,6 +918,26 @@ class TestRedirectUriMatches:
         assert m("http://localhost/cb", "http://localhost:0/cb")
         assert m("http://localhost/cb", "http://localhost:abc/cb")
         assert m("http://localhost/cb", "http://localhost:99999/cb")
+
+    def test_unsafe_redirect_uri_bytes_is_c0_del_only(self):
+        r"""(#3443) The byte gate is C0 + DEL, never "all control characters".
+
+        U+0085 and the rest of C1 are refused by NOTHING because they do not move
+        the authority boundary: 0 host divergences across 7,623 single-insertion
+        and 57,212 fuzz candidates without a backslash. #3443 makes the REGISTERED
+        URI the trust anchor of the navigation (the rebuild re-emits its authority
+        verbatim), so that boundary is recorded where a reader can find it — and
+        pinned here so widening it is a DELIBERATE act rather than a silent one,
+        because a comment alone reds nothing.
+        """
+        from tortoise.oauth import _unsafe_redirect_uri_bytes as unsafe
+        # The declared boundary: C1 is NOT a differential, so it passes.
+        assert not unsafe("http://localhost/\u0085/cb")
+        assert not unsafe("http://localhost:3118/cb\u009f")
+        # The bytes that ARE refused: C0/DEL, and the genuine differential.
+        assert unsafe("http://localhost:3118/cb\r")
+        assert unsafe("http://localhost:3118/cb\x00")
+        assert unsafe("http://localhost:3118\\cb")
 
     def test_unsafe_bytes_never_match(self):
         r"""REVIEW P0 — a raw backslash moves the authority boundary between
@@ -1154,6 +1194,359 @@ class TestCursorPrivateUseRedirectScheme:
                 "code_challenge_method": "S256", "state": "st",
                 "scope": "mcp", "resource": ""})
             assert r.status_code == 400, (bad, r.status_code, r.text)
+
+
+class TestCanonicalRedirectTarget:
+    """#3443 — the consent page navigates a redirect REBUILT from the validated
+    registered URI, never the request string.
+
+    #2846 closed its P0 with a byte gate (`_unsafe_redirect_uri_bytes`) — a
+    DENYLIST whose correctness depends on having enumerated every byte the two
+    parsers can disagree about, revisited three times in review. #3443 removes
+    the class: `_canonical_redirect_target` re-emits the REGISTERED URI's scheme,
+    authority, path and query and copies only the presented PORT (RFC 8252 §7.3
+    — the one component allowed to vary), so the port's ASCII digits are the
+    only request bytes that can reach the browser and the two parsers cannot
+    move the host BY CONSTRUCTION. The byte gate is kept as defence in depth (it is still
+    load-bearing on the registered side — the rebuild trusts that value).
+
+    Four legs, each with the control that makes it discriminating:
+      A. the builder cannot emit the presented authority — asserted DIRECTLY, so
+         it is a claim about the CONSTRUCTION and not about the gate;
+      B. the served page carries the rebuilt target;
+      C. the pre-consent `error=` redirect emits the rebuilt target, not the raw
+         param (the one place the raw value used to reach a Location header);
+      D. the code stays bound to the PRESENTED value, so the port relaxation and
+         the RFC 6749 §4.1.3 exact match at /oauth/token are untouched.
+    Leg E — the page's `redirectBack` navigating the rebuilt target rather than
+    the raw one — is EXECUTED by the node harness in
+    `tests/test_oauth_consent_pkce.py` (`test_3443_...`), where that script runs.
+    """
+
+    ATTACK = "http://evil.example:8443\\@127.0.0.1/callback"
+
+    def test_the_rebuild_takes_the_authority_from_the_registered_uri(self):
+        """Leg A, the issue's whole point. `_canonical_redirect_target` is called
+        DIRECTLY here — not through `canonical_redirect_target`, which would
+        refuse this pair at the byte gate first and leave the construction
+        unproven. With only the registration as its trusted input, the
+        attacker's host cannot appear in the output whatever the two parsers
+        disagree about.
+        """
+        from tortoise.oauth import _canonical_redirect_target as build
+        from tortoise.oauth import _redirect_uri_matches as m
+
+        target = build("http://localhost/callback", self.ATTACK)
+        assert "evil.example" not in target, target
+        assert target == "http://localhost/callback", target
+        # …and the pair is refused on the composed path too, so the request
+        # never even reaches the rebuild. Both halves, because either alone is
+        # an incomplete story: the gate is defence in depth, the rebuild is the
+        # boundary.
+        assert not m("http://localhost/callback", self.ATTACK)
+
+    def test_only_the_port_varies_and_it_is_copied_as_text(self):
+        """The rebuild carries exactly one component from the request. Each row
+        differs from the registered URI in a way the matcher accepts, so a
+        rebuild that copied any OTHER component would change the value here.
+        """
+        from tortoise.oauth import _canonical_redirect_target as build
+        rows = [
+            # (registered, presented, expected) — all MATCHED pairs
+            ("http://localhost/callback", "http://localhost:3118/callback",
+             "http://localhost:3118/callback"),
+            # exact match: byte-identical output (the pre-#3443 value)
+            ("http://localhost/callback", "http://localhost/callback",
+             "http://localhost/callback"),
+            # the ephemeral port replaces a registered one
+            ("http://localhost:8787/cb", "http://localhost:3118/cb",
+             "http://localhost:3118/cb"),
+            # no port presented -> the registered port is dropped, i.e. the
+            # scheme's default: byte-identical with what `redirectBack`
+            # navigated BEFORE this change (fidelity the CLI depends on)
+            ("http://localhost:8787/cb", "http://localhost/cb",
+             "http://localhost/cb"),
+            # a case difference is the one place the output cannot equal the
+            # request: the host text comes from the REGISTERED side
+            ("http://localhost/cb", "http://LOCALHOST:3118/cb",
+             "http://localhost:3118/cb"),
+            # IPv6 literal, userinfo and a registered query all survive
+            ("http://[::1]/cb", "http://[::1]:8765/cb", "http://[::1]:8765/cb"),
+            ("http://a@localhost/cb", "http://a@localhost:3118/cb",
+             "http://a@localhost:3118/cb"),
+            ("http://localhost/cb?x=1", "http://localhost:3118/cb?x=1",
+             "http://localhost:3118/cb?x=1"),
+            # non-loopback keeps the exact string it matched (no port arises)
+            ("https://app.example.com/cb", "https://app.example.com/cb",
+             "https://app.example.com/cb"),
+            # a private-use scheme's opaque authority is carried verbatim
+            ("cursor://anysphere.cursor-mcp/oauth/callback",
+             "cursor://anysphere.cursor-mcp/oauth/callback",
+             "cursor://anysphere.cursor-mcp/oauth/callback"),
+            # a `]` in USERINFO is not an IPv6 terminator: the host is stripped of
+            # userinfo before the bracket rule applies, so the presented port is
+            # still applied (reading that `]` as the host's end dropped it, and a
+            # registrable `_valid_redirect_uri` row can carry one)
+            ("http://a]@[::1]/cb", "http://a]@[::1]:3118/cb",
+             "http://a]@[::1]:3118/cb"),
+            # a registration with NO authority is returned VERBATIM. There is no
+            # port to vary, and `urlunsplit` would otherwise promote the
+            # `//`-leading path into a netloc — emitting a host the registration
+            # never carried (`cursor:////h/cb` -> `cursor://h/cb`)
+            ("cursor:////evil.example/cb", "cursor:////evil.example/cb",
+             "cursor:////evil.example/cb"),
+        ]
+        from tortoise.oauth import _redirect_uri_matches as m
+        for registered, presented, expected in rows:
+            assert m(registered, presented), (registered, presented)
+            assert build(registered, presented) == expected, (registered, presented)
+
+    def test_a_port_no_uri_may_carry_is_never_applied(self):
+        """`_redirect_uri_matches` deliberately does NOT validate port sanity
+        (pinned by `test_port_values_are_not_validated`), so the rebuild is fed
+        those values and must not copy them: a non-digit, an out-of-range, or a
+        trailing-backslash port would either re-introduce a byte the browsers
+        disagree about or emit a URI no browser can dial. In each case the
+        REGISTERED authority stands — the endpoint on record — and the output
+        carries no byte of the presented one.
+        """
+        from tortoise.oauth import _canonical_redirect_target as build
+        for bad_port in ("abc", "99999", "80\\", "\u0663\u0663"):
+            presented = f"http://localhost:{bad_port}/cb"
+            target = build("http://localhost:8787/cb", presented)
+            assert target == "http://localhost:8787/cb", (bad_port, target)
+            assert "\\" not in target, (bad_port, target)
+            # with no registered port there is nothing to keep either
+            assert build("http://localhost/cb", presented) == "http://localhost/cb"
+
+    def test_a_bracket_that_is_not_a_host_terminator_cannot_hide_or_double_a_port(self):
+        """A ``]`` that does not belong to a bracketed host must not be read as the
+        host's end. Reading it as one started the port scan AFTER it, so the
+        separator in front of it was never found and an authority that HAS a port
+        was reported as having none — which either drops a registered port
+        (`http://localhost:8787/cb` -> `http://localhost/cb`, the scheme default)
+        or appends a presented port to an authority that already carries one
+        (`…:8787]:3118`, a URL no browser parses).
+
+        `_authority_parts` is asserted DIRECTLY for the split, because the
+        composed path cannot reach those shapes: `urlsplit` refuses them
+        (`Invalid IPv6 URL` — brackets are legal only in a host that opens with
+        ``[``), so the matcher rejects the pair and the builder's totality guard
+        answers with the registered side. Both halves are pinned: the split, and
+        the value the request path actually produces.
+        """
+        import itertools
+        from urllib.parse import urlsplit
+
+        from tortoise.oauth import _authority_parts
+        from tortoise.oauth import _canonical_redirect_target as build
+        from tortoise.oauth import _redirect_uri_matches as m
+
+        # A `]` after the separator is not a terminator…
+        assert _authority_parts("localhost:3118]") == ("localhost", "3118]")
+        assert _authority_parts("localhost:8787]") == ("localhost", "8787]")
+        # …while a real bracketed host, a `]` in USERINFO, an empty port and no
+        # port at all keep the split they had.
+        assert _authority_parts("[::1]:3118") == ("[::1]", "3118")
+        assert _authority_parts("[::1]") == ("[::1]", "")
+        assert _authority_parts("a]@[::1]:3118") == ("a]@[::1]", "3118")
+        assert _authority_parts("localhost:") == ("localhost", "")
+        assert _authority_parts("localhost") == ("localhost", "")
+
+        # The composed path: BOTH rows are refused by the matcher (so neither can
+        # ever be rebuilt-and-navigated) and the builder answers with the
+        # REGISTERED string — never the presented bytes, never a doubled port.
+        dropped = build("http://localhost:8787/cb", "http://localhost:3118]/cb")
+        doubled = build("http://localhost:8787]/cb", "http://localhost:3118/cb")
+        assert dropped == "http://localhost:8787/cb", dropped
+        assert doubled == "http://localhost:8787]/cb", doubled
+        assert ']:' not in dropped and ']:' not in doubled
+        for registered, presented in (("http://localhost:8787/cb", "http://localhost:3118]/cb"),
+                                      ("http://localhost:8787]/cb", "http://localhost:3118/cb")):
+            assert not m(registered, presented), (registered, presented)
+
+        # Which is not luck, and is why this is defence in depth rather than a
+        # live path: every netloc `urlsplit` ACCEPTS carries brackets only in a
+        # host that opens with `[`, so the rule above cannot mis-fire on anything
+        # the builder is actually handed.
+        for length in range(1, 5):
+            for chars in itertools.product("a:[]@1", repeat=length):
+                netloc = "".join(chars)
+                try:
+                    urlsplit(f"http://{netloc}/cb")
+                except ValueError:
+                    continue
+                host_at = netloc.rfind("@") + 1
+                if "]" in netloc[host_at:]:
+                    assert netloc.startswith("[", host_at), netloc
+
+    def test_the_rebuild_is_total_on_unparseable_input(self):
+        """`urlsplit` raises on an unbalanced IPv6 bracket (the one shape it
+        rejects outright). The matcher already refuses such a pair, but the
+        builder must not raise on the security path — it returns the TRUSTED
+        side, never the presented string.
+        """
+        from tortoise.oauth import _canonical_redirect_target as build
+        assert build("http://localhost/cb", "http://[::1/cb") == "http://localhost/cb"
+        assert build("http://[::1/cb", "http://localhost/cb") == "http://[::1/cb"
+        # A port text long enough that `int()` raises (CPython's
+        # sys.get_int_max_str_digits(), 4300) must be REFUSED, not converted:
+        # `GET /oauth/authorize` is unauthenticated, so a raise here answered
+        # 500 for plain client input where the contract is a 400. The registered
+        # authority stands, exactly as for `:abc`.
+        long_port = "9" * 4301
+        assert build("http://localhost/cb", f"http://localhost:{long_port}/cb") \
+            == "http://localhost/cb"
+        # …and leading zeros are still NETLOC TEXT the browser parses: the
+        # builder copies the presented port's text rather than re-rendering it
+        # from an int, so the zeros survive (and the value resolves to 3118).
+        assert build("http://localhost:8787/cb",
+                     "http://localhost:000003118/cb") \
+            == "http://localhost:000003118/cb"
+        # idempotent for any target the NAVIGABLE-port branch produced:
+        # re-targeting a rebuilt value yields that value
+        for registered, presented in (("http://localhost/cb", "http://localhost:3118/cb"),
+                                      ("http://localhost:8787/cb", "http://localhost:abc/cb")):
+            once = build(registered, presented)
+            assert build(once, once) == once
+        # …and the one shape the docstring names as the exception: a target ending in
+        # an EMPTY port canonicalizes to the portless form on a second pass. Same
+        # destination — the empty port IS the scheme default.
+        assert build("http://localhost:/cb", "http://localhost:/cb") == "http://localhost/cb"
+
+    def test_authorize_page_carries_the_rebuilt_target(self, api_client):
+        """Leg B: the destination the page navigates is SERVER-built. The
+        presented value differs from the registered one only in host case —
+        which the matcher accepts — so the assertion discriminates: a page that
+        still embedded the request string would carry the uppercase form."""
+        import json as _json
+        tc, _ = api_client
+        reg = _register_client(tc, redirect_uris=["http://localhost/callback"])
+        _, challenge = _pkce()
+        r = tc.get("/oauth/authorize", params={
+            "client_id": reg["client_id"],
+            "redirect_uri": "http://LOCALHOST:3118/callback",
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": "st-1",
+            "scope": "mcp", "resource": ""})
+        assert r.status_code == 200, r.text
+        payload = r.text.split("const PARAMS = ", 1)[1].split(";", 1)[0]
+        parsed = _json.loads(payload.encode().decode("unicode_escape"))
+        assert parsed["redirect_target"] == "http://localhost:3118/callback", parsed
+        # …and the raw value is still there, because the page POSTS it back for
+        # validation and the code is bound to it (leg D)
+        assert parsed["redirect_uri"] == "http://LOCALHOST:3118/callback", parsed
+
+    def test_authorize_error_redirect_is_rebuilt_not_echoed(self, api_client):
+        """Leg C: before #3443 this was the ONE place the raw request param
+        reached a `Location` header (see the #2846 review P2 note in
+        hosted_api). It now emits the rebuilt target — asserted with a
+        case-differing present, so "echoed verbatim" and "rebuilt" are
+        distinguishable."""
+        tc, _ = api_client
+        reg = _register_client(tc, redirect_uris=["http://localhost/callback"])
+        _, challenge = _pkce()
+        # response_type=token -> validate_authorize_params raises AFTER the
+        # redirect_uri match, which is what makes this the redirect-vs-JSON
+        # branch.
+        r = tc.get("/oauth/authorize", params={
+            "client_id": reg["client_id"],
+            "redirect_uri": "http://LOCALHOST:3118/callback",
+            "response_type": "token", "state": "st-1",
+            "code_challenge": challenge, "code_challenge_method": "S256"},
+            follow_redirects=False)
+        location = r.headers.get("location", "")
+        assert location.startswith("http://localhost:3118/callback?"), location
+        assert location == ("http://localhost:3118/callback"
+                            "?error=invalid_request&state=st-1"), location
+        assert "LOCALHOST" not in location, location
+
+    def test_consent_returns_the_rebuilt_target_and_binds_the_presented_one(
+            self, api_client, session_user):
+        """Legs B+D on the round trip that mints the code: the response carries
+        the rebuilt target the page prefers, and the code is still bound to the
+        PRESENTED string — so the token step's exact comparison (RFC 6749
+        §4.1.3) is neither loosened nor fed the target. Asserted by EXCHANGING
+        with the target (refused) and with the presented value (accepted)."""
+        tc, cp = api_client
+        session_user(_U1)
+        presented = "http://LOCALHOST:3118/callback"
+        reg = _register_client(tc, redirect_uris=["http://localhost/callback"])
+
+        def _minted() -> tuple[str, dict]:
+            verifier, challenge = _pkce()
+            resp = _consent(tc, client_id=reg["client_id"], redirect_uri=presented,
+                            challenge=challenge)
+            assert resp.status_code == 200, resp.text
+            return verifier, resp.json()
+
+        verifier, body = _minted()
+        assert body["redirect_target"] == "http://localhost:3118/callback", body
+        assert body["redirect_uri"] == presented, body
+        assert cp.tables["oauth_codes"][-1]["redirect_uri"] == presented
+        # the exact match at /oauth/token is untouched: the TARGET is refused…
+        refused = _exchange(tc, client_id=reg["client_id"], code=body["code"],
+                            verifier=verifier,
+                            redirect_uri=body["redirect_target"])
+        assert refused.status_code == 400, refused.text
+        assert refused.json()["error"] == "invalid_grant"
+        # …and the value the client actually presented is accepted. A fresh code
+        # because a refused exchange still CLAIMS the single-use code (#2863).
+        verifier2, body2 = _minted()
+        ok = _exchange(tc, client_id=reg["client_id"], code=body2["code"],
+                       verifier=verifier2, redirect_uri=presented)
+        assert ok.status_code == 200, ok.text
+
+    def test_a_target_that_cannot_be_rebuilt_is_refused_not_echoed(
+            self, api_client, monkeypatch):
+        """The fail-closed direction of the guard in both handlers. Unreachable
+        while the matcher and the rebuild agree (they share a predicate and a
+        list), so it is driven by making them disagree: a client row that
+        matches NOTHING. The answer must be a JSON 400 with no `Location` —
+        never a redirect built from the raw param."""
+        tc, _ = api_client
+        _, challenge = _pkce()
+        monkeypatch.setattr(
+            "tortoise.oauth.validate_authorize_params",
+            lambda *a, **k: {"id": "c-x", "client_name": "x",
+                             "redirect_uris": ["http://localhost/other"]})
+        r = tc.get("/oauth/authorize", params={
+            "client_id": "c-x", "redirect_uri": "http://localhost:3118/callback",
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": "st-1"},
+            follow_redirects=False)
+        assert r.status_code == 400, r.text
+        assert "location" not in {k.lower() for k in r.headers}, dict(r.headers)
+        assert r.json()["error"] == "invalid_request"
+
+    def test_the_consent_handler_never_mints_for_an_undeliverable_target(
+            self, api_client, monkeypatch):
+        """The `/oauth/consent` leg of the same guard — the authorize-only leg
+        above cannot cover it, and the two handlers fail closed INDEPENDENTLY.
+
+        That leg resolves the target BEFORE the mint ("a code nobody can be sent
+        to must not be issued"), so the mint is made to fail loudly if it is
+        reached at all; the answer must be the same JSON 400 with no `Location`.
+        The guard runs before the session JWT is verified, so no bearer is needed.
+        """
+        tc, _ = api_client
+        _, challenge = _pkce()
+        monkeypatch.setattr(
+            "tortoise.oauth.validate_authorize_params",
+            lambda *a, **k: {"id": "c-x", "client_name": "x",
+                             "redirect_uris": ["http://localhost/other"]})
+
+        def _must_not_mint(*a, **k):
+            raise AssertionError("a code was minted for an undeliverable target")
+
+        monkeypatch.setattr("tortoise.oauth.issue_auth_code", _must_not_mint)
+        r = tc.post("/oauth/consent", json={
+            "client_id": "c-x", "redirect_uri": "http://localhost:3118/callback",
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": "st-1"})
+        assert r.status_code == 400, r.text
+        assert "location" not in {k.lower() for k in r.headers}, dict(r.headers)
+        assert r.json()["error"] == "invalid_request"
 
 
 class TestConsentPreview:

@@ -30,6 +30,7 @@ each one asserts it found its subject.
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -247,6 +248,119 @@ def test_the_redirect_allowlist_record_covers_the_consent_page() -> None:
         "the consent page's sign-in fallback origin (https://api.premiselabs.co/oauth/authorize) "
         "is absent from the redirect-allowlist record. Add the entry, or record that the bridge "
         "removed the dependency — do not leave the origin unaddressed (#3524 task 5)."
+    )
+
+
+# ── §7 — the deletion set's anchors, recomputed not trusted ──────────────────
+
+#: §7's deletion set: (row marker, the token that IS the item) for each anchor the table cites, so
+#: the row's `oauth.py:<n>` can be RECOMPUTED from the source instead of trusted. The marker names
+#: the ROW the citation must appear in: a number that happens to be cited elsewhere in §7 (the
+#: prose above the table cites `oauth.py:2268-2497`, for instance) must not be able to satisfy a
+#: row it does not belong to. Each token must also occur on exactly one line (see `_only_line`), so
+#: a duplicated or renamed site reds here rather than silently re-pointing.
+_DELETION_SET = {
+    ("adapter + the aux-store probe chain", "const auxStores = () => {"),
+    ("`COOKIE_NAME`/`COOKIE_DOMAIN`",
+     'const COOKIE_NAME = "sb-tortoise-auth-token";'),
+    ("`COOKIE_NAME`/`COOKIE_DOMAIN`", 'const COOKIE_PATH = "/";'),
+    ("`COOKIE_NAME`/`COOKIE_DOMAIN`", 'const COOKIE_DOMAIN = ".premiselabs.co";'),
+    ("`COOKIE_NAME`/`COOKIE_DOMAIN`", "const SIZE_GUARD = 3800;"),
+    ("`COOKIE_NAME`/`COOKIE_DOMAIN`", "const SIZE_CAP = COOKIE_LIMIT"),
+    ("`COOKIE_NAME`/`COOKIE_DOMAIN`", 'document.cookie = key + "=" + encoded'),
+    ("`COOKIE_NAME`/`COOKIE_DOMAIN`", 'document.cookie = key + "=;"'),
+    ("supabase-js CDN", "window.supabase.createClient("),
+    ("`pkceIncapable`/`CAPABILITY`", "function pkceIncapable() {"),
+    ("`onAuthStateChange` (property 4", "supabaseClient.auth.onAuthStateChange("),
+}
+
+
+def test_the_deletion_set_rows_cite_live_sites() -> None:
+    """§7's deletion-set table must cite the line each item ACTUALLY lives on at this head.
+
+    This table is the part of the spec that was hand-remapped and got it wrong twice: round 1
+    advanced a block by +171 (`oauth.py` had moved +190), and round 2 rewrote the §7 rows with the
+    PR BASE's numbers, so `:2037` pointed at `_valid_redirect_uri`'s neighbour instead of
+    `COOKIE_NAME`. `test_the_four_properties_have_live_implementation_sites` recomputes only the
+    four property anchors, so nothing caught it: the anchors were wrong and CI was green.
+
+    The guard therefore DERIVES the number from `tortoise/oauth.py` and requires the row that names
+    the item to cite it — an anchor is a claim about a live site, and a claim nobody recomputes is
+    exactly how this table came to point at unrelated code.
+    """
+    spec = SPEC.read_text()
+    section = spec.split("## 7. Deletion set", 1)
+    assert len(section) == 2, (
+        "the spec no longer has a '## 7. Deletion set' section — the deletion set and its ordering "
+        "guard moved, and this guard is now scanning nothing"
+    )
+    section_text = section[1].split("## 8.", 1)[0]
+    rows = [line for line in section_text.splitlines() if line.startswith("|")]
+    assert rows, "§7 has no table rows — the guard would pass vacuously"
+
+    stale: list[str] = []
+    for row_marker, token in _DELETION_SET:
+        matching = [row for row in rows if row_marker in row]
+        assert len(matching) == 1, (
+            f"§7 should have exactly one row naming {row_marker!r}, found {len(matching)} — the "
+            "table's shape changed and this guard can no longer tell which row it is checking"
+        )
+        # Both citation forms the spec uses: `oauth.py:<n>` and the bare in-context `:<n>` (§7
+        # only cites `oauth.py`, but the bare form is what the §4 table already uses). The item's
+        # line must be the START of a cited span: a range names the block it opens, and the
+        # singleton anchors name the individual sites INSIDE such a range. Containment is
+        # deliberately not accepted — the round-2 defect was exactly the singletons going stale
+        # while the row's outer range still covered them, so a containment test would have passed
+        # on `(:2037, :2052, :2053, :2054, :2060)`.
+        starts = {int(m.group(1)) for m in re.finditer(r":(\d+)", matching[0])}
+        line = _only_line(OAUTH, token)
+        if line not in starts:
+            stale.append(f"{token!r} is at oauth.py:{line}, but its row starts citing {sorted(starts)}")
+    assert not stale, (
+        "§7's deletion set cites line numbers that do not name the item: " + "; ".join(stale) +
+        " — re-derive them from tortoise/oauth.py AFTER the last source edit (a remap done before "
+        "a later comment edit shifts them again, which is how this table went stale twice)."
+    )
+
+
+# ── The spec's `hosted_api.py` anchors, recomputed the same way ──────────────
+
+#: `hosted_api.py` anchors the spec cites as EVIDENCE. The provenance note's QUOTATIONS of #3524's
+#: stale issue body (`hosted_api.py:23409`, `:23284-23292`) are deliberately not here: a quotation
+#: of the issue cannot be remapped when the source moves. These can, and did — the §5/§8 §10 rows
+#: were off by ~3,300 lines (`:34756` naming backup-restore code) while `_oauth_base` alone had been
+#: corrected, so each table mixed one live anchor with a dead one and read as authoritative. An
+#: anchor is satisfied when the item's line STARTS a citation, for the same reason as §7's: a
+#: broad range that merely contains the site is what let the round-2 singletons go stale.
+_HOSTED_ANCHORS = {
+    "the well-known authorization-server routes":
+        '@app.get("/.well-known/oauth-authorization-server")',
+    "the authorize handler": '@app.get("/oauth/authorize")',
+    "the consent handler": '@app.post("/oauth/consent")',
+    "`_oauth_base`": "def _oauth_base(request: Request) -> str:",
+}
+
+
+def test_the_spec_cites_live_hosted_api_sites() -> None:
+    """EVERY `hosted_api.py:<n>` anchor in the spec must name one of the live sites.
+
+    Checked in the inverse direction on purpose: a dead anchor is dead even when the SAME line is
+    also cited correctly somewhere else, and the §5/§8 §10 rows did exactly that (one corrected
+    `_oauth_base` beside three anchors ~3,300 lines off). So the rule is "no citation may point
+    anywhere but a derived site", not "each site must be cited somewhere".
+    """
+    spec = SPEC.read_text()
+    # The provenance note QUOTES #3524's stale issue-body anchors; a quotation cannot be remapped
+    # when the source moves, so it is excluded rather than "fixed".
+    body = "\n".join(line for line in spec.splitlines() if not line.startswith(">"))
+    live = {_only_line(HOSTED, token) for token in _HOSTED_ANCHORS.values()}
+    cited = {int(m.group(1)) for m in re.finditer(r"hosted_api\.py:(\d+)", body)}
+    assert cited, "the spec cites no `hosted_api.py` line anchors at all"
+    dead = sorted(cited - live)
+    assert not dead, (
+        f"the spec cites hosted_api.py line(s) {dead} that are not one of the live sites "
+        f"{sorted(live)} ({sorted(_HOSTED_ANCHORS)}) — re-derive them from tortoise/hosted_api.py "
+        "after the last source edit, or cite the route string instead of a line number."
     )
 
 

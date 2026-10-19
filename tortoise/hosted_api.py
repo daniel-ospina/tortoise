@@ -38523,6 +38523,7 @@ async def oauth_authorize(request: Request):
     """
     from tortoise.oauth import (
         OAuthError,
+        canonical_redirect_target,
         consent_page_html,
         validate_authorize_params,
     )
@@ -38556,6 +38557,19 @@ async def oauth_authorize(request: Request):
                 code_challenge_method=params["code_challenge_method"] or None,
                 scope=params["scope"] or None),
             op="oauth_authorize_params")
+        # #3443: WHETHER the request may proceed and WHERE the browser is sent
+        # are decided together, inside this try — the destination is rebuilt
+        # from the registered URI (`canonical_redirect_target`), never taken
+        # from the request string, so a target we cannot rebuild is an
+        # invalid_request handled by the block below (as JSON: there is no
+        # destination to redirect to). `None` is unreachable while the matcher
+        # in `validate_authorize_params` and this helper agree, which they do by
+        # construction: same predicate, same list. The guard is the fail-closed
+        # direction if that ever stops being true.
+        redirect_target = canonical_redirect_target(client, params["redirect_uri"])
+        if redirect_target is None:
+            raise OAuthError(400, "invalid_request",
+                             "redirect_uri is not registered for this client.")
     except OAuthError as exc:
         # Invalid authorize params → RFC 6749 §4.1.2.1 error to the browser.
         # Open-redirect guard: only redirect when the redirect_uri is
@@ -38565,10 +38579,12 @@ async def oauth_authorize(request: Request):
         # native client that registered a PORTLESS loopback URI never receives
         # the error on its ephemeral listener — the strict membership test
         # fails, so we return JSON where the client is waiting for a redirect.
-        # Using the relaxed matcher here is safe ONLY because
-        # `_redirect_uri_matches` also refuses parse-differential input: this is
-        # the one place the raw request param is echoed into a Location header,
-        # so relaxing the match without that guard would BE the open redirect.
+        # Using the relaxed matcher here is safe because #3443 rebuilds the
+        # destination from the MATCHED registered URI: the bytes echoed into
+        # this Location header are the registered URI's, so relaxing the match
+        # cannot BE the open redirect (and `_redirect_uri_matches` refuses
+        # parse-differential input in any case). That is why this path needs no
+        # second copy of the raw-param reasoning: there is no raw param here.
         #
         # #3669 finding 2: `validate_authorize_params` STAMPS the client it
         # resolved (None when unresolved) on the raised OAuthError, so this
@@ -38576,18 +38592,13 @@ async def oauth_authorize(request: Request):
         # fetch and a second rate-limit charge on the FAILURE path (the success
         # path paid nothing — the cache absorbed it), halving the effective
         # failure budget.
-        from tortoise.oauth import _redirect_uri_matches
-        client = getattr(exc, "client", None)
-        registered_uris = (client.get("redirect_uris") or []) if client else []
-        if not isinstance(registered_uris, (list, tuple)):
-            registered_uris = [registered_uris]
-        if (params["redirect_uri"] and client is not None
-                and any(_redirect_uri_matches(u, params["redirect_uri"])
-                        for u in registered_uris)):
+        target = canonical_redirect_target(getattr(exc, "client", None),
+                                          params["redirect_uri"])
+        if target is not None:
             from urllib.parse import urlencode
-            sep = "&" if "?" in params["redirect_uri"] else "?"
+            sep = "&" if "?" in target else "?"
             return RedirectResponse(
-                params["redirect_uri"] + sep + urlencode(
+                target + sep + urlencode(
                     {"error": exc.error, "state": params["state"]}))
         return _oauth_error_response(exc)
     except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
@@ -38595,7 +38606,10 @@ async def oauth_authorize(request: Request):
     html, nonce = consent_page_html(
         client_name=client.get("client_name") or client["id"],
         scope=params["scope"] or client.get("scope") or "mcp",
-        params=params,
+        # #3443: `redirect_target` rides along with the raw params — the page
+        # navigates THAT (deny included, which has no server round trip) and
+        # posts `redirect_uri` back for validation as before.
+        params={**params, "redirect_target": redirect_target},
         supabase_url=os.environ.get("SUPABASE_URL", ""),
         supabase_anon_key=os.environ.get("SUPABASE_ANON_KEY", ""),
     )
@@ -38654,6 +38668,7 @@ async def oauth_consent(request: Request):
     """
     from tortoise.oauth import (
         OAuthError,
+        canonical_redirect_target,
         issue_auth_code,
         validate_authorize_params,
     )
@@ -38686,6 +38701,18 @@ async def oauth_consent(request: Request):
                 code_challenge_method=body.get("code_challenge_method") or "S256",
                 scope=body.get("scope") or None),
             op="oauth_consent_params")
+        # #3443: the destination is rebuilt here too — the consent round trip
+        # is where the CODE is minted, so the target it returns is the one the
+        # page navigates to deliver it, computed on the same validated request
+        # (the page's `redirect_target` stays the source for the deny path,
+        # which never reaches this endpoint). Resolved BEFORE the mint: a code
+        # nobody can be sent to must not be issued. `None` is unreachable while
+        # the matcher and this helper agree (same predicate, same list); the
+        # guard is the fail-closed direction if that ever stops being true.
+        redirect_target = canonical_redirect_target(client, body.get("redirect_uri"))
+        if redirect_target is None:
+            raise OAuthError(400, "invalid_request",
+                             "redirect_uri is not registered for this client.")
     except OAuthError as exc:
         return _oauth_error_response(exc)
     except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
@@ -38708,7 +38735,14 @@ async def oauth_consent(request: Request):
     except Exception as exc:            # last-resort: never a bare 500 detail (#3026)
         return _oauth_unconverted_failure(exc, where="oauth/consent mint")
     return {"code": code, "state": body.get("state"),
-            "redirect_uri": body["redirect_uri"]}
+            "redirect_uri": body["redirect_uri"],
+            # #3443: the destination the browser must be sent to, rebuilt from
+            # the registered URI — ADDITIVE, so an existing consumer reading
+            # `redirect_uri` (the presented value, still what the code is bound
+            # to) is unaffected. The page prefers this one and falls back to the
+            # page-scoped `redirect_target` for the deny path / mixed-version
+            # deploys; both are server-rebuilt values, never the request string.
+            "redirect_target": redirect_target}
 
 
 @app.post("/oauth/token")
