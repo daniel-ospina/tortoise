@@ -3251,6 +3251,19 @@ def _journal_safe_params(params, cypher=None):
 #   * `_replay_write_scope()` — opened by the replay engines (`rebuild`,
 #     `recover_from_log`, `backup.restore`, `_cmd_reconcile`), whose records
 #     came FROM the journal and must not journal again.
+#   * `_graph_metadata_write_scope(...)` — the GRAPH-METADATA lane: a write
+#     that is NOT a projection of any journal record and never becomes one,
+#     because it is graph-wide bookkeeping rather than a fact about the corpus,
+#     so a rebuild re-derives it from zero. `:EpMeta`'s monotonic epoch
+#     (`TortoiseSDK._advance_ep_version`, #9123) is its one writer today. The
+#     lane exists so a reader who assumes "every cache write is a journal
+#     projection" meets the reason at the door — and so closing the guarded
+#     handle (`#9079`) refuses a writer that has NOT declared itself instead of
+#     silently refusing the create hot path. It is a DECLARATION, not a
+#     bypass: see the two properties it claims at `_graph_metadata_write_scope`
+#     — including what those properties do NOT claim (the epoch value rides the
+#     record as each Point's `ep_dirty_at`, and the epoch is an ordering BOUND
+#     a reset inverts for a while, `#5166`).
 #   * `onboarding.metadata` (`tortoise/onboarding/state.py`, #9121) — the
 #     onboarding FLOW metadata (`:OnboardingState`, `:OnboardingStep`, the
 #     `COMPLETED_STEP` edges) is graph-resident org-level metadata, not a
@@ -3337,10 +3350,12 @@ _CACHE_WRITE_AUTHORIZED: ContextVar[str | None] = ContextVar(
 def _cache_write_authorized(reason: str):
     """Declare the enclosed writes a sanctioned projection of the journal.
 
-    ``reason`` is carried for the refusal message and for a test that asserts
-    the live doors declare themselves. Entry is always paired with a ``reset``
-    in a ``finally``, so a raising fold can never leave the scope armed over
-    the caller's next write.
+    ``reason`` is the value a test reads back at the write handle to prove the
+    door declared itself. It is NOT rendered into a refusal: a refusal fires
+    precisely when this var is ``None`` (`FalkorProjection.apply`, and the
+    public raw-query lane), so there is no reason in flight to print. Entry is
+    always paired with a ``reset`` in a ``finally``, so a raising fold can
+    never leave the scope armed over the caller's next write.
     """
     token = _CACHE_WRITE_AUTHORIZED.set(reason)
     try:
@@ -3364,6 +3379,59 @@ def _live_write_scope(reason: str = "live-door"):
 def _replay_write_scope():
     """The replay engines' scope: the record came FROM the journal."""
     return _cache_write_authorized("replay")
+
+
+def _graph_metadata_write_scope(reason: str = "graph-metadata"):
+    """The GRAPH-METADATA lane: a write §17.1 does not route through a journal.
+
+    §17.1 forbids a second writer of the DERIVED cache, and its remedy is
+    "project it from the record". That remedy needs a record to project, and a
+    *few* writers have none and cannot have one — they write graph-wide
+    bookkeeping whose value is not a fact about the corpus. Naming them is the
+    difference between a declared lane and an undeclared hole, so the scope
+    carries TWO obligations, and a caller must be able to state both:
+
+    1. **No journal record describes it AS GRAPH METADATA.** Nothing happened
+       to the corpus that a replay could re-apply, so a rebuild cannot
+       reconstruct it: no event writes a `:EpMeta`-shaped node, and no payload
+       key carries the counter. ⚠️ **Stated precisely, because the near-miss
+       reading is FALSE:** the epoch's *value* does ride the record — every
+       non-born-terminal `create_point` stamps it into the Point's own
+       `ep_dirty_at` (`sdk.py::_create_map`), and the replay restores that
+       stamp (`projection/entities.py`, open-set passthrough). What is
+       unjournalled is the counter itself, never every appearance of its
+       value; `tests/test_9079_ep_epoch_declared.py` pins exactly this split.
+    2. **A rebuild may reset it; nothing reconciles over its VALUE — but it is
+       an ordering BOUND, and a reset inverts that bound for a while.** No
+       reconciliation reports divergence when a rebuild drops it, and the
+       corpus is unaffected (belief recomputation is idempotent from the
+       record). What a caller may NOT claim is that no comparison exists: two
+       guards compare against the epoch. `_sweep_dirty_roots` clears a dirty
+       flag only under `n.ep_dirty_at <= $run_ep` (`sdk.py`), and `_ep_epoch()`
+       returns 0 when `:EpMeta` is absent — so after a rebuild the stamps the
+       replay restored (obligation 1) sit AHEAD of the reset counter, those
+       flags cannot be swept until the epoch re-climbs past them, and
+       `TortoiseEP._flush_cache`'s stale-run guard (`current >
+       _run_ep_version`) cannot fire in the direction it exists for over the
+       same window. That is a DELAYED sweep, not corruption, and it predates
+       this lane (`#5166` records it) — but this obligation means "the bound is
+       absorbable", not "there is no bound".
+
+    ⛔ **It is not a general-purpose "let this write through".** Both
+    obligations are properties of the WRITE, not of the caller's convenience:
+    a write that a journal record COULD describe belongs on `_live_write_scope`
+    (append first, then fold), and a write whose loss would be a data loss
+    belongs nowhere — it is a defect. `#9068` is the shape this must never
+    become: a declaration that blesses an unjournalled cache write of
+    recoverable state.
+
+    The reason is what the declaration PINS — the value a test reads back at
+    the write handle (`tests/test_9079_ep_epoch_declared.py`) — not a string
+    any refusal prints: a refusal fires when no scope is in flight, so there is
+    no reason to render. The lane is therefore discoverable from the source and
+    from its pins, and the value is stable so a reader can grep it.
+    """
+    return _cache_write_authorized(reason)
 
 
 class _GuardedGraph:

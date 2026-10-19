@@ -463,13 +463,16 @@ def _org_lock(org_id: str) -> threading.Lock:
 #     this list and fails if it drifts from the AST, and fails the day one of
 #     those sites enters a declaration.
 #
-# SEAM: `#9123` (a sibling in the same decomposition, in flight) is landing
-# `_graph_metadata_write_scope(reason)` in `tortoise/projection/__init__.py` for
-# the `:EpMeta` epoch write. This lane declares through the same primitive
-# (`_cache_write_authorized`) and should DELEGATE to that named wrapper when it
-# lands, rather than keep a second spelling of the same class. It is not created
-# here to avoid two lanes adding the same symbol to the projection module at
-# once.
+# SEAM: `#9123` landed that named wrapper — `_graph_metadata_write_scope(reason)`
+# in `tortoise/projection/__init__.py`, for the `:EpMeta` epoch write. This lane
+# declares through the same primitive (`_cache_write_authorized`) and does NOT
+# delegate to it: that wrapper's docstring carries the epoch's two obligations,
+# and the first of them is FALSE of this lane — the `:Subject` anchor mint above
+# is a journalled ontology class, disclosed here rather than claimed away.
+# Delegating would make this lane inherit a claim it contradicts. It becomes the
+# right shape when a wrapper states the CLASS alone ("no record, and a rebuild
+# may reset it"); until then these are two spellings of one primitive with
+# different obligations, which is what a second spelling is for.
 ONBOARDING_WRITE_LANE = "onboarding.metadata"
 
 
