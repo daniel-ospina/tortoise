@@ -320,6 +320,18 @@ def test_the_declaration_is_not_a_bypass(sdk_with_journal, monkeypatch):
 #: `_EdgeHandlers` verbs that CAN issue a mutating statement but are NOT this
 #: lane, each with the reason — the same bucket discipline
 #: `tests/test_9079_onboarding_declared_lane.py` applies to `_run` call sites.
+#: The provenance lane's one reason — shared by its four verbs. The
+#: disclosure is the point: a reader must not infer from the about lane's
+#: ⚠️ that these four are refusal-safe (#9124 refuses them too).
+_PROVENANCE_REASON = (
+    "PROVENANCE: MERGEs a `:Source` NODE and stamps `r.sourceVersion`. "
+    "⚠️ NOT refusal-safe today either: the write funnels through "
+    "`self.g.query` in `_link_source` with NO scope in flight, and its live "
+    "callers (`create_entity`'s `extractedFrom` leg, and "
+    "`link_source_to_entity`, reached from the REST surface) issue it AFTER "
+    "their enclosing scope closes, so `#9124` would refuse them — MEASURED; "
+    "`#9124` must census them"
+)
 _STATED_OTHER_WRITERS = {
     "_create_edges":
         "the FOLD: runs inside `_live_write_scope`/`_replay_write_scope`",
@@ -338,14 +350,10 @@ _STATED_OTHER_WRITERS = {
         "pinned by "
         "`test_the_about_name_path_is_still_refused_until_its_lane_lands`; "
         "`#9124` must census them before arming",
-    "_link_source":
-        "PROVENANCE: MERGEs a `:Source` NODE and stamps `r.sourceVersion`",
-    "link_source_to_entity":
-        "PROVENANCE: MERGEs a `:Source` node and stamps `r.sourceVersion`",
-    "link_source_to_event":
-        "PROVENANCE: MERGEs a `:Source` node and stamps `r.sourceVersion`",
-    "link_source_to_legacy_event":
-        "PROVENANCE: MERGEs a `:Source` node and stamps `r.sourceVersion`",
+    "_link_source": _PROVENANCE_REASON,
+    "link_source_to_entity": _PROVENANCE_REASON,
+    "link_source_to_event": _PROVENANCE_REASON,
+    "link_source_to_legacy_event": _PROVENANCE_REASON,
     "_sync_tags":
         "`TAGGED` edges + a `:Tag` MERGE, written from `create_point`'s own "
         "declared scope",

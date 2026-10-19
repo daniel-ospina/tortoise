@@ -729,7 +729,13 @@ def source_change_notices(g, source_refs, current_versions: dict[str, str] | Non
 #   * `_link_source` / `link_source_to_entity` / `link_source_to_event` /
 #     `link_source_to_legacy_event` — the PROVENANCE lane: they `MERGE` a
 #     `:Source` NODE and stamp `r.sourceVersion` (a `:Source` mint under an edge
-#     lane would be the `#9068` shape).
+#     lane would be the `#9068` shape). ⚠️ They are NOT refusal-safe today
+#     either, exactly like the about lane above: the write funnels through
+#     `self.g.query` in `_link_source` with no scope in flight, and its live
+#     callers — `create_entity`'s `extractedFrom` leg and
+#     `link_source_to_entity` (reached from the REST surface) — issue it AFTER
+#     their enclosing scope closes, so `#9124` would refuse them. Stated as a
+#     residual this lane does NOT absorb: `#9124` must census it.
 #   * `_sync_tags` — `TAGGED` edges plus a `:Tag` MERGE, written from
 #     `create_point`'s own declared scope.
 #   * `_create_edges` / `replay_about_links` — the FOLD: they run inside
