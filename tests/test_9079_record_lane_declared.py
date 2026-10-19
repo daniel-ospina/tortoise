@@ -5,8 +5,10 @@ STORE and the two REPLAY engines.
 the store: the journal is the system of record, the graph is a derived cache, so
 "every write goes to the truth store first, and the cache is projected from it".
 `#7951` enforced that at the fold and at the public raw-query lane; `#9079`
-closes the third door — the projection's own write handle, `proj.g`
-(`_GuardedGraph`).
+declares the writers that must not be refused when the third door — the
+projection's own write handle, `proj.g` (`_GuardedGraph`) — is CLOSED. That
+door is still open (`#9124`, not on `main`), which is why the declarations land
+first.
 
 Two writer classes reached that handle with NO declaration, and this suite pins
 both. Neither is a violation of §17.1; both are writers the door will refuse,
@@ -56,8 +58,16 @@ disagree about what a declaration is.
 MUTATION for the load-bearing tests:
 
 * drop `_record_write` in `tortoise/event_store.py` (call `g.query` directly
-  again) → the lane test fails on an observed `None` lane and the armed test
-  fails on `DirectCacheWriteRefused` from `CREATE (e:GraphEvent …)`;
+  again) → TWO tests go red. `test_every_event_store_write_declares_the_record_lane`
+  fails on observed `None` lanes; `test_an_armed_guard_does_not_refuse_the_event_store`
+  fails on FOUR refusals whose first is
+  `CREATE INDEX FOR (n:GraphEvent) ON (n.event_id)` and whose fourth is
+  `next_seq`'s MERGE — the `append_event` CREATE is never reached, because
+  `_emit_event` wraps the schema DDL, the allocator and the append in ONE `try`
+  and `ensure_event_schema` swallows each DDL refusal individually, so it is the
+  ALLOCATOR that aborts the block. The width test deliberately stays GREEN
+  under this mutation: its assertion is membership-based, so an event-store
+  defect cannot reach it (that is what makes it about lane width);
 * drop either `with _replay_write_scope():` wrapper in `tortoise/projection/
   __init__.py` (`rebuild_all` / `rebuild_from_record`) → that engine's armed
   test fails on the wipe (`MATCH (n) DETACH DELETE n`);
@@ -81,21 +91,6 @@ from tortoise.projection import (
 #: `DirectCacheWriteRefused` deliberately does not render it: a refusal fires
 #: only when NO scope is in flight, so there is no reason to print.)
 RECORD_LANE = "event-store.record"
-
-#: Index/constraint statements. `FalkorProjection.__init__` and this store's
-#: `ensure_event_schema` both issue `CREATE INDEX …`. DDL changes no node, so
-#: it is not a §17.1 cache write; it is still DECLARED here (schema is not a
-#: journal projection either) — the exclusion is only from the node-write
-#: assertion, so a future undeclared index statement is not silently blessed.
-_DDL_PREFIXES = (
-    "CREATE INDEX", "CREATE CONSTRAINT", "GRAPH.CONSTRAINT",
-    "DROP INDEX", "DROP CONSTRAINT",
-)
-
-
-def _is_ddl(statement: str) -> bool:
-    return statement.upper().startswith(_DDL_PREFIXES)
-
 
 # ── fixtures ──────────────────────────────────────────────────────────────
 
@@ -221,18 +216,27 @@ def test_every_event_store_write_declares_the_record_lane(sdk_with_journal,
         f"lane {RECORD_LANE!r}; observed undeclared: "
         + " | ".join(f"{s[:100]} (lane={lane!r})" for s, lane in undeclared))
 
-    # NON-VACUOUS: the assertion above is only meaningful if the classes it
-    # claims to cover were actually reached. Each of these is a distinct
-    # mutating shape, and each must appear.
-    classes = {
-        "allocator": lambda s: "MERGE (m:GraphEventMeta)" in s,
-        "append": lambda s: "CREATE (e:GraphEvent" in s,
-        "purge_expired": lambda s: "n.ts < $cutoff" in s and "DETACH DELETE" in s,
-        "purge_overflow": lambda s: "ORDER BY n.seq ASC" in s,
-        "schema": lambda s: _is_ddl(s) and "GraphEvent" in s,
+    # NON-VACUOUS, at STATEMENT granularity rather than per family: every one of
+    # the store's mutating statements carries its own distinguishing fragment, so
+    # a statement that stops being exercised (or stops being declared) cannot
+    # hide behind a sibling that shares its family. Two statements were genuinely
+    # unpinned under the family-keyed census this replaces: `_refresh_first_seq`'s
+    # SET matched NO family at all, and `reestablish_watermark`'s MERGE was
+    # indistinguishable from `next_seq`'s (one predicate satisfied both). (The
+    # purges were already pinned by their own fragments.)
+    statements = {
+        "schema:event_id index": "ON (n.event_id)",
+        "schema:unique constraint": "GRAPH.CONSTRAINT CREATE",
+        "schema:seq index": "ON (n.seq)",
+        "allocator (next_seq)": "m.last_seq AS prev",
+        "append (GraphEvent)": "CREATE (e:GraphEvent",
+        "purge_expired": "n.ts < $cutoff",
+        "purge_overflow": "ORDER BY n.seq ASC",
+        "refresh_first_seq": "SET m.first_seq = CASE",
+        "reestablish_watermark": "ON CREATE SET m.last_seq = $last",
     }
-    missing = [name for name, match in classes.items()
-               if not any(match(s) for s, _lane in observed)]
+    missing = [name for name, fragment in statements.items()
+               if not any(fragment in s for s, _lane in observed)]
     assert not missing, (
         f"the exercise did not reach {missing} — the coverage claim in this "
         "test would be vacuous. Statements observed: "
@@ -300,8 +304,9 @@ def test_the_declaration_is_not_a_global_bypass(sdk_with_journal, monkeypatch):
     with pytest.raises(DirectCacheWriteRefused):
         proj.g.query("CREATE (n:Point {id:'undeclared-demo'})")
 
-    assert probe.refused, "the armed probe did not record the refusal"
-    assert "undeclared-demo" in probe.refused[0]
+    assert any("undeclared-demo" in s for s in probe.refused), (
+        "the armed probe did not refuse the undeclared `:Point` write; "
+        "refused: " + " | ".join(s[:120] for s in probe.refused))
 
     # A READ through the same handle is untouched by the door.
     rows = proj.g.query(
