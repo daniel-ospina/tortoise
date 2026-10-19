@@ -642,73 +642,88 @@ def source_change_notices(g, source_refs, current_versions: dict[str, str] | Non
 # child (`#9123` the `:EpMeta` epoch, `#9121` onboarding metadata, `#9122` the
 # raw `:Event` writers).
 #
-# WHAT THE WRITE IS. `create_edge` issues exactly ONE mutating statement,
+# WHAT THE WRITES ARE. `create_edge` and `create_about_edge` each issue exactly
+# ONE mutating statement,
 #
 #   MATCH (s:L {k:$sv}) MATCH (t:M {k:$tv}) MERGE (s)-[:<predicate>]->(t)
 #
-# and its three typed wrappers (`create_owned_by`, `create_managed_by`,
-# `create_authored_by`) are `return self.create_edge(...)` — one funnel, one
-# statement. The write mints NO node (`MATCH` on both endpoints, never `MERGE`:
-# an absent endpoint returns `False` and writes nothing), NO property (no `SET`
-# on the relationship, no value parameter — the verb takes none, see
+# and `create_edge`'s three typed wrappers (`create_owned_by`,
+# `create_managed_by`, `create_authored_by`) are `return self.create_edge(...)` —
+# so the lane is two mints over one statement shape. The write mints NO node
+# (`MATCH` on both endpoints, never `MERGE`: an absent endpoint returns `False`
+# and writes nothing), NO property (no `SET` on the relationship, no value
+# parameter — the verbs take none, see
 # `docs/architecture/STORAGE-ARCHITECTURE.md` §9.6) and NO identity. Its whole
 # content is `(source, predicate, target)` between two entities that already
 # exist, so the write adds no state of its own: it is a DERIVATION.
 #
 # WHY DECLARED AND NOT JOURNALLED. A record COULD describe it (so this is not
 # the `_graph_metadata_write_scope` lane, whose first obligation is that no
-# record describes the write), and the edge is not re-derived by today's replay
-# from the edge itself — the two shapes that would make journaling or
-# `_live_write_scope` honest. Journalling needs a record type, a fold and a
-# replay resolver; that is the record-store epic's work (`#7879`), not this
-# child's, and the ordering it settles is the OPPOSITE one: the declaration
-# lands BEFORE the guard, because a guard that refuses the product's own edge
-# mints is not a guard, it is a regression (measured on `#9079`'s lane: arming
-# it refused these writers; the seed path's REST caller answers 500 — see
+# record describes the write), and the edges it mints are not re-derived by
+# today's replay — the two shapes that would make journaling or
+# `_live_write_scope` honest. ⛔ WHY NOT JOURNALLED, PRECISELY — the replay half
+# of journalling ALREADY EXISTS and this is NOT a request for a new resolver:
+# `DirectEdgeCreated` is a flat `{src, tgt, edge_type, direction}` record whose
+# pass-2b fold re-creates exactly this edge shape, and MEASURED on this head,
+# emitting that record and running `rebuild_all` brings `ownedBy`, `dependsOn`,
+# `references` and `memberOf` edges back. What is missing is the EMISSION: this
+# verb is a PROJECTION method with no journal handle, so the gap is on the
+# producer side (an SDK-level edge door that emits the record), not in the
+# replay engines — a bigger change than a declaration child, and it belongs to
+# the record-store epic (`#7879`) with the write-class row carried on `#9079`'s
+# census; its ordering is settled the OTHER way round: the declaration lands
+# BEFORE the guard, because a guard that refuses the product's own edge mints is
+# not a guard, it is a regression (measured on `#9079`'s lane: arming it refused
+# these writers; the seed path's REST caller answers 500 — see
 # `selfhost_api.py::POST /onboarding/seed` and
 # `hosted_api.py::POST /v1/onboarding/seed`).
 #
 # ⛔ WHAT THIS LANE CLAIMS, PER RELATION — not one global claim, because one
 # global claim would be false. ``structural_edge_carrier`` answers it from the
-# ONE set the replay engines read, and the two halves are MEASURED (an embedded
+# ONE set the replay engines read, and both halves are MEASURED (an embedded
 # journal-backed SDK, two endpoints, `rebuild_all` from the journal):
 #   * **snapshot-carried** — `DERIVABLE_STRUCTURAL_RELS` (`aboutSubject`,
 #     `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDocument`,
-#     `extractedFrom`): the graph has a carrier — the endpoint Point's immutable
-#     snapshot (`aboutEntities` / the `extractedFrom` prop, resurrected by
-#     `entities._upsert_point_edges` at replay). An edge minted HERE is
-#     resurrected when the endpoint's snapshot already carries the same link,
+#     `extractedFrom`): the endpoint Point's immutable snapshot
+#     (`aboutEntities` / the `extractedFrom` prop, resurrected by
+#     `entities._upsert_point_edges` at replay) is a carrier, so an edge minted
+#     HERE is resurrected when that snapshot already carries the same link —
 #     which is how the sanctioned writers write it (`create_point(aboutSubject=
-#     …)`, `extractedFrom=…`), and NOT when it is a bare assertion on a node
+#     …)`, `extractedFrom=…`) — and NOT when it is a bare assertion on a node
 #     whose record never held it.
-#   * **carrier-less** — every other predicate in `_VALID_EDGE_PREDICATES`
-#     (`related`, `dependsOn`, `ownedBy`, `managedBy`, `authoredBy`, `memberOf`,
-#     `hasMember`, `holdsRole`, `reportsTo`, `participatesIn`, `hasPart`,
-#     `performs`, `produces`, `uses`, `wasDerivedFrom`, `references`,
-#     `aboutSource`, `aboutAction`): there is NO replay carrier. MEASURED at
-#     this head: a `rebuild_all` over a journal holding such edges reports
-#     `edges: 0` and the edges are GONE, whether they were minted bare or
-#     carried by an `ownedBy`/`managedBy`/`authoredBy` node property.
+#   * **no carrier emitted by this lane** — every other predicate in
+#     `_VALID_EDGE_PREDICATES` (`related`, `dependsOn`, `ownedBy`, `managedBy`,
+#     `authoredBy`, `memberOf`, `hasMember`, `holdsRole`, `reportsTo`,
+#     `participatesIn`, `hasPart`, `performs`, `produces`, `uses`,
+#     `wasDerivedFrom`, `references`, `aboutSource`, `aboutAction`). MEASURED at
+#     this head: mint them live and `rebuild_all` reports `edges: 0` — they are
+#     GONE, whether minted bare or carried by an `ownedBy`/`managedBy`/
+#     `authoredBy` node property, because nothing emitted a record for them.
 #     **This lane does NOT claim durability for them.** It discloses the gap so
 #     the next reader meets it here instead of discovering it, and so that
 #     `#9124`'s census has the class enumerated rather than assumed: the
-#     missing replay carrier is a REBUILD-fidelity gap in the replay engines,
-#     tracked on `#9079`'s census (the folded write-surface map of `#2296`,
-#     whose per-write-class obligation (`#7951`) this row discharges only for
-#     the LIVE side). Declaring this lane does not create that gap and does not
-#     bless it — the gap exists on `origin/main` today, with no declaration
-#     anywhere (measured the same way).
+#     missing half is the EMISSION from the edge doors (the record type, the
+#     fold and the resolver exist — `DirectEdgeCreated`), tracked on `#9079`'s
+#     census (the folded write-surface map of `#2296`, whose per-write-class
+#     obligation (`#7951`) this row discharges only for the LIVE side).
+#     Declaring this lane does not create that gap and does not bless it — the
+#     gap exists on `origin/main` today, with no declaration anywhere (measured
+#     the same way).
 #
 # ⛔ WHAT THIS LANE DOES NOT COVER — stated, so a reader does not infer it from
 # a green suite. `_EdgeHandlers` holds OTHER edge-minting verbs; they are not
-# this lane and deliberately keep their own shape:
-#   * `create_about_edge` / `_create_about_edges` / `wire_about_link` — the
-#     `about*` path, where a caller-supplied NAME is resolved through the
-#     Subject→Object→Event→Source→Point cascade and the resolved decision is
-#     journalled (`resolve_about_link`, `EventRecorded`'s replay links, #8398).
-#     Their record exists, so they belong to their journalling door's scope, not
-#     to a declaration; `wire_about_link` can also MINT a `:Subject` stub — a
-#     node, so an edge lane must not authorize it.
+# this lane and deliberately keep their own shape (each reason below is
+# MEASURED at this head, not inferred from a name):
+#   * `_create_about_edges` / `wire_about_link` — the NAME-resolved `about*`
+#     path: the caller resolves a name through the Subject→Object→Event→Source→
+#     Point cascade and the resolved decision is JOURNALLED (`resolve_about_link`,
+#     `EventRecorded`'s replay links, #8398), so their write belongs to their
+#     journalling door's scope — the live-scoped shape, not this one.
+#     `wire_about_link` also MINTS a `:Subject` stub (a node), so an edge lane
+#     must not authorize it. ⚠️ They are NOT refusal-safe today either: the
+#     about links are written AFTER `_live_write_scope("create_entity")` closes
+#     (`sdk.py`'s about path), so `#9124` would refuse them — measured. That is a
+#     residual this lane discloses and does NOT absorb; `#9124` must census it.
 #   * `_link_source` / `link_source_to_entity` / `link_source_to_event` /
 #     `link_source_to_legacy_event` — the PROVENANCE lane: they `MERGE` a
 #     `:Source` NODE and stamp `r.sourceVersion` (a `:Source` mint under an edge
@@ -742,13 +757,24 @@ STRUCTURAL_EDGE_WRITE_LANE = "structural-edge.derived"
 
 
 def structural_edge_carrier(rel: str) -> str | None:
-    """The replay carrier for an edge minted by ``create_edge``, or ``None``.
+    """The replay carrier THIS LANE provides for an edge of relation ``rel``.
+
+    ``"endpoint-snapshot"`` — the endpoint Point's own record is the carrier
+    (`DERIVABLE_STRUCTURAL_RELS`, resurrected by
+    `entities._upsert_point_edges`), so an edge the lane mints survives a
+    rebuild when that record already carries the same link.
+
+    ``None`` — **this verb emits no record and the endpoint snapshot carries no
+    such link, so a rebuild drops the edge.** That is NOT a claim that no replay
+    carrier can exist: the ENGINE has one (`DirectEdgeCreated` + its pass-2b
+    fold), and emitting that record restores these edges (measured). The gap is
+    the EMISSION — this projection verb has no journal handle — so ``None``
+    reads "nothing carried from here", never "nothing could carry it".
 
     DERIVED from ``DERIVABLE_STRUCTURAL_RELS`` — the one set the replay engines
-    read — rather than a second hand-maintained table: adding a rel to that set
-    moves this answer with it, so the lane's per-relation claim cannot drift
-    from replay's actual behaviour. See the block above: a ``None`` here is a
-    DISCLOSED carrier gap, not a claim that no record is needed.
+    read — rather than a second hand-maintained table, so adding a rel to that
+    set moves this answer with it and the lane's per-relation claim cannot
+    drift from replay's actual behaviour.
     """
     return "endpoint-snapshot" if rel in DERIVABLE_STRUCTURAL_RELS else None
 
@@ -1418,17 +1444,22 @@ class _EdgeHandlers:
         if not sources or not targets:
             return False
         created = False
-        for s in sources:
-            for t in targets:
-                r = self.g.query(
-                    f"MATCH (s:{s['label']} {{{s['key']}:$sv}}) "
-                    f"MATCH (t:{t['label']} {{{t['key']}:$tv}}) "
-                    f"MERGE (s)-[:{edge_type}]->(t) "
-                    f"RETURN count(*) > 0",
-                    params={"sv": s["value"], "tv": t["value"]},
-                )
-                if r.result_set and r.result_set[0][0]:
-                    created = True
+        # §17.1 (#9195): the about-lane's ONE mutating statement, DECLARED. Both
+        # endpoints were just resolved by `MATCH` above, so this writes a bare
+        # relationship and nothing else — the same shape and the same claim as
+        # `create_edge`; read the block above `STRUCTURAL_EDGE_WRITE_LANE`.
+        with _structural_edge_write_scope():
+            for s in sources:
+                for t in targets:
+                    r = self.g.query(
+                        f"MATCH (s:{s['label']} {{{s['key']}:$sv}}) "
+                        f"MATCH (t:{t['label']} {{{t['key']}:$tv}}) "
+                        f"MERGE (s)-[:{edge_type}]->(t) "
+                        f"RETURN count(*) > 0",
+                        params={"sv": s["value"], "tv": t["value"]},
+                    )
+                    if r.result_set and r.result_set[0][0]:
+                        created = True
         return created
 
     def replay_about_links(self, payload: dict, hard_delete_seqs=None,

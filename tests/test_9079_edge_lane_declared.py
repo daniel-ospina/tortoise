@@ -82,13 +82,24 @@ DECLARED_VERBS = (
     "create_edge", "create_owned_by", "create_managed_by", "create_authored_by",
 )
 
+#: The lane's declared verbs — the two edge mints plus `create_edge`'s three
+#: typed wrappers.
+DECLARED_VERBS = (
+    "create_edge", "create_about_edge",
+    "create_owned_by", "create_managed_by", "create_authored_by",
+)
+
 #: The predicates this lane can write. Pinned as a LITERAL partition of
 #: `_VALID_EDGE_PREDICATES` so a predicate added to (or moved between) the two
 #: halves is a visible diff in this file rather than a silent widening.
 SNAPSHOT_CARRIED = frozenset({
     "aboutSubject", "aboutObject", "aboutEvent", "aboutDocument",
 })
-NO_REPLAY_CARRIER = frozenset({
+#: No carrier is EMITTED from this lane, so a rebuild drops these edges. The
+#: name says "emitted", not "exists": the replay engine has a carrier
+#: (`DirectEdgeCreated` + its pass-2b fold) and emitting that record restores
+#: them — what is missing is the emission from this projection verb.
+NO_CARRIER_EMITTED = frozenset({
     "performs", "produces", "uses", "authoredBy", "ownedBy", "managedBy",
     "hasMember", "holdsRole", "memberOf", "reportsTo",
     "participatesIn", "hasPart", "related", "dependsOn", "references",
@@ -178,6 +189,11 @@ def _walk_the_edge_lane(proj, endpoints) -> None:
         target = endpoints["doc"] if predicate == "aboutDocument" \
             else endpoints["target"]
         proj.create_edge(endpoints["source"], target, predicate)
+    for about_type in ("aboutSubject", "aboutObject", "aboutEvent",
+                       "aboutPoint", "aboutDocument"):
+        target = endpoints["doc"] if about_type == "aboutDocument" \
+            else endpoints["target"]
+        proj.create_about_edge(endpoints["source"], target, about_type)
     proj.create_owned_by(endpoints["entity"], endpoints["subject"])
     proj.create_managed_by(endpoints["entity"], endpoints["subject"])
     proj.create_authored_by(endpoints["entity"], endpoints["subject"])
@@ -311,14 +327,12 @@ _STATED_OTHER_WRITERS = {
         "the FOLD: runs inside `_live_write_scope`/`_replay_write_scope`",
     "replay_about_links":
         "replay: the links came FROM the journal's `EventRecorded` record",
-    "create_about_edge":
-        "the `about*` lane: its links are journaled with the record (#8398) and "
-        "it can MINT a `:Subject` stub — a node, not an edge",
     "_create_about_edges":
-        "delegates to `wire_about_link`; same journaled-about lane",
+        "delegates to `wire_about_link`; the name-resolved about lane, whose "
+        "links are journaled with the record (#8398)",
     "wire_about_link":
         "the single about-link construction; journals via its caller's record "
-        "and mints `:Subject` stubs",
+        "and MINTS `:Subject` stubs",
     "_link_source":
         "PROVENANCE: MERGEs a `:Source` NODE and stamps `r.sourceVersion`",
     "link_source_to_entity":
@@ -339,42 +353,95 @@ def _mutating_verbs() -> set[str]:
     """Every `_EdgeHandlers` verb that can reach a mutating statement.
 
     DERIVED from the module's own AST, not hand-maintained: a verb counts when
-    it issues a `self.g.query(<string literal>)` whose text carries a write
-    keyword, and the set is then CLOSED over intra-class delegation (that is how
-    `create_owned_by` → `create_edge` is covered without being spelled out).
+    it issues a handle call that can write, and the set is then CLOSED over
+    both intra-class delegation (`create_owned_by` → `create_edge`) and the
+    module-level helpers a verb calls (`_mint_source_stub` and friends MERGE, so
+    a verb that only delegates to one still writes).
+
+    ⛔ IT FAILS CLOSED ON A SHAPE IT CANNOT READ. A handle call whose statement
+    text is not a literal we can test (`self.g.query(some_variable)`), any
+    verb other than the statement verbs on `self.g`, and any module-level
+    helper that itself writes all count as writers. The fail-open direction —
+    a verb that writes being classified read-only and so passing as
+    "undeclared" — is exactly what this enumeration exists to prevent, so an
+    unknown shape must make noise, not silence.
     """
     from tortoise.projection import edges as _edges
 
-    tree = ast.parse(Path(_edges.__file__).read_text(encoding="utf-8"))
+    source = Path(_edges.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
     cls = next((n for n in ast.walk(tree)
                 if isinstance(n, ast.ClassDef) and n.name == "_EdgeHandlers"),
                None)
     assert cls is not None, "`_EdgeHandlers` is gone or renamed"
 
     methods = {fn.name: fn for fn in cls.body if isinstance(fn, ast.FunctionDef)}
+    module_fns = {fn.name: fn for fn in tree.body
+                  if isinstance(fn, ast.FunctionDef)}
 
-    def _issues_a_write(fn: ast.FunctionDef) -> bool:
+    #: The handle's statement verbs. `execute_command` is included because
+    #: `_GuardedGraph` overrides it and a `GRAPH.QUERY` through it writes;
+    #: `profile`/`explain` execute the statement.
+    statement_verbs = {"query", "_query", "execute_command", "profile",
+                       "explain"}
+
+    def _receiver(node: ast.Call) -> str | None:
+        """`g` for a call on `self.g` / `self.g.<attr>`, else `None`."""
+        func = node.func
+        if not isinstance(func, ast.Attribute):
+            return None
+        if isinstance(func.value, ast.Name) and func.value.id == "g":
+            return "g"
+        if (isinstance(func.value, ast.Attribute)
+                and isinstance(func.value.value, ast.Name)
+                and func.value.value.id == "self"
+                and func.value.attr == "g"):
+            return "g"
+        return None
+
+    def _issues_a_write(fn: ast.FunctionDef,
+                        writers: set[str] | None = None) -> bool:
         for node in ast.walk(fn):
-            if not (isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr in {"query", "_query"}
-                    and node.args):
+            if not isinstance(node, ast.Call):
                 continue
+            # Module-level helper or same-class sibling that writes?
+            target = None
+            if isinstance(node.func, ast.Name):
+                target = node.func.id
+            elif (isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id in {"self", "_edges"}):
+                target = node.func.attr
+            if target is not None and writers and target in writers:
+                return True
+
+            on_handle = _receiver(node)
+            if on_handle is None:
+                continue
+            verb = node.func.attr
+            if verb not in statement_verbs or not node.args:
+                # An unknown verb on the handle (`self.g.anything(...)`) cannot
+                # be proven read-only — fail closed.
+                return True
             # The statement text is assembled in several spellings on this
             # module (a plain literal, an f-string, and `literal + helper(...)`
-            # — `_link_source` uses the last), so the test reads EVERY literal
-            # piece of the first argument's expression tree rather than one
-            # node shape. A shape it cannot read would make the verb look
-            # read-only, which is the fail-open direction for this enumeration.
+            # — `_link_source` uses the last), so every literal piece of the
+            # first argument's expression tree is read. NO literal at all means
+            # the statement is unreadable: fail closed.
             literal = "".join(
                 part.value for part in ast.walk(node.args[0])
                 if isinstance(part, ast.Constant) and isinstance(part.value, str)
-            ).upper()
-            if any(kw in literal for kw in _WRITE_KEYWORDS):
+            )
+            if not literal.strip():
+                return True
+            if any(kw in literal.upper() for kw in _WRITE_KEYWORDS):
                 return True
         return False
 
-    writers = {name for name, fn in methods.items() if _issues_a_write(fn)}
+    module_writers = {name for name, fn in module_fns.items()
+                      if _issues_a_write(fn)}
+    writers = {name for name, fn in methods.items()
+               if _issues_a_write(fn, module_writers)}
     # Delegation closure: a verb that calls a writing sibling can write too.
     changed = True
     while changed:
@@ -382,15 +449,9 @@ def _mutating_verbs() -> set[str]:
         for name, fn in methods.items():
             if name in writers:
                 continue
-            for node in ast.walk(fn):
-                if (isinstance(node, ast.Call)
-                        and isinstance(node.func, ast.Attribute)
-                        and node.func.value.__class__ is ast.Name
-                        and getattr(node.func.value, "id", "") == "self"
-                        and node.func.attr in writers):
-                    writers.add(name)
-                    changed = True
-                    break
+            if _issues_a_write(fn, writers):
+                writers.add(name)
+                changed = True
     return writers
 
 
@@ -473,18 +534,24 @@ def test_the_lane_states_its_carrier_per_relation():
     """The issue's "classify per relation, not per lane" row.
 
     A blanket answer is false in one direction or the other: `references` has no
-    anchor and no carrier (`#5213` option 3, §9.6), while the `about*` family is
-    snapshot-derivable (`DERIVABLE_STRUCTURAL_RELS` ← `entities._upsert_point_
-    edges`). `structural_edge_carrier` must answer from that ONE set, and the
-    two halves must partition the predicates this lane can write — so a new
-    predicate, or a change to what replay resurrects, is a visible diff here.
+    anchor and no carrier emitted from here (`#5213` option 3, §9.6), while the
+    `about*` family is snapshot-derivable (`DERIVABLE_STRUCTURAL_RELS` ←
+    `entities._upsert_point_edges`). `structural_edge_carrier` must answer from
+    that ONE set, and the two halves must partition the predicates this lane can
+    write — so a new predicate, or a change to what replay resurrects, is a
+    visible diff here.
+
+    ⚠️ A `None` here means "no carrier is EMITTED from this verb", NOT "no
+    replay carrier can exist": the engine's `DirectEdgeCreated` fold restores
+    these very edges when a record describes them (measured), so the gap is the
+    emission.
     """
-    assert set(_VALID_EDGE_PREDICATES) == SNAPSHOT_CARRIED | NO_REPLAY_CARRIER, (
+    assert set(_VALID_EDGE_PREDICATES) == SNAPSHOT_CARRIED | NO_CARRIER_EMITTED, (
         "the pinned partition no longer covers the predicates this lane can "
-        f"write: uncovered={sorted(set(_VALID_EDGE_PREDICATES) - SNAPSHOT_CARRIED - NO_REPLAY_CARRIER)} "
-        f"stale={sorted((SNAPSHOT_CARRIED | NO_REPLAY_CARRIER) - set(_VALID_EDGE_PREDICATES))}"
+        f"write: uncovered={sorted(set(_VALID_EDGE_PREDICATES) - SNAPSHOT_CARRIED - NO_CARRIER_EMITTED)} "
+        f"stale={sorted((SNAPSHOT_CARRIED | NO_CARRIER_EMITTED) - set(_VALID_EDGE_PREDICATES))}"
     )
-    assert not (SNAPSHOT_CARRIED & NO_REPLAY_CARRIER)
+    assert not (SNAPSHOT_CARRIED & NO_CARRIER_EMITTED)
 
     assert set(_VALID_EDGE_PREDICATES) & DERIVABLE_STRUCTURAL_RELS == SNAPSHOT_CARRIED, (
         "the snapshot-carried half must be exactly the intersection with the "
@@ -494,14 +561,14 @@ def test_the_lane_states_its_carrier_per_relation():
 
     for rel in SNAPSHOT_CARRIED:
         assert structural_edge_carrier(rel) == "endpoint-snapshot", rel
-    for rel in NO_REPLAY_CARRIER:
+    for rel in NO_CARRIER_EMITTED:
         assert structural_edge_carrier(rel) is None, (
-            f"`{rel}` is classified carrier-less, but the lane claims a replay "
-            "carrier for it"
+            f"`{rel}` is classified as emitting no carrier, but the lane claims "
+            "a replay carrier for it"
         )
     assert structural_edge_carrier("references") is None, (
         "`references` is the relation the issue names as the counter-example to "
-        "a global answer; it must keep its carrier-less classification"
+        "a global answer; it must keep its no-carrier-from-here classification"
     )
 
 
@@ -562,6 +629,11 @@ def test_the_lane_and_its_argument_are_recorded():
     assert "MEASURED at" in block, (
         "the carrier gap is asserted, not measured — the lane must record the "
         "measurement that produced it (a rebuild drops these edges)"
+    )
+    assert "DirectEdgeCreated" in block, (
+        "the declaration must name the replay machinery that DOES exist for "
+        "these edges, so the gap is stated as the EMISSION from this door and "
+        "not as a missing replay engine"
     )
     assert "#5213" in block and "#7879" in block, (
         "the declaration must cite the `references` boundary (#5213) and where "
