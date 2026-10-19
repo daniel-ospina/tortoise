@@ -3633,17 +3633,6 @@ surfaces:
   # test_the_inventory_runs_on_a_diff_to_every_module_it_scans`.
   - test_9068_pack_gate_residuals.py
   - test_7951_enforce_atomic_write.py
-  # #9121 residual: the seam the §17.1 declaration does NOT cover — the five
-  # `eager_init_query()` call sites that CREATE `:OnboardingState` on
-  # `proj.db.select_graph(...)` (escape (3)). Its subjects are
-  # `tortoise/onboarding/state.py` (the note, `onboarding` surface),
-  # `tortoise/projection/__init__.py` (the opener inventory that ENFORCES the
-  # rule -> full matrix, SHARED_MODULES), and the two files that hold the call
-  # sites (`sdk.py`/`hosted_api.py` -> full matrix). Registered on `api` AND
-  # `onboarding` because either match REPLACES the `core` fallback (the
-  # #1349/#2938 silent-drop class); the pins are source-structural, so there is
-  # no graph fixture to keep in sync with `test_9079_onboarding_declared_lane.py`.
-  - test_9121_onboarding_residual_pins.py
   - test_7951_create_point_outbox.py
   # #7951 (increment 2, the revision door): `update_point` appends its
   # `PointRevised` record BEFORE the cache write. Same subjects as the
@@ -3815,6 +3804,19 @@ surfaces:
   # the `core` fallback in `select()`, so a change to any ONE of them alone would
   # otherwise run this suite never — the #1349/#2938/#3154 silent-drop class.
   - test_9079_onboarding_declared_lane.py
+  # #9121 residual: the seam the §17.1 declaration does NOT cover — the five
+  # `eager_init_query()` call sites that CREATE `:OnboardingState` on
+  # `proj.db.select_graph(...)` (escape (3)). Its PRIMARY subject is
+  # `tortoise/onboarding/state.py` (the declaration's note about that seam), so
+  # this arm must exist: `tortoise/onboarding/**` is an EXACT `onboarding`
+  # SOURCE_PATTERN match that REPLACES the `core` fallback in `select()`, and
+  # an `onboarding`-only change would otherwise run the pin never — the exact
+  # drift the note exists to catch (the #1349/#2938 silent-drop class). The
+  # `api` arm (above) covers the two files holding the call sites
+  # (`sdk.py`/`hosted_api.py`); `tortoise/projection/__init__.py` is in
+  # SHARED_MODULES -> full matrix. NOT registered on `ep`: nothing this file
+  # pins lives in `tortoise/analyze.py` / `dream.py` / `ranking.py`.
+  - test_9121_onboarding_residual_pins.py
   - test_7951_write_doors.py
   # #9068 review P1: MULTI-REGISTERED with `core` (below), `api` and `onboarding`
   # (above), and `ep` / `eval` / `sdk` — the six surfaces a module the #5475 door
@@ -5153,8 +5155,7 @@ uri_requiring:
 push_extra: []
 durations_captured_at: "2026-10-17T15:43:47Z"
 durations:
-  test_9121_onboarding_residual_pins.py: 2.0  # unmeasured — new in #9121; no sweep has collected it, so it carries the flat default for an unmeasured file (same convention as test_prod_csp_monitor.py / test_venture_pack.py). Do NOT substitute a local timing: the file's own carve-out run is ~11s on this box, but the map is a SHARD-LAYOUT input modelling CI, and a locally measured weight that does not model CI must not decide what runs together. Measured 2026-10-19: 7 cases, source-structural only (no graph fixture).
-  test_9079_onboarding_declared_lane.py: 2.0  # unmeasured — new in #9121/#9153; no sweep has collected it, so it carries the flat default for an unmeasured file (same convention as test_prod_csp_monitor.py / test_venture_pack.py). Landed on main WITHOUT a durations row, which is what dropped the #3400 coverage metric back under the 90% floor (measured 2026-10-19: 839/933 = 89.9% at `f96a18da1`); the underlying drift is #9149, this row is the new-file convention applied to the file that caused the drop. Do NOT substitute a local timing.
+  test_9121_onboarding_residual_pins.py: 2.0  # unmeasured — new in #9121; no sweep has collected it, so it carries the flat default for an unmeasured file (same convention as test_prod_csp_monitor.py / test_venture_pack.py). Do NOT substitute a local timing: the file's own carve-out run is ~11s on this box, but the map is a SHARD-LAYOUT input modelling CI, and a locally measured weight that does not model CI must not decide what runs together. Measured 2026-10-19: 11 cases, source-structural only (no graph fixture). `test_9079_onboarding_declared_lane.py` already carries a measured row in the #3400-trap block below (3.6) — do NOT add a second key here; a duplicate mapping key is refused by `tools/registry_integrity.py` and silently keeps the LAST value (#5373).
 # #3395: per-file CI wall time (seconds), swept from the junit artifacts of four
 # completed 2026-09-22 runs rather than entered by hand — two push-to-main runs
 # (35770984825 at b8ded3646, 35779482728 at 45aa52f70) and two runs of branch

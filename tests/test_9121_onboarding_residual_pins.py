@@ -423,6 +423,119 @@ def test_the_guards_inventory_names_this_lane_and_its_residual():
         )
 
 
+def test_the_live_scope_docstring_names_the_opener_the_lane_actually_calls():
+    """The docstring must name the call `state.py` makes — and not this alias.
+
+    `_live_write_scope`'s own docstring said the onboarding lane opens *it*, and
+    one grep disproves that: `tortoise/onboarding/state.py` never imports this
+    alias — `_onboarding_write_scope` returns
+    `_cache_write_authorized(ONBOARDING_WRITE_LANE)`, the same ContextVar under a
+    different spelling. The sentence lives in the file that ENFORCES §17.1, so a
+    reader who trusts it over `state.py` learns the wrong mechanism, and the
+    phrase-presence pin above cannot see it (it asserts that words exist, never
+    that they are true).
+
+    Derived, not eyeballed: the mechanism names are read out of `state.py`'s own
+    opener, so re-wording the docstring around a mechanism the lane does not use
+    cannot satisfy this.
+    """
+    state_source = (_REPO / "tortoise/onboarding/state.py").read_text(
+        encoding="utf-8")
+    assert "_live_write_scope" not in state_source, (
+        "`tortoise/onboarding/state.py` now opens `_live_write_scope` itself — "
+        "re-read the opener inventory's onboarding bullet in "
+        "`tortoise/projection/__init__.py` (and this pin) (#9121)"
+    )
+    tree, _parents = _parse("tortoise/onboarding/state.py")
+    opener = next(
+        (node for node in ast.walk(tree)
+         if isinstance(node, ast.FunctionDef)
+         and node.name == "_onboarding_write_scope"),
+        None,
+    )
+    assert opener is not None, (
+        "`tortoise/onboarding/state.py` no longer defines "
+        "`_onboarding_write_scope` — the lane's §17.1 declaration moved, so "
+        "every claim about how it declares must be re-derived"
+    )
+    names: set[str] = set()
+    for node in ast.walk(opener):
+        if isinstance(node, ast.Call):
+            names.add(getattr(node.func, "id", None)
+                      or getattr(node.func, "attr", None) or "")
+        elif isinstance(node, ast.Name):
+            names.add(node.id)
+    mechanism = {
+        name for name in names
+        if name == "ONBOARDING_WRITE_LANE"
+        or name.startswith("_cache_write_authorized")
+        or name.startswith("_onboarding_write_scope")
+    }
+    assert mechanism == {"_cache_write_authorized", "ONBOARDING_WRITE_LANE"}, (
+        "the onboarding lane's declaration mechanism moved: the opener now "
+        f"names {sorted(mechanism)} — re-derive the claim in "
+        "`tortoise/projection/__init__.py` rather than assuming it (#9121)"
+    )
+    projection_tree, _pp = _parse("tortoise/projection/__init__.py")
+    live = next(
+        (node for node in ast.walk(projection_tree)
+         if isinstance(node, ast.FunctionDef) and node.name == "_live_write_scope"),
+        None,
+    )
+    assert live is not None, (
+        "`tortoise/projection/__init__.py` no longer defines "
+        "`_live_write_scope` — the §17.1 opener inventory moved"
+    )
+    doc = ast.get_docstring(live) or ""
+    missed = sorted(name for name in mechanism if name not in doc)
+    assert not missed, (
+        "`_live_write_scope`'s docstring describes the onboarding lane without "
+        f"naming the mechanism it actually uses ({missed} absent). It claimed "
+        "the lane opens THIS alias, which `tortoise/onboarding/state.py` never "
+        "imports; a reader trusts the docstring over the code, and this is the "
+        "file that ENFORCES §17.1 (#9121)"
+    )
+
+
+def test_a_diff_to_the_note_itself_selects_this_file():
+    """The pin must RUN on the change it guards — a named surface REPLACES `core`.
+
+    `test_the_declaration_note_names_the_seam_it_does_not_cover` and
+    `test_the_note_and_the_ast_inventory_agree` guard the note in
+    `tortoise/onboarding/state.py`, and `tools/ci_selection.py` resolves
+    `tortoise/onboarding/` to the `onboarding` surface — a NAMED
+    `SOURCE_PATTERNS` match, which REPLACES the `core` fallback. While this file
+    was registered on `api` + `ep` and NOT on `onboarding`, an
+    `onboarding`-only diff — the exact drift these two pins exist to catch —
+    selected every suite EXCEPT this one, so the note could go stale green (the
+    #1349/#2938 silent-drop class). The population is the set of files this
+    suite actually reads, derived from the pins above rather than from a copy of
+    the registration.
+    """
+    from tools.ci_selection import load_manifest, select
+
+    manifest = load_manifest()
+    this_file = Path(__file__).name
+    missing: dict[str, list[str]] = {}
+    for subject in (
+        "tortoise/onboarding/state.py",
+        "tortoise/projection/__init__.py",
+        "tortoise/sdk.py",
+        "tortoise/hosted_api.py",
+    ):
+        sel = select([subject], "pull_request", manifest)
+        selected = (sel["full"] or sel["test_files"] == "ALL"
+                    or this_file in set(sel["test_files"]))
+        if not selected:
+            missing[subject] = list(sel["surfaces"])
+    assert not missing, (
+        "a diff to a file this suite reads does not SELECT this file, so the "
+        f"pins above cannot fail there: {missing}. Register this file on the "
+        "surfaces those files resolve to in `config/ci-surfaces.yml` — a named "
+        "match REPLACES the `core` fallback (#9121 review P1)"
+    )
+
+
 def test_the_inventory_cites_the_issue_that_owns_the_journalling_increment():
     """A pointer a reader follows must land on the tracked work, not a stub.
 

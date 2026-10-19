@@ -3367,11 +3367,14 @@ def _cache_write_authorized(reason: str):
 def _live_write_scope(reason: str = "live-door"):
     """The live doors' scope: journal appended first, then the fold.
 
-    Also opened by the DECLARED METADATA lane (`#9121`:
-    `onboarding/state.py::_run`), which appends nothing — the opener inventory
-    above says why, and names the seam the declaration does NOT cover
-    (`#9157`). `onboarding/seed.py::_run` does not open it: its only caller
-    issues a READ.
+    The SAME scope is opened by the DECLARED METADATA lane (`#9121`) from
+    `onboarding/state.py::_run` — through `_onboarding_write_scope` →
+    `_cache_write_authorized(ONBOARDING_WRITE_LANE)`, i.e. the same ContextVar
+    this function sets, **not through this alias** (that module never imports
+    it; two spellings, one primitive). That lane appends nothing — the opener
+    inventory above says why, and names the seam the declaration does NOT cover
+    (`#9157`). `onboarding/seed.py::_run` does not open it at all: its only
+    caller issues a READ.
     """
     return _cache_write_authorized(reason)
 
