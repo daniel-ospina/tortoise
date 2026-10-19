@@ -17,7 +17,7 @@ Two workflow-shape properties make that class of outage possible, and both are
 cheap to pin:
 
 1. **A workflow with no ``concurrency:`` block is unbounded.** Every run of it
-   that an event creates is eligible for a runner at once. Nine workflows in
+   that an event creates is eligible for a runner at once. Seven workflows in
    this repo had none before this guard; ``finding-provenance`` fires on
    ``issue_comment: [created]`` — i.e. on every comment of ~50 lanes — so it
    could, and did, occupy the entire budget of §"queued".
@@ -35,8 +35,10 @@ What this module pins
   ``cancel-in-progress:``** — a silent default of ``false`` is how a per-event
   workflow grows an unbounded queue;
 * every workflow with a ``push`` trigger is either path-scoped or listed in
-  :data:`MUST_RUN_ON_EVERY_PUSH` with its reason (a deploy or a merged-tree
-  validation genuinely has no path filter to take);
+  :data:`UNFILTERED_PUSH_OK` with its reason (a merged-tree validation
+  genuinely has no path filter to take), and an excused entry must actually
+  BE unfiltered — the excuse and the artifact have to agree, or the entry
+  silently licenses deleting a ``paths:`` filter that exists today;
 * ``finding-provenance`` — the workflow that actually flooded — keeps its
   group keyed **per unit of work** and the two arms that make that key a
   correctness requirement are pinned: a constant group would cancel a finding's
@@ -94,16 +96,21 @@ def _triggers(doc: dict) -> dict:
 
 # Workflows that legitimately keep an UNFILTERED `push` trigger. Each reason is
 # a property of the artifact, not a convenience: the workflow either must see
-# every merged tree (it validates/aggregates ONE tree) or must publish the tree
-# (a deploy cannot skip a merge), or its push arm keys on a TAG, where GitHub
-# does not evaluate `paths` at all. Anything else that fires per push must be
-# path-scoped — that is the rule `welcome-e2e-monitor` now follows.
+# every merged tree (it validates/aggregates ONE tree) or its push arm keys on
+# a TAG, where GitHub does not evaluate `paths` at all. Anything else that fires
+# per push must be path-scoped — that is the rule `welcome-e2e-monitor` follows.
+#
+# ⛔ An entry here is UNCONDITIONAL: it is consulted before the `paths:`
+# assertion, so it also licenses the REMOVAL of a `paths:` filter that the
+# workflow carries today. That is why only genuinely-unfiltered workflows may
+# be listed — `deploy-hosted`, `deploy-pages` and `redis-guard` were removed
+# from an earlier draft of this list for exactly that reason (all three ARE
+# path-scoped, so they already satisfy the rule and their entries could only
+# have weakened it). `test_the_allow_list_has_no_dead_entries` now asserts the
+# converse too: an excused workflow must have NO `paths`/`paths-ignore` key.
 UNFILTERED_PUSH_OK = {
     "python-ci.yml": "the push-to-main leg IS the merged-tree test run the merge rail baselines against",
     "post-merge-validation.yml": "validates every merged tree (warn-only) — the whole point is one run per push",
-    "deploy-hosted.yml": "publishes main; a merge it skipped would never be deployed",
-    "deploy-pages.yml": "publishes main's website; same reason",
-    "redis-guard.yml": "the push leg provisions/repairs the shared Redis; gating the PR leg is not enough",
     "publish-pypi.yml": "the push arm is a TAG (`v*`), and GitHub does not evaluate `paths` for tag pushes",
 }
 
@@ -208,9 +215,15 @@ def test_every_reporting_per_event_workflow_is_bounded() -> None:
 def test_per_push_workflows_are_path_scoped_or_declared(path: Path) -> None:
     """A report cannot observe a change it never reads — path-scope it (#9115)."""
     doc = _load(path)
-    push = _triggers(doc).get("push")
-    if push is None:
+    trig = _triggers(doc)
+    # KEY PRESENCE, not value. `_triggers()` normalises a bare-string `on: push`,
+    # a list-form `on: [push]` and a value-less `push:` to ``{"push": None}`` —
+    # exactly the three UNFILTERED forms. Reading ``.get("push") is None`` as
+    # "no push trigger" made the guard skip the widest triggers it exists to
+    # catch (fail-open); ``None`` here means "push, with no filter".
+    if "push" not in trig:
         return
+    push = trig["push"] or {}
     if path.name in UNFILTERED_PUSH_OK:
         # The reason must still be a live claim: this dict is the allow-list.
         assert UNFILTERED_PUSH_OK[path.name].strip()
@@ -234,6 +247,16 @@ def test_the_allow_list_has_no_dead_entries() -> None:
         assert "push" in _triggers(_load(path)), (
             f"{name} is excused from the path-filter rule but no longer triggers "
             "on push — drop the entry so the next per-push workflow is caught."
+        )
+        # The excuse and the artifact must AGREE. An allow-list entry is
+        # consulted before the `paths:` assertion, so an entry whose workflow
+        # IS path-scoped silently licenses deleting that filter later — the
+        # exact regression this rule exists to catch.
+        push = _triggers(_load(path))["push"]
+        assert not (isinstance(push, dict) and {"paths", "paths-ignore"} & set(push)), (
+            f"{name} is in UNFILTERED_PUSH_OK but its push trigger IS path-scoped "
+            "— it already satisfies the rule, so the entry can only weaken it "
+            "(it would license removing the filter). Drop the entry."
         )
     for name in ZERO_COST_PR_EVENT:
         assert (WORKFLOW_DIR / name).exists(), (
@@ -333,6 +356,7 @@ def test_no_reporting_workflow_runs_on_the_pull_request_path() -> None:
     """A REPORT must never be a ``pull_request`` check: a red report would block.
 
     #9115's lesson generalised — the required-check surface is small and
+    deliberate, and a report competes with it for the same runner budget.
     """
     offenders = []
     for name in REPORTING_PER_EVENT:

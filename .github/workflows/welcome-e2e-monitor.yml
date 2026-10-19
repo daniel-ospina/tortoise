@@ -29,7 +29,13 @@ on:
   # then killed it on the NEXT merge: measured 2026-10-19, 13 run-minutes spent
   # to produce almost no completed reading — pure slot theft from `python-ci-gate`.
   # The 2-hourly schedule still catches prod drift that no push causes (the
-  # live-funnel risk this workflow exists for) and the dispatch arm is unchanged.
+  # live-funnel risk this workflow exists for).
+  #
+  # ⛔ `workflow_dispatch:` below is ADDED by this change (main had schedule +
+  # push only). It shares the cancel-in-progress group with the schedule, so a
+  # manual dispatch would kill an in-flight scheduled prod reading — on the one
+  # workflow whose whole purpose is completing a reading. The group is keyed by
+  # EVENT NAME so the two arms supersede only themselves.
   push:
     branches: [main]
     paths:
@@ -40,6 +46,14 @@ on:
       - 'tests/test_waitlist_form.py'
       - 'tests/test_waitlist_subscribe.mjs'
       - 'tests/test_tenant_provision_cors.mjs'
+      # `tests/test_waitlist_form.py` READS these: it derives the expected
+      # endpoint from `supabase/config.toml`'s project_id and asserts against a
+      # migration + a function definition. Without them a supabase-only push
+      # can red the suite with no trigger here — the filter would be narrower
+      # than what the suite actually reads.
+      - 'supabase/config.toml'
+      - 'supabase/migrations/**'
+      - 'supabase/functions/**'
       # The auto-dedupe script the failure arm runs.
       - '.github/scripts/welcome-e2e-monitor.sh'
       # Self-trigger: an edit here takes effect on the merge that makes it,
@@ -48,7 +62,10 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: welcome-e2e
+  # Keyed by EVENT so a manual dispatch cannot cancel a scheduled prod reading
+  # (and vice versa); `cancel-in-progress: true` still makes a newer run of the
+  # SAME arm supersede the older one, which is what bounds this report.
+  group: welcome-e2e-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
