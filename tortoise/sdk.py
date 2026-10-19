@@ -7103,10 +7103,18 @@ class TortoiseSDK:
         # files in this repo alone — would fail, be marked retryable, and never
         # converge. (Measured on this repo's own corpus before the degradation:
         # `ingested 0 / failed 2`, graph count 0.)
+        # The ENCODE is part of the test, not just the dump: `json.dumps` accepts
+        # a lone surrogate (``ensure_ascii=False`` passes it through) and the
+        # failure only appears at `EventLog.append`'s UTF-8 file write, inside
+        # `_emit_event`'s try — so a `dumps`-only probe left exactly the same
+        # permanent, retryable-forever failure one step later (measured: a
+        # frontmatter `title` with an unpaired surrogate gave `ingested 0 /
+        # failed 1` on every run, and pre-PR the same file ingested with
+        # `title = None` via the transport gate's degradation).
         for _k, _v in list(record.items()):
             try:
-                _json.dumps(_v, ensure_ascii=False)
-            except (TypeError, ValueError):
+                _json.dumps(_v, ensure_ascii=False).encode("utf-8")
+            except (TypeError, ValueError, UnicodeError):
                 record[_k] = None
         record["eventId"] = event_id
         if event_kind is not None:

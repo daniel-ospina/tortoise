@@ -43,9 +43,15 @@ writers actually use.
   from `_session_event_write`) MERGEs `:Object` nodes and `aboutObject` edges on
   the raw handle with no record and no scope.** Measured with the guard probe
   armed and a session body containing `foo#123`: the `:Event` lands, then the
-  `:Object` write is REFUSED and the sweep aborts. So `#9124` must census that
-  writer before it arms; this suite's guard assertion is deliberately scoped to
-  `:Event` statements and says so.
+  `:Object` write is REFUSED and the sweep aborts. ⚠️ And the abort is not
+  self-healing: on the RETRY the file is skipped before the connect call (the
+  `file_hash`-and-keywords arm returns early), so the `:Object` and
+  `aboutObject` writes are never re-attempted and the links are permanently
+  absent (measured: run 1 aborted with 4 Object-write attempts, run 2 reported
+  `skipped: 1` with 0). "Aborts loudly once" and "aborts once, then silently
+  drops the edges forever" are different inputs to the arming decision, which is
+  why this is written down. `#9124` must census that writer before it arms; this
+  suite's guard assertion is deliberately scoped to `:Event` statements.
 * it does not arm the standalone `session_indexer` CLI's journal.
   `main()` builds `TortoiseSDK()` with no `event_log_path`, and the product's
   only derivation (`config._resolve_event_log_path`) deliberately returns
@@ -390,9 +396,10 @@ def test_ingest_corpus_writes_inside_a_live_write_scope(
     SCOPE, stated because it is load-bearing: this asserts about `:Event`
     statements only. The same session ingest ALSO reaches
     `_connect_issue_objects`, which writes `:Object` nodes and `aboutObject`
-    edges unscoped — refused under this probe once the body references an issue
-    — and that writer is `#9124`'s census item, disclosed in the module
-    docstring, not silently blessed here.
+    edges unscoped — refused under this probe once the body references an issue,
+    and never retried afterwards (the skip arm comes first) — and that writer is
+    `#9124`'s census item, disclosed in the module docstring, not silently
+    blessed here.
     """
     probe = _GuardProbe().install(monkeypatch)
     sdk = sdk_with_journal
