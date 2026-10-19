@@ -471,6 +471,9 @@ def _bind_handle_aliases(node, aliases, params=()) -> None:
         return
     if isinstance(value, (ast.Tuple, ast.List)) and len(targets) == 1 \
             and targets[0] is not None:
+        # `strict=False` states the existing behaviour: an unpacking target
+        # SHORTER than the value tuple silently truncates, which is all this
+        # alias walk needs (it is a census, not a validator).
         pairs = zip(value.elts, _flatten_target(targets[0]), strict=False)
         for part, target in pairs:
             if _carries_handle(part, aliases, params):
@@ -1391,20 +1394,18 @@ def test_a_duplicate_writer_definition_reds_the_gates(monkeypatch):
 
 #: Entry points whose lane is opened by their ONLY CALLER, so a declaration in
 #: the body would be redundant and misleading — `rebuild_all` wraps
-#: `_rebuild_all_replay` in `_replay_write_scope`, `_ensure_indexes` wraps
-#: `_ensure_indexes_declared` in `_graph_metadata_write_scope`, and
-#: `rebuild_from_record` wraps `_project_record_view` in `_replay_write_scope`.
-#: They are listed here rather than left in the flip gate's remainder, where part
-#: 2 would read "declare a lane below" and add exactly that redundant scope.
+#: `_rebuild_all_replay` in `_replay_write_scope`, and `_ensure_indexes` wraps
+#: `_ensure_indexes_declared` in `_graph_metadata_write_scope`. They are listed
+#: here rather than left in the flip gate's remainder, where part 2 would read
+#: "declare a lane below" and add exactly that redundant scope.
 #:
 #: ⛔ PAIRS ARE `(module, SCOPE-QUALIFIED function)` (#9124 review, round 2). A
 #: bare name would exempt EVERY same-named function in that module — the
-#: collision the census keys away — and all three are methods of
+#: collision the census keys away — and both of these are methods of
 #: `FalkorProjection`, whose module defines plenty of other helpers.
 _CALLER_DECLARED = {
     ("tortoise/projection/__init__.py", "FalkorProjection._rebuild_all_replay"),
     ("tortoise/projection/__init__.py", "FalkorProjection._ensure_indexes_declared"),
-    ("tortoise/projection/__init__.py", "FalkorProjection._project_record_view"),
 }
 
 
