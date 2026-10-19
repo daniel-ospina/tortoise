@@ -614,12 +614,27 @@ def test_exhausted_allocator_never_reuses_a_seq_on_emit(sdk_factory, tmp_path):
     assert before, "the fixture must really emit an event"
 
     _set_counter(proj, MAX_SEQ)
-    sdk.create_point("statement", "at the ceiling")  # mutation continues
+    try:
+        sdk.create_point("statement", "at the ceiling")  # mutation continues
 
-    assert [(e["seq"], e["event_id"])
-            for e in event_store.read_after(proj, 0)] == before, (
-        "no graph event may be appended when the allocator refuses")
-    assert _counter(proj) == (MAX_SEQ, 1), "the refusal must not move the counter"
+        assert [(e["seq"], e["event_id"])
+                for e in event_store.read_after(proj, 0)] == before, (
+            "no graph event may be appended when the allocator refuses")
+        assert _counter(proj) == (MAX_SEQ, 1), "the refusal must not move the counter"
+
+        # ⚠️ A REFUSED EMIT IS A LOSS, so it also latches the #9208 degraded
+        # state — process-global memory keyed by (store, graph) that refuses
+        # `poll_events` for that graph until an explicit clear. Left behind, it
+        # reddens every later poll in this process (and, before the suite-wide
+        # isolation fixture existed, every later test in the shard). The clear is
+        # in a `finally` for that reason, and the assertion above it keeps the
+        # clear from being vacuous: if the emit path stopped recording the loss,
+        # THIS line is what reds (#9208 review, P1).
+        assert event_store.degraded(proj) is not None, (
+            "the refused emit must be recorded as a DEGRADED change feed — a "
+            "silent refusal is the defect #9208 exists to remove")
+    finally:
+        event_store.clear_degraded()
 
 
 def test_next_seq_ceiling_is_atomic_across_workers_live_falkor():
