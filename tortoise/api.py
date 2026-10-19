@@ -71,8 +71,9 @@ class EventAPI:
         that do it are the ``__main__`` demo subcommand and ``m0.py``'s fold
         demo) would
         journal a kind for that replay to fold. Neither is a caller-controlled
-        escalation from a live tenant; both are why #8982's replay half is a
-        STATEMENT here, not a test.
+        escalation from a live tenant; both are why #8982's replay half is
+        pinned as a STATEMENT by ``TestReplayIsDeliberatelyUngated5475`` rather
+        than as a gate.
 
         It runs BEFORE ``self.log.append`` in ``_emit``, and that ordering is
         load-bearing: the append is this seam's COMMIT POINT (the journal IS the
@@ -92,7 +93,7 @@ class EventAPI:
         gated by nothing on that lane, and the replay that folds it is
         deliberately ungated too).
         """
-        g = getattr(self.projection, "g", None)
+        g = getattr(getattr(self, "projection", None), "g", None)
         if g is None:
             return
         from .pack_state import (

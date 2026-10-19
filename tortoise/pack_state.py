@@ -1470,11 +1470,14 @@ def payload_names_pack(payload) -> tuple[tuple[str, str], ...]:
     ``core:Project``-spelled extraction result, every ``PointRetracted``).
 
     Returns the pairs rather than a bool ON PURPOSE: the caller passes them
-    straight to ``refuse_unapproved_kinds_in_payload``, so the payload is walked
-    and ``kind_named_packs`` is evaluated ONCE. A separate bool pre-check would
-    walk and classify a second time, and any future change to one half and not
-    the other would silently turn the pre-check into a skip (the #5475 review of
-    this diff). Empty tuple = nothing names a pack = no read needed.
+    straight to ``refuse_unapproved_kinds_in_payload``, so the payload is WALKED
+    once (the classification is re-run per pair inside
+    ``unapproved_kind_refusal`` — a pure string partition plus one memoized
+    catalog read, so that half is cheap; a SECOND walk is what the pair return
+    exists to avoid). A separate bool pre-check would walk twice, and any future
+    change to one half and not the other would silently turn the pre-check into
+    a skip (the #5475 review of this diff). Empty tuple = nothing names a pack =
+    no read needed.
     """
     return tuple(
         (prop, kind) for prop, kind in kind_spellings_in_payload(payload)

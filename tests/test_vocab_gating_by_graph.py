@@ -1994,6 +1994,52 @@ class TestRecordBuildingSeamsRefuseUnapprovedPacks5475:
         })
         assert graph_installed_namespaces(sdk) == frozenset({DEV})
 
+    def test_apply_and_journal_gates_the_TARGET_graph_not_the_sdk(self, sdk,
+                                                                 tmp_path):
+        """The gate must read the approval set of the graph the record lands in.
+
+        ``_apply_and_journal(proj, record)`` takes the projection as an
+        ARGUMENT, so the caller — not ``self`` — decides which graph is
+        written. A gate that resolved ``self``'s set would admit a namespace
+        into a graph that never approved it (and refuse a legitimate write the
+        other way round), which is the widening #5475 exists to close, moved
+        one argument to the right. Latent today (every caller passes its own
+        projection), so it is pinned at the seam instead of left to be
+        discovered by the first caller that does not.
+
+        FAIL-ON (measured): with the gate reading ``self``'s set, a
+        ``marketing``-approved SDK writes ``marketing:campaign`` into a
+        ``dev``-only graph, whose approval set then holds ``marketing`` too.
+        REACHABLE: both graphs are real projections on the same embedded DB,
+        the ``self`` SDK genuinely has ``marketing`` approved, and the target
+        genuinely does not — so the two reads disagree, which is the only way
+        this test can fail.
+        """
+        _seed_install(sdk, DEV)
+        _seed_install(sdk, MARKETING)
+        target = TortoiseSDK(
+            db_path=str(tmp_path / "l7-vocab-gating.db"),
+            namespace=f"test_l7_vocab_{uuid.uuid4().hex[:8]}")
+        _seed_install(target, DEV)
+        target_g = target._get_proj().g
+        self_set = graph_installed_namespaces(sdk)
+        assert self_set == frozenset({DEV, MARKETING}), "fixture: self admits it"
+        assert graph_installed_namespaces(target) == frozenset({DEV}), (
+            "fixture: the WRITE TARGET does not")
+        with pytest.raises(ValueError) as excinfo:
+            sdk._apply_and_journal(target._get_proj(), {
+                "type": "ObjectRegistered",
+                "id": "target-graph-object",
+                "name": "target graph object",
+                "object_kind": MARKETING_OBJECT,
+            })
+        assert MARKETING in str(excinfo.value)
+        assert graph_installed_namespaces(target) == frozenset({DEV}), (
+            "a refused record must not widen the TARGET graph's approval set")
+        assert target_g.query(
+            "MATCH (o:Object) WHERE o.id = 'target-graph-object' "
+            "RETURN o.id").result_set == [], "a refused record must not fold"
+
     def test_doc_write_refuses_a_frontmatter_kind(self, sdk, tmp_path):
         """``_doc_write`` takes ``document_kind`` from the file's FRONTMATTER.
 
@@ -2094,13 +2140,21 @@ class TestSecondWritersOfAKindProperty5475:
 
 
 class TestReplayIsDeliberatelyUngated5475:
-    """: #8982's second acceptance half — the REPLAY boundary is stated AND pinned.
+    """#8982's second acceptance half — the REPLAY boundary is stated AND pinned.
 
     Refusing at ``rebuild_all`` would make a committed record unfoldable, which
     is strictly worse than the widening it prevents: the journal is the truth.
-    So replay MUST stay ungated, and this pins it — the test that would catch a
-    future refactor moving the gate into ``FalkorProjection.apply`` (where it
-    would refuse every rebuild of a journal written before the gate existed).
+    So replay MUST stay ungated, and this pins it.
+
+    ⛔ WHAT IT DOES NOT COVER, measured during the #5475 review round: a gate
+    added inside the FOLD that reads the graph at fold time would ALSO pass this
+    test, because ``rebuild_all`` wipes the graph before replay and restores
+    the ``:PackInstall`` config from the sidecar AFTER it — so at fold time the
+    approval set is empty and such a gate abstains for EVERY record. It does
+    catch the other natural variant (a fold gate fed a captured PRE-WIPE set),
+    which was verified by patching one in. Closing the fold-time variant needs a
+    test that installs a pack mid-replay, which the current rebuild shape cannot
+    express; that residual is written down here rather than implied away.
     """
 
     def test_rebuild_reproduces_an_unapproved_namespace_without_refusing(
@@ -2112,12 +2166,13 @@ class TestReplayIsDeliberatelyUngated5475:
         before this gate existed looks like, and what a projection-less lane
         produces today.
 
-        FAIL-ON: the gate is moved into the fold (``projection.apply``) or into
-        ``rebuild``, so the rebuild raises ``UnapprovedKindNamespace`` and the
-        graph comes back missing a record the journal holds.
+        FAIL-ON: a replay path that consults an approval set (a pre-wipe
+        capture, or a caller-supplied one) raises instead of reproducing — the
+        graph comes back missing a record the journal holds. See the class
+        docstring for the variant this pin cannot catch.
         REACHABLE: the graph is genuinely gated to ``dev`` (asserted) and the
-        record genuinely names ``marketing``, so a gated replay WOULD refuse —
-        the assertion is not vacuous.
+        record genuinely names ``marketing``, so a replay that consulted that
+        set WOULD refuse — the assertion is not vacuous.
         """
         import json
 
@@ -2179,3 +2234,40 @@ class TestIngestCorpusEventKind5475:
             sdk.ingest_corpus(str(corpus), eventKind=MARKETING_OBJECT)
         assert MARKETING in str(excinfo.value)
         assert graph_installed_namespaces(sdk) == before
+
+    def test_scope_note_no_longer_lists_this_closed_seam_as_ungated(self):
+        """The ``compile_vocab`` map must not name a seam this PR CLOSED.
+
+        ``compile_vocab``'s docstring carries the authoritative "what is still
+        open" map — it is what a later lane reads to decide whether a write
+        path needs work, and the PR body leans on it for the same reason. The
+        paragraph this test pins listed ``sdk.ingest_corpus(eventKind=...)``'s
+        raw ``SET e += $props`` among the writers that "never meet a door at
+        all"; this PR gated that argument BEFORE the raw write, so the map had
+        to drop the clause and say what is really left on that method.
+
+        FAIL-ON: the sentence still names ``ingest_corpus(eventKind=...)`` as
+        ungated — the state at ``origin/main`` and at this PR's first head. A
+        lane reading it re-investigates landed work, or files a duplicate of
+        #9068 against it.
+        REACHABLE: the seam really IS gated (the refusal above is the
+        evidence), so "not listed as ungated" is true rather than convenient,
+        and the paragraph is still present and still names the writers that
+        genuinely never meet a door (``pipeline.py``, the connectors,
+        ``migrate_kinds.py``/``retype.py``).
+        """
+        doc = compile_vocab.__doc__ or ""
+        marker = "never meets a door at all"
+        assert marker in doc, (
+            "the ungated-writers map must still exist — deleting it would make "
+            "'not listed as ungated' vacuous rather than true")
+        ungated = doc.split(marker, 1)[1].split("This function still gates", 1)[0]
+        assert "ingest_corpus(eventKind" not in ungated, (
+            "``ingest_corpus``'s eventKind is gated before the raw write, so "
+            "the scope note may not list it as a writer that never meets a door")
+        for still_ungated in ("pipeline.py", "proj.apply", "migrate_kinds.py",
+                              "retype.py"):
+            assert still_ungated in ungated, (
+                f"{still_ungated} is genuinely ungated and must stay named — "
+                "a scope note that drops the real residuals is the same defect "
+                "in the other direction")

@@ -217,11 +217,13 @@ def compile_vocab(packs_dir: Path | str | None = None,
     Layer-1 membership test (#5202, open); replay/``rebuild_all`` is
     deliberately ungated (the journal is the truth, so a record already in it
     reproduces faithfully); and a set of writers never meets a door at all —
-    ``sdk.ingest_corpus(eventKind=...)``'s raw ``SET e += $props``,
     ``tortoise/pipeline.py``'s ``SET p.kind = <pipeline_key>`` (which also shows
     the mining leg conflates an ontology kind with any ``kind``), the connectors'
     direct ``proj.apply`` on a journal-less projection, and raw-Cypher / offline
     re-typing (``tortoise/migrate_kinds.py``, ``tortoise/retype.py``).
+    (``sdk.ingest_corpus`` writes its remaining fields with raw Cypher too, but
+    its one mined input — ``eventKind`` — IS gated, and the rest are snake-case
+    keys ``graph_kind_namespaces`` does not mine, so it is not a widening path.)
     This function still gates the vocab it is GIVEN; it does not make the write
     path's object kinds closed-vocab.
 

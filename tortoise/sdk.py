@@ -6927,8 +6927,9 @@ class TortoiseSDK:
         # it was one more way to install a pack (measured on the same class:
         # ``['dev']`` → ``['dev','marketing']`` via one ``object_kind`` record).
         # Before the append, so a refusal leaves the journal untouched and the
-        # replay cannot resurrect it.
-        self._refuse_unapproved_kinds_in_record(event)
+        # replay cannot resurrect it. Gated against `proj`'s graph — the write
+        # TARGET — not this SDK's bound graph (see the reader's docstring).
+        self._refuse_unapproved_kinds_in_record(event, getattr(proj, "g", None))
         if journal:
             # (#7951 P1-b) Mirror `_create_entity`'s `createdAt` synthesis on
             # the journaling path, BEFORE the append (so the record and the
@@ -28533,7 +28534,7 @@ class TortoiseSDK:
         from .pack_state import unapproved_kind_refusal
         return unapproved_kind_refusal(prop, kind, approved)
 
-    def _refuse_unapproved_kinds_in_record(self, record: dict) -> None:
+    def _refuse_unapproved_kinds_in_record(self, record: dict, graph=None) -> None:
         """#5475: gate a RECORD a live door built itself, before it is persisted.
 
         ``_refuse_unapproved_kinds_in_props`` covers the doors that hand their
@@ -28560,11 +28561,21 @@ class TortoiseSDK:
         )
         if not (spells := payload_names_pack(record)):
             return
-        # `_installed_namespaces_for_gate` is this module's SDK-aware reader
-        # (it is the one that knows a bare-``__new__`` SDK has no graph and a
-        # bound-but-unreachable graph RAISES rather than reading as no-packs).
-        refuse_unapproved_kinds_in_payload(
-            record, _installed_namespaces_for_gate(self), spells=spells)
+        if graph is not None:
+            # The WRITE TARGET's approval set, not this SDK's (#5475 review): a
+            # door that takes a ``proj`` argument persists into THAT graph, so
+            # reading ``self``'s set would admit an unapproved namespace into a
+            # graph that never approved it (and refuse a legitimate write the
+            # other way round). Latent today — every caller passes its own
+            # projection — which is exactly why it is fixed at the seam.
+            from tortoise.pack_state import graph_approval_namespaces
+            approved = graph_approval_namespaces(graph)
+        else:
+            # `_installed_namespaces_for_gate` is this module's SDK-aware reader
+            # (it is the one that knows a bare-``__new__`` SDK has no graph and a
+            # bound-but-unreachable graph RAISES rather than reading as no-packs).
+            approved = _installed_namespaces_for_gate(self)
+        refuse_unapproved_kinds_in_payload(record, approved, spells=spells)
 
     def _refuse_unapproved_kinds_in_props(self, props: dict) -> None:
         """Run the #5475 gate over EVERY kind property a write is carrying.
