@@ -56,13 +56,23 @@ WHAT THIS MODULE DELIBERATELY IS NOT
   customer is the dogfood instance. No dual-write, backfill, cutover or
   rollback-parity surface appears here, and none should be added.
 
-TENANCY IS A PER-CALL ARGUMENT, NEVER AMBIENT
-============================================
+TENANCY IS A PER-CALL ARGUMENT AT THIS LAYER, NEVER AMBIENT
+===========================================================
 Every layer row is keyed by `(org_id, graph_id)` with a foreign key to
 `public.graphs`. Both are **required keyword arguments** of every entry point
-here (:func:`mutations_for`, :func:`replay_plan`, :func:`replay`): there is
-deliberately no module-level default, no ContextVar and no environment fallback
-at this layer.
+here (:func:`mutations_for`, :func:`replay_plan`, :func:`replay`), and of the
+seam that drives them (`record_writer.RecordWriter.write`, #9194): at this
+layer there is deliberately no module-level default, no ContextVar and no
+environment fallback. `test_this_module_has_no_ambient_tenant_READER` executes
+the half of that a scan can execute — no environment reader and no
+`contextvars` — while the parameter half (each coordinate required on its own)
+is executed by the refusal leg in `tests/test_record_projection.py`. What
+neither instrument reaches is a module-level constant applied in a FUNCTION
+BODY (`org_id = org_id or _DEFAULT_TENANT[0]`, signature still required): the
+scan looks for env/`contextvars` names, and the refusal leg only sees a
+signature default — measured, all legs stay green on that shape. A signature
+default, however, IS caught by the refusal leg. That limit is stated, with the
+measurement, in `tests/test_record_projection.py` rather than glossed here.
 
 The reason is the failure mode, not taste. The hosted lane builds one SDK per
 tenant graph and its capture executor is process-wide, so a tenant resolved
@@ -70,8 +80,19 @@ from anything process-global files tenant A's rows under tenant B **with no
 error** — the row is well-formed and the FK only checks that the graph exists.
 An environment pair is not a mitigation for that: env is process-global, so it
 is the same single value for every tenant the process serves. A caller that
-cannot name its tenant must refuse; anything wiring a live caller (`#9188`)
-resolves the pair from the request it is serving and passes it in.
+cannot name its tenant must refuse.
+
+⚠️ WHERE AN AMBIENT CARRIER WOULD ARRIVE, and this module cannot see it. #9192
+names a surface THIS TREE DOES NOT CARRY: `record_writer.use_record_tenant`, a
+ContextVar, with a `TORTOISE_RECORD_ORG_ID`/`_GRAPH_ID` fallback for a
+SINGLE-TENANT deployment. When it lands it arrives one layer up, and the rules
+that must hold there are stated where that work is tracked rather than asserted
+as settled here: a supplied pair is never overridden by an ambient one, and a
+process serving several tenants must not be armable from env at all (#9192
+ask 2 — and ask 1, the production caller for the carrier, is what makes the
+ambient pair unnecessary in the first place). The regression pins for the two
+layers are `test_two_tenants_in_one_process_do_not_cross_write` and
+`test_two_tenants_through_the_seam_never_cross_write`.
 """
 
 from __future__ import annotations
