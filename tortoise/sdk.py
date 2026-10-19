@@ -5007,13 +5007,18 @@ def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
         # #2350 (E-prec): the precision block owes every read path the same
         # 3-state end the primary decoration carries — the embedded fallback
         # must not relabel an ended-unknown window as still-true.
-        if (st.get("valid_from") or st.get("valid_to")
+        # #9201: presence is the BOUND's, not the precision's. A present-but-
+        # unorderable bound resolves to precision ``None``, so each gate reads
+        # its end's presence datum and the key is emitted as ``null`` —
+        # dropping it here is the cross-surface drift #2350 review P2 removed.
+        if (st.get("valid_from_present") or st.get("valid_from")
+                or st.get("valid_to") or st.get("valid_to_present")
                 or st.get("valid_from_precision")
                 or st.get("valid_to_precision")):
-            if st.get("valid_from_precision"):
-                r["valid_from_precision"] = st["valid_from_precision"]
-            if st.get("valid_to_precision"):
-                r["valid_to_precision"] = st["valid_to_precision"]
+            if st.get("valid_from_precision") or st.get("valid_from_present"):
+                r["valid_from_precision"] = st.get("valid_from_precision") or None
+            if st.get("valid_to_precision") or st.get("valid_to_present"):
+                r["valid_to_precision"] = st.get("valid_to_precision") or None
             r["end_state"] = st.get("end_state") or _resolve_end_state(
                 st.get("valid_to"), st.get("valid_to_precision"))
         # #4889: same additive subject field as SearchResult.to_dict.
@@ -26078,10 +26083,20 @@ class TortoiseSDK:
                 expired_at=point_state.get(pid, {}).get("expired_at")
                 or pt.get("expiredAt") or "",
                 # #2350 (E-prec): the precision block rides the SAME decoration
-                # as the window fields above. ``end_state`` falls back to the
-                # raw props when the batch decoration ran on a graph the
-                # precision fetch could not reach — so a window is never
-                # silently relabelled ``open``.
+                # as the window fields above. ⚠️ ``end_state``/precision are
+                # read from ``point_state`` ONLY — when the batch decoration
+                # query fails or skips the id, ``point_state`` has no entry and
+                # the whole window block (fields + precision) is absent on this
+                # surface, not relabelled ``open`` (#9201 review P3: the old
+                # "falls back to the raw props" comment described a fallback
+                # that cannot fire — ``pt`` carries no window column).
+                # #9201: each end's presence rides along — a present-but-
+                # unorderable bound yields precision ``None``, so the block's
+                # presence needs its own datum (see ``SearchResult.to_dict``).
+                valid_from_present=bool(
+                    point_state.get(pid, {}).get("valid_from_present")),
+                valid_to_present=bool(
+                    point_state.get(pid, {}).get("valid_to_present")),
                 valid_from_precision=(
                     point_state.get(pid, {}).get("valid_from_precision")
                     or pt.get("validFromPrecision") or ""),
