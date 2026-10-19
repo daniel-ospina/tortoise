@@ -546,9 +546,13 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # assertion lives in the #1349 arm, not here. Do not read it as evidence
     # that `--db` precedence is pinned in this module.
     #
-    # The regex pins the CONTINUATION shape (`, <newline>`), so a future
-    # value-bearing `setenv("TORTOISE_DB_URI", <live uri>)` in this growing file
-    # still reds instead of being excused by this entry.
+    # The regex pins the CONTINUATION shape (`, <newline>`), which catches only
+    # what the census CAN catch: a same-line value, `setenv("TORTOISE_DB_URI",
+    # <uri>)`, no longer matches and reds. The honest LIMIT: `_is_declared`
+    # matches per PHYSICAL LINE, so a value split onto the next line
+    # (`monkeypatch.setenv("TORTOISE_DB_URI",` + a newline + `"docker://…")`) is
+    # still excused by this entry — the continuation line is not inspected. The
+    # narrow shape is a real improvement, not a bound.
     "test_9079_event_writers_journal.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*$'],
     # The arm's `--db` scoping tests (#1349 isolation): an explicit `--db` must
