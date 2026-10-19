@@ -46,6 +46,7 @@ machine, so it is a follow-up, not a silent part of this fix.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from datetime import datetime, timezone
@@ -219,6 +220,121 @@ def clear_degraded(graph_name: str | None = None) -> None:
 
 _SCHEMA_ATTR = "_tortoise_event_schema"
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# §17.1 (#9079) — THE RECORD LANE, declared. Read this before adding a write.
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# `docs/architecture/STORAGE-ARCHITECTURE.md` §17.1 (from the §2.0 owner
+# ruling) splits the store in two: **Postgres/the journal is the system of
+# record; FalkorDB is a derived hot cache**, so "every write goes to the truth
+# store first, and the cache is projected from it". `#7951` enforced that at
+# the fold, and `#9079` closes the third door — the projection's own write
+# handle, `proj.g`.
+#
+# This module writes the cache graph through that SAME handle, and it is on the
+# RECORD side of the split, not the cache side:
+#
+#   1. `:GraphEvent` IS the durable event record. The module docstring says so
+#      — "Durable per-tenant event store — `:GraphEvent` nodes in the org's
+#      graph" — and it is what `read_after` / `poll_events` serve to a
+#      subscriber. Refusing its append would not enforce §17.1; it would
+#      refuse the record while enforcing a rule ABOUT the record.
+#   2. A rebuild does not replay these rows (#4664). The class survives a wipe
+#      the way `:TeamMeta` does — CAPTURE-AND-RESTORE, not projection:
+#      `capture_watermark(proj)` is read BEFORE `DETACH DELETE` and
+#      `reestablish_watermark(proj, carried)` writes the carried counter back
+#      after (`projection/__init__.py`, both `rebuild` and `rebuild_all`; the
+#      watermark sidecar in `rebuild_all`). So "a rebuild re-derives it" is
+#      true of the COUNTER, and false of the rows — which is exactly why the
+#      declaration is about a RECORD and not about recoverable cache state.
+#   3. The DDL in `ensure_event_schema` is SCHEMA, not content: index and
+#      unique-constraint creation for `:GraphEvent`, idempotent, and re-applied
+#      by `ensure_event_schema` itself (once per projection object — it
+#      early-returns on its own `_SCHEMA_ATTR` cache; its only call sites are
+#      `_emit_event` and `append_event`). It does NOT run ``on open``, and the
+#      rebuild lane's `_ensure_indexes` does not create these. Losing an index
+#      costs a slow scan, not a fact: they are schema-level, so a rebuild's
+#      node wipe leaves them in place, and no journal record describes one.
+#
+# ⛔ WHY THE DECLARATION IS LOAD-BEARING, not a formality. `_emit_event`
+# (`tortoise/sdk.py`) calls `ensure_event_schema` / `next_seq` /
+# `append_event` inside `try: … except Exception: _logger.warning("event
+# emission failed … continuing")` — a FAIL-OPEN caller. So an unarmed
+# `proj.g` write here, with the third door closed and no declaration, does not
+# fail loudly: it silently stops writing the durable event store on every
+# mutation, and `poll_events` returns `[]` forever with only a warning line.
+# That is the same silent-loss shape `#7951` hit on the onboarding lane, and it
+# is why the writers that legitimately reach the guarded handle must DECLARE
+# themselves before the guard lands rather than after.
+#
+# ⛔ NOT A GENERAL BYPASS — its width, stated:
+#   * Per-call `with` block (`_record_write_scope`). No attribute, constructor
+#     argument or env var can set it, so a writer that does not enter it is
+#     REFUSED, not grandfathered.
+#   * Opened only for a statement THIS MODULE issues that the shared classifier
+#     (`_statement_writes`, the same one the fold's parameter gate and the
+#     raw-query lane use) calls mutating — so the three doors cannot disagree
+#     about what a write is. That classifier is conservative, so a statement it
+#     cannot read takes the declaration too, including an unreadable read.
+#     ⚠️ WHAT THE PIN IS, stated so it is not over-read: the guard is in the
+#     SCOPE, not in a label check — this funnel does NOT verify that the
+#     statement touches `:GraphEvent`/`:GraphEventMeta`, so a future call site
+#     routed through it with a foreign label WOULD be authorized. What
+#     `tests/test_9079_record_lane_declared.py` actually pins is (a) the census
+#     of this store's mutating statements at the handle, each observing the
+#     lane, and (b) that the lane is not a general bypass (an undeclared
+#     `:Point` write through the same armed handle is still refused). The
+#     label set is held by REVIEW of the call sites, not by a runtime check —
+#     a deliberate trade: a runtime label assertion here would have to parse
+#     Cypher, and the statement census already fails when a new mutating shape
+#     appears.
+#   * It authorizes nothing outside §17.1's third door: the two lower escapes
+#     (`proj.g._g.query(...)`, `proj.db.select_graph(<g>).query(...)`) stay
+#     open — they are one hop below anything a runtime signal sits on.
+#   * It does NOT claim the event store is journalled into the JSONL record
+#     too: `rebuild` restores the counter it captured, and where no watermark
+#     was captured at all (`hosted_backup._restore_event_meta`'s OLD-dump
+#     branch) the values are RE-DERIVED from the restored `:GraphEvent` log —
+#     the counter as `max(seq)`, the purge floor (`first_seq`) as `min(seq)`.
+#     That is a derivation, not a fidelity guarantee: it reconstructs what the
+#     surviving rows imply, so a truncated log yields a lower counter rather
+#     than the truthful one.
+RECORD_LANE = "event-store.record"
+
+
+def _record_write_scope(cypher: str):
+    """The §17.1 declaration for `cypher` — or a no-op scope for a read.
+
+    Lazy import on purpose: this module is imported by `tortoise.sdk` and
+    function-locally by `tortoise.projection` (its rebuild lanes), so a
+    module-level import of the projection would put the dependency in both
+    directions and make the pair circular in a future import order.
+
+    The reason string is what a `DirectCacheWriteRefused` cites and what the
+    lane's test pins, so the two cannot drift about which lane authorized a
+    write.
+    """
+    from tortoise.projection import _cache_write_authorized, _statement_writes
+
+    if _statement_writes(cypher):
+        return _cache_write_authorized(RECORD_LANE)
+    return contextlib.nullcontext()
+
+
+def _record_write(g, cypher: str, params: dict | None = None):
+    """Issue a MUTATING event-store statement inside the declared lane.
+
+    The one funnel for this module's writes: `proj.g.query` on a
+    journal-backed projection is §17.1's third door, so every mutating
+    statement here goes through this function rather than calling the handle
+    directly. Reads (`read_after`, the pre-checks, the diagnostics) still call
+    `proj.g.query` directly — a read needs no declaration, and routing it
+    through a scope object would be cost for no gain.
+    """
+    with _record_write_scope(cypher):
+        return g.query(cypher, params=params)
+
 # The largest ``last_seq`` the store will carry. Two hard ceilings apply, and
 # the lower one wins:
 #
@@ -270,18 +386,21 @@ def ensure_event_schema(proj) -> None:
     g = proj.g
     try:
         # Exact-match index first — the constraint requires it (Pattern Research).
-        g.query("CREATE INDEX FOR (n:GraphEvent) ON (n.event_id)")
+        # §17.1 (#9079): DDL is schema, not cache content — declared, not
+        # refused. See RECORD_LANE above.
+        _record_write(g, "CREATE INDEX FOR (n:GraphEvent) ON (n.event_id)")
     except Exception:  # noqa: BLE001, RUF100
         logger.debug("event_store: event_id index may already exist")
     try:
-        g.query(
+        _record_write(
+            g,
             "GRAPH.CONSTRAINT CREATE tortoise_ge_uid UNIQUE NODE GraphEvent "
             "PROPERTIES 1 event_id"
         )
     except Exception:  # noqa: BLE001, RUF100
         logger.debug("event_store: unique constraint may already exist")
     try:
-        g.query("CREATE INDEX FOR (n:GraphEvent) ON (n.seq)")
+        _record_write(g, "CREATE INDEX FOR (n:GraphEvent) ON (n.seq)")
     except Exception:  # noqa: BLE001, RUF100
         logger.debug("event_store: seq index may already exist")
     setattr(proj, _SCHEMA_ATTR, True)
@@ -331,7 +450,8 @@ def next_seq(proj) -> int:
     exactly: each granted bump moves the counter, so the last legal seq is
     handed out once (the live counter test pins it).
     """
-    rows = proj.g.query(
+    rows = _record_write(
+        proj.g,
         # `ON CREATE SET m.last_seq = 0` seeds the PRE-increment value, so the
         # one CASE below grants `1` to a fresh graph exactly as the pre-#5379
         # `ON CREATE SET m.last_seq = 1` did; the node is never observable at 0
@@ -537,7 +657,8 @@ def reestablish_watermark(proj, carried_last_seq: int | None) -> int | None:
     # `first_seq` is raised, never lowered (see the docstring), and its `CASE`
     # reads the PRE-clause value — Cypher evaluates a SET clause against the
     # state before it.
-    rows = proj.g.query(
+    rows = _record_write(
+        proj.g,
         "MERGE (m:GraphEventMeta) "
         "ON CREATE SET m.last_seq = $last, m.first_seq = $first "
         "ON MATCH SET m.last_seq = CASE WHEN m.last_seq IS NULL "
@@ -606,7 +727,8 @@ def append_event(proj, seq: int, type_: str, payload: dict, event_id: str,
         logger.warning("event_store: duplicate event_id %r skipped", event_id)
         return False
     try:
-        proj.g.query(
+        _record_write(
+            proj.g,
             "CREATE (e:GraphEvent {seq:$seq, ts:$ts, type:$type, "
             "event_id:$event_id, payload:$payload})",
             params={
@@ -725,7 +847,8 @@ def purge_expired(proj, retention_days: int = 30) -> int:
     from datetime import timedelta
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=int(retention_days))).isoformat()  # noqa: UP017
-    rows = proj.g.query(
+    rows = _record_write(
+        proj.g,
         "MATCH (n:GraphEvent) WHERE n.ts < $cutoff "
         "WITH n LIMIT 10000 DETACH DELETE n RETURN count(*)",
         params={"cutoff": cutoff},
@@ -745,7 +868,8 @@ def purge_overflow(proj, max_events: int) -> int:
     overflow = total - int(max_events)
     if overflow <= 0:
         return 0
-    del_rows = proj.g.query(
+    del_rows = _record_write(
+        proj.g,
         "MATCH (n:GraphEvent) WITH n ORDER BY n.seq ASC LIMIT $overflow "
         "DETACH DELETE n RETURN count(*)",
         params={"overflow": overflow},
@@ -791,7 +915,8 @@ def _refresh_first_seq(proj) -> None:
     inputs produce a floor above every cursor, so both answer 410.
     """
     try:  # noqa: SIM105
-        proj.g.query(
+        _record_write(
+            proj.g,
             "MATCH (m:GraphEventMeta) "
             "OPTIONAL MATCH (e:GraphEvent) "
             "WITH m, min(e.seq) AS mn, "

@@ -3307,6 +3307,30 @@ def _journal_safe_params(params, cypher=None):
 # three is guarded in this increment. They are the surface §17.1's atomic
 # write has to close; a lexical inventory cannot, because each is one hop
 # below anything a runtime signal is placed on.
+#
+# ⚠️ CLOSING (1) NEEDS THE WRITERS THAT LEGITIMATELY REACH IT TO DECLARE
+# THEMSELVES FIRST — and as of `#9079`'s declaration children, these are the
+# declared lanes, each with the reason stated at its own scope:
+#
+#   * `_live_write_scope` — the live doors (`TortoiseSDK._apply_and_journal`,
+#     `_doc_write`, `_create_entity`, `EventAPI._emit`, …): journal first, fold
+#     second;
+#   * `_replay_write_scope` — the replay engines, now including
+#     `rebuild_all` and `rebuild_from_record`, which open it at their public
+#     entry points exactly as `rebuild` does;
+#   * `_graph_metadata_write_scope` — the `:EpMeta` epoch (`#9123`);
+#   * `tortoise/onboarding/state.ONBOARDING_WRITE_LANE` — the onboarding flow
+#     metadata (`#9121`);
+#   * `tortoise/event_store.RECORD_LANE` — the durable event store, which is
+#     the RECORD rather than a projection of it (`#9079`);
+#   * the SDK's structural-edge lane (`edges.py::create_edge` and friends),
+#     filed as `#9195` and NOT yet declared.
+#
+# So (1) is not "blocked by an unknown surface" any more — what remains before
+# it can be refused is the edge lane plus a measurement pass over the SDK's
+# other direct writers. Until then the fold and the raw-query lane above are
+# the two doors that gate, and this list is where a reader finds out which
+# writers will NOT be refused when (1) closes.
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -9532,6 +9556,36 @@ class FalkorProjection(
         A failed snapshot CAPTURE, a write failure, an untrustworthy sidecar,
         or a refused wipe all abort BEFORE the wipe. See
         ``_PREWIPE_SNAPSHOT_FILENAME``.
+
+        #9079 §17.1: the REPLAY scope is opened HERE, at the public entry
+        point, exactly as :meth:`rebuild` does (``with _replay_write_scope():
+        self._replay_log(...)``) — not at each fold or each write. This engine
+        issues mutating statements straight at the projection's write handle
+        (``proj.g``): the wipe, pass-1a's Point/Operator creates, the pass-1b
+        ``:Event`` folds, and the watermark re-establish. Declaring the scope
+        once, around the whole replay, means a fold added to any of this
+        engine's helpers is covered without a second declaration — which is
+        the whole reason the scope exists (a new unjournaled writer must have
+        to work at escaping the door, not merely forget to declare itself).
+
+        The records CAME FROM the journal, so they are authorized to be folded
+        and, by the ordering contract's exception 1, they must not be
+        journaled again.
+        """
+        with _replay_write_scope():
+            return self._replay_all_from_log(
+                log_dir, confirm_destructive=confirm_destructive,
+                require_empty=require_empty)
+
+    def _replay_all_from_log(self, log_dir: str, *,
+                             confirm_destructive: bool = False,
+                             require_empty: bool = False) -> dict:
+        """Implementation of :meth:`rebuild_all`.
+
+        Runs INSIDE the replay scope the public entry point opens — do not
+        call it directly. It is extracted (rather than indented) so the entry
+        point stays the one named, decorated, documented place a caller and
+        the §17.1 scope can find.
         """
         # #3044 review (P1): the recovery route's caller
         # (`consistency.recover_from_log`) has to tell a PRE-wipe failure from
@@ -13755,6 +13809,26 @@ class FalkorProjection(
         deterministic key order, and a relation whose endpoint falls outside
         the bound is a no-op (the same verdict the record projection's own
         endpoint resolution gives an absent endpoint).
+
+        #9079 §17.1: everything from the wipe to the declaration is a REPLAY
+        of the record into the cache — one authorized projection, not four
+        independent cache writes. The scope is opened at this public entry
+        point (the :meth:`rebuild_all` precedent) so the wipe,
+        ``_ensure_indexes``' DDL, ``project_records`` and ``write_declaration``
+        are all declared by the one statement that says what the call IS.
+        """
+        with _replay_write_scope():
+            return self._project_record_view(
+                view, confirm_destructive=confirm_destructive,
+                declare=declare, scope=scope, limit=limit)
+
+    def _project_record_view(self, view, *, confirm_destructive: bool = False,
+                             declare: bool = True, scope: str = "",
+                             limit: int | None = None) -> dict:
+        """Implementation of :meth:`rebuild_from_record`.
+
+        Runs INSIDE the replay scope the public entry point opens — do not
+        call it directly.
         """
         from tortoise.cache_projection import (
             declaration_for,
