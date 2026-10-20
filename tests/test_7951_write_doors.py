@@ -884,19 +884,27 @@ def _seed_legacy_created(proj, rec: dict) -> None:
     A pre-fix binary wrote this node through the raw graph handle with no
     journal bound, so `_seed_legacy_created` issues the equivalent raw write.
     It cannot use `proj.apply` any more: §17.1's guard (this lane) refuses a
-    direct fold on a journal-backed projection — which is the point, and the
-    raw handle it uses instead is the surface that guard does not yet cover
-    (recorded as still-open on #7951). The thing under test here — the
-    backfill's JOURNALING — is unaffected by which path seeded the node.
+    direct fold on a journal-backed projection — which is the point. Since
+    #9124 the raw handle is closed too (§17.1's THIRD door), so seeding a
+    PRE-FIX node now has to declare itself for what it is: a fixture emulating
+    state an older binary produced, not a live writer. `_replay_write_scope()`
+    is that declaration — it names "this content came from the record", which
+    is exactly the pre-fix node's status here (it is the legacy row the
+    backfill is about to journal). Declaring it keeps this helper from
+    re-opening the hole the suite exists to keep shut, and the thing under test
+    — the backfill's JOURNALING — is unaffected by which path seeded the node.
     """
-    proj.g.query(
-        "CREATE (e:Event {eventId:$eventId, eventKind:$eventKind, "
-        "subject:$subject, object:$object, startedAt:$startedAt, "
-        "endedAt:$endedAt, source:$source, sourceKind:$sourceKind})",
-        params={k: rec[k] for k in (
-            "eventId", "eventKind", "subject", "object",
-            "startedAt", "endedAt", "source", "sourceKind")},
-    )
+    from tortoise.projection import _replay_write_scope
+
+    with _replay_write_scope():
+        proj.g.query(
+            "CREATE (e:Event {eventId:$eventId, eventKind:$eventKind, "
+            "subject:$subject, object:$object, startedAt:$startedAt, "
+            "endedAt:$endedAt, source:$source, sourceKind:$sourceKind})",
+            params={k: rec[k] for k in (
+                "eventId", "eventKind", "subject", "object",
+                "startedAt", "endedAt", "source", "sourceKind")},
+        )
 
 
 def test_indexer_sdk_less_fallback_fails_closed_on_a_journal_backed_projection(

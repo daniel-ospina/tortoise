@@ -119,9 +119,9 @@ def test_handler_makes_no_direct_query_call():
 # ``_session_pinned_org`` lazy-read shape; it is pinned directly by
 # ``test_session_pinned_org_is_a_pure_predicate``). The on-loop calls that
 # remain in an async body are exempted MECHANICALLY by
-# ``_ORG_MINT_LOCK_RESIDUAL``: each is proven to sit inside a
-# ``with _org_mint_lock(...):`` section, so the exemption is a property of the
-# code rather than a declaration.
+# ``_ORG_MINT_LOCK_RESIDUAL``: each is proven to sit inside an
+# ``async with _org_mint_lock_bounded(...):`` section, so the exemption is a
+# property of the code rather than a declaration.
 
 #: The §A1-confirmed seam helpers whose sites must stay OFF the loop. Every name
 #: still has to resolve (``test_routed_seam_helper_names_still_exist``) and none
@@ -149,9 +149,9 @@ _ROUTED_SESSION_SEAMS = frozenset({
 #: would silently re-open those sites.
 #:
 #: The exemption is MECHANICAL, not declared. The guard resolves every
-#: offender's call LINE and asserts it falls inside a
-#: ``with _org_mint_lock(...):`` body: the mint section runs under a
-#: synchronous ``threading.Lock``, and the module comment above
+#: offender's call LINE and asserts it falls inside an
+#: ``async with _org_mint_lock_bounded(...):`` body: the mint section runs under
+#: a synchronous ``threading.Lock``, and the module comment above
 #: ``_org_mint_lock`` says an ``await`` inside it requires converting the lock to
 #: a per-org ``asyncio.Lock`` (or porting the mint to the single SQL RPC) — a
 #: design change of a security-critical mint path deliberately left to its own
@@ -493,20 +493,28 @@ def _hosted_api_defined_seam_names() -> set[str]:
 
 
 def _org_mint_lock_ranges(tree: ast.AST) -> list[tuple[int, int]]:
-    """The line ranges covered by every ``with _org_mint_lock(...):`` body.
+    """The line ranges covered by every bounded mint-lock scope in the file.
 
     There are several such sites in the file (the session lane and the registry
     lane); a residual call site must fall inside ONE of them. This is the
     mechanism that turns the residual from a declaration into a property of the
     code.
+
+    ⛔ BOTH SPELLING AND STATEMENT TYPE ARE PINNED (2026-10-19). The scope entry
+    is ``_org_mint_lock_bounded`` and the scope is an ``async with``: a lane that
+    reverts to a bare ``with _org_mint_lock(tid):`` gets an UNBOUNDED acquire on
+    the event loop, which is the defect a whole CI shard died of. So the bare
+    name is deliberately NOT in the set below (it would silently exempt the
+    body of exactly that regression), and the walk covers ``ast.AsyncWith`` as
+    well as ``ast.With``.
     """
     ranges: list[tuple[int, int]] = []
     for sub in ast.walk(tree):
-        if not isinstance(sub, ast.With):
+        if not isinstance(sub, (ast.With, ast.AsyncWith)):
             continue
         if not any(
             isinstance(item.context_expr, ast.Call)
-            and _callee_name(item.context_expr.func) == "_org_mint_lock"
+            and _callee_name(item.context_expr.func) in _MINT_LOCK_SCOPE_ENTRIES
             for item in sub.items
         ):
             continue
@@ -515,6 +523,115 @@ def _org_mint_lock_ranges(tree: ast.AST) -> list[tuple[int, int]]:
             max(stmt.end_lineno or stmt.lineno for stmt in sub.body),
         ))
     return ranges
+
+
+#: The names that OPEN the per-org mint critical section in hosted_api.py.
+#: ONLY the bounded, fail-closed scope entry belongs here. `_org_mint_lock` —
+#: the raw lock object — must never appear: a `with _org_mint_lock(tid):` is the
+#: unbounded-on-the-loop regression, and listing it here would exempt its body
+#: from the guard instead of flagging it (pinned by
+#: `test_no_bare_mint_lock_scope_entry`).
+_MINT_LOCK_SCOPE_ENTRIES = frozenset({"_org_mint_lock_bounded"})
+
+
+def _bounded_lock_impl_lines(tree: ast.AST) -> tuple[int, int]:
+    """The line range of `_org_mint_lock_bounded` itself.
+
+    It is the ONE place allowed to bind the raw lock and call `.acquire()` on
+    the binding — that IS the bounded implementation. Everything else in the
+    module must enter through it.
+    """
+    for node in ast.walk(tree):
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == "_org_mint_lock_bounded"):
+            return node.lineno, node.end_lineno or node.lineno
+    return (0, -1)
+
+
+def _bare_mint_lock_scopes(tree: ast.AST) -> list[int]:
+    """Line numbers of any scope entered through the RAW lock object.
+
+    THREE spellings, because the second and third restore exactly the same
+    unbounded acquire while looking like a tidy refactor:
+      1. `with _org_mint_lock(tid):` / `async with ...`
+      2. `lock = _org_mint_lock(tid)` then `with lock:` / `async with lock:`
+      3. `lock = _org_mint_lock(tid)` then `lock.acquire(...)`
+
+    The alias is resolved PER ENCLOSING FUNCTION, not file-wide: `lock` is an
+    extremely common local name (the rate limiter and the commit-lock both bind
+    one), so a file-wide alias set reports five innocent `with lock:` sites.
+    """
+    lo, hi = _bounded_lock_impl_lines(tree)
+    funcs = [(n.lineno, n.end_lineno or n.lineno)
+             for n in ast.walk(tree)
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    alias_at: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            value, targets = node.value, node.targets
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            value, targets = node.value, [node.target]
+        else:
+            continue
+        if (isinstance(value, ast.Call)
+                and _callee_name(value.func) == "_org_mint_lock"):
+            alias_at += [(node.lineno, t.id) for t in targets
+                         if isinstance(t, ast.Name)]
+
+    def _aliases_for(lineno: int) -> set[str]:
+        enclosing = [(fhi - flo, flo, fhi) for flo, fhi in funcs
+                     if flo <= lineno <= fhi]
+        if not enclosing:
+            return set()
+        _, flo, fhi = min(enclosing)
+        return {name for line, name in alias_at if flo <= line <= fhi}
+
+    bad: list[int] = []
+    for sub in ast.walk(tree):
+        lineno = getattr(sub, "lineno", -1)
+        if lo <= lineno <= hi:
+            continue
+        if isinstance(sub, (ast.With, ast.AsyncWith)):
+            aliases = _aliases_for(lineno)
+            for item in sub.items:
+                expr = item.context_expr
+                raw_call = (isinstance(expr, ast.Call)
+                            and _callee_name(expr.func) == "_org_mint_lock")
+                raw_alias = (isinstance(expr, ast.Name)
+                             and expr.id in aliases)
+                if raw_call or raw_alias:
+                    bad.append(lineno)
+        elif (isinstance(sub, ast.Call)
+                and isinstance(sub.func, ast.Attribute)
+                and sub.func.attr == "acquire"
+                and isinstance(sub.func.value, ast.Name)
+                and sub.func.value.id in _aliases_for(lineno)):
+            bad.append(lineno)
+    return sorted(set(bad))
+
+
+def test_no_bare_mint_lock_scope_entry():
+    """The mint lock is entered ONLY through the bounded, off-loop scope entry.
+
+    Mutation: change either lane back to `with _org_mint_lock(tid):` and this
+    fails. That is the regression the 2026-10-19 incident was made of — an
+    unbounded `acquire()` whose waiter is the event loop, which cost a CI shard
+    its whole 20m watchdog. The behavioural guard for it is
+    `test_session_key_http.py::test_held_team_lock_refuses_the_mint_instead_of_hanging`;
+    this is the static one that also covers the Supabase lane.
+    """
+    tree = ast.parse(HOSTED_API.read_text())
+    bare = _bare_mint_lock_scopes(tree)
+    assert not bare, (
+        f"bare `with _org_mint_lock(...)` scope entry at line(s) {bare} in "
+        "hosted_api.py — that is an UNBOUNDED acquire on the event loop. Use "
+        "`async with _org_mint_lock_bounded(tid):` (#ciwatch)")
+    # And the bounded entry must actually be used, so a rename cannot satisfy
+    # this test by having no lock scope at all.
+    assert _org_mint_lock_ranges(tree), (
+        "no bounded mint-lock scope found in hosted_api.py — every exemption "
+        f"below would pass vacuously. Names looked for: "
+        f"{sorted(_MINT_LOCK_SCOPE_ENTRIES)}")
 
 
 def test_no_on_loop_control_plane_helper_calls():
@@ -585,6 +702,14 @@ def test_no_on_loop_control_plane_helper_calls():
     # needs no list entry — the same no-await invariant justifies it, and this
     # check proves the site is in it; outside, it fails regardless of spelling.
     lock_ranges = _org_mint_lock_ranges(tree)
+    # Fail CLOSED on an empty universe. This is NOT the guard's only failure mode
+    # (an emptied range list still reddens it while the residual set is
+    # non-empty, because the residual site then counts as `outside`) — it is the
+    # cheap assertion that keeps the NEXT narrowing of this guard honest.
+    assert lock_ranges, (
+        "no bounded mint-lock scope found in hosted_api.py — the line-range "
+        "exemption below would pass vacuously. Scope-entry names looked for: "
+        f"{sorted(_MINT_LOCK_SCOPE_ENTRIES)}")
     outside = sorted(
         (fn, name, line)
         for fn, name, line in helper_sites + cp_io_sites

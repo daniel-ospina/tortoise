@@ -1,0 +1,928 @@
+"""#9195 §17.1 — the SDK's structural-edge write lane **declares** itself, so
+closing the write handle (#9079 / #9124) does not refuse the product's own edge
+mints.
+
+`tortoise/projection/edges.py::_EdgeHandlers.create_edge` reaches the
+projection's guarded write handle (`self.g`) with **no authorization scope and
+no journal record**, and its three typed wrappers
+(`create_owned_by`/`create_managed_by`/`create_authored_by`) are one funnel onto
+the same statement:
+
+    MATCH (s:L {k:$sv}) MATCH (t:M {k:$tv}) MERGE (s)-[:<predicate>]->(t)
+
+`#9124`'s guard classifies that `MERGE` a write (`_statement_writes`), so with
+the guard armed every `sdk.create_edge*` call site on `origin/main` would be
+refused — including the self-host onboarding seed, whose REST callers answer
+500. That is a product regression wearing a guard, so this declaration lands in
+the **before-the-guard batch** with `#9123`/`#9121`/`#9122`.
+
+⛔ WHAT THIS SUITE PINS, AND WHY IT IS NOT VACUOUS. `#9124`'s guard is not on
+`main` yet, so `_instrument` reproduces the third door's *predicate* verbatim —
+journal-backed + no declaration in flight + a mutating statement ⇒
+`DirectCacheWriteRefused` — and installs it on `_GuardedGraph.query`, reading
+`_CACHE_WRITE_AUTHORIZED` **at the write**, inside the handle dispatch, where
+`#9124`'s guard will read it. "The write ran inside a declaration" is therefore
+observed, not inferred from source.
+
+The chosen shape is **(a) DECLARED**, and the lane states its claim **per
+relation** rather than globally (`structural_edge_carrier`, derived from
+`DERIVABLE_STRUCTURAL_RELS`). Read the block above `STRUCTURAL_EDGE_WRITE_LANE`
+for the argument. Its two measured legs:
+
+* `DERIVABLE_STRUCTURAL_RELS` are snapshot-carried — replay resurrects them from
+  the endpoint Point's immutable record (`entities._upsert_point_edges`);
+* every other allowlisted predicate has **no replay carrier**: measured at this
+  head, `rebuild_all` over a journal holding such edges reports `edges: 0` and
+  the edges are gone. **This lane discloses that gap; it does not bless it** —
+  the gap is on `origin/main` today, undeclared, and the carrier belongs to the
+  record-store work (`#7879`), not to a declaration child.
+
+⛔ WHAT THIS SUITE DOES **NOT** CLAIM:
+* it does not claim `_EdgeHandlers` holds only this lane's writers. The
+  about/provenance/tag/fold verbs mint NODES or stamp `sourceVersion` or are
+  already scoped by their journalling door, so they are NOT in this lane, and
+  `test_every_edge_minting_verb_is_declared_or_stated` enumerates them from this
+  module's own AST so a new one cannot appear undeclared. `#9124` must census
+  them before it arms; this suite's guard assertion is deliberately scoped to
+  the five declared verbs (`create_edge` and `create_about_edge`, each with its
+  own `MERGE`, plus `create_edge`'s three typed wrappers).
+* it does not claim the bare `references` edge is anchored. The generic verb
+  writes it property-free and a later `link_source_to_*` `MERGE` cannot repair
+  it (`#5213` option 3, §9.6, `tests/test_references_boundary_5213.py`);
+  `test_the_references_edge_is_still_written_bare` asserts THAT shape.
+* it does not claim durability for the relations this lane emits no carrier for
+  (above) — the engine's `DirectEdgeCreated` fold could carry them, and this verb
+  emits nothing.
+
+⚠️ What is NOT acceptable, and what these tests exist to prevent: "fixing" this
+by making `create_edge` tolerate a refusal, or by treating the lane as a bypass
+(a blanket scope around the handle). A declaration that also authorizes a raw
+`MERGE` it does not own is not a declaration.
+"""
+from __future__ import annotations
+
+import ast
+import textwrap
+from pathlib import Path
+
+import pytest
+
+from tortoise.projection import (
+    _CACHE_WRITE_AUTHORIZED,
+    DirectCacheWriteRefused,
+    _GuardedGraph,
+    _statement_writes,
+)
+from tortoise.projection.edges import (
+    _VALID_ABOUT_EDGE_PREDICATES,
+    _VALID_EDGE_PREDICATES,
+    DERIVABLE_STRUCTURAL_RELS,
+    STRUCTURAL_EDGE_LANE_PREDICATES,
+    STRUCTURAL_EDGE_WRITE_LANE,
+    structural_edge_carrier,
+)
+
+#: The lane's declared verbs — the two edge mints plus `create_edge`'s three
+#: typed wrappers.
+DECLARED_VERBS = (
+    "create_edge", "create_about_edge",
+    "create_owned_by", "create_managed_by", "create_authored_by",
+)
+
+#: The predicates this lane can write — the union of BOTH declared mints'
+#: allow-lists (`create_edge` + `create_about_edge`), not just the generic
+#: verb's. Pinned as a LITERAL partition of `STRUCTURAL_EDGE_LANE_PREDICATES`
+#: so a predicate added to (or moved between) the two halves is a visible diff
+#: in this file rather than a silent widening.
+#: ⚠️ `aboutPoint` is accepted by `create_about_edge` ONLY, so pinning against
+#: `_VALID_EDGE_PREDICATES` alone left its carrier answer unpinned (#9195
+#: review P2-1).
+SNAPSHOT_CARRIED = frozenset({
+    "aboutSubject", "aboutObject", "aboutEvent", "aboutPoint",
+    "aboutDocument",
+})
+#: No carrier is EMITTED from this lane, so a rebuild drops these edges. The
+#: name says "emitted", not "exists": the replay engine has a carrier
+#: (`DirectEdgeCreated` + its pass-2b fold) and emitting that record restores
+#: them — what is missing is the emission from this projection verb.
+NO_CARRIER_EMITTED = frozenset({
+    "performs", "produces", "uses", "authoredBy", "ownedBy", "managedBy",
+    "hasMember", "holdsRole", "memberOf", "reportsTo",
+    "participatesIn", "hasPart", "related", "dependsOn", "references",
+    "wasDerivedFrom", "aboutSource", "aboutAction",
+})
+
+DOC_URL = "https://docs9195.test/page"
+
+
+@pytest.fixture
+def sdk_with_journal(tmp_path):
+    """A real SDK with a configured JSONL journal, so §17.1's guard is ARMED.
+
+    The same shape `tests/test_9079_onboarding_declared_lane.py` uses: the
+    explicit `db_path` makes the projection embedded when no URI is configured,
+    and `event_log_path` is what arms the guard.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    sdk = TortoiseSDK(str(tmp_path / "edges9195.db"),
+                      event_log_path=str(tmp_path / "journal.jsonl"))
+    try:
+        yield sdk
+    finally:
+        sdk.close()
+
+
+def _instrument(monkeypatch, *, refuse: bool):
+    """Install the #9124 predicate on `_GuardedGraph.query`; record every
+    statement the edge writers issue as `(statement, reason, writes)`.
+
+    `reason` is `_CACHE_WRITE_AUTHORIZED` AT THE WRITE — read inside the handle
+    dispatch, which is where #9124's guard will read it.
+
+    ⛔ The statement is recorded IN FULL (normalized whitespace only):
+    truncating it would let the class checks read a PREFIX of the statement they
+    are checking (the fail-open direction #9121 measured on its own suite).
+    """
+    original = _GuardedGraph.query
+    seen: list[tuple[str, str | None, bool]] = []
+
+    def instrumented(self, cypher, params=None, timeout=None):
+        writes = _statement_writes(cypher)
+        reason = _CACHE_WRITE_AUTHORIZED.get()
+        seen.append((" ".join((cypher or "").split()), reason, writes))
+        if (refuse and writes and reason is None
+                and getattr(self._proj, "_journal_backed", False)):
+            raise DirectCacheWriteRefused(
+                "§17.1 third door (#9079/#9124): a mutating statement reached "
+                "`proj.g` with no declaration in flight — statement="
+                + seen[-1][0][:160]
+            )
+        return original(self, cypher, params=params, timeout=timeout)
+
+    monkeypatch.setattr(_GuardedGraph, "query", instrumented)
+    return seen
+
+
+def _endpoints(sdk) -> dict:
+    """The walk's fixtures: two Points for the generic verb, two MORE Points
+    for the typed wrappers (the generic loop mints `(p1)-[:ownedBy]->(p2)`, so
+    reusing those ids for `create_owned_by` would close a real ownership cycle
+    and raise), and a document-bearing `:Source` (`aboutDocument`'s legal
+    target, ONTOLOGY §4.4)."""
+    first = sdk.create_point("statement", "edge-lane source 9195")
+    second = sdk.create_point("statement", "edge-lane target 9195")
+    third = sdk.create_point("statement", "edge-lane wrapper entity 9195")
+    fourth = sdk.create_point("statement", "edge-lane wrapper subject 9195")
+    sdk.create_source(DOC_URL, "web", documentKind="page")
+
+    def _id(p):
+        return p["id"] if isinstance(p, dict) else p
+
+    return {"source": _id(first), "target": _id(second),
+            "entity": _id(third), "subject": _id(fourth),
+            "doc": DOC_URL}
+
+
+def _walk_the_edge_lane(proj, endpoints) -> None:
+    """Every DECLARED verb, in a plausible order.
+
+    The generic verb runs over the whole allowlist, because the lane's claim is
+    per relation and a predicate that stops reaching the funnel must fail here
+    rather than quietly leaving the walk's coverage.
+    """
+    for predicate in sorted(_VALID_EDGE_PREDICATES):
+        target = endpoints["doc"] if predicate == "aboutDocument" \
+            else endpoints["target"]
+        proj.create_edge(endpoints["source"], target, predicate)
+    for about_type in sorted(_VALID_ABOUT_EDGE_PREDICATES):
+        target = endpoints["doc"] if about_type == "aboutDocument" \
+            else endpoints["target"]
+        proj.create_about_edge(endpoints["source"], target, about_type)
+    proj.create_owned_by(endpoints["entity"], endpoints["subject"])
+    proj.create_managed_by(endpoints["entity"], endpoints["subject"])
+    proj.create_authored_by(endpoints["entity"], endpoints["subject"])
+
+
+# ── the declaration: the lane's write runs inside it ──────────────────────
+
+def test_every_edge_mint_declares_its_lane(sdk_with_journal, monkeypatch):
+    """Was RED before this change: `_CACHE_WRITE_AUTHORIZED` was `None` at the
+    lane's `MERGE`, so #9124's handle guard refuses the product's own edge
+    mints. MUTATION: drop the `_structural_edge_write_scope()` wrapper in
+    `create_edge` and this fails with the undeclared statements listed.
+    """
+    proj = sdk_with_journal._get_proj()
+    assert proj._journal_backed is True, (
+        "the fixture did not arm §17.1 — an unarmed projection is outside the "
+        "rule and every assertion below would be vacuous"
+    )
+    endpoints = _endpoints(sdk_with_journal)
+
+    seen = _instrument(monkeypatch, refuse=False)
+    _walk_the_edge_lane(proj, endpoints)
+
+    writes = [(c, r) for c, r, w in seen if w]
+    assert len(writes) >= len(STRUCTURAL_EDGE_LANE_PREDICATES), (
+        f"the walk issued {len(writes)} mutating statement(s) for the lane's "
+        f"{len(STRUCTURAL_EDGE_LANE_PREDICATES)} writable predicates; the lane "
+        "no longer funnels every mint through the declared statement, so this "
+        "pin has gone stale"
+    )
+    undeclared = [c for c, r in writes if r is None]
+    assert not undeclared, (
+        "these structural-edge mints reached the cache handle OUTSIDE any "
+        "§17.1 declaration: #9079's handle guard will refuse them, and the "
+        "self-host/hosted onboarding seed answers 500 when it does "
+        f"({len(undeclared)} statement(s)): {undeclared[:3]}"
+    )
+    assert {r for _c, r in writes} == {STRUCTURAL_EDGE_WRITE_LANE}, (
+        "the lane must declare ONE name, so the guard block and this pin cannot "
+        f"drift about which lane authorized a write; saw "
+        f"{sorted({r for _c, r in writes})}"
+    )
+
+
+@pytest.mark.parametrize("mint", ["create_edge", "create_about_edge"])
+def test_a_read_on_this_path_is_not_declared(sdk_with_journal, monkeypatch, mint):
+    """The scope wraps the MUTATING statement, not the verb — for EACH declared
+    mint, not just the generic one.
+
+    Both verbs resolve their endpoints (`MATCH`es) — and `create_edge` walks a
+    bounded `ownedBy` cycle probe — BEFORE they write. Those are reads, and
+    declaring them would widen the lane over statements it does not own — the
+    direction that turns a declaration into a blanket scope. ⚠️ Pinning only
+    `create_edge` left the twin mint free to be widened silently (#9195 review
+    P2-2): wrapping all of `create_about_edge` in the scope, `_resolve_entity`
+    reads included, used to leave this suite green.
+    """
+    proj = sdk_with_journal._get_proj()
+    endpoints = _endpoints(sdk_with_journal)
+
+    seen = _instrument(monkeypatch, refuse=False)
+    if mint == "create_edge":
+        proj.create_edge(endpoints["source"], endpoints["target"], "ownedBy")
+    else:
+        assert proj.create_about_edge(
+            endpoints["source"], endpoints["target"], "aboutObject") is True
+
+    reads = [(c, r) for c, r, w in seen if not w]
+    assert reads, "the walk issued no read — this pin would be vacuous"
+    declared_reads = [(c, r) for c, r in reads if r is not None]
+    assert not declared_reads, (
+        "a statement the CLASSIFIER called read-only ran inside the lane's "
+        f"write declaration ({mint}), i.e. the scope is wrapped around the "
+        f"verb (or the method) instead of around its write: {declared_reads}"
+    )
+
+
+def test_the_edges_still_land_when_the_handle_guard_is_armed(
+        sdk_with_journal, monkeypatch):
+    """Was RED before this change — this is the P0 the issue names: with the
+    guard armed, `create_edge` raised `DirectCacheWriteRefused` and the edge
+    never landed, while every caller treats a raise as a failed operation (the
+    seed turns it into a 500).
+    """
+    proj = sdk_with_journal._get_proj()
+    endpoints = _endpoints(sdk_with_journal)
+
+    _instrument(monkeypatch, refuse=True)
+    _walk_the_edge_lane(proj, endpoints)
+
+    def count(rel: str) -> int:
+        return proj.g.query(
+            f"MATCH ()-[r:{rel}]->() RETURN count(r)").result_set[0][0]
+
+    for rel in ("related", "dependsOn", "ownedBy", "managedBy", "authoredBy",
+                "wasDerivedFrom", "aboutDocument"):
+        assert count(rel) >= 1, (
+            f"the armed handle guard refused the product's own `{rel}` mint, "
+            "so the edge never landed"
+        )
+    assert count("references") >= 1, (
+        "the bare `references` mint was refused — it is the relation #5213 "
+        "documents as written WITHOUT an anchor, and the lane must not start "
+        "requiring one"
+    )
+
+
+def test_the_declaration_is_not_a_bypass(sdk_with_journal, monkeypatch):
+    """A declaration must not become a bypass, in either direction:
+
+    * an UNDECLARED mutating statement on the handle is still refused while the
+      guard is armed (the lane is not a blanket scope around `proj.g`);
+    * the scope does not LEAK — after a mint returns, no reason is in flight, so
+      the caller's next write is refused again (a `ContextVar` reset in a
+      `finally`, #7951's thread-isolation property).
+    """
+    proj = sdk_with_journal._get_proj()
+    endpoints = _endpoints(sdk_with_journal)
+
+    _instrument(monkeypatch, refuse=True)
+    proj.create_edge(endpoints["source"], endpoints["target"], "related")
+
+    assert _CACHE_WRITE_AUTHORIZED.get() is None, (
+        "the lane's write scope leaked past the statement — a caller's next "
+        "write would be silently authorized"
+    )
+    with pytest.raises(DirectCacheWriteRefused):
+        proj.g.query(
+            "MATCH (n:Point {id:$id}) SET n.hijacked9195 = true",
+            params={"id": endpoints["source"]},
+        )
+
+
+# ── the enumeration: no edge-minting verb appears undeclared ──────────────
+
+#: `_EdgeHandlers` verbs that CAN issue a mutating statement but are NOT this
+#: lane, each with the reason — the same bucket discipline
+#: `tests/test_9079_onboarding_declared_lane.py` applies to `_run` call sites.
+#: The provenance lane's one reason — shared by its four verbs. The
+#: disclosure is the point: a reader must not infer from the about lane's
+#: ⚠️ that these four are refusal-safe (#9124 refuses them too).
+_PROVENANCE_REASON = (
+    "PROVENANCE: MERGEs a `:Source` NODE and stamps `r.sourceVersion`. "
+    "⚠️ NOT refusal-safe today either: the write funnels through "
+    "`self.g.query` in `_link_source` with NO scope in flight, and its live "
+    "callers (`create_entity`'s `extractedFrom` leg, and "
+    "`link_source_to_entity`, reached from the REST surface) issue it AFTER "
+    "their enclosing scope closes, so `#9124` would refuse them — MEASURED; "
+    "`#9124` must census them"
+)
+_STATED_OTHER_WRITERS = {
+    "_create_edges":
+        "the FOLD: runs inside `_live_write_scope`/`_replay_write_scope`",
+    "replay_about_links":
+        "replay: the links came FROM the journal's `EventRecorded` record",
+    "_create_about_edges":
+        "delegates to `wire_about_link`; the name-resolved about lane, whose "
+        "links are journaled with the record (#8398). ⚠️ NOT refusal-safe "
+        "today — see `wire_about_link` below; the residual is PINNED by "
+        "`test_the_about_name_path_is_still_refused_until_its_lane_lands`",
+    "wire_about_link":
+        "the single about-link construction; journals via its caller's record "
+        "and MINTS `:Subject` stubs. ⚠️ NOT refusal-safe today: the live call "
+        "sites write AFTER `_live_write_scope(\"create_entity\")` closes "
+        "(`sdk.py`'s about loop), so `#9124` would refuse them — MEASURED, and "
+        "pinned by "
+        "`test_the_about_name_path_is_still_refused_until_its_lane_lands`; "
+        "`#9124` must census them before arming",
+    "_link_source": _PROVENANCE_REASON,
+    "link_source_to_entity": _PROVENANCE_REASON,
+    "link_source_to_event": _PROVENANCE_REASON,
+    "link_source_to_legacy_event": _PROVENANCE_REASON,
+    "_sync_tags":
+        "`TAGGED` edges + a `:Tag` MERGE, written from `create_point`'s own "
+        "declared scope",
+}
+
+_WRITE_KEYWORDS = ("MERGE", "CREATE", "SET ", "DELETE", "REMOVE ")
+
+#: The handle's statement verbs. `execute_command` is included because
+#: `_GuardedGraph` overrides it and a `GRAPH.QUERY` through it writes;
+#: `profile`/`explain` execute the statement.
+_STATEMENT_VERBS = {"query", "_query", "execute_command", "profile", "explain"}
+
+
+def _receiver(node: ast.Call) -> str | None:
+    """`g` for a call on `self.g` / `self.g.<attr>`, else `None`."""
+    func = node.func
+    if not isinstance(func, ast.Attribute):
+        return None
+    if isinstance(func.value, ast.Name) and func.value.id == "g":
+        return "g"
+    if (isinstance(func.value, ast.Attribute)
+            and isinstance(func.value.value, ast.Name)
+            and func.value.value.id == "self"
+            and func.value.attr == "g"):
+        return "g"
+    return None
+
+
+def _issues_a_write(fn, writers: set[str] | None = None) -> bool:
+    """Does this function reach a mutating statement (or a writer we know of)?
+
+    ⛔ FAILS CLOSED ON A SHAPE IT CANNOT READ, in every direction:
+    * a handle call whose statement text is not a literal we can test
+      (`self.g.query(some_variable)`) — unreadable ⇒ writer;
+    * any verb other than the statement verbs on `self.g` — unknown ⇒ writer;
+    * a STATEMENT VERB on a receiver that is neither `g` nor `self.g` — an
+      aliased handle (`h = self.g; h.query(...)`) or a re-parameterised one
+      (`def _helper(graph): graph.query(...)`) cannot be proven read-only ⇒
+      writer. Before this rule the scan skipped such calls outright, i.e. it
+      certified exactly the miss this enumeration exists to prevent;
+    * a callee in `writers` (module-level helper or sibling) — a delegation
+      that only writes through another writer ⇒ writer.
+    """
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Call):
+            continue
+        # Module-level helper or same-class sibling that writes?
+        target = None
+        if isinstance(node.func, ast.Name):
+            target = node.func.id
+        elif (isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in {"self", "_edges"}):
+            target = node.func.attr
+        if target is not None and writers and target in writers:
+            return True
+
+        on_handle = _receiver(node)
+        if on_handle is None:
+            # An unresolved receiver is only a writer when the call IS a
+            # statement verb: `logger.warning(...)` / `list.append(...)` stay
+            # read-only, an aliased or re-parameterised handle does not.
+            if (isinstance(node.func, ast.Attribute)
+                    and node.func.attr in _STATEMENT_VERBS):
+                return True
+            continue
+        verb = node.func.attr
+        if verb not in _STATEMENT_VERBS or not node.args:
+            # An unknown verb on the handle (`self.g.anything(...)`) cannot
+            # be proven read-only — fail closed.
+            return True
+        # The statement text is assembled in several spellings on this
+        # module (a plain literal, an f-string, and `literal + helper(...)`
+        # — `_link_source` uses the last), so every literal piece of the
+        # first argument's expression tree is read. NO literal at all means
+        # the statement is unreadable: fail closed.
+        literal = "".join(
+            part.value for part in ast.walk(node.args[0])
+            if isinstance(part, ast.Constant) and isinstance(part.value, str)
+        )
+        if not literal.strip():
+            return True
+        if any(kw in literal.upper() for kw in _WRITE_KEYWORDS):
+            return True
+    return False
+
+
+def _write_scan(source: str | None = None
+                ) -> tuple[dict, set[str], set[str]]:
+    """`(methods, writers, module_writers)` derived from a module's AST.
+
+    The fixed point runs over BOTH tables — `_EdgeHandlers` methods AND the
+    module-level helpers they call. Closing only over methods is a fail-open:
+    a helper (or a verb) whose ONLY write goes through another module helper
+    was certified read-only, because the module pass ran with `writers=None`
+    (#9212 review P1-1). ⚠️ MEASURED at this head: the delta is EMPTY, i.e. no
+    module function in `edges.py` is currently missed by that hole —
+    `resolve_structural_target` is already a writer, but through the
+    unreadable-statement arm (`g.query(q, …)` with `q` a variable), not
+    through the closure. So the closure is a LATENT fail-open being closed,
+    and `test_the_scan_closes_over_module_helpers` proves it fires on a
+    synthetic `A → B → handle` chain instead of relying on a real instance.
+
+    ``source`` is injectable so that proof can scan a synthetic module.
+    """
+    real_module = source is None
+    if real_module:
+        from tortoise.projection import edges as _edges
+        source = Path(_edges.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    cls = next((n for n in ast.walk(tree)
+                if isinstance(n, ast.ClassDef) and n.name == "_EdgeHandlers"),
+               None)
+    if real_module:
+        assert cls is not None, "`_EdgeHandlers` is gone or renamed"
+
+    methods = ({fn.name: fn for fn in cls.body if isinstance(fn, ast.FunctionDef)}
+               if cls is not None else {})
+    module_fns = {fn.name: fn for fn in tree.body
+                  if isinstance(fn, ast.FunctionDef)}
+
+    module_writers = {name for name, fn in module_fns.items()
+                      if _issues_a_write(fn)}
+    writers = {name for name, fn in methods.items()
+               if _issues_a_write(fn, module_writers)}
+    # Delegation closure over BOTH tables: a verb — or a module-level helper —
+    # that calls a writing sibling can write too. `name` is excluded from its
+    # own callee set so a purely recursive reader cannot certify itself.
+    changed = True
+    while changed:
+        changed = False
+        for table, derived in ((methods, writers), (module_fns, module_writers)):
+            for name, fn in table.items():
+                if name in derived:
+                    continue
+                known = (writers | module_writers) - {name}
+                if _issues_a_write(fn, known):
+                    derived.add(name)
+                    changed = True
+    return methods, writers, module_writers
+
+
+def _mutating_verbs() -> set[str]:
+    """Every `_EdgeHandlers` verb that can reach a mutating statement.
+
+    DERIVED from the module's own AST, not hand-maintained: a verb counts when
+    it issues a handle call that can write, and the set is then CLOSED over
+    both intra-class delegation (`create_owned_by` → `create_edge`) and the
+    module-level helpers a verb calls (`_mint_source_stub` and friends MERGE, so
+    a verb that only delegates to one still writes).
+
+    ⛔ IT FAILS CLOSED ON A SHAPE IT CANNOT READ. A handle call whose statement
+    text is not a literal we can test (`self.g.query(some_variable)`), any
+    verb other than the statement verbs on `self.g`, a statement verb on an
+    unresolvable receiver (an aliased or re-parameterised handle), and any
+    helper that itself writes all count as writers. The fail-open direction —
+    a verb that writes being classified read-only and so passing as
+    "undeclared" — is exactly what this enumeration exists to prevent, so an
+    unknown shape must make noise, not silence.
+    """
+    return _write_scan()[1]
+
+
+def _classifies_as_writer(source: str, writers: set[str] | None = None) -> bool:
+    """Run the LIVE classifier over a synthetic one-function snippet.
+
+    Used to prove the fail-closed branches actually fire, rather than asserting
+    that they do in a docstring.
+    """
+    fn = ast.parse(textwrap.dedent(source)).body[0]
+    assert isinstance(fn, ast.FunctionDef), "snippet must be one function def"
+    return _issues_a_write(fn, writers)
+
+
+
+def _verbs_called_by_walk() -> set[str]:
+    """The `proj.<name>(...)` calls the walk actually issues, read from its own
+    body — so a DECLARED bucket cannot be satisfied by a name no walk calls."""
+    import inspect
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(_walk_the_edge_lane)))
+    return {
+        node.func.attr for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "proj"
+    }
+
+
+def test_the_verb_scan_is_not_vacuous():
+    """The derivation above must find the lane's own funnel and at least one
+    verb per bucket — otherwise the enumeration proves nothing.
+
+    ⛔ AND EVERY "read-only" NAME IS CHECKED FOR MEMBERSHIP FIRST. A name that is
+    not an `_EdgeHandlers` verb can never be a key of `writers`, so
+    `name not in writers` is TRUE no matter what the scan does — the check
+    certifies nothing (#9212 review P1-1 / the earlier P2). `_resolve_entity`
+    is exactly such a name: it is a `FalkorProjection` method, and this module
+    only CALLS it.
+    """
+    methods, writers, module_writers = _write_scan()
+    for required in ("create_edge", "create_owned_by", "create_managed_by",
+                     "create_authored_by", "_link_source", "create_about_edge",
+                     "_create_edges", "_sync_tags"):
+        assert required in writers, (
+            f"the AST scan did not find {required!r} as a mutating verb — the "
+            f"derivation is not measuring the class it claims to: "
+            f"{sorted(writers)}"
+        )
+    # And it must NOT sweep in a verb that writes nothing (the read-only
+    # resolvers on this path), or the buckets below become noise. Membership is
+    # asserted first, so each of these can actually FAIL.
+    for read_only in ("resolve_about_link", "_resolve_about_edge_target",
+                      "edge_stats"):
+        assert read_only in methods, (
+            f"{read_only!r} is not an `_EdgeHandlers` verb, so asserting it is "
+            "not a writer is a tautology — the check would be vacuous"
+        )
+        assert read_only not in writers, (
+            f"{read_only!r} is read-only but the scan called it a writer — the "
+            "keyword test is too loose to be a check"
+        )
+    # `_resolve_entity` is a `FalkorProjection` method (imported into this
+    # module's calls, never defined here) — pinning it as "read-only" against
+    # `writers` is the tautology this test now refuses to accept.
+    assert "_resolve_entity" not in methods, (
+        "`_resolve_entity` is now defined on `_EdgeHandlers` — if it is a "
+        "class verb it belongs in the read-only list above"
+    )
+    # ⛔ THE FAIL-OPEN DIRECTION, PINNED: `resolve_structural_target` is a
+    # MODULE-LEVEL function that MINTS nodes (`_mint_subject_stub` MERGEs a
+    # `:Subject`, `_mint_source_stub` a `:Source`). ⚠️ It is a writer here
+    # because one of its own statements is UNREADABLE (`g.query(q, …)` with `q`
+    # a variable), NOT because the helper closure reached it — measured, and
+    # that is why the closure has its own synthetic test below.
+    for mints in ("resolve_structural_target", "_mint_subject_stub",
+                  "_mint_source_stub"):
+        assert mints in module_writers, (
+            f"{mints!r} MINTS a node but the scan did not classify it a "
+            "writer — a verb that writes only through a module helper would "
+            f"pass as undeclared: {sorted(module_writers)}"
+        )
+
+
+def test_the_scan_closes_over_module_helpers():
+    """A verb whose ONLY write goes `verb → module helper → helper → handle`.
+
+    Pre-fix the module pass ran with `writers=None`, and the delegation
+    fixed point ran over `methods` only, so BOTH links in that chain were
+    missed and the verb was certified read-only — the fail-open direction this
+    enumeration exists to prevent (#9212 review P1-1). The real module happens
+    not to exercise the hole yet, so the proof scans a synthetic one.
+    """
+    methods, writers, module_writers = _write_scan(textwrap.dedent('''
+        class _EdgeHandlers:
+            def create_thing(self, key):
+                return _mint_thing(self.g, key)
+
+            def resolve_only(self, key):
+                return _lookup(self.g, key)
+
+        def _mint_thing(g, key):
+            return _emit(g, key)
+
+        def _emit(g, key):
+            return g.query("MERGE (s:Subject {name:$n})", params={"n": key})
+
+        def _lookup(g, key):
+            return g.query("MATCH (s:Subject {name:$n}) RETURN s",
+                           params={"n": key})
+    '''))
+    assert set(methods) == {"create_thing", "resolve_only"}, sorted(methods)
+    assert "_emit" in module_writers, (
+        "the helper with the literal MERGE must be a writer"
+    )
+    assert "_mint_thing" in module_writers, (
+        "a module helper whose only write goes through another module writer "
+        "must be a writer too — the module pass must run the same closure"
+    )
+    assert "create_thing" in writers, (
+        "a verb whose only write goes through a module helper must be a "
+        "writer — otherwise it passes `test_every_edge_minting_verb_is_"
+        "declared_or_stated` as read-only and #9124 refuses it in production"
+    )
+    assert "resolve_only" not in writers, (
+        "a verb that only reads must stay out, or the buckets become noise"
+    )
+
+
+def test_the_scan_fails_closed_on_a_handle_it_cannot_name():
+    """The receiver half of the scan: an ALIASED or RE-PARAMETERISED handle is
+    a writer, because a call it cannot attribute cannot be proven read-only.
+
+    Before this rule `_receiver` returned `None` and the call was SKIPPED
+    outright, so `h = self.g; h.query("MERGE …")` classified as read-only while
+    the docstring claimed the scan fails closed on unreadable shapes (#9212
+    review P2-4) — the same fail-open class as the module-helper miss.
+    """
+    assert _classifies_as_writer(
+        """
+        def _aliased(self, source_id):
+            h = self.g
+            return h.query("MATCH (n) SET n.x = 1")
+        """), "an ALIASED handle write must be a writer"
+    assert _classifies_as_writer(
+        """
+        def _helper(graph):
+            return graph.query("MERGE (s:Subject {name:$n})")
+        """), "a RE-PARAMETERISED handle write must be a writer"
+    # …while the read-only shapes on this path stay out of the bucket, so the
+    # rule makes noise about the unreadable and not about everything.
+    assert not _classifies_as_writer(
+        """
+        def _reader(self):
+            rows = self.g.query("MATCH (n:Point) RETURN n")
+            logger.warning("read %d rows", len(rows))
+            return rows
+        """), "a plain read through the handle is not a writer"
+    assert not _classifies_as_writer(
+        """
+        def _delegates(self):
+            return resolve_about_link("acme")
+        """, writers=set()), (
+            "a call to a NON-writer is not a write by itself"
+        )
+
+
+def test_the_about_name_path_is_still_refused_until_its_lane_lands(
+        sdk_with_journal, monkeypatch):
+    """THE RESIDUAL, MEASURED RATHER THAN ASSERTED (review P1-2).
+
+    The declaration block discloses that `_create_about_edges` /
+    `wire_about_link` are NOT refusal-safe today — the live about links are
+    written AFTER `_live_write_scope("create_entity")` closes (`sdk.py`'s about
+    loop), so `#9124`'s predicate refuses them. Issue #9195's indicator (3)
+    requires every edge-minting helper to be either declared OR **documented as
+    refusal-safe**; this test is the executable half of that handoff, so the
+    residual flips visibly when its own lane lands and #9124 cannot arm over it
+    silently.
+
+    The target is an EXISTING `:Object`, so the name path RESOLVES (no
+    `:Subject` stub mint) and the refusal can only come from the about-LINK
+    `MERGE` — the edge write this lane does not own.
+    """
+    sdk = sdk_with_journal
+    proj = sdk._get_proj()
+    assert proj._journal_backed is True, "the fixture did not arm §17.1"
+    sdk.create_object("residual-target-9195", "release")
+
+    seen = _instrument(monkeypatch, refuse=True)
+    with pytest.raises(DirectCacheWriteRefused) as refused:
+        sdk.create_event("residual-probe-9195", "meeting",
+                         aboutObject="residual-target-9195")
+    assert "#9124" in str(refused.value), (
+        "the refusal must name the guard that will fire (#9124), so the failure "
+        f"mode is unambiguous: {refused.value}"
+    )
+    assert seen and "MERGE (n)-[:aboutObject]->(t)" in seen[-1][0], (
+        "the refusal must come from the about-LINK merge this lane does not "
+        "own (the residual), not from an unrelated write on the event path: "
+        f"{seen[-1][0] if seen else None}"
+    )
+    # ⚠️ WHEN THIS ASSERTION FLIPS: the about lane is scoped by its own
+    # declaration (or #9124's census exempts it) and the `raises` above stops
+    # raising. That is the moment to re-read the residual paragraph in
+    # `tortoise/projection/edges.py` and delete it — not to delete this test.
+
+
+def test_every_edge_minting_verb_is_declared_or_stated():
+    """The issue's "no verb left undeclared" row.
+
+    A new edge-minting verb on `_EdgeHandlers` fails HERE — it is neither in
+    `DECLARED_VERBS` nor accounted for in `_STATED_OTHER_WRITERS` — instead of
+    arriving undeclared and being refused by #9124's guard in production.
+    """
+    writers = _mutating_verbs()
+    uncovered = writers - set(DECLARED_VERBS) - set(_STATED_OTHER_WRITERS)
+    assert not uncovered, (
+        "these `_EdgeHandlers` verbs can issue a mutating statement and are "
+        f"neither declared by this lane nor stated with a reason: "
+        f"{sorted(uncovered)}. Add them to the lane's declaration (and this "
+        "suite's walk), or to `_STATED_OTHER_WRITERS` with the reason their "
+        "write is scoped/recorded elsewhere."
+    )
+
+    stale = (set(DECLARED_VERBS) | set(_STATED_OTHER_WRITERS)) - writers
+    assert not stale, (
+        "this suite names verbs that no longer issue a mutating statement — "
+        f"the buckets have drifted from the module: {sorted(stale)}"
+    )
+
+    # ⛔ Bucket MEMBERSHIP is a claim about the walk, so it is checked against
+    # the walk's own BODY: otherwise the cheapest way to green the check above
+    # is to add a name to `DECLARED_VERBS` that no walk ever calls, leaving the
+    # verb unexercised and its statements unseen.
+    called = _verbs_called_by_walk()
+    not_called = sorted(set(DECLARED_VERBS) - called)
+    assert not not_called, (
+        "these verbs are claimed as DECLARED but the walk never calls them, so "
+        f"their statements are never observed: {not_called}"
+    )
+
+
+# ── the lane's per-relation claim ─────────────────────────────────────────
+
+def test_the_lane_states_its_carrier_per_relation():
+    """The issue's "classify per relation, not per lane" row.
+
+    A blanket answer is false in one direction or the other: `references` has no
+    anchor and no carrier emitted from here (`#5213` option 3, §9.6), while the
+    `about*` family is snapshot-derivable (`DERIVABLE_STRUCTURAL_RELS` ←
+    `entities._upsert_point_edges`). `structural_edge_carrier` must answer from
+    that ONE set, and the two halves must partition the predicates this lane can
+    write — `STRUCTURAL_EDGE_LANE_PREDICATES`, the union of BOTH declared
+    mints' allow-lists, NOT `_VALID_EDGE_PREDICATES` alone (that set is
+    `create_edge`'s and misses `aboutPoint`, which `create_about_edge` accepts —
+    a partition over it left that predicate's answer unpinned) — so a new
+    predicate, or a change to what replay resurrects, is a visible diff here.
+
+    ⚠️ A `None` here means "no carrier is EMITTED from this verb", NOT "no
+    replay carrier can exist": the engine's `DirectEdgeCreated` fold restores
+    these very edges when a record describes them (measured), so the gap is the
+    emission.
+    """
+    assert STRUCTURAL_EDGE_LANE_PREDICATES == (
+        _VALID_EDGE_PREDICATES | _VALID_ABOUT_EDGE_PREDICATES
+    ), (
+        "the lane's write set is no longer the union of its two mints' "
+        "allow-lists — whoever widened one of the verbs must say so here"
+    )
+    assert _VALID_EDGE_PREDICATES | {"aboutPoint"} == STRUCTURAL_EDGE_LANE_PREDICATES, (
+        "`aboutPoint` is the ONLY predicate the about mint adds to the generic "
+        "verb's set; a new one must be classified into a carrier half below"
+    )
+    assert set(STRUCTURAL_EDGE_LANE_PREDICATES) == SNAPSHOT_CARRIED | NO_CARRIER_EMITTED, (
+        "the pinned partition no longer covers the predicates this lane can "
+        f"write: uncovered={sorted(set(STRUCTURAL_EDGE_LANE_PREDICATES) - SNAPSHOT_CARRIED - NO_CARRIER_EMITTED)} "
+        f"stale={sorted((SNAPSHOT_CARRIED | NO_CARRIER_EMITTED) - set(STRUCTURAL_EDGE_LANE_PREDICATES))}"
+    )
+    assert not (SNAPSHOT_CARRIED & NO_CARRIER_EMITTED)
+
+    assert (set(STRUCTURAL_EDGE_LANE_PREDICATES) & DERIVABLE_STRUCTURAL_RELS
+            == SNAPSHOT_CARRIED), (
+        "the snapshot-carried half must be exactly the intersection with the "
+        "set the replay engines read — a hand-written second table would drift "
+        "from what replay actually resurrects"
+    )
+
+    for rel in SNAPSHOT_CARRIED:
+        assert structural_edge_carrier(rel) == "endpoint-snapshot", rel
+    assert structural_edge_carrier("aboutPoint") == "endpoint-snapshot", (
+        "`aboutPoint` is snapshot-carried (`aboutEntities`) AND writable by "
+        "this lane (`create_about_edge`); its answer must never fall through "
+        "the partition because the generic verb does not accept it"
+    )
+    for rel in NO_CARRIER_EMITTED:
+        assert structural_edge_carrier(rel) is None, (
+            f"`{rel}` is classified as emitting no carrier, but the lane claims "
+            "a replay carrier for it"
+        )
+    assert structural_edge_carrier("references") is None, (
+        "`references` is the relation the issue names as the counter-example to "
+        "a global answer; it must keep its no-carrier-from-here classification"
+    )
+
+
+def test_the_references_edge_is_still_written_bare(sdk_with_journal):
+    """The issue's "the bare `references` edge" row: whatever this lane
+    declares, it does not route `references` through the derivation anchor.
+
+    `create_edge` takes no property parameter, so an anchor is unsuppliable
+    from the caller; the assertion is the WRITE's shape, not a doc claim
+    (`#5213` option 3; `tests/test_references_boundary_5213.py`).
+    """
+    proj = sdk_with_journal._get_proj()
+    endpoints = _endpoints(sdk_with_journal)
+
+    assert proj.create_edge(
+        endpoints["source"], endpoints["target"], "references") is True
+    rows = proj.g.query(
+        "MATCH (a:Point {id:$a})-[r:references]->(b:Point {id:$b}) "
+        "RETURN r.sourceVersion",
+        params={"a": endpoints["source"], "b": endpoints["target"]},
+    ).result_set
+    assert rows, "the `references` edge did not land"
+    assert rows[0][0] is None, (
+        "the generic verb started stamping `sourceVersion` — that is a "
+        "behaviour change (#5213 option 1), not a §17.1 declaration"
+    )
+
+
+# ── the decision is recorded where the writer reads it ───────────────────
+
+def test_the_lane_and_its_argument_are_recorded():
+    """The issue's requirement that the lane's obligation be stated AT THE
+    VERB, not as one global claim. Nothing else in this suite would notice the
+    argument being deleted from the source."""
+    from tortoise.projection import edges as _edges
+
+    assert STRUCTURAL_EDGE_WRITE_LANE == "structural-edge.derived", (
+        "the lane name is what a refusal message and the projection module's "
+        "declaration ledger cite; changing it is a deliberate act"
+    )
+
+    block = Path(_edges.__file__).read_text(encoding="utf-8")
+    # Load-bearing phrases, not words that survive the paragraph's deletion:
+    # `"declared"` alone is satisfied by the module docstring, and `#9124` /
+    # `#9079` each appear more than once. These co-exist only if the
+    # DECLARATION paragraph is present.
+    for phrase in (
+        "WHAT THIS LANE CLAIMS, PER RELATION",
+        "This lane does NOT claim durability for them",
+        "WHAT THIS LANE DOES NOT COVER",
+        "`references` KEEPS ITS OWN SHAPE",
+    ):
+        assert phrase in block, (
+            f"the declaration block no longer contains {phrase!r} — the shape "
+            "decision #9195 requires recorded has been deleted or reworded out "
+            "from under this pin"
+        )
+    assert "MEASURED at" in block, (
+        "the carrier gap is asserted, not measured — the lane must record the "
+        "measurement that produced it (a rebuild drops these edges)"
+    )
+    assert "DirectEdgeCreated" in block, (
+        "the declaration must name the replay machinery that DOES exist for "
+        "these edges, so the gap is stated as the EMISSION from this door and "
+        "not as a missing replay engine"
+    )
+    assert "#5213" in block and "#7879" in block, (
+        "the declaration must cite the `references` boundary (#5213) and where "
+        "the missing replay carrier belongs (#7879)"
+    )
+
+    # The ledger in the projection's own module must list the lane, so a reader
+    # who asks "which writes are sanctioned?" finds it there too.
+    from tortoise.projection import __file__ as _proj_file
+
+    init_block = Path(_proj_file).read_text(encoding="utf-8")
+    assert f"`{STRUCTURAL_EDGE_WRITE_LANE}`" in init_block, (
+        "the projection's declaration ledger no longer names this lane"
+    )
+    # ⛔ The ledger is what a reader uses to answer "which writes are
+    # sanctioned?", so naming only ONE of the lane's two mints is a claim the
+    # code contradicts (the review's P2). The lane has two: `create_edge` and
+    # `create_about_edge`, each issuing its own `MERGE`.
+    ledger_at = init_block.find(f"`{STRUCTURAL_EDGE_WRITE_LANE}`")
+    ledger_row = init_block[ledger_at:ledger_at + 900]
+    for mint in ("create_edge", "create_about_edge"):
+        assert mint in ledger_row, (
+            f"the declaration ledger's row for this lane does not name "
+            f"{mint!r} — the lane mints TWO relationships and a ledger that "
+            "names one of them understates the sanctioned surface"
+        )

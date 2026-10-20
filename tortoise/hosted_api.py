@@ -144,6 +144,7 @@ from tortoise.monitoring import (
 )
 from tortoise.onboarding import state as _os  # #2001 (W5) canonical FLOW-state module
 from tortoise.projection import (
+    DirectCacheWriteRefused,  # #9233: §17.1 refusal is not a crypto failure
     is_missing_graph_error,  # #2163: absent-graph GRAPH.DELETE family == success
     journal_mint_write_ahead,  # #3390: journal the intended name BEFORE the CREATE
 )
@@ -2881,11 +2882,15 @@ async def _dispatch_webhooks(org_id: str, graph_namespace: str | None = None,
     (``_webhook_retry_sweep_pass``, #8098). Nothing on the write path ever
     awaits this: a capture must stay 2xx regardless of a subscriber's endpoint.
 
-    Best-effort by construction. ``dispatch_pending`` itself never raises; this
-    wrapper additionally catches the SDK/edge failures around it (an
-    unreachable graph, a build failure) and logs — a delivery problem must
-    never surface as a dream failure, and it must never abort the worker (the
-    roots are already drained; a raise here would be read as a dream bug).
+    Best-effort by construction. ``dispatch_pending`` does not raise for a
+    subscriber, transport or graph failure; this wrapper additionally catches
+    everything above it (an unreachable graph, a build failure) and logs — a
+    delivery problem must never surface as a dream failure, and it must never
+    abort the worker (the roots are already drained; a raise here would be read
+    as a dream bug). ⚠️ That INCLUDES a §17.1 refusal of the store's own write
+    (#9233), which is deliberately loud at the dispatcher: swallowing it here is
+    the documented behaviour of this wrapper, and the refusal is logged as the
+    error it is rather than as a delivery.
 
     Returns the dispatcher summary (``None`` when it could not run) so a caller
     can aggregate/assert on what actually happened.
@@ -3180,10 +3185,15 @@ def _webhook_retry_targets() -> list[dict[str, str]]:
 async def _webhook_retry_sweep_pass() -> dict:
     """#8098: ONE sweep pass — enumerate, gate, dispatch at bounded concurrency.
 
-    Never raises for a delivery/graph problem (``_guarded_step`` still wraps it,
-    but the contract here is the same best-effort one ``dispatch_pending``
-    keeps): a dead subscriber endpoint, an unreadable graph, or a failed
-    enumeration costs this pass, never the loop.
+    Never raises for a delivery/graph problem (``_guarded_step`` still wraps it):
+    a dead subscriber endpoint, an unreadable graph, or a failed enumeration
+    costs this pass, never the loop. ⚠️ ``dispatch_pending``'s ONE exception
+    (#9233) is contained HERE, per graph: a §17.1 ``DirectCacheWriteRefused``
+    refusing that store's own write originates in the dispatch and is caught by
+    ``_one``'s ``except Exception``, so it costs that tenant's pass rather than
+    the sweep — which is what lets this pass call the dispatcher without a
+    refusal arm of its own. A new call site does NOT inherit that containment:
+    it needs its own arm.
 
     Cancellation DOES propagate — shutdown cancels the loop task, so the pass
     must not swallow ``CancelledError`` to keep its ``_WEBHOOK_SWEEP_INFLIGHT``
@@ -5463,6 +5473,45 @@ _READY_PROBE = HealthProbe(
     lambda: _probe_db(), timeout=DB_PROBE_HARD_TIMEOUT, fresh_only=True)
 
 
+def _change_feed_health() -> dict:
+    """#9208: degraded `:GraphEvent` feeds, as `/health` reports them.
+
+    The degraded state is PROCESS MEMORY and its only acknowledgement is a
+    Python call inside the process that holds it, so without a report here the
+    state is invisible from outside: `GET /v1/events` 503s for one tenant and
+    nothing else on the box says why or which worker. This block is that
+    report — it makes the state FINDABLE.
+
+    It deliberately does NOT fold into `status`, unlike `db` and
+    `backup_watcher`: those answer "is THIS PROCESS able to serve", while a
+    degraded feed is one graph's store refusing writes. Folding it would fail a
+    deploy's liveness/readiness over a single tenant's graph and (worse)
+    restart-loop the worker that holds the only acknowledgement path.
+
+    It carries NO graph names or store identities, only counts per stage. This
+    endpoint is unauthenticated; tenant graph names are not ours to publish, and
+    the operator who needs the name gets it from the authenticated 503 detail,
+    from `event_store.degraded_graphs()` inside the worker, or from the boot
+    logs. Never raises: a health path must always answer.
+    """
+    try:
+        from tortoise.event_store import degraded_graphs
+
+        rows = degraded_graphs()
+    except Exception as exc:  # liveness must answer, always
+        return {"degraded": False, "feeds": 0, "stages": [],
+                "error": str(exc)[:200]}
+    stages: dict[str, int] = {}
+    for row in rows:
+        stages[row["stage"]] = stages.get(row["stage"], 0) + 1
+    return {
+        "degraded": bool(rows),
+        "feeds": len(rows),
+        "stages": [{"stage": k, "feeds": v} for k, v in sorted(stages.items())],
+        "error": None,
+    }
+
+
 def _backup_watcher_health() -> dict:
     """#2877: backup-watcher liveness for /health.
 
@@ -5574,6 +5623,14 @@ async def health():
     so on a host where a watcher was expected, ``{"state": "disabled", "ok":
     true, "expected": true}`` reads as "wanted, and not running" — the
     operator's cue to check the boot log for the reason.
+
+    Change-feed check (#9208): ``change_feed`` reports how many graphs' event
+    feeds are DEGRADED in this process — the ONLY way that state is visible from
+    outside, because it is process memory whose acknowledgement is a Python call
+    inside the process. It does NOT fold into ``status`` (see
+    ``_change_feed_health``): a single tenant's refused store write is not this
+    process's liveness, and restarting the worker over it would destroy the only
+    place the acknowledgement can be made.
     """
     try:
         db = _HEALTH_PROBE.snapshot()
@@ -5590,7 +5647,7 @@ async def health():
     watcher = _backup_watcher_health()
     return {"status": "ok" if (db.get("ok") and watcher["ok"]) else "degraded",
             "db": db, "probe": probe_meta, "loop_stale_ms": loop_age_ms,
-            "backup_watcher": watcher}
+            "backup_watcher": watcher, "change_feed": _change_feed_health()}
 
 
 @app.get("/health/ready")
@@ -8079,11 +8136,14 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
 
     ``pool`` (#3669, #3773, #7678) selects the worker pool: ``"auth"``
     (default), ``"telemetry"`` for best-effort work, ``"oauth"`` for the
-    attacker-reachable OAuth client-resolution lane, ``"graph"`` for the
-    DATA-PLANE graph helpers (kept off auth capacity; see
-    ``_graph_offload``, which passes its own ``unavailable`` factory), or
-    ``"org"`` (#7678) for the org-create lane's sequential gate reads and
-    provision write.
+    attacker-reachable OAuth client-resolution lane, ``"graph"`` for the graph
+    helpers — data-plane (``_data_sdk``'s connect, ``_check_org_limit``) AND
+    registry reads, since ``_get_registry()`` uses the same connection — kept
+    off auth capacity; see ``_graph_offload``, which passes its own
+    ``unavailable`` factory and is the only sanctioned way onto that pool.
+    Routing a registry read to ``"auth"`` here hands it the sign-in 503 copy
+    (#3718). Or ``"org"`` (#7678) for the org-create lane's sequential gate
+    reads and provision write.
 
     ``unavailable`` (#3669) overrides the fail-closed error FACTORY. The
     auth/REST lane keeps the repo-standard 503 ``control_plane_unavailable``;
@@ -8131,17 +8191,22 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
 
 
 def _graph_unavailable() -> HTTPException:
-    """#3773: fail-closed 503 for a saturated / bound-missed data-plane offload.
+    """#3773: fail-closed 503 for a saturated / bound-missed GRAPH-lane offload
+    (a data-plane helper or a registry read, #3718).
 
     Deliberately NOT ``_control_plane_unavailable``: that body's copy is
     sign-in specific and would mislead a client retrying a graph write. A
-    graph helper that could not get a worker is a service-capacity failure,
-    and the write did not happen — retryable.
+    helper that could not get a worker is a service-capacity failure: a
+    submission that never ran did NO work (retryable), while one abandoned at
+    the bound — ``bound_miss_running``, the case the chunking rationale cites —
+    may still complete in its worker (CPython #87185: the timeout cancels the
+    await, never the thread). So do not retry a MUTATING call on this code
+    without checking first; a read is safe to retry.
 
     Deliberately distinct from ``org_graph_unavailable`` (a TENANCY/access
     failure on the activation scorecard, activation_scorecard.py): this one
-    means only that the offload could not get a worker, so the request is
-    retryable. The code is body-only today — no client maps it yet (the REST
+    means only that the offload did not complete inside the lane's budget, so
+    the request may be retried. The code is body-only today — no client maps it yet (the REST
     write lane is consumed by agents/SDKs, which treat any 5xx as retryable);
     the dashboard renders a 503 on the auth lane, not this one.
     """
@@ -8155,7 +8220,29 @@ def _graph_unavailable() -> HTTPException:
 
 
 async def _graph_offload(fn, *, op: str, timeout: float | None = None):
-    """#3773: run ONE synchronous DATA-PLANE graph helper off the event loop.
+    """#3773: run ONE synchronous graph helper (data-plane OR registry) off loop.
+
+    REGISTRY reads belong here too (#3718): ``_get_registry()`` uses the
+    existing db connection rather than opening a second one, so a registry
+    attach/query carries the same cold-start and blocking shape this lane's
+    bound exists to cover. Do NOT route them to ``_cp_offload``'s default
+    ``auth`` pool — that is the PostgREST lane's seam, and a bound miss there
+    returns the sign-in 503 copy.
+
+    ONE CALLABLE per submission, but the callable may run a BOUNDED fan-out
+    (#3718's org switcher submits one callable that lists several orgs). The
+    wait bound covers the WHOLE submission, not one round trip, so an uncapped
+    fan-out is out of contract: a caller that fans out must chunk it (see
+    ``_GRAPH_LIST_OFFLOAD_CHUNK`` and, for the Supabase lane, the smaller
+    ``_GRAPH_LIST_CONTROL_PLANE_CHUNK``), or a healthy-but-large fan-out will cross
+    the bound and its worker will be abandoned still holding a pool slot.
+
+    A mode-agnostic op name, not a per-mode one: ``_graph_list_for`` is the same
+    callable on both lanes, and the LANE is chosen by the caller by mode (#3718)
+    — registry reads submit here, Supabase/PostgREST listings submit through
+    ``_cp_offload``, so each leg gets the bound and the 503 copy of the
+    dependency it actually uses. The callable still branches on the mode first,
+    so neither lane builds a handle it will not use.
 
     Thin hosted-side wrapper over the #3498 seam (``_cp_offload`` ->
     ``monitoring.run_control_plane_call``) on the dedicated ``graph`` pool.
@@ -9139,14 +9226,25 @@ async def events_poll(
     """
     _require_scope(org, "graphs:read", "events_poll")
     sdk = await _data_sdk_offloaded(org)
+    # Lazy import, matching this module's pattern for tortoise submodules.
+    from tortoise.event_store import ChangeFeedDegraded
+
     type_list = [t.strip() for t in (types or "").split(",") if t.strip()]
     try:
         # #3718: sync FalkorDB I/O — off-loaded off the event loop so a slow
         # event-page read does not stall every concurrent request. The
         # ValueError contract (410/400 mapping) is unchanged: the same
         # exception propagates out of the worker thread.
+        #
+        # #9208: `ChangeFeedDegraded` is NOT a client error — the org's event
+        # store refused a write, so the feed is incomplete — and a bare 500
+        # would strip the graph name, the refusal and the remedy out of a state
+        # that exists to be readable. 503 says "the feed's store is broken,
+        # not your request", and the detail relays the named diagnosis verbatim.
         result = await asyncio.to_thread(
             sdk.poll_events, after=after, types=type_list or None, limit=limit)
+    except ChangeFeedDegraded as e:
+        raise HTTPException(status_code=503, detail=str(e))  # noqa: B904
     except ValueError as e:
         msg = str(e)
         if "cursor expired" in msg:
@@ -18146,6 +18244,16 @@ async def _user_memberships(user_id: str) -> list[dict]:
         return await _cp_offload(
             lambda: _sb_memberships(get_control_plane(), user_id),
             op="user_memberships")
+    # #3718: this stays INLINE and declared residual (#2446) — the same
+    # registry-Membership read CLASS as the auth path's `_membership_role`,
+    # where off-loading was measured to produce a WRONG ANSWER (an EMPTY member
+    # list in `test_invites_http.py::TestExpiredInviteReMint`). NOTE the
+    # inference: that measurement was taken on `_membership_role`'s read, NOT on
+    # this one — this helper's membership in the class is inferred (same label,
+    # same connection, same thread-visibility question), which is why the
+    # deferral is recorded on #2446 with the measurement quoted and the
+    # inference marked, rather than restated here as measured. Do not off-load
+    # it without reproducing that measurement for THIS query.
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
         "MATCH (m:Membership {user_id:$uid, status:'active'}) "
@@ -18188,6 +18296,47 @@ async def _membership_org(user_id: str, org_id: str) -> dict | None:
     return {"org_id": org_id, "role": rows[0][0]}
 
 
+def _graph_list_for(org_id: str) -> list[dict]:
+    """One org's graph listing (#3718: blocking registry/PostgREST read).
+
+    The MODE BRANCH is here, not left to ``graph_list``'s own short-circuit:
+    in Supabase mode ``_registry_anchor()`` would build (and eagerly attach)
+    a FalkorDB handle BEFORE the callee ever consulted the mode, so the
+    switcher — the first read every client makes — would need a live graph
+    server to resolve orgs that live entirely in PostgREST, and raise a raw
+    ``ConnectionError`` (a 500, not even the lane's 503) when it is down.
+    Reading the mode first keeps the handler's contract ("this endpoint never
+    touches the registry in Supabase mode") true.
+
+    The FalkorDB leg uses the process-lifetime ``_registry_anchor()``, not a
+    fresh ``_make_sdk(namespace="registry")``: the anchor is the documented
+    pattern for registry reads (#1607 — a fresh handle is GC'd with close-on-GC
+    + SHUTDOWN NOSAVE), and it avoids paying ``_ensure_registry_indexes``' 9
+    ``CREATE INDEX`` statements once per org while an offload slot is held.
+    """
+    from tortoise.supabase_control import (
+        get_control_plane,
+        graph_metadata,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        return graph_metadata(get_control_plane(), org_id)
+    return _registry_anchor().graph_list(org_id)
+
+
+#: Orgs per off-loop submission when the switcher lists graphs, PER LANE
+#: (#3718). Each submission gets ONE wait bound and the two lanes do not do
+#: equal work per org: the registry read is one query under the graph lane's
+#: cold-projection allowance (``graph_offload_timeout_s()``, ~30 s), while the
+#: Supabase read is THREE sequential PostgREST round trips (organizations,
+#: default graphs, custom graphs) under the control plane's 10 s
+#: ``CONTROL_PLANE_OFFLOAD_TIMEOUT_S``. Sizing both at 8 would budget 24
+#: round trips against that 10 s, so the branch sizes each by its own bound —
+#: see the chunking rationale in ``list_my_orgs``.
+_GRAPH_LIST_OFFLOAD_CHUNK = 8
+_GRAPH_LIST_CONTROL_PLANE_CHUNK = 3
+
+
 async def _org_node(org_id: str) -> dict | None:
     """Org node/properties for session endpoints (E5/E6/E7/E8).
 
@@ -18206,6 +18355,14 @@ async def _org_node(org_id: str) -> dict | None:
         # endpoints, and by _require_owner_admin's suspension-stamp check).
         return await _cp_offload(
             lambda: _sb_org(get_control_plane(), org_id), op="org_by_id")
+    # #3718: the registry lane stays INLINE and declared residual (#2446) — the
+    # same registry read class as `_membership_role`, where off-loading was
+    # measured to produce a WRONG ANSWER (an EMPTY member list in
+    # `test_invites_http.py::TestExpiredInviteReMint`). That measurement was
+    # taken on `_membership_role`'s read; THIS helper's membership in the class
+    # is an inference (same Team/Membership registry read, same connection, same
+    # thread-visibility question), recorded as such on #2446. Do not off-load it
+    # without reproducing the measurement for THIS read.
     sdk = _registry_anchor()
     rows = sdk._get_registry().query(
         "MATCH (t:Team {id:$id}) RETURN properties(t)",
@@ -18277,21 +18434,82 @@ async def list_my_orgs(user: dict = Depends(get_current_user)):  # noqa: B008
 
     #765 (plan Task 8 reader inventory): graph_list resolves via the
     mode-aware SDK (Supabase → teams.graph_name derivation via the seam;
-    registry → Graph nodes), so this endpoint never touches the registry in
-    Supabase mode."""
+    registry → Graph nodes). The mode branch that keeps this endpoint off the
+    registry in Supabase mode is NOT the callee's short-circuit — it is the
+    call-site branch in ``_graph_list_for`` (#3718), together with the
+    lane-and-chunk choice made on the loop below, because ``_registry_anchor()``
+    binds eagerly and would be built before ``graph_list`` could consult the
+    mode."""
     memberships = await _user_memberships(user["user_id"])
-    out = []
+    resolved = []
     for m in memberships:
         org = await _org_node(m["org_id"])
         if org is None:
             continue
+        resolved.append((m, org))
+
+    # Suspended rows are excluded from graph resolution — they cannot be
+    # selected anyway, and graph_list must not observe the suspension stamp.
+    # #3718: the listing is a blocking registry/PostgREST read, and it used to
+    # run per membership ON the loop. It now costs one OFF-LOOP submission per
+    # chunk — ceil(N / the lane's chunk) submissions for N healthy orgs. (The
+    # membership scan and the per-org Team read stay inline under #2446; see
+    # `_user_memberships`.)
+    #
+    # CHUNKED, not one batch over every org: nothing caps how many active
+    # Memberships a user holds, and each submission gets ONE wait bound. N
+    # sequential reads submitted together consume that budget jointly, so a
+    # large-but-healthy fan-out would cross it — and a bound miss abandons a
+    # worker that keeps holding its pool slot until it returns (CPython
+    # #87185). Chunks keep each submission's fan-out small and predictable.
+    #
+    # WHY NOT `asyncio.to_thread` (the read-half house style), reviewed and
+    # declined: the module's own seam note records that to_thread's SHARED
+    # default executor is the starvation path (#3060, `_submit_off_loop`), and
+    # the graph lane's bound is the truth-telling one for a graph read
+    # (``_graph_unavailable``, not the sign-in copy). The cost concern that
+    # motivated the objection — a chunk holding one of eight graph slots while
+    # it works — is answered at its source instead: `_graph_list_for` uses the
+    # CACHED ``_registry_anchor()``, so a submission is N cheap reads, not N
+    # handle builds plus 9 ``CREATE INDEX`` each.
+    healthy = [m["org_id"] for m, org in resolved
+               if org.get("suspended_at") is None]
+    # #3718: the LANE is chosen on the loop, by MODE, before anything touches a
+    # handle. A Supabase listing is a PostgREST read and belongs on the
+    # control-plane lane: one chunk there is 3 sequential PostgREST round trips
+    # PER ORG (organizations + default + custom graphs), and the graph lane's
+    # bound is the COLD-PROJECTION allowance (~30 s), which a degraded control
+    # plane could consume — after which the 503 names a service that is not in
+    # this path at all (`graph_unavailable`) and the abandoned worker keeps
+    # issuing the chunk's remaining calls while holding a graph slot, turning a
+    # control-plane slowdown into data-plane unavailability. Each lane therefore
+    # gets its own bound AND its own chunk size, so the arithmetic holds on the
+    # tighter one too (3 orgs x 3 round trips inside 10 s).
+    #
+    # The cost of this choice, stated: the Supabase fan-out lands on the
+    # ``auth`` pool — the capacity the graph pool exists to keep free. Chunking
+    # bounds how long ONE chunk holds a slot (a few round trips, not 24), and
+    # that is the whole mitigation; the listing is the app's first read, so it
+    # cannot be deferred off the request path.
+    from tortoise.supabase_control import is_supabase_enabled
+
+    if is_supabase_enabled():
+        offload, chunk_size = _cp_offload, _GRAPH_LIST_CONTROL_PLANE_CHUNK
+    else:
+        offload, chunk_size = _graph_offload, _GRAPH_LIST_OFFLOAD_CHUNK
+
+    graphs_by_org: dict[str, list[dict]] = {}
+    for start in range(0, len(healthy), chunk_size):
+        chunk = healthy[start:start + chunk_size]
+        graphs_by_org.update(await offload(
+            lambda chunk=chunk: {
+                org_id: _graph_list_for(org_id) for org_id in chunk},
+            op="graph_list"))
+
+    out = []
+    for m, org in resolved:
         suspended_at = org.get("suspended_at")
-        graphs = []
-        if suspended_at is None:
-            # Suspended rows are excluded from graph resolution — they
-            # cannot be selected anyway, and graph_list must not observe
-            # the suspension stamp.
-            graphs = _make_sdk(namespace="registry").graph_list(m["org_id"])
+        graphs = graphs_by_org.get(m["org_id"], []) if suspended_at is None else []
         out.append({
             "org_id": m["org_id"],
             "org_name": org.get("name", m["org_id"]),
@@ -26718,13 +26936,45 @@ def _now_iso() -> str:
 #
 # threading.Lock (not asyncio.Lock): loop-agnostic (tests spin fresh asyncio
 # loops; asyncio.Lock caches its loop on first acquire) and the section is
-# all-sync, so acquire() never blocks the event loop in the current
-# architecture. ⛔ If an await is ever introduced INSIDE the section, switch to
+# all-sync, so acquire() never blocks the event loop ON THE SUCCESS PATH.
+# ⛔ If an await is ever introduced INSIDE the section, switch to
 # an asyncio.Lock (same per-org keying) — or route the lane through the SQL RPC,
 # as the Supabase lane now does. Cross-process (--workers > 1) serialization
 # requires that SQL RPC.
+#
+# ⛔ THE UNCONTESTED PATH IS NOT THE ONLY PATH — `acquire()` on a lock somebody
+# ELSE holds blocks the calling thread, and on an `async def` endpoint that
+# thread is the EVENT LOOP. The old text claimed "acquire() never blocks the
+# event loop in the current architecture", which is true only until the lock is
+# already held; then one owner stalls every route on this server. So every scope
+# entry goes through `_org_mint_lock_bounded()`, which bounds the wait, keeps it
+# off the loop, and stays cancellable. `tests/test_health_ready_nonblocking.py`
+# fails if a bare `with _org_mint_lock(...)` ever comes back.
 _ORG_MINT_LOCKS: dict[str, threading.Lock] = {}
 _ORG_MINT_LOCKS_GUARD = threading.Lock()
+
+#: How long a mint waits for the per-org lock before FAILING CLOSED (503).
+#: Who can hold it longer than this: a WEDGED owner (a leaked lock), or another
+#: THREAD in this process. No coroutine can: both critical sections are
+#: await-free, so on one loop the holder always finishes before any other
+#: coroutine runs, and `--workers > 1` gives each process its own table.
+#: MEASURED (main run 39264762684, `test (a)`; and 39235544056/39254836130 /
+#: 39255746368 on `test (c)` — 4/4 runs affected): a leaked lock blocked every
+#: later mint with no bound, the shard sat on the deadlock past the per-item
+#: pytest-timeout bound (300s, faulthandler dumping at 280s) and then spent its
+#: whole 20m watchdog, was killed at 20.2m with 366 nodeids unrun, and reported
+#: INCOMPLETE — a 23.5m job that owned `ci_crit_med` on main.
+_ORG_MINT_LOCK_TIMEOUT_S = 10.0
+
+#: Re-poll interval while the lock is held by someone else. Small enough that a
+#: contended mint is imperceptible, large enough that a 10s wait is ~2000 cheap
+#: iterations rather than a spin.
+_ORG_MINT_LOCK_POLL_S = 0.005
+
+#: The `detail` of the busy refusal — ONE home, so a test can assert WHICH 503
+#: this route returned (it legitimately returns other 503s).
+_ORG_MINT_LOCK_MESSAGE = ("Session-key mint is busy for this team — retry "
+                         "(the per-team mint lock was held past its bound)")
 
 
 def _org_mint_lock(org_id: str) -> threading.Lock:
@@ -26735,6 +26985,66 @@ def _org_mint_lock(org_id: str) -> threading.Lock:
             lock = threading.Lock()
             _ORG_MINT_LOCKS[org_id] = lock
         return lock
+
+
+@contextlib.asynccontextmanager
+async def _org_mint_lock_bounded(org_id: str):
+    """`with _org_mint_lock(org_id)` — bounded wait, fail CLOSED, cancellable.
+
+    Two defects, one entry point:
+
+    * UNBOUNDED. A bare `with _org_mint_lock(tid):` waits forever. It is also
+      ON THE LOOP (`session_key` is `async def`), so one wedged owner stalls
+      every route on this server. Measured as a 20m-per-shard CI hang
+      (2026-10-19) that reddened `python-ci-gate`.
+    * UNINTERRUPTIBLE. Bounding the wait is not enough if the waiter cannot be
+      torn down: `await asyncio.to_thread(lock.acquire, ...)` looks like the
+      fix (and is how `_restore_trash_graph` waits for its own lock) but a
+      worker thread cannot be cancelled — on a client disconnect mid-wait the
+      orphaned thread ACQUIRES the lock after the coroutine is gone and nothing
+      ever releases it. That is the same permanent wedge, now reachable from
+      production. (Verified by probe against a real `threading.Lock`: after
+      cancel + holder release, `lock.locked()` is True forever.)
+
+    So the wait is a NON-BLOCKING poll: the only await happens BEFORE ownership
+    is taken, so a cancellation there simply unwinds having never held the lock,
+    and no thread is parked (the default executor is shared with ~80 other call
+    sites and the per-request auth path — parking waiters on it starves them).
+    The uncontended path takes the lock on the first try: no await, no thread.
+
+    503 rather than mint-without-the-lock: the lock protects a cap COUNT +
+    INSERT, so proceeding unbounded would overshoot `max_api_keys` (the #1855
+    invariant). Refusing is the fail-closed direction.
+    """
+    lock = _org_mint_lock(org_id)
+    if not lock.acquire(blocking=False):
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _ORG_MINT_LOCK_TIMEOUT_S
+        while not lock.acquire(blocking=False):
+            if loop.time() >= deadline:
+                # A wedge is otherwise SILENT: every later mint for this org
+                # just returns 503. One line is the only local evidence that
+                # the process needs a restart. No user data, just the org id.
+                _logger.warning(
+                    "session-key mint lock for org %s held past %.1fs — "
+                    "refusing the mint (the owner is wedged; retry after a "
+                    "restart if this persists)",
+                    org_id, _ORG_MINT_LOCK_TIMEOUT_S)
+                # `Retry-After` because this 503 is "busy", not an outage — the
+                # distinction #3284 makes for the session-auth 503 on this route
+                # (the header is in CORS `expose_headers`, so a browser can read
+                # it). 5s, not 1s: the reachable causes are a wedged owner or a
+                # foreign thread, so a rapid retry only re-polls.
+                raise HTTPException(
+                    status_code=503,
+                    headers={"Retry-After": "5"},
+                    detail=_ORG_MINT_LOCK_MESSAGE,
+                ) from None
+            await asyncio.sleep(_ORG_MINT_LOCK_POLL_S)
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -26933,6 +27243,10 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
     RESOLVED org — body org_id when multi-membership, else
     memberships[0] — in BOTH auth lanes, see the gates below); BOOTSTRAP
     (24h ephemeral) stays member-open per product posture.
+
+    503 + ``Retry-After`` when the per-team mint lock is held past its bound
+    (``_org_mint_lock_bounded``) — RETRYABLE and nothing was minted, distinct
+    from the session-auth 503 that means the control plane is unavailable.
     """
     import uuid as _uuid
     from datetime import datetime, timedelta
@@ -27034,7 +27348,7 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
     if replace_key_id is not None:
         replace_target = await _resolve_replace_target(tid, replace_key_id, user_id)
 
-    with _org_mint_lock(tid):
+    async with _org_mint_lock_bounded(tid):
 
         if purpose == "bootstrap":
             active_boot = reg.query(
@@ -27422,7 +27736,7 @@ async def _session_key_supabase(body: dict, request: Request, user: dict,
     # when a rotation happened; None otherwise.
     rotated_key_prefix = None
 
-    with _org_mint_lock(tid):
+    async with _org_mint_lock_bounded(tid):
         # #1879: the ENTIRE critical section (bootstrap 3-active check / cap
         # count -> oldest-OTHER revoke -> fail-closed re-check -> 3-tier
         # rotation -> fail-closed re-check -> INSERT) runs in ONE Postgres
@@ -27552,6 +27866,11 @@ async def create_context_subscription(
         a loopback/private/link-local/metadata host (SSRF gate,
         ``security.validate_webhook_url``), an unknown event type (the same
         registry ``events_poll`` validates against), or the per-graph cap.
+      * 500 when the §17.1 write guard REFUSES the store's write — the
+        projection is journal-backed and the declaration is missing. That is an
+        operator/deployment defect, not the caller's: retrying will not help.
+        (It is deliberately NOT the 503 below: both are ``RuntimeError``
+        subclasses, so the specific arm must come first — #9233.)
       * 503 when ``TORTOISE_ENCRYPTION_KEY`` is unset — the signing secret is a
         long-lived credential and is never stored in the clear (``crypto``
         fails loudly rather than downgrade).
@@ -27580,6 +27899,17 @@ async def create_context_subscription(
         return await asyncio.to_thread(_create)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
+    except DirectCacheWriteRefused as e:
+        # §17.1's third door refused the store's own write (#9233). This is NOT
+        # the encryption-key failure below (both are RuntimeError subclasses,
+        # which is why this arm must come first): the operator needs §17.1, not
+        # a crypto knob.
+        raise HTTPException(
+            status_code=500,
+            detail="webhook subscription could not be recorded: the projection "
+                   "refused a cache write (§17.1 — the cache is derived from "
+                   "the journal)",
+        ) from e
     except RuntimeError as e:
         # TORTOISE_ENCRYPTION_KEY unset/malformed (crypto fail-loud contract).
         raise HTTPException(

@@ -155,4 +155,4 @@ The plan's `DE2E-N` headers copy these cells (`06-plan.md` §7) and the same mod
 | 16 wizard shrink | hosted-e2e + manual | 5 human steps; Organization copy; chooser archived; legacy wizard archived-not-deleted |
 | 17 cross-W journey | hosted-e2e + walk-through | full journey one sitting; completion on aha; friction test passes; A0 gate scheduled; fork-aware gates per type (self/build/compact) |
 
-> **Consumed by:** epic plan (04-plan.md) + every child issue's verification checklist (epic-decompose).
+> **Consumed by:** epic plan (06-plan.md) + every child issue's verification checklist (epic-decompose).
