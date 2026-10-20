@@ -1,50 +1,30 @@
 {
   "candidate_flakes": [
     {
-      "failed_at": "2026-10-20T18:40:00Z",
-      "passed_at": "2026-10-20T18:40:00Z",
-      "run_id": "39467226356",
-      "test": "tests/test_entry_point_python_guard.py::test_no_doc_or_usage_advertises_the_form_the_guard_refuses"
-    },
-    {
-      "failed_at": "2026-10-20T18:40:00Z",
-      "passed_at": "2026-10-20T18:40:00Z",
-      "run_id": "39467226356",
-      "test": "tests/test_markers.py::test_namespace_literals_guard_passing_or_routed"
-    },
-    {
-      "failed_at": "2026-10-20T18:40:00Z",
-      "passed_at": "2026-10-20T18:40:00Z",
-      "run_id": "39467226356",
-      "test": "tests/test_pytest_attribution.py::test_killed_leg_names_the_test_it_was_running[tests/test_session_key_http.py::TestSessionKeyMintConcurrency::test_registry_mint_blocks_while_team_lock_held"
-    },
-    {
-      "failed_at": "2026-10-20T18:40:00Z",
-      "passed_at": "2026-10-20T18:40:00Z",
-      "run_id": "39467226356",
-      "test": "tests/test_uri_env_mutations_declared.py::test_uri_env_mutations_declared"
-    },
-    {
       "failed_at": "2026-10-20T14:39:07Z",
       "passed_at": "2026-10-20T18:40:00Z",
+      "passed_run_id": "39467226356",
       "run_id": "39191149586",
       "test": "tests/test_7925_route_parity.py::test_both_routes_produce_the_same_confidence[IMPL]"
     },
     {
       "failed_at": "2026-10-20T14:39:07Z",
       "passed_at": "2026-10-20T18:40:00Z",
+      "passed_run_id": "39467226356",
       "run_id": "39191149586",
       "test": "tests/test_7925_route_parity.py::test_both_routes_produce_the_same_confidence[NAND]"
     },
     {
       "failed_at": "2026-10-20T14:39:07Z",
       "passed_at": "2026-10-20T18:40:00Z",
+      "passed_run_id": "39467226356",
       "run_id": "39191149586",
       "test": "tests/test_ci_timing.py::test_refresh_durations_on_the_real_manifest_of_record"
     },
     {
       "failed_at": "2026-10-20T14:39:07Z",
       "passed_at": "2026-10-20T18:40:00Z",
+      "passed_run_id": "39467226356",
       "run_id": "39191149586",
       "test": "tests/test_oauth_consent_bridge.py::test_the_spec_cites_live_hosted_api_sites"
     }

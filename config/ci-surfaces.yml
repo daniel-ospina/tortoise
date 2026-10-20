@@ -7378,7 +7378,7 @@ durations:
   # `# unmeasured` so `render_refreshed_manifest` drops it on that first sweep
   # instead of leaving a stale local-basis note attached to a CI value.
   test_ci_selection_changed_files_9109.py: 2.0  # unmeasured — new in #9109: a file added by a PR has no junit measurement, so it carries the flat default (#3419/#2788 rule) until the first post-merge sweep. Do NOT substitute a local timing here — the weight is a SHARD-LAYOUT input
-  test_4521_revise_point_embedding.py: 1.6  # ci-timing top-15 2026-10-20 (run 39467226356): measured in that run — 1 test, 1.64 s total (max 1.64 s). A CI measurement, not a local reading: the row was added by this refresh because the file had none, and the run the artifact samples measured it. Not a floor rescue — this file is a `carve_out:` member, so it is outside the fast pool the coverage floor is computed over (integrity rc 0 with or without the row).
+  test_4521_revise_point_embedding.py: 1.6  # ci-timing top-15 2026-10-20 (run 39467226356): measured in that run — 1 test, 1.64 s total (max 1.64 s). A CI measurement, not a local reading: the row was added because the file had none. Not a floor rescue — this file is a `carve_out:` member, so it is outside the fast pool the coverage floor is computed over (integrity rc 0 with or without the row).
 on_demand:
   - eval/retrieval/test_integration.py
   - test_perf_lane_volunteer_context.py

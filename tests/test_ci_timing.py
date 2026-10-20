@@ -1765,6 +1765,33 @@ def test_a_parametrised_file_has_no_denominator(tmp_path: Path) -> None:
     assert counts == {"test_plain.py": 2}
 
 
+def test_a_flake_pair_is_ordered_by_when_the_samples_were_taken() -> None:
+    """`history` is insertion-ordered; the pair must be ordered by CAPTURE time instead.
+
+    One refresh can append a sample while an older run is re-sampled beside it, so
+    `history[i + 1]` can be the NEWER run. Comparing positionally then published a test as
+    "passing again" at an instant that precedes the failure it supposedly recovered from —
+    measured: run 39467226356 (created 2026-10-20T17:34:10Z) "passing" run 39191149586's
+    2026-10-19T02:41:31Z failure (#9134 review, P2). A pair that shares an instant cannot be
+    ordered at all, so it is skipped rather than guessed.
+    """
+    older = {"run_id": "1", "created_at": "2026-10-19T02:41:31Z",
+             "sample_time": "2026-10-20T18:40:00Z", "failed_tests": ["tests/t.py::test_x"]}
+    newer = {"run_id": "2", "created_at": "2026-10-20T17:34:10Z",
+             "sample_time": "2026-10-20T18:40:00Z", "failed_tests": []}
+    # The OLDER run is FIRST in the list — the inversion the shipped table exhibited.
+    flakes = ci_timing.candidate_flakes([older, newer])
+
+    assert flakes == []  # same instant: nothing can be ordered, so nothing is claimed
+
+    newer_instant = dict(newer, sample_time="2026-10-20T18:41:00Z")
+    flakes = ci_timing.candidate_flakes([older, newer_instant])
+
+    assert len(flakes) == 1
+    assert flakes[0]["failed_at"] == "2026-10-20T18:40:00Z"
+    assert flakes[0]["passed_at"] == "2026-10-20T18:41:00Z"
+
+
 def test_a_negated_guard_skips_the_DEAD_side(tmp_path: Path) -> None:
     """`if not TYPE_CHECKING:` runs its body — so the `else:` is the dead side.
 

@@ -659,16 +659,12 @@ Second-granularity timestamps: sub-10s steps read 0s — do not alarm on those.
 > sample and is absent from the next sample's failed list is a *candidate flake*.
 > Per-test rerun-based flake rate becomes exact once the retry protocol lands (#1477).
 
-| Test | Failed (run) | Passed again (sample) |
+| Test | Failed (run) | Passed again (run) |
 |---|---|---|
-| `tests/test_entry_point_python_guard.py::test_no_doc_or_usage_advertises_the_form_the_guard_refuses` | `39467226356` | 2026-10-20T18:40:00Z |
-| `tests/test_markers.py::test_namespace_literals_guard_passing_or_routed` | `39467226356` | 2026-10-20T18:40:00Z |
-| `tests/test_pytest_attribution.py::test_killed_leg_names_the_test_it_was_running[tests/test_session_key_http.py::TestSessionKeyMintConcurrency::test_registry_mint_blocks_while_team_lock_held` | `39467226356` | 2026-10-20T18:40:00Z |
-| `tests/test_uri_env_mutations_declared.py::test_uri_env_mutations_declared` | `39467226356` | 2026-10-20T18:40:00Z |
-| `tests/test_7925_route_parity.py::test_both_routes_produce_the_same_confidence[IMPL]` | `39191149586` | 2026-10-20T18:40:00Z |
-| `tests/test_7925_route_parity.py::test_both_routes_produce_the_same_confidence[NAND]` | `39191149586` | 2026-10-20T18:40:00Z |
-| `tests/test_ci_timing.py::test_refresh_durations_on_the_real_manifest_of_record` | `39191149586` | 2026-10-20T18:40:00Z |
-| `tests/test_oauth_consent_bridge.py::test_the_spec_cites_live_hosted_api_sites` | `39191149586` | 2026-10-20T18:40:00Z |
+| `tests/test_7925_route_parity.py::test_both_routes_produce_the_same_confidence[IMPL]` | `39191149586` | 2026-10-20T18:40:00Z (`39467226356`) |
+| `tests/test_7925_route_parity.py::test_both_routes_produce_the_same_confidence[NAND]` | `39191149586` | 2026-10-20T18:40:00Z (`39467226356`) |
+| `tests/test_ci_timing.py::test_refresh_durations_on_the_real_manifest_of_record` | `39191149586` | 2026-10-20T18:40:00Z (`39467226356`) |
+| `tests/test_oauth_consent_bridge.py::test_the_spec_cites_live_hosted_api_sites` | `39191149586` | 2026-10-20T18:40:00Z (`39467226356`) |
 
 ## History (bounded to last 52 samples)
 

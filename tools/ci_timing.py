@@ -2297,17 +2297,42 @@ def candidate_flakes(history: list[dict]) -> list[dict]:
     """Nodeid failed in an earlier sample, absent from the failed list of the
     next sample (i.e. it passed next time) → flake candidate. Checks up to the
     3 most recent consecutive sample pairs. Documented proxy — the retry
-    protocol will make this rerun-based."""
+    protocol will make this rerun-based.
+
+    ⛔ TWO SAMPLES ARE ORDERED BY WHEN THEY WERE TAKEN, never by their slot in the list.
+    `history` is insertion-ordered, and one refresh can append a sample while an older
+    run is re-sampled beside it, so `history[i + 1]` can be the NEWER run — the shipped
+    table then claimed a test "passed again" at an instant 21 h BEFORE the failure it
+    says it recovered from (measured: run 39467226356 created 2026-10-20T17:34:10Z
+    "passing" run 39191149586's 2026-10-19T02:41:31Z failure). A pair whose samples
+    share an instant cannot order them at all, so it is skipped rather than guessed:
+    a flake claim is a claim about time (#9134 review, P2).
+    """
+    def sampled_at(row: dict) -> tuple[str, str]:
+        return (str(row.get("created_at") or ""), str(row.get("sample_time") or ""))
+
     out: list[dict] = []
     for i in range(min(3, len(history) - 1)):
-        prev_failed = set(history[i + 1].get("failed_tests", []))
-        cur_failed = set(history[i].get("failed_tests", []))
+        newer, older = history[i], history[i + 1]
+        if sampled_at(older) > sampled_at(newer):
+            newer, older = older, newer
+        if newer.get("sample_time") == older.get("sample_time"):
+            # Two samples stamped with ONE instant: the transition cannot be dated, so the
+            # claim "it failed then, it passed after" would name the same moment twice.
+            continue
+        prev_failed = set(older.get("failed_tests", []))
+        cur_failed = set(newer.get("failed_tests", []))
         for nodeid in sorted(prev_failed - cur_failed):
             out.append({
                 "test": nodeid,
-                "failed_at": history[i + 1].get("sample_time"),
-                "passed_at": history[i].get("sample_time"),
-                "run_id": history[i + 1].get("run_id"),
+                "failed_at": older.get("sample_time"),
+                "passed_at": newer.get("sample_time"),
+                "run_id": older.get("run_id"),
+                # ⛔ The PASS has its own run, and it is usually a different one: two
+                # samples can share a `sample_time`, so naming only the failing run left
+                # the table saying "passed again" at an instant at which the run it DID
+                # name is recorded failing (#9134 review, P2).
+                "passed_run_id": newer.get("run_id"),
             })
     return out
 
@@ -2414,10 +2439,13 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
         # never rendered; the path is only reachable once two consecutive
         # committed samples exist, which is why it survived (#6092 review round
         # 8, found because the round-8 history tests reach it).
-        lines.append("| Test | Failed (run) | Passed again (sample) |")
+        lines.append("| Test | Failed (run) | Passed again (run) |")
         lines.append("|---|---|---|")
         for f in flakes:
-            lines.append(f"| `{f['test']}` | `{f['run_id']}` | {f['passed_at']} |")
+            passed_run = f.get("passed_run_id")
+            cell = (f"{f['passed_at']} (`{passed_run}`)" if passed_run
+                    else f"{f['passed_at']}")
+            lines.append(f"| `{f['test']}` | `{f['run_id']}` | {cell} |")
     else:
         # Asterisk, not underscore: MD049 (`consistent`) keys on the document's
         # FIRST emphasis, and the `*candidate flake*` blockquote above it is
