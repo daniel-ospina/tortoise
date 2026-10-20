@@ -1661,11 +1661,15 @@ def test_legacy_sweep_reclaims_on_live_server(uri_env, monkeypatch):
 # journals already consumed. The fix binds each journal to the instance it was
 # written against; a sweep for another instance must SKIP it, not consume it.
 
-def test_uri_instance_key_binds_the_port_and_folds_localhost():
+def test_uri_instance_key_binds_the_port_and_folds_localhost(monkeypatch):
     """The binding key must name ONE instance per spelling: a portless loopback
     URI resolves to 16379 (mirroring `from_uri`), and `localhost` folds onto
     `127.0.0.1` — otherwise the fleet's two spellings of the same docker lane
     read as a mismatch and every journal is stranded."""
+    # The instance key folds a non-default `DOCKER_HOST` in, so a
+    # contributor on Docker Desktop/colima/rind would otherwise get a red
+    # here for a correct implementation (instrument false positive).
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
     from tests._embedded import _uri_instance_key
     assert _uri_instance_key("docker://:falkordb@localhost:6379/g") == "127.0.0.1:6379"
     assert _uri_instance_key("docker://:falkordb@127.0.0.1:6379/g") == "127.0.0.1:6379"
@@ -1684,6 +1688,10 @@ def test_stale_sweep_never_consumes_a_journal_bound_to_another_instance(
     the second assertion fails: the journal is consumed while its graph is
     still live somewhere else, which is precisely how 2,331 graphs became
     permanently unattributable."""
+    # The instance key folds a non-default `DOCKER_HOST` in, so a
+    # contributor on Docker Desktop/colima/rind would otherwise get a red
+    # here for a correct implementation (instrument false positive).
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
     import tortoise.embedded_reaper as er
     from tests._embedded import (
         JOURNAL_INSTANCE_SUFFIX,
@@ -1733,7 +1741,8 @@ def test_stale_sweep_never_consumes_a_journal_bound_to_another_instance(
         journal.name + JOURNAL_INSTANCE_SUFFIX).exists()
 
 
-def test_binding_creates_the_coordination_dir_a_fresh_host_lacks(tmp_path):
+def test_binding_creates_the_coordination_dir_a_fresh_host_lacks(
+        monkeypatch, tmp_path):
     """_bind_journal_instance runs at conftest IMPORT, and on a fresh host
     nothing has created ACTIVE_SUITES_DIR yet — the journal itself is created
     later, by the append seam, which makes the dir for this same reason. Without
@@ -1741,6 +1750,10 @@ def test_binding_creates_the_coordination_dir_a_fresh_host_lacks(tmp_path):
     most need one (a first session on a host, a per-job CI temp root, the #3752
     redirect), restoring the defect this PR exists to fix with no signal.
     Mutation: drop the `os.makedirs` and this returns False."""
+    # The instance key folds a non-default `DOCKER_HOST` in, so a
+    # contributor on Docker Desktop/colima/rind would otherwise get a red
+    # here for a correct implementation (instrument false positive).
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
     from tests._embedded import JOURNAL_INSTANCE_SUFFIX, _bind_journal_instance, _journal_instance
     journal = tmp_path / "fresh" / "nested" / "abcdef123456.graphs.jsonl"
     assert _bind_journal_instance(
@@ -1788,13 +1801,18 @@ def test_the_sweep_census_does_not_call_a_SKIPPED_journal_dropped():
     assert [r["journal"] for r in elsewhere] == ["b.graphs.jsonl"], elsewhere
 
 
-def test_the_instance_sidecar_round_trips_what_conftest_writes(tmp_path):
+def test_the_instance_sidecar_round_trips_what_conftest_writes(
+        monkeypatch, tmp_path):
     """Pins the WRITE side the conftest import-time block performs, without
     re-importing conftest (which would re-roll the session nonce): the file it
     writes must be exactly what `_journal_instance` reads back, and
     `_remove_journal_file` must take the sidecar with the journal. Mutation:
     drop the sidecar from `_remove_journal_file` and the last assertion fails;
     write anything but the plain key and the first one does."""
+    # The instance key folds a non-default `DOCKER_HOST` in, so a
+    # contributor on Docker Desktop/colima/rind would otherwise get a red
+    # here for a correct implementation (instrument false positive).
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
     from tests._embedded import (
         JOURNAL_INSTANCE_SUFFIX,
         _bind_journal_instance,
@@ -1825,6 +1843,10 @@ def test_stale_sweep_skips_a_bound_journal_when_the_target_is_UNRESOLVABLE(
     sweeping that instance. Mutation: re-add `and target is not None` to the
     gate and this test fails, because the journal is then eaten.
     """
+    # The instance key folds a non-default `DOCKER_HOST` in, so a
+    # contributor on Docker Desktop/colima/rind would otherwise get a red
+    # here for a correct implementation (instrument false positive).
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
     import tortoise.embedded_reaper as er
     from tests._embedded import JOURNAL_INSTANCE_SUFFIX, _stale_sweep
     adir = tmp_path / "suites"
@@ -1857,6 +1879,10 @@ def test_stale_sweep_SKIPS_a_journal_whose_sidecar_is_UNREADABLE(
     remove, re-entered through a corrupt sidecar. Mutation: fold the empty case
     into `None` (`return key or None`) and this fails.
     """
+    # The instance key folds a non-default `DOCKER_HOST` in, so a
+    # contributor on Docker Desktop/colima/rind would otherwise get a red
+    # here for a correct implementation (instrument false positive).
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
     import tortoise.embedded_reaper as er
     from tests._embedded import JOURNAL_INSTANCE_SUFFIX, _stale_sweep
     adir = tmp_path / "suites"
@@ -1974,12 +2000,30 @@ def test_the_marker_age_prune_never_unlinks_an_OWNERSHIP_RECORD(
     marker = adir / "4242-feed0dead"
     marker.write_text("pid=1\nstart=1.0\n")
     os.utime(marker, (old, old))
+    # A marker whose pid is STILL LIVE but whose file is a day old. This is the
+    # #1642 recurrence the prune exists for: a recycled pid would otherwise pin
+    # `suites_active=True` and silently disable live-orphan kills. Asserting the
+    # file is gone is not enough — the OUTCOME (it is not a live token) is what
+    # the sweep consumes, and only that survives a rewrite that keeps the file
+    # and stops returning tokens for it.
+    # `start=` must be the REAL start time: `_pid_identity_matches` compares it,
+    # so a fabricated value makes the marker stale for a different reason and the
+    # outcome assertion below can then never fail (measured: with `start=1.0`
+    # and the whole prune arm deleted, `active_suite_markers()` was still `[]`).
+    recycled = adir / f"{os.getpid()}-feed0live"
+    recycled.write_text(
+        f"pid={os.getpid()}\nstart={er._process_start_time(os.getpid())}\n")
+    os.utime(recycled, (old, old))
     monkeypatch.setattr(er, "ACTIVE_SUITES_DIR", str(adir))
-    er.active_suite_markers()          # the prune runs here
+    tokens = {m["token"] for m in er.active_suite_markers()}  # the prune runs here
     left = sorted(os.listdir(adir))
+    # Outcome FIRST: with the prune gone, the aged-but-live marker is returned as
+    # a token and this is the assertion that fires (the file's mere presence is
+    # the weaker signal, and asserting it first would mask this one).
+    assert not [t for t in tokens if "feed0" in t], tokens
+    assert "4242-feed0dead" not in left, left   # the marker itself IS pruned
     assert "feed0dead.graphs.jsonl" in left, left
     assert "feed0dead.graphs.jsonl.instance" in left, left
-    assert "4242-feed0dead" not in left, left   # the marker itself IS pruned
 
 
 def test_instance_key_separates_two_DAEMONS_on_the_same_host_and_port(
@@ -2030,7 +2074,7 @@ def test_conftest_BINDS_the_journal_at_import(tmp_path):
     out = subprocess.run([sys.executable, "-c", code], cwd=root,
                          capture_output=True, text=True,
                          env={k: v for k, v in os.environ.items()
-                              if k != "TORTOISE_DB_URI"})
+                              if k not in ("TORTOISE_DB_URI", "DOCKER_HOST")})
     assert out.returncode == 0, (out.stdout, out.stderr)
     d = out.stdout.strip().splitlines()[-1]
     bound = [f for f in os.listdir(d) if f.endswith(".graphs.jsonl.instance")]
