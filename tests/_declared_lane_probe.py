@@ -40,15 +40,33 @@ Two rules keep that honest, both pinned by the adopting suites:
   refusal to the owner would turn the instrument into a filter that hides real
   §17.1 violations.
 * a suite that filters must prove its filter is not vacuous — that a foreign
-  projection's statements really were recorded, and really were excluded.
+  projection's statements really were recorded, and really were excluded;
+* and a CENSUS suite must still assert that no foreign handle wrote UNDECLARED
+  (`assert_no_foreign_undeclared()` below). Attributing correctly answers "whose
+  statement is this?", never "was it declared?" — a peer's write with no
+  declaration in flight is nobody's claim to check and everybody's violation.
 
-REMAINING ADOPTERS (named, not silently left): `test_9079_ep_epoch_declared.py`
-and `test_9079_event_writers_journal.py` install their own class-wide recorders.
-They are not adoption targets in this change because neither asserts an
-attribution over a fixture it does not own in the way the two adopters do — the
-event-writers probe instead excludes index DDL by shape, which this module's
-docstring argues against — and widening this change to them would mean
-re-deriving four suites' pins rather than fixing one defect.
+ADOPTED: the two suites above, plus `tests/test_9079_edge_lane_declared.py`,
+which carried a verbatim copy of the pre-fix recorder and the same
+whole-record-set attribution assertion (its own peer-DDL exposure).
+
+REMAINING ADOPTERS (named, not silently left):
+`test_9079_ep_epoch_declared.py`, `test_9079_event_writers_journal.py` and
+`test_9210_rebuild_declares_restore.py` install their own class-wide recorders.
+They are not adoption targets in this change:
+
+* `test_9079_ep_epoch_declared.py` filters its records to statements naming
+  `EpMeta` before asserting, and `test_9079_event_writers_journal.py` excludes
+  index DDL by shape (which this module argues against) — neither makes the
+  adopters' "every recorded statement carried OUR lane" claim, so neither
+  misattributes a peer projection's statement. Widening them means re-deriving
+  their pins, not fixing a defect.
+* `test_9210_rebuild_declares_restore.py` DOES record class-wide on the raw
+  handle, but every assertion over that record is keyed to a restore LEG
+  fragment or to the `SET <x> += $props` restore SHAPE. A peer projection's
+  `_ensure_indexes` burst — the #9256 traffic — matches neither, so it cannot be
+  misattributed there; adopting `LaneProbe` would re-derive that suite's leg
+  pins for no defect.
 """
 from __future__ import annotations
 
@@ -121,7 +139,17 @@ class LaneProbe:
 
         def instrumented(handle, cypher, params=None, timeout=None):
             text = " ".join((cypher or "").split())
-            writes = _statement_writes(text)
+            # ⛔ Classify the RAW statement, never the normalized one. The
+            # product guard classifies the raw argument
+            # (`_GuardedGraph._refuse_unauthorized_cache_write(statement)`), and
+            # `_statement_writes` strips `//` line comments with `//[^\n]*`.
+            # Normalizing FIRST turns the newline into a space, so a comment
+            # swallows the rest of the statement — `MATCH (n) // note\nSET
+            # n.x = 1` classifies as a READ, drops out of every `if w` census
+            # filter and is never refused: fail-open in the one direction this
+            # instrument exists for. `text` stays normalized — it is the
+            # RECORD, not the classification.
+            writes = _statement_writes(cypher or "")
             record = Recorded(
                 text=text,
                 scope=_CACHE_WRITE_AUTHORIZED.get(),
@@ -179,9 +207,35 @@ class LaneProbe:
     def foreign_undeclared(self) -> list[Recorded]:
         """Foreign mutating statements with no declaration in flight.
 
-        NOT an assertion target for an adopting suite: this lane cannot judge
-        another lane's declaration, and asserting here is the #9256
-        misattribution in a new spelling. It is exposed so a failure message can
-        distinguish "this lane wrote undeclared" from "a peer lane did".
+        This IS an assertion target for an adopting suite — see
+        `assert_no_foreign_undeclared()` below. It is not a place to judge
+        another lane's declaration NAME: every record here has `scope is None`,
+        i.e. no declaration at all, so there is no lane whose claim could be
+        checked — only a §17.1 violation to report. It also lets a failure
+        message distinguish "this lane wrote undeclared" from "a peer lane
+        did".
         """
         return [r for r in self.foreign_records() if r.writes and r.scope is None]
+
+
+def assert_no_foreign_undeclared(probe: LaneProbe) -> None:
+    """The census suite's OTHER half: no PEER projection wrote undeclared.
+
+    Attribution and blindness are two questions, and scoping `own()` answers
+    only the first (#9256). A mutating statement with `scope is None` is not
+    "another lane's declaration to judge" — there is NO declaration in flight,
+    so it is a violation on whichever handle issued it, and a census test that
+    filters it away goes green on exactly the class #9256 asked it to keep
+    loud. The wild peer (`hosted_api._acquire_probe_sdk`) is PRODUCT code, so
+    this is not a test-only concern.
+
+    It cannot reintroduce the false red: that peer's `_ensure_indexes` burst is
+    DECLARED (`schema-ddl`), so it stays out of `foreign_undeclared()`.
+    """
+    offenders = probe.foreign_undeclared()
+    assert not offenders, (
+        "a PEER projection wrote through the handle with NO §17.1 declaration "
+        "in flight — not this lane's declaration to judge, but still a "
+        "violation (scope is None on every record here): "
+        f"{[(r.text[:120], r.scope) for r in offenders]}"
+    )

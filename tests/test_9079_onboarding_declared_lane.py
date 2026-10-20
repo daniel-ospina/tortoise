@@ -59,7 +59,10 @@ from pathlib import Path
 
 import pytest
 
-from tests._declared_lane_probe import LaneProbe
+from tests._declared_lane_probe import (
+    LaneProbe,
+    assert_no_foreign_undeclared,
+)
 from tortoise.projection import (
     DirectCacheWriteRefused,
     _GuardedGraph,
@@ -311,6 +314,11 @@ def test_every_onboarding_write_declares_its_lane(sdk_with_journal, monkeypatch)
         "the lane must declare ONE name, so the guard block and the refusal "
         f"message can point at it; saw {sorted({r for _c, r in writes})}"
     )
+    # ⛔ Attribution is not a blindfold (#9256): scoping this census to THIS
+    # lane must not silence a PEER projection's UNDECLARED write — that is a
+    # §17.1 violation on product code (`hosted_api._acquire_probe_sdk`), not
+    # another lane's declaration to judge.
+    assert_no_foreign_undeclared(probe)
 
 
 def test_every_declared_statement_writes_only_declared_labels(
@@ -356,6 +364,9 @@ def test_every_declared_statement_writes_only_declared_labels(
         "declared set WITH its argument, or stop routing it through this "
         "funnel."
     )
+    # ⛔ The label check above reads `probe.own()` (#9256); this keeps a PEER
+    # projection's undeclared write from being filtered away with it.
+    assert_no_foreign_undeclared(probe)
 
 
 def test_the_subject_anchor_mint_is_not_widened(sdk_with_journal, monkeypatch):

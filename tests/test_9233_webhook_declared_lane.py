@@ -51,7 +51,10 @@ from pathlib import Path
 import pytest
 from cryptography.fernet import Fernet
 
-from tests._declared_lane_probe import LaneProbe
+from tests._declared_lane_probe import (
+    LaneProbe,
+    assert_no_foreign_undeclared,
+)
 from tortoise.projection import (
     DirectCacheWriteRefused,
     _statement_writes,
@@ -273,6 +276,11 @@ def test_every_webhook_write_declares_its_lane(sdk_with_journal, monkeypatch):
         "the lane must declare ONE name, so the guard and the refusal message "
         f"point at it; saw {sorted({r for _c, r in writes})}"
     )
+    # ⛔ Attribution is not a blindfold (#9256): scoping this census to THIS
+    # lane must not silence a PEER projection's UNDECLARED write — that is a
+    # §17.1 violation on product code (`hosted_api._acquire_probe_sdk`), not
+    # another lane's declaration to judge.
+    assert_no_foreign_undeclared(probe)
 
 
 def test_the_lane_name_is_pinned():
@@ -689,6 +697,10 @@ def test_every_declared_statement_writes_only_declared_labels(
     assert not offenders, (
         "the webhook lane declares labels it does not own; either narrow the "
         f"declaration or name the class in it: {offenders}")
+    # ⛔ The label check above is scoped to this lane by `probe.own()` (#9256);
+    # this keeps a PEER projection's undeclared write from being filtered away
+    # with it.
+    assert_no_foreign_undeclared(probe)
 
 
 # ── the census: nothing writes outside the funnel ─────────────────────────

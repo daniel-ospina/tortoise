@@ -27,13 +27,23 @@ buy:
   write from a peer projection is still refused loudly — scoping the refusal to
   the owner would turn the instrument into the blindfold #9256 is about;
 * a probe constructed with no owner is refused outright, so the defect cannot be
-  reintroduced by omitting the argument.
+  reintroduced by omitting the argument;
+* the CENSUS half survives the attribution: `assert_no_foreign_undeclared()`
+  stays green on the peer's DECLARED `_ensure_indexes` burst (the traffic that
+  produced the false red) and still reds on a peer's UNDECLARED write, so
+  scoping `own()` cannot filter a real §17.1 violation into silence;
+* the write CLASSIFIER reads the RAW statement, as the product guard does — a
+  `//` line comment must not swallow the write after it once the text is
+  whitespace-normalized for the record (fail-open in the armed door).
 """
 from __future__ import annotations
 
 import pytest
 
-from tests._declared_lane_probe import LaneProbe
+from tests._declared_lane_probe import (
+    LaneProbe,
+    assert_no_foreign_undeclared,
+)
 from tortoise.projection import DirectCacheWriteRefused
 from tortoise.sdk import TortoiseSDK
 
@@ -151,3 +161,71 @@ def test_a_probe_with_no_owner_is_refused():
     """
     with pytest.raises(ValueError, match="#9256"):
         LaneProbe(None)
+
+
+def test_the_census_helper_reds_on_a_foreign_undeclared_write_not_on_its_ddl(
+        two_journal_backed_sdks, monkeypatch):
+    """Attribution must not buy silence: the census half of #9256.
+
+    Scoping an assertion to `own()` answers "whose statement is this?" — never
+    "was it declared?". A peer projection's UNDECLARED write has no declaration
+    to attribute to anyone, so it is a §17.1 violation however the census is
+    scoped, and a suite that filters it away goes green on exactly the class
+    #9256 asked it to keep loud (the wild peer is product code).
+
+    MUTATION: delete `assert_no_foreign_undeclared()` from an adopting census
+    test and the peer's undeclared write below is recorded, excluded from
+    `own()`, and the suite passes.
+    """
+    owner_sdk, other_sdk = two_journal_backed_sdks
+    owner = owner_sdk._get_proj()
+    probe = LaneProbe(owner).install(monkeypatch, refuse=False)
+    other = other_sdk._get_proj()
+
+    # The peer's own `_ensure_indexes` burst is DECLARED (`schema-ddl`) — the
+    # traffic that produced the #9256 false red — so the census stays GREEN on
+    # it. A helper that reddened here would be the false red all over again.
+    assert probe.foreign(), (
+        "the peer contributed no statement, so the green half of this pin is "
+        "vacuous"
+    )
+    assert_no_foreign_undeclared(probe)
+
+    # ... and an undeclared write on the peer's handle must RED, not be
+    # filtered into silence by the attribution.
+    other.g.query("CREATE (x:PeerUndeclared9256 {id: 'x'})")
+    with pytest.raises(AssertionError, match=r"NO §17\.1 declaration"):
+        assert_no_foreign_undeclared(probe)
+
+
+def test_the_classifier_reads_the_raw_statement_not_the_normalized_one(
+        two_journal_backed_sdks, monkeypatch):
+    """A `//` comment must not swallow the write that follows it.
+
+    `_statement_writes` strips `//[^\\n]*`, and the product guard classifies the
+    RAW statement. Normalizing whitespace FIRST turns the newline into a space,
+    so the comment eats the rest of the statement: `SET` disappears, the record
+    says `writes=False`, the statement drops out of every `if w` census filter
+    AND is never refused by the armed door — fail-open in the one direction this
+    instrument exists for.
+
+    MUTATION: classify `text` (the normalized string) instead of `cypher` and
+    nothing is raised here.
+    """
+    owner_sdk, _other = two_journal_backed_sdks
+    owner = owner_sdk._get_proj()
+    probe = LaneProbe(owner).install(monkeypatch, refuse=True)
+
+    statement = "MATCH (n:Point) // a note\nSET n.commented9256 = true"
+    with pytest.raises(DirectCacheWriteRefused):
+        owner.g.query(statement)
+
+    record = probe.own_records()[-1]
+    assert record.writes is True, (
+        "the write after the `//` comment was classified as a READ, so it is "
+        "invisible to every census filter and to the armed door: "
+        f"{record.as_tuple()}"
+    )
+    assert "\n" not in record.text, (
+        f"the RECORD must stay whitespace-normalized: {record.text!r}"
+    )
