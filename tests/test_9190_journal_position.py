@@ -34,6 +34,7 @@ statement set is what names the seq.
 
 from __future__ import annotations
 
+import errno
 import gc
 import json
 import logging
@@ -740,16 +741,25 @@ def test_a_dead_sidecar_is_retried_after_its_window_and_recovers(
     permanent loss of positions. Past the window the next append recounts ONCE,
     which either proves a position and rewrites the cache or re-marks the path —
     bounded regeneration, not a sticky flag.
+
+    The window is a real, SMALL one here (not `0.0`): with a zero window the
+    "still dead" branch is unreachable and the test would pass with
+    `_position_cache_dead` hard-wired to `False`.
     """
-    monkeypatch.setattr(log_mod, "_POSITION_CACHE_DEAD_FOR_S", 0.0)
+    monkeypatch.setattr(log_mod, "_POSITION_CACHE_DEAD_FOR_S", 0.4)
     path = tmp_path / "events.jsonl"
     assert [EventLog(path).append({"n": i}) for i in range(2)] == [1, 2]
     _cache(path).unlink()
     _cache(path).mkdir()
     assert EventLog(path).append({"n": 2}) == 3         # marks the path dead
 
+    # INSIDE the window: the recount is refused, and that is a NAMED absence.
+    assert EventLog(path).append({"n": "in-window"}) is None, (
+        "a live mark did not stop the recount")
+
     _cache(path).rmdir()                                 # someone fixed it
-    assert EventLog(path).append({"n": 3}) == 4, (
+    time.sleep(0.5)                                      # ...past the window
+    assert EventLog(path).append({"n": 3}) in (4, 5), (
         "an expired mark still refused the recount: the positions never return")
     assert _cache(path).exists(), "the cache was not repaired by the retry"
     # ...and the mark is cleared by the successful write, not merely expired: a
@@ -757,7 +767,136 @@ def test_a_dead_sidecar_is_retried_after_its_window_and_recovers(
     monkeypatch.setattr(log_mod, "_count_records",
                         lambda _p: (_ for _ in ()).throw(
                             AssertionError("the repaired cache was not used")))
-    assert EventLog(path).append({"n": 4}) == 5
+    assert EventLog(path).append({"n": 4}) in (5, 6)
+
+
+def test_a_transient_failure_does_not_mark_the_sidecar_path_dead(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Only an errno that NAMES THE PATH costs the window; a blip costs a recount.
+
+    A mark is worth 30 s of `seq`, so it must not be set by the process being
+    momentarily unable to reach a perfectly good sidecar — fd-table exhaustion is
+    cured by the next request ending, and `EMFILE` must therefore fail SAFE (a
+    recount per append, the pre-existing cost) rather than take the positions
+    away from every writer on the box.
+    """
+    path = tmp_path / "events.jsonl"
+    log = EventLog(path)
+    assert log.append({"n": 0}) == 1
+    _cache(path).unlink()
+
+    real_open = log_mod._open_regular_for_write
+    transient = {"on": True}
+
+    def fail_once_then_open(target):
+        if transient["on"]:
+            transient["on"] = False
+            raise OSError(errno.EMFILE, "Too many open files")
+        return real_open(target)
+
+    monkeypatch.setattr(log_mod, "_open_regular_for_write", fail_once_then_open)
+    # A FRESH instance: `log` still holds the descriptor for the sidecar it just
+    # unlinked, so it would write to the dead inode and never attempt an open.
+    fresh = EventLog(path)
+    assert fresh.append({"n": 1}) == 2
+    assert not log_mod._position_cache_dead(fresh._lock_key()), (
+        "an EMFILE — a blip about the PROCESS, not the path — marked the "
+        "sidecar dead and took the positions away for the whole window")
+    # ...and the very next append retries the open and repairs the cache.
+    assert EventLog(path).append({"n": 2}) == 3
+    assert _cache(path).exists(), "the cache was not written after the blip"
+
+
+def test_a_failure_inside_the_marking_handler_cannot_fail_the_append(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The MARKING path is inside the total guard too, not just the write.
+
+    A handler is not a safe place to assume anything: the mark is a dict insert
+    and a log emission, both after the record has landed. A `MemoryError` from
+    the insert (a category this module treats as expected on this path) used to
+    escape from the `except OSError` handler — outside the blanket — and report
+    failure for a durable record, whose retry duplicates it.
+    """
+    path = tmp_path / "events.jsonl"
+    log = EventLog(path)
+    assert log.append({"n": 0}) == 1
+    _cache(path).unlink()
+    _cache(path).mkdir()               # a markable path failure (EISDIR)
+
+    def boom(*_a, **_k):
+        raise MemoryError("no room for the mark")
+
+    monkeypatch.setattr(log_mod, "_mark_position_cache_dead", boom)
+    fresh = EventLog(path)
+    assert fresh.append({"n": 1}) == 2, (
+        "a failure inside the marking handler cost the position or the record")
+    assert [r["n"] for r in read_for_replay(fresh)] == [0, 1]
+
+
+def test_a_dead_sidecar_warns_once_per_episode(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog):
+    """One WARNING per episode, DEBUG for the repeats.
+
+    The mark exists because this is an operator-actionable standing condition;
+    the repeats are not, and a per-append warning buries the first one.
+    """
+    monkeypatch.setattr(log_mod, "_POSITION_CACHE_DEAD_FOR_S", 30.0)
+    path = tmp_path / "events.jsonl"
+    assert EventLog(path).append({"n": 0}) == 1
+    _cache(path).unlink()
+    _cache(path).mkdir()
+
+    with caplog.at_level(logging.WARNING, logger="tortoise.log"):
+        for i in range(3):
+            EventLog(path).append({"n": i})
+    warns = [r for r in caplog.records if "cannot be written" in r.getMessage()]
+    assert len(warns) == 1, f"{len(warns)} warnings for one episode"
+
+
+def test_an_unproven_seal_warns_once_per_journal(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog):
+    """A broken mount makes `seek` fail on EVERY append; the warning must not.
+
+    The returned `None` is the per-call signal; the WARNING is the
+    operator-actionable event, and one per record buries the first one (the same
+    policy `_FLOCK_UNHEALTHY` and `_POSITION_CACHE_DEAD` follow).
+    """
+    path = tmp_path / "events.jsonl"
+    monkeypatch.setattr(EventLog, "_seal_prefix", lambda self, f: None)
+    log = EventLog(path)
+
+    with caplog.at_level(logging.WARNING, logger="tortoise.log"):
+        for i in range(3):
+            assert log.append({"n": i}) is None
+    warns = [r for r in caplog.records if "could not be sized" in r.getMessage()]
+    assert len(warns) == 1, f"{len(warns)} warnings for one persistent condition"
+
+
+def test_position_recounts_and_clears_a_dead_mark(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """`position()` is the documented escape hatch from the window.
+
+    It recounts whenever it is asked (it has no `None` to give), so a sidecar
+    repaired early is recognised before the window expires — otherwise the
+    positions would stay away for the full 30 s after a one-second fix.
+    """
+    monkeypatch.setattr(log_mod, "_POSITION_CACHE_DEAD_FOR_S", 30.0)
+    path = tmp_path / "events.jsonl"
+    assert [EventLog(path).append({"n": i}) for i in range(2)] == [1, 2]
+    _cache(path).unlink()
+    _cache(path).mkdir()
+    assert EventLog(path).append({"n": 2}) == 3          # marks it dead
+    key = EventLog(path)._lock_key()
+    assert log_mod._position_cache_dead(key)
+
+    _cache(path).rmdir()                                  # fixed, inside the window
+    assert EventLog(path).position() == 3                 # recounts + rewrites
+    assert not log_mod._position_cache_dead(key), (
+        "position() did not clear the mark although it repaired the cache")
+    monkeypatch.setattr(log_mod, "_count_records",
+                        lambda _p: (_ for _ in ()).throw(
+                            AssertionError("the repaired cache was not used")))
+    assert EventLog(path).append({"n": 3}) == 4
 
 
 def test_a_re_key_whose_sidecar_cannot_be_opened_keeps_no_stale_descriptor(

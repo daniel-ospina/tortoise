@@ -607,6 +607,7 @@ def _reinit_append_locks_after_fork() -> None:
     _APPEND_LOCKS.clear()
     _FLOCK_UNHEALTHY.clear()
     _POSITION_CACHE_DEAD.clear()
+    _UNPROVEN_SEAL_REPORTED.clear()
     _APPEND_LOCKS_GUARD = threading.Lock()
 
 
@@ -854,6 +855,11 @@ _POSITION_VERSION = 1
 _POSITION_CACHE_DEAD_FOR_S = 30.0
 _POSITION_CACHE_DEAD: dict[str, float] = {}
 
+#: Journals whose unproven-seal state has already been reported in this process.
+#: A set, not a window: the condition is a property of the MOUNT, and repeating
+#: it while it persists is noise, while a restart re-reports it once.
+_UNPROVEN_SEAL_REPORTED: set[str] = set()
+
 
 def _position_cache_path(path: Path) -> Path:
     return path.with_name(path.name + POSITION_SUFFIX)
@@ -873,6 +879,27 @@ def _position_cache_dead(key: str) -> bool:
         return True
     _POSITION_CACHE_DEAD.pop(key, None)
     return False
+
+
+#: The errnos that make a sidecar PATH unusable — as opposed to this PROCESS
+#: being briefly unable to reach it.
+#:
+#: The distinction is load-bearing: a mark costs the window's worth of positions,
+#: so one transient ``EMFILE`` (fd-table exhaustion, cured by the next request
+#: ending) must not take 30 s of ``seq`` away. ``EMFILE``/``ENFILE``, ``ESTALE``,
+#: ``EIO`` and ``EBADF`` are therefore NOT markable: they cost a recount per
+#: append — the pre-existing cost — until the blip passes, which fails SAFE.
+#: ``ENOSPC``/``EDQUOT`` are markable because nothing frees space by itself, and
+#: ``ESPIPE``/``ENXIO`` because a FIFO at the path is a standing shape (the open
+#: fails with ENXIO when nobody is reading, the `pwrite` with ESPIPE when
+#: somebody is).
+_CACHE_PATH_ERRNOS = frozenset(
+    {errno.EACCES, errno.EPERM, errno.EISDIR, errno.ENOTDIR, errno.EROFS,
+     errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC), errno.ESPIPE,
+     errno.ENAMETOOLONG, errno.ELOOP,
+     # ENXIO: `O_WRONLY|O_NONBLOCK` on a FIFO nobody is reading. A FIFO at the
+     # cache path is a standing shape, and it is what the FIFO tests pin.
+     errno.ENXIO})
 
 
 def _mark_position_cache_dead(key: str, path: Path, exc: BaseException) -> None:
@@ -1251,12 +1278,20 @@ class EventLog:
                 # that (the bytes are gone into a line a replay refuses), which
                 # is exactly why it must be SAID rather than inferred from a
                 # later discrepancy.
-                logging.getLogger(__name__).warning(
-                    "EventLog %s: the journal's tail could not be sized, so the "
-                    "record just appended carries NO seal: if the previous "
-                    "writer was killed mid-record, this record is glued onto "
-                    "that fragment and the next replay will skip BOTH. No "
-                    "position is reported for this record.", self.path)
+                # Said ONCE per journal: a broken mount makes `seek` fail on
+                # every append, and a WARNING per record is the noise this file's
+                # other mechanisms (`_FLOCK_UNHEALTHY`, `_POSITION_CACHE_DEAD`)
+                # exist to avoid. The returned `None` is the per-call signal.
+                key = self._lock_key()
+                if key not in _UNPROVEN_SEAL_REPORTED:
+                    _UNPROVEN_SEAL_REPORTED.add(key)
+                    logging.getLogger(__name__).warning(
+                        "EventLog %s: the journal's tail could not be sized, so "
+                        "the record just appended carries NO seal: if the "
+                        "previous writer was killed mid-record, this record is "
+                        "glued onto that fragment and the next replay will skip "
+                        "BOTH. No position is reported for this record. "
+                        "(Reported once per journal.)", self.path)
             if position is not None and seal is None:
                 # The tail could not be examined, so "this record adds exactly
                 # one to the count" is unproven even though the write landed:
@@ -1312,9 +1347,11 @@ class EventLog:
         the syscalls raise ``OSError``, the payload build can raise
         ``RecursionError`` on a deeply nested record, and the descriptor's
         finalizer raises ``TypeError`` the day ``EventLog`` gains ``__slots__``
-        without ``__weakref__``. A cache that cannot be written costs a RECOUNT
-        next time and never a wrong number, so swallowing here cannot hide a
-        wrong count — only the missed optimization.
+        without ``__weakref__``. Swallowing here cannot hide a WRONG count: a
+        failure costs either a RECOUNT next time (an unclassifiable blip) or —
+        for an ``OSError`` whose errno names the PATH, see
+        ``_CACHE_PATH_ERRNOS`` — the positions for the retry window below, which
+        an operator is warned about once. Both are losses of the OPTIMIZATION.
 
         ONLY an ``OSError`` marks the path DEAD (``_POSITION_CACHE_DEAD``): that
         is the shape where the sidecar PATH is unusable — EACCES on the
@@ -1339,24 +1376,37 @@ class EventLog:
         # guard `_records_before` uses for the same allocation.
         with contextlib.suppress(*_COUNT_MAY_RAISE):
             self._position_memo = (os.fspath(self.path), size, mtime_ns, records)
-        try:
-            _write_position_cache(self._cache_fd(key), records, size, mtime_ns)
-        except OSError as exc:
-            # The sidecar PATH is unusable. Mark it, so the append path stops
-            # paying a recount it cannot amortise until the path is fixed.
-            _mark_position_cache_dead(key, self.path, exc)
-            logging.getLogger(__name__).debug(
-                "EventLog %s: position cache not written", self.path,
-                exc_info=True)
-        except Exception:                  # blanket ON PURPOSE — see the docstring
-            logging.getLogger(__name__).debug(
-                "EventLog %s: position cache not written", self.path,
-                exc_info=True)
-        else:
-            # A cache that just answered is not dead: clear the mark at once, so
-            # a repaired sidecar does not keep the positions away for a whole
-            # retry window (the mark's only other exit is expiry).
-            _POSITION_CACHE_DEAD.pop(key, None)
+        # EVERY branch below is inside this blanket, including the marking and
+        # the logging: a handler is not a safe place to assume anything, and this
+        # runs AFTER the record has landed. (A `MemoryError` from the mark's dict
+        # insert, or a raising log handler, used to escape from here and report a
+        # failure for a durable record — the retry then duplicates it.)
+        with contextlib.suppress(Exception):
+            try:
+                _write_position_cache(self._cache_fd(key), records, size,
+                                      mtime_ns)
+            except OSError as exc:
+                if exc.errno in _CACHE_PATH_ERRNOS:
+                    # The sidecar PATH is unusable. Mark it, so the append path
+                    # stops paying a recount it cannot amortise until it is fixed.
+                    _mark_position_cache_dead(key, self.path, exc)
+                logging.getLogger(__name__).debug(
+                    "EventLog %s: position cache not written", self.path,
+                    exc_info=True)
+            except Exception:
+                logging.getLogger(__name__).debug(
+                    "EventLog %s: position cache not written", self.path,
+                    exc_info=True)
+            else:
+                # A cache that just answered is not dead: clear the mark at once,
+                # so a repaired sidecar does not keep the positions away for a
+                # whole retry window (the mark's only other exit is expiry).
+                # KNOWN IMPRECISION, fail-safe by construction: a kept descriptor
+                # can still name an UNLINKED inode, so this clear can be evidence
+                # about a file the path no longer names. The worst it does is make
+                # the next memo-less append RECOUNT — the pre-existing cost — never
+                # a wrong number.
+                _POSITION_CACHE_DEAD.pop(key, None)
 
     def _cache_fd(self, key: str) -> int:
         """An open descriptor for the sidecar, kept for this instance.
