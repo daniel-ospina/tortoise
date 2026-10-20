@@ -25,9 +25,12 @@ statement raise `DirectCacheWriteRefused`. So:
   refused, not that the guard refuses).
 
 MUTATION (measured): delete the `with _replay_write_scope():` wrapper from
-`rebuild_from_record` and all four tests below red — T1 names the undeclared
-statements, T2/T4 raise on the fold, T3 observes the lane as `None`. That is
-exactly the pre-fix tree, so no test here is vacuous.
+`rebuild_from_record` and all four tests below red — T1 counts the undeclared
+statements (`MERGE (n:Meta …)` and `MERGE (n:Point …)`, one each), T2 observes
+the lane as `None` at the fold (it is the UNARMED one, so it reads the lane
+rather than a refusal), and T3/T4 raise `DirectCacheWriteRefused` on that same
+fold (both flip `_HANDLE_GUARD_ENFORCES` for real). That is exactly the pre-fix
+tree, so no test here is vacuous.
 
 WHAT IS *NOT* CLAIMED. This suite is about `rebuild_from_record` only: the
 event store's writes and `rebuild_all` are already declared (#9224), and this
