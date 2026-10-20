@@ -235,7 +235,8 @@ shape above looked frontier-proportional, but the frontier was never the anchor
 of the queries that regressed: each id-set hop that ran over an expanding
 traversal WITHOUT an anchor was **planned as a label scan of the traversal's
 other endpoint**, with `n.id IN $ids` applied per record afterwards. (Three
-`ep.py` id-set queries were already `Node By Index Scan` without a barrier —
+`ep.py` id-set queries **that traverse** were already `Node By Index Scan`
+without a barrier —
 they are named below.) Measured with `GRAPH.PROFILE` on a 23,353-node /
 160,000-edge fixture (falkordb-server 4.20.6), two-hop bridge at a 30-id
 frontier:
@@ -253,7 +254,8 @@ does the work differs per site** — that is why
 the invariant is the plan assertion, not a syntactic rule. Barriered and
 load-bearing (removing the barrier reddens the plan test): the seed
 neighbourhood, the plain-seed direct-edge expansion, the bridge hop, Batch 1,
-and all four of the operator selector's legs in `analyze.py` — the viability
+and all four of the operator selector's **barriered** legs in `analyze.py` —
+the viability
 query (`242.5 ms` -> `12.6 ms`) plus the incoming, backward and expansion legs
 (the last three measured unanchored on the same fixture,
 `Node By Label Scan (op:Point)` / `All Node Scan (a)` / `All Node Scan (p)`;
@@ -275,8 +277,9 @@ single-node probes at 4 + 1 + 4: the cache's per-label node-params load (the
 lookup is the one term that moves: it probes labels in `EPISTEMIC_LABELS` order
 and breaks only when every seed has RESOLVED (`ep.py:1203-1219`), so it emits
 one statement per label up to the last epistemic label a seed uses — all four
-when a seed resolves under none. Every one of them is index-anchored. Three id-set
-statements in `analyze.py` are NOT counted here either, because this census is
+when a seed resolves under none. Every one of them is index-anchored. Three of
+the operator selector's OWN id-set statements in `analyze.py` are NOT counted
+here either, because this census is
 `ep.py`'s: the operator selector's operator→target leg (emitted by
 `_bfs_select_operators`, never by `TortoiseEP.run()`), its per-label draft filter
 and its forward direct-edge sweep. All three carry no barrier and all three are
@@ -298,17 +301,21 @@ captures the statements the pass emits and asserts the PLAN of each (`Node By
 Index Scan`, and no `Node By Label Scan`; the selector test additionally rejects
 `All Node Scan`), never their text; each is reached by the fixture
 (`_load_cache`'s sweeps and Batch 2 directly, `seed_operators` through an
-operator seed — the 300 operators hanging off the hub claim). On the 23k-node /
-160k-edge fixture that assertion covers the pass's **49 distinct** id-set
+operator seed — the 300 operators hanging off the hub claim). On this file's own
+fixture (`_build`: ~8.6k nodes, ~8k edges — NOT the 23k/160k PROFILE fixture
+above) that assertion covers the pass's **49 distinct** id-set
 statements (95 emissions) and the operator selector's **12 distinct** (37
-emissions across the two seeds the assertion uses) — zero unanchored in either.
-Against `origin/main`'s code the file's six behavioural tests run `4
+emissions across the two seeds the assertion uses — all seven of the selector's
+id-set legs: four barriered, three not) — zero unanchored in either.
+Against the pre-#9282 tree (`8c3823b92^`) the file's six behavioural tests run `4
 failed, 2 passed` — the emitted-statement plan test, the hop's record bound, the
 OR split's statement counts and the operator selector's four legs fail, while
 the fixture guard and the OR-split row-semantics guard pass, because they pin
-properties `origin/main` already had. (The seventh test in that file pins this
-manifest row and is not part of that count: `origin/main` carries no `durations`
-row for a PR-added file at all, so it fails there for a different reason.) The
+properties that tree already had. (The seventh test in that file pins this
+manifest row, which #9282 itself added: on that tree there is no row to pin, so
+it fails there for a different reason.) #9282 has since landed on `origin/main`,
+so `origin/main` now IS the anchored tree and every comparison in this section is
+against the tree before it. The
 selector's expansion leg is individually discriminating: removing its barrier
 alone reddens the selector test.
 
@@ -345,7 +352,8 @@ statements per pass — and it is a real cost, paid on the interactive path.
 Instrumenting the graph handle and counting every query a `TortoiseEP.run()`
 issues on the 40-claim interactive zone that
 `tests/test_ep_local_395.py::test_ac5_interactive_latency_zone` builds, this
-branch emits **11 more statements per pass** than `origin/main` (**+22** for the
+branch emits **11 more statements per pass** than the pre-#9282 tree
+(`8c3823b92^`) (**+22** for the
 two passes one `compute_confidence()` runs). Only the DELTA is quoted here: the
 absolute totals move with how much of the call the recorder sees (a
 `TortoiseEP.g`-level recorder and a graph-handle-level one disagree by the
@@ -353,7 +361,7 @@ sweeps that never reach the pass), and the delta is identical either way.
 Nothing replaces anything — the two splits are the entire delta, and an added
 `WITH *` barrier emits no statement of its own:
 
-| site | `origin/main` | this branch |
+| site | pre-#9282 (`8c3823b92^`) | this branch |
 |---|---|---|
 | `_affected_factors` Batch 3 | **1** (one unlabelled `MATCH (a)-[r:IMPL\|NAND]->(b) ... (a.id IN $ids OR b.id IN $ids)`) | **8** (2 anchors x 4 epistemic labels) |
 | `_load_cache` back-message sweep | **4** (target-labelled, `b.id IN $ids` in the same predicate) | **8** (2 anchors x 4 epistemic labels) |
@@ -366,7 +374,7 @@ the branch slower in **114 of 135** paired runs (37/45, 40/45, 37/45; sign test
 p < 1e-4). A 6-run sequence had suggested the cost was inside the range; the
 interleaved study is what settles it, and it settles it the other way. The AC5
 guard itself is flaky on this host for BOTH trees — it trips its `< 1.2 s`
-bound on `origin/main` too, and more often here (#9015 tracks that flake), so
+bound on the pre-#9282 tree too, and more often here (#9015 tracks that flake), so
 per-run tallies from one host are not worth quoting as a characterisation.
 
 **That cost is accepted, not denied.** The alternative on the other side is the
