@@ -121,11 +121,12 @@ the FK only checks the graph exists. An env fallback with no declaration in
 front of it is reachable from the live door on any deployment that sets the
 pair, which is exactly the hazard the declaration removes.
 
-``OVERRIDES:`` the industry default (and this module's own decision 3 above) of
-inferring single-tenancy from the mere PRESENCE of a process-global pair —
-:data:`RECORD_SINGLE_TENANT_ENV` must be set, because single-tenancy is a
-deployment fact that has to be STATED, and an inferred one is exactly what a
-multi-tenant process would satisfy silently (#9192 ask 2).
+``OVERRIDES:`` the industry default (and #9078's scope decision 3's own
+inference) of treating the mere PRESENCE of a process-global pair as proof that
+the deployment is single-tenant — :data:`RECORD_SINGLE_TENANT_ENV` must be set,
+because single-tenancy is a deployment fact that has to be STATED, and an
+inferred one is exactly what a multi-tenant process would satisfy silently
+(#9192 ask 2).
 
 This does not remove #9078's scope decision 3 — a single-tenant deployment
 still arms by env — but it DOES change the operational contract for an

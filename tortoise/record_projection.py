@@ -108,10 +108,13 @@ SINGLE-TENANT deployment. On this tree it EXISTS — the carrier landed in #9231
   `call_next`, from the `(org_id, graph_id)` that lane already resolves per
   request — so a write anywhere under the request, on the loop or on a
   context-copying pool worker, is filed under the REQUEST's tenant. It is
-  installed only when the resolution NAMED a graph: an org-wide credential has
+  installed only when the resolution NAMED a graph — an org-wide credential has
   no `public.graphs` row the record could key on, so its write is refused
-  (`no_tenant`) rather than guessed. The hosted REST lane has no installer yet
-  and the default-graph tenant id is unnamed — #9188.
+  (`no_tenant`) rather than guessed — and only on the CONTROL-PLANE lane: the
+  self-host registry's `graph_id` is a Falkor `g_<hex>` node id with no
+  `public.graphs` row, so installing it would be a row the FK cannot satisfy.
+  The hosted REST lane has no installer yet and the default-graph tenant id is
+  unnamed — #9188.
 * **The arming gate.** `record_tenant()` reads the `ContextVar` first and
   consults the env pair ONLY when the deployment declared itself single-tenant
   (`record_writer.single_tenant_declared()` → `TORTOISE_RECORD_SINGLE_TENANT`,

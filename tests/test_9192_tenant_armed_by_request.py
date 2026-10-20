@@ -152,6 +152,63 @@ def two_tenant_lane(tmp_path, monkeypatch):
     reg.close()
 
 
+def _post_request(api_key: str, *, lane: str = "loop"):
+    """A POST /mcp request whose bearer resolves through the auth middleware."""
+    from starlette.requests import Request
+
+    return Request({
+        "type": "http", "http_version": "1.1", "method": "POST",
+        "scheme": "https", "path": "/mcp", "raw_path": b"/mcp",
+        "query_string": b"", "root_path": "",
+        "headers": [(b"authorization", f"Bearer {api_key}".encode()),
+                    (b"x-lane", lane.encode()),
+                    (b"content-type", b"application/json")],
+        "client": ("127.0.0.1", 54321),
+        "server": ("testserver", 443),
+        "state": {},
+    })
+
+
+@pytest.fixture
+def control_plane_lane(monkeypatch):
+    """A CONTROL-PLANE-keyed resolution: the id space the record can key on.
+
+    The tenant scope is installed only where the ids come from `public.*`
+    (`is_supabase_enabled()`, the predicate that also chooses the resolver),
+    because the layer tables FK to `public.graphs` — so the multi-tenant leg
+    has to model that lane. These stubs stand in for `resolve_api_key` (which
+    returns the orgs row + `api_keys.graph_id`, `REFERENCES public.graphs(id)`),
+    not for anything this PR changed; the middleware, the scope, the record
+    resolver and the seam are all the real objects.
+    """
+    from tortoise import supabase_control as sc
+
+    tenants: dict[str, dict] = {}
+    by_key: dict[str, dict] = {}
+    for leaf in ("a", "b"):
+        org_id = f"org-{leaf}-cp"
+        graph_id = f"3f9a0c1e-0b2d-4c8a-9e77-00000000000{leaf}"  # a uuid, not g_<hex>
+        api_key = f"tk_{leaf}_control_plane"
+        tenant = {"org_id": org_id, "graph_id": graph_id, "api_key": api_key}
+        tenants[leaf] = tenant
+        by_key[api_key] = {
+            "org_id": org_id,
+            "graph_id": graph_id,
+            "graph_namespace": f"org_{org_id}_{graph_id}",
+            "delegation_depth": None,
+            "scopes": ["graphs:read", "graphs:write"],
+            "legacy_full_access": True,
+            "created_by": None,
+            "suspended_at": None,
+            "plan": "pro",
+        }
+    monkeypatch.setattr(sc, "is_supabase_enabled", lambda: True)
+    monkeypatch.setattr(sc, "get_control_plane", lambda: None)
+    monkeypatch.setattr(sc, "resolve_api_key",
+                        lambda _cp, token: by_key.get(token))
+    return tenants
+
+
 def _mounted_test_client(app):
     """Wrap the MCP app in a Starlette Mount at /mcp (mirrors hosted_api).
 
@@ -293,28 +350,54 @@ class TestTheProductionCaller:
             + "\n  ".join(violations))
 
     def test_two_tenants_are_filed_under_their_own_request_tenant(
-            self, two_tenant_lane, record_calls, monkeypatch):
+            self, control_plane_lane, record_calls, monkeypatch):
         """Two tenants, one process: each write is filed under ITS request.
 
-        The env pair is planted as tenant A's, so this is also the cross-write
-        leg: if the resolution ever fell back to the pair, tenant B's record
-        would appear as tenant A — a well-formed row under the wrong
-        organisation, which nothing downstream can detect.
+        Driven at the MIDDLEWARE, because the installation is conditioned on a
+        control-plane id space (`is_supabase_enabled()`) and the registry lane
+        used by the HTTP legs cannot produce one — see
+        `test_a_registry_graph_id_is_never_installed` for that lane's own
+        behaviour. What is under test here is the attribution, and the assertion
+        is on what `write_records` was called with (the observable consequence
+        on the record/write path), not on "the ContextVar was set".
+
+        A DECLARED single-tenant pair is planted as tenant A's, so this is also
+        the precedence leg: if the pair could outrank the scope, tenant B's row
+        would appear as tenant A — well-formed, and undetectable downstream.
+        Tenant B's write runs on a WORKER THREAD (`asyncio.to_thread`), which is
+        where the repo's offloads run: the context copy is the property that
+        makes the scope reach them.
         """
-        reg, tenants = two_tenant_lane
-        monkeypatch.delenv(RECORD_SINGLE_TENANT_ENV, raising=False)
+        tenants = control_plane_lane
+        monkeypatch.setenv(RECORD_SINGLE_TENANT_ENV, "1")
         monkeypatch.setenv(RECORD_ORG_ENV, tenants["a"]["org_id"])
         monkeypatch.setenv(RECORD_GRAPH_ENV, tenants["a"]["graph_id"])
 
-        from tortoise.mcp_server import create_http_app
+        async def _drive() -> list:
+            seen: list = []
+            from starlette.responses import JSONResponse
 
-        app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
-                              _registry_sdk=reg)
-        client = _mounted_test_client(app)
-        with client:
-            _write_a_point(client, tenants["a"]["api_key"], "tenant a: the door is open")
-            _write_a_point(client, tenants["b"]["api_key"], "tenant b: the door is open")
+            from tortoise.mcp_auth import OrgResolutionMiddleware
 
+            middleware = OrgResolutionMiddleware(app=None, registry_sdk=None)
+
+            async def _call_next(request):
+                # The write is what a tool would do under `call_next`.
+                if request.headers["x-lane"] == "thread":
+                    await asyncio.to_thread(write_live_record, {"type": "PointAdded"})
+                else:
+                    write_live_record({"type": "PointAdded"})
+                seen.append(current_record_tenant())
+                return JSONResponse({"ok": True})
+
+            for name in ("a", "b"):
+                await middleware.dispatch(
+                    _post_request(tenants[name]["api_key"],
+                                  lane="thread" if name == "b" else "loop"),
+                    _call_next)
+            return seen
+
+        seen = asyncio.run(_drive())
         assert record_calls == [
             (tenants["a"]["org_id"], tenants["a"]["graph_id"]),
             (tenants["b"]["org_id"], tenants["b"]["graph_id"]),
@@ -323,8 +406,12 @@ class TestTheProductionCaller:
             f"(got {record_calls}) — a value from the process-global env pair "
             "is a cross-tenant write, and a refusal here means no tenant was "
             "installed by the tenancy middleware")
+        assert seen == [
+            (tenants["a"]["org_id"], tenants["a"]["graph_id"]),
+            (tenants["b"]["org_id"], tenants["b"]["graph_id"]),
+        ], f"the scope was not what the request saw (got {seen})"
 
-    def test_the_tenant_does_not_survive_its_request(self, two_tenant_lane):
+    def test_the_tenant_does_not_survive_its_request(self, control_plane_lane):
         """The scope is a `with` in the SAME context, so it cannot outlive it.
 
         ⛔ THIS LEG DELIBERATELY DOES NOT USE THE MOUNTED CLIENT (#9192 review
@@ -336,43 +423,23 @@ class TestTheProductionCaller:
         context, which makes any `set` without a reset visible to the assertion
         after the `await`, while the `with` restores it.
         """
-        reg, tenants = two_tenant_lane
-        org = tenants["a"]
-        seen: list = []
+        tenants = control_plane_lane
 
-        from starlette.requests import Request
-        from starlette.responses import JSONResponse
+        async def _drive() -> list:
+            seen: list = []
+            from starlette.responses import JSONResponse
 
-        from tortoise.mcp_auth import OrgResolutionMiddleware
+            from tortoise.mcp_auth import OrgResolutionMiddleware
 
-        async def _call_next(_request):
-            # Observed INSIDE the request: the tenant is in scope, and it is the
-            # one the credential resolved.
-            seen.append(current_record_tenant())
-            return JSONResponse({"ok": True})
+            middleware = OrgResolutionMiddleware(app=None, registry_sdk=None)
 
-        def _scope() -> dict:
-            return {
-                "type": "http", "http_version": "1.1", "method": "POST",
-                "scheme": "https", "path": "/mcp", "raw_path": b"/mcp",
-                "query_string": b"", "root_path": "",
-                "headers": [(b"authorization",
-                             f"Bearer {org['api_key']}".encode()),
-                            (b"content-type", b"application/json")],
-                "client": ("127.0.0.1", 54321),
-                "server": ("testserver", 443),
-                "state": {},
-            }
-
-        async def _drive() -> None:
-            middleware = OrgResolutionMiddleware(app=None, registry_sdk=reg)
-
-            async def _receive():
-                return {"type": "http.request", "body": b"",
-                        "more_body": False}
+            async def _call_next(_request):
+                seen.append(current_record_tenant())
+                return JSONResponse({"ok": True})
 
             assert current_record_tenant() is None
-            await middleware.dispatch(Request(_scope()), _call_next)
+            await middleware.dispatch(
+                _post_request(tenants["a"]["api_key"]), _call_next)
             # SAME context as the dispatch ⇒ a bare `set` is still here.
             assert current_record_tenant() is None, (
                 "the record's tenant outlived its request — the middleware set "
@@ -380,11 +447,63 @@ class TestTheProductionCaller:
                 "context (a background task, a pooled worker, a later request on "
                 "a reused context) would be filed under a stranger's tenant")
             assert record_tenant() is None
+            return seen
 
-        asyncio.run(_drive())
+        seen = asyncio.run(_drive())
+        org = tenants["a"]
         assert seen == [(org["org_id"], org["graph_id"])], (
             "the middleware did not install the credential's tenant around the "
             f"request (saw {seen})")
+
+    def test_a_registry_graph_id_is_never_installed(
+            self, two_tenant_lane, record_calls, monkeypatch):
+        """The SELF-HOST lane's graph ids are not record ids — install nothing.
+
+        #9192 review C1. `apikey_verify` returns `api_keys.graph_id` on the
+        Supabase lane, which is `REFERENCES public.graphs(id)` — the id the
+        record's layer tables key on. On the self-host registry lane the same
+        field is the Falkor `:Graph` node id (`g_<hex>`, minted in
+        `sdk._graph_create`) and registry graphs are never inserted into
+        `public.graphs`, so installing it would displace a correctly declared
+        single-tenant pair with a value the FK cannot satisfy — every write
+        `write_failed`, cause unattributable.
+
+        So the lane keeps its pre-#9192 arming exactly: UNDECLARED ⇒ refused
+        (never misfiled under the planted pair), DECLARED single-tenant ⇒ filed
+        under the pair. Both phases drive the real mounted MCP app.
+        """
+        reg, tenants = two_tenant_lane
+        monkeypatch.setenv(RECORD_ORG_ENV, tenants["a"]["org_id"])
+        monkeypatch.setenv(RECORD_GRAPH_ENV, tenants["a"]["graph_id"])
+        monkeypatch.delenv(RECORD_SINGLE_TENANT_ENV, raising=False)
+
+        from tortoise.mcp_server import create_http_app
+
+        app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
+                              _registry_sdk=reg)
+        client = _mounted_test_client(app)
+        before = dict(monitoring.record_write_failure_counts())
+        with client:
+            _write_a_point(client, tenants["a"]["api_key"], "a: undeclared")
+            _write_a_point(client, tenants["b"]["api_key"], "b: undeclared")
+        after = dict(monitoring.record_write_failure_counts())
+
+        assert record_calls == [], (
+            "a registry-lane request filed a record under an id the record's "
+            "tables cannot key on (or under the env pair it did not declare): "
+            f"{record_calls}")
+        assert after.get("no_tenant", 0) >= before.get("no_tenant", 0) + 2, (
+            before, after)
+
+        # DECLARED: the self-host single-tenant deployment still records, and it
+        # records under the pair — the pre-#9192 behaviour, preserved.
+        monkeypatch.setenv(RECORD_SINGLE_TENANT_ENV, "1")
+        record_calls.clear()
+        with client:
+            _write_a_point(client, tenants["a"]["api_key"], "a: declared")
+        assert record_calls == [(tenants["a"]["org_id"], tenants["a"]["graph_id"])], (
+            f"a declared single-tenant self-host deployment lost its pair "
+            f"(got {record_calls})")
 
 
 # ── 2. the arming modes ─────────────────────────────────────────────────────
