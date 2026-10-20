@@ -81,6 +81,15 @@ own ordering, retry and watermark semantics. That is a design with its own state
 machine; if #9188 wants one it decides one there. A seam cannot half-own it,
 and half-owning it is how a record silently loses rows.
 
+**OVERRIDES:** one door deliberately departs from this decision — the LIVE door
+(`write_live_record`). It runs after the caller's journal append has already
+committed (§17.1 makes the append the commit point), so raising there would
+hand a producer an exception for a write that PERSISTED (#5148's rule). It
+counts ``write_failed``/``circuit_open`` and warns instead, which keeps the
+``degraded`` vs ``unconfigured`` distinction on the counter surface rather than
+the exception surface. `write_records`/`RecordWriter.write` — the path a caller
+with an open transaction uses — still FAILS exactly as this decision says.
+
 **4. Per-record vs batch ⇒ ONE batch per call.** Forced by the position, not
 preferred. `replay_plan` numbers records by their index in the batch, so one
 replay per record would number every record `seq=1` and the
@@ -117,29 +126,100 @@ transaction stays open and unrolled-back on failure.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import hashlib
+import logging
 import os
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from . import record_projection, status_vocabulary
 
+_logger = logging.getLogger(__name__)
+
 __all__ = [
+    "CONNECT_TIMEOUT_SECONDS",
+    "LIVE_WRITE_BREAKER_SECONDS",
+    "POSITION_ROW_DEFERRED_ON",
     "RECORD_DSN_ENV",
+    "RECORD_GRAPH_ENV",
+    "RECORD_ORG_ENV",
+    "RecordConnectError",
     "RecordWrite",
     "RecordWriteError",
     "RecordWriteOutcome",
     "RecordWriter",
+    "current_record_tenant",
     "record_dsn",
+    "record_tenant",
+    "use_record_tenant",
+    "write_live_record",
     "write_records",
 ]
+
+#: The record's position row (`public.journal_event`) is NOT written by the live
+#: path yet: a position is a fact only a bounded replay can derive, and the live
+#: chokepoint has no ordinal (`EventLog.append` reports nothing; there is no
+#: count accessor). Writing one anyway would collide on `(org_id, graph_id,
+#: seq)` with a later full replay's numbering — in silence. #9190 owns the
+#: ordinal; the live write passes `position=False` until it lands, and the FOUR
+#: ontology layers are unaffected (the position row is bookkeeping ABOUT them,
+#: not one of them).
+POSITION_ROW_DEFERRED_ON = "#9190"
 
 #: The arming key. Present ⇒ armed; unset/blank ⇒ ``NOT_ARMED``. See the module
 #: docstring, decision 2 — and note it is a DSN, not a boolean, so a second
 #: "enabled" flag would be a second thing to get out of step.
 RECORD_DSN_ENV = "TORTOISE_RECORD_DSN"
+
+#: The SINGLE-TENANT arming pair (#9078 scope decision 3). A deployment that
+#: serves exactly one graph may name it here instead of wrapping every write in
+#: :func:`use_record_tenant`. Both must be set or neither counts: a half pair is
+#: a misconfiguration and is refused like an unnamed tenant, never completed by
+#: guesswork.
+#:
+#: ⚠️ A MULTI-TENANT process must NOT arm this way — env is process-global, so
+#: every tenant's rows would be filed under one graph (#9192). Such a process
+#: sets :func:`use_record_tenant` per request, and that always wins.
+RECORD_ORG_ENV = "TORTOISE_RECORD_ORG_ID"
+RECORD_GRAPH_ENV = "TORTOISE_RECORD_GRAPH_ID"
+
+#: The bound on OPENING the record's connection, in seconds. libpq's default is
+#: ``0`` — wait forever — and the live door opens one connection per journal
+#: record ON THE CALLER'S THREAD, after the journal append has committed. So an
+#: armed-but-unreachable record (a dead host, or a firewall dropping SYNs) would
+#: stall every capture for as long as the kernel takes, which is the difference
+#: between "the record is degraded" and "the capture path is hung". A DSN that
+#: names its own ``connect_timeout`` WINS: the operator's explicit bound is not
+#: silently replaced by this one.
+CONNECT_TIMEOUT_SECONDS = 10
+
+#: How long the LIVE door stops trying after a connect to the record FAILED, in
+#: seconds. :data:`CONNECT_TIMEOUT_SECONDS` bounds ONE connect; it does not bound
+#: a CAPTURE, and the door is called once per journal record on the caller's
+#: thread — so a capture emitting N records paid N × the timeout while
+#: ``write_live_record`` (fail-soft by design) went on reporting success. Under
+#: exactly the drop/blackhole case the timeout exists for, that is the wedged
+#: capture the bound was supposed to prevent: 25 records × 10 s ≈ 4 minutes
+#: inside one ``capture_session`` call.
+#:
+#: So a connect failure TRIPS this breaker: every further live write for the next
+#: ``LIVE_WRITE_BREAKER_SECONDS`` is refused locally and counted
+#: ``circuit_open`` — no socket, no timeout, no stall — and the first SUCCESSFUL
+#: write closes it again. Connection-refused fails instantly and is unaffected in
+#: cost; this bounds the shape that does not. It is deliberately process-wide
+#: (one record, one deployment) and deliberately time-based rather than
+#: attempt-based: a probe after the window re-tests the record once, so a healed
+#: record recovers on its own with no restart.
+LIVE_WRITE_BREAKER_SECONDS = 60.0
+
+#: When the live breaker closes again, on ``time.monotonic()`` (0.0 = closed).
+#: Module-level on purpose: the cost it bounds is per PROCESS, not per call.
+_breaker_open_until = 0.0
 
 #: The DSN schemes a DB-API Postgres driver accepts. A value outside this set is
 #: a *misconfiguration*, never an unarmed state.
@@ -166,6 +246,19 @@ class RecordWriteError(Exception):
     ``except RecordWriteError as exc: isinstance(exc.__cause__,
     record_projection.UnknownJournalRecordType)``. The seam wraps rather than
     re-raises because the cause is what a human reads.
+    """
+
+
+class RecordConnectError(RecordWriteError):
+    """The record is ARMED but its connection could not be OPENED.
+
+    A :class:`RecordWriteError` in every respect (one catchable class for a
+    caller), and a separate class for one reason: only THIS failure means the
+    record is unreachable RIGHT NOW rather than refusing this one record, so it
+    is what trips the live door's breaker (:data:`LIVE_WRITE_BREAKER_SECONDS`).
+    A totality refusal or a statement-level Postgres error must NOT trip it —
+    the connection was fine, and hiding real record errors behind a 60 s silence
+    would be worse than the cost the breaker saves.
     """
 
 
@@ -267,6 +360,85 @@ def record_dsn(explicit: str | None = None) -> str | None:
     return dsn
 
 
+#: The TENANT a live write is filed under, per call, resolved by the caller's
+#: own scope (`use_record_tenant`). #9192's hazard is a process-global tenant: a
+#: hosted process serves many tenant graphs, so a module-level or
+#: environment-supplied org/graph files tenant A's rows under tenant B with no
+#: error (the row is well-formed and the FK only checks that the graph exists).
+#: So this is a ContextVar the REQUEST sets. It is NOT the only surface — the
+#: env pair is the single-tenant arming surface, resolved by
+#: :func:`record_tenant` — but it is the only one that can be per-request, so a
+#: scope ALWAYS wins over env (env is process-global: the same single value for
+#: every tenant the process serves, #9192). Neither set ⇒ an armed write is
+#: REFUSED and counted (`no_tenant`), never guessed. Ask
+#: :func:`record_tenant` — not :func:`current_record_tenant` — to learn whether
+#: an armed write will be refused.
+_RECORD_TENANT: contextvars.ContextVar[tuple[str, str] | None] = (
+    contextvars.ContextVar("tortoise_record_tenant", default=None)
+)
+
+
+@contextlib.contextmanager
+def use_record_tenant(org_id: str, graph_id: str):
+    """File every record write in this scope under ``(org_id, graph_id)``.
+
+    The one way a live write learns its tenant. A hosted request wraps its write
+    path in this; a single-tenant process wraps its writes (or its whole serving
+    loop). It is a ContextVar, so two concurrent requests in one process cannot
+    see each other's tenant, and it nests.
+    """
+    if not (isinstance(org_id, str) and org_id
+            and isinstance(graph_id, str) and graph_id):
+        raise ValueError(
+            "use_record_tenant needs a non-empty org_id and graph_id — an "
+            "unnamed tenant is how a row lands under the wrong graph "
+            f"(got {org_id!r}, {graph_id!r})"
+        )
+    token = _RECORD_TENANT.set((org_id, graph_id))
+    try:
+        yield (org_id, graph_id)
+    finally:
+        _RECORD_TENANT.reset(token)
+
+
+def current_record_tenant() -> tuple[str, str] | None:
+    """The tenant this SCOPE set, or ``None``. Scope only — never env.
+
+    ⛔ ``None`` here does NOT mean an armed write is refused: this is the
+    request scope alone, and :func:`record_tenant` falls back to the
+    single-tenant ``RECORD_ORG_ENV``/``RECORD_GRAPH_ENV`` pair, so a process
+    armed by env is refused nothing while this returns ``None``. Use
+    :func:`record_tenant` to ask "what tenant would an armed write be filed
+    under, and would it be refused?" — that ``None``, and only that one, is the
+    refusal. This function answers the narrower "did the caller say whose data
+    this is?", which is what a scope-aware caller wants (see
+    :func:`use_record_tenant`).
+    """
+    return _RECORD_TENANT.get()
+
+
+def record_tenant() -> tuple[str, str] | None:
+    """The tenant a LIVE write is filed under: the scope's, else the env pair.
+
+    Precedence is the point. A request-scoped tenant
+    (:func:`use_record_tenant`) is the only correct answer in a process that
+    serves more than one graph, so it always wins. The
+    :data:`RECORD_ORG_ENV`/:data:`RECORD_GRAPH_ENV` pair is the SINGLE-TENANT
+    deployment's arming surface (#9078 scope decision 3) — without it, arming
+    the record would require a code change at every call site, which is how a
+    capability ends up with no production caller again. A HALF-configured pair
+    is not a tenant: it is refused, not completed.
+    """
+    scoped = _RECORD_TENANT.get()
+    if scoped is not None:
+        return scoped
+    org_id = (os.environ.get(RECORD_ORG_ENV) or "").strip()
+    graph_id = (os.environ.get(RECORD_GRAPH_ENV) or "").strip()
+    if org_id and graph_id:
+        return (org_id, graph_id)
+    return None
+
+
 def _default_connect(dsn: str) -> Any:
     """Open the record's connection. The ONE place a driver choice lives.
 
@@ -283,7 +455,15 @@ def _default_connect(dsn: str) -> Any:
             "the record is armed but no Postgres driver is installed — install "
             "the 'postgres' extra (pip install -e '.[postgres]')"
         ) from exc
-    return psycopg2.connect(dsn)
+    # The operator's bound is a QUERY KEY, not a substring: `dsn` is the whole
+    # URI, and a password such as `postgresql://svc:connect_timeout@host/db`
+    # (needs no percent-encoding, passes `_DSN_SCHEMES`) would otherwise take
+    # the "already bounded" branch and restore libpq's wait-forever default on
+    # the per-record connect this constant exists to cap (#9231 review P2).
+    if "connect_timeout" in parse_qs(urlsplit(dsn).query):
+        # The operator bounded it already; do not replace their number.
+        return psycopg2.connect(dsn)
+    return psycopg2.connect(dsn, connect_timeout=CONNECT_TIMEOUT_SECONDS)
 
 
 @dataclass
@@ -314,6 +494,7 @@ class RecordWriter:
         graph_id: str,
         first_seq: int = 1,
         conn: Any | None = None,
+        position: bool = True,
     ) -> RecordWrite:
         """Apply `records` to the record, on a transaction the CALLER owns.
 
@@ -327,6 +508,12 @@ class RecordWriter:
         :param conn: an already-open connection to write on. Inject it to span
             the journal append and this projection in ONE transaction; the seam
             then neither opens nor closes nor commits it.
+        :param position: write the per-record ``journal_event`` position row
+            (default ``True``). The LIVE path passes ``False``: it has no
+            ordinal to record (
+            :data:`POSITION_ROW_DEFERRED_ON`, #9190), and a guessed one would
+            collide with a later replay's numbering in silence. The four
+            ontology layers are written either way.
 
         :raises RecordWriteError: the record was ARMED and the write did not
             happen (malformed DSN, unreachable record, totality refusal, or a
@@ -364,8 +551,10 @@ class RecordWriter:
             except RecordWriteError:
                 raise
             except Exception as exc:
-                # Armed-but-unreachable MUST NOT read as unarmed (decision 3).
-                raise RecordWriteError(
+                # Armed-but-unreachable MUST NOT read as unarmed (decision 3),
+                # and it is its OWN class so the live door can bound the cost of
+                # a dead record (`LIVE_WRITE_BREAKER_SECONDS`).
+                raise RecordConnectError(
                     f"the record is armed but its connection could not be "
                     f"opened ({type(exc).__name__})"
                 ) from exc
@@ -374,7 +563,7 @@ class RecordWriter:
         try:
             report = record_projection.replay(
                 records, target, org_id=org_id, graph_id=graph_id,
-                start_seq=first_seq,
+                start_seq=first_seq, position=position,
             )
         except Exception as exc:
             # Totality (an undeclared/refused record type raises before the
@@ -416,6 +605,7 @@ def write_records(
     graph_id: str,
     first_seq: int = 1,
     conn: Any | None = None,
+    position: bool = True,
     writer: RecordWriter | None = None,
 ) -> RecordWrite:
     """One-call form of :meth:`RecordWriter.write` — the chokepoint's entry point.
@@ -427,5 +617,191 @@ def write_records(
     have to invent one.
     """
     return (writer or RecordWriter()).write(
-        records, org_id=org_id, graph_id=graph_id, first_seq=first_seq, conn=conn,
+        records, org_id=org_id, graph_id=graph_id, first_seq=first_seq,
+        conn=conn, position=position,
     )
+
+
+def _breaker_is_open(now: float | None = None) -> bool:
+    """Has a recent connect failure silenced the live door for now?"""
+    return (time.monotonic() if now is None else now) < _breaker_open_until
+
+
+def _trip_live_breaker(now: float | None = None) -> None:
+    """A connect to the record failed: stop paying for it once per record."""
+    global _breaker_open_until
+    _breaker_open_until = (
+        (time.monotonic() if now is None else now) + LIVE_WRITE_BREAKER_SECONDS
+    )
+
+
+def _close_live_breaker() -> None:
+    """The record answered: re-open the door (and reset the test seam)."""
+    global _breaker_open_until
+    _breaker_open_until = 0.0
+
+
+def _count_write_failure(reason: str) -> None:
+    """Count one lost record write. **Never raises** (#5148's rule, one frame on).
+
+    The caller's journal append is already committed, so nothing here may hand
+    the caller an exception for a write that persisted — not the import of
+    ``monitoring`` (a failing import hook) and not the metrics call itself. The
+    bare-``except`` swallow is deliberate and narrow: the RETURN VALUE of a
+    counter is nothing a caller can use.
+    """
+    with contextlib.suppress(Exception):
+        from . import monitoring
+        monitoring.record_record_write_failure(reason)
+
+
+def _count_non_journal_skip(reason: str = "no_durable_journal") -> None:
+    """Count one DECLINED non-journal write. **Never raises** (#5148's rule).
+
+    A sibling of :func:`_count_write_failure` with the same swallow and a
+    different channel: ``monitoring.record_non_journal_skips``, not
+    ``record_write_failures`` (#9231 review P2). Same rule, because the caller's
+    journal-less append has committed just the same.
+    """
+    with contextlib.suppress(Exception):
+        from . import monitoring
+        monitoring.record_non_journal_skip(reason)
+
+
+def write_live_record(record: Mapping[str, Any], *,
+                      durable: bool = True) -> RecordWrite | None:
+    """The LIVE door: one journal record that has ALREADY been appended.
+
+    Called at each of the three places the journal is appended on a live write
+    — `TortoiseSDK._emit_event`, `EventAPI._emit`, `ConversationMiner.
+    _emit_event` — so every producer's record reaches the record, not just the
+    SDK's. §17.1: the append is the commit point, so this runs after it and
+    before any cache fold.
+
+    ``durable`` says whether the log the record was appended to is a JOURNAL.
+    The record is ``replay(journal)`` — its whole repair story is "rebuild the
+    record from the log" — so a record appended to a SCRATCH buffer must not
+    become a row: nothing could ever reproduce it and no replay could correct
+    it. The M2 session-capture extraction lane appends through
+    `EventAPI._emit` to `_InMemoryEventLog` (no file I/O, by design), so a
+    capture on that lane would otherwise file rows the journal never carried.
+    ``False`` ⇒ nothing is written and the DECLINE is counted on
+    ``monitoring.metrics()["record_non_journal_skips"]`` — NOT on
+    ``record_write_failures``, because a lane that has no journal by design lost
+    nothing a replay could restore (#9231 review P2: counting it as a failure
+    made that counter permanently non-zero on the healthy capture path, since
+    every ``capture_session`` emits through the M2 lane). Read AFTER the arming
+    check, so an UNARMED deployment stays byte-identical (no counter, no log
+    line) on this lane too.
+
+    Returns ``None`` when the record is not armed (no DSN): nothing was
+    attempted, no connection, no plan — the unarmed deployment is
+    byte-identical to the pre-record one (§2.0's sequence). Otherwise it
+    returns the write, and a FAILURE never raises: it is counted
+    (``monitoring.metrics()["record_write_failures"]``) and logged, because the
+    journal already holds the record and a question about the derived record
+    must not fail a write that persisted. ``replay`` heals the gap. That
+    contract is enforced, not just intended: every counter call goes through
+    :func:`_count_write_failure`, which suppresses its own failures.
+
+    The transaction is THIS write's own (the journal append was a file append,
+    so there is nothing to span): the seam opens the connection, this commits
+    it, and it is closed on every path.
+
+    Cost, measured at #9188's head: an armed record costs ~one connection +
+    commit and ~4 ms of plan materialization (the fold re-reads the record
+    migrations to build its column map — `table_columns()` is deliberately
+    uncached, so a migration edit can never be read stale). That is a
+    DELIBERATE residual: one record, one transaction, no batching, because a
+    batch seam's ordering across three independent doors is a throughput
+    question with no measurement behind it yet. The UNHEALTHY case is bounded
+    too, in two places that answer different questions: opening the connection
+    is capped by :data:`CONNECT_TIMEOUT_SECONDS` (~10 s), and a connect that
+    FAILS trips :data:`LIVE_WRITE_BREAKER_SECONDS` so the REST of the capture
+    is refused locally (counted ``circuit_open``) instead of paying that
+    timeout once per record — N records used to cost N × 10 s inside one
+    ``capture_session`` call, which is a wedged capture, not a degraded one.
+
+    ``OVERRIDES:`` the module's decision 3 (`Armed but unreachable ⇒ the write
+    FAILS (RecordWriteError)`) does not apply to this door, and that is a
+    deliberate departure rather than an oversight. Decision 3 governs
+    :meth:`RecordWriter.write`, whose caller's write has NOT yet committed; this
+    door runs AFTER the caller's append is the commit point (§17.1), so raising
+    here would hand a producer an exception for a write that persisted — the
+    #5148 rule. The distinction decision 3 exists to keep (`degraded` vs
+    `unconfigured`) is kept by the counter and the warning instead of by the
+    exception, on the ``monitoring.record_write_failures`` surface. #9187 owns
+    decision 3; the reversal is recorded there.
+    """
+    try:
+        armed = record_dsn() is not None
+    except RecordWriteError as exc:
+        _count_write_failure("malformed_dsn")
+        _logger.warning("the record write did not happen (malformed_dsn): %s", exc)
+        return None
+    if not armed:
+        return None
+    if not durable:
+        # A DECLINE, not a loss: this lane has no journal by design, so no row is
+        # missing that a replay could restore (#9231 review P2). Counted on the
+        # skip counter and logged at DEBUG — a warning per extracted record on
+        # the healthy M2 capture path is the same noise the counter was.
+        _count_non_journal_skip("no_durable_journal")
+        _logger.debug(
+            "the record write was declined (no_durable_journal) — the record "
+            "is armed but this log is a scratch buffer, not a journal, so no "
+            "replay could reproduce the row: %s", record.get("type"),
+        )
+        return None
+    tenant = record_tenant()
+    if tenant is None:
+        _count_write_failure("no_tenant")
+        _logger.warning(
+            "the record write did not happen (no_tenant) — the record is armed "
+            "but no tenant is in scope: wrap the write in "
+            "record_writer.use_record_tenant(org_id, graph_id) or set "
+            "%s/%s for a single-tenant deployment", RECORD_ORG_ENV,
+            RECORD_GRAPH_ENV,
+        )
+        return None
+    org_id, graph_id = tenant
+    if _breaker_is_open():
+        # A recent connect FAILED. Refuse locally: the journal already holds the
+        # record, a replay heals it, and paying the connect timeout once per
+        # record is what turns a degraded record into a wedged capture.
+        _count_write_failure("circuit_open")
+        _logger.warning(
+            "the record write did not happen (circuit_open) — a connect to the "
+            "record failed within the last %.0fs, so this write is refused "
+            "without a socket: %s", LIVE_WRITE_BREAKER_SECONDS,
+            record.get("type"),
+        )
+        return None
+    connection: Any | None = None
+    try:
+        write = write_records([record], org_id=org_id, graph_id=graph_id,
+                              position=False)  # #9190: never invent a position
+        _close_live_breaker()
+        connection = write.connection
+        if connection is not None:
+            connection.commit()
+        return write
+    except Exception as exc:
+        if isinstance(exc, RecordConnectError):
+            # Unreachable RIGHT NOW (not a refusal of this one record): bound the
+            # cost of the rest of the capture. A totality or statement failure
+            # deliberately does NOT trip it — the connection was fine.
+            _trip_live_breaker()
+        _count_write_failure("write_failed")
+        _logger.warning(
+            "the record write did not happen (write_failed) — the journal has "
+            "the record and a replay heals the record: %s", exc,
+        )
+        return None
+    finally:
+        if connection is not None:
+            # Close AFTER the commit so an armed deployment does not leak one
+            # backend slot per journal record; a close failure must not mask a
+            # write failure that is already being reported above.
+            with contextlib.suppress(Exception):
+                connection.close()

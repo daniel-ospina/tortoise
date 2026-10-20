@@ -508,6 +508,34 @@ def _isolate_process_env():
             os.environ[k] = v
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_record_arming(monkeypatch):
+    """#9231 review P2: the record's arming keys are never ambient for a test.
+
+    ``_isolate_process_env`` above RESTORES the ``TORTOISE_*`` keys after each
+    test but does not CLEAR them, so a developer lane armed exactly the way
+    ``.env.example`` documents (``TORTOISE_RECORD_DSN`` + the single-tenant
+    ``_ORG_ID``/``_GRAPH_ID`` pair) armed every test that drives an
+    ``EventAPI``/``TortoiseSDK`` door: the seam filed rows from pytest tmp-dir
+    journals into that real record — rows no journal outlives — and the
+    ``no_tenant`` legs in ``test_9078_*`` misdiagnosed the machine as a code
+    defect. Clearing all three per test makes the suite hermetic; a test that
+    wants the record armed re-arms it with ``monkeypatch.setenv``, which is the
+    only way an arming can reach a test now.
+
+    The live door's breaker is PROCESS state by design (``record_writer.
+    _breaker_open_until``), so it is reset on both sides too: a test that proves
+    the bound must not leak a 60-second silence into the next one.
+    """
+    for name in ("TORTOISE_RECORD_DSN", "TORTOISE_RECORD_ORG_ID",
+                 "TORTOISE_RECORD_GRAPH_ID"):
+        monkeypatch.delenv(name, raising=False)
+    from tortoise import record_writer
+    record_writer._close_live_breaker()
+    yield
+    record_writer._close_live_breaker()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _fresh_capture_spool():
     """#3963: start every pytest SESSION with a fresh capture spool.

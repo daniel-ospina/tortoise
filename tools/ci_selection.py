@@ -962,6 +962,24 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # ran on the PR that edits it (the #1349/#3332/#3616 silent-drop
              # class, and the same gap tools/drift-guard.py carries).
              "tools/queue_conflict_census.py",
+             # #9231 review P1 (the #9188/#9078 wiring gate): tools/record_wiring_check.py
+             # is the ONLY executor of the claim "the record has a production
+             # caller" — its guard is
+             # tests/test_9078_record_written_by_production_path.py, registered
+             # `core`. But `tools/` is swallowed by NON_PYTHON_PREFIXES and no
+             # SOURCE_PATTERNS entry matches the tool, so a wiring-check-only
+             # change (i.e. the file whose whole purpose is to decide whether
+             # the record is wired, and therefore the most likely file to be
+             # weakened) filtered to `changed == []`, took the docs-only early
+             # return and fell back to tier-1 smoke — where that test is NOT
+             # registered, so the gate never ran on the PR that can disarm it.
+             # Measured on the PR head:
+             # `select(["tools/record_wiring_check.py"])` -> surfaces=[],
+             # full=False, 51 tier-1 files, guard absent. Same
+             # #1349/#3332/#3616/#4309 silent-drop class as the entries above.
+             # Pinned by
+             # tests/test_ci_selection.py::test_record_wiring_check_tool_change_selects_core_not_tier1.
+             "tools/record_wiring_check.py",
              # #4174 review P1: the drift gate's suite (test_drift_guard.py) is
              # `core`-registered, but `tools/` is swallowed by
              # NON_PYTHON_PREFIXES and no SOURCE_PATTERNS entry matches
