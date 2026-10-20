@@ -159,6 +159,10 @@ READER_MODEL_DEFAULT = "deepseek/deepseek-v4-flash"
 READER_TEMPERATURE = 0.0
 READER_MAX_TOKENS = 500
 READER_PINNED = True
+#: Recorded when the run was handed a reader factory (tests, wiring runs): such
+#: a run did NOT use the pre-registered product reader, and the bar's reader
+#: clause must be able to say so.
+INJECTED_READER_SPEC = "injected"
 
 #: The judge pin for this benchmark: the OFFICIAL LongMemEval anscheck judge
 #: (``tools/longmem_eval/judge.py`` → ``build_judge()``), the same grading
@@ -179,14 +183,43 @@ def _sha16(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
+def judge_model_id(spec: str) -> str:
+    """``provider:model`` → ``model`` (a bare id is its own model id)."""
+    return (spec or "").strip().split(":", 1)[-1]
+
+
 def judge_pin_for(spec: str) -> str:
-    """The pin belonging to a judge spec (mock specs get the mock pin)."""
-    return MOCK_JUDGE_PIN if (spec or "").strip() == MOCK_JUDGE_SPEC \
-        else JUDGE_PIN
+    """The pin belonging to a judge spec — an ALLOW-LIST, never a default.
+
+    ``JUDGE_PIN`` used to be the answer for every spec except the literal
+    ``"mock"``, so a stub recorded as ``"mock-judge"`` carried the OFFICIAL pin
+    and a receipt could claim the official judge while a stub graded every
+    answer. A spec that is neither the mock nor the pre-registered model now
+    gets ``unpinned:<spec>`` — an honest record that travels with the receipt.
+    """
+    spec = (spec or "").strip()
+    if spec == MOCK_JUDGE_SPEC:
+        return MOCK_JUDGE_PIN
+    model = judge_model_id(spec)
+    # The official judge is the MODEL, not the transport: a routed provider that
+    # serves the same model id (openrouter:openai/gpt-4o-2024-08-06) grades with
+    # the same judge, so it keeps the official pin.
+    official = judge_model_id(DEFAULT_JUDGE_MODEL)
+    if model == official or model.endswith("/" + official):
+        return JUDGE_PIN
+    return f"unpinned:{spec}"
 
 
-def judge_rubric_id_hash() -> str:
-    return _sha16(JUDGE_RUBRIC_ID)
+def judge_rubric_id_hash(rubric_id: str | None = None) -> str:
+    """Hash of the rubric id (the official anscheck template name by default).
+
+    When the judge object declares its OWN ``rubric_id``, that is what gets
+    hashed: comparing the module constant to itself on both sides could never
+    fail, so the clause only caught a hand-edited pre-registration. A judge that
+    declares no rubric still records the official id — that fallback cannot
+    differ, and the docstring says so rather than implying a guard it is not.
+    """
+    return _sha16(rubric_id or JUDGE_RUBRIC_ID)
 
 
 def resolve_reader_spec(override: str | None = None) -> str:
@@ -272,8 +305,24 @@ def protocol(*, reader_spec: str | None = None,
                 "mismatched file, or corpus hash drift)",
                 "this pre-registration's corpus_hash does not match the corpus "
                 "under test",
-                "the run's resolved reader spec, judge spec, or arms differ "
+                "this file names no cases or no classes (a protocol with no "
+                "case or class list cannot certify a run)",
+                "the scored run does not cover exactly the pre-registered "
+                "cases, or does not cover exactly the pre-registered classes "
+                "(a subset run, or a run with a graded class stripped, is not "
+                "this measurement)",
+                "the run's fixtures_hash does not match the scored corpus's "
+                "(the run was over different fixtures than the gold grades)",
+                "the run's resolved reader spec, judge spec, judge pin, judge "
+                "rubric hash, sampling seed flags, arms, or gate arm differ "
                 "from this pre-registration",
+                "the metrics block disagrees with the per-case rows it "
+                "summarises (a summary is not a result)",
+                "the run is a falsification probe (it measures the gate, not "
+                "the product)",
+                "the scored corpus plants NO superseded claim, has NO verbatim "
+                "case, or the raw arm committed no verbatim case (an empty "
+                "measurement is not a green one)",
                 "any case failed to run in either arm (an unmeasured case is "
                 "never a pass)",
             ],
@@ -455,7 +504,12 @@ def run_sealed(*, corpus_root: Path = corpus.ASK_DIR,
         # The SCORE step computes the full corpus hash, because it is the step
         # allowed to open the key.
         "fixtures_hash": corpus.compute_fixtures_hash(corpus_root),
-        "reader_model_spec": resolve_reader_spec(),
+        # The INJECTED reader when a factory was supplied: recording the env
+        # default made every stub-reader wiring run publish as the pinned
+        # product reader, and the bar's reader clause passed against it.
+        "reader_model_spec": (INJECTED_READER_SPEC if reader_factory is not None
+                              else resolve_reader_spec()),
+        "reader_injected": reader_factory is not None,
         "arms": list(arms),
         "seed": {"turns_embedded": SEED_TURNS_EMBEDDED_BY_DEFAULT,
                  "search_keys": SEED_SEARCH_KEYS_BY_DEFAULT},
@@ -503,22 +557,44 @@ def score(*, run_report: dict, corpus_root: Path = corpus.ASK_DIR,
     if judge is None:
         judge = MockJudge() if mock else build_judge(judge_spec)
         spec = resolve_judge_spec(judge_spec, mock=mock)
+    elif isinstance(judge, MockJudge):
+        # UNCONDITIONAL: a mock is a mock. Checking a caller-declared spec first
+        # let `score(judge=MockJudge(), judge_spec="mock-judge")` record the
+        # stub's own id and collect the OFFICIAL pin with it.
+        spec = MOCK_JUDGE_SPEC
     else:
         # The recorded identity must describe the OBJECT that graded the run,
-        # not the spec string a caller hopes it used: `score(judge=MockJudge())`
+        # not a spec string a caller hopes it used: `score(judge=SomeStub())`
         # with the official spec in scope would otherwise satisfy the
-        # pre-registration's judge check while a stub graded every answer. A
-        # declared spec is honoured only when the judge's OWN identity appears
-        # in it; otherwise the object is recorded as what it is.
-        declared = judge_spec or resolve_judge_spec(
-            mock=mock or isinstance(judge, MockJudge))
+        # pre-registration's judge check while the stub graded every answer. The
+        # declared spec is honoured only on an EXACT model-id match (substring
+        # containment let `model_id="gpt-4o"` claim the official spec).
         object_id = getattr(judge, "model_id", "") or type(judge).__name__
-        if object_id and object_id in declared:
+        declared = judge_spec or resolve_judge_spec()
+        if object_id and object_id == judge_model_id(declared):
             spec = declared
-        elif isinstance(judge, MockJudge):
-            spec = MOCK_JUDGE_SPEC
         else:
             spec = f"injected:{object_id}"
+
+    # Refuse a report the bar has a clause for, LOUDLY, instead of dying with a
+    # bare KeyError a caller has to decode: the clause cannot fire if the scorer
+    # crashes first, and a traceback is not a diagnosis.
+    arms_in_report = list(run_report.get("arms") or ())
+    missing_arms = [arm for arm in ("raw", GATE_ARM) if arm not in arms_in_report]
+    if missing_arms:
+        raise ValueError(
+            f"the run report has arm(s) {arms_in_report}, so arm(s) "
+            f"{missing_arms} were never measured — score it only if BOTH arms "
+            f"ran (the exit bar's paired read needs them)")
+    report_ids = [case.get("case_id") for case in run_report.get("cases") or ()]
+    unknown = [cid for cid in report_ids
+               if cid not in fixtures or cid not in golds]
+    if unknown:
+        raise ValueError(
+            f"the run report names case(s) {unknown} that this sealed corpus "
+            f"does not carry (fixtures: {sorted(fixtures)}, gold: "
+            f"{sorted(golds)}) — a run over other cases cannot be graded by "
+            f"this gold")
 
     rows: list[dict] = []
     for record in run_report["cases"]:
@@ -575,7 +651,8 @@ def score(*, run_report: dict, corpus_root: Path = corpus.ASK_DIR,
         "judge_model_spec": spec,
         "judge_pin": judge_pin_for(spec),
         "judge_model_id": getattr(judge, "model_id", ""),
-        "judge_rubric_id_hash": judge_rubric_id_hash(),
+        "judge_rubric_id_hash": judge_rubric_id_hash(
+            getattr(judge, "rubric_id", None)),
         "arms": run_report["arms"],
         "seed": run_report.get("seed") or {},
         "cases": rows,
@@ -641,11 +718,11 @@ def evaluate_exit_bar(*, scored: dict, manifest: dict | None = None,
                       prereg: dict | None = None) -> dict:
     """Decide PASS / REGRESSION / INCONCLUSIVE from the scored run.
 
-    The order is deliberate and pre-registered: **integrity first** (a verdict
-    about a corpus that does not verify, or a configuration the
-    pre-registration does not describe, is not a measurement), then
-    **completeness** (an unmeasured case is never a pass), then the two
-    regression clauses.
+    The order is deliberate and matches ``protocol()["decision_rule"]``:
+    **integrity first** (a verdict about a corpus that does not verify, or a
+    configuration the pre-registration does not describe, is not a measurement),
+    then **coverage and denominator floors** (an unmeasured case, class, claim or
+    verbatim case is never a pass), then the two regression clauses.
     """
     if manifest is None:
         manifest = corpus.verify_manifest(
@@ -707,7 +784,14 @@ def evaluate_exit_bar(*, scored: dict, manifest: dict | None = None,
             "satisfy a bar whose clauses are all per-case")
     covered = {row["case_id"] for row in scored["cases"]}
     expected_cases = set(prereg["corpus"].get("cases") or ())
-    if expected_cases and covered != expected_cases:
+    # No short-circuit on an empty expectation: a pre-registration that names no
+    # cases describes no measurement, so it is a mismatch, not a free pass.
+    if not expected_cases:
+        return _inconclusive(
+            "config_mismatch",
+            "the pre-registration names no cases — a protocol with no case list "
+            "cannot certify any run")
+    if covered != expected_cases:
         return _inconclusive(
             "config_mismatch",
             f"the scored run covers {sorted(covered)}, but the "
@@ -715,7 +799,12 @@ def evaluate_exit_bar(*, scored: dict, manifest: dict | None = None,
             f"is not the pre-registered measurement")
     classes = {row["class"] for row in scored["cases"]}
     expected_classes = set(prereg["corpus"].get("classes") or ())
-    if expected_classes and classes != expected_classes:
+    if not expected_classes:
+        return _inconclusive(
+            "config_mismatch",
+            "the pre-registration names no classes — a protocol with no class "
+            "list cannot certify that both halves of the bar were measured")
+    if classes != expected_classes:
         return _inconclusive(
             "config_mismatch",
             f"the scored run covers class(es) {sorted(classes)}, but the "
@@ -792,9 +881,32 @@ def evaluate_exit_bar(*, scored: dict, manifest: dict | None = None,
             "— the summary was edited (or produced by a different scorer), so "
             "neither reading can be published")
 
-    # (3) the two regression clauses
+    # (2c) DENOMINATOR FLOORS. Both regression clauses are satisfied by an empty
+    # measurement — `seen != n` is 0 != 0 and a raw arm that committed nothing
+    # has nothing to lose — so a corpus with no planted claim, a corpus with no
+    # verbatim case, or a reader that committed nothing anywhere would publish a
+    # green bar over a measurement it never made.
     live = scored["metrics"][f"superseded_live@{GATE_ARM}"]
-    regressions = scored["metrics"]["verbatim_no_regression"]["regressions"]
+    verbatim_metrics = scored["metrics"]["verbatim_no_regression"]
+    if not live["n"]:
+        return _inconclusive(
+            "config_mismatch",
+            "the scored corpus plants NO superseded claim, so the D8 gate "
+            "observed nothing — an empty gate is not a green gate")
+    if not verbatim_metrics["n"]:
+        return _inconclusive(
+            "config_mismatch",
+            "the scored corpus has NO verbatim case, so the no-regression half "
+            "of the exit bar measured nothing")
+    if not verbatim_metrics["raw_committed"]:
+        return _inconclusive(
+            "config_mismatch",
+            "the raw arm committed NO verbatim case, so there is nothing for "
+            "the distilled arm to regress FROM — 'no regression' would be "
+            "vacuous")
+
+    # (3) the two regression clauses
+    regressions = verbatim_metrics["regressions"]
     if live["rendered_live"]:
         reasons.append(
             f"D8: {live['rendered_live']}/{live['n']} superseded claims were "
@@ -979,7 +1091,7 @@ def validate_ask_receipt(receipt: dict) -> list[str]:
     for name, block in ((f"superseded_live@{GATE_ARM}", live),
                         ("verbatim_no_regression", verbatim)):
         n = block.get("n")
-        if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+        if isinstance(n, bool) or not isinstance(n, int) or n <= 0:
             issues.append(f"receipt.metrics.{name}.n: expected a count, got {n!r}")
     live_unknown = any(live.get(k) is None for k in ("seen", "rendered_live"))
     gate_red = live_unknown or bool(live.get("rendered_live")) or (
@@ -1023,7 +1135,8 @@ def render_report(*, receipt: dict, scored: dict, prereg: dict,
             ("seen" if c["seen"] else "unseen")
             + " / "
             + ("LIVE" if c["rendered_live"]
-               else ("flagged" if c["flagged"] else "live-unflagged"))
+               else ("flagged" if c["flagged"]
+                     else ("live-unflagged" if c["seen"] else "—")))
             for c in claims)
 
     rows = "\n".join(

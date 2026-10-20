@@ -29,7 +29,13 @@
     "inconclusive": [
       "the corpus manifest does not verify (missing/extra/mismatched file, or corpus hash drift)",
       "this pre-registration's corpus_hash does not match the corpus under test",
-      "the run's resolved reader spec, judge spec, or arms differ from this pre-registration",
+      "this file names no cases or no classes (a protocol with no case or class list cannot certify a run)",
+      "the scored run does not cover exactly the pre-registered cases, or does not cover exactly the pre-registered classes (a subset run, or a run with a graded class stripped, is not this measurement)",
+      "the run's fixtures_hash does not match the scored corpus's (the run was over different fixtures than the gold grades)",
+      "the run's resolved reader spec, judge spec, judge pin, judge rubric hash, sampling seed flags, arms, or gate arm differ from this pre-registration",
+      "the metrics block disagrees with the per-case rows it summarises (a summary is not a result)",
+      "the run is a falsification probe (it measures the gate, not the product)",
+      "the scored corpus plants NO superseded claim, has NO verbatim case, or the raw arm committed no verbatim case (an empty measurement is not a green one)",
       "any case failed to run in either arm (an unmeasured case is never a pass)"
     ],
     "kind": "paired within-run comparison + product gate; NO pre-set quality threshold",

@@ -107,17 +107,24 @@ def _answer_map() -> dict[str, str]:
     }
 
 
-class _StubJudge(MockJudge):
+class _StubJudge:
     """The mock's containment grading, under an identity the receipt can state.
 
-    ``MockJudge`` cannot publish a PASS (its pin is the mock pin, by design):
-    a mock-graded run proves the *wiring*, never the measurement. These tests
-    do need a receipt that validates, so the stub declares its own identity and
-    the protocol pre-registers THAT — which is the same honest path a real
-    judge takes, with a deterministic grader standing in for the API.
+    ⛔ Deliberately NOT a ``MockJudge`` subclass: a mock is recorded as a mock
+    unconditionally (that is what stops a stub collecting the official judge
+    pin), so a subclass could never carry its own identity. This delegates the
+    grading rule and declares its own ``model_id``, which is the same honest
+    path a real judge takes — a deterministic grader standing in for the API.
     """
 
     model_id = "test-stub-judge"
+    rubric_id = m.JUDGE_RUBRIC_ID
+
+    def __init__(self):
+        self._mock = MockJudge()
+
+    def judge(self, **kwargs):
+        return self._mock.judge(**kwargs)
 
 
 def _factory(reader):
@@ -173,6 +180,12 @@ def _mock_prereg(root: Path | None = None,
     """
     root = root or ask_corpus.ASK_DIR
     record = m.protocol(judge_spec=judge_spec or _StubJudge.model_id)
+    # Every test run is handed a reader FACTORY, so the run records
+    # `injected` — and the protocol must describe the reader the run used, not
+    # the product default (`deepseek/deepseek-v4-flash`), or a stub-reader
+    # wiring run would publish as the pinned product reader.
+    record["reader"]["model_spec"] = m.INJECTED_READER_SPEC
+    record["reader"]["injected"] = True
     record["corpus"].update({
         "hash": ask_corpus.compute_corpus_hash(root),
         "manifest_verified": True,
@@ -495,7 +508,11 @@ def test_the_receipt_carries_sha_model_and_hash_and_validates(shared_run):
     assert receipt["commit"] == "a" * 40
     assert receipt["corpus_hash"] == scored["corpus_hash"]
     assert receipt["corpus_hash"].startswith("sha256:")
-    assert receipt["reader_model_spec"] == m.resolve_reader_spec()
+    # The run was handed a reader FACTORY, so it records `injected` — never the
+    # env/product default it did not use (`resolve_reader_spec()`). That is what
+    # stops a stub-reader run from publishing as the pinned product reader.
+    assert receipt["reader_model_spec"] == m.INJECTED_READER_SPEC
+    assert receipt["reader_model_spec"] != m.resolve_reader_spec()
     assert receipt["judge_model"]
     assert receipt["verdict"] == "pass"
     assert set(m.REQUIRED_METRICS).issubset(receipt["metrics"])
@@ -786,3 +803,147 @@ def test_a_run_over_different_fixtures_cannot_be_scored_as_this_corpus(tmp_path)
     bar = m.evaluate_exit_bar(scored=scored, prereg=_mock_prereg(root))
     assert bar["verdict"] == "inconclusive", bar
     assert any("fixtures_hash" in r for r in bar["reasons"]), bar["reasons"]
+
+
+def test_a_corpus_with_no_planted_claim_cannot_pass(shared_run):
+    """An EMPTY gate is not a green gate.
+
+    Both regression clauses are satisfied by an empty measurement: `seen != n`
+    is `0 != 0`, and a raw arm that committed nothing has nothing to lose. A
+    corpus that plants no superseded claim (or a class-stripped run) therefore
+    published `PASS` over a D8 gate that observed nothing.
+    """
+    scored = json.loads(json.dumps(shared_run["scored"]))
+    for row in scored["cases"]:
+        row["superseded"] = []
+    scored["metrics"] = m.aggregate(scored["cases"])  # internally consistent…
+    assert scored["metrics"]["superseded_live@distilled"]["n"] == 0
+    bar = m.evaluate_exit_bar(scored=scored,
+                              prereg=_mock_prereg(shared_run["root"]))
+    assert bar["verdict"] == "inconclusive", bar  # …and still refused
+    assert any("plants NO superseded claim" in r for r in bar["reasons"]), bar
+
+
+def test_a_raw_arm_that_committed_nothing_cannot_claim_no_regression(shared_run):
+    """'No regression' needs something to regress FROM."""
+
+    class _SilentJudge(_StubJudge):
+        def judge(self, **kwargs):
+            return False
+
+    scored = m.score(run_report=shared_run["run"], corpus_root=shared_run["root"],
+                     judge=_SilentJudge(), judge_spec=_SilentJudge.model_id)
+    assert scored["metrics"]["verbatim_no_regression"]["raw_committed"] == 0
+    bar = m.evaluate_exit_bar(scored=scored,
+                              prereg=_mock_prereg(shared_run["root"]))
+    assert bar["verdict"] == "inconclusive", bar
+    assert any("nothing for the distilled arm to regress FROM" in r
+               for r in bar["reasons"]), bar
+
+
+def test_a_mock_judge_can_never_carry_the_official_pin(tmp_path):
+    """The pin is an allow-list, not a default.
+
+    `judge_pin_for` returned the OFFICIAL pin for every spec except the literal
+    `"mock"`, and MockJudge's own id is `"mock-judge"` — so declaring that spec
+    recorded the stub and collected the official pin.
+    """
+    assert m.judge_pin_for("mock-judge") == "unpinned:mock-judge"
+    assert m.judge_pin_for("some-other-judge") == "unpinned:some-other-judge"
+    assert m.judge_pin_for(m.MOCK_JUDGE_SPEC) == m.MOCK_JUDGE_PIN
+    assert m.judge_pin_for(m.DEFAULT_JUDGE_MODEL) == m.JUDGE_PIN
+    # the official judge is the MODEL, not the transport
+    assert m.judge_pin_for("openrouter:openai/gpt-4o-2024-08-06") == m.JUDGE_PIN
+
+    root = _small_corpus(tmp_path)
+    run = m.run_sealed(corpus_root=root,
+                       reader_factory=_factory(_RecordingReader(_answer_map(), [])))
+    scored = m.score(run_report=run, corpus_root=root, judge=MockJudge(),
+                     judge_spec="mock-judge")
+    assert scored["judge_model_spec"] == m.MOCK_JUDGE_SPEC
+    assert scored["judge_pin"] == m.MOCK_JUDGE_PIN
+
+
+def test_an_injected_reader_is_recorded_as_injected(shared_run):
+    """The run records the reader that ANSWERED, not the env default it did not
+    use: recording `resolve_reader_spec()` made a stub-reader run publish as the
+    pinned product reader, and the bar's reader clause pass against it."""
+    assert shared_run["run"]["reader_model_spec"] == m.INJECTED_READER_SPEC
+    assert shared_run["run"]["reader_injected"] is True
+    scored = json.loads(json.dumps(shared_run["scored"]))
+    official = m.protocol()  # the pre-registered product reader
+    official["corpus"].update({"hash": scored["corpus_hash"],
+                               "cases": [r["case_id"] for r in scored["cases"]],
+                               "classes": [r["class"] for r in scored["cases"]]})
+    bar = m.evaluate_exit_bar(scored=scored, prereg=official)
+    assert bar["verdict"] == "inconclusive", bar
+    assert any("reader" in r for r in bar["reasons"]), bar["reasons"]
+
+
+def test_the_rubric_hash_follows_the_judge_that_graded(tmp_path):
+    """A guard that compares a constant to itself can never fire."""
+
+    class _OtherRubric(_StubJudge):
+        rubric_id = "a-different-anscheck-template"
+
+    assert m.judge_rubric_id_hash() != m.judge_rubric_id_hash(_OtherRubric.rubric_id)
+    root = _small_corpus(tmp_path)
+    run = m.run_sealed(corpus_root=root,
+                       reader_factory=_factory(_RecordingReader(_answer_map(), [])))
+    scored = m.score(run_report=run, corpus_root=root, judge=_OtherRubric(),
+                     judge_spec=_OtherRubric.model_id)
+    assert scored["judge_rubric_id_hash"] == m.judge_rubric_id_hash(
+        _OtherRubric.rubric_id)
+    prereg = _mock_prereg(root)
+    bar = m.evaluate_exit_bar(scored=scored, prereg=prereg)
+    assert bar["verdict"] == "inconclusive", bar
+    assert any("rubric_id_hash" in r for r in bar["reasons"]), bar["reasons"]
+
+
+def test_score_refuses_a_report_it_cannot_grade(tmp_path):
+    """A missing arm or a foreign case is refused with a diagnosis, not a
+    KeyError: the bar has an `inconclusive` clause for each, and the clause can
+    never fire if the scorer crashes first."""
+    root = _small_corpus(tmp_path)
+    run = m.run_sealed(corpus_root=root,
+                       reader_factory=_factory(_RecordingReader(_answer_map(), [])))
+    one_armed = json.loads(json.dumps(run))
+    one_armed["arms"] = ["raw"]
+    for case in one_armed["cases"]:
+        case["arms"] = {"raw": case["arms"]["raw"]}
+    with pytest.raises(ValueError, match="never measured"):
+        m.score(run_report=one_armed, corpus_root=root, mock=True)
+
+    foreign = json.loads(json.dumps(run))
+    foreign["cases"][0]["case_id"] = "ask99_ghost"
+    with pytest.raises(ValueError, match="ask99_ghost"):
+        m.score(run_report=foreign, corpus_root=root, mock=True)
+
+
+def test_a_receipt_rejects_a_zero_denominator(shared_run):
+    """A vacuous PASS must be refused at the publication boundary too — the
+    receipt's own comment promised this and the code only rejected `n < 0`."""
+    receipt = m.build_receipt(scored=shared_run["scored"], commit="f" * 40,
+                              cost_usd=0.0, prereg_sha256="0" * 64)
+    assert m.validate_ask_receipt(receipt) == []
+    receipt["metrics"]["superseded_live@distilled"] = {
+        "seen": 0, "rendered_live": 0, "n": 0, "n_cases": 0}
+    issues = m.validate_ask_receipt(receipt)
+    assert any("superseded_live@distilled.n" in i for i in issues), issues
+
+
+def test_the_report_renders_an_unobserved_claim_as_unmeasured(shared_run):
+    """The three-state cell must not assert the D8 failure it did not measure:
+    `seen=False, rendered_live=False, flagged=False` used to print
+    `unseen / live-unflagged`."""
+    scored = json.loads(json.dumps(shared_run["scored"]))
+    row = next(r for r in scored["cases"] if r["superseded"])
+    row["superseded"][0].update({"seen": False, "rendered_live": False,
+                                 "flagged": False})
+    report = m.render_report(
+        receipt=m.build_receipt(scored=shared_run["scored"], commit="a" * 40,
+                                cost_usd=0.0, prereg_sha256="0" * 64),
+        scored=scored, prereg=_mock_prereg(shared_run["root"]),
+        prereg_sha256="0" * 64)
+    assert "unseen / —" in report
+    assert "unseen / live-unflagged" not in report
