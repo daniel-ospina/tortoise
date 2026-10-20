@@ -471,6 +471,21 @@ SOURCE_PATTERNS = {
                    # runs on the only change that can break it — which is exactly what the
                    # registration comment in `config/ci-surfaces.yml` claimed it did.
                    "docs/plans/2026-09-22-3525-csp-no-store.md",
+                   # #9121 review (P1): `tests/test_9121_onboarding_residual_pins.py`
+                   # pins the §17.1 escape-(3) residual in TWO records beyond the
+                   # two code modules it already reached — the increment-4 tracker
+                   # and §17.1's own door ledger. Reviewer-measured: both were
+                   # WITHOUT the residual, and an auditor reading either concludes
+                   # the onboarding class has no second writer, which the five
+                   # `eager_init_query()` sites disprove (`#9157`). `docs/` is in
+                   # NON_PYTHON_PREFIXES and is not itself a pattern, so without
+                   # these CONCRETE entries a docs-only edit to either record
+                   # selects NO surface and the pin never runs on the only change
+                   # that can break it — the #1349/#3332 silent-drop class, one
+                   # level up. Named as CONCRETE files, not globs: `select()`
+                   # matches with `startswith` and has no glob support.
+                   "docs/plans/2026-10-14-7951-atomic-write-outbox.md",
+                   "docs/architecture/STORAGE-ARCHITECTURE.md",
                    # #8379 (finding 2): `test_blog_authoring_doc.py` renders the
                    # blog authoring contract with a real CommonMark parser. `docs/` is
                    # in NON_PYTHON_PREFIXES and is not itself a pattern, so without this

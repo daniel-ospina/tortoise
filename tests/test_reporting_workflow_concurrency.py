@@ -64,6 +64,12 @@ What this module pins
   still defines a job with the id ``python-ci-gate`` and no ``name:`` override
   (renaming it silently un-requires the gate — branch protection and Mergify's
   ``check-success=python-ci-gate`` name it);
+* no job reuses its workflow's run-level ``concurrency.group``, and
+  ``supabase-deploy``'s two locks are pinned exactly (a CONSTANT apply lock,
+  an event-scoped run lock, both ``cancel-in-progress: false``) — equal names
+  deadlock the job with ZERO steps, and a constant run group lets a starved
+  ``push`` run hold the RUN lock a dispatch needs, so its apply cannot start
+  (measured 2026-10-20, #9120 x #1095);
 * the guard is NON-VACUOUS: it asserts it parsed a plausible number of
   workflows and that each workflow it makes a claim about actually exists, so a
   renamed file or a glob typo fails here instead of passing silently.
@@ -74,6 +80,7 @@ and ``test_workflow_secret_interpolation.py``.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -490,3 +497,301 @@ def test_the_zero_cost_pr_event_exemption_is_still_true() -> None:
         "zero-cost on the PR path — keep it in the job-level `if:`"
     )
     assert "mergify[bot]" in job_if, "the Mergify exemption must stay explicit (#3558)"
+
+
+# ── A run-level group and a job-level group must never share a name ──────────
+#
+# Measured 2026-10-20. Adding a run-level `concurrency:` to supabase-deploy
+# (#9120) reused the group name the `deploy` JOB already declared. The RUN
+# acquires the group first, so the job can never acquire it — and the run cannot
+# finish until the job runs. GitHub resolves that deadlock by failing the job
+# INSTANTLY with ZERO steps and `runner_name: null`:
+#
+#     JOB deploy | conclusion=failure | steps=0 | runner=none
+#     started_at 20:02:38Z -> completed_at 20:02:37Z   (completed BEFORE started)
+#
+# Nothing in that output names concurrency, so it reads as a mystery red. The
+# consequence was not cosmetic: the job is the ONLY thing that applies repo
+# migrations to prod, so no migration could be applied, so the drift gate
+# blocked every `deploy-hosted` behind it, so a merged fix could not deploy.
+#
+# A name comparison catches the whole class in one line, and the two intents
+# stay separately satisfiable: the run-level group serialises whole deploys
+# (#9115), the job-level one serialises only the apply (#1095). Callers compare
+# through :func:`_normalise_group`, because GitHub treats `${{github.ref}}` and
+# `${{ github.ref }}` as the SAME group — a raw-text comparison would miss a
+# real deadlock written the other way round.
+
+
+def _concurrency_group(block: object) -> str | None:
+    """The group name of a `concurrency:` block, or None when it is not a name.
+
+    Accepts both spellings GitHub allows (bare string, or a mapping).
+
+    The contract is **textual**: a group containing `${{ … }}` is returned as
+    its literal text, NOT resolved and NOT skipped. That is deliberate and it
+    cuts both ways:
+
+    * two blocks naming the SAME group collide, including expression-valued
+      ones (`ci-${{ github.ref }}` twice) — correctly flagged;
+    * two blocks whose expressions name DIFFERENT groups (`github.ref` vs
+      `github.ref_name`, or an extra `github.run_id`) compare unequal, so a
+      collision there is MISSED — that is a semantic difference, not a
+      spelling one, and resolving it needs the expression evaluated.
+
+    Callers MUST compare through :func:`_normalise_group`: spacing inside
+    `${{ … }}` does not change the group, so raw-text comparison would both
+    miss a real collision (`${{github.ref}}` vs `${{ github.ref }}`) and invent
+    one in the other direction. Skipping expressions altogether would lose the
+    collision case to catch the semantics case, which is the worse trade: an
+    unresolved collision deadlocks a job, while differing contexts are caught
+    by review. Callers must not assume an expression means "no group".
+    """
+    if isinstance(block, str):
+        return block
+    if isinstance(block, dict):
+        group = block.get("group")
+        return group if isinstance(group, str) else None
+    return None
+
+
+_EXPRESSION = re.compile(r"\$\{\{\s*(.*?)\s*\}\}")
+_CONDITION_OPERATOR = re.compile(r"\s*(==|!=|>=|<=|&&|\|\||>|<)\s*")
+
+
+def _normalise_condition(condition: str) -> str:
+    """An `if:` expression canonicalised: no `${{ }}`, quote style, or spacing.
+
+    `if: github.event_name == 'workflow_dispatch'`, the same condition with
+    double quotes, with the operators unpadded, and the wrapped
+    `if: ${{ github.event_name == 'workflow_dispatch' }}` are all the SAME
+    condition — GitHub evaluates an `if:` as an expression with or without the
+    wrapper — so a format pass or a hand-edit copying the documented form must
+    not red the pin, and the failure message ("revisit the group design") would
+    then be false about the artifact in front of the maintainer. Only the FORM
+    is normalised: adding, dropping or changing a term still fails, wrapped or
+    not.
+    """
+    stripped = condition.strip()
+    whole = _EXPRESSION.fullmatch(stripped)
+    if whole is not None:
+        stripped = whole.group(1)
+    collapsed = re.sub(r"\s+", " ", stripped.replace('"', "'")).strip()
+    return _CONDITION_OPERATOR.sub(r" \1 ", collapsed).strip()
+
+
+def _normalise_group(group: str) -> str:
+    """Group text with `${{ … }}` spacing collapsed, for exact comparison.
+
+    GitHub ignores the whitespace inside an expression, so `${{github.ref}}`
+    and `${{ github.ref }}` are the SAME group. Comparing raw text would turn a
+    cosmetic reformat into a red, and the assertion message ("must be
+    event-scoped and NOTHING else") would then be false about the artifact in
+    front of the maintainer. Normalising keeps the pin about WHICH contexts a
+    group uses and still fails every change of context (an added
+    `${{ github.run_id }}`, a removed `github.event_name`).
+    """
+    return _EXPRESSION.sub(lambda m: "${{ " + m.group(1) + " }}", group)
+
+
+@pytest.mark.parametrize("path", _workflow_paths(), ids=lambda p: p.name)
+def test_no_job_reuses_the_run_level_concurrency_group(path: Path) -> None:
+    """A job group equal to the run group deadlocks: the job never starts.
+
+    Compared through :func:`_normalise_group`, so `ci-${{github.ref}}` in a job
+    against `ci-${{ github.ref }}` at run level is flagged as the collision it
+    is. Raw text would miss it, and that pair deadlocks exactly like an
+    identical spelling does.
+    """
+    doc = _load(path)
+    run_group = _concurrency_group(doc.get("concurrency"))
+    if run_group is None:
+        return
+    jobs = doc.get("jobs") or {}
+    assert isinstance(jobs, dict), f"{path.name}: `jobs:` is not a mapping"
+    normalised_run = _normalise_group(run_group)
+    colliding = sorted(
+        name
+        for name, job in jobs.items()
+        if isinstance(job, dict)
+        and (job_group := _concurrency_group(job.get("concurrency"))) is not None
+        and _normalise_group(job_group) == normalised_run
+    )
+    assert not colliding, (
+        f"{path.name}: job(s) {colliding} reuse the run-level concurrency group "
+        f"{run_group!r}. The run holds that group first, so the job can never "
+        f"acquire it and GitHub fails it with ZERO steps and no runner — which "
+        f"reads as a mystery red (measured 2026-10-20, #9120 x #1095). Give the "
+        f"job its own group name."
+    )
+
+
+def test_supabase_deploy_apply_lock_is_distinct_from_the_run_lock() -> None:
+    """The incident itself, pinned: every property of the two locks.
+
+    (a) the apply lock is a CONSTANT and differs from the run group — that is the
+        deadlock (#9120 x #1095);
+    (b) the run group is EVENT-SCOPED, so a starved `push` run cannot hold the
+        lock a `workflow_dispatch` needs. A constant run group re-breaks #1095
+        even with distinct names, because every run of the workflow acquires it
+        (#1095's reviewed decision: "workflow-level concurrency is claimed
+        per-run — a push run would still hold the shared group");
+    (c) neither lock cancels (a cancelled apply leaves a half-applied schema);
+    (d) a push run cannot reach the CONSTANT apply lock at all: `check-drift`
+        declares no job-level group, and `deploy` is dispatch-only. The exact
+        pins (a)-(c) describe names and flags only, so without (d) either
+        mechanism can be removed with the module fully green — measured.
+
+    Named separately from the parametrised sweep because a regression here is
+    the one that silently kills the ONLY automated path from repo to prod
+    migrations, and it must fail with that consequence spelled out.
+    """
+    doc = _load(WORKFLOW_DIR / "supabase-deploy.yml")
+    run_group = _concurrency_group(doc.get("concurrency"))
+    apply_group = _concurrency_group(doc["jobs"]["deploy"].get("concurrency"))
+    assert run_group is not None, "the run-level deploy lock (#9115) must stay"
+    assert apply_group is not None, "the apply lock (#1095) must stay in place"
+    # ⛔ EXACT pins, not substring checks. An earlier revision asserted
+    # `"github.event_name" in run_group` and `"${{'" not in apply_group`, and
+    # BOTH were vacuous in the direction that matters: the first is satisfied by
+    # `supabase-deploy-${{ github.event_name }}-${{ github.run_id }}` (every run
+    # gets its own group, so deploys never serialise), and the second — the
+    # literal is `$`, `{`, `{`, `'`, and a real group always has a character
+    # between `{{` and a quote — is satisfied by
+    # `supabase-deploy-apply-${{ github.run_id }}` (every dispatch gets its own
+    # apply group, so the apply lock stops being a lock at all). Exact text
+    # pins both properties at once: constant apply lock, event-scoped run lock,
+    # and the two distinct from each other.
+    #
+    # The comparison is on NORMALISED text (`${{github.ref}}` == `${{ github.ref }}`),
+    # so a cosmetic reformat is not a false red: the pin is about which contexts
+    # the group uses, not about spacing. Every mutation that changes the contexts
+    # still fails — see `test_group_pin_ignores_whitespace_but_not_extra_context`.
+    assert _normalise_group(run_group) == "supabase-deploy-${{ github.event_name }}", (
+        f"the run-level group must be event-scoped and NOTHING else "
+        f"({run_group!r}). A constant holds the lock on every run — including "
+        "the `push` drift run, which then starves an operator's dispatch apply "
+        "(#1095); any extra context (e.g. `github.run_id`) gives every run its "
+        "own group, so the run-level lock bounds NOTHING (#9115's unbounded "
+        "shape) and whole deploys stop serialising. Applies themselves are still "
+        "serialised by the constant apply lock below — which is exactly why "
+        "this mutation has to be caught HERE."
+    )
+    assert _normalise_group(apply_group) == "supabase-deploy-apply", (
+        f"the apply lock must be the CONSTANT 'supabase-deploy-apply' "
+        f"({apply_group!r}): an expression gives every dispatch its own apply "
+        "lock, so the ONLY thing serialising applies would be the event-scoped "
+        "RUN lock above — the apply lock would no longer be independent of the "
+        "run-level design #1095 exists to change, and a second applying "
+        "workflow (or a push deploy after the #771 flip) would have nothing "
+        "excluding it. Collapsing onto the run group "
+        f"{run_group!r} is the 2026-10-20 deadlock, where the deploy job "
+        "fails with zero steps and no migration can be applied automatically."
+    )
+    # ⛔ `cancel-in-progress: false` is the other half of the same promise, and
+    # it is stated as load-bearing in the workflow's own comment (“a cancelled
+    # migration apply leaves the schema half-migrated”). Presence alone is not
+    # it: flipping either lock to `true` left the whole module green, so the
+    # claim in that comment would have been enforced by nothing.
+    assert doc["concurrency"]["cancel-in-progress"] is False, (
+        "the run-level deploy lock must never cancel: a cancelled migration "
+        "apply leaves the schema half-migrated and no re-run repairs it "
+        "deterministically — a superseded run must QUEUE instead (#9115)"
+    )
+    assert doc["jobs"]["deploy"]["concurrency"]["cancel-in-progress"] is False, (
+        "the apply lock must never cancel a workflow_dispatch run: a cancelled "
+        "apply leaves the schema half-migrated and no re-run repairs it "
+        "deterministically (#1095). If superseded `push` DRIFT runs should "
+        "cancel, that is a different lock — write it as the expression "
+        "`cancel-in-progress: ${{ github.event_name == 'push' }}` and update "
+        "this pin deliberately; the literal `true` must stay red."
+    )
+    # ⛔ The apply lock is CONSTANT, so it is only safe because a push run can
+    # never reach it. TWO things make that true and neither is a group name, so
+    # the exact pins above cannot see either one going away:
+    #   * `check-drift` (the push arm) never acquires the apply lock — if it
+    #     did, a starved push run would hold the lock an operator's dispatch
+    #     apply needs (#1095);
+    #   * `deploy` is dispatch-only — let it run on push and every push run's
+    #     deploy job queues on the SAME constant group.
+    # Both mutants left the whole module green before these pins existed.
+    drift_group = _concurrency_group(doc["jobs"]["check-drift"].get("concurrency"))
+    assert drift_group is None or (
+        _normalise_group(drift_group) != _normalise_group(apply_group)
+    ), (
+        "check-drift must NOT acquire the constant apply lock: it runs in a push "
+        "run, so a starved push run would hold the lock an operator's dispatch "
+        "apply needs (#1095), and no group on this job needs an apply lock."
+    )
+    assert _normalise_condition(str(doc["jobs"]["deploy"].get("if", ""))) == (
+        "github.event_name == 'workflow_dispatch'"
+    ), (
+        "deploy must stay DISPATCH-ONLY: the apply lock is a constant, so a push "
+        "run that reaches this job queues behind an operator's apply. If you are "
+        "deliberately flipping #771 so pushes deploy, the apply lock has to stop "
+        "being reachable from a push run first — revisit this pin and the group "
+        "design together, not this test alone."
+    )
+
+
+def test_group_pin_ignores_whitespace_but_not_extra_context() -> None:
+    """The normaliser the exact pins compare through: cosmetic, and no more.
+
+    A whitespace-only reformat of an expression is the SAME GitHub group, so it
+    must not read as a property change — while every change of CONTEXT (adding
+    `github.run_id`, dropping `github.event_name`) must still be visible to the
+    pin, or the pin would be the vacuous assertion this module replaced.
+    """
+    pinned = "supabase-deploy-${{ github.event_name }}"
+    assert _normalise_group("supabase-deploy-${{github.event_name}}") == (
+        _normalise_group(pinned)
+    ), "a whitespace-only reformat is the same group; it must not be a red"
+    assert _normalise_group("supabase-deploy-${{  github.event_name  }}") == (
+        _normalise_group(pinned)
+    )
+    differing = [
+        "supabase-deploy-${{ github.event_name }}-${{ github.run_id }}",
+        "supabase-deploy-${{ github.ref }}",
+        "supabase-deploy",
+    ]
+    for group in differing:
+        assert _normalise_group(group) != _normalise_group(pinned), (
+            f"{group!r} differs in the CONTEXTS it uses, so the pin must see it "
+            "as different — otherwise every run gets its own group and deploys "
+            "stop serialising"
+        )
+
+
+def test_if_condition_pin_ignores_quote_style_but_not_extra_terms() -> None:
+    """The `if:` pin's normaliser: canonical FORM, exact CONDITION.
+
+    A YAML format pass may switch a quoted scalar's quote style or reflow
+    spaces; that is the same condition and must not red the dispatch-only pin
+    with a message about redesigning the locks. A changed term must still fail,
+    or the pin would not hold the property.
+    """
+    pinned = "github.event_name == 'workflow_dispatch'"
+    accepted = (
+        'github.event_name  ==  "workflow_dispatch"',
+        "  github.event_name == 'workflow_dispatch' \n",
+        # `if:` is an expression with or without the `${{ }}` wrapper, and the
+        # wrapped form is the one the docs show.
+        "${{ github.event_name == 'workflow_dispatch' }}",
+        "${{github.event_name=='workflow_dispatch'}}",
+    )
+    for form in accepted:
+        assert _normalise_condition(form) == pinned, (
+            f"{form!r} is the SAME condition; it must not red the pin"
+        )
+    rejected = (
+        "github.event_name == 'push'",
+        "github.event_name != 'workflow_dispatch'",
+        "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'",
+        "${{ github.event_name == 'push' }}",
+        "${{ true }}",
+        "",
+    )
+    for other in rejected:
+        assert _normalise_condition(other) != pinned, (
+            f"{other!r} is not the dispatch-only condition; the pin must see it"
+        )

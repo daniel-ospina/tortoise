@@ -6072,6 +6072,21 @@ class TortoiseSDK:
         self._graph_name = graph_name
         self._event_log_path = event_log_path
         self._event_log = None  # lazy-init EventLog (#548)
+        # ── the record's tenant for THIS SDK's writes (#9188) ───────────
+        # The Postgres record files every row under `(org_id, graph_id)`, and
+        # the tenant is normally ambient (`record_writer.use_record_tenant`,
+        # installed per request by the MCP lane's middleware). The hosted REST
+        # lane BINDS it here instead, and the reason is CONFINEMENT, not
+        # propagation (measured: a contextvar set on the loop IS copied into
+        # `asyncio.to_thread` / `_graph_offload`). `_data_sdk` — the only place
+        # that lane resolves a tenant — runs INSIDE `_graph_offload` for the
+        # capture path, so a scope entered there dies with the context copy; and
+        # setting it loop-side would mean setting it WITH NO EXIT, where every
+        # detached task and every other write door in that context inherits it.
+        # So the value travels on the SDK the write runs on: this request's own
+        # answer, unable to escape into a concurrent one. `None` (every other
+        # lane) is the historical behaviour, byte-identical.
+        self._record_tenant: tuple[str, str] | None = None
         # #4240 review F1: count journal appends that failed on a CONFIGURED
         # journal. A configured journal that cannot record makes the derived
         # graph live-only, so a failure is a real degradation — it is counted
@@ -7296,7 +7311,51 @@ class TortoiseSDK:
         # nothing was lost (#9231 review P2).
         log = self._event_log
         durable = log is not None and getattr(log, "durable", True)
-        record_writer.write_live_record(record, durable=durable, seq=seq)
+        record_writer.write_live_record(record, durable=durable, seq=seq,
+                                        tenant=self._record_tenant)
+
+    def _bind_record_tenant(self, org_id: str, graph_id: str) -> None:
+        """Bind this SDK's writes to one record tenant (#9188).
+
+        The BY-VALUE half of the tenant carrier. `record_writer.use_record_tenant`
+        is the ambient half (a ContextVar, right wherever a lane can hold a
+        `with` around the work). This is the half a lane needs when it cannot:
+        the hosted REST lane resolves the tenant inside `_data_sdk`, which the
+        capture path submits to `_graph_offload` (a scope entered there dies
+        with the copy), and setting it loop-side would mean setting it with no
+        exit (the `_data_sdk` auth seam is a plain dependency; a
+        `yield`-dependency could hold a `with`, and none does) — one unreleased
+        value that every detached task and every other write door in that
+        context inherits. Carrying it on the SDK confines it
+        to the write it belongs to. (Propagation is NOT the reason: a contextvar
+        set on the loop is copied into `asyncio.to_thread` / `_graph_offload`.)
+
+        ⚠️ It is NOT a second resolution: the caller passes what
+        `record_writer.record_tenant_for` derived from the SAME credential dict
+        that chose the graph this SDK is bound to, so the record's tenant and
+        the graph the write lands in cannot disagree by construction. A lane
+        that binds a guessed or process-global tenant recreates #9192's silent
+        cross-tenant write — never call this with anything but a per-request
+        resolution.
+
+        ⚠️ The binding is a PROPERTY OF THIS OBJECT, so it is only as
+        request-scoped as the SDK is. Today every hosted data path builds a
+        fresh SDK per request (`hosted_api._make_sdk`) and the keepalive
+        anchors are never bound — but a future cache of `_data_sdk`'s result
+        would carry this tenant into a later request, which ambient state could
+        not do. Bind a throwaway SDK, never a shared one.
+
+        Validated here rather than at the write because the failure mode of an
+        empty half is a row filed under a graph this write never touched, and
+        finding that at the seam is one drained record too late.
+        """
+        if not (isinstance(org_id, str) and org_id
+                and isinstance(graph_id, str) and graph_id):
+            raise ValueError(
+                "_bind_record_tenant needs a non-empty org_id and graph_id "
+                f"(got {org_id!r}, {graph_id!r})"
+            )
+        self._record_tenant = (org_id, graph_id)
 
     def _record_write_failure(self, reason: str, exc: BaseException) -> None:
         """Count and report one armed record write that did not happen (#9188).
@@ -22215,6 +22274,40 @@ class TortoiseSDK:
         ``diagnostic: "no_dirty_state_http"`` without the three keys — a caller
         on the hosted surface must read that diagnostic first.
 
+        DIRTY-FLAG CLEARING (#6211, mode 2) — a successful pass retires the
+        flags it recomputed. `ep_dirty` is the graph's cross-process "this
+        claim's belief is stale" marker; before #6211 the only path that
+        retired a CONVERGED PASS's recomputed set was the dreaming adapters'
+        `_sweep_dirty_roots` (the two other writers of the flag — `_mark_dirty`'s
+        terminal-point clear and `_register_failed_attempt`'s retry-cap clear —
+        are lifecycle events, not "this pass recomputed it"). A writer following
+        the documented "compute confidence for my claims" call (`anchors=` /
+        `factors=`) therefore got posteriors and `converged: true` while its own
+        claims stayed `ep_dirty` forever. The two TARGETED branches (`factors=` /
+        `anchors=`) now clear the run's affected claims through
+        `_clear_targeted_pass_dirty`. The NO-ARG branch is unchanged: it clears
+        through the fail-safe `dream` it delegates to, so it inherits THAT
+        pass's gates and nothing here.
+
+        The targeted clear is scaled to what the pass actually did, and it is
+        deliberately STRICTER than the dream adapters, which gate on
+        `converged`, the #1163 stale-run guard and `_guard_dream_progress`
+        (#3139 — an explicit raise on a zero-work pass, NOT a truncation gate)
+        and nothing else: measured, a no-arg pass whose dream selection was
+        capped at 200 of 260 operators still clears, reporting
+        `truncated: true`. This path additionally refuses when the pass was
+        TRUNCATED (a reduced topology's `affected` set is incomplete by
+        construction, so every claim outside it is still stale) and when the
+        run recomputed nothing at all — stated directly here rather than
+        inherited from the Dreamer's raise. A pass that fails, is capped, is
+        truncated, or did no work clears NOTHING (W4 retention, #1243): those
+        roots are still stale and must be retried. A missing epoch snapshot
+        refuses explicitly (the Dreamer cannot reach that state: its snapshot is
+        always an int, `0` when the epoch read failed, which clears nothing).
+        Nothing new is returned for this — the flag itself is the observable,
+        and `ep_dirty_at` records
+        when it was set.
+
         Two diagnostics can accompany the result, both ABSENT when they do not
         apply: ``diagnostic`` — one of ``truncated`` (#395 degeneration guard),
         ``no_factors`` / ``no_dirty_roots`` (nothing to run), ``factors_skipped``;
@@ -22495,7 +22588,150 @@ class TortoiseSDK:
                 for s in ep._last_skipped_factors
             ]
             result.setdefault("diagnostic", "factors_skipped")
+        # #6211 (mode 2): the targeted paths have persisted their posteriors and
+        # their `n.confidence` write-back, so the claims they recomputed are no
+        # longer stale — clear THEIR flags. Runs after the write-back on purpose:
+        # a claim is recomputed when its belief is persisted, not when the factor
+        # pass returns.
+        #
+        # Keyed on the BRANCH PREDICATE, not a hand-set flag: the same condition
+        # that chose the branch chooses whether this method owns the sweep, so a
+        # future branch (or a refactor that moves one) cannot silently strand the
+        # flags again — the #6211 failure reproduced by omission. The no-arg case
+        # is excluded because its fail-safe `dream` already swept, and sweeping a
+        # second time here would restate that rule in a second place.
+        if factors is not None or anchors is not None:
+            self._clear_targeted_pass_dirty(ep, result)
         return result
+
+    def _clear_targeted_pass_dirty(self, ep, result: dict) -> None:
+        """#6211 (mode 2) — a converged TARGETED pass clears its own roots.
+
+        THE DEFECT THIS CLOSES. `ep_dirty` is the graph's cross-process source
+        of truth for "this claim's belief has not been recomputed since it was
+        written", and the ONLY code that retires a CONVERGED PASS's recomputed
+        set is `_sweep_dirty_roots`, called from the three dreaming adapters
+        (`_dream_local` / `_dream_stale_first` / `_dream_full`). Two other
+        writers touch the same flag and are NOT this rule: `_mark_dirty` clears
+        it for TERMINAL points as it re-marks them, and
+        `_register_failed_attempt` clears it when a root hits the retry cap —
+        both are lifecycle events, not "a pass recomputed this belief". The
+        targeted fast path — `compute_confidence(
+        factors=…)` / `compute_confidence(anchors=…)`, the call the graph
+        instruction and `docs/capacity.md` point a writer at — runs `ep.run`
+        directly and never touches the Dreamer, so it wrote posteriors and left
+        the writer's own `ep_dirty` flags set. MEASURED on this head before the
+        change (4-claim IMPL chain, embedded lane): after
+        `compute_confidence(anchors=[c0], max_hops=2)` reported
+        `converged=True, truncated=False` over all 4 claims, all 4 were still
+        `ep_dirty`; the subsequent no-arg pass cleared all 4. A writer therefore
+        had a way to mark claims dirty and no API that cleared them — the
+        issue's second failure mode.
+
+        WHY THIS IS NOT A NEW CLEARING RULE. It is the Dreamer's rule, applied
+        to the second entry point of the same problem, and the SAME method
+        already clears dirty state on its no-arg branch (via `dream`) — two
+        branches of one public method disagreeing about whether a recompute
+        retires its own flag is the inconsistency, not the fix.
+
+        THE GATES, all fail-closed (each refuses when its datum is missing
+        too). TWO are the Dreamer's, THREE are this path's own and STRICTER:
+
+          * ``converged`` — shared with the Dreamer. W4 retention (#1243): a
+            pass that did not converge leaves its roots dirty for the retry.
+          * ``not _flush_skipped`` — shared with the Dreamer. #1163/#6761: the
+            run's posteriors were DROPPED by the stale-run guard after a
+            concurrent process advanced the epoch, so nothing was recomputed.
+          * ``not truncated`` — ADDED HERE, not a Dreamer gate. The adapters
+            consult convergence, the flush guard and `_guard_dream_progress`'s
+            #3139 raise, and NOT truncation: measured, a no-arg pass whose dream
+            selection was capped at 200 of 260 operators still clears while
+            reporting ``truncated: true``. A truncated pass was computed over a
+            REDUCED topology — the operator cap, or the #395 degeneration guard
+            — so its ``affected`` set is incomplete by construction and every
+            claim outside it is still stale. This is why the clearing path was
+            blocked on the reporting half: before it, a capped pass was
+            indistinguishable from a full one and there was nothing sound to
+            gate on.
+          * ``iterations`` > 0 AND a non-empty ``affected`` — ADDED HERE. A pass
+            that ran NO factor recomputed nothing, and sweeping its roots would
+            be the #3139 "no-op that sweeps its own backlog" false PASS. The
+            Dreamer obtains the same protection by RAISING
+            (`_guard_dream_progress` → `DreamNoOpError`) before any sweep; this
+            path states the rule directly and refuses the clear instead of
+            failing the call. Belt-and-braces: the epoch arm below also refuses
+            that shape after the fix in ``TortoiseEP.run``'s entry reset.
+          * ``_run_ep_version >= 0`` — ADDED HERE. The epoch this run SAW is the
+            guard's only protection against erasing a marking newer than the
+            run's world view, and `_sweep_dirty_roots(run_ep=None)` clears
+            UNCONDITIONALLY (the #1163 hazard). `-1` is the "no snapshot this
+            run" sentinel, so this path refuses explicitly. The Dreamer cannot
+            reach that state — its `_last_run_ep_version` is always an int (`0`
+            when the epoch read failed), and `ep_dirty_at <= 0` matches no
+            stamp, i.e. it clears nothing — so this arm is stricter, not merely
+            different.
+
+        The epoch is then passed to `_sweep_dirty_roots`, which clears only
+        `ep_dirty_at <= run_ep`: a concurrent process's newer marking survives,
+        exactly as in the Dreamer. Roots the pass did not reach are retained
+        (W4). The #7505 NEUTRAL-LINK roots are handled by
+        `_unsweepable_dirty_roots` INSIDE the sweep only when this process's
+        dirty mirror is populated — i.e. for the writer's own long-lived SDK,
+        not for a request-scoped caller whose mirror starts empty. That is the
+        pre-existing scope of the sweep, unchanged here: the targeted path is
+        not asked to drain a backlog it never saw, and a hosted caller's
+        neutral-link roots are still the dream drain's work.
+
+        BEST-EFFORT. The posteriors, the `n.confidence` write-back and the
+        `ConfidenceChanged` journal entries have ALREADY landed by the time this
+        runs, so a failed clear must not turn a successful pass into a raised
+        exception — a clear that fails retains the flag (the safe, W4
+        direction) and is logged.
+
+        NOT done here: `_prune_nonexistent_dirty_roots` (the deleted-point
+        zombie pass, #1243 P2-review) stays with the Dreamer. The targeted path
+        does not create zombies — `delete_point` does, and the dream drain is
+        the sweep that owns that class — and a per-read whole-graph prune would
+        put a scan on the interactive fast path.
+        """
+        if not result.get("converged"):
+            return
+        # Fail closed on a MISSING key too: the sole call site always supplies
+        # it (via `_report`), but an absent `truncated` must never read as
+        # "not truncated" — that is the direction that retires a flag on a
+        # reduced topology.
+        if result.get("truncated", True):
+            return
+        if not result.get("iterations"):
+            return
+        if getattr(ep, "_flush_skipped", True):
+            return
+        run_ep = getattr(ep, "_run_ep_version", -1)
+        if not isinstance(run_ep, int) or run_ep < 0:
+            return
+        affected = set(getattr(ep, "_last_affected", ()) or ())
+        if not affected:
+            return
+        # Snapshot the mirror for an EXACT undo. `_sweep_dirty_roots` subtracts
+        # `set(affected) | _unsweepable_dirty_roots(affected)` BEFORE it issues
+        # the graph write, so a failure leaves the roots in the graph but gone
+        # from this process's backlog — and `_hydrate_dirty_roots` returns early
+        # while the mirror is non-empty, so a later no-arg pass would never
+        # retry them. Restoring `affected` alone is not enough: the #7505
+        # NEUTRAL-LINK residue is subtracted too and would be lost; and when the
+        # failure happens BEFORE the subtraction (a raise from
+        # `_unsweepable_dirty_roots` itself) re-adding `affected` would
+        # manufacture mirror roots whose graph flag is clean. A snapshot is the
+        # identity in both positions.
+        mirror_before = set(self._dirty_roots)
+        try:
+            self._sweep_dirty_roots(affected, run_ep=run_ep)
+        except Exception:  # noqa: BLE001, RUF100 - best-effort, see docstring
+            self._dirty_roots |= mirror_before
+            _logger.warning(
+                "#6211: could not clear ep_dirty on %d recomputed claim(s) — "
+                "their flags stay set (retained for the next pass)",
+                len(affected), exc_info=True)
 
     def _hydrate_evidence(self) -> None:
         """Load graph-persisted baselines (baseline_set=true) into _evidence.
