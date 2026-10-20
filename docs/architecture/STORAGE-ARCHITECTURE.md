@@ -1345,25 +1345,36 @@ follows is the evidence each ruling rests on, which is design.
 
   **The primary search path does NOT read it.** `rg -n 'aboutObject' tortoise/retrieval.py tortoise/search_engine.py tortoise/session_reinjection.py` → **exit 1, zero matches**, case-insensitive. **Hindsight's premise holds for this path.**
 
-  **It IS load-bearing elsewhere — ELEVEN read sites, and FOUR of them are CUSTOMER-CALLABLE** (all line numbers pinned to `c79ba1cf2`; the symbols are authoritative):
+  **It IS load-bearing elsewhere — TWENTY read sites, and EIGHT of them are CUSTOMER-CALLABLE (across five distinct doors).** ⚠️ **Each row names its READER as `module.py::symbol`, and `tests/test_7948_about_object_read_sites.py` resolves every one of them, re-runs the census over `tortoise/`, checks that each named symbol still reads the edge, and checks that the two counts below equal this table** — because this list is the ruling's evidence and hand-maintaining it has now been wrong three times (#7948's body said the measurement did not exist; B2.7 counted 22 files and two customer-callable sites; `#7956` corrected it to four *doors*, and re-deriving it at `26aff163c` finds **five doors / eight sites** — the whole state-recall path was missing). Line numbers are deliberately **not** carried any more: the symbol is authoritative, the line was the convenience, and the lines had all rotted.
 
-  | # | site | what it reads for | reach |
+  | # | reader (`module.py::symbol`) | what it reads for | reach |
   |---|---|---|---|
-  | 1 | `sdk.py:6411` — SDK **`belief_timeline`** (MCP `tortoise_belief_timeline`, `tool_registry.py:391`) | walks decision → Object named by topic | **customer-callable** |
-  | 2 | `topic_summarization.py:174` — SDK **`topic_summarize`** (`sdk.py:7516`; hosted REST `hosted_api.py:6294`) | finds seed claims via Object | **customer-callable** (⚠️ the MCP handler `tortoise_topic_summarize` is registered nowhere and never served — `#7988`) |
-  | 3 | `ranking.py:1195`/`:1206` — SDK **`recall_subgraph`** (`ranking.SubgraphExpander._neighbors`) | its default `completeness="full"` walks **every** relationship type (`MATCH (n)-[r]->(m)`) — so it reads the edge **without naming it** and no grep can find it | **customer-callable** |
-  | 4 | `ranking.py:461` / `:714` — **`search(order_by="graph")`** (MCP `tortoise_search`) | event and point degree centrality | **customer-callable** |
-  | 5 | `extractor_v2.py:1934` (`_enrich_point_priors`) | the classifier's "same entity?" gate | default-ON, write path |
-  | 6 | `mining.py:477` (`_temporal_wire`) | finds prior decisions on the same Object, then **mints a NAND** | default-ON, write path, **2-hop** |
-  | 7 | `sdk.py:14744` (`_entity_key_expansion_pass`) | the entity-key alias harvest | **OFF by default** (`entity_key_expansion: bool = False`, `sdk.py:13777`) |
-  | 8 | `assembly.py:573`/`:789`/`:809` (`alias_objects`, `collect_slices`) | the connected-assembly slices | **OFF by default** (`TORTOISE_ASK_CONNECTED_ASSEMBLY`) |
-  | 9 | `subgraph.py:312`/`:319-320` (`build_subgraph`) | the `#3011` epistemic-subgraph engine | **eval harness only** (`tools/longmem_eval/context_assembly_arms.py`) |
-  | 10 | `aggregate.py:502` (`collect_anchor_census`) | the aggregative-verdict anchor census | **eval harness only** (`tools/longmem_eval/retrieve.py`) |
-  | 11 | `coverage_loop.py:238` (`facet_census`) | the rule-based facet census | **eval harness only** (`tools/longmem_eval/retrieve.py`) |
+  | 1 | `ranking.py::GraphRanker._fetch_event_signals` | the Event degree signal — `0.6·aboutObject` count — behind graph-ordered search | **customer-callable** — MCP `tortoise_search` (`order_by="graph"`), SDK `suggest_entry_points` |
+  | 2 | `ranking.py::StateRanker._fetch_point_signals` | the present-day Point signal behind state recall (absent ⇒ neutral, never a penalty) — ⚠️ **the door this table was missing** | **customer-callable** — MCP `tortoise_recall` (`mode="state"`), SDK `recall_state` |
+  | 3 | `ranking.py::SubgraphExpander._neighbors` | **every** relationship type at the default `completeness="full"` (`rel_pattern = ""` → `MATCH (n)-[r]->(m)`), so it reads the edge **without naming it** and no grep can find it | **customer-callable** — MCP `tortoise_recall` (`mode="subgraph"`), SDK `recall_subgraph` |
+  | 4 | `sdk.py::TortoiseSDK.belief_timeline` | walks decision → Object named by topic | **customer-callable** — MCP `tortoise_belief_timeline`, SDK `belief_timeline` |
+  | 5 | `topic_summarization.py::_retrieve_topic_neighborhood` | seed claims via the Object side; the edge name is built at run time (`edge_type = "aboutSubject" if … else "aboutObject"`), so grep misses this one too | **customer-callable** — SDK `topic_summarize`, hosted REST (`/v1/…/topic`), ⚠️ no MCP door exists (`#7988`) |
+  | 6 | `mining.py::ConversationMiner._temporal_wire` | finds prior decisions on the same Object, then **mints a NAND** (2-hop) | **write path** |
+  | 7 | `extractor_v2.py::_enrich_point_priors` | the classifier's "same entity?" prior | **write path** |
+  | 8 | `projection/edges.py::_EdgeHandlers._count_about_out` | whether a replayed about-link landed — called by `replay_about_links` on the `#8398` restore path | **journal replay** |
+  | 9 | `session_schema.py::audit_session_retrofit` | live-vs-recorded edge-count reconciliation for captured Sessions | **ops audit** |
+  | 10 | `assembly.py::docker_resolver_port` | the `alias_objects` alias harvest inside the resolver port | **off by default** (`TORTOISE_ASK_CONNECTED_ASSEMBLY`) |
+  | 11 | `assembly.py::docker_walker_port` | the `spine_rows` spine slices inside the walker port (`collect_slices` only delegates) | **off by default** (`TORTOISE_ASK_CONNECTED_ASSEMBLY`) |
+  | 12 | `sdk.py::TortoiseSDK._entity_key_expansion_pass` | the entity-key alias harvest | **off by default** (`entity_key_expansion: bool = False`) |
+  | 13 | `subgraph.py::_CYPHER_ABOUT` | the `#3011` 1-hop hub read | **eval harness** |
+  | 14 | `subgraph.py::_CYPHER_SIBLINGS` | the `#3011` 2-hop sibling read (the `#5010` cap site) | **eval harness** |
+  | 15 | `aggregate.py::collect_anchor_census` | the aggregative-verdict anchor census | **eval harness** |
+  | 16 | `coverage_loop.py::facet_census` | the rule-based facet census | **eval harness** |
+  | 17 | `ranking.py::StateRanker._fetch_object_signals` | degree/centrality for the Objects in a state recall, folded through the `ABOUT_EDGE_TYPES` alternation (`ranking.py:770`) — the edge is named in a CONSTANT, never in the query | **customer-callable** — MCP `tortoise_recall` (`mode="state"`), SDK `recall_state` |
+  | 18 | `sdk.py::TortoiseSDK._state_related_objects` | the related-Objects surface of a state read, built from `TortoiseSDK._ABOUT_TYPES` (`sdk.py:28240`) — again a constant, so grep cannot see it | **customer-callable** — MCP `tortoise_recall` (`mode="state"`), SDK `recall_state` |
+  | 19 | `sdk.py::TortoiseSDK._state_related_points` | points about each returned Object, same `_ABOUT_TYPES` alternation — the fourth `recall_state` path | **customer-callable** — MCP `tortoise_recall` (`mode="state"`), SDK `recall_state` |
+  | 20 | `sdk.py::TortoiseSDK.supersede_point` | migrates the superseded claim's structural rels, the `about*` family included, onto the successor (`SUPERSEDE_STRUCTURAL_RELS`, `sdk.py:466`) — a WRITE that must first read what it moves | **write path** |
 
-  And **36 test files assert the edge at the pin**.
+  ⚠️ **Rows 17–20 are why a name-based census undercounts even when it is hunting for the invisible walk:** each names the edge through a carrier CONSTANT (`ABOUT_EDGE_TYPES`, `TortoiseSDK._ABOUT_TYPES`, `SUPERSEDE_STRUCTURAL_RELS`), so neither the literal `aboutObject` nor a bare `MATCH (n)-[r]->(m)` appears anywhere in the reader. `tests/test_7948_about_object_read_sites.py` therefore resolves each carrier constant and asserts its membership — the constant IS the read.
 
-  **⇒ The comparable's conclusion does NOT transfer.** Their justification was *"recall never touched them"* — **false here.** Deleting the edge would silently break **four** customer-callable surfaces. ⚠️ **The count is the whole argument — the table must name every customer-callable surface: `recall_subgraph` and `search(order_by="graph")` are two of them**.
+  And **59 test files under `tests/` assert the edge** (`rg -l aboutObject tests/ | wc -l` at `26aff163c`; the earlier figure of 36 was the count at the 2026-09-23 pin).
+
+  **⇒ The comparable's conclusion does NOT transfer.** Their justification was *"recall never touched them"* — **false here.** Deleting the edge would silently break **five distinct customer-callable doors** (`recall_state`, `recall_subgraph`, graph-ordered `search`/`suggest_entry_points`, `belief_timeline`, `topic_summarize`). ⚠️ **The count is the whole argument — and it is EIGHT sites behind those five doors, because `recall_state` alone reads the edge on FOUR code paths; a count that names only the doors understates the blast radius of a `SET`-free derive.**
 
   **But the structural door stays open:** **no** `aboutObject` edge carries **any property** — `create_about_edge` (`projection/edges.py:344`) emits `MERGE (s)-[:aboutObject]->(t)` with no `SET`, and the search for a property-bearing edge returns **zero** at the pin. Unlike Graphiti — whose *fact and validity window live on the edge* — **we lose nothing semantically by deriving later.**
 
@@ -1371,7 +1382,7 @@ follows is the evidence each ruling rests on, which is design.
 
   **⚠️ The derived design is what CREATES a fan-out problem.** Hindsight's join needed a `LATERAL LIMIT per_entity_limit` (default **200**) *and* a timeout that **drops the entire entity arm**. A join on a 1,200-claim hub yields ~1,200 intermediate rows **per anchor**. **So the cap is the price of deriving — and also the guard rail for keeping the edge.** The cap lives in `tortoise/fanout.py` (`PER_ENTITY_FANOUT_CAP = 200`, wired query-side). At 200 it **binds nothing today** (worst hub 123 — the next bullet).
 
-  **What remains UNKNOWN, and would flip the recommendation:** whether `belief_timeline` / `topic_summarize` are **ever actually called** in production. If they are reachable-but-unused, Hindsight's premise is restored and deriving becomes correct.
+  **What remains UNKNOWN, and would flip the recommendation:** whether `belief_timeline` / `topic_summarize` are **ever actually called** in production. If they are reachable-but-unused, Hindsight's premise is restored and deriving becomes correct. ⚠️ **`recall_state` is the one surface this question can be answered for first** — it is the primary recall door, so its call volume is the number to read before launch, not after.
 
   **✅ OWNER RULING 2026-09-23: KEEP the stored edges — and the stored-vs-derived question is DEFERRED to post-launch, not left open.** *"we haven't launched yet, so unanswerable. keep them for now, we optimise with users."* **The unknown above is unanswerable before launch — there is no usage to count.** So: **keep the stored edges; revisit once there are users and real call data.** ⚠️ **The deferral costs only storage — ~3 MB, per §11.1 — so deferring is genuinely cheap, and it is the right call: it buys the option back for the price of nothing.**
 - **Fan-out caps** — **`#5010`** — nothing in our write path bounds how many edges one entity accumulates (`config/ci-surfaces.yml` at **123**, `durations map` at 111, `the admin-merge rail` at 70, `cal-trigger.py` at 64, `the plan doc` at 63). Hindsight caps at **200** and drops the arm under budget pressure. **Initial value: 200** (owner, 2026-09-23). **§11.5 carries the rationale.** It is a **guard rail, not an optimisation** — it binds nothing today (worst hub is 123) and is refined with real usage.

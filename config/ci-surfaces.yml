@@ -3017,6 +3017,14 @@ surfaces:
   # diff takes `select()`'s early return, so `tier1` is where it must live;
   # `core` is its home for the code diffs that can re-rotate a passage.
   - test_extractor_v4_citation_rot.py
+  # #7948: the executable census behind §13's `aboutObject` read-site table — the
+  # evidence the "KEEP the stored edges" ruling rests on. Registered `core` because
+  # its subject code is the graph read path (`ranking.py`, `sdk.py`, `subgraph.py`,
+  # …) which matches no narrower named surface — the same classification home as the
+  # sibling document guards above — AND in `tier1`, because the table it guards lives
+  # in a DOC (`docs/architecture/STORAGE-ARCHITECTURE.md` §13) and a docs-only diff
+  # takes `select()`'s early return. Static/`ast`-only: no DB, no network.
+  - test_7948_about_object_read_sites.py
   # #8500: the FOURTH guard over the same document — the S4 divergence. The doc
   # says *"There is no S4"*, the shipped pipeline runs one whenever a story
   # exists, and the drift marker recording that (#8498) is PROSE: nothing failed
@@ -5205,6 +5213,10 @@ tier1:
 # and the same docs-only PR is exactly the change that can re-introduce a
 # retracted passage.
 - test_extractor_v4_citation_rot.py
+# #7948: §13's `aboutObject` read-site census (`core` above) — a static `ast` scan of
+# `tortoise/` plus the two architecture docs, so a docs-only PR must run it: the
+# doc-only diff is exactly what can make the table stale or the counts disagree.
+- test_7948_about_object_read_sites.py
 # #8500: the same document's S4-divergence guard (`core` above) — same no-DB,
 # `ast`-only shape, and the same docs-only PR is exactly the change that can
 # falsify a claim it pins (or tidy the marker away).
