@@ -693,3 +693,147 @@ def test_the_hosted_capture_journals_and_replays_the_same_provenance(
             assert after[0][0].get(key) == before[pid].get(key), (
                 f"rebuild() lost hosted {key!r} on {pid}: "
                 f"{before[pid].get(key)!r} -> {after[0][0].get(key)!r}")
+
+
+# ── the guard rails the two lanes must not lose (review round 3) ──────────
+
+def test_a_guarded_stamp_without_the_narrow_clause_is_refused(tmp_path):
+    """A guarded stamp MUST narrow its write to the journalled ids.
+
+    ``$ids`` on a guarded statement is the caller's CLAIM predicate, so without
+    ``AND <node>.id IN $stamp_ids`` the written set is not a subset of the
+    recorded set and an id that became eligible between the pre-read and the
+    write is stamped with no record. The helper refuses that shape itself, so a
+    call site that drops the clause (either lane) fails loudly rather than
+    reverting one race away from §17.1.
+    """
+    from tortoise.sdk import _stamp_capture_provenance
+
+    sdk = TortoiseSDK(str(tmp_path / "guard.db"))
+    try:
+        proj = sdk._get_proj()
+        with pytest.raises(ValueError, match=r"\$stamp_ids"):
+            _stamp_capture_provenance(
+                sdk, proj, ["p-a"], event_id="evt-1", session_id="sess-1",
+                harness="tortoise-sdk", ingested_at="2026-10-20T00:00:00Z",
+                statement="MATCH (o:Point) WHERE o.eventId IS NULL "
+                          "SET o.eventId=$eid",
+                what="unguarded test stamp")
+    finally:
+        sdk.close()
+
+
+def test_the_id_pre_read_refuses_a_statement_that_writes(tmp_path):
+    """The census declares this helper an unresolved READ — enforce it.
+
+    The §17.1 arming gate rests on that declaration, so a ``SET`` smuggled into
+    a caller's prefix would ride a declaration that says "reads" — the census
+    false-PASS the review measured.
+    """
+    from tortoise.sdk import _capture_stamp_targets
+
+    sdk = TortoiseSDK(str(tmp_path / "readonly.db"))
+    try:
+        with pytest.raises(ValueError, match="read-only"):
+            _capture_stamp_targets(
+                sdk, sdk._get_proj(),
+                "MATCH (n:Point) RETURN DISTINCT n.id "
+                "SET n.eventId='LEAK' REMOVE n.x",
+                {"ids": ["p-a"]}, "writing test read")
+    finally:
+        sdk.close()
+
+
+def test_the_id_pre_read_rides_the_write_retry_funnel(tmp_path):
+    """A graph-replaced abort on the READ must not lose the whole stamp (#7405).
+
+    The pre-read is on the same stamp path as the write, so it goes through the
+    same funnel: a transient abort re-issues it instead of raising out of the
+    capture and leaving the minted claims unstamped.
+    """
+    import redis.exceptions as redis_exc
+
+    from tortoise.sdk import _capture_stamp_targets
+
+    class _AbortOnce:
+        def __init__(self, real, needle):
+            self._real, self._needle = real, needle
+            self.matching = 0
+            self.applied = 0
+
+        def query(self, cypher, params=None, timeout=None):
+            if self._needle in cypher:
+                self.matching += 1
+                if self.matching == 1:
+                    raise redis_exc.ResponseError(
+                        "graph was deleted or replaced while the query was "
+                        "running, aborting")
+                self.applied += 1
+            return self._real.query(cypher, params=params, timeout=timeout)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    sdk = TortoiseSDK(str(tmp_path / "preread.db"))
+    try:
+        pid = sdk.create_point(
+            "statement", "a claim the pre-read must find")["id"]
+        proj = sdk._get_proj()
+        proxy = _AbortOnce(proj.g, "RETURN DISTINCT")
+        proj.g = proxy
+        try:
+            ids = _capture_stamp_targets(
+                sdk, proj,
+                "MATCH (n:Point) WHERE n.eventId IS NULL "
+                "RETURN DISTINCT n.id",
+                {"ids": [pid]}, "pre-read retry test")
+        finally:
+            proj.g = proxy._real
+        assert ids == [pid], f"the re-issued read returned {ids!r}"
+        assert proxy.matching >= 2, (
+            "the aborted pre-read was never re-issued, so a graph-replaced "
+            "abort loses the whole provenance stamp (#7405/#9350)")
+    finally:
+        sdk.close()
+
+
+@pytest.mark.parametrize("module", ["tortoise/sdk.py", "tortoise/hosted_api.py"])
+def test_every_guarded_stamp_call_narrows_its_write_to_the_journalled_ids(module):
+    """EVERY guarded call site, both lanes — the narrowing is checked in source.
+
+    The helper refuses the shape at RUNTIME, but a guarded site that drops the
+    clause only fails when that path is actually executed — and the operator and
+    retry-heal paths are not reached by every capture. This walks the two
+    modules instead, so dropping the clause from any of the six sites (three per
+    lane) reds CI rather than reverting one race away from §17.1. The minted
+    stamp is UNGUARDED and passes no ``ids`` param, so it is correctly exempt.
+    """
+    import ast
+    from pathlib import Path
+
+    src = Path(module).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    guarded, unguarded = [], []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        name = getattr(fn, "id", None) or getattr(fn, "attr", None)
+        if name not in ("_stamp_capture_provenance", "_stamp_capture_provenance"):
+            continue
+        segment = ast.get_source_segment(src, node) or ""
+        if '"ids"' in segment:
+            guarded.append(segment)
+        else:
+            unguarded.append(segment)
+    assert guarded, f"{module}: no guarded call site found — did the wiring move?"
+    for segment in guarded:
+        assert "$stamp_ids" in segment, (
+            f"{module}: a guarded _stamp_capture_provenance call does not "
+            "narrow its write to $stamp_ids, so the WRITTEN set is not a "
+            "subset of the JOURNALLED set — an id that becomes eligible "
+            "between the pre-read and the write is stamped with no record "
+            "(#9350):\n" + segment[:600])
+    assert unguarded, (
+        f"{module}: expected the unguarded minted-point stamp to pass no "
+        "`ids` param — if it now does, it needs `$stamp_ids` too")
