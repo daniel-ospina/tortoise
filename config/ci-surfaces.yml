@@ -5622,7 +5622,7 @@ durations:
   test_8098_webhook_retry_sweep.py: 8.8  # #8098 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention, not a CI measurement. MEASURED on this host 2026-10-18 at the PR head AFTER the LAST review fixes (embedded carve-out lane, **56 tests**, `--junitxml`): sum of testcase/@time ranged **7.25s** on a quiet host to **24.65s** with the fleet loading this box, max single test 1.65-6.90s (`test_every_test_the_plan_cites_exists`, which rglobs `tests/`). The reading is re-derived with the COUNT at every revision, never carried forward (the neighbouring #3429 row states the same convention): earlier revisions of this row read 39, 48, 49, 51, 53 and 55 tests as the file grew. The 8.8 WEIGHT is deliberately left alone: it is the shard packer's input, and keeping the higher of the readings means a file whose per-test sum is dominated by one cold-lane test is never under-weighted, so do not "correct" it down without a CI junit measurement. Required for the durations half as well as the surface half (#4348 trap): MEASURED this turn, WITHOUT this row `tools/ci_selection.py --integrity` reds the durations coverage floor (the file is in the fast pool, so an absent row also packs it at the flat 2.0s default). Refresh from the first post-merge run that includes it; do NOT drop the row without re-deriving the floor at that head.
   test_9233_webhook_declared_lane.py: 14.0  # #9233 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention, not a CI measurement. MEASURED on this host at the PR head AFTER the review fixes (embedded carve-out lane, 25 tests — 23 when this row was first written, +2 contract pins since; the count is re-derived at every revision and the WEIGHT is left at the coldest reading), whole-file wall): 14.03 s cold (first run after `uv sync --extra embeddings --extra parity`), then 9.90 / 9.98 / 11.12 s warm. Several tests build an embedded SDK each and `test_a_rebuild_does_not_restore_the_store` runs a real `rebuild_all`, so the weight is SDK builds + a journal rebuild, and it is declared at the COLDEST reading so a cold shard leg cannot under-pack. Added on the review advisory that measured this margin over four rounds: the fast pool is 943 files, so WITHOUT this row 849 weighted = 90.03% (0.03 pp above the `duration_coverage_issues()` floor) and the next unmeasured fast file would red the repo-wide gate at 849/944 = 89.94%; WITH it 850 weighted = 90.14%. Refresh from the first post-merge run that includes it; do NOT drop the row without re-deriving the floor at that head.
   test_installer_preserves_foreign_skill_content.py: 0.6
-  test_installer_agents_block_3429.py: 25.4  # #3429 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention. MEASURED on this host 2026-10-18 on a private tools/test_lane.py container, TWO consecutive runs, sum of testcase/@time over ALL 48 tests: 24.42s and 26.46s with the box quiet, and 31.92s-76.72s over 45 of these tests with the fleet loaded (the 2.8x below) — the 48 count is this branch's, the base main file has 42 — the reading is re-derived with the count at every revision, never carried forward (earlier rows here said 31.92s and 32.62s over 45 tests, 11.95s and 13.58s over all 42 tests, and before that 4.53s/4, 5.8s/10, 7.2s/15, 9.0s/20, 14.4s/25, 20.4s/30, 20.9s/35 and 18.6s/40 as the review added cases; the count and the sum move together, and this spread shows the host load, not the tests). The file drives the REAL installer in a temp HOME/project, so it is subprocess-bound, not DB-bound. NOTE: the sum is per-test durations; WALL-CLOCK under a loaded fleet has measured 2.8x this. Refresh from the first post-merge push run that includes it; do NOT drop the row without re-deriving the floor at that head.
+  test_installer_agents_block_3429.py: 32.3  # #3429 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention. MEASURED on this host 2026-10-18 on a private tools/test_lane.py container, TWO consecutive runs, sum of testcase/@time over ALL 45 tests: 31.92s and 32.62s with the box quiet, and 52.46s and 76.72s with the fleet loaded (the 2.8x below) — the 45 count is this branch's, the base main file has 42 — the reading is re-derived with the count at every revision, never carried forward (earlier rows here said 11.95s and 13.58s over all 42 tests, and before that 4.53s/4, 5.8s/10, 7.2s/15, 9.0s/20, 14.4s/25, 20.4s/30, 20.9s/35 and 18.6s/40 as the review added cases; the count and the sum move together, and this spread shows the host load, not the tests). The file drives the REAL installer in a temp HOME/project, so it is subprocess-bound, not DB-bound. NOTE: the sum is per-test durations; WALL-CLOCK under a loaded fleet has measured 2.8x this. Refresh from the first post-merge push run that includes it; do NOT drop the row without re-deriving the floor at that head.
   test_backup_watcher_health.py: 0.2
   test_manage_sources_3540.py: 4.4  # #3540 (#3400 trap): a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention, not a CI measurement. MEASURED at the branch head, after the review fixes: sum of testcase/@time over ALL 41 tests = 4.37s (most of it is the one-time `tortoise.mcp_server` import plus the per-leg conftest cost; the review cycles added 11 tests since the 30-test reading, which is why the count and the sum move together). An earlier row claimed 1.52s over "15 tests" when the file already held 24, and a later one claimed 2.29s over 30 when it held 41 — the count and the sum are re-derived together, never carried forward (review P2); the file is DB-free and monkeypatched, so conftest setup is the once-per-leg cost the method attributes to no file. Without this row the file packs at the flat 2.0s default and `tools/ci_selection.py --integrity` reds the durations coverage floor — the surface entry alone does not cover it (#4348 trap). Refresh from the first post-merge run that includes it; do NOT drop the row without re-deriving the floor at that head.
   # The two rows below arrived with the origin/main merge, unmeasured and IN the fast
@@ -5636,13 +5636,13 @@ durations:
   # `# unmeasured` convention stated above. Refresh from the first post-merge main run that includes it.
   test_onboarding_state_cas.py: 120.0  # unmeasured
   test_onboarding_state_split_init.py: 2.6
-  test_onboarding_state_split_checkpoint.py: 11.8
+  test_onboarding_state_split_checkpoint.py: 23.7  # ci-timing top-15 2026-10-19 (run 39191149586); was 11.8
   test_onboarding_state_split_patch.py: 13.2
   test_onboarding_state_split_projection.py: 39.8  # unmeasured
   test_onboarding_truth_surface.py: 4.0
-  eval/write_path/test_write_path_benchmark.py: 275.9
+  eval/write_path/test_write_path_benchmark.py: 275.9  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 3 of 4 testcases = 274.5s, a LOWER bound; kept 275.9
   test_tortoise_client.py: 1.7
-  eval/retrieval/test_run.py: 63.6  # #9017 CI-junit 2026-10-18 (run 39165691659); was 20.3
+  eval/retrieval/test_run.py: 63.6  # #9017 CI-junit 2026-10-18 (run 39165691659); was 20.3 — ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 2 of 15 testcases = 49.2s, a LOWER bound; kept 63.6
   test_4314_inert_hooks.py: 20.1
   test_platform_seams.py: 85.8  # #9017 CI-junit 2026-10-18 (run 39165691659); was 27.6
   # #2125: NEW file — no CI junit measurement existed when it was added, so it
@@ -5654,12 +5654,12 @@ durations:
   # found (#4348 trap).
   test_framework_middleware.py: 2.6  # #9017 CI-junit 2026-10-18 (run 39165691659); was 5.2
   test_2952_degraded_read.py: 0.4
-  test_quota.py: 11.8
+  test_quota.py: 11.8  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 54 testcases = 8.2s, a LOWER bound; kept 11.8
   test_no_legacy_token_path.py: 0.5
   test_dump_edge_asymmetry_3895.py: 0.8
   test_9226_dump_paging_v6.py: 2.0  # unmeasured — #9226 (#3400/#4348 trap): a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it carries the flat default exactly as an absent key would — the #3419/#9003 rule, NOT the branch's local reading. No local wall-clock reading is substituted either: a weight is a SHARD-LAYOUT input, and the #3419 venture-pack row records what a local number did to unrelated files' grouping. The ROW ITSELF is required for the durations half as well as the surface half, and the durable reason is structural rather than a snapshot: `duration_coverage_issues()` measures PRESENCE, not value, and the fast pool sits ~0.1pp over the #3400 90% floor — at the pre-row head it was exactly 90.02% (942 files, 94 unweighted), the last slot the floor had, so the next unweighted fast file would have redded the check repo-wide and been attributed to an unrelated PR. (Measured 2026-10-20 at this head: 948 fast files, 855 weighted = 90.19%, `duration_coverage_issues() == []`.) Those counts move with every main merge — re-derive the floor at your own head instead of trusting a number in a comment: the structural fact (PRESENCE is measured against a floor the pool clears by a fraction of a point) is what to re-check. Refresh from the first post-merge run that includes it (the marker leads the tail so the refresher clears it); do NOT drop the row without re-deriving the floor at that head.
   test_divergence_conformance.py: 4.8
-  test_from_uri_userinfo.py: 3.1
+  test_from_uri_userinfo.py: 4.0  # ci-timing top-15 2026-10-19 (run 39191149586); was 3.1
   test_export_cli.py: 10.0
   # #2961: newly-declared fast file. Originally placed at its value-ordered slot
   # (the map was value-ordered then); main's #3400 refresh re-wrote the block, so
@@ -5677,17 +5677,17 @@ durations:
   # file it introduces. Supersede from the first post-merge main run that
   # includes it (#4817/#4729).
   test_graph_delete_guard.py: 13.1
-  test_github_indexer.py: 87.4
+  test_github_indexer.py: 108.4  # ci-timing top-15 2026-10-19 (run 39191149586); was 87.4
   test_doctor.py: 7.1
-  test_onboarding_w6_capture_disclosure.py: 15.0
+  test_onboarding_w6_capture_disclosure.py: 15.0  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 5 of 12 testcases = 14.8s, a LOWER bound; kept 15.0
   test_onboarding_w4_settings.py: 59.4
   test_finding_provenance.py: 1.7
   test_onboarding_false_completion_repair.py: 3.6
   test_onboarding_telemetry_w11.py: 0.8
-  test_graph_diagnostics.py: 25.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 7.6
-  eval/write_path/test_write_path_runner.py: 146.2  # #9017 CI-junit 2026-10-18 (run 39165691659); was 135.8
+  test_graph_diagnostics.py: 25.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 7.6 — ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 3 testcases = 17.4s, a LOWER bound; kept 25.9
+  eval/write_path/test_write_path_runner.py: 146.2  # #9017 CI-junit 2026-10-18 (run 39165691659); was 135.8 — ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 3 of 32 testcases = 133.0s, a LOWER bound; kept 146.2
   test_unjournaled_mutation_class.py: 4.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 7.0
-  test_2296_document_created_journal.py: 27.0  # unmeasured by the refresher — #2296: a file ADDED BY A PR can never have a CI duration at PR time (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only). Measured on this host 2026-10-14 on a private `tools/test_lane.py` docker container reached via TORTOISE_DB_URI: pytest session total 26.49s (that reading was the file's original 7 tests; the file now collects 8 and a later re-measure on a loaded host read 24.9s). WHAT THE NUMBER IS: the pytest session total, NOT what the refresher computes — it reads the TEXTUAL `--durations=15` block out of the CI log, so a CI reading is a LOWER bound. Refresh from the first post-merge push run that includes it.
+  test_2296_document_created_journal.py: 27.0  # carried forward (not a full-file CI measurement) — by the refresher — #2296: a file ADDED BY A PR can never have a CI duration at PR time (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only). Measured on this host 2026-10-14 on a private `tools/test_lane.py` docker container reached via TORTOISE_DB_URI: pytest session total 26.49s (that reading was the file's original 7 tests; the file now collects 8 and a later re-measure on a loaded host read 24.9s). WHAT THE NUMBER IS: the pytest session total, NOT what the refresher computes — it reads the TEXTUAL `--durations=15` block out of the CI log, so a CI reading is a LOWER bound. Refresh from the first post-merge push run that includes it. — ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 10 testcases = 6.1s, a LOWER bound; kept 27.0
   test_3311_multilabel_status_vocab.py: 2.5  # #9017 CI-junit 2026-10-18 (run 39165691659); was 5.3
   test_url_keyed_source_write_4649.py: 170.0  # unmeasured — #4649: locally measured (23 tests, live FalkorDB on a spare container; 169.5s wall for the whole file). Needed here rather than left to the sweep because tools/ci_timing.py --refresh-durations samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time — the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Refresh from CI junit once this file has run on main.
   test_e2e_wrangler_prewarm.py: 15.9  # #8743/#8816: locally measured on this host. WHAT THE FILE IS NOW (24 test functions, 25 executions): 23 in-memory plus ONE function parametrized over both `from_repo_root` values, which EXECUTES `website/apps/dashboard/deploy.sh` against a scratch tree with stubbed npm/npx (no DB, no fixture). Of the 23 in-memory arms, 5 exercise the guard's own helpers on literal text or hand-built documents (so "each reads the workflow files" was not true of them); the other 18 read a repo file — of the 15 that read the workflow/action files, 11 parse them by `yaml.safe_load` and 4 scan their text, 2 read `website/README.md`, and 2 read `deploy.sh`, one of which also scans a workflow. WHERE THE TIME GOES: the parsing arms, NOT the shared conftest import — nearly every arm re-globs and re-parses all 36 files (32 workflows + the 4 composite actions) (ci.yml and deploy-pages.yml are large). MEASURED at the #8874 head: session totals 11.4 s on an idle host, 18.9 s cold, and 15.9 s on a loaded one where `--durations=0` attributes call 12.8 s / setup 4.3 s / slowest single call 1.2 s. 15.9 is committed as the weight; the 4.0 this row used to carry was about a third of the measured session, and its "the conftest import dominates" sentence was wrong in the other direction. PR #8852 review: the note said 11 before that, which was wrong even for the 12-arm file it described. Hand-added for the same reason the test_8474_ontology_record.py entry below gives: `tools/ci_timing.py --refresh-durations` samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time and the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Refresh from the first post-merge run that includes it.
@@ -5699,13 +5699,13 @@ durations:
   test_capture_session.py: 90.6  # #9017 CI-junit 2026-10-18 (run 39165691659); was 43.7
   test_write_session_and_turns_3551.py: 2.1  # #3551 (10 tests, embedded carve-out lane; the hosted half drives POST /v1/sessions) — NOW CI-MEASURED from run 39040632415 (was 70.8 locally measured; the local figure counted container lifecycle, not the pytest session)
   test_session_schema_3554.py: 3.9  # #3554 (42 hermetic tests, no graph lane) — NOW CI-MEASURED from run 39040632415 (was 6.6 locally measured)
-  test_battery_setup.py: 177.7  # #9017 CI-junit 2026-10-18 (run 39165691659); was 106.8
+  test_battery_setup.py: 177.7  # #9017 CI-junit 2026-10-18 (run 39165691659); was 106.8 — ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 3 of 11 testcases = 151.1s, a LOWER bound; kept 177.7
   test_graph_write_loop_responsiveness.py: 4.4
-  test_read_routes_loop_responsiveness.py: 2.2
+  test_read_routes_loop_responsiveness.py: 2.6  # ci-timing top-15 2026-10-19 (run 39191149586); was 2.2
   test_cli_serve.py: 5.5
   test_redirect_seam.py: 3.3
   eval/retrieval/test_gate_1349.py: 25.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 26.7
-  eval/why_suite/test_why_suite_benchmark.py: 65.0  # #9017 CI-junit 2026-10-18 (run 39165691659); was 24.3
+  eval/why_suite/test_why_suite_benchmark.py: 66.3  # ci-timing top-15 2026-10-19 (run 39191149586); was 65.0
   test_commit_schema.py: 3.3
   test_onboarding_seed_endpoint.py: 3.0
   test_battery_r1_seed.py: 38.5  # #9017 CI-junit 2026-10-18 (run 39165691659); was 28.2
@@ -5719,13 +5719,13 @@ durations:
   test_epic903_warmstart.py: 52.6  # #9017 CI-junit 2026-10-18 (run 39165691659); was 26.4
   test_epic903_modes.py: 30.8  # #9017 CI-junit 2026-10-18 (run 39165691659); was 14.9
   test_import_endpoint.py: 25.4  # #9017 CI-junit 2026-10-18 (run 39165691659); was 18.5
-  test_client_surface.py: 17.6  # #9017 CI-junit 2026-10-18 (run 39165691659); was 25.7
-  test_ingest_v2_consolidation.py: 25.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 10.0
+  test_client_surface.py: 17.6  # #9017 CI-junit 2026-10-18 (run 39165691659); was 25.7 — ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 7 testcases = 16.4s, a LOWER bound; kept 17.6
+  test_ingest_v2_consolidation.py: 25.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 10.0 — ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 10 testcases = 14.5s, a LOWER bound; kept 25.9
   test_metering.py: 6.8
-  eval/harness/test_harness_benchmark.py: 59.1  # #9017 CI-junit 2026-10-18 (run 39165691659); was 22.8
-  test_epic903_scheduler.py: 34.4  # #9017 CI-junit 2026-10-18 (run 39165691659); was 15.7
+  eval/harness/test_harness_benchmark.py: 59.1  # #9017 CI-junit 2026-10-18 (run 39165691659); was 22.8 — ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 3 of 9 testcases = 37.2s, a LOWER bound; kept 59.1
+  test_epic903_scheduler.py: 34.4  # #9017 CI-junit 2026-10-18 (run 39165691659); was 15.7 — ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 17 testcases = 18.7s, a LOWER bound; kept 34.4
   test_hosted_volunteer_context.py: 16.1  # #9017 CI-junit 2026-10-18 (run 39165691659); was 8.2
-  test_tripwire.py: 6.1
+  test_tripwire.py: 7.3  # ci-timing top-15 2026-10-19 (run 39191149586); was 6.1
   test_battery_corpus.py: 7.4
   test_commit_endpoint.py: 51.3  # #9017 CI-junit 2026-10-18 (run 39165691659); was 33.9
   test_invites_http.py: 13.6
@@ -5748,21 +5748,21 @@ durations:
   test_ask_sdk.py: 3.9
   test_battery_seed_ingest.py: 3.9
   test_delivery_tenancy.py: 9.7
-  test_ep_selector.py: 23.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 10.9
+  test_ep_selector.py: 23.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 10.9 — ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 9 testcases = 21.2s, a LOWER bound; kept 23.9
   test_longmem_reader_prompting.py: 11.2
   test_pages_bindings.py: 7.3
   test_abuse_integration.py: 17.8  # #9017 CI-junit 2026-10-18 (run 39165691659); was 13.1
-  test_github_index_lifecycle.py: 11.1
-  test_main_guards.py: 13.5
+  test_github_index_lifecycle.py: 11.1  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 43 testcases = 9.2s, a LOWER bound; kept 11.1
+  test_main_guards.py: 13.5  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 2 of 4 testcases = 10.5s, a LOWER bound; kept 13.5
   test_epic903_fixtures.py: 25.7  # #9017 CI-junit 2026-10-18 (run 39165691659); was 12.0
   test_index_docs_api.py: 2.2
-  longmem_eval/test_vector_arm.py: 8.9
+  longmem_eval/test_vector_arm.py: 8.9  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 63 testcases = 4.4s, a LOWER bound; kept 8.9
   test_dr_endpoints.py: 33.5  # #9017 CI-junit 2026-10-18 (run 39165691659); was 16.1
-  test_retrieval.py: 19.8
+  test_retrieval.py: 26.7  # ci-timing top-15 2026-10-19 (run 39191149586); was 19.8
   test_consolidation_4way.py: 9.0
   test_invite_fusion_http.py: 12.2
   test_signup_token_revoke.py: 4.0
-  test_w4_why_enrichment.py: 4.0
+  test_w4_why_enrichment.py: 4.1  # ci-timing top-15 2026-10-19 (run 39191149586); was 4.0
   test_why_operator_mediation.py: 4.5  # #3990 measured locally (9 tests, embedded graphs)
   test_why_layer_rate.py: 22.0  # #3990 measured locally (15 tests; each movement control seeds a fresh graph)
   #3400 trap: files ADDED BY A MAIN PUSH carry no junit row until the next
@@ -5774,20 +5774,20 @@ durations:
   test_9079_onboarding_declared_lane.py: 3.6  # #9079: 14 tests, 3.63s wall (same convention)
   test_9079_edge_lane_declared.py: 18.0  # unmeasured — #9195 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), and WITHOUT this row `duration_coverage_issues()` reds on `ci_selection.py --integrity`. Local embedded-lane wall readings at this head: 15.3 s, 22.4 s, 12.2 s and 6.7 s over four runs (12 test functions / 13 collected — `test_a_read_on_this_path_is_not_declared` is parametrized over BOTH declared mints; fleet load varies). ⚠️ The testcase/@time sum is ~18 s, NOT the wall clock — the first `create_point` in a process pays the one-time lazy embedding load (the same weight the #9123 row documents), and the fixture is per-test. Refresh from the first post-merge run that includes it.
   test_write_op_reachability.py: 3.3  # #8135: 43 tests + 1 xfail, 3.25s wall (same convention)
-  test_capture_loop_responsiveness.py: 10.2
+  test_capture_loop_responsiveness.py: 13.5  # ci-timing top-15 2026-10-19 (run 39191149586); was 10.2
   # #2988/#3243: AST pins plus behavioural tests that park real daemon-pool
   # workers on threading.Event gates and drive a reachable cold-start through
   # the real probe. The weight is a measured estimate — re-measure from the
   # first post-merge junit artifact rather than trusting it.
   test_selfhost_health_probe_executor.py: 9.3
   test_writer_inventory.py: 3.1
-  test_decide.py: 5.9
-  test_onboarding_endpoints.py: 1.4
+  test_decide.py: 7.5  # ci-timing top-15 2026-10-19 (run 39191149586); was 5.9
+  test_onboarding_endpoints.py: 2.2  # ci-timing top-15 2026-10-19 (run 39191149586); was 1.4
   test_data_source_capture.py: 22.0  # #3514: locally measured on this host (43 tests, DB-free: the analytics sink is the local JSONL or a stubbed HTTP client, Telegram is a stub; the two #3514-review-P2 rows added in the fix put one 1.0 s park + a 0.15 s settle on the clock). Needed here rather than left to the sweep because `tools/ci_timing.py --refresh-durations` samples push-to-main runs only, so a file ADDED BY A PR can never have a measured duration at PR time — the >=90% coverage floor (#2876) fails by construction for any test-adding PR. Deliberately NOT in `slow_files`: its rows put threads, not processes, on a released barrier, and the dual-registration note above (`classify_test_file` takes the FIRST match) is exactly the trap that list's header warns about. Refresh from CI junit once this file has run on main.
-  test_battery_executor_v2.py: 4.1
+  test_battery_executor_v2.py: 4.1  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 14 testcases = 2.0s, a LOWER bound; kept 4.1
   test_body_cap_sweep.py: 3.6
-  test_agent_signup_idempotency.py: 3.5
-  test_ep_local_395.py: 22.0
+  test_agent_signup_idempotency.py: 3.5  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 36 testcases = 2.2s, a LOWER bound; kept 3.5
+  test_ep_local_395.py: 22.0  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 24 testcases = 15.4s, a LOWER bound; kept 22.0
   # #6211: locally measured on this host, docker lane, whole-file wall time over
   # several runs (shape: 23 tests / 12-19 s; scale: 4 tests / 10-19 s incl. the
   # 3,353-claim fixture build). The spread is host load, not test content, so
@@ -5795,15 +5795,15 @@ durations:
   # exactly the direction that hurts a PR-added file (#3514 note above). Both
   # are PR-ADDED files, so the push-to-main sweep cannot have measured them yet.
   test_6211_ep_result_shape.py: 19.0
-  test_6211_ep_scale.py: 19.0
+  test_6211_ep_scale.py: 19.0  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 4 testcases = 3.3s, a LOWER bound; kept 19.0
   test_round_trip_parity.py: 0.8
   test_longmem_rerank.py: 6.3
-  test_pack_manifest_store_extraction.py: 5.2
+  test_pack_manifest_store_extraction.py: 5.2  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 10 testcases = 4.7s, a LOWER bound; kept 5.2
   test_battery_provenance.py: 3.2
   test_assembly_pure.py: 2.8
   test_ep_terminal_ghost.py: 5.9
-  test_uri_env_mutations_declared.py: 17.3
-  eval/retrieval/test_oracle.py: 15.4
+  test_uri_env_mutations_declared.py: 19.5  # ci-timing top-15 2026-10-19 (run 39191149586); was 17.3
+  eval/retrieval/test_oracle.py: 19.7  # ci-timing top-15 2026-10-19 (run 39191149586); was 15.4
   longmem_eval/test_context_assembly_leakage.py: 5.2
   test_ep_directional.py: 2.1
   # #2944: new file. NOT gate-required. Measured at 4a453a352 (the base merge):
@@ -5838,7 +5838,7 @@ durations:
   # by hand here, and the mechanically checkable half — a row whose value is not the
   # flat default must not claim it is — is pinned by
   # `tests/test_ci_selection.py::test_no_durations_row_claims_the_flat_default_at_a_measured_value`.
-  test_destructive_wipe_guard.py: 11.1
+  test_destructive_wipe_guard.py: 16.1  # ci-timing top-15 2026-10-19 (run 39191149586); was 11.1
   # #3718 (DATA-plane residual): 9 cases (4 parametrized lane cases + the
   # /v1/sessions delete freeze case + the demo-seed serialization case + the
   # commit-serialization case + the _lifespan control-plane case + the
@@ -5851,13 +5851,13 @@ durations:
   # embedded-redislite startup). FIRST ESTIMATE; re-measure
   # from the first post-merge junit artifact (see #3653/#3685 for the flake
   # that inflates the tail).
-  test_dataplane_lane_loop_responsiveness.py: 13.4
-  test_extractor_reliability.py: 3.5
+  test_dataplane_lane_loop_responsiveness.py: 13.4  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 3 of 9 testcases = 11.2s, a LOWER bound; kept 13.4
+  test_extractor_reliability.py: 4.9  # ci-timing top-15 2026-10-19 (run 39191149586); was 3.5
   test_acl_graph_users.py: 8.5
-  test_battery_exposure_liveness.py: 4.1
+  test_battery_exposure_liveness.py: 4.8  # ci-timing top-15 2026-10-19 (run 39191149586); was 4.1
   test_attribution_machine_model.py: 6.5
-  test_battery_real_deadline.py: 3.0
-  test_epic903_lifecycle.py: 7.3
+  test_battery_real_deadline.py: 5.0  # ci-timing top-15 2026-10-19 (run 39191149586); was 3.0
+  test_epic903_lifecycle.py: 9.0  # ci-timing top-15 2026-10-19 (run 39191149586); was 7.3
   test_pointsuperseded_rebuild.py: 8.7
   test_session_key_http.py: 5.5
   test_write_consolidation.py: 5.3
@@ -5873,7 +5873,7 @@ durations:
   # keeps this out of the cold HF-model-load cost class. Refresh from the first
   # post-merge run.
   test_write_doors_9068.py: 2.0
-  test_value_extractor.py: 39.0
+  test_value_extractor.py: 49.3  # ci-timing top-15 2026-10-19 (run 39191149586); was 39.0
   test_venture_pack.py: 2.0  # unmeasured — new in #3419; no sweep has collected it, so it carries the flat default exactly as an absent key would, which is main's own weight for it. Do NOT substitute a local timing here: a measured-on-this-box 67.2 was recorded first, and it is a SHARD-LAYOUT input, so it moved tests/test_tortoise_search.py into the same shard as tests/test_subject_layer_read_surfaces_4889.py and exposed a pre-existing embedded-lane isolation leak (#3750 family) that main's grouping keeps apart. A weight that does not model CI must not be used to decide what runs together.
   # #2729: same rule as the entry directly above — unmeasured, carries the flat
   # default exactly as an absent key would. The explicit entry is REQUIRED, not
@@ -5904,10 +5904,10 @@ durations:
   # `slow_file_issues` has no duration rule.
   test_9068_pack_gate_residuals.py: 166.0
   test_pack_selection_by_graph.py: 2.0  # unmeasured — new in #2728; no sweep has collected it, so it carries the flat default exactly as an absent key would. Do NOT substitute a local timing here: the weight is a SHARD-LAYOUT input, and the #3419 venture-pack precedent (a local 67.2 that re-grouped unrelated files and exposed a pre-existing embedded-lane isolation leak) is why an unmeasured new file stays at the flat default until a junit sweep measures it.
-  test_skip_guard.py: 38.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 52.4
-  test_admin_return_to.py: 3.1
+  test_skip_guard.py: 38.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 52.4 — ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 3 of 89 testcases = 30.6s, a LOWER bound; kept 38.9
+  test_admin_return_to.py: 3.4  # ci-timing top-15 2026-10-19 (run 39191149586); was 3.1
   test_admin_origin_redirect.py: 3.1
-  test_longmem_usage_e2e.py: 5.6
+  test_longmem_usage_e2e.py: 5.6  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 3 testcases = 3.1s, a LOWER bound; kept 5.6
   test_init_apikey_validation.py: 4.5
   test_orient_direct_consolidation.py: 5.9
   test_oauth_mcp.py: 14.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 12.4
@@ -5915,8 +5915,8 @@ durations:
   test_mcp_server.py: 0.9
   test_dashboard_client_paths_resolve.py: 3.6
   test_dashboard_login.py: 6.8
-  test_capture_phase_d_dedup.py: 2.3
-  test_ci_selection.py: 184.1  # #9017 CI-junit 2026-10-18 (run 39165691659); was 191.6
+  test_capture_phase_d_dedup.py: 2.3  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 21 testcases = 1.7s, a LOWER bound; kept 2.3
+  test_ci_selection.py: 184.1  # #9017 CI-junit 2026-10-18 (run 39165691659); was 191.6 — ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 2 of 263 testcases = 64.9s, a LOWER bound; kept 184.1
   # #6144: measured floor over 3 runs on the dev box (19.0 / 21.2 / 23.4s); the
   # spread is fleet I/O contention, not the guard (user+sys ~4s). The YAML parses
   # are memoized on (path, mtime, size) so the 2.2k-line python-ci.yml is read
@@ -5936,12 +5936,12 @@ durations:
   # --refresh-durations collects it (a local reading does not model CI).
   test_pack_brief_hints_4894.py: 12.0
   test_capabilities_endpoint.py: 6.2
-  test_longmem_reader_pinning.py: 3.8
+  test_longmem_reader_pinning.py: 5.1  # ci-timing top-15 2026-10-19 (run 39191149586); was 3.8
   test_recall_state.py: 3.8
   test_battery_corpus_v11.py: 3.3
   test_tenancy_spine.py: 3.0
   test_transport_wait_bound.py: 2.1
-  test_collision_preflight.py: 3.6
+  test_collision_preflight.py: 23.5  # ci-timing top-15 2026-10-19 (run 39191149586); was 3.6
   # #8051: LOCAL readings on this fleet-loaded host (subprocess + real-git
   # harness): 173s / 182s at 61 tests (head 876dabfe), 187s at 69, 192s at 76,
   # 198s at 79, 223s at 82, 241s at 83, 250s at 83, 227s at 87, 323s at 90, 273s
@@ -5991,7 +5991,7 @@ durations:
   test_analytics_offloop_4015.py: 0.6
   test_free_team_entitlement.py: 4.8
   test_integration_search.py: 2.8
-  test_kind_classifier.py: 2.5
+  test_kind_classifier.py: 2.5  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 33 testcases = 1.8s, a LOWER bound; kept 2.5
   test_kind_vocabulary_consistency.py: 2.0  # unmeasured — new in #2786; no push-to-main sweep has collected it yet, so it carries the flat default exactly as an absent key would (#3419/#2788 rule — do NOT substitute a local timing, the map is a shard-layout input). The row is also what restores `durations` coverage above the 90% floor, which a test-adding PR drops by construction.
   test_longmem_preflight.py: 0.8
   test_battery_ep_outcome.py: 1.8
@@ -6008,7 +6008,7 @@ durations:
   test_domain_validators.py: 4.2
   test_email_notify.py: 4.3
   test_mining.py: 2.9
-  test_wipe_server.py: 5.1
+  test_wipe_server.py: 5.1  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 58 testcases = 2.4s, a LOWER bound; kept 5.1
   test_boot_regressions.py: 3.3
   test_de2e1_entity_extraction.py: 2.1
   # #3019: measured 2026-10-05 LOCALLY under the embedded carve-out config
@@ -6035,7 +6035,7 @@ durations:
   # `tortoise.embeddings` import, 2.7s the module-level-probe census, the rest
   # three fresh-interpreter probe imports). Refresh from the first post-merge
   # CI run that measures it.
-  test_8057_probe_embedder_mask.py: 4.3
+  test_8057_probe_embedder_mask.py: 4.3  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 5 testcases = 2.6s, a LOWER bound; kept 4.3
   test_epic903_retention.py: 2.1
   test_eval_retrieval_budget.py: 2.0
   test_export_delete.py: 3.2
@@ -6100,7 +6100,7 @@ durations:
   test_mcp_client.py: 1.8
   test_sdk_props_coercion.py: 1.9
   test_volunteer_pipeline.py: 2.6
-  eval/retrieval/test_1348.py: 4.7
+  eval/retrieval/test_1348.py: 4.7  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 9 testcases = 3.3s, a LOWER bound; kept 4.7
   test_about_event_untangle.py: 1.5
   test_auth_flip.py: 0.8
   test_battery_config.py: 1.2
@@ -6117,7 +6117,7 @@ durations:
   bench/test_degradation_chain.py: 2.0
   longmem_eval/test_measure_temporal.py: 6.2
   test_assembly_fixtures.py: 2.2
-  test_epic903_hosted.py: 2.5
+  test_epic903_hosted.py: 3.4  # ci-timing top-15 2026-10-19 (run 39191149586); was 2.5
   test_operator_dedup_parity.py: 1.4
   test_operator_idempotency_4971.py: 2.3  # #9017 CI-junit 2026-10-18 (run 39165691659); was 5.8
   test_search_promoted_fields.py: 1.5
@@ -6127,7 +6127,7 @@ durations:
   test_battery_probe_measured.py: 1.5
   test_coverage_loop.py: 1.3
   test_ep_quadrature.py: 0.9
-  test_event_store.py: 6.8
+  test_event_store.py: 9.6  # ci-timing top-15 2026-10-19 (run 39191149586); was 6.8
   # #2353: hand-measured, NOT a junit re-derivation — a file added by a PR can
   # never have a CI duration at PR time (`tools/ci_timing.py --refresh-durations`
   # samples push-to-main runs only), so the >=90% coverage floor (#2876) fails
@@ -6191,7 +6191,7 @@ durations:
   test_session_index_health.py: 1.1
   test_suspension_parity.py: 2.5
   test_2206_confidence_surfaces.py: 6.2
-  test_2350_validity_precision.py: 3.7  # #2350: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so the #3400 flat 2.0s default was its FIRST weight — this value is a CI measurement since the 2026-10-17 refresh; required for the durations coverage half as well as the surface half (#4348 trap — do not drop the row without re-deriving the floor at that head).
+  test_2350_validity_precision.py: 5.6  # #2350: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so the #3400 flat 2.0s default was its FIRST weight; required for the durations coverage half as well as the surface half (#4348 trap — do not drop the row without re-deriving the floor at that head). — ci-timing top-15 2026-10-19 (run 39191149586); was 3.7
   test_ask_regression_llm.py: 0.5
   test_entity_key_expansion.py: 0.8
   test_ep_dirty_persist.py: 1.2
@@ -6221,7 +6221,7 @@ durations:
   test_session_capture_e2e.py: 0.7
   test_stop_writes.py: 0.5
   test_subscriptions.py: 0.8
-  test_1162_add_operator_local_svbp.py: 5.5
+  test_1162_add_operator_local_svbp.py: 5.5  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 4 testcases = 3.7s, a LOWER bound; kept 5.5
   test_analyze.py: 0.2
   test_battery_arms.py: 0.6
   test_battery_lane_matrix.py: 0.7
@@ -6298,7 +6298,7 @@ durations:
   test_remove_context_migration.py: 0.4
   test_search_engine_nameerror.py: 0.7
   test_signup_form_safety.py: 1.6
-  test_tool_registry.py: 4.4
+  test_tool_registry.py: 18.3  # ci-timing top-15 2026-10-19 (run 39191149586); was 4.4
   test_user_identity_authority.py: 2.3
   test_ci_expected_manifests.py: 0.6
   test_ci_guard_invocation.py: 0.6
@@ -6551,7 +6551,7 @@ durations:
   test_session_reinjection.py: 3.0
   test_session_reinjection_rules.py: 0.9
   test_backups_v1_alias.py: 0.1
-  eval/write_path/test_write_path_operator_lane.py: 25.0
+  eval/write_path/test_write_path_operator_lane.py: 25.0  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 2 of 7 testcases = 11.2s, a LOWER bound; kept 25.0
   longmem_eval/test_temporal_admission_trace.py: 0.1
   test_2884_ep_state_journaled.py: 4.7
   test_3276_has_ep_measured.py: 4.6
@@ -6601,7 +6601,7 @@ durations:
   test_metering_window_admission.py: 1.0
   test_metering_unmetered.py: 60.0  # unmeasured — #4779: locally measured (50 tests, live docker FalkorDB: 42–111s across the review cycles, 275s under fleet load); no source leg of the sweep collected it — refresh from CI junit.
   test_operator_annotator_rebuild.py: 4.8
-  test_pi_capture_hooks.py: 10.4
+  test_pi_capture_hooks.py: 10.4  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 14 testcases = 10.3s, a LOWER bound; kept 10.4
   # #2120: measured locally on the carve-out lane (26 tests, ~6.2s): the plugin
   # artifact + installer + parser, one node --test subprocess, and one real
   # `tortoise install openclaw` CLI run into a temp HOME.
@@ -6617,13 +6617,13 @@ durations:
   test_source_version_window_3644.py: 22.0  # #3644: 19 tests, embedded carve-out lane; locally measured (8-27s across clean runs; fleet-contention sensitive — redislite start failures under load, not assertions)
   test_rebuild_event_meta_watermark_4653.py: 25.0  # #4653: 29 tests, docker FalkorDB; locally measured
   test_restore_seq_3902.py: 0.8
-  test_retention_promise.py: 3.8
+  test_retention_promise.py: 4.8  # ci-timing top-15 2026-10-19 (run 39191149586); was 3.8
   test_retired_tools.py: 0.2
   test_retrieval_metering.py: 90.0  # unmeasured — #4489: 34 tests on the embedded registry lane, locally measured 87.5s (TestTeamRoute's FastAPI client runs three requests through the real app; refresh from CI junit).
   test_session_bridge_fragment_retention.py: 0.3
-  test_session_verify.py: 90.8
+  test_session_verify.py: 90.8  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 6 of 45 testcases = 90.5s, a LOWER bound; kept 90.8
   test_ship_test_onboarding.py: 1.4
-  test_surface_manifest.py: 199.1  # #9017 CI-junit 2026-10-18 (run 39165691659); was 180.7
+  test_surface_manifest.py: 199.1  # #9017 CI-junit 2026-10-18 (run 39165691659); was 180.7 — ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 2 of 142 testcases = 36.0s, a LOWER bound; kept 199.1
   test_surface_resolution.py: 0.9
   test_telemetry_registration.py: 1.6
   test_temporal_leg_2976.py: 0.4
@@ -6633,9 +6633,9 @@ durations:
   test_time_aware_eval_2520.py: 0.0   # unmeasured — arrived via main #5297; no source leg measured it
   test_time_aware_run_2520.py: 0.0    # unmeasured — arrived via main #5297; no source leg measured it
   test_time_aware_sdk_2520.py: 0.0    # unmeasured — arrived via main #5297; no source leg measured it
-  test_tmpdir_hygiene_4096.py: 13.7
+  test_tmpdir_hygiene_4096.py: 13.7  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 5 testcases = 13.6s, a LOWER bound; kept 13.7
   test_turn_embedding_write_path_4194.py: 1.4
-  test_website_docs_consistency.py: 7.6
+  test_website_docs_consistency.py: 7.6  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 33 testcases = 4.3s, a LOWER bound; kept 7.6
   test_blog_authoring_doc.py: 2.0  # unmeasured — new file; refresh from the first post-merge run via tools/ci_timing.py --refresh-durations
   test_csp_plan_doc_consistency.py: 2.0  # unmeasured — new file; refresh from the first post-merge run via tools/ci_timing.py --refresh-durations
   test_install_reaper_schedule.py: 7.8  # unmeasured
@@ -6658,8 +6658,8 @@ durations:
   test_rotate_key.py: 3.6  # unmeasured
   test_verbatim_span.py: 0.5  # unmeasured
   test_ops_safety.py: 16.8  # unmeasured
-  test_org_graph_open_tripwire.py: 4.3
-  test_backup_e2e.py: 13.1  # unmeasured
+  test_org_graph_open_tripwire.py: 4.3  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 13 testcases = 3.6s, a LOWER bound; kept 4.3
+  test_backup_e2e.py: 13.1  # carried forward (not a full-file CI measurement) — ci-timing top-15 2026-10-19 (run 39191149586): a single-test file cannot prove full coverage from a top-15 projection; the reading (4.8s) is a LOWER bound; kept 13.1
   test_embedded_lifecycle_fast_close.py: 9.1  # unmeasured
   # #5011: 64 tests, docker lane — one full fold+graph-diff per assertion, nine of
   # them rebuild_all a journal, so the shared test container + the session-hygiene
@@ -6680,7 +6680,7 @@ durations:
   test_never_across_fold_5080.py: 2.0  # unmeasured
   test_operator_alert.py: 2.3
   test_consumed_sdk_binding_3904.py: 2.0  # unmeasured — new in #3904. Without a row this file packs at the flat 2.0s default anyway, but it would count as UNCOVERED, dropping the repo-wide coverage floor (#3400) to 89.9% and redding the manifest-integrity gate. The 2.0 value is the default it would have received; it is a weight, not a measurement.
-  bench/test_smoke_embedded.py: 38.6
+  bench/test_smoke_embedded.py: 38.6  # ci-timing top-15 2026-10-19 (run 39191149586): a single-test file cannot prove full coverage from a top-15 projection; the reading (24.3s) is a LOWER bound; kept 38.6
   test_about_edges.py: 3.0  # #9017 CI-junit 2026-10-18 (run 39165691659); was 6.2
   test_backfill_sources.py: 1.7  # #9017 CI-junit 2026-10-18 (run 39165691659); was 27.3
   test_billing.py: 35.3  # #9017 CI-junit 2026-10-18 (run 39165691659); was 27.8
@@ -6689,21 +6689,21 @@ durations:
   test_control_plane.py: 5.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 8.1
   test_cross_tenant_read_isolation.py: 1.9
   test_dream.py: 6.7  # #9017 CI-junit 2026-10-18 (run 39165691659); was 7.9
-  test_embedded_concurrency.py: 131.0
+  test_embedded_concurrency.py: 131.0  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 7 of 15 testcases = 101.2s in the largest single job (117.8s summed across the legs; 10 distinct testcases seen), a LOWER bound; kept 131.0
   test_embedded_durability_claim.py: 0.5  # unmeasured
-  test_embedded_lifecycle.py: 79.0
+  test_embedded_lifecycle.py: 84.8  # ci-timing top-15 2026-10-19 (run 39191149586); was 79.0
   test_enumeration_surfaces.py: 3.0  # #9017 CI-junit 2026-10-18 (run 39165691659); was 5.9
   test_ep_sources.py: 10.5  # #9017 CI-junit 2026-10-18 (run 39165691659); was 9.5
   test_eval_extraction_health.py: 0.1  # unmeasured
-  test_eval_ingest_retry.py: 7.1
-  test_eval_resume_retry_failed.py: 2.2
+  test_eval_ingest_retry.py: 13.2  # ci-timing top-15 2026-10-19 (run 39191149586); was 7.1
+  test_eval_resume_retry_failed.py: 2.2  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 18 testcases = 1.8s, a LOWER bound; kept 2.2
   test_event_provenance.py: 7.0  # #9017 CI-junit 2026-10-18 (run 39165691659)
   test_flip_gate.py: 6.7  # unmeasured
   test_fork_safety_3845.py: 11.3
   test_fork_slot_wedge_3845.py: 2.1  # unmeasured
-  test_graph_integrity_gate.py: 9.2  # unmeasured
-  test_graphcopy_boolean_index_3154.py: 0.8  # #9017 CI-junit 2026-10-18 (run 39165691659); was 4.4
-  test_guard.py: 32.0
+  test_graph_integrity_gate.py: 9.2  # carried forward (not a full-file CI measurement) — ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 87 testcases = 2.9s, a LOWER bound; kept 9.2
+  test_graphcopy_boolean_index_3154.py: 11.9  # ci-timing top-15 2026-10-19 (run 39191149586); was 0.8
+  test_guard.py: 32.0  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 15 testcases = 9.4s, a LOWER bound; kept 32.0
   test_hard_reject.py: 0.7  # unmeasured
   test_hosted_api.py: 174.5  # #9017 CI-junit 2026-10-18 (run 39165691659); was 113.5
   test_hosted_backup.py: 14.4  # unmeasured
@@ -6715,18 +6715,18 @@ durations:
   test_ingest_mode.py: 7.6  # #9017 CI-junit 2026-10-18 (run 39165691659)
   test_ingest_validation.py: 4.7  # #9017 CI-junit 2026-10-18 (run 39165691659); was 7.6
   test_8499_point_mediated_routing.py: 1.4  # unmeasured
-  test_longmem_runner.py: 15.3
+  test_longmem_runner.py: 33.6  # ci-timing top-15 2026-10-19 (run 39191149586); was 15.3
   test_mcp_http.py: 31.2  # #9017 CI-junit 2026-10-18 (run 39165691659); was 22.0
   test_mcp_route_challenge.py: 2.1  # #9017 CI-junit 2026-10-18 (run 39165691659); was 5.5
-  test_migrate_db.py: 21.1
-  test_pack_shipping_wheel.py: 42.4  # #9017 CI-junit 2026-10-18 (run 39165691659); was 58.1
+  test_migrate_db.py: 21.1  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 3 of 5 testcases = 17.4s, a LOWER bound; kept 21.1
+  test_pack_shipping_wheel.py: 42.4  # #9017 CI-junit 2026-10-18 (run 39165691659); was 58.1 — ci-timing top-15 2026-10-19 (run 39191149586): a single-test file cannot prove full coverage from a top-15 projection; the reading (40.6s) is a LOWER bound; kept 42.4
   test_per_session_census.py: 2.0  # unmeasured
   test_pre_migration_safety.py: 2.3  # unmeasured
   test_precision_leak_4028.py: 3.1  # unmeasured
   test_projection.py: 15.4  # #9017 CI-junit 2026-10-18 (run 39165691659); was 9.7
   test_projection_embedded_socket_timeout.py: 1.9  # unmeasured
-  test_projection_lifecycle.py: 8.6
-  test_reaper.py: 40.5
+  test_projection_lifecycle.py: 8.6  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 6 testcases = 4.8s, a LOWER bound; kept 8.6
+  test_reaper.py: 61.9  # ci-timing top-15 2026-10-19 (run 39191149586); was 40.5
   test_reaper_orphan.py: 0.1  # unmeasured
   test_redis_guard.py: 0.5  # unmeasured
   test_rest_surface_inventory.py: 4.8  # unmeasured (new file, #3875 — no CI junit yet)
@@ -6735,7 +6735,7 @@ durations:
   test_sdk.py: 20.6  # #9017 CI-junit 2026-10-18 (run 39165691659); was 16.1
   test_sdk_group3.py: 3.7  # #9017 CI-junit 2026-10-18 (run 39165691659); was 30.8
   test_search_engine_gaps.py: 2.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 6.0
-  test_source_inheritance_own.py: 68.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 27.2
+  test_source_inheritance_own.py: 68.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 27.2 — ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 49 testcases = 49.5s, a LOWER bound; kept 68.9
   test_embedding_model_required.py: 0.5  # unmeasured
   test_journal_embedding_5004.py: 24.0  # unmeasured
   test_update_point_content_embedding_4208.py: 9.6  # #4208: 9 tests, docker FalkorDB; locally measured (junit testcase/@time sum, max of 4 runs)
@@ -6764,7 +6764,7 @@ durations:
   # reports the whole file unmeasured.
   eval/write_path/test_write_path_prescreen.py: 0.2
   eval/write_path/test_write_path_semantic_judge.py: 0.2
-  test_2500_terminal_ep_backfill.py: 6.2
+  test_2500_terminal_ep_backfill.py: 6.2  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 16 testcases = 5.5s, a LOWER bound; kept 6.2
   test_3026_oauth_boundaries.py: 0.7
   test_3660_session_upload_identity.py: 0.1
   test_3844_annotation_injection.py: 0.1
@@ -6783,7 +6783,7 @@ durations:
   test_4542_retract_fold_decay.py: 0.1
   test_4647_store_representable.py: 0.3
   test_4716_capture_operator_ref_remap.py: 1.2
-  test_4921_construct_lock.py: 105.3  # #4921: MEASURED (3 tests) — the two forced-interleave tests (two real embedded servers per arm) dominate, so the weight still moves with box load. The run this note used to cite (114.13s summed, 60.06s slowest) is not this value's basis any more and is dropped rather than left pointing at a superseded sample (see the provenance rule above the block). The registration is load-bearing in BOTH halves: the surface entry alone leaves durations coverage below the 90% floor and `tools/ci_selection.py --integrity` reds (#4348 trap — do not drop without re-deriving the floor at that head).
+  test_4921_construct_lock.py: 113.9  # #4921: MEASURED (3 tests) — the two forced-interleave tests (two real embedded servers per arm) dominate, so the weight still moves with box load. The run this note used to cite (114.13s summed, 60.06s slowest) is not this value's basis any more and is dropped rather than left pointing at a superseded sample (see the provenance rule above the block). The registration is load-bearing in BOTH halves: the surface entry alone leaves durations coverage below the 90% floor and `tools/ci_selection.py --integrity` reds (#4348 trap — do not drop without re-deriving the floor at that head). — ci-timing top-15 2026-10-19 (run 39191149586); was 105.3
   test_4999_vector_mechanism.py: 0.1
   test_5359_unchecked_window_writers.py: 0.6
   test_5361_inverted_window_audit.py: 0.4
@@ -6795,7 +6795,7 @@ durations:
   test_capture_consent.py: 0.4
   test_capture_graph_ops.py: 0.8
   test_capture_redaction_sinks_5445.py: 0.1
-  test_capture_secret_redaction_4911.py: 9.1
+  test_capture_secret_redaction_4911.py: 9.6  # ci-timing top-15 2026-10-19 (run 39191149586); was 9.1
   test_connection_url_redaction_5326.py: 2.7  # #5326: 23 tests (21 at the first cut; #5326 review added 2 that pin the authority-boundary leak). Local wall is fuzz- and box-dependent (~2.7-8 s), so the numeric value stays the pre-merge estimate; a NEW file has no CI junit measurement (a file that never ran cannot appear in an artifact). The registration is load-bearing in BOTH halves: the surface entry alone leaves durations coverage below the 90% floor and `tools/ci_selection.py --integrity` reds (#4348 trap — do not drop without re-deriving the floor at that head). The file is CPU-light (one 6,000-case in-process fuzz, no DB), so unlike the #4921 entry above it does NOT move much with box load. Refresh the value from the first post-merge run that includes it.
   test_capture_validfrom_3945.py: 0.5
   test_ci_last_failed.py: 1.9
@@ -6868,7 +6868,7 @@ durations:
   test_id_predicate_barrier_6976.py: 0.1
   test_invalidate_inverted_window_5358.py: 0.8
   test_merge_throughput.py: 5.8
-  test_mergify_config_guard.py: 4.0
+  test_mergify_config_guard.py: 4.5  # ci-timing top-15 2026-10-19 (run 39191149586); was 4.0
   test_notify_offloop_4456.py: 1.1
   test_pack_extraction_slots_v31.py: 0.2
   test_pr_lead_time.py: 0.2
@@ -6901,18 +6901,18 @@ durations:
   test_vocab_gating_by_graph.py: 5.1
   test_bounded_raw_clients_3065.py: 3.0
   test_socket_bound_not_multiplied_2969.py: 7.5  # unmeasured — file ADDED BY THIS PR (#3400 trap: the refresher samples push-to-main runs only, so a new file packs at the flat 2.0s default and drops duration coverage under the 90% floor). Readings: 4.0s warm on the authoring box, 8.1s cold on a reviewer box (first import of redis/falkordb/tortoise.projection dominates); the two socket measurements themselves are ~1.0s each. Declared at the HIGHER reading so a cold leg cannot under-pack. Refresh from the first post-merge run.
-  test_entity_identity.py: 7.5
+  test_entity_identity.py: 7.5  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 56 testcases = 5.8s, a LOWER bound; kept 7.5
   test_3589_3326_salvage.py: 4.2
   test_5388_org_enumeration_completeness.py: 2.5
-  test_7951_write_doors.py: 6.2
+  test_7951_write_doors.py: 6.2  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 13 testcases = 3.9s, a LOWER bound; kept 6.2
   test_7951_create_point_outbox.py: 3.2  # unmeasured — #7951 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red at 772/858 = 89.98% — the same shape as the `test_7950_capstone_probe.py` row above. Local embedded-lane reading 3.2s (14 tests × ~0.23s). Refresh from the first post-merge run that includes it.
-  test_7951_update_point_outbox.py: 7.2  # unmeasured — #7951 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red (790/878 = 90.0% at the floor, and the file packs at the flat 2.0s default) — the same shape as the `test_7951_create_point_outbox.py` row above. Local embedded-lane reading 7.2s (6 tests; two of them rebuild the graph). The count is now 7: `test_the_promote_arm_stays_apply_first_a_recorded_deviation` is parametrized over both promote arms (see #9272), so it collects twice. Refresh from the first post-merge run that includes it.
+  test_7951_update_point_outbox.py: 7.2  # unmeasured — #7951 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red (790/878 = 90.0% at the floor, and the file packs at the flat 2.0s default) — the same shape as the `test_7951_create_point_outbox.py` row above. Local embedded-lane reading 7.2s (6 tests; two of them rebuild the graph). Refresh from the first post-merge run that includes it.
   test_7951_delete_point_outbox.py: 5.0  # unmeasured — #7951 increment 4a (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), and an absent row packs it at the flat 2.0s default, which drops `duration_coverage_issues()` under the 90% floor — the same shape as the `test_7951_create_point_outbox.py` row above. Local embedded-lane readings 4.3–6.8 s when the file collected 6 tests; at this head it collects 10 (T1-T10, TWO of which call `rebuild_all` — T3 and T8) and measured 7.5 s here on the same lane, so the 5.0 weight is a lower-ish bound in the right neighbourhood rather than a stale one. Refresh from the first post-merge run that includes it.
   test_9079_ep_epoch_declared.py: 7.2  # unmeasured — #9123 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red at 840/934 = 89.9% — the same shape as the `test_7951_create_point_outbox.py` row above. Local embedded-lane readings 5.9/6.0/6.4 s over three runs (6 tests; one calls `rebuild_all`). ⚠️ A longer reading (148 s) is NOT this file's weight: the FIRST `create_point` in a process lazily loads the embedding model — 15.7 s standalone, and 134 s for the one test that pays it under fleet load 65 — after which creates are 0.16 s. That one-time load is paid once per file and is not what this weight packs. Declared above the quiet-box readings so a cold leg cannot under-pack. Refresh from the first post-merge run that includes it.
   test_9079_record_replay_declared.py: 9.0  # unmeasured — #9079 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), and an absent row packs it at the flat 2.0s default. Four tests, each one `rebuild_from_record` round trip in an embedded SDK with NO `create_point` (so the once-per-leg embedding-model load the `test_9079_ep_epoch_declared.py` row above pays is NOT part of this weight); local readings are recorded on the `#9079` PR. Refresh from the first post-merge run that includes it.
   test_audit_fallback_home_isolation.py: 2.4
   test_9208_change_feed_degraded.py: 2.0  # unmeasured — new in #9208 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). Without this row the file is in the fast pool, so it packs at the flat 2.0s default AND `duration_coverage_issues()` sits at 90.02% — one peer lane adding a file tips it under the 90% floor. The weight is the flat default deliberately (a LOCAL reading would not be a shard-layout input, #3419/#2788): the local 42-65 s readings for this file are almost entirely the once-per-leg embedding-model load the #3400 method attributes to no file. Refresh from the first post-merge run that includes it.
-  test_ci_stall_identify.py: 16.0  # #5035: the 1.8 predated this PR's subprocess-launching tests. A quiet-machine estimate (measured 12.3, 14.8, 16.3 s; 25.9 s under moderate load and 34-40 s at fleet load 67-79 — the file spawns pytest children, so it tracks box load hard). `tools/ci_timing.py --refresh-durations` is the canonical (CI-measured) writer; this line is a local estimate until it next runs.
+  test_ci_stall_identify.py: 16.0  # #5035: the 1.8 predated this PR's subprocess-launching tests. A quiet-machine estimate (measured 12.3, 14.8, 16.3 s; 25.9 s under moderate load and 34-40 s at fleet load 67-79 — the file spawns pytest children, so it tracks box load hard). `tools/ci_timing.py --refresh-durations` is the canonical (CI-measured) writer; this line is a local estimate until it next runs. — ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 1 of 8 testcases = 2.3s, a LOWER bound; kept 16.0
   test_env_contract_covers_supabase_config.py: 2.0  # #4030: appended by hand so the entry exists at all — main sat only just above the guard's floor (764/848 fast files = 90.09%), and this new fast file tipped `duration_coverage_issues()` below it (764/849 = 89.99%, formatted as the `90.0%` in that error). Local estimate: 3.24 s measured for this file plus its paired pin in test_ci_selection.py, most of it one conftest import. `tools/ci_timing.py --refresh-durations` replaces it with the CI-measured value.
   test_7936_stable_stub_ids.py: 18.0  # #7936 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red at 777/864 = 89.9% (the file is in the fast pool, so its absence packs it at the flat 2.0s default and drops coverage under the 90% floor) — the same shape as `test_7951_create_point_outbox.py` above, and it is also what reds `tests/test_ci_timing.py`'s four `validate_refreshed_manifest` assertions on the manifest of record. Local embedded-lane reading 16.6–20.4 s (18 tests; three rebuild the graph). Refresh from the first post-merge run that includes it.
   test_7935_restore_destination_lock.py: 5.0  # #7935 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red at 780/867 = 89.97% (formatted as the `90.0%` in that error) — the file is in the fast pool, so its absence packs it at the flat 2.0s default and drops coverage under the 90% floor; the same shape as the rows above. Local embedded-carve-out reading (4 tests, re-measured after the P3 journal-lock test was added): call 0.52 s + 2.83 s + 2.73 s + <0.01 s (the lock-only test enters `_destination_lock` directly, no restore), setup/teardown ~0.5 s each. The file's FIRST embedded replay in a cold process also pays the once-per-leg embedding-model load the #3400 method attributes to no file (~124 s, and the fixture pays it in setup so the lock gates are not timed against it) — that cost is already carried by `test_7767_restore_rollback.py`, which replays the same path. Refresh from the first post-merge run that includes it.
@@ -6993,7 +6993,7 @@ durations:
   # deliberately NOT stated: a hand-written count here goes stale the moment a
   # test is added. Refresh from the first post-merge sweep that collects it.
   test_8089_expired_invitation_sweep.py: 11.0  # unmeasured — local wall reading, added by #8089; refresh from the next sweep
-  test_5142_ontology_record.py: 3.7
+  test_5142_ontology_record.py: 3.8  # ci-timing top-15 2026-10-19 (run 39191149586); was 3.7
   test_direction_storage_7852.py: 5.4
   test_incident_kinds.py: 4.0
   # #9217 (#3400 trap): both files are ADDED BY THIS PR, so no CI junit measurement can exist for

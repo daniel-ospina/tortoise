@@ -60,11 +60,44 @@ CANONICAL_DOC = REPO / CANONICAL_DOC_REL
 # never crosses a newline and the alternations keep their local scope. The
 # extension is scoped to the SAME paths and adds no false positives (the
 # legitimate "the derivation is the truth, the cache is a copy" stays green).
+#
+# The LAST alternation is #9134's P2: a pre-existing red was greened by rewording
+# `journal is the truth` to `the journal is the durable record`, which moves the
+# claim out of the `truth` window while still ATTRIBUTING DURABILITY to the
+# journal — the opposite of this doc's rule ("durability = the store's own
+# persistence plus an off-box copy of it. Nothing else."; the JSONL "is never the
+# durability mechanism"). Durability is now a SUBJECT-ATTRIBUTION predicate, so
+# the same claim cannot come back in a different wording. The determiner slot is
+# a SLOT, not the literal `the`: `the journal is A durable record` and `the event
+# log is ITS durability mechanism` are the same claim, and pinning `(?:the )?`
+# made the gate see only the one reword that happened to be reviewed. Measured
+# over all 304 scanned files: no false positives (nothing in the tree attributes
+# durability to the log in any determiner form).
 _SUBJECT = r"(?:event log|journal|jsonl|\blog\b|event stream)"
+# any possessive/indefinite determiner, or none
+_DURAB_DET = r"(?:the |a |an |our |its |their |your )?"
 CLAIM_RE = re.compile(
     rf"{_SUBJECT}.{{0,40}}source of truth"
     rf"|source of truth.{{0,40}}(?:durab|{_SUBJECT})"
-    rf"|{_SUBJECT}.{{0,40}}is (?:the )?truth",
+    rf"|{_SUBJECT}.{{0,40}}is (?:the )?truth"
+    rf"|{_SUBJECT}.{{0,40}}is {_DURAB_DET}durab(?:le|ility)",
+    re.IGNORECASE,
+)
+
+# The two PREDICATE alternations, applied to whitespace-JOINED text. A line
+# break is not a scope: `COMMIT POINT (the journal IS the` / `truth)` is the
+# same claim as one line, and `CLAIM_RE` above — line-at-a-time like grep, so
+# `.` cannot cross a newline — reads it as clean. That is not hypothetical:
+# `tortoise/api.py` carried exactly that wrapped claim, one reflow away from
+# firing, and this gate certified the file green for it. Only the predicate
+# forms are re-scanned: the `source of truth` alternations have legitimate
+# cross-line neighbours (`corpus files (source of truth), (2) the FULL
+# `events/` JSONL directory`, `single source of truth with apply, #330` /
+# `# Journal-order`), so joining them repo-wide would manufacture false
+# positives — measured, not assumed.
+WRAPPED_CLAIM_RE = re.compile(
+    rf"{_SUBJECT}.{{0,40}}is (?:the )?truth"
+    rf"|{_SUBJECT}.{{0,40}}is {_DURAB_DET}durab(?:le|ility)",
     re.IGNORECASE,
 )
 
@@ -127,6 +160,29 @@ def _claim_lines(path: Path) -> list[tuple[int, str]]:
         for i, line in enumerate(text.splitlines(), 1)
         if CLAIM_RE.search(line)
     ]
+
+
+def _wrapped_claim_lines(path: Path) -> list[tuple[int, str]]:
+    """Claims the line-at-a-time gate cannot see because the subject and the
+    predicate sit on different lines. Reports the line the MATCH STARTS on."""
+    starts: list[tuple[int, int]] = []
+    parts: list[str] = []
+    pos = 0
+    for lineno, line in enumerate(
+        path.read_bytes().decode("utf-8", errors="ignore").splitlines(), 1
+    ):
+        collapsed = re.sub(r"\s+", " ", line).strip()
+        if not collapsed:
+            continue
+        starts.append((pos, lineno))
+        parts.append(collapsed)
+        pos += len(collapsed) + 1
+    joined = " ".join(parts)
+    out: list[tuple[int, str]] = []
+    for match in WRAPPED_CLAIM_RE.finditer(joined):
+        lineno = next(n for p, n in reversed(starts) if p <= match.start())
+        out.append((lineno, joined[max(0, match.start() - 60) : match.end() + 60]))
+    return out
 
 
 # ── 1. the scan reaches the declared roots ──────────────────────────────────
@@ -285,6 +341,55 @@ def test_canonical_doc_is_itself_a_claim_hit():
 
 # ── 4. the regex fires on the defect and not on unrelated prose ─────────────
 
+# ``CLAIM_RE`` is line-at-a-time, so wrapping is the one hole left in it. These
+# two tests close it: the detector must see a wrapped claim (or the file scan
+# below proves nothing), and the file scan must find none anywhere.
+def test_wrapped_detector_sees_a_claim_split_across_lines(tmp_path):
+    """Non-vacuity for :func:`_wrapped_claim_lines`: the exact pre-fix shape at
+    ``tortoise/api.py`` (subject + ``truth`` on either side of a newline) is
+    reported, at the line the claim STARTS on. Deleting the join — or falling
+    back to the line-at-a-time scan — must fail this."""
+    target = tmp_path / "wrapped.py"
+    target.write_text(
+        "x = 1\n"
+        "        load-bearing: the append is this seam's COMMIT POINT (the journal IS the\n"
+        "        truth), so a refusal raised after it would leave a record,\n",
+        encoding="utf-8",
+    )
+    hits = _wrapped_claim_lines(target)
+    assert [lineno for lineno, _ in hits] == [2], hits
+    # ...while the line-at-a-time gate really is blind to it.
+    assert _claim_lines(target) == []
+
+
+def test_no_wrapped_durability_claim_anywhere_in_the_scanned_roots():
+    """A line break must not hide the PREDICATE claim from the gate. ``tortoise/api.py``
+    carried `(the journal IS the` / `truth)` while this gate reported clean,
+    which is the fail-open shape the gate exists to forbid.
+
+    SCOPE: the joined re-scan covers only the two predicate alternations
+    (`is truth` / `is durable`), not `source of truth`. That is deliberate and
+    measured — the `source of truth` alternations have legitimate cross-line
+    neighbours in this tree (`corpus files (source of truth), (2) the FULL
+    \`events/\` JSONL directory`, `single source of truth with apply, #330` /
+    `# Journal-order`), so joining them repo-wide fabricates false positives. A
+    wrapped `source of` / `truth` is therefore NOT caught here; narrowing the
+    claim in that direction is what keeps this gate honest about its own reach.
+    """
+    offenders: list[str] = []
+    for path in _scanned_files():
+        rel = path.relative_to(REPO).as_posix()
+        if rel == CANONICAL_DOC_REL:
+            continue
+        for lineno, snippet in _wrapped_claim_lines(path):
+            offenders.append(f"{rel}:{lineno}: {snippet[:160]}")
+    assert not offenders, (
+        "the durability authority is " + CANONICAL_DOC_REL + " — a claim split "
+        "across lines is the same claim; delete it and link the canonical doc:\n"
+        + "\n".join(offenders)
+    )
+
+
 def test_claim_regex_matches_the_original_defect_forms():
     """Every form the deleted sites actually carried — including the two the
     owner's exact pattern cannot see, which this change also removes."""
@@ -302,6 +407,20 @@ def test_claim_regex_matches_the_original_defect_forms():
         "the source of truth is the event stream",
         # the durability-worded second alternation:
         "the source of truth for durability claims",
+        # #9134's SUBJECT-ATTRIBUTION alternation (the 4th). Without these
+        # cases that alternation is unpinned: deleting it left every
+        # assertion green, so the wording it exists to catch went untested.
+        # The first one is the exact reword that greened a real red.
+        "the journal is the durable record",
+        "the event log is the durability mechanism",
+        # the DETERMINER slot, not just `the`: a reword that swaps the article
+        # is the same claim, and pinning `(?:the )?` saw only the reviewed one.
+        "the journal is a durable record",
+        "the journal is our durable record",
+        "the event log is its durability mechanism",
+        # `_SUBJECT` includes a bare `log`, so this is DELIBERATELY a hit: it
+        # attributes durability to the log, which the canonical doc denies.
+        "the log is durable",
     ):
         assert CLAIM_RE.search(claim), f"scan misses a real claim: {claim!r}"
 
@@ -318,6 +437,10 @@ def test_claim_regex_rejects_unrelated_source_of_truth_prose():
         "the journal/event stream is the reconstruction source for Object.status",
         # `\blog\b` must not fire inside `changelog`:
         "the changelog is the source of truth for released versions",
+        # The 4th alternation's boundary: a durability statement whose subject
+        # is NOT a journal/event log is the canonical doc's own framing.
+        "the store is the durability authority",
+        "the store's own persistence is durable; the journal is not",
     ):
         assert not CLAIM_RE.search(unrelated), (
             f"scan false-positives on unrelated copy: {unrelated!r}"
