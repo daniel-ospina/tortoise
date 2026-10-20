@@ -272,3 +272,150 @@ def test_sweep_drops_a_root_a_peer_already_cleared():
             assert ids[1] not in sdk._stale_unresolved
         finally:
             sdk.close()
+
+
+# ── Review-driven cases (round 2) ────────────────────────────────
+
+
+def test_mixed_verdict_in_one_call_reconciles_each_class():
+    """One sweep carrying a cleared, a retained and a phantom root in the SAME
+    call — the normal multi-process shape — lands each class correctly.
+
+    The landed single-statement code path is exercised per class by the tests
+    above; this one pins the COMPOSITION (and a mixed verdict is the only shape
+    in which a per-row verdict can be mis-assigned between rows).
+    """
+    with _db() as db:
+        sdk = TortoiseSDK(db)
+        try:
+            ids = _chain(sdk, 4)
+            sdk.dream(mode="local")
+            assert sdk._dirty_roots == set()
+            # Stamp the three roots DIRECTLY (epochs 5 / 50), so the classes are
+            # exact and `_mark_dirty`'s reverse-BFS cannot re-stamp a sibling.
+            sdk._get_proj().g.query(
+                "MATCH (n:Point {id:$a}) SET n.ep_dirty = true, n.ep_dirty_at = 5",
+                params={"a": ids[0]},
+            )
+            sdk._get_proj().g.query(
+                "MATCH (n:Point {id:$b}) SET n.ep_dirty = true, n.ep_dirty_at = 50",
+                params={"b": ids[1]},
+            )
+            # phantom root: in the mirror, flag already cleared by a peer
+            sdk._dirty_roots |= {ids[0], ids[1], ids[2]}
+
+            sdk._sweep_dirty_roots({ids[0], ids[1], ids[2]}, run_ep=10)
+
+            assert ids[0] not in _ep_dirty_ids(sdk), "cleared root left the graph"
+            assert ids[0] not in sdk._dirty_roots, "cleared root left the mirror"
+            assert ids[1] in _ep_dirty_ids(sdk), "newer marking must survive"
+            assert ids[1] in sdk._dirty_roots, "retained root must stay in mirror"
+            assert ids[2] not in sdk._dirty_roots, "phantom must leave the mirror"
+        finally:
+            sdk.close()
+
+
+def test_sweep_never_acquires_a_root_the_mirror_never_held():
+    """A retained root is KEPT, never ACQUIRED.
+
+    `_hydrate_dirty_roots` keys on an EMPTY mirror, so if a sweep ADDED a root
+    the mirror had never held (a peer's marking, seen for the first time), the
+    mirror would become non-empty-but-partial and the rest of the graph's
+    backlog could never be hydrated — the same stale-backlog failure this
+    change exists to remove, in the other direction.
+    """
+    with _db() as db:
+        peer = TortoiseSDK(db)
+        try:
+            ids = _chain(peer, 3)
+            peer.dream(mode="local")
+            peer._mark_dirty(ids)          # peer marks all three, at epoch E
+            e = peer._ep_epoch()
+
+            fresh = TortoiseSDK(db)        # a fresh process: empty mirror
+            try:
+                assert fresh._dirty_roots == set()
+                assert _ep_dirty_ids(fresh) == set(ids)
+
+                fresh._sweep_dirty_roots({ids[0]}, run_ep=e - 1)   # retained
+
+                assert ids[0] in _ep_dirty_ids(fresh), "the stamp is newer — kept"
+                assert fresh._dirty_roots == set(), (
+                    "the sweep ACQUIRED a root into an empty mirror; hydration "
+                    "is now blocked and the rest of the backlog is invisible"
+                )
+                assert fresh._hydrate_dirty_roots() == set(ids), (
+                    "with an empty mirror the whole backlog must hydrate"
+                )
+            finally:
+                fresh.close()
+        finally:
+            peer.close()
+
+
+def test_run_ep_none_clears_stamped_and_unstamped_alike():
+    """`run_ep=None` (no snapshot) clears unconditionally — the documented
+    contract, routed through a NULL parameter binding.
+
+    Every production caller passes an int epoch, so this branch is pinned only
+    here; it is the one engine-level assumption the merged statement adds
+    (`$run_ep IS NULL` with `params={"run_ep": None}`).
+    """
+    with _db() as db:
+        sdk = TortoiseSDK(db)
+        try:
+            ids = _chain(sdk, 2)
+            sdk.dream(mode="local")
+            sdk._mark_dirty([ids[1]])
+            # an unstamped flag from legacy/raw state
+            sdk._get_proj().g.query(
+                "MATCH (n:Point {id:$id}) SET n.ep_dirty = true, n.ep_dirty_at = null",
+                params={"id": ids[0]},
+            )
+            sdk._dirty_roots |= {ids[0], ids[1]}
+
+            sdk._sweep_dirty_roots({ids[0], ids[1]}, run_ep=None)
+
+            assert _ep_dirty_ids(sdk) == set(), (
+                "run_ep=None must clear every flag, stamped or not"
+            )
+            assert sdk._dirty_roots == set()
+        finally:
+            sdk.close()
+
+
+def test_retry_cap_does_not_erase_a_peers_newer_marking():
+    """The attempt cap's graph clear is epoch-guarded (#9362 review).
+
+    A root the sweep RETAINED (a peer stamped it after this run's snapshot) is
+    now in the mirror, so it can reach the retry cap at all. An unguarded cap
+    clear would let this process's local retry policy erase the peer's newer
+    marking — a false CLEAN for every other reader.
+    """
+    with _db() as db:
+        sdk = TortoiseSDK(db)
+        try:
+            ids = _chain(sdk, 2)
+            sdk.dream(mode="local")
+            sdk._mark_dirty([ids[1]])
+            e = sdk._ep_epoch()
+            cap = sdk.retry_attempt_cap
+            sdk._dirty_roots.add(ids[1])
+
+            # A run whose snapshot predates the marking caps the root.
+            sdk._retry_attempts[ids[1]] = cap
+            sdk._register_failed_attempt({ids[1]}, run_ep=e - 1)
+            assert ids[1] not in sdk._dirty_roots, "a capped root leaves the mirror"
+            assert _ep_dirty_at(sdk, ids[1]) == e, (
+                "the cap erased a marking stamped after the run's snapshot — "
+                "another process's dirty root was retired by this one's retry "
+                "policy"
+            )
+
+            # A run that SAW the stamp may retire it.
+            sdk._dirty_roots.add(ids[1])
+            sdk._retry_attempts[ids[1]] = cap
+            sdk._register_failed_attempt({ids[1]}, run_ep=e)
+            assert _ep_dirty_at(sdk, ids[1]) is None
+        finally:
+            sdk.close()

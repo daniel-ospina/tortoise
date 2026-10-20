@@ -4123,6 +4123,10 @@ surfaces:
   - test_ep_directional.py
   - test_ep_draft_filter.py
   - test_ep_dirty_persist.py
+  # #9362: the dirty-root sweep's mirror reconciliation — it reads/writes the
+  # same `ep_dirty`/`ep_dirty_at` contract as `test_ep_dirty_persist.py` above
+  # and must run on any change to `sdk.py`'s sweep or the dream adapters.
+  - test_9362_sweep_mirror_order.py
   - test_ep_local_395.py
   # #6211: EP at the graph's own scale — the 200-operator selection cap made
   # VISIBLE in `compute_confidence`'s result, and the timed-out affected-
