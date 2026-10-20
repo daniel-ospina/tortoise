@@ -5777,13 +5777,28 @@ def test_drift_gate_cannot_skip_the_test_matrix():
             the code it replaced — the old bare `grep -qE 'failure|cancelled'`
             bail exits 1 on every red vector below, so exit-code-only coverage
             is satisfied by the pre-fix script (proved in #9240 review).
-            `bash -e` matches the runner's shell (`bash -e {0}`), so a green
-            path that only survives without errexit is caught here too.
+
+            The SHELL is `bash -eo pipefail`, deliberately the stricter of the
+            two GitHub uses: this step declares no `shell:`, so the runner uses
+            its Linux default `bash -e {0}` (the run log's `shell:` line says
+            exactly that), while any step declaring `shell: bash` gets
+            `bash --noprofile --norc -eo pipefail {0}`. Why it matters HERE:
+            the aggregate's LAST-RESORT #5219 backstop is
+            `echo "$RESULTS" | grep -qE 'failure|cancelled'` — a `grep -q`
+            mid-pipeline, the shape this repo has recorded silently INVERTING a
+            branch (the writer takes SIGPIPE, `pipefail` then reports the
+            pipeline as failed while the matched line IS present —
+            `docs/ci/docs-lint-baseline.md`,
+            `tests/test_migration_drift_gate.py`). A verdict that only survives
+            `-e` is one this harness must red, because #9240 makes that sweep
+            the last reachable layer (#9240 review). Errexit is covered too:
+            both shells carry `-e`.
             """
             sel = dict(SELECTED)
             sel.update(selected or {})
             proc = subprocess.run(
-                ["bash", "-e", "-c", _render(results, sel, extra, src)],
+                ["bash", "-eo", "pipefail", "-c",
+                 _render(results, sel, extra, src)],
                 capture_output=True, text=True)
             return proc.returncode, proc.stdout + proc.stderr
 
