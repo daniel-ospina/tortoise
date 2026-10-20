@@ -32,12 +32,15 @@ handles — is guarded. That construction set is no longer a convention: #6882
 pins it with an AST inventory (a revert to a raw ``FalkorDB(...)`` fails a test)
 and a runtime marker assertion on a real embedded projection.
 
-⛔ TWO IN-PACKAGE EXCEPTIONS, and the pin above cannot see either: the AST
-inventory recognises ``FalkorDB(...)`` / ``guarded_client(...)``, so a module
-that builds a bare ``redis.Redis(...)`` is invisible to it as well as unguarded
-— ``hosted_backup._restore_copy_client`` (raw on purpose, #3813) and
-``acl_graph_users``' admin client. Their commands do NOT carry the #7357 note
-and are NOT operator-guarded; see :class:`_GuardedExecuteCommand`.
+⛔ TWO IN-PACKAGE EXCEPTIONS, and the guard-seam pin above cannot see either:
+the #6882 SCAN matches only ``FalkorDB(...)`` / ``guarded_client(...)``, so a
+module that builds a bare ``redis.Redis(...)`` passes it unguarded —
+``hosted_backup._restore_copy_client`` (raw on purpose, #3813) and
+``acl_graph_users``' admin client. Both ARE counted by the SIBLING read-bound
+inventory in the same test file (``_EXPECTED_SITES`` names both modules), and
+that is the distinction a reader must not blur: it pins that they carry a
+socket bound, NOT that they are guarded. Their commands do NOT carry the #7357
+note and are NOT operator-guarded; see :class:`_GuardedExecuteCommand`.
 
 Code OUTSIDE the package that builds a raw vendor client is NOT covered. That
 set is ILLUSTRATIVE, not exhaustive — e.g. ``graph-scripts/*.py``,
@@ -1382,7 +1385,8 @@ def _statement_mutating(statement) -> bool | None:
     evaluated as an ARGUMENT at four of the proxy's five verbs
     (``mutating=_statement_mutating(q)`` in ``_GuardedHandleProxy``; ``explain``
     derives its arm from ``_NON_EXECUTING_COMMANDS`` through
-    ``_command_mutating`` instead, so it has nothing to classify), which runs it
+    ``_command_mutating`` instead, so while ``GRAPH.EXPLAIN`` is in that set
+    there is nothing here to classify), which runs it
     BEFORE ``_forward_query``'s ``except`` can catch anything — so a raise here
     would fail the caller's query outright instead of hedging the note, and it
     would do it on the READ traffic the ``ro_query`` arm change newly routes
@@ -1839,9 +1843,11 @@ def _forward_query(method, q, params=None, timeout=None, *, mutating,
     ``query``, ``ro_query`` and ``_query`` all take the arm from the statement
     TEXT — the vendor's "read-only" verb name is not a guarantee that a write
     cannot be dispatched (see ``_NON_EXECUTING_COMMANDS``). Only ``explain`` is
-    verb-derived, and it is ``False`` because ``GRAPH.EXPLAIN`` plans without
-    executing. Deriving it here instead would put a classification below the
-    seam that already knows the verb.
+    verb-derived — from ``_NON_EXECUTING_COMMANDS`` through ``_command_mutating``,
+    which answers ``False`` while ``GRAPH.EXPLAIN`` is in that set, because it
+    plans without executing. Deriving it here instead would put a classification
+    below the seam that already knows the verb, and hardcoding the value would
+    be the prose copy this note exists to prevent.
 
     #7357: this is also where the duck-typed proxy's five verbs pass, so the
     instance-outage note is applied here — the proxy dispatches straight to the
