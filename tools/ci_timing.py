@@ -963,7 +963,10 @@ def _splits_tests_across_exclusive_sides(tree: ast.Module) -> bool:
     """
     tc = _type_checking_names(tree)
     for node in ast.walk(tree):
-        if isinstance(node, (ast.If, ast.While)):
+        if isinstance(node, ast.If):
+            # ⛔ `ast.While` is deliberately absent: a live `while`'s `else:` runs after the
+            # loop, so its two sides are ADDITIVE, not exclusive. `_dead_branches` still
+            # treats a `while False:` body as dead, which is a different question.
             dead = _dead_branches(node, tc)
             live = [block for attr, block in (("body", node.body), ("orelse", node.orelse))
                     if attr not in dead]
@@ -1139,12 +1142,16 @@ def _collectable_statements(
         out.append(node)
         dead = _dead_branches(node, type_checking)
         for attr in ("body", "orelse", "finalbody"):
-            # ⛔ A dead if/while skips its BODY but not its `else:`/`finally:` — those run
-            # at import, so a `def` inside them is collected. Measured: `if
-            # TYPE_CHECKING: … else: def test_late_bound` beside three plain tests
-            # collected 4 against a declared 3, a floor that licensed a 3.3x discount
+            # ⛔ Skip only the side that CANNOT RUN — `body` for `if TYPE_CHECKING:` /
+            # `if False:`, `orelse` for the NEGATED guard `if not TYPE_CHECKING:` (which
+            # runs its body and skips its `else:`). `finally:` always runs. Skipping
+            # `body` unconditionally left the negated polarity counting a DEAD def and
+            # dropping two live ones: measured 2 declared against 3 collected, a floor
+            # that licensed a discount. The `else:` of a plain dead guard DOES run, so
+            # `if TYPE_CHECKING: … else: def test_late_bound` beside three plain tests is
+            # 4 declared against 4 collected; skipping it counted 3 of 4 — a floor
             # (#9134 review, P2).
-            if attr in dead:  # the side THAT CANNOT RUN is the one to skip
+            if attr in dead:
                 continue
             block = getattr(node, attr, None)
             if isinstance(block, list) and block and isinstance(block[0], ast.stmt):
