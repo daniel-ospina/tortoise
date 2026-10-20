@@ -628,7 +628,7 @@ def _run_provision(tmp_path: Path, *, run_id: str = "42", legacy: str = "true",
                    repo_owner: str = ""
                    ) -> tuple[subprocess.CompletedProcess, Path, Path]:
     bindir = tmp_path / "bin"
-    bindir.mkdir(exist_ok=True)
+    bindir.mkdir(parents=True, exist_ok=True)
     (bindir / "docker").write_text(STUB_DOCKER)
     (bindir / "docker").chmod(0o755)
     # per-call scratch paths: a shared GITHUB_ENV would be truncated by the
@@ -786,7 +786,7 @@ def test_provision_cleans_up_its_own_containers_when_it_fails(tmp_path):
 
 def test_teardown_removes_only_the_recorded_containers(tmp_path):
     bindir = tmp_path / "bin"
-    bindir.mkdir(exist_ok=True)
+    bindir.mkdir(parents=True, exist_ok=True)
     (bindir / "docker").write_text(STUB_DOCKER)
     (bindir / "docker").chmod(0o755)
     calls = tmp_path / "td-calls"
@@ -1059,6 +1059,10 @@ def _run_step8(monkeypatch, *, status: str, created_image: str):
     monkeypatch.setattr(setup, "MODE", "docker")
     monkeypatch.setattr(setup, "_container_status", lambda _n: status)
     monkeypatch.setattr(setup, "_container_image", lambda _n: created_image)
+    # #7357: the reuse paths read the container's memory limit. Stubbed so this
+    # helper stays HERMETIC — an unstubbed read shells out to a real docker with
+    # no timeout, and the test would hang on a wedged daemon (#7357 review F9).
+    monkeypatch.setattr(setup, "_container_memory_limit", lambda _n: 2 << 30)
     monkeypatch.setattr(setup, "_port_collision", lambda _p: None)
     monkeypatch.setattr(setup, "_run", lambda cmd, **kw: calls.append(cmd))
 
@@ -1369,4 +1373,832 @@ def test_the_selfhost_quickstart_hands_out_the_compose_pin_not_latest():
     )
     assert not re.search(r"falkordb/falkordb[a-z-]*:latest", option_b), (
         "Option B still hands out a floating `:latest` engine (#8124)"
+    )
+
+
+# ── #7357: every FalkorDB container this repo starts carries a KERNEL cap ──
+#
+# The issue's measured root cause is not one bug but one MISSING FLAG,
+# repeated at every entry point that starts a FalkorDB: `HostConfig.Memory=0`.
+# `--maxmemory` (where it is set at all) is a REDIS-side limit, so with no
+# cgroup cap the container's real ceiling is the HOST's — and the host's
+# ceiling is swap. Measured on the fleet box: `Memory=0`, `OOMKilled=false`,
+# `ExitCode=0`, `RestartCount` climbing, every lane degraded with it, and the
+# canonical graph instance killed and restarted by its own restart policy.
+#
+# So the guard is per ENTRY POINT, from the argv each one really issues: a
+# source-level `grep` for `--memory` is satisfied by a comment, and a single
+# count across all entry points stays green when one of them loses the flag.
+
+MEMORY_CAP_ENV = "FALKORDB_CONTAINER_MEMORY"
+MEMORY_CAP_DEFAULT = "2g"
+
+
+def test_the_lane_tool_caps_the_container_memory(monkeypatch):
+    """`tools/test_lane.py` — the fleet's per-lane container (#7357)."""
+    monkeypatch.delenv(MEMORY_CAP_ENV, raising=False)
+    from tools import test_lane as tl
+
+    args = tl._memory_cap_args()
+    assert args == ["--memory", MEMORY_CAP_DEFAULT,
+                    "--memory-swap", MEMORY_CAP_DEFAULT], args
+    assert tl.DEFAULT_CONTAINER_MEMORY == MEMORY_CAP_DEFAULT
+
+    monkeypatch.setenv(MEMORY_CAP_ENV, "1536m")
+    assert tl._memory_cap_args()[1] == "1536m", (
+        "the cap must be read at CALL time, so one lane can raise it"
+    )
+
+
+def test_the_edge_census_probe_caps_the_container_memory(monkeypatch):
+    """`tools/edge_census.py` — the disposable probe the issue names as a
+    neighbour that can starve the canonical graph (#7357)."""
+    monkeypatch.delenv(MEMORY_CAP_ENV, raising=False)
+    from tools import edge_census as ec
+
+    args = ec._probe_run_args("probe-x", ec.PROBE_IMAGE)
+    assert args[:4] == ["run", "-d", "--network", "none"], args
+    assert "--rm" not in args, (
+        f"`--rm` removes a stopped container before its OOMKilled/ExitCode can "
+        f"be read — the evidence this report is made of (#7357 review): {args}"
+    )
+    assert "--memory" in args and "--memory-swap" in args, args
+    cap = args[args.index("--memory") + 1]
+    assert args[args.index("--memory-swap") + 1] == cap, (
+        "swap must EQUAL memory: docker's default is 2x, which lets the "
+        "container page the host for minutes instead of dying alone"
+    )
+    assert cap == MEMORY_CAP_DEFAULT, cap
+    assert args[-1] == ec.PROBE_IMAGE, args
+
+
+def test_the_dev_installer_caps_the_memory_and_bounds_the_restart_loop(monkeypatch):
+    """`graph-scripts/setup.py` — the only in-repo launcher of a 16379 container,
+    and the only one with an unconditional restart policy (#7357).
+
+    Two properties, both from the argv: the KERNEL cap (an over-consuming dev
+    container must die alone, not swap the host), and a BOUNDED restart policy
+    (`unless-stopped` + a container that dies on every boot is a silent infinite
+    loop — `docker ps` just shows a small uptime each time).
+    """
+    monkeypatch.delenv(MEMORY_CAP_ENV, raising=False)
+    _setup, calls = _run_step8(
+        monkeypatch, status="missing", created_image=FALKORDB_PIN)
+    run = next(c for c in calls if c[:2] == ["docker", "run"])
+    assert "--memory" in run and "--memory-swap" in run, run
+    cap = run[run.index("--memory") + 1]
+    assert run[run.index("--memory-swap") + 1] == cap, run
+    assert cap == MEMORY_CAP_DEFAULT, run
+    assert "unless-stopped" not in run, (
+        f"an unconditional restart policy is the loop #7357 records: {run}"
+    )
+    assert "on-failure:5" in run, run
+
+
+def _run_ci_provision(tmp_path, *, mode: str, cap: str | None = None,
+                      inspect_stderr: str = ""):
+    """Run the REAL provision.sh with a stub `docker`, returning (result, argv log).
+
+    A stub on PATH rather than a source-level grep: the defect is an argv that
+    reaches docker, so the guard has to read the argv docker really got.
+    ``mode`` is ``healthy`` (PING answers), ``killed`` (never answers, docker
+    reports the kernel killed it), or ``gone`` (never answers and `docker
+    inspect` FAILS — which is UNKNOWN, not absence; ``inspect_stderr`` supplies
+    docker's own wording when the case is genuinely an absence).
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir(parents=True, exist_ok=True)
+    log = tmp_path / "docker.log"
+    _write_ci_docker_stub(bindir, mode)
+    gh_env = tmp_path / "gh_env"
+    gh_env.write_text("")
+    env = {
+        **os.environ,
+        "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
+        "DOCKER_LOG": str(log),
+        "GITHUB_ENV": str(gh_env),
+        "FALKORDB_IMAGE": FALKORDB_PIN,
+        "FALKORDB_LEGACY": "false",
+        "FALKORDB_URI_GRAPH": "",
+        "FALKORDB_HEALTH_TIMEOUT": "1",
+    }
+    env.pop(MEMORY_CAP_ENV, None)
+    if cap is not None:
+        env[MEMORY_CAP_ENV] = cap
+    env["INSPECT_STDERR"] = inspect_stderr
+    script = ACTION_DIR / "falkordb-provision" / "provision.sh"
+    result = subprocess.run(
+        ["bash", str(script)], capture_output=True, text=True, env=env,
+        timeout=120,
+    )
+    return result, log
+
+
+def _write_ci_docker_stub(bindir: Path, mode: str) -> Path:
+    """Write the stub `docker` for ``mode`` into ``bindir``; return its path.
+
+    Split out of ``_run_ci_provision`` so the stub's OWN properties (the shell it
+    needs) can be asserted without executing provision.sh against it.
+    """
+    # ⛔ `;;` only — NEVER `;;&`. The `;;&` fall-through terminator is bash 4.0+,
+    # and on a macOS dev box `bash` (from PATH) is /bin/bash 3.2.57, where it is
+    # a SYNTAX ERROR (rc 2) rather than a fall-through: every `docker` call then
+    # fails before doing anything, so the "healthy" runs assert a pull failure
+    # and the "should refuse" runs pass for the wrong reason. CI cannot see it
+    # (the ubuntu runner's bash is 5.x), which is exactly why the stub is POSIX
+    # `sh` and `test_the_stubbed_docker_seams_are_POSIX_parseable` runs `sh -n`
+    # over it (#9204 review, P1). Nothing here needs a fall-through: each branch
+    # either exits or prints, and `image`/`port`/`exec`/`inspect` are mutually
+    # exclusive first arguments.
+    if mode == "healthy":
+        answers = (
+            '  image) exit 0 ;;\n'
+            '  port) printf "127.0.0.1:32770\\n" ;;\n'
+            '  exec) printf "PONG\\n" ;;\n'
+            '  inspect) printf "false 0\\n" ;;\n'
+        )
+    elif mode == "killed":
+        # The container never answers, and docker says the kernel killed it.
+        answers = (
+            '  image) exit 0 ;;\n'
+            '  port) printf "127.0.0.1:32770\\n" ;;\n'
+            '  exec) exit 1 ;;\n'
+            '  inspect) printf "true 137\\n" ;;\n'
+        )
+    else:  # gone
+        # `docker inspect` FAILS: a wedged daemon, a timeout, or a container
+        # removed by hand. That is UNKNOWN, not evidence of absence (see
+        # `inspect_stderr` above for the genuine-absence wording).
+        answers = (
+            '  image) exit 0 ;;\n'
+            '  port) printf "127.0.0.1:32770\\n" ;;\n'
+            '  exec) exit 1 ;;\n'
+            '  inspect) printf "%s" "$INSPECT_STDERR" >&2; exit 1 ;;\n'
+        )
+    stub = bindir / "docker"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
+        'case "$1" in\n' + answers + "esac\n"
+        "exit 0\n"
+    )
+    stub.chmod(0o755)
+    return stub
+
+
+def test_the_stubbed_docker_seams_are_POSIX_parseable(tmp_path):
+    """The stub must run under the shell that resolves it, on EVERY platform.
+
+    The P1 this pins (#9204 review): the CI stub was written with `;;&`, a
+    bash-4.0 case terminator. CI is bash 5 (green), but a macOS dev box runs
+    /bin/bash 3.2.57, where `;;&` is a SYNTAX ERROR — the stub exited 2 on
+    every call, so 5 of these tests could not run locally at all. `sh -n` is
+    the portable check: the stub is POSIX, and POSIX shells (dash, bash-3.2 in
+    POSIX mode) reject a bash-4 terminator too, so this reds on Linux as well.
+    """
+    for mode in ("healthy", "killed", "gone"):
+        bindir = tmp_path / mode / "bin"
+        bindir.mkdir(parents=True, exist_ok=True)
+        stub = _write_ci_docker_stub(bindir, mode)
+        assert stub.exists(), f"{mode}: no stub was written"
+        text = stub.read_text()
+        assert ";;&" not in text, (
+            f"{mode}: `;;&` is bash 4+ — on macOS (/bin/bash 3.2) the stub is a "
+            f"syntax error, so every docker call returns 2 before running: {text}"
+        )
+        for shell in ("sh", "bash"):
+            parsed = subprocess.run([shell, "-n", str(stub)],
+                                    capture_output=True, text=True)
+            assert parsed.returncode == 0, (
+                f"{mode}: the stub does not parse under {shell} — "
+                f"{parsed.stderr}{parsed.stdout}"
+            )
+
+
+def test_the_ci_provision_caps_the_container_memory(tmp_path):
+    """`.github/actions` — the CI spawner, on the SAME host as the canonical
+    instance (the runners share one Docker daemon), two containers per job."""
+    result, log = _run_ci_provision(tmp_path, mode="healthy")
+    assert result.returncode == 0, result.stdout + result.stderr
+    run_lines = [ln for ln in log.read_text().splitlines() if ln.startswith("run ")]
+    assert run_lines, log.read_text()
+    for line in run_lines:
+        cap = line.split("--memory ", 1)[1].split(" ", 1)[0]
+        assert line.count("--memory") == 2, line  # --memory and --memory-swap
+        assert f"--memory-swap {cap}" in line, (
+            f"swap must EQUAL the memory cap, not docker's 2x default: {line}"
+        )
+        assert cap == MEMORY_CAP_DEFAULT, line
+
+
+def test_the_ci_provision_names_a_memory_kill_instead_of_merely_unhealthy(tmp_path):
+    """#7357's legibility half, at the CI gate: a container the kernel (or the
+    cap) killed must be reported as KILLED FOR MEMORY, not as a server that
+    "did not answer" — otherwise the operator retries into the same death."""
+    result, _log = _run_ci_provision(tmp_path, mode="killed")
+    out = result.stdout + result.stderr
+    assert result.returncode != 0, out
+    assert "KILLED FOR MEMORY" in out, out
+    assert "OOMKilled=true" in out and "137" in out, out
+
+
+def test_the_ci_provision_distinguishes_absence_from_a_failed_read(tmp_path):
+    """#7357 review F3: a failed `docker inspect` is NOT evidence of absence —
+    it also fails when the daemon is wedged, which is this issue's condition. So
+    only docker's OWN absence wording is reported as a disappearance; any other
+    failure says the state is UNKNOWN."""
+    result, _log = _run_ci_provision(tmp_path, mode="gone")
+    out = result.stdout + result.stderr
+    assert result.returncode != 0, out
+    assert "could not be READ" in out, out
+    assert "UNKNOWN" in out, out
+    assert "no longer EXISTS" not in out, (
+        f"a failed read must not be asserted as an absence: {out}"
+    )
+
+    result, _log = _run_ci_provision(tmp_path, mode="gone", inspect_stderr="No such object: x")
+    out = result.stdout + result.stderr
+    assert "no longer EXISTS" in out, out
+    assert "CRASHED or was KILLED" in out, out
+
+
+def test_the_probe_names_a_memory_kill_and_an_unreadable_termination(monkeypatch):
+    """#7357 review: the probe is started WITHOUT `--rm` so a dead container's
+    facts are still readable; when they are not, the report says the state is
+    UNKNOWN instead of asserting a kill or an absence. A healthy container must
+    stay silent (no false alarm)."""
+    from tools import edge_census as ec
+
+    class _R:
+        def __init__(self, rc, out=""):
+            self.returncode, self.stdout, self.stderr = rc, out, ""
+
+    monkeypatch.setattr(ec, "_docker", lambda *a, **k: _R(0, "true 137 false\n"))
+    assert "KILLED FOR MEMORY" in ec._memory_kill_report("probe-x")
+
+    # inspect fails (a wedged daemon, a timeout, a container removed by hand):
+    # the READ is what gets reported, and the state stays UNKNOWN — never a
+    # guessed kill, never an asserted absence, never a silent "" (the #7357
+    # review's dead-code finding).
+    monkeypatch.setattr(ec, "_docker", lambda *a, **k: _R(1, ""))
+    gone = ec._memory_kill_report("probe-x")
+    assert "could not be READ" in gone, gone
+    assert "UNKNOWN" in gone, (
+        f"a failed read must not be asserted as an absence or a kill: {gone}"
+    )
+
+    # A `_docker` that RAISES (a timeout on an overloaded host) must not replace
+    # the CensusError with a traceback (#7357 review).
+    def boom(*a, **k):
+        raise OSError("docker timed out")
+    monkeypatch.setattr(ec, "_docker", boom)
+    assert "could not be READ" in ec._memory_kill_report("probe-x")
+
+    # Still running (or exited cleanly): nothing to report.
+    monkeypatch.setattr(ec, "_docker", lambda *a, **k: _R(0, "false 0\n"))
+    assert ec._memory_kill_report("probe-x") == ""
+
+
+def test_the_cap_seams_refuse_a_zero_value(monkeypatch):
+    """`--memory 0` is docker's spelling for NO LIMIT, so the ZERO value must be
+    refused at every seam — not only malformed text (#7357 review)."""
+    from tools import edge_census as ec
+
+    for bad in ("0", "0g", "0.0m"):
+        monkeypatch.setenv(MEMORY_CAP_ENV, bad)
+        with pytest.raises(ec.CensusError) as e:
+            ec.container_memory_cap()
+        assert MEMORY_CAP_ENV in str(e.value), (bad, str(e.value))
+
+    setup = _load_setup_module()
+    for bad in ("0", "0g"):
+        monkeypatch.setenv(MEMORY_CAP_ENV, bad)
+        with pytest.raises(SystemExit):
+            setup._container_memory()
+
+
+def test_the_dev_installer_reports_an_existing_uncapped_container(monkeypatch, capsys):
+    """`docker start` cannot add a limit, so an EXISTING container keeps
+    `Memory=0` for life. That must be SAID, not silently reused: the same
+    "an existing container keeps the bad setting forever" mechanism as #8124's
+    image pin, and the reason this cap could otherwise never reach the
+    container most likely to need it (#7357 review N1)."""
+    setup = _load_setup_module()
+    monkeypatch.setenv(MEMORY_CAP_ENV, MEMORY_CAP_DEFAULT)
+    monkeypatch.setattr(setup, "MODE", "docker")
+    monkeypatch.setattr(setup, "_container_status", lambda _n: "running")
+    monkeypatch.setattr(setup, "_container_image", lambda _n: setup.FALKORDB_IMAGE)
+    monkeypatch.setattr(setup, "_container_memory_limit", lambda _n: 0)
+    setup.step8()
+    out = capsys.readouterr().out
+    assert "WITHOUT a kernel memory cap" in out, out
+    assert "docker rm -f" in out, out
+
+    # …and a container that IS capped says nothing (no false alarm).
+    monkeypatch.setattr(setup, "_container_memory_limit", lambda _n: 2 << 30)
+    setup.step8()
+    assert "WITHOUT a kernel memory cap" not in capsys.readouterr().out
+
+
+def test_the_dev_installer_says_when_the_memory_limit_cannot_be_READ(
+        monkeypatch, capsys):
+    """#7357 review F9: `None` from `_container_memory_limit` is "could not
+    READ", never "it is capped" — and reporting it as SILENCE makes the two
+    indistinguishable, which is how an uncapped container goes unnoticed. The
+    same function already names its other unreadable fact (the image pin), so
+    this arm does too, with the command that would settle it."""
+    setup = _load_setup_module()
+    monkeypatch.setenv(MEMORY_CAP_ENV, MEMORY_CAP_DEFAULT)
+    monkeypatch.setattr(setup, "MODE", "docker")
+    monkeypatch.setattr(setup, "_container_status", lambda _n: "running")
+    monkeypatch.setattr(setup, "_container_image", lambda _n: setup.FALKORDB_IMAGE)
+    monkeypatch.setattr(setup, "_container_memory_limit", lambda _n: None)
+    setup.step8()
+    out = capsys.readouterr().out
+    assert "Could not read the kernel memory limit" in out, out
+    assert "HostConfig.Memory" in out, (
+        f"the message must name the query that failed, so the reader can run "
+        f"it: {out}"
+    )
+    assert "WITHOUT a kernel memory cap" not in out, (
+        f"an unreadable limit must NOT be reported as an absent one: {out}"
+    )
+
+
+def test_the_dev_installer_refuses_a_bad_cap_before_removing_anything(monkeypatch):
+    """#7357 review F8: a guard is only as good as its ORDERING.
+
+    `_container_memory()` used to be called at the `docker run` call site — i.e.
+    AFTER the stale-container `docker rm -f` and after the port-collision prompt
+    that can `docker kill` a NEIGHBOUR. So `FALKORDB_CONTAINER_MEMORY=0` (which
+    docker reads as UNLIMITED) destroyed the stopped dev container and only then
+    refused to start a replacement. Both destructive seams are booby-trapped
+    here, so this test fails if the validation ever moves back below them.
+    """
+    setup = _load_setup_module()
+    calls: list[list[str]] = []
+
+    def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
+        raise AssertionError("docker was called before cap validation")
+
+    monkeypatch.setattr(setup, "MODE", "docker")
+    monkeypatch.setattr(setup, "_container_status", _boom)
+    monkeypatch.setattr(setup, "_container_image", _boom)
+    monkeypatch.setattr(setup, "_port_collision", _boom)
+    monkeypatch.setattr(setup, "_run", lambda cmd, **kw: calls.append(cmd))
+    for bad in ("0", "0g", "2 gigs"):
+        monkeypatch.setenv(MEMORY_CAP_ENV, bad)
+        with pytest.raises(SystemExit):
+            setup.step8()
+    assert calls == [], (
+        f"a bad cap must refuse BEFORE any docker command (a `docker rm -f` in "
+        f"here destroys the container it then refuses to replace): {calls}"
+    )
+
+
+def test_the_cap_grammar_is_the_SAME_at_every_seam(tmp_path, monkeypatch):
+    """#7357 review F7: ONE env var, ONE grammar.
+
+    The three Python seams read the value with `.strip().lower()`, so `2G` and
+    `" 2g "` are accepted and `"2 g"` is REFUSED. The shell seam normalised with
+    `tr -d '[:space:]'`, which deleted INNER whitespace too — so `"2 g"` was
+    silently rewritten to `2g` in CI and refused in every lane. One env var,
+    two contracts: a value that works in CI reds nowhere, which is the wrong
+    half of a disagreement. Pinned at the argv docker really gets, on BOTH
+    spellings, so the seams cannot drift back apart.
+    """
+    from tools import edge_census as ec
+    from tools import test_lane as tl
+
+    setup = _load_setup_module()
+    for i, good in enumerate(("2G", " 2g ", "\t2G\t", "2gb", "2048mb",
+                              "1t", "2tb", "1.5gb", "2gib", "+2g")):
+        monkeypatch.setenv(MEMORY_CAP_ENV, good)
+        expected = good.strip().lower()   # `.strip().lower()`, at every seam
+        assert tl.container_memory_cap() == expected, good
+        assert ec.container_memory_cap() == expected, good
+        assert setup._container_memory() == expected, good
+        result, log = _run_ci_provision(tmp_path / f"ok{i}", mode="healthy",
+                                        cap=good)
+        out = result.stdout + result.stderr
+        assert result.returncode == 0, (good, out)
+        line = next(ln for ln in log.read_text().splitlines()
+                    if ln.startswith("run "))
+        # `2gb`/`2048mb` are docker-valid LONG units, so they reach the argv as
+        # written (docker normalises them); the short forms normalise to `2g`
+        # (#7357 review). The point pinned here is that ALL FOUR seams accept
+        # the same set — never that they rewrite the value to one spelling.
+        expected = good.strip().lower()
+        assert f"--memory {expected} --memory-swap {expected}" in line, (good, line)
+
+    # `2g\nabc` used to be ACCEPTED by the shell seam alone: `grep -E '$'` is
+    # line-anchored, so any one matching LINE accepted the whole value, while the
+    # Python seams' `\Z` refused it (#7357 review). A value with a newline must
+    # be refused at every seam — never silently normalised, and never passed to
+    # `docker run` where the refusal is opaque.
+    # BYTE positivity, not number positivity: docker truncates the parsed spec
+    # to an int64, so `0.0000000001g` (0.107 B) and `0.1b` install as
+    # `HostConfig.Memory=0` — the UNCAPPED container every seam exists to
+    # prevent, reached through a value that reads as positive (#7357 review).
+    for i, bad in enumerate(("2 g", "2\tg", "2bb", "2g\nabc", "2g\n0",
+                             "0.0000000001g", "0.1b", "0.0g", "0t")):
+        monkeypatch.setenv(MEMORY_CAP_ENV, bad)
+        with pytest.raises(SystemExit):
+            tl.container_memory_cap()
+        with pytest.raises(ec.CensusError):
+            ec.container_memory_cap()
+        with pytest.raises(SystemExit):
+            setup._container_memory()
+        result, log = _run_ci_provision(tmp_path / f"bad{i}", mode="healthy",
+                                        cap=bad)
+        out = result.stdout + result.stderr
+        assert result.returncode != 0, (bad, out)
+        assert "POSITIVE docker memory spec" in out, (bad, out)
+        assert "run " not in log.read_text(), (
+            f"{bad!r} was silently normalised into a usable cap: "
+            f"{log.read_text()}"
+        )
+
+
+def test_the_ci_provision_refuses_a_zero_cap(tmp_path):
+    """The CI seam refuses a zero cap too — the shell validator's zero arm."""
+    result, log = _run_ci_provision(tmp_path, mode="healthy", cap="0")
+    out = result.stdout + result.stderr
+    assert result.returncode != 0, out
+    assert "POSITIVE docker memory spec" in out, out
+    assert "0 means UNLIMITED" in out, (
+        f"the refusal must explain WHY zero is refused; a backtick in the "
+        f"annotation makes bash run the token and lose it (#7357 review "
+        f"F7): {out}"
+    )
+    assert "command not found" not in out, out
+    assert "run " not in log.read_text(), (
+        f"no container may be started with a zero cap: {log.read_text()}"
+    )
+
+
+#: Byte multipliers for the units docker AND compose accept: `b`,
+#: `k`/`kb`/`kib`, `m`/`mb`/`mib`, `g`/`gb`/`gib`, `t`/`tb`/`tib` (measured on
+#: docker 29.1.3 / compose 2.40.3; `2bb` is "invalid suffix: 'bb'" to docker).
+_MEMORY_UNITS = {
+    "": 1, "b": 1,
+    "k": 1 << 10, "kb": 1 << 10, "kib": 1 << 10,
+    "m": 1 << 20, "mb": 1 << 20, "mib": 1 << 20,
+    "g": 1 << 30, "gb": 1 << 30, "gib": 1 << 30,
+    "t": 1 << 40, "tb": 1 << 40, "tib": 1 << 40,
+}
+
+
+def _memory_bytes(spec):
+    """Bytes for a literal docker memory spec, or None for anything else.
+
+    #7357 review: `2g` and `2048m` are the SAME 2 GiB (measured: `docker create
+    --memory 2048m --memory-swap 2048m` -> Memory=2147483648), so comparing the
+    strings turns one correct configuration into a false red whose message
+    misstates the condition. A compose INTERPOLATION (`${VAR:-2g}`) is not a
+    literal and returns None — that case is settled by raw equality instead, so
+    the two keys must read the same expression and the seams' own remedy lever
+    keeps working here.
+    """
+    # Docker's suffix set: `b`, `k`/`kb`/`kib`, `m`/`mb`/`mib`, `g`/`gb`/`gib`,
+    # `t`/`tb`/`tib`, with an optional leading `+` — all measured against docker
+    # (`2gib`, `+2g` are accepted; `2bb` is "invalid suffix: 'bb'").
+    #
+    # The whitespace rule is compose's OWN, measured on 2.40.3: ONE space between
+    # the number and the unit is accepted (`"2 g"` -> 2147483648), while padding
+    # or a doubled space is not (`" 2g "` fails with `strconv.ParseFloat:
+    # parsing " 2g": invalid syntax`, `"2  g"` with `parsing "2 ": invalid
+    # syntax` — each quotes ITS OWN input). A guard that trimmed
+    # the value would pass a file `docker compose up` refuses; one that refused
+    # the inner space would reject a file it accepts. So the value is judged as
+    # written, with exactly one optional inner space and no padding.
+    m = re.fullmatch(r"\+?([0-9]+(?:\.[0-9]+)?) ?([bkmgt]|[kmgt]b|[kmgt]ib)?",
+                     str(spec), re.IGNORECASE)
+    if not m:
+        return None
+    return int(float(m.group(1)) * _MEMORY_UNITS[(m.group(2) or "").lower()])
+
+
+def _is_interpolation(spec) -> bool:
+    """Whether *spec* is a compose interpolation rather than a literal.
+
+    An interpolation cannot be resolved here (the value depends on the
+    environment at `docker compose up` time), so it is compared AS WRITTEN: the
+    two keys must read the same expression, which is what makes raising the
+    shared env var move both.
+    """
+    return "${" in str(spec)
+
+
+def _compose_falkordb_gaps(root, globs):
+    """(files, examined, uncapped, swap_mismatch, bad_spec) per compose service.
+
+    Split out so the population and the failure kinds are testable against a temp
+    tree (#7357 review), not only against this checkout. FOUR distinct failure
+    kinds, because one message cannot honestly describe them all:
+    an absent cap, a cap of ZERO (docker's spelling for NO LIMIT — every `docker
+    run` seam refuses it, so this guard must not accept it), a swap mismatch, and
+    a value that is not a docker memory spec at all.
+    """
+    files = sorted({p for g in globs for p in root.glob(g) if p.is_file()})
+    checked = 0
+    uncapped = []
+    swap_mismatch = []
+    bad_spec = []
+    for path in files:
+        data = yaml.safe_load(path.read_text()) or {}
+        for name, svc in (data.get("services") or {}).items():
+            svc = svc or {}
+            if "falkordb" not in str(svc.get("image", "")).lower():
+                continue
+            checked += 1
+            label = f"{path.relative_to(root)}:{name}"
+            limit = (((svc.get("deploy") or {}).get("resources") or {})
+                     .get("limits") or {}).get("memory")
+            if not limit:
+                uncapped.append(label)
+                continue
+            limit_b = _memory_bytes(limit)
+            if limit_b is None and not _is_interpolation(limit):
+                bad_spec.append(f"{label} (memory={limit!r})")
+                continue
+            if limit_b == 0:
+                # `memory: "0"` is a truthy STRING, so `if not limit` misses it
+                # — and 0 is docker's spelling for NO LIMIT, i.e. exactly the
+                # uncapped container this guard exists to prevent (#7357
+                # review, measured: `--memory 0` -> HostConfig.Memory=0).
+                uncapped.append(f"{label} (memory={limit!r} is docker's NO-LIMIT)")
+                continue
+            swap = svc.get("memswap_limit")
+            swap_b = _memory_bytes(swap)
+            if swap_b is None and not _is_interpolation(swap):
+                bad_spec.append(f"{label} (memswap_limit={swap!r})")
+                continue
+            same = (limit_b is not None and limit_b == swap_b) or (
+                _is_interpolation(limit) and str(swap).strip() == str(limit).strip()
+            )
+            if not same:
+                swap_mismatch.append(
+                    f"{label} (memswap_limit={swap!r}, memory={limit!r})"
+                )
+    return files, checked, uncapped, swap_mismatch, bad_spec
+
+
+def test_every_compose_falkordb_has_a_memory_limit():
+    """The invariant the cap comments claim: NO compose service in this repo
+    starts a FalkorDB without a `memory` AND an equal `memswap_limit`.
+    `deploy.resources.limits.memory` IS applied by `docker compose up`
+    (measured, compose 2.40.3 — #7357).
+
+    Swap equality is enforced ONLY on the compose files here and on the five
+    `docker run` seams in this file (`--memory` + `--memory-swap`, equal); a
+    service with a memory limit and docker's 2x swap default still pages the
+    host for minutes, which is the mechanism the cap exists to remove.
+
+    ANTI-VACUITY (#7357 review): without the population assertions below, a
+    glob that stops matching (a compose file moves, `apps/*/` is renamed) or a
+    service whose image string stops matching leaves `missing == []` and this
+    guard passes having read NOTHING — the exact silent-coverage-loss the
+    sibling `test_published_falkordb_compose_ports_bind_loopback` documents and
+    guards against. Not `rglob`-ed, so the `.worktrees/` filter the sibling does
+    not carry would be dead code HERE and, in a fleet lane (where `ROOT` IS
+    `<main>/.worktrees/<lane>`), would skip EVERY file: measured, the guard was
+    green in a worktree against an uncapped `apps/graph-viz`.
+    """
+    files, checked, uncapped, swap_mismatch, bad_spec = _compose_falkordb_gaps(
+        ROOT, COMPOSE_GLOBS)
+    assert files, f"no compose file matched {COMPOSE_GLOBS} — the guard is vacuous"
+    assert checked, (
+        f"not one FalkorDB service was examined across {len(files)} compose "
+        f"file(s) — the guard no longer covers what it exists for"
+    )
+    assert not uncapped, (
+        "these compose FalkorDB services have no kernel memory limit, so one "
+        "runaway instance can swap the host and starve the canonical graph "
+        f"(#7357): {uncapped}"
+    )
+    assert not swap_mismatch, (
+        "these compose FalkorDB services pin a memory limit but NOT an equal "
+        "memswap_limit, so docker's 2x swap default applies — a swapping "
+        f"FalkorDB is a minutes-long RDB reload, not a fast death (#7357): "
+        f"{swap_mismatch}"
+    )
+    assert not bad_spec, (
+        "these compose FalkorDB services state a memory value that is neither a "
+        f"docker memory spec nor an interpolation (#7357): {bad_spec}"
+    )
+
+
+def test_the_compose_guard_reads_bytes_not_spelling(tmp_path):
+    """#7357 review: `memory: 2048m` with `memswap_limit: 2g` IS a correct
+    configuration — the guard used to fail it as "no kernel memory limit", a
+    false red that also misstated the condition. Bytes are compared, and the two
+    failure kinds have their own messages: a MISSING cap is not a SWAP mismatch.
+    """
+    def _write(memory, swap):
+        d = tmp_path / "app"
+        d.mkdir(parents=True, exist_ok=True)
+        body = ["services:", "  falkordb:",
+                "    image: falkordb/falkordb-server:v4.20.6"]
+        if memory is not None:
+            body += ["    deploy:", "      resources:", "        limits:",
+                     f'          memory: "{memory}"']
+        if swap is not None:
+            body += [f'    memswap_limit: "{swap}"']
+        (d / "docker-compose.yml").write_text("\n".join(body) + "\n")
+
+    globs = ("app/docker-compose*.yml",)
+
+    def _gaps():
+        _f, _c, unc, mism, bad = _compose_falkordb_gaps(tmp_path, globs)
+        return unc, mism, bad
+
+    _write("2048m", "2g")
+    assert _gaps() == ([], [], []), (
+        "2g and 2048m are the same 2 GiB (and 1t and 1099511627776 the same "
+        f"TiB); a byte comparison must accept them: {_gaps()}"
+    )
+    _write("1t", "1099511627776")
+    assert _gaps() == ([], [], []), _gaps()
+    _write("2gib", "+2147483648")   # docker accepts both spellings
+    assert _gaps() == ([], [], []), _gaps()
+
+    # compose REJECTS padding (`strconv.ParseFloat: parsing " 2g": invalid
+    # syntax`), so the guard must not normalise it away — reporting it is the
+    # true reading (#7357 review).
+    _write(" 2g ", " 2g ")
+    unc, mism, bad = _gaps()
+    assert bad and not unc and not mism, (
+        f"a padded value is not a compose memory spec, so it is neither a cap "
+        f"nor a swap mismatch: {_gaps()}"
+    )
+
+    # …while ONE inner space IS a spec compose accepts ("2 g" -> 2147483648),
+    # so refusing it would be a false red on a deployable file.
+    _write("2 g", " 2g ".strip())
+    unc, mism, bad = _gaps()
+    assert not unc and not mism and not bad, (
+        f"compose accepts a single inner space between number and unit, so the "
+        f"guard must too: {_gaps()}"
+    )
+
+    _write("512m", "1g")
+    unc, mism, bad = _gaps()
+    assert not unc and not bad and mism, _gaps()
+
+    _write(None, "512m")
+    unc, mism, bad = _gaps()
+    assert unc and not mism and not bad, (
+        f"an absent cap must be reported as an absent cap, not as a swap "
+        f"mismatch: {_gaps()}"
+    )
+
+    # `"0"` is a TRUTHY string, so `if not limit` misses it — and 0 is docker's
+    # spelling for NO LIMIT (#7357 review). An integer 0 was caught, the quoted
+    # string was not.
+    _write("0", "0")
+    unc, mism, bad = _gaps()
+    assert unc and not mism and not bad, (
+        f"`memory: \"0\"` is an UNCAPPED container, which is what this guard "
+        f"exists to catch: {_gaps()}"
+    )
+
+    _write("lots", "lots")
+    unc, mism, bad = _gaps()
+    assert bad and not unc and not mism, (
+        f"a value that is not a docker memory spec is neither an absent cap nor "
+        f"a swap mismatch: {_gaps()}"
+    )
+
+
+def test_the_compose_guard_keeps_a_shared_interpolation_seam(tmp_path):
+    """The remedy these messages print is `raise FALKORDB_CONTAINER_MEMORY`, so
+    a compose service must be able to take BOTH keys from that ONE env var
+    (`${FALKORDB_CONTAINER_MEMORY:-2g}`). An interpolation is not a literal, so
+    the comparison falls back to raw equality — two different expressions (even
+    if they resolve to the same bytes) are a real mismatch, because the operator
+    raising the env var would cap memory and swap differently."""
+    d = tmp_path / "app"
+    d.mkdir()
+    (d / "docker-compose.yml").write_text(
+        "services:\n"
+        "  falkordb:\n"
+        "    image: falkordb/falkordb-server:v4.20.6\n"
+        "    deploy:\n"
+        "      resources:\n"
+        "        limits:\n"
+        '          memory: "${FALKORDB_CONTAINER_MEMORY:-2g}"\n'
+        '    memswap_limit: "${FALKORDB_CONTAINER_MEMORY:-2g}"\n'
+    )
+    _files, _checked, uncapped, mismatch, bad = _compose_falkordb_gaps(
+        tmp_path, ("app/docker-compose*.yml",))
+    assert (uncapped, mismatch, bad) == ([], [], []), (uncapped, mismatch, bad)
+
+    (d / "docker-compose.yml").write_text(
+        "services:\n"
+        "  falkordb:\n"
+        "    image: falkordb/falkordb-server:v4.20.6\n"
+        "    deploy:\n"
+        "      resources:\n"
+        "        limits:\n"
+        '          memory: "${FALKORDB_CONTAINER_MEMORY:-2g}"\n'
+        '    memswap_limit: "2g"\n'
+    )
+    _files, _checked, uncapped, mismatch, bad = _compose_falkordb_gaps(
+        tmp_path, ("app/docker-compose*.yml",))
+    assert mismatch and not bad, (
+        "raising FALKORDB_CONTAINER_MEMORY must move BOTH keys, or the cap and "
+        f"the swap diverge: {mismatch}"
+    )
+
+
+def test_a_probe_killed_MID_STAGE_is_explained_not_left_as_raw_stderr(monkeypatch):
+    """#7357 review: the probe's memory-kill report was attached ONLY to the
+    "never became ready" branch. The cap this module now imposes makes the likely
+    failure of a large `--n` a kill AFTER readiness — mid-stage — which raised
+    docker's raw "Container … is not running" with no cause at all: the legibility
+    gap the issue is about, on the very path the cap creates.
+    """
+    from tools import edge_census as ec
+
+    calls: list[tuple] = []
+
+    def fake(*args, **kwargs):
+        calls.append(args)
+        if args[0] == "version":
+            return ec.subprocess.CompletedProcess(args, 0, "8.0.0\n", "")
+        if args[0] == "run":
+            return ec.subprocess.CompletedProcess(args, 0, "abc123\n", "")
+        if args[0] == "exec":
+            return ec.subprocess.CompletedProcess(args, 0, "PONG\n", "")
+        if args[0] == "inspect":
+            fmt = str(args[2])
+            if "HostConfig" in fmt:
+                return ec.subprocess.CompletedProcess(args, 0, "2147483648\n", "")
+            if "OOMKilled" in fmt:
+                # dead, and killed by its own cgroup cap
+                return ec.subprocess.CompletedProcess(
+                    args, 0, "true 137 false\n", "")
+            return ec.subprocess.CompletedProcess(args, 0, "\n", "")
+        if args[0] == "rm":
+            return ec.subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(f"unexpected docker call: {args}")
+
+    # First query (the baseline read) succeeds; the CREATE then finds the
+    # container gone, exactly what an OOM kill mid-run looks like.
+    def _ping_then_die(container, *a, **k):
+        calls.append(("QUERY", container))
+        if len([c for c in calls if c[0] == "QUERY"]) > 1:
+            raise ec.CensusError(
+                f"probe query failed in {container!r}: "
+                f"Error response from daemon: Container abc is not running")
+        return None
+
+    monkeypatch.setattr(ec, "_docker", fake)
+    monkeypatch.setattr(ec, "_container_query", _ping_then_die)
+    monkeypatch.setattr(ec, "_container_used_memory",
+                        lambda _c: 1234)
+    with pytest.raises(ec.CensusError) as excinfo:
+        ec.run_probe(n=100, log=lambda _m: None)
+    msg = str(excinfo.value)
+    assert "KILLED FOR MEMORY" in msg, (
+        f"a probe killed mid-stage must name the kill, not raise docker's raw "
+        f"stderr on its own: {msg}"
+    )
+    assert "is not running" in msg, (
+        f"the engine's own error must stay — the report is APPENDED, never a "
+        f"replacement: {msg}"
+    )
+
+
+def test_the_probe_start_failure_carries_dockers_own_line(monkeypatch):
+    """#7357 review: `str(CalledProcessError)` holds only the argv and the exit
+    status, so a missing image, a permission problem and a wedged daemon were
+    indistinguishable — and this module's stated rule is that it reports docker's
+    reason, never an opaque refusal. `_container_query` in the same file already
+    sets that standard."""
+    from tools import edge_census as ec
+
+    def fake(*args, **kwargs):
+        if args[0] == "version":
+            return ec.subprocess.CompletedProcess(args, 0, "8.0.0\n", "")
+        if args[0] == "run":
+            raise ec.subprocess.CalledProcessError(
+                125, args,
+                output="",
+                stderr="docker: Error response from daemon: pull access denied "
+                       "for tortoise-review/no-such-image, repository does not "
+                       "exist")
+        if args[0] == "rm":       # the `finally:` teardown, on the failure path
+            return ec.subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(f"unexpected docker call: {args}")
+
+    monkeypatch.setattr(ec, "_docker", fake)
+    with pytest.raises(ec.CensusError) as excinfo:
+        ec.run_probe(n=100, image="tortoise-review/no-such-image:1",
+                     log=lambda _m: None)
+    msg = str(excinfo.value)
+    assert "pull access denied" in msg, (
+        f"docker's own line must survive: a bare exit status cannot distinguish "
+        f"a missing image from a permission problem or a wedged daemon: {msg}"
     )

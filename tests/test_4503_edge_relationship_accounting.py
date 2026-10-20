@@ -1079,7 +1079,15 @@ def test_run_probe_builds_the_stage_sequence_and_removes_the_container(
     run_args = [a for a, _c in docker_calls if a[0] == "run"]
     assert len(run_args) == 1, f"expected exactly one container start: {run_args}"
     flags = run_args[0]
-    assert "--rm" in flags, "the probe container must remove itself"
+    # #7357: NOT `--rm`. `--rm` removes a container the moment it STOPS, which
+    # deletes the `OOMKilled`/`ExitCode` facts the probe's own failure report is
+    # made of — so the flag was replaced by an explicit, unconditional teardown
+    # (asserted below) and a reapable label. This asserts the evidence survives,
+    # not that the container leaks.
+    assert "--rm" not in flags, (
+        f"`--rm` would delete a stopped probe before its termination could be "
+        f"read (#7357): {flags}"
+    )
     assert "--network" in flags and "none" in flags, (
         "the probe must not share a network with the caller's containers — "
         "the documented local URI is itself a bridge container")

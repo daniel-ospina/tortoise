@@ -20,7 +20,38 @@ services:
       - FALKORDB_ARGS=MAX_QUEUED_QUERIES 25 TIMEOUT 1000 RESULTSET_SIZE 10000
     volumes:
       - tortoise-data:/var/lib/falkordb/data
-    restart: always
+    # #7357: a KERNEL cap, on the same terms as every other FalkorDB container
+    # this repo starts (root `docker-compose.yml`, `tools/test_lane.py`,
+    # `tools/edge_census.py`, `graph-scripts/setup.py`,
+    # `.github/actions/falkordb-provision`). This service publishes 16379, so an
+    # over-consuming viz DB is a neighbour that can starve the canonical graph
+    # instance on the same host — the measured outage. `docker compose up` DOES
+    # apply `deploy.resources.limits` (verified, compose 2.40.3).
+    #
+    # `memswap_limit` EQUALS the cap on purpose: docker's default swap is 2x
+    # memory, and a swapping FalkorDB is a minutes-long RDB reload instead of a
+    # fast, isolated death (measured: memory-only -> Swap=2x; with this -> equal).
+    #
+    # BOTH values read the SAME `FALKORDB_CONTAINER_MEMORY` seam every other
+    # in-repo launcher reads, so the remedy the kill messages print ("raise
+    # FALKORDB_CONTAINER_MEMORY") is a lever HERE too instead of "edit this
+    # file" (#7357 review F9). ⚠️ 2g is deliberately NOT the root compose
+    # sidecar's 8g: that number exists for the V3 benchmark ingest (4.2-4.8 GB
+    # heap, #1733) — a workload this viz DB does not run. If this service ever
+    # carries that ingest, raise the env var (or this default) the same way.
+    deploy:
+      resources:
+        limits:
+          memory: ${FALKORDB_CONTAINER_MEMORY:-2g}
+    memswap_limit: ${FALKORDB_CONTAINER_MEMORY:-2g}
+    # `unless-stopped`, NOT the bounded `on-failure:5` used for the long-lived dev
+    # container in `graph-scripts/setup.py`: this one is a developer convenience
+    # whose header promises `docker compose up -d` starts FalkorDB, and
+    # `on-failure` does not restart a container when the DAEMON restarts (docker
+    # documents it), so a bounded policy here would silently lose the DB after a
+    # reboot. The cap above is what removes the host-starvation loop; the policy
+    # choice is about coming back after a reboot.
+    restart: unless-stopped
 
 volumes:
   tortoise-data:

@@ -6,7 +6,7 @@ doc_status: draft
 created: 2026-10-17
 subjects.team: epistemic-team
 aboutSubjects: Tortoise memory graph
-aboutObjects: "#7951, #7950, STORAGE-ARCHITECTURE.md §17.1, tortoise/sdk.py update_point, FalkorDB cache"
+aboutObjects: "#7951, #7950, #9248, #9255, STORAGE-ARCHITECTURE.md §17.1, tortoise/sdk.py update_point, FalkorDB cache"
 ---
 
 # #7951 increment 2a — the outbox ordering on `update_point`
@@ -113,11 +113,20 @@ each docstring rather than implied.
    raw handle authorizes nothing (the guard covers `FalkorProjection.apply`/`.query`) — the same note
    `create_point`'s scope makes about itself. Increment 3 (the cache driven from the record) is where the
    door declares itself.
-5. **`:Object` version bump / `updatedAt` still are not replayable from the record** (live
-   `version = coalesce(version,0)+1`, replay no clause; replay stamps its own `updatedAt`). Pre-existing
-   live-vs-replay parity gaps, unchanged and not claimed closed here.
+5. **`:Object` version bump / `updatedAt` / `status` are still not applied by the GRAPH fold** (live
+   `version = coalesce(version,0)+1`, replay no clause; replay stamps its own
+   `updatedAt`; `projection._revise_point` has no `status` clause, so a promote journalled by
+   `update_point(status='live')` replays as `draft`). Pre-existing live-vs-replay parity gaps, unchanged and
+   not claimed closed here. The RECORD (Postgres) lane does apply the promote's `status` — `PointRevised`
+   is a flat `NodePatch` and `Point.status` is a primary column (#9255).
 6. **A revision for a NON-EXISTENT id is still journalled** (the `MATCH … SET` matches nothing, the call
    returns `{}`). Pre-existing; this increment moves *when* the record is written, not *whether*.
+7. **The tag half of a stranded promote replays in the OPPOSITE direction** (#9255). The record carries
+   `tags`, and the graph fold DOES apply them (`n.tags = $tags` + `_sync_tags`), so a `rebuild_all` over the
+   window increment 2b closes (`update_point(status='live', tags=[…])` whose TAGGED `MERGE` cannot land)
+   mints the `TAGGED` edges live never wrote — `query_points_by_tag` then disagrees between live and
+   rebuilt, and `check_consistency` cannot see it (it compares the `tags` PROPERTY, which agrees). Needs a
+   decision (mint, or withhold the edge half for this record shape), not a clause; filed as #9255.
 
 ## 7. Next increments (recorded so the next lane does not re-derive)
 

@@ -50,9 +50,9 @@ from pathlib import Path
 import pytest
 
 from tortoise.projection import (
+    _HANDLE_MUTATING_VERBS,
     DirectCacheWriteRefused,
     _GuardedGraph,
-    _HANDLE_MUTATING_VERBS,
     _live_write_scope,
     _replay_write_scope,
     _reset_undeclared_handle_writes,
@@ -408,10 +408,9 @@ def test_the_authorization_is_context_local_and_expires(armed_sdk, enforced):
     one, which is strictly worse than no guard because it reads as one.
     """
     proj = armed_sdk._get_proj()
-    with pytest.raises(RuntimeError):
-        with _live_write_scope("test-leak"):
-            proj.g.query("CREATE (n:Point {id:'handle-in-scope'})")
-            raise RuntimeError("boom")
+    with pytest.raises(RuntimeError), _live_write_scope("test-leak"):
+        proj.g.query("CREATE (n:Point {id:'handle-in-scope'})")
+        raise RuntimeError("boom")
     with pytest.raises(DirectCacheWriteRefused):
         proj.g.query("CREATE (n:Point {id:'handle-after-scope'})")
 

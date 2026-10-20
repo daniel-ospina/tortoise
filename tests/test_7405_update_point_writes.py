@@ -2805,3 +2805,126 @@ def test_an_unhashable_tag_value_keeps_the_engine_error_family(tmp_path):
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
+
+
+class _AbortThenRefuseTagMerge:
+    """Abort the tag MERGE once, then answer every tag MERGE with ZERO rows.
+
+    Models the rebuild window from the PROMOTE side: the graph key is present
+    (so the retry is authorised) and the promote statement has already applied,
+    while the tag arm can never land because its MERGE matches an anchor the
+    replay has not provided. The order matters — this is the only window in
+    which a landed promote used to be left unjournaled.
+    """
+
+    def __init__(self, real, needle: str) -> None:
+        self._real = real
+        self._needle = needle
+        self.matching = 0
+
+    def query(self, cypher, params=None, timeout=None):
+        if self._needle in cypher:
+            self.matching += 1
+            if self.matching == 1:
+                raise redis_exc.ResponseError(_DELETED_OR_REPLACED)
+            return _EmptyResult()
+        return self._real.query(cypher, params=params, timeout=timeout)
+
+    def execute_command(self, *a, **k):
+        if a and a[0] == "EXISTS":
+            return 1
+        return self._real.execute_command(*a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+@pytest.mark.parametrize("arm", ["point", "object"])
+def test_a_landed_promote_is_journaled_before_a_later_arm_can_abort(
+        tmp_path, monkeypatch, arm):
+    """A promote that LANDED must be recorded even when the tag arm aborts.
+
+    `update_point` carries the promote TWICE — a `:Point:Object` arm and a plain
+    `:Point` arm — so both are covered here: a pin on one arm does not red the
+    other, and deleting the `:Point:Object` arm's `_record_promote()` call left
+    the suite green before this parametrization.
+
+    `#8830` exempts the promote arm from the outbox ordering — its guarded `SET`
+    can legitimately match nothing, so the record may not precede the write. It
+    must not follow the TAG sync either: that arm is witnessed, so an
+    unlandable tag merge aborts the whole call, and a record appended at the tail
+    was never reached. Measured on `main`: the node ended `status='live'`, the
+    caller was told the call failed, and ZERO `PointRevised` was appended — a
+    promotion that APPLIED with no record of it at all.
+
+    No other test combines `status` with `tags`; this is the union that exposed
+    the window, and the assertion is on ONE emit so a double record also reds.
+
+    ⚠️ WHAT THIS PIN PROVES, AND WHAT IT DOES NOT. It proves the APPEND: exactly
+    one `PointRevised`, and (asserted below) a payload that CARRIES the
+    promotion (`status='live'` a payload without it would close nothing — the
+    record lane applies `status` from this payload, `PointRevised` being a flat
+    `NodePatch` onto `point.status`). It does NOT prove replay parity: the GRAPH
+    fold (`projection._revise_point`) has no `status` clause, so a `rebuild_all`
+    over this journal still materialises the point as `draft` — the pre-existing
+    gap declared in `docs/plans/2026-10-17-7951-update-point-outbox.md` §6.5 and
+    filed as #9255. Do not restate this test as "the promotion survives a
+    rebuild"; when that fold lands, extend THIS test with
+    `rebuild_all(..., confirm_destructive=True)` instead of reading the count as
+    parity.
+    """
+    monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
+    monkeypatch.setattr("tortoise.retry.time",
+                        types.SimpleNamespace(sleep=lambda _s: None))
+
+    def revised(sdk) -> list:
+        return [e for e in sdk.poll_events()["events"]
+                if e["type"] == "PointRevised"]
+
+    sdk = _sdk(tmp_path, "promotejournal")
+    try:
+        pid = sdk.create_point(
+            "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
+        proj = sdk._get_proj()
+        if arm == "object":
+            # The `:Point:Object` arm of the promote is reached only by a node
+            # carrying both labels; no production path mints one, so the shape
+            # is built by hand (same approach as test_3311).
+            proj.g.query("MATCH (n:Point {id:$id}) SET n:Object",
+                         params={"id": pid})
+            labels = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN labels(n)",
+                params={"id": pid}).result_set
+            assert labels and set(labels[0][0]) == {"Point", "Object"}, (
+                "fixture precondition: the object arm needs BOTH labels — "
+                f"node labels {labels!r}")
+        before = len(revised(sdk))
+        proxy = _AbortThenRefuseTagMerge(proj.g, _TAGGED_NEEDLE)
+        proj.g = proxy
+
+        with pytest.raises(redis_exc.ResponseError, match="deleted or replaced"):
+            sdk.update_point(pid, status="live", tags=["7405late"])
+
+        assert proxy.matching >= 2, (
+            "the tag arm was never re-issued — the witness was never consulted, "
+            "so this test would prove nothing")
+        proj.g = proxy._real
+        state = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.status",
+            params={"id": pid}).result_set
+        assert state and state[0][0] == "live", (
+            "fixture precondition: the PROMOTE must have landed before the tag "
+            f"arm aborted — node state {state!r}")
+        emitted = len(revised(sdk)) - before
+        assert emitted == 1, (
+            "a landed promote whose later arm aborted must be journaled exactly "
+            f"once — appends observed: {emitted}")
+        record = revised(sdk)[-1]
+        assert (record.get("payload") or {}).get("status") == "live", (
+            "the record of a LANDED promote must CARRY the promotion: the "
+            "record lane applies `status` from this payload (`PointRevised` is "
+            "a flat NodePatch onto `point.status`), so a record without it "
+            f"would close nothing — record: {record!r}")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
