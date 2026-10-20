@@ -6258,11 +6258,12 @@ durations:
   # pool size or percentage is restated here on purpose — see the same rule on
   # the `#3400` rows above.
   test_determinism_tie_order_3019.py: 7.1
-  # #7704: measured 2026-10-20 LOCALLY under the embedded carve-out config
-  # (`TORTOISE_TEST_CARVE_OUT=1`) — 2.96s / 2.69s for the file, hermetic (one
-  # pure-`rrf_fusion` module, no DB and no embedder). Refresh from the first
-  # post-merge CI run that measures it.
-  test_rrf_tie_rank_7704.py: 2.9
+  # #7704: new in this lane, so NO CI sweep has collected it — the row carries
+  # the flat default, per the #3419/#2788/#2818 rule above (a weight is a
+  # SHARD-LAYOUT input, so a locally-measured number must not decide which files
+  # share a shard; measured on this box it is 2.96s / 2.69s under
+  # `TORTOISE_TEST_CARVE_OUT=1`, hermetic — kept in this prose, not in the value).
+  test_rrf_tie_rank_7704.py: 2.0  # unmeasured — new in #7704; no sweep has collected it, so it carries the flat default exactly as an absent key would. The refresher (tools/ci_timing.py) replaces this value and clears this tail from the first post-merge CI run that includes the file.
   test_epic903_staleness.py: 2.9
   test_epic903_observability.py: 2.9
   test_lme_m6_evidence.py: 2.4

@@ -53,18 +53,38 @@ When the ruling lands, this file is the switch that forces the follow-through:
   swallowed, a leg that DID rank the rows apart is still respected, and a tie
   group does not displace a row the legs ranked lower).
 
-  ⛔ **The blast radius is larger than this file.** A tie-averaging remedy also
-  inverts the premises of
-  ``tests/test_ranking_w4b.py::test_integration_boost_requirement_is_bounded_by_the_page``:
-  it asserts the twins' similarities are ``{0.0, 1.0}`` (and the contested twin
-  at the ``0`` end) *because* the id tie-break hands the lower-ULID twin rank 0.
-  With averaged ranks the twins' fused scores become equal, ``_min_max_normalize``
-  returns the all-equal midpoint ``0.5`` for both, and those assertions fail with
-  a message that blames the FIXTURE ("regenerate the fixture rather than
-  re-deriving the comment's 1.4286") instead of the fusion remedy. When the
-  ruling lands, re-derive that test's narrative deliberately — **do not relax its
-  assertions**, or the bounded-boost measurement recorded on
-  ``W4_CONTESTED_BOOST`` (``tortoise/ranking.py``) silently stops being pinned.
+  ⛔ **The blast radius is larger than this file — MEASURED, not guessed.** Run
+  against a rank-averaging prototype of ``rrf_fusion``, this area's suite reds in
+  exactly five places, one of which is a real contract and not a stale assertion:
+
+  * ``tests/test_temporal_leg_2976.py::test_empty_temporal_leg_leaves_rrf_order_byte_identical``,
+    ``::test_zero_weight_temporal_leg_is_a_no_op_on_membership_and_order`` and
+    ``::test_placement_head_is_the_counterfactual_and_tail_is_the_default`` —
+    ``temporal_leg`` fuses ``[(id, 0.0), …]`` and encodes rank by LIST POSITION
+    (#2976), so score-equality tie detection collapses that leg to one block and
+    the order falls through to the id sort. **The constraint, not just the red:**
+    a tie-averaged remedy MUST leave a leg's GIVEN order untouched when an equal
+    score means "position is the rank" — repair the temporal leg first, not after.
+  * ``tests/test_bm25_lexical_8488.py::TestReadPath::test_bm25_arm_lifts_the_record_in_the_shipped_read``
+    — its "strict rank improvement" is partly the phantom spread among four
+    dense-tied rows (see #7704's 2026-10-20 round); re-derive that assertion from
+    the lexical leg's own rank/score.
+  * ``tests/test_ranking_w4b.py::test_integration_boost_requirement_is_bounded_by_the_page``
+    — its ``{0.0, 1.0}`` similarity span (contested twin at ``0``) assumes the id
+    tie-break hands the lower-ULID twin rank 0; with averaged ranks
+    ``_min_max_normalize`` returns the all-equal midpoint ``0.5`` for both.
+    NOTE: the first assertion to fail there is the BARE ``== {0.0, 1.0}`` check,
+    which carries no message at all; the "FIXTURE PREMISE BROKEN … regenerate the
+    fixture" text sits on the NEXT assertion and is never reached.
+
+  **Do not relax any of them.** Which of these the remedy diff actually RUNS
+  differs, and one of the three can miss it: ``test_temporal_leg_2976.py`` is
+  registered under the ``sdk`` surface only, so a
+  ``tortoise/search_engine.py``-only remedy diff (which selects ``core``) never
+  runs it — the temporal-leg reds then surface later, on an unrelated PR.
+  ``test_bm25_lexical_8488.py`` is registered under ``core`` AND ``carve_out``,
+  so it DOES run in the embedded carve-out leg of the same remedy PR, and its
+  red appears where the remedy can see it.
 * **accept-and-restate** — delete the xfail pin together with the #2102 E2E-1
   restatement. Deleting it is a deliberate act, never a silent green.
 """
