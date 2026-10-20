@@ -212,6 +212,14 @@ _APPLY_FIRST_DOORS = {
     # ⚠️ It used to sit in `_MIXED_ARM_DOORS` as "journal-first" because the
     # census counted the `_emit_event` inside its `on_session_merged=` lambda as
     # an append — a callback the CALLEE ran, not a record the door appended.
+    # ⚠️ Its TWO state writes (`s.capture_ok`/`s.capture_extractor` and the
+    # entity-link counters) are NOT among those stamps any more: #9206's review
+    # found them undeclared, refused by an ARMED handle and swallowed by the
+    # door's own non-fatal `except` — so each moved into its own DECLARED
+    # apply-first door (`_stamp_capture_attempt_state`,
+    # `_stamp_entity_link_counters`), because each appends the trailing
+    # `SessionRecorded` that carries exactly the values it wrote. What remains
+    # here is the stamps-only remainder (#9350 journals the stamps themselves).
     "capture_session",
     "compute_confidence",    # SET n.confidence per row, then ConfidenceChanged
     "mitigate_operator",     # CREATE the mitigation, then its records
@@ -1044,6 +1052,12 @@ _APPLY_FIRST_DECLARED_DOORS = {
     "_delete_entity",
     "_write_capture_turns",
     "_materialize_session_source",
+    # #9206 review: the capture door's two state writes, each extracted into its
+    # own door so the lane is narrow enough to be honest (the write's OUTCOME is
+    # the record's input) and an ARMED handle completes them instead of having
+    # the refusal swallowed by `capture_session`'s non-fatal `except`.
+    "_stamp_capture_attempt_state",   # `s.capture_ok`/`s.capture_extractor`
+    "_stamp_entity_link_counters",    # `s.entity_links_attempted/created`
 }
 
 #: The apply-first lane's membership OUTSIDE `sdk.py`, pinned per module
@@ -1383,6 +1397,8 @@ _DECLARED_DOOR_NESTED_INVENTORIED = {
     "_materialize_session_source": set(),
     "_write_capture_turns": set(),
     "_write_session_and_turns": set(),
+    "_stamp_capture_attempt_state": set(),
+    "_stamp_entity_link_counters": set(),
     "invalidate_messages": set(),
     "invalidate_factor_messages": set(),
     "_delete_session_sync": set(),

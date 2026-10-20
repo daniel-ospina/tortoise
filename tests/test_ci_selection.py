@@ -8925,3 +8925,45 @@ def test_dashboard_deploy_script_change_selects_core_not_tier1():
     assert r["full"] is False, r
     assert r["surfaces"] == ["core"], r
     assert "test_e2e_wrangler_prewarm.py" in r["test_files"], r
+
+
+def test_9206_lane_suites_run_on_the_diffs_that_can_break_them():
+    # #9206 review P1: `test_9206_apply_first_lane.py` and
+    # `test_9206_derived_recompute_lane.py` are the proof that §17.1's write
+    # handle COMPLETES the SDK's own doors under an armed guard. A REGISTRATION
+    # alone closed `--integrity` (the required `manifest-integrity` job) but is
+    # not a SELECTION pin — the same distinction `test_9192_guard_runs_on_the_
+    # diff_that_can_break_it` records. Each arm below is the diff that can
+    # silently disarm one of the two lanes:
+    #
+    #   * `tortoise/source_identity.py` — the derived-recompute lane's ONLY
+    #     product writer (`resolve_source_key`'s adopt-on-touch). It matches no
+    #     SOURCE_PATTERNS row, so it falls through to `core`, which is where the
+    #     suite is registered.
+    #   * `tools/source_dedup_report.py` — the lane's second DECLARED writer and
+    #     the repair path its own disclosure recommends. `tools/` is a flat
+    #     NON_PYTHON_PREFIXES entry, so WITHOUT the CORE_ALSO entry this diff
+    #     selected NO surface at all (`surfaces: []`, `full: false`) and took
+    #     the docs-only early return: the census that pins the tool's lane never
+    #     ran on the PR editing the tool (the #1349/#3332/#3616 silent-drop
+    #     class).
+    #   * `tortoise/sdk.py` — the apply-first lane's doors. It is a
+    #     SHARED_MODULE (full matrix), so the assertion here is `full is True`,
+    #     not a surface list: it documents that this arm is covered by the trunk
+    #     backstop rather than by the `core` row.
+    #
+    # Mutation: removing either the `core` registration or the CORE_ALSO entry
+    # fails the corresponding assert below.
+    r = _sel(["tortoise/source_identity.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_9206_derived_recompute_lane.py" in r["test_files"], r
+
+    r = _sel(["tools/source_dedup_report.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_9206_derived_recompute_lane.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1(), r
+
+    r = _sel(["tortoise/sdk.py"])
+    assert r["full"] is True, r

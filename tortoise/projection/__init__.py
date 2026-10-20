@@ -4520,14 +4520,23 @@ class _GuardedGraph:
         `test_7951_update_point_outbox.py`, `test_7951_delete_point_outbox.py`,
         `test_5048_retract_instant_recorded.py` and
         `test_6239_promote_after_supersede.py`. The reason is a census, not a
-        hunch: the product's own write path is still largely undeclared — the 10
-        apply-first public doors (`delete_point` joined them in #9207: the
-        `DETACH DELETE` is issued FIRST, so its #9124 live-lane declaration was
-        withdrawn — see `_APPLY_FIRST_DOORS`), the 2 mixed-arm doors
-        (`update_point`, `capture_session`) and every writer that appends no
-        record at all, all inventoried in
+        hunch: the product's own write path is still largely undeclared — the
+        apply-first doors inventoried in `_APPLY_FIRST_DOORS` (`approve_merge`,
+        `assess_source`, `capture_session`, `compute_confidence`,
+        `mitigate_operator`, `promote_point`, `record_calibration`,
+        `set_point_baseline`), the helpers inventoried beside them, and every
+        writer that appends no record at all, all inventoried in
         `tests/test_9124_declared_live_doors.py`, which also REFUSES the flip
-        while any module has an undeclared entry point. The
+        while any module has an undeclared entry point. The doors #9206 DID
+        declare hold the apply-first lane
+        (`_declares_apply_first_write_lane`), so an ARMED handle COMPLETES them
+        — `delete_point` and `update_point` among them (their cache write IS the
+        commit point, by decision: #9207 and #8830), as are `create_operator`,
+        `create_direct_edge`, `_update_entity`, `_delete_entity`,
+        `_write_capture_turns`, `_materialize_session_source` and the capture
+        door's two state stamps — membership pinned as
+        `_APPLY_FIRST_DECLARED_DOORS` / `_APPLY_FIRST_DECLARED_DOORS_BY_MODULE`.
+        The
         detection itself is complete and identical in both modes; only the
         refusal is gated. Do not read this method's presence as "§17.1 is
         enforced at the handle".

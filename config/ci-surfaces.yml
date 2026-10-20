@@ -1763,6 +1763,28 @@ surfaces:
   # they need no arm of their own. `--integrity` also requires every test file
   # to be classified, which this entry satisfies.
   - test_9124_declared_live_doors.py
+  # #9206 (§17.1 write-lane DECLARATION, the APPLY-FIRST lane): the SDK doors
+  # whose cache write IS the commit point, driven on a REAL ARMED handle, plus
+  # the census-driven record-completeness pins. REGISTERED on `core` alone, for
+  # the same reason the `#9124` entry directly above is: its subjects are
+  # `tortoise/sdk.py` and `tortoise/projection/__init__.py`, and BOTH select the
+  # FULL matrix (`ci_selection.py --changed-files tortoise/sdk.py` →
+  # `"full": true`; `projection/__init__.py` is a SHARED_MODULE), so no arm of
+  # its own is needed and an over-broad row would run a 13-test armed battery on
+  # diffs it cannot observe. `--integrity` also requires every test file to be
+  # classified, which this entry satisfies.
+  - test_9206_apply_first_lane.py
+  # #9206 (§17.1's FIFTH lane, DERIVED-RECOMPUTE): `resolve_source_key`'s
+  # adopt-on-touch re-derives `canonicalUrl`/`urlAliases` from journal-carried
+  # input and appends NOTHING, so it is neither live nor replay. Its subjects
+  # are `tortoise/source_identity.py` (falls through to `core` — verified:
+  # `--changed-files tortoise/source_identity.py` → `['core']`) and the repair
+  # path `tools/source_dedup_report.py --backfill`, which the suite's own SOURCE
+  # CENSUS pins — so that tool is in `tools/ci_selection.py::CORE_ALSO` (a
+  # `tools/`-only diff otherwise selects NO surface at all, the
+  # #1349/#3332/#3616 silent-drop class). Pinned by
+  # tests/test_ci_selection.py::test_9206_lane_suites_run_on_the_diffs_that_can_break_them.
+  - test_9206_derived_recompute_lane.py
   # #7951 (increment 2, the revision door): `update_point` appends its
   # `PointRevised` record BEFORE the cache write. Same subjects as the
   # create-side suite above (`tortoise/sdk.py`), so it is registered on the
@@ -7254,6 +7276,8 @@ durations:
   test_7951_delete_point_outbox.py: 5.0  # unmeasured — #7951 increment 4a (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), and an absent row packs it at the flat 2.0s default, which drops `duration_coverage_issues()` under the 90% floor — the same shape as the `test_7951_create_point_outbox.py` row above. Local embedded-lane readings 4.3–6.8 s when the file collected 6 tests; at this head it collects 17 (T1–T10 plus T3b, T3c, T3d, T3e, T3f, T3g and T3i, TWO of which call `rebuild_all` — T3 and T8) and measured 10.4 s here on the same lane, so the 5.0 weight is a lower-ish bound in the right neighbourhood rather than a stale one. Refresh from the first post-merge run that includes it.
   test_9079_ep_epoch_declared.py: 7.2  # unmeasured — #9123 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red at 840/934 = 89.9% — the same shape as the `test_7951_create_point_outbox.py` row above. Local embedded-lane readings 5.9/6.0/6.4 s over three runs (6 tests; one calls `rebuild_all`). ⚠️ A longer reading (148 s) is NOT this file's weight: the FIRST `create_point` in a process lazily loads the embedding model — 15.7 s standalone, and 134 s for the one test that pays it under fleet load 65 — after which creates are 0.16 s. That one-time load is paid once per file and is not what this weight packs. Declared above the quiet-box readings so a cold leg cannot under-pack. Refresh from the first post-merge run that includes it.
   test_9079_record_replay_declared.py: 9.0  # unmeasured — #9079 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), and an absent row packs it at the flat 2.0s default. Four tests, each one `rebuild_from_record` round trip in an embedded SDK with NO `create_point` (so the once-per-leg embedding-model load the `test_9079_ep_epoch_declared.py` row above pays is NOT part of this weight); local readings are recorded on the `#9079` PR. Refresh from the first post-merge run that includes it.
+  test_9206_apply_first_lane.py: 20.0  # unmeasured — #9206 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so an absent row packs it at the flat 2.0s default AND drops `duration_coverage_issues()` under the 90% floor (measured this turn: WITHOUT the two #9206 rows the manifest sits at 866/963 = 89.9%). Local embedded-lane reading 16.2 s for 13 tests, every one of which builds its own journal-backed SDK and drives REAL doors (capture_session alone issues a full capture + journal); declared above the reading so a cold leg cannot under-pack. Refresh from the first post-merge run that includes it.
+  test_9206_derived_recompute_lane.py: 4.0  # unmeasured — #9206 (#3400 trap), same class as the row above. Local embedded-lane reading 2.9 s for 5 tests (the resolver's adopt-on-touch plus the journal-bytes assertion); declared above the reading so a cold leg cannot under-pack. Refresh from the first post-merge run that includes it.
   test_audit_fallback_home_isolation.py: 2.4
   test_9208_change_feed_degraded.py: 2.0  # unmeasured — new in #9208 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). Without this row the file is in the fast pool, so it packs at the flat 2.0s default AND `duration_coverage_issues()` sits at 90.02% — one peer lane adding a file tips it under the 90% floor. The weight is the flat default deliberately (a LOCAL reading would not be a shard-layout input, #3419/#2788): the local 42-65 s readings for this file are almost entirely the once-per-leg embedding-model load the #3400 method attributes to no file. Refresh from the first post-merge run that includes it.
   test_ci_stall_identify.py: 16.0  # #5035: the 1.8 predated this PR's subprocess-launching tests. A quiet-machine estimate (measured 12.3, 14.8, 16.3 s; 25.9 s under moderate load and 34-40 s at fleet load 67-79 — the file spawns pytest children, so it tracks box load hard). `tools/ci_timing.py --refresh-durations` is the canonical (CI-measured) writer; this line is a local estimate until it next runs.

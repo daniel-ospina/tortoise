@@ -238,6 +238,19 @@ def test_capture_session_writes_and_records_both_halves_under_the_armed_guard(
     honesty rests on them: `SessionRecorded` (appended by the shared writer
     BEFORE its MERGE — journal-first for that statement) and `PointAdded` for the
     turn Points (`_write_capture_turns`, which declares the apply-first lane).
+
+    ⛔ THE STAMPS ARE THE PART AN ARMED BATTERY CANNOT SEE (#9206 review P2).
+    The two state writes this door used to issue inline (`s.capture_ok` /
+    `s.capture_extractor`, and the entity-link counters) carried NO lane, so an
+    armed handle REFUSED them — and this door's deliberate "a provenance
+    failure must not fail a capture" `except` downgraded the refusal to an
+    `extraction_warnings` entry. A test that asserts only "the door returned"
+    therefore stays GREEN over a write that never landed, which is the one shape
+    arming cannot detect. Both stamps are now their own declared apply-first
+    doors (`_stamp_capture_attempt_state`, `_stamp_entity_link_counters`) and
+    this test reads them back OFF THE NODE: an unrecorded `capture_ok` is not
+    harmless — the #2335 WI-2b gate reads NULL as "legacy presumed captured",
+    so a FAILED capture would never retry.
     """
     sdk = armed_sdk
     out = sdk.capture_session([
@@ -253,6 +266,29 @@ def test_capture_session_writes_and_records_both_halves_under_the_armed_guard(
         f"rebuild would drop the node (records={types})")
     assert types.count("PointAdded") >= 2, (
         f"the turn Points landed with no records (records={types})")
+
+    # The stamps, read back at the node they were written to. `is not None` is
+    # the assertion that reds on the pre-fix code: with the writes undeclared an
+    # armed handle refused them and the refusal never reached the caller.
+    rows = sdk._get_proj().g.query(
+        "MATCH (s:Session {id:$sid}) "
+        "RETURN s.capture_ok, s.capture_extractor",
+        params={"sid": "sess_9206_lane"}).result_set
+    assert rows, "the :Session node itself is missing under the armed guard"
+    capture_ok, capture_extractor = rows[0]
+    assert capture_ok is not None, (
+        "the capture attempt-outcome stamp did NOT land under the armed guard — "
+        "the refusal was swallowed into extraction_warnings instead "
+        f"(warnings={out.get('warnings')}). A NULL capture_ok is read by the "
+        "#2335 WI-2b gate as 'legacy presumed captured', so a FAILED capture "
+        "would never retry")
+    assert capture_extractor is not None, (
+        "the extractor lane did not land with the outcome stamp "
+        f"(warnings={out.get('warnings')})")
+    assert not [w for w in (out.get("warnings") or [])
+                if "capture_ok" in w or "entity-link" in w], (
+        "a capture state write was refused under the armed guard and reported "
+        f"only as a warning: {out.get('warnings')}")
 
 
 def test_the_lane_is_not_a_bypass(armed_sdk, enforced):

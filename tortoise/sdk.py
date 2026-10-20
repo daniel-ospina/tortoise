@@ -9133,6 +9133,83 @@ class TortoiseSDK:
             return {"session_id": session_id, "ok": False, "error": str(e),
                     "payload": payload, "guards": guards, "delta": delta}
 
+    @_declares_apply_first_write_lane("_stamp_entity_link_counters")
+    def _stamp_entity_link_counters(self, proj, session_id: str,
+                                    link_result: dict) -> None:
+        """Record the #7405 entity-link counters on the `:Session`, then journal them.
+
+        ⛔ WHY THIS IS ITS OWN DOOR (#9206 review). The write and its record
+        used to sit inline in `capture_session`, which is inventoried
+        apply-first and declares NO lane — so with §17.1's handle ARMED this SET
+        raised `DirectCacheWriteRefused`, and the caller's deliberate
+        `except Exception` ("a provenance failure must not fail a capture")
+        swallowed the refusal into `extraction_warnings` while it asserted
+        nothing about it: a silently-unwritten write is the one shape an armed
+        battery cannot see. Declaring the lane HERE is honest because the pair
+        is genuinely apply-first by necessity — the counters ARE the landed
+        pass's result, so the record cannot precede the write it describes.
+
+        The SET is idempotent (absolute values for this link pass, #7405 audit
+        G8), so a re-issue after an abort cannot double-count, and it rides the
+        retry. The trailing `SessionRecorded` is what makes the counter survive
+        a journal-only `rebuild()` / `recover_from_log`: the FIRST
+        `SessionRecorded` is emitted BEFORE the link pass, so its payload cannot
+        carry these values (a live != rebuild divergence).
+        """
+        self._graph_write_with_retry(
+            lambda: proj.g.query(
+                "MATCH (s:Session {id:$sid}) SET "
+                "s.entity_links_attempted=$a, s.entity_links_created=$c",
+                params={"sid": session_id,
+                        "a": link_result["attempted"],
+                        "c": link_result["created"]}),
+            what="capture entity-link counters",
+        )
+        # #3664 review P2: the raw SET above is a LIVE write with no journal
+        # carrier unless this record follows — emit the counters as a THIRD
+        # SessionRecorded AFTER the result is known, so the durable fold
+        # (``_fold_session_recorded``) replays them.
+        self._emit_event(
+            "SessionRecorded", id=session_id,
+            entity_links_attempted=link_result["attempted"],
+            entity_links_created=link_result["created"])
+
+    @_declares_apply_first_write_lane("_stamp_capture_attempt_state")
+    def _stamp_capture_attempt_state(self, proj, session_id: str, *,
+                                     capture_ok: bool,
+                                     capture_extractor: str) -> None:
+        """Record the #2335 WI-2b attempt outcome on the `:Session`, then journal it.
+
+        ⛔ WHY THIS IS ITS OWN DOOR (#9206 review). Same shape as
+        `_stamp_entity_link_counters`: inline in `capture_session` this SET was
+        undeclared, so an ARMED handle refused it and the caller's `except`
+        turned the refusal into an additive warning — leaving `capture_ok`
+        NULL, which the #2335 WI-2b gate reads as "legacy presumed captured" and
+        therefore NEVER retries. A FAILED capture silently stopped retrying,
+        invisibly.
+
+        Apply-first by necessity: the recorded outcome IS this attempt's result,
+        so the record cannot precede the write it describes. The SET is
+        idempotent (absolute ``capture_ok``/``capture_extractor`` values, #7405
+        audit G8) and rides the retry; the trailing `SessionRecorded` is emitted
+        ONLY after the live SET succeeded, so live and replay stay in lockstep
+        (that null was consumed by the TRUE-retry gate above — a session whose
+        capture FAILED silently stopped retrying).
+        """
+        self._graph_write_with_retry(
+            lambda: proj.g.query(
+                "MATCH (s:Session {id:$sid}) "
+                "SET s.capture_ok=$ok, "
+                "    s.capture_extractor=$extractor",
+                params={"sid": session_id, "ok": capture_ok,
+                        "extractor": capture_extractor}),
+            what="capture attempt-outcome stamp",
+        )
+        self._emit_event(
+            "SessionRecorded", id=session_id,
+            capture_ok=capture_ok,
+            capture_extractor=capture_extractor)
+
     @counts_capture_ops
     def capture_session(
         self,
@@ -9817,32 +9894,12 @@ class TortoiseSDK:
                           for i in range(len(link_texts))],
                 sdk=self)
             if link_result["attempted"]:
-                # #7405 (audit G8): the counter SET is idempotent (absolute
-                # values for this link pass), so a re-issue after an abort
-                # cannot double-count.
-                self._graph_write_with_retry(
-                    lambda: proj.g.query(
-                        "MATCH (s:Session {id:$sid}) SET "
-                        "s.entity_links_attempted=$a, s.entity_links_created=$c",
-                        params={"sid": session_id,
-                                "a": link_result["attempted"],
-                                "c": link_result["created"]}),
-                    what="capture entity-link counters",
-                )
-                # #3664 review P2: the raw SET above is a LIVE write with no
-                # journal carrier — the first SessionRecorded is emitted
-                # BEFORE the link pass, so its payload cannot carry the
-                # counters, and the apply()-based engines
-                # (``recover_from_log`` / a journal-only ``rebuild()``)
-                # restored the :Session node with both fields null (a
-                # live != rebuild divergence). Emit the counters as a
-                # THIRD SessionRecorded AFTER the result is known, under
-                # the SAME ``if attempted`` guard as the live write, so the
-                # durable fold (``_fold_session_recorded``) replays them.
-                self._emit_event(
-                    "SessionRecorded", id=session_id,
-                    entity_links_attempted=link_result["attempted"],
-                    entity_links_created=link_result["created"])
+                # #9206 review: the counter SET and its trailing record live in
+                # a DECLARED apply-first door. Inline here they carried no lane,
+                # so an armed handle refused the write and this block's own
+                # `except` swallowed the refusal into `extraction_warnings` —
+                # measured as a green test over a write that never landed.
+                self._stamp_entity_link_counters(proj, session_id, link_result)
         except Exception as e:  # noqa: BLE001, RUF100 — non-fatal, mirror hosted
             _logger.warning(
                 "capture_session: session entity-linking failed (non-fatal) "
@@ -9912,42 +9969,24 @@ class TortoiseSDK:
             # re-attempting (the TRUE retry silently no-ops). The warning
             # names the residue: capture_ok unset means an unknown prior.
             try:
-                # #7405 (audit G8): the attempt-outcome SET is idempotent
-                # (absolute ``capture_ok``/``capture_extractor`` values) and
-                # rides the retry. The outer try/except stays: an exhausted
-                # retry surfaces the original error and is downgraded to the
-                # additive warning below, exactly as before.
-                self._graph_write_with_retry(
-                    lambda: proj.g.query(
-                        "MATCH (s:Session {id:$sid}) "
-                        "SET s.capture_ok=$ok, "
-                        "    s.capture_extractor=$extractor",
-                        params={"sid": session_id, "ok": _capture_ok_record,
-                                "extractor": _capture_extractor_record}),
-                    what="capture attempt-outcome stamp",
-                )
+                # #9206 review: the attempt-outcome SET and the trailing record
+                # it needs live in a DECLARED apply-first door. Inline here they
+                # carried no lane, so an armed handle refused the SET and this
+                # `except` downgraded the refusal to a warning — leaving
+                # ``capture_ok`` NULL, which the #2335 WI-2b gate reads as
+                # "legacy presumed captured", so a FAILED capture never
+                # retried. The outer try/except stays: an exhausted retry
+                # surfaces the original error and is downgraded to the additive
+                # warning below, exactly as before (and the record is emitted
+                # ONLY when the live SET succeeded, so live and replay stay in
+                # lockstep).
+                self._stamp_capture_attempt_state(
+                    proj, session_id,
+                    capture_ok=_capture_ok_record,
+                    capture_extractor=_capture_extractor_record)
             except Exception as exc:  # pragma: no cover - graph hiccup
                 extraction_warnings.append(
                     f"capture_ok state write failed: {type(exc).__name__}")
-            else:
-                # #3664 review P2: the raw SET above has no journal carrier —
-                # the FIRST SessionRecorded is emitted BEFORE extraction, and
-                # the counter emission carries only the link counters — so a
-                # journal-only ``rebuild()`` / ``recover_from_log`` restored
-                # ``capture_ok = capture_extractor = null``. That null is
-                # CONSUMED by the #2335 WI-2b TRUE-retry gate above ("null"
-                # reads as the legacy presumed-captured case), so a session
-                # whose capture FAILED silently stopped retrying. Emit a
-                # TRAILING SessionRecorded with the values just written so
-                # ``_fold_session_recorded`` replays them. Under the SAME
-                # ``_record_session_state`` gate (and only after the live SET
-                # succeeded) so live and replay stay in lockstep; a
-                # journal-less SDK no-ops in ``_emit_event``, exactly as it
-                # does for the first record.
-                self._emit_event(
-                    "SessionRecorded", id=session_id,
-                    capture_ok=_capture_ok_record,
-                    capture_extractor=_capture_extractor_record)
         if not ok and meta.get("mode") == "empty":
             effective_mode = "empty"
         elif not ok:
