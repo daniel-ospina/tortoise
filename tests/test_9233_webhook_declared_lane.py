@@ -144,7 +144,7 @@ class _ScriptedTransport:
 
 def _instrument(monkeypatch, *, refuse: bool | str, owner) -> LaneProbe:
     """Install #9124's predicate on `_GuardedGraph.query`, ATTRIBUTED to `owner`.
-    
+
     The recorder is `tests/_declared_lane_probe.LaneProbe` (#9256): it records
     `_CACHE_WRITE_AUTHORIZED` AT THE WRITE — read inside the handle dispatch,
     which is where #9124's guard will read it, so "the write ran inside a
