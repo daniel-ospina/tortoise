@@ -121,6 +121,16 @@ surfaces:
   # `test_7951_write_doors.py` absent; `--surface-audit` flagged it as an
   # addition candidate). `--integrity` also requires every test file to be
   # classified, which the `core` entry satisfies.
+  # #9121 residual: the seam the §17.1 declaration does NOT cover — the five
+  # `eager_init_query()` call sites that CREATE `:OnboardingState` on
+  # `proj.db.select_graph(...)` (escape (3)). The `api` arm covers the files
+  # holding those call sites (`tortoise/sdk.py` and `tortoise/hosted_api.py`);
+  # `tortoise/projection/__init__.py` is in SHARED_MODULES (full matrix) and
+  # `tortoise/onboarding/**` selects the `onboarding` arm beside the sibling
+  # `test_9079_onboarding_declared_lane.py` — a named match REPLACES the `core`
+  # fallback, so an onboarding-only diff must run this pin (#1349/#2938 class).
+  # `core` carries it too, because the suite READS this manifest.
+  - test_9121_onboarding_residual_pins.py
   - test_7951_write_doors.py
   # #7951 (steps 1-3, the ENFORCEMENT): DUAL-REGISTERED with the same six
   # surfaces as the door inventory above, for the same reason — the guard's
@@ -1572,6 +1582,7 @@ surfaces:
   # the `core` fallback in `select()`, so a change to any ONE of them alone would
   # otherwise run this suite never — the #1349/#2938/#3154 silent-drop class.
   - test_9079_onboarding_declared_lane.py
+  - test_9121_onboarding_residual_pins.py
   # #9195 (§17.1's FOURTH declaration child): the SDK's structural-edge write
   # lane (`create_edge` and `create_about_edge`, each with ONE `MERGE`, plus
   # `create_edge`'s three typed wrappers — the lane mints no node, no property
@@ -4025,6 +4036,7 @@ surfaces:
   # the `core` fallback in `select()`, so a change to any ONE of them alone would
   # otherwise run this suite never — the #1349/#2938/#3154 silent-drop class.
   - test_9079_onboarding_declared_lane.py
+  - test_9121_onboarding_residual_pins.py
   - test_7951_write_doors.py
   # #9068 review P1: MULTI-REGISTERED with `core` (below), `api` and `onboarding`
   # (above), and `ep` / `eval` / `sdk` — the six surfaces a module the #5475 door
@@ -5410,6 +5422,7 @@ uri_requiring:
 push_extra: []
 durations_captured_at: "2026-10-17T15:43:47Z"
 durations:
+  test_9121_onboarding_residual_pins.py: 2.0  # unmeasured — new in #9121; no sweep has collected it, so it carries the flat default for an unmeasured file (same convention as test_prod_csp_monitor.py / test_venture_pack.py). Do NOT substitute a local timing: the file's own carve-out run is ~11s on this box, but the map is a SHARD-LAYOUT input modelling CI, and a locally measured weight that does not model CI must not decide what runs together. Measured 2026-10-19: 14 cases, source-structural only (no graph fixture). `test_9079_onboarding_declared_lane.py` already carries a measured row in the #3400-trap block below (3.6) — do NOT add a second key here; a duplicate mapping key is refused by `tools/registry_integrity.py` and silently keeps the LAST value (#5373).
 # #3395: per-file CI wall time (seconds), swept from the junit artifacts of four
 # completed 2026-09-22 runs rather than entered by hand — two push-to-main runs
 # (35770984825 at b8ded3646, 35779482728 at 45aa52f70) and two runs of branch

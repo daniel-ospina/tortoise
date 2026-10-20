@@ -451,7 +451,19 @@ def _org_lock(org_id: str) -> threading.Lock:
 #     own declaration) is tracked on `#9079`'s family.
 #   * It does NOT cover the eager-init statement on the org-graph lane, issued
 #     on `proj.db.select_graph(<g>)` — §17.1's stated escape (3), below anything
-#     a handle guard sits on.
+#     a handle guard sits on. Five call sites build that statement with
+#     `eager_init_query`, and every one of them issues it OUTSIDE this lane:
+#     `tortoise/sdk.py::org_create`, `tortoise/hosted_api.py::provision_tenant`,
+#     `tortoise/hosted_api.py::register_user` (TWO sites: the self-service arm
+#     and the Supabase-mode arm) and
+#     `tortoise/hosted_api.py::_eager_provision_org_graph`. Those
+#     `:OnboardingState` CREATION writes stay unjournalled AND undeclared and
+#     are filed as `#9157` — do not close escape (3) believing the onboarding
+#     class is covered. Journalling the class is the larger, §2.0-correct
+#     increment and is filed separately (`#9129`).
+#     `tests/test_9121_onboarding_residual_pins.py` reads this list and fails if
+#     it drifts from the AST, and fails the day one of those sites enters a
+#     declaration.
 #
 # SEAM: `#9123` landed that named wrapper — `_graph_metadata_write_scope(reason)`
 # in `tortoise/projection/__init__.py`, for the `:EpMeta` epoch write. This lane

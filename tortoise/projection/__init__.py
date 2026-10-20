@@ -3280,6 +3280,27 @@ def _journal_safe_params(params, cypher=None):
 #     with the writers. `:TeamMeta` is its documented sibling (#5353 below),
 #     not a vetted precedent: it holds no declaration of its own — its writers
 #     escape at (3).
+#     ⚠️ THIS LANE APPENDS NOTHING, which is what distinguishes it from the
+#     `_live_write_scope` openers above rather than a contradiction of them:
+#     read the "append first, fold second" invariant as describing the SDK's
+#     LIVE DOORS, **not every opener of this scope**. What makes this a lane of
+#     its own is how its state is RECOVERED: it is neither a fold of a record
+#     (the live doors) nor rebuild-from-zero bookkeeping (the metadata lanes) —
+#     it is org-level FLOW metadata that a rebuild cannot re-derive, which is why
+#     the replay engines CAPTURE-AND-RESTORE the class instead (#4641 below)
+#     rather than replay it. So no journal event exists whose fold would produce
+#     it, and the declaration IS the whole of this lane's authorization. It
+#     declares through the same primitive (`_cache_write_authorized`) and
+#     deliberately does not delegate to `_graph_metadata_write_scope` (whose
+#     docstring carries the epoch's two obligations, the first of them false of
+#     this lane).
+#     ⚠️ And it does not cover the whole onboarding class: the five
+#     `eager_init_query()` call sites that CREATE `:OnboardingState` execute on
+#     `proj.db.select_graph(...)` — escape (3) below — so those writes remain
+#     unjournalled AND undeclared and are filed as `#9157`. Journalling the class
+#     is the larger, §2.0-correct increment and is filed separately
+#     (`#9129`), not assumed by this lane. A door inventory done against THIS block must not
+#     close escape (3) believing onboarding is covered.
 #   * `structural-edge.derived` (`tortoise/projection/edges.py`, #9195) — the
 #     SDK's structural-edge mints (`create_edge` and `create_about_edge`, each
 #     with ONE `MERGE`, plus `create_edge`'s three typed wrappers — two mints
@@ -3488,7 +3509,17 @@ def _cache_write_authorized(reason: str):
 
 
 def _live_write_scope(reason: str = "live-door"):
-    """The live doors' scope: journal appended first, then the fold."""
+    """The live doors' scope: journal appended first, then the fold.
+
+    The SAME scope is opened by the DECLARED METADATA lane (`#9121`) from
+    `onboarding/state.py::_run` — through `_onboarding_write_scope` →
+    `_cache_write_authorized(ONBOARDING_WRITE_LANE)`, i.e. the same ContextVar
+    this function sets, **not through this alias** (that module never imports
+    it; two spellings, one primitive). That lane appends nothing — the opener
+    inventory above says why, and names the seam the declaration does NOT cover
+    (`#9157`). `onboarding/seed.py::_run` does not open it at all: its only
+    caller issues a READ.
+    """
     return _cache_write_authorized(reason)
 
 
