@@ -36,6 +36,29 @@ a publishable claim, which needs four things the instrument did not have:
    receipt through it would either fail or force LongMemEval metric names onto
    an ask run — so this module validates the ASK metric vocabulary instead.
 
+### What "sealed" and "pre-registered" do and do not prove
+
+Two limits are worth stating where they are implemented, because both look
+stronger than they are:
+
+* **Sealing is structural, not cryptographic.** The RUN step is handed fixtures
+  only, so the runner cannot *grade itself* — that is the property under test.
+  It is **not** a secret: for a knowledge-update case the answer is already one
+  of the planted claims (or in the turn store), and the full corpus hash digests
+  ``gold/``, so handing the runner that digest would be a weak oracle over an
+  answer whose shape is otherwise known. So the run records
+  :func:`corpus.compute_fixtures_hash` and the SCORE step computes the full
+  corpus hash; a reader that could see both would not gain much, but there is no
+  reason to hand it over.
+* **``written_before_any_arm_run`` is a declaration, verified by history, not
+  by this module.** The ordering claim ("the protocol commit is an ancestor of
+  the run commit") lives in git, and the run report's Reproduction section
+  points at ``git log -- tests/eval/ask/preregistration.json``. What the bar
+  DOES enforce is the content: corpus hash, case and class coverage, reader and
+  judge spec, judge pin and rubric hash, seed flags, arms, and the gate arm —
+  every field the protocol fixes is a field the bar refuses to run without, so
+  the protocol cannot be quietly re-worded after the fact and still pass.
+
 Sibling module, not an extension of ``run_protocol.py``: that protocol's steps
 are LongMemEval-shaped (500-Q run, vs-V3-baseline delta, 1k benchmark, its own
 step numbering). Extending it would couple two benchmarks' pre-registrations.
@@ -144,12 +167,22 @@ READER_PINNED = True
 #: ``tools/longmem_eval/run.py``); the hash is computed with the same 16-hex
 #: convention so the two records are comparable.
 JUDGE_PIN = "ask-exit-anscheck-official-v1"
+#: The pin a MOCK-graded run carries. The pin is derived from the judge spec
+#: (never passed in independently), so a receipt cannot claim the official pin
+#: while a stub graded the answers — the two travel together.
+MOCK_JUDGE_PIN = "ask-exit-anscheck-mock"
 JUDGE_RUBRIC_ID = "longmemeval-official"
 MOCK_JUDGE_SPEC = "mock"
 
 
 def _sha16(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def judge_pin_for(spec: str) -> str:
+    """The pin belonging to a judge spec (mock specs get the mock pin)."""
+    return MOCK_JUDGE_PIN if (spec or "").strip() == MOCK_JUDGE_SPEC \
+        else JUDGE_PIN
 
 
 def judge_rubric_id_hash() -> str:
@@ -172,13 +205,22 @@ def resolve_judge_spec(override: str | None = None,
 
 
 def protocol(*, reader_spec: str | None = None,
-             judge_spec: str | None = None) -> dict:
+             judge_spec: str | None = None,
+             corpus_root: Path | None = None) -> dict:
     """The pre-registered protocol body (no run data, no numbers).
 
     Everything a re-run must reproduce, and everything a reviewer needs to
     FALSIFY the claim: corpus identity, classes, split, scoring, and the
     decision rule — including the parts that are deliberately not thresholds.
     """
+    root = Path(corpus_root) if corpus_root is not None else corpus.ASK_DIR
+    case_ids = corpus.case_ids(root)
+    # Derived from the corpus ITSELF (never from the module constant): the
+    # pre-registration must pin what it verified, or a corpus that lost a class
+    # would be pre-registered as still having it.
+    classes = sorted({fixture["class"]
+                      for fixture in corpus.load_fixtures(root)}) \
+        if case_ids else list(corpus.CLASSES)
     return {
         "schema": PREREG_SCHEMA,
         "issue": ISSUE,
@@ -194,8 +236,8 @@ def protocol(*, reader_spec: str | None = None,
             "hash_scope": "fixtures/*.json + gold/*.gold.json (a gold-only "
                           "edit changes the hash and voids this "
                           "pre-registration)",
-            "cases": corpus.case_ids(),
-            "classes": list(corpus.CLASSES),
+            "cases": case_ids,
+            "classes": classes,
             "authored_by": "hand-authored, hermetic, row-by-row reviewable "
                            "(tests/eval/ask/generate_corpus.py) — the #9095 "
                            "method (run it small and by hand first)",
@@ -265,7 +307,7 @@ def protocol(*, reader_spec: str | None = None,
         },
         "judge": {
             "model_spec": resolve_judge_spec(judge_spec),
-            "pin": JUDGE_PIN,
+            "pin": judge_pin_for(resolve_judge_spec(judge_spec)),
             "rubric_id": JUDGE_RUBRIC_ID,
             "rubric_id_hash": judge_rubric_id_hash(),
         },
@@ -309,7 +351,8 @@ def write_preregistration(path: str | Path, *,
         raise ValueError(
             f"refusing to pre-register: the corpus does not verify ({manifest}) "
             "— a pre-registration must pin the corpus it will be run against")
-    record = protocol(reader_spec=reader_spec, judge_spec=judge_spec)
+    record = protocol(reader_spec=reader_spec, judge_spec=judge_spec,
+                      corpus_root=corpus_root)
     record["corpus"]["hash"] = manifest["corpus_hash"]
     record["corpus"]["manifest_verified"] = True
     record["corpus"]["n_cases"] = len(record["corpus"]["cases"])
@@ -379,7 +422,8 @@ def _run_arm(*, fixture: dict, arm: str, sdk_factory, reader_factory,
 
 def run_sealed(*, corpus_root: Path = corpus.ASK_DIR,
                arms: tuple[str, ...] = ARMS,
-               reader_factory=None, sdk_factory=None, mutate=None) -> dict:
+               reader_factory=None, sdk_factory=None, mutate=None,
+               mutate_label: str | None = None) -> dict:
     """Run the sealed corpus: both arms per case, fixtures ONLY.
 
     ⛔ The inputs are ``corpus.load_fixtures`` — ``fixtures/*.json``. The gold
@@ -404,15 +448,26 @@ def run_sealed(*, corpus_root: Path = corpus.ASK_DIR,
                 fixture=fixture, arm=arm, sdk_factory=sdk_factory,
                 reader_factory=reader_factory, mutate=mutate)
         records.append(case)
-    return {
+    report = {
         "schema": RUN_SCHEMA,
-        "corpus_hash": corpus.compute_corpus_hash(corpus_root),
+        # FIXTURES ONLY — deliberately NOT the full corpus hash, which digests
+        # the sealed gold and would be a (weak) oracle over the answer key.
+        # The SCORE step computes the full corpus hash, because it is the step
+        # allowed to open the key.
+        "fixtures_hash": corpus.compute_fixtures_hash(corpus_root),
         "reader_model_spec": resolve_reader_spec(),
         "arms": list(arms),
         "seed": {"turns_embedded": SEED_TURNS_EMBEDDED_BY_DEFAULT,
                  "search_keys": SEED_SEARCH_KEYS_BY_DEFAULT},
         "cases": records,
     }
+    if mutate is not None:
+        # Recorded by the RUN step, not by whichever caller remembered to: a
+        # probe whose flag depends on the caller is a probe that gets scored as
+        # a measurement the first time someone forgets.
+        report["mutated"] = (mutate_label
+                             or f"falsification probe: {getattr(mutate, '__name__', 'mutate hook')}")
+    return report
 
 
 # ── 2. the SCORE step — the sealed key is opened HERE ─────────────────────
@@ -435,12 +490,6 @@ def _judge_committed(gold: dict, fixture: dict, answer: str, judge) -> bool:
     ))
 
 
-def _superseded_text(fixture: dict) -> str:
-    """The claim the D8 gate watches: the superseded half of the planted pair."""
-    supersessions = fixture["distilled"]["supersessions"]
-    return supersessions[0]["old"] if supersessions else ""
-
-
 def score(*, run_report: dict, corpus_root: Path = corpus.ASK_DIR,
           judge=None, judge_spec: str | None = None,
           mock: bool = False) -> dict:
@@ -453,7 +502,23 @@ def score(*, run_report: dict, corpus_root: Path = corpus.ASK_DIR,
     golds = corpus.load_golds(corpus_root)
     if judge is None:
         judge = MockJudge() if mock else build_judge(judge_spec)
-    spec = resolve_judge_spec(judge_spec, mock=mock)
+        spec = resolve_judge_spec(judge_spec, mock=mock)
+    else:
+        # The recorded identity must describe the OBJECT that graded the run,
+        # not the spec string a caller hopes it used: `score(judge=MockJudge())`
+        # with the official spec in scope would otherwise satisfy the
+        # pre-registration's judge check while a stub graded every answer. A
+        # declared spec is honoured only when the judge's OWN identity appears
+        # in it; otherwise the object is recorded as what it is.
+        declared = judge_spec or resolve_judge_spec(
+            mock=mock or isinstance(judge, MockJudge))
+        object_id = getattr(judge, "model_id", "") or type(judge).__name__
+        if object_id and object_id in declared:
+            spec = declared
+        elif isinstance(judge, MockJudge):
+            spec = MOCK_JUDGE_SPEC
+        else:
+            spec = f"injected:{object_id}"
 
     rows: list[dict] = []
     for record in run_report["cases"]:
@@ -469,15 +534,18 @@ def score(*, run_report: dict, corpus_root: Path = corpus.ASK_DIR,
                 "committed": (bool(obs["ok"]) and _judge_committed(
                     gold, fixture, obs["answer"], judge)),
             }
-        superseded = None
-        old_text = _superseded_text(fixture)
-        if old_text:
-            gate_obs = record["arms"][GATE_ARM]
+        superseded = []
+        gate_obs = record["arms"][GATE_ARM]
+        # EVERY planted supersession is gated. Gating only the first pair while
+        # counting CASES in the denominator would leave a second planted dead
+        # claim ungated and still publish a green D8 row.
+        for planted in fixture["distilled"]["supersessions"]:
             seen, rendered_live, flagged = _superseded_live_state(
-                gate_obs.get("evidence") or "", old_text)
-            superseded = {"claim": old_text, "seen": bool(seen),
-                          "rendered_live": bool(rendered_live),
-                          "flagged": bool(flagged)}
+                gate_obs.get("evidence") or "", planted["old"])
+            superseded.append({"claim": planted["old"],
+                               "seen": bool(seen),
+                               "rendered_live": bool(rendered_live),
+                               "flagged": bool(flagged)})
         verbatim_regression = bool(
             fixture["class"] == corpus.CLASS_VERBATIM
             and arms["raw"]["committed"]
@@ -490,45 +558,28 @@ def score(*, run_report: dict, corpus_root: Path = corpus.ASK_DIR,
             "verbatim_regression": verbatim_regression,
         })
 
-    ku_rows = [r for r in rows if r["class"] == corpus.CLASS_KNOWLEDGE_UPDATE]
-    verbatim_rows = [r for r in rows if r["class"] == corpus.CLASS_VERBATIM]
-    metrics = {
-        f"current_state@{GATE_ARM}": _rate_block(
-            r["arms"][GATE_ARM]["committed"] for r in ku_rows),
-        "current_state@raw": _rate_block(
-            r["arms"]["raw"]["committed"] for r in ku_rows),
-        f"superseded_live@{GATE_ARM}": {
-            "seen": sum(1 for r in ku_rows
-                        if r["superseded"] and r["superseded"]["seen"]),
-            "rendered_live": sum(1 for r in ku_rows
-                                 if r["superseded"]
-                                 and r["superseded"]["rendered_live"]),
-            "n": len(ku_rows),
-        },
-        "verbatim_no_regression": {
-            "raw_committed": sum(1 for r in verbatim_rows
-                                 if r["arms"]["raw"]["committed"]),
-            "distilled_committed": sum(1 for r in verbatim_rows
-                                       if r["arms"][GATE_ARM]["committed"]),
-            "n": len(verbatim_rows),
-            "regressions": [r["case_id"] for r in verbatim_rows
-                            if r["verbatim_regression"]],
-        },
-    }
     scored = {
         "schema": SCORED_SCHEMA,
-        "corpus_hash": run_report["corpus_hash"],
+        # Computed HERE (the scorer may open the sealed key), never taken from
+        # the run report — the run does not carry a digest of the gold.
+        "corpus_hash": corpus.compute_corpus_hash(corpus_root),
+        "fixtures_hash": corpus.compute_fixtures_hash(corpus_root),
+        # The RUN's own fixture digest: the linkage the bar checks, so a run
+        # over different fixtures can never be scored against this gold.
+        "run_fixtures_hash": run_report.get("fixtures_hash"),
         # Recorded so a later audit/bar evaluation re-verifies the manifest of
         # the corpus this run actually used — never the committed one by
         # default (that default is how a tmp-corpus run reads as drifted).
         "corpus_root": str(corpus_root),
         "reader_model_spec": run_report["reader_model_spec"],
         "judge_model_spec": spec,
+        "judge_pin": judge_pin_for(spec),
         "judge_model_id": getattr(judge, "model_id", ""),
         "judge_rubric_id_hash": judge_rubric_id_hash(),
         "arms": run_report["arms"],
+        "seed": run_report.get("seed") or {},
         "cases": rows,
-        "metrics": metrics,
+        "metrics": aggregate(rows),
         "bar": OUTCOME_PENDING,  # filled by evaluate_exit_bar
     }
     if run_report.get("mutated"):
@@ -542,6 +593,42 @@ def _rate_block(flags) -> dict:
     committed = sum(1 for f in flags if f)
     return {"committed": committed, "n": n,
             "rate": (committed / n) if n else 0.0}
+
+
+def aggregate(rows: list[dict]) -> dict:
+    """The metric block, derived from the per-case ROWS (one implementation).
+
+    The bar re-runs this over ``scored["cases"]`` and refuses a metrics block
+    that disagrees with the rows it summarises — a summary is not a result, and
+    a forged/edited summary must not be able to carry a verdict on its own.
+    """
+    ku_rows = [r for r in rows if r["class"] == corpus.CLASS_KNOWLEDGE_UPDATE]
+    verbatim_rows = [r for r in rows if r["class"] == corpus.CLASS_VERBATIM]
+    claims = [claim for r in ku_rows for claim in r.get("superseded") or []]
+    return {
+        f"current_state@{GATE_ARM}": _rate_block(
+            r["arms"][GATE_ARM]["committed"] for r in ku_rows),
+        "current_state@raw": _rate_block(
+            r["arms"]["raw"]["committed"] for r in ku_rows),
+        # The denominator is planted CLAIMS, not cases: a case may plant more
+        # than one old→new pair and each one must be observed and unflagged.
+        f"superseded_live@{GATE_ARM}": {
+            "seen": sum(1 for claim in claims if claim["seen"]),
+            "rendered_live": sum(1 for claim in claims
+                                 if claim["rendered_live"]),
+            "n": len(claims),
+            "n_cases": len(ku_rows),
+        },
+        "verbatim_no_regression": {
+            "raw_committed": sum(1 for r in verbatim_rows
+                                 if r["arms"]["raw"]["committed"]),
+            "distilled_committed": sum(1 for r in verbatim_rows
+                                       if r["arms"][GATE_ARM]["committed"]),
+            "n": len(verbatim_rows),
+            "regressions": [r["case_id"] for r in verbatim_rows
+                            if r["verbatim_regression"]],
+        },
+    }
 
 
 #: Marker for "the bar has not been evaluated yet" — never a verdict value.
@@ -592,12 +679,63 @@ def evaluate_exit_bar(*, scored: dict, manifest: dict | None = None,
             "config_mismatch",
             "no pre-registration: without a protocol committed BEFORE the run "
             "the bar was not fixed in advance, so no claim can be published")
+    # A falsification PROBE measures the gate, not the product: it plants a
+    # known defect to prove the gate can see it. Publishing its verdict would
+    # report a deliberately broken run as the measurement.
+    if scored.get("mutated"):
+        return _inconclusive(
+            "config_mismatch",
+            f"this run is a falsification probe ({scored['mutated']}) — the "
+            f"gate readings it produces are evidence ABOUT the gate, never a "
+            f"measurement that can satisfy the exit bar")
     if prereg.get("corpus", {}).get("hash") != scored.get("corpus_hash"):
         return _inconclusive(
             "hash_mismatch",
             "the pre-registration's corpus_hash does not match this corpus — "
             "the protocol describes a corpus that no longer exists (re-keyed "
             "gold, or an edited fixture)")
+    # (1b) the scored run must COVER the pre-registered corpus. Without this,
+    # an empty (or class-stripped) result set is a NO-OP GATE: every downstream
+    # clause divides by a denominator it never measures — `seen == n` is 0 == 0,
+    # and a corpus with no verbatim case trivially has "no verbatim regression".
+    # The corpus hash already catches an edited corpus, but a caller can score a
+    # tabulated subset, so the coverage is checked explicitly.
+    if not scored.get("cases"):
+        return _inconclusive(
+            "config_mismatch",
+            "the scored run carries NO cases — an empty result set cannot "
+            "satisfy a bar whose clauses are all per-case")
+    covered = {row["case_id"] for row in scored["cases"]}
+    expected_cases = set(prereg["corpus"].get("cases") or ())
+    if expected_cases and covered != expected_cases:
+        return _inconclusive(
+            "config_mismatch",
+            f"the scored run covers {sorted(covered)}, but the "
+            f"pre-registration names {sorted(expected_cases)} — a subset run "
+            f"is not the pre-registered measurement")
+    classes = {row["class"] for row in scored["cases"]}
+    expected_classes = set(prereg["corpus"].get("classes") or ())
+    if expected_classes and classes != expected_classes:
+        return _inconclusive(
+            "config_mismatch",
+            f"the scored run covers class(es) {sorted(classes)}, but the "
+            f"pre-registration names {sorted(expected_classes)} — a missing "
+            f"class silently empties the half of the bar that grades it")
+
+    # (1c) the run's fixture digest must be THIS corpus's fixtures. The corpus
+    # hash binds the corpus on disk to the pre-registration; this binds the RUN
+    # to the corpus it was scored against (a run over other fixtures cannot be
+    # graded by this gold just because both trees were re-hashed together).
+    if scored.get("run_fixtures_hash") != scored.get("fixtures_hash"):
+        return _inconclusive(
+            "hash_mismatch",
+            "the run's fixtures_hash does not match the scored corpus's — the "
+            "run was over different fixtures than the gold grades")
+
+    # (1d) EVERY field the pre-registration fixes must actually be enforced.
+    # A pre-registered field that is written and never read is documentation,
+    # not a pre-registration: the protocol's authority is exactly the set of
+    # fields the bar refuses to run without.
     mismatches = []
     if prereg["reader"]["model_spec"] != scored.get("reader_model_spec"):
         mismatches.append(f"reader {prereg['reader']['model_spec']!r} != "
@@ -605,8 +743,26 @@ def evaluate_exit_bar(*, scored: dict, manifest: dict | None = None,
     if prereg["judge"]["model_spec"] != scored.get("judge_model_spec"):
         mismatches.append(f"judge {prereg['judge']['model_spec']!r} != "
                           f"{scored.get('judge_model_spec')!r}")
+    if prereg["judge"].get("pin") != scored.get("judge_pin"):
+        mismatches.append(f"judge pin {prereg['judge'].get('pin')!r} != "
+                          f"{scored.get('judge_pin')!r}")
+    if prereg["judge"].get("rubric_id_hash") != scored.get(
+            "judge_rubric_id_hash"):
+        mismatches.append("judge rubric_id_hash differs from the "
+                          "pre-registration (the anscheck template moved)")
+    # The seeder flags are the enforced part; the pre-registration also carries
+    # a prose `note`, which describes the choice rather than configuring it.
+    for flag in ("turns_embedded", "search_keys"):
+        if prereg["seed"].get(flag) != (scored.get("seed") or {}).get(flag):
+            mismatches.append(
+                f"seed {flag} {prereg['seed'].get(flag)!r} != "
+                f"{(scored.get('seed') or {}).get(flag)!r}")
     if prereg["arms"] != scored.get("arms"):
         mismatches.append(f"arms {prereg['arms']} != {scored.get('arms')}")
+    if prereg.get("gate_arm") != GATE_ARM:
+        mismatches.append(
+            f"pre-registered gate_arm {prereg.get('gate_arm')!r} is not the arm "
+            f"this bar grades ({GATE_ARM!r})")
     if mismatches:
         return _inconclusive(
             "config_mismatch",
@@ -622,6 +778,19 @@ def evaluate_exit_bar(*, scored: dict, manifest: dict | None = None,
             "runner_error",
             f"case(s) {sorted(unmeasured)} did not run in both arms — an "
             f"unmeasured case is never a pass")
+
+    # (2b) THE METRICS BLOCK IS NOT THE RESULT. Recompute it from the per-case
+    # rows and refuse a summary that disagrees with the rows it summarises: a
+    # metrics dict is editable from outside the audit trail (a forged artifacts
+    # file, a "fix up the numbers" patch), and a bar that reads only the summary
+    # cannot tell a real 0-of-3 from an edited 0-of-0.
+    recomputed = aggregate(scored["cases"])
+    if recomputed != scored.get("metrics"):
+        return _inconclusive(
+            "config_mismatch",
+            "the metrics block disagrees with the per-case rows it summarises "
+            "— the summary was edited (or produced by a different scorer), so "
+            "neither reading can be published")
 
     # (3) the two regression clauses
     live = scored["metrics"][f"superseded_live@{GATE_ARM}"]
@@ -688,7 +857,8 @@ def build_receipt(*, scored: dict, commit: str, cost_usd: float,
         date=date or datetime.now(UTC).strftime("%Y-%m-%d"),
         commit=commit,
         corpus_hash=scored["corpus_hash"],
-        judge_pin=JUDGE_PIN,
+        judge_pin=scored.get("judge_pin") or judge_pin_for(
+            scored["judge_model_spec"]),
         judge_model=scored.get("judge_model_id") or scored["judge_model_spec"],
         judge_rubric_id_hash=scored.get("judge_rubric_id_hash")
         or judge_rubric_id_hash(),
@@ -779,12 +949,45 @@ def validate_ask_receipt(receipt: dict) -> list[str]:
                           f"judge identity")
     if not str(receipt.get("corpus_hash") or "").startswith("sha256:"):
         issues.append("receipt.corpus_hash: expected a sha256:… corpus hash")
+    # ── the judge identity must be internally consistent ──
+    # A pin/spec pair that cannot both be true is how a stub-graded wiring check
+    # is published under the official judge pin. The pin is DERIVED from the
+    # spec in this module; a receipt that pairs them differently was not built
+    # by this module (or was edited afterwards).
+    resolved = receipt.get("resolved_config") or {}
+    spec = str(resolved.get("judge_model_spec") or "")
+    model = str(receipt.get("judge_model") or "")
+    pin = str(receipt.get("judge_pin") or "")
+    if spec and pin and pin != judge_pin_for(spec):
+        issues.append(
+            f"receipt.judge_pin: {pin!r} does not belong to judge spec "
+            f"{spec!r} (expected {judge_pin_for(spec)!r})")
+    if spec and model and model not in spec and spec not in model:
+        issues.append(
+            f"receipt.judge_model: {model!r} is inconsistent with the resolved "
+            f"judge spec {spec!r}")
+    if receipt.get("verdict") == "pass" and pin == MOCK_JUDGE_PIN:
+        issues.append(
+            "receipt.verdict: a MOCK-graded run cannot publish 'pass' — a mock "
+            "judge proves the wiring, never the measurement")
     # ── the receipt must not disagree with its own evidence ──
     live = metrics[f"superseded_live@{GATE_ARM}"]
     verbatim = metrics["verbatim_no_regression"]
-    gate_red = bool(live.get("rendered_live")) or (
+    # `n` is the denominator the claim depends on: grosser numbers are only
+    # meaningful over a measured population, so a zero denominator is a
+    # malformed receipt rather than a clean one.
+    for name, block in ((f"superseded_live@{GATE_ARM}", live),
+                        ("verbatim_no_regression", verbatim)):
+        n = block.get("n")
+        if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+            issues.append(f"receipt.metrics.{name}.n: expected a count, got {n!r}")
+    live_unknown = any(live.get(k) is None for k in ("seen", "rendered_live"))
+    gate_red = live_unknown or bool(live.get("rendered_live")) or (
         live.get("seen") != live.get("n"))
-    verbatim_red = bool(verbatim.get("regressions"))
+    verbatim_red = bool(verbatim.get("regressions")) or (
+        isinstance(verbatim.get("raw_committed"), int)
+        and isinstance(verbatim.get("distilled_committed"), int)
+        and verbatim["raw_committed"] > verbatim["distilled_committed"])
     if receipt.get("verdict") == "pass" and (gate_red or verbatim_red):
         issues.append(
             "receipt.verdict: 'pass' contradicts the receipt's own metrics "
@@ -811,11 +1014,23 @@ def render_report(*, receipt: dict, scored: dict, prereg: dict,
     ku_raw = m["current_state@raw"]
     live = m[f"superseded_live@{GATE_ARM}"]
     verbatim = m["verbatim_no_regression"]
+    def _claim_cell(claims: list[dict]) -> str:
+        # Every planted pair is reported, not just the first: the denominator is
+        # claims, so a second ungated pair would be invisible in this table.
+        if not claims:
+            return "—"
+        return ", ".join(
+            ("seen" if c["seen"] else "unseen")
+            + " / "
+            + ("LIVE" if c["rendered_live"]
+               else ("flagged" if c["flagged"] else "live-unflagged"))
+            for c in claims)
+
     rows = "\n".join(
         f"| `{row['case_id']}` | {row['class']} | "
         f"{'✅' if row['arms']['raw']['committed'] else '❌'} | "
         f"{'✅' if row['arms'][GATE_ARM]['committed'] else '❌'} | "
-        f"{(('seen' if row['superseded']['seen'] else 'unseen') + ' / ' + ('LIVE' if row['superseded']['rendered_live'] else ('flagged' if row['superseded']['flagged'] else 'live-unflagged'))) if row['superseded'] else '—'} |"
+        f"{_claim_cell(row['superseded'])} |"
         for row in scored["cases"])
     notes = "\n".join(f"- {note}" for note in receipt["notes"])
     return f"""---
@@ -843,7 +1058,8 @@ extends: tools/longmem_eval/measure_ask_distilled.py, tests/eval/ask/README.md
 | Field | Value |
 |---|---|
 | Benchmark | ask lane over a distilled + planted-supersession corpus (`tests/eval/ask`, {prereg['corpus']['n_cases']} hand-authored cases) |
-| Classes | {", ".join(f"`{c}`" for c in prereg["corpus"]["classes"])} |
+| Cases scored | {len(scored["cases"])} of {prereg["corpus"]["n_cases"]} pre-registered |
+| Classes | {", ".join(f"`{c}`" for c in sorted({row["class"] for row in scored["cases"]}))} |
 | Arms | {", ".join(f"`{a}`" for a in prereg["arms"])} — one invocation, paired read (D4) |
 | Gate arm | `{prereg["gate_arm"]}` |
 | Reader | `{receipt["reader_model_spec"]}` (temperature {prereg["reader"]["temperature"]}, max_tokens {prereg["reader"]["max_tokens"]}, pinned: {receipt["reader_pinned"]}) |
@@ -883,7 +1099,7 @@ verbatim/raw") held.
 
 ## 4. Per-case readings
 
-| Case | Class | `raw` committed | `{GATE_ARM}` committed | Superseded claim |
+| Case | Class | `raw` committed | `{GATE_ARM}` committed | Superseded claim(s) |
 |---|---|---|---|---|
 {rows}
 
@@ -997,9 +1213,8 @@ def _main(argv: list[str] | None = None) -> int:
     if args.cmd == "run":
         report = run_sealed(
             corpus_root=Path(args.corpus_root),
-            mutate=(_drop_supersession if args.mutate else None))
-        if args.mutate:
-            report["mutated"] = "planted supersessions dropped on the gate arm"
+            mutate=(_drop_supersession if args.mutate else None),
+            mutate_label="planted supersessions dropped on the gate arm")
         _dump(args.out, report)
         measured = sum(1 for c in report["cases"]
                        for arm in report["arms"] if c["arms"][arm]["ok"])

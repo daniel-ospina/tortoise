@@ -47,10 +47,18 @@ distillation, never a corpus difference.
 
 The answer key's only on-disk home is `gold/`. The **run** step is handed
 `corpus.load_fixtures`, which globs `fixtures/*.json` only and refuses any
-fixture carrying a grading key (`answer` / `gold` / `grading` / `expected`); the
-**score** step is the one that opens `gold/`. Blindness is a property of the
-API, not a promise — `tests/test_measure_ask_distilled.py::
+fixture carrying a grading key (`answer` / `gold` / `grading` / `expected`) **at
+any depth** (`find_grading_keys` — a top-level check is walked past by a nested
+key); the **score** step is the one that opens `gold/`. Blindness is a property
+of the API, not a promise — `tests/test_measure_ask_distilled.py::
 test_the_runner_cannot_read_the_sealed_gold` proves it with a sentinel.
+
+**What "sealed" does not mean.** It is structural, not cryptographic: for a
+knowledge-update case the answer is one of the planted claims anyway, and the
+full `corpus_hash` digests `gold/`, so it would act as a weak oracle. That is
+why the **run** record carries `fixtures_hash` (fixtures only) and the **score**
+step computes the full `corpus_hash` — the bar binds the run to the corpus
+through `fixtures_hash` and the corpus to the protocol through `corpus_hash`.
 
 A **gold-only** edit changes the tree-wide `corpus_hash`, which voids the
 pre-registration: a run over the re-keyed corpus reports `inconclusive`

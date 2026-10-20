@@ -48,6 +48,10 @@ CLASSES: tuple[str, ...] = (CLASS_KNOWLEDGE_UPDATE, CLASS_VERBATIM)
 
 #: Keys that belong to the sealed grading key ONLY. A fixture carrying one is
 #: a validation error: the answer key's only on-disk home is ``gold/``.
+#:
+#: Scanned RECURSIVELY (:func:`find_grading_keys`): a top-level-only check is
+#: defeated by ``{"distilled": {"claims": [{"answer": "…"}]}}``, which is the
+#: shape a future case would most plausibly grow into.
 GRADING_KEYS = frozenset({"answer", "gold", "grading", "expected"})
 
 FIXTURE_GLOB = "fixtures/*.json"
@@ -99,6 +103,24 @@ def case_ids(root: Path = ASK_DIR) -> list[str]:
     return sorted(p.stem for p in (root / "fixtures").glob("*.json"))
 
 
+def compute_fixtures_hash(root: Path = ASK_DIR) -> str:
+    """sha256 over the FIXTURE files only (``fixtures/*.json``).
+
+    The RUN step records this, never the full corpus hash: the full hash covers
+    the sealed gold, and handing the runner a digest of the answer key would be
+    a (weak) oracle — ``gold/<case>.gold.json`` is fully determined by
+    ``{schema, case_id, class, answer, judge_template}`` with a known rendering,
+    so everything but the answer is known or guessable. The full hash is
+    computed by the SCORE step, which is allowed to open the key.
+    """
+    digests = [(rel, sha256_file(path))
+               for rel, path in ((_relative(p, root), p)
+                                 for p in sorted((root / "fixtures").glob("*.json")))]
+    payload = "\n".join(f"{rel}:{digest}"
+                        for rel, digest in sorted(digests)).encode("utf-8")
+    return sha256_bytes(payload)
+
+
 def compute_corpus_hash(root: Path = ASK_DIR) -> str:
     """sha256 over every fixture + gold file.
 
@@ -118,21 +140,42 @@ def compute_corpus_hash(root: Path = ASK_DIR) -> str:
 
 # ── sealed loaders ────────────────────────────────────────────────────────
 
+def find_grading_keys(node, path: str = "") -> list[str]:
+    """Recursively find grading-key paths in a document (empty = clean).
+
+    A top-level ``intersection`` is a one-depth guard: nesting the key one level
+    down (``{"distilled": {"claims": [{"answer": …}]}}``) walked straight past
+    the loader, the generator check and the corpus test, all three of which
+    claimed the answer key had exactly one home. One predicate, three callers.
+    """
+    found: list[str] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            here = f"{path}.{key}" if path else str(key)
+            if key in GRADING_KEYS:
+                found.append(here)
+            found.extend(find_grading_keys(value, here))
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            found.extend(find_grading_keys(value, f"{path}[{index}]"))
+    return found
+
+
 def load_fixtures(root: Path = ASK_DIR) -> list[dict]:
     """The RUNNER's input: the fixtures ONLY, in case-id order.
 
-    Refuses (loudly) any fixture carrying a grading key — the sealed-key rule
-    is enforced at the boundary the runner crosses, not by convention.
+    Refuses (loudly) any fixture carrying a grading key ANYWHERE in its
+    document — the sealed-key rule is enforced at the boundary the runner
+    crosses, not by convention.
     """
     out: list[dict] = []
     for path in sorted((root / "fixtures").glob("*.json")):
         fixture = read_json(path)
-        leaked = GRADING_KEYS.intersection(fixture)
+        leaked = find_grading_keys(fixture)
         if leaked:
             raise ValueError(
                 f"sealed corpus violation: {_relative(path, root)} carries "
-                f"grading key(s) {sorted(leaked)} — the answer key lives only "
-                f"in gold/")
+                f"grading key(s) {leaked} — the answer key lives only in gold/")
         out.append(fixture)
     return out
 

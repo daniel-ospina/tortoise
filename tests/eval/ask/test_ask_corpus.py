@@ -48,11 +48,17 @@ def test_both_graded_classes_are_present_with_a_real_denominator():
 
 
 def test_no_fixture_carries_a_grading_key():
-    """The answer key's only on-disk home is ``gold/``."""
+    """The answer key's only on-disk home is ``gold/`` — at ANY depth.
+
+    Scanned recursively on purpose: a top-level check passes a fixture that
+    nests the answer one level down (``distilled.claims[i].answer``), which is
+    the shape a later case would most plausibly grow into.
+    """
     for path in sorted(corpus.FIXTURES_DIR.glob("*.json")):
         doc = json.loads(path.read_text(encoding="utf-8"))
-        assert not corpus.GRADING_KEYS.intersection(doc), (
-            f"{path.name} carries a grading key")
+        assert corpus.find_grading_keys(doc) == [], (
+            f"{path.name} carries grading key(s) "
+            f"{corpus.find_grading_keys(doc)}")
 
 
 def test_every_distilled_claim_is_verbatim_in_its_own_session():

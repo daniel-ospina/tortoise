@@ -341,8 +341,9 @@ def _issues(case: dict) -> list[str]:
                        f"(got {len(claims)})")
     if not str(case["gold"].get("answer") or "").strip():
         out.append(f"{cid}: empty gold answer")
-    if corpus.GRADING_KEYS.intersection(_fixture_doc(case)):
-        out.append(f"{cid}: fixture carries a grading key")
+    leaked = corpus.find_grading_keys(_fixture_doc(case))
+    if leaked:
+        out.append(f"{cid}: fixture carries grading key(s) {leaked}")
     return out
 
 

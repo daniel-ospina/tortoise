@@ -107,6 +107,19 @@ def _answer_map() -> dict[str, str]:
     }
 
 
+class _StubJudge(MockJudge):
+    """The mock's containment grading, under an identity the receipt can state.
+
+    ``MockJudge`` cannot publish a PASS (its pin is the mock pin, by design):
+    a mock-graded run proves the *wiring*, never the measurement. These tests
+    do need a receipt that validates, so the stub declares its own identity and
+    the protocol pre-registers THAT — which is the same honest path a real
+    judge takes, with a deterministic grader standing in for the API.
+    """
+
+    model_id = "test-stub-judge"
+
+
 def _factory(reader):
     return lambda: reader
 
@@ -148,7 +161,8 @@ def _small_corpus(tmp_path: Path) -> Path:
     return root
 
 
-def _mock_prereg(root: Path | None = None) -> dict:
+def _mock_prereg(root: Path | None = None,
+                 judge_spec: str | None = None) -> dict:
     """A pre-registration for the MOCK judge (offline wiring runs only).
 
     The committed protocol pins the OFFICIAL judge; a run graded by
@@ -158,10 +172,11 @@ def _mock_prereg(root: Path | None = None) -> dict:
     measured number (its reader and judge are not the pre-registered ones).
     """
     root = root or ask_corpus.ASK_DIR
-    record = m.protocol(judge_spec=m.MOCK_JUDGE_SPEC)
+    record = m.protocol(judge_spec=judge_spec or _StubJudge.model_id)
     record["corpus"].update({
         "hash": ask_corpus.compute_corpus_hash(root),
         "manifest_verified": True,
+        "cases": ask_corpus.case_ids(root),
         "n_cases": len(ask_corpus.case_ids(root)),
     })
     return record
@@ -188,8 +203,8 @@ def shared_run(tmp_path_factory):
     root = _small_corpus(tmp)
     run = m.run_sealed(corpus_root=root,
                        reader_factory=_factory(_RecordingReader(_answer_map(), [])))
-    scored = m.score(run_report=run, corpus_root=root, judge=MockJudge(),
-                     mock=True)
+    scored = m.score(run_report=run, corpus_root=root, judge=_StubJudge(),
+                     judge_spec=_StubJudge.model_id)
     scored["bar"] = m.evaluate_exit_bar(
         scored=scored, manifest=ask_corpus.verify_manifest(root),
         prereg=_mock_prereg(root))
@@ -206,7 +221,8 @@ def _scored(tmp_path: Path, *, mutate=None, reader=None, judge=None):
     run = m.run_sealed(corpus_root=root, reader_factory=_factory(reader),
                        mutate=mutate)
     scored = m.score(run_report=run, corpus_root=root,
-                     judge=judge or MockJudge(), mock=True)
+                     judge=judge or _StubJudge(),
+                     judge_spec=(judge or _StubJudge()).model_id)
     scored["bar"] = m.evaluate_exit_bar(
         scored=scored, manifest=ask_corpus.verify_manifest(root),
         prereg=_mock_prereg(root))
@@ -305,18 +321,27 @@ def test_a_clean_run_passes_with_no_knowledge_update_threshold(shared_run):
     assert len(run["cases"]) == len(_SMALL_CASES)
     assert scored["bar"]["verdict"] == "pass", scored["bar"]
     live = scored["metrics"]["superseded_live@distilled"]
-    assert live == {"seen": 1, "rendered_live": 0, "n": 1}, live
+    assert live == {"seen": 1, "rendered_live": 0, "n": 1, "n_cases": 1}, live
     assert scored["metrics"]["verbatim_no_regression"]["regressions"] == []
 
-    # ⛔ D8: the KU rate is reported, never thresholded. Zero committed
-    # current states with a green D8 gate and no verbatim regression is still
-    # a PASS — the bar has no pre-set quality threshold to fail against.
-    flattened = json.loads(json.dumps(scored))
-    flattened["metrics"]["current_state@distilled"] = {
-        "committed": 0, "n": 1, "rate": 0.0}
-    assert m.evaluate_exit_bar(
-        scored=flattened,
-        prereg=_mock_prereg(shared_run["root"]))["verdict"] == "pass", (
+    # ⛔ D8: the KU rate is reported, never thresholded. A run whose reader
+    # commits NOTHING on the knowledge-update case, with a green D8 gate and no
+    # verbatim regression, is still a PASS — the bar has no pre-set quality
+    # threshold to fail against. (Proved with a genuinely silent reader rather
+    # than by editing the metrics block: a hand-edited summary is refused now.)
+    class _NoKuJudge(_StubJudge):
+        """Committed everywhere except the knowledge-update answer."""
+        def judge(self, **kwargs):
+            if "Porto" in (kwargs.get("answer") or ""):
+                return False
+            return super().judge(**kwargs)
+
+    no_ku = m.score(run_report=shared_run["run"], corpus_root=shared_run["root"],
+                    judge=_NoKuJudge(), judge_spec=_NoKuJudge.model_id)
+    no_ku["bar"] = m.evaluate_exit_bar(
+        scored=no_ku, prereg=_mock_prereg(shared_run["root"]))
+    assert no_ku["metrics"]["current_state@distilled"]["committed"] == 0
+    assert no_ku["bar"]["verdict"] == "pass", (
         "the exit bar must not invent a knowledge-update threshold — D8 says "
         "the first published run sets that number")
 
@@ -348,8 +373,49 @@ def test_dropping_the_planted_supersession_turns_the_d8_gate_red(tmp_path):
     _run, scored = _scored(tmp_path, mutate=m._drop_supersession)
     live = scored["metrics"]["superseded_live@distilled"]
     assert live["rendered_live"] == live["n"] == 1, live
-    assert scored["bar"]["verdict"] == "regression", scored["bar"]
-    assert any("D8" in reason for reason in scored["bar"]["reasons"])
+    # A probe measures the GATE, not the product: its readings prove the gate
+    # can see a live superseded claim, but they can never be published as the
+    # measurement (that would report a deliberately broken run as the result).
+    assert scored["bar"]["verdict"] == "inconclusive", scored["bar"]
+    assert any("falsification probe" in reason
+               for reason in scored["bar"]["reasons"])
+    as_measurement = json.loads(json.dumps(scored))
+    as_measurement.pop("mutated")
+    probed = m.evaluate_exit_bar(scored=as_measurement,
+                                 prereg=_mock_prereg(tmp_path / "small-corpus"))
+    assert probed["verdict"] == "regression", probed
+    assert any("D8" in reason for reason in probed["reasons"])
+
+
+def test_an_empty_or_class_stripped_run_cannot_pass(shared_run):
+    """The no-op gate: every clause of the bar is per-case, so a result set with
+    no cases — or with one graded CLASS stripped out — divides by a denominator
+    it never measured. `seen == n` is 0 == 0 and a corpus with no verbatim case
+    trivially has "no verbatim regression". Both must be INCONCLUSIVE."""
+    root = shared_run["root"]
+    prereg = _mock_prereg(root)
+
+    empty = json.loads(json.dumps(shared_run["scored"]))
+    empty["cases"] = []
+    bar = m.evaluate_exit_bar(scored=empty, prereg=prereg)
+    assert bar["verdict"] == "inconclusive", bar
+    assert "NO cases" in bar["reasons"][0]
+
+    # Relabel (do not drop) the verbatim row: the CLASS coverage must be
+    # checked even when the case count is intact — otherwise a mislabelled case
+    # silently empties the no-regression half of the bar.
+    stripped = json.loads(json.dumps(shared_run["scored"]))
+    for row in stripped["cases"]:
+        if row["class"] == "verbatim":
+            row["class"] = "knowledge-update"
+    bar = m.evaluate_exit_bar(scored=stripped, prereg=prereg)
+    assert bar["verdict"] == "inconclusive", bar
+    assert "missing class" in bar["reasons"][0]
+
+    subset = json.loads(json.dumps(shared_run["scored"]))
+    subset["cases"] = subset["cases"][:1]
+    bar = m.evaluate_exit_bar(scored=subset, prereg=prereg)
+    assert bar["verdict"] == "inconclusive", bar
 
 
 def test_an_unmeasured_case_is_inconclusive_and_never_a_pass(shared_run):
@@ -359,8 +425,8 @@ def test_an_unmeasured_case_is_inconclusive_and_never_a_pass(shared_run):
     run["cases"][0]["arms"]["raw"] = {
         "ok": False, "answer": "", "evidence": "", "error": "boom"}
     root = shared_run["root"]
-    scored = m.score(run_report=run, corpus_root=root, judge=MockJudge(),
-                     mock=True)
+    scored = m.score(run_report=run, corpus_root=root, judge=_StubJudge(),
+                     judge_spec=_StubJudge.model_id)
     bar = m.evaluate_exit_bar(scored=scored, prereg=_mock_prereg(root))
     assert bar["verdict"] == "inconclusive", bar
     assert bar["failure_origin"] == "runner_error"
@@ -385,8 +451,8 @@ def test_a_gold_only_edit_invalidates_the_preregistration(tmp_path):
 
     run = m.run_sealed(corpus_root=root,
                        reader_factory=_factory(_RecordingReader(_answer_map(), [])))
-    scored = m.score(run_report=run, corpus_root=root, judge=MockJudge(),
-                     mock=True)
+    scored = m.score(run_report=run, corpus_root=root, judge=_StubJudge(),
+                     judge_spec=_StubJudge.model_id)
     bar = m.evaluate_exit_bar(scored=scored,
                               manifest=ask_corpus.verify_manifest(root),
                               prereg=prereg)
@@ -512,10 +578,211 @@ def test_cli_preregister_run_score_publish(tmp_path, monkeypatch):
 
     report = tmp_path / "run-report.md"
     receipt = tmp_path / "receipt.json"
+    # A MOCK-graded run is wiring, never a measurement: publish refuses it even
+    # though its bar verdict is PASS.
     assert m._main(["publish", "--scored", str(scored_path),
                     "--commit", "c" * 40, "--cost-usd", "0.02",
                     "--out", str(report), "--receipt", str(receipt),
                     "--prereg", str(prereg_path),
+                    "--corpus-root", str(root)]) == 2
+    assert not report.exists() and not receipt.exists()
+    return
+
+def test_cli_publishes_a_run_under_an_honest_judge_identity(tmp_path):
+    """The publish path end to end, with the judge identity the receipt states.
+
+    The mock pin cannot carry a PASS (``test_cli_preregister_run_score_publish``
+    asserts that refusal). Here the same wiring runs under a stub judge whose
+    identity is pre-registered and recorded, which is the shape a real judge
+    takes — so the receipt validates, the report renders, and the numbers in it
+    are the numbers the bar read.
+    """
+    root = _small_corpus(tmp_path)
+    run = m.run_sealed(corpus_root=root,
+                       reader_factory=_factory(_RecordingReader(_answer_map(), [])))
+    scored = m.score(run_report=run, corpus_root=root, judge=_StubJudge(),
+                     judge_spec=_StubJudge.model_id)
+    prereg = _mock_prereg(root)
+    prereg_path = tmp_path / "prereg.json"
+    prereg_path.write_text(json.dumps(prereg), encoding="utf-8")
+    scored["bar"] = m.evaluate_exit_bar(
+        scored=scored, manifest=ask_corpus.verify_manifest(root), prereg=prereg)
+    assert scored["bar"]["verdict"] == "pass", scored["bar"]
+    scored_path = tmp_path / "scored.json"
+    scored_path.write_text(json.dumps(scored), encoding="utf-8")
+
+    report = tmp_path / "run-report.md"
+    receipt_path = tmp_path / "receipt.json"
+    assert m._main(["publish", "--scored", str(scored_path),
+                    "--commit", "c" * 40, "--cost-usd", "0.02",
+                    "--out", str(report), "--receipt", str(receipt_path),
+                    "--prereg", str(prereg_path),
                     "--corpus-root", str(root)]) == 0
     assert report.read_text(encoding="utf-8").startswith("---\ntitle:")
-    assert json.loads(receipt.read_text(encoding="utf-8"))["verdict"] == "pass"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["verdict"] == "pass"
+    assert receipt["judge_model"] == _StubJudge.model_id
+    assert m.validate_ask_receipt(receipt) == []
+
+
+# ── reviewer-driven hardening: the bar must not be satisfiable by construction ──
+
+def test_a_metrics_block_that_disagrees_with_the_rows_cannot_pass(shared_run):
+    """A SUMMARY IS NOT A RESULT.
+
+    The bar's clauses all read the metrics block, which is a plain dict in a
+    JSON artifact — editable from outside the audit trail. If the rows say a
+    superseded claim was RENDERED LIVE and the summary says 0 of 1, a bar that
+    trusts the summary publishes a PASS over a red reading.
+    """
+    scored = json.loads(json.dumps(shared_run["scored"]))
+    row = next(r for r in scored["cases"] if r["superseded"])
+    row["superseded"][0]["rendered_live"] = True  # the rows now contradict…
+    bar = m.evaluate_exit_bar(scored=scored,
+                              prereg=_mock_prereg(shared_run["root"]))
+    assert bar["verdict"] == "inconclusive", bar
+    assert any("disagrees with the per-case rows" in r for r in bar["reasons"])
+
+
+def test_the_judge_identity_is_derived_from_the_object_that_graded(tmp_path):
+    """A caller-supplied judge may not be recorded under a spec it does not
+    match: `score(judge=MockJudge())` with the official spec in scope would
+    otherwise satisfy the pre-registered judge check while a stub graded every
+    answer, and publish the stub's numbers under the official pin."""
+    root = _small_corpus(tmp_path)
+    run = m.run_sealed(corpus_root=root,
+                       reader_factory=_factory(_RecordingReader(_answer_map(), [])))
+    official = "openai:gpt-4o-2024-08-06"
+    scored = m.score(run_report=run, corpus_root=root, judge=MockJudge(),
+                     judge_spec=official)
+    assert scored["judge_model_spec"] == m.MOCK_JUDGE_SPEC, scored["judge_model_spec"]
+    assert scored["judge_pin"] == m.MOCK_JUDGE_PIN
+    # …and the pre-registration's official config check refuses it
+    prereg = m.protocol(judge_spec=official)
+    prereg["corpus"].update({"hash": scored["corpus_hash"],
+                             "cases": ask_corpus.case_ids(root),
+                             "classes": sorted({r["class"] for r in scored["cases"]})})
+    bar = m.evaluate_exit_bar(scored=scored, prereg=prereg)
+    assert bar["verdict"] == "inconclusive", bar
+
+
+def test_a_mock_graded_receipt_cannot_claim_the_official_pin(tmp_path):
+    """The pin travels with the spec: a receipt pairing the official pin with a
+    mock judge is rejected, and a mock pin can never carry a PASS."""
+    root = _small_corpus(tmp_path)
+    run = m.run_sealed(corpus_root=root,
+                       reader_factory=_factory(_RecordingReader(_answer_map(), [])))
+    scored = m.score(run_report=run, corpus_root=root, mock=True)
+    scored["bar"] = m.evaluate_exit_bar(
+        scored=scored, prereg=_mock_prereg(root,
+                                           judge_spec=m.MOCK_JUDGE_SPEC))
+    assert scored["bar"]["verdict"] == "pass", scored["bar"]
+    receipt = m.build_receipt(scored=scored, commit="e" * 40, cost_usd=0.0,
+                              prereg_sha256="0" * 64)
+    mock_issues = m.validate_ask_receipt(receipt)
+    assert any("MOCK-graded run cannot publish" in i for i in mock_issues), mock_issues
+    # forging the pin onto the same receipt is caught by the derived-pin rule
+    receipt["judge_pin"] = m.JUDGE_PIN
+    issues = m.validate_ask_receipt(receipt)
+    assert any("does not belong to judge spec" in i for i in issues), issues
+
+
+def test_a_nested_grading_key_is_refused(tmp_path):
+    """The sealed-key rule cannot be a one-depth check: nesting the answer one
+    level down walked past the loader, the generator and the corpus test."""
+    root = _small_corpus(tmp_path)
+    fixture = json.loads(json.dumps(ask_corpus.load_fixtures(root)[0]))
+    fixture["distilled"]["claims"][0]["answer"] = "leaked"
+    path = root / "fixtures" / f"{fixture['case_id']}.json"
+    path.write_text(json.dumps(fixture), encoding="utf-8")
+    with pytest.raises(ValueError, match="grading key"):
+        ask_corpus.load_fixtures(root)
+    assert ask_corpus.find_grading_keys(fixture) == [
+        "distilled.claims[0].answer"]
+
+
+def test_every_planted_supersession_is_gated_not_just_the_first(tmp_path):
+    """The denominator is planted CLAIMS. Gating only the first pair while
+    counting cases would leave a second planted dead claim ungated and still
+    publish a green D8 row."""
+    case = {
+        "case_id": "ask99_two_pairs",
+        "class": ask_corpus.CLASS_KNOWLEDGE_UPDATE,
+        "question_type": "knowledge-update",
+        "question": "Where do I live and what is my name?",
+        "question_date": "2023/06/01 (Thu) 10:00",
+        "turn_store": {
+            "session_ids": ("a-old", "a-new", "b-old", "b-new"),
+            "dates": ("2023/01/02 (Mon) 10:00", "2023/02/03 (Fri) 10:00",
+                      "2023/03/04 (Sat) 10:00", "2023/04/05 (Wed) 10:00"),
+            "sessions": (({"role": "user", "content": "I live in Lisbon."},),
+                         ({"role": "user", "content": "I live in Porto."},),
+                         ({"role": "user", "content": "My name is Bea."},),
+                         ({"role": "user", "content": "My name is Ana."},)),
+        },
+        "claims": (
+            {"text": "I live in Lisbon.", "session_id": "a-old",
+             "valid_from": "2023-01-02"},
+            {"text": "I live in Porto.", "session_id": "a-new",
+             "valid_from": "2023-02-03"},
+            {"text": "My name is Bea.", "session_id": "b-old",
+             "valid_from": "2023-03-04"},
+            {"text": "My name is Ana.", "session_id": "b-new",
+             "valid_from": "2023-04-05"},
+        ),
+        "supersessions": (
+            {"old": "I live in Lisbon.", "new": "I live in Porto."},
+            {"old": "My name is Bea.", "new": "My name is Ana."},
+        ),
+        "judge_template": "knowledge-update",
+        "gold": {"answer": "I live in Porto and my name is Ana."},
+    }
+    assert generate_corpus._issues(case) == []
+    root = tmp_path / "two-pairs"
+    # Rendered directly: `write_corpus` enforces the corpus-LEVEL invariant that
+    # both classes exist (the exit bar needs both halves), and this case is a
+    # single-class probe. That guard stays untouched.
+    for rel, payload in generate_corpus.render((case,)).items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(payload, encoding="utf-8")
+    answers = {"Where do I live and what is my name?":
+               "I live in Porto and my name is Ana."}
+    run = m.run_sealed(corpus_root=root,
+                       reader_factory=_factory(_RecordingReader(answers, [])))
+    scored = m.score(run_report=run, corpus_root=root, judge=_StubJudge(),
+                     judge_spec=_StubJudge.model_id)
+    live = scored["metrics"]["superseded_live@distilled"]
+    assert live["n"] == 2 and live["n_cases"] == 1, live
+    assert live["seen"] == 2 and live["rendered_live"] == 0, live
+    # …and the probe that drops BOTH pairs proves the gate reads both
+    probed = m.run_sealed(corpus_root=root, mutate=m._drop_supersession,
+                          reader_factory=_factory(_RecordingReader(answers, [])))
+    scored_probe = m.score(run_report=probed, corpus_root=root,
+                           judge=_StubJudge(), judge_spec=_StubJudge.model_id)
+    assert scored_probe["metrics"]["superseded_live@distilled"][
+        "rendered_live"] == 2
+
+
+def test_a_pre_registered_field_is_enforced_not_just_written(shared_run):
+    """A field the bar never reads is documentation, not a pre-registration."""
+    scored = json.loads(json.dumps(shared_run["scored"]))
+    prereg = _mock_prereg(shared_run["root"])
+    prereg["gate_arm"] = "raw"
+    bar = m.evaluate_exit_bar(scored=scored, prereg=prereg)
+    assert bar["verdict"] == "inconclusive", bar
+    assert any("gate_arm" in r for r in bar["reasons"]), bar["reasons"]
+
+
+def test_a_run_over_different_fixtures_cannot_be_scored_as_this_corpus(tmp_path):
+    """The corpus hash binds the corpus to the pre-registration; the fixtures
+    hash binds the RUN to the corpus it is scored against."""
+    root = _small_corpus(tmp_path)
+    run = m.run_sealed(corpus_root=root,
+                       reader_factory=_factory(_RecordingReader(_answer_map(), [])))
+    run["fixtures_hash"] = "sha256:" + "0" * 64
+    scored = m.score(run_report=run, corpus_root=root, judge=_StubJudge(),
+                     judge_spec=_StubJudge.model_id)
+    bar = m.evaluate_exit_bar(scored=scored, prereg=_mock_prereg(root))
+    assert bar["verdict"] == "inconclusive", bar
+    assert any("fixtures_hash" in r for r in bar["reasons"]), bar["reasons"]
