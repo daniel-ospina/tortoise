@@ -2563,6 +2563,13 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
 # concurrency natively — this is a cooperative asyncio task, not a thread
 # (no SQLite/redislite single-writer hazard, #6761/#176).
 _DREAM_QUEUES: dict[str, asyncio.Queue] = {}
+# #9188: the record's tenant for each dream key. The drain opens its OWN SDK
+# (`_open_sdk`), never `_data_sdk`, so without this the record writes a dream
+# pass emits (`ConfidenceChanged`, through `sdk._emit_event`) would be refused
+# `no_tenant` on the very graph the enqueueing credential named. Set at
+# enqueue (where the request's credential is in hand), read in `_open_sdk`,
+# and popped WITH the queue so it cannot outlive the key it describes.
+_DREAM_RECORD_TENANTS: dict[str, tuple[str, str]] = {}
 # #329: per-org hourly budget for /v1/dream?full=true (CPU DoS bound)
 _DREAM_FULL_BUCKETS: dict[str, list[float]] = {}
 _DREAM_TASKS: dict[str, asyncio.Task] = {}
@@ -2780,11 +2787,22 @@ def _dream_lock(key: str) -> threading.Lock:
 
 
 def _enqueue_dream(org_id: str, dirty_roots: list[str],
-                   *, graph_namespace: str | None = None) -> None:
-    """Enqueue affected roots for a tenant's next dream cycle (per graph)."""
+                   *, graph_namespace: str | None = None,
+                   record_tenant: tuple[str, str] | None = None) -> None:
+    """Enqueue affected roots for a tenant's next dream cycle (per graph).
+
+    ``record_tenant`` (#9188) is the Postgres record's tenant for THAT graph,
+    resolved by the enqueueing request from its own credential. The drain can
+    only open a graph, not a tenant, so this is where the answer has to be
+    carried across the queue. ``None`` (an org-wide/session credential, which
+    names no graph) records nothing and the drain's writes are refused
+    `no_tenant` — the default-graph question, not a guess.
+    """
     if not dirty_roots:
         return
     key = _dream_key(org_id, graph_namespace)
+    if record_tenant is not None:
+        _DREAM_RECORD_TENANTS[key] = record_tenant
     q = _DREAM_QUEUES.setdefault(key, asyncio.Queue())
     for root in dirty_roots[: _DREAM_BATCH_MAX]:
         q.put_nowait(root)
@@ -3312,8 +3330,13 @@ async def _dream_worker(org_id: str, key: str | None = None) -> None:
             # fail closed to, and its roots are already drained — an offload
             # failure there would DROP them (until a later sweep) while logging
             # a capacity signal as a graph failure.
-            return (_make_sdk(graph_name=gns) if gns is not None
-                    else _make_sdk(namespace=org_id))
+            sdk = (_make_sdk(graph_name=gns) if gns is not None
+                   else _make_sdk(namespace=org_id))
+            # #9188: this drain writes as the tenant the ENQUEUEING request
+            # named (see `_DREAM_RECORD_TENANTS`) — otherwise every dream-
+            # emitted record on an armed hosted lane is refused `no_tenant`.
+            _bind_dream_record_tenant(sdk, key)
+            return sdk
 
         def _drain(sdk: TortoiseSDK) -> None:
             # #3718: mark → dream on the DEDICATED dream pool, serialized per
@@ -3370,6 +3393,11 @@ async def _dream_worker(org_id: str, key: str | None = None) -> None:
             # Idle: evict the queue (TTL guard) unless a new write re-adds it.
             _DREAM_QUEUES.pop(key, None)
             _DREAM_TASKS.pop(key, None)
+            # #9188: the tenant is a property of THIS key's live queue, so it
+            # goes with it — a re-created graph gets a fresh graphs id, and a
+            # stale one would make every dream-emitted record `write_failed`
+            # (counted, never misfiled, but a permanent red nobody can explain).
+            _DREAM_RECORD_TENANTS.pop(key, None)
 
 
 # ── Rate Limiter ──────────────────────────────────────────────────
@@ -6594,6 +6622,111 @@ def _bind_actor_context(org: dict) -> None:
         _current_actor_user_id.set(_actor)
 
 
+def _resolve_record_tenant(org: dict) -> tuple[str, str] | None:
+    """The Postgres record's tenant for THIS request's credential, or ``None``.
+
+    The ONE place this module asks the question — so the request's own writes
+    (`_bind_record_tenant`), the dream drain it enqueues
+    (`_DREAM_RECORD_TENANTS`) and anything added later cannot answer it three
+    ways. The answer itself is not decided here: it is
+    :func:`tortoise.record_writer.record_tenant_for`, shared with the MCP lane.
+
+    Fail-soft (#5148's rule): the record is a derived, replayable store, so a
+    resolution fault must never fail the request that is about to write.
+    """
+    try:
+        from tortoise.record_writer import record_tenant_for
+        from tortoise.supabase_control import is_supabase_enabled
+
+        return record_tenant_for(org, control_plane_ids=is_supabase_enabled())
+    except Exception:
+        _logger.warning("could not resolve the record tenant for this request",
+                        exc_info=True)
+        return None
+
+
+def _bind_record_tenant(sdk: TortoiseSDK, org: dict) -> None:
+    """Hand the record the SAME tenant this request's data write goes to (#9188).
+
+    THE REST lane's carrier. The MCP lane installs the tenant as an ambient
+    scope (:func:`tortoise.mcp_auth._record_tenant_scope`) around
+    ``call_next``, which works because its auth is middleware. This lane's auth
+    is a plain FastAPI dependency, so it holds no `with` TODAY (a
+    `yield`-dependency could hold one; nothing does), and the tenant is resolved
+    HERE — inside ``_data_sdk``, which the capture path submits to
+    ``_graph_offload`` — where a scope entered at this depth would die with the
+    context copy. Installing it loop-side instead would mean setting it WITH NO
+    EXIT, and one unreleased value is inherited by every detached task and every
+    other write door in that context (``_enqueue_dream``, the indexing jobs) —
+    the leak that files tenant A's rows under tenant B. So the tenant travels
+    on the SDK object the write runs on, by value. (Propagation is not the
+    reason: a contextvar set on the loop IS copied into ``asyncio.to_thread``.)
+
+    Until this existed, EVERY armed write on that lane was refused
+    ``no_tenant``, including a graph-bound key whose ``graph_id`` is a
+    perfectly good ``public.graphs`` id — the credential told us the tenant and
+    the record refused to hear it.
+
+    Both lanes resolve it through the one declaration
+    (:func:`tortoise.record_writer.record_tenant_for`), from the same credential
+    dict that chose the graph this SDK is bound to, so the record's tenant and
+    the graph the data lands in cannot disagree.
+
+    ⚠️ SCOPE BOUND, stated so the boundary is not mistaken for coverage: this
+    covers the SDK it is given, opened through ``_data_sdk`` — the data-plane
+    tenancy resolver — and the dream drain it enqueues carries the same answer
+    across the queue (``_DREAM_RECORD_TENANTS`` / ``_bind_dream_record_tenant``),
+    because that drain opens its own SDK. Routes that write the org's DEFAULT
+    graph by construction (the onboarding/starter seed runners) are NOT bound,
+    and neither are the background indexing jobs: the default graph need not
+    have a ``public.graphs`` row, so naming it is the open control-plane
+    decision on #9188 — and binding them to a graph-bound key's id would file
+    their rows under a graph they never wrote. (Both seed surfaces reject a
+    graph-bound credential outright, so the residue there is a counted
+    ``no_tenant``, never a misfiled row.)
+
+    Fail-soft and DELIBERATELY so: a record-binding fault must not fail the
+    request (#5148's rule — the record is a derived, replayable store, and this
+    runs before any write). A refusal to name a tenant is not an error either:
+    the seam counts ``no_tenant`` and a replay heals the gap, which is the
+    documented fail-closed direction (#9192), not a regression.
+    """
+    tenant = _resolve_record_tenant(org)
+    if tenant is None:
+        return
+    try:
+        sdk._bind_record_tenant(*tenant)
+    except Exception:
+        _logger.warning("could not bind the record tenant for this request",
+                        exc_info=True)
+
+
+def _bind_dream_record_tenant(sdk: TortoiseSDK, key: str) -> None:
+    """Bind the tenant the ENQUEUEING request named to the drain's own SDK.
+
+    The dream drain is the REST lane's second writer and it does NOT go through
+    `_data_sdk`: `_open_sdk` builds its SDK from the queue key (a namespace),
+    and a namespace is not a tenant. `_enqueue_dream` therefore stores the
+    request's resolution against the key (#9188 review N1), and this puts it on
+    the SDK that will emit the pass's records (`ConfidenceChanged`) — otherwise
+    an armed hosted deployment refuses every dream-emitted record `no_tenant`
+    for a graph whose credential named it.
+
+    Silent by design when the key carries no tenant: that is an
+    org-wide/session write, whose graph is the DEFAULT one and whose record
+    tenant is the open control-plane decision on #9188 — not something this
+    helper may guess.
+    """
+    tenant = _DREAM_RECORD_TENANTS.get(key)
+    if tenant is None:
+        return
+    try:
+        sdk._bind_record_tenant(*tenant)
+    except Exception:
+        _logger.warning("could not bind the record tenant for dream key %s",
+                        key, exc_info=True)
+
+
 def _data_sdk(org: dict) -> TortoiseSDK:
     """C5 #2114 (D-C5-2): the data-plane tenancy resolver — the sync entry
     every org-data surface uses to open its SDK. Off-loop callers use its async
@@ -6618,6 +6751,16 @@ def _data_sdk(org: dict) -> TortoiseSDK:
       stores graph_name == org_{org_id}, but the selfhost legacy lane
       (sdk.org_create org_{name}, #2023) diverges and flipping would
       silently move those orgs' data access.
+
+    #9188: the SDK it returns also carries this request's RECORD tenant
+    (``_bind_record_tenant``), resolved from the same dict by the one
+    declaration — so the Postgres record files the write under the same graph
+    the data went to. It is carried by value because this lane resolves the
+    tenant at this depth (inside the offload, for the capture path) and its
+    auth seam holds no `with` to hang an ambient scope on. The default-graph
+    half is deliberately NOT bound (no `public.graphs` row is guaranteed);
+    naming it is a control-plane decision, and until it is made the write is
+    refused `no_tenant` rather than filed under a tenant nobody chose.
     """
     # #2600: bind the actor through the ONE helper — CONDITIONAL (only when the
     # dict carries a gated actor; never erase a value the auth seams set).
@@ -6636,8 +6779,14 @@ def _data_sdk(org: dict) -> TortoiseSDK:
                 detail={"error_code": "GRAPH_NOT_FOUND",
                         "message": "graph not found for key"})
         _assert_graph_owned(org, gid, ns)
-        return _make_sdk(graph_name=ns)
-    return _make_sdk(namespace=org_id)
+        sdk = _make_sdk(graph_name=ns)
+    else:
+        sdk = _make_sdk(namespace=org_id)
+    # #9188: the record's tenant rides THIS SDK (see `_bind_record_tenant`).
+    # After the bind and before the caller can write: an armed record on this
+    # lane is otherwise refused `no_tenant` on every request.
+    _bind_record_tenant(sdk, org)
+    return sdk
 
 
 async def _data_sdk_offloaded(org: dict) -> TortoiseSDK:
@@ -9172,13 +9321,28 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
     # C5 (#2114, sweep parity): the enqueue rides the WRITTEN graph — a
     # custom-graph key's write must drain the custom graph, never the org
     # default (sdk is the _data_sdk-resolved graph).
+    #
+    # #9188 review N3: the namespace and the record tenant come from ONE value,
+    # because they must name the same graph. Gating the tenant on
+    # `org["graph_id"]` alone would let a graph-bound credential with a falsy
+    # namespace land its tenant on the ORG-WIDE key — whose drain opens the
+    # DEFAULT graph — i.e. file the pass's rows under a graph it never wrote.
+    # (`_data_sdk` refuses that org first with 403 GRAPH_NOT_FOUND, so it is
+    # latent rather than live; tying the two arguments keeps it that way.)
+    _dream_ns = (org.get("graph_namespace") if org.get("graph_id") else None)
     _enqueue_dream(org["org_id"], list(sdk._dirty_roots),
                    # graph-bound key → ITS custom graph; org-wide/session →
                    # the legacy org-keyed drain (graph_namespace is always
                    # set by C1 even for org-wide keys — org_{id} or a
                    # selfhost org_{name} — so gate on graph_id).
-                   graph_namespace=(org.get("graph_namespace")
-                                    if org.get("graph_id") else None))
+                   graph_namespace=_dream_ns,
+                   # #9188: the record's tenant for the SAME graph, resolved
+                   # once from THIS request's credential. Nothing else in the
+                   # drain knows it (`_open_sdk` opens a namespace, not a
+                   # tenant), and an armed lane otherwise refuses every
+                   # dream-emitted record `no_tenant`.
+                   record_tenant=(_resolve_record_tenant(org)
+                                  if _dream_ns else None))
     # Log audit event
     await _async_audit(
         request, org["org_id"], "point_create",

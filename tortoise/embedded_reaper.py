@@ -259,6 +259,21 @@ ZERO_CLIENT_CONFIRM_MINUTES = 10.0
 # leftover (pytest sessions never run for days) — prune it so its recycled
 # pid can never pin suites_active=True and disable live-orphan kills.
 MARKER_MAX_AGE_S = 24 * 3600
+
+#: Suffixes in `ACTIVE_SUITES_DIR` that are OWNERSHIP RECORDS, not markers. The
+#: age prune below unlinks any entry older than `MARKER_MAX_AGE_S` — which used
+#: to include these, so a stale session journal the instance gate had
+#: deliberately SKIPPED (its graphs live on another server, so they are not
+#: "absent" and nothing may be concluded) was silently destroyed 24 h after its
+#: last append, unreported, while those graphs kept running. Measured on
+#: 2026-10-20: a bound journal + sidecar were both unlinked by
+#: `active_suite_markers()` alone. A journal is the ONLY record of which graphs a
+#: session minted, so it may be removed by a sweep that has decided its graphs
+#: are gone — never by a housekeeping timer. The cost is that a stranded journal
+#: (a few KB) now persists; that is the safe direction, and it is what makes the
+#: gate's "the record survives" promise true.
+_OWNERSHIP_SUFFIXES = (".graphs.jsonl", ".graphs.jsonl.cursor",
+                       ".graphs.jsonl.instance")
 # State entries older than this are pruned (a confirmed/reaped server leaves
 # an entry; the socket dir is gone so it is never seen again).
 ZERO_CLIENT_STATE_MAX_AGE = 7 * 86400.0
@@ -718,6 +733,11 @@ def active_suite_markers() -> list[dict]:
     markers = []
     for e in entries:
         if e.startswith("."):
+            continue
+        if e.endswith(_OWNERSHIP_SUFFIXES):
+            # Not a marker: an ownership record (see `_OWNERSHIP_SUFFIXES`).
+            # It carries no pid, so it was always skipped as unparsable — but
+            # only AFTER the age prune had already unlinked it.
             continue
         mpath = Path(ACTIVE_SUITES_DIR, e)
         try:
