@@ -627,6 +627,15 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "longmem_eval/test_vector_arm.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #9192: the two-tenant record lane forces the EMBEDDED lane (delenv the URI
+    # + TORTOISE_DB_PATH pinned to a tmp_path db) so both tenants' registry
+    # graphs, their `tk_` keys and the armed JSONL journal live in ONE hermetic
+    # store — the assertions are about which `(org_id, graph_id)` the record is
+    # filed under, and a URI redirect would put the auth-path registry read on a
+    # shared server graph the fixture never seeded. The delenv IS the point;
+    # the fixture-param monkeypatch auto-restores (no lane leak).
+    "test_9192_tenant_armed_by_request.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;

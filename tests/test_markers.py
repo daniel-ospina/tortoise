@@ -266,6 +266,18 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     # "gold" is a fixture graph name, not a server graph the SDK resolves from the
     # registry and not a production-shape namespace.
     "test_document_source_gold.py": {"gold": "test-constructed"},
+    # #9328 landed this two-tenant lane without a route, which reds this guard on
+    # main. The literal is PROD-COUPLED, not incidental: the fixture seeds the
+    # orgs / graphs / `tk_` keys through the CANONICAL registry namespace, and
+    # the app it then drives resolves (and writes under) that same namespace via
+    # `_make_sdk(namespace="registry")` + the `TORTOISE_DB_PATH` pin. Renaming
+    # it makes the seed land on `test_9192_registry_tortoise` while the auth path
+    # reads `registry_tortoise` — MEASURED here: the rename reds
+    # `test_a_registry_graph_id_is_never_installed` and
+    # `test_an_org_wide_credential_is_refused_not_guessed` (2 failed, 23 passed);
+    # with the literal restored the file is 25 passed. Same class (and same
+    # failure shape) as the `test_quota`/`test_github_connect` entries above.
+    "test_9192_tenant_armed_by_request.py": {"registry": "prod-coupled"},
 }
 
 # ── ROUTED_SELECT_GRAPH_SITES (cycle-6 P2-10) ───────────────────────────────

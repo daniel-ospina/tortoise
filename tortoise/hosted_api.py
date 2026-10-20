@@ -888,9 +888,12 @@ def _registry_anchor() -> TortoiseSDK:
 
     So URI mode delegates to ``_registry_probe_sdk()`` — the #4661 cache that
     already exists for exactly this shape: one handle per process, keyed by the
-    ``TORTOISE_DB_URI`` STRING (a reconfigured URI closes the stale handle and
-    rebuilds, so a test's private lane or a process reconfiguration can never be
-    served the old server), built under ``_KEEPALIVE_LOCK`` so two threads
+    identity that determines the graph it addresses — the ``TORTOISE_DB_URI``
+    string AND the ``TORTOISE_DB_PATH`` pin (see ``_registry_probe_identity``;
+    a change in either closes the stale handle and rebuilds, so a test's private
+    lane, a per-test path re-bind or a process reconfiguration can never be
+    served the old server or the old derived graph), built under
+    ``_KEEPALIVE_LOCK`` so two threads
     cannot both build one, and closed by ``_reset_registry_probe_sdk()`` (the
     suite's isolation hook). Sharing it with the probe is deliberate: both want
     "the one registry connection this process holds", and a second cache would
@@ -29155,6 +29158,33 @@ _REGISTRY_PROBE_SDK: TortoiseSDK | None = None
 #: means the cached handle addresses ANOTHER server (process reconfiguration,
 #: or a test's private lane) — it is closed and rebuilt, never reused.
 _REGISTRY_PROBE_URI: str | None = None
+#: The `TORTOISE_DB_PATH` pin `_REGISTRY_PROBE_SDK` was built under — the URI is
+#: NOT the whole identity (#9334). Under the epic-#1647 test redirect the graph
+#: a construction lands on is derived from `sha1(session + path + name)`, so two
+#: `_make_sdk(namespace="registry")` calls with ONE URI and TWO path pins address
+#: TWO graphs. `tests/_http_fixtures.patched_tortoise_sdk` re-binds that path per
+#: test, while the pin value is what the redirect hashes — so a URI-only key
+#: hands the auth path a handle derived under the PREVIOUS test's path. MEASURED
+#: (one process, one thread, one URI, same namespace): fresh construction ->
+#: `test_onboarding_ede2db12d074`, cached anchor -> `test_onboarding_f3f234cc26c8`
+#: (empty). `_user_memberships` then finds the seeded rows on the fresh handle
+#: while `_org_node`/`_membership_role` read the stale one and answer "no
+#: membership" — the empty auth-path read behind the 403 in
+#: `test_session_key_http.py::TestSessionKeyMintConcurrency`
+#: and the empty `GET /v1/organizations` in `test_onboarding_endpoints.py`.
+#: In production the pin is constant, so this costs nothing there.
+_REGISTRY_PROBE_PATH: str | None = None
+
+
+def _registry_probe_identity() -> tuple[str, str]:
+    """The cache identity of the registry probe: (URI, embedded path pin).
+
+    Both inputs reach the derived graph name (see `_REGISTRY_PROBE_PATH`), so a
+    change in either means the cached handle addresses a different graph and
+    must be rebuilt — the same rule the URI half has always followed.
+    """
+    return (os.environ.get("TORTOISE_DB_URI") or "",
+            os.environ.get("TORTOISE_DB_PATH") or "")
 
 
 def _reset_registry_probe_sdk() -> None:
@@ -29164,12 +29194,13 @@ def _reset_registry_probe_sdk() -> None:
     `_make_sdk`/`TortoiseSDK` must not inherit a handle an earlier test built
     (#5049 rule 4). The close runs OUTSIDE `_KEEPALIVE_LOCK` so a slow close
     cannot block a concurrent construction (the #2172 lock discipline)."""
-    global _REGISTRY_PROBE_SDK, _REGISTRY_PROBE_URI
+    global _REGISTRY_PROBE_SDK, _REGISTRY_PROBE_URI, _REGISTRY_PROBE_PATH
     if _REGISTRY_PROBE_SDK is None:
         return
     with _KEEPALIVE_LOCK:
         sdk, _REGISTRY_PROBE_SDK = _REGISTRY_PROBE_SDK, None
         _REGISTRY_PROBE_URI = None
+        _REGISTRY_PROBE_PATH = None
     try:  # noqa: SIM105
         sdk.close()
     except Exception:
@@ -29185,28 +29216,30 @@ def _registry_probe_sdk() -> TortoiseSDK:
     the loser. A construction FAILURE is not cached: the exception propagates
     to `_registry_existing_graphs`'s never-raise wrapper and the next probe
     retries, so the fail-open contract is unchanged."""
-    global _REGISTRY_PROBE_SDK, _REGISTRY_PROBE_URI
-    uri = os.environ.get("TORTOISE_DB_URI")
+    global _REGISTRY_PROBE_SDK, _REGISTRY_PROBE_URI, _REGISTRY_PROBE_PATH
+    identity = _registry_probe_identity()
+    uri, path_pin = identity
     cached = _REGISTRY_PROBE_SDK
-    cached_uri = _REGISTRY_PROBE_URI
-    if cached is not None and cached_uri == uri:
+    if (cached is not None and uri == _REGISTRY_PROBE_URI
+            and path_pin == _REGISTRY_PROBE_PATH):
         return cached
     with _KEEPALIVE_LOCK:
         cached = _REGISTRY_PROBE_SDK
-        cached_uri = _REGISTRY_PROBE_URI
-        if cached is not None and cached_uri == uri:
+        if (cached is not None and uri == _REGISTRY_PROBE_URI
+                and path_pin == _REGISTRY_PROBE_PATH):
             return cached
         if cached is not None:
-            # The configured server changed — a reconfiguration event, not a
-            # request event (the embedded anchor evicts on drift the same
-            # way, #1502). Drop the handle: reusing it would probe a server
-            # this process no longer talks to.
+            # The configured server OR the embedded path pin changed — a
+            # reconfiguration event, not a request event (the embedded anchor
+            # evicts on drift the same way, #1502). Drop the handle: reusing it
+            # would probe a graph this process no longer resolves to.
             try:  # noqa: SIM105
                 cached.close()
             except Exception:
                 pass
             _REGISTRY_PROBE_SDK = None
             _REGISTRY_PROBE_URI = None
+            _REGISTRY_PROBE_PATH = None
         sdk = _make_sdk(namespace="registry")
         try:
             sdk._get_proj()
@@ -29217,7 +29250,7 @@ def _registry_probe_sdk() -> TortoiseSDK:
                 pass
             raise
         _REGISTRY_PROBE_SDK = sdk
-        _REGISTRY_PROBE_URI = uri
+        _REGISTRY_PROBE_URI, _REGISTRY_PROBE_PATH = identity
         return sdk
 
 

@@ -9487,6 +9487,46 @@ class TestUriRegistryProbeConnectionReuse:
         assert ha_mod._registry_existing_graphs() == {"org_a"}
         assert len(constructed) == 2, "the reset did not clear the cache"
 
+    def test_a_changed_path_pin_rebuilds_the_handle(self, monkeypatch):
+        """#9334: the URI is NOT the probe's whole identity.
+
+        Under the epic-#1647 redirect a construction's graph is derived from
+        `sha1(session + path + graph_name)`, and the per-test fixtures re-bind
+        `TORTOISE_DB_PATH` per test while the URI string stays constant. A
+        URI-only cache key therefore handed the AUTH path a handle resolved
+        against the PREVIOUS test's path-derived graph: `_user_memberships`
+        (a fresh `_make_sdk`) found the seeded rows while
+        `_org_node`/`_membership_role` (this cache) found none — the empty
+        auth-path read behind `test_registry_mint_blocks_while_team_lock_held`
+        and the empty `GET /v1/organizations` in
+        `test_create_team_then_session_key_mint_registry`, both deterministic
+        when one process ran both files. Production never rebinds the pin, so
+        the extra key is inert there.
+        """
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setenv("TORTOISE_DB_URI",
+                           "docker://:pw@localhost:6379/probe-path")
+        constructed, closed = self._install(monkeypatch, ["org_a"])
+
+        monkeypatch.setenv("TORTOISE_DB_PATH", "/nonexistent/lane-a/t.db")
+        assert ha_mod._registry_existing_graphs() == {"org_a"}
+        assert len(constructed) == 1
+
+        # SAME URI, DIFFERENT path pin -> a different derived graph.
+        monkeypatch.setenv("TORTOISE_DB_PATH", "/nonexistent/lane-b/t.db")
+        assert ha_mod._registry_existing_graphs() == {"org_a"}
+        assert len(constructed) == 2, (
+            "the cache key ignored TORTOISE_DB_PATH — the probe reused a handle "
+            "derived under the previous path, i.e. the auth path reads a store "
+            "the test never seeded")
+        assert closed == [True], "the stale handle was dropped without closing it"
+
+        # An UNCHANGED identity must still be reused (the fix must not defeat
+        # the cache it exists to keep).
+        assert ha_mod._registry_existing_graphs() == {"org_a"}
+        assert len(constructed) == 2, "an unchanged identity rebuilt the handle"
+
 
 class TestOnboardingProjectionSamplesTheRegistryOnce:
     """#4661: the projection probes the registry ONCE, and opens the name it
