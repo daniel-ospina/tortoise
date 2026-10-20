@@ -374,11 +374,72 @@ def test_document_must_be_self_referential():
         _validate({"redirect_uris": ["https://claude.ai/cb"]})
 
 
-@pytest.mark.parametrize("method", ["client_secret_post", "client_secret_basic",
-                                    "private_key_jwt", "tls_client_auth"])
-def test_confidential_auth_methods_refused(method):
+@pytest.mark.parametrize("method", ["client_secret_post", "client_secret_basic"])
+def test_shared_secret_auth_methods_refused(method):
+    """§4.1, unconditional: a CIMD client cannot establish a shared secret, so
+    advertising "none" ALONGSIDE a secret does not entitle it to one."""
+    with pytest.raises(cimd.CimdError, match="token_endpoint_auth_method"):
+        _validate(_doc(token_endpoint_auth_method=method,
+                       token_endpoint_auth_methods_supported=["none", method]))
+
+
+@pytest.mark.parametrize("method", ["client_secret_jwt", "banana", "", [], {}, 1, None, True])
+def test_unknown_auth_methods_refused_even_with_a_none_fallback(method):
+    """An allowlist, not a denylist: only key-based methods may ride the "none"
+    fallback. Unhashable (list/dict) and non-string values must raise CimdError
+    rather than TypeError — the module's error contract is CimdError."""
+    with pytest.raises(cimd.CimdError, match="token_endpoint_auth_method"):
+        _validate(_doc(token_endpoint_auth_method=method,
+                       token_endpoint_auth_methods_supported=["none", method]))
+
+
+@pytest.mark.parametrize("method", ["private_key_jwt", "tls_client_auth"])
+def test_key_auth_methods_refused_without_a_none_fallback(method):
+    """We implement neither key-based method, so a document that names one and
+    does NOT advertise "none" cannot authenticate here."""
     with pytest.raises(cimd.CimdError, match="token_endpoint_auth_method"):
         _validate(_doc(token_endpoint_auth_method=method))
+
+
+@pytest.mark.parametrize("method", ["private_key_jwt", "tls_client_auth"])
+def test_key_auth_methods_with_a_none_fallback_resolve_to_a_public_client(method):
+    record = _validate(_doc(token_endpoint_auth_method=method,
+                            token_endpoint_auth_methods_supported=["none", method]))
+    assert record["token_endpoint_auth_method"] == "none"
+    assert "client_secret" not in record
+
+
+# Verbatim body served by https://chatgpt.com/oauth/xf4v1zmjo3-b/client.json on
+# 2026-10-20 (HTTP 200, application/json, 552 bytes) during the first ChatGPT
+# connector attempt. It declares its PREFERRED method as private_key_jwt while
+# listing "none" among the supported ones — the fallback the validator must
+# honour, or the connector cannot reach a consent screen at all (#3657).
+CHATGPT_DOCUMENT = {
+    "client_id": "https://chatgpt.com/oauth/xf4v1zmjo3-b/client.json",
+    "client_uri": "https://chatgpt.com/",
+    "redirect_uris": ["https://chatgpt.com/connector/oauth/xf4v1zmjo3-b"],
+    "token_endpoint_auth_method": "private_key_jwt",
+    "token_endpoint_auth_methods_supported": ["none", "private_key_jwt"],
+    "grant_types": ["authorization_code", "refresh_token"],
+    "response_types": ["code"],
+    "client_name": "ChatGPT",
+    "logo_uri": "https://persistent.oaistatic.com/sonic/misc/openai-logo.png",
+    "token_endpoint_auth_signing_alg": "RS256",
+    "jwks_uri": "https://chatgpt.com/oauth/jwks.json",
+}
+
+
+def test_chatgpt_document_resolves_to_a_public_client():
+    record = cimd.validate_document(
+        CHATGPT_DOCUMENT["client_id"], CHATGPT_DOCUMENT,
+        supported_scopes={"mcp", "offline_access"},
+        supported_grants={"authorization_code", "refresh_token"},
+        default_scope="mcp")
+    assert record["token_endpoint_auth_method"] == "none"
+    assert record["client_name"] == "chatgpt.com"
+    assert record["scope"] == "mcp"
+    assert record["redirect_uris"] == [
+        "https://chatgpt.com/connector/oauth/xf4v1zmjo3-b"]
 
 
 def test_redirect_uris_are_required():

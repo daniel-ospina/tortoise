@@ -626,6 +626,11 @@ def _same_origin(a, b) -> bool:
     return key(a) == key(b)
 
 
+_SHARED_SECRET_METHODS = frozenset({"client_secret_post", "client_secret_basic"})
+_KEY_BASED_METHODS = frozenset({"private_key_jwt", "tls_client_auth"})
+_KNOWN_AUTH_METHODS = frozenset({"none"}) | _SHARED_SECRET_METHODS | _KEY_BASED_METHODS
+
+
 def validate_document(client_id: str, document: dict,
                       *, supported_scopes: set[str],
                       supported_grants: set[str],
@@ -646,11 +651,38 @@ def validate_document(client_id: str, document: dict,
             "(client_id does not match the URL it was served from).")
 
     method = document.get("token_endpoint_auth_method", "none")
+    if not isinstance(method, str) or method not in _KNOWN_AUTH_METHODS:
+        # An allowlist, not a denylist, and checked BEFORE any set membership:
+        # an unhashable value (a list or object) would otherwise raise TypeError
+        # out of validate_document instead of CimdError, breaking this module's
+        # error contract for every caller.
+        raise CimdError(
+            "client metadata document declares an unsupported "
+            "token_endpoint_auth_method.")
     if method != "none":
         # §4.1: a CIMD client cannot establish a shared secret, so
-        # client_secret_post/_basic MUST be refused.
-        raise CimdError(
-            "client metadata document must use token_endpoint_auth_method 'none'.")
+        # client_secret_post/_basic MUST be refused — unconditionally, since a
+        # document that could fall back to "none" was never entitled to a
+        # secret in the first place.
+        if method in _SHARED_SECRET_METHODS:
+            raise CimdError(
+                "client metadata document must use token_endpoint_auth_method "
+                "'none'.")
+        # A KEY-BASED preference (private_key_jwt / tls_client_auth) is not a
+        # shared secret, so §4.1 does not forbid it; we refuse it because we
+        # implement neither, so such a client cannot authenticate here. But a
+        # platform client may name its PREFERRED method in this field while
+        # listing "none" among the methods it supports — ChatGPT does exactly
+        # that (`private_key_jwt` + `["none", "private_key_jwt"]`). Honour the
+        # declared fallback and resolve it to "none" (public client + PKCE),
+        # which the returned record forces anyway. Strictness is preserved: a
+        # document that does NOT advertise "none" is still refused.
+        advertised = document.get("token_endpoint_auth_methods_supported")
+        if not (isinstance(advertised, list) and "none" in advertised):
+            raise CimdError(
+                "client metadata document must use token_endpoint_auth_method "
+                "'none' (or advertise it in "
+                "token_endpoint_auth_methods_supported).")
 
     redirect_uris = document.get("redirect_uris")
     if not isinstance(redirect_uris, list) or not redirect_uris:
