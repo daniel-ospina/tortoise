@@ -1,0 +1,80 @@
+{
+  "arms": [
+    "raw",
+    "distilled"
+  ],
+  "corpus": {
+    "authored_by": "hand-authored, hermetic, row-by-row reviewable (tests/eval/ask/generate_corpus.py) \u2014 the #9095 method (run it small and by hand first)",
+    "cases": [
+      "ask01_residence",
+      "ask02_diet",
+      "ask03_employer",
+      "ask04_badge",
+      "ask05_ferry",
+      "ask06_allergy"
+    ],
+    "classes": [
+      "knowledge-update",
+      "verbatim"
+    ],
+    "fixture_glob": "fixtures/*.json",
+    "hash": "sha256:e0842ccbd6e0676ca051a71e5a6d6d12bec0750816d3f60687f9d78a331e43ff",
+    "hash_scope": "fixtures/*.json + gold/*.gold.json (a gold-only edit changes the hash and voids this pre-registration)",
+    "manifest_verified": true,
+    "n_cases": 6,
+    "path": "tests/eval/ask",
+    "sealed_gold_glob": "gold/*.gold.json"
+  },
+  "decision_rule": {
+    "inconclusive": [
+      "the corpus manifest does not verify (missing/extra/mismatched file, or corpus hash drift)",
+      "this pre-registration's corpus_hash does not match the corpus under test",
+      "the run's resolved reader spec, judge spec, or arms differ from this pre-registration",
+      "any case failed to run in either arm (an unmeasured case is never a pass)"
+    ],
+    "kind": "paired within-run comparison + product gate; NO pre-set quality threshold",
+    "pass": "the corpus verifies, the config matches this pre-registration, every case ran in both arms, and neither regression clause fired",
+    "regression": [
+      "D8: any superseded claim RENDERED LIVE on the distilled arm",
+      "D8: any planted claim not OBSERVED (seen < n) on the distilled arm",
+      "verbatim/raw: a verbatim-class case committed on the raw arm and NOT on the distilled arm"
+    ],
+    "reported_not_thresholded": "the knowledge-update current-state rate. D8 is explicit \u2014 the benchmark-side X set comes from the first published run, so no pass threshold is pre-set here (and no competing threshold is invented: the product gate lives at docs/product-success-eval.md)"
+  },
+  "epic": "2281",
+  "epic_exit": "Q3 exit bar \u2014 a published, sealed-benchmark measurement of the ask lane over a distilled + planted-supersession corpus",
+  "gate_arm": "distilled",
+  "issue": "9097",
+  "judge": {
+    "model_spec": "openai:gpt-4o-2024-08-06",
+    "pin": "ask-exit-anscheck-official-v1",
+    "rubric_id": "longmemeval-official",
+    "rubric_id_hash": "82d07b0de05daa48"
+  },
+  "reader": {
+    "lane": "run_ask_lane (the eval-only ask lane, EVAL-ONLY per #3849) \u2014 the product's own retrieval + render + reader path, not a re-implementation",
+    "max_tokens": 500,
+    "model_spec": "deepseek/deepseek-v4-flash",
+    "pinned": true,
+    "temperature": 0.0
+  },
+  "reproduce": {
+    "preregister": "uv run python -m tools.longmem_eval.measure_ask_distilled preregister --out tests/eval/ask/preregistration.json",
+    "publish": "uv run python -m tools.longmem_eval.measure_ask_distilled publish --scored <scored.json> --commit <sha> --cost-usd <usd> --out docs/benchmarks/ask-distilled/run-report.md --receipt docs/benchmarks/ask-distilled/receipt.json",
+    "run": "uv run python -m tools.longmem_eval.measure_ask_distilled run --out <observations.json>",
+    "score": "uv run python -m tools.longmem_eval.measure_ask_distilled score --run <observations.json> --out <scored.json>"
+  },
+  "schema": "ask-distilled-preregistration/v1",
+  "scoring": {
+    "committed": "the official anscheck semantic judge (build_judge) grades the reader's answer against the SEALED gold answer, per case per arm, using the official template the sealed gold names (knowledge-update | single-session-user)",
+    "superseded_live": "the assembled READER EVIDENCE is searched for the superseded claim's own text (ask_spotcheck._superseded_live_state): seen / rendered_live / flagged, attribution by the validity window so a raw turn is never mistaken for a distilled claim",
+    "verbatim_regression": "for a verbatim-class case: raw.committed AND NOT distilled.committed"
+  },
+  "seed": {
+    "note": "the #9095 seeder's own defaults \u2014 the instrument is not re-tuned here",
+    "search_keys": false,
+    "turns_embedded": true
+  },
+  "split": "every case runs in BOTH arms inside ONE invocation (the D4 paired read: extend W2-b, never a parallel benchmark). No train/test split \u2014 the corpus is hand-authored and every case is scored, so there is nothing to fit.",
+  "written_before_any_arm_run": true
+}

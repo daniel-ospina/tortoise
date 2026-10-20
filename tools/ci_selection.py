@@ -910,7 +910,19 @@ SOURCE_PATTERNS = {
              # THIS table. Same #1349/#2938/#3616 silent-drop class as the
              # entries above. Pinned by
              # tests/test_ci_selection.py::test_write_path_measurement_source_edit_selects_eval.
-             "tests/eval/write_path/"),
+             "tests/eval/write_path/",
+             # #9097: same class, same fix — the SEALED ask exit benchmark's
+             # measurement sources (`corpus.py` globs/hash/manifest,
+             # `generate_corpus.py` renders the sealed gold) live under
+             # `tests/eval/ask/` and are not named `test_*.py`. Without this
+             # entry a `corpus.py`-only change fell to the `tests/` -> `core`
+             # fallback and selected `core`, where NOT ONE of the tests that pin
+             # the corpus contract (`eval/ask/test_ask_corpus.py`) or the exit
+             # bar (`test_measure_ask_distilled.py`) is registered — so the hash
+             # scope or a sealed-gold check could be rewritten with the gate
+             # green. Pinned by
+             # tests/test_ci_selection.py::test_ask_sealed_corpus_source_edit_selects_eval.
+             "tests/eval/ask/"),
     # core is the fallback for any other python-relevant path
 }
 

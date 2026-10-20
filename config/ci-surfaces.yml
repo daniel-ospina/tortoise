@@ -4881,6 +4881,17 @@ surfaces:
   - longmem_eval/test_assembly_arm.py  # #2165 Task 7: v2-lane eval arm A/A-widened/B admission + R9 geometry (docker-lane)
   - test_ask_eval_only.py  # #3849: N6 pins tools/longmem_eval/reader.py's prompt re-export (an eval-owned file) — also under api/core/sdk
   - longmem_eval/test_measure_temporal.py  # #2578 Task 2: measurement scaffold — census 133->55 pin, prereg writer, refusal classifier (embedded-safe)
+  # #9097: the SEALED ask exit benchmark (epic #2281 Q3 exit bar) — the
+  # pre-registered corpus, the fixtures-only runner, the sealed-gold scorer and
+  # the exit-bar evaluator. The gate can say NO (a verbatim regression on the
+  # paired read, a dropped planted supersession) and the sealed key is
+  # unreachable from the run step; both are mutation-proven in the test.
+  # `tools/longmem_eval/` and `tests/eval/ask/` are SOURCE_PATTERNS entries of
+  # THIS surface, so an eval-only change must run these pins (the #7947
+  # silent-drop class: without the registration a `corpus.py`-only change would
+  # select `eval` and run neither).
+  - test_measure_ask_distilled.py
+  - eval/ask/test_ask_corpus.py
   - longmem_eval/test_freq_count_disposition.py  # #2886: guards tools/longmem_eval/freq_count_disposition.py (the census frequency/count disposition tool) — `tools/longmem_eval/` is a SOURCE_PATTERNS entry of this surface, so an eval-tool change alone selects it
   - test_temporal_aggregate_arm.py  # #2886: guards tools/longmem_eval/retrieve.py's `temporal_aggregate_verdict` adapter — `tools/longmem_eval/` is a SOURCE_PATTERNS entry of this surface, so a retrieve.py-only change selects it (dual-registered with `core` for the core's verdict semantics)
   - longmem_eval/test_temporal_admission_trace.py  # #2976: temporal admission trace — pool-membership vs reader-window-cut receipts + TR-machinery-inert mechanism pin (hermetic, no DB)
@@ -7285,6 +7296,15 @@ durations:
   # `# unmeasured` so `render_refreshed_manifest` drops it on that first sweep
   # instead of leaving a stale local-basis note attached to a CI value.
   test_ci_selection_changed_files_9109.py: 2.0  # unmeasured — new in #9109: a file added by a PR has no junit measurement, so it carries the flat default (#3419/#2788 rule) until the first post-merge sweep. Do NOT substitute a local timing here — the weight is a SHARD-LAYOUT input
+  # #9097: both files are ADDED BY THIS PR, so they have no CI junit measurement
+  # (the refresher samples push-to-main runs only) and carry the flat default
+  # until a sweep collects them — the #3419/#2788 rule, same as the #9076/#9109
+  # rows above. They are registered rather than omitted because they are fast-pool
+  # members and an absent key moves the durations coverage RATIO (#3400). The tail
+  # LEADS with `# unmeasured` so `render_refreshed_manifest` clears it on that first
+  # sweep instead of leaving a stale note attached to a CI value (#9110 review P2).
+  test_measure_ask_distilled.py: 2.0  # unmeasured — new in #9097: flat default until the first post-merge sweep
+  eval/ask/test_ask_corpus.py: 2.0  # unmeasured — new in #9097: flat default until the first post-merge sweep
 on_demand:
   - eval/retrieval/test_integration.py
   - test_perf_lane_volunteer_context.py

@@ -1,0 +1,32 @@
+{
+  "case_id": "ask06_allergy",
+  "class": "verbatim",
+  "distilled": {
+    "claims": [
+      {
+        "session_id": "dinner-2023",
+        "text": "I am allergic to shellfish.",
+        "valid_from": "2023-05-02"
+      }
+    ],
+    "supersessions": []
+  },
+  "haystack_dates": [
+    "2023/05/02 (Tue) 20:10"
+  ],
+  "haystack_session_ids": [
+    "dinner-2023"
+  ],
+  "haystack_sessions": [
+    [
+      {
+        "content": "Dinner was a problem: I am allergic to shellfish.",
+        "role": "user"
+      }
+    ]
+  ],
+  "question": "What am I allergic to?",
+  "question_date": "2023/06/01 (Thu) 10:00",
+  "question_type": null,
+  "schema": "ask-sealed-fixture/v1"
+}
