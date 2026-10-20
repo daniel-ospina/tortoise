@@ -230,9 +230,11 @@ def record_degraded(proj, stage: str, event_type: str, event_id: str | None,
 
     ``stage``/``event_type``/``error`` describe the MOST RECENT failure, and the
     FIRST one is kept beside them as ``first_stage``/``first_error``: a graph can
-    fail twice for different reasons (`append-unverified` then `append`), and the
-    first is often the only provable one, so overwriting it would discard the
-    diagnosis a reader needs. Both are recorded rather than one being chosen.
+    fail twice for different reasons (`append` then `append-unverified`), and the
+    first is often the only provable one — the order matters, because
+    ``append-unverified`` is by definition the stage that could NOT be proven —
+    so overwriting it would discard the diagnosis a reader needs. Both are
+    recorded rather than one being chosen.
 
     Called from BOTH swallows (`TortoiseSDK._emit_event` and `append_event`) so
     the two cannot record different diagnoses for the same failure, and so a

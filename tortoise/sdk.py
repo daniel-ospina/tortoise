@@ -6839,11 +6839,16 @@ class TortoiseSDK:
             # prescribed an action it had no way to perform; naming the exits
             # (in-process clear, or restart this worker) plus where the state is
             # visible does not.
-            # ⚠️ BOTH DIAGNOSES ARE REPORTED, not just the latest (#9208
-            # review): a graph can fail twice for different reasons
-            # (`append-unverified` then `append`), and the FIRST is often the
-            # only provable one — `record_degraded` keeps it for exactly this
-            # reader, and reporting only the latest would discard it.
+            # ⚠️ THE FIRST DIAGNOSIS IS REPORTED WHEN ITS STAGE DIFFERS, not
+            # only the latest (#9208 review): a graph can fail twice for
+            # different reasons (`append` then `append-unverified`), and the
+            # FIRST is often the only provable one — `record_degraded` keeps it
+            # for exactly this reader, and reporting only the latest would
+            # discard it. The stage check below is what keeps the appended
+            # "the stage named above is the LATEST" sentence TRUE; a same-stage
+            # repeat keeps `first_error` for `degraded_graphs()` but this detail
+            # names only the latest message (docs/durability-posture.md states
+            # the same rule — keep the two in step).
             first = ""
             if state.get("first_stage") and state["first_stage"] != state["stage"]:
                 # ⚠️ `first` is APPENDED to the message, so the latest stage is
