@@ -1781,7 +1781,8 @@ def test_ci_runs_the_embedded_only_marker_selection():
 PLATFORM_GATED_TESTS: dict[str, str] = {
     "test_fork_safety_3845.py": (
         "#3845 producer + MUTATION PROOF. `_build_holder()` skips unless "
-        "sys.platform == 'darwin', and every CI job is ubuntu-latest (12/12), "
+        "sys.platform == 'darwin', and every CI job is Linux (11 `ubuntu-latest`, "
+        "2 `ubuntu-24.04`), "
         "so `test_fork_child_does_not_hang_with_the_production_config` (the "
         "fix) and `test_without_the_fix_the_same_race_hangs_a_child` (the "
         "mutation that proves it) execute on a dev-machine macOS run only. "

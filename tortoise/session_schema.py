@@ -339,16 +339,24 @@ SESSION_WRITERS: tuple[SessionWriter, ...] = (
             "from a full-path MERGE."),
     ),
     SessionWriter(
+        # The OWNER is the function the scanner sees enclosing the literal, and
+        # #9124 split `rebuild_all` into a public entry point + `_rebuild_all_replay`
+        # so the replay body could be wrapped in a declared write lane (§17.1's
+        # third door). The `SET s += $props` statement moved INTO the private
+        # body, so the key follows it — declaring the old name would leave the
+        # real site undeclared and the old name stale.
         key="tortoise/projection/__init__.py::_rebuild_all_replay",
         kind="replay",
-        lane="_rebuild_all_replay pre-wipe snapshot restore",
+        lane="_rebuild_all_replay (rebuild_all's pre-wipe snapshot restore)",
         properties=frozenset(SESSION_PROPERTIES) | {"id"},
         writes_whole_schema=True,
         note=(
             "`SET s += $props` over the pre-wipe `:Session` snapshot — the "
             "ONE writer whose property set IS the whole schema, which is why "
             "it is declared as such rather than enumerated. Any property a "
-            "legacy writer stored rides this restore."),
+            "legacy writer stored rides this restore. Since #9124 it runs "
+            "inside `_rebuild_all_replay`, the replay write lane — `rebuild_all`"
+            " itself is the entry point and no longer holds the write."),
     ),
     SessionWriter(
         key="tools/ask_spotcheck.py::merge_capture_session",
@@ -483,10 +491,11 @@ def session_property_owners() -> dict[str, tuple[str, ...]]:
     for the property — that is what a :class:`SessionWriter`'s ``properties``
     enumerates (and what the scanner reads back at the site). A property used
     only as a ``MERGE`` key is NOT attributed: ten writers mint the node with
-    ``MERGE (s:Session {id: …})``, but only ``_rebuild_all_replay``'s
-    ``SET s += $props`` owns ``id``. Without that convention the ``id`` row
-    reads as "a replay restore owns the Session id", which is the opposite of
-    what the code does — the contradiction the §4.8 table inherits (#3554
+    ``MERGE (s:Session {id: …})``, but only the replay restore's
+    ``SET s += $props`` (``_rebuild_all_replay`` since #9124 split the replay
+    body out of ``rebuild_all``) owns ``id``. Without that convention the ``id``
+    row reads as "a replay restore owns the Session id", which is the opposite
+    of what the code does — the contradiction the §4.8 table inherits (#3554
     review).
     """
     owners: dict[str, list[str]] = {prop: [] for prop in SESSION_PROPERTIES}
