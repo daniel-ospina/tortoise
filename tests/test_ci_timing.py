@@ -1765,6 +1765,62 @@ def test_a_parametrised_file_has_no_denominator(tmp_path: Path) -> None:
     assert counts == {"test_plain.py": 2}
 
 
+def test_a_negated_guard_skips_the_DEAD_side(tmp_path: Path) -> None:
+    """`if not TYPE_CHECKING:` runs its body — so the `else:` is the dead side.
+
+    `_collectable_statements` skipped `body` whenever a branch was dead, which is right
+    for `if TYPE_CHECKING:` and EXACTLY INVERTED for the negated guard: it skipped the
+    live body and counted the dead `else:`, leaving a count BELOW the collected one — a
+    floor, the direction this witness exists to refuse. Measured against
+    `pytest --collect-only` on this module: 3 collected.
+    """
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "h.py").write_text(
+        "import typing\n"
+        "if not typing.TYPE_CHECKING:\n"
+        "    def test_live_a(): pass\n"
+        "    def test_live_b(): pass\n"
+        "else:\n"
+        "    def test_dead(): pass\n"
+        "def test_plain(): pass\n"
+    )
+
+    counts = ci_timing.declared_test_counts(["h.py"], tmp_path)
+
+    assert counts["h.py"] == 3
+
+
+def test_tests_split_across_exclusive_branches_have_no_denominator(tmp_path: Path) -> None:
+    """A live `if`/`else` or `try`/`except` defines ONE side's tests, not both.
+
+    Both sides are descended, so their defs are SUMMED, and the count then EXCEEDS what
+    pytest collects — measured: 5 declared against 2 collected on this host for a
+    platform-guarded module. That makes `observed >= declared` unsatisfiable and holds
+    the row's weight forever with a witness naming a testcase that never exists. The
+    denominator is therefore OMITTED (UNKNOWN is raisable, never lowerable).
+    """
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "s.py").write_text(
+        "import sys\n"
+        "if sys.platform == 'win32':\n"
+        "    def test_win_a(): pass\n"
+        "    def test_win_b(): pass\n"
+        "else:\n"
+        "    def test_posix_c(): pass\n"
+        "try:\n"
+        "    import ujson  # noqa: F401\n"
+        "    def test_fast(): pass\n"
+        "except ImportError:\n"
+        "    def test_slow(): pass\n"
+    )
+
+    import ast as _ast
+
+    assert ci_timing._splits_tests_across_exclusive_sides(
+        _ast.parse((tmp_path / "tests" / "s.py").read_text())) is True
+    assert "s.py" not in ci_timing.declared_test_counts(["s.py"], tmp_path)
+
+
 def test_the_remaining_floor_shapes_have_no_denominator(tmp_path: Path) -> None:
     """#9134 review P1: four ways a module collects MORE than its `def` count, and a
     fifth that collects the same but is invisible to a `tree.body`-only walk.

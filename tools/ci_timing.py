@@ -802,6 +802,7 @@ def declared_test_counts(keys, repo_root: Path) -> dict[str, int]:
         except (OSError, SyntaxError, UnicodeDecodeError):
             continue
         if (_has_parametrisation(tree) or _declares_a_floor(tree)
+                or _splits_tests_across_exclusive_sides(tree)
                 or _conftest_multiplies(candidate.parent, root)):
             # ⛔ OMITTED, not counted: a count of `def`s is a FLOOR of the collected
             # count, and a floor satisfies `observed >= declared` for a reading that
@@ -945,6 +946,35 @@ def _has_parametrisation(tree: ast.Module) -> bool:
                     return True
                 if isinstance(value, ast.Call) and not isinstance(value.func, ast.Attribute):
                     return True
+    return False
+
+
+def _splits_tests_across_exclusive_sides(tree: ast.Module) -> bool:
+    """True when two MUTUALLY EXCLUSIVE branches each define tests.
+
+    Only one side of a live `if`/`else` runs, and only one of `try`'s body and a
+    handler can — but `_collectable_statements` descends into both, so their tests are
+    SUMMED. The count then EXCEEDS what pytest collects, which makes the row's
+    `observed >= declared` permanently unsatisfiable: the weight holds forever with a
+    witness naming a testcase that never exists (measured on a platform-guarded module:
+    5 declared against 2 collected on this host). The count is therefore OMITTED —
+    UNKNOWN is raisable and never lowerable, the direction this module requires
+    (#9134 review, P2).
+    """
+    tc = _type_checking_names(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.If, ast.While)):
+            dead = _dead_branches(node, tc)
+            live = [block for attr, block in (("body", node.body), ("orelse", node.orelse))
+                    if attr not in dead]
+            if sum(1 for block in live if _count_collected(block, tc)) > 1:
+                return True
+        elif isinstance(node, (ast.Try, ast.TryStar)):
+            # `body` and a HANDLER are exclusive; `orelse`/`finalbody` follow the body,
+            # so a test in either of those is additive and not a split.
+            body_tests = _count_collected(node.body, tc)
+            if body_tests and any(_count_collected(h.body, tc) for h in node.handlers):
+                return True
     return False
 
 
@@ -1114,7 +1144,7 @@ def _collectable_statements(
             # TYPE_CHECKING: … else: def test_late_bound` beside three plain tests
             # collected 4 against a declared 3, a floor that licensed a 3.3x discount
             # (#9134 review, P2).
-            if dead and attr == "body":
+            if attr in dead:  # the side THAT CANNOT RUN is the one to skip
                 continue
             block = getattr(node, attr, None)
             if isinstance(block, list) and block and isinstance(block[0], ast.stmt):
