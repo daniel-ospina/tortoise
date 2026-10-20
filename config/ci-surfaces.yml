@@ -7075,19 +7075,26 @@ durations:
   test_graph_delete_hygiene_report.py: 1.8
   test_graph_name_ownership.py: 0.1
   test_graph_storage.py: 5.2
-  # #9210: added by a PR, so no CI reading exists yet (#3400 trap). 7 test
-  # functions, 7 collected cases (both counts are 7 today — the file carries no
+  # #9210: added by a PR, so no CI reading exists yet (#3400 trap). 9 test
+  # functions, 9 collected cases (both counts are 9 today — the file carries no
   # parametrization since the eleven table-only cases were deleted; the sixth is
   # the shape rule's ONE exemption, `_NOT_A_RESTORE_STATEMENTS`, added in round 3
-  # so the rule cannot red on the `config_reset` marker write, and the seventh
-  # pins the sibling `rebuild()` engine's watermark on the engine's `"replay"`
-  # as a DISCLOSED deferral to #9213 — so it reds when that lane changes, not
-  # after someone re-reads the sentence it replaced).
+  # so the rule cannot red on the `config_reset` marker write; the seventh pins
+  # the sibling `rebuild()` engine's watermark on the engine's `"replay"` as a
+  # DISCLOSED deferral to #9213 — so it reds when that lane changes, not after
+  # someone re-reads the sentence it replaced — and the eighth/ninth are the
+  # SYNTHETIC-fold leg: the `#548` graph-only rows are folded back from the
+  # pre-wipe capture in TWO passes (pass 1a's `_upsert_point_props`, pass 2's
+  # `_upsert_point_edges`), so both are pinned, plus an outer-permit shadowing
+  # case for that leg. That is the count moving 7 → 9; the constant test was
+  # also renamed to the plural (`…_match_the_pinned_literals`) because it now
+  # reconciles BOTH lane literals.
   # MEASURED locally in the embedded lane: 27.3 s on a quiet box and 35.1 s
   # under fleet load, of which ~15 s is the FIRST `create_point`'s one-time
   # embedding-model load — the same artefact #9123 recorded for its own file.
   # The whole file measured 7.3 s / 6.2 s warm over two runs on 2026-10-20 with
-  # the seventh case in it (the model already loaded in-process), so the
+  # the seventh case in it, and 6.4 s / 5.8 s on 2026-10-21 with all nine (the
+  # two synthetic cases reuse a warm model in-process, so they add ~1 s), so the
   # declared 45.0 stays ABOVE the highest LOADED reading and a busy leg cannot
   # under-pack it. The
   # weight is unchanged by the deletion of the eleven table-only parametrized
