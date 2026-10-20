@@ -274,8 +274,11 @@ not recovered by a later successful write. The stage is part of the diagnosis:
 `append-unverified` means the read-back also failed, so "lost" is a guess the
 state refuses to make. A graph can fail twice for different reasons, and the
 FIRST failure is often the only provable one, so `first_stage`/`first_error` are
-kept beside the current pair and the 503 detail quotes the first as well —
-overwriting it would have discarded the diagnosis a reader needs. Over HTTP the
+kept beside the current pair — overwriting it would have discarded the diagnosis
+a reader needs. The 503 detail quotes the first diagnosis whenever its STAGE
+differs from the latest (that is the case the sentence about the stage is
+warning about); a same-stage repeat keeps `first_error` for
+`degraded_graphs()` but the 503 names only the latest message. Over HTTP the
 state is a **503** carrying that detail
 verbatim, not a bare 500. It is process memory: a peer process cannot see it —
 and, the other half of the same scope, a peer process cannot ACKNOWLEDGE it
