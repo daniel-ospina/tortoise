@@ -92,6 +92,19 @@ statement did not land (though a rebuild may have REPLACED the contents, and
 presence is not writability), so a re-issue cannot duplicate; an absent key is
 a deletion OR a rebuild still inside its delete window, and is never told
 "retry".
+
+The SAME issue names a second, disjoint family: the instance stops answering
+underneath the client (a container restart, an RDB reload, an OOM-kill) and
+surfaces as a bare transport error — ``TimeoutError("Timeout reading from
+socket")``, ``ConnectionError("Connection closed by server.")``, or a
+``LOADING`` handshake. Those are not graph aborts (the engine never replied),
+so :func:`explain_graph_abort` deliberately leaves them alone; they get their
+own diagnosis from :func:`explain_instance_unavailable`, which states the
+mechanism and, because it cannot know whether a statement landed, branches on
+whether the statement can MUTATE rather than on any graph probe — EXCEPT for
+the ``LOADING`` handshake, which ignores ``mutating`` because the instance
+replied and rejected the command before it ran, so nothing was applied either
+way.
 """
 from __future__ import annotations
 
@@ -466,6 +479,220 @@ def explain_graph_abort(
             "projection was available), and the answer does not say which — "
             "check the connection, the graph name and the projection before "
             "concluding anything about the data."
+        )
+    return text + _LEGIBLE_OPENER + explains
+
+
+# The instance-side failures a graph client sees when the CONTAINER goes away
+# or comes back — the second family #7357 names, and the one
+# `explain_graph_abort` deliberately leaves alone: nothing was aborted by the
+# engine (so its anchored family does not match), and its ``EXISTS`` probe would
+# answer about a graph nobody is asking after.
+def is_instance_unavailable(exc: BaseException) -> bool:
+    """True when *exc* is the INSTANCE going away, not the engine refusing.
+
+    Three exclusions and one reuse, all deliberate — and the exclusion is BY
+    TYPE, never a ``ConnectionError`` subclass walk:
+
+    - an ANSWERED refusal is never an instance outage. On the pinned ``redis``
+      (7.4.1, measured) ``AuthenticationError``, ``AuthorizationError`` and
+      ``MaxConnectionsError`` all SUBCLASS ``ConnectionError``, so a plain
+      membership test against the transport family would smuggle a
+      ``WRONGPASS`` / ``NOPERM`` / pool-exhaustion into "the box died" and send
+      the reader after a container restart instead of their credentials — the
+      exact mirror of the defect this module exists to fix, and the trap
+      ``graph_key_restore._instrument_failures`` records from its own incident
+      (#8827: *"a subclass test would smuggle an auth failure into the very
+      transport set it must never join"*). ``ResponseError`` covers the
+      ``MISCONF`` / ``Can't persist`` refusal, which
+      :func:`retryable_transient` calls retryable for a different reason (disk
+      pressure, not a dead container).
+    - everything else is decided by :func:`retryable_transient`, the module's
+      ONE transport classifier, so this predicate cannot drift from the arm
+      that decides whether such a failure may be re-issued. That also keeps
+      the errno narrowing (``_NETWORK_ERRNOS``) and the socket-origin rule for
+      a builtin ``TimeoutError`` in a single place.
+
+    ``BusyLoadingError`` is the one family member the instance ANSWERED, and its
+    early return above is ORDER-CRITICAL, not merely arm selection: the vendor
+    parser maps ``LOADING`` in its ``EXCEPTION_CLASSES``, so
+    :func:`_answered_by_server` would classify it as an answered refusal and drop
+    it from the family — taking the LOADING arm (and every test that pins it) with
+    it. :func:`retryable_transient` would have admitted it; that is NOT the gate
+    that would reject it.
+    """
+    import redis.exceptions as _re
+
+    busy_loading = getattr(_re, "BusyLoadingError", None)
+    if busy_loading is not None and isinstance(exc, busy_loading):
+        # ORDER-CRITICAL: admitted BEFORE the answered-refusal checks below, which
+        # would otherwise exclude it (the parser maps "LOADING" to this class).
+        return True
+    for name in ("ResponseError", "AuthenticationError", "AuthorizationError",
+                 "MaxConnectionsError", "ExternalAuthProviderError"):
+        answered = getattr(_re, name, None)
+        if answered is not None and isinstance(exc, answered):
+            return False
+    if _answered_by_server(exc):
+        return False
+    # A legibility predicate must never REPLACE the exception it explains, so a
+    # classifier that cannot run (a broken optional import inside
+    # ``retryable_transient``) answers "not this family" rather than raising
+    # from inside an ``except`` block.
+    try:
+        return retryable_transient(exc)
+    except Exception:  # noqa: BLE001, RUF100
+        logger.debug("transport classification unavailable", exc_info=True)
+        return False
+
+
+def _answered_by_server(exc: BaseException) -> bool:
+    """Whether the vendor PARSER produced *exc* from a server's own ANSWER.
+
+    The type list above cannot be complete on its own, and this closes the gap
+    the measured way: ``redis``'s reply parser maps some *answered* refusals
+    into the ``ConnectionError`` family, including the PLAIN class —
+    ``-ERR max number of clients reached`` → ``ConnectionError`` and
+    ``-ERR problem with LDAP service`` → ``ExternalAuthProviderError`` (both
+    read from the pinned parser's own table, not restated from memory). A
+    caller told "the instance quit answering" when the instance answered "too
+    many clients" or "your LDAP backend is broken" is the same defect as
+    telling it the graph was deleted.
+
+    The mapping is read from the parser's own ``EXCEPTION_CLASSES`` — the
+    vendor table that PRODUCED the exception — so this cannot drift from the
+    pin the way a copied list of literals would. The parser raises
+    ``ResponseError`` for anything it does not map, and that is excluded above.
+    Any failure to read the table (a private module, a future redis) answers
+    False, i.e. falls back to the type list and the transport family.
+    """
+    try:
+        from redis._parsers.base import BaseParser
+    except Exception:  # noqa: BLE001, RUF100 — a private module; never fail the error path
+        return False
+    table = getattr(BaseParser, "EXCEPTION_CLASSES", None) or {}
+    text = str(exc).strip()
+    # TWO lookups, because redis-py STRIPS a leading ``ERR `` from a wire error
+    # (measured; ``_ERR_PREFIX_RE`` records the same fact from the other side),
+    # so a parsed refusal arrives as ``max number of clients reached`` while a
+    # directly constructed one may keep the ``ERR ``. The bare form is matched
+    # FIRST against the parser's own nested table — that is where the served
+    # ``-ERR <text>`` answers live.
+    mapped = None
+    err_table = table.get("ERR")
+    if isinstance(err_table, dict):
+        mapped = err_table.get(text[4:] if text.upper().startswith("ERR ") else text)
+    if mapped is None:
+        head, _, rest = text.partition(" ")
+        mapped = table.get(head)
+        if isinstance(mapped, dict):
+            mapped = mapped.get(rest)
+    return isinstance(mapped, type) and isinstance(exc, mapped)
+
+
+def explain_instance_unavailable(
+    exc: BaseException,
+    *,
+    mutating: bool | None = None,
+) -> str | None:
+    """Return *exc*'s message with an instance-outage diagnosis appended (#7357).
+
+    **The defect this closes.** The issue's symptom block lists TWO errors, and
+    only one of them was made legible. ``graph was deleted or replaced while
+    the query was running`` is explained by :func:`explain_graph_abort` on the
+    write retry's exhaustion arm (#8954); the other —
+    ``TimeoutError: Timeout reading from socket`` — still arrives as the bare
+    driver sentence, in every verb, on reads as well as writes. Measured cost
+    (the issue's 2026-10-13 comment): a read probe died with a bare transport
+    error inside a test run and the lane spent a full cycle reading it as the
+    test's own defect, because nothing in the message named the instance.
+
+    **What it says, and what it refuses to claim.** The note names the
+    mechanism CLASS — the instance quit answering mid-request, which is what a
+    container restart / RDB reload / OOM-kill looks like from here, and equally
+    what a query slower than the client's timeout looks like — and states
+    outright that this is NOT the engine's graph-swap abort and NOT evidence
+    that the graph's data was lost. It never says "your data is intact": a
+    transport failure proves nothing about DATA either way, and that overclaim
+    is the mirror of the defect (#7357's ``explain_graph_abort`` records the
+    same rule).
+
+    **Why the branch is on ``mutating``, not on a graph probe.** A transport
+    failure means the reply was lost, and a lost reply is NOT a lost write
+    (see :func:`retryable_aborted_write`, which refuses this whole family for a
+    bare ``CREATE`` for exactly that reason). So the only actionable fact is
+    the statement's shape:
+
+    - ``mutating is False`` — a read changes nothing, so re-issuing it is safe.
+    - ``mutating is True`` — the OUTCOME IS UNKNOWN. Never told "retry": it may
+      have landed with only the reply lost, and re-issuing a non-idempotent
+      statement can DUPLICATE it. The caller is told to read back first.
+    - ``mutating is None`` — the command carries no classifiable statement
+      (``PING``, ``GRAPH.LIST``, a raw command): the outcome is UNKNOWN and the
+      caller is told which way each shape falls.
+
+    **``LOADING`` is its own arm, and it is the one that ignores ``mutating``.**
+    A ``BusyLoadingError`` is the instance ANSWERING (it replied LOADING while
+    reloading its dataset), and the engine rejects the command BEFORE it runs —
+    so nothing was applied whether the statement reads or writes, and re-issuing
+    after the load is safe for both. Telling a LOADING caller the instance
+    "quit answering" and its write's outcome is UNKNOWN would be two false
+    statements, which is why this family does not share the arm above.
+
+    **Contract preserved.** The original sentence stays at position 0 (every
+    driver/``redis`` text match and the ``in``-style assertions in callers keep
+    working), the exception TYPE is untouched, and the note is appended at most
+    once — the shared :data:`_LEGIBLE_OPENER` is the idempotency marker, so a
+    failure explained by ``explain_graph_abort`` (or already explained here) is
+    never given a second suffix. Returns ``None`` for anything outside
+    :func:`is_instance_unavailable`'s family.
+    """
+    if not is_instance_unavailable(exc):
+        return None
+    text = str(exc)
+    if _LEGIBLE_OPENER in text:
+        return None
+    import redis.exceptions as _re
+
+    loading = isinstance(exc, getattr(_re, "BusyLoadingError", ()))
+    if loading:
+        explains = (
+            "the instance ANSWERED, and what it answered was LOADING: it is "
+            "restarting and loading its dataset from disk, so it is up but not "
+            "serving yet. This is not the engine's 'graph was deleted or "
+            "replaced' abort, and it is not evidence that the graph or its "
+            "data was lost. The command was rejected BEFORE it ran, so nothing "
+            "was applied and re-issuing it once the load completes is safe — "
+            "a large RDB can take minutes to load, so check again rather than "
+            "assuming the instance is gone."
+        )
+        return text + _LEGIBLE_OPENER + explains
+    explains = (
+        "the instance quit answering in the middle of this request (a closed "
+        "connection, or the client's read timeout expiring) — which is what a "
+        "container restart/reload or an OOM-kill of the instance looks like "
+        "from the client, and equally what a query slower than the client's "
+        "timeout looks like. This is NOT the engine's 'graph was deleted or "
+        "replaced' abort, and it is not evidence that the graph or its data "
+        "was lost. "
+    )
+    if mutating is True:
+        explains += (
+            "The statement's OUTCOME IS UNKNOWN: it may have landed with only "
+            "its reply lost. Do not conclude that it failed — read back what "
+            "you wrote before re-issuing, because re-issuing a "
+            "non-idempotent statement (a bare CREATE) can duplicate it."
+        )
+    elif mutating is False:
+        explains += (
+            "No result was returned, and a read changes nothing, so "
+            "re-issuing this statement is safe."
+        )
+    else:
+        explains += (
+            "Whether the command took effect is UNKNOWN — re-issuing a "
+            "read-only command is safe; anything that mutates must be read "
+            "back before it is re-issued."
         )
     return text + _LEGIBLE_OPENER + explains
 
