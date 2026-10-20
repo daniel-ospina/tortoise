@@ -1553,7 +1553,18 @@ def reap_orphans() -> list[str]:
             # facts are read BEFORE the removal — `rm -f` destroys the only
             # evidence of WHY it stopped, and nobody else will report it now
             # that its owner is gone.
-            prior = _termination_report(name, live=False)
+            #
+            # The facts are a claim about WHY it stopped, so they may only be
+            # read for a container docker actually reports as STOPPED: this
+            # path also fires for a RUNNING container whose owner worktree was
+            # deleted (a lane container outlives its worktree by design), and a
+            # previous OOM kill reported there is HISTORY, not this failure —
+            # `_termination_report(live=False)` states "it did not hang, it was
+            # terminated", the false diagnosis its own `live` flag exists to
+            # prevent. An unreadable state asserts nothing at all, exactly as
+            # `start()` already refuses to append a report to `unknown`.
+            prior = ("" if state not in _TERMINAL_STATES
+                     else _termination_report(name, live=False))
             rm = _docker("rm", "-f", name)
             out.append(f"reap: {'removed' if rm.returncode == 0 else 'FAILED to remove'} "
                        f"{name} — its owning worktree {owner} is gone"
@@ -1571,10 +1582,11 @@ def reap_orphans() -> list[str]:
             #
             # So the DEFAULT reports, and the report is the load-bearing part:
             # this container holds a port out of PORT_RANGE until someone
-            # removes it, and no other instrument on the host shows it. Docker's
-            # termination facts are read too (#7357) — the operator still learns
-            # WHY the lane died, for one read-only `docker inspect`.
-            facts = _termination_report(name, live=False)
+            # removes it, and no other instrument on the host shows it. No
+            # `docker inspect` is spent here: nothing is being destroyed, so
+            # there is no evidence to preserve, and this runs on EVERY `up`/`uri`
+            # for every stopped peer container (measured ~53 ms per inspect;
+            # 67 of them is ~3.5 s added to every lane start).
             if not _stopped_reap_enabled():
                 out.append(
                     f"reap: kept {name} — its owning worktree exists ({owner}) "
@@ -1583,8 +1595,7 @@ def reap_orphans() -> list[str]:
                     f"gone. It holds a port from {PORT_RANGE[0]}-{PORT_RANGE[1]} "
                     f"until it is removed, from its OWN worktree: `cd {owner} "
                     f"&& uv run python tools/test_lane.py down` (or rule on "
-                    f"#8180 to arm `{STOPPED_REAP_ENV}=1`)"
-                    + (f"; it was {facts}" if facts else ""))
+                    f"#8180 to arm `{STOPPED_REAP_ENV}=1`")
                 continue
             # Re-read the state AT THE MOMENT OF ACTION: the snapshot above was
             # one `docker ps`, and a lane restarting its own container reuses
@@ -1596,8 +1607,10 @@ def reap_orphans() -> list[str]:
                 out.append(f"reap: kept {name} — it read {state} in the sweep "
                            f"but is {now} at removal time (fail-closed)")
                 continue
-            # Facts were read BEFORE this removal, above (#7357): the owner's
-            # own `start()` will now read `absent` and report nothing.
+            # Facts are read BEFORE this removal (#7357): the owner's own
+            # `start()` will now read `absent` and report nothing, so this is
+            # the last moment the cause exists.
+            facts = _termination_report(name, live=False)
             rm = _docker("rm", "-f", name)
             out.append(f"reap: {'removed' if rm.returncode == 0 else 'FAILED to remove'} "
                        f"{name} — it is {now} (a stopped container serves "

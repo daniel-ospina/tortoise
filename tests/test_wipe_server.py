@@ -1833,6 +1833,35 @@ def test_stale_sweep_skips_a_bound_journal_when_the_target_is_UNRESOLVABLE(
     assert res["stale"][0]["skipped_instance"], res
 
 
+def test_stale_sweep_SKIPS_a_journal_whose_sidecar_is_UNREADABLE(
+        monkeypatch, tmp_path):
+    """A sidecar that EXISTS but holds nothing usable is not "legacy".
+
+    `_bind_journal_instance` creates the file before it writes into it, so a
+    torn write leaves a 0-byte `.instance` — the likeliest corrupt state there
+    is. Reading that as "unbound" would send the journal down the legacy path and
+    CONSUME it against whatever instance happens to be sweeping, i.e. the very
+    defect this PR exists to remove, re-entered through a crash. Mutation: fold
+    the empty case into `None` (`return key or None`) and this fails.
+    """
+    import tortoise.embedded_reaper as er
+    from tests._embedded import JOURNAL_INSTANCE_SUFFIX, _stale_sweep
+    adir = tmp_path / "suites"
+    adir.mkdir()
+    monkeypatch.setattr(er, "ACTIVE_SUITES_DIR", str(adir))
+    monkeypatch.setattr(er, "active_suite_markers", lambda: [])
+    journal = adir / "tornsidecar0.graphs.jsonl"
+    journal.write_text("test_ws_torn_graph\n")
+    journal.with_name(journal.name + JOURNAL_INSTANCE_SUFFIX).write_text("")
+    db = _FakeDb(graphs=["test_ws_torn_graph"])
+    monkeypatch.setattr("tests._embedded._proj_for_uri",
+                        lambda uri: _FakeProj(db))
+    res = _stale_sweep(_live_utils.docker_base_uri(password="x", host="127.0.0.1"))
+    assert db.deleted == [], res
+    assert journal.exists(), res
+    assert "UNREADABLE" in res["stale"][0]["skipped_instance"], res
+
+
 def test_stale_sweep_still_consumes_an_UNBOUND_legacy_journal(
         monkeypatch, tmp_path):
     """Legacy journals carry no instance sidecar. Unknown is NOT a mismatch:

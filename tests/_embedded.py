@@ -1225,18 +1225,34 @@ def _uri_instance_key(uri: str | None) -> str | None:
 
 
 def _journal_instance(journal_file: str) -> str | None:
-    """The instance key recorded beside *journal_file*, or None if unrecorded.
+    """The instance key recorded beside *journal_file*.
 
-    None is NOT "no instance": it means the journal predates the binding (or
-    its sidecar could not be written), and a caller must treat that as UNKNOWN
-    rather than as a mismatch it can act on.
+    THREE states, and they must not collapse into two, because the caller uses
+    the answer to decide an IRREVERSIBLE action (consuming the only ownership
+    record a set of graphs has):
+
+    * ``None`` — no sidecar at all: the journal predates the binding. LEGACY,
+      and swept the pre-fix way.
+    * ``""`` — a sidecar exists but its content is unusable (empty/torn). We
+      cannot say which instance these graphs are on, so this is a MISMATCH, and
+      a mismatch SKIPS. Reading it as ``None`` (legacy) would consume the
+      journal against whatever instance happens to be sweeping — which is
+      exactly the pre-fix defect, re-entered through a torn write. A 0-byte
+      sidecar is the LIKELIEST torn state: `_bind_journal_instance` creates the
+      file before it writes into it.
+    * ``"host:port"`` — bound; compare it to the sweep's target.
     """
+    path = journal_file + JOURNAL_INSTANCE_SUFFIX
     try:
-        with open(journal_file + JOURNAL_INSTANCE_SUFFIX) as fh:
+        with open(path) as fh:
             key = fh.read().strip()
-    except OSError:
+    except FileNotFoundError:
         return None
-    return key or None
+    except OSError:
+        # Exists but cannot be read (EACCES, EISDIR, ...). "Cannot tell" is not
+        # "legacy": nothing may be consumed on the strength of a failed read.
+        return ""
+    return key or ""
 
 
 def _bind_journal_instance(journal_file: str, uri: str | None) -> bool:
@@ -1251,6 +1267,8 @@ def _bind_journal_instance(journal_file: str, uri: str | None) -> bool:
     key = _uri_instance_key(uri)
     if not key:
         return False
+    path = journal_file + JOURNAL_INSTANCE_SUFFIX
+    tmp = path + ".tmp"
     try:
         # The parent dir may not exist yet: this runs at conftest IMPORT, and on
         # a fresh host (a new TMPDIR, CI's per-job temp root, the #3752
@@ -1259,9 +1277,17 @@ def _bind_journal_instance(journal_file: str, uri: str | None) -> bool:
         # same reason (cycle-7 P1-1). Without this line the bind silently
         # fails on exactly the sessions whose journals most need a binding.
         os.makedirs(os.path.dirname(journal_file) or ".", exist_ok=True)
-        with open(journal_file + JOURNAL_INSTANCE_SUFFIX, "w") as fh:
+        # Write-then-rename: a partially written sidecar must never be visible
+        # (see `_journal_instance` — a torn one reads as "unusable", and an
+        # unusable binding skips a journal for the rest of its life).
+        with open(tmp, "w") as fh:
             fh.write(key + "\n")
+        os.replace(tmp, path)
     except OSError:
+        try:  # noqa: SIM105
+            os.remove(tmp)
+        except OSError:
+            pass
         return False
     return True
 
@@ -1689,6 +1715,17 @@ def _sweep_drop(proj, journal_file: str, *, drop: bool = True,
     dict {"dropped", "failed", "preserved", "journal_removed"} or
     {"skipped": ...}.
 
+    RESIDUAL, stated because it is the same defect one level down: the
+    INSTANCE binding is recorded PER JOURNAL (``_journal_instance``), while a
+    journal's ENTRIES are not stamped with the instance they were minted on
+    (``_journal_append_product`` takes only a name). A session that mints on
+    two instances — realistic: a test that points ``TORTOISE_DB_URI``/its own
+    projection at the shared lane mid-run — can therefore still satisfy one
+    instance's entry by absence while sweeping the other. Closing that needs a
+    per-entry instance stamp at the append seam, which is a journal-FORMAT
+    change and is filed rather than smuggled in here. The ``_stale_sweep`` gate
+    is what this module can enforce today.
+
     FAIL-CLOSED name gate (#7795): only the families in
     ``_SWEEP_OWNED_PREFIXES`` are ever DETACH+DELETEd. A name outside them
     reached the journal because a test drove PRODUCT code with a shared path
@@ -2071,8 +2108,12 @@ def _stale_sweep(uri: str, *, skip_on_non_loopback: bool = True) -> dict:
             # journal would destroy the only ownership record they have. An
             # UNRESOLVABLE target (None) lands here too — unknown is not
             # "matches", and the cost of being wrong is an irreversible one.
-            results.append({"journal": e, "skipped_instance": f"bound to "
-                            f"{bound}, this sweep targets {target}",
+            why = ("its recorded instance binding is UNREADABLE, so which "
+                   "server these graphs are on cannot be established"
+                   if not bound else f"bound to {bound}")
+            results.append({"journal": e,
+                            "skipped_instance": f"{why}, this sweep targets "
+                                                f"{target}",
                             "journal_removed": False})
             continue
         with _sweep_proj(uri) as proj:
