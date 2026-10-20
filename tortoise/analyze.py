@@ -563,8 +563,20 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
         if not ids:
             return set()
         rows = proj.g.query(
-            "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]-(t) "
-            "WHERE op.id IN $ids "
+            # #6211: the ANCHOR BARRIER. `MATCH (op:Point {is_operator:true})
+            # -[:IMPL|NAND]-(t) WHERE op.id IN $ids` is planned as
+            # `All Node Scan (t)` — the id predicate degrades to a per-record
+            # filter, so this query (which runs over the WHOLE operator
+            # frontier, the largest id set of the pass) paid for every node in
+            # the graph. Measured on a 23,354-node / 160,000-edge fixture,
+            # 200-operator frontier: 242.5 ms `All Node Scan (t)` -> 12.6 ms
+            # `Node By Index Scan (op)`, identical rows. Same defect and same
+            # shape as `ep._EP_ANCHOR_BARRIER` (see that constant); `WITH *`
+            # rather than `WITH op` so an id predicate is never separated from
+            # a variable a later clause needs (#7162).
+            "MATCH (op:Point) WHERE op.id IN $ids WITH * "
+            "MATCH (op)-[:IMPL|NAND]-(t) "
+            "WHERE op.is_operator = true "
             # #7927: ``t`` is a TRAVERSAL position reached from the anchored
             # operator — the claim a non-Point belief feeds is epistemic too.
             f"AND {epistemic_disjunction('t')} "
@@ -629,9 +641,14 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
                     # #7927: ``p`` is ID-ANCHORED (`p.id IN $frontier`) —
                     # label-swept so a :Subject/:Object/:Event anchor finds
                     # the operators pointing at it.
+                    # #6211: the anchor barrier — `p.id IN $frontier` is on
+                    # the pattern's FAR endpoint, so without `WITH *` the plan
+                    # is a label scan of every operator and a per-record filter
+                    # (same defect as `ep._EP_ANCHOR_BARRIER`, measured there).
                     rows = _sweep(
-                        ("MATCH (op:Point {is_operator:true})-[:{rel}]->(p:{label}) "
-                         f"WHERE p.id IN $frontier {live_op} "
+                        ("MATCH (p:{label}) WHERE p.id IN $frontier WITH * "
+                         "MATCH (op:Point)-[:{rel}]->(p) "
+                         f"WHERE op.is_operator = true {live_op} "
                          "RETURN DISTINCT op.id").replace("{rel}", rel),
                         {"frontier": frontier_list},
                         frontier_labels,
@@ -646,7 +663,11 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
                     alive = _derived_live_operators(frontier_list)
                     if alive:
                         # #7927: ``target`` is a TRAVERSAL position reached
-                        # from the anchored operator.
+                        # from the anchored operator — and, unlike the three
+                        # legs above, this one needs no #6211 barrier: measured
+                        # ``Node By Index Scan (op:Point)`` on the 160k-edge
+                        # fixture (one record for a one-id frontier), so the
+                        # planner already anchors it on ``op.id``.
                         rows = proj.g.query(
                             "MATCH (op:Point {is_operator:true})-[:" + safe_rel + "]->(target) "
                             f"WHERE op.id IN $ops {live_op} {live_t} "
@@ -717,9 +738,15 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
             if rel == "NAND" or direction in ("incoming", "both"):
                 # #7927: ``b`` is ID-ANCHORED (`b.id IN $frontier`) → label
                 # sweep; ``a`` is the TRAVERSAL position → WHERE disjunction.
+                # #6211: the anchor barrier (see ep._EP_ANCHOR_BARRIER) —
+                # `b.id IN $frontier` sits on the far endpoint of the pattern,
+                # so the unbarriered form planned as `All Node Scan (a)`.
                 bwd_tpl = (
-                    "MATCH (a)-[r:" + safe_rel + "]->(b:{label}) "
-                    f"WHERE b.id IN $frontier {live_a} {live_b} "
+                    "MATCH (b:{label}) WHERE b.id IN $frontier WITH * "
+                    "MATCH (a)-[r:" + safe_rel + "]->(b) "
+                    # `1 = 1` keeps the AND-chained fragments (each begins
+                    # with AND) syntactically valid after the bare WHERE.
+                    f"WHERE 1 = 1 {live_a} {live_b} "
                     f"AND {epistemic_disjunction('a')} "
                     # A keyless legacy ``:Event`` (``session_indexer`` mints
                     # ``(e:Event {eventId:…})`` with no ``id``) has NO
@@ -783,9 +810,13 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
         # Expand to new frontier points from collected operators
         if new_ops and (max_hops is None or hop < max_hops - 1):
             ops_list = list(new_ops)
+            # #6211: barrier — `op.id IN $ops` must be read off the id index
+            # before the expansion; unbarriered the planner walked `p` instead
+            # (`All Node Scan (p)`, measured on the 160k-edge fixture).
             rows = proj.g.query(
-                "MATCH (op:Point {is_operator:true})-[r:IMPL|NAND]->(p) "
-                f"WHERE op.id IN $ops {live_p} "
+                "MATCH (op:Point) WHERE op.id IN $ops WITH * "
+                "MATCH (op)-[r:IMPL|NAND]->(p) "
+                f"WHERE op.is_operator = true {live_p} "
                 # #7927: ``p`` is reached from the anchored operator.
                 f"AND {epistemic_disjunction('p')} "
                 # The EXPANSION frontier is re-anchored by ``p.id`` on the next

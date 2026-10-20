@@ -20,6 +20,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -233,6 +234,44 @@ def test_cross_subdomain_cookie_sync_gate_runs_on_a_new_file_diff():
         "a diff that only ADDS an adapter copy in a new website/assets/ file must "
         "select the registry-completeness gate — otherwise the fourth copy merges "
         "green (#8701 review P1, #4309 class)"
+    )
+
+
+def test_the_end_customer_credential_design_guard_runs_on_its_doc_only_diff():
+    """#8693 review (P1, finding 1): the design doc must select its own guard.
+
+    `test_8693_end_customer_credential_design.py` pins the end-customer credential
+    DESIGN DOC — half code pins against `tortoise/hosted_api.py` (`rotate`/
+    `DELETE` org pin, owner-class `graphs:create`, the third audit action name),
+    half the corrected prose of
+    `docs/scoping/2026-10-19-8693-end-customer-credential-design.md`. The prose
+    half only breaks on a docs-only edit to that doc, and `docs/` is in
+    NON_PYTHON_PREFIXES with the doc matching no SOURCE_PATTERNS entry, so a
+    doc-only diff filters to `changed == []` and takes the docs-only early return
+    — tier1 ONLY. Registered on `api` (which covers `hosted_api.py` edits) but not
+    in `tier1`, the guard was asleep on the one change that can re-stale it: the
+    doc reverted to the three refuted claims in a one-file PR would merge green
+    and only red `main` post-merge (the #1349/#3332/#3616/#4309 silent-drop
+    class; the #8614/#8135 shape one doc over). Dropping the tier1 entry re-opens
+    that hole.
+
+    Asserted as `surfaces == []` on purpose, not just "the guard is present": the
+    docs-only early return is the whole reason this registration is needed, and a
+    Python path creeping into the selection would mask the loss of the tier1
+    entry (`test_fly_secret_drift_gate_runs_on_a_runbook_only_diff` shape above).
+    """
+    root = Path(__file__).resolve().parents[1]
+    changed = "docs/scoping/2026-10-19-8693-end-customer-credential-design.md"
+    assert (root / changed).exists(), f"guarded design doc is gone: {changed}"
+    r = _sel([changed])
+    assert r["full"] is False
+    assert r["surfaces"] == []
+    assert "test_8693_end_customer_credential_design.py" in r["test_files"], (
+        f"a {changed}-only diff does not select "
+        "tests/test_8693_end_customer_credential_design.py, so its prose pins "
+        "cannot fire on the only change that can break them — a one-file revert "
+        "to the three refuted claims would merge green (#8693 review P1, #4309 "
+        "silent-drop class)"
     )
 
 
@@ -4864,6 +4903,168 @@ def test_slow_leg_bounds_clear_the_committed_work():
             f"the leg is killed mid-suite and the gate reds before pytest can "
             f"report. Re-derive the budget (and the outer cap above it) from "
             f"the committed `durations` map.")
+
+
+CI_RUNNER_GATE = Path(__file__).resolve().parents[1] / "scripts" / "ci_runner_gate.sh"
+#: The tracked `scripts` symlink itself, WITHOUT following it: a dangling link is the
+#: runner case (no agent-infra checkout), and it is the ONLY case that may skip.
+SCRIPTS_LINK = Path(__file__).resolve().parents[1] / "scripts"
+CI_RUNNER_GATE_ABSENT = (
+    f"PREMISE CROSS-CHECK NOT RUN: agent-infra's ci_runner_gate.sh is not "
+    f"reachable at {CI_RUNNER_GATE} (the tracked `scripts` symlink dangles where "
+    f"$AGENT_INFRA_PATH is unset, as on a runner). The repo-side half of the "
+    f"guard — test-slow's label is VERSION-PINNED — ran and passed. The premise "
+    f"half is HOST-ONLY AND UNTESTED BY CI: it is a cross-repo fact (the labels "
+    f"agent-infra's gate attaches to the self-hosted pool) that no runner checks "
+    f"out, so a green CI run says nothing about it. Run this module on a host "
+    f"with $AGENT_INFRA_PATH set to verify that the gate still attaches only "
+    f"`ubuntu-latest`. Same shape and same limit as RAIL_ABSENT_REASON in "
+    f"tests/test_pytest_attribution.py."
+)
+
+
+def test_slow_legs_are_pinned_off_the_ambiguous_runner_label():
+    """2026-10-19: `ubuntu-latest` is not "GitHub-hosted" on this repo.
+
+    `scripts/ci_runner_gate.sh` re-attaches `ubuntu-latest` to the self-hosted
+    ARM64 pool as a fallback, so `runs-on: ubuntu-latest` resolves to a ~2x
+    slower class run to run — and `test-slow` (the leg that IS the critical
+    path) was killed at its 40m watchdog on `pi-runner-vm-2` after executing
+    39.6 min of test time (run 39309984832, `rc=137`). The job then read 42.1m
+    and concluded `failure`, so this leg's wall became main's critical path
+    (`ci_crit_max=42.1m`, up from 22.6m) and the required aggregate red named a
+    KILL rather than a test verdict. (That run was ALSO red for independent,
+    genuine reasons — three fast shards on hosted runners failed real tests — so
+    the pin removes this kill and the critical-path inflation, not the run's
+    redness.)
+
+    The budget cannot absorb that class: 2x the leg would be >=79m against a
+    40m budget built at the `WATCHDOG_HEADROOM` floor, past both
+    `WATCHDOG_CEILING_MIN` and this job's 60m cap. So the leg is pinned to a
+    VERSION-PINNED hosted label (the pool claims `ubuntu-latest`, `self-hosted`,
+    `Linux`, `ARM64` and `self-hosted-arm64` — never `ubuntu-<version>`), the
+    same pin and the same reasoning as `workflow-lint` (#7867).
+
+    A bare `ubuntu-latest` here re-opens exactly that false red, so this reds
+    rather than relying on a comment nobody re-reads."""
+    job = _load_python_ci()["jobs"]["test-slow"]
+    runs_on = job["runs-on"]
+    assert runs_on != "ubuntu-latest", (
+        "test-slow must NOT use `ubuntu-latest`: the fallback gate re-attaches "
+        "that label to the self-hosted ARM64 pool, where this leg needs ~2x its "
+        "budget and is killed at the watchdog (measured: 39.6 min of test time, "
+        "rc=137, job 42.1m). Pin a version-pinned hosted label (`ubuntu-24.04`).")
+    assert isinstance(runs_on, str) and re.fullmatch(r"ubuntu-\d+\.\d+", runs_on), (
+        f"test-slow's runner label {runs_on!r} must be a VERSION-PINNED hosted "
+        f"label (`ubuntu-<version>`): `ubuntu-latest` is claimed by the "
+        f"self-hosted pool whenever the fallback is attached, and a label the "
+        f"pool claims puts this leg back on the class that cannot finish it.")
+
+    if not SCRIPTS_LINK.is_dir():
+        # The tracked `scripts` symlink DANGLES (no agent-infra checkout here), which
+        # is every CI runner: the link is a host convenience, not a repo dependency
+        # (`python-ci.yml` is self-contained by decision, fix #555). Announced, never
+        # silent, and the message says out loud that the premise half is untested by
+        # CI — a bare `skipped` would let a green run read as "the pool's labels were
+        # verified", which is the vacuous pass this guard exists to prevent.
+        print(CI_RUNNER_GATE_ABSENT)
+        pytest.skip(CI_RUNNER_GATE_ABSENT)
+    # The link RESOLVED, so agent-infra IS checked out at $AGENT_INFRA_PATH: a missing
+    # gate file now means the premise moved or was renamed out from under this pin,
+    # not that there is no premise to check. That is a FAIL, not a skip — the old
+    # `.exists()` check folded both cases into the skip and so could never report a
+    # premise that had silently stopped existing.
+    assert CI_RUNNER_GATE.is_file(), (
+        f"the `scripts` symlink resolves ({SCRIPTS_LINK} -> "
+        f"{SCRIPTS_LINK.resolve()}) but {CI_RUNNER_GATE.name} is not there: the "
+        f"cross-repo premise of this pin has been moved or renamed, so the premise "
+        f"half can no longer be verified from this host — fix the path (or the pin) "
+        f"rather than letting this guard drift out of reach")
+    gate = CI_RUNNER_GATE.read_text()
+    # The premise this pin rests on lives in ANOTHER repo's script, reached here
+    # through the tracked `scripts` symlink. Pinning a literal against an external,
+    # changeable fact with nothing asserting that fact is the "comment nobody
+    # re-reads" failure this test criticises: harden the gate to attach a
+    # VERSION-PINNED label instead of `ubuntu-latest` and this test would stay green
+    # while `test-slow` silently returned to the ARM64 pool.
+    #
+    # The assignment shape is NOT part of the premise: agent-infra may quote it, drop
+    # the quotes, or `export` it. Only the VALUE is contractual, so the matcher
+    # tolerates the spelling instead of asserting it — but it must still FIND both, or
+    # the premise is unreadable and this test must not pass by not looking.
+    labels = _gate_pool_labels(gate)
+    assert set(labels) == {"FALLBACK_LABEL", "POOL_LABEL"}, (
+        f"cannot read FALLBACK_LABEL/POOL_LABEL from {CI_RUNNER_GATE} (read "
+        f"{sorted(labels) or 'nothing'}) — the premise of this pin is unverifiable, "
+        f"so this test must not pass by not looking. If agent-infra renamed the "
+        f"constants, update the matcher here in the same change that renamed them.")
+    for label in labels.values():
+        assert not re.fullmatch(r"ubuntu-\d+\.\d+", label), (
+            f"ci_runner_gate.sh can attach {label!r} to the self-hosted pool, "
+            f"which is the VERSION-PINNED class test-slow is pinned to: the pin "
+            f"below no longer keeps this leg off the pool. Either the gate must "
+            f"stop attaching version-pinned labels, or test-slow needs a "
+            f"different isolation.")
+
+
+def _gate_pool_labels(gate_text: str) -> dict[str, str]:
+    """The labels `ci_runner_gate.sh` can attach to the self-hosted pool.
+
+    Returned by a helper so the PARSING half of the cross-repo premise is testable
+    WITHOUT agent-infra checked out — the gate file itself is host-only (see
+    `CI_RUNNER_GATE_ABSENT`), but the matcher that reads it is not, and an unreadable
+    matcher is how a guard stays green while protecting nothing.
+
+    Only the VALUE is contractual; the assignment SHAPE is not, so the matcher accepts
+    `export`, either quoting style, none, and leading whitespace. A commented-out
+    assignment is not read — prose is not the value the gate will use.
+    """
+    found: dict[str, str] = {}
+    for name in ("FALLBACK_LABEL", "POOL_LABEL"):
+        match = re.search(
+            rf'^\s*(?:export\s+)?{name}=["\']?([^"\'\s]+)', gate_text, re.MULTILINE
+        )
+        if match:
+            found[name] = match.group(1)
+    return found
+
+
+def test_the_gate_label_matcher_reads_the_spellings_and_rejects_the_unsafe_one():
+    """The premise half's PARSER and its DISCRIMINATOR, executed with no agent-infra.
+
+    `test_slow_legs_are_pinned_off_the_ambiguous_runner_label` skips its cross-repo
+    half on every runner, so without this test the regexes that read
+    `ci_runner_gate.sh` and the `ubuntu-<version>` rejection below them would never
+    execute anywhere — and a guard that cannot fail is not a guard. Three claims are
+    pinned here, all against crafted gate text:
+
+    1. the shipped spelling is read (double-quoted, line start);
+    2. a cosmetic change in agent-infra — `export`, single quotes, no quotes, leading
+       whitespace — does not make the labels unreadable (an unreadable premise must
+       fail loudly on the host, not silently weaken the pin);
+    3. the rejection FIRES: a gate that starts attaching `ubuntu-24.04` to the pool is
+       reported, which is the drift this pin exists to notice.
+    """
+    shipped = 'FALLBACK_LABEL="ubuntu-latest"\nPOOL_LABEL="ubuntu-latest"\n'
+    expected = {"FALLBACK_LABEL": "ubuntu-latest", "POOL_LABEL": "ubuntu-latest"}
+    assert _gate_pool_labels(shipped) == expected
+    for spelling in (
+        "export FALLBACK_LABEL='ubuntu-latest'\nexport POOL_LABEL='ubuntu-latest'\n",
+        "FALLBACK_LABEL=ubuntu-latest\nPOOL_LABEL=ubuntu-latest\n",
+        'FALLBACK_LABEL="ubuntu-latest" # inline note\nPOOL_LABEL="ubuntu-latest"\n',
+    ):
+        assert _gate_pool_labels(spelling) == expected, spelling
+    # A commented-out assignment is not an assignment: prose must not stand in for the
+    # value the gate will actually use.
+    assert _gate_pool_labels('# FALLBACK_LABEL="ubuntu-latest"\n') == {}
+    # The discriminator itself, executed: this is the arm that has never run on a
+    # runner and decides whether the pin still protects anything.
+    drifted = 'FALLBACK_LABEL="ubuntu-latest"\nPOOL_LABEL="ubuntu-24.04"\n'
+    labels = _gate_pool_labels(drifted)
+    assert labels == {"FALLBACK_LABEL": "ubuntu-latest", "POOL_LABEL": "ubuntu-24.04"}
+    assert [lbl for lbl in labels.values() if re.fullmatch(r"ubuntu-\d+\.\d+", lbl)] == [
+        "ubuntu-24.04"
+    ]
 
 
 def test_carve_out_shard_bounds_clear_the_committed_work_without_dwarfing_it():

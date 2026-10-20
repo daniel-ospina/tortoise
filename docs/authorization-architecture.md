@@ -245,6 +245,14 @@ be native, external, or customer-supplied behind that seam.
 | **C. ABAC / policy-as-code (OPA, Cerbos)** | Attribute rules (source kind, session, time windows) evaluated per request | Best fit for time-bounded or attribute-rich policy (e.g. retention windows). Overlaps heavily with (A) for a two-scope vocabulary |
 | **D. Customer IAM / delegation** | We call the customer's authority | Only meaningful for the developer-customer model *if* they ever want to govern their end-users' slices |
 
+**Option D's end-customer instance is designed in
+`docs/scoping/2026-10-19-8693-end-customer-credential-design.md` (#8693):** the
+tenant-of-tenant tier is a *credential* the builder's app vends under its own
+authority (a scoped `tk_` child in the end user's own team), not a principal we
+authorise directly; RFC 8693 token exchange is recorded there as the v2 upgrade
+(per the `#557` Q2 owner decision), not as a v1 mechanism. That design adds no
+principal type here and does not touch this section's `OVERRIDES:` ruling.
+
 How a ReBAC tuple maps onto our ids (so that picking B later is a mapping, not a
 rewrite): object type = entity type, object id = our canonical id
 (`graph:g_…`, `point:pt_…`, `source:session:s_…`, `team:org_…`), and the relation
