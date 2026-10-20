@@ -39,14 +39,16 @@ with no added coverage.
 is consistent"): the point axis carries a deliberate TWO-name exception — ``event`` and
 ``humanApproval`` are accepted by the Layer-1 gate and are not pack-facing (asserted below,
 sized to catch a third). ``event`` is additionally a *live* three-way divergence: the gate
-accepts it, ``PackRegistry`` cannot resolve it, and the hosted point-create door silently
-rejects it (``known_kinds('pointKind')`` never carried it, because #1013 removed ``event`` as
-a point kind). Pinned as a size-1 exception below rather than fixed here: widening the hosted
-door's point vocabulary would walk back #1013's option-B ruling, and widening the pack-facing
-set would leak the legacy kinds into the extractor's prompt bucket. AF-9 (the CRM bridge mints
-a ``commitment`` pointKind that §5 declares nowhere) and the flat legacy registry's cross-axis
-overlap in ``domain_loader._BASE_KINDS`` (``incident``/``session``/``meeting`` fold into the
-point bucket) are the remaining legs on the issue.
+accepts it, ``PackRegistry`` cannot resolve it, and the hosted point-create door's DECLARED
+layers do not carry it (#1013 removed ``event`` as a point kind) — see the caveat on
+``known_kinds('pointKind')`` in that test, which is why the claim is made on the declared
+layers rather than on the door's whole allowlist. Pinned as a size-1 exception below rather
+than fixed here: widening the hosted door's point vocabulary would walk back #1013's option-B
+ruling, and widening the pack-facing set would leak the legacy kinds into the extractor's
+prompt bucket. AF-9 (the CRM bridge mints a ``commitment`` pointKind that §5 declares nowhere)
+and the flat legacy registry's cross-axis overlap in ``domain_loader._BASE_KINDS``
+(``incident``/``session``/``meeting`` fold into the point bucket) are the remaining legs on
+the issue.
 """
 from __future__ import annotations
 
@@ -224,11 +226,44 @@ def test_point_axis_runtime_exception_is_exactly_two_names():
     assert {"humanApproval", "event"} == CORE_POINT_KINDS - CANONICAL_POINT_KINDS, (
         "the gate-only point kinds changed; §5 + the #1013 ruling admit exactly two "
         f"(got {sorted(CORE_POINT_KINDS - CANONICAL_POINT_KINDS)})")
-    # `event` is the size-1 live divergence: gate-accepted, pack-unresolvable, and rejected by
-    # the hosted point-create door. Asserted so it cannot grow silently; see the module docstring.
+    # `event` is the size-1 live divergence: gate-accepted and pack-unresolvable. Asserted so
+    # it cannot grow silently; see the module docstring.
+    from tortoise import domain_loader
     from tortoise.domain_loader import known_kinds
+
+    # `humanApproval` must stay ADMITTED — it is §5's timeline kind and the reason the
+    # exception is a pair rather than a single name.
     assert "humanApproval" in known_kinds("pointKind")
-    assert "event" not in known_kinds("pointKind")
+
+    # ⛔ The two legs below are read from the DECLARED layers on purpose, never from
+    # `known_kinds("pointKind")`. That function is the hosted point-create door's allowlist,
+    # and it is `CORE_KINDS_BY_BUCKET["pointKind"] ∪ _legacy_point_kinds() ∪ pack point kinds`
+    # — where the middle term is the PROCESS-GLOBAL, IMPORT-MUTABLE
+    # `domain_loader._BASE_KINDS` that `register_kind()` appends to at import time.
+    # `tortoise/sdk.py` registers `diary`/`checkpoint-item`/`option`/`evidence`, and
+    # `tools/longmem_eval/ingest.py` registers `event`/`session-transcript`; two test modules
+    # import that file at COLLECTION time (`tests/test_session_reinjection.py`,
+    # `tests/test_coverage_loop.py`), so on a full shard `event` is already in the set before
+    # this test runs. A `"event" not in known_kinds("pointKind")` assertion therefore measured
+    # WHICH MODULES THE PROCESS IMPORTED, not the vocabulary: it was green file-scoped and red
+    # in shard (f) (#9175). The claim itself is unchanged and still guarded — by the two
+    # layers a `register_kind()` call cannot reach.
+
+    # (a) The door's CORE layer is the pack-facing nine, NOT the gate's wider
+    # `CORE_POINT_KINDS`. Swapping it for the gate set is the one edit that would let `event`
+    # (and `humanApproval`) into every request without touching a pack — the regression this
+    # pins.
+    assert set(domain_loader._CORE_KINDS_BY_BUCKET["pointKind"]) == CANONICAL_POINT_KINDS, (
+        "the door's core point layer is no longer the pack-facing set — using the gate's "
+        f"wider CORE_POINT_KINDS admits {sorted(CORE_POINT_KINDS - CANONICAL_POINT_KINDS)} "
+        "across the whole point axis (#1013 option B)")
+
+    # (b) No PACK may declare `event` as a point kind either: that would reach the door
+    # through the pack term and leak an episodic kind into the point axis.
+    assert "event" not in domain_loader._pack_kinds_by_bucket()["pointKind"], (
+        "a pack now declares `event` as a point kind — #1013's option-B ruling retired it "
+        "from this axis; drop it from the pack's `pointKinds`")
+    assert "event" not in CANONICAL_POINT_KINDS
 
 
 def test_ontology_source_types_are_pack_validatable(tmp_path):

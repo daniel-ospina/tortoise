@@ -1081,8 +1081,13 @@ def test_refresh_durations_on_the_real_manifest_adds_a_pending_file() -> None:
     target = pending[0]
     # A real stamp: `integrity_problems` treats a PRESENT-but-unparseable
     # `durations_captured_at` as red, and this test asserts the full gate is green.
+    # It must also be a CURRENT one: the validator reds a map older than 21 days
+    # (`tools/ci_manifest.py::staleness`), so a literal is a time bomb that goes off
+    # for every lane on the twenty-second day — the same defect `:1278` records for
+    # the other site, which is why this one derives its stamp too.
+    captured = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     new_text, stats = ci_timing.render_refreshed_manifest(
-        before, {target: 4.34}, "2026-10-07T00:00:00Z")
+        before, {target: 4.34}, captured)
     assert stats["added_keys"] == 1
     assert f"  {target}: 4.3" in new_text
     _, entries_before = ci_timing._locate_durations_block(before.split("\n"))
@@ -1577,7 +1582,19 @@ def test_integrity_problems_promotes_a_present_but_unparseable_stamp() -> None:
     problems = ci_timing.integrity_problems(rendered)
     assert any("not a parseable timestamp" in p for p in problems), problems
     # Absence is still the notice-only class: no stamp key, no problem.
-    assert ci_timing.integrity_problems(before) == []
+    #
+    # The key must actually be ABSENT for that to be what this line proves. It
+    # used to assert over `before` — the committed manifest — which carries a
+    # `durations_captured_at`, so the assertion took the FRESHNESS branch and the
+    # absence branch was never executed: the comment described a property the test
+    # could not reach. Strip the key and assert on the stripped manifest.
+    absent = yaml.safe_load(before)
+    absent.pop(ci_timing.DURATIONS_CAPTURED_AT, None)
+    absent_text = yaml.safe_dump(absent, sort_keys=False)
+    assert ci_timing.DURATIONS_CAPTURED_AT not in absent_text, (
+        "the absence case must be built by REMOVING the stamp, not by trusting "
+        "the committed manifest's age")
+    assert ci_timing.integrity_problems(absent_text) == []
 
 
 def test_ci_timing_docstring_no_longer_claims_it_never_gates_ci() -> None:

@@ -445,6 +445,56 @@ def test_a_verbatim_marker_without_a_vector_is_still_written():
     assert stmt.params["props"]["embedding_verbatim"] is True
 
 
+def test_the_projection_narrows_exactly_the_declared_stored_vector_props():
+    """#8615 — WHICH properties ride `vecf32` is declared once, in `stored_form`.
+
+    The record↔cache check (`tortoise/reconciliation.py`) narrows the truth side
+    by that same declaration, so the two cannot disagree about the form the
+    cache holds. A second, hand-copied list is how this drifts.
+    """
+    got = _node("Point", {"id": "p-1", "embedding": [0.5, 0.25]})
+    stmt = cp.node_statement(got)
+    narrowed = {prop for prop in cp.stored_vector_props()
+                if f"vecf32(${prop})" in stmt.cypher}
+    assert narrowed == set(cp.stored_vector_props())
+    assert set(cp.stored_vector_props()) == {"embedding"}
+    # each declared vector property rides as its OWN clause, never inside props
+    for prop in cp.stored_vector_props():
+        assert prop not in stmt.params["props"]
+
+
+def test_a_verbatim_projection_narrows_no_declared_vector_prop():
+    got = _node("Point", {"id": "p-1", "embedding": [0.5],
+                          "embedding_verbatim": True})
+    stmt = cp.node_statement(got)
+    for prop in cp.stored_vector_props():
+        assert f"vecf32(${prop})" not in stmt.cypher
+        assert f"n.{prop} = ${prop}" in stmt.cypher
+
+
+def test_is_verbatim_is_an_or_across_the_sides_it_is_given():
+    """One side's flag is enough — a dropped flag must not hide a narrowing."""
+    from tortoise.stored_form import is_verbatim
+
+    assert is_verbatim({}, {}) is False
+    assert is_verbatim({"embedding_verbatim": None}) is False
+    assert is_verbatim({"embedding_verbatim": False}) is False
+    assert is_verbatim({"embedding_verbatim": True}, {}) is True
+    assert is_verbatim({}, {"embedding_verbatim": True}) is True
+
+
+def test_the_stored_width_narrowing_is_total_and_matches_float32():
+    """`struct`'s float32 round trip — the number the engine actually holds."""
+    from tortoise.stored_form import narrow_to_stored_width
+
+    assert narrow_to_stored_width([0.1, 0.2]) == [
+        0.10000000149011612, 0.20000000298023224]
+    assert narrow_to_stored_width([]) == []
+    # NOT a numeric vector → None ("not comparable this way"), never a raise
+    for bad in ([None], ["x"], [object()], [1e300], None, 7, "abc"):
+        assert narrow_to_stored_width(bad) is None
+
+
 def test_a_non_allowlisted_rel_type_is_refused_before_any_statement_is_built():
     """`rel_type` is interpolated into the query STRUCTURE — it must be allowed.
 

@@ -23,6 +23,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import fcntl
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -601,6 +602,39 @@ _FALKORDB_CONTAINER = "falkordb-tortoise"
 #: unreachable host rather than a crash. Same engine as the CI gate (#6386).
 FALKORDB_IMAGE = "falkordb/falkordb-server:v4.20.6"
 
+#: #7357 — the KERNEL (cgroup) memory cap for the dev container, as a docker
+#: memory spec. Same env seam and default as every other FalkorDB container
+#: this repo starts (`tools/test_lane.py`, `tools/edge_census.py`,
+#: `.github/actions/falkordb-provision/provision.sh`).
+#:
+#: WHY THIS ONE MATTERS MOST HERE: `REDIS_ARGS` below carries `--maxmemory
+#: 512mb`, which is a REDIS-side limit — without `--memory` the container's real
+#: ceiling is the HOST's, and the host's ceiling is swap. So a container that
+#: crashes (a panicking engine, #8124) or overshoots is restarted by
+#: `--restart` into the same pressure, forever, and the operator sees a dead
+#: database rather than a container that was killed. #7357 measured exactly
+#: that on the canonical instance: `HostConfig.Memory=0`, `OOMKilled=false`,
+#: `ExitCode=0`, `RestartCount` climbing.
+#:
+#: `--memory-swap` is EQUAL to `--memory` deliberately: docker's default is 2x
+#: memory, i.e. the container may swap, and a swapping FalkorDB is a
+#: minutes-long RDB reload instead of a fast, isolated failure.
+CONTAINER_MEMORY_ENV = "FALKORDB_CONTAINER_MEMORY"
+DEFAULT_CONTAINER_MEMORY = "2g"
+
+#: #7357 — the restart policy the dev container is created with.
+#:
+#: `unless-stopped` restarts unconditionally and forever: a container that dies
+#: on every boot (the #8124 panic, an over-cap memory kill) is a SILENT infinite
+#: loop — `docker ps` shows `Up <seconds>` each time and nothing reports that it
+#: has been cycling all afternoon. `on-failure:5` bounds it: after five
+#: consecutive failures docker gives up and leaves the container `Exited`, which
+#: is VISIBLE, inspectable (`OOMKilled`/`ExitCode` are still there) and no longer
+#: consuming the host in a loop. The trade-off is deliberate: the container no
+#: longer auto-starts after a host reboot — run this step again, which is what
+#: the wizard is for.
+CONTAINER_RESTART_POLICY = "on-failure:5"
+
 
 def _container_status(name: str) -> str:
     """Return 'running', 'exited', or 'missing'."""
@@ -622,6 +656,58 @@ def _container_image(name: str) -> str:
     )
 
 
+#: `docker container inspect --format` for the cgroup memory limit (#7357).
+#: `0` is docker's spelling for NO LIMIT.
+_MEMORY_LIMIT_FORMAT = "{{.HostConfig.Memory}}"
+
+
+def _container_memory_limit(name: str) -> int | None:
+    """The container's cgroup memory limit in BYTES, or None when unreadable.
+
+    None is "could not read", never "it is capped": a failed `docker inspect`
+    is not evidence about the limit (#7357). `0` is docker's spelling for NO
+    LIMIT, and it is what every container created before this cap reports.
+    """
+    out = _run_output(
+        ["docker", "container", "inspect", "-f", _MEMORY_LIMIT_FORMAT,
+         name]
+    )
+    try:
+        return int(out)
+    except ValueError:
+        return None
+
+
+def _note_uncapped_existing() -> None:
+    """Say it out loud when the container we are about to REUSE has no cap.
+
+    `docker start` cannot add a limit, so a container created before this cap
+    existed keeps `HostConfig.Memory=0` for life — the same "an existing
+    container keeps the bad setting forever" mechanism as #8124's image pin.
+    Silence is how that goes unnoticed, so the reuse paths report it and name
+    the remedy (the data dir is a bind mount, so recreating keeps it).
+    """
+    current = _container_memory_limit(_FALKORDB_CONTAINER)
+    if current is not None and current <= 0:
+        print(f"  {_FALKORDB_CONTAINER!r} was created WITHOUT a kernel memory "
+              f"cap (HostConfig.Memory=0, #7357) and `docker start` cannot add "
+              f"one — `docker rm -f {_FALKORDB_CONTAINER}` and re-run this "
+              f"step to apply {CONTAINER_MEMORY_ENV} (data in ./data is a "
+              f"bind mount and is kept).")
+    elif current is None:
+        # #7357 review F9: `None` is "could not READ", and reporting it as
+        # silence makes it indistinguishable from "it is capped" — the same
+        # unread fact that leaves an uncapped container unnoticed. The caller
+        # above already says what it could not read (the image pin), so this one
+        # names the failed query and the command that would settle it.
+        probe = f"docker container inspect -f '{_MEMORY_LIMIT_FORMAT}'"
+        print(f"  Could not read the kernel memory limit of "
+              f"{_FALKORDB_CONTAINER!r} (the `{probe}` query failed), so "
+              f"whether it is capped cannot be confirmed — leaving it alone. "
+              f"Check it with `{probe} {_FALKORDB_CONTAINER}` and run `docker "
+              f"rm -f {_FALKORDB_CONTAINER}` if it reports 0 (#7357).")
+
+
 def _port_collision(port: str) -> str | None:
     """Return container ID using this port, or None."""
     out = _run_output(["docker", "ps", "--format", "{{.ID}} {{.Ports}}"])
@@ -631,18 +717,60 @@ def _port_collision(port: str) -> str | None:
     return None
 
 
+def _container_memory() -> str:
+    """The validated kernel memory cap for the dev container (#7357).
+
+    Read at CALL time and refused when malformed OR ZERO: the value is
+    interpolated into an argv, a silently dropped cap is the uncapped container
+    this prevents, and `0` means UNLIMITED to docker (the one value a reader
+    would type to "disable" the cap).
+    """
+    raw = (os.environ.get(CONTAINER_MEMORY_ENV)
+           or DEFAULT_CONTAINER_MEMORY).strip().lower()
+    # Group 1 is the NUMBER: docker accepts the LONG unit forms too (`2gb`,
+    # `2048mb`), so the seam must not refuse a spelling docker itself accepts
+    # (#7357 review) — this message is what tells an operator to raise the cap.
+    m = re.match(r"\+?([0-9]+(?:\.[0-9]+)?)(?:[bkmgt]|[kmgt]b|[kmgt]ib)?\Z", raw)
+    if not m:
+        _fail(f"{CONTAINER_MEMORY_ENV}={raw!r} is not a docker memory spec "
+              f"(e.g. 512m, 2g, 1.5g) — refusing to start the container with "
+              f"an unparseable cap (default {DEFAULT_CONTAINER_MEMORY})")
+    # BYTES, not the number: docker truncates the spec to an int64, so
+    # `0.0000000001g` (0.107 B) installs as HostConfig.Memory=0 — an UNCAPPED
+    # container reached through a value that reads as positive (#7357 review).
+    _units = {"": 1, "b": 1,
+              "k": 1 << 10, "kb": 1 << 10, "kib": 1 << 10,
+              "m": 1 << 20, "mb": 1 << 20, "mib": 1 << 20,
+              "g": 1 << 30, "gb": 1 << 30, "gib": 1 << 30,
+              "t": 1 << 40, "tb": 1 << 40, "tib": 1 << 40}
+    if int(float(m.group(1)) * _units[raw[m.end(1):].lower()]) < 1:
+        _fail(f"{CONTAINER_MEMORY_ENV}={raw!r} is a ZERO cap, which docker "
+              f"reads as UNLIMITED — refusing to start an uncapped container "
+              f"(default {DEFAULT_CONTAINER_MEMORY})")
+    return raw
+
+
 def step8() -> None:
     if MODE != "docker":
         _skip("lite mode")
         return
+
+    # #7357 review F8: the cap is validated FIRST — before `_container_status`,
+    # before the stale-container `docker rm -f`, and before the port-collision
+    # prompt that can `docker kill` ANOTHER container. It used to be read at the
+    # `docker run` call site, so a typo (or `0`, which docker reads as UNLIMITED)
+    # destroyed the stopped dev container — and possibly a neighbour — and only
+    # then refused to start the replacement. A guard is only as good as its
+    # ordering.
+    cap = _container_memory()
 
     status = _container_status(_FALKORDB_CONTAINER)
 
     # #8124: an EXISTING container is the case the pin does not reach by itself.
     # `docker run` only happens on the `missing` path, and a container created
     # from the old floating `falkordb/falkordb:latest` keeps its engine for life
-    # (`docker start` never re-resolves an image) — under `--restart
-    # unless-stopped` that is the panicking 6.0.x engine restarted forever, on
+    # (`docker start` never re-resolves an image) — under an unconditional
+    # restart policy that is the panicking 6.0.x engine restarted forever, on
     # the container MOST likely to be broken (it is the one that crashed).
     # Recreating is safe: the data dir is a bind mount, not the container's.
     if status in ("running", "exited"):
@@ -669,9 +797,11 @@ def step8() -> None:
             _run(["docker", "rm", "-f", _FALKORDB_CONTAINER])
             status = "missing"
         elif status == "running":
+            _note_uncapped_existing()
             _skip("container already running")
             return
         else:
+            _note_uncapped_existing()
             print("  Restarting stopped container...")
             _run(["docker", "start", _FALKORDB_CONTAINER])
             return
@@ -695,11 +825,16 @@ def step8() -> None:
     # Start
     data_dir = PROJECT / "data"
     data_dir.mkdir(exist_ok=True)
+    # `cap` was validated at the TOP of this function (ordering note there).
 
     _run([
         "docker", "run", "-d",
         "--name", _FALKORDB_CONTAINER,
-        "--restart", "unless-stopped",
+        "--restart", CONTAINER_RESTART_POLICY,
+        # #7357: the KERNEL cap. Validated here rather than interpolated raw —
+        # a typo must fail with the variable named, not as an opaque docker
+        # refusal (a dropped cap is the uncapped container this prevents).
+        "--memory", cap, "--memory-swap", cap,
         "-p", f"127.0.0.1:{_FALKORDB_PORT}:6379",
         "-v", f"{data_dir}:/var/lib/falkordb/data",
         "-e", "REDIS_ARGS=--appendonly yes --save 60 1000 --maxmemory 512mb --maxmemory-policy noeviction",
@@ -707,9 +842,9 @@ def step8() -> None:
         # resolves to engine 6.0.x, whose `reply.rs:655` `reply_compact` PANICS
         # the server on `OPTIONAL MATCH (s) RETURN count(s) AS n, s.harness AS h`
         # (aggregate + property in one projection) and exits it — this container
-        # is long-lived (`--restart unless-stopped`), so the crash would take the
-        # developer's DB down mid-session and read as an unreachable host. Pinned
-        # to the engine the CI gate runs (#6386).
+        # restarts on a policy (`CONTAINER_RESTART_POLICY`), so the crash would
+        # take the developer's DB down mid-session and read as an unreachable
+        # host. Pinned to the engine the CI gate runs (#6386).
         FALKORDB_IMAGE,
     ])
     ENV_VARS["FALKORDB_PORT"] = _FALKORDB_PORT

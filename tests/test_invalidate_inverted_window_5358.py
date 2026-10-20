@@ -222,23 +222,34 @@ def test_unparseable_valid_from_does_not_refuse(sdk):
     parseable ``(0, epoch)``), so a raw ``>`` against ``now`` would report
     "future" purely as an ordering-fallback artifact — a guess, not a
     comparison.  The guard refuses only when BOTH sides are parseable, so this
-    stamps as before.  (That point's window already covers no PARSEABLE instant,
-    so the write cannot newly hide it.)
+    stamps as before.
+
+    The read path, however, now says the point COVERS ``now`` before the write:
+    per the #6140 ruling (owner, 2026-10-11, reading A) a start that names no
+    instant is an OPEN start, so the pre-ruling premise — "that point's window
+    already covers no PARSEABLE instant, so the write cannot newly hide it" — no
+    longer holds and is not what this test asserts. What the write does here is
+    terminate the window at ``now``: the closed end still covers ``now`` itself,
+    and everything after it stops covering. That is the invalidation working,
+    not the guard refusing.
     """
     now_iso = _dt.datetime.now(_dt.UTC).isoformat()
     old = _make_point(sdk, content="undecidable", validFrom="not-a-date")
     repl = _make_point(sdk, content="replacement")
 
-    # the documented outcome IS honest absence, before and after the write —
-    # the write cannot newly hide the point from any PARSEABLE query instant
-    assert sdk.get_historical_knowledge(old["id"], now_iso)["found"] is False
+    # an OPEN start covers every instant — including `now`, before any write
+    assert sdk.get_historical_knowledge(old["id"], now_iso)["found"] is True
 
     res = sdk.invalidate_point(old["id"], repl["id"])
     assert res["invalidated"] is True
     op = _props(sdk, old["id"])
     assert op["outdated"] is True
     assert op["validTo"] == op["expiredAt"]
-    assert sdk.get_historical_knowledge(old["id"], now_iso)["found"] is False
+    # still covers its own (closed) end instant …
+    assert sdk.get_historical_knowledge(old["id"], now_iso)["found"] is True
+    # … and stops covering afterwards: the invalidation actually terminated it.
+    later = (_dt.datetime.now(_dt.UTC) + _dt.timedelta(days=1)).isoformat()
+    assert sdk.get_historical_knowledge(old["id"], later)["found"] is False
 
 
 def test_falsey_but_present_valid_from_is_a_real_past_start(sdk):

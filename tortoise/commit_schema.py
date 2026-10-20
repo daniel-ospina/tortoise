@@ -215,9 +215,10 @@ def compile_vocab(packs_dir: Path | str | None = None,
     ⛔ That is NOT every write into a mined property — do not read it as one.
     Still outside it (#9068 carries the measurements): ``entities[].kind`` has no
     Layer-1 membership test (#5202, open); replay/``rebuild_all`` is
-    deliberately ungated (the durability authority is
-    ``docs/durability-posture.md``, so a record already in the journal
-    reproduces faithfully); and a set of writers never meets a door at all —
+    deliberately ungated (the journal is the RECONSTRUCTION SOURCE — never a
+    durability authority, which lives only in ``docs/durability-posture.md`` —
+    so a record already in it reproduces faithfully); and a set of writers
+    never meets a door at all —
     ``tortoise/pipeline.py``'s ``SET p.kind = <pipeline_key>`` (which also shows
     the mining leg conflates an ontology kind with any ``kind``), the connectors'
     direct ``proj.apply`` on a journal-less projection, and raw-Cypher / offline
@@ -465,18 +466,34 @@ def validate_validity_window(valid_from: object, valid_to: object) -> None:
     The predicate is the read path's own. ``get_historical_knowledge``'s ``_covers``
     orders the two bounds with ``tortoise.search_engine._created_sort_key``
     and gates presence with ``is not None``; this guard uses the SAME measure
-    and the SAME presence predicate, so its boundary IS the read path's. A
-    persisted inverted window (``valid_to < valid_from``) then covers no
+    and the SAME presence predicate. (The read path's START bound additionally
+    requires ORDERABILITY since #6140 — a start that names no instant is an
+    OPEN start there — which this guard matches from its own side by refusing
+    only a DECIDABLE inversion, so both skip a bound that names no instant.)
+    A persisted inverted window (``valid_to < valid_from``) then covers no
     instant and the point silently disappears from every temporal query.
 
     Absent bounds are legal — a window may be open-ended — so only a present,
     orderable pair can be inverted. A bound that ``_created_sort_key`` cannot
     order (it buckets as ``(1, <text>)``) is deliberately not refused here;
     unparseable bounds are a separate concern with their own guard (#5360).
-    Such a window can still hide a point from a temporal query, but that hiding
-    is attributable to the unparseable bound rather than to this guard, and
-    refusing it here would be a behaviour change outside this issue. Equality
-    is well-formed: a zero-length ``[t, t]`` window is legal.
+    An unparseable bound is not what hides a point either (since #6140 an
+    unorderable START is an OPEN start and an unorderable END over-covers — see
+    the paragraph below); hiding happens through a PARSEABLE end sorting before
+    the probe instant. Refusing an unparseable pair here would be a behaviour
+    change outside this issue. Equality is well-formed: a zero-length
+    ``[t, t]`` window is legal.
+
+    #6140 — an unorderable START is not refused here, and this function does
+    not warn about it either. Its caller
+    ``sdk._refuse_inverted_point_window`` is what MERGES a caller's bound with
+    the STORED opposite one before delegating (this function still checks only
+    the pair it is given — see the Scope note below), so a warning here would
+    also fire on the stored side of an update that is not writing it. The
+    warning therefore belongs to that caller, which is the only place that knows
+    the value was just given to us. What the ruling settles is the meaning —
+    reading A: a start that names no instant means **no start was recorded**, so
+    the window is OPEN BELOW (``-(inf)``), which is what ``_covers`` does.
 
     Scope note: this checks the pair it is GIVEN. It does not merge a caller's
     bound with a stored opposite bound, so a writer that updates one edge of an
@@ -506,7 +523,8 @@ def validate_validity_window(valid_from: object, valid_to: object) -> None:
         return
     # Imported locally: this module sits on the Layer-1 commit path and needs
     # only its own models and validators there, so the heavyweight
-    # ``search_engine`` import stays off that path.
+    # ``search_engine`` import stays off that path — including for the
+    # one-sided call above, which cannot reach an inversion verdict.
     from .search_engine import _created_sort_key
     k_from = _created_sort_key(valid_from)
     k_to = _created_sort_key(valid_to)

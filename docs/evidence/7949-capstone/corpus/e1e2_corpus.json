@@ -1,0 +1,1450 @@
+{
+ "control_population": {
+  "count": 90,
+  "what": "the versioned write-path corpus's planted must-keep units (7 sessions)",
+  "why_this_population": "the E1 share may not fall only because fewer real facts are extracted, so these must survive every arm — they are the anti-gaming control"
+ },
+ "generated_by": "docs/evidence/7949-capstone/corpus/build_e1e2_corpus.py",
+ "object_population": {
+  "count": 25,
+  "what": "the 25 owner-confirmed non-entity Object NAMES from the production audit",
+  "why_this_population": "it is the only owner-labelled Object population in the repo, so it is the only denominator that is not a guess; its LEVEL is not comparable to the architecture doc's 62.3% (that figure is over ALL Objects)"
+ },
+ "objects": [
+  {
+   "class": "definite_description",
+   "id": "obj-audit-01",
+   "keep_object_ruling": false,
+   "name": "the timeout command",
+   "owner_confirmed": "2026-09-23",
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "class": "definite_description",
+   "id": "obj-audit-02",
+   "keep_object_ruling": false,
+   "name": "the staging-only constraint",
+   "owner_confirmed": "2026-09-23",
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "class": "definite_description",
+   "id": "obj-audit-03",
+   "keep_object_ruling": false,
+   "name": "the lane ownership rule",
+   "owner_confirmed": "2026-09-23",
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "class": "definite_description",
+   "id": "obj-audit-04",
+   "keep_object_ruling": false,
+   "name": "the round-3 review P2 finding",
+   "owner_confirmed": "2026-09-23",
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "class": "definite_description",
+   "id": "obj-audit-05",
+   "keep_object_ruling": false,
+   "name": "the parity harness",
+   "owner_confirmed": "2026-09-23",
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "class": "definite_description",
+   "id": "obj-audit-06",
+   "keep_object_ruling": false,
+   "name": "the vocabulary-pinned test",
+   "owner_confirmed": "2026-09-23",
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "class": "definite_description",
+   "id": "obj-audit-07",
+   "keep_object_ruling": false,
+   "name": "the reaper probe sys.modules.pop nit",
+   "owner_confirmed": "2026-09-23",
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "class": "definite_description",
+   "id": "obj-audit-08",
+   "keep_object_ruling": false,
+   "name": "the URI-unset carve-out CI job",
+   "owner_confirmed": "2026-09-23",
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "class": "definite_description",
+   "id": "obj-audit-09",
+   "keep_object_ruling": false,
+   "name": "the local route store gap",
+   "owner_confirmed": "2026-09-23",
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "class": "definite_description",
+   "id": "obj-audit-10",
+   "keep_object_ruling": false,
+   "name": "the research skill's 2-cycle cap",
+   "owner_confirmed": "2026-09-23",
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "class": "definite_description",
+   "id": "obj-audit-11",
+   "keep_object_ruling": false,
+   "name": "the agent-infra workflow-lock issue",
+   "owner_confirmed": "2026-09-23",
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "class": "definite_description",
+   "id": "obj-audit-12",
+   "keep_object_ruling": false,
+   "name": "the five previously ungrouped methods",
+   "owner_confirmed": "2026-09-23",
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "class": "definite_description",
+   "id": "obj-audit-13",
+   "keep_object_ruling": false,
+   "name": "the cross-arm lead-in duplication in main.jsx",
+   "owner_confirmed": "2026-09-23",
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "class": "definite_description",
+   "id": "obj-audit-14",
+   "keep_object_ruling": false,
+   "name": "the declared adversarial acceptance criterion",
+   "owner_confirmed": "2026-09-23",
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "class": "definite_description",
+   "id": "obj-audit-15",
+   "keep_object_ruling": false,
+   "name": "the ask/ask_assembled removal",
+   "owner_confirmed": "2026-09-23",
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "class": "symbol_name",
+   "id": "obj-audit-16",
+   "keep_object_ruling": true,
+   "name": "guard 2",
+   "owner_confirmed": "2026-09-23",
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "class": "file_path",
+   "id": "obj-audit-17",
+   "keep_object_ruling": false,
+   "name": "tests/test_frontmatter_validator.py",
+   "owner_confirmed": "2026-09-23",
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "class": "pr_or_issue_number",
+   "id": "obj-audit-18",
+   "keep_object_ruling": false,
+   "name": "PR #465",
+   "owner_confirmed": "2026-09-23",
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "class": "pr_or_issue_number",
+   "id": "obj-audit-19",
+   "keep_object_ruling": false,
+   "name": "issue #3775",
+   "owner_confirmed": "2026-09-23",
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "class": "section_marker",
+   "id": "obj-audit-20",
+   "keep_object_ruling": false,
+   "name": "§24",
+   "owner_confirmed": "2026-09-23",
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "class": "code_fragment",
+   "id": "obj-audit-21",
+   "keep_object_ruling": false,
+   "name": "gh api -X PATCH",
+   "owner_confirmed": "2026-09-23",
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "class": "symbol_name",
+   "id": "obj-audit-22",
+   "keep_object_ruling": true,
+   "name": "_TOOL_BY_NAME",
+   "owner_confirmed": "2026-09-23",
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "class": "branch_name",
+   "id": "obj-audit-23",
+   "keep_object_ruling": false,
+   "name": "feat/2779-slice1-display-name",
+   "owner_confirmed": "2026-09-23",
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "class": "repo_slug",
+   "id": "obj-audit-24",
+   "keep_object_ruling": true,
+   "name": "daniel-ospina/agent-infra",
+   "owner_confirmed": "2026-09-23",
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "class": "symbol_name",
+   "id": "obj-audit-25",
+   "keep_object_ruling": true,
+   "name": "_capture_cost_props",
+   "owner_confirmed": "2026-09-23",
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  }
+ ],
+ "points": [
+  {
+   "about": [
+    "the timeout command"
+   ],
+   "content": "timeout is not on macOS",
+   "id": "pt-audit-01",
+   "kind": "statement",
+   "must_keep": false,
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "about": [
+    "the staging-only constraint"
+   ],
+   "content": "The session's job was to fix two P2s the reviewer found that we had missed, staging only, no commit/push.",
+   "id": "pt-audit-02",
+   "kind": "statement",
+   "must_keep": false,
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "about": [
+    "the lane ownership rule"
+   ],
+   "content": "Lane ownership: #4668/#4648 belong to the B5+B2b durability lane - stood off...",
+   "id": "pt-audit-03",
+   "kind": "statement",
+   "must_keep": false,
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "about": [
+    "the round-3 review P2 finding"
+   ],
+   "content": "The round-3 review verdict is no P0/P1, with one P2 covering the test's remaining consumer-level gap...",
+   "id": "pt-audit-04",
+   "kind": "statement",
+   "must_keep": false,
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "about": [
+    "the parity harness"
+   ],
+   "content": "The parity harness fix is to split the table by resolver shape...",
+   "id": "pt-audit-05",
+   "kind": "statement",
+   "must_keep": false,
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "about": [
+    "the vocabulary-pinned test"
+   ],
+   "content": "a reaper mirror that gains a spelling the contract rejects diverges silently...",
+   "id": "pt-audit-06",
+   "kind": "statement",
+   "must_keep": false,
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "about": [
+    "the reaper probe sys.modules.pop nit"
+   ],
+   "content": "The sys.modules.pop(tortoise.env_truthy) in the probe is never restored, which is harmless...",
+   "id": "pt-audit-07",
+   "kind": "statement",
+   "must_keep": false,
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "about": [
+    "the URI-unset carve-out CI job"
+   ],
+   "content": "The change updated the two mirrored registries but not the third list (RAW_EMBEDDED_ALLOWLIST)...",
+   "id": "pt-audit-08",
+   "kind": "statement",
+   "must_keep": false,
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "about": [
+    "the local route store gap"
+   ],
+   "content": "the local route never reaches the store - the shipped default path for keyless users is broken, blocking O1",
+   "id": "pt-audit-09",
+   "kind": "statement",
+   "must_keep": false,
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "about": [
+    "the research skill's 2-cycle cap"
+   ],
+   "content": "The research skill's 2-cycle cap on fresh-context verifier cycles was applied...",
+   "id": "pt-audit-10",
+   "kind": "statement",
+   "must_keep": false,
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "about": [
+    "the agent-infra workflow-lock issue"
+   ],
+   "content": "The workflow-lock checker is inert in tortoise because the symlinked scripts/ resolves to agent-infra...",
+   "id": "pt-audit-11",
+   "kind": "statement",
+   "must_keep": false,
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "about": [
+    "the five previously ungrouped methods"
+   ],
+   "content": "Five methods - annotate_ask_hits, topic_summarize, calibration_passed, backfill_about_entities, backfill_v25 - were in no group...",
+   "id": "pt-audit-12",
+   "kind": "statement",
+   "must_keep": false,
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "about": [
+    "the cross-arm lead-in duplication in main.jsx"
+   ],
+   "content": "The remaining cross-arm lead-in duplication in main.jsx (owner-arm half) is a known, already-scoped gap...",
+   "id": "pt-audit-13",
+   "kind": "statement",
+   "must_keep": false,
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "about": [
+    "the declared adversarial acceptance criterion"
+   ],
+   "content": "The declared adversarial acceptance is not met for class 4...",
+   "id": "pt-audit-14",
+   "kind": "statement",
+   "must_keep": false,
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "about": [
+    "the ask/ask_assembled removal"
+   ],
+   "content": "TortoiseSDK.ask and TortoiseSDK.ask_assembled do not exist; they were removed by #3849 / PR #3929...",
+   "id": "pt-audit-15",
+   "kind": "statement",
+   "must_keep": false,
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "about": [
+    "guard 2"
+   ],
+   "content": "The handler_self_guards substring defect defeats guard 1's second leg and guard 2's HTTP-excluded exemption.",
+   "id": "pt-audit-16",
+   "kind": "statement",
+   "must_keep": false,
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "about": [
+    "tests/test_frontmatter_validator.py"
+   ],
+   "content": "tests/test_frontmatter_validator.py:206-211 is the only other pin of the narrow semantics...",
+   "id": "pt-audit-17",
+   "kind": "statement",
+   "must_keep": false,
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "about": [
+    "PR #465"
+   ],
+   "content": "PR #465 closed a personal-data leak in a tracked file and closed the guard gap that let it through.",
+   "id": "pt-audit-18",
+   "kind": "statement",
+   "must_keep": false,
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "about": [
+    "issue #3775"
+   ],
+   "content": "Issue #3775 untracked the dashboard dist/ tree and .gitignore line 38 enforces that.",
+   "id": "pt-audit-19",
+   "kind": "statement",
+   "must_keep": false,
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "about": [
+    "§24"
+   ],
+   "content": "The gate that actually governs is the nine objectives' done-states, observed against the running system...",
+   "id": "pt-audit-20",
+   "kind": "statement",
+   "must_keep": false,
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "about": [
+    "gh api -X PATCH"
+   ],
+   "content": "gh pr edit is intercepted on this box, so PR-body edits must go through gh api -X PATCH...",
+   "id": "pt-audit-21",
+   "kind": "statement",
+   "must_keep": false,
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "about": [
+    "_TOOL_BY_NAME"
+   ],
+   "content": "The _TOOL_BY_NAME cache is not a real staleness risk (the sole mutator appends the same entry and restores).",
+   "id": "pt-audit-22",
+   "kind": "statement",
+   "must_keep": false,
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "about": [
+    "feat/2779-slice1-display-name"
+   ],
+   "content": "The org precedent tortoise/org_naming.py is not on the stable-tool-id branch - it lives only on feat/2779-slice1-display-name...",
+   "id": "pt-audit-23",
+   "kind": "statement",
+   "must_keep": false,
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "about": [
+    "daniel-ospina/agent-infra"
+   ],
+   "content": "There is no complexity:low label in either daniel-ospina/agent-infra or daniel-ospina/tortoise...",
+   "id": "pt-audit-24",
+   "kind": "statement",
+   "must_keep": false,
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "about": [
+    "_capture_cost_props"
+   ],
+   "content": "_capture_cost_props returned None for two distinct facts: F1, a genuinely call-free capture...",
+   "id": "pt-audit-25",
+   "kind": "statement",
+   "must_keep": false,
+   "provenance": "prod-graph-audit-2026-09-23",
+   "source": "tests/eval/write_path/salience_labels.jsonl"
+  },
+  {
+   "about": [],
+   "content": "stuck at 62 percent since 3am",
+   "id": "pt-wp01_quarry_debug_u_01",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "medium",
+   "provenance": "write_path_gold:wp01_quarry_debug",
+   "source": "tests/eval/write_path/gold/wp01_quarry_debug.gold.json"
+  },
+  {
+   "about": [],
+   "content": "four workers on the wire queue",
+   "id": "pt-wp01_quarry_debug_u_02",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "medium",
+   "provenance": "write_path_gold:wp01_quarry_debug",
+   "source": "tests/eval/write_path/gold/wp01_quarry_debug.gold.json"
+  },
+  {
+   "about": [],
+   "content": "no lease rows at all",
+   "id": "pt-wp01_quarry_debug_u_03",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "low",
+   "provenance": "write_path_gold:wp01_quarry_debug",
+   "source": "tests/eval/write_path/gold/wp01_quarry_debug.gold.json"
+  },
+  {
+   "about": [],
+   "content": "batch ownership check was probably bypassed on the retry path",
+   "id": "pt-wp01_quarry_debug_u_04",
+   "kind": "idea",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp01_quarry_debug",
+   "source": "tests/eval/write_path/gold/wp01_quarry_debug.gold.json"
+  },
+  {
+   "about": [],
+   "content": "two workers grabbed the same batch twice from the ingest queue",
+   "id": "pt-wp01_quarry_debug_u_05",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp01_quarry_debug",
+   "source": "tests/eval/write_path/gold/wp01_quarry_debug.gold.json"
+  },
+  {
+   "about": [],
+   "content": "losing sleep over this backfill all week and it is a relief",
+   "id": "pt-wp01_quarry_debug_u_06",
+   "kind": "vibe",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp01_quarry_debug",
+   "source": "tests/eval/write_path/gold/wp01_quarry_debug.gold.json"
+  },
+  {
+   "about": [],
+   "content": "make each batch claim a single-owner lease",
+   "id": "pt-wp01_quarry_debug_u_07",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp01_quarry_debug",
+   "source": "tests/eval/write_path/gold/wp01_quarry_debug.gold.json"
+  },
+  {
+   "about": [],
+   "content": "I do not want a distributed lock service",
+   "id": "pt-wp01_quarry_debug_u_08",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp01_quarry_debug",
+   "source": "tests/eval/write_path/gold/wp01_quarry_debug.gold.json"
+  },
+  {
+   "about": [],
+   "content": "retry the batch after a sixty second backoff",
+   "id": "pt-wp01_quarry_debug_u_09",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp01_quarry_debug",
+   "source": "tests/eval/write_path/gold/wp01_quarry_debug.gold.json"
+  },
+  {
+   "about": [],
+   "content": "that gives you crash recovery for free",
+   "id": "pt-wp01_quarry_debug_u_10",
+   "kind": "idea",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp01_quarry_debug",
+   "source": "tests/eval/write_path/gold/wp01_quarry_debug.gold.json"
+  },
+  {
+   "about": [],
+   "content": "shipped before the October 15 freeze",
+   "id": "pt-wp01_quarry_debug_u_11",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp01_quarry_debug",
+   "source": "tests/eval/write_path/gold/wp01_quarry_debug.gold.json"
+  },
+  {
+   "about": [],
+   "content": "batches of five thousand events each",
+   "id": "pt-wp01_quarry_debug_u_12",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp01_quarry_debug",
+   "source": "tests/eval/write_path/gold/wp01_quarry_debug.gold.json"
+  },
+  {
+   "about": [],
+   "content": "twelve million events for Halcyon",
+   "id": "pt-wp01_quarry_debug_u_13",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp01_quarry_debug",
+   "source": "tests/eval/write_path/gold/wp01_quarry_debug.gold.json"
+  },
+  {
+   "about": [],
+   "content": "Maya Chen owns the ingest queue service",
+   "id": "pt-wp01_quarry_debug_u_14",
+   "kind": "entity",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp01_quarry_debug",
+   "source": "tests/eval/write_path/gold/wp01_quarry_debug.gold.json"
+  },
+  {
+   "about": [],
+   "content": "backfill cutoff at September 30",
+   "id": "pt-wp01_quarry_debug_u_15",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp01_quarry_debug",
+   "source": "tests/eval/write_path/gold/wp01_quarry_debug.gold.json"
+  },
+  {
+   "about": [],
+   "content": "maintenance window is Friday at 2am",
+   "id": "pt-wp01_quarry_debug_u_16",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp01_quarry_debug",
+   "source": "tests/eval/write_path/gold/wp01_quarry_debug.gold.json"
+  },
+  {
+   "about": [],
+   "content": "moving lumen auth to per-graph API keys",
+   "id": "pt-wp02_lumen_refactor_u_01",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp02_lumen_refactor",
+   "source": "tests/eval/write_path/gold/wp02_lumen_refactor.gold.json"
+  },
+  {
+   "about": [],
+   "content": "the team signed off last Friday",
+   "id": "pt-wp02_lumen_refactor_u_02",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "medium",
+   "provenance": "write_path_gold:wp02_lumen_refactor",
+   "source": "tests/eval/write_path/gold/wp02_lumen_refactor.gold.json"
+  },
+  {
+   "about": [],
+   "content": "graph keys get the tt_ prefix",
+   "id": "pt-wp02_lumen_refactor_u_03",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp02_lumen_refactor",
+   "source": "tests/eval/write_path/gold/wp02_lumen_refactor.gold.json"
+  },
+  {
+   "about": [],
+   "content": "the leaked token stayed valid for weeks",
+   "id": "pt-wp02_lumen_refactor_u_13",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "medium",
+   "provenance": "write_path_gold:wp02_lumen_refactor",
+   "source": "tests/eval/write_path/gold/wp02_lumen_refactor.gold.json"
+  },
+  {
+   "about": [],
+   "content": "token lifetime of twenty-four hours",
+   "id": "pt-wp02_lumen_refactor_u_04",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp02_lumen_refactor",
+   "source": "tests/eval/write_path/gold/wp02_lumen_refactor.gold.json"
+  },
+  {
+   "about": [],
+   "content": "Legacy keys remain valid until the rotation window closes",
+   "id": "pt-wp02_lumen_refactor_u_05",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp02_lumen_refactor",
+   "source": "tests/eval/write_path/gold/wp02_lumen_refactor.gold.json"
+  },
+  {
+   "about": [],
+   "content": "Bluepeak Logistics is the pilot customer",
+   "id": "pt-wp02_lumen_refactor_u_06",
+   "kind": "entity",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp02_lumen_refactor",
+   "source": "tests/eval/write_path/gold/wp02_lumen_refactor.gold.json"
+  },
+  {
+   "about": [],
+   "content": "Priya owns the registry service",
+   "id": "pt-wp02_lumen_refactor_u_07",
+   "kind": "entity",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp02_lumen_refactor",
+   "source": "tests/eval/write_path/gold/wp02_lumen_refactor.gold.json"
+  },
+  {
+   "about": [],
+   "content": "Fail closed with a 401",
+   "id": "pt-wp02_lumen_refactor_u_08",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp02_lumen_refactor",
+   "source": "tests/eval/write_path/gold/wp02_lumen_refactor.gold.json"
+  },
+  {
+   "about": [],
+   "content": "Keep key usage events for ninety days",
+   "id": "pt-wp02_lumen_refactor_u_09",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp02_lumen_refactor",
+   "source": "tests/eval/write_path/gold/wp02_lumen_refactor.gold.json"
+  },
+  {
+   "about": [],
+   "content": "Two-phase deploy",
+   "id": "pt-wp02_lumen_refactor_u_10",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp02_lumen_refactor",
+   "source": "tests/eval/write_path/gold/wp02_lumen_refactor.gold.json"
+  },
+  {
+   "about": [],
+   "content": "the sandbox org runs on them for a week",
+   "id": "pt-wp02_lumen_refactor_u_11",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "medium",
+   "provenance": "write_path_gold:wp02_lumen_refactor",
+   "source": "tests/eval/write_path/gold/wp02_lumen_refactor.gold.json"
+  },
+  {
+   "about": [],
+   "content": "it is overdue, I have been meaning to clean that page up for months",
+   "id": "pt-wp02_lumen_refactor_u_12",
+   "kind": "vibe",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp02_lumen_refactor",
+   "source": "tests/eval/write_path/gold/wp02_lumen_refactor.gold.json"
+  },
+  {
+   "about": [],
+   "content": "the pager fired twelve times per week",
+   "id": "pt-wp03_ember_design_u_01",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp03_ember_design",
+   "source": "tests/eval/write_path/gold/wp03_ember_design.gold.json"
+  },
+  {
+   "about": [],
+   "content": "Tomas pulled double duty for three weeks in September",
+   "id": "pt-wp03_ember_design_u_10",
+   "kind": "entity",
+   "must_keep": true,
+   "notability": "medium",
+   "provenance": "write_path_gold:wp03_ember_design",
+   "source": "tests/eval/write_path/gold/wp03_ember_design.gold.json"
+  },
+  {
+   "about": [],
+   "content": "thirty percent of alerts are unactionable",
+   "id": "pt-wp03_ember_design_u_02",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp03_ember_design",
+   "source": "tests/eval/write_path/gold/wp03_ember_design.gold.json"
+  },
+  {
+   "about": [],
+   "content": "We route ember alerts by service ownership instead of by page group",
+   "id": "pt-wp03_ember_design_u_03",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp03_ember_design",
+   "source": "tests/eval/write_path/gold/wp03_ember_design.gold.json"
+  },
+  {
+   "about": [],
+   "content": "the ownership table in lumen becomes the single source of truth",
+   "id": "pt-wp03_ember_design_u_04",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp03_ember_design",
+   "source": "tests/eval/write_path/gold/wp03_ember_design.gold.json"
+  },
+  {
+   "about": [],
+   "content": "falls to the default rotation and we flag it in the weekly ownership report",
+   "id": "pt-wp03_ember_design_u_05",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp03_ember_design",
+   "source": "tests/eval/write_path/gold/wp03_ember_design.gold.json"
+  },
+  {
+   "about": [],
+   "content": "get the pager down to four actionable pages per week",
+   "id": "pt-wp03_ember_design_u_06",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp03_ember_design",
+   "source": "tests/eval/write_path/gold/wp03_ember_design.gold.json"
+  },
+  {
+   "about": [],
+   "content": "Add a severity preflight that requires a real user impact statement",
+   "id": "pt-wp03_ember_design_u_07",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp03_ember_design",
+   "source": "tests/eval/write_path/gold/wp03_ember_design.gold.json"
+  },
+  {
+   "about": [],
+   "content": "auto-suppress alerts during declared maintenance windows",
+   "id": "pt-wp03_ember_design_u_08",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp03_ember_design",
+   "source": "tests/eval/write_path/gold/wp03_ember_design.gold.json"
+  },
+  {
+   "about": [],
+   "content": "Aisha suggested we keep the declarations human-owned rather than automated",
+   "id": "pt-wp03_ember_design_u_09",
+   "kind": "idea",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp03_ember_design",
+   "source": "tests/eval/write_path/gold/wp03_ember_design.gold.json"
+  },
+  {
+   "about": [],
+   "content": "Migrate service by service over two sprints",
+   "id": "pt-wp03_ember_design_u_11",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp03_ember_design",
+   "source": "tests/eval/write_path/gold/wp03_ember_design.gold.json"
+  },
+  {
+   "about": [],
+   "content": "starting with the ten noisiest services",
+   "id": "pt-wp03_ember_design_u_12",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "medium",
+   "provenance": "write_path_gold:wp03_ember_design",
+   "source": "tests/eval/write_path/gold/wp03_ember_design.gold.json"
+  },
+  {
+   "about": [],
+   "content": "first cutover review is scheduled for October 2",
+   "id": "pt-wp03_ember_design_u_13",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp03_ember_design",
+   "source": "tests/eval/write_path/gold/wp03_ember_design.gold.json"
+  },
+  {
+   "about": [],
+   "content": "suppressed alerts still land in the morning digest",
+   "id": "pt-wp03_ember_design_u_14",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp03_ember_design",
+   "source": "tests/eval/write_path/gold/wp03_ember_design.gold.json"
+  },
+  {
+   "about": [],
+   "content": "we want people to page early, not hide alerts",
+   "id": "pt-wp03_ember_design_u_15",
+   "kind": "vibe",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp03_ember_design",
+   "source": "tests/eval/write_path/gold/wp03_ember_design.gold.json"
+  },
+  {
+   "about": [],
+   "content": "it hit 4.2 seconds yesterday afternoon",
+   "id": "pt-wp04_aurora_perf_u_01",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp04_aurora_perf",
+   "source": "tests/eval/write_path/gold/wp04_aurora_perf.gold.json"
+  },
+  {
+   "about": [],
+   "content": "The spike correlates with the October 5 release",
+   "id": "pt-wp04_aurora_perf_u_02",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp04_aurora_perf",
+   "source": "tests/eval/write_path/gold/wp04_aurora_perf.gold.json"
+  },
+  {
+   "about": [],
+   "content": "a page with forty rows issues forty separate calls",
+   "id": "pt-wp04_aurora_perf_u_03",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp04_aurora_perf",
+   "source": "tests/eval/write_path/gold/wp04_aurora_perf.gold.json"
+  },
+  {
+   "about": [],
+   "content": "The N+1 embedding calls are what blew up the p95",
+   "id": "pt-wp04_aurora_perf_u_04",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp04_aurora_perf",
+   "source": "tests/eval/write_path/gold/wp04_aurora_perf.gold.json"
+  },
+  {
+   "about": [],
+   "content": "batch the lookup into a single call per page",
+   "id": "pt-wp04_aurora_perf_u_05",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp04_aurora_perf",
+   "source": "tests/eval/write_path/gold/wp04_aurora_perf.gold.json"
+  },
+  {
+   "about": [],
+   "content": "cache the embedding results in memory with a ten minute TTL",
+   "id": "pt-wp04_aurora_perf_u_06",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp04_aurora_perf",
+   "source": "tests/eval/write_path/gold/wp04_aurora_perf.gold.json"
+  },
+  {
+   "about": [],
+   "content": "refresh them ahead of the next view",
+   "id": "pt-wp04_aurora_perf_u_07",
+   "kind": "idea",
+   "must_keep": true,
+   "notability": "medium",
+   "provenance": "write_path_gold:wp04_aurora_perf",
+   "source": "tests/eval/write_path/gold/wp04_aurora_perf.gold.json"
+  },
+  {
+   "about": [],
+   "content": "forty thousand load requests per day",
+   "id": "pt-wp04_aurora_perf_u_08",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp04_aurora_perf",
+   "source": "tests/eval/write_path/gold/wp04_aurora_perf.gold.json"
+  },
+  {
+   "about": [],
+   "content": "ship this behind a flag",
+   "id": "pt-wp04_aurora_perf_u_09",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp04_aurora_perf",
+   "source": "tests/eval/write_path/gold/wp04_aurora_perf.gold.json"
+  },
+  {
+   "about": [],
+   "content": "Felix runs the dashboard perf review",
+   "id": "pt-wp04_aurora_perf_u_10",
+   "kind": "entity",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp04_aurora_perf",
+   "source": "tests/eval/write_path/gold/wp04_aurora_perf.gold.json"
+  },
+  {
+   "about": [],
+   "content": "Invalidate the cache entry for a team whenever a write lands",
+   "id": "pt-wp04_aurora_perf_u_11",
+   "kind": "idea",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp04_aurora_perf",
+   "source": "tests/eval/write_path/gold/wp04_aurora_perf.gold.json"
+  },
+  {
+   "about": [],
+   "content": "gets the p95 back under 800 milliseconds",
+   "id": "pt-wp04_aurora_perf_u_12",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp04_aurora_perf",
+   "source": "tests/eval/write_path/gold/wp04_aurora_perf.gold.json"
+  },
+  {
+   "about": [],
+   "content": "glad we finally measured it, the dashboard has been getting slower for months",
+   "id": "pt-wp04_aurora_perf_u_13",
+   "kind": "vibe",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp04_aurora_perf",
+   "source": "tests/eval/write_path/gold/wp04_aurora_perf.gold.json"
+  },
+  {
+   "about": [],
+   "content": "three hours and forty-one minutes of degraded search",
+   "id": "pt-wp05_retro_writeup_u_01",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp05_retro_writeup",
+   "source": "tests/eval/write_path/gold/wp05_retro_writeup.gold.json"
+  },
+  {
+   "about": [],
+   "content": "The first signal was the error budget burn alert at 9:15am",
+   "id": "pt-wp05_retro_writeup_u_02",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp05_retro_writeup",
+   "source": "tests/eval/write_path/gold/wp05_retro_writeup.gold.json"
+  },
+  {
+   "about": [],
+   "content": "the deploy went out at 9:12am",
+   "id": "pt-wp05_retro_writeup_u_03",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp05_retro_writeup",
+   "source": "tests/eval/write_path/gold/wp05_retro_writeup.gold.json"
+  },
+  {
+   "about": [],
+   "content": "The initial investigation blamed the search index",
+   "id": "pt-wp05_retro_writeup_u_04",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "medium",
+   "provenance": "write_path_gold:wp05_retro_writeup",
+   "source": "tests/eval/write_path/gold/wp05_retro_writeup.gold.json"
+  },
+  {
+   "about": [],
+   "content": "The config partition was the root cause",
+   "id": "pt-wp05_retro_writeup_u_05",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp05_retro_writeup",
+   "source": "tests/eval/write_path/gold/wp05_retro_writeup.gold.json"
+  },
+  {
+   "about": [],
+   "content": "We rolled the config back to the previous partition at 12:40pm",
+   "id": "pt-wp05_retro_writeup_u_06",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp05_retro_writeup",
+   "source": "tests/eval/write_path/gold/wp05_retro_writeup.gold.json"
+  },
+  {
+   "about": [],
+   "content": "add a pre-deploy check that compares partition weights against the shard capacity model",
+   "id": "pt-wp05_retro_writeup_u_07",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp05_retro_writeup",
+   "source": "tests/eval/write_path/gold/wp05_retro_writeup.gold.json"
+  },
+  {
+   "about": [],
+   "content": "make the config diff visible in the deploy review",
+   "id": "pt-wp05_retro_writeup_u_08",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp05_retro_writeup",
+   "source": "tests/eval/write_path/gold/wp05_retro_writeup.gold.json"
+  },
+  {
+   "about": [],
+   "content": "Nora suggested both",
+   "id": "pt-wp05_retro_writeup_u_09",
+   "kind": "idea",
+   "must_keep": true,
+   "notability": "medium",
+   "provenance": "write_path_gold:wp05_retro_writeup",
+   "source": "tests/eval/write_path/gold/wp05_retro_writeup.gold.json"
+  },
+  {
+   "about": [],
+   "content": "Maya owns the pre-deploy check and it needs to land by November 2",
+   "id": "pt-wp05_retro_writeup_u_10",
+   "kind": "entity",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp05_retro_writeup",
+   "source": "tests/eval/write_path/gold/wp05_retro_writeup.gold.json"
+  },
+  {
+   "about": [],
+   "content": "Diego owns the config diff surfacing, due November 9",
+   "id": "pt-wp05_retro_writeup_u_11",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp05_retro_writeup",
+   "source": "tests/eval/write_path/gold/wp05_retro_writeup.gold.json"
+  },
+  {
+   "about": [],
+   "content": "the search SLO is 99.9 percent",
+   "id": "pt-wp05_retro_writeup_u_12",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp05_retro_writeup",
+   "source": "tests/eval/write_path/gold/wp05_retro_writeup.gold.json"
+  },
+  {
+   "about": [],
+   "content": "Incident writeups are opt-out by default now",
+   "id": "pt-wp05_retro_writeup_u_13",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp05_retro_writeup",
+   "source": "tests/eval/write_path/gold/wp05_retro_writeup.gold.json"
+  },
+  {
+   "about": [],
+   "content": "the on-call stayed calm, honestly that matters more than any tooling",
+   "id": "pt-wp05_retro_writeup_u_14",
+   "kind": "vibe",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp05_retro_writeup",
+   "source": "tests/eval/write_path/gold/wp05_retro_writeup.gold.json"
+  },
+  {
+   "about": [],
+   "content": "Sam from customer engineering wrote the status updates",
+   "id": "pt-wp05_retro_writeup_u_15",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp05_retro_writeup",
+   "source": "tests/eval/write_path/gold/wp05_retro_writeup.gold.json"
+  },
+  {
+   "about": [],
+   "content": "the staging matrix is green",
+   "id": "pt-wp06_quarry_rollout_u_01",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "medium",
+   "provenance": "write_path_gold:wp06_quarry_rollout",
+   "source": "tests/eval/write_path/gold/wp06_quarry_rollout.gold.json"
+  },
+  {
+   "about": [],
+   "content": "until the October freeze",
+   "id": "pt-wp06_quarry_rollout_u_02",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "medium",
+   "provenance": "write_path_gold:wp06_quarry_rollout",
+   "source": "tests/eval/write_path/gold/wp06_quarry_rollout.gold.json"
+  },
+  {
+   "about": [],
+   "content": "run the chaos harness against both rollout shapes",
+   "id": "pt-wp06_quarry_rollout_u_03",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp06_quarry_rollout",
+   "source": "tests/eval/write_path/gold/wp06_quarry_rollout.gold.json"
+  },
+  {
+   "about": [],
+   "content": "we could re-enter the duplicate-processing race while the queue drains",
+   "id": "pt-wp06_quarry_rollout_u_04",
+   "kind": "idea",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp06_quarry_rollout",
+   "source": "tests/eval/write_path/gold/wp06_quarry_rollout.gold.json"
+  },
+  {
+   "about": [],
+   "content": "two workers claiming one batch at the exact moment a region toggles",
+   "id": "pt-wp06_quarry_rollout_u_05",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp06_quarry_rollout",
+   "source": "tests/eval/write_path/gold/wp06_quarry_rollout.gold.json"
+  },
+  {
+   "about": [],
+   "content": "one day of rollout instead of a week of canary watching",
+   "id": "pt-wp06_quarry_rollout_u_06",
+   "kind": "idea",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp06_quarry_rollout",
+   "source": "tests/eval/write_path/gold/wp06_quarry_rollout.gold.json"
+  },
+  {
+   "about": [],
+   "content": "one person with the runbook open",
+   "id": "pt-wp06_quarry_rollout_u_07",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp06_quarry_rollout",
+   "source": "tests/eval/write_path/gold/wp06_quarry_rollout.gold.json"
+  },
+  {
+   "about": [],
+   "content": "Maya is the natural driver for the flip",
+   "id": "pt-wp06_quarry_rollout_u_08",
+   "kind": "entity",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp06_quarry_rollout",
+   "source": "tests/eval/write_path/gold/wp06_quarry_rollout.gold.json"
+  },
+  {
+   "about": [],
+   "content": "lease migration already landed ahead of Friday's maintenance window",
+   "id": "pt-wp06_quarry_rollout_u_09",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp06_quarry_rollout",
+   "source": "tests/eval/write_path/gold/wp06_quarry_rollout.gold.json"
+  },
+  {
+   "about": [],
+   "content": "duplicate claims for about six minutes on the hydrate queue",
+   "id": "pt-wp07_bluepeak_followup_u_01",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp07_bluepeak_followup",
+   "source": "tests/eval/write_path/gold/wp07_bluepeak_followup.gold.json"
+  },
+  {
+   "about": [],
+   "content": "The on-call handoff was smooth",
+   "id": "pt-wp07_bluepeak_followup_u_02",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "low",
+   "provenance": "write_path_gold:wp07_bluepeak_followup",
+   "source": "tests/eval/write_path/gold/wp07_bluepeak_followup.gold.json"
+  },
+  {
+   "about": [],
+   "content": "toggled the global flag once at cutover",
+   "id": "pt-wp07_bluepeak_followup_u_03",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp07_bluepeak_followup",
+   "source": "tests/eval/write_path/gold/wp07_bluepeak_followup.gold.json"
+  },
+  {
+   "about": [],
+   "content": "second-guessing the all-at-once call since we made it",
+   "id": "pt-wp07_bluepeak_followup_u_04",
+   "kind": "vibe",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp07_bluepeak_followup",
+   "source": "tests/eval/write_path/gold/wp07_bluepeak_followup.gold.json"
+  },
+  {
+   "about": [],
+   "content": "the toggle is two hours before the first duplicate",
+   "id": "pt-wp07_bluepeak_followup_u_05",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp07_bluepeak_followup",
+   "source": "tests/eval/write_path/gold/wp07_bluepeak_followup.gold.json"
+  },
+  {
+   "about": [],
+   "content": "Eleven seconds is the worst we have logged",
+   "id": "pt-wp07_bluepeak_followup_u_06",
+   "kind": "fact",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp07_bluepeak_followup",
+   "source": "tests/eval/write_path/gold/wp07_bluepeak_followup.gold.json"
+  },
+  {
+   "about": [],
+   "content": "size the grace to thirty seconds",
+   "id": "pt-wp07_bluepeak_followup_u_07",
+   "kind": "decision",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp07_bluepeak_followup",
+   "source": "tests/eval/write_path/gold/wp07_bluepeak_followup.gold.json"
+  },
+  {
+   "about": [],
+   "content": "the global flag has been the single point of failure all along",
+   "id": "pt-wp07_bluepeak_followup_u_09",
+   "kind": "vibe",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp07_bluepeak_followup",
+   "source": "tests/eval/write_path/gold/wp07_bluepeak_followup.gold.json"
+  },
+  {
+   "about": [],
+   "content": "Priya will track the grace-expiry log for a week",
+   "id": "pt-wp07_bluepeak_followup_u_08",
+   "kind": "entity",
+   "must_keep": true,
+   "notability": "high",
+   "provenance": "write_path_gold:wp07_bluepeak_followup",
+   "source": "tests/eval/write_path/gold/wp07_bluepeak_followup.gold.json"
+  }
+ ],
+ "rulings_this_corpus_respects": {
+  "keep_object_names": [
+   "NON_SDK_READ_OPERATIONS",
+   "PR #4638 CSP/no-store change",
+   "_TOOL_BY_NAME",
+   "_capture_cost_props",
+   "ai-review-gate",
+   "cal-trigger.py",
+   "canonical MCP tool list",
+   "config/ci-surfaces.yml",
+   "contact-form test suite",
+   "daniel-ospina/agent-infra",
+   "durations map",
+   "guard 2",
+   "prune_backups",
+   "the T2 guard",
+   "the T4-class write→rename race",
+   "the admin-merge rail",
+   "the plan doc",
+   "tools/ci_selection.py",
+   "tortoise",
+   "tortoise PR #4151",
+   "tortoise/env_truthy.py",
+   "tortoise/hosted_api.py"
+  ],
+  "keep_object_source": "docs/engineering/1026-calibration-set.jsonl (#1026 owner ruling 2026-09-26)",
+  "labels_are_a_detection_specification_not_a_drop_list": "#4917 header"
+ },
+ "schema": "e1e2-corpus/1",
+ "sources": [
+  "tests/eval/write_path/salience_labels.jsonl",
+  "tests/eval/write_path/gold/*.gold.json"
+ ]
+}

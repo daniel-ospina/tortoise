@@ -1661,6 +1661,33 @@ def test_docs_lint_baseline_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_e1_e2_evidence_bundle_change_selects_core_not_the_docs_only_return():
+    # #9076: the E1+E2 evidence bundle (`docs/evidence/7949-capstone/` — the probe,
+    # the corpus JSON + builder, the evidence log) and its structural checker
+    # (`tools/e1_e2_census_check.py`) own `tests/test_e1_e2_measurement.py`,
+    # registered `core`. MEASURED before the CORE_ALSO entries: all three paths
+    # returned `surfaces=[]`, `full=False`, 50 files — `docs/` and `tools/` are
+    # flat NON_PYTHON_PREFIXES entries, so the changed list came back empty and
+    # select() took the docs-only early return (tier-1 smoke). The pin ran there
+    # only because this PR dual-registers it in `tier1`; `tier1` is a CURATED
+    # list, so the guard's owning surface was nominal and one tier1 edit from
+    # dropping it silently. These asserts are on the `core` arm, which is what the
+    # entries create: after the change, `surfaces=['core']` and the pin is present.
+    # Mutation check: removing either CORE_ALSO entry restores `surfaces=[]` and
+    # fails the FIRST assert (`"core" in r["surfaces"]`), which is the one that
+    # names the owning surface. The second assert (`full is False`) still PASSES on
+    # the docs-only early return, which returns `full: False` — the mutation is
+    # caught by the surface assert, not by that one (#9110 review P3).
+    for path in ("docs/evidence/7949-capstone/probes/e1_e2_probe.py",
+                 "docs/evidence/7949-capstone/corpus/e1e2_corpus.json",
+                 "docs/evidence/7949-capstone/e1-e2.log",
+                 "tools/e1_e2_census_check.py"):
+        r = _sel([path])
+        assert "core" in r["surfaces"], (path, r["surfaces"])
+        assert r["full"] is False, (path, r)
+        assert "test_e1_e2_measurement.py" in r["test_files"], (path, r)
+
+
 def test_supabase_control_change_selects_the_org_purge_rpc_guard():
     # #7968 / PR #8179 review P1: `purge_org_control_plane` lives in
     # `tortoise/supabase_control.py`, which IS a SOURCE_PATTERNS["api"] entry —
@@ -1949,28 +1976,46 @@ def test_write_op_reachability_guard_runs_on_every_surface_it_pins():
     assert "test_write_op_reachability.py" in r["test_files"], r
 
 
-def test_orchestrator_harness_change_selects_core_not_tier1():
-    # operations/orchestrator-harness/*.sh own tests/test_orchestrator_harness.py
-    # (`core`): the shipped-block pins for lane.sh's heredoc, merged-not-closed.sh's
-    # paged enumeration, refresh-candidates.sh's pool/checked contract and
-    # orch-loop.sh's P0 merge-priority override.
+def test_retired_orchestrator_harness_selects_its_retained_guards():
+    # RETIRED 2026-10-19. The harness moved to agent-infra/scripts/orchestrator-harness/
+    # (single source of truth) and tests/test_orchestrator_harness.py was retired WITH the
+    # copy it drove.
     #
-    # #8469 review P1: `operations/` is a flat NON_PYTHON_PREFIXES entry and no
-    # SOURCE_PATTERNS row matches the harness scripts, so an operations-only diff
-    # came back with `changed == []` and took the docs-only early return — the
-    # guard never ran on the file it guards. Registering the test under `core` is
-    # NOT sufficient: a name in a surface's test_files only runs when that surface
-    # is already selected, and an operations-only diff selects none.
+    # The directory is NOT a dead path, though: two scripts are retained because their fixes are
+    # UNPORTED (`merge-one.sh` — #8484/#8602/#8612; `merged-not-closed.sh` — no landed copy
+    # anywhere, agent-infra#2160 is still open), and they carry hermetic guards of their own
+    # (tests/test_orchestrator_harness_retained.py), as does the guard that keeps the rest
+    # retired (tests/test_harness_pointer_guard.py for tools/check-harness-fork.sh).
     #
-    # Measured before the CORE_ALSO entry: `_sel(["operations/orchestrator-harness/
-    # lane.sh"])` -> surfaces=[], full=False, test_files 33, harness test absent.
-    # CORE_ALSO (not TOOL_CARVEOUTS) is the deliberate choice: the suite is
-    # hermetic and sub-second, so selecting `core` runs it at the lowest CI cost.
-    # Mutation check: removing the CORE_ALSO entry fails assert 1 below.
-    r = _sel(["operations/orchestrator-harness/merged-not-closed.sh"])
+    # Both must run on a change to their subject. `operations/` and `tools/` are flat
+    # NON_PYTHON_PREFIXES entries and no SOURCE_PATTERNS row matches either path, so without the
+    # CORE_ALSO entries an operations-only or tools-only diff came back with `changed == []`, took
+    # the docs-only early return and ran NO surface — the #1349/#3332/#3616 silent-drop class (the
+    # guard would not run on the PR that weakens the guard). A name in a surface's test_files is
+    # NOT sufficient: it only runs when the surface is already selected.
+    #
+    # Mutation check: removing either CORE_ALSO entry restores `surfaces=[]` and reds these asserts.
+    r = _sel(["operations/orchestrator-harness/lane.sh"])
     assert "core" in r["surfaces"], r
-    assert "test_orchestrator_harness.py" in r["test_files"], r
+    assert "test_orchestrator_harness_retained.py" in r["test_files"], r
+    # ⛔ The RETIRED suite must not come back with it: a stale registration schedules a file that
+    # no longer exists and hides the retirement from anyone reading the map.
+    assert "test_orchestrator_harness.py" not in r["test_files"], r
+    # ⛔ `full` MUST STAY FALSE (review finding): a change under this path must not start forcing
+    # a full run — that would be a heavy, silent regression from a retirement. Pinning it makes
+    # this "deliberately retired" rather than "path dropped".
     assert r["full"] is False, r
+
+    # The guard's own path: same class, same requirement.
+    g = _sel(["tools/check-harness-fork.sh"])
+    assert "core" in g["surfaces"], g
+    assert "test_harness_pointer_guard.py" in g["test_files"], g
+    assert g["full"] is False, g
+
+    # The pointer README is a docs change: still no harness suite, still not a full run.
+    r2 = _sel(["operations/orchestrator-harness/README.md"])
+    assert "test_orchestrator_harness.py" not in r2["test_files"], r2
+    assert r2["full"] is False, r2
 
 
 def test_queue_dispatch_and_fleet_state_change_select_core_not_tier1():
@@ -6060,6 +6105,60 @@ def test_surface_audit_maps_tortoise_api_source_as_api_pin(tmp_path):
     report = _audit(_audit_manifest(api=["test_imports_api.py"]), repo)
     assert "tortoise/api.py" not in [g["path"] for g in report["coverage_gaps"]]
     assert "tortoise/api.py" not in [r["path"] for r in report["uncovered"]]
+
+
+def test_write_path_measurement_source_edit_selects_eval():
+    """#7947 review P1: editing the scorer must run the tests that pin the rule.
+
+    `score_qualifiers.py` (and `raw_vs_narrative.py`, `generate_corpus.py`,
+    `schema.py`, and every `gold/*.json`) live under `tests/eval/write_path/`
+    and NONE of them is named `test_*.py`, so before the `tests/eval/write_path/`
+    SOURCE_PATTERNS entry a change to them matched no pattern and fell to the
+    `tests/` -> `core` fallback. `test_score_qualifiers.py` and
+    `test_write_path_corpus.py` are registered on `eval` ONLY, so the tests
+    that pin the pre-registered decision rule (`MARKERS` / `BAND_PP` /
+    `classify()` / `evaluate_branches()`) and the corpus counts §10 publishes a
+    verdict on ran on NO diff-selected leg — every published number could move
+    with every gate green. Registering the TEST file in
+    config/ci-surfaces.yml does not fix this half: selection is driven by
+    SOURCE_PATTERNS.
+
+    `core` must stay too (CORE_ALSO): `test_extractor_v2.py` imports
+    `tests.eval.write_path.runner` and `test_salience_labels_4917.py` reads
+    `tests/eval/write_path/salience_labels.jsonl`, so an `eval`-only match
+    would trade one silent drop for another.
+
+    Watched RED before the entry existed (`surfaces == ['core']`, neither pin
+    in `test_files`), GREEN after — mutation-real, not a tautology: deleting
+    the SOURCE_PATTERNS entry reproduces the red.
+    """
+    cases = (
+        # the rule itself — the decisive one: `evaluate_branches`/`verdict_label`
+        "tests/eval/write_path/score_qualifiers.py",
+        # the instrument's calibration inputs
+        "tests/eval/write_path/raw_vs_narrative.py",
+        # the generator whose output the pinned counts are read off
+        "tests/eval/write_path/generate_corpus.py",
+        # a hand-edited sealed gold — the scenario `[gold]` in MEMORY.md warns about
+        "tests/eval/write_path/gold/wp01_quarry_debug.gold.json",
+    )
+    for changed in cases:
+        r = _sel([changed])
+        assert r["full"] is False
+        assert r["surfaces"] == ["core", "eval"], (
+            f"a write-path measurement source edit ({changed}) must select the "
+            f"`eval` surface that owns its pinning tests (and keep `core`, whose "
+            f"tests read the same sources); got {r['surfaces']}")
+        selected = set(r["test_files"]) | set(r["slow_selected"])
+        assert "eval/write_path/test_score_qualifiers.py" in selected, (
+            f"the test that pins the pre-registered rule must run on {changed}; "
+            f"selected {sorted(selected)}")
+        assert "eval/write_path/test_write_path_corpus.py" in selected, (
+            f"the corpus counts §10's verdict is computed on must be pinned on "
+            f"{changed}; selected {sorted(selected)}")
+        assert "test_extractor_v2.py" in selected, (
+            "the core-registered importer of tests.eval.write_path.runner must "
+            f"still run on {changed}; selected {sorted(selected)}")
 
 
 def test_tortoise_api_change_selects_api_and_core():

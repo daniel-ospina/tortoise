@@ -48,7 +48,6 @@ import math
 import os
 import re
 import stat
-import struct
 from contextlib import suppress
 from datetime import datetime, timezone
 
@@ -108,6 +107,7 @@ from .projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
     record_non_folded,
     refused_events,
 )
+from .stored_form import narrow_to_stored_width
 
 logger = logging.getLogger(__name__)
 
@@ -537,11 +537,14 @@ def _as_f32(vec: list) -> list | None:
     The journal carries the ingest encoder's float64 (`encode_for_store`), while
     the node stores `vecf32($embedding)` — so an exact comparison of a faithful
     replay fails on the last mantissa bits. Compare at the stored width.
+
+    #8615: the rounding itself lives in `tortoise/stored_form.py` — ONE spelling
+    shared with the writer (`cache_projection.node_statement`) and with the
+    record↔cache check (`reconciliation`), so the three cannot disagree about
+    what width the store holds. This name stays as the journal half's local
+    seam (its callers read as `jf32`/`gf32`).
     """
-    try:
-        return [struct.unpack("<f", struct.pack("<f", float(x)))[0] for x in vec]
-    except (TypeError, ValueError, struct.error, OverflowError):
-        return None
+    return narrow_to_stored_width(vec)
 
 
 def _uncarried(journal_by_id: dict) -> dict[str, dict[str, str]]:

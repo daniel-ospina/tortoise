@@ -1,0 +1,1105 @@
+{
+  "model_id": "deepseek/deepseek-v4-flash",
+  "chunk_size": 50,
+  "session_date": "2026-10-10",
+  "chunks": 1,
+  "errors": [],
+  "stories": {
+    "raw": "0: user: The all-at-once rollout shipped clean on Friday, but there was an anomaly overnight in the Bluepeak region: duplicate claims for about six minutes on the hydrate queue. We need a cause before the next rollout. The on-call handoff was smooth at least, no pages overnight.\n1: assistant: Duplicates on the hydrate queue post-fix is the exact class the lease was supposed to kill. Six minutes is short, a window rather than a drain. Let us timeline it against the flag state.\n2: user: We toggled the global flag once at cutover and never touched it after. I pulled the toggle log to be sure.\n3: assistant: One toggle at cutover. Then the anomaly is not a mid-flight flip, unless the flag state itself was the trigger.\n4: user: My first hypothesis is the global flag: the flip must have raced the lease renewal when the region cut over, leaving a renewal window where two workers could claim one batch. Honestly I have been second-guessing the all-at-once call since we made it.\n5: assistant: Flag-raced-renewal is testable: compare the toggle timestamp against the lease renewal stamps in the region around the anomaly.\n6: user: I pulled both. The toggle is two hours before the first duplicate, and the renewal stamps are all clean, no overlap, no double renewal.\n7: assistant: Two hours of stable flag state before the duplicates already weakens the flag hypothesis. What does differ in that region?\n8: user: Whatever the cause, here is the risk that matters for the next rollout: clock skew between regions can make lease expiry unsafe, a lagging region renews after the owner's lease truly expired, and its renewal can clobber a live lease in another region.\n9: assistant: Skew is a real expiry hazard: the CAS compares against wall-clock expiry, so a drifted clock changes who wins. Is that what the timestamps show?\n10: user: The flag did not cause the duplicates, it had been stable for two hours before the anomaly, and the renewal stamps show the region clock drifted eleven seconds, which is exactly the six-minute duplicate window on the hydrate queue.\n11: assistant: So the flag hypothesis is out, the clock drift explains the window, and the lease behaved as designed under a drifted clock: it expired early, the second worker claimed the batch, and the hydrate side saw the duplicate.\n12: user: Then the fix is not about the flag at all. A skew-tolerant lease: the expiry check needs a grace period so a lagging region cannot clobber a live lease.\n13: assistant: Grace period on the lease expiry, sized to the worst observed drift. What is the biggest skew we have seen between regions?\n14: user: Eleven seconds is the worst we have logged, but the SLO review assumed sub-second. I would size the grace to thirty seconds and log any expiry that lands inside it.\n15: assistant: Thirty-second grace with an internal log on grace expiries. That bounds the skew hazard without making the lease lax.\n16: user: We shipped the skew-tolerant lease grace period to every region last night, with the grace window a lagging region's renewal cannot clobber a live lease, so the clock-skew risk is covered.\n17: assistant: Risk closed by the grace period: expiry is now skew-tolerant, and the duplicates are attributed to the drift, not to the fix.\n18: user: And one more decision while we are here: for the next rollout, reverse the all-at-once call, per-service flags instead of one global flag, so a single bad region cannot take the whole fleet down with it. Honestly the global flag has been the single point of failure all along.\n19: assistant: Per-service flags changes the reversibility model: each service's flag is pulled independently instead of one fleet-wide switch.\n20: user: Right. The global flag made one bad region a fleet-wide event; per-service flags keep a bad region from taking the whole fleet down.\n21: user: Good, and the skew fix ships with the hydrate queue re-run before the next rollout. Priya will track the grace-expiry log for a week. Also the demo room is booked Thursday if you want to show the dashboards.",
+    "narrative": "## Narrative\n\n**What changed.** The all-at-once rollout shipped clean on Friday (2026-10-09), but overnight an anomaly surfaced in the Bluepeak region: duplicate claims for about six minutes on the hydrate queue.\n\nThe team's first hypothesis \u2014 that the global flag flip at cutover raced the lease renewal, leaving a window where two workers could claim one batch \u2014 was tested and **falsified**: the toggle log showed the flag was flipped once, two hours before the first duplicate, and the lease renewal stamps were clean (no overlap, no double renewal).\n\nThe actual cause was **clock skew**: the region clock had drifted **eleven seconds**, and that drift is exactly what produced the six-minute duplicate window.\n\nThe lease behaved as designed under a drifted clock \u2014 it expired early, a second worker claimed the batch, and the hydrate side saw the duplicate.\n\nThe flag was not the cause.\n\n**The fix and its reasoning.** The remedy is not about the flag.\n\nThe team shipped a **skew-tolerant lease grace period** to every region on 2026-10-09 (last night): the expiry check now carries a grace window so a lagging region's renewal cannot clobber a live lease.\n\nThe grace was sized to **thirty seconds**, against a worst-logged inter-region skew of **eleven seconds** \u2014 deliberately generous because the SLO review had assumed sub-second skew, which the observed drift undermined.\n\nAny expiry landing inside the grace window is logged internally, so the grace bounds the skew hazard without making the lease lax.\n\nThe clock-skew risk is considered covered.\n\n**The second decision \u2014 reversibility model.** For the next rollout, the team **reversed the all-at-once call**: per-service flags replace the single global flag.\n\nThe reasoning: the global flag made one bad region a fleet-wide event and was the single point of failure all along; per-service flags let each service's flag be pulled independently, so a bad region cannot take the whole fleet down.\n\nThis changes the reversibility model from one fleet-wide switch to independent per-service switches.\n\n**Open items.** The skew fix ships together with the hydrate queue re-run before the next rollout.\n\nPriya owns tracking the grace-expiry log for a week.\n\nThe on-call handoff was smooth with no pages overnight."
+  },
+  "story_sha": {
+    "raw": "edba9bb7862f311e",
+    "narrative": "7fa5c5e3c0e22d99"
+  },
+  "story_chars": {
+    "raw": 4045,
+    "narrative": 2269
+  },
+  "embed_list": {
+    "raw": {
+      "entities": [
+        {
+          "name": "the all-at-once rollout",
+          "kind": "core:deployment",
+          "lifecycle": "unchanged",
+          "supersedes": null,
+          "note": "Shipped clean on Friday; superseded as the rollout strategy by per-service flags"
+        },
+        {
+          "name": "the global flag",
+          "kind": "core:tool",
+          "lifecycle": "unchanged",
+          "supersedes": null,
+          "note": "Single fleet-wide toggle flipped once at cutover; identified as single point of failure"
+        },
+        {
+          "name": "the hydrate queue",
+          "kind": "core:tool",
+          "lifecycle": "unchanged",
+          "supersedes": null,
+          "note": "Queue where duplicate claims appeared for about six minutes"
+        },
+        {
+          "name": "the Bluepeak region",
+          "kind": "core:other",
+          "lifecycle": "unchanged",
+          "supersedes": null,
+          "note": "Region where the duplicate-claim anomaly occurred"
+        },
+        {
+          "name": "the lease",
+          "kind": "core:tool",
+          "lifecycle": "changed",
+          "supersedes": null,
+          "note": "Expiry check now carries a thirty-second grace period; skew-tolerant"
+        },
+        {
+          "name": "the skew-tolerant lease grace period",
+          "kind": "core:standard",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Thirty-second grace on lease expiry, shipped to every region; logs expiries landing inside the grace"
+        },
+        {
+          "name": "per-service flags",
+          "kind": "core:strategy",
+          "lifecycle": "created",
+          "supersedes": "the all-at-once rollout",
+          "note": "Replaces the single global flag for the next rollout so one bad region cannot take the fleet down"
+        },
+        {
+          "name": "the grace-expiry log",
+          "kind": "core:tool",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Internal log of expiries landing inside the grace window; tracked by Priya for a week"
+        },
+        {
+          "name": "Priya",
+          "kind": "core:naturalPerson",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Owns tracking the grace-expiry log for a week"
+        }
+      ],
+      "events": [
+        {
+          "content": "The all-at-once rollout shipped clean on Friday",
+          "eventKind": "core:deployment",
+          "about_entities": [
+            "the all-at-once rollout"
+          ],
+          "startedAt": "2026-10-09",
+          "slots": {
+            "subject": [
+              {
+                "name": "the all-at-once rollout",
+                "kind": "core:deployment",
+                "confidence": 0.9
+              }
+            ]
+          }
+        },
+        {
+          "content": "Duplicate claims appeared on the hydrate queue in the Bluepeak region for about six minutes overnight",
+          "eventKind": "core:incident",
+          "about_entities": [
+            "the hydrate queue",
+            "the Bluepeak region"
+          ],
+          "startedAt": "2026-10-09",
+          "slots": {
+            "subject": [
+              {
+                "name": "the hydrate queue",
+                "kind": "core:tool",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "the Bluepeak region",
+                "kind": "core:other",
+                "confidence": 0.7
+              }
+            ]
+          }
+        },
+        {
+          "content": "The skew-tolerant lease grace period was shipped to every region",
+          "eventKind": "core:deployment",
+          "about_entities": [
+            "the skew-tolerant lease grace period",
+            "the lease"
+          ],
+          "startedAt": "2026-10-09",
+          "slots": {
+            "subject": [
+              {
+                "name": "the skew-tolerant lease grace period",
+                "kind": "core:standard",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "the lease",
+                "kind": "core:tool",
+                "confidence": 0.8
+              }
+            ]
+          }
+        },
+        {
+          "content": "The decision was made to reverse the all-at-once call and use per-service flags for the next rollout",
+          "eventKind": "core:decision",
+          "about_entities": [
+            "per-service flags",
+            "the all-at-once rollout",
+            "the global flag"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "per-service flags",
+                "kind": "core:strategy",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "the all-at-once rollout",
+                "kind": "core:deployment",
+                "confidence": 0.8
+              }
+            ]
+          }
+        },
+        {
+          "content": "The decision was made to size the lease grace period to thirty seconds and log any expiry landing inside it",
+          "eventKind": "core:decision",
+          "about_entities": [
+            "the skew-tolerant lease grace period",
+            "the grace-expiry log"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the skew-tolerant lease grace period",
+                "kind": "core:standard",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "the grace-expiry log",
+                "kind": "core:tool",
+                "confidence": 0.7
+              }
+            ]
+          }
+        }
+      ],
+      "points": [
+        {
+          "content": "The global flag flip raced the lease renewal at region cutover, leaving a renewal window where two workers could claim one batch",
+          "pointKind": "statement",
+          "about_entities": [
+            "the global flag",
+            "the lease"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "the global flag",
+                "kind": "core:tool",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "the lease",
+                "kind": "core:tool",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "My first hypothesis is the global flag: the flip must have raced the lease renewal when the region cut over, leaving a renewal window where two workers could claim one batch.",
+          "search_keys": [
+            "flag raced lease renewal",
+            "global flag hypothesis",
+            "renewal window",
+            "two workers claim one batch"
+          ],
+          "source_turn_id": 4
+        },
+        {
+          "content": "The global flag did not cause the duplicate claims; it had been stable for two hours before the anomaly",
+          "pointKind": "statement",
+          "about_entities": [
+            "the global flag",
+            "the hydrate queue"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the global flag",
+                "kind": "core:tool",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "the hydrate queue",
+                "kind": "core:tool",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The flag did not cause the duplicates, it had been stable for two hours before the anomaly",
+          "search_keys": [
+            "flag not the cause",
+            "flag stable two hours",
+            "duplicates not flag",
+            "flag hypothesis refuted"
+          ],
+          "source_turn_id": 10
+        },
+        {
+          "content": "Clock skew between regions can make lease expiry unsafe: a lagging region renews after the owner's lease truly expired and its renewal can clobber a live lease in another region",
+          "pointKind": "statement",
+          "about_entities": [
+            "the lease"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "the lease",
+                "kind": "core:tool",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "clock skew between regions can make lease expiry unsafe, a lagging region renews after the owner's lease truly expired, and its renewal can clobber a live lease in another region",
+          "search_keys": [
+            "clock skew lease expiry",
+            "skew hazard",
+            "lagging region clobbers live lease",
+            "lease expiry unsafe"
+          ],
+          "source_turn_id": 8
+        },
+        {
+          "content": "The Bluepeak region clock drifted eleven seconds, which is exactly the six-minute duplicate window on the hydrate queue",
+          "pointKind": "statement",
+          "about_entities": [
+            "the Bluepeak region",
+            "the hydrate queue",
+            "the lease"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the Bluepeak region",
+                "kind": "core:other",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "the hydrate queue",
+                "kind": "core:tool",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "the renewal stamps show the region clock drifted eleven seconds, which is exactly the six-minute duplicate window on the hydrate queue",
+          "search_keys": [
+            "eleven seconds drift",
+            "clock drift",
+            "six-minute duplicate window",
+            "Bluepeak clock skew"
+          ],
+          "source_turn_id": 10
+        },
+        {
+          "content": "The fix is a skew-tolerant lease: the expiry check needs a grace period so a lagging region cannot clobber a live lease",
+          "pointKind": "statement",
+          "about_entities": [
+            "the skew-tolerant lease grace period",
+            "the lease"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the skew-tolerant lease grace period",
+                "kind": "core:standard",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "the lease",
+                "kind": "core:tool",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "A skew-tolerant lease: the expiry check needs a grace period so a lagging region cannot clobber a live lease.",
+          "search_keys": [
+            "skew-tolerant lease",
+            "grace period on expiry",
+            "lease grace period",
+            "lagging region clobber"
+          ],
+          "source_turn_id": 12
+        },
+        {
+          "content": "Eleven seconds is the worst inter-region clock skew logged, while the SLO review assumed sub-second",
+          "pointKind": "statement",
+          "about_entities": [
+            "the Bluepeak region"
+          ]
+        }
+      ]
+    },
+    "narrative": {
+      "entities": [
+        {
+          "name": "all-at-once rollout",
+          "kind": "core:workflow",
+          "lifecycle": "unchanged",
+          "supersedes": null,
+          "note": "Shipped clean on 2026-10-09; rollout approach now reversed for the next rollout"
+        },
+        {
+          "name": "global flag",
+          "kind": "core:tool",
+          "lifecycle": "superseded",
+          "supersedes": null,
+          "note": "Single fleet-wide toggle flipped once at cutover; identified as the single point of failure"
+        },
+        {
+          "name": "per-service flags",
+          "kind": "core:tool",
+          "lifecycle": "created",
+          "supersedes": "global flag",
+          "note": "Replaces the single global flag for the next rollout so a bad region cannot take the whole fleet down"
+        },
+        {
+          "name": "Bluepeak region",
+          "kind": "core:other",
+          "lifecycle": "unchanged",
+          "supersedes": null,
+          "note": "Region where the duplicate-claim anomaly surfaced overnight"
+        },
+        {
+          "name": "hydrate queue",
+          "kind": "core:other",
+          "lifecycle": "unchanged",
+          "supersedes": null,
+          "note": "Queue that saw duplicate claims for about six minutes"
+        },
+        {
+          "name": "skew-tolerant lease grace period",
+          "kind": "core:standard",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Thirty-second grace window on lease expiry, shipped to every region on 2026-10-09"
+        },
+        {
+          "name": "clock-skew risk",
+          "kind": "dev:risk",
+          "lifecycle": "changed",
+          "supersedes": null,
+          "note": "Inter-region clock skew can make lease expiry unsafe; considered covered by the grace period"
+        },
+        {
+          "name": "grace-expiry log",
+          "kind": "core:tool",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Internal log of any expiry landing inside the grace window; Priya tracks it for a week"
+        },
+        {
+          "name": "Priya",
+          "kind": "core:naturalPerson",
+          "lifecycle": "unchanged",
+          "supersedes": null,
+          "note": "Owns tracking the grace-expiry log for a week"
+        },
+        {
+          "name": "hydrate queue re-run",
+          "kind": "core:WorkItem",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Ships together with the skew fix before the next rollout"
+        }
+      ],
+      "events": [
+        {
+          "content": "The all-at-once rollout shipped clean on 2026-10-09",
+          "eventKind": "core:deployment",
+          "about_entities": [
+            "all-at-once rollout"
+          ],
+          "startedAt": "2026-10-09",
+          "slots": {
+            "subject": [
+              {
+                "name": "all-at-once rollout",
+                "kind": "core:workflow",
+                "confidence": 0.9
+              }
+            ]
+          }
+        },
+        {
+          "content": "Duplicate claims appeared on the hydrate queue in the Bluepeak region for about six minutes overnight",
+          "eventKind": "core:occurrence",
+          "about_entities": [
+            "hydrate queue",
+            "Bluepeak region"
+          ],
+          "startedAt": "2026-10-09",
+          "slots": {
+            "subject": [
+              {
+                "name": "hydrate queue",
+                "kind": "core:other",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak region",
+                "kind": "core:other",
+                "confidence": 0.7
+              }
+            ]
+          }
+        },
+        {
+          "content": "The flag-raced-renewal hypothesis was tested and falsified: the toggle was two hours before the first duplicate and the renewal stamps were clean",
+          "eventKind": "core:experiment",
+          "about_entities": [
+            "global flag"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "global flag",
+                "kind": "core:tool",
+                "confidence": 0.8
+              }
+            ]
+          }
+        },
+        {
+          "content": "The skew-tolerant lease grace period shipped to every region on 2026-10-09",
+          "eventKind": "core:deployment",
+          "about_entities": [
+            "skew-tolerant lease grace period"
+          ],
+          "startedAt": "2026-10-09",
+          "slots": {
+            "subject": [
+              {
+                "name": "skew-tolerant lease grace period",
+                "kind": "core:standard",
+                "confidence": 0.9
+              }
+            ]
+          }
+        },
+        {
+          "content": "The team decided to reverse the all-at-once call and use per-service flags instead of one global flag for the next rollout",
+          "eventKind": "core:decision",
+          "about_entities": [
+            "per-service flags",
+            "global flag",
+            "all-at-once rollout"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "per-service flags",
+                "kind": "core:tool",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "global flag",
+                "kind": "core:tool",
+                "confidence": 0.9
+              }
+            ]
+          }
+        }
+      ],
+      "points": [
+        {
+          "content": "The global flag flip at cutover did not cause the duplicate claims; the flag had been stable for two hours before the anomaly",
+          "pointKind": "statement",
+          "about_entities": [
+            "global flag",
+            "hydrate queue"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "global flag",
+                "kind": "core:tool",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "hydrate queue",
+                "kind": "core:other",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The flag did not cause the duplicates, it had been stable for two hours before the anomaly",
+          "search_keys": [
+            "flag not the cause",
+            "global flag exonerated",
+            "toggle two hours before duplicates",
+            "flag hypothesis falsified"
+          ],
+          "source_turn_id": 10
+        },
+        {
+          "content": "The Bluepeak region clock drifted eleven seconds, which is exactly the six-minute duplicate window on the hydrate queue",
+          "pointKind": "statement",
+          "about_entities": [
+            "Bluepeak region",
+            "hydrate queue"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "Bluepeak region",
+                "kind": "core:other",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "hydrate queue",
+                "kind": "core:other",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "the renewal stamps show the region clock drifted eleven seconds, which is exactly the six-minute duplicate window on the hydrate queue",
+          "search_keys": [
+            "clock skew",
+            "eleven seconds drift",
+            "six-minute duplicate window",
+            "region clock drift"
+          ],
+          "source_turn_id": 10
+        },
+        {
+          "content": "Clock skew between regions can make lease expiry unsafe: a lagging region renews after the owner's lease truly expired and its renewal can clobber a live lease in another region",
+          "pointKind": "statement",
+          "about_entities": [
+            "clock-skew risk"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "clock-skew risk",
+                "kind": "dev:risk",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "clock skew between regions can make lease expiry unsafe, a lagging region renews after the owner's lease truly expired, and its renewal can clobber a live lease in another region",
+          "search_keys": [
+            "clock skew lease hazard",
+            "lease expiry unsafe",
+            "renewal clobbers live lease",
+            "lagging region renewal"
+          ],
+          "source_turn_id": 8
+        },
+        {
+          "content": "The fix is a skew-tolerant lease: the expiry check needs a grace period so a lagging region cannot clobber a live lease",
+          "pointKind": "statement",
+          "about_entities": [
+            "skew-tolerant lease grace period",
+            "clock-skew risk"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "skew-tolerant lease grace period",
+                "kind": "core:standard",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "clock-skew risk",
+                "kind": "dev:risk",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "A skew-tolerant lease: the expiry check needs a grace period so a lagging region cannot clobber a live lease.",
+          "search_keys": [
+            "skew-tolerant lease",
+            "grace period on expiry",
+            "lease grace window",
+            "skew fix"
+          ],
+          "source_turn_id": 12
+        },
+        {
+          "content": "The lease grace period is sized to thirty seconds against a worst-logged inter-region skew of eleven seconds",
+          "pointKind": "statement",
+          "about_entities": [
+            "skew-tolerant lease grace period"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "skew-tolerant lease grace period",
+                "kind": "core:standard",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Eleven seconds is the worst we have logged, but the SLO review assumed sub-second. I would size the grace to thirty seconds",
+          "search_keys": [
+            "thirty-second grace",
+            "grace window size",
+            "eleven seconds worst skew",
+            "sub-second SLO assumption"
+          ],
+          "source_turn_id": 14
+        },
+        {
+          "content": "The SLO review had assumed sub-second inter-region skew, which the observed eleven-second drift undermined",
+          "pointKind": "statement",
+          "about_entities": [
+            "clock-skew risk"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "clock-skew risk",
+                "kind": "dev:risk",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "the SLO review assumed sub-second",
+          "search_keys": [
+            "sub-second skew assumption",
+            "SLO review skew",
+            "drift undermined assumption"
+          ],
+          "source_turn_id": 14
+        },
+        {
+          "content": "Any lease expiry landing inside the grace window is logged internally, so the grace bounds the skew hazard without making the lease lax",
+          "pointKind": "statement",
+          "about_entities": [
+            "grace-expiry log",
+            "skew-tolerant lease grace period"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "grace-expiry log",
+                "kind": "core:tool",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "skew-tolerant lease grace period",
+                "kind": "core:standard",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "I would size the grace to thirty seconds and log any expiry that lands inside it.",
+          "search_keys": [
+            "grace-expiry log",
+            "log expiries inside grace",
+            "internal grace log"
+          ],
+          "source_turn_id": 14
+        },
+        {
+          "content": "The skew-tolerant lease grace period shipped to every region on 2026-10-09, so a lagging region's renewal cannot clobber a live lease and the clock-skew risk is covered",
+          "pointKind": "statement",
+          "about_entities": [
+            "skew-tolerant lease grace period",
+            "clock-skew risk"
+          ],
+          "when": "2026-10-09",
+          "slots": {
+            "subject": [
+              {
+                "name": "skew-tolerant lease grace period",
+                "kind": "core:standard",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "clock-skew risk",
+                "kind": "dev:risk",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "We shipped the skew-tolerant lease grace period to every region last night, with the grace window a lagging region's renewal cannot clobber a live lease, so the clock-skew risk is covered.",
+          "search_keys": [
+            "grace period shipped",
+            "skew risk covered",
+            "skew-tolerant lease deployed",
+            "every region"
+          ],
+          "source_turn_id": 16
+        },
+        {
+          "content": "For the next rollout the all-at-once call is reversed: per-service flags replace the single global flag",
+          "pointKind": "statement",
+          "about_entities": [
+            "per-service flags",
+            "global flag",
+            "all-at-once rollout"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "per-service flags",
+                "kind": "core:tool",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "global flag",
+                "kind": "core:tool",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "for the next rollout, reverse the all-at-once call, per-service flags instead of one global flag",
+          "search_keys": [
+            "per-service flags",
+            "reverse all-at-once",
+            "drop global flag",
+            "independent service flags"
+          ],
+          "source_turn_id": 18
+        },
+        {
+          "content": "The global flag made one bad region a fleet-wide event and was the single point of failure; per-service flags keep a bad region from taking the whole fleet down",
+          "pointKind": "statement",
+          "about_entities": [
+            "global flag",
+            "per-service flags"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "global flag",
+                "kind": "core:tool",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "per-service flags",
+                "kind": "core:tool",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The global flag made one bad region a fleet-wide event; per-service flags keep a bad region from taking the whole fleet down.",
+          "search_keys": [
+            "single point of failure",
+            "fleet-wide blast radius",
+            "per-service reversibility",
+            "bad region isolation"
+          ],
+          "source_turn_id": 20
+        },
+        {
+          "content": "Per-service flags change the reversibility model from one fleet-wide switch to independent per-service switches",
+          "pointKind": "statement",
+          "about_entities": [
+            "per-service flags",
+            "global flag"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "per-service flags",
+                "kind": "core:tool",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Per-service flags changes the reversibility model: each service's flag is pulled independently instead of one fleet-wide switch.",
+          "search_keys": [
+            "reversibility model",
+            "independent switches",
+            "fleet-wide switch"
+          ],
+          "source_turn_id": 19
+        },
+        {
+          "content": "The skew fix ships together with the hydrate queue re-run before the next rollout",
+          "pointKind": "statement",
+          "about_entities": [
+            "skew-tolerant lease grace period",
+            "hydrate queue re-run"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "hydrate queue re-run",
+                "kind": "core:WorkItem",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "skew-tolerant lease grace period",
+                "kind": "core:standard",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "the skew fix ships with the hydrate queue re-run before the next rollout",
+          "search_keys": [
+            "hydrate queue re-run",
+            "skew fix ships",
+            "before next rollout"
+          ],
+          "source_turn_id": 21
+        },
+        {
+          "content": "Priya owns tracking the grace-expiry log for a week",
+          "pointKind": "statement",
+          "about_entities": [
+            "Priya",
+            "grace-expiry log"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "Priya",
+                "kind": "core:naturalPerson",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "grace-expiry log",
+                "kind": "core:tool",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Priya will track the grace-expiry log for a week",
+          "search_keys": [
+            "Priya grace-expiry log",
+            "one week tracking",
+            "grace log owner"
+          ],
+          "source_turn_id": 21
+        }
+      ],
+      "operators": [
+        {
+          "src": "The Bluepeak region clock drifted eleven seconds, which is exactly the six-minute duplicate window on the hydrate queue",
+          "dst": "The global flag flip at cutover did not cause the duplicate claims; the flag had been stable for two hours before the anomaly",
+          "op_type": "NAND"
+        },
+        {
+          "src": "The skew-tolerant lease grace period shipped to every region on 2026-10-09, so a lagging region's renewal cannot clobber a live lease and the clock-skew risk is covered",
+          "dst": "Clock skew between regions can make lease expiry unsafe: a lagging region renews after the owner's lease truly expired and its renewal can clobber a live lease in another region",
+          "op_type": "MITIGATES",
+          "target_edge": {
+            "src": "The fix is a skew-tolerant lease: the expiry check needs a grace period so a lagging region cannot clobber a live lease",
+            "dst": "Clock skew between regions can make lease expiry unsafe: a lagging region renews after the owner's lease truly expired and its renewal can clobber a live lease in another region",
+            "op_type": "IMPL"
+          },
+          "strength": 0.5
+        },
+        {
+          "src": "The SLO review had assumed sub-second inter-region skew, which the observed eleven-second drift undermined",
+          "dst": "The lease grace period is sized to thirty seconds against a worst-logged inter-region skew of eleven seconds",
+          "op_type": "MITIGATES",
+          "target_edge": {
+            "src": "The fix is a skew-tolerant lease: the expiry check needs a grace period so a lagging region cannot clobber a live lease",
+            "dst": "Clock skew between regions can make lease expiry unsafe: a lagging region renews after the owner's lease truly expired and its renewal can clobber a live lease in another region",
+            "op_type": "IMPL"
+          },
+          "strength": 0.3
+        }
+      ],
+      "chain_notes": [
+        {
+          "chain": "epicToCode",
+          "finding": "The hydrate queue re-run is a work item without an epic parent; no epic exists in the story",
+          "action": "warned",
+          "note": "Left as a standalone WorkItem rather than inventing an epic"
+        }
+      ],
+      "link_before_create": [
+        {
+          "searched_for": "global flag",
+          "found": false,
+          "note": "No prior entity for the global flag; created and marked superseded by per-service flags"
+        },
+        {
+          "searched_for": "clock-skew risk",
+          "found": false,
+          "note": "No prior risk entity; created as dev:risk"
+        },
+        {
+          "searched_for": "skew-tolerant lease grace period",
+          "found": false,
+          "note": "No prior standard; created"
+        },
+        {
+          "searched_for": "hydrate queue",
+          "found": false,
+          "note": "No prior entity; created"
+        },
+        {
+          "searched_for": "Bluepeak region",
+          "found": false,
+          "note": "No prior entity; created"
+        }
+      ],
+      "retractions": []
+    }
+  },
+  "s2_stats": {
+    "raw": {
+      "attempts": 1,
+      "retries": 0,
+      "last_class": null,
+      "truncated": false,
+      "finish_reason": "stop",
+      "prompt_tokens": 9290,
+      "completion_tokens": 3384,
+      "cost": {
+        "calls": 1,
+        "prompt_tokens": 9290,
+        "completion_tokens": 3384,
+        "calls_without_cost": 1,
+        "by_route": {
+          "deepseek-direct": {
+            "deepseek-v4-flash": {
+              "calls": 1,
+              "prompt_tokens": 9290,
+              "completion_tokens": 3384,
+              "cost_usd": 0.0,
+              "calls_without_cost": 1,
+              "calls_without_usage": 0,
+              "calls_without_tokens": 0,
+              "usage_present": true
+            }
+          }
+        }
+      },
+      "recovery": {},
+      "partial": true
+    },
+    "narrative": {
+      "attempts": 1,
+      "retries": 0,
+      "last_class": null,
+      "truncated": false,
+      "finish_reason": "stop",
+      "prompt_tokens": 8876,
+      "completion_tokens": 3542,
+      "cost": {
+        "calls": 1,
+        "prompt_tokens": 8876,
+        "completion_tokens": 3542,
+        "calls_without_cost": 1,
+        "by_route": {
+          "deepseek-direct": {
+            "deepseek-v4-flash": {
+              "calls": 1,
+              "prompt_tokens": 8876,
+              "completion_tokens": 3542,
+              "cost_usd": 0.0,
+              "calls_without_cost": 1,
+              "calls_without_usage": 0,
+              "calls_without_tokens": 0,
+              "usage_present": true
+            }
+          }
+        }
+      },
+      "recovery": {
+        "s2_out_tokens": 3542
+      }
+    }
+  },
+  "s2_errors": {},
+  "s2_seconds": {
+    "raw": 11.0,
+    "narrative": 11.4
+  },
+  "session_id": "wp07_bluepeak_followup",
+  "turns": 22,
+  "seconds": 25.2
+}

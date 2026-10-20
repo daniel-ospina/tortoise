@@ -1202,6 +1202,34 @@ def test_rest_rejects_ssrf_target_and_unknown_type_and_bad_body(client):
     assert missing_url.status_code == 422
 
 
+def test_rest_reports_a_refused_cache_write_as_17_1_not_a_crypto_failure(
+        client, monkeypatch):
+    """#9233: a §17.1 refusal must not be answered as "encryption key not
+    configured".
+
+    `DirectCacheWriteRefused` subclasses `RuntimeError`, and the create door's
+    `RuntimeError` arm exists for the crypto fail-loud contract, so an unmapped
+    refusal sent the operator to the wrong knob (and to a 503, not a 500).
+    """
+    from tortoise import webhook_delivery as wd
+    from tortoise.projection import DirectCacheWriteRefused
+
+    def _refuse(*_a, **_kw):
+        raise DirectCacheWriteRefused("§17.1: no declaration in flight")
+
+    monkeypatch.setattr(wd, "create_subscription", _refuse)
+    r = client.post("/v1/context/subscriptions",
+                    json={"url": "https://hooks.example.com/cb"})
+
+    assert r.status_code == 500, r.text
+    detail = json.dumps(r.json())
+    assert "17.1" in detail, detail
+    assert "encryption key" not in detail, (
+        "a refused cache write is still reported as a missing encryption key, "
+        "so the operator is sent to the wrong knob"
+    )
+
+
 def test_rest_requires_auth(client):
     """No dependency override → the REAL auth dependency → 401, never a
     subscription. Guards the fail-closed half of a write surface."""

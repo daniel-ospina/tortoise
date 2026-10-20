@@ -1,4 +1,19 @@
 #!/usr/bin/env bash
+# ⛔ REFERENCE EXCERPT — THIS COPY CANNOT RUN HERE (retired 2026-10-19).
+#
+# `operations/orchestrator-harness/` is a pointer to agent-infra/scripts/orchestrator-harness/, and
+# this file is the one deliberate survivor: the #8484 detached-reviewer sandbox plus the #8602
+# `reviewer_prompt()` and the #8612 `verdict_kind()` / `apply_verdict_marker()` pair are NOT ported
+# yet (agent-infra's port-provenance.txt records them as not-yet-ported). It is kept as TEXT — the
+# only copy of that fix — and NOT as a runnable tool:
+#   * its exec bit is cleared, and
+#   * line ~27 sources `spawn-gate.sh`, which was retired with the rest of the copy, so running it
+#     exits 78 ("refusing to run an ungated reviewer") before doing any work — fail-closed, loudly.
+# The contracts that matter (the prompt must not tell the reviewer to provision a venv or run the
+# suite; a verdict-LESS run must not authorise a fixer) are pinned by pytest against the SHIPPED
+# function text: tests/test_orchestrator_harness_retained.py. Port this file to agent-infra, then
+# delete it here and drop it from `ALLOWED` in tools/check-harness-fork.sh.
+#
 # merge-one.sh <repo-path> <owner/repo> <pr> <branch>
 # merge-one.sh --argv <file>            (4 lines: repo, owner/repo, pr, branch)
 # Full chain for ONE PR: fresh-context review -> evidence comment -> record-review -> wait green -> merge.

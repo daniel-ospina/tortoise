@@ -529,6 +529,64 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         r'os\.environ\["TORTOISE_DB_URI"\]\s*=',
         r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']',
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # #9122/#9197's second writer (`python -m tortoise.session_indexer`).
+    # `_run_indexer` re-sets `TORTOISE_DB_URI` to its OWN CURRENT VALUE — a
+    # self-read identity — purely so `monkeypatch` has an undo entry to
+    # register: `session_indexer.main()` writes the var DIRECTLY
+    # (`tortoise/session_indexer.py:691` and `:714`), which monkeypatch would
+    # never undo, leaking a dead endpoint into every module collected after this
+    # one.
+    #
+    # It flips NO lane here, and this file's intents do not have a category for
+    # that: the fixture stubs `tortoise.sdk.TortoiseSDK` to return the shared
+    # `sdk_with_journal` and calls `_get_proj()` BEFORE `main()`, so the
+    # PROJECTION the SDK dials is pinned before `--db` is written. The value
+    # `main()` writes is still READ later in that same call — `extract_metadata`
+    # → `_graph_entity_keywords` reads `TORTOISE_DB_URI` and dials it
+    # (`tortoise/session_indexer.py:719` → `:328` → `:228`) — but against the
+    # dead `localhost:1` endpoint that read only logs "graph entity keyword
+    # lookup failed" (:296) and is swallowed, so it moves no lane. The row
+    # carries the DELIBERATE_URI label because the census requires every
+    # mutation line to be declared and has no restoration intent. NO precedence
+    # assertion is pinned for this CLI anywhere: the #1349 arm's
+    # `test_db_uri_env_restored_after_cleanup` covers the longmem_eval runner's
+    # `_temporary_env_var`, a DIFFERENT CLI. Do not read this row as evidence
+    # that `session_indexer --db` precedence is pinned.
+    #
+    # The regex pins the CONTINUATION shape (`, <newline>`), which catches only
+    # what the census CAN catch: a same-line value, `setenv("TORTOISE_DB_URI",
+    # <uri>)`, no longer matches and reds. The honest LIMIT: `_is_declared`
+    # matches per PHYSICAL LINE, so a value split onto the next line
+    # (`monkeypatch.setenv("TORTOISE_DB_URI",` + a newline + `"docker://…")`) is
+    # still excused by this entry — the continuation line is not inspected. The
+    # narrow shape is a real improvement, not a bound.
+    # #9219 — the #9197 site (`b9d99c5e5`), declared late: it redded the required
+    # `test (e)` / `python-ci-gate` on `main` while the suite itself passed.
+    # SITE CLASS: RESTORATION RECORD, not a lane switch (the #2500 shape one entry
+    # up). `_run_indexer` (:451) records the CURRENT `TORTOISE_DB_URI` before
+    # calling `session_indexer.main()`, because `main()` writes its `--db` value
+    # straight into `os.environ` (:691, :714) — the fixture-param monkeypatch
+    # would then have nothing of its own to restore, and every later module would
+    # inherit a dead endpoint (the sdk_factory lane flip). So the recorded value
+    # is the AMBIENT one and this site forces NO lane; it is declared rather than
+    # exempted because the census counts every mutation line, and a mutation it
+    # cannot see is one nothing audits.
+    # LANE INTENT: DELIBERATE_URI — the mutation this record guards is `main()`'s
+    # write of the deliberately-UNREACHABLE docker probe
+    # `docker://:x@localhost:1/g` (the docstring's "deliberately-unreachable URI
+    # probes" class). Nothing connects to it: `indexer_sdk` (:427) replaces
+    # `TortoiseSDK` with a journal-backed fake and pre-builds the projection
+    # before `main()` writes the var. Function-scoped `monkeypatch` — auto-undone
+    # at teardown, so no lane leaks into a later module.
+    #
+    # ⛔ ONE ROW ONLY — this module had a SECOND, broad row
+    # (`[r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"']`) further up the dict.
+    # Python's last-wins dict semantics made the broad row DEAD (it never applied;
+    # ruff `F601` flagged it), so removing it changes no exemption, while MERGING
+    # the two would silently re-widen the shape the entry below deliberately
+    # narrows. Same behaviour, one row, no reading that says otherwise.
+    "test_9079_event_writers_journal.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*$'],
     # The arm's `--db` scoping tests (#1349 isolation): an explicit `--db` must
     # beat a stale `TORTOISE_DB_URI`, so the stale value is set to a DIFFERENT
     # endpoint and then the store's own `_temporary_env_var` proves the scoped
@@ -943,28 +1001,37 @@ def test_the_cost_skip_cannot_hide_a_uri_agnostic_leak():
 # ═══════════════════════════════════════════════════════════════════════
 
 def _scope_map(src: str) -> list[tuple[str, str | None]]:
-    """Per-line scope classification, with a FAIL-CLOSED fallback.
+    """Per-line scope classification, FAIL-CLOSED by construction.
 
     `_scope_map_pass` carries a single-quoted literal across a backslash
-    continuation. If the source ends with that literal still open it cannot
-    tokenize at all, so the carry established nothing about where the code ends
-    — and honouring it would attribute every remaining line to the function
-    that opened the literal, HIDING violations rather than surfacing them. The
-    second pass disables the carry, which is the pre-carry behaviour."""
+    continuation, which can only be justified by the source PARSING: on an
+    unparsable source an unclosed literal proves nothing, and honouring it
+    attributes every remaining line to the function that opened the literal —
+    HIDING violations instead of surfacing them.
+
+    So the gate compiles the source, and when it cannot, BOTH passes run and a
+    line is labelled `("top", None)` unless they AGREE. Choosing one pass and
+    ARGUING it is the safe direction is what a reviewer caught here: the
+    no-carry pass is the over-reporting direction only for a continuation at
+    column 0 — for an INDENTED one it is the HIDING direction, because the
+    continuation line's bracket stays counted and every later `def` is skipped.
+    Disagreement therefore resolves to module scope, which surfaces a mutation
+    rather than absorbing it.
+
+    The gate compiles `src.lstrip(BOM)`: `compile()` rejects a UTF-8 BOM that
+    the module loader strips, so a file that IS a valid module would otherwise
+    lose the carry and hide on the indented shape above (measured against
+    `origin/main`, which reports that mutation)."""
     try:
         # A test file may carry a deprecation-shaped escape sequence; compiling
         # it here must not print a warning the guard never printed before.
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            compile(src, "<scope-map>", "exec")
+            compile(src.lstrip("\ufeff"), "<scope-map>", "exec")
     except (SyntaxError, ValueError):
-        # The source does not parse, so NOTHING it says about where a literal
-        # ends can be trusted — and a carry on an unterminated literal
-        # attributes the rest of the file to the function that opened it,
-        # HIDING violations instead of surfacing them. Fail CLOSED: no carry,
-        # which over-reports rather than under-reports.
-        scopes, _ = _scope_map_pass(src, allow_single_carry=False)
-        return scopes
+        carried, _ = _scope_map_pass(src, allow_single_carry=True)
+        plain, _ = _scope_map_pass(src, allow_single_carry=False)
+        return [a if a == b else ("top", None) for a, b in zip(carried, plain, strict=True)]
     scopes, _ = _scope_map_pass(src, allow_single_carry=True)
     return scopes
 
@@ -1030,7 +1097,7 @@ def _scope_map_pass(
         # Paren balance over `code`, the `_code_only` output — code brackets
         # only, so a bracket inside copy cannot freeze the continuation state
         # (#8995). NOT over the raw line (#8487), and NOT over a second,
-        # `tokenize`-based counter: `tokenize` emits ONE column for the
+        # `tokenize`-based counter (deleted): `tokenize` emitted ONE column for the
         # `FSTRING_MIDDLE` holding `{{`, so the second brace of `f"a {{ b"`
         # reaches a tokenize-span counter as code and opens a paren that
         # nothing closes. Measured on this tree by diffing the two scope maps
@@ -1788,6 +1855,69 @@ def test_an_unterminated_literal_does_not_swallow_the_rest_of_the_file():
         assert scope == ("top", None), (
             f"{stray!r} carried across an unparsable source and attributed a "
             f"top-level mutation to the function above it — got {scope}")
+
+
+def test_disagreeing_passes_resolve_to_module_scope():
+    """A line the two passes disagree on is `("top", None)` — never a function.
+
+    Choosing ONE pass and arguing it is the safe direction is what review caught:
+    the no-carry pass over-reports for a continuation at column 0 but HIDES for
+    an INDENTED one (the continuation line's bracket stays counted, every later
+    `def` is skipped, and the mutation is absorbed by the function above it).
+    Disagreement now resolves to module scope by construction, so the polarity is
+    right on both arms instead of one.
+
+    Measured: the source below is a VALID module once the UTF-8 BOM is stripped
+    (`compile()` rejects the BOM, the loader strips it), and the pop line is
+    `("top", None)` with the violation reported — as `origin/main` reports it.
+    With the BOM strip removed the SAME answer holds, which is the point: the
+    disagreement rule, not the strip, is what makes it fail closed.
+    """
+    body = (
+        'import os\n'
+        '\n'
+        '\n'
+        'def _ku_sdk():\n'
+        '    old = os.environ.get("TORTOISE_DB_URI")\n'
+        '    q = "MATCH (n )\\\n'
+        '    (foo"\n'
+        '    try:\n'
+        '        yield\n'
+        '    finally:\n'
+        '        os.environ["TORTOISE_DB_URI"] = old\n'
+        '\n'
+        '\n'
+        'os.environ.pop("TORTOISE_DB_URI")\n'
+    )
+    compile(body, "<test>", "exec")  # a valid module without the BOM
+    # ARM 1 — a VALID module: the gate passes, so only the carry runs. This is
+    # the BOM claim, and it holds with or without `lstrip` (belt and braces).
+    for src in (body, "\ufeff" + body):
+        scopes = _scope_map(src)
+        assert scopes[-1] == ("top", None), (
+            f"a module-level mutation was attributed to the function above it "
+            f"(BOM={src.startswith(chr(0xfeff))}) — got {scopes[-1]}")
+        assert _restoration_violations([("synthetic_bom.py", src)]), (
+            "the mutation was not reported at all")
+    # ARM 2 — the gate FIRES (a stray literal at the end), so the fallback and
+    # its disagreement rule are what answer. The two passes disagree on the pop
+    # line: the carried pass reads the indented continuation as copy, while the
+    # no-carry pass keeps its `(` counted and swallows every later `def`. If the
+    # fallback merely PREFERRED the no-carry pass, the mutation would be hidden
+    # and this arm reds — which is the whole point of the rule.
+    broken = body + 'x = "oops\n'
+    try:
+        compile(broken, "<test>", "exec")
+    except SyntaxError:
+        pass
+    else:  # pragma: no cover - the arm must actually reach the gate
+        raise AssertionError("the stray literal did not make the source unparsable")
+    scopes = _scope_map(broken)
+    assert scopes[-2] == ("top", None), (
+        "with the gate firing, a disagreeing line must resolve to MODULE scope "
+        f"— got {scopes[-2]}")
+    assert _restoration_violations([("synthetic_broken.py", broken)]), (
+        "the mutation went unreported once the gate fired")
 
 
 def test_pep701_nested_quote_is_a_KNOWN_limitation():

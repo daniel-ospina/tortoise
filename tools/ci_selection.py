@@ -877,7 +877,25 @@ SOURCE_PATTERNS = {
              # P2-1 (code review): an embeddings.py/cross_lens.py-only PR must
              # select eval so probe/vector-arm/threshold tests run (they assert
              # the EMBEDDING_MODEL + threshold constants — drift class #1260).
-             "tortoise/embeddings.py", "tortoise/cross_lens.py"),
+             "tortoise/embeddings.py", "tortoise/cross_lens.py",
+             # #7947 review P1: the write-path MEASUREMENT sources — the
+             # corpus generator and its schema, the two-arm harness, and the
+             # pre-registered scorer (`score_qualifiers.py`) — live under
+             # `tests/eval/write_path/`, and none of them is named `test_*.py`,
+             # so before this entry a `score_qualifiers.py`-only change matched
+             # no pattern, fell to the `tests/` -> `core` fallback at
+             # `select()`, and selected `core` — where NOT ONE of the tests that
+             # pin the rule it edits is registered (`test_score_qualifiers.py`
+             # and `test_write_path_corpus.py` are `eval`). A change to
+             # `MARKERS`/`BAND_PP`/`classify()`/`evaluate_branches()` therefore
+             # rewrote every number in §10 with every gate green, and a
+             # hand-edited `gold/*.json` did not run the planted-count pin
+             # either. Registering the test file alone (config/ci-surfaces.yml)
+             # only fixes the manifest classification: selection is driven by
+             # THIS table. Same #1349/#2938/#3616 silent-drop class as the
+             # entries above. Pinned by
+             # tests/test_ci_selection.py::test_write_path_measurement_source_edit_selects_eval.
+             "tests/eval/write_path/"),
     # core is the fallback for any other python-relevant path
 }
 
@@ -913,6 +931,16 @@ SOURCE_PATTERNS = {
 # tuple is redundant for any path already listed here.
 CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.py",
              "tortoise/projection/edges.py",
+             # #7947 review P1: `tests/eval/write_path/` is a SOURCE_PATTERNS
+             # entry of `eval` (the measurement sources), and a named-surface
+             # match REPLACES the `tests/` -> core fallback — but `core`
+             # registers two tests that READ those sources:
+             # `test_extractor_v2.py` imports `tests.eval.write_path.runner`,
+             # and `test_salience_labels_4917.py` reads
+             # `tests/eval/write_path/salience_labels.jsonl`. Without this
+             # entry a write_path-only change would drop them from the
+             # selection, trading one silent drop for another.
+             "tests/eval/write_path/",
              "tools/tmpdir_sweep.py",
              # queue_resweep: `tools/` is in NON_PYTHON_PREFIXES, so a
              # tools/queue_resweep.py-only change was filtered out BEFORE the
@@ -1096,23 +1124,25 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
              "supabase/migrations/20261018000001_record_point_money_value_2782.sql",
              "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md",
-             # #8469 review P1: the orchestrator harness's shipped shell scripts
-             # (lane.sh, merged-not-closed.sh, refresh-candidates.sh, orch-loop.sh,
-             # install.sh, selftest.sh) own tests/test_orchestrator_harness.py,
-             # which is `core`-registered. `operations/` is a flat
-             # NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches these
-             # scripts, so an `operations/**`-only diff filtered to `changed == []`,
-             # took the docs-only early return, and fell back to tier-1 smoke —
-             # which does NOT contain that file. The registration under `core`
-             # does NOT fix it: a name in a surface's test_files only runs when
-             # that surface is ALREADY selected; it cannot select the surface.
-             # Measured before this entry: `_sel(["operations/orchestrator-harness/
-             # lane.sh"])` -> surfaces=[], test_files=33, harness test absent. This
-             # is the repo's own documented remedy (the #1349/#3332/#3616
-             # silent-drop class), the same shape as tools/queue_resweep.py and
-             # tools/drift-guard.py above. Pinned by
-             # tests/test_ci_selection.py::test_orchestrator_harness_change_selects_core_not_tier1.
+             # RETIRED 2026-10-19: the orchestrator harness (and therefore
+             # tests/test_orchestrator_harness.py) moved to
+             # agent-infra/scripts/orchestrator-harness/. This repo keeps only a pointer
+             # README plus the two scripts whose fixes are UNPORTED (`merge-one.sh`,
+             # `merged-not-closed.sh`); a harness script beyond those is a fork, which
+             # tools/check-harness-fork.sh now fails on.
+             #
+             # #9217 review: the directory is STILL registered, because the two retained
+             # scripts are live code with hermetic guards
+             # (tests/test_orchestrator_harness_retained.py) — a change to either, or to the
+             # guard itself, must run them. That is the #1349/#3332/#3616 silent-drop class:
+             # `operations/` and `tools/` are flat NON_PYTHON_PREFIXES entries, so an
+             # operations-only or tools-only diff filtered to `changed == []`, took the
+             # docs-only early return and fell to tier-1 smoke, which does not carry these
+             # files. A name in a surface's test_files cannot fix that on its own — it only
+             # runs when the surface is ALREADY selected. Pinned by
+             # tests/test_ci_selection.py::test_retired_orchestrator_harness_selects_its_retained_guards.
              "operations/orchestrator-harness/",
+             "tools/check-harness-fork.sh",
              # #3554 review (P2, Finding 2): the :Session declaration's own doc
              # subjects — `docs/ONTOLOGY.md` §4.8 (the owner table the machine
              # declaration mirrors) and
@@ -1179,6 +1209,34 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # Pinned by
              # tests/test_ci_selection.py::test_capstone_probe_change_selects_core_not_tier1.
              "docs/evidence/7950-capstone/probes/",
+             # #9076: the E1+E2 evidence bundle
+             # (`docs/evidence/7949-capstone/` — the probe, the corpus JSON and its
+             # builder, the evidence log) and its structural checker
+             # (`tools/e1_e2_census_check.py`) own
+             # `tests/test_e1_e2_measurement.py`, registered `core`.
+             #
+             # MEASURED before these entries (2026-10-18, `select()` in-process):
+             # a diff touching ANY of them returned `surfaces=[]`, `full=False`,
+             # 50 test files — i.e. `docs/` and `tools/` are flat
+             # NON_PYTHON_PREFIXES entries, the changed list came back empty and
+             # select() took the docs-only early return. The pin still RAN, but
+             # only because this PR also dual-registers it in `tier1` (the same
+             # `core`=home / `tier1`=docs-only pairing the extractor-v4 guards
+             # above use). That is the fragile state these entries remove: `tier1`
+             # is a CURATED list, so the guard's owning surface (`core`) was
+             # nominal and one tier1 edit from dropping the pin silently — the
+             # #1349/#3332/#3616 class, reached through the early return rather
+             # than through `_selection_relevant`. After: `surfaces=['core']`,
+             # `full=False`, pin present — the same shape and remedy as
+             # `docs/evidence/7950-capstone/probes/` above, and (unlike that
+             # entry) it is a cost/home fix rather than a hole fix, which is
+             # stated so the polarity is not misread later.
+             "docs/evidence/7949-capstone/",
+             # `tools/` is a flat NON_PYTHON_PREFIXES entry too, so the checker was
+             # swallowed by the same early return; its pins are `core`-registered
+             # and hermetic, so `core` is the right lane (the shape
+             # `tools/lane_stash.py` above takes).
+             "tools/e1_e2_census_check.py",
              # #4030: `supabase/config.toml` is the committed LOCAL-stack config,
              # and every env var it resolves by `env(NAME)` substitution must be
              # declared in `.env.example` — the guard for that pair
@@ -1904,7 +1962,48 @@ def _full_selection(manifest: dict, slow: set[str]) -> dict:
             "slow_selected": sorted(slow - carve)}
 
 
-def select(changed_files: list[str], event: str, manifest: dict) -> dict:
+def select(changed_files: list[str], event: str, manifest: dict,
+           explain: dict | None = None) -> dict:
+    """Selection for a changed-path list.
+
+    *explain*, when passed a dict, is filled with WHY a fail-closed answer was
+    chosen, so `main()` can say it on stderr. The contract is:
+
+        {"reasons": [<cause>, ...]}
+
+    — EVERY cause of THIS call's FULL matrix, in scan order — plus
+    `"reason": "unknown-paths"` and `"unknown": [...]` ONLY when
+    `"unknown-paths"` is among them. `reasons` is the authoritative field: a
+    legitimate FULL selection with no unknown path at all (a `SHARED_MODULES`
+    entry the surface patterns also claim, a linter-policy file) records
+    `reasons` and nothing else, so a caller that reads `explain["reason"]` once
+    `explain` is non-empty raises `KeyError` — e.g. `tortoise/sdk.py`, a
+    `SHARED_MODULES` entry the `tortoise/` prefix fallback claims so it never
+    reaches `unknown`, or `battery/.markdownlint.json`, a policy file under a
+    claimed surface (a dependency-bump diff like `pyproject.toml` DOES carry
+    `reason`, because that path is unknown to the surface patterns as well and
+    both causes are recorded). Read `reasons`.
+
+    A fourth key, `unknown_all_blast`, appears at the same time as `reason` and is
+    INTERNAL to the diagnostic: it says whether every unrecognised path is also a
+    blast-radius path (which decides whether the lead-in reads "the same path(s)"
+    or "additionally, …"). Branch on `reasons`/`unknown`; treat
+    `unknown_all_blast` as private and never assert the dict verbatim while it is
+    present.
+
+    It is a SIDE CHANNEL on purpose: the returned dict is the artifact schema
+    (`.ci-selection/selection.json`) and is asserted verbatim up and down this
+    suite, so a reason field inside it would be a migration; and the reason must
+    not be re-derived by the caller, which is how the diagnostic would drift
+    from the decision it describes (#9109). It is CLEARED on entry, so a caller
+    may reuse one dict across calls.
+    """
+    if explain is not None:
+        # A caller may reuse one dict across calls, and what it holds is only
+        # ever about THIS call — so empty it here. That makes "empty unless THIS
+        # call failed closed, in which case it names every cause" true by
+        # construction, whatever a previous call recorded.
+        explain.clear()
     slow = set(manifest.get("slow_files", []))
     # #1371: slow files run ONLY in the test-slow job — never in the fast
     # gate's tier-1/tier-2 selections (they are already covered there).
@@ -1987,26 +2086,6 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
                 "slow_run": False, "carve_out_run": False,
                 "slow_selected": []}
 
-    # Shared module -> full
-    if any(c.startswith(SHARED_MODULES) for c in changed):
-        return _full_selection(manifest, slow)
-
-    # Linter POLICY -> full (#7435 review P1). A `.markdownlint*`/`.lycheeignore`/
-    # `lychee.toml` file changes the linting OUTCOME of every doc beneath it, so
-    # the selection must be the WHOLE matrix — the only selection containing
-    # `tests/test_docs_lint_baseline.py`, whose committed-policy pin is what makes
-    # a config edit move the snapshot.
-    #
-    # `_keep_changed` above only stops such a path being DROPPED as an unknown
-    # prefix; it does NOT stop the match loop below CLAIMING it. Measured: with
-    # the claim alone, `battery/.markdownlint.json` → surfaces=['battery'] and
-    # `tools/longmem_eval/.markdownlint.json` → ['eval'], and neither leg runs the
-    # pin — so the policy edit landed with the snapshot unmoved, which is the very
-    # hole the pin exists to close. Placed with SHARED_MODULES because both mean
-    # "this path's blast radius is not its own directory".
-    if any(_is_linter_policy_path(c) for c in changed):
-        return _full_selection(manifest, slow)
-
     matched: set[str] = set()
     unknown: list[str] = []
     for c in changed:
@@ -2031,9 +2110,69 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
                 found = True
         if not found:
             unknown.append(c)
+    # EVERY cause of a fail-closed FULL matrix is recorded, not just the first
+    # one found (#9109 review P1 on this branch). A `SHARED_MODULES` member or a
+    # linter-policy file is FULL because its blast radius IS the whole matrix, so
+    # labelling one of those "unknown to every SOURCE_PATTERN … NOT a statement
+    # that this diff touches everything" inverts its meaning — and several
+    # shared-module entries (`pyproject.toml`, `requirements.txt`,
+    # `.github/workflows/python-ci.yml`, `.github/actions/`) are genuinely unknown
+    # to the surface patterns, so the mislabel is reachable from the most
+    # ordinary legit-full diff. (`len(SHARED_MODULES)` is the count; do not
+    # restate it here, it decays.)
+    shared_cause = any(c.startswith(SHARED_MODULES) for c in changed)
+    # Linter POLICY is a FULL cause of its own (#7435 review P1), recorded here
+    # rather than in a return of its own: a `.markdownlint*`/`.lycheeignore`/
+    # `lychee.toml` file changes the linting OUTCOME of every doc beneath it, so
+    # the selection must be the WHOLE matrix — the only selection containing
+    # `tests/test_docs_lint_baseline.py`, whose committed-policy pin is what
+    # makes a config edit move the snapshot. `_keep_changed` only stops such a
+    # path being DROPPED as an unknown prefix; it does NOT stop the match loop
+    # above CLAIMING it. Measured: with the claim alone,
+    # `battery/.markdownlint.json` -> surfaces=['battery'] and
+    # `tools/longmem_eval/.markdownlint.json` -> ['eval'], and neither leg runs
+    # the pin — so the policy edit landed with the snapshot unmoved, which is
+    # the very hole the pin exists to close. A shared module means the same
+    # thing ("this path's blast radius is not its own directory"), and BOTH are
+    # fulfilled by the single `if reasons:` return below.
+    lint_cause = any(_is_linter_policy_path(c) for c in changed)
+    reasons: list[str] = []
+    if shared_cause:
+        reasons.append("shared-module")
+    if lint_cause:
+        reasons.append("linter-policy")
     if unknown:
-        # New/unknown path -> fail-closed full matrix (scope v5 decision 1)
+        reasons.append("unknown-paths")
+    if reasons:
+        # The ANSWER is right and deliberate (scope v5 decision 1); the DEFECT
+        # (#9109) is that it is indistinguishable from a legitimate full
+        # selection, so a caller who passed a list FILE as a changed file reads
+        # "this diff selects everything" instead of "my argument was wrong".
+        # Record EVERY reason so `main()` can say it out loud; the selection
+        # itself is unchanged.
+        if explain is not None:
+            explain["reasons"] = reasons
+            if unknown:
+                # `reason`/`unknown` stay the unknown-path pair the diagnostic
+                # keys on; `reasons` is what keeps the message truthful when
+                # another cause is also present.
+                explain["reason"] = "unknown-paths"
+                explain["unknown"] = list(unknown)
+                # Whether EVERY unrecognised path is also a blast-radius path.
+                # `unknown` is NOT a subset of those (`tests/conftest.py` beside
+                # `tools/ci_selection.py` leaves the latter unknown), and the
+                # diagnostic's lead-in must say which shape it is looking at.
+                blast = {c for c in changed
+                         if c.startswith(SHARED_MODULES)
+                         or _is_linter_policy_path(c)}
+                explain["unknown_all_blast"] = set(unknown) <= blast
         return _full_selection(manifest, slow)
+
+    # No separate `SHARED_MODULES` / linter-policy returns here: both causes were
+    # appended to `reasons` above, so the `if reasons:` return already answered
+    # for them. Two such branches used to sit right here and were unreachable —
+    # `reasons` is non-empty exactly when one of those causes holds — so they
+    # read as live decisions when the decision had already been taken.
 
     # Test-file changes select their owning surface
     for c in changed:
@@ -4120,6 +4259,178 @@ def _manifest_contract_issues(manifest: dict) -> list[str]:
     return red
 
 
+def _warn_unknown_paths(explain: dict) -> None:
+    """Say on STDERR why a fail-closed FULL matrix was chosen (#9109).
+
+    The failure this prevents is a MEASUREMENT one. `--changed-files` takes the
+    newline-separated LIST, not a path to it; passing a path made the path
+    itself a changed file, which no SOURCE_PATTERN knows, so the selection took
+    the deliberate fail-closed FULL-matrix branch (scope v5 decision 1) and
+    reported `full=true, surfaces=[all]`. That answer is indistinguishable from
+    a legitimate full selection — a push, a schedule, a shared module — so it
+    was read as "a docs-only diff selects FULL, not tier1-only" in a live PR's
+    CI-registration rationale, and that statement is simply false for the diff
+    (the same list on stdin selects `core`).
+
+    WHY A WARNING AND NOT A REFUSAL (the issue's first proposal): the single
+    path form is an ALLOWED, DOCUMENTED inline invocation — `config/ci-surfaces.yml`
+    documents several of them (`--changed-files tortoise/hosted_api.py`,
+    `--changed-files tortoise/__main__.py`, `--changed-files tortoise/audit.py`,
+    and the same shape for other modules; grep the file for
+    `--changed-files tortoise/`), and
+    `docs/plans/2026-09-14-3467-trunk-green-honest-gate.md` records one. A
+    refusal keyed on "the argument is an existing file" refuses all of them,
+    which is the issue's OWN target 2 ("100% of the documented invocations
+    unchanged") failing. The ambiguity between `a one-item list` and `a path to
+    a list` has no syntactic answer, so this keeps the argument contract, keeps
+    stdout byte-identical, and makes the fail-closed answer SELF-DESCRIBING
+    instead. A caller that ignores stderr still gets exactly the selection it
+    got before.
+
+    WHY THE LIST-VS-PATH HINT IS CONFINED TO A PATH OUTSIDE THE CHECKOUT: an
+    unknown path is mostly a LEGITIMATE diff — most of the tracked tree that
+    reaches FULL through this branch alone is real repo content
+    (`.github/workflows/ci.yml`, `uv.lock`, `Makefile`, `.mergify.yml`, and a
+    `TOOL_CARVEOUTS`-registered `tools/*.py` that no `SOURCE_PATTERNS` row matches,
+    such as `tools/ci_selection.py` — an UNREGISTERED `tools/*.py` is dropped by
+    `_keep_changed`, and a REGISTERED-AND-claimed one is matched by the surface
+    loop, so neither reaches this branch) — and every added or modified path in a
+    checked-out PR is an
+    existing file. A hint keyed on "this path exists" therefore fires on nearly
+    every real fail-closed selection and asserts a malformed invocation that did
+    not happen: a new plausible-but-false reading, which is the class this issue
+    is about. The hint is confined instead to the shape an operator's list file
+    actually takes — an existing file OUTSIDE the checkout (`/tmp/c.txt` in the
+    measured case) — and it is attached to the MARKED path on its own line, so a
+    mixed list (one repo path + one outside file) cannot be read as "all of
+    these are outside". A repo path is a changed path by definition, so the
+    generic explanation is all it gets.
+
+    KNOWN RESIDUAL — this branch speaks only for the paths that SURVIVED
+    `_keep_changed`. The other resolutions of "I passed a path, not a list" are
+    still silent, and the two under-selecting ones are the worse direction: a
+    list file under a `NON_PYTHON_PREFIXES` directory (`docs/changed.txt`,
+    `tools/changed.txt`, `website/…`) is dropped there, so `changed == []` and
+    the docs-only early return answers tier-1 smoke with `full=false`; a list
+    file under `tests/` or `config/` takes that prefix's fallback surface. Both
+    predate #9109 and are NOT fixed here; they are recorded on #9109 so this
+    shape is not read as closed. The remedy is the same for all of them: pass
+    the list on stdin.
+    """
+    reasons = explain.get("reasons") or ([explain["reason"]]
+                                        if explain.get("reason") else [])
+    if not reasons:
+        return
+    unknown = explain.get("unknown") or []
+    # A cause OTHER than the unknown-path branch also produced this FULL matrix,
+    # and it must not be described as a mistake: those paths are FULL because
+    # their blast radius IS everything (#9109 review P1). Stated FIRST, so the
+    # unknown-path sentence is never borrowed to explain them — and the inverted
+    # "NOT a statement that this diff touches everything" is suppressed entirely
+    # when such a cause is present, because for these paths the diff DOES touch
+    # everything.
+    other = [r for r in reasons if r != "unknown-paths"]
+    causes = {
+        "shared-module": (
+            "a SHARED_MODULES path changed — that file is read by the whole "
+            "matrix, so the FULL selection is the BLAST RADIUS, not a malformed "
+            "argument"),
+        "linter-policy": (
+            "a linter-POLICY file changed — it changes the lint outcome of every "
+            "doc beneath it, so the FULL selection is the BLAST RADIUS, not a "
+            "malformed argument"),
+    }
+    for r in other:
+        print(f"ci_selection: FULL matrix because {causes.get(r, r)} (#9109).",
+              file=sys.stderr)
+    if unknown:
+        if other:
+            # Two shapes, and the lead-in must not confuse them. When every
+            # unrecognised path IS a blast-radius path (pyproject.toml, a root
+            # `.markdownlint*`), the list repeats the path line 1 explained, so
+            # "additionally" would invite a hunt for a second path that does not
+            # exist. When even ONE unrecognised path is something else
+            # (`tests/conftest.py` beside `tools/ci_selection.py`), "the same
+            # path(s)" would instead DENY a second path that is right there — the
+            # mirror of the same error, and the worse direction, because the
+            # unrecognised path is the only thing this diagnostic exists to name
+            # (#9109 review).
+            if explain.get("unknown_all_blast"):
+                print(
+                    f"ci_selection: the same path(s) are also not matched by any "
+                    f"SOURCE_PATTERN ({len(unknown)} changed path(s), which would "
+                    "force the FULL selection on their own):", file=sys.stderr)
+            else:
+                print(
+                    f"ci_selection: additionally, {len(unknown)} changed path(s) "
+                    "are not matched by any SOURCE_PATTERN:", file=sys.stderr)
+        else:
+            print(
+                f"ci_selection: FULL matrix because {len(unknown)} changed path(s) "
+                "are unknown to every SOURCE_PATTERN — fail-closed by design (the "
+                "unknown branch returns _full_selection(); see this module's "
+                "docstring), NOT a statement that this diff touches everything:",
+                file=sys.stderr)
+    outside: list[str] = []
+    for c in unknown:
+        mark = ""
+        if _is_outside_repo_file(c):
+            outside.append(c)
+            # Marked ON the path's own line, never as a blanket claim under the
+            # list: a mixed list (one repo path + one outside file) would then
+            # assert that the repo path is outside too, which is exactly the
+            # plausible-but-false reading this diagnostic exists to prevent.
+            mark = ("  [OUTSIDE the checkout — if this is a file CONTAINING the "
+                    "list, pass its contents instead]")
+        print(f"  - {c}{mark}", file=sys.stderr)
+    if outside:
+        print(
+            "  ^ the path(s) marked above are OUTSIDE the checkout. "
+            "`--changed-files` takes the newline-separated LIST, not a path to "
+            "it — if one of them is a file CONTAINING the list, pass its "
+            "contents instead (`--changed-files -` with the list on stdin) "
+            "(#9109).",
+            file=sys.stderr)
+
+
+def _is_outside_repo_file(c: str) -> bool:
+    """True when *c* is an existing file OUTSIDE the checkout.
+
+    That is the shape of an operator's list file (`/tmp/c.txt`), and the only
+    evidence this tool has that the argument might have been meant as a path to
+    a list. A repo-relative path is a changed path whatever else it is, so it is
+    deliberately NOT eligible — that discrimination is what keeps the hint off
+    the legitimate fail-closed case.
+
+    BOTH operands are absolute before they are compared, and each is anchored to
+    where the argument actually means: `c` is a shell argument, so a relative one
+    is relative to the process CWD, while `REPO` is derived from `__file__` and
+    is therefore checkout-anchored whatever the CWD is. A caller that runs this
+    tool from a subdirectory therefore gets `False` (never `True`) for a
+    repo-relative name — it fails QUIET, it cannot invent a list-file hint.
+    """
+    p = Path(c)
+    if not p.is_file():
+        return False
+    # abspath FIRST, and deliberately not on its own: a repo-relative symlink
+    # that points OUTSIDE the checkout is still a repo path, and `resolve()`
+    # alone would relabel it as an outside file and hint at it (pin exists). But
+    # abspath alone is not enough either — an ABSOLUTE argument routed through a
+    # symlinked ALIAS of the checkout (`/tmp/linkrepo -> .../checkout`) is never
+    # under the resolved REPO string, so the repo's own `uv.lock` was marked
+    # "OUTSIDE the checkout" and told to pass its contents instead. Inside is
+    # therefore EITHER form: abspath keeps the repo-symlink-to-outside behaviour,
+    # realpath closes the alias case (#9109 review P2).
+    repo = Path(os.path.abspath(REPO))
+    for candidate in (os.path.abspath(p), os.path.realpath(p)):
+        try:
+            Path(candidate).relative_to(repo)
+        except ValueError:
+            continue
+        return False
+    return True
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--changed-files", default="", help="newline-separated changed files")
@@ -4252,7 +4563,9 @@ def main() -> int:
     changed = [l.strip() for l in args.changed_files.splitlines() if l.strip()]  # noqa: E741
     if args.changed_files == "-":
         changed = [l.strip() for l in sys.stdin.read().splitlines() if l.strip()]  # noqa: E741
-    result = select(changed, args.event, manifest)
+    explain: dict = {}
+    result = select(changed, args.event, manifest, explain=explain)
+    _warn_unknown_paths(explain)
 
     # Audit artifact (scope v5 decision 1): replayable selection record.
     artifact = {

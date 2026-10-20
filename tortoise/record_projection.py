@@ -55,6 +55,69 @@ WHAT THIS MODULE DELIBERATELY IS NOT
 * **No migration-safety apparatus.** Owner scope ruling 2026-10-10: the only
   customer is the dogfood instance. No dual-write, backfill, cutover or
   rollback-parity surface appears here, and none should be added.
+
+TENANCY IS A PER-CALL ARGUMENT AT THIS LAYER, NEVER AMBIENT
+===========================================================
+Every layer row is keyed by `(org_id, graph_id)` with a foreign key to
+`public.graphs`. Both are **required keyword arguments** of every entry point
+here (:func:`mutations_for`, :func:`replay_plan`, :func:`replay`), and of the
+seam that drives them (`record_writer.RecordWriter.write`, #9194): at this
+layer there is deliberately no module-level default, no ContextVar and no
+environment fallback. `test_this_module_has_no_ambient_tenant_READER` executes
+the half of that a scan can execute — no environment reader and no
+`contextvars` — while the parameter half (each coordinate required on its own)
+is executed by the refusal leg in `tests/test_record_projection.py` for these
+three entry points, and by
+`test_the_seam_refuses_a_call_that_cannot_name_its_tenant` for
+`RecordWriter.write` / `write_records`, which is what a production caller
+touches. What defeats the SCAN, and only the scan, is an ACTIVE obfuscated
+read (`org_id = getattr(os, "environ").get("TORTOISE_RECORD_ORG_ID") or
+org_id`, `__import__("os")`): spelled that way it still reds the same value
+legs as the plain spelling (measured, three of them) — while a DORMANT
+spelling of it defeats both, like any dormant read (measured, all green). What
+escapes BOTH instruments is a read that never fires on a fixture path — a
+body-local fallback to a module constant (`org_id = org_id or
+_DEFAULT_TENANT[0]`, signature still required), or a carrier DEFINED ELSEWHERE
+(a `ContextVar` imported from another module: the `record_writer.use_record_tenant`
+that #9192 names, which this tree does not carry and whose production owner is
+#9188): the scan parses this file only, and no fixture arms that carrier.
+Measured: all legs stay green on both. A signature default, however, IS
+caught — by the refusal leg on these entry points, and by the seam leg on
+`RecordWriter.write` / `write_records`. These limits are SUMMARISED here and
+MEASURED in `tests/test_record_projection.py`, except the signature one, which
+is pinned in both test files.
+
+The reason is the failure mode, not taste. The hosted lane builds one SDK per
+tenant graph and its capture executor is process-wide, so a tenant resolved
+from anything process-global files tenant A's rows under tenant B **with no
+error** — the row is well-formed and the FK only checks that the graph exists.
+An environment pair is not a mitigation for that: env is process-global, so it
+is the same single value for every tenant the process serves. A caller that
+cannot name its tenant must refuse.
+
+⚠️ WHERE THE AMBIENT CARRIER ARRIVES, and this module cannot see it. #9192
+names a surface THIS TREE DOES NOT CARRY: `record_writer.use_record_tenant`, a
+ContextVar, with a `TORTOISE_RECORD_ORG_ID`/`_GRAPH_ID` fallback for a
+SINGLE-TENANT deployment. It is not a future plan: the carrier is **in flight
+in #9231** (`fix/9078-record-write-call-site`), one layer up, and `git grep`
+for any of its symbols is empty on `origin/main` under `tortoise/` while
+#9231's ref carries them all — `RECORD_ORG_ENV`/`RECORD_GRAPH_ENV`,
+`_RECORD_TENANT`, `use_record_tenant()` and `record_tenant()`. Do not read this
+module as the statement of record for what those must do; read #9231. The
+precedence it implements is **scope always wins over env**: `record_tenant()`
+reads the `ContextVar` first and consults the env pair only when the scope set
+nothing (a half-configured pair is refused, not completed). The surface #9192
+ask 2 must be pinned on is that env fallback, because it is reachable from the
+live door with **no caller-supplied pair** — #9231's door calls
+`record_tenant()` and files the write under whatever comes back, so a process
+serving several tenants can be armed entirely from the environment, one pair,
+the same value for every tenant it serves. Until that fallback is pinned,
+"scope wins" is a precedence rule rather than a fail-closed one; ask 1, the
+production caller, is what makes the fallback unnecessary in the first place.
+The regression pins for THIS layer are
+`test_two_tenants_in_one_process_do_not_cross_write` and
+`test_two_tenants_through_the_seam_never_cross_write`; the pin for the arming
+surface belongs with #9231.
 """
 
 from __future__ import annotations
@@ -158,6 +221,16 @@ _ENTITY_MATCH_COLUMNS: dict[str, tuple[str, ...]] = {
 #: ``_emit_event`` owns these envelope keys; they are never node properties.
 ENVELOPE_KEYS: frozenset[str] = frozenset({
     "type", "ts", "event_id", "initiated_by", "projection_version", "seq",
+    # ⚠️ `agent_id` is DELIBERATELY NOT here, though the record must not keep it
+    # as a NODE prop: this set is not only a props set — `_journal_row` filters
+    # the DURABLE `public.journal_event.payload` through it, while the JSONL
+    # journal keeps `agent_id` (`sdk._journal_record_payload` subtracts
+    # `_JOURNAL_ENVELOPE_KEYS`, which does not name it). Adding it here truncated
+    # the record's own event stream on every API-door record — a NEW divergence
+    # between the two journals, introduced by the fix whose premise is that they
+    # must not diverge (#9078 review). The props strip is `_RECORD_ONLY_KEYS`'
+    # job, and `test_agent_id_is_dropped_like_the_fold_drops_it` is the leg that
+    # keeps it.
 })
 
 #: The journal's record-type vocabulary. Sourced from the graph fold's own
@@ -369,7 +442,10 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
     # The `…Added` / `…Promoted` / dedup record types all carry a FULL point
     # snapshot (`payload["point"]`), which is what the graph fold indexes too
     # (`_apply_one`'s `points[p["id"]] = p`), so the record projects the same
-    # dict the fold does. `id` rides the envelope, not the snapshot.
+    # dict the fold does. `id` rides the envelope OR the snapshot, and this
+    # module reads both carriers (`_key_value`'s `fallback`): the capture writer
+    # emits `PointAdded` with the id ONLY in `payload["point"]` (#9078, measured
+    # on the live door).
     "PointAdded": Mutation(
         NodeSnapshot(Node("point", "Point", "id"), path="point", key_from="id"),
         note="full snapshot under `point`; identity keys are record-only and "
@@ -392,12 +468,51 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
         NodeSnapshot(Node("point", "Point", "id"), path="point", key_from="id"),
     ),
     "EntityBindingRefused": Mutation(
-        NodeSnapshot(Node("point", "Point", "id"), path="point", key_from="id"),
+        # AUDIT-ONLY — no record effect, and that is a DECISION, not an omission.
+        # The graph folds this type NOWHERE (`projection/__init__.py::
+        # _NO_PROJECTION_FOLD`, #1370: "a refused/suspected subject binding is an
+        # AUDIT record — the edge it declined to write must NOT be replayed from
+        # it"), so a Point mutation here materialized a row no writer ever
+        # created: an ungated upsert on a fresh graph produces a stub point whose
+        # props are the refusal's forensics (#9078 review, measured — 3 such rows
+        # in one capture). The producer is FLAT anyway
+        # (`subject_binding._journal_refusal`: `id=point_id, point_id=..., role=...`),
+        # so the previous `path="point"` declaration refused every real write
+        # while the fixture's invented carrier kept the suite green.
+        NoRecordEffect(
+            "#1370 — an audit record: the graph folds it nowhere, so the record "
+            "must not invent the point it declined to bind. The event stream "
+            "keeps the refusal (journal_event), and the point's own write "
+            "records carry its state."),
     ),
     # #902/A10: batch_id (+ content_hash / mitigates_operator_id /
     # mitigation_strength) restore, replayed from the batch snapshot.
     "BatchIdStamped": Mutation(
-        NodeSnapshot(Node("point", "Point", "id"), path="point", key_from="id"),
+        # FLAT: `sdk._emit_event(_BATCH_ID_RECORD_TYPE, id=point_id, **extra)`
+        # carries the batch props on the envelope, never under a `point`. A
+        # schema-refused prop (`content_hash`) is DROPPED by `_split_properties`,
+        # not raised — see its docstring. A PATCH, never a snapshot: the graph
+        # folds this type NOWHERE (`projection/__init__.py::_NO_PROJECTION_FOLD`
+        # — #902/A10 restores it in pass-2b with `MATCH (p:Point {id:$pid}) SET
+        # p.batch_id = $bid`, a MATCH that cannot create), so an upsert here
+        # invented the row. It is the same defect as `EntityBindingRefused`
+        # above, and it is reachable: #9187 replays SEGMENTS (`first_seq=41`), so
+        # a stamp whose `PointAdded` sits outside the segment is the ordinary
+        # case, not a corner. A patch stores the §17.5-PRIMARY `batch_id` and is
+        # a 0-row no-op when the point is genuinely absent — the fold's verdict.
+        #
+        # ⚠️ An explicit allow-list, NOT `from_payload=None`. The producer emits a
+        # WIDER flat payload (`sdk._emit_batch_id_record`: `content_hash`,
+        # `mitigates_operator_id`, `mitigation_strength`), and pass-2b restores the
+        # stamp with `SET p.batch_id = $bid` and nothing else — so
+        # `mitigates_operator_id` would land in `point.props` as a key no journal
+        # replay ever writes, and a record-sourced rebuild copies the tail verbatim
+        # (`cache_projection._props_from_row`). Same defect class as `agent_id`
+        # above (#9200 review, P2). `content_hash` is schema-refused and
+        # `mitigates_operator_id` is folded nowhere, so neither may pass;
+        # `mitigation_strength` is a real `public.point` column.
+        NodePatch(Node("point", "Point", "id"), key_from="id",
+                  from_payload=frozenset({"batch_id", "mitigation_strength"})),
     ),
     # ⚠️ `new_content` is the journal's own name for the revised `content`; it
     # is NOT a node property of that name, so it is renamed rather than written
@@ -558,7 +673,11 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
     "DocumentCreated": Mutation(
         NodeSnapshot(Node("source", "Source", "url"), path=None, key_from="url",
                      drop=frozenset({"content", "doc_status", "docStatus",
-                                     "objectKind", "object_kind"})),
+                                     "objectKind", "object_kind",
+                                     # `projection/entities.py`: these "ride the
+                                     # DocumentCreated event and must never
+                                     # persist as node props".
+                                     "source_url", "suppress_embedding"})),
         note="§9.3/§9.5 Q3 — a document is a `:Source`; the retired "
              "`content`/`doc_status`/`objectKind` props have no column AND are "
              "scrubbed by the graph fold (`_upsert_document`), so storing them "
@@ -801,6 +920,17 @@ def snake(prop: str) -> str:
 #: failure Interface A forbids.
 _RECORD_ONLY_KEYS: frozenset[str] = frozenset({
     "type", "ts", "event_id", "initiated_by", "projection_version", "seq",
+    # #9078 review: the graph's ONE global skip-set (`projection/entities.py::
+    # _META_KEYS`) strips `agent_id` before it reaches a node, so a record that
+    # kept it wrote a props key a journal replay never does — and a
+    # record-sourced rebuild copies the props tail VERBATIM
+    # (`cache_projection._props_from_row`), so the two rebuild paths diverged on
+    # every API-door record. ⚠️ `actor_user_id` is DELIBERATELY NOT here: §17.5
+    # places it as a PRIMARY record property, so the record stores it even
+    # though the cache node does not carry it (the record is the truth; the
+    # cache is the projection). `test_record_projection`'s storable-primary leg
+    # is what keeps that distinction honest.
+    "agent_id",
     "point", "contains_session", "keep_id", "merge_ids", "corrects",
     # #5097 review P2: the capture path's STUB-COMPLETION discriminator. It
     # selects `_upsert_source`'s write behaviour (suppresses the ON CREATE
@@ -888,9 +1018,20 @@ def _split_properties(
     """
     cols = columns[table]
     refused_here = refused.get(table, frozenset())
+    # ⚠️ PER-TABLE, because §17.5 places `actor_user_id` as a PRIMARY property of
+    # the EPISODIC (session) layer ONLY, and `session` is the one table with the
+    # column. Everywhere else the graph's global skip-set (`projection/entities.py::
+    # _META_KEYS`, "rebuild replay must NOT leak it as a node property") strips
+    # it, so a record that kept it in the props tail made a journal replay and a
+    # record-sourced rebuild disagree about the same node (#9078 review). It
+    # cannot go in `_RECORD_ONLY_KEYS`: that would drop the Session PRIMARY the
+    # storable-property pin exists to protect.
+    table_columns_here = columns.get(table, frozenset())
     col_values: dict[str, Any] = {}
     tail: dict[str, Any] = {}
     for prop, value in props.items():
+        if prop in _STORED_ONLY_IF_COLUMNED and prop not in table_columns_here:
+            continue
         if prop in drop:
             continue
         column = snake(prop)
@@ -919,13 +1060,23 @@ def _node_table(node: Node, columns: Mapping[str, frozenset[str]]) -> str:
     return node.table
 
 
-def _key_value(node: Node, payload: Mapping[str, Any], key_from: str) -> str:
+def _key_value(node: Node, payload: Mapping[str, Any], key_from: str,
+               *, fallback: Mapping[str, Any] | None = None) -> str:
     """The node key, and the schema's own pin that it is the label's key.
 
     A record whose key column is absent cannot be projected: the schema's
     `chk_*_node_key_is_contract_key` would refuse the write anyway, and a
     `node_key = <NULL>` comparison is SQL NULL (not FALSE), so the failure
     would be silent. Fail here instead, where the record is known.
+
+    *fallback* is the record's own SNAPSHOT (`record[effect.path]`), consulted
+    only when the envelope carries no usable key. Measured on #9078's lane: the
+    capture writer emits `PointAdded`/`PointPromoted` with the id ONLY inside
+    `payload["point"]` and no envelope `id` at all, while the comment on
+    `RECORD_MUTATIONS` asserts the opposite ("`id` rides the envelope, not the
+    snapshot"). The graph fold read `inner = event.get("point") or event` all
+    along, so the snapshot was always a legitimate source. Reading the envelope
+    FIRST keeps every producer that does carry the id byte-identical.
     """
     value = payload.get(key_from)
     if value is None and key_from in ("event_id", "eventId"):
@@ -933,6 +1084,29 @@ def _key_value(node: Node, payload: Mapping[str, Any], key_from: str) -> str:
         # MERGE key is `inner.get("id") or inner.get("eventId")`); the
         # envelope `event_id` is a per-record ULID and must never be used.
         value = payload.get("eventId") or payload.get("id")
+    # A `:Source`'s MERGE key is `url`, and `_upsert_source` resolves it as
+    # `raw_key = url or sid` — so a document record that names its identity `id`
+    # (the `EventAPI.add_document` shape: `id=doc_id`, no `url`) keys the node by
+    # that id LIVE. The record must key the row the SAME way, or every ingested
+    # document is refused and the record loses it (#9078).
+    #
+    # ⚠️ The gate is ABSENCE (`key_from not in payload`), never unusability. A
+    # `url` that is PRESENT but unusable (`""`, `None`) means the producer named
+    # an identity it cannot express, and there are two ways to be wrong about it:
+    # resolving `id` while the *props* still carry the unusable `url` emits a row
+    # whose `node_key` and `url` column disagree — refused by the schema's own
+    # `chk_source_node_key_is_contract_key`, AFTER the `node_identity` insert has
+    # already run inside the caller's transaction — and silently repairing the
+    # column instead would store a `url` the producer never emitted, hiding its
+    # bug. Refuse here, where the record is known (this docstring's rule).
+    # Absence is the one shape that is a real producer: `add_document` emits `id`
+    # and no `url` at all.
+    if key_from == "url" and key_from not in payload:
+        value = payload.get("id")
+    if fallback is not None and (not isinstance(value, str) or not value):
+        value = fallback.get(key_from)
+        if value is None and key_from in ("event_id", "eventId"):
+            value = fallback.get("eventId") or fallback.get("id")
     if not isinstance(value, str) or not value:
         raise RecordProjectionError(
             f"record has no usable {key_from!r} key for {node.label} "
@@ -1280,6 +1454,37 @@ def _op_dispatch_statements(
     )
 
 
+#: Record properties that are authority ONLY where the table has a column for
+#: them. `actor_user_id` is §17.5-PRIMARY on the Episodic (session) layer and
+#: nowhere else; the graph's `_META_KEYS` skip-set strips it from every other
+#: node, so storing it in another table's props tail would make a record-sourced
+#: rebuild diverge from a journal replay (see `_split_properties`).
+_STORED_ONLY_IF_COLUMNED = frozenset({"actor_user_id"})
+
+#: The envelope name a producer may NEST its node under instead of flattening it.
+#: ONE entry, because only one exists: the fold unwraps exactly this carrier —
+#: `inner = event.get("event", event)` (`projection/entities.py`, and the same
+#: shape in `projection/__init__.py`) — and `ConversationMiner` is the producer
+#: that uses it. Do NOT widen this list speculatively: an entry no fold reads
+#: would materialize a row the folder never makes, which is the case the
+#: snapshot guard below exists to prevent.
+_NESTED_NODE_CARRIERS = ("event",)
+
+
+def _nested_node_carrier(record: Mapping[str, Any],
+                         key_from: str) -> Mapping[str, Any] | None:
+    """The nested mapping that CARRIES *key_from*, or None.
+
+    Only consulted when the envelope itself cannot be keyed, so it can widen the
+    accepted producer shapes and never re-point a record that already resolves.
+    """
+    for name in _NESTED_NODE_CARRIERS:
+        nested = record.get(name)
+        if isinstance(nested, Mapping) and nested.get(key_from) is not None:
+            return nested
+    return None
+
+
 def mutations_for(
     record: Mapping[str, Any],
     *,
@@ -1323,21 +1528,41 @@ def mutations_for(
     if isinstance(effect, NodeSnapshot):
         node = effect.node
         _node_table(node, columns)
-        key = _key_value(node, record, effect.key_from)
-        props: dict[str, Any] = {}
-        if effect.path is None:
-            props = {k: v for k, v in record.items() if k not in _RECORD_ONLY_KEYS}
+        snapshot = record.get(effect.path) if effect.path is not None else None
+        if effect.path is not None and not isinstance(snapshot, Mapping):
+            raise RecordProjectionError(
+                f"{record_type!r} carries no `{effect.path}` snapshot to "
+                "project — registering from a record that does not carry "
+                "the node would materialize a row the journal never wrote"
+            )
+        # Envelope key FIRST (every producer that carries one is unchanged),
+        # then the snapshot's — the capture writer puts the id ONLY in the
+        # snapshot (#9078, measured; see `_key_value`).
+        try:
+            key = _key_value(
+                node, record, effect.key_from,
+                fallback=snapshot if isinstance(snapshot, Mapping) else None)
+        except RecordProjectionError:
+            # A producer may NEST its node under its own envelope key instead of
+            # flattening it — `ConversationMiner` emits
+            # `{type: "EventRecorded", event: {...}}`, and the fold handles both
+            # carriers explicitly (`projection/entities.py`: "Handles both nested
+            # (…event:{eventId:…}) and flat (eventId at top level) formats
+            # transparently"). Without this leg every mined event was refused
+            # (#9078 review, measured) — the record would lose them in silence.
+            nested = _nested_node_carrier(record, effect.key_from) if effect.path is None else None
+            if nested is None:
+                raise
+            key = _key_value(node, nested, effect.key_from)
+            props = {k: v for k, v in nested.items() if k not in _RECORD_ONLY_KEYS}
             props.setdefault(effect.key_from, key)
         else:
-            snapshot = record.get(effect.path)
-            if not isinstance(snapshot, Mapping):
-                raise RecordProjectionError(
-                    f"{record_type!r} carries no `{effect.path}` snapshot to "
-                    "project — registering from a record that does not carry "
-                    "the node would materialize a row the journal never wrote"
-                )
-            props = {k: v for k, v in snapshot.items() if k not in _RECORD_ONLY_KEYS}
-            props[effect.key_from] = key
+            if effect.path is None:
+                props = {k: v for k, v in record.items() if k not in _RECORD_ONLY_KEYS}
+                props.setdefault(effect.key_from, key)
+            else:
+                props = {k: v for k, v in snapshot.items() if k not in _RECORD_ONLY_KEYS}
+                props[effect.key_from] = key
         col_values, tail = _split_properties(node.table, props, columns=columns,
                                             refused=refused, drop=effect.drop)
         if node.key_column not in col_values:
@@ -1424,7 +1649,7 @@ class ReplayReport:
 
 
 def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
-           graph_id: str) -> ReplayReport:
+           graph_id: str, start_seq: int = 1) -> ReplayReport:
     """Replay a journal into the record, on the CALLER's transaction.
 
     `§3`: *"One transaction covers the journal and its projection — no dual
@@ -1451,8 +1676,14 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
     TOTALITY. The whole journal is materialized into statements *before* the
     first one executes, so an undeclared record type fails the replay with the
     transaction untouched rather than leaving a half-applied record.
+
+    THE POSITION WATERMARK. ``start_seq`` is the journal position of
+    ``records[0]`` — the caller's fact, not this module's invention (see
+    :func:`replay_plan`). It defaults to ``1``, which reproduces every call
+    made before the parameter existed byte for byte.
     """
-    plan = replay_plan(records, org_id=org_id, graph_id=graph_id)
+    plan = replay_plan(records, org_id=org_id, graph_id=graph_id,
+                       start_seq=start_seq)
     cursor = conn.cursor()
     for statement in plan:
         cursor.execute(statement.sql, statement.params)
@@ -1470,7 +1701,7 @@ _JOURNAL_INSERT_PREFIX = "INSERT INTO public.journal_event"
 
 
 def replay_plan(records: Sequence[Mapping[str, Any]], *, org_id: str,
-                graph_id: str) -> list[Statement]:
+                graph_id: str, start_seq: int = 1) -> list[Statement]:
     """Every statement a full replay emits, in order, WITHOUT executing any.
 
     The totality gate lives here: an undeclared record type raises before a
@@ -1478,11 +1709,29 @@ def replay_plan(records: Sequence[Mapping[str, Any]], *, org_id: str,
     or leaves the record exactly as it found it. It is also the seam the PGlite
     harness (`supabase/tests/pglite/validate.mjs`) and the tests use to look at
     the *whole* statement set rather than one record at a time.
+
+    THE POSITION WATERMARK (#9187). `_journal_row` keys the consumed position on
+    `(org_id, graph_id, seq)`, where `seq` is a record's index in the batch — so
+    a batch is a *contiguous segment of the journal*, and its first position is
+    a fact only the caller holds: the journal append is the chokepoint's, not
+    this module's. `start_seq` therefore defaults to 1 (the whole journal, or a
+    first segment) and a caller replaying a LATER segment passes the offset it
+    read from the journal. Without it, replaying a tail segment would renumber
+    every record to seq 1.. and `ON CONFLICT DO NOTHING` would silently absorb
+    the position writes of records that were never numbered — the layer rows
+    would land, but the record's own claim about what it consumed would be a
+    lie. Since the journal is append-only, a re-run after a crash re-derives the
+    SAME offset from the same durable facts, so a retry never renumbers.
     """
+    if start_seq < 1:
+        raise RecordProjectionError(
+            f"start_seq is the journal position of records[0] and must be >= 1 "
+            f"(got {start_seq!r})"
+        )
     columns = table_columns()
     refused = refused_props_names()
     plan: list[Statement] = []
-    for seq, record in enumerate(records, start=1):
+    for seq, record in enumerate(records, start=start_seq):
         plan.extend(mutations_for(record, org_id=org_id, graph_id=graph_id,
                                   columns=columns, refused=refused))
         plan.append(_journal_row(record, seq, org_id, graph_id))

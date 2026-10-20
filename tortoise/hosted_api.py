@@ -144,6 +144,7 @@ from tortoise.monitoring import (
 )
 from tortoise.onboarding import state as _os  # #2001 (W5) canonical FLOW-state module
 from tortoise.projection import (
+    DirectCacheWriteRefused,  # #9233: §17.1 refusal is not a crypto failure
     is_missing_graph_error,  # #2163: absent-graph GRAPH.DELETE family == success
     journal_mint_write_ahead,  # #3390: journal the intended name BEFORE the CREATE
 )
@@ -2881,11 +2882,15 @@ async def _dispatch_webhooks(org_id: str, graph_namespace: str | None = None,
     (``_webhook_retry_sweep_pass``, #8098). Nothing on the write path ever
     awaits this: a capture must stay 2xx regardless of a subscriber's endpoint.
 
-    Best-effort by construction. ``dispatch_pending`` itself never raises; this
-    wrapper additionally catches the SDK/edge failures around it (an
-    unreachable graph, a build failure) and logs — a delivery problem must
-    never surface as a dream failure, and it must never abort the worker (the
-    roots are already drained; a raise here would be read as a dream bug).
+    Best-effort by construction. ``dispatch_pending`` does not raise for a
+    subscriber, transport or graph failure; this wrapper additionally catches
+    everything above it (an unreachable graph, a build failure) and logs — a
+    delivery problem must never surface as a dream failure, and it must never
+    abort the worker (the roots are already drained; a raise here would be read
+    as a dream bug). ⚠️ That INCLUDES a §17.1 refusal of the store's own write
+    (#9233), which is deliberately loud at the dispatcher: swallowing it here is
+    the documented behaviour of this wrapper, and the refusal is logged as the
+    error it is rather than as a delivery.
 
     Returns the dispatcher summary (``None`` when it could not run) so a caller
     can aggregate/assert on what actually happened.
@@ -3180,10 +3185,15 @@ def _webhook_retry_targets() -> list[dict[str, str]]:
 async def _webhook_retry_sweep_pass() -> dict:
     """#8098: ONE sweep pass — enumerate, gate, dispatch at bounded concurrency.
 
-    Never raises for a delivery/graph problem (``_guarded_step`` still wraps it,
-    but the contract here is the same best-effort one ``dispatch_pending``
-    keeps): a dead subscriber endpoint, an unreadable graph, or a failed
-    enumeration costs this pass, never the loop.
+    Never raises for a delivery/graph problem (``_guarded_step`` still wraps it):
+    a dead subscriber endpoint, an unreadable graph, or a failed enumeration
+    costs this pass, never the loop. ⚠️ ``dispatch_pending``'s ONE exception
+    (#9233) is contained HERE, per graph: a §17.1 ``DirectCacheWriteRefused``
+    refusing that store's own write originates in the dispatch and is caught by
+    ``_one``'s ``except Exception``, so it costs that tenant's pass rather than
+    the sweep — which is what lets this pass call the dispatcher without a
+    refusal arm of its own. A new call site does NOT inherit that containment:
+    it needs its own arm.
 
     Cancellation DOES propagate — shutdown cancels the loop task, so the pass
     must not swallow ``CancelledError`` to keep its ``_WEBHOOK_SWEEP_INFLIGHT``
@@ -5463,6 +5473,45 @@ _READY_PROBE = HealthProbe(
     lambda: _probe_db(), timeout=DB_PROBE_HARD_TIMEOUT, fresh_only=True)
 
 
+def _change_feed_health() -> dict:
+    """#9208: degraded `:GraphEvent` feeds, as `/health` reports them.
+
+    The degraded state is PROCESS MEMORY and its only acknowledgement is a
+    Python call inside the process that holds it, so without a report here the
+    state is invisible from outside: `GET /v1/events` 503s for one tenant and
+    nothing else on the box says why or which worker. This block is that
+    report — it makes the state FINDABLE.
+
+    It deliberately does NOT fold into `status`, unlike `db` and
+    `backup_watcher`: those answer "is THIS PROCESS able to serve", while a
+    degraded feed is one graph's store refusing writes. Folding it would fail a
+    deploy's liveness/readiness over a single tenant's graph and (worse)
+    restart-loop the worker that holds the only acknowledgement path.
+
+    It carries NO graph names or store identities, only counts per stage. This
+    endpoint is unauthenticated; tenant graph names are not ours to publish, and
+    the operator who needs the name gets it from the authenticated 503 detail,
+    from `event_store.degraded_graphs()` inside the worker, or from the boot
+    logs. Never raises: a health path must always answer.
+    """
+    try:
+        from tortoise.event_store import degraded_graphs
+
+        rows = degraded_graphs()
+    except Exception as exc:  # liveness must answer, always
+        return {"degraded": False, "feeds": 0, "stages": [],
+                "error": str(exc)[:200]}
+    stages: dict[str, int] = {}
+    for row in rows:
+        stages[row["stage"]] = stages.get(row["stage"], 0) + 1
+    return {
+        "degraded": bool(rows),
+        "feeds": len(rows),
+        "stages": [{"stage": k, "feeds": v} for k, v in sorted(stages.items())],
+        "error": None,
+    }
+
+
 def _backup_watcher_health() -> dict:
     """#2877: backup-watcher liveness for /health.
 
@@ -5574,6 +5623,14 @@ async def health():
     so on a host where a watcher was expected, ``{"state": "disabled", "ok":
     true, "expected": true}`` reads as "wanted, and not running" — the
     operator's cue to check the boot log for the reason.
+
+    Change-feed check (#9208): ``change_feed`` reports how many graphs' event
+    feeds are DEGRADED in this process — the ONLY way that state is visible from
+    outside, because it is process memory whose acknowledgement is a Python call
+    inside the process. It does NOT fold into ``status`` (see
+    ``_change_feed_health``): a single tenant's refused store write is not this
+    process's liveness, and restarting the worker over it would destroy the only
+    place the acknowledgement can be made.
     """
     try:
         db = _HEALTH_PROBE.snapshot()
@@ -5590,7 +5647,7 @@ async def health():
     watcher = _backup_watcher_health()
     return {"status": "ok" if (db.get("ok") and watcher["ok"]) else "degraded",
             "db": db, "probe": probe_meta, "loop_stale_ms": loop_age_ms,
-            "backup_watcher": watcher}
+            "backup_watcher": watcher, "change_feed": _change_feed_health()}
 
 
 @app.get("/health/ready")
@@ -9139,14 +9196,25 @@ async def events_poll(
     """
     _require_scope(org, "graphs:read", "events_poll")
     sdk = await _data_sdk_offloaded(org)
+    # Lazy import, matching this module's pattern for tortoise submodules.
+    from tortoise.event_store import ChangeFeedDegraded
+
     type_list = [t.strip() for t in (types or "").split(",") if t.strip()]
     try:
         # #3718: sync FalkorDB I/O — off-loaded off the event loop so a slow
         # event-page read does not stall every concurrent request. The
         # ValueError contract (410/400 mapping) is unchanged: the same
         # exception propagates out of the worker thread.
+        #
+        # #9208: `ChangeFeedDegraded` is NOT a client error — the org's event
+        # store refused a write, so the feed is incomplete — and a bare 500
+        # would strip the graph name, the refusal and the remedy out of a state
+        # that exists to be readable. 503 says "the feed's store is broken,
+        # not your request", and the detail relays the named diagnosis verbatim.
         result = await asyncio.to_thread(
             sdk.poll_events, after=after, types=type_list or None, limit=limit)
+    except ChangeFeedDegraded as e:
+        raise HTTPException(status_code=503, detail=str(e))  # noqa: B904
     except ValueError as e:
         msg = str(e)
         if "cursor expired" in msg:
@@ -26718,13 +26786,45 @@ def _now_iso() -> str:
 #
 # threading.Lock (not asyncio.Lock): loop-agnostic (tests spin fresh asyncio
 # loops; asyncio.Lock caches its loop on first acquire) and the section is
-# all-sync, so acquire() never blocks the event loop in the current
-# architecture. ⛔ If an await is ever introduced INSIDE the section, switch to
+# all-sync, so acquire() never blocks the event loop ON THE SUCCESS PATH.
+# ⛔ If an await is ever introduced INSIDE the section, switch to
 # an asyncio.Lock (same per-org keying) — or route the lane through the SQL RPC,
 # as the Supabase lane now does. Cross-process (--workers > 1) serialization
 # requires that SQL RPC.
+#
+# ⛔ THE UNCONTESTED PATH IS NOT THE ONLY PATH — `acquire()` on a lock somebody
+# ELSE holds blocks the calling thread, and on an `async def` endpoint that
+# thread is the EVENT LOOP. The old text claimed "acquire() never blocks the
+# event loop in the current architecture", which is true only until the lock is
+# already held; then one owner stalls every route on this server. So every scope
+# entry goes through `_org_mint_lock_bounded()`, which bounds the wait, keeps it
+# off the loop, and stays cancellable. `tests/test_health_ready_nonblocking.py`
+# fails if a bare `with _org_mint_lock(...)` ever comes back.
 _ORG_MINT_LOCKS: dict[str, threading.Lock] = {}
 _ORG_MINT_LOCKS_GUARD = threading.Lock()
+
+#: How long a mint waits for the per-org lock before FAILING CLOSED (503).
+#: Who can hold it longer than this: a WEDGED owner (a leaked lock), or another
+#: THREAD in this process. No coroutine can: both critical sections are
+#: await-free, so on one loop the holder always finishes before any other
+#: coroutine runs, and `--workers > 1` gives each process its own table.
+#: MEASURED (main run 39264762684, `test (a)`; and 39235544056/39254836130 /
+#: 39255746368 on `test (c)` — 4/4 runs affected): a leaked lock blocked every
+#: later mint with no bound, the shard sat on the deadlock past the per-item
+#: pytest-timeout bound (300s, faulthandler dumping at 280s) and then spent its
+#: whole 20m watchdog, was killed at 20.2m with 366 nodeids unrun, and reported
+#: INCOMPLETE — a 23.5m job that owned `ci_crit_med` on main.
+_ORG_MINT_LOCK_TIMEOUT_S = 10.0
+
+#: Re-poll interval while the lock is held by someone else. Small enough that a
+#: contended mint is imperceptible, large enough that a 10s wait is ~2000 cheap
+#: iterations rather than a spin.
+_ORG_MINT_LOCK_POLL_S = 0.005
+
+#: The `detail` of the busy refusal — ONE home, so a test can assert WHICH 503
+#: this route returned (it legitimately returns other 503s).
+_ORG_MINT_LOCK_MESSAGE = ("Session-key mint is busy for this team — retry "
+                         "(the per-team mint lock was held past its bound)")
 
 
 def _org_mint_lock(org_id: str) -> threading.Lock:
@@ -26735,6 +26835,66 @@ def _org_mint_lock(org_id: str) -> threading.Lock:
             lock = threading.Lock()
             _ORG_MINT_LOCKS[org_id] = lock
         return lock
+
+
+@contextlib.asynccontextmanager
+async def _org_mint_lock_bounded(org_id: str):
+    """`with _org_mint_lock(org_id)` — bounded wait, fail CLOSED, cancellable.
+
+    Two defects, one entry point:
+
+    * UNBOUNDED. A bare `with _org_mint_lock(tid):` waits forever. It is also
+      ON THE LOOP (`session_key` is `async def`), so one wedged owner stalls
+      every route on this server. Measured as a 20m-per-shard CI hang
+      (2026-10-19) that reddened `python-ci-gate`.
+    * UNINTERRUPTIBLE. Bounding the wait is not enough if the waiter cannot be
+      torn down: `await asyncio.to_thread(lock.acquire, ...)` looks like the
+      fix (and is how `_restore_trash_graph` waits for its own lock) but a
+      worker thread cannot be cancelled — on a client disconnect mid-wait the
+      orphaned thread ACQUIRES the lock after the coroutine is gone and nothing
+      ever releases it. That is the same permanent wedge, now reachable from
+      production. (Verified by probe against a real `threading.Lock`: after
+      cancel + holder release, `lock.locked()` is True forever.)
+
+    So the wait is a NON-BLOCKING poll: the only await happens BEFORE ownership
+    is taken, so a cancellation there simply unwinds having never held the lock,
+    and no thread is parked (the default executor is shared with ~80 other call
+    sites and the per-request auth path — parking waiters on it starves them).
+    The uncontended path takes the lock on the first try: no await, no thread.
+
+    503 rather than mint-without-the-lock: the lock protects a cap COUNT +
+    INSERT, so proceeding unbounded would overshoot `max_api_keys` (the #1855
+    invariant). Refusing is the fail-closed direction.
+    """
+    lock = _org_mint_lock(org_id)
+    if not lock.acquire(blocking=False):
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _ORG_MINT_LOCK_TIMEOUT_S
+        while not lock.acquire(blocking=False):
+            if loop.time() >= deadline:
+                # A wedge is otherwise SILENT: every later mint for this org
+                # just returns 503. One line is the only local evidence that
+                # the process needs a restart. No user data, just the org id.
+                _logger.warning(
+                    "session-key mint lock for org %s held past %.1fs — "
+                    "refusing the mint (the owner is wedged; retry after a "
+                    "restart if this persists)",
+                    org_id, _ORG_MINT_LOCK_TIMEOUT_S)
+                # `Retry-After` because this 503 is "busy", not an outage — the
+                # distinction #3284 makes for the session-auth 503 on this route
+                # (the header is in CORS `expose_headers`, so a browser can read
+                # it). 5s, not 1s: the reachable causes are a wedged owner or a
+                # foreign thread, so a rapid retry only re-polls.
+                raise HTTPException(
+                    status_code=503,
+                    headers={"Retry-After": "5"},
+                    detail=_ORG_MINT_LOCK_MESSAGE,
+                ) from None
+            await asyncio.sleep(_ORG_MINT_LOCK_POLL_S)
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -26933,6 +27093,10 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
     RESOLVED org — body org_id when multi-membership, else
     memberships[0] — in BOTH auth lanes, see the gates below); BOOTSTRAP
     (24h ephemeral) stays member-open per product posture.
+
+    503 + ``Retry-After`` when the per-team mint lock is held past its bound
+    (``_org_mint_lock_bounded``) — RETRYABLE and nothing was minted, distinct
+    from the session-auth 503 that means the control plane is unavailable.
     """
     import uuid as _uuid
     from datetime import datetime, timedelta
@@ -27034,7 +27198,7 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
     if replace_key_id is not None:
         replace_target = await _resolve_replace_target(tid, replace_key_id, user_id)
 
-    with _org_mint_lock(tid):
+    async with _org_mint_lock_bounded(tid):
 
         if purpose == "bootstrap":
             active_boot = reg.query(
@@ -27422,7 +27586,7 @@ async def _session_key_supabase(body: dict, request: Request, user: dict,
     # when a rotation happened; None otherwise.
     rotated_key_prefix = None
 
-    with _org_mint_lock(tid):
+    async with _org_mint_lock_bounded(tid):
         # #1879: the ENTIRE critical section (bootstrap 3-active check / cap
         # count -> oldest-OTHER revoke -> fail-closed re-check -> 3-tier
         # rotation -> fail-closed re-check -> INSERT) runs in ONE Postgres
@@ -27552,6 +27716,11 @@ async def create_context_subscription(
         a loopback/private/link-local/metadata host (SSRF gate,
         ``security.validate_webhook_url``), an unknown event type (the same
         registry ``events_poll`` validates against), or the per-graph cap.
+      * 500 when the §17.1 write guard REFUSES the store's write — the
+        projection is journal-backed and the declaration is missing. That is an
+        operator/deployment defect, not the caller's: retrying will not help.
+        (It is deliberately NOT the 503 below: both are ``RuntimeError``
+        subclasses, so the specific arm must come first — #9233.)
       * 503 when ``TORTOISE_ENCRYPTION_KEY`` is unset — the signing secret is a
         long-lived credential and is never stored in the clear (``crypto``
         fails loudly rather than downgrade).
@@ -27580,6 +27749,17 @@ async def create_context_subscription(
         return await asyncio.to_thread(_create)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
+    except DirectCacheWriteRefused as e:
+        # §17.1's third door refused the store's own write (#9233). This is NOT
+        # the encryption-key failure below (both are RuntimeError subclasses,
+        # which is why this arm must come first): the operator needs §17.1, not
+        # a crypto knob.
+        raise HTTPException(
+            status_code=500,
+            detail="webhook subscription could not be recorded: the projection "
+                   "refused a cache write (§17.1 — the cache is derived from "
+                   "the journal)",
+        ) from e
     except RuntimeError as e:
         # TORTOISE_ENCRYPTION_KEY unset/malformed (crypto fail-loud contract).
         raise HTTPException(

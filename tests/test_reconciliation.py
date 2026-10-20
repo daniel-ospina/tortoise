@@ -18,6 +18,9 @@ reader failure into an empty view REDs the two refusal tests.
 """
 from __future__ import annotations
 
+from pathlib import Path
+from typing import ClassVar
+
 import pytest
 
 from tortoise.reconciliation import (
@@ -232,3 +235,143 @@ class TestFocusedCount:
         absent_cache = {"p1": {}}
         assert (divergent_key_count(["p1"], none_truth, absent_cache)
                 == reconcile_views(none_truth, absent_cache).divergent)
+
+
+class TestStoredVectorForm:
+    """#8615 — a non-verbatim vector is STORED at float32; compare that form.
+
+    Measured before the fix (private FalkorDB + a throwaway `postgres:16`, the
+    shipped 39-record fixture, a full `rebuild_from_record`):
+    `1 divergent of 7 checked (field_mismatches=1)`, the single field being
+    `Point:p1 .embedding` — record `[0.1, 0.2]` against cache
+    `[0.10000000149011612, 0.20000000298023224]`. A correctness-preserving
+    projection, reported as a stale value on every rebuild, and structurally
+    unable to go green.
+
+    The rule: narrow the TRUTH side to the width `cache_projection.node_statement`
+    writes (shared, one spelling — `tortoise/stored_form.py`), unless either
+    side declares `embedding_verbatim`. It is NOT a tolerance: the comparison
+    stays exact, and only the representation changes.
+    """
+
+    RECORD_VEC: ClassVar[list[float]] = [0.1, 0.2]
+
+    @staticmethod
+    def _stored(vector):
+        """The value the cache holds — the narrowing the projection writes."""
+        from tortoise.stored_form import narrow_to_stored_width
+        return narrow_to_stored_width(vector)
+
+    def _one(self, record_props, cache_props):
+        return reconcile_views({"Point:p1": record_props},
+                               {"Point:p1": cache_props})
+
+    def test_a_faithful_projection_is_not_a_field_mismatch(self):
+        stored = self._stored(self.RECORD_VEC)
+        # The narrowing is REAL — otherwise this test proves nothing.
+        assert stored is not None and stored != self.RECORD_VEC
+        report = self._one({"id": "p1", "embedding": self.RECORD_VEC},
+                           {"id": "p1", "embedding": stored})
+        assert report.field_mismatches == 0
+        assert report.divergent == 0
+        assert report.divergent_keys == ()
+        # The focused count is the same rule, not a second one.
+        assert divergent_key_count(
+            ["Point:p1"],
+            {"Point:p1": {"id": "p1", "embedding": self.RECORD_VEC}},
+            {"Point:p1": {"id": "p1", "embedding": stored}}) == 0
+
+    def test_a_real_vector_divergence_is_still_a_mismatch(self):
+        """Narrowing must not turn the check into a check that cannot fail."""
+        report = self._one({"id": "p1", "embedding": [0.1, 0.2]},
+                           {"id": "p1", "embedding": self._stored([0.1, 0.9])})
+        assert report.field_mismatches == 1
+        assert report.divergent == 1
+
+    def test_the_narrowing_is_not_a_tolerance(self):
+        """A cache value a band would forgive is a mismatch: only the RECORD
+        side is narrowed, so the acceptance window is one point, not a width."""
+        near = [0.100000001]   # 1e-9 above 0.1 — inside one float32 step
+        assert self._stored(near) == self._stored([0.1])   # a band WOULD forgive it
+        report = self._one({"id": "p1", "embedding": [0.1]},
+                           {"id": "p1", "embedding": near})
+        assert report.field_mismatches == 1
+
+    def test_a_verbatim_vector_is_compared_exactly(self):
+        """`embedding_verbatim` means the store holds the value UN-narrowed."""
+        report = self._one(
+            {"id": "p1", "embedding": [0.1, 0.2], "embedding_verbatim": True},
+            {"id": "p1", "embedding": self._stored([0.1, 0.2]),
+             "embedding_verbatim": True})
+        assert report.field_mismatches == 1
+
+    @pytest.mark.parametrize("on_truth,on_cache", [(True, False), (False, True)])
+    def test_the_marker_on_EITHER_side_forces_the_exact_comparison(
+            self, on_truth, on_cache):
+        """Same rule as the journal half: a dropped flag must not hide a
+        narrowed vector behind the side that kept it."""
+        record = {"id": "p1", "embedding": [0.1, 0.2]}
+        cache = {"id": "p1", "embedding": self._stored([0.1, 0.2])}
+        if on_truth:
+            record["embedding_verbatim"] = True
+        if on_cache:
+            cache["embedding_verbatim"] = True
+        # the marker is PRESENT on one side only → its own presence is also a
+        # mismatch (P5), so compare the vector field with the marker removed
+        # from the counting by asking about the value rule directly.
+        from tortoise.reconciliation import _props_agree
+        assert not _props_agree("embedding", record, cache)
+
+    def test_a_non_vector_list_property_is_still_compared_exactly(self):
+        """The narrowing is declared per property, not applied to any list."""
+        report = self._one({"id": "p1", "tags": [0.1, 0.2]},
+                           {"id": "p1", "tags": self._stored([0.1, 0.2])})
+        assert report.field_mismatches == 1
+
+    def test_a_non_numeric_value_under_a_vector_name_compares_exactly(self):
+        """`narrow_to_stored_width` is TOTAL — it degrades, it never raises."""
+        report = self._one({"id": "p1", "embedding": ["a", "b"]},
+                           {"id": "p1", "embedding": ["a", "c"]})
+        assert report.field_mismatches == 1
+        report = self._one({"id": "p1", "embedding": ["a", "b"]},
+                           {"id": "p1", "embedding": ["a", "b"]})
+        assert report.field_mismatches == 0
+
+    def test_a_vector_of_a_different_width_is_a_mismatch(self):
+        report = self._one({"id": "p1", "embedding": [0.1, 0.2]},
+                           {"id": "p1", "embedding": self._stored([0.1])})
+        assert report.field_mismatches == 1
+
+
+def _storage_arch_section(heading: str) -> str:
+    """One `### …` section of STORAGE-ARCHITECTURE.md, up to the next heading."""
+    doc = (Path(__file__).resolve().parents[1]
+           / "docs/architecture/STORAGE-ARCHITECTURE.md").read_text()
+    start = doc.index(heading)
+    ends = [doc.find(marker, start + len(heading)) for marker in ("\n### ", "\n## ")]
+    ends = [e for e in ends if e != -1]
+    return doc[start:min(ends)] if ends else doc[start:]
+
+
+def test_section_17_2_carries_the_stored_form_overrides_line():
+    """The decision has ONE recorded home, and it must say WHAT it departs from.
+
+    The rule this issue lands (narrow the truth side to the store's `vecf32`
+    width) is a deliberate departure from "compare every property by exact
+    value", which is what `_canonical`'s own docstring asserted. A record that
+    states the choice but not what it overrides reads identically to an
+    accident of history, so the next reader holding a stack of exact-comparison
+    habits tidies it away. §17.2 owns reconciliation in
+    `STORAGE-ARCHITECTURE.md`; the marker lives there (#8615).
+    """
+    section = _storage_arch_section("### 17.2 Cache coherence")
+    overrides = [ln for ln in section.splitlines() if "OVERRIDES:" in ln]
+    assert len(overrides) == 1, (
+        "expected exactly one `OVERRIDES:` line in §17.2 (#8615)")
+    assert "float32" in overrides[0] or "vecf32" in overrides[0], (
+        "the `OVERRIDES:` line must name the DEFAULT departed from — exact "
+        "by-value comparison defeated by the store's `float32`/`vecf32` width "
+        "— not merely state the choice (#8615)")
+    assert "stored_form" in section, (
+        "§17.2 must name `tortoise/stored_form.py` as the one spelling of the "
+        "storage form, shared by the writer and both checks (#8615)")

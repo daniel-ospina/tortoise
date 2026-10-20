@@ -283,12 +283,92 @@ def _dump_node(internal_id, labels, props) -> dict:
 #: truncated; the independent aggregate count below is the load-bearing guard.
 _DUMP_PAGE_SIZE = 1000
 
+#: Keyset-paged reads, ordered on the internal `id()`. The comparison is
+#: ``>=`` against a cursor the caller has ALREADY advanced past the last row it
+#: saw — never ``>`` against a negative start (see ``_paged_rows``).
+#:
+#: ⛔ This was ``id(n) > $cursor`` with ``cursor = -1``, and that form is silently
+#: WRONG for NODE ids on the v6 Rust core of FalkorDB as served by
+#: ``falkordb/falkordb:latest`` (``MODULE LIST`` ``graph`` ver **60002**, measured
+#: here; ``docs/evidence/7846-indexed-graph-restore/README.md`` maps **60001** to
+#: ``falkordb/falkordb:6.0.1``, which this note does NOT claim to have probed).
+#: Measured 2026-10-19 against live servers holding 3 nodes, the pinned v4 core
+#: (``42006``) and one v6 server (``60002``):
+#:
+#:     nodes:                           v4 (42006)   v6 (60002)
+#:     id(n) > -1    (the old form)        3 rows      0 rows   (!!)
+#:     id(n) >= 0    (the shipped form)    3 rows      3 rows
+#:     id(n) > 0                           2 rows      2 rows
+#:     id(n) > -2                          0 rows      0 rows
+#:     id(n) > -4294967296                 0 rows      0 rows
+#:     id(n) > -9223372036854775808        0 rows      0 rows
+#:     id(n) >= -1  (the tempting fix)     0 rows      0 rows
+#:
+#: The two cores disagree at exactly one point — ``> -1`` on a NODE id, the value
+#: the old code sent — and that is the whole defect. Every operand below ``-1``
+#: answers 0 rows on BOTH cores, and v4 does not answer monotonically (``> -1``
+#: yields rows, ``> -2`` does not), so the mechanism is not established by these
+#: measurements and is deliberately not guessed at here. Nor does it generalise
+#: to relationship ids: on both cores ``id(r) > -1``, ``id(r) > -2`` and
+#: ``id(r) >= -1`` all return every edge. ``>= -1`` is not a fix either — it
+#: returns 0 node rows on v4 as well.
+#:
+#: Consequence of the old form was concrete: the FIRST node page was empty on the
+#: v6 server measured, so any node that was not an edge endpoint disappeared from
+#: the export and the fail-closed guard refused — **a graph holding an isolated
+#: node could not be backed up on that engine**, with a message that blamed a
+#: truncated read (#9226).
+#:
+#: ⛔ And the SHIPPED form needs a guard of its own on the same engine: for a
+#: graph ABSENT from the registry, ``id(n) >= 0`` returns a phantom row
+#: ``(0, [], {})`` while ``MATCH (n)`` returns nothing and the store's own counts
+#: are 0 (an empty-but-PRESENT graph reads as 0 rows on both cores). ``dump_graph``
+#: therefore skips the **node page** only when a `MATCH (n)` existence probe —
+#: which cannot produce the phantom — finds no node at all; see
+#: ``_graph_has_any_node``.
+#:
+#: The probe's OWN statement has its own measured row set (same v6 core, 60002;
+#: absent graph vs empty-but-PRESENT graph):
+#:
+#:     statement                                          absent   present
+#:     keyset page (id(n) >= 0 … RETURN id(n),…)          [[0,[],{}]]  []
+#:     MATCH (n) RETURN id(n) LIMIT 1  (shipped probe)     []       []
+#:     MATCH (n) RETURN count(n)                          [[0]]    [[0]]
+#:
+#: Two consequences, and both are why the probe has this exact shape. The
+#: phantom belongs to the keyset PROJECTION, not to `MATCH (n)` as a clause —
+#: the probe projects `id(n)` too and still answers 0 rows on the absent graph,
+#: so it is measured, not assumed, that a `MATCH (n)` that never pages cannot
+#: fabricate the phantom. And the aggregate CANNOT serve as the probe: `count(n)`
+#: answers one `0` row in BOTH cases, so it cannot tell an absent graph from an
+#: empty-present one — existence here must be judged by ROWS RETURNED, not by a
+#: count. Do not "simplify" the probe to `count(n)` without re-measuring this.
+#:
+#: ⚠️ The phantom is MEASURED on the NODE read ONLY, so the guard is deliberately
+#: scoped to it. On the same absent graph, 60002 answers the EDGE page
+#: (``_DUMP_EDGE_PAGE_QUERY``) and the reconcile ``id(n) IN $ids`` read with 0
+#: rows — no phantom — so guarding the edge read would change nothing on the
+#: engine as measured and would cost a real recovery: when the probe sees an
+#: empty graph and a writer creates the first nodes AND their edge inside the
+#: read window, the unconditional edge page is what pulls those endpoints back
+#: (#9226 review). Do not "tidy" the edge read behind the probe without
+#: re-measuring the engine first.
+#:
+#: The blast radius of the old form is NOT "no backup on v6": ``dump_graph``
+#: reconciles edge endpoints by id (#3895), so a graph whose nodes are all edge
+#: endpoints dumped COMPLETE even pre-fix (measured on 60002: 3 nodes / 2 edges).
+#: It is a graph containing an ISOLATED node that could not be dumped — the node
+#: is absent from the (empty) first page and no edge pulls it back, so the totality
+#: guard refuses, and the message blamed a truncated read.
+#: Offsetting the cursor instead of negating it is engine-independent: an
+#: integer `id` is non-negative, so ``id >= 0`` is the true first page on both
+#: cores and ``id >= last + 1`` is exactly the old ``id > last``.
 _DUMP_NODE_PAGE_QUERY = (
-    "MATCH (n) WHERE id(n) > $cursor "
+    "MATCH (n) WHERE id(n) >= $cursor "
     "RETURN id(n), labels(n), properties(n) ORDER BY id(n) LIMIT $batch"
 )
 _DUMP_EDGE_PAGE_QUERY = (
-    "MATCH (a)-[r]->(b) WHERE id(r) > $cursor "
+    "MATCH (a)-[r]->(b) WHERE id(r) >= $cursor "
     "RETURN id(a), id(b), type(r), properties(r), id(r) "
     "ORDER BY id(r) LIMIT $batch"
 )
@@ -296,14 +376,34 @@ _DUMP_EDGE_PAGE_QUERY = (
 _COUNT_ALL_EDGES_QUERY = "MATCH ()-[r]->() RETURN count(r)"
 
 
-def _paged_rows(g, query: str, key_index: int, *, batch: int = _DUMP_PAGE_SIZE):
+def _paged_rows(g, query: str, key_index: int, *, batch: int | None = None):
     """Yield every row of ``query``, keyset-paged on the ``id()`` ordering key.
 
     ``query`` must select that key as column ``key_index`` and take ``$cursor`` /
     ``$batch``. An increasing-id cursor is stable against concurrent inserts and
     deletes — unlike SKIP, which re-counts a moving set.
+
+    The page predicate is ``id(...) >= $cursor`` and the cursor is advanced to
+    ``last + 1`` — so the first call sends ``0``, the inclusive lower bound of the
+    id space, and never a negative value. That is not cosmetic: a NEGATIVE
+    comparison against a NODE ``id()`` answers 0 rows on the v6 Rust core (it does
+    not for relationship ids — measured), so every node that was not an edge
+    endpoint vanished from the first page and a graph holding one could not be
+    dumped at all (#9226 — see ``_DUMP_NODE_PAGE_QUERY``). Advancing past the last
+    row keeps the paging identical on both cores because ids are non-negative
+    integers, so ``>= last + 1`` is exactly the old ``> last``.
+
+    ``batch`` defaults to the CURRENT ``_DUMP_PAGE_SIZE``, read here rather than
+    in the signature. A def-time default would bind at import, so a runtime
+    retune of the module constant — which is exactly how
+    ``tests/test_9226_dump_paging_v6.py`` pins a small page size to make the live
+    dump take MORE THAN ONE page — would be silently ignored: the dump would
+    page at 1000, finish on the ``len(rows) < batch`` branch, and never exercise
+    the ``last + 1`` advance at all.
     """
-    cursor = -1
+    if batch is None:
+        batch = _DUMP_PAGE_SIZE
+    cursor = 0
     while True:
         rows = g.query(
             query, params={"cursor": cursor, "batch": batch}
@@ -311,7 +411,7 @@ def _paged_rows(g, query: str, key_index: int, *, batch: int = _DUMP_PAGE_SIZE):
         if not rows:
             return
         yield from rows
-        cursor = int(rows[-1][key_index])
+        cursor = int(rows[-1][key_index]) + 1
         if len(rows) < batch:
             return
 
@@ -333,6 +433,29 @@ def _independent_counts(g) -> tuple[int, int]:
     ).result_set[0][0])
     edges = int(g.query(_COUNT_ALL_EDGES_QUERY).result_set[0][0])
     return nodes, edges
+
+
+_NODE_EXISTS_QUERY = "MATCH (n) RETURN id(n) LIMIT 1"
+
+
+def _graph_has_any_node(g) -> bool:
+    """True when the graph holds at least one node — one row, never a phantom.
+
+    The probe is deliberately ``MATCH (n)`` and NOT the keyset predicate: on v6
+    (``60002``, MEASURED — see the matrix in ``_DUMP_NODE_PAGE_QUERY``'s notes)
+    ``id(n) >= 0`` fabricates a ``(0, [], {})`` row for a graph ABSENT from the
+    engine registry, while THIS statement — measured verbatim, not assumed from
+    the clause's shape — answers 0 rows for BOTH the absent graph and the
+    empty-but-present one. ``dump_graph`` skips the node page only on that 0-row
+    answer, so the skip cannot hide real nodes — including the bookkeeping nodes
+    an exclusion count would otherwise report as 0. A node created after this
+    probe is caught by the post-read check below.
+
+    The verdict is the RESULT SET's emptiness (``bool``), never an aggregate:
+    ``MATCH (n) RETURN count(n)`` is measured to answer one ``0`` row in BOTH
+    cases, so it would answer True for an empty graph and never skip anything.
+    """
+    return bool(g.query(_NODE_EXISTS_QUERY).result_set)
 
 
 def dump_graph(g, graph_name: str | None = None) -> dict:
@@ -413,7 +536,31 @@ def dump_graph(g, graph_name: str | None = None) -> dict:
     # concurrent deletes do not turn a faithful dump into a false failure.
     source_count_start = _independent_counts(g)
 
-    for internal_id, labels, props in _paged_rows(g, _DUMP_NODE_PAGE_QUERY, 0):
+    # ⛔ An existence probe decides whether there is anything to page. On v6
+    # (60002) a NODE read of a graph that is ABSENT from the engine registry
+    # fabricates one row — `id(n) >= 0` returns the phantom `(0, [], {})` while
+    # `MATCH (n)` returns nothing and the aggregate counts 0 nodes. Paging such a
+    # graph would export that phantom as a node (`node_count: 1`, then
+    # `restore_graph` materialises it), and `len(nodes) < source_node_count` is
+    # one-sided so the guard would not catch it. The probe is the `MATCH (n)`
+    # statement itself (measured 0 rows on 60002, absent AND empty-present — the
+    # matrix is in `_DUMP_NODE_PAGE_QUERY`'s notes); it also keeps a
+    # bookkeeping-only graph on the normal path, so `excluded_node_count` still
+    # reports its exclusions.
+    #
+    # The probe gates the NODE page alone, and that is measured rather than
+    # assumed: on the same absent graph the EDGE page and the reconcile read both
+    # answer 0 rows on 60002, so there is no phantom to keep out of `raw_edges`.
+    # Leaving the edge read unconditional also preserves the mid-read recovery
+    # below — a graph whose first nodes (and their edge) are created after this
+    # probe still exports COMPLETE instead of being refused.
+    nodes_skipped_as_empty = False
+    if _graph_has_any_node(g):
+        node_rows = _paged_rows(g, _DUMP_NODE_PAGE_QUERY, 0)
+    else:
+        node_rows = ()
+        nodes_skipped_as_empty = True
+    for internal_id, labels, props in node_rows:
         _collect(internal_id, labels, props)
 
     raw_edges: list[tuple[int, int, str, dict]] = []
@@ -499,6 +646,46 @@ def dump_graph(g, graph_name: str | None = None) -> dict:
     source_count_end = _independent_counts(g)
     source_node_count = min(source_count_start[0], source_count_end[0])
     source_edge_count = min(source_count_start[1], source_count_end[1])
+    if nodes_skipped_as_empty and len(nodes) < source_count_end[0]:
+        # The probe found no node, and the dump collected FEWER data nodes than
+        # the store NOW holds: a writer created the graph's first node(s) inside
+        # the read window and they were not all captured. `min(start, end)` below
+        # resolves to 0 for this branch (the start count was 0), so every
+        # totality guard would pass a PARTIAL artifact and record it
+        # `source_node_count: 0` — refused explicitly instead.
+        #
+        # Why not ``not nodes`` (the obvious reading of "refuse the empty dump"):
+        # the edge page is unconditional and its endpoints are reconciled, so a
+        # node-page-skipped read CAN be complete (probe empty; a writer then
+        # creates A, B and A→B; the reconcile returns both — that dump must be
+        # written, #9226 review P3). But the SAME recovery is partial when an
+        # ISOLATED node appears beside the edge's endpoints: A and B come back
+        # through the reconcile and C does not, so `not nodes` would emit a
+        # 2-node dump for a 3-node graph, silently. Comparing against the END
+        # count closes the CREATE-ONLY race: complete → no refusal, empty or
+        # partial → refuse.
+        #
+        # Two limits are deliberate. (1) This compares CARDINALITY, not
+        # membership, so an interleaving that deletes as well as creates can still
+        # slip through (recover A+B, the writer deletes B and adds isolated C, end
+        # count 2 == len(nodes) 2). Closing that needs an id-SET comparison — a
+        # second full node read — and it is the same accepted limitation as the
+        # ``min(start, end)`` bound on the guard below, so it is named rather than
+        # paid for. (2) It compares against the END count with no ``min(start,
+        # end)``, so a node created after the reconcile still refuses a dump the
+        # ordinary path would accept: stricter than the guard below, chosen
+        # because in THIS branch every node is a creation and the two cannot be
+        # told apart. ``nodes`` and ``source_count_end[0]`` are the same
+        # population (both apply the export-skip predicate), and a node captured
+        # then deleted mid-read only makes ``len(nodes)`` larger, which cannot
+        # trip this.
+        raise ValueError(
+            f"dump_graph({graph_name}): the graph held no nodes when the read "
+            f"began but holds {source_count_end[0]} now, and this dump captured "
+            f"{len(nodes)} of them — refusing to write a partial dump for a "
+            "graph that gained content mid-read (a torn read must never look "
+            "green)."
+        )
     if len(nodes) < source_node_count:
         raise ValueError(
             f"dump_graph({graph_name}): exported {len(nodes)} data nodes but the "
@@ -922,6 +1109,26 @@ class BackupStorage(Protocol):
     def list(self, prefix: str) -> list[str]: ...
     def delete(self, key: str) -> None: ...
     def create_if_not_exists(self, key: str, data: bytes) -> bool: ...
+    def head_bucket(self) -> None:
+        """Bucket-scoped reachability probe: return normally iff the substrate ANSWERED.
+
+        #8422: the ONE thing an object/prefix operation cannot tell you. A
+        ``list()`` failure conflates "the store does not answer" (network, DNS,
+        revoked key) with "the store answers but this credential may not list"
+        — two DR tiers that need different recovery evidence (#3147). A
+        bucket-scoped HEAD is answered BEFORE any prefix or key is consulted, so
+        a caller that sees it return has positive evidence the substrate is
+        REACHABLE and the failure it just hit belongs to the listing/measurement
+        tier.
+
+        Raise on failure (never return a bool): every implementation already
+        normalises its errors to an exception, and a boolean would let a caller
+        read "not implemented" as "reachable". A store that cannot probe at all
+        should simply not define this method — callers treat its ABSENCE as "no
+        evidence", which is the conservative direction (see
+        ``backup_watcher._r2_bucket_reachable``).
+        """
+        ...
 
 
 def _r2_endpoint_from_env() -> str:
@@ -1072,6 +1279,25 @@ class R2Storage:
         except Exception as e:
             raise RuntimeError(f"R2 list failed for {prefix}: {e}") from e
 
+    def head_bucket(self) -> None:
+        """Bucket-scoped HEAD — the reachability tier's own probe (#8422).
+
+        Deliberately NOT the account-level ``list_buckets``: R2's S3 API does
+        not reliably support it from an object-scoped access key (the same
+        reason the DR driver uses ``aws s3api head-bucket``,
+        ``.github/scripts/registry-cron.sh``). Bucket-scoped means the call is
+        answered by the bucket endpoint before any PREFIX or KEY is consulted,
+        so it is the reachability question and not the listing one.
+
+        Raises (never returns a bool) so a caller cannot mistake a failure for
+        a verdict: ``backup_watcher`` treats "returned" as the only positive
+        evidence and files the unlistable tier on it.
+        """
+        try:
+            self._s3().head_bucket(Bucket=self._bucket)
+        except Exception as e:
+            raise RuntimeError(f"R2 head_bucket failed for {self._bucket}: {e}") from e
+
     def delete(self, key: str) -> None:
         try:
             self._s3().delete_object(Bucket=self._bucket, Key=key)
@@ -1104,6 +1330,15 @@ class MemoryStorage:
             return False
         self._objects[key] = data
         return True
+
+    def head_bucket(self) -> None:
+        """Trivially reachable — an in-memory store has no substrate to answer.
+
+        Present so a test double is a full ``BackupStorage``: a watcher test that
+        breaks ``list()`` on a ``MemoryStorage`` subclass is simulating the
+        LISTING tier, which is exactly the distinction #8422 is about. A double
+        that wants to simulate unreachability overrides this to raise.
+        """
 
 
 # ── #2319 bucket-lock immutability + second-region mirror ────────────────────

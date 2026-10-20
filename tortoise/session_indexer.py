@@ -777,22 +777,72 @@ def main():
                         "eventStatus": "completed",
                         "classificationLevel": "internal",
                     }
+                    # #9122 (§17.1): this CLI wrote `:Event` nodes straight at
+                    # the projection's write handle with NO journal record, so
+                    # a rebuild deleted them. Both arms now go through the
+                    # SDK's raw-Event door — journal first, then the handle
+                    # inside the live-write scope — so `#9079`'s third door
+                    # (#9124) does not refuse the sanctioned route.
+                    _event_statement = (
+                        "MATCH (e:Event {eventId: $eid}) "
+                        + clear_then_set_prefix("e")
+                        + "SET e += $props, " + set_embedding_clause("e")
+                    )
                     if exists:
-                        proj.g.query(
-                            "MATCH (e:Event {eventId: $eid}) "
-                            + clear_then_set_prefix("e")
-                            + "SET e += $props, " + set_embedding_clause("e"),
-                            params={"eid": event_id, "props": props, "embedding": embedding}
-                        )
-                        print(json.dumps({"status": "updated", "eventId": event_id}))
+                        statement = _event_statement
+                        stored = exists[0][0] or {}
                     else:
                         props["startedAt"] = __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()
-                        proj.g.query(
+                        statement = (
                             "CREATE (e:Event {eventId: $eid}) SET e += $props, "
-                            + set_embedding_clause("e", preserve_on_null=False),
-                            params={"eid": event_id, "props": props, "embedding": embedding}
+                            + set_embedding_clause("e", preserve_on_null=False)
                         )
-                        print(json.dumps({"status": "ingested", "eventId": event_id}))
+                        stored = {}
+                    # ⛔ The UPDATE record carries the MERGED node view, not the
+                    # patch alone: the replay fold writes its own fixed props
+                    # with DEFAULTS for anything the record omits
+                    # (`_upsert_event`), so a patch-only record would replace
+                    # `startedAt` with `''` and `format` with `jsonl` on every
+                    # rebuild. `embedding` is excluded — the stored value is a
+                    # `Vectorf32` (not JSON) and the computed vector below is the
+                    # only one that may ride the record.
+                    record_props = {k: v for k, v in stored.items()
+                                    if k != "embedding"}
+                    record_props.update(props)
+                    # The live clause is preserve-on-null but the FOLD is not:
+                    # with no `embedding` on the record it encodes
+                    # `subject + eventKind + object` ("AgentSession") and writes
+                    # that OVER the stored vector. Carry the stored one forward.
+                    from .sdk import _journal_vector
+                    record_embedding = (
+                        embedding if embedding is not None
+                        else _journal_vector(stored.get("embedding")))
+                    from .sdk import UnapprovedKindNamespace
+                    try:
+                        _written = sdk._event_raw_write_door(
+                            proj, statement,
+                            event_id=event_id, props=record_props,
+                            event_kind="AgentSession",
+                            embedding=record_embedding,
+                            lane="session_indexer",
+                        )
+                    except UnapprovedKindNamespace as _refused:
+                        # #5475: a kind spelling the graph's packs do not
+                        # approve. Retrying would refuse identically, so this is
+                        # reported, not retried.
+                        print(json.dumps({"status": "error",
+                                          "reason": f"refused: {_refused}",
+                                          "eventId": event_id}))
+                        return
+                    if not _written:
+                        # Append is the commit point; nothing was written.
+                        print(json.dumps({"status": "error",
+                                          "reason": "journal append failed — the "
+                                                    ":Event write was not committed",
+                                          "eventId": event_id}))
+                        return
+                    print(json.dumps({"status": "updated" if exists else "ingested",
+                                      "eventId": event_id}))
                     # Wire aboutObject edges to issue/PR Objects (ONTOLOGY v3.2
                     # §3.2 — INSTANTIATES was removed from the predicate set;
                     # #781 re-verified the ingest path is INSTANTIATES-free).

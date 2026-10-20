@@ -314,6 +314,16 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
     # targets a `graph_name=`-qualified per-test projection (the `graph`
     # fixture's random test_object_search_vis_<hex> name).
     "test_object_search_visibility_3301.py": [r"from_uri\(uri\)"],
+    # #9226: module live-FalkorDB availability probe over candidate URIs
+    # (construct + RETURN 1 + close, never DETACHs) — the same shape as
+    # test_object_search_visibility_3301.py above. SAFETY IS NOT "every handle is
+    # test-prefixed": the probe cannot pass graph_name= because it is testing
+    # WHETHER a candidate is reachable, before any per-run name exists. It is
+    # safe because the file contains NO DETACH at all (``git grep -c DETACH`` →
+    # 0): the only other handle is the ``graph_name=test_9226_paging_<hex>``
+    # per-run projection, deleted by name at teardown. The regex is deliberately
+    # narrow to the one shape that exists today so a second one reds instead.
+    "test_9226_dump_paging_v6.py": [r"from_uri\(uri\)"],
     # invalid-scheme raise tests (raise BEFORE any connection)
     "test_projection.py": [r"from_uri\(\"postgresql://", r"from_uri\(\"localhost:6379"],
     # raw-client migration test — per-test tortoise_test_r2_migrate_<uuid> path

@@ -435,8 +435,9 @@ emit_codex_agents_block() {
   # unchecked `awk`/`cat` failure used to end in a SUCCESS report over an
   # untouched file, which is the harm this whole change exists to end.
   local state="" prev_version="" same_bytes=0
-  local state_kind="" c_start c_startline c_end c_endline
+  local state_kind="" c_start c_startline c_end c_endline c_fence_start
   local c_near_s c_near_e c_mangled_s c_mangled_e c_fence_open
+  local block_inside_fence orig_mode
   _emit_fail() {
     # ONE place that cleans up and fails. It EXITS rather than returning: a
     # `cmd || helper` list is itself an errexit-exempt context, so a helper that
@@ -573,22 +574,24 @@ ${me}" > "$block" || _emit_fail "could not build the new block text — nothing 
         # them treated a 4-space-indented documentation example (CommonMark allows
         # that as a code block too) as a "duplicate" and its remedy deleted it.
         if (starts == 1 && ends == 1 && startline < endline) {
-          printf "paired|1|%d|1|%d|0|0|0|0|%d\n", startline, endline, fenceopen; exit
+          printf "paired|1|%d|1|%d|0|0|0|0|%d|%d\n", startline, endline, fenceopen, (fence != "" ? fstart : 0); exit
         }
         if (starts + ends + nearstart + nearend + mangledstart + mangledend == 0) {
-          printf "none|0|-|0|-|0|0|0|0|%d\n", fenceopen; exit
+          printf "none|0|-|0|-|0|0|0|0|%d|%d\n", fenceopen, (fence != "" ? fstart : 0); exit
         }
         # Per-marker counts, so the message and the remedy agree with each other:
         # `c_end` (anchored only) used to say "there is no end line" while the
         # line it was printed under reported a mangled one.
-        printf "malformed|%d|%s|%d|%s|%d|%d|%d|%d|%d\n", starts, (startline ? startline : "-"), ends, (endline ? endline : "-"), nearstart, nearend, mangledstart, mangledend, fenceopen
+        printf "malformed|%d|%s|%d|%s|%d|%d|%d|%d|%d|%d\n", starts, (startline ? startline : "-"), ends, (endline ? endline : "-"), nearstart, nearend, mangledstart, mangledend, fenceopen, (fence != "" ? fstart : 0)
       }' "$target")" || _emit_fail "could not read $target (unreadable, or not a regular file) — nothing was changed"
     IFS='|' read -r state_kind c_start c_startline c_end c_endline \
-      c_near_s c_near_e c_mangled_s c_mangled_e c_fence_open <<EOF
+      c_near_s c_near_e c_mangled_s c_mangled_e c_fence_open c_fence_start <<EOF
 $state
 EOF
   else
     state_kind="none"
+    c_fence_open=0
+    c_fence_start=0
   fi
 
   case "$state_kind" in
@@ -637,7 +640,41 @@ EOF
   # A block written INSIDE an unterminated fence renders as code and is never read
   # by the agent it was written for. The write is what the pre-#3429 installer did,
   # so it is not refused — but it must not be silent.
-  if [ "${c_fence_open:-0}" = "1" ] && [ "$state_kind" != "malformed" ]; then
+  block_inside_fence=0
+  if [ "${c_fence_open:-0}" = "1" ]; then
+    case "$state_kind" in
+      # An append lands at EOF, which is after the fence opened.
+      none) block_inside_fence=1 ;;
+      # A clean pair is REPLACED in place: it is inside the open fence only if the
+      # block starts BELOW the fence. A pair ABOVE it is rewritten where it sits
+      # and stays readable — warning there was a false alarm (measured), and NOT
+      # warning when it IS below was a missed one (measured): both directions are
+      # pinned by tests.
+      paired) [ "${c_startline:-0}" -gt "${c_fence_start:-0}" ] && block_inside_fence=1 ;;
+    esac
+  fi
+
+  # A pair whose END marker sits BELOW an open fence STRADDLES it: the fence opens
+  # inside the block, so the replace window contains the fence line itself and
+  # rewriting it deletes the fence — and whatever it was quoting becomes live
+  # instructions. Measured: a build snippet inside the fence vanished and the line
+  # after the block was promoted to prose, while the run reported "✓ upgraded".
+  # Refused rather than warned: a warning does not put a deleted code block back.
+  if [ "${c_fence_open:-0}" = "1" ] && [ "$state_kind" = "paired" ] \
+     && [ "${c_fence_start:-0}" -ge "${c_startline:-0}" ] \
+     && [ "${c_fence_start:-0}" -le "${c_endline:-0}" ]; then
+    echo "  ✗ AGENTS.md — the Tortoise block's markers STRADDLE an UNTERMINATED code fence" >&2
+    echo "      start marker line ${c_startline}, end marker line ${c_endline}, fence opens on line ${c_fence_start}" >&2
+    echo "      — i.e. the fence is INSIDE the block. Rewriting the block would delete the" >&2
+    echo "      fence line and quote its contents as live instructions, so nothing was" >&2
+    echo "      written. Close the fence, or delete the stale Tortoise block by hand," >&2
+    echo "      then re-run." >&2
+    rm -rf "$tmpdir"
+    echo "  (skills above ARE installed; only the AGENTS.md block was not upgraded — exit 3)" >&2
+    exit 3
+  fi
+
+  if [ "$block_inside_fence" = "1" ]; then
     echo "  ⚠ AGENTS.md has an UNTERMINATED code fence — the Tortoise block will be written" >&2
     echo "    inside it and read as code, not as instructions. Close the fence and re-run." >&2
   fi
@@ -700,15 +737,46 @@ EOF
     # cp -p first preserves the file's mode (a 0600 AGENTS.md stays 0600) and
     # ownership; cat then overwrites content in place.
     cp -p "$target" "$staged" || { rm -f "$staged"; _emit_fail "could not copy $target — nothing was changed"; }
+    # The mode is captured so it can be RESTORED, and the staged copy is made
+    # writable meanwhile: `cp -p` gives the staged file the target's mode, so a
+    # read-only AGENTS.md (0444) could not be upgraded even though the directory
+    # and the `mv` were writable — and the failure named no cause at all.
+    orig_mode="$(stat -c '%a' "$target" 2>/dev/null || stat -f '%Lp' "$target" 2>/dev/null || true)"
+    if [ -z "$orig_mode" ]; then
+      rm -f "$staged"
+      _emit_fail "could not read the mode of $target — nothing was changed, because rewriting it without the mode could loosen its permissions (a 0444 file must stay 0444)"
+    fi
+    chmod u+w "$staged" || { rm -f "$staged"; _emit_fail "could not make the staged copy writable — nothing was changed"; }
     if ! cat "$pre" "$block" "$post" > "$staged"; then
       rm -f "$staged"
-      _emit_fail "could not write the staged file — the original is untouched"
+      _emit_fail "could not write the staged file — $target is read-only or its directory is not writable; the original is untouched"
     fi
+    # Put the user's mode back before the rename, so a read-only AGENTS.md stays
+    # read-only instead of being silently loosened to the umask default.
+    chmod "$orig_mode" "$staged" || { rm -f "$staged"; _emit_fail "could not restore mode $orig_mode on $target — nothing was changed"; }
     mv "$staged" "$target" || { rm -f "$staged"; _emit_fail "could not replace $target — the original is untouched"; }
   elif [ "$state_kind" = "none" ]; then
     if [ -f "$target" ]; then
-      printf '\n\n' >> "$target" || _emit_fail "could not append to $target"
-      cat "$block" >> "$target" || _emit_fail "could not append the block to $target (partially written — re-run after checking the file)"
+      # SAME staging discipline as the replace path. Appending with `>>` onto the
+      # user's own file could not work at all for a read-only AGENTS.md (0444):
+      # bash printed its own "Permission denied" and the installer named no cause
+      # or remedy (measured). Copy, make the COPY writable, append there, put the
+      # mode back, rename — so a read-only file is upgraded and stays read-only.
+      staged="$(mktemp "$(dirname "$target")/.tortoise-agents.XXXXXX")" \
+        || _emit_fail "could not stage a temp file next to $target — nothing was changed"
+      cp -p "$target" "$staged" || { rm -f "$staged"; _emit_fail "could not copy $target — nothing was changed"; }
+      orig_mode="$(stat -c '%a' "$target" 2>/dev/null || stat -f '%Lp' "$target" 2>/dev/null || true)"
+      if [ -z "$orig_mode" ]; then
+        rm -f "$staged"
+        _emit_fail "could not read the mode of $target — nothing was changed, because rewriting it without the mode could loosen its permissions (a 0444 file must stay 0444)"
+      fi
+      chmod u+w "$staged" || { rm -f "$staged"; _emit_fail "could not make the staged copy writable — nothing was changed"; }
+      if ! printf '\n\n' >> "$staged" || ! cat "$block" >> "$staged"; then
+        rm -f "$staged"
+        _emit_fail "could not write the staged file — $target is read-only or its directory is not writable; the original is untouched"
+      fi
+      chmod "$orig_mode" "$staged" || { rm -f "$staged"; _emit_fail "could not restore mode $orig_mode on $target — nothing was changed"; }
+      mv "$staged" "$target" || { rm -f "$staged"; _emit_fail "could not replace $target — the original is untouched"; }
     else
       cat "$block" > "$target" || _emit_fail "could not create $target"
     fi

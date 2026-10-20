@@ -17,7 +17,7 @@
     "lychee": "lychee 0.24.2",
     "population": "git ls-files '*.md' (minus vendored) \u2014 772 files",
     "counts": {
-      "markdownlint": 3299,
+      "markdownlint": 3297,
       "lychee": 46,
       "relative_links": 0
     },
@@ -3260,8 +3260,6 @@
     "product/strategy/v1-strategy-2026-07-09.md|MD040|1|Fenced code blocks should have a language specified [Context: \"```\"]",
     "product/v1-planning/2026-07-09-v1-model-architecture.md|MD040|1|Fenced code blocks should have a language specified [Context: \"```\"]",
     "tests/e2e/hosted/README.md|MD004|3|Unordered list style [Expected: dash; Actual: plus]",
-    "tests/eval/write_path/README.md|MD018|1|No space after hash on atx style heading [Context: \"#2098 round 2): `baselines/mai...\"]",
-    "tests/eval/write_path/README.md|MD040|1|Fenced code blocks should have a language specified [Context: \"```\"]",
     "tools/experiments/extractor-v2/cleaner-v6.md|MD018|1|No space after hash on atx style heading [Context: \"#992, #998, #1000, #1004, PR #...\"]",
     "tools/longmem_eval/README.md|MD004|1|Unordered list style [Expected: plus; Actual: asterisk]",
     "tools/longmem_eval/README.md|MD004|1|Unordered list style [Expected: plus; Actual: asterisk]",

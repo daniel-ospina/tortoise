@@ -1,0 +1,1936 @@
+{
+  "model_id": "deepseek/deepseek-v4-flash",
+  "chunk_size": 50,
+  "session_date": "2026-10-10",
+  "chunks": 1,
+  "errors": [],
+  "stories": {
+    "raw": "0: user: Let us draft the Bluepeak incident retro. The outage ran from 9:12am to 12:53pm on Monday, so about three hours and forty-one minutes of degraded search for their team.\n1: assistant: Three hours forty-one minutes of degraded search. Let us capture the timeline first. What was the first signal the on-call saw?\n2: user: The first signal was the error budget burn alert at 9:15am, three minutes after the deploy that introduced the bad configuration landed. The deploy went out at 9:12am.\n3: assistant: Deploy at 9:12, burn alert at 9:15. What did the initial investigation blame before the actual root cause surfaced?\n4: user: The initial investigation blamed the search index, which made us chase a reindex for the first forty minutes. Aisha kept pushing us to check the config diff instead, and that is where the real cause was.\n5: assistant: So the config diff was the real cause. Can you state the root cause precisely for the retro?\n6: user: The config partition was the root cause, the deploy shipped a config that split the query traffic unevenly across the search shards and one shard saturated.\n7: assistant: Config partition confirmed. What was the mitigation that brought the system back?\n8: user: We rolled the config back to the previous partition at 12:40pm and traffic normalized within thirteen minutes. Search was fully healthy again by 12:53pm.\n9: assistant: Rollback at 12:40, healthy by 12:53. Now the follow-ups. What actions do we commit to so this class of incident does not repeat?\n10: user: First, add a pre-deploy check that compares partition weights against the shard capacity model. Second, make the config diff visible in the deploy review. Nora suggested both and they are both good.\n11: assistant: Pre-deploy partition check and visible config diff. Who owns each follow-up and by when?\n12: user: Maya owns the pre-deploy check and it needs to land by November 2. Diego owns the config diff surfacing, due November 9.\n13: assistant: Maya by November 2, Diego by November 9. Was the SLO breached, and do we owe the customer anything contractual?\n14: user: The search SLO is 99.9 percent and we landed at 99.86 for the month, so yes we breached it. We already offered Bluepeak a service credit and their account team accepted. The account call ran smoothly, good Wi-Fi in the new meeting room.\n15: assistant: SLO breach confirmed with a credit offered and accepted. Do you want the retro published to the whole company, or restricted to the engineering org?\n16: user: Publish it company-wide. Incident writeups are opt-out by default now, that was the decision after the August incident, so the whole company sees the timeline and the follow-ups. I will book the retro room for Friday morning in case anyone wants to talk it through.\n17: assistant: Company-wide publication with opt-out default. One more section retros often miss: what went well under pressure?\n18: user: The rollback went smoothly because the deploy tooling kept the previous config one click away. And the on-call stayed calm, honestly that matters more than any tooling.\n19: assistant: Rollback tooling and on-call calmness under pressure. Anything the timeline still misses before I assemble the writeup?\n20: user: Add the comms timeline: we posted the first customer-facing status at 9:40am and the all-clear at 1:05pm. Sam from customer engineering wrote the status updates with Aisha.\n21: assistant: Customer status at 9:40, all-clear at 1:05. That is a complete retro: timeline, root cause, mitigation, follow-ups with owners and dates, SLO breach with credit, company-wide publication.\n22: user: Yes, and let us also record that the search team will run a shard capacity review before the end of the year, Priya volunteered to lead it.",
+    "narrative": "## Narrative: Bluepeak incident retro \u2014 2026-10-10\n\n**The incident and its shape.** On Monday 2026-10-05, Bluepeak's search was degraded for three hours and forty-one minutes, from 9:12am to 12:53pm.\n\nThe deploy that went out at 9:12am introduced the bad configuration; the error budget burn alert fired at 9:15am, three minutes later.\n\nThe root cause was the **config partition**: the deploy shipped a config that split query traffic unevenly across the search shards, and one shard saturated.\n\nThe initial investigation blamed the search index and sent the team chasing a reindex for the first forty minutes \u2014 Aisha pushed the team to check the config diff instead, which is where the real cause was found.\n\nMitigation was a rollback of the config to the previous partition at 12:40pm; traffic normalized within thirteen minutes and search was fully healthy by 12:53pm.\n\nCustomer-facing comms: first status posted at 9:40am, all-clear at 1:05pm, written by Sam from customer engineering with Aisha.\n\n**SLO and contractual state.** The search SLO is 99.9 percent; the month landed at 99.86, so the SLO was breached.\n\nBluepeak was offered a service credit and their account team accepted it.\n\n**Committed follow-ups (durable, owned, dated).** Two actions were chosen to prevent this class of incident, both proposed by Nora:\n- **Pre-deploy check comparing partition weights against the shard capacity model** \u2014 owned by **Maya**, due **2026-11-02**.\n\n- **Make the config diff visible in the deploy review** \u2014 owned by **Diego**, due **2026-11-09**.\n\nAdditionally, the **search team will run a shard capacity review before the end of the year**, with **Priya** volunteering to lead it.\n\n**What went well.** The rollback went smoothly because the deploy tooling kept the previous config one click away.\n\nThe on-call stayed calm \u2014 the team's own view is that this matters more than any tooling.\n\n**Publication policy (durable org rule).** The retro is published **company-wide**.\n\nIncident writeups are **opt-out by default** \u2014 a decision taken after the August incident \u2014 so the whole company sees the timeline and follow-ups.\n\nA retro room is booked for Friday morning for anyone who wants to talk it through.\n\n**Reasoning carried forward.** The config-diff visibility action is directly supported by the investigation's failure mode: the index was blamed first and cost forty minutes, so making the diff legible at review time attacks the actual detection gap.\n\nThe pre-deploy partition check attacks the cause itself (uneven traffic split vs.\n\nshard capacity).\n\nThe shard capacity review is the broader structural follow-up \u2014 it questions whether the capacity model the pre-deploy check will lean on is itself current."
+  },
+  "story_sha": {
+    "raw": "426f98300f983eea",
+    "narrative": "82cc198f1d5cb0a2"
+  },
+  "story_chars": {
+    "raw": 3751,
+    "narrative": 2719
+  },
+  "embed_list": {
+    "raw": {
+      "entities": [
+        {
+          "name": "Bluepeak",
+          "kind": "product-strategy:customer",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Customer whose search was degraded during the incident; accepted a service credit."
+        },
+        {
+          "name": "Bluepeak incident",
+          "kind": "dev:incident",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Search outage 9:12am\u201312:53pm Monday; root cause config partition; SLO breached at 99.86% vs 99.9%."
+        },
+        {
+          "name": "the config partition",
+          "kind": "dev:bug",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Root cause: deploy shipped a config that split query traffic unevenly across search shards; one shard saturated."
+        },
+        {
+          "name": "the config rollback",
+          "kind": "dev:runbook",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Rolled config back to previous partition at 12:40pm; traffic normalized within thirteen minutes."
+        },
+        {
+          "name": "the pre-deploy partition check",
+          "kind": "venture:actionItem",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Compare partition weights against the shard capacity model; owned by Maya, due November 2."
+        },
+        {
+          "name": "the config diff surfacing",
+          "kind": "venture:actionItem",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Make the config diff visible in the deploy review; owned by Diego, due November 9."
+        },
+        {
+          "name": "the shard capacity review",
+          "kind": "venture:actionItem",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Search team to run before end of year; Priya volunteered to lead."
+        },
+        {
+          "name": "the Bluepeak service credit",
+          "kind": "core:agreement",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Offered to Bluepeak for the SLO breach; accepted by their account team."
+        },
+        {
+          "name": "the company-wide incident writeup policy",
+          "kind": "agent-ops:rule",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Incident writeups are opt-out by default, decided after the August incident."
+        },
+        {
+          "name": "Maya",
+          "kind": "core:naturalPerson",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Owns the pre-deploy partition check."
+        },
+        {
+          "name": "Diego",
+          "kind": "core:naturalPerson",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Owns the config diff surfacing."
+        },
+        {
+          "name": "Priya",
+          "kind": "core:naturalPerson",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Volunteered to lead the shard capacity review."
+        },
+        {
+          "name": "Aisha",
+          "kind": "core:naturalPerson",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Pushed the team to check the config diff; co-wrote customer status updates."
+        },
+        {
+          "name": "Nora",
+          "kind": "core:naturalPerson",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Suggested both follow-up actions."
+        },
+        {
+          "name": "Sam",
+          "kind": "core:naturalPerson",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Customer engineering; wrote status updates with Aisha."
+        },
+        {
+          "name": "the search team",
+          "kind": "core:team",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Will run the shard capacity review."
+        }
+      ],
+      "events": [
+        {
+          "content": "The Bluepeak search outage ran from 9:12am to 12:53pm on Monday, about three hours and forty-one minutes of degraded search.",
+          "eventKind": "dev:incident",
+          "about_entities": [
+            "Bluepeak incident",
+            "Bluepeak"
+          ],
+          "startedAt": "2026-10-05",
+          "slots": {
+            "subject": [
+              {
+                "name": "Bluepeak incident",
+                "kind": "dev:incident",
+                "confidence": 0.95
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak",
+                "kind": "product-strategy:customer",
+                "confidence": 0.9
+              }
+            ]
+          }
+        },
+        {
+          "content": "The error budget burn alert fired at 9:15am, three minutes after the deploy landed at 9:12am.",
+          "eventKind": "core:occurrence",
+          "about_entities": [
+            "Bluepeak incident"
+          ],
+          "startedAt": "2026-10-05",
+          "slots": {
+            "subject": [
+              {
+                "name": "Bluepeak incident",
+                "kind": "dev:incident",
+                "confidence": 0.85
+              }
+            ]
+          }
+        },
+        {
+          "content": "The initial investigation blamed the search index and chased a reindex for the first forty minutes before the config diff was identified as the real cause.",
+          "eventKind": "core:friction",
+          "about_entities": [
+            "Bluepeak incident",
+            "Aisha"
+          ],
+          "startedAt": "2026-10-05",
+          "slots": {
+            "subject": [
+              {
+                "name": "Bluepeak incident",
+                "kind": "dev:incident",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "Aisha",
+                "kind": "core:naturalPerson",
+                "confidence": 0.6
+              }
+            ]
+          }
+        },
+        {
+          "content": "The config was rolled back to the previous partition at 12:40pm and search was fully healthy again by 12:53pm.",
+          "eventKind": "core:occurrence",
+          "about_entities": [
+            "the config rollback",
+            "Bluepeak incident"
+          ],
+          "startedAt": "2026-10-05",
+          "slots": {
+            "subject": [
+              {
+                "name": "the config rollback",
+                "kind": "dev:runbook",
+                "confidence": 0.85
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak incident",
+                "kind": "dev:incident",
+                "confidence": 0.85
+              }
+            ]
+          }
+        },
+        {
+          "content": "The team committed to two follow-ups: a pre-deploy partition check owned by Maya due November 2 and config diff surfacing owned by Diego due November 9.",
+          "eventKind": "core:decision",
+          "about_entities": [
+            "the pre-deploy partition check",
+            "the config diff surfacing",
+            "Maya",
+            "Diego",
+            "Nora"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the pre-deploy partition check",
+                "kind": "venture:actionItem",
+                "confidence": 0.9
+              },
+              {
+                "name": "the config diff surfacing",
+                "kind": "venture:actionItem",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "Maya",
+                "kind": "core:naturalPerson",
+                "confidence": 0.8
+              },
+              {
+                "name": "Diego",
+                "kind": "core:naturalPerson",
+                "confidence": 0.8
+              }
+            ]
+          }
+        },
+        {
+          "content": "Bluepeak was offered a service credit for the SLO breach and their account team accepted it.",
+          "eventKind": "core:occurrence",
+          "about_entities": [
+            "the Bluepeak service credit",
+            "Bluepeak"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the Bluepeak service credit",
+                "kind": "core:agreement",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak",
+                "kind": "product-strategy:customer",
+                "confidence": 0.9
+              }
+            ]
+          }
+        },
+        {
+          "content": "The decision was made to publish the retro company-wide under the opt-out-by-default incident writeup policy.",
+          "eventKind": "core:decision",
+          "about_entities": [
+            "the company-wide incident writeup policy",
+            "Bluepeak incident"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the company-wide incident writeup policy",
+                "kind": "agent-ops:rule",
+                "confidence": 0.85
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak incident",
+                "kind": "dev:incident",
+                "confidence": 0.8
+              }
+            ]
+          }
+        },
+        {
+          "content": "The first customer-facing status was posted at 9:40am and the all-clear at 1:05pm, written by Sam and Aisha.",
+          "eventKind": "core:occurrence",
+          "about_entities": [
+            "Bluepeak incident",
+            "Sam",
+            "Aisha"
+          ],
+          "startedAt": "2026-10-05",
+          "slots": {
+            "subject": [
+              {
+                "name": "Sam",
+                "kind": "core:naturalPerson",
+                "confidence": 0.8
+              },
+              {
+                "name": "Aisha",
+                "kind": "core:naturalPerson",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak",
+                "kind": "product-strategy:customer",
+                "confidence": 0.7
+              }
+            ]
+          }
+        },
+        {
+          "content": "The search team committed to run a shard capacity review before the end of the year, led by Priya.",
+          "eventKind": "core:decision",
+          "about_entities": [
+            "the shard capacity review",
+            "the search team",
+            "Priya"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the shard capacity review",
+                "kind": "venture:actionItem",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "Priya",
+                "kind": "core:naturalPerson",
+                "confidence": 0.85
+              }
+            ]
+          }
+        }
+      ],
+      "points": [
+        {
+          "content": "The Bluepeak search outage ran from 9:12am to 12:53pm on Monday, about three hours and forty-one minutes of degraded search.",
+          "pointKind": "statement",
+          "about_entities": [
+            "Bluepeak incident",
+            "Bluepeak"
+          ],
+          "when": "2026-10-05",
+          "slots": {
+            "subject": [
+              {
+                "name": "Bluepeak incident",
+                "kind": "dev:incident",
+                "confidence": 0.95
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak",
+                "kind": "product-strategy:customer",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The outage ran from 9:12am to 12:53pm on Monday, so about three hours and forty-one minutes of degraded search for their team.",
+          "search_keys": [
+            "Bluepeak outage duration",
+            "three hours forty-one minutes",
+            "9:12am to 12:53pm",
+            "degraded search window"
+          ],
+          "source_turn_id": 0
+        },
+        {
+          "content": "The first signal was the error budget burn alert at 9:15am, three minutes after the deploy landed at 9:12am.",
+          "pointKind": "statement",
+          "about_entities": [
+            "Bluepeak incident"
+          ],
+          "when": "2026-10-05",
+          "slots": {
+            "subject": [
+              {
+                "name": "Bluepeak incident",
+                "kind": "dev:incident",
+                "confidence": 0.85
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The first signal was the error budget burn alert at 9:15am, three minutes after the deploy that introduced the bad configuration landed.",
+          "search_keys": [
+            "error budget burn alert",
+            "9:15am first signal",
+            "deploy at 9:12am"
+          ],
+          "source_turn_id": 2
+        },
+        {
+          "content": "The config partition was the root cause: the deploy shipped a config that split query traffic unevenly across the search shards and one shard saturated.",
+          "pointKind": "statement",
+          "about_entities": [
+            "the config partition",
+            "Bluepeak incident"
+          ],
+          "when": "2026-10-05",
+          "slots": {
+            "subject": [
+              {
+                "name": "the config partition",
+                "kind": "dev:bug",
+                "confidence": 0.95
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak incident",
+                "kind": "dev:incident",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The config partition was the root cause, the deploy shipped a config that split the query traffic unevenly across the search shards and one shard saturated.",
+          "search_keys": [
+            "config partition root cause",
+            "uneven query traffic",
+            "shard saturation",
+            "config diff"
+          ],
+          "source_turn_id": 6
+        },
+        {
+          "content": "The initial investigation blamed the search index and chased a reindex for the first forty minutes before the config diff was identified as the real cause.",
+          "pointKind": "statement",
+          "about_entities": [
+            "Bluepeak incident",
+            "Aisha"
+          ],
+          "when": "2026-10-05",
+          "slots": {
+            "subject": [
+              {
+                "name": "Bluepeak incident",
+                "kind": "dev:incident",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "Aisha",
+                "kind": "core:naturalPerson",
+                "confidence": 0.6
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The initial investigation blamed the search index, which made us chase a reindex for the first forty minutes.",
+          "search_keys": [
+            "misdiagnosis search index",
+            "reindex forty minutes",
+            "Aisha config diff"
+          ],
+          "source_turn_id": 4
+        },
+        {
+          "content": "The config was rolled back to the previous partition at 12:40pm and traffic normalized within thirteen minutes, with search fully healthy by 12:53pm.",
+          "pointKind": "statement",
+          "about_entities": [
+            "the config rollback",
+            "Bluepeak incident"
+          ],
+          "when": "2026-10-05",
+          "slots": {
+            "subject": [
+              {
+                "name": "the config rollback",
+                "kind": "dev:runbook",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak incident",
+                "kind": "dev:incident",
+                "confidence": 0.85
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "We rolled the config back to the previous partition at 12:40pm and traffic normalized within thirteen minutes. Search was fully healthy again by 12:53pm.",
+          "search_keys": [
+            "config rollback 12:40pm",
+            "thirteen minutes to normalize",
+            "healthy by 12:53pm"
+          ],
+          "source_turn_id": 8
+        },
+        {
+          "content": "The pre-deploy partition check compares partition weights against the shard capacity model and must land by November 2, owned by Maya.",
+          "pointKind": "statement",
+          "about_entities": [
+            "the pre-deploy partition check",
+            "Maya"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the pre-deploy partition check",
+                "kind": "venture:actionItem",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "Maya",
+                "kind": "core:naturalPerson",
+                "confidence": 0.85
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Maya owns the pre-deploy check and it needs to land by November 2.",
+          "search_keys": [
+            "pre-deploy partition check",
+            "shard capacity model",
+            "Maya November 2"
+          ],
+          "source_turn_id": 12
+        },
+        {
+          "content": "The config diff surfacing makes the config diff visible in the deploy review and is due November 9, owned by Diego.",
+          "pointKind": "statement",
+          "about_entities": [
+            "the config diff surfacing",
+            "Diego"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the config diff surfacing",
+                "kind": "venture:actionItem",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "Diego",
+                "kind": "core:naturalPerson",
+                "confidence": 0.85
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Diego owns the config diff surfacing, due November 9.",
+          "search_keys": [
+            "config diff in deploy review",
+            "Diego November 9",
+            "visible config diff"
+          ],
+          "source_turn_id": 12
+        },
+        {
+          "content": "The search SLO is 99.9 percent and the month landed at 99.86 percent, so the SLO was breached.",
+          "pointKind": "statement",
+          "about_entities": [
+            "Bluepeak incident"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "Bluepeak incident",
+                "kind": "dev:incident",
+                "confidence": 0.85
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The search SLO is 99.9 percent and we landed at 99.86 for the month, so yes we breached it.",
+          "search_keys": [
+            "SLO 99.9 percent",
+            "99.86 for the month",
+            "SLO breach"
+          ],
+          "source_turn_id": 14
+        },
+        {
+          "content": "Bluepeak was offered a service credit for the SLO breach and their account team accepted it.",
+          "pointKind": "statement",
+          "about_entities": [
+            "the Bluepeak service credit",
+            "Bluepeak"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the Bluepeak service credit",
+                "kind": "core:agreement",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak",
+                "kind": "product-strategy:customer",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "We already offered Bluepeak a service credit and their account team accepted.",
+          "search_keys": [
+            "service credit",
+            "Bluepeak credit accepted",
+            "SLO credit"
+          ],
+          "source_turn_id": 14
+        },
+        {
+          "content": "Incident writeups are opt-out by default, a decision made after the August incident, so the Bluepeak retro is published company-wide.",
+          "pointKind": "statement",
+          "about_entities": [
+            "the company-wide incident writeup policy",
+            "Bluepeak incident"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the company-wide incident writeup policy",
+                "kind": "agent-ops:rule",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak incident",
+                "kind": "dev:incident",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Incident writeups are opt-out by default now, that was the decision after the August incident, so the whole company sees the timeline and the follow-ups.",
+          "search_keys": [
+            "opt-out by default",
+            "company-wide retro",
+            "August incident policy"
+          ],
+          "source_turn_id": 16
+        },
+        {
+          "content": "The rollback went smoothly because the deploy tooling kept the previous config one click away.",
+          "pointKind": "statement",
+          "about_entities": [
+            "the config rollback"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "the config rollback",
+                "kind": "dev:runbook",
+                "confidence": 0.85
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The rollback went smoothly because the deploy tooling kept the previous config one click away.",
+          "search_keys": [
+            "rollback tooling",
+            "previous config one click away",
+            "smooth rollback"
+          ],
+          "source_turn_id": 18
+        },
+        {
+          "content": "The first customer-facing status was posted at 9:40am and the all-clear at 1:05pm, written by Sam and Aisha.",
+          "pointKind": "statement",
+          "about_entities": [
+            "Bluepeak incident",
+            "Sam",
+            "Aisha"
+          ],
+          "when": "2026-10-05",
+          "slots": {
+            "subject": [
+              {
+                "name": "Sam",
+                "kind": "core:naturalPerson",
+                "confidence": 0.8
+              },
+              {
+                "name": "Aisha",
+                "kind": "core:naturalPerson",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak",
+                "kind": "product-strategy:customer",
+                "confidence": 0.7
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "we posted the first customer-facing status at 9:40am and the all-clear at 1:05pm. Sam from customer engineering wrote the status updates with Aisha.",
+          "search_keys": [
+            "customer status 9:40am",
+            "all-clear 1:05pm",
+            "comms timeline",
+            "Sam Aisha status updates"
+          ],
+          "source_turn_id": 20
+        },
+        {
+          "content": "The search team will run a shard capacity review before the end of the year, with Priya volunteering to lead it.",
+          "pointKind": "statement",
+          "about_entities": [
+            "the shard capacity review",
+            "the search team",
+            "Priya"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "the shard capacity review",
+                "kind": "venture:actionItem",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "Priya",
+                "kind": "core:naturalPerson",
+                "confidence": 0.85
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "the search team will run a shard capacity review before the end of the year, Priya volunteered to lead it.",
+          "search_keys": [
+            "shard capacity review",
+            "end of year",
+            "Priya lead"
+          ],
+          "source_turn_id": 22
+        }
+      ],
+      "operators": [
+        {
+          "src": "The config partition was the root cause: the deploy shipped a config that split query traffic unevenly across the search shards and one shard saturated.",
+          "dst": "The initial investigation blamed the search index and chased a reindex for the first forty minutes before the config diff was identified as the real cause.",
+          "op_type": "NAND"
+        },
+        {
+          "src": "The config was rolled back to the previous partition at 12:40pm and traffic normalized within thirteen minutes, with search fully healthy by 12:53pm.",
+          "dst": "The Bluepeak search outage ran from 9:12am to 12:53pm on Monday, about three hours and forty-one minutes of degraded search.",
+          "op_type": "MITIGATES",
+          "target_edge": {
+            "src": "The Bluepeak search outage ran from 9:12am to 12:53pm on Monday, about three hours and forty-one minutes of degraded search.",
+            "dst": "The config partition was the root cause: the deploy shipped a config that split query traffic unevenly across the search shards and one shard saturated.",
+            "op_type": "IMPL"
+          },
+          "strength": 0.3
+        }
+      ],
+      "chain_notes": [
+        {
+          "chain": "epicToCode",
+          "finding": "Incident and follow-up action items mapped without an epic/issue layer; action items are venture:actionItem commitments rather than dev:issue.",
+          "action": "warned",
+          "note": "No epic or issue entities were stated in the story, so no decomposition layer was invented."
+        }
+      ],
+      "link_before_create": [
+        {
+          "searched_for": "Bluepeak incident",
+          "found": false,
+          "note": "No prior Bluepeak incident in graph."
+        },
+        {
+          "searched_for": "config partition root cause",
+          "found": false,
+          "note": "No existing root-cause point."
+        },
+        {
+          "searched_for": "company-wide incident writeup policy",
+          "found": false,
+          "note": "No existing opt-out-by-default rule."
+        },
+        {
+          "searched_for": "shard capacity review",
+          "found": false,
+          "note": "No existing action item."
+        }
+      ],
+      "retractions": []
+    },
+    "narrative": {
+      "entities": [
+        {
+          "name": "Bluepeak",
+          "kind": "product-strategy:customer",
+          "lifecycle": "unchanged",
+          "supersedes": null,
+          "note": "Customer whose search was degraded in the 2026-10-05 incident; accepted a service credit."
+        },
+        {
+          "name": "Bluepeak search incident",
+          "kind": "dev:incident",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Search degraded 9:12am\u201312:53pm on 2026-10-05 (three hours forty-one minutes); root cause config partition."
+        },
+        {
+          "name": "config partition",
+          "kind": "dev:bug",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Deploy shipped a config splitting query traffic unevenly across search shards; one shard saturated."
+        },
+        {
+          "name": "search index misdiagnosis",
+          "kind": "dev:bug",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Initial investigation blamed the search index, costing forty minutes of reindex chasing before the config diff was checked."
+        },
+        {
+          "name": "config rollback to previous partition",
+          "kind": "dev:runbook",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Mitigation: rolled config back at 12:40pm; traffic normalized within thirteen minutes, healthy by 12:53pm."
+        },
+        {
+          "name": "pre-deploy partition weight check",
+          "kind": "dev:issue",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Compares partition weights against the shard capacity model; owned by Maya, due 2026-11-02."
+        },
+        {
+          "name": "config diff visibility in deploy review",
+          "kind": "dev:issue",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Make the config diff visible in the deploy review; owned by Diego, due 2026-11-09."
+        },
+        {
+          "name": "shard capacity review",
+          "kind": "dev:issue",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Search team review before end of year; Priya volunteered to lead."
+        },
+        {
+          "name": "search SLO",
+          "kind": "dev:indicator",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "99.9 percent target; month landed at 99.86, so breached."
+        },
+        {
+          "name": "Bluepeak service credit",
+          "kind": "core:agreement",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Offered to Bluepeak and accepted by their account team."
+        },
+        {
+          "name": "incident writeups opt-out by default",
+          "kind": "agent-ops:rule",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Decision taken after the August incident; whole company sees timeline and follow-ups."
+        },
+        {
+          "name": "Maya",
+          "kind": "core:naturalPerson",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Owns the pre-deploy partition weight check."
+        },
+        {
+          "name": "Diego",
+          "kind": "core:naturalPerson",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Owns config diff visibility in deploy review."
+        },
+        {
+          "name": "Priya",
+          "kind": "core:naturalPerson",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Volunteered to lead the shard capacity review."
+        },
+        {
+          "name": "Aisha",
+          "kind": "core:naturalPerson",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Pushed the team to check the config diff; co-wrote customer status updates."
+        },
+        {
+          "name": "Nora",
+          "kind": "core:naturalPerson",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Proposed both follow-up actions."
+        },
+        {
+          "name": "Sam",
+          "kind": "core:naturalPerson",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Customer engineering; wrote customer status updates with Aisha."
+        },
+        {
+          "name": "search team",
+          "kind": "core:team",
+          "lifecycle": "created",
+          "supersedes": null,
+          "note": "Will run the shard capacity review before end of year."
+        }
+      ],
+      "events": [
+        {
+          "content": "Bluepeak search was degraded for three hours and forty-one minutes, from 9:12am to 12:53pm on 2026-10-05",
+          "eventKind": "dev:incident",
+          "about_entities": [
+            "Bluepeak search incident",
+            "Bluepeak"
+          ],
+          "startedAt": "2026-10-05T09:12:00",
+          "slots": {
+            "subject": [
+              {
+                "name": "Bluepeak search incident",
+                "kind": "dev:incident",
+                "confidence": 0.95
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak",
+                "kind": "product-strategy:customer",
+                "confidence": 0.9
+              }
+            ]
+          }
+        },
+        {
+          "content": "The deploy at 9:12am introduced the bad configuration and the error budget burn alert fired at 9:15am",
+          "eventKind": "core:occurrence",
+          "about_entities": [
+            "Bluepeak search incident",
+            "config partition"
+          ],
+          "startedAt": "2026-10-05T09:12:00",
+          "slots": {
+            "subject": [
+              {
+                "name": "config partition",
+                "kind": "dev:bug",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak search incident",
+                "kind": "dev:incident",
+                "confidence": 0.9
+              }
+            ]
+          }
+        },
+        {
+          "content": "The initial investigation blamed the search index and the team chased a reindex for the first forty minutes",
+          "eventKind": "core:friction",
+          "about_entities": [
+            "search index misdiagnosis",
+            "Bluepeak search incident"
+          ],
+          "startedAt": "2026-10-05T09:15:00",
+          "slots": {
+            "subject": [
+              {
+                "name": "search index misdiagnosis",
+                "kind": "dev:bug",
+                "confidence": 0.85
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak search incident",
+                "kind": "dev:incident",
+                "confidence": 0.85
+              }
+            ]
+          }
+        },
+        {
+          "content": "The config was rolled back to the previous partition at 12:40pm and search was fully healthy by 12:53pm",
+          "eventKind": "core:occurrence",
+          "about_entities": [
+            "config rollback to previous partition",
+            "Bluepeak search incident"
+          ],
+          "startedAt": "2026-10-05T12:40:00",
+          "slots": {
+            "subject": [
+              {
+                "name": "config rollback to previous partition",
+                "kind": "dev:runbook",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak search incident",
+                "kind": "dev:incident",
+                "confidence": 0.9
+              }
+            ]
+          }
+        },
+        {
+          "content": "The first customer-facing status was posted at 9:40am and the all-clear at 1:05pm",
+          "eventKind": "core:occurrence",
+          "about_entities": [
+            "Bluepeak search incident",
+            "Sam",
+            "Aisha"
+          ],
+          "startedAt": "2026-10-05T09:40:00",
+          "slots": {
+            "subject": [
+              {
+                "name": "Sam",
+                "kind": "core:naturalPerson",
+                "confidence": 0.8
+              },
+              {
+                "name": "Aisha",
+                "kind": "core:naturalPerson",
+                "confidence": 0.8
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak",
+                "kind": "product-strategy:customer",
+                "confidence": 0.85
+              }
+            ]
+          }
+        },
+        {
+          "content": "Bluepeak was offered a service credit and their account team accepted it",
+          "eventKind": "core:decision",
+          "about_entities": [
+            "Bluepeak service credit",
+            "Bluepeak"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "Bluepeak service credit",
+                "kind": "core:agreement",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak",
+                "kind": "product-strategy:customer",
+                "confidence": 0.9
+              }
+            ]
+          }
+        },
+        {
+          "content": "The team committed to a pre-deploy check comparing partition weights against the shard capacity model, owned by Maya and due 2026-11-02",
+          "eventKind": "core:decision",
+          "about_entities": [
+            "pre-deploy partition weight check",
+            "Maya",
+            "Nora"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "Maya",
+                "kind": "core:naturalPerson",
+                "confidence": 0.85
+              }
+            ],
+            "object": [
+              {
+                "name": "pre-deploy partition weight check",
+                "kind": "dev:issue",
+                "confidence": 0.95
+              }
+            ]
+          }
+        },
+        {
+          "content": "The team committed to making the config diff visible in the deploy review, owned by Diego and due 2026-11-09",
+          "eventKind": "core:decision",
+          "about_entities": [
+            "config diff visibility in deploy review",
+            "Diego",
+            "Nora"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "Diego",
+                "kind": "core:naturalPerson",
+                "confidence": 0.85
+              }
+            ],
+            "object": [
+              {
+                "name": "config diff visibility in deploy review",
+                "kind": "dev:issue",
+                "confidence": 0.95
+              }
+            ]
+          }
+        },
+        {
+          "content": "The search team will run a shard capacity review before the end of the year, with Priya volunteering to lead it",
+          "eventKind": "core:decision",
+          "about_entities": [
+            "shard capacity review",
+            "search team",
+            "Priya"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "Priya",
+                "kind": "core:naturalPerson",
+                "confidence": 0.85
+              }
+            ],
+            "object": [
+              {
+                "name": "shard capacity review",
+                "kind": "dev:issue",
+                "confidence": 0.9
+              }
+            ]
+          }
+        },
+        {
+          "content": "The retro was decided to be published company-wide under the opt-out-by-default writeup policy",
+          "eventKind": "core:decision",
+          "about_entities": [
+            "incident writeups opt-out by default",
+            "Bluepeak search incident"
+          ],
+          "startedAt": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "incident writeups opt-out by default",
+                "kind": "agent-ops:rule",
+                "confidence": 0.85
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak search incident",
+                "kind": "dev:incident",
+                "confidence": 0.85
+              }
+            ]
+          }
+        }
+      ],
+      "points": [
+        {
+          "content": "The Bluepeak search outage ran from 9:12am to 12:53pm on 2026-10-05, three hours and forty-one minutes of degraded search",
+          "pointKind": "statement",
+          "about_entities": [
+            "Bluepeak search incident",
+            "Bluepeak"
+          ],
+          "when": "2026-10-05",
+          "slots": {
+            "subject": [
+              {
+                "name": "Bluepeak search incident",
+                "kind": "dev:incident",
+                "confidence": 0.95
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak",
+                "kind": "product-strategy:customer",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The outage ran from 9:12am to 12:53pm on Monday, so about three hours and forty-one minutes of degraded search for their team.",
+          "search_keys": [
+            "Bluepeak outage duration",
+            "three hours forty-one minutes",
+            "9:12am to 12:53pm",
+            "degraded search window"
+          ],
+          "source_turn_id": 0
+        },
+        {
+          "content": "The error budget burn alert fired at 9:15am, three minutes after the 9:12am deploy that introduced the bad configuration",
+          "pointKind": "statement",
+          "about_entities": [
+            "Bluepeak search incident",
+            "config partition"
+          ],
+          "when": "2026-10-05",
+          "slots": {
+            "subject": [
+              {
+                "name": "config partition",
+                "kind": "dev:bug",
+                "confidence": 0.85
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak search incident",
+                "kind": "dev:incident",
+                "confidence": 0.85
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The first signal was the error budget burn alert at 9:15am, three minutes after the deploy that introduced the bad configuration landed.",
+          "search_keys": [
+            "burn alert 9:15am",
+            "first signal",
+            "detection time",
+            "error budget burn"
+          ],
+          "source_turn_id": 2
+        },
+        {
+          "content": "The root cause was the config partition: the deploy shipped a config that split query traffic unevenly across the search shards and one shard saturated",
+          "pointKind": "statement",
+          "about_entities": [
+            "config partition",
+            "Bluepeak search incident"
+          ],
+          "when": "2026-10-05",
+          "slots": {
+            "subject": [
+              {
+                "name": "config partition",
+                "kind": "dev:bug",
+                "confidence": 0.95
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak search incident",
+                "kind": "dev:incident",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The config partition was the root cause, the deploy shipped a config that split the query traffic unevenly across the search shards and one shard saturated.",
+          "search_keys": [
+            "config partition root cause",
+            "uneven query traffic",
+            "shard saturation",
+            "bad config deploy"
+          ],
+          "source_turn_id": 6
+        },
+        {
+          "content": "The initial investigation blamed the search index and cost the first forty minutes chasing a reindex before the config diff revealed the real cause",
+          "pointKind": "statement",
+          "about_entities": [
+            "search index misdiagnosis",
+            "Bluepeak search incident",
+            "Aisha"
+          ],
+          "when": "2026-10-05",
+          "slots": {
+            "subject": [
+              {
+                "name": "search index misdiagnosis",
+                "kind": "dev:bug",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak search incident",
+                "kind": "dev:incident",
+                "confidence": 0.85
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The initial investigation blamed the search index, which made us chase a reindex for the first forty minutes.",
+          "search_keys": [
+            "search index blamed",
+            "forty minutes reindex",
+            "misdiagnosis",
+            "config diff check"
+          ],
+          "source_turn_id": 4
+        },
+        {
+          "content": "Rolling the config back to the previous partition at 12:40pm normalized traffic within thirteen minutes and search was fully healthy by 12:53pm",
+          "pointKind": "statement",
+          "about_entities": [
+            "config rollback to previous partition",
+            "Bluepeak search incident"
+          ],
+          "when": "2026-10-05",
+          "slots": {
+            "subject": [
+              {
+                "name": "config rollback to previous partition",
+                "kind": "dev:runbook",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak search incident",
+                "kind": "dev:incident",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "We rolled the config back to the previous partition at 12:40pm and traffic normalized within thirteen minutes. Search was fully healthy again by 12:53pm.",
+          "search_keys": [
+            "config rollback 12:40pm",
+            "thirteen minutes to normalize",
+            "mitigation",
+            "healthy by 12:53pm"
+          ],
+          "source_turn_id": 8
+        },
+        {
+          "content": "The search SLO is 99.9 percent and the month landed at 99.86, so the SLO was breached",
+          "pointKind": "statement",
+          "about_entities": [
+            "search SLO",
+            "Bluepeak search incident"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "search SLO",
+                "kind": "dev:indicator",
+                "confidence": 0.95
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak search incident",
+                "kind": "dev:incident",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The search SLO is 99.9 percent and we landed at 99.86 for the month, so yes we breached it.",
+          "search_keys": [
+            "search SLO 99.9",
+            "99.86 for the month",
+            "SLO breach",
+            "error budget"
+          ],
+          "source_turn_id": 14
+        },
+        {
+          "content": "Bluepeak was offered a service credit and their account team accepted it",
+          "pointKind": "statement",
+          "about_entities": [
+            "Bluepeak service credit",
+            "Bluepeak"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "Bluepeak service credit",
+                "kind": "core:agreement",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak",
+                "kind": "product-strategy:customer",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "We already offered Bluepeak a service credit and their account team accepted.",
+          "search_keys": [
+            "service credit",
+            "Bluepeak credit accepted",
+            "contractual remedy"
+          ],
+          "source_turn_id": 14
+        },
+        {
+          "content": "A pre-deploy check comparing partition weights against the shard capacity model is committed, owned by Maya and due 2026-11-02",
+          "pointKind": "statement",
+          "about_entities": [
+            "pre-deploy partition weight check",
+            "Maya",
+            "Nora"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "Maya",
+                "kind": "core:naturalPerson",
+                "confidence": 0.85
+              }
+            ],
+            "object": [
+              {
+                "name": "pre-deploy partition weight check",
+                "kind": "dev:issue",
+                "confidence": 0.95
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Maya owns the pre-deploy check and it needs to land by November 2.",
+          "search_keys": [
+            "pre-deploy partition check",
+            "Maya owner",
+            "November 2",
+            "shard capacity model"
+          ],
+          "source_turn_id": 12
+        },
+        {
+          "content": "Making the config diff visible in the deploy review is committed, owned by Diego and due 2026-11-09",
+          "pointKind": "statement",
+          "about_entities": [
+            "config diff visibility in deploy review",
+            "Diego",
+            "Nora"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "Diego",
+                "kind": "core:naturalPerson",
+                "confidence": 0.85
+              }
+            ],
+            "object": [
+              {
+                "name": "config diff visibility in deploy review",
+                "kind": "dev:issue",
+                "confidence": 0.95
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Diego owns the config diff surfacing, due November 9.",
+          "search_keys": [
+            "config diff visibility",
+            "Diego owner",
+            "November 9",
+            "deploy review diff"
+          ],
+          "source_turn_id": 12
+        },
+        {
+          "content": "The search team will run a shard capacity review before the end of the year, with Priya volunteering to lead it",
+          "pointKind": "statement",
+          "about_entities": [
+            "shard capacity review",
+            "search team",
+            "Priya"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "Priya",
+                "kind": "core:naturalPerson",
+                "confidence": 0.85
+              }
+            ],
+            "object": [
+              {
+                "name": "shard capacity review",
+                "kind": "dev:issue",
+                "confidence": 0.9
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "the search team will run a shard capacity review before the end of the year, Priya volunteered to lead it.",
+          "search_keys": [
+            "shard capacity review",
+            "Priya lead",
+            "end of year",
+            "capacity model review"
+          ],
+          "source_turn_id": 22
+        },
+        {
+          "content": "Incident writeups are opt-out by default, a decision taken after the August incident, so the whole company sees the timeline and follow-ups",
+          "pointKind": "statement",
+          "about_entities": [
+            "incident writeups opt-out by default",
+            "Bluepeak search incident"
+          ],
+          "when": "2026-10-10",
+          "slots": {
+            "subject": [
+              {
+                "name": "incident writeups opt-out by default",
+                "kind": "agent-ops:rule",
+                "confidence": 0.9
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak search incident",
+                "kind": "dev:incident",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "Incident writeups are opt-out by default now, that was the decision after the August incident, so the whole company sees the timeline and the follow-ups.",
+          "search_keys": [
+            "opt-out by default",
+            "incident writeup policy",
+            "company-wide publication",
+            "August incident decision"
+          ],
+          "source_turn_id": 16
+        },
+        {
+          "content": "The rollback went smoothly because the deploy tooling kept the previous config one click away",
+          "pointKind": "statement",
+          "about_entities": [
+            "config rollback to previous partition"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "config rollback to previous partition",
+                "kind": "dev:runbook",
+                "confidence": 0.85
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The rollback went smoothly because the deploy tooling kept the previous config one click away.",
+          "search_keys": [
+            "rollback tooling",
+            "previous config one click away",
+            "what went well"
+          ],
+          "source_turn_id": 18
+        },
+        {
+          "content": "The team's view is that the on-call staying calm matters more than any tooling",
+          "pointKind": "statement",
+          "about_entities": [
+            "Bluepeak search incident"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "Bluepeak search incident",
+                "kind": "dev:incident",
+                "confidence": 0.6
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "the on-call stayed calm, honestly that matters more than any tooling.",
+          "search_keys": [
+            "on-call calmness",
+            "matters more than tooling",
+            "what went well"
+          ],
+          "source_turn_id": 18
+        },
+        {
+          "content": "The first customer-facing status was posted at 9:40am and the all-clear at 1:05pm, written by Sam from customer engineering with Aisha",
+          "pointKind": "statement",
+          "about_entities": [
+            "Bluepeak search incident",
+            "Sam",
+            "Aisha",
+            "Bluepeak"
+          ],
+          "when": "2026-10-05",
+          "slots": {
+            "subject": [
+              {
+                "name": "Sam",
+                "kind": "core:naturalPerson",
+                "confidence": 0.85
+              },
+              {
+                "name": "Aisha",
+                "kind": "core:naturalPerson",
+                "confidence": 0.85
+              }
+            ],
+            "object": [
+              {
+                "name": "Bluepeak",
+                "kind": "product-strategy:customer",
+                "confidence": 0.85
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "we posted the first customer-facing status at 9:40am and the all-clear at 1:05pm. Sam from customer engineering wrote the status updates with Aisha.",
+          "search_keys": [
+            "comms timeline",
+            "status 9:40am",
+            "all-clear 1:05pm",
+            "Sam customer engineering"
+          ],
+          "source_turn_id": 20
+        },
+        {
+          "content": "Making the config diff legible at review time attacks the actual detection gap, since the index was blamed first and cost forty minutes",
+          "pointKind": "statement",
+          "about_entities": [
+            "config diff visibility in deploy review",
+            "search index misdiagnosis"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "config diff visibility in deploy review",
+                "kind": "dev:issue",
+                "confidence": 0.85
+              }
+            ],
+            "object": [
+              {
+                "name": "search index misdiagnosis",
+                "kind": "dev:bug",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "the index was blamed first and cost forty minutes, so making the diff legible at review time attacks the actual detection gap.",
+          "search_keys": [
+            "detection gap",
+            "config diff legibility",
+            "forty minutes lost",
+            "review-time visibility"
+          ],
+          "source_turn_id": null
+        },
+        {
+          "content": "The pre-deploy partition check attacks the cause itself: uneven traffic split against shard capacity",
+          "pointKind": "statement",
+          "about_entities": [
+            "pre-deploy partition weight check",
+            "config partition"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "pre-deploy partition weight check",
+                "kind": "dev:issue",
+                "confidence": 0.85
+              }
+            ],
+            "object": [
+              {
+                "name": "config partition",
+                "kind": "dev:bug",
+                "confidence": 0.85
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The pre-deploy partition check attacks the cause itself (uneven traffic split vs. shard capacity).",
+          "search_keys": [
+            "attacks the cause",
+            "partition weights vs shard capacity",
+            "preventive check"
+          ],
+          "source_turn_id": null
+        },
+        {
+          "content": "The shard capacity review is the broader structural follow-up: it questions whether the capacity model the pre-deploy check will lean on is itself current",
+          "pointKind": "statement",
+          "about_entities": [
+            "shard capacity review",
+            "pre-deploy partition weight check"
+          ],
+          "when": null,
+          "slots": {
+            "subject": [
+              {
+                "name": "shard capacity review",
+                "kind": "dev:issue",
+                "confidence": 0.85
+              }
+            ],
+            "object": [
+              {
+                "name": "pre-deploy partition weight check",
+                "kind": "dev:issue",
+                "confidence": 0.8
+              }
+            ]
+          },
+          "tier": "B",
+          "quote": "The shard capacity review is the broader structural follow-up \u2014 it questions whether the capacity model the pre-deploy check will lean on is itself current.",
+          "search_keys": [
+            "structural follow-up",
+            "capacity model currency",
+            "shard capacity review rationale"
+          ],
+          "source_turn_id": null
+        }
+      ],
+      "operators": [
+        {
+          "src": "Making the config diff legible at review time attacks the actual detection gap, since the index was blamed first and cost forty minutes",
+          "dst": "The initial investigation blamed the search index and cost the first forty minutes chasing a reindex before the config diff revealed the real cause",
+          "op_type": "IMPL"
+        },
+        {
+          "src": "The pre-deploy partition check attacks the cause itself: uneven traffic split against shard capacity",
+          "dst": "The root cause was the config partition: the deploy shipped a config that split query traffic unevenly across the search shards and one shard saturated",
+          "op_type": "IMPL"
+        },
+        {
+          "src": "The shard capacity review is the broader structural follow-up: it questions whether the capacity model the pre-deploy check will lean on is itself current",
+          "dst": "The pre-deploy partition check attacks the cause itself: uneven traffic split against shard capacity",
+          "op_type": "IMPL"
+        },
+        {
+          "src": "Rolling the config back to the previous partition at 12:40pm normalized traffic within thirteen minutes and search was fully healthy by 12:53pm",
+          "dst": "The Bluepeak search outage ran from 9:12am to 12:53pm on 2026-10-05, three hours and forty-one minutes of degraded search",
+          "op_type": "MITIGATES",
+          "target_edge": {
+            "src": "The root cause was the config partition: the deploy shipped a config that split query traffic unevenly across the search shards and one shard saturated",
+            "dst": "The Bluepeak search outage ran from 9:12am to 12:53pm on 2026-10-05, three hours and forty-one minutes of degraded search",
+            "op_type": "IMPL"
+          },
+          "strength": 0.3
+        }
+      ],
+      "chain_notes": [
+        {
+          "chain": "epicToCode",
+          "finding": "Follow-up issues (pre-deploy partition check, config diff visibility, shard capacity review) have no parent epic or code emitted",
+          "action": "warned",
+          "note": "No epic was stated in the retro; issues stand alone rather than inventing an epic."
+        }
+      ],
+      "link_before_create": [
+        {
+          "searched_for": "Bluepeak",
+          "found": false,
+          "note": "No prior Bluepeak customer entity in this session's graph context."
+        },
+        {
+          "searched_for": "Bluepeak search incident",
+          "found": false,
+          "note": "New incident record for the 2026-10-05 outage."
+        },
+        {
+          "searched_for": "incident writeups opt-out by default",
+          "found": false,
+          "note": "Policy rule referenced as decided after the August incident; not previously recorded here."
+        },
+        {
+          "searched_for": "search SLO",
+          "found": false,
+          "note": "SLO indicator with 99.9 percent target newly recorded."
+        }
+      ],
+      "retractions": []
+    }
+  },
+  "s2_stats": {
+    "raw": {
+      "attempts": 1,
+      "retries": 0,
+      "last_class": null,
+      "truncated": false,
+      "finish_reason": "stop",
+      "prompt_tokens": 9252,
+      "completion_tokens": 4380,
+      "cost": {
+        "calls": 1,
+        "prompt_tokens": 9252,
+        "completion_tokens": 4380,
+        "calls_without_cost": 1,
+        "by_route": {
+          "deepseek-direct": {
+            "deepseek-v4-flash": {
+              "calls": 1,
+              "prompt_tokens": 9252,
+              "completion_tokens": 4380,
+              "cost_usd": 0.0,
+              "calls_without_cost": 1,
+              "calls_without_usage": 0,
+              "calls_without_tokens": 0,
+              "usage_present": true
+            }
+          }
+        }
+      },
+      "recovery": {
+        "s2_out_tokens": 4380
+      }
+    },
+    "narrative": {
+      "attempts": 1,
+      "retries": 0,
+      "last_class": null,
+      "truncated": false,
+      "finish_reason": "stop",
+      "prompt_tokens": 9002,
+      "completion_tokens": 5453,
+      "cost": {
+        "calls": 1,
+        "prompt_tokens": 9002,
+        "completion_tokens": 5453,
+        "calls_without_cost": 1,
+        "by_route": {
+          "deepseek-direct": {
+            "deepseek-v4-flash": {
+              "calls": 1,
+              "prompt_tokens": 9002,
+              "completion_tokens": 5453,
+              "cost_usd": 0.0,
+              "calls_without_cost": 1,
+              "calls_without_usage": 0,
+              "calls_without_tokens": 0,
+              "usage_present": true
+            }
+          }
+        }
+      },
+      "recovery": {
+        "s2_out_tokens": 5453
+      }
+    }
+  },
+  "s2_errors": {},
+  "s2_seconds": {
+    "raw": 13.2,
+    "narrative": 16.0
+  },
+  "session_id": "wp05_retro_writeup",
+  "turns": 23,
+  "seconds": 32.6
+}
