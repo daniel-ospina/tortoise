@@ -218,11 +218,11 @@ fi
 # `ERROR <path>` record IS the attributable failure set (the rail reads it), so the
 # marker would add a false second key to an already-attributable leg.
 COLLECTION_ERROR=0
-if strip_sgr < "$LOG" | tr -d '\r\000' | grep -qaE 'Interrupted: [0-9]+ error'; then
+if strip_sgr < "$LOG" | tr -d '\r\000' | grep -aE 'Interrupted: [0-9]+ error' > /dev/null; then
   COLLECTION_ERROR=1
 fi
 OBSERVABLE=0
-if strip_sgr < "$LOG" | tr -d '\r\000' | grep -qaE '^(FAILED|ERROR) '; then
+if strip_sgr < "$LOG" | tr -d '\r\000' | grep -aE '^(FAILED|ERROR) ' > /dev/null; then
   OBSERVABLE=1
 fi
 # A genuine collection error's OWN summary reports it (`= 1 error in 0.09s =`), which
@@ -230,7 +230,7 @@ fi
 # same log while the LEG's summary reports tests. Only the former is a completed leg.
 COLLECTION_VERDICT=0
 if [ "$COLLECTION_ERROR" = "1" ] && [ -n "$SUMMARY_TEXT" ] \
-   && printf '%s' "$SUMMARY_TEXT" | grep -qE '^[= ]*[0-9]+ error'; then
+   && grep -qE '^[= ]*[0-9]+ error' <<< "$SUMMARY_TEXT"; then
   COLLECTION_VERDICT=1
 fi
 
@@ -366,7 +366,7 @@ IN_FLIGHT="$(strip_sgr < "$LOG" | tr -d '\000' | awk '
 # (tests/test_ship_test_onboarding.py), so a COMPLETED leg's FAILURES section contains
 # the word, and treating that as a kill reports a finished leg as unfinished.
 KILL_EVIDENCE=0
-if strip_sgr < "$LOG" | tr -d '\r\000' | grep -qaE 'Timeout \([0-9]+:|^!+ KeyboardInterrupt !+'; then
+if strip_sgr < "$LOG" | tr -d '\r\000' | grep -aE 'Timeout \([0-9]+:|^!+ KeyboardInterrupt !+' > /dev/null; then
   KILL_EVIDENCE=1
 fi
 KILLED=0
