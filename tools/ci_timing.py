@@ -402,25 +402,34 @@ def paid_vs_selected(jobs: list[dict], selection: dict, durations: dict,
 DURATION_RE = re.compile(r"^(\d+\.\d+)s\s+(call|setup|teardown)\s+(\S+)")
 COUNT_RE = re.compile(r"(\d+)\s+(passed|failed|error|skipped|xfailed|xpassed)")
 V_PROGRESS_RE = re.compile(r"^(tests/\S+?\.py::[^\s]+?)\s+(PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)\b")
-# The session-summary line, matched by SHAPE: it is the line that reports how long
-# the run took. `no tests ran` / `N deselected` carry no count token, so a
-# count-based test called an honest empty leg "truncated" (#9134 review, P1).
+# The session-summary line reports how long the session took, and it must also NAME
+# what happened — see `_is_summary_line`. Matching any line that merely mentions a
+# duration certified truncated legs as complete: pytest echoes a failing test's
+# captured stdout at column 0, so `===== warmup in 1.23s =====` inside a FAILURES
+# block closed the disclosure and dropped that leg's real failures (#9134 review,
+# P1). The mention of a duration is only the SHAPE; the outcome name is the
+# evidence. (Anchoring the scan to the end of the log was tried and DISCARDED: it
+# published complete legs as truncated.)
 _SUMMARY_IN_RE = re.compile(r"\bin \d+(?:\.\d+)?s\b")
 
 
 def _is_summary_line(line: str) -> bool:
-    """True for pytest's session-summary line, in banner and banner-less forms."""
+    """True for pytest's session-summary line, in banner and banner-less forms.
+
+    Banner form: `= 10 passed in 3.00s =`, `==== no tests ran in 0.01s ====`.
+    Banner-less: `1 failed, 3 passed in 0.04s` (pytest -q), `2 deselected in 0.1s`.
+    """
     stripped = line.strip()
-    if not _SUMMARY_IN_RE.search(stripped):
+    if not stripped or not _SUMMARY_IN_RE.search(stripped):
         return False
-    if (stripped.startswith("=") or stripped.startswith("no tests ran")
-            or " deselected" in stripped or " warning" in stripped):
-        return True
-    # ⛔ A BANNER-LESS count line is also a summary: pytest's `-q` form prints
-    # `10 passed in 3.02s` (and `6 failed, 30697 passed, … in 1300.12s`) with no banner and
-    # none of the words above, so shape alone called it truncated — the docstring claimed
-    # this form was handled (#9134 review, P3).
-    return bool(COUNT_RE.search(stripped))
+    # A summary NAMES what happened — a count, `no tests ran`, or a deselection.
+    # A banner alone is not enough: captured stdout is echoed at column 0, so
+    # `===== warmup in 1.23s =====` inside a FAILURES block would otherwise certify
+    # a truncated leg as complete and drop its real failures (#9134 review, P1).
+    # The count form is also the only thing that recognises pytest -q's banner-less
+    # `10 passed in 3.02s` (#9134 review, P3).
+    return bool(COUNT_RE.search(stripped) or "no tests ran" in stripped
+                or " deselected" in stripped)
 
 
 R_SUMMARY_RE = re.compile(r"^(FAILED|ERROR)\s+(tests/\S+?\.py::[^\s]+)")
@@ -479,6 +488,11 @@ def parse_log(path: Path) -> dict:
                 # turned one unreadable log into a KeyError that killed the whole
                 # artifact run instead of degrading that leg (#9134 review, P2).
                 "summary_seen": False}
+
+    # Any line that NAMES the outcome counts as the summary: a leg's summary is not
+    # always the last line (two legs in the sample end with trailing output after
+    # it), and anchoring to the end published complete legs as truncated.
+    summary_seen = any(_is_summary_line(ln) for ln in lines)
 
     for line in lines:
         # #1477 review P2: the WATCHDOG banner is shell-echoed to the step's
@@ -562,8 +576,6 @@ def parse_log(path: Path) -> dict:
         # Requiring a COUNT token missed the last two (neither names a count), and
         # matching only `-q`'s banner-less form missed the banner form that every
         # `-v` CI leg actually prints (#9134 review, P1).
-        if _is_summary_line(line):
-            summary_seen = True
         if line.startswith("=") and COUNT_RE.search(line):
             for n, key in COUNT_RE.findall(line):
                 if key in counts:
@@ -2214,16 +2226,20 @@ def load_history(json_path: Path) -> list[dict]:
 def _dedupe_history(rows: list[dict]) -> list[dict]:
     """One row per SAMPLE, newest first — preserving order.
 
-    ⛔ The key falls back to `sample_time`: a row written BEFORE `sampled_at` existed has
-    none, so keying on `sampled_at` alone gives it `None` and lets it survive beside its own
-    stamped twin — the shipped artifact carried run 39191149586 twice for exactly that
+    ⛔ The key is `(run, WHEN it was sampled)` — never `sampled_at` alone: a row written
+    before that field existed has none, so it keyed to `None` and survived beside its own
+    stamped twin. The shipped artifact carried run 39191149586 twice for exactly that
     reason, spent one of the flake proxy's comparison slots on a sample compared with
-    itself, and the dedupe could never heal it (#9134 review, P2).
+    itself, and the dedupe could never heal it (#9134 review, P2). `sample_time` is the
+    timestamp every row has; `sampled_at` is its fallback, and a row carrying neither
+    collapses with its twin — which is right, because two rows indistinguishable on
+    (run, when) ARE one sample.
     """
     out: list[dict] = []
     seen: set[tuple[object, object]] = set()
     for entry in rows:
-        key = (entry.get("run_id"), entry.get("sampled_at") or entry.get("sample_time"))
+        key = (entry.get("run_id") or entry.get("sha"),
+               entry.get("sample_time") or entry.get("sampled_at"))
         if key in seen:
             continue
         seen.add(key)
@@ -2612,8 +2628,6 @@ def main() -> int:
         "steps_total_ms": sum(s["duration_ms"] for job in steps.values() for s in job),
         "steps_max_job_ms": max((sum(s["duration_ms"] for s in job) for job in steps.values()), default=0),
         "failed_tests": sorted(failed_tests),
-        "sampled_at": (os.environ.get("CI_TIMING_NOW")
-                       or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")),  # noqa: UP017
     }
     # Dedupe by identity, not position: running the generator twice under the same
     # frozen CI_TIMING_NOW appended the SAME sample twice, so the artifact's history

@@ -1242,6 +1242,11 @@ def test_a_banner_less_count_summary_is_a_summary() -> None:
     assert ci_timing._is_summary_line("10 passed in 3.02s")
     assert ci_timing._is_summary_line("6 failed, 30697 passed in 1300.12s (0:21:40)")
     assert not ci_timing._is_summary_line("collecting ... /repo/tests/test_a.py")
+    # ⛔ the discriminating negative: this line HAS the summary SHAPE (`in 1.23s`) and
+    # a banner, and names no outcome. Accepting it certifies a truncated leg as
+    # complete. Without it, this pin passes under a rule that accepts any banner —
+    # measured: the only other negative above lacks the shape, so it cannot see it.
+    assert not ci_timing._is_summary_line("===== warmup in 1.23s =====")
 
 
 def test_the_rendered_provenance_names_the_run_it_sampled(monkeypatch) -> None:
@@ -1296,10 +1301,13 @@ def test_the_artifact_names_the_legs_whose_passes_it_could_not_count(tmp_path: P
     the basename, because 15 of the shipped sample's 17 sources are `pytest.log`
     (#9134 review, P1/P2).
 
-    Non-vacuity: this test pins render_md's disclosure, not main()'s wiring to it —
-    with `summary_less_legs` not passed (the pre-fix call) every assertion below
-    goes red. The wiring itself is pinned by
-    `test_main_wires_the_disclosure_into_the_artifact`.
+    Non-vacuity: this test pins render_md's disclosure, not main()'s wiring to it.
+    With `summary_less_legs` not passed (the pre-fix call), the three POSITIVE
+    assertions red — the leg is not named, `LOWER BOUND` is absent, and the
+    no-summary label is absent. The two negative assertions (the complete leg is
+    not named; `md(None)` carries no LOWER BOUND) hold by construction and are
+    there to pin over-reach, not as mutation evidence. The wiring itself is pinned
+    by `test_main_wires_the_disclosure_into_the_artifact`.
     """
     (tmp_path / "pytest-log-test-a").mkdir()
     (tmp_path / "pytest-log-test-b").mkdir()
@@ -1328,6 +1336,50 @@ def test_the_artifact_names_the_legs_whose_passes_it_could_not_count(tmp_path: P
     # The disclosure must not claim a watchdog kill this log does not show.
     assert "summary-less legs — no pytest summary line" in text, text
     assert "LOWER BOUND" not in md(None)                # silent on a clean run
+
+
+def test_captured_output_cannot_close_the_disclosure(tmp_path: Path) -> None:
+    """A duration inside a FAILURES block is not a session summary.
+
+    pytest echoes a failing test's captured stdout at column 0, and a truncated log
+    (the documented SIGKILL path) can contain such a line. Treating any line
+    mentioning a duration as the summary certified the truncated leg as complete
+    and dropped its real failures — the opposite of what the disclosure is for
+    (#9134 review, P1).
+    """
+    (tmp_path / "pytest-log-test-d").mkdir()
+    (tmp_path / "pytest-log-test-d" / "pytest.log").write_text(
+        "FAILED tests/test_d.py::test_slow - Timeout\n"
+        "------------ Captured stdout call ------------\n"
+        "===== warmup in 1.23s =====\n"
+        "some output in 4.56s\n")   # log ends here: no pytest summary
+
+    agg = ci_timing.aggregate_logs(tmp_path)
+
+    assert agg["log_sources"][0]["summary_seen"] is False
+    assert agg["total_counts"]["failed"] == 1, agg["total_counts"]
+
+
+def test_generating_twice_under_one_frozen_clock_does_not_duplicate_the_sample(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The artifact's history must not publish one sample twice.
+
+    The shipped history carried the same sample as two rows (generated twice under
+    a frozen CI_TIMING_NOW), so the flake proxy compared a sample with itself
+    (#9134 review, P2)."""
+    logs = tmp_path / "logs" / "pytest-log-test-a"
+    logs.mkdir(parents=True)
+    (logs / "pytest.log").write_text("= 3 passed in 1.00s =\n")
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("CI_TIMING_NOW", "2026-10-20T18:40:00Z")
+    for _ in range(2):
+        monkeypatch.setattr("sys.argv", ["ci_timing.py", "--repo", "o/r",
+                                         "--logs-dir", str(tmp_path / "logs"),
+                                         "--out-dir", str(out)])
+        assert ci_timing.main() == 0
+    history = json.loads((out / "ci-timing.json").read_text())["history"]
+    assert len(history) == 1, history
 
 
 def test_an_unreadable_log_degrades_instead_of_killing_the_run(tmp_path: Path) -> None:
@@ -1384,7 +1436,8 @@ def test_a_zero_count_summary_is_not_a_truncated_leg(tmp_path: Path) -> None:
     for body in ("no tests ran in 0.30s\n",                 # -q, banner-less
                  "===== no tests ran in 0.01s =====\n",    # -v, BANNER form
                  "===== 2 deselected in 0.10s =====\n",    # banner, no count token
-                 "2 deselected in 0.10s\n"):
+                 "2 deselected in 0.10s\n",
+                 "1 failed, 3 passed in 0.04s\n"):   # pytest -q, no banner
         (tmp_path / "pytest-log-test-a" / "pytest.log").write_text(body)
         agg = ci_timing.aggregate_logs(tmp_path)
         assert agg["log_sources"][0]["summary_seen"] is True, body
