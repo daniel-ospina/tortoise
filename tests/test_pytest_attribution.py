@@ -1037,9 +1037,11 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
     # `test`'s last-failed pre-phase (200), `test` (300), `test-slow` (300),
     # `test-concurrency-falkor` (120) and `test-carve-out` (200) — plus `trackb.log`,
     # plus `pmv-pytest.log` in post-merge-validation.yml, plus `pytest-d14.log` written
-    # through `| tee`. The floor used to be 6 — TWO BELOW reality (8 sites exist at
-    # main) — so a single leg could be renamed out from under this check and it
-    # stayed green; two of them could go before the floor even noticed.
+    # through `| tee`. The floor used to be 6 against the 7 sites main's tail-only
+    # counter measured — ONE below reality — so a single leg could be renamed out from
+    # under this check while it stayed green (it took two losses to red it). Counting
+    # the `tee` site as well makes the inventory 8, so this floor has zero slack now:
+    # losing any one leg reds it.
     # A drop here means a leg was lost, not that it got safer; an ADDITION is fine,
     # which is why this is a floor.
     assert tails >= 8, f"only {tails} pytest-log sites found (expected >= 8) — a leg was renamed or dropped"
