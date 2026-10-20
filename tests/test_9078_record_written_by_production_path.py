@@ -85,9 +85,33 @@ RECORD_DB_ENV = "TEST_RECORD_DB_URI"
 #: revert of the live door would then pass on rows it never wrote. With a pair
 #: this process has never used, the rows can only be this run's: the door wrote
 #: them, or the leg has nothing to count.
-_RUN_TOKEN = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
-ORG, GRAPH = (f"org-9188-production-path-{_RUN_TOKEN}",
-              f"graph-9188-production-path-{_RUN_TOKEN}")
+#:
+#: Per TEST as well as per run (#9307 review F2): two capture legs under ONE
+#: pair each number their own fresh journal from 1, so the second one's position
+#: rows are absorbed by the same `DO NOTHING` and its delta reads 0 — a false red
+#: the moment those legs run in the other order. `_new_tenant` is therefore
+#: called per test through the `tenant` fixture, and the constants below serve
+#: only the DB-FREE legs, which need *a* pair in scope and count nothing.
+def _new_tenant() -> tuple[str, str]:
+    token = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    return (f"org-9188-production-path-{token}",
+            f"graph-9188-production-path-{token}")
+
+
+ORG, GRAPH = _new_tenant()
+
+
+@pytest.fixture()
+def tenant() -> tuple[str, str]:
+    """A tenant pair no other test in this PROCESS has used.
+
+    `journal_event` is append-only and every capture numbers its own fresh
+    journal from 1, so a shared pair makes the second capture's rows collide
+    with the first's and its delta read 0 — the false red this fixture removes
+    by construction (#9307 review F2).
+    """
+    return _new_tenant()
+
 
 #: Journal keys whose emitted VALUE the record's declared column type cannot
 #: hold — a schema/producer DISAGREEMENT, not a folding bug (`_jsonb_or_scalar`
@@ -729,6 +753,39 @@ _CALL_SITE_SPELLINGS = {
         'from . import record_writer\n'
         'def _write_record_projection(self, record, seq):\n'
         '    record_writer.write_live_record(record, durable=True, seq=seq)\n'),
+    # The append's RECEIVER has to be the journal (#9307 review I1). A list's
+    # `append` also matches the name, and returns `None` at runtime — which this
+    # door turns into `position=False`, i.e. layer 1 silently empty, with no
+    # error and no counter. Accepted by the rule before the receiver is checked.
+    "list-append": (
+        'from . import record_writer\n'
+        'def _emit_event(self, record):\n'
+        '    seq = self._pending.append(record)\n'
+        '    record_writer.write_live_record(record, durable=True, seq=seq)\n'),
+    # ... and the ASSIGNMENT scan has to stay in the door's own scope. A nested
+    # helper that happens to append must not make an outer COMPUTED `seq` look
+    # like the journal's ordinal (#9307 review I1).
+    "computed-nested-append": (
+        'from . import record_writer\n'
+        'def _emit_event(self, record):\n'
+        '    seq = self._counter + 1\n'
+        '    def inner():\n'
+        '        seq = log.append(record)\n'
+        '        return seq\n'
+        '    record_writer.write_live_record(record, durable=True, seq=seq)\n'),
+    # The three receiver spellings the SHIPPED doors actually use
+    # (`log` in sdk.py, `self.log` in api.py, `api.log` in mining.py), so the
+    # receiver allow-list cannot tighten into a false red on the real tree.
+    "honest-self-log": (
+        'from . import record_writer\n'
+        'def _emit_event(self, record):\n'
+        '    seq = self.log.append(record)\n'
+        '    record_writer.write_live_record(record, durable=True, seq=seq)\n'),
+    "honest-api-log": (
+        'from . import record_writer\n'
+        'def _emit_event(self, api, record):\n'
+        '    seq = api.log.append(record)\n'
+        '    record_writer.write_live_record(record, durable=True, seq=seq)\n'),
 }
 
 
@@ -741,8 +798,14 @@ def test_the_ordinal_argument_rule_fires_on_every_way_a_door_drops_it(
     no position row, and leaves layer 1 empty on a live write — the defect this
     change closes, with `record_wiring_check` still printing WIRED, because the
     body-only rule above only certifies that the door USES what it is given
-    (#9307 review F2). Every spelling here is a way to lose it; the two `honest`
-    ones prove the rule is not simply refusing all call sites.
+    (#9307 review F2). Every spelling here is a way to lose it; the `honest`
+    ones prove the rule is not simply refusing all call sites — including the
+    three receiver spellings the shipped doors use.
+
+    Two of them are fail-OPENS the rule admitted until it checked the append's
+    receiver and the assignment's scope (#9307 review I1): a list `append`
+    (returns `None`) and an outer computed `seq` shadowed by a nested helper's
+    append. Both certified WIRED over an empty layer 1.
     """
     module, _, _ = wiring
     rel = "tortoise/a_new_door.py"
@@ -1283,6 +1346,43 @@ def test_an_armed_live_write_commits_and_closes_exactly_once(monkeypatch):
         "the live write must commit AND close the connection it opened, once")
 
 
+def test_the_live_door_threads_the_ordinal_into_the_seam(monkeypatch):
+    """The ORDINAL half of the seam, DB-free — the half CI could not see.
+
+    Both Postgres legs SKIP without `TEST_RECORD_DB_URI` and no CI job arms it,
+    so a door could satisfy every AST rule in this file and still hand the seam
+    `position=False` / `first_seq=1` — the empty-layer-1 defect, on the one path
+    the static rules cannot execute (#9307 review advisory). This drives the
+    real door against the same fake seam as the leg above: the ordinal the
+    journal reported arrives AS the row's number, one call, one number.
+    """
+    seen: list[dict] = []
+
+    def _fake_write_records(records, **kwargs):
+        seen.append(kwargs)
+        return record_writer.RecordWrite(
+            outcome=record_writer.RecordWriteOutcome.APPLIED,
+            events=len(records), statements=1,
+            first_seq=kwargs["first_seq"], last_seq=kwargs["first_seq"],
+            connection=None)
+
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
+                       "postgresql://record:record@127.0.0.1:1/record")
+    monkeypatch.setattr(record_writer, "write_records", _fake_write_records)
+    record = {"type": "PointAdded", "id": "p1"}
+    with use_record_tenant(ORG, GRAPH):
+        for seq in (1, 7):
+            assert record_writer.write_live_record(
+                record, seq=seq) is not None, (seq, seen)
+
+    assert [k["position"] for k in seen] == [True, True], (
+        "the door received the journal's ordinal and still told the seam to "
+        f"defer the position — layer 1 stays empty on a live write: {seen}")
+    assert [k["first_seq"] for k in seen] == [1, 7], (
+        "the row's number is not the append's ordinal — a live write and a "
+        f"full replay would disagree about the same record's seq: {seen}")
+
+
 def test_a_dead_record_costs_a_capture_one_connect_not_one_per_record(monkeypatch):
     """A connect timeout bounds ONE connect, not a CAPTURE (#9231 review P1).
 
@@ -1466,33 +1566,35 @@ def _ensure_record_schema(conn) -> None:
             cur.execute(path.read_text(encoding="utf-8"))
 
 
-def _seed_tenant(conn) -> None:
+def _seed_tenant(conn, tenant: tuple[str, str]) -> None:
+    org, graph = tenant
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO public.organizations (id, name) VALUES (%s, %s) "
-            "ON CONFLICT (id) DO NOTHING", (ORG, ORG))
+            "ON CONFLICT (id) DO NOTHING", (org, org))
         cur.execute(
             "INSERT INTO public.graphs (id, org_id, name) VALUES (%s, %s, %s) "
-            "ON CONFLICT (id) DO NOTHING", (GRAPH, ORG, GRAPH))
+            "ON CONFLICT (id) DO NOTHING", (graph, org, graph))
         # `journal_event` is APPEND-ONLY by trigger (a tenant erasure sets
         # `app.record_journal_purge=on`), so this seed CANNOT clear it — and it
         # no longer tries. Deleting here was itself the #9078 assumption (layer 1
         # never written) baked into the fixture. What makes layer 1 assertable
-        # instead is the RUN-UNIQUE `ORG`/`GRAPH` pair above: on a pair no
-        # previous run has used, the only rows the table can hold for this tenant
-        # are the ones this process wrote, so the leg's DELTA is attributable to
-        # this capture and a reverted door reds it (#9307 review F4).
+        # instead is a tenant only THIS test has used (`tenant`, #9307 review
+        # F2/F4): on a pair no previous run and no sibling test has touched, the
+        # only rows the table can hold are the ones this leg wrote, so its DELTA
+        # is attributable to this capture and a reverted door reds it.
         for table in ("event", "object", "subject", "point", "relation",
                       "session", "source"):
             cur.execute(
                 f"DELETE FROM public.{table} WHERE org_id=%s AND graph_id=%s",
-                (ORG, GRAPH))
+                (org, graph))
 
 
-def _count(conn, table: str) -> int:
+def _count(conn, table: str, tenant: tuple[str, str]) -> int:
+    org, graph = tenant
     with conn.cursor() as cur:
         cur.execute(f"SELECT count(*) FROM public.{table} WHERE org_id=%s "
-                    f"AND graph_id=%s", (ORG, GRAPH))
+                    f"AND graph_id=%s", (org, graph))
         return int(cur.fetchone()[0])
 
 
@@ -1561,12 +1663,13 @@ def _journal_records(journal_path: Path) -> list[dict]:
             journal_path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def _capture(capture_sdk, monkeypatch) -> tuple[object, Path, int]:
+def _capture(capture_sdk, monkeypatch,
+             tenant: tuple[str, str]) -> tuple[object, Path, int]:
     """Seed, arm, capture through the PUBLIC API, return (sdk, journal, losses)."""
     monkeypatch.setenv(record_writer.RECORD_DSN_ENV, os.environ[RECORD_DB_ENV])
     sdk, journal_path = capture_sdk()
     before = dict(monitoring.record_write_failure_counts())
-    with use_record_tenant(ORG, GRAPH):
+    with use_record_tenant(*tenant):
         receipt = sdk.capture_session([
             {"role": "user", "content": "We chose FalkorDB for the hot cache."},
             {"role": "assistant", "content": "Noted: FalkorDB holds the hot cache."},
@@ -1577,7 +1680,8 @@ def _capture(capture_sdk, monkeypatch) -> tuple[object, Path, int]:
     return sdk, journal_path, lost
 
 
-def test_the_public_capture_path_writes_the_record(capture_sdk, monkeypatch):
+def test_the_public_capture_path_writes_the_record(capture_sdk, monkeypatch,
+                                                  tenant):
     """The record, written by the PUBLIC capture path — and the residue NAMED.
 
     Layer by layer, from the schema's own shape:
@@ -1605,19 +1709,20 @@ def test_the_public_capture_path_writes_the_record(capture_sdk, monkeypatch):
     conn = _record_db()
     try:
         _ensure_record_schema(conn)
-        _seed_tenant(conn)
+        _seed_tenant(conn, tenant)
         # The layer-1 count is a property of THIS run (#9307 review F4).
         # `journal_event` is append-only by trigger, so nothing clears it; taken
-        # as a DELTA it stays correct on a database a previous run migrated, and
-        # the count can only move in the direction the door writes it.
-        before = _count(conn, "journal_event")
-        _sdk, journal_path, lost = _capture(capture_sdk, monkeypatch)
-        after = _count(conn, "journal_event")
+        # as a DELTA against a tenant only this test has used, it stays correct
+        # on a database a previous run migrated, and the count can only move in
+        # the direction the door writes it.
+        before = _count(conn, "journal_event", tenant)
+        _sdk, journal_path, lost = _capture(capture_sdk, monkeypatch, tenant)
+        after = _count(conn, "journal_event", tenant)
         written = after - before
 
         # 1. the event stream, from the production path
         for table in ("event", "source", "session"):
-            assert _count(conn, table) >= 1, (
+            assert _count(conn, table, tenant) >= 1, (
                 f"{table} received no row from the public capture path")
         # 2. layer 1 is written from the journal's OWN ordinal (#9190).
         #    `journal_event` is `public.record_event_stream`'s source, and it is
@@ -1651,12 +1756,12 @@ def test_the_public_capture_path_writes_the_record(capture_sdk, monkeypatch):
             "the capture emitted no ObjectRegistered record, so the semantic- "
             f"layer claim would be vacuous — journal types: "
             f"{sorted({r.get('type') for r in records})}")
-        assert _count(conn, "object") >= len(objects), (
-            f"the record holds {_count(conn, 'object')} Object row(s) for the "
-            f"{len(objects)} ObjectRegistered record(s) the journal carried")
+        assert _count(conn, "object", tenant) >= len(objects), (
+            f"the record holds {_count(conn, 'object', tenant)} Object row(s) for "
+            f"the {len(objects)} ObjectRegistered record(s) the journal carried")
         with conn.cursor() as cur:
             cur.execute("SELECT count(*) FROM public.object_current_status "
-                        "WHERE org_id=%s", (ORG,))
+                        "WHERE org_id=%s", (tenant[0],))
             assert int(cur.fetchone()[0]) >= len(objects), (
                 "the procedural layer's view returns fewer rows than the "
                 "objects the record holds")
@@ -1665,8 +1770,8 @@ def test_the_public_capture_path_writes_the_record(capture_sdk, monkeypatch):
         refused = 0
         for record in records:
             try:
-                record_projection.replay([record], conn, org_id=ORG,
-                                         graph_id=GRAPH, position=False)
+                record_projection.replay([record], conn, org_id=tenant[0],
+                                         graph_id=tenant[1], position=False)
                 conn.commit()
             except Exception as exc:
                 conn.rollback()
@@ -1705,7 +1810,7 @@ def test_the_public_capture_path_writes_the_record(capture_sdk, monkeypatch):
 @pytest.mark.xfail(condition=_fold_refuses_captured_points(), strict=True,
                    reason=_ENGINE_DEPENDENCY)
 def test_the_public_capture_path_writes_the_epistemic_layer(capture_sdk,
-                                                            monkeypatch):
+                                                            monkeypatch, tenant):
     """`point` / `relation` receive rows from the production path.
 
     THE claim the epic makes about a user's data ("a user's Points … exist in
@@ -1716,9 +1821,9 @@ def test_the_public_capture_path_writes_the_epistemic_layer(capture_sdk,
     conn = _record_db()
     try:
         _ensure_record_schema(conn)
-        _seed_tenant(conn)
-        _capture(capture_sdk, monkeypatch)
-        assert _count(conn, "point") >= 1, (
+        _seed_tenant(conn, tenant)
+        _capture(capture_sdk, monkeypatch, tenant)
+        assert _count(conn, "point", tenant) >= 1, (
             "the epistemic layer received no row from the capture")
     finally:
         conn.close()

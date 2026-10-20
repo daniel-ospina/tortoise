@@ -125,8 +125,9 @@ _CALL_NAMES = frozenset({"write_live_record", "write_records", "write", "replay"
 #: `position=False` writes an invented `journal_event.seq`. `replay`/
 #: `replay_plan` are what the parameter actually lives on
 #: (`record_projection.py`), `write_records`/`write` are the raw seam spellings,
-#: and `write_live_record` is NOT here: it takes no `position`, and passes the
-#: literal internally — that is the point of a single door.
+#: and `write_live_record` is NOT here: it takes no `position` parameter — it
+#: takes the ORDINAL (`seq`) and derives the flag internally
+#: (`position=seq is not None`), which is the point of a single door.
 _POSITION_NAMES = frozenset({"write_records", "write", "replay", "replay_plan"})
 
 #: The one LIVE door: the helper every journal-append site calls. Its existence
@@ -647,6 +648,72 @@ def _function_name(scope: ast.AST) -> str:
     return getattr(scope, "name", "<module>")
 
 
+#: The names a journal is bound under where a record is appended — `log` in
+#: `sdk.py`, `self.log` in `api.py`, `api.log` in `mining.py`.
+#:
+#: The RECEIVER has to be a journal, not merely something with an `append`: a
+#: list's `append` returns `None`, which the door maps to `position=False`, i.e.
+#: layer 1 silently empty with no error, no counter and a `WIRED` verdict (#9307
+#: review I1). Widening this list is a false RED (noisy) when an honest door
+#: binds its journal under a new name; leaving it as "any `.append`" is a false
+#: GREEN (silent), which is the direction this gate may not fail in.
+_JOURNAL_RECEIVERS = frozenset({"log", "journal", "event_log"})
+
+
+def _is_journal_append(value: ast.expr) -> bool:
+    """Is this `<journal>.append(…)` — the ONE call that yields an ordinal?
+
+    Name-only matching accepted `self._pending.append(rec)` (a list, returns
+    `None`) and so certified a door that writes no position row at all (#9307
+    review I1). The receiver is matched on its FINAL name, so all three shipped
+    spellings — `log.append(…)`, `self.log.append(…)`, `api.log.append(…)` —
+    resolve to a journal.
+    """
+    if not (isinstance(value, ast.Call) and _call_name(value) == _APPEND_NAME):
+        return False
+    func = value.func
+    if not isinstance(func, ast.Attribute):
+        return False  # a bare `append(…)` names no journal to have appended to
+    receiver = func.value
+    if isinstance(receiver, ast.Name):
+        return receiver.id in _JOURNAL_RECEIVERS
+    if isinstance(receiver, ast.Attribute):
+        return receiver.attr in _JOURNAL_RECEIVERS
+    return False
+
+
+def _assignments_in(scope: ast.AST, name: str) -> list[ast.expr]:
+    """Every value assigned to `name` in `scope`'s OWN body.
+
+    Scoped rather than `ast.walk(scope)`, for the reason `_calls_by_scope`
+    exists: `ast.walk` enters a NESTED function, so a helper that happens to do
+    `seq = log.append(record)` made an outer `seq = self._counter + 1` read as
+    "the append's result" — and the gate printed `WIRED` for a door that
+    computes its own number (#9307 review I1).
+    """
+    found: list[ast.expr] = []
+
+    def visit(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.Lambda)):
+                continue  # a nested scope's bindings are not this one's
+            if isinstance(child, ast.Assign):
+                value, targets = child.value, child.targets
+            elif isinstance(child, (ast.AnnAssign, ast.NamedExpr)):
+                value, targets = child.value, [child.target]
+            else:
+                value, targets = None, []
+            if value is not None and any(
+                    isinstance(t, ast.Name) and t.id == name
+                    for t in targets):
+                found.append(value)
+            visit(child)
+
+    visit(scope)
+    return found
+
+
 def _calls_by_scope(tree: ast.AST) -> list[tuple[ast.AST, ast.Call]]:
     """`(enclosing scope, call)` for every call, per SCOPE.
 
@@ -691,26 +758,21 @@ def _name_origin(scope: ast.AST, name: str) -> tuple[str, str]:
 
     Origins: `required-parameter` · `optional-parameter` · `appended` ·
     `other` (assigned here, but not from an append) · `unknown`.
+
+    `appended` needs EVERY binding of the name in this scope to be a JOURNAL
+    append: one append among other assignments does not prove which value
+    reached the call, and a single non-journal `.append`/computed value is a
+    number the journal never reported. Over-strict is a false RED (noisy);
+    under-strict is a silent empty layer 1 (#9307 review I1).
     """
     params = _parameters(scope)
     if name in params:
         default = params[name]
         return (("required-parameter", "") if default is None
                 else ("optional-parameter", ast.unparse(default)))
-    assigned: list[ast.expr] = []
-    for node in ast.walk(scope):
-        if isinstance(node, ast.Assign):
-            value, targets = node.value, node.targets
-        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
-            value, targets = node.value, [node.target]
-        else:
-            continue
-        if value is not None and any(
-                isinstance(t, ast.Name) and t.id == name for t in targets):
-            assigned.append(value)
-    for value in assigned:
-        if isinstance(value, ast.Call) and _call_name(value) == _APPEND_NAME:
-            return "appended", ""
+    assigned = _assignments_in(scope, name)
+    if assigned and all(_is_journal_append(value) for value in assigned):
+        return "appended", ""
     if assigned:
         return "other", ", ".join(sorted({ast.unparse(v) for v in assigned}))
     return "unknown", ""
