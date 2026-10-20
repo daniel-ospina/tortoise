@@ -453,6 +453,12 @@ def test_the_selfhost_onboarding_lane_writes_on_a_journal_backed_proj(
     projection, from `ensure_selfhost_onboarding_once` — best-effort and
     never-raise, so a refusal here is exactly as silent as the hosted one.
 
+    Since #9121 that write DECLARES itself: `selfhost` reaches the graph
+    through `state._run`, so the lane declared there
+    (`_onboarding_write_scope(cypher)` -> `ONBOARDING_WRITE_LANE`) covers this
+    caller too — one declaration, both lanes. That is why it keeps landing once
+    `#9079` closes the raw write handle to an UNDECLARED mutating statement.
+
     RED before the fix: the create-on-write MERGE raises
     `DirectCacheWriteRefused`.
 
