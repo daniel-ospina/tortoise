@@ -1265,3 +1265,95 @@ def test_a_block_written_inside_an_unterminated_fence_is_not_silent(tmp_path):
     assert "UNTERMINATED code fence" in done.stderr, (
         f"a block written inside an open fence must not be silent:\n{done.stderr}")
     assert text.count(START) == 1, "the block IS written (unchanged behaviour)"
+
+
+def test_a_pair_that_straddles_an_unterminated_fence_is_refused(tmp_path):
+    """Review P2: the block's END marker below the fence line puts the fence
+    INSIDE the replace window, so rewriting the block deletes the fence line and
+    promotes whatever it was quoting to live instructions.
+
+    Measured against the condition that warned here: a build snippet inside the
+    fence vanished and the trailing line became prose, while the run reported
+    "✓ upgraded". Destroying a user's code block while reporting success cannot be
+    fixed by warning, so this case is refused and nothing is written.
+    """
+    base = _fixture_tree(tmp_path)
+    installer = _patched_installer(tmp_path, base)
+    home = tmp_path / "home"
+    home.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / "AGENTS.md"
+    original = f"# House\n\n{START}\nold\n\n```bash\nnpm run build\n{END}\nAFTER\n"
+    target.write_text(original, encoding="utf-8")
+
+    done = _run(installer, home, project)
+
+    assert done.returncode == 3, (
+        "a straddling pair must be refused, not rewritten:\n"
+        + done.stdout + done.stderr)
+    assert "STRADDLE" in done.stderr, done.stderr
+    assert target.read_text(encoding="utf-8") == original, (
+        "nothing may be written when the block's window contains the fence line")
+    assert not list(project.glob(".tortoise-agents.*")), "no staged file is left behind"
+
+
+def test_a_read_only_agents_md_with_no_block_still_gets_one(tmp_path):
+    """Review P2: the append path wrote with `>>` straight onto the user's file,
+    so a 0444 AGENTS.md got bash's "Permission denied" and no named cause, while
+    the replace path handled read-only files. Both paths must behave the same."""
+    base = _fixture_tree(tmp_path)
+    installer = _patched_installer(tmp_path, base)
+    home = tmp_path / "home"
+    home.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / "AGENTS.md"
+    target.write_text("# House\n", encoding="utf-8")
+    target.chmod(0o444)
+
+    done = _run(installer, home, project)
+    text = target.read_text(encoding="utf-8")
+
+    assert done.returncode == 0, (
+        "a read-only AGENTS.md with no block must still get one:\n"
+        + done.stdout + done.stderr)
+    assert text.count(START) == 1, "the block must be appended"
+    assert text.startswith("# House\n"), "the user's content must be preserved"
+    assert (target.stat().st_mode & 0o777) == 0o444, (
+        f"the read-only mode must survive: got {oct(target.stat().st_mode & 0o777)}")
+
+
+def test_an_unreadable_mode_refuses_rather_than_loosening_permissions(tmp_path):
+    """Review P3: the mode restore was `chmod … 2>/dev/null || true`, so a failed
+    `stat` silently loosened a 0444 file to the umask default and still reported
+    success. Fail closed instead: the user's mode is not ours to drop."""
+    base = _fixture_tree(tmp_path)
+    installer = _patched_installer(tmp_path, base)
+    home = tmp_path / "home"
+    home.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / "AGENTS.md"
+    original = f"# House\n\n{START}\nold\n{END}\n"
+    target.write_text(original, encoding="utf-8")
+    target.chmod(0o444)
+    # A `stat` that always fails: both the GNU and the BSD form must be defeated.
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    fake = shim / "stat"
+    fake.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fake.chmod(0o755)
+
+    env_path = f"{shim}:{os.environ.get('PATH', '')}"
+    done = subprocess.run(
+        ["bash", str(installer), "--harness", "codex"],
+        cwd=str(project), env={**os.environ, "HOME": str(home), "PATH": env_path},
+        capture_output=True, text=True, timeout=180)
+
+    assert done.returncode == 3, (
+        "an unreadable mode must refuse rather than rewrite with looser "
+        f"permissions:\n{done.stdout}{done.stderr}")
+    assert "could not read the mode" in done.stderr, done.stderr
+    assert target.read_text(encoding="utf-8") == original, "nothing may be written"
+    assert (target.stat().st_mode & 0o777) == 0o444, "the mode must be untouched"

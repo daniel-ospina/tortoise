@@ -1,7 +1,7 @@
 """The record projection's contract, made executable (#7969, epic #7879).
 
 WHAT THIS PINS. Interface A — *"journal → Postgres, replayable and idempotent"* —
-is four claims, and each one is a test here rather than a sentence in a design
+is five claims, and each one is a test here rather than a sentence in a design
 doc:
 
 1. **TOTAL.** Every record type the journal can carry has a declared mutation,
@@ -30,8 +30,26 @@ doc:
    its capture executor is process-wide) must not be able to file one tenant's
    rows under another: the row would be well-formed and the FK to
    `public.graphs` only checks that the graph exists, so nothing would raise.
-   Two legs: two tenants in one process never cross-write, and a caller that
-   cannot name its tenant REFUSES rather than inheriting one.
+   Five legs: two tenants in one process never cross-write; a third tenant
+   planted in the ENVIRONMENT never reaches a plan a caller asked for; a caller
+   that cannot name its tenant REFUSES rather than inheriting one (each
+   coordinate on its own); the module is scanned to prove it has no ambient
+   reader to inherit FROM; and the same substitution is pinned at the write
+   site (`tests/test_record_writer_seam.py`).
+
+   ⛔ SCOPE, so the pin is not over-read: this file holds the fold every writer
+   funnels through. The write site — where a caller names the pair — is pinned
+   in `tests/test_record_writer_seam.py`, and BOTH legs are needed: a tenant
+   supplied correctly and then dropped between the call and the plan is only
+   visible at the seam, and an ambient read that is DORMANT on every fixture
+   path is only visible to the scan in this file — a read that FIRES reds the
+   projection legs, and the seam leg where its three-record fixture reaches the
+   same builder. A caller-level
+   ARMING leg ("a multi-tenant process must not be armable from env") belongs to
+   #9192's own ask 2, and it cannot be pinned at either layer until this tree
+   carries that carrier: neither entry point here has a tenant env pair or a
+   ContextVar, which is what the AST scan below turns into an executable
+   statement — within the limits that scan declares.
 
 WHY THE PLACEMENT TABLE IS IMPORTED, NOT RE-DECLARED. `#7968`'s
 `tests/test_record_schema_placement.py` already parses §17.5 and resolves its
@@ -44,6 +62,7 @@ subject is the same statement set this module emits.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from pathlib import Path
@@ -276,7 +295,32 @@ def test_points_merged_is_refused_not_approximated():
 
 
 def _everything_records() -> list[dict[str, Any]]:
-    """One record per declared type — the plan every leg below is asserted on."""
+    """One record per declared type — every type but the declared refusal
+    `PointsMerged`, which has its own leg — plus the `delete_only` leg of a
+    repoint. Five of the 30 carry `NoRecordEffect` (`EntityBindingRefused`,
+    `ConfidenceChanged`, `EdgeMessageChanged`, `IngestStarted`,
+    `CalibrationRecorded`): their `mutations_for` is empty, which
+    `test_each_declared_type_materializes_or_declares_a_no_effect` is the leg
+    for, and `replay_plan` adds only their `journal_event` position row —
+    pinned for `IngestStarted` by
+    `test_the_journal_position_is_recorded_do_nothing`.
+
+    TWO records are added to the registry's minimal payloads, for two different
+    reasons. The `delete_only` leg (#2489) emits a statement otherwise never
+    emitted at all — a relation `DELETE`, and it is the only shape the
+    `delete_only` flag adds; `DirectEdgeRepoint` is also the one type carrying
+    two records. `EntityMutated` is otherwise absent from the record set
+    entirely: its `UPDATE` text is already emitted by `PointRetracted`, so what
+    it adds is the DOOR, not the shape, and a door is what a producer regression
+    arrives through.
+
+    A statement shape the record set cannot reach is a shape no per-statement
+    leg can hold, which is what made the tenancy legs' "the WHOLE plan" claim
+    wider than their fixture. It is narrower than "every shape the builders can
+    emit": an `EntityLinked` whose endpoint is a `Source` (the
+    `(id = %s OR node_key = %s)` resolve) is still unrepresented here — checked
+    by hand against `_tenant_bindings` and mapped correctly, but not pinned.
+    """
     records: list[dict[str, Any]] = [
         {"type": t, "ts": "2026-10-12T00:00:00Z", **payload}
         for t, payload in _MINIMAL_RECORDS.items()
@@ -284,6 +328,12 @@ def _everything_records() -> list[dict[str, Any]]:
     records.append({"type": "EntityMutated", "ts": "T", "id": "p1",
                     "label": "Point", "op": "restatus",
                     "state": {"status": "live"}})
+    # #2489/#7969: the pass-2b delete of a resurrected phantom edge. The same
+    # record type WITHOUT the flag is the upsert above, so this is the only way
+    # `_relation_delete_statement` is reached from a record.
+    records.append({"type": "DirectEdgeRepoint", "ts": "T",
+                    "id": "p1->p2:IMPL", "src": "p1", "tgt": "p2",
+                    "edge_type": "IMPL", "delete_only": True})
     return records
 
 
@@ -1042,8 +1092,22 @@ def test_a_hard_delete_cascades_the_identity_and_incident_relations():
     )
     assert len(statements) == 2, statements
     identity = statements[0]
-    assert identity.sql.startswith("DELETE FROM public.node_identity")
-    assert "node_key IN (SELECT node_key FROM public.point" in identity.sql
+    # EXACT, not `startswith`: the two sites fail DIFFERENTLY, and the substring
+    # assertions this pin REPLACES stayed GREEN for either drop — measured. Drop
+    # the OUTER
+    # predicate and the DELETE is no longer scoped to the caller's tenant at
+    # all: it removes another tenant's identity row and cascades to that
+    # tenant's node and incident relations. Drop the SUBQUERY predicate and the
+    # rows deleted are still the caller's own, but the KEY SET is resolved from
+    # other tenants' rows, so the delete can remove a row of the same tenant
+    # that the tenant-scoped resolve would not have selected.
+    assert identity.sql == (
+        "DELETE FROM public.node_identity "
+        "WHERE org_id = %s AND graph_id = %s AND node_label = %s "
+        "AND node_key IN (SELECT node_key FROM public.point "
+        "WHERE org_id = %s AND graph_id = %s AND node_key = %s)"
+    ), identity.sql
+    assert identity.params == ("o", "g", "Point", "o", "g", "p2")
     assert statements[1].sql.startswith("DELETE FROM public.point")
     # The identity cascade works for a name-keyed Object too (delete matched by
     # `id`, while `node_key` is the name the relation FKs into).
@@ -1111,7 +1175,24 @@ def test_entity_linked_endpoint_resolves_to_the_name_keyed_object():
     )
     assert len(statements) == 1, statements
     insert = statements[0]
-    assert insert.sql.startswith("INSERT INTO public.relation"), insert.sql
+    # EXACT, not `startswith` + substrings: this statement carries SIX tenant
+    # sites (the column list and two correlated resolves), so the exact text is
+    # what pins the tenant scope of every one of them. A predicate dropped from
+    # BOTH a resolve's SQL and its parameters leaves every substring assertion
+    # below green — measured — while the resolve now reads another tenant's node
+    # rows.
+    assert insert.sql == (
+        "INSERT INTO public.relation (org_id, graph_id, rel_type, src_label, "
+        "src_key, tgt_label, tgt_key, idx, props) SELECT %s, %s, %s, %s, "
+        "src.node_key, %s, tgt.node_key, %s, %s FROM (SELECT node_key FROM "
+        "public.point WHERE org_id = %s AND graph_id = %s AND node_key = %s) "
+        "src, (SELECT node_key FROM public.object WHERE org_id = %s AND "
+        "graph_id = %s AND id = %s) tgt ON CONFLICT (org_id, graph_id, "
+        "rel_type, src_label, src_key, tgt_label, tgt_key, idx) DO UPDATE "
+        "SET props = EXCLUDED.props"
+    ), insert.sql
+    assert insert.params == ("o", "g", "aboutObject", "Point", "Object", 0,
+                             "{}", "o", "g", "p1", "o", "g", "o1")
     # The key columns are the JOINED node rows' canonical keys, not `%s` params
     # carrying the journal id.
     assert "src.node_key" in insert.sql and "tgt.node_key" in insert.sql
@@ -1496,15 +1577,177 @@ def test_a_mid_journal_segment_keeps_the_positions_it_was_given():
 _TENANT_A = ("org_a", "graph_a")
 _TENANT_B = ("org_b", "graph_b")
 
+#: A THIRD tenant that exists only in the ENVIRONMENT. It must never appear in a
+#: plan a caller asked for under another tenant: an ambient fallback carries one
+#: value for every tenant the process serves, so it can never BE a tenant's.
+_TENANT_ENV = ("env_org", "env_graph")
+
 
 def _every_param(plan: list[rp.Statement]) -> list[Any]:
     """Every bound parameter of a plan, flattened.
 
     Tenancy is asserted over the WHOLE plan rather than a sampled statement:
     one statement built from a different tenant is the cross-tenant write, and
-    it would sit next to 73 correct ones.
+    it would sit next to 72 correct ones.
     """
     return [param for statement in plan for param in statement.params]
+
+
+#: `… WHERE org_id = %s …` — one tenant BINDING SITE, with its column named.
+#: Whitespace-tolerant on purpose: `graph_id= %s` is the same binding site, and a
+#: pattern that only matched the canonical spelling would miss it — the
+#: mention/binding count check below would then fire on a legitimate site,
+#: which is a false red with a message that blames the wrong thing.
+_TENANT_EQ_SITE = re.compile(r"\b(org_id|graph_id)\s*=\s*%s")
+#: A tenant COLUMN named anywhere in SQL, whether or not it is bound as `%s`.
+_TENANT_MENTION = re.compile(r"\b(org_id|graph_id)\b")
+#: The leading column list of a layer INSERT (`(org_id, graph_id, …)`).
+_INSERT_COLUMNS = re.compile(r"^INSERT INTO public\.\w+\s*\(([^)]*)\)")
+#: `ON CONFLICT (cols)` names tenant columns without binding them again.
+_ON_CONFLICT = re.compile(r"ON CONFLICT\s*\([^)]*\)")
+
+
+def _tenant_bindings(statement: rp.Statement) -> list[tuple[int, str]]:
+    """`(parameter index, tenant column)` for EVERY site this SQL binds one.
+
+    Positional on purpose. Asking *"is the tenant's value among the parameters"*
+    cannot see the two ways a statement goes cross-tenant while looking right:
+    the coordinates SWAPPED (`graph_id = <org value>` — a silent 0-row update on
+    a `WHERE`, and zero rows resolved from a correlated subquery), and one wrong
+    site in a statement that binds the pair more than once (5 of the 73 here
+    do). Both are invisible to a membership check and to a count, and both are
+    caught by asking each site what it was given.
+
+    The index of a site is the number of `%s` placeholders before it, which is
+    its parameter offset because this module emits DB-API `%s` in order and
+    every parameter is a placeholder (no value is ever interpolated into SQL).
+
+    Fail-closed: a tenant column named in the SQL but NOT bound as `%s` (a
+    literal, or a rewrite such as `(org_id, graph_id) = (%s, %s)`) raises rather
+    than being skipped, because a skipped site is a cross-tenant clause no leg
+    evaluates. The count is taken over the SQL with the INSERT's column list and
+    any `ON CONFLICT (…)` removed — those name the columns without binding them
+    at a site.
+    """
+    sql = statement.sql
+    bindings = [(sql.count("%s", 0, match.end()) - 1, match.group(1))
+                for match in _TENANT_EQ_SITE.finditer(sql)]
+    named = _ON_CONFLICT.sub("", sql)
+    head = _INSERT_COLUMNS.match(sql)
+    insert_bindings: list[tuple[int, str]] = []
+    if head is not None:
+        # A layer INSERT names its columns and binds them positionally, so the
+        # tenant is a column-list position rather than an `= %s` site. The pair
+        # leads every layer INSERT, and a swap here puts each value under the
+        # other's column — the one case no parameter VALUE check can see. (The
+        # tenancy FK on `(org_id, graph_id)` then refuses the row, so the
+        # database is the backstop, not the detector: it cannot tell a swapped
+        # pair from a mistake, and the assert below names what went wrong.)
+        # Asserting the ORDER (rather than filtering whichever of the two
+        # leads) keeps a reordered list from silently falling out of the
+        # check.
+        columns = [column.strip() for column in head.group(1).split(",")]
+        assert columns[:2] == ["org_id", "graph_id"], (
+            f"{sql[:80]!r} does not lead with (org_id, graph_id) — the tenant "
+            f"position of a layer INSERT is pinned, not derived: {columns[:4]}"
+        )
+        insert_bindings = [(0, "org_id"), (1, "graph_id")]
+        named = named.replace(head.group(0), "", 1)
+    # Every REMAINING reference to a tenant column must be an `= %s` site; the
+    # column list and `ON CONFLICT` name the columns without binding them.
+    mentions = len(_TENANT_MENTION.findall(named))
+    assert mentions == len(bindings), (
+        f"{sql[:80]!r} names a tenant column {mentions} time(s) outside its "
+        f"column list but binds it {len(bindings)} time(s) — a tenant "
+        f"reference that is not a `%s` binding site is not checked by any "
+        f"leg, so it must not exist"
+    )
+    return bindings + insert_bindings
+
+
+def _assert_binds(plan: list[rp.Statement], tenant: tuple[str, str]) -> None:
+    """Every statement binds `tenant` at EVERY site that names a tenant column.
+
+    Two rules, because each catches a cross-tenant write the other is blind to.
+    A membership-only check — what this leg replaces — passes both, since a
+    swapped value is still one of the two values it looks for:
+
+    * **EVERY SITE, PAIRED BY ITS OWN COLUMN.** Swapping the two coordinates
+      passes a
+      membership check, and so does ONE wrong site in a statement that binds
+      the pair twice — `DELETE … WHERE org_id = %s … AND node_key IN (… WHERE
+      org_id = %s …)`, or the relation upsert's two correlated endpoint
+      resolves. A swap in one of those subqueries matches no row at all — a
+      silent 0-row no-op, not another tenant's row — while every VALUE is still
+      one of the two the check looks for, so only a positional, per-site rule
+      can see it.
+    * **THE COLUMN LIST OF AN INSERT.** A layer INSERT binds the pair by column
+      position, not by `= %s`, so a `(graph_id, org_id, …)` column list swapped
+      WITHOUT reordering its parameters puts each value under the other's
+      column — invisible to any `= %s` site and to any parameter-value check.
+      The tenancy FK then refuses the row rather than filing it under the wrong
+      tenant, so the database is a backstop and not a detector: it cannot say
+      WHICH column was misplaced, which is why the order is asserted here.
+      (That assert is positional, so it also reds a CONSISTENT reorder, which is
+      correctly scoped: a false red, not a cross-tenant write.)
+
+    Every statement must bind BOTH coordinates (a statement scoped on
+    `graph_id` alone is unscoped across organisations), so the two rules above
+    are checked against the site set AND, separately, against the rule that the
+    set is the whole pair.
+
+    ⚠️ What this does NOT catch, so it is not over-read: a tenant predicate
+    removed from BOTH the SQL and its parameter. The statement still names both
+    coordinates and every remaining site is given the right value, so both rules
+    above pass — measured, dropping one of the identity `DELETE`'s two
+    `graph_id` sites from SQL and params together leaves `_assert_binds` green
+    over the whole plan. Such a drop is invisible here because it is a rewrite
+    of a statement's TEXT, indistinguishable from the text having always been
+    that way. (Removing a whole COORDINATE is caught, by the both-coordinates
+    rule.)
+
+    The bound on that gap is TEXT PINS, not a class of statements. In this file
+    two statements have their full text pinned: the identity `DELETE`
+    (`test_a_hard_delete_cascades_the_identity_and_incident_relations`) and the
+    relation `INSERT`
+    (`test_entity_linked_endpoint_resolves_to_the_name_keyed_object`); a drop
+    inside either shared builder reds its pin — measured: removing the identity
+    `DELETE` subquery's `graph_id` site from SQL and params reds that one leg
+    and nothing else. `tests/test_record_writer_seam.py` pins more than text —
+    its pre-#9187 plan fixture compares the full SQL AND params of 8 statements
+    (the `node_identity`, `point`, `object` and `journal_event` INSERTs and a
+    `point` UPDATE), so a drop inside any of those builders reds that fixture
+    too. What escapes is a shape that appears in NEITHER plan: the
+    `Source`-endpoint resolve (`EntityLinked` to a `Source`) is one, and review
+    holds it.
+    """
+    for statement in plan:
+        params = list(statement.params)
+        bindings = _tenant_bindings(statement)
+        assert bindings, (
+            f"{statement.sql[:80]!r} names no tenant column at all — tenancy is "
+            f"the row key of every layer table, so this statement is unkeyed"
+        )
+        # BOTH coordinates, not just the ones this statement happens to name: a
+        # statement scoped on `graph_id` alone is unscoped across organisations,
+        # and the per-site rule cannot see that (every site it found WAS
+        # correct). This rule exists because the membership check this change
+        # replaced had the property by accident — it demanded both values be
+        # present — and a per-site rewrite of it would have lost it.
+        named_columns = {column for _index, column in bindings}
+        assert named_columns == {"org_id", "graph_id"}, (
+            f"{statement.sql[:80]!r} scopes only {sorted(named_columns)} — the "
+            f"row key is the PAIR, so a statement naming one coordinate is "
+            f"scoped across the other axis"
+        )
+        for index, column in bindings:
+            expected = tenant[0] if column == "org_id" else tenant[1]
+            got = params[index] if index < len(params) else "<no such parameter>"
+            assert got == expected, (
+                f"{statement.sql[:80]!r} binds {column} to {got!r}, not "
+                f"{expected!r} (site #{index}, params={params!r}) — a "
+                f"statement can escape tenancy"
+            )
 
 
 def test_two_tenants_in_one_process_do_not_cross_write():
@@ -1516,7 +1759,8 @@ def test_two_tenants_in_one_process_do_not_cross_write():
     a ContextVar set at a pool thread's top level) files tenant A's rows under
     tenant B **without raising**: the row is well-formed and the FK to
     `public.graphs` only checks that the graph exists. Nothing downstream can
-    detect it — only the write site can, so the write site is where it is pinned.
+    detect it — so it is pinned wherever the pair crosses a boundary: at the
+    seam, where a caller names it, and here, where the fold receives it.
     """
     plan_a = rp.replay_plan(_everything_records(), org_id=_TENANT_A[0],
                             graph_id=_TENANT_A[1])
@@ -1532,11 +1776,7 @@ def test_two_tenants_in_one_process_do_not_cross_write():
 
     for plan, tenant, other in ((plan_a, _TENANT_A, _TENANT_B),
                                 (plan_b, _TENANT_B, _TENANT_A)):
-        for statement in plan:
-            assert tenant[0] in statement.params and tenant[1] in statement.params, (
-                f"{statement.sql[:80]!r} does not bind the tenant it was asked "
-                f"for ({tenant}) — a statement can escape tenancy"
-            )
+        _assert_binds(plan, tenant)
         params = _every_param(plan)
         assert other[0] not in params, (
             f"{other[0]} leaked into the plan written for {tenant[0]}"
@@ -1546,10 +1786,184 @@ def test_two_tenants_in_one_process_do_not_cross_write():
         )
 
 
+def test_the_environment_cannot_name_the_tenant_of_a_call(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """#9192 ask 2: an ambient carrier may exist, and may never outrank the call.
+
+    Planted as a THIRD tenant and asserted over the WHOLE record set, which is
+    the part that has power. A fallback confined to one path is invisible to a
+    single-record leg: measured on this tree, every one of the plan's 73
+    statements binds a tenant coordinate, so a fallback where the pair is read
+    at the PLAN'S ENTRY misfiles all 73 — while a per-record read
+    (`mutations_for`) reaches the 42 statements the mutations emit and leaves
+    the 31 journal rows carrying the caller's pair. A leg that builds one
+    record only ever sees the statements that record produces.
+
+    Nothing is being forbidden here: the environment is allowed to carry a
+    deployment's tenant (a single-tenant install has exactly one). What it may
+    not do is answer a question the caller already answered, because on a
+    multi-tenant process that one value is tenant B's while the call is A's.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", _TENANT_ENV[0])
+    monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", _TENANT_ENV[1])
+
+    plan = rp.replay_plan(_everything_records(), org_id=_TENANT_A[0],
+                          graph_id=_TENANT_A[1])
+    assert plan, "the record set materialized no statements — the leg is vacuous"
+    _assert_binds(plan, _TENANT_A)
+    params = _every_param(plan)
+    assert _TENANT_ENV[0] not in params, (
+        f"{_TENANT_ENV[0]} came from the environment into a plan written for "
+        f"{_TENANT_A[0]} — an ambient tenant outranked the call"
+    )
+    assert _TENANT_ENV[1] not in params, (
+        f"{_TENANT_ENV[1]} came from the environment into a plan written for "
+        f"{_TENANT_A[1]} — an ambient tenant outranked the call"
+    )
+
+
+def test_the_tenancy_section_names_the_carrier_it_cannot_see():
+    """The #9231 pointer, executable — the prose it pins has been lost TWICE.
+
+    This is guidance, not a safety property, so it is pinned for a reason the
+    review measured rather than for symmetry: the paragraph that tells the next
+    lane where the ambient carrier lives was dropped by a rebase (twice — the
+    `3752faf9` squash, then the rebase onto `41e958de8`), and each time the PR
+    body went on reporting the correction as applied. A docstring cannot red a
+    build, so a dropped pointer survives every leg here; nothing else in this
+    file notices that the artifact a lane actually reads stopped naming the
+    issue.
+
+    WHAT THIS PINS, and what it deliberately does not: a rebase that drops the
+    pointer again, and the framing the review found (`WHERE AN AMBIENT CARRIER
+    WOULD ARRIVE` — a hypothesis — instead of one that is in flight). It does
+    NOT pin the wording of the precedence rule or the symbol list; a reviewer
+    rewriting that prose should stay green, which is why the assertions are a
+    mention and a phrasing that the review called the defect, not a snapshot.
+
+    Measured non-vacuity: at `bf32ebed` (the head the review found this on)
+    `#9231` appears 0 times in `tortoise/record_projection.py` and the tenancy
+    section still says `WOULD ARRIVE` — both assertions below red there, and
+    only they do (118 of 118 other legs stay green).
+    """
+    src = Path(rp.__file__).read_text(encoding="utf-8")
+    heading = "TENANCY IS A PER-CALL ARGUMENT AT THIS LAYER"
+    assert heading in src, f"the tenancy section is gone from {rp.__file__}"
+    section = src.split(heading, 1)[1]
+    assert "#9231" in section, (
+        "the tenancy section no longer names #9231, the ref carrying the "
+        "ambient carrier (`record_writer.use_record_tenant`, `record_tenant()` "
+        "and its env fallback) — a lane reading this module would be told the "
+        "carrier is hypothetical and pointed at no issue"
+    )
+    assert "#9192" in section, (
+        "the tenancy section no longer names #9192, the acceptance the arming "
+        "pin belongs to"
+    )
+    assert "WOULD ARRIVE" not in section, (
+        "the tenancy section frames the ambient carrier as a hypothesis "
+        "(`WHERE AN AMBIENT CARRIER WOULD ARRIVE`) while it is in flight in "
+        "#9231 — the claim/artifact mismatch the #9214 review found"
+    )
+
+
+def test_this_module_has_no_ambient_tenant_READER():
+    """The "no ambient tenant" rule, executable rather than prose.
+
+    A docstring cannot fail a build, and a statement-level leg cannot see a read
+    that never fires on any fixture path. Measured: a DORMANT env read
+    (`if False: org_id = os.environ["TORTOISE_RECORD_ORG_ID"] or org_id`) leaves
+    117 of 118 green and only this scan reds it.
+
+    The scan is AST-shaped, not textual, so a comment or a docstring naming
+    `ContextVar` (this file's own header does) is not a hit. It resolves `os`
+    through its aliases (`import os as x` ⇒ `x.environ` is still a hit: an
+    alias is the obvious way a reader would arrive) and covers
+    `environ`/`environb`/`getenv`/`getenvb`, `from os import …`,
+    `from os import *`, and the `contextvars` module. There is no legitimate env
+    read in this module — the record DSN is read in `record_writer`, which owns
+    it.
+
+    WHERE THE MARGINAL VALUE IS, stated precisely because the value legs above
+    are stronger than they look: an *active* env-first fallback IS caught by
+    `test_the_environment_cannot_name_the_tenant_of_a_call` (it runs the whole
+    plan — measured: a fallback at the fold reds that leg, the refusal leg, the
+    seam leg and this scan). What no value-level leg can see is a read that is
+    DORMANT on
+    every fixture path — one that fires only when the pair is absent, or that
+    sits in a branch the record set does not reach. That read is one wire away
+    from cross-tenant on the process the rule has to hold on, and this scan is
+    the only thing that reds it.
+
+    ⛔ WHAT THIS SCAN CANNOT SEE, measured, because the gap is where the real
+    carrier lives: it parses THIS module only, and it matches env and
+    `contextvars` names. So a read through an import — a `ContextVar` (or a
+    `use_record_tenant`-style getter) defined one layer up and called here — is
+    caught by nothing in this file: measured, a sibling-module `ContextVar`
+    imported and applied in `mutations_for`
+    (`_t = RECORD_TENANT.get(None); if _t is not None: org_id = org_id or
+    _t[0]`) leaves all 118 green, because the carrier is unset on every fixture
+    path — so even a fold that would honour it is invisible to both layers. That is the shape #9192 names, and
+    it is closed by the production owner of the carrier (#9188), not here.
+    What this scan misses, and only this scan: an OBFUSCATED read
+    (`getattr(os, "environ")`, `__import__("os")`) — an env-first read spelled
+    that way still reds the value legs (measured, three of them); only a
+    DORMANT spelling of it escapes every leg, like any dormant read. What
+    escapes BOTH layers: a read that never fires on a fixture path — a
+    module-level constant applied in a function BODY (`org_id = org_id or
+    _DEFAULT_TENANT[0]`, signature still required), or a carrier DEFINED
+    ELSEWHERE (measured, all 118 green on each). A signature default is NOT in
+    either gap; the refusal leg catches it.
+    """
+    tree = ast.parse(Path(rp.__file__).read_text(encoding="utf-8"))
+    ambient_modules = {"contextvars"}
+    ambient_names = {"environ", "environb", "getenv", "getenvb"}
+    os_aliases = {"os"}
+    os_readers: set[str] = set()
+    hits: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                if root == "os":
+                    os_aliases.add(alias.asname or root)
+                elif root in ambient_modules:
+                    hits.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            root = (node.module or "").split(".")[0]
+            if root in ambient_modules:
+                hits.append(node.module or "")
+            if root == "os":
+                for alias in node.names:
+                    local = alias.asname or alias.name
+                    if alias.name == "*":
+                        # `from os import *` binds every name this scan looks
+                        # for, including one this set does not list yet.
+                        hits.append("from os import *")
+                    elif alias.name in ambient_names:
+                        hits.append(f"os.{alias.name}")
+                        os_readers.add(local)
+
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Attribute) and node.attr in ambient_names
+                and isinstance(node.value, ast.Name)
+                and node.value.id in os_aliases):
+            hits.append(f"{node.value.id}.{node.attr}")
+        elif (isinstance(node, ast.Name) and node.id in os_readers
+                and isinstance(node.ctx, ast.Load)):
+            hits.append(f"{node.id} (from os)")
+    assert not hits, (
+        f"tortoise/record_projection.py reads an ambient tenant carrier "
+        f"({sorted(set(hits))}) — tenancy is a per-call argument here, and an "
+        f"ambient value is one value for every tenant the process serves"
+    )
+
+
 def test_a_write_that_cannot_name_its_tenant_refuses_instead_of_falling_back(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """#9192 ask 2: no ambient tenant exists, so an unnamed one cannot be armed.
+    """#9192 ask 2: an unnamed tenant is REFUSED, never inherited.
 
     The refusal is the whole safety property. A fallback is not a mitigation on
     the process this has to hold on: env (and any module-level default) is
@@ -1558,9 +1972,22 @@ def test_a_write_that_cannot_name_its_tenant_refuses_instead_of_falling_back(
     keyword arguments, and the environment is never consulted — asserted with
     the pair present, since an absent env cannot distinguish "not read" from
     "read and empty".
+
+    Companion to `test_the_environment_cannot_name_the_tenant_of_a_call`: this
+    leg proves the pair cannot be OMITTED, that one proves a planted pair cannot
+    SUBSTITUTE for one the caller supplied. Both are needed — this one is
+    satisfied by any implementation with a required keyword, including one that
+    would fall back the moment the argument is optional.
+
+    ⛔ EACH COORDINATE ON ITS OWN, which is the part a "the call raises" check
+    misses: a coordinate given a default still leaves the OTHER one required, so
+    dropping the pair entirely raises and the leg stays green. Measured — a
+    literal default (`org_id: str = "a-literal-default"`, no env read) left
+    every other leg green and reddened only this one (117 of 118), which is what
+    isolates the per-coordinate loop's value.
     """
-    monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "env_org")
-    monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "env_graph")
+    monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", _TENANT_ENV[0])
+    monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", _TENANT_ENV[1])
 
     record = {"type": "PointAdded", "ts": "T", "id": "p1",
               "point": dict(_SNAPSHOT)}
@@ -1573,12 +2000,22 @@ def test_a_write_that_cannot_name_its_tenant_refuses_instead_of_falling_back(
     with pytest.raises(TypeError):
         rp.replay([record], None)
 
+    # …and each coordinate is required on its own, so neither can acquire a
+    # default without this leg going red.
+    for only in ({"org_id": _TENANT_A[0]}, {"graph_id": _TENANT_A[1]}):
+        with pytest.raises(TypeError):
+            rp.mutations_for(record, **only)
+        with pytest.raises(TypeError):
+            rp.replay_plan([record], **only)
+        with pytest.raises(TypeError):
+            rp.replay([record], None, **only)
+
     # And a NAMED tenant is the one that lands — the env pair is not read even
     # as a fallback for the coordinate the caller did supply.
     plan = rp.replay_plan([record], org_id=_TENANT_A[0], graph_id=_TENANT_A[1])
     assert _every_param(plan), "the plan bound no parameters — the leg is vacuous"
     params = _every_param(plan)
-    assert "env_org" not in params and "env_graph" not in params
+    assert _TENANT_ENV[0] not in params and _TENANT_ENV[1] not in params
 
 
 def test_the_journal_payload_keeps_the_producer_fields_that_are_not_props():

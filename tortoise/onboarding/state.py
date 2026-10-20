@@ -477,9 +477,11 @@ def _onboarding_write_scope(cypher: str):
     `_capture_onboarding_snapshot`), so a future module-level import on that side
     cannot make this one circular.
 
-    The reason string is what a `DirectCacheWriteRefused` message will cite and
-    what `tests/test_9079_onboarding_declared_lane.py` pins, so the two cannot
-    drift about which lane authorized a write.
+    The reason string is what `tests/test_9079_onboarding_declared_lane.py`
+    reads back at the write handle, so the two cannot drift about which lane
+    authorized a write. ⚠️ It is NOT rendered into a `DirectCacheWriteRefused`
+    message: a refusal fires precisely when the ContextVar is ``None``, so there
+    is no reason in flight to print (``projection._cache_write_authorized``).
     """
     from tortoise.projection import _cache_write_authorized, _statement_writes
 

@@ -3251,9 +3251,11 @@ def _journal_safe_params(params, cypher=None):
 #     `tortoise/sdk.py`); the scope is opened immediately AFTER it, around the
 #     fold that follows — so the journal write is never inside the scope that
 #     authorizes the cache write, it strictly precedes it.
-#   * `_replay_write_scope()` — opened by the replay engines (`rebuild`,
-#     `recover_from_log`, `backup.restore`, `_cmd_reconcile`), whose records
-#     came FROM the journal and must not journal again.
+#   * `_replay_write_scope()` — opened by the rebuild/replay engines (`rebuild`,
+#     `rebuild_all`, `rebuild_from_record` — the record-sourced one, whose writes
+#     come from the RECORD rather than a log but are the same sanctioned rebuild
+#     of derived state — `recover_from_log`, `backup.restore`, `_cmd_reconcile`),
+#     whose records came FROM the journal and must not journal again.
 #   * `_graph_metadata_write_scope(...)` — the GRAPH-METADATA lane: a write
 #     that is NOT a projection of any journal record and never becomes one,
 #     because it is graph-wide bookkeeping rather than a fact about the corpus,
@@ -14104,6 +14106,48 @@ class FalkorProjection(
         deterministic key order, and a relation whose endpoint falls outside
         the bound is a no-op (the same verdict the record projection's own
         endpoint resolution gives an absent endpoint).
+
+        #9124: declare the REBUILD lane, then project the record. Every write
+        this engine issues — ``_wipe_all_nodes``'s ``MATCH (n) DETACH DELETE n``,
+        ``_ensure_indexes``'s DDL, ``project_records``'s ``MERGE``/``CREATE``
+        statements and ``write_declaration``'s write — is the cache being REBUILT, from a
+        sanctioned source, after a wipe. Without the scope the guard refuses the
+        projection of the first record row (measured: ``DirectCacheWriteRefused``
+        on the fold's own ``MERGE``) and §2.0's record→cache load — the rebuild
+        path a lost cache depends on — breaks.
+
+        ⇒ The lane declared here is ``_replay_write_scope()``, the SAME one
+        :meth:`rebuild_all` and :meth:`rebuild` declare, and the honest reading
+        of its name is "this rebuild's writes come from the sanctioned source, so
+        they are not a second writer". For this engine the source is the RECORD,
+        not a journal log; the lane's meaning is *rebuild of derived state*, not
+        *byte-for-byte journal replay*, and the two engines' bodies are shared
+        machinery, so one declaration covers both. ⚠️ The scope's WIDTH is the
+        reason it is stated rather than assumed: ``FalkorProjection.query``'s
+        ``#7951`` refusal is scope-CONDITIONED (it fires only while
+        ``_CACHE_WRITE_AUTHORIZED`` is ``None``), so the window also AUTHORIZES
+        that lane — latent here (this engine never calls ``self.query``), and
+        narrowable in one place if the rebuild engines get their own lane.
+        """
+        with _replay_write_scope():
+            return self._project_record_view(
+                view,
+                confirm_destructive=confirm_destructive,
+                declare=declare,
+                scope=scope,
+                limit=limit,
+            )
+
+    def _project_record_view(self, view, *, confirm_destructive: bool = False,
+                            declare: bool = True, scope: str = "",
+                            limit: int | None = None) -> dict:
+        """Implementation of :meth:`rebuild_from_record`.
+
+        Extracted so the public entry point can declare the lane ONCE, around the
+        whole rebuild — the :meth:`_rebuild_all_replay` shape (#9124). The body
+        below is unchanged; it is listed in
+        ``tests/test_9124_declared_live_doors.py::_CALLER_DECLARED`` because its
+        lane is opened by its only caller.
         """
         from tortoise.cache_projection import (
             declaration_for,
