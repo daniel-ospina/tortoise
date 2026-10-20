@@ -96,7 +96,7 @@ class _FailingSweepWrite:
                 return getattr(real_g, name)
 
             def query(self, cypher, params=None, **kw):
-                if "SET n.ep_dirty" in " ".join(cypher.split()):
+                if "collect(CASE WHEN swept_now" in " ".join(cypher.split()):
                     outer.attempts.append(cypher)
                     raise RuntimeError("sweep write aborted (engine timeout)")
                 return real_g.query(cypher, params=params, **kw)
@@ -255,7 +255,12 @@ def test_sweep_drops_a_root_a_peer_already_cleared():
             # Retry state is per-mirror-root; give the phantom some before the
             # sweep so the cleanup is observable.
             sdk._retry_attempts[ids[1]] = 3
-            sdk._stale_unresolved[ids[1]] = 1
+            sdk._stale_unresolved[ids[1]] = {
+                "attempts": 1,
+                "last_attempt_at": 0.0,
+                "backoff_state": "capped",
+                "reason": "non_converged",
+            }
 
             sdk._sweep_dirty_roots({ids[1]}, run_ep=sdk._ep_epoch())
 
@@ -557,6 +562,64 @@ def test_a_retaining_sweep_costs_one_write_not_one_per_root():
                 "flag-mutating statement(s): the retained branch must ride the "
                 "one clearing statement (its cost is one index entry per "
                 "retained row, not one extra statement per row — #2952)"
+            )
+        finally:
+            sdk.close()
+
+
+def test_retry_cap_fails_safe_and_logs_when_the_verdict_cannot_be_read(caplog):
+    """A raise from the cap's statement keeps the root retryable AND says so.
+
+    `unknown` must not silently become "the cap never retires": an inert cap
+    restores #1243's immortal-retry class, so the arm logs. It also drops any
+    stale `capped` record, because a root cannot be reported capped and kept
+    retryable at the same time (#1243's mutual exclusion).
+    """
+    import logging
+
+    with _db() as db:
+        sdk = TortoiseSDK(db)
+        try:
+            ids = _chain(sdk, 2)
+            sdk.dream(mode="local")
+            cap = sdk.retry_attempt_cap
+            sdk._dirty_roots.add(ids[1])
+            sdk._retry_attempts[ids[1]] = cap
+            sdk._stale_unresolved[ids[1]] = {
+                "attempts": cap, "last_attempt_at": 0.0,
+                "backoff_state": "capped", "reason": "non_converged",
+            }
+
+            real_proj = sdk._get_proj()
+
+            class _Boom:
+                def __getattr__(self, name):
+                    return getattr(real_proj, name)
+
+                @property
+                def g(self):
+                    raise RuntimeError("engine went away mid-cap")
+
+            epoch = sdk._ep_epoch()   # read BEFORE the patch: it needs the graph
+            sdk._get_proj = lambda: _Boom()  # type: ignore[method-assign]
+            try:
+                with caplog.at_level(logging.WARNING):
+                    sdk._register_failed_attempt({ids[1]}, run_ep=epoch)
+            finally:
+                sdk._get_proj = lambda: real_proj  # type: ignore[method-assign]
+
+            assert ids[1] in sdk._dirty_roots, (
+                "a cap whose verdict could not be read dropped the root anyway — "
+                "fail-safe means keep it retryable"
+            )
+            assert ids[1] not in sdk._stale_unresolved, (
+                "the root is reported capped while still being retried (#1243's "
+                "mutual exclusion)"
+            )
+            assert any("#9362" in r.getMessage()
+                       for r in caplog.records if r.levelno >= logging.WARNING), (
+                "the fail-safe arm is silent: a broken cap statement would make "
+                "the retry cap inert with no diagnostic"
             )
         finally:
             sdk.close()

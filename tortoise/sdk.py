@@ -20658,17 +20658,20 @@ class TortoiseSDK:
 
         ⛔ ``run_ep`` (#9362 review) — the CAP must not erase another
         process's marking, and the GRAPH is what decides, exactly as it does for
-        :meth:`_sweep_dirty_roots`. Three outcomes, from one statement:
+        :meth:`_sweep_dirty_roots`. FOUR outcomes, from one statement:
 
         * ``retired`` — a dirty flag at or before this run's snapshot: cleared in
-          the graph, dropped from the mirror, recorded as capped;
+          the graph, so the caller drops the root from the mirror and records it
+          capped;
         * ``retained`` — a flag a PEER stamped after this run's snapshot: the
-          graph keeps it, the mirror keeps the root, and its attempts are kept
-          too (so the next cap attempt is one pass away, and no false `capped`
-          record is written for a root that is not capped);
-        * ``unknown`` — the statement raised, or no such dirty ``:Point`` exists
-          (deleted, or already cleared): a raise fails SAFE (kept, retryable),
-          an absent root is the phantom case and leaves the mirror.
+          graph keeps it, and the caller keeps the root, its attempts (so the
+          next cap attempt is one pass away) and its backoff, writing no `capped`
+          record for a root that is not capped;
+        * ``absent`` — no dirty ``:Point`` with that id (deleted, or a flag no
+          reader will see): the phantom case, and the caller drops the root;
+        * ``unknown`` — the statement raised: the caller keeps the root retryable
+          (fail SAFE) and logs, because a silently inert cap would restore the
+          immortal-retry class #1243 bounds.
 
         An UNSTAMPED flag is retired (``n.ep_dirty_at IS NULL``): the cap's job
         is to stop this process retrying a root it has failed on repeatedly, and
@@ -20698,9 +20701,18 @@ class TortoiseSDK:
                     self._stale_unresolved.pop(root, None)
                     continue
                 if verdict == "unknown":
-                    # The write failed. Fail SAFE: keep the root retryable
-                    # rather than dropping a root whose graph flag may stand.
+                    # The write failed. Fail SAFE: keep the root retryable rather
+                    # than dropping a root whose graph flag may stand — and LOG,
+                    # because an inert cap is #1243's immortal-retry class
+                    # coming back silently. The stale record is dropped so the
+                    # root is never reported capped and retrying at once.
                     self._retry_attempts[root] = attempts
+                    self._stale_unresolved.pop(root, None)
+                    _logger.warning(
+                        "#9362: could not read the graph's verdict for capped "
+                        "dirty root %s — keeping it retryable (attempt %d); a "
+                        "persistent failure here makes the retry cap inert",
+                        root, attempts, exc_info=True)
                     continue
                 # `retired` (this run's snapshot outranks the stamp and the
                 # flag is now gone) or `absent` (no such dirty :Point — the
@@ -20727,15 +20739,17 @@ class TortoiseSDK:
 
     def _retry_cap_verdict(self, root: str, run_ep: int | None) -> str:
         """The GRAPH's verdict on retiring a capped root: ``retired``,
-        ``retained`` or ``unknown`` (#9362 review).
+        ``retained``, ``absent`` or ``unknown`` (#9362 review).
 
         One statement, so the clear and the verdict cannot disagree: a flag a
         peer stamped AFTER this run's snapshot is left exactly as it is
         (`SET x = x`), and the row says so. No row means there is no dirty
         ``:Point`` with that id — deleted, or a flag no reader will see — which
-        the caller treats as the phantom case. A raise is ``unknown``: the
-        caller keeps the root retryable rather than dropping it on a write it
-        did not see succeed.
+        the caller treats as the phantom case (`absent`, NOT `unknown`: folding
+        the two together would keep a phantom in the mirror forever and block
+        hydration). A raise is ``unknown``: the caller keeps the root retryable
+        rather than dropping it on a write it did not see succeed, and logs, so
+        a broken statement cannot make the cap silently inert.
         """
         try:
             rows = self._get_proj().g.query(
