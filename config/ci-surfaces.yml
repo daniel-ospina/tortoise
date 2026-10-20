@@ -5580,9 +5580,10 @@ push_extra: []
 # never lowerable, rather than measured against a floor (#9134). Those figures are
 # left as the capture run measured them, not edited. Read the VALUE as a weight; do
 # not read a note as a current statement about the file's size, and do not assume
-# Y is still the denominator the tool would compute. The next refresh re-renders
-# them.
-durations_captured_at: "2026-10-17T15:43:47Z"
+# Y is still the denominator the tool would compute. Do not assume the next
+# refresh fixes a stale Y either: a row's note is rewritten only when that row's
+# value moves or it is held, so an unchanged row keeps the figure it was given.
+durations_captured_at: "2026-10-19T02:41:31Z"
 durations:
 # #3395: per-file CI wall time (seconds), swept from the junit artifacts of four
 # completed 2026-09-22 runs rather than entered by hand — two push-to-main runs

@@ -363,9 +363,12 @@ def test_wrapped_detector_sees_a_claim_split_across_lines(tmp_path):
 
 
 def test_no_wrapped_durability_claim_anywhere_in_the_scanned_roots():
-    """A line break must not hide the PREDICATE claim from the gate. ``tortoise/api.py``
-    carried `(the journal IS the` / `truth)` while this gate reported clean,
-    which is the fail-open shape the gate exists to forbid.
+    """A line break must not hide the PREDICATE claim from the gate.
+
+    ``tortoise/api.py`` reads `(the journal IS the` / `reconstruction source)`
+    today, and the predicate the gate looks for spans both lines — so the shape
+    that would slip past a line-oriented scan is live, and a gate that reported
+    clean on it would be failing open, which is what this forbids.
 
     SCOPE: the joined re-scan covers only the two predicate alternations
     (`is truth` / `is durable`), not `source of truth`. That is deliberate and

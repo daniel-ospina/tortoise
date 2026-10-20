@@ -864,7 +864,7 @@ def test_an_adopted_unmeasured_row_keeps_its_record_and_appends_the_basis() -> N
     row = next(ln for ln in text.split("\n")
                if ln.strip().startswith("test_url_keyed.py:"))
     # the marker itself is falsified by the adoption and must not survive ...
-    assert not re.search(r"[\d.]\s*#\s*unmeasured\b", row)
+    assert not re.search(r"#\s*unmeasured\b", row)
     # ... but the RECORD the marker prefixed does, with this render's basis on it
     assert "#4649: 23 tests, live FalkorDB, measured locally" in row
     assert "the #2876 coverage floor needs the row to exist" in row
@@ -1264,7 +1264,7 @@ def test_a_held_row_restates_an_unmeasured_marker_and_keeps_the_rationale() -> N
     assert "carried forward (not a full-file CI measurement)" in row
     # the stale marker token itself must not survive as the leading tail token:
     # the artifact measured this file, so `# unmeasured` would be a false claim.
-    assert not re.search(r"[\d.]\s*#\s*unmeasured\b", row)
+    assert not re.search(r"#\s*unmeasured\b", row)
     assert yaml.safe_load(text)["durations"]["test_journal.py"] == 27.0
 
 
@@ -1776,6 +1776,26 @@ def test_committed_map_marks_no_measured_row_unmeasured() -> None:
     assert not stale, (
         f"{len(stale)} durations row(s) still claim `# unmeasured` while the "
         f"rendered artifact shows their basename measured: {stale[:5]}"
+    )
+
+
+def test_every_capture_dated_note_agrees_with_the_capture_stamp() -> None:
+    """#9134 review P2: the machine-readable stamp and the row notes drifted apart.
+
+    A note reading `ci-timing top-15 2026-10-19 (run ...)` says which capture the
+    figure came from, and `durations_captured_at` is the same fact in machine form.
+    They were rendered by different runs (88 notes dated 2026-10-19 beside a stamp of
+    2026-10-17), which no single run of the tool can produce — the reader then cannot
+    tell whether a weight is freshly measured or inherited. One fact, so: assert it.
+    """
+    text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    stamp = re.search(r'^durations_captured_at:\s*"(\d{4}-\d{2}-\d{2})', text, re.M)
+    assert stamp, "durations_captured_at is missing or unparseable"
+    dates = set(re.findall(r"ci-timing top-15 (\d{4}-\d{2}-\d{2})", text))
+    assert dates, "the map carries no capture-dated note, so this guard is vacuous"
+    assert dates == {stamp.group(1)}, (
+        f"notes are dated {sorted(dates)} but durations_captured_at says "
+        f"{stamp.group(1)} — one of the two is stale"
     )
 
 
