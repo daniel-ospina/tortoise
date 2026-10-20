@@ -1897,32 +1897,70 @@ def test_session_end_own_sweep_SKIPS_a_journal_bound_to_ANOTHER_instance(
     assert journal.exists(), res
     assert res["journal_removed"] is False, res
     assert "16390" in res["skipped_instance"], res
+    # The teardown gate keys on `skipped` (not on the reason string) to mean
+    # "this sweep did not run"; without it the E2E-7 survivor probe would score
+    # the state this skip deliberately left as a leak and red the suite.
+    # Mutation: drop `"skipped"` from the skip return and this fails —
+    # `tests/test_server_hygiene_gate.py::
+    # test_gate_is_SILENT_for_the_INSTANCE_GATE_skip_that_withheld_the_sweep`
+    # fails with it (AssertionError on the survivor).
+    assert res.get("skipped"), res
 
 
-def test_stale_sweep_reaps_an_ORPHAN_instance_sidecar_but_not_a_live_one(
+def test_the_sweep_never_touches_a_sidecar_of_a_session_STILL_COLLECTING(
         monkeypatch, tmp_path):
-    """`_bind_journal_instance` writes a sidecar at conftest IMPORT, but the
-    journal is created lazily by the first append — so a session that mints no
-    graph strands its sidecar and nothing collects it (the journal loop iterates
-    journals; `_remove_journal_file` is only reachable through one). Observed on
-    the author's host while writing this: 4 sidecars to 2 journals.
-    Mutation: drop the orphan loop (`if True: continue`) and this fails; removing
-    the `live_nonces` guard instead reaps a live session's binding and the
-    second half fails."""
+    """The collection window: `_bind_journal_instance` runs at conftest IMPORT,
+    while a docker session's MARKER — `_stale_sweep`'s liveness record — is
+    written later, in the autouse session fixture, and its journal only on the
+    first append. A live peer is therefore, mid-collection, a sidecar with no
+    marker and no journal: textually identical to "stranded". An orphan-sidecar
+    reap keyed on marker absence deleted that binding, after which the peer's
+    journal read as LEGACY (gate off) and the next wrong-instance sweep consumed
+    it — the PR's own defect through a new path. Measured on this tree: 2 m 34 s
+    of collection, so the overlap is the normal case for two lanes.
+    Mutation: restore any marker-absence sidecar reap and this fails."""
     import tortoise.embedded_reaper as er
     from tests._embedded import JOURNAL_INSTANCE_SUFFIX, _stale_sweep
     adir = tmp_path / "suites"
     adir.mkdir()
-    orphan = adir / ("dead0orph.graphs.jsonl" + JOURNAL_INSTANCE_SUFFIX)
-    orphan.write_text("127.0.0.1:16379\n")
-    live = adir / ("live0sess.graphs.jsonl" + JOURNAL_INSTANCE_SUFFIX)
-    live.write_text("127.0.0.1:16379\n")
+    collecting = adir / ("peer0coll.graphs.jsonl" + JOURNAL_INSTANCE_SUFFIX)
+    collecting.write_text("127.0.0.1:16379\n")
     monkeypatch.setattr(er, "ACTIVE_SUITES_DIR", str(adir))
-    monkeypatch.setattr(er, "active_suite_markers",
-                        lambda: [{"token": "4242-live0sess"}])
+    monkeypatch.setattr(er, "active_suite_markers", lambda: [])
     _stale_sweep(_live_utils.docker_base_uri(password="x", host="127.0.0.1"))
-    assert not orphan.exists(), sorted(os.listdir(adir))
-    assert live.exists(), sorted(os.listdir(adir))
+    assert collecting.exists(), sorted(os.listdir(adir))
+
+
+def test_the_marker_age_prune_never_unlinks_an_OWNERSHIP_RECORD(
+        monkeypatch, tmp_path):
+    """The 24 h prune in `active_suite_markers` unlinks ANY non-dot entry — it
+    is not restricted to markers. A journal the instance gate deliberately
+    SKIPPED (its graphs are on another server, so nothing was concluded and the
+    record must survive for that server's session to reap them) was therefore
+    destroyed, unreported, 24 h after its last append — the PR's defect on a
+    delay, through the very function its stale sweep calls on every docker
+    session. Mutation: drop the `_OWNERSHIP_SUFFIXES` guard and this fails."""
+    import os
+    import time as _t
+
+    import tortoise.embedded_reaper as er
+    adir = tmp_path / "suites"
+    adir.mkdir()
+    old = _t.time() - er.MARKER_MAX_AGE_S - 60
+    for name in ("feed0dead.graphs.jsonl", "feed0dead.graphs.jsonl.cursor",
+                 "feed0dead.graphs.jsonl.instance"):
+        f = adir / name
+        f.write_text("127.0.0.1:16379\n")
+        os.utime(f, (old, old))
+    marker = adir / "4242-feed0dead"
+    marker.write_text("pid=1\nstart=1.0\n")
+    os.utime(marker, (old, old))
+    monkeypatch.setattr(er, "ACTIVE_SUITES_DIR", str(adir))
+    er.active_suite_markers()          # the prune runs here
+    left = sorted(os.listdir(adir))
+    assert "feed0dead.graphs.jsonl" in left, left
+    assert "feed0dead.graphs.jsonl.instance" in left, left
+    assert "4242-feed0dead" not in left, left   # the marker itself IS pruned
 
 
 def test_instance_key_separates_two_DAEMONS_on_the_same_host_and_port(
@@ -1940,6 +1978,16 @@ def test_instance_key_separates_two_DAEMONS_on_the_same_host_and_port(
     remote = _uri_instance_key(uri)
     assert local and remote and local != remote, (local, remote)
     assert "10.0.0.9" in remote, remote
+    # ...but a lane that exports the DEFAULT socket explicitly addresses the
+    # same daemon, so it must produce the SAME key: otherwise that lane writes
+    # journals no peer on the host could ever match, stranding them permanently
+    # (a journal has no age prune). Mutation: return `DOCKER_HOST` raw.
+    for spelling in ("unix:///var/run/docker.sock", "unix:/var/run/docker.sock",
+                     ""):
+        monkeypatch.setenv("DOCKER_HOST", spelling)
+        assert _uri_instance_key(uri) == local, spelling
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    assert _uri_instance_key(uri) == local
 
 
 def test_conftest_BINDS_the_journal_at_import(tmp_path):

@@ -1218,9 +1218,20 @@ def _server_graph_hygiene(_redislite_hygiene):
         # report it, because the only session that can reap those graphs is one
         # pointed at that instance.
         if elsewhere:
+            # Grouped by target: a host with N stranded lane journals printed N
+            # ~70-char reasons at EVERY lane start, and every entry for the same
+            # instance was repeated. Keyed on the reason's own "targets X" tail
+            # so the grouping cannot drift from what the sweep recorded.
+            by_target: dict[str, int] = {}
+            for r in elsewhere:
+                target = r["skipped_instance"].rsplit("this sweep targets ", 1)[-1]
+                by_target[target] = by_target.get(target, 0) + 1
+            shown = sorted(by_target.items())
+            detail = ", ".join(f"{n} for {t}" for t, n in shown[:5])
+            if len(shown) > 5:
+                detail += f", +{len(shown) - 5} more target(s)"
             print(f"[server-graph-hygiene] {len(elsewhere)} dead journal(s) left "
-                  f"for another instance: "
-                  f"{', '.join(r['skipped_instance'] for r in elsewhere)}")
+                  f"for another instance ({detail})")
     except Exception as exc:
         print(f"[server-graph-hygiene] stale sweep skipped: {exc}")
 
@@ -1510,6 +1521,12 @@ def _assert_backend_identity():
         if isinstance(exc, _conn_class) or (
                 isinstance(exc, RuntimeError)
                 and "health check failed" in str(exc)):
+            # This is the ONE journal-removal site that does not consult the
+            # instance binding, and deliberately so: it fires only on a
+            # connection-class failure reaching the target, so the graphs never
+            # came to exist there — there is no ownership to preserve, and the
+            # binding would only say which endpoint refused. Every other removal
+            # path is gated (`_stale_sweep`, `_session_end_own_sweep`).
             from tests._embedded import _remove_journal_file
             _remove_journal_file(os.environ.get("TORTOISE_TEST_JOURNAL_FILE", ""))
             # #2961: at this point a poisoned-AOF crash loop and a genuine

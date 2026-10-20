@@ -1228,8 +1228,24 @@ def _uri_instance_key(uri: str | None) -> str | None:
     # variable is folded in raw (not resolved) because writer and reader both
     # come through here, so only a CHANGE of it matters, and a change is exactly
     # the case where matching would be wrong.
-    daemon = os.environ.get("DOCKER_HOST", "").strip()
+    daemon = _canonical_docker_host()
     return f"{host}:{port or 16379}" + (f"@{daemon}" if daemon else "")
+
+
+#: Spellings of "the default daemon". Folding them to "" matters because the key
+#: is written by one lane and read by another: a lane that exports the default
+#: socket explicitly would otherwise write journals no peer could ever match,
+#: stranding them forever (a journal has no age prune — see `_stale_sweep`).
+_DEFAULT_DOCKER_HOSTS = frozenset({
+    "", "unix:///var/run/docker.sock", "unix:///var/run/docker.sock/",
+    "unix:/var/run/docker.sock", "npipe:////./pipe/docker_engine",
+})
+
+
+def _canonical_docker_host() -> str:
+    """`DOCKER_HOST` foldable to "" when it names the DEFAULT daemon."""
+    raw = os.environ.get("DOCKER_HOST", "").strip()
+    return "" if raw in _DEFAULT_DOCKER_HOSTS else raw
 
 
 def _journal_instance(journal_file: str) -> str | None:
@@ -1820,6 +1836,15 @@ def _session_end_own_sweep(uri: str, journal_file: str, *,
     is consumed here and its graphs become unattributable, which is the defect
     this PR removes. Setup-time agreement is the normal case, so this skips
     nothing in practice; it withholds the irreversible step when it does not.
+
+    The skip is reported under BOTH ``skipped_instance`` (the reason, for the
+    census) and ``skipped`` — the key `tests/conftest.py`'s teardown gate
+    short-circuits on to mean "this sweep did not run". They are not
+    interchangeable: ``skipped_instance`` says WHY, ``skipped`` says the sweep
+    withheld all action, and the E2E-7 survivor gate scores a sweep that did
+    not run as a leak unless the latter is set. Withholding the sweep and then
+    probing the journal's names anyway would raise on state this function
+    deliberately left alone — a false red, not a leak.
     """
     bound = _journal_instance(journal_file)
     target = _uri_instance_key(uri)
@@ -1827,9 +1852,10 @@ def _session_end_own_sweep(uri: str, journal_file: str, *,
         why = ("its recorded instance binding is UNREADABLE, so which server "
                "these graphs are on cannot be established"
                if not bound else f"bound to {bound}")
+        reason = f"{why}, this sweep targets {target}"
         return {"dropped": [], "failed": [], "preserved": [],
-                "journal_removed": False,
-                "skipped_instance": f"{why}, this sweep targets {target}"}
+                "journal_removed": False, "skipped": reason,
+                "skipped_instance": reason}
     with _sweep_proj(uri) as proj:
         return _sweep_drop(proj, journal_file, drop=True,
                            skip_on_non_loopback=skip_on_non_loopback)
@@ -2153,28 +2179,21 @@ def _stale_sweep(uri: str, *, skip_on_non_loopback: bool = True) -> dict:
         results.append({"journal": e, **res})
         if res.get("journal_removed"):
             consumed_markers.add(nonce)
-    # Housekeeping: an ORPHAN sidecar. `_bind_journal_instance` writes one at
-    # conftest IMPORT, but the journal itself is created lazily by the first
-    # `_journal_append` — so a bound session that mints no graph leaves
-    # `<nonce>.graphs.jsonl.instance` behind and nothing ever collects it (the
-    # journal loop above iterates journals, and `_remove_journal_file` is only
-    # reachable through one). Measured on the author's host while writing this:
-    # 4 sidecars to 2 journals. Same rule as the marker loop: only a nonce no
-    # live suite holds is touched.
-    for e in sorted(entries):
-        if not e.endswith(JOURNAL_INSTANCE_SUFFIX):
-            continue
-        journal_name = e[: -len(JOURNAL_INSTANCE_SUFFIX)]
-        if journal_name in entries:
-            continue  # a real journal still owns this binding
-        nonce = journal_name[: -len(".graphs.jsonl")] \
-            if journal_name.endswith(".graphs.jsonl") else journal_name
-        if nonce in live_nonces:
-            continue
-        try:  # noqa: SIM105
-            os.remove(os.path.join(_ASD, e))
-        except OSError:
-            pass
+    # NO orphan-sidecar reap here, deliberately. `_bind_journal_instance`
+    # writes `<nonce>.graphs.jsonl.instance` at conftest IMPORT, while a docker
+    # session's MARKER (this loop's liveness record) is written later, in the
+    # autouse session fixture — so during the whole COLLECTION phase a live
+    # session has a sidecar, no marker and no journal (the journal appears on
+    # the first append), which is textually identical to "stranded". A reap
+    # keyed on marker absence therefore deletes a live peer's binding, and
+    # without it that peer's journal reads as LEGACY: the instance gate switches
+    # itself off and the next wrong-instance sweep consumes it — the defect this
+    # PR removes, re-entered. Measured 2026-10-20 on `pytest tests/
+    # --collect-only` for this tree: 2 m 34 s of collection, i.e. the overlap is
+    # the normal case for two concurrent lanes. The residue this leaves is a
+    # sidecar for a session that CRASHES after import and before its first
+    # append (a few dozen bytes); `_remove_journal_file` still reaps the sidecar
+    # of every journal a sweep consumes.
     # Housekeeping: a consumed journal's DEAD marker is now meaningless, and
     # leaving it is what made "a marker with no journal" the only surviving
     # trace of the consumption measured above. Only markers whose nonce we just
