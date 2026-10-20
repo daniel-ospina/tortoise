@@ -3481,6 +3481,15 @@ surfaces:
   # never executed.
   - test_bm25_lexical_8488.py
   - test_determinism_tie_order_3019.py
+  # #7704: the RRF positional-rank guard — two documents a leg scored
+  # IDENTICALLY must not come out of fusion with different relevance (the
+  # `xfail(strict=True)` pin is the forcing function for the open owner ruling
+  # on that issue). Registered under `core` for the #3518 reason above:
+  # `tortoise/search_engine.py` (where `rrf_fusion` lives) matches no
+  # SOURCE_PATTERNS entry and falls to the `core` fallback, so a
+  # search_engine.py-only PR would otherwise never run this pin. Hermetic (no
+  # DB, no embedder), so NOT in `carve_out`.
+  - test_rrf_tie_rank_7704.py
   # #4999: the vector leg's trace must report WHICH path it took (index vs
   # brute-force scan). Pins the unpatterned engine module
   # `tortoise/search_engine.py` (run_vector_query), which falls to the `core`
@@ -6249,6 +6258,11 @@ durations:
   # pool size or percentage is restated here on purpose — see the same rule on
   # the `#3400` rows above.
   test_determinism_tie_order_3019.py: 7.1
+  # #7704: measured 2026-10-20 LOCALLY under the embedded carve-out config
+  # (`TORTOISE_TEST_CARVE_OUT=1`) — 2.96s / 2.69s for the file, hermetic (one
+  # pure-`rrf_fusion` module, no DB and no embedder). Refresh from the first
+  # post-merge CI run that measures it.
+  test_rrf_tie_rank_7704.py: 2.9
   test_epic903_staleness.py: 2.9
   test_epic903_observability.py: 2.9
   test_lme_m6_evidence.py: 2.4

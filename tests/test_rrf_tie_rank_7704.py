@@ -4,8 +4,10 @@
 scores two documents identically, the *leg's own* tie order becomes a fusion
 **relevance** difference between documents whose evidence is identical. On the
 search legs that tie order is the leg's secondary sort on its own id field
-(#3019) — the ULID for points (creation order), ``url`` for source/document,
-``eventId`` for events.
+(#3019) — ``url`` for source/document, ``eventId`` for events, and for points
+``id``: a ULID on the create paths (chronological) but ``pt_<sha256>`` on the
+extraction/commit paths (``commit_schema.point_content_id``), where the order is
+content-hash and the two id spaces sort as blocks.
 
 Measured on ``origin/main`` at ``248940bf1`` (this file's red run; the same
 quantity the issue body measured at ``38c3b6ea5``)::
@@ -33,11 +35,15 @@ fusion-level cause, not a page outcome). The **single-leg** path does not fuse
 score there — the two paths disagree about identical evidence.
 
 ⛔ **What this file is, and is NOT.** The defect is measured; *what to do about
-it* is an OPEN owner ruling on #7704 (tie-averaged ranks vs. restate the #2102
-E2E-1 promise as single-leg/exact-tie only, plus the boost-magnitude and
-clamp-headroom variants). Nothing here decides that: the pin below is
-``xfail(strict=True, raises=AssertionError)`` so the shipped behaviour is
-EXECUTABLE and cannot drift silently, while the suite stays green.
+it* is an OPEN owner ruling on #7704. The recorded option set is the rationale
+on ``W4_CONTESTED_BOOST`` (``tortoise/ranking.py``) — do not re-list it here:
+two of its members decide OTHER questions and are NOT #7704 choices, i.e.
+replacing rank-based fusion with score-based fusion is the OPEN OWNER RULING on
+#4210, and tie-breaking on the contested signal reverses #3019's id tie-break
+that ``temporal_leg`` consumes positionally (#2976). Nothing here decides any
+of it: the pin below is ``xfail(strict=True, raises=AssertionError)`` so the
+shipped behaviour is EXECUTABLE and cannot drift silently, while the suite stays
+green.
 
 When the ruling lands, this file is the switch that forces the follow-through:
 

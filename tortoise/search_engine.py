@@ -2471,9 +2471,14 @@ def rrf_fusion(
     #     -> {'b': 0.04098360655737705, 'a': 0.04032258064516129}
     #
     # — land 1.61% apart, ordered by whatever broke the leg's tie. In the search
-    # legs that is the leg's secondary sort on its own id field (#3019): the
-    # ULID for points (creation order), ``url`` for source/document, ``eventId``
-    # for events. The single-leg path does not fuse (``sdk.py``'s
+    # legs that is the leg's secondary sort on its own id field (#3019):
+    # ``url`` for source/document, ``eventId`` for events, and for points the
+    # node id — a ULID on the create paths (chronological) but
+    # ``pt_<sha256>`` on the extraction/commit paths
+    # (``commit_schema.point_content_id``), so a tie's order is chronological
+    # for one population and content-hash for the other, and the two id spaces
+    # sort as blocks ('p' after the digits). Arbitrary-but-stable, never a
+    # relevance proxy. The single-leg path does not fuse (``sdk.py``'s
     # ``len(raw_results) == 1`` shortcut), so the same two rows keep the SAME
     # score there: the two paths disagree about identical evidence.
     #
@@ -2488,12 +2493,16 @@ def rrf_fusion(
     # ``W4_CONTESTED_BOOST`` in ``tortoise/ranking.py`` — do not re-derive it
     # here, and do not read a single page's outcome as the mechanism's promise.
     #
-    # Whether fusion MAY spread identical evidence by an id is an OPEN owner
-    # ruling on #7704, and the options are NOT just two: tie-averaged ranks, or
-    # restating the promise as single-leg/exact-tie only, or a boost-magnitude
-    # change, or a clamp-headroom change. The equal-evidence invariant is pinned
-    # by ``tests/test_rrf_tie_rank_7704.py`` (``xfail(strict=True)`` until that
-    # ruling lands — it reds when a remedy lands so the marker comes off
+    # Whether fusion MAY spread identical evidence by an id — and which remedy is
+    # permitted — is an OPEN owner ruling on #7704. The recorded option set is
+    # the rationale on ``W4_CONTESTED_BOOST`` in ``tortoise/ranking.py``: read it
+    # there, not as a re-list here, because two of its members decide OTHER
+    # questions and are NOT #7704 choices — replacing rank-based fusion with
+    # score-based fusion is the OPEN OWNER RULING on #4210, and tie-breaking on
+    # the contested signal reverses #3019's id tie-break, which ``temporal_leg``
+    # consumes positionally (#2976). The equal-evidence invariant itself is
+    # pinned by ``tests/test_rrf_tie_rank_7704.py`` (``xfail(strict=True)`` until
+    # that ruling lands — it reds when a remedy lands so the marker comes off
     # deliberately); the measured magnitudes live on #7704. Do not read this
     # comment as a decision either way.
     # R5 (#1544): optional recency multiplier — a multiplier, NOT an additive
