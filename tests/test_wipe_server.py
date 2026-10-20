@@ -119,6 +119,17 @@ class _FakeProj:
     def close(self):
         pass
 
+    # The sweep helper is used as a context manager (`_sweep_proj`), and a
+    # patched `_sweep_proj` is reached in both the gated and the un-gated path —
+    # so without these an un-gated mutant dies of `TypeError` instead of the
+    # assertion the test is written for (measured: VGATE mutant (a)).
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
 
 # ── wipe_server: filter/refusal/completeness surface ───────────────────────
 
@@ -1862,6 +1873,103 @@ def test_stale_sweep_SKIPS_a_journal_whose_sidecar_is_UNREADABLE(
     assert db.deleted == [], res
     assert journal.exists(), res
     assert "UNREADABLE" in res["stale"][0]["skipped_instance"], res
+
+
+def test_session_end_own_sweep_SKIPS_a_journal_bound_to_ANOTHER_instance(
+        monkeypatch, tmp_path):
+    """The session-END path ends by REMOVING the journal, and `_sweep_drop`
+    counts an absent graph as satisfied — so sweeping the WRONG instance consumes
+    the only ownership record while the graphs live on. The binding is written at
+    conftest IMPORT and `uri` is read at fixture SETUP, so the two can disagree;
+    this is the same guard `_stale_sweep` has, on the path every session takes.
+    Mutation: drop the gate (sweep unconditionally) and this fails."""
+    from tests._embedded import JOURNAL_INSTANCE_SUFFIX, _session_end_own_sweep
+    journal = tmp_path / "own0end.graphs.jsonl"
+    journal.write_text("test_ws_own_graph\n")
+    journal.with_name(journal.name + JOURNAL_INSTANCE_SUFFIX).write_text(
+        "127.0.0.1:16390\n")
+    db = _FakeDb(graphs=[])          # the OTHER instance: the graph is "absent"
+    monkeypatch.setattr("tests._embedded._sweep_proj",
+                        lambda uri: _FakeProj(db))
+    res = _session_end_own_sweep(
+        _live_utils.docker_base_uri(password="x", host="127.0.0.1"), str(journal))
+    assert db.deleted == [], res
+    assert journal.exists(), res
+    assert res["journal_removed"] is False, res
+    assert "16390" in res["skipped_instance"], res
+
+
+def test_stale_sweep_reaps_an_ORPHAN_instance_sidecar_but_not_a_live_one(
+        monkeypatch, tmp_path):
+    """`_bind_journal_instance` writes a sidecar at conftest IMPORT, but the
+    journal is created lazily by the first append — so a session that mints no
+    graph strands its sidecar and nothing collects it (the journal loop iterates
+    journals; `_remove_journal_file` is only reachable through one). Observed on
+    the author's host while writing this: 4 sidecars to 2 journals.
+    Mutation: drop the orphan loop (`if True: continue`) and this fails; removing
+    the `live_nonces` guard instead reaps a live session's binding and the
+    second half fails."""
+    import tortoise.embedded_reaper as er
+    from tests._embedded import JOURNAL_INSTANCE_SUFFIX, _stale_sweep
+    adir = tmp_path / "suites"
+    adir.mkdir()
+    orphan = adir / ("dead0orph.graphs.jsonl" + JOURNAL_INSTANCE_SUFFIX)
+    orphan.write_text("127.0.0.1:16379\n")
+    live = adir / ("live0sess.graphs.jsonl" + JOURNAL_INSTANCE_SUFFIX)
+    live.write_text("127.0.0.1:16379\n")
+    monkeypatch.setattr(er, "ACTIVE_SUITES_DIR", str(adir))
+    monkeypatch.setattr(er, "active_suite_markers",
+                        lambda: [{"token": "4242-live0sess"}])
+    _stale_sweep(_live_utils.docker_base_uri(password="x", host="127.0.0.1"))
+    assert not orphan.exists(), sorted(os.listdir(adir))
+    assert live.exists(), sorted(os.listdir(adir))
+
+
+def test_instance_key_separates_two_DAEMONS_on_the_same_host_and_port(
+        monkeypatch):
+    """`127.0.0.1:16390` exists on EVERY docker daemon, so `host:port` alone
+    does not identify a server: a journal minted against daemon A's lane
+    container would read as a MATCH to daemon B's — the wrong-instance
+    consumption the key exists to prevent. Mutation: drop the `DOCKER_HOST`
+    fold and the two keys compare equal."""
+    from tests._embedded import _uri_instance_key
+    uri = "docker://:x@127.0.0.1:16390/tortoise_test_probe"
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    local = _uri_instance_key(uri)
+    monkeypatch.setenv("DOCKER_HOST", "tcp://10.0.0.9:2375")
+    remote = _uri_instance_key(uri)
+    assert local and remote and local != remote, (local, remote)
+    assert "10.0.0.9" in remote, remote
+
+
+def test_conftest_BINDS_the_journal_at_import(tmp_path):
+    """Wiring pin for the ONLY production caller of `_bind_journal_instance`.
+
+    Every other instance test drives the helper directly, so deleting the
+    conftest block leaves the whole suite green while restoring the pre-fix
+    behaviour exactly (unbound journal -> not instance-gated -> consumed against
+    whatever instance sweeps next). Mutation: `if False:` on that block, or
+    deleting it, and this fails."""
+    import subprocess
+    import sys
+    code = (
+        "import tempfile, os, tortoise.embedded_reaper as er\n"
+        "d = tempfile.mkdtemp(); er.ACTIVE_SUITES_DIR = d\n"
+        "os.environ['TORTOISE_DB_URI'] = "
+        "'docker://:x@127.0.0.1:16499/tortoise_test_probe'\n"
+        "import tests.conftest\n"
+        "print(d)\n")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out = subprocess.run([sys.executable, "-c", code], cwd=root,
+                         capture_output=True, text=True,
+                         env={k: v for k, v in os.environ.items()
+                              if k != "TORTOISE_DB_URI"})
+    assert out.returncode == 0, (out.stdout, out.stderr)
+    d = out.stdout.strip().splitlines()[-1]
+    bound = [f for f in os.listdir(d) if f.endswith(".graphs.jsonl.instance")]
+    assert len(bound) == 1, (bound, out.stdout)
+    with open(os.path.join(d, bound[0])) as fh:
+        assert fh.read().strip() == "127.0.0.1:16499"
 
 
 def test_stale_sweep_still_consumes_an_UNBOUND_legacy_journal(

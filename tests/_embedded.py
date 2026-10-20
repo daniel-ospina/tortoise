@@ -1221,7 +1221,15 @@ def _uri_instance_key(uri: str | None) -> str | None:
     host = parsed.hostname.lower()
     if host == "localhost":
         host = "127.0.0.1"
-    return f"{host}:{port or 16379}"
+    # `host:port` alone does not identify a SERVER when a non-default daemon is
+    # in play: `127.0.0.1:16390` exists on EVERY docker daemon, so a journal
+    # minted against daemon A's lane container would read as a MATCH to daemon
+    # B's — the wrong-instance consumption this key exists to prevent. The
+    # variable is folded in raw (not resolved) because writer and reader both
+    # come through here, so only a CHANGE of it matters, and a change is exactly
+    # the case where matching would be wrong.
+    daemon = os.environ.get("DOCKER_HOST", "").strip()
+    return f"{host}:{port or 16379}" + (f"@{daemon}" if daemon else "")
 
 
 def _journal_instance(journal_file: str) -> str | None:
@@ -1801,7 +1809,27 @@ def _sweep_drop(proj, journal_file: str, *, drop: bool = True,
 
 def _session_end_own_sweep(uri: str, journal_file: str, *,
                            skip_on_non_loopback: bool = True) -> dict:
-    """Session-end sweep of THIS session's journaled graphs (Step 7 item 3)."""
+    """Session-end sweep of THIS session's journaled graphs (Step 7 item 3).
+
+    Gated on the journal's recorded instance exactly like `_stale_sweep`, and
+    for the same reason: this path ends by REMOVING the journal (the only
+    ownership record its graphs have) once every entry is accounted for, and
+    `_sweep_drop` counts an ABSENT graph as satisfied. The two can disagree
+    about the instance — the binding is written at conftest IMPORT while `uri`
+    is read at fixture SETUP — so without this check a journal bound elsewhere
+    is consumed here and its graphs become unattributable, which is the defect
+    this PR removes. Setup-time agreement is the normal case, so this skips
+    nothing in practice; it withholds the irreversible step when it does not.
+    """
+    bound = _journal_instance(journal_file)
+    target = _uri_instance_key(uri)
+    if bound is not None and bound != target:
+        why = ("its recorded instance binding is UNREADABLE, so which server "
+               "these graphs are on cannot be established"
+               if not bound else f"bound to {bound}")
+        return {"dropped": [], "failed": [], "preserved": [],
+                "journal_removed": False,
+                "skipped_instance": f"{why}, this sweep targets {target}"}
     with _sweep_proj(uri) as proj:
         return _sweep_drop(proj, journal_file, drop=True,
                            skip_on_non_loopback=skip_on_non_loopback)
@@ -2125,6 +2153,28 @@ def _stale_sweep(uri: str, *, skip_on_non_loopback: bool = True) -> dict:
         results.append({"journal": e, **res})
         if res.get("journal_removed"):
             consumed_markers.add(nonce)
+    # Housekeeping: an ORPHAN sidecar. `_bind_journal_instance` writes one at
+    # conftest IMPORT, but the journal itself is created lazily by the first
+    # `_journal_append` — so a bound session that mints no graph leaves
+    # `<nonce>.graphs.jsonl.instance` behind and nothing ever collects it (the
+    # journal loop above iterates journals, and `_remove_journal_file` is only
+    # reachable through one). Measured on the author's host while writing this:
+    # 4 sidecars to 2 journals. Same rule as the marker loop: only a nonce no
+    # live suite holds is touched.
+    for e in sorted(entries):
+        if not e.endswith(JOURNAL_INSTANCE_SUFFIX):
+            continue
+        journal_name = e[: -len(JOURNAL_INSTANCE_SUFFIX)]
+        if journal_name in entries:
+            continue  # a real journal still owns this binding
+        nonce = journal_name[: -len(".graphs.jsonl")] \
+            if journal_name.endswith(".graphs.jsonl") else journal_name
+        if nonce in live_nonces:
+            continue
+        try:  # noqa: SIM105
+            os.remove(os.path.join(_ASD, e))
+        except OSError:
+            pass
     # Housekeeping: a consumed journal's DEAD marker is now meaningless, and
     # leaving it is what made "a marker with no journal" the only surviving
     # trace of the consumption measured above. Only markers whose nonce we just
