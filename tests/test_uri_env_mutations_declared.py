@@ -608,14 +608,15 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # function-scoped `monkeypatch`, auto-undone at teardown (no lane leak).
     "test_7949_capstone_verdict_check.py": [
         r'monkeypatch\.(?:setenv|delenv)\(\s*"TORTOISE_DB_URI"'],
-    # #9122's indexer test (`_run_indexer`): `session_indexer.main()` assigns
-    # `os.environ['TORTOISE_DB_URI']` DIRECTLY, so `monkeypatch` never records a
-    # value to restore and every later module would inherit a dead endpoint. The
-    # test therefore setenv's the CURRENT value first — the setenv is
-    # DELIBERATE_URI whose whole purpose is making the teardown restore real, and
-    # it is function-scoped, so no lane flip can leak into a later module.
-    "test_9079_event_writers_journal.py": [
-        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # ⛔ NO second `test_9079_event_writers_journal.py` row here. This branch had
+    # added the BROAD form (`r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'`) at
+    # this anchor, while `main` carries the NARROW one above and deliberately
+    # removed the broad row for good reason: Python's last-wins dict semantics
+    # made the second row DEAD (it never applied) and ruff flagged it `F601`, so
+    # the merge product was TWO identical keys — a repo-wide `ruff check .` red
+    # (#9089 review) — and, had ruff allowed it, this row winning would have
+    # silently RE-WIDENED the exemption `main` narrowed. Removing it changes no
+    # exemption: `main`'s row covers the site.
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;

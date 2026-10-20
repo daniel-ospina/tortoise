@@ -150,11 +150,25 @@ OWNERS = {
     "E2": "#9075",
     "E3": "#5199",   # :Object/:Event version anchoring — the anchor stops at Points
     "E4": "#9077",   # the planted-operator corpus, real path, no monkeypatch
-    "E5": "#7947",   # the falsifier (§10) run on OUR corpus
+    # ⛔ E5 was #7947 until 2026-10-20. That issue is CLOSED COMPLETED (the
+    # falsifier ran twice, PR #9071 merged, §10 carries the result), so citing
+    # it sent every reader of this table to a LANDED lane — the same durable
+    # misattribution ALSO_BLOCKED_BY exists to prevent, and two commits here
+    # re-touched the README after the 12:54Z closure without re-reading it
+    # (#9089 review). What E5 still lacks is not its measurement but a
+    # PRE-REGISTERED capstone pass to re-derive it in — G0, i.e. #9075, which
+    # the epic's own row already named alongside #7947. A row moves only by
+    # RE-RUNNING this probe; it never moves by reading an issue's state.
+    "E5": "#9075",
 }
 # Criterion-specific causes that survive the pre-registration landing: named in
 # the row's note so the reader is not told "#9075" for a row #9075 cannot fix.
 ALSO_BLOCKED_BY = {"E1": "#9076", "E2": "#9076"}
+# Criterion lanes that have LANDED (state re-read, not assumed). Named in the
+# row's note so the table says what is DONE as well as what is missing: E5's
+# falsifier is not outstanding work, and a note that stayed silent about it
+# would leave the next reader re-opening a closed issue to find that out.
+LANDED_LANES = {"E5": "#7947"}
 
 BEGIN = "=== CAPSTONE-VERDICT-BEGIN ==="
 END = "=== CAPSTONE-VERDICT-END ==="
@@ -257,6 +271,23 @@ def e4_receipt(stats: dict) -> dict:
     }
 
 
+def _landed_suffix(cid: str) -> str:
+    """The "… and this much is DONE" half of a row's note.
+
+    A row that names only what is missing cannot distinguish "nobody has run
+    this" from "the measurement landed and only the re-derivation is left", and
+    the second reads identically to the first. E5 is that case: ``#7947`` is
+    CLOSED COMPLETED, so its note says so — and says that a closed issue still
+    cannot move the row, because a row moves only by re-running this probe.
+    """
+    lane = LANDED_LANES.get(cid)
+    if not lane:
+        return ""
+    return (f" / {lane} LANDED (CLOSED COMPLETED) — its measurement is recorded "
+            "there, but a row moves only by RE-RUNNING this probe, never by "
+            "reading an issue's state")
+
+
 def refused_rows(reason: str, *, prereg_ok: bool,
                  prereg_unread: bool = False) -> list[dict]:
     """The 5 rows of a REFUSED run.
@@ -293,6 +324,7 @@ def refused_rows(reason: str, *, prereg_ok: bool,
         note += owner
         if cid in ALSO_BLOCKED_BY:
             note += f" / the measurement itself is {ALSO_BLOCKED_BY[cid]}"
+        note += _landed_suffix(cid)
         rows.append({
             "criterion": cid,
             "verdict": verdict,
@@ -340,6 +372,7 @@ def completed_rows(*, head: str, corpus_sha: str,
         if cid in ALSO_BLOCKED_BY:
             rows[-1]["note"] += (f" / the pre-registration half is "
                                  f"{OWNERS[cid]}")
+        rows[-1]["note"] += _landed_suffix(cid)
         rows[-1]["sibling"] = "E2" if cid == "E1" else ("E1" if cid == "E2"
                                                        else None)
     for row in rows:

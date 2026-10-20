@@ -11,7 +11,7 @@ aboutObjects: "#7949, #9080, #9075, #9076, #9077, #9116, #5199, #7947, EXTRACTOR
 
 # Capstone evidence — `#7949` / `#9080` (extractor-v4, E1–E5)
 
-**Measured at:** `717355e67` on branch `feat/9080-tm` (2026-10-19). **Blast
+**Measured at:** `472599b6a` on branch `feat/9080-tm` (2026-10-20). **Blast
 radius — the 13 files this branch touches** (`git diff --name-only origin/main...HEAD`):
 the bundle itself (`docs/evidence/7949-capstone/**`, `tools/capstone_verdict_check.py`,
 `tests/test_7949_capstone_verdict_check.py`); its registration (`config/ci-surfaces.yml`
@@ -53,16 +53,27 @@ running end to end."*
 | **E2** | state values preserved verbatim under the volume drop | ⛔ **UNPREREGISTERED** | `capstone.log` | **`#9075`** → then **`#9076`** |
 | **E3** | every derived node carries its version anchor (`:Object`/`:Event` included) | ⛔ **BLOCKED** | `capstone.log` | **`#5199`** |
 | **E4** | the extraction leg merges all 15 edges on the REAL path, unpatched | ⛔ **BLOCKED** | `capstone.log` | **`#9077`** |
-| **E5** | the falsifier (§10) was run on OUR corpus | ⛔ **BLOCKED** | `capstone.log` | **`#7947`** |
+| **E5** | the falsifier (§10) was run on OUR corpus | ⛔ **BLOCKED** | `capstone.log` | **`#9075`** (re-derive in a pre-registered pass) — `#7947` **LANDED** |
 
 `UNPREREGISTERED` and `BLOCKED` are deliberately different verdicts: E1/E2's mechanism
-exists and what is missing is the **frozen thresholds** (`#9075`); E3/E4/E5 are missing
-their **mechanism or measurement** and `#9075` landing would not change that. Collapsing
-them into one word would let the next lane re-run and still learn nothing.
+exists and what is missing is the **frozen thresholds** (`#9075`); E3/E4 are missing
+their **mechanism** and `#9075` landing would not change that. Collapsing them into one
+word would let the next lane re-run and still learn nothing.
+
+⚠️ **E5 moved off `#7947` on 2026-10-20, and the move is the row's own history.** `#7947`
+(the raw-vs-narrative falsifier) is **CLOSED COMPLETED** (`2026-10-19T12:54:38Z`, PR
+`#9071` merged): the measurement ran twice, `EXTRACTOR-V4-ARCHITECTURE.md` §10 carries
+the result and D3 stays provisional. Citing it sent every reader of this table to a
+landed lane, and two commits here re-touched this README *after* that closure while
+still printing `OPEN` — the same misattribution `ALSO_BLOCKED_BY` exists to prevent.
+So the row now names what E5 actually lacks: a **pre-registered** capstone pass to
+re-derive the measurement in, i.e. G0 (`#9075`) — plus the run-level `#9116`. Per this
+README's own rule, a row moves only by RE-RUNNING the probe, never by reading an
+issue's state, so E5 stays `BLOCKED` even though its measurement exists.
 
 ## What the run did
 
-The acceptance command from the issue, executed verbatim at `717355e67`:
+The acceptance command from the issue, executed verbatim at `472599b6a`:
 
 ```bash
 python docs/evidence/7949-capstone/probes/capstone_run.py \
@@ -74,7 +85,7 @@ python docs/evidence/7949-capstone/probes/capstone_run.py \
 model call or write*):
 
 ```text
-run: REFUSED — commit 717355e67… does not carry
+run: REFUSED — commit 472599b6a… does not carry
      docs/evidence/7949-capstone/preregistration.json
 steps observed: (none)   required: S0 S1 S2.1 S2.2 S2.3 S3 S5 S6
 ```
@@ -136,9 +147,9 @@ The body's figures are pinned to `9037c7a7b`. Re-measured at `717355e67`:
    `_rollup_llm(..., "s4")`), not a counter emitted by S5 itself, so a pass whose
    `execute_embed` did not run can still report S5 observed. That is a labelling
    limitation of the surface, recorded here rather than presented as a measurement.
-4. **Dependency status at this head — all five re-queried, all OPEN**
-   (first read was rate-limited mid-lane, `gh` HTTP 403 / `gh-rest: gh-limit … FAILED`;
-   re-read after the reset, before the PR):
+4. **Dependency status at this head — the five re-read again on 2026-10-20, and one of
+   them has MOVED** (the earlier read printed `OPEN` for all of them; `#7947` closed at
+   `2026-10-19T12:54:38Z`, which this row and the log's E5 note now say out loud):
 
    | issue | title (truncated) | state |
    |---|---|---|
@@ -146,12 +157,15 @@ The body's figures are pinned to `9037c7a7b`. Re-measured at `717355e67`:
    | `#9076` | E1+E2 on one run — volume falls, correctness preserved | **OPEN** |
    | `#9077` | E4 on the real extraction leg — wired AND persisted, no monkeypatch | **OPEN** |
    | `#5199` | the version anchor stops at Points — `:Object`/`:Event` not version-scoped | **OPEN** |
-   | `#7947` | the raw-vs-narrative measurement — D3's falsifier | **OPEN** |
+   | `#7947` | the raw-vs-narrative measurement — D3's falsifier | **CLOSED COMPLETED** (2026-10-19) |
    | `#9116` | the run's G5 cannot observe 4 of its 8 steps — `capture_session`'s receipt carries no step surface | **OPEN** |
 
    `#9075` is a precondition for the whole table (it is G0). ⚠️ A row moves to
    `RED`/`GREEN` only by RE-RUNNING the probe and producing the artifact — never by
-   reading an issue's state, even when that state is CLOSED.
+   reading an issue's state, even when that state is CLOSED. That is why E5 did not turn
+   green when `#7947` closed: the falsifier's numbers are in §10, but no pre-registered
+   capstone pass has re-derived them, and the E5 row's owner is now the G0 gate that would
+   allow one.
 
    `#9116` is not a row's blocker, it is the **run's**: the five rows above cannot be
    measured at all until the probe can WITNESS a step (see *What this bundle does NOT
@@ -176,12 +190,16 @@ refuses) — an honest finding for `#7949`, never a guess.
   property that does not exist yet — it would return zero rows and read as a working
   instrument reporting `(0, 0)`.
 - **No E1/E2/E5 evidence inputs.** The probe takes none, and this README no longer tells
-  an operator to pass any: the artifacts' shapes are owned by `#9076` (E1/E2 on one run)
+  an operator to pass any: the artifacts' shapes were owned by `#9076` (E1/E2 on one run)
   and `#7947` (the §10 falsifier), so the flags land with them rather than ahead of them.
+  `#7947` **LANDED** its measurement in its own harness
+  (`tests/eval/write_path/`, PR `#9071`) — *not* as a capstone flag — which is the other
+  half of why E5's blocker is now the G0 pre-registration rather than the falsifier.
 - **The gate cannot detect a fabricated evidence file** with a plausible sha. Its stated
   limit: it closes *inference* (green rows with no artifact), not forgery.
-- **Nothing about the five dependencies beyond their `state`** — that they are OPEN is a
-  fresh read, but *why* each is open is the issue body's decomposition, not re-derived.
+- **Nothing about the five dependencies beyond their `state`** — the states above are a
+  fresh read (2026-10-20, `#7947` CLOSED COMPLETED and the rest OPEN), but *why* each is
+  open is the issue body's decomposition, not re-derived.
 - **Nothing reachable by a run.** The eight-step observation is **currently unreachable**
   on `capture_session`'s receipt: `tortoise/sdk.py` assembles the receipt from `meta` +
   `extracted` (no `extraction` key), so the probe binds `result = captured` and hands

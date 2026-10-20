@@ -94,6 +94,43 @@ END = "=== CAPSTONE-VERDICT-END ==="
 _SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
 _BLOCKER_RE = re.compile(r"^#\d+$")
 
+#: The nested blocks ``check()`` reads as OBJECTS. Declared so the type guard is
+#: derived from one list rather than repeated per call site.
+_BLOCK_KEYS = ("run", "prereg", "corpus")
+
+
+def _non_object_blocks(record: dict) -> list[tuple[str, str]]:
+    """Nested blocks that are PRESENT but not JSON objects, as ``(key, type)``.
+
+    ``check()`` reads these three blocks with ``.get`` unconditionally
+    (``prereg.get("sha")``, ``run.get("status")``, ``corpus.get("sha256")``),
+    and only the ROOT record was type-checked. A truthy non-object therefore
+    raised ``AttributeError: 'list' object has no attribute 'get'`` out of
+    ``check()`` and surfaced as **exit 1 with a traceback** — the code this tool
+    reserves for "the table has findings", i.e. a verdict on the evidence that
+    was never reached (#9089 review). Measured before the fix: ``{"corpus":
+    [1]}`` reached ``corpus.get("sha256")`` from V7's non-GREEN arm.
+
+    ABSENT (``None``) is legitimate — an older or partial log may carry no block
+    at all — so only a present, wrong-typed value counts as malformed. ``main()``
+    maps it to usage error 2 (a malformed machine block is not a verdict on the
+    evidence, the same call the root-not-a-table guard makes); ``check()`` records
+    it as a V1 finding so a direct caller can never be handed a traceback either.
+    """
+    bad: list[tuple[str, str]] = []
+    for key in _BLOCK_KEYS:
+        value = record.get(key)
+        if value is not None and not isinstance(value, dict):
+            bad.append((key, type(value).__name__))
+    return bad
+
+
+def _object(record: dict, key: str) -> dict:
+    """``record[key]`` when it is an object, else ``{}`` (see
+    ``_non_object_blocks``: the malformation is reported, never raised)."""
+    value = record.get(key)
+    return value if isinstance(value, dict) else {}
+
 
 def extract_block(text: str) -> dict:
     """Pull the verdict JSON out of a capstone log.
@@ -213,9 +250,17 @@ def check(record: dict, *, repo: Path,
         if criterion not in CRITERIA:
             f.add("V2", f"rows[{criterion}]", "not an E1–E5 criterion")
 
-    run = record.get("run") or {}
-    prereg = record.get("prereg") or {}
-    corpus = record.get("corpus") or {}
+    # A block that is `[]`/`"x"`/`5` is REPORTED here and read as empty below.
+    # `.get` on a non-object raised AttributeError and escaped as exit 1 on a
+    # traceback (#9089 review) — see `_non_object_blocks`.
+    for key, typename in _non_object_blocks(record):
+        f.add("V1", f"root.{key}", f"the {key!r} block is a {typename}, not an "
+                                     "object — the machine block is malformed, "
+                                     "so nothing in it can be checked")
+
+    run = _object(record, "run")
+    prereg = _object(record, "prereg")
+    corpus = _object(record, "corpus")
     prereg_sha = prereg.get("sha")
     if not (isinstance(prereg_sha, str) and _SHA_RE.match(prereg_sha or "")):
         # A table with no frozen pre-registration can hold no green row; the
@@ -313,7 +358,12 @@ def check(record: dict, *, repo: Path,
                 f.add("V5", where, f"GREEN with run.status="
                                    f"{run.get('status')!r} — every row comes "
                                    "from ONE completed pass")
-            observed = tuple(run.get("steps_observed") or ())
+            observed_raw = run.get("steps_observed")
+            # `tuple(run.get("steps_observed") or ())` raised TypeError on a
+            # non-iterable (`"steps_observed": 5`) — exit 1 on a traceback. A
+            # non-list value observes nothing, which is what this finding says.
+            observed = (tuple(observed_raw)
+                        if isinstance(observed_raw, (list, tuple)) else ())
             missing = [s for s in STEPS if s not in observed]
             if missing:
                 f.add("V5", where, "GREEN with steps not observed in the run: "
@@ -388,8 +438,27 @@ def check(record: dict, *, repo: Path,
                 # measurement's clothes on a refusal.
                 try:
                     cited = extract_block((repo / ev_path).read_text())
-                    cited_ids = {r.get("criterion") for r in cited.get("rows") or []
-                                 if isinstance(r, dict)}
+                    # ``extract_block`` is raw ``json.loads``, so a cited file
+                    # whose block is ``[]`` / ``"x"`` made ``cited.get`` raise
+                    # AttributeError — NOT in the tuple below — and an uncaught
+                    # exception exits 1 ("the table has findings") with a
+                    # traceback and no verdict reached. A non-object block is
+                    # simply not a capstone log, which is this arm's finding.
+                    if not isinstance(cited, dict):
+                        raise ValueError(
+                            f"the cited block is a {type(cited).__name__}, "
+                            "not a capstone log")
+                    cited_rows = cited.get("rows")
+                    # The criterion set is built from HASHABLE scalars only —
+                    # a `criterion` that is a LIST is unhashable and raised
+                    # TypeError out of the comprehension, the same escape as
+                    # the V2 census above (which already guards it).
+                    cited_ids = {
+                        r.get("criterion")
+                        for r in (cited_rows if isinstance(cited_rows, list) else [])
+                        if isinstance(r, dict)
+                        and isinstance(r.get("criterion"),
+                                       (str, int, float, bool, type(None)))}
                 except (OSError, ValueError, json.JSONDecodeError):
                     f.add("V6", where, f"evidence_kind='refusal' must cite a "
                                        f"capstone log; {evidence!r} is not one")
@@ -443,6 +512,12 @@ def check(record: dict, *, repo: Path,
     for cid, row in by_id.items():
         sib = row.get("sibling")
         if not sib:
+            continue
+        if not isinstance(sib, (str, int, float, bool)):
+            # An unhashable sibling (``["E1"]``) raised TypeError out of
+            # `by_id.get(sib)` — exit 1 on a traceback, the same escape class as
+            # a wrong-typed block (#9089 review).
+            f.add("V8", f"rows[{cid}]", f"sibling {sib!r} is not a row name")
             continue
         other = by_id.get(sib)
         if other is None:
@@ -519,6 +594,17 @@ def main(argv: list[str] | None = None) -> int:
               f"{type(record).__name__}, not a table", file=sys.stderr)
         return 2
 
+    for key, typename in _non_object_blocks(record):
+        # Exit 1 means "the table has findings", and a lane reads it as a verdict
+        # on the evidence. A machine block that is `[]`/`"x"`/`5` is not a
+        # verdict, it is a malformed artifact — the same call the root-not-a-table
+        # guard above makes. `check()` records it as V1 too, so a direct caller
+        # never sees a traceback either.
+        print(f"capstone-verdict-check: {args.log}: the {key!r} block is a "
+              f"{typename}, not an object — the machine block is malformed",
+              file=sys.stderr)
+        return 2
+
     repo = Path(args.repo).resolve()
     if not repo.is_dir():
         # Exit 1 means "the table has findings" and a lane reads it as a
@@ -530,7 +616,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     findings = check(record, repo=repo, require_green=args.require_green,
                      require_resolvable=args.require_resolvable)
-    rows = record.get("rows") or []
+    rows = record.get("rows")
+    # `record.get("rows") or []` handed a truthy non-list (`"rows": 5`) to the
+    # tally loop below, which raised TypeError — exit 1 on a traceback after the
+    # verdict had already been computed. `check()` reports it as V2.
+    rows = rows if isinstance(rows, list) else []
     tally = {v: sum(1 for r in rows if isinstance(r, dict)
                     and r.get("verdict") == v) for v in VERDICTS}
     print(f"capstone-verdict-check: {args.log} — "

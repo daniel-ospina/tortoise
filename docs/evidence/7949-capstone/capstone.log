@@ -1,9 +1,9 @@
 # extractor-v4 capstone — S0 → S6 on the pre-registered corpus (#9080)
-# generated: 2026-10-19T01:09:39Z
-# head: 717355e67afd5262812f000e32ab0f545b91fa3d
-# pre-registration: 717355e67afd5262812f000e32ab0f545b91fa3d (ABSENT)
+# generated: 2026-10-20T04:39:39Z
+# head: 472599b6afb25473b6882d4924ac2c80625591a5
+# pre-registration: 472599b6afb25473b6882d4924ac2c80625591a5 (ABSENT)
 # corpus: battery/config/corpus.json sha256=None turns=None
-# run: REFUSED — commit 717355e67afd5262812f000e32ab0f545b91fa3d does not carry docs/evidence/7949-capstone/preregistration.json — there is no pre-registration to measure against (#9075)
+# run: REFUSED — commit 472599b6afb25473b6882d4924ac2c80625591a5 does not carry docs/evidence/7949-capstone/preregistration.json — there is no pre-registration to measure against (#9075)
 # steps observed: (none)  required: S0 S1 S2.1 S2.2 S2.3 S3 S5 S6
 # steps MISSING: S0 S1 S2.1 S2.2 S2.3 S3 S5 S6
 
@@ -11,11 +11,11 @@
 
 | criterion | verdict | evidence | blocked_by | note |
 |---|---|---|---|---|
-| E1 | UNPREREGISTERED | docs/evidence/7949-capstone/capstone.log | #9075 | gate refused: commit 717355e67afd5262812f000e32ab0f545b91fa3d does not carry docs/evidence/7949-capstone/preregistration.json — there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #9075 / the measurement itself is #9076 |
-| E2 | UNPREREGISTERED | docs/evidence/7949-capstone/capstone.log | #9075 | gate refused: commit 717355e67afd5262812f000e32ab0f545b91fa3d does not carry docs/evidence/7949-capstone/preregistration.json — there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #9075 / the measurement itself is #9076 |
-| E3 | BLOCKED | docs/evidence/7949-capstone/capstone.log | #5199 | gate refused: commit 717355e67afd5262812f000e32ab0f545b91fa3d does not carry docs/evidence/7949-capstone/preregistration.json — there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #5199 |
-| E4 | BLOCKED | docs/evidence/7949-capstone/capstone.log | #9077 | gate refused: commit 717355e67afd5262812f000e32ab0f545b91fa3d does not carry docs/evidence/7949-capstone/preregistration.json — there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #9077 |
-| E5 | BLOCKED | docs/evidence/7949-capstone/capstone.log | #7947 | gate refused: commit 717355e67afd5262812f000e32ab0f545b91fa3d does not carry docs/evidence/7949-capstone/preregistration.json — there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #7947 |
+| E1 | UNPREREGISTERED | docs/evidence/7949-capstone/capstone.log | #9075 | gate refused: commit 472599b6afb25473b6882d4924ac2c80625591a5 does not carry docs/evidence/7949-capstone/preregistration.json — there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #9075 / the measurement itself is #9076 |
+| E2 | UNPREREGISTERED | docs/evidence/7949-capstone/capstone.log | #9075 | gate refused: commit 472599b6afb25473b6882d4924ac2c80625591a5 does not carry docs/evidence/7949-capstone/preregistration.json — there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #9075 / the measurement itself is #9076 |
+| E3 | BLOCKED | docs/evidence/7949-capstone/capstone.log | #5199 | gate refused: commit 472599b6afb25473b6882d4924ac2c80625591a5 does not carry docs/evidence/7949-capstone/preregistration.json — there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #5199 |
+| E4 | BLOCKED | docs/evidence/7949-capstone/capstone.log | #9077 | gate refused: commit 472599b6afb25473b6882d4924ac2c80625591a5 does not carry docs/evidence/7949-capstone/preregistration.json — there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #9077 |
+| E5 | BLOCKED | docs/evidence/7949-capstone/capstone.log | #9075 | gate refused: commit 472599b6afb25473b6882d4924ac2c80625591a5 does not carry docs/evidence/7949-capstone/preregistration.json — there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #9075 / #7947 LANDED (CLOSED COMPLETED) — its measurement is recorded there, but a row moves only by RE-RUNNING this probe, never by reading an issue's state |
 
 === CAPSTONE-VERDICT-BEGIN ===
 {
@@ -25,11 +25,11 @@
     "turns": null
   },
   "epic": 7949,
-  "head": "717355e67afd5262812f000e32ab0f545b91fa3d",
+  "head": "472599b6afb25473b6882d4924ac2c80625591a5",
   "issue": 9080,
   "prereg": {
     "artifact": "docs/evidence/7949-capstone/preregistration.json",
-    "sha": "717355e67afd5262812f000e32ab0f545b91fa3d",
+    "sha": "472599b6afb25473b6882d4924ac2c80625591a5",
     "status": "ABSENT"
   },
   "rows": [
@@ -40,9 +40,9 @@
       "denominator": null,
       "evidence": "docs/evidence/7949-capstone/capstone.log",
       "evidence_kind": "refusal",
-      "note": "gate refused: commit 717355e67afd5262812f000e32ab0f545b91fa3d does not carry docs/evidence/7949-capstone/preregistration.json \u2014 there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #9075 / the measurement itself is #9076",
+      "note": "gate refused: commit 472599b6afb25473b6882d4924ac2c80625591a5 does not carry docs/evidence/7949-capstone/preregistration.json \u2014 there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #9075 / the measurement itself is #9076",
       "numerator": null,
-      "sha": "717355e67afd5262812f000e32ab0f545b91fa3d",
+      "sha": "472599b6afb25473b6882d4924ac2c80625591a5",
       "sibling": null,
       "verdict": "UNPREREGISTERED"
     },
@@ -53,9 +53,9 @@
       "denominator": null,
       "evidence": "docs/evidence/7949-capstone/capstone.log",
       "evidence_kind": "refusal",
-      "note": "gate refused: commit 717355e67afd5262812f000e32ab0f545b91fa3d does not carry docs/evidence/7949-capstone/preregistration.json \u2014 there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #9075 / the measurement itself is #9076",
+      "note": "gate refused: commit 472599b6afb25473b6882d4924ac2c80625591a5 does not carry docs/evidence/7949-capstone/preregistration.json \u2014 there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #9075 / the measurement itself is #9076",
       "numerator": null,
-      "sha": "717355e67afd5262812f000e32ab0f545b91fa3d",
+      "sha": "472599b6afb25473b6882d4924ac2c80625591a5",
       "sibling": null,
       "verdict": "UNPREREGISTERED"
     },
@@ -66,9 +66,9 @@
       "denominator": null,
       "evidence": "docs/evidence/7949-capstone/capstone.log",
       "evidence_kind": "refusal",
-      "note": "gate refused: commit 717355e67afd5262812f000e32ab0f545b91fa3d does not carry docs/evidence/7949-capstone/preregistration.json \u2014 there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #5199",
+      "note": "gate refused: commit 472599b6afb25473b6882d4924ac2c80625591a5 does not carry docs/evidence/7949-capstone/preregistration.json \u2014 there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #5199",
       "numerator": null,
-      "sha": "717355e67afd5262812f000e32ab0f545b91fa3d",
+      "sha": "472599b6afb25473b6882d4924ac2c80625591a5",
       "sibling": null,
       "verdict": "BLOCKED"
     },
@@ -79,29 +79,29 @@
       "denominator": null,
       "evidence": "docs/evidence/7949-capstone/capstone.log",
       "evidence_kind": "refusal",
-      "note": "gate refused: commit 717355e67afd5262812f000e32ab0f545b91fa3d does not carry docs/evidence/7949-capstone/preregistration.json \u2014 there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #9077",
+      "note": "gate refused: commit 472599b6afb25473b6882d4924ac2c80625591a5 does not carry docs/evidence/7949-capstone/preregistration.json \u2014 there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #9077",
       "numerator": null,
-      "sha": "717355e67afd5262812f000e32ab0f545b91fa3d",
+      "sha": "472599b6afb25473b6882d4924ac2c80625591a5",
       "sibling": null,
       "verdict": "BLOCKED"
     },
     {
-      "blocked_by": "#7947",
+      "blocked_by": "#9075",
       "corpus_sha256": null,
       "criterion": "E5",
       "denominator": null,
       "evidence": "docs/evidence/7949-capstone/capstone.log",
       "evidence_kind": "refusal",
-      "note": "gate refused: commit 717355e67afd5262812f000e32ab0f545b91fa3d does not carry docs/evidence/7949-capstone/preregistration.json \u2014 there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #7947",
+      "note": "gate refused: commit 472599b6afb25473b6882d4924ac2c80625591a5 does not carry docs/evidence/7949-capstone/preregistration.json \u2014 there is no pre-registration to measure against (#9075); this criterion's evidence is owned by #9075 / #7947 LANDED (CLOSED COMPLETED) \u2014 its measurement is recorded there, but a row moves only by RE-RUNNING this probe, never by reading an issue's state",
       "numerator": null,
-      "sha": "717355e67afd5262812f000e32ab0f545b91fa3d",
+      "sha": "472599b6afb25473b6882d4924ac2c80625591a5",
       "sibling": null,
       "verdict": "BLOCKED"
     }
   ],
   "run": {
     "gate_failed": 2,
-    "reason": "commit 717355e67afd5262812f000e32ab0f545b91fa3d does not carry docs/evidence/7949-capstone/preregistration.json \u2014 there is no pre-registration to measure against (#9075)",
+    "reason": "commit 472599b6afb25473b6882d4924ac2c80625591a5 does not carry docs/evidence/7949-capstone/preregistration.json \u2014 there is no pre-registration to measure against (#9075)",
     "status": "REFUSED",
     "steps_observed": [],
     "steps_required": [

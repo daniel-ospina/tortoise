@@ -160,15 +160,52 @@ def test_shipped_log_is_not_closeable_and_says_so():
 
 
 def test_shipped_log_names_a_blocker_on_every_row():
-    """Every non-green row carries its cause — the issue's explicit demand."""
+    """Every non-green row carries its cause — the issue's explicit demand.
+
+    #5199 (E3 anchoring) and #9077 (E4 real path) are the per-criterion lanes;
+    #9075 gates E1/E2's thresholds. E5 is NOT #7947 any more: that falsifier is
+    CLOSED COMPLETED (2026-10-19T12:54:38Z), so citing it pointed every reader of
+    the table at a landed issue — the misattribution #9089's review measured on
+    two commits that re-touched the README AFTER the closure while still printing
+    OPEN. What E5 lacks is a PRE-REGISTERED pass to re-derive it in, which is the
+    same G0 gate as E1/E2.
+    """
     record = cvc.extract_block(LOG.read_text())
     for row in record["rows"]:
         assert row["blocked_by"].startswith("#"), row
     owners = {r["criterion"]: r["blocked_by"] for r in record["rows"]}
-    # #5199 (E3 anchoring), #9077 (E4 real path), #7947 (E5 falsifier) are the
-    # per-criterion lanes; #9075 gates E1/E2's thresholds.
     assert owners == {"E1": "#9075", "E2": "#9075", "E3": "#5199",
-                      "E4": "#9077", "E5": "#7947"}, owners
+                      "E4": "#9077", "E5": "#9075"}, owners
+    # The LANDED lane is named in the note, not dropped: a reader must be able to
+    # tell "measured, needs re-deriving" from "nobody has run this".
+    e5 = {r["criterion"]: r for r in record["rows"]}["E5"]
+    assert "#7947 LANDED" in e5["note"], e5["note"]
+    assert "CLOSED COMPLETED" in e5["note"], e5["note"]
+
+
+def test_the_probes_owners_map_names_no_landed_criterion_lane():
+    """REGRESSION (#9089 review): a row's OWNER must be OPEN work.
+
+    E5 named #7947 after it closed, and the README's own dependency table printed
+    that issue as OPEN two commits after it was closed — a stale value nothing
+    reds on, because V6 accepts any `#NNN` with no state check (the gate is
+    offline by design). The pin is therefore on the MAP: a criterion lane that
+    has landed belongs in LANDED_LANES, and its owner is whatever OPEN work is
+    actually left.
+
+    Non-vacuity: with `OWNERS["E5"] = "#7947"` the first assert fails, and the
+    note suffix this test also pins did not exist at all.
+    """
+    assert "E5" not in [c for c, lane in probe.OWNERS.items()
+                        if lane in probe.LANDED_LANES.values()], probe.OWNERS
+    assert probe.LANDED_LANES == {"E5": "#7947"}, probe.LANDED_LANES
+    rows = {r["criterion"]: r for r in probe.refused_rows(
+        "gate refused: x", prereg_ok=False)}
+    assert rows["E5"]["blocked_by"] == "#9075", rows["E5"]
+    assert "#7947 LANDED" in rows["E5"]["note"], rows["E5"]["note"]
+    # and E1/E2's ALSO_BLOCKED_BY note is not disturbed by the new suffix
+    assert "the measurement itself is #9076" in rows["E1"]["note"]
+    assert "LANDED" not in rows["E1"]["note"]
 
 
 # ── V2: the five-row contract ────────────────────────────────────────────
@@ -418,6 +455,96 @@ def test_an_unreadable_repo_is_a_usage_error_not_a_verdict(tmp_path, capsys):
     log = tmp_path / "capstone.log"
     log.write_text(LOG.read_text())
     assert cvc.main([str(log), "--repo", str(tmp_path / "nope")]) == 2
+
+
+def test_a_wrong_typed_nested_block_is_a_usage_error_not_a_traceback(tmp_path, capsys):
+    """REGRESSION (#9089 review): only the ROOT record was type-checked.
+
+    `run` / `prereg` / `corpus` are read with `.get` UNCONDITIONALLY, so a truthy
+    non-object raised `AttributeError: 'list' object has no attribute 'get'` out
+    of `check()` and surfaced as **exit 1 with a traceback** — the code this
+    tool reserves for "the table has findings". A lane that reads exit 1
+    concludes the EVIDENCE is bad when the artifact was merely malformed, and no
+    verdict was ever reached.
+
+    Non-vacuity: measured on the pre-fix tool, every shape below raised out of
+    `main()` (AttributeError) or out of the tally loop (TypeError) — the `== 2` /
+    `== 1` assertions are unreachable there.
+    """
+    for key in ("corpus", "prereg", "run"):
+        rec = _record()
+        rec[key] = [1]          # truthy, not an object
+        log = tmp_path / f"{key}-block.log"
+        log.write_text(f"x\n{cvc.BEGIN}\n{json.dumps(rec)}\n{cvc.END}\n")
+        assert cvc.main([str(log), "--repo", str(_REPO)]) == 2, key
+        assert "not an object" in capsys.readouterr().err, key
+    # `rows: 5` is V2's own finding (the table is five rows), so it is exit 1 —
+    # but with a VERDICT on the table, not the TypeError the tally loop raised.
+    rec = _record()
+    rec["rows"] = 5
+    log = tmp_path / "rows-block.log"
+    log.write_text(f"x\n{cvc.BEGIN}\n{json.dumps(rec)}\n{cvc.END}\n")
+    assert cvc.main([str(log), "--repo", str(_REPO)]) == 1
+    assert "V2" in capsys.readouterr().err
+
+
+def test_a_cited_block_that_is_not_a_table_is_a_V6_finding_not_a_traceback(tmp_path):
+    """REGRESSION (#9089 review): `extract_block` is raw `json.loads`, so a
+    cited file whose block is `[]` / `"x"` made `cited.get` raise AttributeError
+    — not in the V6 except tuple — and escaped `check()` as a traceback.
+
+    V6 reads a SECOND file (an operator-supplied artifact), which is exactly
+    where the guard is easiest to miss: the shipped V6 test cites `README.md`,
+    which has no markers and takes the `ValueError` arm.
+
+    Non-vacuity: both shapes below raised AttributeError / TypeError pre-fix;
+    each is now the SAME finding an unmarked prose file already produced.
+    """
+    cited_dir = tmp_path / "docs/evidence/7949-capstone"
+    cited_dir.mkdir(parents=True)
+    cases = {
+        "empty-list.log": "[]",
+        "a-string.log": '"x"',
+        # a criterion that is a LIST is unhashable — the set comprehension in
+        # V6 raised TypeError on it (the V2 census already guards this shape).
+        "unhashable-criterion.log": json.dumps({"rows": [{"criterion": ["E5"]}]}),
+    }
+    for name, block in cases.items():
+        (cited_dir / name).write_text(f"x\n{cvc.BEGIN}\n{block}\n{cvc.END}\n")
+        rec = _record()
+        for row in rec["rows"]:
+            row["evidence"] = f"docs/evidence/7949-capstone/{name}"
+        findings = cvc.check(rec, repo=tmp_path, require_green=False)
+        codes = [c for c, _w, _m in findings.items]
+        assert codes.count("V6") == 5, (name, findings.render())
+
+
+def test_a_non_iterable_steps_observed_does_not_crash_a_green_row():
+    """REGRESSION (#9089 review): `tuple(run.get("steps_observed") or ())` raised
+    TypeError on a non-iterable, escaping as exit 1 on a traceback.
+
+    Non-vacuity: `tuple(5)` raises, so the pre-fix `_codes` call errored instead
+    of returning findings; a value that observes nothing is now the V5 finding
+    it should be.
+    """
+    rec = _record()
+    _green(rec)
+    rec["run"]["steps_observed"] = 5
+    codes = _codes(rec)
+    assert "V5" in codes, codes
+
+
+def test_an_unhashable_sibling_does_not_crash_the_denominator_check():
+    """REGRESSION (#9089 review): `by_id.get(sib)` with an unhashable sibling
+    raised TypeError out of `check()` — exit 1 on a traceback.
+
+    Non-vacuity: `dict.get(["E1"])` raises, so pre-fix this call errored; the
+    shape is now V8's "sibling is not a row" finding.
+    """
+    rec = _record()
+    rec["rows"][1]["sibling"] = ["E1"]
+    codes = _codes(rec)
+    assert "V8" in codes, codes
 
 
 def test_a_green_table_with_no_frozen_prereg_reds_even_when_the_sha_is_absent():
