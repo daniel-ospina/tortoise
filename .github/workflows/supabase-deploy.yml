@@ -87,6 +87,11 @@ on:
 # the schema half-migrated, which no re-run repairs deterministically. One
 # group, never cancelling — a newer push waits for the in-flight deploy instead
 # of aborting it. Bookkeeping, not a merge gate (#9115).
+#
+# ⛔ The `deploy` JOB below must NOT reuse this group name — a run-level and a
+# job-level group with the same name deadlock and the job fails with zero steps
+# (#9120 caused exactly that; see the note on the job). Its group is
+# `supabase-deploy-apply`.
 concurrency:
   group: supabase-deploy
   cancel-in-progress: false
@@ -125,8 +130,22 @@ jobs:
     # JOB level so a push-triggered run doesn't hold the shared concurrency
     # group and stall an operator's dispatch apply (#1095).
     if: github.event_name == 'workflow_dispatch'
+    # ⛔ This group name MUST differ from the run-level `concurrency.group`
+    # above (#9120). When both are `supabase-deploy`, the RUN acquires the
+    # group first and this job can never acquire it — the run cannot finish
+    # until the job runs, and the job cannot run until the run releases the
+    # group. GitHub resolves the deadlock by failing the job instantly with
+    # ZERO steps and no runner, which reads as a mystery red rather than a
+    # concurrency error. Measured 2026-10-20: the first dispatch after #9120
+    # merged died this way (run 39488590083), so no migration could ever be
+    # applied and the drift gate blocked every `deploy-hosted` behind it.
+    #
+    # Two distinct groups keep both intents: the run-level group serialises
+    # whole deploys (#9115), and this one serialises only the apply, so a
+    # push-triggered run (drift check only) never holds the apply lock
+    # (#1095).
     concurrency:
-      group: supabase-deploy
+      group: supabase-deploy-apply
       cancel-in-progress: false
     env:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}

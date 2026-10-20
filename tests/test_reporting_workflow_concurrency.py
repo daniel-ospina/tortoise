@@ -490,3 +490,83 @@ def test_the_zero_cost_pr_event_exemption_is_still_true() -> None:
         "zero-cost on the PR path — keep it in the job-level `if:`"
     )
     assert "mergify[bot]" in job_if, "the Mergify exemption must stay explicit (#3558)"
+
+
+# ── A run-level group and a job-level group must never share a name ──────────
+#
+# Measured 2026-10-20. Adding a run-level `concurrency:` to supabase-deploy
+# (#9120) reused the group name the `deploy` JOB already declared. The RUN
+# acquires the group first, so the job can never acquire it — and the run cannot
+# finish until the job runs. GitHub resolves that deadlock by failing the job
+# INSTANTLY with ZERO steps and `runner_name: null`:
+#
+#     JOB deploy | conclusion=failure | steps=0 | runner=none
+#     started_at 20:02:38Z -> completed_at 20:02:37Z   (completed BEFORE started)
+#
+# Nothing in that output names concurrency, so it reads as a mystery red. The
+# consequence was not cosmetic: the job is the ONLY thing that applies repo
+# migrations to prod, so no migration could be applied, so the drift gate
+# blocked every `deploy-hosted` behind it, so a merged fix could not deploy.
+#
+# A name comparison catches the whole class in one line, and the two intents
+# stay separately satisfiable: the run-level group serialises whole deploys
+# (#9115), the job-level one serialises only the apply (#1095).
+
+
+def _concurrency_group(block: object) -> str | None:
+    """The literal group name of a `concurrency:` block, or None.
+
+    Accepts both spellings GitHub allows (bare string, or a mapping), and
+    returns None for a block whose group is an expression — an expression is
+    resolved per run and cannot be compared statically.
+    """
+    if isinstance(block, str):
+        return block
+    if isinstance(block, dict):
+        group = block.get("group")
+        return group if isinstance(group, str) else None
+    return None
+
+
+@pytest.mark.parametrize("path", _workflow_paths(), ids=lambda p: p.name)
+def test_no_job_reuses_the_run_level_concurrency_group(path: Path) -> None:
+    """A job group equal to the run group deadlocks: the job never starts."""
+    doc = _load(path)
+    run_group = _concurrency_group(doc.get("concurrency"))
+    if run_group is None:
+        return
+    jobs = doc.get("jobs") or {}
+    assert isinstance(jobs, dict), f"{path.name}: `jobs:` is not a mapping"
+    colliding = sorted(
+        name
+        for name, job in jobs.items()
+        if isinstance(job, dict) and _concurrency_group(job.get("concurrency")) == run_group
+    )
+    assert not colliding, (
+        f"{path.name}: job(s) {colliding} reuse the run-level concurrency group "
+        f"{run_group!r}. The run holds that group first, so the job can never "
+        f"acquire it and GitHub fails it with ZERO steps and no runner — which "
+        f"reads as a mystery red (measured 2026-10-20, #9120 x #1095). Give the "
+        f"job its own group name."
+    )
+
+
+def test_supabase_deploy_apply_lock_is_distinct_from_the_run_lock() -> None:
+    """The incident itself, pinned: the apply lock must stay its own group.
+
+    Named separately from the parametrised sweep because this workflow is the
+    one whose deadlock blocks every prod migration — a regression here must fail
+    with the consequence spelled out, not as one row of a generic table.
+    """
+    doc = _load(WORKFLOW_DIR / "supabase-deploy.yml")
+    run_group = _concurrency_group(doc.get("concurrency"))
+    apply_group = _concurrency_group(doc["jobs"]["deploy"].get("concurrency"))
+    assert run_group == "supabase-deploy", (
+        "the run-level deploy lock (#9115) must stay in place"
+    )
+    assert apply_group is not None, "the apply lock (#1095) must stay in place"
+    assert apply_group != run_group, (
+        f"the apply lock has collapsed back onto the run lock ({run_group!r}) — "
+        "that is the 2026-10-20 deadlock: the deploy job will fail with zero "
+        "steps and no migration can ever be applied"
+    )
