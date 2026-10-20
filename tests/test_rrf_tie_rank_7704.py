@@ -3,8 +3,9 @@
 ``rrf_fusion`` ranks **positionally** (``1/(k + rank + 1)``), so when a leg
 scores two documents identically, the *leg's own* tie order becomes a fusion
 **relevance** difference between documents whose evidence is identical. On the
-search legs that tie order is ``ORDER BY score DESC, node.<id> ASC`` (#3019) —
-i.e. the ULID, i.e. creation order.
+search legs that tie order is the leg's secondary sort on its own id field
+(#3019) — the ULID for points (creation order), ``url`` for source/document,
+``eventId`` for events.
 
 Measured on ``origin/main`` at ``248940bf1`` (this file's red run; the same
 quantity the issue body measured at ``38c3b6ea5``)::
@@ -20,8 +21,14 @@ and end-to-end on the W4-b twin fixture (embedded lane, dense leg LIVE,
     fused rrf   hot 0.03993856  vs  calm 0.04058699        (id tie-break)
     final       hot 0.8936      vs  calm 0.8950            calm first
 
-so the contested twin loses to its uncontested twin because of the tie-break,
-not because of the contested signal. The **single-leg** path does not fuse
+so on every page this fixture exercised (``limit`` 3, 4, 10, 40) the contested
+twin loses to its uncontested twin because of the tie-break, not because of the
+contested signal. That is a page-scoped OUTCOME, not a property of the
+mechanism above: the fused gap becomes a final-score gap only through
+``GraphRanker``'s min-max normalization of the PAGE, so whether the boost
+clears it depends on the caller's ``limit`` (the page-scoped accounting is the
+``W4_CONTESTED_BOOST`` rationale in ``tortoise/ranking.py``; this file pins the
+fusion-level cause, not a page outcome). The **single-leg** path does not fuse
 (``sdk.py``'s ``len(raw_results) == 1`` shortcut), so tied rows keep the same
 score there — the two paths disagree about identical evidence.
 
@@ -39,6 +46,19 @@ When the ruling lands, this file is the switch that forces the follow-through:
   guards below then hold the fix to its invariants (a generator leg is not
   swallowed, a leg that DID rank the rows apart is still respected, and a tie
   group does not displace a row the legs ranked lower).
+
+  ⛔ **The blast radius is larger than this file.** A tie-averaging remedy also
+  inverts the premises of
+  ``tests/test_ranking_w4b.py::test_integration_boost_requirement_is_bounded_by_the_page``:
+  it asserts the twins' similarities are ``{0.0, 1.0}`` (and the contested twin
+  at the ``0`` end) *because* the id tie-break hands the lower-ULID twin rank 0.
+  With averaged ranks the twins' fused scores become equal, ``_min_max_normalize``
+  returns the all-equal midpoint ``0.5`` for both, and those assertions fail with
+  a message that blames the FIXTURE ("regenerate the fixture rather than
+  re-deriving the comment's 1.4286") instead of the fusion remedy. When the
+  ruling lands, re-derive that test's narrative deliberately — **do not relax its
+  assertions**, or the bounded-boost measurement recorded on
+  ``W4_CONTESTED_BOOST`` (``tortoise/ranking.py``) silently stops being pinned.
 * **accept-and-restate** — delete the xfail pin together with the #2102 E2E-1
   restatement. Deleting it is a deliberate act, never a silent green.
 """

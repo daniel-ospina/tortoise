@@ -2470,23 +2470,32 @@ def rrf_fusion(
     #                strategy_names=["fts", "vector"], weights={"vector": 1.5})
     #     -> {'b': 0.04098360655737705, 'a': 0.04032258064516129}
     #
-    # — land 1.61% apart, ordered by whatever broke the leg's tie; in the search
-    # legs that is ``ORDER BY score DESC, node.<id> ASC`` (#3019), i.e. the ULID,
-    # i.e. creation order. The single-leg path does not fuse (``sdk.py``'s
+    # — land 1.61% apart, ordered by whatever broke the leg's tie. In the search
+    # legs that is the leg's secondary sort on its own id field (#3019): the
+    # ULID for points (creation order), ``url`` for source/document, ``eventId``
+    # for events. The single-leg path does not fuse (``sdk.py``'s
     # ``len(raw_results) == 1`` shortcut), so the same two rows keep the SAME
     # score there: the two paths disagree about identical evidence.
     #
-    # That is the mechanism behind #7704's product symptom — the W4-b contested
-    # boost (``W4_CONTESTED_BOOST``) is added AFTER fusion and is smaller than
-    # the one-rank difference this tie-break manufactures, so on a fused read
-    # the contested twin ranks below its uncontested twin, and the outcome is a
-    # function of the caller's ``limit`` (the min-max span is the PAGE). Whether
-    # fusion MAY spread identical evidence by an id (tie-averaged ranks) or the
-    # promise should be restated as single-leg/exact-tie only is an OPEN owner
-    # ruling on #7704; the shipped behaviour and its magnitude are pinned by
-    # ``tests/test_rrf_tie_rank_7704.py`` (``xfail(strict=True)`` until that
-    # ruling lands — it reds when a remedy lands so the marker is removed
-    # deliberately). Do not read this comment as a decision either way.
+    # This is the mechanism behind #7704's product symptom, but the symptom is
+    # NOT a property of the mechanism. The fused gap above only becomes a
+    # FINAL-score gap after ``GraphRanker`` min-max normalizes the PAGE, so
+    # whether the W4-b contested boost (``W4_CONTESTED_BOOST`` — 0.0175 of
+    # final score at ``graph_boost_weight`` 0.35) clears it is a function of the
+    # caller's ``limit``: measured on the twin fixture it does NOT on the
+    # shipped default page (relevance gap 0.0189 > 0.0175) and DOES on a large
+    # one. The full page-scoped accounting is the rationale on
+    # ``W4_CONTESTED_BOOST`` in ``tortoise/ranking.py`` — do not re-derive it
+    # here, and do not read a single page's outcome as the mechanism's promise.
+    #
+    # Whether fusion MAY spread identical evidence by an id is an OPEN owner
+    # ruling on #7704, and the options are NOT just two: tie-averaged ranks, or
+    # restating the promise as single-leg/exact-tie only, or a boost-magnitude
+    # change, or a clamp-headroom change. The equal-evidence invariant is pinned
+    # by ``tests/test_rrf_tie_rank_7704.py`` (``xfail(strict=True)`` until that
+    # ruling lands — it reds when a remedy lands so the marker comes off
+    # deliberately); the measured magnitudes live on #7704. Do not read this
+    # comment as a decision either way.
     # R5 (#1544): optional recency multiplier — a multiplier, NOT an additive
     # constant: the RRF score range is ~0.01–0.05 (the SearchScores rrf
     # docstring), so an additive offset would swamp fusion entirely.
