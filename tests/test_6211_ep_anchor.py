@@ -321,6 +321,56 @@ def test_direct_edge_factors_are_collected_once_per_edge_from_both_ends(graph):
 _ID_PARAMS = ("$ids", "$oids", "$frontier", "$ops")
 
 
+def test_the_or_split_statement_counts_are_anchors_times_labels(graph):
+    """The split emits 2 anchors x 4 epistemic labels at each OR site (8 + 8).
+
+    This pins the arithmetic `docs/capacity.md` §7 states for the split's cost
+    — Batch 3 growing from ONE unlabelled `(a.id IN $ids OR b.id IN $ids)`
+    statement to 8, and the cache's back-message sweep from 4 target-labelled
+    statements to 8, i.e. +11 statements per pass. Without a pin the doc's
+    number is unverifiable prose: a site that silently collapses back to one
+    statement per site, or that stops widening per anchor, would leave the
+    sentence true-sounding and false (the pre-#6211 code emits 1 and 4 here,
+    so this assertion is discriminating rather than decorative).
+    """
+    from tortoise.live import EPISTEMIC_LABELS
+
+    ep = TortoiseEP(graph._get_proj())
+    affected = ep._affected_claims([HUB], 2, False)
+    per_site = 2 * len(EPISTEMIC_LABELS)  # 2 endpoint anchors x 4 labels
+
+    factor_stmts = [
+        q for q, _p in _capture(ep, ep._affected_factors, affected, include_draft=False)
+        if "RETURN id(r)" in q
+    ]
+    assert len(factor_stmts) == per_site, (
+        f"Batch 3 emitted {len(factor_stmts)} statement(s), not {per_site} "
+        f"(2 anchors x {len(EPISTEMIC_LABELS)} labels):\n"
+        + "\n".join(f"  {q[:90]}" for q in factor_stmts)
+    )
+
+    cache_stmts = [
+        q for q, _p in _capture(ep, ep._load_cache, affected)
+        if "r.back_msg_alpha" in q
+    ]
+    assert len(cache_stmts) == per_site, (
+        f"the cache's back-message sweep emitted {len(cache_stmts)} "
+        f"statement(s), not {per_site} (2 anchors x "
+        f"{len(EPISTEMIC_LABELS)} labels):\n"
+        + "\n".join(f"  {q[:90]}" for q in cache_stmts)
+    )
+
+    # ... and the 2 x 4 structure is the COUNT's structure, not a coincidence of
+    # 8 anonymous statements: each site must cover every (anchor, label) pair.
+    for site, stmts in (("Batch 3", factor_stmts), ("cache back-message", cache_stmts)):
+        for label in EPISTEMIC_LABELS:
+            for anchor in ("a", "b"):
+                assert any(f"MATCH ({anchor}:{label})" in q for q in stmts), (
+                    f"{site} emitted no {anchor}-anchored {label} statement — the "
+                    f"per-endpoint split lost an anchor/label pair"
+                )
+
+
 def test_the_operator_selection_queries_are_planned_as_index_reads(graph):
     """The SAME defect over the LARGEST id set of the pass (analyze.py).
 

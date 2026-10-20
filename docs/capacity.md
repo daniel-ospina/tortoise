@@ -284,12 +284,19 @@ The two `OR`-shaped sweeps (`(a.id IN $ids OR b.id IN $ids)`, which can never be
 an index anchor) are split into one anchored sweep per endpoint: the
 target-anchored sweep takes every edge whose target is affected, the
 source-anchored sweep takes the rest (`NOT b.id IN $ids`), so each edge is
-admitted once, de-duplicated on the EDGE's internal id (`id(r)`) — not on the
+admitted once. How each half keeps that "once" is site-specific, because the
+two sweeps fill different containers. `_affected_factors` Batch 3 appends rows
+to a list, so it de-duplicates on the EDGE's internal id (`id(r)`) — not on the
 row, because a row-keyed dedupe would collapse two byte-identical parallel
 direct edges into one factor, and not on a node id, because a multi-labelled
 endpoint (`:Point:Object`) is matched by one label sweep per label it carries
-and comes back once per label. Same fixture, engine
-at the issue's 1,000 ms query bound:
+and comes back once per label. `_load_cache`'s back-message sweep carries no
+such key: its rows overwrite one `(src, tgt, rel)` entry of `_back_cache`, so a
+multi-labelled endpoint re-reads the same edge once per label and two
+byte-identical parallel edges (unsupported there — last writer wins) share one
+slot. Those are the pre-existing cache semantics, unchanged by the split.
+On the 23k-node / 160k-edge fixture above, engine at the issue's 1,000 ms query
+bound:
 `compute_confidence(anchors=[one claim], max_hops=2)` aborted at hop 1
 (operator_bridge) over a **29-claim** frontier before the change and now
 completes; the hop at a 1,000-id frontier went from **5.55 s** to **0.32 s**,
@@ -301,13 +308,26 @@ before target-anchored ones — so a list comparison differs in sequence while
 the posteriors agree to ~1e-12, the summation order; `run` shuffles the factor
 list per iteration anyway).
 
-The split's own cost, measured rather than assumed, because it emits more
-statements per anchor: on the 40-claim interactive zone that
-`tests/test_ep_local_395.py::test_ac5_interactive_latency_zone` guards, both
-trees emit the **same 288 statements** for a pass (the split statements replace
-per-label ones), and 6 interleaved runs gave medians of **1,149 ms** before and
-**1,175 ms** after — inside the run-to-run range of either tree (1,044-1,245 ms
-vs 1,079-1,194 ms).
+The split's own cost, measured rather than assumed, because it emits MORE
+statements per pass. Instrumenting the graph handle and counting every query a
+`TortoiseEP.run()` issues on the 40-claim interactive zone that
+`tests/test_ep_local_395.py::test_ac5_interactive_latency_zone` builds, this
+branch emits **11 more statements per pass** than `origin/main`: 183 and 185 vs
+172 and 174 for the two passes one `compute_confidence()` runs (502 vs 480
+statements over the whole call). Nothing replaces anything — the two splits are
+the entire delta, and both grow:
+
+| site | `origin/main` | this branch |
+|---|---|---|
+| `_affected_factors` Batch 3 | **1** (one unlabelled `MATCH (a)-[r:IMPL\|NAND]->(b) … (a.id IN $ids OR b.id IN $ids)`) | **8** (2 anchors x 4 epistemic labels) |
+| `_load_cache` back-message sweep | **4** (target-labelled, `b.id IN $ids` in the same predicate) | **8** (2 anchors x 4 epistemic labels) |
+
+Every other sweep is byte-identical in count, and the added `WITH *` barriers
+emit no statements of their own, so +7 (Batch 3) and +4 (cache) is the whole of
+it; `tests/test_6211_ep_anchor.py` pins both site counts so this arithmetic
+cannot rot silently. The wall cost of those 11 statements is inside the noise:
+6 interleaved runs gave medians of **1,149 ms** before and **1,175 ms** after —
+inside the run-to-run range of either tree (1,044-1,245 ms vs 1,079-1,194 ms).
 
 What remains open after it: the pass **completes slowly** — the same one-anchor
 pass took **89 s** on the fixture, of which ~43 s is a per-message graph read
