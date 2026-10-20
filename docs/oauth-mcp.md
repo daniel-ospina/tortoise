@@ -335,8 +335,22 @@ off the pinned socket), and unix sockets are refused.
 
 Anthropic's rules beyond SSRF are applied too: the document must be
 **self-referential** (its `client_id` must equal the URL it was served from),
-`token_endpoint_auth_method` must be `none` (no shared secret can be
-established), non-loopback `redirect_uris` must be same-origin with the
+`token_endpoint_auth_method` must **resolve to `none`** — either declared as
+`none`, or declared as a *key-based* method (`private_key_jwt`,
+`tls_client_auth`) that the document also advertises `none` for in its own
+`token_endpoint_auth_methods_supported`; shared-secret methods
+(`client_secret_post`/`_basic`) are refused **unconditionally**, since no shared
+secret can be established and advertising `none` alongside one does not entitle
+a client to it. ⚠️ That field is the **client document's own, self-asserted**
+advertisement — not RFC 8414 server metadata, and not the AS's
+`token_endpoint_auth_methods_supported` that this same server publishes — so it
+is a fidelity signal (`no CIMD client is ever key-authenticated here`), never an
+authentication guarantee; the guarantee is PKCE plus redirect-URI pinning,
+unchanged. (ChatGPT's document is the motivating case: it declares
+`private_key_jwt` and advertises `["none", "private_key_jwt"]`; before this rule
+was corrected it was refused outright, and surfaced as
+`Unknown or revoked client_id`.)
+Non-loopback `redirect_uris` must be same-origin with the
 `client_id` URL, and the consent screen shows the client_id **host** — never
 the document's self-asserted `client_name`, which would be a phishing surface.
 The host must also be **ASCII (punycode)**: a non-ASCII host would render as a
