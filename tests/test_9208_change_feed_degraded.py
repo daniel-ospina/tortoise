@@ -1135,12 +1135,22 @@ def test_the_attribution_fixture_fails_the_polluter_and_only_the_polluter():
     (so the fixture does not fail a well-behaved test, and the cleared state
     cannot poison the next test in the same session).
 
-    The child module is written INSIDE `tests/` (a unique, non-`test_*`
-    directory) rather than into `tmp_path`: a child session rooted outside the
-    repo re-derives its `rootdir` from the argument, and the suite's tmpdir
-    hygiene guard then refuses its own walk (#3752). It is removed in a
-    `finally`, and the directory name is not a `testpaths` match, so nothing
-    collects it.
+    The child module is written INSIDE `tests/` rather than into `tmp_path`: a
+    child session rooted outside the repo re-derives its `rootdir` from the
+    argument, and the suite's tmpdir hygiene guard then refuses its own walk
+    (#3752).
+
+    ⛔ The file is named `attribution_child_case.py`, NOT `test_*.py`, and that
+    is load-bearing — not tidiness (#9320 review P1). pytest gates recursive
+    collection on `python_files`, NOT on the directory name (this repo sets no
+    `testpaths`/`norecursedirs`), so a `test_*` name here is collected by any
+    peer `pytest tests/` **and** reported as unclassified drift by
+    `tools/ci_selection.py --integrity`, whose `tests/test_ci_selection.py`
+    runs the real check over the real tree. The child is invoked by explicit
+    path, and an explicitly-passed file is collected regardless of the pattern,
+    so nothing is lost. The directory is unique per (pid, uuid) and `mkdir` +
+    `write_text` sit INSIDE the `try`, so a partial write still hits the
+    `finally`.
 
     MUTATION that reds it: delete the `pytest.fail(message)` from the fixture
     (the child then exits 0), or move the pre-test clear AFTER the sample (the
@@ -1149,24 +1159,48 @@ def test_the_attribution_fixture_fails_the_polluter_and_only_the_polluter():
     repo_root = Path(__file__).resolve().parent.parent
     child_dir = (repo_root / "tests"
                  / f"_cf_attribution_{os.getpid()}_{uuid.uuid4().hex[:8]}")
-    child_dir.mkdir(parents=True)
-    child = child_dir / "test_attribution_child.py"
-    child.write_text(_ATTRIBUTION_CHILD, encoding="utf-8")
-    env = {k: v for k, v in os.environ.items() if k != "TORTOISE_DB_URI"}
+    child = child_dir / "attribution_child_case.py"
+    # Strip the ambient PYTEST_* options, not just the URI (#9320 review P2):
+    # `PYTEST_ADDOPTS=--tb=no` suppresses the traceback that CARRIES the
+    # attribution message, which false-REDs a correct fixture. The repo already
+    # strips them for its own child sessions (`tests/test_uri_requiring_selection`)
+    # and pytest's own `pytester` does the same.
+    env = {k: v for k, v in os.environ.items()
+           if k != "TORTOISE_DB_URI" and not k.startswith("PYTEST_")}
     env.setdefault("TORTOISE_TEST_CARVE_OUT", "1")
     try:
-        result = subprocess.run(
+        child_dir.mkdir(parents=True)
+        child.write_text(_ATTRIBUTION_CHILD, encoding="utf-8")
+        # `Popen` + `communicate(timeout=…)` in a NEW SESSION, rather than
+        # `subprocess.run(timeout=600)` (#9320 review P2): the item budget is
+        # 300s (pyproject `timeout`), so a 600s bound can never fire — and the
+        # item's SIGALRM unwinds `communicate()` into `Popen.__exit__`, whose
+        # `wait()` is UNBOUNDED, so a hung child would outlive every guard here.
+        # 120s is ~30x the measured ~4s child, and the kill is on the process
+        # GROUP so the child's own pytest can never be orphaned.
+        child_proc = subprocess.Popen(
             [sys.executable, "-m", "pytest", "-p", "no:cacheprovider",
              "-q", "--no-header", "-c", "pyproject.toml", "--rootdir", ".",
              str(child)],
-            cwd=str(repo_root), capture_output=True, text=True, check=False,
-            env=env, timeout=600)
+            cwd=str(repo_root), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, env=env,
+            start_new_session=True)
+        try:
+            out, err = child_proc.communicate(timeout=120)
+        except subprocess.TimeoutExpired:
+            os.killpg(child_proc.pid, 9)
+            out, err = child_proc.communicate()
+            pytest.fail(
+                "the child pytest session did not finish in 120s — the "
+                "fixture pin cannot measure anything from a hung session "
+                f"(#9320); output so far:\n{out}{err}")
+        returncode = child_proc.returncode
     finally:
         shutil.rmtree(child_dir, ignore_errors=True)
 
-    output = result.stdout + result.stderr
+    output = (out or "") + (err or "")
     summary = output.split("short test summary info")[-1]
-    assert result.returncode != 0, (
+    assert returncode != 0, (
         "the polluter must red the child session — a green child means the "
         f"fixture cleared the leak silently again:\n{output}")
     assert "test_polluter_leaves_a_degraded_feed_behind" in summary, (
