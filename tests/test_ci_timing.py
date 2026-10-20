@@ -1524,6 +1524,14 @@ def test_the_remaining_floor_shapes_have_no_denominator(tmp_path: Path) -> None:
     )
     (tmp_path / "tests" / "sub" / "test_alias.py").write_text(
         "def test_a():\n    pass\ntest_b = test_a\n", encoding="utf-8")
+    # The same alias shape in a CLASS body and as an ATTRIBUTE target: both add a
+    # collected testcase (`TestX.test_b = TestX.test_a`) while the count sees one
+    # (measured 2 collected vs 1 declared, #9134 review P2).
+    (tmp_path / "tests" / "sub" / "test_attralias.py").write_text(
+        "class TestX:\n    def test_a(self):\n        pass\n"
+        "TestX.test_b = TestX.test_a\n",
+        encoding="utf-8",
+    )
     (tmp_path / "tests" / "sub" / "test_injected.py").write_text(
         "class TestX:\n    def test_one(self):\n        pass\n"
         "setattr(TestX, 'test_two', lambda self: None)\n",
@@ -1534,11 +1542,12 @@ def test_the_remaining_floor_shapes_have_no_denominator(tmp_path: Path) -> None:
 
     counts = ci_timing.declared_test_counts(
         ["withconf/test_under_conftest.py", "sub/test_ifblock.py", "sub/test_alias.py",
-         "sub/test_injected.py", "sub/test_plain.py"],
+         "sub/test_attralias.py", "sub/test_injected.py", "sub/test_plain.py"],
         tmp_path,
     )
     assert "withconf/test_under_conftest.py" not in counts
     assert "sub/test_alias.py" not in counts
+    assert "sub/test_attralias.py" not in counts
     assert "sub/test_injected.py" not in counts
     # The `if` block is COUNTED, not omitted: what made it a floor was the walk, and
     # the walk now sees the branch, so the count is exact and the row keeps its
@@ -1849,13 +1858,13 @@ def test_every_capture_dated_note_agrees_with_the_capture_stamp() -> None:
     assert stamp, "durations_captured_at is missing or unparseable"
     dates = set(re.findall(r"ci-timing top-15 (\d{4}-\d{2}-\d{2})", text))
     assert dates, "the map carries no capture-dated note, so this guard is vacuous"
-    # ⛔ NOT `dates == {stamp}`: a refresh rewrites a note only when that row's value
-    # MOVED or it was held, so a correct refresh legitimately leaves older notes beside
-    # the newer stamp — the invariant is that the stamp is the NEWEST figure in the map,
-    # which still catches the defect this guards (a stamp OLDER than the notes it dates).
-    assert max(dates) == stamp.group(1), (
-        f"the newest note is dated {max(dates)} but durations_captured_at says "
-        f"{stamp.group(1)} — the stamp is not the capture the notes came from"
+    # ⛔ `<=`, not `==`: a refresh that moves NO row rewrites no note, so it writes a new
+    # stamp beside older notes. The invariant is that no note is dated AFTER the stamp —
+    # a note can only quote a capture that already happened — which still catches the
+    # defect this guards (a stamp older than the figures it dates).
+    assert max(dates) <= stamp.group(1), (
+        f"a note is dated {max(dates)}, after durations_captured_at says "
+        f"{stamp.group(1)} — the notes quote a capture the stamp does not know about"
     )
 
 

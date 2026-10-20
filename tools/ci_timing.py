@@ -827,7 +827,21 @@ def _has_parametrisation(tree: ast.Module) -> bool:
     """
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            # ⛔ ONLY a node pytest collects from can multiply: a `test*` def or a
+            # `Test*` class. A bare `@staticmethod`/`@property`/`@lru_cache` on a
+            # helper def cannot add a nodeid, and treating it as unprovable froze 57
+            # exactly-counted rows for no reason (#9134 review).
+            # A FIXTURE def counts as collected here even though it is not itself a
+            # testcase: `@pytest.fixture(params=...)` is the multiplying form, and the
+            # multiplication is on the tests that CONSUME it, not on the def.
+            collected = (
+                _is_test_def(node) or _is_fixture_decorated(node)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                else node.name.startswith("Test")
+            )
             for dec in node.decorator_list:
+                if not collected:
+                    break
                 # Only an `ast.Attribute` (or a CALL to one) is a decorator this
                 # scan can read the meaning of. A bare `@NAME`, a `@marks[0]`
                 # subscript or a call to a name may all be an ALIAS for a
@@ -883,34 +897,60 @@ def _declares_a_floor(tree: ast.Module) -> bool:
     naming a testcase that does not exist (the `declared > collected` defect the
     `declared_test_counts` docstring records).
     """
+    # `test_b = test_a` is a SECOND collected testcase with no `def` of its own, and
+    # `setattr(TestX, "test_two", ...)` injects one into a class body: measured at 2
+    # declared beside 3 collected and 3 beside 4 (#9134 review).
     for node in _collectable_statements(tree.body):
-        # `test_b = test_a` is a SECOND collected testcase with no `def` of its own;
-        # `setattr(TestX, "test_two", ...)` injects one into a class body. Both were
-        # measured at 2 declared beside 3 collected and 3 beside 4 (#9134 review).
-        if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            if any(isinstance(tg, ast.Name) and tg.id.startswith("test") for tg in targets):
-                return True
-        call = node.value if isinstance(node, ast.Expr) else node
-        if (
-            isinstance(call, ast.Call)
-            and isinstance(call.func, ast.Name)
-            and call.func.id == "setattr"
-            and len(call.args) >= 2
-            and isinstance(call.args[1], ast.Constant)
-            and isinstance(call.args[1].value, str)
-            and call.args[1].value.startswith("test")
-        ):
+        if _is_alias_or_injection(node):
             return True
-    for node in tree.body:
+    for node in _collectable_statements(tree.body):
         if not isinstance(node, ast.ClassDef):
             continue
-        for base in node.bases:
-            base_name = (base.attr if isinstance(base, ast.Attribute)
-                         else getattr(base, "id", ""))
-            if base_name != "object":
+        base_names = [
+            base.attr if isinstance(base, ast.Attribute) else getattr(base, "id", "")
+            for base in node.bases
+        ]
+        # A `Test*` class with ANY explicit base may INHERIT collected test methods this
+        # module does not define, so its count is unprovable — the case that measured 2
+        # declared beside 6 collected. A non-`Test*` class is only collected at all when
+        # it descends from `unittest.TestCase`, which shows up as a base NAME here; every
+        # other base (`Exception`, `HTMLParser`, a test double) contributes no nodeid and
+        # freezing those rows cost 30 exactly-counted keys for nothing (#9134 review).
+        if node.name.startswith("Test") and base_names:
+            return True
+        if any(name.endswith("TestCase") for name in base_names):
+            return True
+        if not node.name.startswith("Test") and any(
+                _is_test_def(sub) for sub in _collectable_statements(node.body)):
+            return True
+        # ---- P2: the alias/injection forms inside a CLASS BODY, and the attribute
+        # target `TestX.test_b = TestX.test_a`, collect a second testcase while the
+        # count sees one (measured 2 collected vs 1 declared).
+        for sub in _collectable_statements(node.body):
+            if _is_alias_or_injection(sub):
                 return True
     return False
+
+
+def _is_alias_or_injection(node: ast.stmt) -> bool:
+    """True for a statement that adds a collected testcase with no `def` of its own."""
+    if isinstance(node, (ast.Assign, ast.AnnAssign)):
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        for target in targets:
+            if isinstance(target, ast.Name) and target.id.startswith("test"):
+                return True
+            if isinstance(target, ast.Attribute) and target.attr.startswith("test"):
+                return True
+    call = node.value if isinstance(node, ast.Expr) else node
+    return (
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "setattr"
+        and len(call.args) >= 2
+        and isinstance(call.args[1], ast.Constant)
+        and isinstance(call.args[1].value, str)
+        and call.args[1].value.startswith("test")
+    )
 
 
 def _collectable_statements(body: list[ast.stmt]) -> list[ast.stmt]:
