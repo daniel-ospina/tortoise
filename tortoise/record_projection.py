@@ -56,13 +56,36 @@ WHAT THIS MODULE DELIBERATELY IS NOT
   customer is the dogfood instance. No dual-write, backfill, cutover or
   rollback-parity surface appears here, and none should be added.
 
-TENANCY IS A PER-CALL ARGUMENT, NEVER AMBIENT
-============================================
+TENANCY IS A PER-CALL ARGUMENT AT THIS LAYER, NEVER AMBIENT
+===========================================================
 Every layer row is keyed by `(org_id, graph_id)` with a foreign key to
 `public.graphs`. Both are **required keyword arguments** of every entry point
-here (:func:`mutations_for`, :func:`replay_plan`, :func:`replay`): there is
-deliberately no module-level default, no ContextVar and no environment fallback
-at this layer.
+here (:func:`mutations_for`, :func:`replay_plan`, :func:`replay`), and of the
+seam that drives them (`record_writer.RecordWriter.write`, #9194): at this
+layer there is deliberately no module-level default, no ContextVar and no
+environment fallback. `test_this_module_has_no_ambient_tenant_READER` executes
+the half of that a scan can execute — no environment reader and no
+`contextvars` — while the parameter half (each coordinate required on its own)
+is executed by the refusal leg in `tests/test_record_projection.py` for these
+three entry points, and by
+`test_the_seam_refuses_a_call_that_cannot_name_its_tenant` for
+`RecordWriter.write` / `write_records`, which is what a production caller
+touches. What defeats the SCAN, and only the scan, is an ACTIVE obfuscated
+read (`org_id = getattr(os, "environ").get("TORTOISE_RECORD_ORG_ID") or
+org_id`, `__import__("os")`): spelled that way it still reds the same value
+legs as the plain spelling (measured, three of them) — while a DORMANT
+spelling of it defeats both, like any dormant read (measured, all green). What
+escapes BOTH instruments is a read that never fires on a fixture path — a
+body-local fallback to a module constant (`org_id = org_id or
+_DEFAULT_TENANT[0]`, signature still required), or a carrier DEFINED ELSEWHERE
+(a `ContextVar` imported from another module: the `record_writer.use_record_tenant`
+that #9192 names, which this tree does not carry and whose production owner is
+#9188): the scan parses this file only, and no fixture arms that carrier.
+Measured: all legs stay green on both. A signature default, however, IS
+caught — by the refusal leg on these entry points, and by the seam leg on
+`RecordWriter.write` / `write_records`. These limits are SUMMARISED here and
+MEASURED in `tests/test_record_projection.py`, except the signature one, which
+is pinned in both test files.
 
 The reason is the failure mode, not taste. The hosted lane builds one SDK per
 tenant graph and its capture executor is process-wide, so a tenant resolved
@@ -70,8 +93,31 @@ from anything process-global files tenant A's rows under tenant B **with no
 error** — the row is well-formed and the FK only checks that the graph exists.
 An environment pair is not a mitigation for that: env is process-global, so it
 is the same single value for every tenant the process serves. A caller that
-cannot name its tenant must refuse; anything wiring a live caller (`#9188`)
-resolves the pair from the request it is serving and passes it in.
+cannot name its tenant must refuse.
+
+⚠️ WHERE THE AMBIENT CARRIER ARRIVES, and this module cannot see it. #9192
+names a surface THIS TREE DOES NOT CARRY: `record_writer.use_record_tenant`, a
+ContextVar, with a `TORTOISE_RECORD_ORG_ID`/`_GRAPH_ID` fallback for a
+SINGLE-TENANT deployment. It is not a future plan: the carrier is **in flight
+in #9231** (`fix/9078-record-write-call-site`), one layer up, and `git grep`
+for any of its symbols is empty on `origin/main` under `tortoise/` while
+#9231's ref carries them all — `RECORD_ORG_ENV`/`RECORD_GRAPH_ENV`,
+`_RECORD_TENANT`, `use_record_tenant()` and `record_tenant()`. Do not read this
+module as the statement of record for what those must do; read #9231. The
+precedence it implements is **scope always wins over env**: `record_tenant()`
+reads the `ContextVar` first and consults the env pair only when the scope set
+nothing (a half-configured pair is refused, not completed). The surface #9192
+ask 2 must be pinned on is that env fallback, because it is reachable from the
+live door with **no caller-supplied pair** — #9231's door calls
+`record_tenant()` and files the write under whatever comes back, so a process
+serving several tenants can be armed entirely from the environment, one pair,
+the same value for every tenant it serves. Until that fallback is pinned,
+"scope wins" is a precedence rule rather than a fail-closed one; ask 1, the
+production caller, is what makes the fallback unnecessary in the first place.
+The regression pins for THIS layer are
+`test_two_tenants_in_one_process_do_not_cross_write` and
+`test_two_tenants_through_the_seam_never_cross_write`; the pin for the arming
+surface belongs with #9231.
 """
 
 from __future__ import annotations

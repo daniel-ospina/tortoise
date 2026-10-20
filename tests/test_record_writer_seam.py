@@ -18,10 +18,13 @@ sentence in a design doc:
    connection attempt, no exception — and the caller can tell it apart from
    success (`.applied`) and from failure (a failure raises).
 
-Plus the two properties the epic's own decisions impose: the seam **never commits
-or rolls back** (§3 point 8 — the caller owns the transaction), and a
+Plus the three properties the epic's own decisions impose: the seam **never
+commits or rolls back** (§3 point 8 — the caller owns the transaction); a
 **configured-but-unreachable** record FAILS rather than reading as unarmed
-(the recorded ``degraded``/``unconfigured`` split, on the write side).
+(the recorded ``degraded``/``unconfigured`` split, on the write side); and the
+**tenant pair is the CALLER's, never the process's** (#9192 ask 3) — two
+tenants through this seam never cross-write, and the environment cannot stand
+in for a pair the caller supplied.
 
 NO DATABASE, NO DRIVER. Every connection here is a fake DB-API object that
 records what it was asked to execute — the same shape
@@ -32,12 +35,14 @@ live-engine half stays where it belongs (#9188).
 
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from tests.test_record_projection import _assert_binds
 from tortoise import record_projection as rp
 from tortoise import record_writer as rw
 from tortoise import status_vocabulary
@@ -623,3 +628,111 @@ def test_the_one_call_form_is_the_same_contract() -> None:
     assert result.applied is True
     assert conn.statements() == _plan()
     assert (conn.commits, conn.rollbacks) == (0, 0)
+
+
+
+def test_the_seam_refuses_a_call_that_cannot_name_its_tenant() -> None:
+    """#9192 ask 2 one layer up: the SEAM's signature cannot lose the pair.
+
+    The fold's refusal leg covers `mutations_for`/`replay_plan`/`replay`. What a
+    production caller actually touches is `RecordWriter.write` /
+    `write_records`, and no leg in this tree calls either one without a tenant —
+    so before this leg, a signature default added HERE was caught by nothing:
+    measured, `org_id: str = "a-literal-default"` on `RecordWriter.write` left
+    every other leg green.
+
+    Each coordinate on its own, for the reason the fold's leg states: a default
+    on one leaves the other required, so a check that only drops the pair
+    together stays green. Binding is done on the SIGNATURE, not by calling and
+    catching a bare `TypeError` — that would also pass on `unexpected keyword
+    argument` if a coordinate were RENAMED (measured), so the both-present
+    `bind` above is the control. Nothing is called, so no connection is needed
+    and nothing is written.
+    """
+    for target, args in (
+        (rw.RecordWriter.write, (None, RECORDS)),
+        (rw.write_records, (RECORDS,)),
+    ):
+        signature = inspect.signature(target)
+        # The positive control, so a renamed coordinate cannot pass this leg:
+        # `bind` only succeeds if BOTH are present under those names.
+        signature.bind(*args, org_id="org_a", graph_id="graph_a")
+        for drop in ("org_id", "graph_id"):
+            kwargs: dict[str, Any] = {"org_id": "org_a", "graph_id": "graph_a"}
+            del kwargs[drop]
+            with pytest.raises(TypeError):
+                signature.bind(*args, **kwargs)
+
+# ════════════════════════════════════════════════════════════════════════════
+# 9. TENANCY AT THE WRITE SITE — the pair is the CALLER's, never the process's
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def _flat(statements: list[tuple[str, list[Any] | None]]) -> list[Any]:
+    """Every bound parameter of an executed statement set, flattened."""
+    return [value for _sql, params in statements for value in (params or [])]
+
+
+def _assert_binds_tenant(statements: list[tuple[str, list[Any] | None]],
+                         tenant: tuple[str, str]) -> None:
+    """Every executed statement binds `tenant` at every tenant binding site.
+
+    ONE definition of "this statement is scoped to that tenant": the fold's own
+    `tests/test_record_projection.py::_assert_binds`, applied to the statements
+    this seam executed. Restating it here would be a second rule, and the
+    obvious restatement — find the pair adjacent in the parameters — is not the
+    contract: a legitimate `WHERE graph_id = %s AND org_id = %s` (the same two
+    values in a different predicate order) satisfies tenancy and would be
+    accused of escaping it. `_assert_binds` maps each column to its own site,
+    so PREDICATE order is not part of the rule (a layer INSERT's column-list
+    order is pinned separately, positionally).
+    """
+    _assert_binds(
+        [rp.Statement(sql, tuple(params or ())) for sql, params in statements],
+        tenant,
+    )
+
+
+def test_two_tenants_through_the_seam_never_cross_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#9192 ask 3, at the layer a caller names its tenant at.
+
+    Two tenants in ONE process, writing the same journal segment on the same
+    connection, in sequence — the shape the hosted lane produces (one SDK per
+    tenant graph, one process-wide capture executor). The environment is
+    pointed at a THIRD tenant for both calls, which is what makes the leg more
+    than a restatement of the call: an env fallback has one value for every
+    tenant the process serves, so if it ever outranked the caller, one of these
+    two assertions must fail.
+
+    ⚠️ Scope, stated so the pin is not over-read: this proves the pair cannot be
+    SUBSTITUTED for a call's own. It does not prove a multi-tenant process
+    cannot ARM from env — this module has no tenant env pair and no ContextVar
+    to arm from, so pinning it belongs to #9192's own ask 2.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_ORG_ID", "env_org")
+    monkeypatch.setenv("TORTOISE_RECORD_GRAPH_ID", "env_graph")
+
+    conn = FakeConnection()
+    writer = _armed(conn)
+
+    writer.write(RECORDS, org_id="org_a", graph_id="graph_a")
+    written_for_a = conn.statements()
+    writer.write(RECORDS, org_id="org_b", graph_id="graph_b")
+    written_for_b = conn.statements()[len(written_for_a):]
+
+    assert written_for_a and written_for_b, "a call executed nothing — vacuous"
+    for statements, tenant, other in (
+        (written_for_a, ("org_a", "graph_a"), ("org_b", "graph_b")),
+        (written_for_b, ("org_b", "graph_b"), ("org_a", "graph_a")),
+    ):
+        _assert_binds_tenant(statements, tenant)
+        values = _flat(statements)
+        assert other[0] not in values and other[1] not in values, (
+            f"{other} leaked into the statements written for {tenant}"
+        )
+        assert "env_org" not in values and "env_graph" not in values, (
+            f"the environment's tenant reached the statements written for "
+            f"{tenant} — an ambient tenant outranked the call"
+        )
