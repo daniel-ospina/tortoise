@@ -1882,12 +1882,31 @@ def test_session_end_own_sweep_SKIPS_a_journal_bound_to_ANOTHER_instance(
     the only ownership record while the graphs live on. The binding is written at
     conftest IMPORT and `uri` is read at fixture SETUP, so the two can disagree;
     this is the same guard `_stale_sweep` has, on the path every session takes.
-    Mutation: drop the gate (sweep unconditionally) and this fails."""
-    from tests._embedded import JOURNAL_INSTANCE_SUFFIX, _session_end_own_sweep
+    Mutation: drop the gate (sweep unconditionally) and this fails.
+
+    Both keys come from the accessors the code uses, NEVER from a literal: CI's
+    `falkordb-provision` allocates `TORTOISE_TEST_DOCKER_PORT` from 16390
+    upwards, so a hardcoded `127.0.0.1:16390` binding is EQUAL to the sweep's
+    target on exactly the runs that are assigned that port — the gate is then
+    never exercised, the graph is dropped and the journal removed (measured
+    locally by exporting `TORTOISE_TEST_DOCKER_PORT=16390`). The other instance
+    is pinned to a TEST-NET-3 host so the mismatch holds for any port and any
+    `DOCKER_HOST`."""
+    from tests._embedded import (
+        JOURNAL_INSTANCE_SUFFIX,
+        _session_end_own_sweep,
+        _uri_instance_key,
+    )
+    target = _uri_instance_key(
+        _live_utils.docker_base_uri(password="x", host="127.0.0.1"))
+    assert target, "the docker lane must resolve an instance key"
+    other = _uri_instance_key(
+        "docker://:x@203.0.113.9:16390/tortoise_test_matrix")
+    assert other and other != target, (target, other)
     journal = tmp_path / "own0end.graphs.jsonl"
     journal.write_text("test_ws_own_graph\n")
     journal.with_name(journal.name + JOURNAL_INSTANCE_SUFFIX).write_text(
-        "127.0.0.1:16390\n")
+        other + "\n")
     db = _FakeDb(graphs=[])          # the OTHER instance: the graph is "absent"
     monkeypatch.setattr("tests._embedded._sweep_proj",
                         lambda uri: _FakeProj(db))
@@ -1896,7 +1915,7 @@ def test_session_end_own_sweep_SKIPS_a_journal_bound_to_ANOTHER_instance(
     assert db.deleted == [], res
     assert journal.exists(), res
     assert res["journal_removed"] is False, res
-    assert "16390" in res["skipped_instance"], res
+    assert "203.0.113.9" in res["skipped_instance"], res
     # The teardown gate keys on `skipped` (not on the reason string) to mean
     # "this sweep did not run"; without it the E2E-7 survivor probe would score
     # the state this skip deliberately left as a leak and red the suite.
