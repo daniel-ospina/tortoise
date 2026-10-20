@@ -644,6 +644,11 @@ def test_the_opener_inventory_is_pinned_so_a_new_lane_moves_this_file():
         "_live_write_scope",
         "_replay_write_scope",
         "_graph_metadata_write_scope",
+        # #9210 added the PRE-WIPE RESTORE lane to the same bullet list (the
+        # restore path writes records that did not come from the journal, so it
+        # is neither a live door nor a replay); #9218 landed it and moved this
+        # inventory, which is the pin doing its job.
+        "_prewipe_restore_write_scope",
     }
     derived = _projection_openers()
     assert derived == expected, (
@@ -673,13 +678,19 @@ def test_the_detector_population_is_pinned_by_content():
         "_live_write_scope",
         "_onboarding_write_scope",
         "_replay_write_scope",
-        # the two that live outside `projection/__init__.py`:
+        "_prewipe_restore_write_scope",
+        # those defined OUTSIDE `projection/__init__.py`:
         # `_run` is `tortoise/webhook_delivery.py`'s opener (a name, not the
         # onboarding funnel — `onboarding/state.py::_run` delegates through
         # `_onboarding_write_scope`, one hop away, and is covered by that name
         # above). Recorded because the population is what the detector iterates.
         "_run",
         "_structural_edge_write_scope",  # projection/edges.py
+        # #9210/#9218 added the watermark re-establish path, which declares its
+        # own cache write from `tortoise/event_store.py` — outside projection
+        # entirely, and therefore exactly the class this wide population exists
+        # to see.
+        "reestablish_watermark",
     }
     derived = _declaration_primitives()
     assert derived == expected, (
