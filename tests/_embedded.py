@@ -350,6 +350,15 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # so the URI-unset carve-out job runs them on every full selection.
     "test_fork_safety_3845",
     "test_fork_slot_wedge_3845",
+    # #9189 (§17.2): the record↔cache observer's journal-backed arm builds a
+    # FRESH embedded projection (``tests._embedded.fresh_embedded_proj``) and
+    # binds a journal to it — §17.1's refusal arm exists only on the embedded
+    # lane, so under a URI-set lane the construction is redirected, the arm is
+    # gone, and the test would either skip (the permanently-green hole #4047
+    # names) or assert nothing. Registered here and in ``config/ci-surfaces.yml``
+    # ``carve_out`` so the URI-unset carve-out job runs it on every full
+    # selection.
+    "test_record_reconcile_trigger",
     # #3663: asserts PRODUCTION graph-name scoping (`org_{org_id}`) on the
     # MCP ``tortoise_list_graphs`` HTTP filter, the namespace probe and its
     # opener — which is only possible BECAUSE this stem is exempt. Without the

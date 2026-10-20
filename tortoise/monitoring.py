@@ -671,6 +671,73 @@ AUDIT_FALLBACK_DROP_COUNT = Counter(
     "Audit events that reached no durable sink (#7924 review)",
     ["reason"],
 )
+# #9188 (epic #7879): an ARMED record write that did not happen — the Postgres
+# record is the truth under §2.0, but the live write is deliberately fail-soft
+# on the CAPTURE (the journal append already committed; a capture that raised
+# here would hand the caller a failure for a write that persisted, and would
+# kill the derived cache too). So a lost record row must be OBSERVABLE rather
+# than a log line nothing watches — the same "signal with no channel" class as
+# the journal counter above. ``reason`` is the COMPLETE vocabulary — every one
+# of these is emitted by ``tortoise/record_writer.py::write_live_record`` except
+# the two the SDK adds, and each names its own fix, so a value found here is
+# self-describing in one read:
+#
+#   ``malformed_dsn``         the DSN is configured but unusable (record_writer's
+#                             seam, and `TortoiseSDK._record_write_without_journal`
+#                             on the journal-less lane);
+#   ``no_tenant``             armed with no tenant in scope — refused rather than
+#                             filed under a guessed tenant (#9192);
+#   ``write_failed``          the record was unreachable or the projection
+#                             refused the record;
+#   ``circuit_open``          a connect to the record FAILED moments ago, so the
+#                             live door refused this write locally instead of
+#                             paying the connect timeout once per record
+#                             (`record_writer.LIVE_WRITE_BREAKER_SECONDS`);
+#   ``no_journal``            armed on a deployment with NO journal, so the write
+#                             has no source and no replay could heal it (SDK);
+#   ``seam_unimportable``     the record module itself could not be imported
+#                             (a failing import hook), so the seam never ran (SDK).
+#
+# NOT here, and the reason is the counter's own read (#9231 review P2):
+# ``no_durable_journal`` — an armed write into a lane that has NO JOURNAL BY
+# DESIGN (the M2 capture lane's ``_InMemoryEventLog``, the demo/MCP scratch
+# logs) — is a DECLINE, not a loss: nothing was journaled before the record
+# existed either, so no row was lost and no replay is owed. Counting it here
+# made ``record_write_failures`` permanently non-zero on the HEALTHY production
+# path (every ``capture_session`` emits through that lane), which teaches an
+# operator to ignore the one channel this counter exists to be.
+# ``RECORD_NON_JOURNAL_SKIP_COUNT`` below carries it instead, so zero here keeps
+# meaning "nothing was lost".
+#
+# Single writer: ``record_record_write_failure`` (the #501/#3677 house shape).
+RECORD_WRITE_FAILURE_COUNT = Counter(
+    "tortoise_record_write_failures_total",
+    "Armed record writes that did not happen (#9188)",
+    ["reason"],
+)
+# #9231 review P2: an armed record write into a lane whose log is NOT a journal.
+# SEPARATE from ``RECORD_WRITE_FAILURE_COUNT`` on purpose: this is a DECLINE, not
+# a loss. The record is ``replay(journal)``, and these lanes have no journal at
+# all — the M2 session-capture extraction lane appends to ``_InMemoryEventLog``
+# ("No file I/O, no temp files", by design) and the demo/MCP lanes append to
+# scratch files nothing keeps. Nothing is lost, so nothing needs healing; the
+# seam refuses to file a row it could never reproduce, and THAT is the whole
+# contract. Keeping it in the failure counter made the healthy path read as
+# broken: every ``capture_session`` emits extracted records through that lane, so
+# ``metrics()["record_write_failures"]`` could never be zero on a working armed
+# deployment (#9231 review P2).
+#
+# ``reason`` vocabulary: ``no_durable_journal`` (the only value today — kept as a
+# label, not a bare counter, so a future non-journal lane names itself instead of
+# overloading one number).
+#
+# Single writer: ``record_non_journal_skip`` (the #501/#3677 house shape).
+RECORD_NON_JOURNAL_SKIP_COUNT = Counter(
+    "tortoise_record_non_journal_skips_total",
+    "Armed record writes DECLINED because the lane has no journal by design "
+    "(#9231 review P2)",
+    ["reason"],
+)
 # #4095: an allowlist-dropped telemetry key — the same loss class as the audit
 # drop above, and the exact defect #3821 fixed half-way. #3821's choke point
 # (``hosted_api._report_unregistered``) counts, warns once per site and never
@@ -1236,6 +1303,76 @@ def record_ingest() -> None:
 
 def record_error() -> None:
     ERROR_COUNT.inc()
+
+
+def record_record_write_failure(reason: str) -> None:
+    """Count one ARMED record write that did not happen (#9188).
+
+    ``reason`` is the vocabulary documented at ``RECORD_WRITE_FAILURE_COUNT``,
+    restated here because THIS function is the definition site an operator
+    reads. SIX distinct values: FOUR emitted by ``tortoise/record_writer.py::
+    write_live_record`` (``malformed_dsn``, ``no_tenant``, ``write_failed``,
+    ``circuit_open``) plus THREE SDK-only values — ``malformed_dsn`` is shared,
+    which is why the counts overlap (4 + 3 − 1 = 6). The split is named because
+    each value names a different fix:
+
+    * ``malformed_dsn`` — the DSN is configured but unusable (the seam; and
+      ``TortoiseSDK._record_write_without_journal`` on the journal-less lane,
+      where the seam is never called and this is the only signal);
+    * ``no_tenant`` — armed with no tenant in scope, so the write is refused
+      rather than filed under a guessed tenant (#9192); set
+      ``TORTOISE_RECORD_ORG_ID``/``_GRAPH_ID`` or wrap in
+      ``record_writer.use_record_tenant(...)``;
+    * ``write_failed`` — the record was unreachable or the projection refused
+      the record; ``replay`` heals it from the journal;
+    * ``circuit_open`` — a connect to the record failed within
+      ``record_writer.LIVE_WRITE_BREAKER_SECONDS``, so the live door refused this
+      write locally: no socket, no timeout. The record is DEGRADED, not
+      misconfigured — and this is what keeps a blackholed record from costing
+      one connect timeout per journal record inside a single capture;
+    * ``no_journal`` — armed on a deployment with no JSONL journal (SDK): the
+      write has no source, and no replay can heal it;
+    * ``seam_unimportable`` — ``tortoise.record_writer`` could not be imported
+      (SDK), so the seam never ran.
+
+    ``no_durable_journal`` is deliberately NOT in this vocabulary (#9231 review
+    P2): a lane whose log is not a journal by design loses nothing, so it is
+    counted by ``record_non_journal_skip`` — keeping zero here meaning "no
+    record row was lost" on a healthy armed deployment.
+
+    Called from ``TortoiseSDK._emit_event``'s record hook and from
+    ``record_writer.write_live_record``, whose swallow is deliberate for the
+    same reason the journal append's is: the capture already committed.
+    """
+    RECORD_WRITE_FAILURE_COUNT.labels(reason=reason).inc()
+
+
+def record_non_journal_skip(reason: str = "no_durable_journal") -> None:
+    """Count one armed write DECLINED because the lane has no journal (#9231).
+
+    Not a failure and not on ``record_write_failures``: the record is
+    ``replay(journal)``, these lanes have no journal by design (the M2 capture
+    lane's ``_InMemoryEventLog``, the demo and MCP scratch logs), and nothing was
+    lost that a replay could restore. The seam refuses the row anyway — a row
+    whose record no journal carries can be neither reproduced nor corrected —
+    and this counter is the channel for that decision, so a permanently non-zero
+    ``record_write_failures`` on a HEALTHY capture path (every
+    ``capture_session`` emits through the M2 lane) is what it removes.
+
+    Single writer: ``record_writer.write_live_record``'s ``durable=False``
+    branch. ``reason`` is that branch's vocabulary (``no_durable_journal``).
+    """
+    RECORD_NON_JOURNAL_SKIP_COUNT.labels(reason=reason).inc()
+
+
+def record_non_journal_skip_counts() -> dict[str, int]:
+    """In-process snapshot of ``RECORD_NON_JOURNAL_SKIP_COUNT``, by reason."""
+    return _collect_by_label(RECORD_NON_JOURNAL_SKIP_COUNT, "reason")
+
+
+def record_write_failure_counts() -> dict[str, int]:
+    """In-process snapshot of ``RECORD_WRITE_FAILURE_COUNT``, by reason (#9188)."""
+    return _collect_by_label(RECORD_WRITE_FAILURE_COUNT, "reason")
 
 
 def record_journal_write_failure() -> None:
@@ -4393,6 +4530,16 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
         # real degradation (the derived graph becomes live-only), so it rides
         # the health/metrics surface rather than a log line nothing watches.
         "journal_write_failures": _counter_val(JOURNAL_WRITE_FAILURE_COUNT),
+        # #9188: the same channel for the record's write path — a layer row that
+        # never reached Postgres is exactly the class #4240 above made
+        # observable for the journal.
+        "record_write_failures": record_write_failure_counts(),
+        # #9231 review P2: an armed write DECLINED because the lane has no journal
+        # by design (the M2 capture lane, the demo/MCP scratch logs). A sibling
+        # key rather than a value in the counter above, so that counter's zero
+        # keeps meaning "no record row was lost" on a healthy armed deployment —
+        # every `capture_session` emits through the M2 lane.
+        "record_non_journal_skips": record_non_journal_skip_counts(),
         # #7924 review P2: an audit event that reached no durable sink is
         # the same class of failure as a journal write, so it rides THIS
         # payload alongside ``journal_write_failures`` rather than a log line

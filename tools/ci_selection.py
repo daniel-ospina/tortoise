@@ -962,6 +962,24 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # ran on the PR that edits it (the #1349/#3332/#3616 silent-drop
              # class, and the same gap tools/drift-guard.py carries).
              "tools/queue_conflict_census.py",
+             # #9231 review P1 (the #9188/#9078 wiring gate): tools/record_wiring_check.py
+             # is the ONLY executor of the claim "the record has a production
+             # caller" — its guard is
+             # tests/test_9078_record_written_by_production_path.py, registered
+             # `core`. But `tools/` is swallowed by NON_PYTHON_PREFIXES and no
+             # SOURCE_PATTERNS entry matches the tool, so a wiring-check-only
+             # change (i.e. the file whose whole purpose is to decide whether
+             # the record is wired, and therefore the most likely file to be
+             # weakened) filtered to `changed == []`, took the docs-only early
+             # return and fell back to tier-1 smoke — where that test is NOT
+             # registered, so the gate never ran on the PR that can disarm it.
+             # Measured on the PR head:
+             # `select(["tools/record_wiring_check.py"])` -> surfaces=[],
+             # full=False, 51 tier-1 files, guard absent. Same
+             # #1349/#3332/#3616/#4309 silent-drop class as the entries above.
+             # Pinned by
+             # tests/test_ci_selection.py::test_record_wiring_check_tool_change_selects_core_not_tier1.
+             "tools/record_wiring_check.py",
              # #4174 review P1: the drift gate's suite (test_drift_guard.py) is
              # `core`-registered, but `tools/` is swallowed by
              # NON_PYTHON_PREFIXES and no SOURCE_PATTERNS entry matches
@@ -1208,7 +1226,23 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `core` surface, and the probe's guard is `core`-registered.
              # Pinned by
              # tests/test_ci_selection.py::test_capstone_probe_change_selects_core_not_tier1.
-             "docs/evidence/7950-capstone/probes/",
+             #
+             # PR #9196 review P1 — WIDENED from `probes/` to the whole bundle:
+             # the probe is no longer the only artifact the guard pins. The same
+             # PR added `test_the_s2_census_log_is_a_LIVE_measurement`, which
+             # re-runs the committed census probe and compares its output to
+             # `s2-wiring-census.log`, and
+             # `test_the_evidence_readme_quotes_the_log_it_cites_verbatim`, which
+             # pins the README's quotes to `e2e-chain-probe.log`. Both LOGS and
+             # the README are hand-editable committed text — so a one-file PR
+             # that re-cuts a number in them took the docs-only early return and
+             # merged with the pin that guards them NEVER RUN (measured:
+             # `select(['docs/evidence/7950-capstone/s2-wiring-census.log'])` →
+             # surfaces=[], probe absent). That is the same #1349/#3332/#3616
+             # shape one level out: the artifact a verdict REST on must not be
+             # editable without the pin that re-measures it running. Pinned by
+             # tests/test_ci_selection.py::test_the_capstone_evidence_bundle_selects_core_not_tier1.
+             "docs/evidence/7950-capstone/",
              # #9076: the E1+E2 evidence bundle
              # (`docs/evidence/7949-capstone/` — the probe, the corpus JSON and its
              # builder, the evidence log) and its structural checker

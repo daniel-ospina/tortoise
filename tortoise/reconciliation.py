@@ -19,7 +19,14 @@ reported as **integer counts**, and the counts are separated by direction:
 ``extra_in_cache``    in the cache, absent from the record  → ⭐ a chokepoint
                       violation: something wrote the cache directly
 ``field_mismatches``  present on both sides, value differs   → a stale value
-``divergent``         node keys differing in any of the three ways above
+``form_normalized``   present on both sides, value differs in STORED FORM only
+                      (a vector's ``float32`` width, or a boolean spelled
+                      ``'true'`` in the record's ``text`` column) → reported
+                      apart, so a faithful projection reaches zero without the
+                      stored-form decision becoming invisible (#8615, #9184)
+``divergent``         node keys differing in any of the ways above — a stored-form
+                      normalization is NOT one of them: it reports AGREEMENT,
+                      and says so through ``form_normalized``
 
 **FAIL-CLOSED, because a reconciliation that cannot see both sides is not a
 reconciliation.** :func:`reconcile` raises :class:`ReconciliationUnavailable`
@@ -33,7 +40,18 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 
-from .stored_form import STORED_VECTOR_PROPS, is_verbatim, narrow_to_stored_width
+from .stored_form import (
+    BOOLEAN_FORM_PROPS,
+    STORED_VECTOR_PROPS,
+    declared_boolean,
+    declares_verbatim,
+    narrow_to_stored_width,
+)
+
+#: How two sides relate for ONE property — the comparison's three outcomes.
+FIELD_AGREE = "agree"
+FIELD_FORM = "form"
+FIELD_DIVERGENT = "divergent"
 
 #: How many divergent keys a report carries verbatim. The COUNTS are the
 #: contract; the sample exists so an operator can look, and is bounded so a
@@ -82,34 +100,67 @@ def _canonical(value: object) -> object:
 def _props_agree(prop: str, truth_props: Mapping, cache_props: Mapping) -> bool:
     """Do the two sides hold this property's value in agreement?
 
+    ``True`` for either agreeing outcome :func:`_props_relation` reports
+    (``FIELD_AGREE`` / ``FIELD_FORM``). Defined in terms of that ONE function so
+    the whole-view comparison (:func:`_equal_view`), the focused count
+    (:func:`divergent_key_count`) and the field counts in
+    :func:`reconcile_views` cannot drift apart.
+    """
+    return _props_relation(prop, truth_props, cache_props) != FIELD_DIVERGENT
+
+
+def _props_relation(prop: str, truth_props: Mapping, cache_props: Mapping) -> str:
+    """How the two sides relate for ONE property — the comparison's ONE home.
+
     Both properties are PRESENT on both sides (the caller checks presence
     first — a ``None`` and an absence are a divergence, not agreement).
 
-    Exact by default. For a property in :data:`STORED_VECTOR_PROPS` the truth
-    value is narrowed to the width the cache stores before the exact
-    comparison, UNLESS either side declares ``embedding_verbatim`` — in which
-    case the value is stored un-narrowed and is compared exactly (#8615).
+    ``FIELD_AGREE`` by exact value. ``FIELD_FORM`` when they agree only after a
+    STORED-FORM rule normalises them — reported apart, so the decision is
+    visible in the report rather than silently absorbed. ``FIELD_DIVERGENT``
+    otherwise.
 
-    The CACHE side is never narrowed: the acceptance window is the exact
-    rounding of the RECORD's value, a single point rather than the band a
-    two-sided narrowing would allow (see :mod:`tortoise.stored_form`). Both
-    sides must be sequences for the narrowing to apply — a scalar under a
-    vector property name is not a vector, and the exact comparison above has
-    already decided it.
+    Two stored-form rules, both from :mod:`tortoise.stored_form`:
+
+    * **vectors** (:data:`STORED_VECTOR_PROPS`) — the truth side is narrowed to
+      the width the cache stores, UNLESS either side declares
+      ``embedding_verbatim``, in which case the value is stored un-narrowed and
+      compared exactly (#8615). The marker is read through
+      :func:`declares_verbatim`, NOT :func:`is_verbatim`'s truthiness: a record
+      holding ``'false'`` means "the store narrows", and reading it truthily
+      (``bool('false') is True``) would report a faithful ``f32`` cache as a
+      permanent divergence — #8615's symptom reached through #9184's spelling.
+      The CACHE side is never narrowed: the acceptance window is the exact
+      rounding of the RECORD's value, a single point rather than the band a
+      two-sided narrowing would allow. Both sides must be sequences for the
+      narrowing to apply — a scalar under a vector property name is not a
+      vector, and the exact comparison above has already decided it.
+    * **boolean-valued properties** (:data:`BOOLEAN_FORM_PROPS`) — the record's
+      column is ``text`` and the cache's property is a boolean, so the two sides
+      are compared by the boolean they DECLARE (:func:`declared_boolean`), in
+      both directions (#9184). A value outside the declared vocabulary keeps
+      the exact comparison, so a genuinely different marker is still a
+      divergence.
     """
     truth_value = truth_props[prop]
     cache_value = cache_props[prop]
     if _canonical(truth_value) == _canonical(cache_value):
-        return True
-    if prop not in STORED_VECTOR_PROPS or is_verbatim(truth_props, cache_props):
-        return False
+        return FIELD_AGREE
+    if prop in BOOLEAN_FORM_PROPS:
+        truth_bool = declared_boolean(truth_value)
+        if truth_bool is not None and truth_bool == declared_boolean(cache_value):
+            return FIELD_FORM
+    if prop not in STORED_VECTOR_PROPS or declares_verbatim(truth_props, cache_props):
+        return FIELD_DIVERGENT
     if not isinstance(truth_value, (list, tuple)) \
             or not isinstance(cache_value, (list, tuple)):
-        return False
+        return FIELD_DIVERGENT
     narrowed = narrow_to_stored_width(truth_value)
     # `None` means the truth value is not a numeric vector: the store could not
     # have narrowed it either, so the exact comparison stands.
-    return narrowed is not None and _canonical(narrowed) == _canonical(cache_value)
+    if narrowed is not None and _canonical(narrowed) == _canonical(cache_value):
+        return FIELD_FORM
+    return FIELD_DIVERGENT
 
 
 @dataclass(frozen=True)
@@ -129,6 +180,21 @@ class ReconciliationReport:
     divergent_keys: tuple[str, ...] = ()
     truth_side: str = "record"
     cache_side: str = "cache"
+    #: Fields that agree only after a STORED-FORM rule normalised them — the
+    #: vector width (#8615) and the boolean form of ``embedding_verbatim``
+    #: (#9184). Kept OUT of ``field_mismatches`` because a faithful projection
+    #: must be able to reach zero, and kept as its OWN count because otherwise
+    #: the decision would be invisible: a comparison that forgives a difference
+    #: has to say so (#9184: *"surfaced as its own named count"*).
+    #:
+    #: ⚠️ APPENDED LAST on purpose (#9189 review): this class is frozen but not
+    #: ``kw_only``, so a field inserted BEFORE the pre-existing defaulted ones
+    #: silently re-binds a positional construction — ``ReconciliationReport(1,
+    #: 0, 0, 0, 0, ("k",))`` would have put ``"k"`` in ``form_normalized`` and
+    #: left ``divergent_keys`` empty, i.e. the new count would eat a caller's
+    #: sample. Pinned by
+    #: ``tests/test_reconciliation.py::test_a_positional_construction_keeps_its_pre_existing_fields``.
+    form_normalized: int = 0
 
     def as_dict(self) -> dict:
         """The machine-readable shape (JSON-safe — tuples become lists)."""
@@ -140,18 +206,24 @@ class ReconciliationReport:
             "missing_in_cache": self.missing_in_cache,
             "extra_in_cache": self.extra_in_cache,
             "field_mismatches": self.field_mismatches,
+            "form_normalized": self.form_normalized,
             "divergent_keys": list(self.divergent_keys),
         }
 
     def render(self) -> str:
         """A one-line operator summary — divergence as a NUMBER, in context."""
-        return (
+        line = (
             f"{self.truth_side} vs {self.cache_side}: "
             f"{self.divergent} divergent of {self.checked} checked "
             f"(missing_in_cache={self.missing_in_cache}, "
             f"extra_in_cache={self.extra_in_cache}, "
-            f"field_mismatches={self.field_mismatches})"
+            f"field_mismatches={self.field_mismatches}"
         )
+        # Only when a stored-form rule actually forgave something: the default
+        # line stays byte-identical for a comparison that needed no rule.
+        if self.form_normalized:
+            line += f", form_normalized={self.form_normalized}"
+        return line + ")"
 
 
 def reconcile_views(truth: Mapping[str, Mapping], cache: Mapping[str, Mapping],
@@ -182,6 +254,7 @@ def reconcile_views(truth: Mapping[str, Mapping], cache: Mapping[str, Mapping],
     missing_in_cache = 0
     extra_in_cache = 0
     field_mismatches = 0
+    form_normalized = 0
     value_divergent = 0
     divergent_keys: list[str] = []
 
@@ -203,8 +276,13 @@ def reconcile_views(truth: Mapping[str, Mapping], cache: Mapping[str, Mapping],
             # value ``None`` on one side and absent on the other is a
             # divergence (`set(keys)` differs), not `None == None`.
             for prop in set(truth_props) | set(cache_props):
-                if (prop not in truth_props or prop not in cache_props
-                        or not _props_agree(prop, truth_props, cache_props)):
+                if prop not in truth_props or prop not in cache_props:
+                    field_mismatches += 1
+                    continue
+                relation = _props_relation(prop, truth_props, cache_props)
+                if relation == FIELD_FORM:
+                    form_normalized += 1
+                elif relation == FIELD_DIVERGENT:
                     field_mismatches += 1
         elif not _equal_view(truth_props, cache_props):
             # An uncomparable per-key value cannot be counted field by field;
@@ -222,6 +300,7 @@ def reconcile_views(truth: Mapping[str, Mapping], cache: Mapping[str, Mapping],
         missing_in_cache=missing_in_cache,
         extra_in_cache=extra_in_cache,
         field_mismatches=field_mismatches,
+        form_normalized=form_normalized,
         divergent_keys=tuple(divergent_keys),
         truth_side=truth_side,
         cache_side=cache_side,

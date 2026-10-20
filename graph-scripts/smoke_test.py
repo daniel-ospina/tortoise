@@ -153,7 +153,12 @@ def main() -> int:
         print(f"[2/8] Graph '{graph_name}' ready", file=sys.stderr)
 
         # ── Step 3: Add 2 points via EventAPI ────────────────────────
-        log = EventLog(os.path.join(tmpdir, "events.jsonl"))
+        # A SCRATCH journal: this file lives in a `TemporaryDirectory` that is
+        # deleted when the `with` block exits, so a record row filed from it
+        # could never be reproduced or healed by a replay
+        # (`record != replay(journal)`). `scratch()` is the one construction-time
+        # home of that verdict (#9231 review P2).
+        log = EventLog.scratch(os.path.join(tmpdir, "events.jsonl"))
         proj = _SmokeProj(g)
         api = EventAPI(log, initiated_by="extractor", agent_id="smoke_test",
                        projection=proj)

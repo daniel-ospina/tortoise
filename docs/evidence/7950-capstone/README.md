@@ -36,7 +36,7 @@ property that makes it safe is **`derived = replay(journal)`**. **§17** is the 
 | # | criterion | verdict | deciding artifact | homed |
 |---|---|---|---|---|
 | **S1** | every write goes to the truth store first; the cache is projected from it | ⛔ **NOT-GREEN** | `s1-bypass-probe.log`: an **armed** journal-backed projection refuses `apply` but lets `proj.g.query` write the cache directly (0 journal records) | **`#7951`** (OPEN) |
-| **S2** | truth↔cache divergence is OBSERVED, not assumed | ⛔ **NOT-GREEN** | `s2-wiring-census.log`: `reconcile` / `record_projection.replay` / `read_record_view` / `rebuild_from_record` all have **0 production call sites**. The measured half is clean since `#8615`: `e2e-chain-probe.log`'s clean record-sourced rebuild is `0 divergent of 7 checked (field_mismatches=0)`, and **both** second-writer signatures still register | **`#7951`** + **`#7970`** (OPEN); the comparison rule for vector-valued properties is **CLOSED** on **`#8615`** |
+| **S2** | truth↔cache divergence is OBSERVED, not assumed | ⛔ **NOT-GREEN** | `s2-wiring-census.log` **re-cut at `#9189`**: `read_record_view` has **1** production call site — the `record-reconcile` verb this change adds — and `record_projection.replay` **1** (`record_writer`, `#9187`). `reconcile` and `rebuild_from_record` are still **0**: nothing in the product composes them, and **no schedule drives the verb yet**, so divergence is observed only when a human runs the sweep. The measured half is clean since `#8615`: `e2e-chain-probe.log`'s clean record-sourced rebuild is `0 divergent of 7 checked (missing_in_cache=0, extra_in_cache=0, field_mismatches=0, form_normalized=1)`, and **both** second-writer signatures still register | **`#9189`** (the trigger, this change) + **`#7951`** + **`#7970`** (OPEN); the comparison rule for vector-valued properties is **CLOSED** on **`#8615`** |
 | **S3** | ⭐ the completeness marker works | ✅ **GREEN** | `s3-s4-named-tests.log` + live bounded rebuild in `e2e-chain-probe.log` (`Point:p1` → `not-hot`) | `#7952` (CLOSED) |
 | **S4** | a residency miss is not an insufficiency | ✅ **GREEN** | `s3-s4-unit-tests.log`: 30 router tests; residency outranks sufficiency | `#7953` (CLOSED) |
 | **S5** | derived/volatile fields are NOT in the system of record | ✅ **GREEN** | `s5-s6-pglite-validate.log` (`20261012000001_record_schema.sql PASSED`, incl. the `subject.props.status` refusal) | `#8263` (CLOSED) |
@@ -64,7 +64,7 @@ real Postgres + a real FalkorDB:
 $ TORTOISE_DB_URI=<private lane> uv run --with psycopg2-binary \
     python docs/evidence/7950-capstone/probes/e2e_chain_probe.py
 journal records read: 39
-record projection: replayed 39 journal records → 60 record mutations (0 declared no-op)
+record projection: replayed 39 journal records → 57 record mutations (0 declared no-op)
 record row counts: {'journal_event': 39, 'source': 2, 'event': 1, 'session': 0, 'object': 1, 'subject': 1, 'point': 2, 'relation': 2, 'node_identity': 7}
 read_record_view -> 7 nodes, 2 relations
 record view by label: {'Point': 2, 'Event': 1, 'Subject': 1, 'Object': 1, 'Source': 2}
@@ -73,13 +73,13 @@ cache node counts (live read): [('Event', 1), ('Meta', 1), ('Object', 1), ('Poin
 hot read for Point 'p1': [['p1']]
 bounded rebuild declaration: coverage=partial
 unwritten record key 'Point:p1' covered-by-declaration=False → residency=not-hot
-RECONCILE (after a record-sourced rebuild): record vs cache: 0 divergent of 7 checked (missing_in_cache=0, extra_in_cache=0, field_mismatches=0)
+RECONCILE (after a record-sourced rebuild): record vs cache: 0 divergent of 7 checked (missing_in_cache=0, extra_in_cache=0, field_mismatches=0, form_normalized=1)
 ARMED FOLD (proj.apply):          refused (DirectCacheWriteRefused)
 ARMED RAW HANDLE (proj.g.query):  SUCCEEDED (direct cache write)
-RECONCILE (after a DIRECT raw-handle cache write): record vs cache: 1 divergent of 8 checked (missing_in_cache=0, extra_in_cache=1, field_mismatches=0)
+RECONCILE (after a DIRECT raw-handle cache write): record vs cache: 1 divergent of 8 checked (missing_in_cache=0, extra_in_cache=1, field_mismatches=0, form_normalized=1)
 second-writer signature -> extra_in_cache=1
 ARMED RAW HANDLE MUTATION:        Point:p1 gained an unauthorized property (Point.second_writer_marker)
-RECONCILE (after a DIRECT raw-handle property WRITE): record vs cache: 2 divergent of 8 checked (missing_in_cache=0, extra_in_cache=1, field_mismatches=1)
+RECONCILE (after a DIRECT raw-handle property WRITE): record vs cache: 2 divergent of 8 checked (missing_in_cache=0, extra_in_cache=1, field_mismatches=1, form_normalized=1)
 field-mutation signature -> field_mismatches=1
 CHAIN RESULT: journal -> record -> cache COMPLETED with the shipped modules
 ```
@@ -120,9 +120,11 @@ and it is measured in both directions: a clean record-sourced rebuild agrees on 
   divergence. `#8615` closed that by comparing a declared vector property at the store's stored
   width (`tortoise/stored_form.py`), one-sided so the accepted set stays the single point
   `f32(record)`.
-- ⛔ It is **driven by hand**. In the product, neither `record_projection.replay`, nor
-  `read_record_view`, nor `rebuild_from_record`, nor `reconcile` has a single production caller
-  (`s2-wiring-census.log`). The chain is **built**, not **wired**.
+- ⛔ It is **not yet observed continuously**. Two of the four call sites now exist in the product —
+  `read_record_view` in the `record-reconcile` verb (`#9189`) and `record_projection.replay` in
+  `record_writer` (`#9187`) — while `reconcile` and `rebuild_from_record` still have **none**, and
+  **nothing schedules the sweep**: `s2-wiring-census.log` is the deciding artifact, re-cut at this
+  head. The chain is now partly **wired** and still not **running**.
 
 ---
 
@@ -195,18 +197,30 @@ $ uv run pytest tests/test_reconciliation.py -q
 $ uv run python docs/evidence/7950-capstone/probes/s2_wiring_census.py
 production population: ['tortoise', 'tools', 'scripts']/**/*.py
 == reconciliation.reconcile: 0 production call site(s) ==
-== record_projection.replay: 0 production call site(s) ==
-== cache_projection.read_record_view: 0 production call site(s) ==
+== record_projection.replay: 1 production call site(s) ==
+== cache_projection.read_record_view: 1 production call site(s) ==
 == FalkorProjection.rebuild_from_record: 0 production call site(s) ==
                                                         (s2-wiring-census.log)
 ```
 
+**Re-cut at `#9189`, and the numbers moved for two different reasons.** The two halves this change
+and `#9187` wired now read **1** each: `read_record_view` is called by the `record-reconcile` verb
+(`tortoise/__main__.py`), and `record_projection.replay` by `record_writer` — so the record→cache leg
+is no longer unreachable from the product. The probe was also made **honest about its own counting**
+at the same re-cut, before the figure was quoted: prose lines inside a docstring no longer count
+(`record_writer.py`'s docstring mentions `record_projection.replay(` twice, which had inflated that
+line to **3**), and `reconciliation.reconcile` no longer matches an import of `reconcile_views` — a
+different function — so its **0** is now a real zero rather than a lenient import-line artifact. The
+comparison is unchanged in substance; what changed is that the census now measures what it claims.
+
 The mechanism itself is sound, and the end-to-end run proves it **on real data** — after a direct
 raw-handle cache write it reports `extra_in_cache=1` (the second-writer signature, §17.2) and after
 a direct raw-handle property write it reports `field_mismatches` (the value-divergence signature).
-But a check that is never run observes nothing. `reconcile()`'s own docstring names the dependency:
-*"until the record's own read path exists (#7970) and the cache is projected one way from it
-(#7971)."* There is no scheduled/continuous runner.
+But a check nothing runs observes nothing: `#9189` supplies the **trigger** (an operator-scheduled
+sweep, not a call inside the capture turn) and with it a real cache reader and a real exit code, and
+**no schedule drives it yet** — that interval is whoever installs the timer, and nothing in the tree
+does. `reconcile()`'s own docstring names the remaining dependency: *"until the record's own read
+path exists (#7970) and the cache is projected one way from it (#7971)."*
 
 **The field half — closed on `#8615`.** With readers carrying the real property maps, a **clean**
 record-sourced rebuild now reports `field_mismatches=0`: `Point:p1.embedding` is `[0.1, 0.2]`
@@ -219,10 +233,11 @@ detectable: the probe's second-writer **property** write reports `field_mismatch
 signature did not go quiet. **This is why S2's remaining blocker is the wiring half only** — the
 comparison rule is no longer one of the reasons S2 cannot go green.
 
-**Missing:** a running reconciliation — the record reader and its wiring. **Homed: `#7951`**
-(the chokepoint the reconciliation is evidence for) and **`#7970`** (the record read path,
-OPEN/deferred by §2.0). The comparison rule for vector-valued properties is **CLOSED** on
-**`#8615`**.
+**Missing:** a **scheduled** reconciliation — the composing `reconcile` and `rebuild_from_record`
+callers are still zero, and no timer drives the `record-reconcile` verb this change adds. **Homed:
+`#9189`** (the trigger, OPEN until a schedule runs it), **`#7951`** (the chokepoint the reconciliation
+is evidence for) and **`#7970`** (the record read path, OPEN/deferred by §2.0). The comparison rule
+for vector-valued properties is **CLOSED** on **`#8615`**.
 
 ---
 
@@ -397,7 +412,7 @@ Recorded here because the proof touches the affected surface.
 | # | blocker |
 |---|---|
 | **S1** | enforcement on the raw-handle lane (`proj.g.query`) + the atomic write → **`#7951`** (OPEN) |
-| **S2** | a running reconciliation: the record reader + the chokepoint wiring → **`#7951`** + **`#7970`** (OPEN); the comparison rule for vector-valued properties is **CLOSED** on **`#8615`** (a clean rebuild now reports `field_mismatches=0`, a second-writer property write still reports `field_mismatches=1`) |
+| **S2** | a **scheduled** running reconciliation: `reconcile`/`rebuild_from_record` still have no caller and no timer drives the `record-reconcile` verb → **`#9276`** (the scheduled sweep, OPEN) + **`#7951`** + **`#7970`** (OPEN); `read_record_view` (**1** call site, `#9189`) and `record_projection.replay` (**1**, `#9187`) are wired; the comparison rule for vector-valued properties is **CLOSED** on **`#8615`** (a clean rebuild now reports `field_mismatches=0`, a second-writer property write still reports `field_mismatches=1`) |
 | **S6 caveat** | live legacy-id normalisation (W1b) → **no issue home** |
 
 Not blocking, recorded: the marker is off by default under a `complete` declaration (§2.0's

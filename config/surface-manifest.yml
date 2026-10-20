@@ -21,7 +21,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: ab1f3e8584d27b88934d84f841878a6e6f85fc83
+cut_at_commit: 53b401dacb2558a7852feef1fdb528d40aeb2fc4
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -58,18 +58,17 @@ response_fields:
   emitted_when: '#2350 — the hit is a Point carrying a validity window, and the START''s precision: year|month|day,
     or null where the stored start is PRESENT but names no instant (`""`, `TBD`, `not-a-date` — the #6140 ruling
     makes that "no start was recorded", so there is no granularity to claim; #9201). A legacy bare-ISO (orderable)
-    start reads as day; a caller-declared token wins. Emitted with the same block as valid_to_precision and
-    end_state, whenever valid_from / valid_to / valid_from_precision / valid_to_precision is present'
+    start reads as day; a caller-declared token wins. Emitted with the same block as valid_to_precision and end_state,
+    whenever valid_from / valid_to / valid_from_precision / valid_to_precision is present'
   unchanged_when_off: n/a — not flag-gated; an undated hit stays byte-identical (no window keys at all), never a
     defaulted value
 - response: tortoise_search
   field: valid_to_precision
   emitted_when: '#2350 — the end precision of the hit''s validity window: year|month|day, the end-only `unknown`
-    marker (the window ENDED but is un-datable), or null where the stored end is PRESENT but names no instant
-    (`TBD` — no granularity to claim; #9201). ABSENT (not null) when the window has no end at all, so the open
-    shape stays distinguishable. Emitted with the same block as valid_from_precision and end_state'
-  unchanged_when_off: n/a — not flag-gated; absent when the point has no end, so an open-ended hit stays
-    byte-identical
+    marker (the window ENDED but is un-datable), or null where the stored end is PRESENT but names no instant (`TBD`
+    — no granularity to claim; #9201). ABSENT (not null) when the window has no end at all, so the open shape stays
+    distinguishable. Emitted with the same block as valid_from_precision and end_state'
+  unchanged_when_off: n/a — not flag-gated; absent when the point has no end, so an open-ended hit stays byte-identical
 - response: tortoise_search
   field: end_state
   emitted_when: '#2350 — the 3-state window end, one of open|known|unknown (tortoise/validity.py is its ONE home),
@@ -149,8 +148,8 @@ response_fields:
   emitted_when: '#2350 — the additive precision block on EVERY chain entry and on each resolved entry: valid_from_precision
     (year|month|day, or null for a PRESENT bound that names no instant — #9201), valid_to_precision (year|month|day,
     the end-only `unknown`, or null for a present un-datable end), end_state (open|known|unknown; a stored-but-un-datable
-    END still reads `known` until #9202''s owner ruling). Resolved by `window_read_fields` in
-    tortoise/validity.py, the ONE read-projection home'
+    END still reads `known` until #9202''s owner ruling). Resolved by `window_read_fields` in tortoise/validity.py,
+    the ONE read-projection home'
   unchanged_when_off: n/a — not flag-gated; additive keys, and a legacy dated window still reads as day / open
 - response: sdk:get_historical_knowledge
   field: end_state_unknown
@@ -302,13 +301,13 @@ response_fields:
   field: advisories
   emitted_when: 'a CLAIM written with no source and no provenance is flagged — {advisories: [{code, node_id, message,
     advisory}]} with code `no_source`, naming the cheap fix `extractedFrom=''session:<id>''` (the session that produced
-    the assertion, registered sourceKind=agentSession). Advisory-only: the write has already landed, the key never blocks
-    or refuses, and it changes nothing that was stored. Absent when the write carries a materialized extractedFrom (a
-    declared or `session_id`-inferred ref — this door creates the :Source and the edge) or an authored word
-    (`credibility=`, which #398 rules IS a source); a bare legacy point-level `sourceKind` does not silence it, because
-    it is an annotation with no link behind it (#8171)'
-  unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a sourced or word-bearing write, so that response stays
-    byte-identical
+    the assertion, registered sourceKind=agentSession). Advisory-only: the write has already landed, the key never
+    blocks or refuses, and it changes nothing that was stored. Absent when the write carries a materialized extractedFrom
+    (a declared or `session_id`-inferred ref — this door creates the :Source and the edge) or an authored word (`credibility=`,
+    which #398 rules IS a source); a bare legacy point-level `sourceKind` does not silence it, because it is an
+    annotation with no link behind it (#8171)'
+  unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a sourced or word-bearing write, so that response
+    stays byte-identical
 - response: tortoise_check_structure
   field: _meta.tortoise_error
   emitted_when: 'only for the transport wait-bound refusal — the ONE producer whose failure payload is a `{code,
@@ -812,10 +811,10 @@ rows:
   keyword_rank: 2
   cluster: null
   canonical: null
-  job: 'Create a Point node (statement, decision, vision, hypothesis, etc.). dedup=True (default): idempotent — returns
-    existing Point if content matches. Declaring extractedFrom materializes that :Source and links it (#8171); a fresh
-    write with no source and no provenance is advised (advisories: [{code: no_source, node_id, message}] — advisory
-    only, never a block).'
+  job: 'Create a Point node (statement, decision, vision, hypothesis, etc.). dedup=True (default): idempotent —
+    returns existing Point if content matches. Declaring extractedFrom materializes that :Source and links it (#8171);
+    a fresh write with no source and no provenance is advised (advisories: [{code: no_source, node_id, message}]
+    — advisory only, never a block).'
   dependency: declares TortoiseSDK.create_point (resolves)
   lifecycle: active
   used_by: agents, tooling, skill-docs, docs
@@ -2720,7 +2719,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_mine_conversations
-  served_from: tortoise/mcp_server.py:7e4594164cdeb8a9
+  served_from: tortoise/mcp_server.py:78f60fbdec710059
   served_attributes: 9885413e99690d9c
   family: mining
   family_rank: 11
