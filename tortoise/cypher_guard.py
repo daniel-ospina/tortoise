@@ -1366,9 +1366,19 @@ def _statement_mutating(statement) -> bool | None:
     handed the statement directly).
 
     ``None`` when there is nothing to classify, and ``None`` when the repo's
-    single write classifier cannot be imported — a classifier that cannot run
-    must answer "not known", never "read", because "read" is the direction
-    that invites a duplicated write.
+    single write classifier cannot be imported OR raises — a classifier that
+    cannot run must answer "not known", never "read", because "read" is the
+    direction that invites a duplicated write.
+
+    The body is TOTAL (#9358 review P2), not just the import: this function is
+    evaluated as an ARGUMENT at every proxy verb
+    (``mutating=_statement_mutating(q)`` in ``_GuardedHandleProxy``), which
+    runs it BEFORE ``_forward_query``'s ``except`` can catch anything — so a
+    raise here would fail the caller's query outright instead of hedging the
+    note, and it would do it on the READ traffic the ``ro_query`` arm change
+    newly routes through this call. The command channel's derivation carries
+    the same belt in ``_explain_instance_unavailable``; here it belongs in the
+    classifier itself, because there is no single call site to wrap.
 
     ``projection._statement_writes`` is imported lazily: ``tortoise.projection``
     imports THIS module at import time, so a module-level import would be a
@@ -1379,9 +1389,11 @@ def _statement_mutating(statement) -> bool | None:
         return None
     try:
         from tortoise.projection import _statement_writes
+
+        return _statement_writes(statement)
     except Exception:  # noqa: BLE001, RUF100 — see the docstring: never guess, never raise
+        logger.debug("statement classification failed", exc_info=True)
         return None
-    return _statement_writes(statement)
 
 
 def _command_mutating(args) -> bool | None:

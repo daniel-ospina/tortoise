@@ -314,6 +314,9 @@ def test_the_proxy_verbs_agree_with_the_command_channel():
         def ro_query(self, q, params=None, timeout=None):
             raise redis_exc.TimeoutError(SOCKET_TIMEOUT)
 
+        def _query(self, q, params=None, timeout=None, read_only=False):
+            raise redis_exc.TimeoutError(SOCKET_TIMEOUT)
+
         def explain(self, q, params=None):
             raise redis_exc.TimeoutError(SOCKET_TIMEOUT)
 
@@ -335,10 +338,58 @@ def test_the_proxy_verbs_agree_with_the_command_channel():
         handle.ro_query(READ_STATEMENT)
     assert "re-issuing this statement is safe" in str(caught.value)
 
+    # ``_query(read_only=True)`` picks the GRAPH.RO_QUERY VERB, it does not make
+    # the statement a read — so it must not restore the hardcoded ``False`` this
+    # round removed. Pinned separately from ``ro_query``: they are different
+    # methods and a revert of one leaves the other green (measured, #9358 review
+    # P2 — the ``_query`` half had no pin at all).
+    with pytest.raises(redis_exc.TimeoutError) as caught:
+        handle._query(WRITE_STATEMENT, read_only=True)
+    assert "OUTCOME IS UNKNOWN" in str(caught.value)
+    assert "re-issuing this statement is safe" not in str(caught.value)
+
+    with pytest.raises(redis_exc.TimeoutError) as caught:
+        handle._query(READ_STATEMENT, read_only=True)
+    assert "re-issuing this statement is safe" in str(caught.value)
+
     # …while a write through the EXECUTING verb still gets the loud arm.
     with pytest.raises(redis_exc.TimeoutError) as caught:
         handle.query(WRITE_STATEMENT)
     assert "OUTCOME IS UNKNOWN" in str(caught.value)
+
+
+def test_a_classifier_that_raises_hedges_instead_of_failing_the_query(monkeypatch):
+    """The classifier is TOTAL, because the proxy evaluates it BEFORE its belt.
+
+    The proxy computes ``mutating=_statement_mutating(q)`` as an ARGUMENT, so it
+    runs outside ``_forward_query``'s ``except``: a raise there would fail the
+    caller's query outright — never dispatching it — instead of hedging the
+    note. The command channel's derivation got the same belt in the merged PR
+    (``_explain_instance_unavailable``); the proxy has no single call site to
+    wrap, so the belt belongs in the classifier. #9358 review P2.
+    """
+    from tortoise import projection
+
+    monkeypatch.setattr(projection, "_statement_writes",
+                        lambda statement: (_ for _ in ()).throw(RuntimeError("classifier blew up")))
+
+    assert cypher_guard._statement_mutating(WRITE_STATEMENT) is None
+
+    class _StubHandle:
+        name = "stub"
+        client = None
+
+        def query(self, q, params=None, timeout=None):
+            raise redis_exc.TimeoutError(SOCKET_TIMEOUT)
+
+    handle = cypher_guard._guard_handle(_StubHandle())
+    with pytest.raises(redis_exc.TimeoutError) as caught:
+        handle.query(WRITE_STATEMENT)
+    # The hedge: described, told the outcome is not known — not raised past the
+    # caller, and never the "safe to re-issue" claim it cannot support.
+    message = str(caught.value)
+    assert "Whether the command took effect is UNKNOWN" in message
+    assert "re-issuing this statement is safe" not in message
 
 
 # ── what must NOT be rewritten ─────────────────────────────────────────────
