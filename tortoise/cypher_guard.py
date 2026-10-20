@@ -32,17 +32,20 @@ handles — is guarded. That construction set is no longer a convention: #6882
 pins it with an AST inventory (a revert to a raw ``FalkorDB(...)`` fails a test)
 and a runtime marker assertion on a real embedded projection.
 
-⛔ TWO IN-PACKAGE EXCEPTIONS, and the guard-seam pin above cannot see either:
-the #6882 SCAN matches only ``FalkorDB(...)`` / ``guarded_client(...)``, so a
-module that builds a bare ``redis.Redis(...)`` passes it unguarded —
-``hosted_backup._restore_copy_client`` (raw on purpose, #3813) and
-``acl_graph_users``' admin client. Both ARE counted by the SIBLING read-bound
-inventory in the same test file (``_EXPECTED_SITES`` names both modules, and its
-``found == _EXPECTED_SITES`` assertion reds on any addition), so a THIRD raw
-client reds that scan instead of slipping in — and that is the distinction a
-reader must not blur: it pins that these clients carry a socket bound, NOT that
-they are guarded. Their commands do NOT carry the #7357 note and are NOT
-operator-guarded; see :class:`_GuardedExecuteCommand`.
+⛔ THE TWO BARE ``redis.Redis`` CLIENTS ARE WIRED NOW (#7357) — they used to be
+this paragraph's exceptions, because the #6882 SCAN matches only
+``FalkorDB(...)`` / ``guarded_client(...)`` and a module that builds a bare
+``redis.Redis(...)`` passes it unguarded: ``hosted_backup._restore_copy_client``
+(raw on purpose, #3813) and ``acl_graph_users``' admin client. Both are now
+constructed THROUGH :func:`guarded_client` (``guarded_client(redis.Redis, …)``),
+so their command channels carry this module's guard AND the #7357
+instance-outage note, and the seam inventory pins them. Their #3813 property is
+untouched: the restore client still derives its OWN pool (generous
+``socket_timeout``, no retry), it is only the CONSTRUCTION that moved. The
+remaining distinction a reader must not blur is that these clients yield no
+``FalkorDB`` handles at all — the seam is here for the command CHANNELS, which
+is why they are listed under ``_EXPECTED_GUARD_SEAM_SITES`` and still counted by
+the SIBLING read-bound inventory (``_EXPECTED_SITES``).
 
 Code OUTSIDE the package that builds a raw vendor client is NOT covered. That
 set is ILLUSTRATIVE, not exhaustive — e.g. ``graph-scripts/*.py``,
@@ -1550,15 +1553,14 @@ class _GuardedExecuteCommand:
     real vendor handle those verbs route through ``execute_command`` and are
     covered.
 
-    ⛔ AND THE TWO IN-PACKAGE CLIENTS THAT BUILD THEIR OWN ``redis.Redis``, named
-    because "in-package" is not the test — going through THIS seam is:
-    ``hosted_backup._restore_copy_client`` (a raw client on purpose, #3813: the
-    restore's ``GRAPH.COPY`` must not inherit an ordinary request's read bound)
-    and ``acl_graph_users``' admin client. A transport failure there still
-    arrives as the bare driver sentence. The claim above is exactly these
-    channels, not "every handle" and not "every client this package builds".
-    Wiring those two is follow-up work on THEIR seam, not a reason to widen this
-    sentence.
+    ⛔ AND THE TWO IN-PACKAGE CLIENTS THAT BUILD THEIR OWN ``redis.Redis`` were
+    the OTHER half of that caveat, now closed (#7357): "in-package" was never
+    the test — going through THIS seam is. ``hosted_backup._restore_copy_client``
+    (a client on purpose, #3813: the restore's ``GRAPH.COPY`` must not inherit an
+    ordinary request's read bound — that bound is unchanged) and
+    ``acl_graph_users``' admin client are both constructed through
+    ``guarded_client(redis.Redis, …)``, so a transport failure there arrives
+    with this note like every other guarded channel.
     """
 
     __slots__ = ("__weakref__", "_client", "_raw")
@@ -2055,9 +2057,10 @@ def guarded_client(base_client, *args, **kwargs):
     doctor probe — goes through here, so every handle they yield is guarded
     regardless of which call site queries it. A raw vendor client built
     *outside* the package (e.g. ``graph-scripts/``, ``apps/graph-viz/``,
-    ``docs/runbook/``, ``tests/``) is not covered, and neither are the two
-    IN-package modules that build a bare ``redis.Redis`` instead
-    (``hosted_backup._restore_copy_client``, ``acl_graph_users``' admin
-    client); see the module docstring's SCOPE paragraph for both boundaries.
+    ``docs/runbook/``, ``tests/``) is not covered. The two IN-package modules
+    that build a bare ``redis.Redis`` (``hosted_backup._restore_copy_client``,
+    ``acl_graph_users``' admin client) now come through HERE as well — for their
+    command channels' operator guard and #7357 outage note, not for a FalkorDB
+    handle they never yield; see the module docstring's SCOPE paragraph.
     """
     return guarded_client_class(base_client)(*args, **kwargs)

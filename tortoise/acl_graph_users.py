@@ -82,7 +82,15 @@ def _admin_client():
     admin creds). None when: no URI (embedded redislite), a hostless URI, or
     an unsupported scheme — every ACL fn then no-ops (fail-soft). Port-less
     URIs default to 16379 (the repo-wide convention — projection/session
-    parsers; docker-compose maps 6379 for containers WITH the port)."""
+    parsers; docker-compose maps 6379 for containers WITH the port).
+
+    #7357 — built through ``guarded_client`` (the #6882 seam), so a role/ACL
+    mutation that meets a restarting instance is told the instance went away
+    and that its OUTCOME IS UNKNOWN, instead of surfacing the bare transport
+    sentence as if the statement had been refused. The ACL bearer commands
+    (``ACL SETUSER`` …) carry no Cypher, so the seam's operator guard is a
+    no-op for them; the outage note is not.
+    """
     uri = os.environ.get("TORTOISE_DB_URI")
     if not uri:
         return None
@@ -99,13 +107,18 @@ def _admin_client():
     # (only redis.from_url does), so a raw read breaks auth silently.
     from tortoise.config import parse_uri_userinfo
 
+    # #6882's ONE construction seam — see this function's docstring for the
+    # #7357 half (the outage note) and why the guard's Cypher arm is inert here.
+    from tortoise.cypher_guard import guarded_client
+
     # #3065: the socket bounds come from the product's ONE resolution point,
     # not from a pair of literals. The literals this replaces (3s connect /
     # 5s read) were bounded but KNOB-BLIND — `TORTOISE_DB_SOCKET_TIMEOUT`
     # never reached this client, which is the same defect one step milder.
     from tortoise.projection import _bounded_server_socket_kwargs
     username, password = parse_uri_userinfo(uri)
-    return redis.Redis(
+    return guarded_client(
+        redis.Redis,
         host=parsed.hostname,
         port=parsed.port or 16379,
         username=username,

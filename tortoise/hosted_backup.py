@@ -2451,6 +2451,17 @@ def _restore_copy_client(db):
     No retry is deliberate on both counts: retrying multiplies the wait, and
     it re-issues the copy (a second server-side fork) while the first may
     still be running.
+
+    #7357 — the client is built through ``guarded_client`` (the #6882 seam) so
+    ``GRAPH.COPY`` reaches the same command channel every other in-package
+    client does: the ``=~`` operator guard, and the instance-outage note that
+    ``cypher_guard`` appends when the container restarts/reloads or is
+    OOM-killed mid-request. Without it a restore that dies mid-copy surfaced as
+    a bare ``Timeout reading from socket`` — which reads as a bad write rather
+    than "the instance went away, the server-side copy may still be running".
+    ⛔ The #3813 read bound is NOT touched by this: the pool below is still the
+    restore's own (generous ``socket_timeout``, no retry), which is the whole
+    reason this client exists rather than reusing an ordinary one.
     """
     import redis as _redis
     from redis.backoff import NoBackoff
@@ -2469,7 +2480,13 @@ def _restore_copy_client(db):
     # client (see tests/test_dr_endpoints.py::TestRestoreSwapReadBound).
     kwargs["socket_timeout"] = _restore_swap_timeout_s()
     kwargs["retry"] = _Retry(NoBackoff(), 0)
-    return _redis.Redis(connection_pool=_redis.ConnectionPool(
+    # #6882's ONE construction seam, not a raw ``redis.Redis``: the client's
+    # own ``execute_command`` (and its connection's command entries) then carry
+    # the operator guard and the #7357 outage note. The pool, its
+    # ``connection_class`` and the #3813 bound are passed through untouched.
+    from tortoise.cypher_guard import guarded_client
+
+    return guarded_client(_redis.Redis, connection_pool=_redis.ConnectionPool(
         connection_class=pool.connection_class, **kwargs))
 
 
