@@ -42,6 +42,7 @@ answer-coverage leg. The answer-bearing **turn** is the missing unit. Five quest
 | `e9327a54` | `answer_ultrachat_480665_t7` | 88 | below the 40-cut |
 
 **Why ordering fixes cannot reach `0a995998`:**
+
 1. It is a **multi-session count** question needing three turns from three sessions; only session 2's turn
    is in the pool. With 1 of 3 turns the reader cannot count to 3 (the #2280 run recorded "2 items").
 2. The other two turns sit at fused rank 146 / 152 against a **120-item pool** — no re-ranker, fusion
@@ -229,13 +230,15 @@ post-retrieval graph chain is already 17.5 ms p50, 22 % of the retrieval budget 
 ## 5. What already exists — and the exact delta
 
 **A modification of an existing mechanism is a better outcome than a new one.** `tortoise/session_reinjection.py`
-(C4, **#2517**, **PR #3577** — **merged 2026-09-22**; it is NOT present at this doc's pinned `e75091e` because it
+(C4, **#2517**, **PR #3577** — **merged 2026-09-22**; it is NOT present at this doc's pinned `4a7b7202e` because it
 landed after it, so read it on `main`) already:
+
 - fetches a seeded hit's own session's turns over `(s:Session)-[:CONTAINS]->(p:Point)` — **product-real**;
 - splices them additively, anchored after the session's last base rank;
 - is OFF by default and eval-armed.
 
 **Its two gaps are the whole delta of #4211:**
+
 1. **SEED** — `seeded_sessions` keys on the hit's `session_id`, which `annotate_ask_hits` fills from
    `ev.sessionId or n.sessionId` — a capture turn has neither (`""`), so `session_key_of` yields
    `idx:-1` and the seed is dropped. The module's own docstring names this: *"the seed is therefore a
@@ -249,6 +252,7 @@ landed after it, so read it on `main`) already:
    anchoring in the pool.
 
 **Other existing mechanisms, precisely located:**
+
 - `GraphRanker` (`tortoise/ranking.py`, #25) — reorders only; the ask lane does not use it.
 - `expand_structural_hops` (`tortoise/search_engine.py:1113`) — introduces candidates over `:IMPL|NAND`;
   zero such edges on the failing store; the ask lane never enables it.
@@ -297,6 +301,7 @@ not regress.
 passing every criterion; record every cell.
 
 **Falsifier.**
+
 - **F1** — the dense leg alone (#4202) already puts all 5 golds inside the cut ⇒ not needed; close.
 - **F2** — any window-miss question's gold stays outside the cut with the arm ON ⇒ no recall delivered.
 - **F3** — a reproducible per-question correct→incorrect regression ⇒ the precision guard failed.
