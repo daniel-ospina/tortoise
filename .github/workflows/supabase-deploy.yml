@@ -84,11 +84,31 @@ on:
   workflow_dispatch:
 
 # A DEPLOY must never be cancelled midway: a cancelled migration apply leaves
-# the schema half-migrated, which no re-run repairs deterministically. One
-# group, never cancelling — a newer push waits for the in-flight deploy instead
-# of aborting it. Bookkeeping, not a merge gate (#9115).
+# the schema half-migrated, which no re-run repairs deterministically. So the
+# run-level lock never cancels — a superseded run of the SAME event queues
+# behind the in-flight one instead of aborting a half-applied schema. Runs of
+# DIFFERENT events do not queue behind each other: as the note below spells
+# out, the group is event-scoped, so a `push` drift run can never hold the lock
+# a `workflow_dispatch` apply needs. Bookkeeping, not a merge gate (#9115).
+#
+# ⛔ The group is EVENT-SCOPED, and that is load-bearing twice over.
+#
+# 1. A run-level group is acquired by EVERY run of this workflow — including the
+#    `push` arm that only runs `check-drift`. With a constant name, a push run
+#    holds the deploy lock for as long as the runner queue starves it (measured
+#    18m35s on run 39153770128), an operator's dispatch queues behind it, and a
+#    THIRD arrival cancels the pending dispatch regardless of
+#    `cancel-in-progress` (#9120's own finding). That is exactly what #1095's
+#    reviewed decision forbids — `docs/plans/2026-08-13-1095-migration-drift-gate.md`:
+#    "workflow-level concurrency is claimed per-run — a push run would still
+#    hold the shared group".
+# 2. A run-level group that equals the JOB-level group name deadlocks: the run
+#    acquires it first, so the job can never acquire it, and GitHub fails the
+#    job instantly with zero steps and no runner (#9120 x #1095, 2026-10-20).
+#
+# Event-scoping fixes (1); keeping the job's own distinct group fixes (2).
 concurrency:
-  group: supabase-deploy
+  group: supabase-deploy-${{ github.event_name }}
   cancel-in-progress: false
 
 jobs:
@@ -98,8 +118,9 @@ jobs:
   # supabase/** push is the expected state (apply is dispatch-only #771), so
   # this is a warning + remediation banner, not a failure. Exit 2 (missing
   # token / API error) DOES fail red — that's a config problem, not drift.
-  # Runs in its own job (no concurrency group) so it can't stall an
-  # operator's dispatch apply.
+  # Runs in the `supabase-deploy-push` run-level group — its own group, so a
+  # starved push run cannot stall an operator's dispatch apply (#1095). It
+  # declares no JOB-level group, deliberately: it needs no apply lock.
   check-drift:
     runs-on: ubuntu-latest
     if: github.event_name == 'push'
@@ -121,12 +142,28 @@ jobs:
 
   deploy:
     runs-on: ubuntu-latest
-    # Dispatch-only (#771 flip gating): a push records but never deploys. At
-    # JOB level so a push-triggered run doesn't hold the shared concurrency
-    # group and stall an operator's dispatch apply (#1095).
+    # Dispatch-only (#771 flip gating): a push records but never deploys. TWO
+    # separate facts keep a push run out of the CONSTANT apply lock, and both
+    # are pinned in tests/test_reporting_workflow_concurrency.py: this `if:` (a
+    # push run never reaches this job) and `check-drift` declaring no job-level
+    # group (the only job a push run has, and it requests no apply lock).
+    # SEPARATELY, the event-scoped run-level group keeps a push run out of a
+    # dispatch's RUN lock — it does not touch this job's lock. The apply lock
+    # below serialises APPLIES with each other, and its name is distinct from
+    # the run-level group so the run/job deadlock cannot return (#1095).
     if: github.event_name == 'workflow_dispatch'
+    # ⛔ This group name MUST differ from the run-level `concurrency.group`
+    # above (#9120). When both were `supabase-deploy`, the RUN acquired the
+    # group first and this job could never acquire it — the run cannot finish
+    # until the job runs, and the job cannot run until the run releases the
+    # group. GitHub resolves the deadlock by failing the job instantly with
+    # ZERO steps and no runner, which reads as a mystery red rather than a
+    # concurrency error. Measured 2026-10-20: the first dispatch after #9120
+    # merged died this way (run 39488590083: `steps=0`, `runner=none`,
+    # completed 1s BEFORE it started), so the only automated migration path was
+    # dead. Keep this a CONSTANT: applies must serialise with each other.
     concurrency:
-      group: supabase-deploy
+      group: supabase-deploy-apply
       cancel-in-progress: false
     env:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}

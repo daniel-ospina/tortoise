@@ -119,6 +119,17 @@ class _FakeProj:
     def close(self):
         pass
 
+    # The sweep helper is used as a context manager (`_sweep_proj`), and a
+    # patched `_sweep_proj` is reached in both the gated and the un-gated path —
+    # so without these an un-gated mutant dies of `TypeError` instead of the
+    # assertion the test is written for (measured: VGATE mutant (a)).
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
 
 # ── wipe_server: filter/refusal/completeness surface ───────────────────────
 
@@ -1636,3 +1647,487 @@ def test_legacy_sweep_reclaims_on_live_server(uri_env, monkeypatch):
             except Exception:
                 pass
         proj.close()
+
+
+# ── Journal ↔ instance binding (measured defect, 2026-10-20) ──────────────
+#
+# `_sweep_drop` counts an ABSENT graph as a satisfied journal entry (it must:
+# a name already dropped by a peer must not be retried forever). The journal
+# also named no SERVER, so a stale journal swept against the WRONG instance
+# "satisfied" every entry while dropping nothing — and then removed itself,
+# destroying the only ownership record those graphs had. The two host
+# instances carried 2,331 graphs and ZERO of them were named by a surviving
+# journal; 24 dead-session markers sat in ACTIVE_SUITES_DIR with their
+# journals already consumed. The fix binds each journal to the instance it was
+# written against; a sweep for another instance must SKIP it, not consume it.
+
+def test_uri_instance_key_binds_the_port_and_folds_localhost(monkeypatch):
+    """The binding key must name ONE instance per spelling: a portless loopback
+    URI resolves to 16379 (mirroring `from_uri`), and `localhost` folds onto
+    `127.0.0.1` — otherwise the fleet's two spellings of the same docker lane
+    read as a mismatch and every journal is stranded."""
+    # The instance key folds a non-default `DOCKER_HOST` in, so a
+    # contributor on Docker Desktop/colima/rind would otherwise get a red
+    # here for a correct implementation (instrument false positive).
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    from tests._embedded import _uri_instance_key
+    assert _uri_instance_key("docker://:falkordb@localhost:6379/g") == "127.0.0.1:6379"
+    assert _uri_instance_key("docker://:falkordb@127.0.0.1:6379/g") == "127.0.0.1:6379"
+    assert _uri_instance_key("docker://:falkordb@127.0.0.1/g") == "127.0.0.1:16379"
+    # Nothing that is not a server target may bind.
+    assert _uri_instance_key("") is None
+    assert _uri_instance_key(None) is None
+    assert _uri_instance_key("/tmp/embedded.db") is None
+
+
+def test_stale_sweep_never_consumes_a_journal_bound_to_another_instance(
+        monkeypatch, tmp_path):
+    """THE MUTATION TEST for the leak: a dead session's journal belongs to
+    another instance, so sweeping it here must drop nothing AND keep the
+    journal. Remove the binding gate (sweep every dead journal, as before) and
+    the second assertion fails: the journal is consumed while its graph is
+    still live somewhere else, which is precisely how 2,331 graphs became
+    permanently unattributable."""
+    # The instance key folds a non-default `DOCKER_HOST` in, so a
+    # contributor on Docker Desktop/colima/rind would otherwise get a red
+    # here for a correct implementation (instrument false positive).
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    import tortoise.embedded_reaper as er
+    from tests._embedded import (
+        JOURNAL_INSTANCE_SUFFIX,
+        _stale_sweep,
+        _uri_instance_key,
+    )
+    adir = tmp_path / "suites"
+    adir.mkdir()
+    monkeypatch.setattr(er, "ACTIVE_SUITES_DIR", str(adir))
+    monkeypatch.setattr(er, "active_suite_markers", lambda: [])
+    nonce = "deadbeefdead"
+    journal = adir / f"{nonce}.graphs.jsonl"
+    journal.write_text("test_ws_elsewhere_graph\n")
+    # The bound key MUST come from the same accessor the MATCHING sweep below
+    # uses. A hardcoded "127.0.0.1:6379" here made the matching half of this
+    # test red in CI, where `.github/actions/falkordb-provision` assigns
+    # TORTOISE_TEST_DOCKER_PORT an ephemeral port — a red about the test's own
+    # literal, not about the instance gate it exists to pin.
+    bound_uri = _live_utils.docker_base_uri(password="x", host="127.0.0.1")
+    bound_key = _uri_instance_key(bound_uri)
+    assert bound_key, bound_uri
+    journal.with_name(journal.name + JOURNAL_INSTANCE_SUFFIX).write_text(
+        bound_key + "\n")
+    db = _FakeDb(graphs=["test_ws_elsewhere_graph"])
+    monkeypatch.setattr("tests._embedded._proj_for_uri",
+                        lambda uri: _FakeProj(db))
+
+    # A sweep for a DIFFERENT instance (the lane's private container), derived
+    # from the bound key so it can NEVER be the bound one whatever port the
+    # environment supplies.
+    host, _, port = bound_key.rpartition(":")
+    other_uri = (f"docker://:falkordb@{host}:{int(port) + 1}"
+                 f"/tortoise_test_matrix")
+    res = _stale_sweep(other_uri)
+    assert db.deleted == [], res          # nothing dropped: wrong instance
+    assert journal.exists(), res          # and the OWNERSHIP RECORD survives
+    assert res["stale"][0]["skipped_instance"], res
+
+    # The same journal, swept by a session pointed at the instance it is
+    # bound to: the graphs are dropped and the record is consumed — BOTH
+    # halves of the record, journal and `.instance` sidecar, so a stale
+    # sidecar cannot outlive its journal and re-bind a future name.
+    _stale_sweep(bound_uri)
+    assert "test_ws_elsewhere_graph" in db.deleted
+    assert not journal.exists()
+    assert not journal.with_name(
+        journal.name + JOURNAL_INSTANCE_SUFFIX).exists()
+
+
+def test_binding_creates_the_coordination_dir_a_fresh_host_lacks(
+        monkeypatch, tmp_path):
+    """_bind_journal_instance runs at conftest IMPORT, and on a fresh host
+    nothing has created ACTIVE_SUITES_DIR yet — the journal itself is created
+    later, by the append seam, which makes the dir for this same reason. Without
+    the mkdir the bind silently failed on exactly the sessions whose journals
+    most need one (a first session on a host, a per-job CI temp root, the #3752
+    redirect), restoring the defect this PR exists to fix with no signal.
+    Mutation: drop the `os.makedirs` and this returns False."""
+    # The instance key folds a non-default `DOCKER_HOST` in, so a
+    # contributor on Docker Desktop/colima/rind would otherwise get a red
+    # here for a correct implementation (instrument false positive).
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    from tests._embedded import JOURNAL_INSTANCE_SUFFIX, _bind_journal_instance, _journal_instance
+    journal = tmp_path / "fresh" / "nested" / "abcdef123456.graphs.jsonl"
+    assert _bind_journal_instance(
+        str(journal), "docker://:falkordb@127.0.0.1:6379/g") is True
+    assert journal.with_name(journal.name + JOURNAL_INSTANCE_SUFFIX).exists()
+    assert _journal_instance(str(journal)) == "127.0.0.1:6379"
+
+
+def test_removing_an_EMPTY_journal_path_touches_nothing(monkeypatch, tmp_path):
+    """The journal path comes from an env var, so it can be `""` — and
+    `"" + ".instance"` is a RELATIVE `.instance` unlinked from the process CWD,
+    which is not this journal's file. `_read_wiped_cursor` guards its own
+    `"" + ".cursor"` for the same reason. Mutation: drop the `if not
+    journal_file: return` guard and the sentinel dies."""
+    from tests._embedded import _remove_journal_file
+    monkeypatch.chdir(tmp_path)
+    for name in (".instance", ".cursor"):
+        (tmp_path / name).write_text("sentinel\n")
+    _remove_journal_file("")
+    for name in (".instance", ".cursor"):
+        assert (tmp_path / name).exists(), f"{name} was unlinked from the CWD"
+
+
+def test_the_sweep_census_does_not_call_a_SKIPPED_journal_dropped():
+    """The operator-facing counters, which a reader uses to judge whether the
+    sweep is working (#5084's evidence WAS this number). A dead journal that
+    was deliberately skipped for another instance sits in the same `stale` list
+    as a consumed one, so counting the list reported "N dropped" while the next
+    printed line said "N left for another instance" — a sweep that dropped
+    NOTHING announcing that it dropped something. Mutation: count
+    `len(entries)` and both the dropped and the elsewhere assertions fail."""
+    from tests._embedded import _sweep_census
+    entries = [
+        {"journal": "a.graphs.jsonl", "journal_removed": True},
+        {"journal": "b.graphs.jsonl", "journal_removed": False,
+         "skipped_instance": "bound to 127.0.0.1:6380, this sweep targets "
+                             "127.0.0.1:6379"},
+        # A NON-LOOPBACK target skips the whole sweep under a plain `skipped`
+        # key — a different fact, and not "belongs elsewhere".
+        {"journal": "c.graphs.jsonl", "journal_removed": False,
+         "skipped": "non-loopback '10.0.0.5'"},
+    ]
+    dropped, elsewhere = _sweep_census(entries)
+    assert [r["journal"] for r in dropped] == ["a.graphs.jsonl"], dropped
+    assert [r["journal"] for r in elsewhere] == ["b.graphs.jsonl"], elsewhere
+
+
+def test_the_instance_sidecar_round_trips_what_conftest_writes(
+        monkeypatch, tmp_path):
+    """Pins the WRITE side the conftest import-time block performs, without
+    re-importing conftest (which would re-roll the session nonce): the file it
+    writes must be exactly what `_journal_instance` reads back, and
+    `_remove_journal_file` must take the sidecar with the journal. Mutation:
+    drop the sidecar from `_remove_journal_file` and the last assertion fails;
+    write anything but the plain key and the first one does."""
+    # The instance key folds a non-default `DOCKER_HOST` in, so a
+    # contributor on Docker Desktop/colima/rind would otherwise get a red
+    # here for a correct implementation (instrument false positive).
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    from tests._embedded import (
+        JOURNAL_INSTANCE_SUFFIX,
+        _bind_journal_instance,
+        _journal_instance,
+        _remove_journal_file,
+    )
+    journal = tmp_path / "abcdef123456.graphs.jsonl"
+    journal.write_text("test_ws_roundtrip\n")
+    # the REAL writer tests/conftest.py calls at import time
+    assert _bind_journal_instance(
+        str(journal), "docker://:falkordb@localhost:6379/g") is True
+    assert _journal_instance(str(journal)) == "127.0.0.1:6379"
+    # Nothing to bind to (embedded/path target) writes nothing — and says so.
+    other = tmp_path / "0123456789ab.graphs.jsonl"
+    assert _bind_journal_instance(str(other), "") is False
+    assert not other.with_name(other.name + JOURNAL_INSTANCE_SUFFIX).exists()
+    _remove_journal_file(str(journal))
+    assert not journal.exists()
+    assert not (tmp_path / (journal.name + JOURNAL_INSTANCE_SUFFIX)).exists()
+    assert _journal_instance(str(journal)) is None
+
+
+def test_stale_sweep_skips_a_bound_journal_when_the_target_is_UNRESOLVABLE(
+        monkeypatch, tmp_path):
+    """Unknown is not "matches". A sweep whose URI resolves to no instance
+    (`_uri_instance_key` -> None: a hostless or unparseable address) must not
+    consume a journal that IS bound to an instance — it cannot know it is
+    sweeping that instance. Mutation: re-add `and target is not None` to the
+    gate and this test fails, because the journal is then eaten.
+    """
+    # The instance key folds a non-default `DOCKER_HOST` in, so a
+    # contributor on Docker Desktop/colima/rind would otherwise get a red
+    # here for a correct implementation (instrument false positive).
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    import tortoise.embedded_reaper as er
+    from tests._embedded import JOURNAL_INSTANCE_SUFFIX, _stale_sweep
+    adir = tmp_path / "suites"
+    adir.mkdir()
+    monkeypatch.setattr(er, "ACTIVE_SUITES_DIR", str(adir))
+    monkeypatch.setattr(er, "active_suite_markers", lambda: [])
+    journal = adir / "deadbeefcafe.graphs.jsonl"
+    journal.write_text("test_ws_bound_graph\n")
+    journal.with_name(journal.name + JOURNAL_INSTANCE_SUFFIX).write_text(
+        "127.0.0.1:6379\n")
+    db = _FakeDb(graphs=["test_ws_bound_graph"])
+    monkeypatch.setattr("tests._embedded._proj_for_uri",
+                        lambda uri: _FakeProj(db))
+    res = _stale_sweep("docker://:falkordb@:6379/tortoise_test_matrix")
+    assert db.deleted == [], res
+    assert journal.exists(), res
+    assert res["stale"][0]["skipped_instance"], res
+
+
+def test_stale_sweep_SKIPS_a_journal_whose_sidecar_is_UNREADABLE(
+        monkeypatch, tmp_path):
+    """A sidecar that EXISTS but holds nothing usable is not "legacy".
+
+    An empty `.instance` is one of the reachable corrupt states (a sidecar this
+    process may not read, one from an older build, one a crash left behind) —
+    the CURRENT writer cannot produce it, because `_bind_journal_instance` writes
+    `<path>.tmp` and `os.replace`s it. Reading the empty case as "unbound" would
+    send the journal down the legacy path and CONSUME it against whatever
+    instance happens to be sweeping, i.e. the very defect this PR exists to
+    remove, re-entered through a corrupt sidecar. Mutation: fold the empty case
+    into `None` (`return key or None`) and this fails.
+    """
+    # The instance key folds a non-default `DOCKER_HOST` in, so a
+    # contributor on Docker Desktop/colima/rind would otherwise get a red
+    # here for a correct implementation (instrument false positive).
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    import tortoise.embedded_reaper as er
+    from tests._embedded import JOURNAL_INSTANCE_SUFFIX, _stale_sweep
+    adir = tmp_path / "suites"
+    adir.mkdir()
+    monkeypatch.setattr(er, "ACTIVE_SUITES_DIR", str(adir))
+    monkeypatch.setattr(er, "active_suite_markers", lambda: [])
+    journal = adir / "tornsidecar0.graphs.jsonl"
+    journal.write_text("test_ws_torn_graph\n")
+    journal.with_name(journal.name + JOURNAL_INSTANCE_SUFFIX).write_text("")
+    db = _FakeDb(graphs=["test_ws_torn_graph"])
+    monkeypatch.setattr("tests._embedded._proj_for_uri",
+                        lambda uri: _FakeProj(db))
+    res = _stale_sweep(_live_utils.docker_base_uri(password="x", host="127.0.0.1"))
+    assert db.deleted == [], res
+    assert journal.exists(), res
+    assert "UNREADABLE" in res["stale"][0]["skipped_instance"], res
+
+
+def test_session_end_own_sweep_SKIPS_a_journal_bound_to_ANOTHER_instance(
+        monkeypatch, tmp_path):
+    """The session-END path ends by REMOVING the journal, and `_sweep_drop`
+    counts an absent graph as satisfied — so sweeping the WRONG instance consumes
+    the only ownership record while the graphs live on. The binding is written at
+    conftest IMPORT and `uri` is read at fixture SETUP, so the two can disagree;
+    this is the same guard `_stale_sweep` has, on the path every session takes.
+    Mutation: drop the gate (sweep unconditionally) and this fails.
+
+    Both keys come from the accessors the code uses, NEVER from a literal: CI's
+    `falkordb-provision` allocates `TORTOISE_TEST_DOCKER_PORT` from 16390
+    upwards, so a hardcoded `127.0.0.1:16390` binding is EQUAL to the sweep's
+    target on exactly the runs that are assigned that port — the gate is then
+    never exercised, the graph is dropped and the journal removed (measured
+    locally by exporting `TORTOISE_TEST_DOCKER_PORT=16390`). The other instance
+    is pinned to a TEST-NET-3 host so the mismatch holds for any port and any
+    `DOCKER_HOST`."""
+    from tests._embedded import (
+        JOURNAL_INSTANCE_SUFFIX,
+        _session_end_own_sweep,
+        _uri_instance_key,
+    )
+    target = _uri_instance_key(
+        _live_utils.docker_base_uri(password="x", host="127.0.0.1"))
+    assert target, "the docker lane must resolve an instance key"
+    other = _uri_instance_key(
+        "docker://:x@203.0.113.9:16390/tortoise_test_matrix")
+    assert other and other != target, (target, other)
+    journal = tmp_path / "own0end.graphs.jsonl"
+    journal.write_text("test_ws_own_graph\n")
+    journal.with_name(journal.name + JOURNAL_INSTANCE_SUFFIX).write_text(
+        other + "\n")
+    db = _FakeDb(graphs=[])          # the OTHER instance: the graph is "absent"
+    monkeypatch.setattr("tests._embedded._sweep_proj",
+                        lambda uri: _FakeProj(db))
+    res = _session_end_own_sweep(
+        _live_utils.docker_base_uri(password="x", host="127.0.0.1"), str(journal))
+    assert db.deleted == [], res
+    assert journal.exists(), res
+    assert res["journal_removed"] is False, res
+    assert "203.0.113.9" in res["skipped_instance"], res
+    # The teardown gate keys on `skipped` (not on the reason string) to mean
+    # "this sweep did not run"; without it the E2E-7 survivor probe would score
+    # the state this skip deliberately left as a leak and red the suite.
+    # Mutation: drop `"skipped"` from the skip return and this fails —
+    # `tests/test_server_hygiene_gate.py::
+    # test_gate_is_SILENT_for_the_INSTANCE_GATE_skip_that_withheld_the_sweep`
+    # fails with it (AssertionError on the survivor).
+    assert res.get("skipped"), res
+
+
+def test_the_sweep_never_touches_a_sidecar_of_a_session_STILL_COLLECTING(
+        monkeypatch, tmp_path):
+    """The collection window: `_bind_journal_instance` runs at conftest IMPORT,
+    while a docker session's MARKER — `_stale_sweep`'s liveness record — is
+    written later, in the autouse session fixture, and its journal only on the
+    first append. A live peer is therefore, mid-collection, a sidecar with no
+    marker and no journal: textually identical to "stranded". An orphan-sidecar
+    reap keyed on marker absence deleted that binding, after which the peer's
+    journal read as LEGACY (gate off) and the next wrong-instance sweep consumed
+    it — the PR's own defect through a new path. Measured on this tree: 2 m 34 s
+    of collection, so the overlap is the normal case for two lanes.
+    Mutation: restore any marker-absence sidecar reap and this fails."""
+    import tortoise.embedded_reaper as er
+    from tests._embedded import JOURNAL_INSTANCE_SUFFIX, _stale_sweep
+    adir = tmp_path / "suites"
+    adir.mkdir()
+    collecting = adir / ("peer0coll.graphs.jsonl" + JOURNAL_INSTANCE_SUFFIX)
+    collecting.write_text("127.0.0.1:16379\n")
+    monkeypatch.setattr(er, "ACTIVE_SUITES_DIR", str(adir))
+    monkeypatch.setattr(er, "active_suite_markers", lambda: [])
+    _stale_sweep(_live_utils.docker_base_uri(password="x", host="127.0.0.1"))
+    assert collecting.exists(), sorted(os.listdir(adir))
+
+
+def test_the_marker_age_prune_never_unlinks_an_OWNERSHIP_RECORD(
+        monkeypatch, tmp_path):
+    """The 24 h prune in `active_suite_markers` unlinks ANY non-dot entry — it
+    is not restricted to markers. A journal the instance gate deliberately
+    SKIPPED (its graphs are on another server, so nothing was concluded and the
+    record must survive for that server's session to reap them) was therefore
+    destroyed, unreported, 24 h after its last append — the PR's defect on a
+    delay, through the very function its stale sweep calls on every docker
+    session. Mutation: drop the `_OWNERSHIP_SUFFIXES` guard and this fails."""
+    import os
+    import time as _t
+
+    import tortoise.embedded_reaper as er
+    adir = tmp_path / "suites"
+    adir.mkdir()
+    old = _t.time() - er.MARKER_MAX_AGE_S - 60
+    for name in ("feed0dead.graphs.jsonl", "feed0dead.graphs.jsonl.cursor",
+                 "feed0dead.graphs.jsonl.instance"):
+        f = adir / name
+        f.write_text("127.0.0.1:16379\n")
+        os.utime(f, (old, old))
+    marker = adir / "4242-feed0dead"
+    marker.write_text("pid=1\nstart=1.0\n")
+    os.utime(marker, (old, old))
+    # A marker whose pid is STILL LIVE but whose file is a day old. This is the
+    # #1642 recurrence the prune exists for: a recycled pid would otherwise pin
+    # `suites_active=True` and silently disable live-orphan kills. Asserting the
+    # file is gone is not enough — the OUTCOME (it is not a live token) is what
+    # the sweep consumes, and only that survives a rewrite that keeps the file
+    # and stops returning tokens for it.
+    # `start=` must be the REAL start time: `_pid_identity_matches` compares it,
+    # so a fabricated value makes the marker stale for a different reason and the
+    # outcome assertion below can then never fail (measured: with `start=1.0`
+    # and the whole prune arm deleted, `active_suite_markers()` was still `[]`).
+    recycled = adir / f"{os.getpid()}-feed0live"
+    recycled.write_text(
+        f"pid={os.getpid()}\nstart={er._process_start_time(os.getpid())}\n")
+    os.utime(recycled, (old, old))
+    monkeypatch.setattr(er, "ACTIVE_SUITES_DIR", str(adir))
+    tokens = {m["token"] for m in er.active_suite_markers()}  # the prune runs here
+    left = sorted(os.listdir(adir))
+    # Outcome FIRST: with the prune gone, the aged-but-live marker is returned as
+    # a token and this is the assertion that fires (the file's mere presence is
+    # the weaker signal, and asserting it first would mask this one).
+    assert not [t for t in tokens if "feed0" in t], tokens
+    assert "4242-feed0dead" not in left, left   # the marker itself IS pruned
+    assert "feed0dead.graphs.jsonl" in left, left
+    assert "feed0dead.graphs.jsonl.instance" in left, left
+
+
+def test_instance_key_separates_two_DAEMONS_on_the_same_host_and_port(
+        monkeypatch):
+    """`127.0.0.1:16390` exists on EVERY docker daemon, so `host:port` alone
+    does not identify a server: a journal minted against daemon A's lane
+    container would read as a MATCH to daemon B's — the wrong-instance
+    consumption the key exists to prevent. Mutation: drop the `DOCKER_HOST`
+    fold and the two keys compare equal."""
+    from tests._embedded import _uri_instance_key
+    uri = "docker://:x@127.0.0.1:16390/tortoise_test_probe"
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    local = _uri_instance_key(uri)
+    monkeypatch.setenv("DOCKER_HOST", "tcp://10.0.0.9:2375")
+    remote = _uri_instance_key(uri)
+    assert local and remote and local != remote, (local, remote)
+    assert "10.0.0.9" in remote, remote
+    # ...but a lane that exports the DEFAULT socket explicitly addresses the
+    # same daemon, so it must produce the SAME key: otherwise that lane writes
+    # journals no peer on the host could ever match, stranding them permanently
+    # (a journal has no age prune). Mutation: return `DOCKER_HOST` raw.
+    for spelling in ("unix:///var/run/docker.sock", "unix:/var/run/docker.sock",
+                     ""):
+        monkeypatch.setenv("DOCKER_HOST", spelling)
+        assert _uri_instance_key(uri) == local, spelling
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    assert _uri_instance_key(uri) == local
+
+
+def test_conftest_BINDS_the_journal_at_import(tmp_path):
+    """Wiring pin for the ONLY production caller of `_bind_journal_instance`.
+
+    Every other instance test drives the helper directly, so deleting the
+    conftest block leaves the whole suite green while restoring the pre-fix
+    behaviour exactly (unbound journal -> not instance-gated -> consumed against
+    whatever instance sweeps next). Mutation: `if False:` on that block, or
+    deleting it, and this fails."""
+    import subprocess
+    import sys
+    code = (
+        "import tempfile, os, tortoise.embedded_reaper as er\n"
+        "d = tempfile.mkdtemp(); er.ACTIVE_SUITES_DIR = d\n"
+        "os.environ['TORTOISE_DB_URI'] = "
+        "'docker://:x@127.0.0.1:16499/tortoise_test_probe'\n"
+        "import tests.conftest\n"
+        "print(d)\n")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out = subprocess.run([sys.executable, "-c", code], cwd=root,
+                         capture_output=True, text=True,
+                         env={k: v for k, v in os.environ.items()
+                              if k not in ("TORTOISE_DB_URI", "DOCKER_HOST")})
+    assert out.returncode == 0, (out.stdout, out.stderr)
+    d = out.stdout.strip().splitlines()[-1]
+    bound = [f for f in os.listdir(d) if f.endswith(".graphs.jsonl.instance")]
+    assert len(bound) == 1, (bound, out.stdout)
+    with open(os.path.join(d, bound[0])) as fh:
+        assert fh.read().strip() == "127.0.0.1:16499"
+
+
+def test_stale_sweep_still_consumes_an_UNBOUND_legacy_journal(
+        monkeypatch, tmp_path):
+    """Legacy journals carry no instance sidecar. Unknown is NOT a mismatch:
+    refusing those would strand every journal written before the binding
+    existed, so the pre-fix behaviour is kept for them."""
+    import tortoise.embedded_reaper as er
+    from tests._embedded import _stale_sweep
+    adir = tmp_path / "suites"
+    adir.mkdir()
+    monkeypatch.setattr(er, "ACTIVE_SUITES_DIR", str(adir))
+    nonce = "0ldn0nce0000"
+    journal = adir / f"{nonce}.graphs.jsonl"
+    journal.write_text("test_ws_legacy_graph\n")
+    db = _FakeDb(graphs=["test_ws_legacy_graph"])
+    monkeypatch.setattr("tests._embedded._proj_for_uri",
+                        lambda uri: _FakeProj(db))
+    monkeypatch.setattr(er, "active_suite_markers", lambda: [])
+    _stale_sweep(_live_utils.docker_base_uri(password="x", host="127.0.0.1"))
+    assert "test_ws_legacy_graph" in db.deleted
+    assert not journal.exists()
+
+
+def test_stale_sweep_removes_the_dead_marker_of_a_consumed_journal(
+        monkeypatch, tmp_path):
+    """A consumed journal's DEAD marker must go with it. Leaving it is what
+    made 24 markers-with-no-journal the only surviving trace of a consumption
+    — i.e. the evidence that journals were being eaten. A LIVE marker is never
+    removed (it cannot reach this path: its nonce is filtered first)."""
+    import tortoise.embedded_reaper as er
+    from tests._embedded import _stale_sweep
+    adir = tmp_path / "suites"
+    adir.mkdir()
+    monkeypatch.setattr(er, "ACTIVE_SUITES_DIR", str(adir))
+    monkeypatch.setattr(er, "active_suite_markers", lambda: [])
+    nonce = "c0nsume11111"
+    dead_marker = adir / f"999999-{nonce}"
+    dead_marker.write_text("pid=999999\nstart=1.0\n")
+    live_marker = adir / "424242-othernonce"
+    live_marker.write_text("pid=424242\nstart=1.0\n")
+    journal = adir / f"{nonce}.graphs.jsonl"
+    journal.write_text("test_ws_marker_graph\n")
+    db = _FakeDb(graphs=["test_ws_marker_graph"])
+    monkeypatch.setattr("tests._embedded._proj_for_uri",
+                        lambda uri: _FakeProj(db))
+    _stale_sweep(_live_utils.docker_base_uri(password="x", host="127.0.0.1"))
+    assert not journal.exists()
+    assert not dead_marker.exists(), "the consumed journal's dead marker stayed"
+    assert live_marker.exists(), "an unrelated marker was removed"

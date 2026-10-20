@@ -1351,9 +1351,12 @@ def record_record_write_failure(reason: str) -> None:
       rather than filed under a guessed tenant (#9192). Remediation depends on
       the deployment: a MULTI-TENANT process (the default) wraps the write path
       in ``record_writer.use_record_tenant(...)`` — the MCP tenant lane does it
-      per request, so a refusal there means the credential named no graph (use a
-      graph-bound key); a deployment that serves exactly ONE graph may instead
-      set ``TORTOISE_RECORD_ORG_ID``/``_GRAPH_ID`` **and**
+      per request, and the hosted REST lane binds the same resolution onto the
+      SDK it opens (#9188), so a refusal on EITHER of those lanes means the
+      credential named no graph (use a graph-bound key; an org-wide key or a
+      session token opens the default graph, whose record tenant is #9188's open
+      control-plane question); a deployment that serves exactly ONE graph may
+      instead set ``TORTOISE_RECORD_ORG_ID``/``_GRAPH_ID`` **and**
       ``TORTOISE_RECORD_SINGLE_TENANT=1``. The pair alone is IGNORED (a
       process-global tenant on a multi-tenant process files every tenant's rows
       under one organisation). The warning distinguishes the two situations an

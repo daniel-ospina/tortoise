@@ -390,8 +390,9 @@ a one-line change.
 What remains open after it: the pass **completes slowly** — the same one-anchor
 pass took **89 s** on the fixture, of which ~43 s is a per-message graph read
 (`_read_node`, 45,087 `MATCH (n:Point {id:$id})` calls in one pass) rather than a
-cache hit — and the `ep_dirty` clearing path below. Neither is a hop-budget
-problem, and neither is fixed here.
+cache hit. That is not a hop-budget problem and is not fixed here. (The
+`ep_dirty` clearing path, previously listed here as open, is now closed — see
+below.)
 
 This is why the frontier guard exists, and why it is a *bound* rather than an
 optimisation: the guard trades an exact closure for staying inside the store's
@@ -431,14 +432,45 @@ now visible to a programmatic caller instead of to a human reading stderr:
   Measured on a 3,353-claim / 160,000-edge graph with the engine's 1,000 ms
   timeout posture: the bridge query aborted after **1.00 s** over a
   **188–257-claim** frontier, and the pass failed after 1.1–2.9 s.
-- **Still open — the clearing path.** `ep_dirty` is cleared only by the dreaming
-  adapters' `_sweep_dirty_roots` (epoch-guarded, convergence-gated, and scoped to
-  the pass's `affected` set). The targeted fast path
-  (`compute_confidence(factors=…)` / `compute_confidence(anchors=…)`) never runs
-  it: measured, a converged targeted pass over three freshly-written claims left
-  all three `ep_dirty`, while a no-arg pass on the same graph cleared them. So a
-  writer that follows the documented "compute confidence for my claims" call has
-  **no** API that clears its own flags — #6211's second failure mode, still open.
+- **The clearing path — closed for the targeted call.** The only code that
+  retires a **converged pass's** recomputed roots is `_sweep_dirty_roots`, which
+  was reachable only from the dreaming adapters (epoch-guarded,
+  convergence-gated, and scoped to the pass's `affected` set), so the targeted
+  fast path (`compute_confidence(factors=…)` / `compute_confidence(anchors=…)`)
+  never cleared a writer's own flags: measured, a converged targeted pass over
+  three freshly-written claims left all three `ep_dirty`, while a no-arg pass on
+  the same graph cleared them. (The flag's two other writers are lifecycle
+  events, not this rule: `_mark_dirty` clears it for terminal points as it
+  re-marks them, and `_register_failed_attempt` clears it when a root hits the
+  retry cap.) Both targeted branches now retire the flags they recomputed,
+  through `_clear_targeted_pass_dirty`.
+  The gates are NOT simply "the Dreamer's". **Two are shared** — `converged`,
+  and the `#1163` stale-run guard — and **three are this path's own and
+  stricter**: a pass that was **truncated** clears nothing (its `affected` set
+  is incomplete by construction, which is why the reporting half above was this
+  fix's prerequisite), a pass that **ran no factor** (`iterations == 0`, the
+  `#3139` no-op) clears nothing (the Dreamer gets the same protection by
+  *raising* from `_guard_dream_progress`; this path refuses the clear instead of
+  failing the call), and a missing epoch snapshot refuses — the Dreamer cannot
+  reach that state, because its snapshot is always an int (`0` when the epoch
+  read failed, which matches no stamp and therefore clears nothing). The
+  measurement is in `tests/test_ep_dirty_persist.py` (`#6211` section): the
+  primary test is red before the change and green after, each refusing gate has
+  its own fail-closed arm, and the request-scoped (empty mirror), best-effort
+  failure and no-arg-untouched shapes are pinned too.
+  The clear is **best-effort**: it runs after the posteriors, the
+  `n.confidence` write-back and the `ConfidenceChanged` journal entries have
+  landed, so a failed sweep keeps the flags set (retained for retry) and is
+  logged rather than turning a committed pass into an error.
+  **Known residual, not fixed here:** the no-arg branch still clears the dream's
+  `affected` roots when that dream's operator selection was capped (measured: a
+  260-reachable-operator graph returns `truncated: true` and the flags go
+  clean), because the dream adapters gate on convergence, the flush guard and
+  `_guard_dream_progress` only. That is a different call path with a different
+  retry lifecycle, and it is tracked on its own:
+  `daniel-ospina/tortoise#9363`. (The sweep's own mirror-vs-graph ordering, which
+  the best-effort handler above works around for this call site only, is
+  `daniel-ospina/tortoise#9362`.)
 
 ### The full-mode cap is a refusal, not a silent truncation
 

@@ -23,16 +23,29 @@ the HANDLE ITSELF covers all of them, so this module wraps the vendor CLIENT:
 its ``select_graph`` returns a guarded ``Graph`` subclass that overrides EVERY
 query entry point.
 
-**SCOPE — what this covers, and what it does not.** Inside the ``tortoise``
-package every FalkorDB client is constructed through :func:`guarded_client`
-(the projection's embedded and Docker clients, the BGSAVE helper, the session
-indexer, the doctor probe), so every handle those clients yield — including the
-``select_graph(...).query(...)`` sites and the SDK registry handles — is
-guarded. That construction set is no longer a convention: #6882 pins it with an
-AST inventory (a revert to a raw ``FalkorDB(...)`` fails a test) and a runtime
-marker assertion on a real embedded projection. Code OUTSIDE the package that
-builds a raw vendor client is NOT covered. That set is ILLUSTRATIVE, not
-exhaustive — e.g. ``graph-scripts/*.py``,
+**SCOPE — what this covers, and what it does not.** Every ``FalkorDB``
+construction inside the ``tortoise`` package goes through
+:func:`guarded_client` (the projection's embedded and Docker clients, the BGSAVE
+helper, the session indexer, the doctor probe), so every handle those clients
+yield — including the ``select_graph(...).query(...)`` sites and the SDK registry
+handles — is guarded. That construction set is no longer a convention: #6882
+pins it with an AST inventory (a revert to a raw ``FalkorDB(...)`` fails a test)
+and a runtime marker assertion on a real embedded projection.
+
+⛔ TWO IN-PACKAGE EXCEPTIONS, and the guard-seam pin above cannot see either:
+the #6882 SCAN matches only ``FalkorDB(...)`` / ``guarded_client(...)``, so a
+module that builds a bare ``redis.Redis(...)`` passes it unguarded —
+``hosted_backup._restore_copy_client`` (raw on purpose, #3813) and
+``acl_graph_users``' admin client. Both ARE counted by the SIBLING read-bound
+inventory in the same test file (``_EXPECTED_SITES`` names both modules, and its
+``found == _EXPECTED_SITES`` assertion reds on any addition), so a THIRD raw
+client reds that scan instead of slipping in — and that is the distinction a
+reader must not blur: it pins that these clients carry a socket bound, NOT that
+they are guarded. Their commands do NOT carry the #7357 note and are NOT
+operator-guarded; see :class:`_GuardedExecuteCommand`.
+
+Code OUTSIDE the package that builds a raw vendor client is NOT covered. That
+set is ILLUSTRATIVE, not exhaustive — e.g. ``graph-scripts/*.py``,
 ``apps/graph-viz/server/main.py``, ``docs/runbook/m2-d3-gold-rank-docker.py``
 (``db.select_graph(name).delete()``) and ``tests/`` all construct a vendor
 client directly, and any other raw construction is equally uncovered; a guard
@@ -119,6 +132,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import functools
+import logging
 import re
 import time
 from contextlib import contextmanager
@@ -132,6 +146,12 @@ from tortoise.numeric_domain import (
     _INT64_MIN,
     numeric_alteration_reason,
 )
+from tortoise.retry import explain_instance_unavailable
+
+#: The #7357 note's own failure channel. A note that cannot be built is
+#: DEBUG-only: the caller is about to re-raise the ORIGINAL exception, and a
+#: log line at a louder level would itself become the artefact under diagnosis.
+logger = logging.getLogger(__name__)
 
 #: Marker set on the generated classes so the factories are idempotent —
 #: wrapping an already-guarded client/handle again is a no-op, never a second
@@ -1298,6 +1318,207 @@ def _guard_execute_command(args, client=None):
     return args
 
 
+#: Commands whose effect is a graph mutation even though they carry no Cypher
+#: statement for the write classifier to read. READ FROM THE PROJECTION, never
+#: copied: that module owns the ONE list of what destroys a graph handle
+#: (``_HANDLE_MUTATING_VERBS``' own rule is "ONE list … so 'what is a mutating
+#: verb' cannot drift between the two readers"), and a private second copy is
+#: exactly that drift. Imported lazily for the same reason as
+#: ``_statement_writes`` (``tortoise.projection`` imports THIS module); see
+#: :func:`_destructive_commands`.
+
+#: Query verb that CANNOT have applied a statement even when its text is a
+#: write: ``GRAPH.EXPLAIN``, which only PLANS. MEASURED on the pinned server
+#: (``falkordb/falkordb-server:v4.20.6``), on a fresh graph, ``count(n:W)``
+#: before and after: ``GRAPH.EXPLAIN "CREATE (:W {i:2})"`` plans it, count 0.
+#:
+#: ⛔ ``GRAPH.RO_QUERY`` IS DELIBERATELY NOT HERE, and this is a reversal of an
+#: earlier (correct-at-the-time) decision in this module. v4.20.6 refuses a
+#: write on that verb — ``ResponseError("graph.RO_QUERY is to be executed only
+#: on read-only queries")``, count 0 — so on THAT engine nothing can have
+#: applied and ``False`` was true. But that refusal is an ENGINE POLICY, not a
+#: property of the verb, and the policy is unmeasured on the two engines this
+#: package actually runs against in production: falkordb 6.x and the embedded
+#: engine (``config/ci-surfaces.yml`` records production as 6.x; the docker
+#: lane pins v4.20.6). The projection already records the opposite reading for
+#: the same verb and keeps a guard for it — ``tortoise/projection``: "The
+#: 'read-only' verb is mutating-CAPABLE, not read-only: the name is the vendor's,
+#: and a statement handed to it is dispatched the same way". A WRONG ``False``
+#: here tells an agent a re-issue is safe and it duplicates a bare
+#: non-idempotent ``CREATE`` — exactly the class ``retryable_aborted_write``
+#: refuses — while a WRONG ``True`` only costs a read-back on an engine that
+#: refused. The asymmetry decides it: classify the TEXT (a read statement still
+#: answers ``False``, so the safe arm survives for the read-only traffic that
+#: overwhelmingly uses this verb). ``GRAPH.PROFILE`` is absent for the mirror
+#: reason: it EXECUTES the statement (measured: count 1).
+_NON_EXECUTING_COMMANDS = frozenset({"GRAPH.EXPLAIN"})
+
+
+def _destructive_commands() -> frozenset | None:
+    """The projection's OWN destructive-command set, or ``None`` if unreadable.
+
+    One list, one owner: a private copy here is the drift ``_HANDLE_MUTATING_VERBS``
+    rules out for exactly this reason. Lazy import because ``tortoise.projection``
+    imports this module at import time; ``None`` on any failure, so a classifier
+    that cannot load answers "not the destructive arm" rather than raising out of
+    an error path (the caller then falls through to the statement classifier).
+    """
+    try:
+        from tortoise.projection import _DESTRUCTIVE_HANDLE_COMMANDS
+    except Exception:  # noqa: BLE001, RUF100 — see the docstring
+        return None
+    return _DESTRUCTIVE_HANDLE_COMMANDS
+
+
+def _statement_mutating(statement) -> bool | None:
+    """Whether *statement* can change the graph — tri-state (#7357).
+
+    The one place the write question is asked, for both command shapes the
+    legibility wiring sees: a raw command (``_command_mutating``, which reads the
+    statement out of ``args``) and a handle verb (``_forward_query``, which is
+    handed the statement directly).
+
+    ``None`` when there is nothing to classify, and ``None`` when the repo's
+    single write classifier cannot be imported OR raises — a classifier that
+    cannot run must answer "not known", never "read", because "read" is the
+    direction that invites a duplicated write.
+
+    The body is TOTAL (#9358 review P2), not just the import: this function is
+    evaluated as an ARGUMENT at four of the proxy's five verbs
+    (``mutating=_statement_mutating(q)`` in ``_GuardedHandleProxy``; ``explain``
+    derives its arm from ``_NON_EXECUTING_COMMANDS`` through
+    ``_command_mutating`` instead, so while ``GRAPH.EXPLAIN`` is in that set
+    there is nothing here to classify), which runs it BEFORE
+    ``_forward_query``'s ``except`` can catch anything — so a raise here
+    would fail the caller's query outright instead of hedging the note, and it
+    would do it on the READ traffic the ``ro_query`` arm change newly routes
+    through this call. The command channel's derivation carries the same belt in
+    ``_explain_instance_unavailable``; here it belongs in the
+    classifier itself, because there is no single call site to wrap.
+
+    ``projection._statement_writes`` is imported lazily: ``tortoise.projection``
+    imports THIS module at import time, so a module-level import would be a
+    cycle. Call time is safe (both modules are loaded long before a command is
+    dispatched).
+    """
+    if not isinstance(statement, str) or not statement.strip():
+        return None
+    try:
+        from tortoise.projection import _statement_writes
+
+        return _statement_writes(statement)
+    except Exception:  # noqa: BLE001, RUF100 — see the docstring: never guess, never raise
+        logger.debug("statement classification failed", exc_info=True)
+        return None
+
+
+def _command_mutating(args) -> bool | None:
+    """Whether the command in *args* can change the graph — tri-state (#7357).
+
+    The consumer is the instance-outage note, and the asymmetry it must respect
+    is the one ``retryable_aborted_write`` states: a transport failure lost the
+    REPLY, not necessarily the write, so the note may only call a re-issue
+    "safe" when the statement cannot mutate. This therefore answers:
+
+    - ``True`` — a write statement (the repo's single write classifier,
+      ``projection._statement_writes``, which is conservative: anything not
+      provably read-only counts as a write), or a command in the projection's
+      own destructive set (``_DESTRUCTIVE_HANDLE_COMMANDS``, read from there
+      rather than copied).
+    - ``False`` — provably not a mutation: a statement the classifier reads as
+      read-only, or one of ``_NON_EXECUTING_COMMANDS``, which the engine cannot
+      have applied (measured; the comment above carries the version).
+    - ``None`` — no answer: a command with no statement to classify (``PING``,
+      ``INFO``, ``GRAPH.LIST``, ``GRAPH.CONFIG``, ``GRAPH.COPY`` …). A command
+      head this module does not know must not be guessed read-only, because
+      that is the direction that would invite a duplicated write.
+
+    ⛔ SCOPE OF THE DESTRUCTIVE ARM, stated because the repo measured that an
+    enumeration cannot be finished: the projection's rule for REFUSAL is the
+    NAMESPACE (a FalkorDB graph IS a Redis key, so ``DEL``/``UNLINK``/``RENAME``/
+    ``EXPIRE 0`` all wipe it). That rule is not reused here, on purpose — it
+    would classify every key-space command as a mutation, and the read-only
+    probes this channel really sends (``MODULE LIST`` on every client
+    construction, ``INFO``, ``EXISTS``) would then be told to "read back what you
+    wrote" about a read. A key-space command therefore lands on the ``None``
+    hedge, whose wording already tells the caller that anything mutating must be
+    read back before it is re-issued — less specific, never wrong.
+    """
+    verb = _as_text(args[0]) if args else None
+    if not isinstance(verb, str):
+        return None
+    verb = verb.upper()
+    destructive = _destructive_commands()
+    if destructive is not None and verb in destructive:
+        return True
+    if verb not in _GRAPH_QUERY_COMMANDS:
+        return None
+    if verb in _NON_EXECUTING_COMMANDS:
+        # ``GRAPH.EXPLAIN`` only PLANS — it does not execute. A transport
+        # failure on it cannot have applied a statement, whatever the
+        # statement's text says, which is why the arm comes from the VERB here
+        # and not from the text: ``g.explain("CREATE …")`` must never be told
+        # its write may have landed. ``GRAPH.RO_QUERY`` is NOT in the set — see
+        # its comment above; a write handed to it is classified from its text.
+        return False
+    return _statement_mutating(_as_text(args[2]) if len(args) >= 3 else None)
+
+
+def _note_instance_outage(exc: BaseException, *, mutating: bool | None) -> None:
+    """Append #7357's instance-outage diagnosis to *exc*, IN PLACE.
+
+    The single applier, shared by every wrapper that can see a graph command
+    fail (the command channel and the duck-typed handle proxy), so the wording
+    and the append-only contract have ONE home.
+
+    Returns nothing and never raises: this runs inside an ``except`` block on
+    the way to re-raising the ORIGINAL error, so a failed explanation must leave
+    the caller's exception exactly as it was rather than replace it.
+
+    Only a SINGLE-string message is rewritten. The note is appended to
+    ``args[0]`` (never prepended — a driver text match and the retry predicates
+    read the message from position 0), and a multi-argument exception is left
+    alone because there is no single message to append to and reshaping
+    ``args`` here would change a contract callers can see.
+
+    The "never raises" half is ENFORCED, not assumed (#9352 review P2): the
+    body is wrapped, because the classification it calls into reads
+    caller-supplied data (``_as_text`` over the wire args, the projection's
+    write regexes over the caller's Cypher) and because ``exc.args`` is not
+    guaranteed writable on every exception type. Each of those is a raise on
+    the error path, which without this belt would REPLACE the original error
+    with the applier's — the exact swap this function exists to prevent.
+    """
+    try:
+        if len(getattr(exc, "args", ())) != 1 or not isinstance(exc.args[0], str):
+            return
+        explained = explain_instance_unavailable(exc, mutating=mutating)
+        if explained is not None:
+            exc.args = (explained,)
+    except Exception:  # noqa: BLE001, RUF100 — never replace the error being explained
+        logger.debug("instance-outage note failed", exc_info=True)
+
+
+def _explain_instance_unavailable(exc: BaseException, args) -> None:
+    """Applier for a raw command channel: derive the arm from *args* (#7357).
+
+    The DERIVATION carries its own belt (#9352 review P2), for the same reason
+    :func:`_note_instance_outage` does: ``_command_mutating`` reads
+    caller-supplied data (``_as_text`` over the wire args, the projection's
+    write regexes over the caller's Cypher, two lazy imports), so a raise from
+    it lands on the SAME error path and would replace the exception being
+    explained just as surely as a raise from the note would. An unclassifiable
+    command falls to the ``None`` hedge, which is the conservative arm the
+    caller is told to treat as "outcome UNKNOWN".
+    """
+    try:
+        mutating = _command_mutating(args)
+    except Exception:  # noqa: BLE001, RUF100 — never replace the error being explained
+        logger.debug("instance-outage classification failed", exc_info=True)
+        mutating = None
+    _note_instance_outage(exc, mutating=mutating)
+
+
 class _GuardedExecuteCommand:
     """Callable refusing an unsupported Cypher operator on a raw command channel.
 
@@ -1308,6 +1529,36 @@ class _GuardedExecuteCommand:
     silently never fire), and reading it with a bare ``getattr`` would let a
     permissive object — a ``MagicMock`` answers every name — forge
     "already guarded" and skip the guard entirely.
+
+    #7357 — the channel also carries the FAILURE legibility, and for the same
+    reason the operator guard lives here: the message cannot live at query call
+    sites. The instance quitting underneath a query (a container restart, an
+    RDB reload, an OOM-kill) surfaces as a bare transport error
+    (``Timeout reading from socket`` / ``Connection closed by server``) on
+    every verb, read and write — so it is annotated once, on the channels every
+    GUARDED client's command passes through: the vendor handles' verbs, the
+    client's own ``execute_command``, and the connection's two command entries
+    (all three reach this wrapper; ``_GuardedHandleProxy`` applies the same note
+    in its own ``execute_command`` and in ``_forward_query``).
+
+    ⛔ WHAT IT DOES NOT REACH, stated as tightly as the module docstring's own
+    exclusion list: ``pipeline()`` / ``transaction()`` and the objects the
+    vendor MINTS from a connection (``client()``, ``pubsub()``, ``monitor()``);
+    any vendor client this package did not build; and the attributes
+    ``_GuardedHandleProxy.__getattr__`` forwards verbatim (``delete``,
+    ``call_procedure``, ``slowlog``, ``schema`` …) on a DUCK-TYPED handle — on a
+    real vendor handle those verbs route through ``execute_command`` and are
+    covered.
+
+    ⛔ AND THE TWO IN-PACKAGE CLIENTS THAT BUILD THEIR OWN ``redis.Redis``, named
+    because "in-package" is not the test — going through THIS seam is:
+    ``hosted_backup._restore_copy_client`` (a raw client on purpose, #3813: the
+    restore's ``GRAPH.COPY`` must not inherit an ordinary request's read bound)
+    and ``acl_graph_users``' admin client. A transport failure there still
+    arrives as the bare driver sentence. The claim above is exactly these
+    channels, not "every handle" and not "every client this package builds".
+    Wiring those two is follow-up work on THEIR seam, not a reason to widen this
+    sentence.
     """
 
     __slots__ = ("__weakref__", "_client", "_raw")
@@ -1317,7 +1568,15 @@ class _GuardedExecuteCommand:
         self._client = client
 
     def __call__(self, *args, **kwargs):
-        return self._raw(*_guard_execute_command(args, self._client), **kwargs)
+        guarded = _guard_execute_command(args, self._client)
+        try:
+            return self._raw(*guarded, **kwargs)
+        except Exception as exc:  # noqa: BLE001, RUF100
+            # Appends IN PLACE and re-raises the SAME exception: the type is
+            # what every caller buckets on (``_classify_db_failure``, the 503
+            # outage mapping) and a wrapper would silently re-bucket it.
+            _explain_instance_unavailable(exc, guarded)
+            raise
 
 
 setattr(_GuardedExecuteCommand, _GUARDED_CHANNEL_MARKER, True)
@@ -1479,30 +1738,58 @@ class _GuardedHandleProxy:
 
     def query(self, q, params=None, timeout=None):
         q = _guard_query(q, params, handle=self._handle)
-        return _forward_query(self._handle.query, q, params, timeout)
+        return _forward_query(
+            self._handle.query, q, params, timeout,
+            mutating=_statement_mutating(q))
 
     def ro_query(self, q, params=None, timeout=None):
         q = _guard_query(q, params, handle=self._handle)
-        return _forward_query(self._handle.ro_query, q, params, timeout)
+        # The arm comes from the TEXT, not the verb: the vendor's "read-only"
+        # name is not a guarantee that a write cannot be dispatched (see
+        # ``_NON_EXECUTING_COMMANDS``), and a wrong ``False`` invites a
+        # duplicated write while a wrong ``True`` only asks for a read-back.
+        return _forward_query(
+            self._handle.ro_query, q, params, timeout,
+            mutating=_statement_mutating(q))
 
     def _query(self, q, params=None, timeout=None, read_only=False):
         q = _guard_query(q, params, handle=self._handle)
-        extra = {"read_only": True} if read_only else {}
+        # ``read_only`` selects the VERB (``GRAPH.RO_QUERY`` vs ``GRAPH.QUERY``),
+        # it does not make the statement a read: both are classified by text.
         return _forward_query(
-            self._handle._query, q, params, timeout, **extra
-        )
+            self._handle._query, q, params, timeout,
+            mutating=_statement_mutating(q),
+            read_only=read_only)
 
     def profile(self, query, params=None):
         query = _guard_query(query, params, handle=self._handle)
-        return _forward_query(self._handle.profile, query, params)
+        # GRAPH.PROFILE EXECUTES the statement, so the text decides.
+        return _forward_query(
+            self._handle.profile, query, params,
+            mutating=_statement_mutating(query))
 
     def explain(self, query, params=None):
         query = _guard_query(query, params, handle=self._handle)
-        return _forward_query(self._handle.explain, query, params)
+        # The arm comes from the POLICY SET, through the same classifier the
+        # command channel uses — never a literal ``False``. A private copy is
+        # the drift ``_destructive_commands`` rules out for the same class of
+        # duplication: if ``GRAPH.EXPLAIN`` ever left ``_NON_EXECUTING_COMMANDS``
+        # the channel would start classifying the text while the proxy kept
+        # answering "safe to re-issue", and nothing would force them together.
+        return _forward_query(
+            self._handle.explain, query, params,
+            mutating=_command_mutating(
+                ("GRAPH.EXPLAIN", getattr(self._handle, "name", ""), query)))
 
     def execute_command(self, *args, **kwargs):
         args = _guard_execute_command(args, self._client)
-        return self._handle.execute_command(*args, **kwargs)
+        try:
+            return self._handle.execute_command(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001, RUF100
+            # #7357: a duck-typed handle's raw channel is NOT the client's, so
+            # it needs the same note applied here (see the class docstring).
+            _explain_instance_unavailable(exc, args)
+            raise
 
     def copy(self, clone):
         return _guard_handle(self._handle.copy(clone))
@@ -1545,18 +1832,50 @@ class _GuardedClientProxy:
         return getattr(self._client, name)
 
 
-def _forward_query(method, q, params=None, timeout=None, **extra):
+def _forward_query(method, q, params=None, timeout=None, *, mutating,
+                   read_only=False, **extra):
     """Call *method* forwarding only the optional kwargs actually supplied.
 
     A real vendor ``query``/``ro_query``/``_query`` accepts ``params`` /
     ``timeout`` / ``read_only``, but a duck-typed stub may declare only ``q``.
     Omitting unset kwargs keeps both call conventions working.
+
+    *mutating* is the #7357 arm, supplied by the CALLER because only the caller
+    knows the VERB: a duck-typed proxy has no command tuple to classify.
+    ``query``, ``ro_query`` and ``_query`` all take the arm from the statement
+    TEXT — the vendor's "read-only" verb name is not a guarantee that a write
+    cannot be dispatched (see ``_NON_EXECUTING_COMMANDS``). ``explain`` is the
+    one verb whose arm is POLICY-derived, not a constant: its caller passes
+    ``_command_mutating(("GRAPH.EXPLAIN", …))``, which answers ``False`` while
+    ``GRAPH.EXPLAIN`` is in that set — because it plans without executing — and
+    follows the statement TEXT once a later lane removes it. Deriving it here
+    instead would put a classification below the seam that already knows the
+    verb, and hardcoding the value would be the prose copy this note exists to
+    prevent.
+
+    #7357: this is also where the duck-typed proxy's five verbs pass, so the
+    instance-outage note is applied here — the proxy dispatches straight to the
+    wrapped handle rather than through ``_GuardedExecuteCommand``, and without
+    this its failures would stay bare while the class claims coverage.
     """
+    try:
+        return _forward_query_unguarded(
+            method, q, params, timeout, read_only=read_only, **extra)
+    except Exception as exc:  # noqa: BLE001, RUF100
+        _note_instance_outage(exc, mutating=mutating)
+        raise
+
+
+def _forward_query_unguarded(method, q, params=None, timeout=None, *,
+                            read_only=False, **extra):
+    """The forwarding call itself, split out so the #7357 note must not be lost."""
     kwargs = dict(extra)
     if params is not None:
         kwargs["params"] = params
     if timeout is not None:
         kwargs["timeout"] = timeout
+    if read_only:
+        kwargs["read_only"] = True
     # #7174: defence in depth — the proxy's verbs already guard, so this is
     # normally a second (cheap) pass over the same map. It exists so that a verb
     # added to THIS proxy later cannot forward params unguarded by forgetting
@@ -1731,12 +2050,14 @@ def guarded_client_class(base_client):
 def guarded_client(base_client, *args, **kwargs):
     """Construct a guarded instance of *base_client* (the ONE construction seam).
 
-    Every FalkorDB client the ``tortoise`` package builds — the projection's
+    Every ``FalkorDB`` the ``tortoise`` package builds — the projection's
     embedded and Docker clients, the BGSAVE helper, the session indexer, the
     doctor probe — goes through here, so every handle they yield is guarded
     regardless of which call site queries it. A raw vendor client built
     *outside* the package (e.g. ``graph-scripts/``, ``apps/graph-viz/``,
-    ``docs/runbook/``, ``tests/``) is not covered; see the module docstring for
-    that scope boundary.
+    ``docs/runbook/``, ``tests/``) is not covered, and neither are the two
+    IN-package modules that build a bare ``redis.Redis`` instead
+    (``hosted_backup._restore_copy_client``, ``acl_graph_users``' admin
+    client); see the module docstring's SCOPE paragraph for both boundaries.
     """
     return guarded_client_class(base_client)(*args, **kwargs)

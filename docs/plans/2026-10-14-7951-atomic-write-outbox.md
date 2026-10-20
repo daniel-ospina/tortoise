@@ -200,6 +200,33 @@ its edges), and a test pins that scope.
   fixing residual 6 first: give `_upsert_point_props` presence-gated `baseline_*` clauses).
 - **4** — the remaining raw-handle doors (`_sync_tags`, `_link_source`, deletes, `onboarding/state.py`,
   `onboarding/seed.py`, `hosted_api.py`, `__main__.py`, connectors), then gate the handle.
+  **LANDED SO FAR: the `onboarding` write lane is DECLARED (#9121)** —
+  `onboarding/state.py::_run` no longer rests on the handle being open: every MUTATING statement it
+  issues runs inside `_onboarding_write_scope(cypher)`, which declares the named lane
+  `ONBOARDING_WRITE_LANE = "onboarding.metadata"` — §17.1's option to DECLARE the lane rather than
+  journal it. The metadata-vs-journal argument, why this class is **not**
+  rebuilt-from-zero-safe and rides the `#4641` rescue instead, and the
+  disclosure that the `:Subject` anchor mint is NOT this lane's claim, are in the block above that
+  constant. So gating the handle (`#9079`) does not disable onboarding and `onboarding/state.py` is no
+  longer an UNDECLARED door; its writes are still unjournalled — what changed is that the lane says so,
+  in one named place.
+  ⚠️ `onboarding/seed.py::_run` is NOT part of that lane and takes no declaration: its sole caller
+  (`find_subject_by_name`) issues a READ, and this module's writes go through the SDK: `create_subject`
+  is journalled (`SubjectAdded`), while `create_edge` is NOT journalled — it is the DECLARED,
+  unjournalled `structural-edge.derived` lane (#9195), whose `memberOf` carrier is `None`, so a rebuild
+  drops the seed's anchor edge. A mutating statement added to that primitive is a NEW unjournalled
+  writer and gets no authorization from the onboarding declaration.
+  **STILL OPEN: the five `eager_init_query()` call sites (§17.1 escape (3)) — `#9157`.**
+  `sdk.py::org_create`, `hosted_api.py::provision_tenant`, `hosted_api.py::register_user` (two
+  statements) and `hosted_api.py::_eager_provision_org_graph` CREATE `:OnboardingState` on
+  `proj.db.select_graph(...)` — i.e. BELOW the guarded handle, so they meet neither `state._run` nor
+  `_onboarding_write_scope`, and they keep working after `#9079` precisely *because* they sit below
+  it. They are **unjournalled AND undeclared**. ⛔ Do not close escape (3) believing the onboarding
+  class is covered: the declaration above covers the funnel, not these five. The inventory is derived
+  from the AST of the whole package and pinned by `tests/test_9121_onboarding_residual_pins.py`; the
+  same seam is stated at `tortoise/onboarding/state.py` (the declaration's "does NOT cover" bullet)
+  and in the opener inventory at `tortoise/projection/__init__.py` — the block that ENFORCES §17.1 and
+  the one a door inventory reads. Journalling the class is the larger increment, filed as `#9129`.
   **LANDED SO FAR: the `delete_point` DOOR (increment 4a)** —
   `docs/plans/2026-10-18-7951-delete-point-outbox.md`. ⚠️ **#9207 reversed the ORDER**: the
   `DETACH DELETE` is issued FIRST and the `EntityMutated` op=delete record follows a LANDED destroy,

@@ -315,7 +315,10 @@ class TortoiseEP:
         # (the #6761 batch-I/O load→flush race). ``_flush_skipped`` records
         # that the guard fired. -1 = no snapshot taken (a DIRECT flush with
         # manually-set caches is unconditional — only load→flush runs are
-        # guarded).
+        # guarded). Reset to -1 at run ENTRY as well (#6211 review): a run
+        # that early-returns before ``_load_cache`` took no snapshot, and the
+        # dirty-flag sweep keys on this value, so carrying a previous run's
+        # epoch here would let a no-op pass clear flags it never recomputed.
         self._run_ep_version: int = -1
         self._flush_skipped: bool = False
 
@@ -2234,6 +2237,35 @@ class TortoiseEP:
         # #1163: flush-guard diagnostics reset at entry (a vacuous run that
         # never loads a cache must not carry a previous run's skip flag).
         self._flush_skipped = False
+        # #6211 (mode 2) review: the load-side EPOCH SNAPSHOT is reset with the
+        # rest of the run-set state, and this one was missed. A REAL snapshot is
+        # assigned only by `_load_cache` (`= self._graph_ep_version()`); the
+        # only other writers are the constructor and this reset, both of which
+        # write the -1 sentinel. `run` has two early returns BEFORE
+        # `_load_cache` (`if not affected` / `if not factors`, both
+        # `return 0, True`). Without this reset, a factor-less run — every
+        # factor dropped as degenerate (#780/#2422), so `_last_affected` is
+        # NON-empty and `_last_skipped_factors` names them — leaves
+        # `_run_ep_version` holding the PREVIOUS run's epoch, i.e. the attribute
+        # silently claims "this run saw epoch N" for a run that saw nothing.
+        # MEASURED (embedded lane, on the pre-review revision — this line absent
+        # AND `_clear_targeted_pass_dirty`'s `iterations` arm absent): after a
+        # healthy targeted pass took snapshot 8, a
+        # `compute_confidence(factors=[op])` whose only operator was degenerate
+        # returned `{converged: True, truncated: False, iterations: 0,
+        # diagnostic: factors_skipped}` and swept the untouched claim's
+        # `ep_dirty` flag at epoch 8 — the #3139 "a no-op that sweeps its own
+        # backlog" false PASS, reachable because the dirty-flag sweep keys on
+        # this snapshot. (Reverting THIS line alone no longer reproduces it: the
+        # `iterations` arm refuses first. THIS line is pinned by
+        # `tests/test_ep_dirty_persist.py`'s
+        # `test_a_converged_pass_that_ran_no_factor_clears_nothing` (its
+        # `_run_ep_version == -1` assertion); the `iterations` arm is pinned by
+        # the `ran-no-factor` row of `test_the_clear_gates_are_fail_closed`.)
+        # `-1` is the "no snapshot" sentinel the rest of the class already uses
+        # (the constructor sets it, and `_flush_cache`'s guard is explicitly
+        # `>= 0` so an unvalidated direct flush stays unconditional).
+        self._run_ep_version = -1
         # Run-level evidence is CALL-SCOPED (#330): merge into a local dict so
         # self._evidence is never mutated by run() — otherwise a later run()
         # without evidence would re-apply (and re-write to the graph) stale
