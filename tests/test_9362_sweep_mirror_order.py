@@ -523,8 +523,13 @@ def test_a_retaining_sweep_costs_one_write_not_one_per_root():
     existing node costs a fulltext index entry, so the question is not "is there
     a write" but "is it one write or one per root".
 
-    Pre-fix this probe reads 0 (the retained rows were never written at all); it
-    is 1 here, and it stays 1 no matter how many roots the sweep retains.
+    What the probe counts is STATEMENTS, not rows: the pre-fix sweep also issued
+    exactly one clearing statement (with a per-row `ep_dirty_at <= $run_ep`
+    guard), so `flag_writes == 1` alone does not discriminate the two heads —
+    the discriminator is that the pre-fix run wrote zero ROWS and dropped every
+    retained root from the mirror (`_dirty_roots == set()`), which the mirror
+    assertion below pins. The statement count is the N+1 guard: a fix that
+    issued one clearing statement per retained root would red here.
     """
     with _db() as db:
         sdk = TortoiseSDK(db)
