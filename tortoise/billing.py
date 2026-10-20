@@ -1428,13 +1428,15 @@ def reconcile_subscriptions(sdk=None, *, limit: int | None = None,
     - ``unverified`` — no active Stripe subscription could be established for
       an org whose stored tier claims PAID — more entitlement than Free — or
       whose claim could not be decided at all (``_tier_claim``; ``reconcile_org``
-      reports ``action: "noop"``). THREE causes land here and the counter does
+      reports ``action: "noop"``). FOUR causes land here and the counter does
       not distinguish them: Stripe ANSWERED and named no active subscription,
       the customer LIST failed and the org was deliberately left alone (a
-      provider error is not a verdict), or the pricing ladder itself could not
-      be READ (#750.8) so whether the tier is paid is UNKNOWN. The last is
-      counted here rather than in ``skipped`` on purpose: an unreadable ladder
-      is not evidence that a stored ``pro`` org pays nothing. Counting it SEPARATELY from ``unchanged`` because nothing
+      provider error is not a verdict), the pricing ladder itself could not be
+      READ (#750.8), or the ladder IS readable and contradicts itself (Free
+      declared unlimited while this tier publishes a finite cap) — so whether
+      the tier is paid is UNKNOWN. Both ladder causes are counted here rather
+      than in ``skipped`` on purpose: neither an unread nor a self-contradicting
+      ladder is evidence that a stored ``pro`` org pays nothing. Counting them SEPARATELY from ``unchanged`` because nothing
       was verified against a subscription: folding it into ``unchanged`` would
       report an unexamined org as verified-clean, which is exactly the
       read-only-reconciler failure the ``unrepaired`` guard exists to catch.
@@ -1544,17 +1546,32 @@ def reconcile_subscriptions(sdk=None, *, limit: int | None = None,
                 continue
             summary["unverified"] += 1
             if claim == "unknown":
-                # The ladder itself could not be read, so "does this org pay?" is
-                # UNKNOWN, never "no". Filing a stored `pro` org under
-                # nothing-to-verify on the strength of an unread config file (#750.8)
-                # is a paid org passing the pass that exists to catch one.
-                _logger.warning(
-                    "billing reconcile: %s is stored at tier %r but no active "
-                    "Stripe subscription could be established AND the pricing "
-                    "ladder could not be read, so whether it claims paid "
-                    "entitlement is UNKNOWN — not verified, not downgraded, "
-                    "not counted as nothing-to-verify",
-                    org_id, before_tier)
+                # "unknown" has TWO shapes and they are DIFFERENT faults, so name
+                # the one the ladder actually showed instead of guessing: an
+                # UNREADABLE ladder (#750.8), or a READABLE one that contradicts
+                # itself (Free declared unlimited while this tier publishes a
+                # finite cap, so no cap proves a paid claim). Naming a cause the
+                # code never established is the #8946 defect class itself.
+                if (_tier_cap(before_tier) is _UNREADABLE
+                        or _tier_cap("free") is _UNREADABLE):
+                    _logger.warning(
+                        "billing reconcile: %s is stored at tier %r but no "
+                        "active Stripe subscription could be established AND "
+                        "the pricing ladder could not be read, so whether it "
+                        "claims paid entitlement is UNKNOWN — not verified, "
+                        "not downgraded, not counted as nothing-to-verify",
+                        org_id, before_tier)
+                else:
+                    _logger.warning(
+                        "billing reconcile: %s is stored at tier %r but no "
+                        "active Stripe subscription could be established AND "
+                        "the pricing ladder contradicts itself (Free is "
+                        "declared unlimited while this tier publishes a "
+                        "finite cap), so whether it claims paid entitlement "
+                        "is UNKNOWN — not verified, not downgraded, not "
+                        "counted as nothing-to-verify. Fix the ladder's Free "
+                        "cap",
+                        org_id, before_tier)
                 continue
             _logger.warning(
                 "billing reconcile: %s is stored as billed (tier=%r) but no "

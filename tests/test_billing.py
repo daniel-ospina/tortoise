@@ -3452,6 +3452,47 @@ class TestReconcileSweep:
             "the ladder WAS read and said unlimited — naming a read failure is "
             "the #8946 defect this test pins")
 
+    def test_a_self_contradicting_ladder_names_ITS_OWN_cause_not_a_read_failure(
+            self, monkeypatch, billing_client, caplog):
+        """Two shapes reach "unknown", and the arm must name the one it saw.
+
+        A ladder that declares Free `null` while a named tier publishes a
+        FINITE cap is READABLE and self-contradicting: no cap can prove a paid
+        claim, so ``_tier_claim`` answers ``"unknown"`` instead of ``"unpaid"``
+        (``skipped`` is "nothing to verify", the one bucket ``unverified``
+        exists to keep a stored-PAID org out of). Pointing that org at "the
+        pricing ladder could not be read" would be the #8946 defect one arm
+        over: a log line naming a cause the code never established, in the one
+        file an operator reads during an incident.
+        """
+        import logging
+
+        import tortoise.pricing as pricing
+        from tortoise import billing as bl
+        org_id = billing_client["org_id"]
+        sdk = billing_client["sdk"]
+        self._seed(sdk, org_id, tier="pro", stripe_customer_id="cus_8946d")
+        monkeypatch.setattr(bl.StripeClient, "list_subscriptions",
+                            lambda self, cid: [])
+        monkeypatch.setattr(
+            pricing, "tier_limits",
+            lambda tier: {"max_graph_nodes": None if tier == "free" else 600000})
+        caplog.set_level(logging.WARNING, logger=bl._logger.name)
+
+        summary = bl.reconcile_subscriptions(sdk, notifier=False)
+
+        assert summary["unverified"] == 1, summary
+        assert summary["skipped"] == 0, (
+            "a stored paid tier on a contradictory ladder is a config fault to "
+            "look at, never nothing-to-verify — got " + repr(summary))
+        assert self._row(sdk, org_id)[0] == "pro"
+        said = "\n".join(r.getMessage() for r in caplog.records)
+        assert "contradicts itself" in said, (
+            "the arm must name the cause it actually saw — got " + repr(said))
+        assert "ladder could not be read" not in said, (
+            "the ladder WAS readable (Free null, this tier 600000) — a read "
+            "failure is a cause the code never established")
+
     def test_one_orgs_store_failure_does_not_abort_the_pass(
             self, monkeypatch, billing_client):
         """The control plane fails with RuntimeError, not a BillingError.
