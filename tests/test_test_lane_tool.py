@@ -25,7 +25,6 @@ import socket
 import subprocess
 import sys
 import threading
-import time
 from pathlib import Path
 
 import pytest
@@ -59,6 +58,12 @@ def _host_probe_and_sweep_are_stubbed(monkeypatch):
     the gate itself is not relaxed."""
     monkeypatch.setattr(tl, "_ping_over_host", lambda port, timeout: True)
     monkeypatch.setenv("TORTOISE_TEST_LANE_REAP", "0")
+    # The withheld proof-2 reap (`STOPPED_REAP_ENV`) is OFF unless an operator
+    # asks for it, and a test must not inherit that choice from the shell it was
+    # launched in — a lane that exported it would otherwise green the default-
+    # keeps test and red the opt-in one. Spelled literally so this fixture also
+    # works against the code that predates the constant.
+    monkeypatch.delenv("TORTOISE_TEST_LANE_REAP_STOPPED", raising=False)
     # #8124: the lane's image comes from `TORTOISE_TEST_LANE_IMAGE` read at
     # IMPORT time, and a lane that exports it (to compare engines) must not be
     # able to move these tests — `start()` now refuses a floating tag, so an
@@ -217,22 +222,62 @@ def test_the_reaper_never_removes_a_container_no_worktree_here_claims(monkeypatc
 
 # ── The port-exhaustion fix: a TERMINAL container is provably out of service ──
 
-def test_reaper_reaps_a_TERMINAL_container_whose_owner_worktree_still_EXISTS(
+def test_reaper_KEEPS_a_TERMINAL_container_of_a_LIVE_owner_by_DEFAULT(
         tmp_path, monkeypatch):
-    """Measured 2026-10-20: all 110 ports in ``PORT_RANGE`` were published and
-    **67 were held by EXITED containers**, so `uri` failed outright with `no
-    free port in 16390-16499` while every lane that could have used them was
-    long gone. Docker keeps a stopped container's port reservation, and the
-    ownership rule alone could never reclaim it: the dead lane's worktree
-    directory still exists (nobody deletes a worktree after a merge), so
-    "the owning worktree exists" was true for a container that had not run for
-    ten days.
+    """#8180's recorded owner ruling, pinned at the behaviour that crossed it.
 
-    The discriminator is therefore the container's STATE, not its owner and not
-    its age: `start()` already replaces a terminal container unconditionally,
-    so its own lane has already forfeited it. The MUTATION that must fail here:
-    delete the terminal-state arm (keep only the ownership rule) and this
-    stopped container's port is never released."""
+    The rule is: a `fdb-lane-*` container MAY be reaped **when the worktree that
+    owns it is gone**, and the scope is "reap only what is *yours*". A container
+    in a TERMINAL state whose worktree still EXISTS belongs to a lane that is
+    still registered, so removing it is a peer's deletion — and gating that on
+    "the owner is determined" narrows nothing: measured 2026-10-20, 565 of 567
+    registered worktrees still exist on this host, so nearly every lane
+    container passes the gate.
+
+    This is the MUTATION TEST for the boundary: restore the arm (reap a terminal
+    container of a live owner) and the `removed == []` assertion fails. What the
+    default owes instead is the REPORT — this container holds a port out of
+    ``PORT_RANGE`` and no other instrument shows it, so the line must name the
+    owner worktree, the state, docker's termination facts (#7357 — the operator
+    still learns WHY the lane died) and the one command that releases it from
+    its OWN worktree."""
+    owner = tmp_path / "worktree-of-a-long-dead-lane"
+    owner.mkdir()
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-deadlane\texited\n", "")
+        if a[0] == "inspect" and a[2] == tl._TERMINATION_FORMAT:
+            return _R(0, "true 137 0 2147483648\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"deadlane": str(owner)})
+    monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
+    out = tl.reap_orphans()
+    assert removed == [], (removed, out)
+    line = out[0]
+    assert "kept fdb-lane-deadlane" in line, out
+    assert str(owner) in line and "exited" in line, out
+    assert "test_lane.py down" in line, out      # the owner's own remedy
+    assert "KILLED FOR MEMORY" in line, out      # #7357 facts survive the keep
+
+
+def test_reaper_reaps_a_TERMINAL_container_of_a_live_owner_only_on_OPT_IN(
+        tmp_path, monkeypatch):
+    """The measured port relief is PRESERVED, but only as an operator's explicit
+    choice (`TORTOISE_TEST_LANE_REAP_STOPPED=1`) while #8180's reopen is pending:
+    the shipped default may not reverse a recorded owner ruling, and a lane
+    cannot obtain that ruling for itself. The line says which opt-in produced the
+    deletion, so a later reader can tell an authorised reap from a default one.
+
+    This is a CAPABILITY pin, not a mutation test: it passes on the pre-fix code
+    too (which removed unconditionally) — what it protects is the ability to
+    reach the same outcome once the owner rules."""
     owner = tmp_path / "worktree-of-a-long-dead-lane"
     owner.mkdir()
     removed: list = []
@@ -247,27 +292,87 @@ def test_reaper_reaps_a_TERMINAL_container_whose_owner_worktree_still_EXISTS(
     monkeypatch.setattr(tl, "_docker", fake)
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"deadlane": str(owner)})
-    monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time())
-    # The arm re-reads the state at the moment of action; pin that read.
     monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
+    monkeypatch.setenv(tl.STOPPED_REAP_ENV, "1")
     out = tl.reap_orphans()
     assert removed == [("-f", "fdb-lane-deadlane")], (removed, out)
     assert "removed fdb-lane-deadlane" in out[0], out
-    assert "exited" in out[0], out
+    assert tl.STOPPED_REAP_ENV in out[0], out
+
+
+def test_reaper_treats_only_the_exact_opt_in_value_as_consent(
+        tmp_path, monkeypatch):
+    """A deletion that crosses a recorded ownership boundary must not be
+    triggered by an inherited or nearly-right value: `true`, `yes`, `2` and ""
+    are not the operator asking for it. Mutation: `strtobool`-style leniency in
+    `_stopped_reap_enabled` and this fails."""
+    owner = tmp_path / "live-worktree"
+    owner.mkdir()
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-deadlane\texited\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"deadlane": str(owner)})
+    monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
+    for value in ("true", "yes", "2", "1 ", ""):
+        removed.clear()
+        monkeypatch.setenv(tl.STOPPED_REAP_ENV, value)
+        tl.reap_orphans()
+        assert removed == [], (value, removed)
+
+
+def test_reaper_reads_the_TERMINATION_FACTS_before_an_OWNER_GONE_removal(
+        monkeypatch, tmp_path):
+    """#7357's rule on the arm that is ARMED: `rm -f` destroys the only evidence
+    of WHY the container stopped, and nobody else will report it — this
+    container's owning worktree is gone. Mutation: drop the
+    `_termination_report` read from that removal (or move it after the `rm`) and
+    one of the two assertions fails; the pre-fix path removed with no facts read
+    at all, so this is red on it."""
+    order: list = []
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-gone\tdead\n", "")
+        if a[0] == "inspect" and a[2] == tl._TERMINATION_FORMAT:
+            order.append("facts")
+            return _R(0, "true 137 0 2147483648\n", "")
+        if a[0] == "rm":
+            order.append("rm")
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs",
+                        lambda: {"gone": str(tmp_path / "removed-worktree")})
+    out = tl.reap_orphans()
+    assert removed == [("-f", "fdb-lane-gone")], (removed, out)
+    assert order == ["facts", "rm"], (order, out)   # read BEFORE the removal
+    assert "KILLED FOR MEMORY" in out[0], out
+    assert "OOMKilled=true" in out[0] and "ExitCode=137" in out[0], out
 
 
 def test_reaper_reads_the_TERMINATION_FACTS_before_it_removes(monkeypatch,
                                                              tmp_path):
-    """#7357's rule, applied to the arm that removes ANOTHER lane's container:
-    `rm -f` destroys the only evidence of WHY it stopped, and this reap runs
-    BEFORE that lane's own `start()` — whose termination report is the read
-    #7357 added. After the removal, that lane reads `absent` and reports
+    """#7357's rule, applied to the OPT-IN arm that removes a live owner's
+    container: `rm -f` destroys the only evidence of WHY it stopped, and this
+    reap runs BEFORE that lane's own `start()` — whose termination report is the
+    read #7357 added. After the removal, that lane reads `absent` and reports
     nothing, so if the facts are not read and printed HERE they are gone.
 
     Measured shape this protects: a Docker-daemon restart leaves every lane
-    container `exited`, and one sweep removes the fleet's whole diagnostic in
-    one pass. Mutation: drop the `prior = _termination_report(...)` read (or
-    move it after the `rm`) and one of the two assertions fails."""
+    container `exited`, and one opt-in sweep removes the fleet's whole diagnostic
+    in one pass. Mutation: drop the `_termination_report` read (or move it after
+    the `rm`) and one of the two assertions fails."""
     owner = tmp_path / "worktree-of-a-dead-lane"
     owner.mkdir()
     order: list = []
@@ -291,6 +396,7 @@ def test_reaper_reads_the_TERMINATION_FACTS_before_it_removes(monkeypatch,
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"deadlane": str(owner)})
     monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)
+    monkeypatch.setenv(tl.STOPPED_REAP_ENV, "1")   # the arm this test pins
     out = tl.reap_orphans()
     assert removed == [("-f", "fdb-lane-deadlane")], (removed, out)
     assert order == ["facts", "rm"], (order, out)   # read BEFORE the removal
@@ -370,6 +476,8 @@ def test_reaper_re_reads_the_state_before_removing(monkeypatch, tmp_path):
     by the time the `rm` lands, and `rm -f` would SIGKILL a live FalkorDB
     mid-suite. The removal is therefore decided by a state read taken at the
     moment of action (the rule `start()` already states for `_wait_ready`).
+    This is the OPT-IN arm (the default removes nothing at all, see
+    `..._KEEPS_a_TERMINAL_container_of_a_LIVE_owner_by_DEFAULT`).
     Mutation: remove the re-read and this fails."""
     owner = tmp_path / "live-worktree"
     owner.mkdir()
@@ -386,6 +494,7 @@ def test_reaper_re_reads_the_state_before_removing(monkeypatch, tmp_path):
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"cameback": str(owner)})
     monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setenv(tl.STOPPED_REAP_ENV, "1")
     out = tl.reap_orphans()
     assert removed == [], removed
     assert "at removal time" in out[0], out
@@ -416,18 +525,21 @@ def test_reaper_never_reaps_THIS_worktrees_own_container_however_stopped(
 
 def test_reaper_carries_the_termination_evidence_into_its_report(
         monkeypatch, tmp_path):
-    """A peer lane's next `start()` will read `absent` and report NOTHING, so if
-    this arm removes the container it must carry docker's termination facts
-    itself — `rm -f` destroys the only evidence of why it stopped, and an
-    OOM-killed lane reads identically to a clean exit once the container is
-    gone (#7357). Mutation: drop `_termination_report` from the line and this
-    fails."""
-    owner = tmp_path / "dead-worktree"
+    """#7357's evidence must survive the DEFAULT (which removes nothing): the
+    operator is told WHY the lane died even though the container is kept, or the
+    stopped container is just an unexplained name in a sweep line. Mutation:
+    drop `_termination_report` from the keep line and this fails; the pre-fix
+    code removed the container instead of reporting it, so it is red there
+    too."""
+    owner = tmp_path / "live-worktree"
     owner.mkdir()
+    removed: list = []
 
     def fake(*a, **k):
         if a[0] == "ps":
             return _R(0, "fdb-lane-oomed\texited\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
         return _R(0, "", "")
 
     monkeypatch.setattr(tl, "_docker", fake)
@@ -437,7 +549,8 @@ def test_reaper_carries_the_termination_evidence_into_its_report(
     monkeypatch.setattr(tl, "_termination_report",
                         lambda _n, live: "killed for memory (OOMKilled=true)")
     out = tl.reap_orphans()
-    assert "removed fdb-lane-oomed" in out[0], out
+    assert removed == [], (removed, out)
+    assert "kept fdb-lane-oomed" in out[0], out
     assert "OOMKilled" in out[0], out
 
 
@@ -492,14 +605,22 @@ def test_reaper_reads_no_state_as_UNKNOWN_not_as_terminal(monkeypatch):
 def test_pick_port_names_the_stopped_container_remedy_when_the_range_is_full(
         monkeypatch):
     """The operator-facing half of the measured failure: the message must name
-    the cause (a STOPPED container keeps its port) so the next reader does not
-    go looking for a wider range or a leaked socket."""
+    the cause (a STOPPED container keeps its port) AND a remedy that respects
+    #8180 — the owner's own `down`, or the explicit opt-in — so the next reader
+    does not go looking for a wider range, a leaked socket, or a reap that the
+    default deliberately does not perform. The earlier wording promised that
+    `up`/`uri` reaped these containers, which was true only while the withdrawn
+    arm was armed, so asserting the opt-in's NAME is what keeps the message
+    honest."""
     monkeypatch.setattr(tl, "_published_scan", lambda: {})
     monkeypatch.setattr(tl, "port_is_free", lambda _p: False)
     with pytest.raises(SystemExit) as e:
         tl.pick_port()
     msg = str(e.value)
     assert "no free port" in msg and "stopped" in msg.lower(), msg
+    assert "test_lane.py down" in msg, msg          # the owner's own remedy
+    assert "TORTOISE_TEST_LANE_REAP_STOPPED=1" in msg, msg
+    assert "reaps the ones whose owning worktree this clone can name" not in msg, msg
 
 
 def test_ping_over_host_is_false_when_nothing_is_listening(monkeypatch):
