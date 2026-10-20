@@ -142,11 +142,13 @@ jobs:
 
   deploy:
     runs-on: ubuntu-latest
-    # Dispatch-only (#771 flip gating): a push records but never deploys. The
-    # apply lock below serialises APPLIES only — push runs are in their own
-    # run-level group (`supabase-deploy-push`), so a starved push run can never
-    # stall an operator's dispatch apply (#1095), and this name is distinct from
-    # the run-level group so the run/job deadlock cannot return.
+    # Dispatch-only (#771 flip gating): a push records but never deploys. TWO
+    # separate facts hold the apply lock out of a push run, and both are pinned
+    # in tests/test_reporting_workflow_concurrency.py: this `if:` (a push run
+    # never reaches this job) and the run-level group being event-scoped (a push
+    # run holds `supabase-deploy-push`, never a dispatch's lock). The apply lock
+    # below serialises APPLIES with each other, and its name is distinct from
+    # the run-level group so the run/job deadlock cannot return (#1095).
     if: github.event_name == 'workflow_dispatch'
     # ⛔ This group name MUST differ from the run-level `concurrency.group`
     # above (#9120). When both were `supabase-deploy`, the RUN acquired the

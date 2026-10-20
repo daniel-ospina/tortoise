@@ -516,7 +516,10 @@ def test_the_zero_cost_pr_event_exemption_is_still_true() -> None:
 #
 # A name comparison catches the whole class in one line, and the two intents
 # stay separately satisfiable: the run-level group serialises whole deploys
-# (#9115), the job-level one serialises only the apply (#1095).
+# (#9115), the job-level one serialises only the apply (#1095). Callers compare
+# through :func:`_normalise_group`, because GitHub treats `${{github.ref}}` and
+# `${{ github.ref }}` as the SAME group — a raw-text comparison would miss a
+# real deadlock written the other way round.
 
 
 def _concurrency_group(block: object) -> str | None:
@@ -528,15 +531,20 @@ def _concurrency_group(block: object) -> str | None:
     its literal text, NOT resolved and NOT skipped. That is deliberate and it
     cuts both ways:
 
-    * two blocks with IDENTICAL text collide, including expression-valued ones
-      (`ci-${{ github.ref }}` twice) — correctly flagged;
-    * two blocks whose expressions differ only in spelling (`${{ github.ref }}`
-      vs `${{github.ref}}`) compare unequal, so a collision there is MISSED.
+    * two blocks naming the SAME group collide, including expression-valued
+      ones (`ci-${{ github.ref }}` twice) — correctly flagged;
+    * two blocks whose expressions name DIFFERENT groups (`github.ref` vs
+      `github.ref_name`, or an extra `github.run_id`) compare unequal, so a
+      collision there is MISSED — that is a semantic difference, not a
+      spelling one, and resolving it needs the expression evaluated.
 
-    Skipping expressions instead would lose the first case to catch the second,
-    which is the worse trade: an unresolved collision deadlocks a job, while a
-    spelling difference is caught by review. Callers must not assume an
-    expression means "no group".
+    Callers MUST compare through :func:`_normalise_group`: spacing inside
+    `${{ … }}` does not change the group, so raw-text comparison would both
+    miss a real collision (`${{github.ref}}` vs `${{ github.ref }}`) and invent
+    one in the other direction. Skipping expressions altogether would lose the
+    collision case to catch the semantics case, which is the worse trade: an
+    unresolved collision deadlocks a job, while differing contexts are caught
+    by review. Callers must not assume an expression means "no group".
     """
     if isinstance(block, str):
         return block
@@ -565,17 +573,26 @@ def _normalise_group(group: str) -> str:
 
 @pytest.mark.parametrize("path", _workflow_paths(), ids=lambda p: p.name)
 def test_no_job_reuses_the_run_level_concurrency_group(path: Path) -> None:
-    """A job group equal to the run group deadlocks: the job never starts."""
+    """A job group equal to the run group deadlocks: the job never starts.
+
+    Compared through :func:`_normalise_group`, so `ci-${{github.ref}}` in a job
+    against `ci-${{ github.ref }}` at run level is flagged as the collision it
+    is. Raw text would miss it, and that pair deadlocks exactly like an
+    identical spelling does.
+    """
     doc = _load(path)
     run_group = _concurrency_group(doc.get("concurrency"))
     if run_group is None:
         return
     jobs = doc.get("jobs") or {}
     assert isinstance(jobs, dict), f"{path.name}: `jobs:` is not a mapping"
+    normalised_run = _normalise_group(run_group)
     colliding = sorted(
         name
         for name, job in jobs.items()
-        if isinstance(job, dict) and _concurrency_group(job.get("concurrency")) == run_group
+        if isinstance(job, dict)
+        and (job_group := _concurrency_group(job.get("concurrency"))) is not None
+        and _normalise_group(job_group) == normalised_run
     )
     assert not colliding, (
         f"{path.name}: job(s) {colliding} reuse the run-level concurrency group "
@@ -587,7 +604,7 @@ def test_no_job_reuses_the_run_level_concurrency_group(path: Path) -> None:
 
 
 def test_supabase_deploy_apply_lock_is_distinct_from_the_run_lock() -> None:
-    """The incident itself, pinned: two properties, not one.
+    """The incident itself, pinned: every property of the two locks.
 
     (a) the apply lock is a CONSTANT and differs from the run group — that is the
         deadlock (#9120 x #1095);
@@ -595,7 +612,12 @@ def test_supabase_deploy_apply_lock_is_distinct_from_the_run_lock() -> None:
         lock a `workflow_dispatch` needs. A constant run group re-breaks #1095
         even with distinct names, because every run of the workflow acquires it
         (#1095's reviewed decision: "workflow-level concurrency is claimed
-        per-run — a push run would still hold the shared group").
+        per-run — a push run would still hold the shared group");
+    (c) neither lock cancels (a cancelled apply leaves a half-applied schema);
+    (d) a push run cannot reach the CONSTANT apply lock at all: `check-drift`
+        declares no job-level group, and `deploy` is dispatch-only. The exact
+        pins (a)-(c) describe names and flags only, so without (d) either
+        mechanism can be removed with the module fully green — measured.
 
     Named separately from the parametrised sweep because a regression here is
     the one that silently kills the ONLY automated path from repo to prod
@@ -650,6 +672,28 @@ def test_supabase_deploy_apply_lock_is_distinct_from_the_run_lock() -> None:
         "the apply lock must never cancel: two applies interleaved or a "
         "half-applied schema is exactly the hazard the apply lock exists "
         "for (#1095)"
+    )
+    # ⛔ The apply lock is CONSTANT, so it is only safe because a push run can
+    # never reach it. TWO things make that true and neither is a group name, so
+    # the exact pins above cannot see either one going away:
+    #   * `check-drift` (the push arm) declares no job-level group — give it one
+    #     and a starved push run holds the apply lock again (#1095);
+    #   * `deploy` is dispatch-only — let it run on push and every push run's
+    #     deploy job queues on the SAME constant group.
+    # Both mutants left the whole module green before these pins existed.
+    assert "concurrency" not in doc["jobs"]["check-drift"], (
+        "check-drift must declare NO job-level group (its own comment says so): "
+        "it runs in a push run, so a group here — above all the constant apply "
+        "lock — lets a starved push run stall an operator's dispatch (#1095)"
+    )
+    assert str(doc["jobs"]["deploy"].get("if", "")).strip() == (
+        "github.event_name == 'workflow_dispatch'"
+    ), (
+        "deploy must stay DISPATCH-ONLY: the apply lock is a constant, so a push "
+        "run that reaches this job queues behind an operator's apply. If you are "
+        "deliberately flipping #771 so pushes deploy, the apply lock has to stop "
+        "being reachable from a push run first — revisit this pin and the group "
+        "design together, not this test alone."
     )
 
 
