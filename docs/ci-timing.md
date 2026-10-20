@@ -10,7 +10,7 @@ subjects.team: epistemic-team
 # CI Timing Measurement Artifact
 
 > Measurement-only artifact (#1477). Refreshed weekly by the `ci-timing.yml`
-> workflow, sampling the latest completed push-to-main Python CI run. Never a gate.
+> workflow, sampling one completed push-to-main Python CI run — the run is named in the `Sampled run` list below, not assumed to be the newest. Never a gate.
 
 ## Sampled run
 
@@ -19,7 +19,7 @@ subjects.team: epistemic-team
 - created_at: `2026-10-19T02:41:31Z`
 - conclusion: `failure`
 - sample_time: `2026-10-20T18:40:00Z`
-- selection: latest completed `event=push&branch=main` run, `exclude_pull_requests=true`, cancelled skipped
+- selection: `event=push&branch=main`, `exclude_pull_requests=true`, cancelled skipped; this sample IS run `39191149586` (created `2026-10-19T02:41:31Z`), and it is not re-labelled as a newer run
 - schema_version: `1`
 
 ## Step timings (Jobs API — real run)
@@ -665,7 +665,6 @@ Second-granularity timestamps: sub-10s steps read 0s — do not alarm on those.
 
 | Sample | Run | Conclusion | Passed | Failed | Error | Skipped | Steps max job (s) |
 |---|---|---|---|---|---|---|---|
-| 2026-10-20T18:40:00Z | 39191149586 | failure | 30697 | 6 | 0 | 129 | 1300 |
 | 2026-10-20T18:40:00Z | 39191149586 | failure | 30697 | 6 | 0 | 129 | 1300 |
 | 2026-10-20T14:39:07Z | 39191149586 | failure | 30697 | 6 | 0 | 129 | 1300 |
 | 2026-10-17T15:56:38Z | 39040632415 | success | 31284 | 0 | 0 | 139 | 1414 |

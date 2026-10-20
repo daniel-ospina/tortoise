@@ -1213,6 +1213,27 @@ def test_a_summary_less_leg_still_counts_its_failures(tmp_path: Path) -> None:
     assert agg["total_counts"]["passed"] == 10, agg["total_counts"]
 
 
+def test_the_rendered_provenance_names_the_run_it_sampled(monkeypatch) -> None:
+    """The `selection:` line must not claim "the latest run" — it must name THIS one.
+
+    The line was a hardcoded constant, so an artifact could say "latest completed run"
+    while sampling an older run, and no reader could tell. It is rendered from the run
+    now, in the markdown AND in the JSON snapshot. This asserts the RENDERED output, not a
+    copy of the string: the earlier version of this test checked a literal and could never
+    fail.
+    """
+    monkeypatch.setenv("CI_TIMING_NOW", "2026-08-18T10:00:00Z")
+    run = {"head_sha": "abc123", "created_at": "2026-08-18T09:00:00Z",
+           "conclusion": "success", "event": "push", "head_branch": "main"}
+
+    md = ci_timing.render_md(run, {}, {}, dict.fromkeys(ci_timing.COUNT_KEYS, 0), False,
+                             "4242", [], [])
+
+    assert "latest completed" not in md
+    assert "run `4242`" in md
+    assert "2026-08-18T09:00:00Z" in md
+
+
 def test_a_collection_error_leg_reports_its_error(tmp_path: Path) -> None:
     """A summary line is `=== <n> <state>` and need not mention `passed`.
 

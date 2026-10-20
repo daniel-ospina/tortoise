@@ -535,7 +535,10 @@ def parse_log(path: Path) -> dict:
         # pytest prints a zero-collection summary WITHOUT the `===` banner
         # ("no tests ran in 0.30s"), so shape alone would call an honest empty leg
         # truncated (#9134 review, P2).
-        if line.startswith("no tests ran in"):
+        # ⛔ Phrase, not prefix: pytest prints `===== no tests ran in 0.02s =====`, so a
+        # startswith() test misses the banner and calls an honest empty leg truncated
+        # (#9134 review, P1).
+        if "no tests ran in" in line:
             summary_seen = True
         if line.startswith("=") and COUNT_RE.search(line):
             summary_seen = True
@@ -1015,23 +1018,34 @@ def _type_checking_names(tree: ast.Module) -> frozenset[str]:
     return frozenset(names)
 
 
-def _block_cannot_execute(node: ast.stmt, type_checking: frozenset[str] = frozenset({"TYPE_CHECKING"})) -> bool:
-    """True for an `if`/`while` whose body can never run at import time.
+def _dead_branches(
+    node: ast.stmt, type_checking: frozenset[str] = frozenset({"TYPE_CHECKING"}),
+) -> frozenset[str]:
+    """WHICH branches of this `if`/`while` cannot run at import time.
 
-    A `def` under `if TYPE_CHECKING:` or `if False:` is never bound, so pytest collects
-    nothing from it — counting it makes `observed >= declared` UNSATISFIABLE and holds the
-    row's weight forever, the mirror of the floor this module exists to refuse. Measured
-    on a module with three such guards beside one real test: 1 collected, and the count
-    said 4 (#9134 review, P2).
+    Returns a subset of `{"body", "orelse"}` — the distinction matters because the two
+    guards skip opposite sides: `if TYPE_CHECKING:` runs its `else:` and skips its body,
+    while `if not TYPE_CHECKING:` (which is ordinary live code) runs its body and skips
+    its `else:`. Counting the side that cannot run makes `observed >= declared`
+    UNSATISFIABLE, which holds a row's weight forever — the mirror of the floor this
+    module exists to refuse. Both directions were measured (#9134 review).
+
+    A FALSY constant guard (`if False:`, `while False:`) skips its body for the same
+    reason, and `if 0:` too.
     """
     if not isinstance(node, (ast.If, ast.While)):
-        return False
+        return frozenset()
     test = node.test
-    if isinstance(test, ast.Constant) and not test.value:
-        return True
-    if isinstance(test, ast.Name) and test.id in type_checking:
-        return True
-    return isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+    negated = isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
+    inner = test.operand if negated else test
+    is_dead_condition = (
+        (isinstance(inner, ast.Constant) and not inner.value)
+        or (isinstance(inner, ast.Name) and inner.id in type_checking)
+        or (isinstance(inner, ast.Attribute) and inner.attr == "TYPE_CHECKING")
+    )
+    if not is_dead_condition:
+        return frozenset()
+    return frozenset({"orelse"}) if negated else frozenset({"body"})
 
 
 def _collectable_statements(
@@ -1050,14 +1064,9 @@ def _collectable_statements(
     out: list[ast.stmt] = []
     for node in body:
         out.append(node)
-        dead = _block_cannot_execute(node, type_checking)
+        dead = _dead_branches(node, type_checking)
         for attr in ("body", "orelse", "finalbody"):
-            # ⛔ A dead if/while skips its BODY but not its `else:`/`finally:` — those run
-            # at import, so a `def` inside them is collected. Measured: `if
-            # TYPE_CHECKING: … else: def test_late_bound` beside three plain tests
-            # collected 4 against a declared 3, a floor that licensed a 3.3x discount
-            # (#9134 review, P2).
-            if dead and attr == "body":
+            if attr in dead:
                 continue
             block = getattr(node, attr, None)
             if isinstance(block, list) and block and isinstance(block[0], ast.stmt):
@@ -2208,7 +2217,7 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
              "# CI Timing Measurement Artifact",
              "",
              "> Measurement-only artifact (#1477). Refreshed weekly by the `ci-timing.yml`",
-             "> workflow, sampling the latest completed push-to-main Python CI run. Never a gate.",
+             "> workflow, sampling one completed push-to-main Python CI run — the run is named in the `Sampled run` list below, not assumed to be the newest. Never a gate.",
              "",
              "## Sampled run",
              "",
@@ -2217,7 +2226,9 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
              f"- created_at: `{run.get('created_at') or '-'}`",
              f"- conclusion: `{run.get('conclusion') or '-'}`",
              f"- sample_time: `{now}`",
-             f"- selection: latest completed `event=push&branch=main` run, `exclude_pull_requests=true`, cancelled skipped",  # noqa: F541
+             f"- selection: `event=push&branch=main`, `exclude_pull_requests=true`, "
+            f"cancelled skipped; this sample IS run `{run_id or '-'}` (created "
+            f"`{run.get('created_at') or '-'}`), and it is not re-labelled as a newer run",
              f"- schema_version: `{SCHEMA_VERSION}`",
              "",
              "## Step timings (Jobs API — real run)",
@@ -2557,7 +2568,19 @@ def main() -> int:
         "steps_max_job_ms": max((sum(s["duration_ms"] for s in job) for job in steps.values()), default=0),
         "failed_tests": sorted(failed_tests),
     }
-    history = [row] + load_history(json_path)  # noqa: RUF005
+    # ⛔ Drop EXACT twins — same run measured at the same instant — which is how the
+    # shipped artifact came to carry run 39191149586 twice with two identical table lines
+    # (#9134 review, P2). A re-sample at a LATER sample_time is a different observation of
+    # the same run and stays: the history is a time series, and collapsing it would lose
+    # the re-measurement the reader is looking for.
+    prior = [
+        entry for entry in load_history(json_path)
+        if not (
+            str(entry.get("run_id")) == str(run_id)
+            and entry.get("sample_time") == row["sample_time"]
+        )
+    ]
+    history = [row] + prior  # noqa: RUF005
     history = history[: args.max_history]
 
     flakes = candidate_flakes(history)
@@ -2570,7 +2593,11 @@ def main() -> int:
             "created_at": run.get("created_at"),
             "conclusion": run.get("conclusion"),
             "sample_time": now,
-            "selection": "latest completed event=push&branch=main run, exclude_pull_requests=true, cancelled skipped",
+            "selection": (
+                f"event=push&branch=main, exclude_pull_requests=true, cancelled skipped; "
+                f"this sample IS run {run_id or '-'} (created {run.get('created_at') or '-'}), "
+                f"and it is not re-labelled as a newer run"
+            ),
         },
         "steps": steps,
         "files": dict(sorted(files.items(), key=lambda kv: (-kv[1]["total_ms"], kv[0]))),
