@@ -73,6 +73,7 @@ guarded handle (#9124 part 2), not a declaration.
 """
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -123,7 +124,7 @@ _DEGRADED: dict[tuple[str, str], dict[str, Any]] = {}
 #: NOT `asyncio.to_thread`, whose shared default executor is the #3060
 #: starvation path the repo avoids — so the `:GraphEvent` emit leg executes on a
 #: graph-pool worker, while `degraded_graphs()` is called from the `async def`
-#: `/health` route ON the loop (`_health_payload` → `_change_feed_health`). `sorted(_DEGRADED.items())` materialises a list
+#: health route ON the loop (`hosted_api.health()` → `_change_feed_health`). `sorted(_DEGRADED.items())` materialises a list
 #: while a peer thread may insert, which raises ``RuntimeError: dictionary
 #: changed size during iteration`` — and `/health` swallows that, so it would
 #: answer ``change_feed.degraded: false`` at the exact moment a second feed went
@@ -134,6 +135,7 @@ _DEGRADED: dict[tuple[str, str], dict[str, Any]] = {}
 _DEGRADED_LOCK = threading.Lock()
 
 
+@functools.cache
 def _canonical_path(path: str) -> str:
     """ONE store, ONE key — however its path is spelled.
 
@@ -145,6 +147,20 @@ def _canonical_path(path: str) -> str:
     identity, the same normalisation `projection._prewipe_db_path_identity` and
     `fallback_snapshot.snapshot_key` apply (`realpath(abspath(expanduser()))`,
     which is what makes macOS's `/tmp` -> `/private/tmp` compare EQUAL).
+
+    ⛔ MEMOISED per raw spelling, and the memo is part of the fix, not an
+    optimisation. The normalisation reads MUTABLE ambient state — the process
+    cwd (`abspath`) and the symlinks along the path (`realpath`) — while both
+    the WRITER (`record_degraded` -> `_graph_key`) and the READER
+    (`degraded()` -> `_graph_key`) re-derive the key on every call. Re-deriving
+    would let a recorded loss become un-findable by the very poll it must
+    refuse: `chdir` after a relative `_path` was recorded, or a repointed
+    symlinked parent, moves the key out from under the state, `degraded()`
+    answers `None`, and `poll_events` returns `[]` over the lost event — the
+    silence this module exists to break, reintroduced by the fix for a
+    different one. Pinning the resolution for the process lifetime makes a
+    projection's identity stable, which is what the raw-string key was, and
+    takes the per-poll `realpath` syscalls off the `poll_events` path.
 
     `:memory:` is left ALONE deliberately: it names no file, `abspath` would
     fold the caller's cwd into the key, and two cwds would then be two keys for
@@ -279,6 +295,10 @@ def degraded_graphs() -> list[dict[str, Any]]:
             "first_stage": state["first_stage"],
             "lost": state["lost"],
             "error": state["error"],
+            # Both diagnoses, for the same reason `degraded()` carries both: a
+            # reporter that forwarded only the CURRENT stage would still hide
+            # the first, often only provable, one (#9208 review).
+            "first_error": state["first_error"],
         }
         for (store, _graph), state in sorted(snapshot)
     ]
