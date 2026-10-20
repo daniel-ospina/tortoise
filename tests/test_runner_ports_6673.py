@@ -499,12 +499,19 @@ SEAM_FILES_WITH_ALLOWED_LITERALS = {
         "docker://:falkordb@localhost:6379",
     ],
     "tests/test_wipe_server.py": [
-        # Every literal here is an INPUT to the journal-instance gate — a URI
-        # parser (`_uri_instance_key`), the sidecar text it binds/reads, or a
-        # census row — never a connection target. The two `_stale_sweep` calls
-        # that hand one over from a literal do so with `_proj_for_uri`
-        # monkeypatched to `_FakeProj`, so no client is constructed; the one
-        # that sweeps a REAL target takes it from
+        # Every literal here but ONE is a pure INPUT to the journal-instance
+        # gate — a URI parser (`_uri_instance_key`), the sidecar text it
+        # binds/reads, or a census row — and never a connection target.
+        #
+        # The exception is the ONE `_stale_sweep` call handed a literal URI
+        # (declared below as its full statement, never a URI prefix: a sweep of
+        # a DIFFERENT graph name on the same dialect IS a live target, since
+        # `FalkorProjection.from_uri` folds an empty host to `localhost`). It is
+        # safe on two independent counts — its journal is bound to
+        # `127.0.0.1:6379` while this URI's instance key is `None`, so the
+        # instance gate skips the journal before any projection, AND
+        # `_proj_for_uri` is monkeypatched to `_FakeProj` on the neighbouring
+        # lines. Every other sweep in the file takes its target from
         # `_live_utils.docker_base_uri` (#9359).
         #
         # They must stay literal: these assertions pin the DEFAULT-port folding
@@ -518,7 +525,7 @@ SEAM_FILES_WITH_ALLOWED_LITERALS = {
         r'"127.0.0.1:6379\n")',
         'write_text("127.0.0.1:16379',
         "bound to 127.0.0.1:6380, this sweep targets",
-        '_stale_sweep("docker://:falkordb@:6379',
+        'res = _stale_sweep("docker://:falkordb@:6379/tortoise_test_matrix")',
     ],
 }
 

@@ -358,6 +358,42 @@ def test_the_proxy_verbs_agree_with_the_command_channel():
     assert "OUTCOME IS UNKNOWN" in str(caught.value)
 
 
+def test_the_proxy_explain_arm_follows_the_policy_set_not_a_literal(monkeypatch):
+    """``explain``'s ``False`` must be DERIVED from ``_NON_EXECUTING_COMMANDS``.
+
+    The proxy USED TO pass ``False`` for that verb while the command channel
+    derived it from the set — a literal there is a second encoding of one policy,
+    the drift ``_destructive_commands`` rules out for the same reason. If a
+    later lane does what the ⛔ block on that set invites and measures
+    ``GRAPH.RO_QUERY``/``EXPLAIN`` on another engine, the set changes and the
+    proxy must move with it. Pinned by REMOVING the verb from the set: the
+    proxy's arm must then follow the TEXT (the loud arm for a write), which a
+    hardcoded ``False`` cannot do.
+    """
+
+    class _StubHandle:
+        name = "stub"
+        client = None
+
+        def explain(self, q, params=None):
+            raise redis_exc.TimeoutError(SOCKET_TIMEOUT)
+
+    handle = cypher_guard._guard_handle(_StubHandle())
+    with pytest.raises(redis_exc.TimeoutError) as caught:
+        handle.explain(WRITE_STATEMENT)
+    assert "re-issuing this statement is safe" in str(caught.value)
+
+    monkeypatch.setattr(cypher_guard, "_NON_EXECUTING_COMMANDS", frozenset())
+    with pytest.raises(redis_exc.TimeoutError) as caught:
+        handle.explain(WRITE_STATEMENT)
+    assert "OUTCOME IS UNKNOWN" in str(caught.value)
+    assert "re-issuing this statement is safe" not in str(caught.value)
+
+    # The command channel agrees with the proxy under the same policy change.
+    assert cypher_guard._command_mutating(
+        ("GRAPH.EXPLAIN", "tortoise", WRITE_STATEMENT)) is True
+
+
 def test_a_classifier_that_raises_hedges_instead_of_failing_the_query(monkeypatch):
     """The classifier is TOTAL, because the proxy evaluates it BEFORE its belt.
 
