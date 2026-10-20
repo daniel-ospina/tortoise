@@ -402,6 +402,21 @@ def paid_vs_selected(jobs: list[dict], selection: dict, durations: dict,
 DURATION_RE = re.compile(r"^(\d+\.\d+)s\s+(call|setup|teardown)\s+(\S+)")
 COUNT_RE = re.compile(r"(\d+)\s+(passed|failed|error|skipped|xfailed|xpassed)")
 V_PROGRESS_RE = re.compile(r"^(tests/\S+?\.py::[^\s]+?)\s+(PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)\b")
+# The session-summary line, matched by SHAPE: it is the line that reports how long
+# the run took. `no tests ran` / `N deselected` carry no count token, so a
+# count-based test called an honest empty leg "truncated" (#9134 review, P1).
+_SUMMARY_IN_RE = re.compile(r"\bin \d+(?:\.\d+)?s\b")
+
+
+def _is_summary_line(line: str) -> bool:
+    """True for pytest's session-summary line, in banner and banner-less forms."""
+    stripped = line.strip()
+    if not _SUMMARY_IN_RE.search(stripped):
+        return False
+    return (stripped.startswith("=") or stripped.startswith("no tests ran")
+            or " deselected" in stripped or " warning" in stripped)
+
+
 R_SUMMARY_RE = re.compile(r"^(FAILED|ERROR)\s+(tests/\S+?\.py::[^\s]+)")
 
 COUNT_KEYS = ("passed", "failed", "error", "skipped", "xfailed", "xpassed")
@@ -453,7 +468,11 @@ def parse_log(path: Path) -> dict:
         lines = path.read_text(errors="replace").splitlines()
     except OSError as exc:
         return {"files": {}, "file_paths": {}, "counts": counts, "outcomes": {},
-                "killed": False, "error": f"unreadable: {exc}"}
+                "killed": False, "error": f"unreadable: {exc}",
+                # Every consumer reads this key unconditionally, so leaving it out
+                # turned one unreadable log into a KeyError that killed the whole
+                # artifact run instead of degrading that leg (#9134 review, P2).
+                "summary_seen": False}
 
     for line in lines:
         # #1477 review P2: the WATCHDOG banner is shell-echoed to the step's
@@ -532,16 +551,14 @@ def parse_log(path: Path) -> dict:
         # to mention `passed`. Requiring that word made a COLLECTION-ERROR leg
         # (`=== 1 error in 0.40s ===`) parse as all-zero, so a leg that failed to collect
         # reported no errors at all (#9134 review, P3).
-        # pytest prints a zero-collection summary WITHOUT the `===` banner
-        # ("no tests ran in 0.30s"), so shape alone would call an honest empty leg
-        # truncated (#9134 review, P2).
-        # ⛔ Phrase, not prefix: pytest prints `===== no tests ran in 0.02s =====`, so a
-        # startswith() test misses the banner and calls an honest empty leg truncated
-        # (#9134 review, P1).
-        if "no tests ran in" in line:
+        # A summary is the line that says how long the session took — `= 10 passed
+        # in 3.00s =`, `==== no tests ran in 0.01s ====`, `2 deselected in 0.10s`.
+        # Requiring a COUNT token missed the last two (neither names a count), and
+        # matching only `-q`'s banner-less form missed the banner form that every
+        # `-v` CI leg actually prints (#9134 review, P1).
+        if _is_summary_line(line):
             summary_seen = True
         if line.startswith("=") and COUNT_RE.search(line):
-            summary_seen = True
             for n, key in COUNT_RE.findall(line):
                 if key in counts:
                     counts[key] = int(n)
@@ -1024,26 +1041,25 @@ def _dead_branches(
     """WHICH branches of this `if`/`while` cannot run at import time.
 
     Returns a subset of `{"body", "orelse"}` — the distinction matters because the two
-    guards skip opposite sides: `if TYPE_CHECKING:` runs its `else:` and skips its body,
-    while `if not TYPE_CHECKING:` (which is ordinary live code) runs its body and skips
-    its `else:`. Counting the side that cannot run makes `observed >= declared`
+    guards skip OPPOSITE sides: `if TYPE_CHECKING:` runs its `else:` and skips its body,
+    while `if not TYPE_CHECKING:` (ordinary live code) runs its body and skips its
+    `else:`. Counting the side that cannot run makes `observed >= declared`
     UNSATISFIABLE, which holds a row's weight forever — the mirror of the floor this
     module exists to refuse. Both directions were measured (#9134 review).
 
-    A FALSY constant guard (`if False:`, `while False:`) skips its body for the same
-    reason, and `if 0:` too.
+    A falsy constant guard (`if False:`, `if 0:`, `while False:`) skips its body.
     """
     if not isinstance(node, (ast.If, ast.While)):
         return frozenset()
     test = node.test
     negated = isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
     inner = test.operand if negated else test
-    is_dead_condition = (
+    is_dead = (
         (isinstance(inner, ast.Constant) and not inner.value)
         or (isinstance(inner, ast.Name) and inner.id in type_checking)
         or (isinstance(inner, ast.Attribute) and inner.attr == "TYPE_CHECKING")
     )
-    if not is_dead_condition:
+    if not is_dead:
         return frozenset()
     return frozenset({"orelse"}) if negated else frozenset({"body"})
 
@@ -1066,7 +1082,12 @@ def _collectable_statements(
         out.append(node)
         dead = _dead_branches(node, type_checking)
         for attr in ("body", "orelse", "finalbody"):
-            if attr in dead:
+            # ⛔ A dead if/while skips its BODY but not its `else:`/`finally:` — those run
+            # at import, so a `def` inside them is collected. Measured: `if
+            # TYPE_CHECKING: … else: def test_late_bound` beside three plain tests
+            # collected 4 against a declared 3, a floor that licensed a 3.3x discount
+            # (#9134 review, P2).
+            if dead and attr == "body":
                 continue
             block = getattr(node, attr, None)
             if isinstance(block, list) and block and isinstance(block[0], ast.stmt):
@@ -2217,7 +2238,8 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
              "# CI Timing Measurement Artifact",
              "",
              "> Measurement-only artifact (#1477). Refreshed weekly by the `ci-timing.yml`",
-             "> workflow, sampling one completed push-to-main Python CI run — the run is named in the `Sampled run` list below, not assumed to be the newest. Never a gate.",
+             "> workflow, sampling one completed push-to-main Python CI run — the run is named "
+             "in the `Sampled run` list below, not assumed to be the newest. Never a gate.",
              "",
              "## Sampled run",
              "",
@@ -2227,8 +2249,8 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
              f"- conclusion: `{run.get('conclusion') or '-'}`",
              f"- sample_time: `{now}`",
              f"- selection: `event=push&branch=main`, `exclude_pull_requests=true`, "
-            f"cancelled skipped; this sample IS run `{run_id or '-'}` (created "
-            f"`{run.get('created_at') or '-'}`), and it is not re-labelled as a newer run",
+             f"cancelled skipped; this sample IS run `{run_id or '-'}` (created "
+             f"`{run.get('created_at') or '-'}`), and it is not re-labelled as a newer run",
              f"- schema_version: `{SCHEMA_VERSION}`",
              "",
              "## Step timings (Jobs API — real run)",
@@ -2277,12 +2299,14 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
         def _label(src: dict) -> str:
             return f"`{src.get('leg') or '?'}/{src['log']}`"
 
-        named = ", ".join(_label(s) for s in summary_less_legs)
-        saw_watchdog = any(s.get("killed") for s in summary_less_legs)
-        why = ("watchdog-killed before pytest's summary line" if saw_watchdog
-               else "no pytest summary line")
+        by_cause = [("watchdog-killed before pytest's summary line",
+                     [s for s in summary_less_legs if s.get("killed")]),
+                    ("no pytest summary line",
+                     [s for s in summary_less_legs if not s.get("killed")])]
+        parts = [f"{cause}: " + ", ".join(_label(s) for s in group)
+                 for cause, group in by_cause if group]
         lines.append(
-            f"- summary-less legs — {why}: {named}\n"
+            f"- summary-less legs — {'; '.join(parts)}\n"
             f"  - their FAILURES are counted (from progress lines); their PASSES and "
             f"SKIPS are not — a log without a summary cannot establish them. Read "
             f"`passed` as a LOWER BOUND for the run, not as a total.")
@@ -2567,20 +2591,21 @@ def main() -> int:
         "steps_total_ms": sum(s["duration_ms"] for job in steps.values() for s in job),
         "steps_max_job_ms": max((sum(s["duration_ms"] for s in job) for job in steps.values()), default=0),
         "failed_tests": sorted(failed_tests),
+        "sampled_at": (os.environ.get("CI_TIMING_NOW")
+                       or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")),  # noqa: UP017
     }
-    # ⛔ Drop EXACT twins — same run measured at the same instant — which is how the
-    # shipped artifact came to carry run 39191149586 twice with two identical table lines
-    # (#9134 review, P2). A re-sample at a LATER sample_time is a different observation of
-    # the same run and stays: the history is a time series, and collapsing it would lose
-    # the re-measurement the reader is looking for.
-    prior = [
-        entry for entry in load_history(json_path)
-        if not (
-            str(entry.get("run_id")) == str(run_id)
-            and entry.get("sample_time") == row["sample_time"]
-        )
-    ]
-    history = [row] + prior  # noqa: RUF005
+    # Dedupe by identity, not position: running the generator twice under the same
+    # frozen CI_TIMING_NOW appended the SAME sample twice, so the artifact's history
+    # (and the flake proxy built from it) counted one measurement as two, and the
+    # committed bytes stopped being any single invocation's output (#9134 review, P2).
+    history: list[dict] = []
+    seen: set[tuple[object, object]] = set()
+    for h in [row, *load_history(json_path)]:
+        key = (h.get("run_id"), h.get("sampled_at"))
+        if key in seen:
+            continue
+        seen.add(key)
+        history.append(h)
     history = history[: args.max_history]
 
     flakes = candidate_flakes(history)

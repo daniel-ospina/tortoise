@@ -666,7 +666,7 @@ Second-granularity timestamps: sub-10s steps read 0s — do not alarm on those.
 | Sample | Run | Conclusion | Passed | Failed | Error | Skipped | Steps max job (s) |
 |---|---|---|---|---|---|---|---|
 | 2026-10-20T18:40:00Z | 39191149586 | failure | 30697 | 6 | 0 | 129 | 1300 |
-| 2026-10-20T14:39:07Z | 39191149586 | failure | 30697 | 6 | 0 | 129 | 1300 |
+| 2026-10-20T18:40:00Z | 39191149586 | failure | 30697 | 6 | 0 | 129 | 1300 |
 | 2026-10-17T15:56:38Z | 39040632415 | success | 31284 | 0 | 0 | 139 | 1414 |
 | 2026-10-13T03:18:43Z | 38337541559 | success | 28478 | 0 | 0 | 137 | 1232 |
 | 2026-10-12T04:54:57Z | 38203397437 | success | 27677 | 0 | 0 | 137 | 1052 |

@@ -515,6 +515,7 @@
       "killed": false,
       "run_id": "39191149586",
       "sample_time": "2026-10-20T18:40:00Z",
+      "sampled_at": "2026-10-20T18:40:00Z",
       "sha": "8464f850f938ff048666a24ade2081e4518987b6",
       "steps_max_job_ms": 1300000,
       "steps_total_ms": 9951000
@@ -542,7 +543,7 @@
       ],
       "killed": false,
       "run_id": "39191149586",
-      "sample_time": "2026-10-20T14:39:07Z",
+      "sample_time": "2026-10-20T18:40:00Z",
       "sha": "8464f850f938ff048666a24ade2081e4518987b6",
       "steps_max_job_ms": 1300000,
       "steps_total_ms": 9951000
