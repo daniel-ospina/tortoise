@@ -3805,9 +3805,11 @@ def _derived_recompute_write_scope(reason: str):
     that blesses a cache write of RECOVERABLE state — and the distinguishing
     property is the recomputability, so it is stated per writer:
 
-    * the ONE writer on this lane today is
-      `tortoise/source_identity.py::resolve_source_key`'s adopt-on-touch: it
-      stamps ``canonicalUrl``/``urlAliases`` onto a PRE-canonical ``:Source``
+    * the TWO writers on this lane today are
+      `tortoise/source_identity.py::resolve_source_key`'s adopt-on-touch, and the
+      operator repair path `tools/source_dedup_report.py --backfill` (which issues
+      the SAME statement against a legacy corpus). The resolver stamps
+      ``canonicalUrl``/``urlAliases`` onto a PRE-canonical ``:Source``
       it found by ``url``. ``canonicalUrl`` is
       ``normalize_source_url(url)`` — a pure function of the ``url`` that is
       the node's own journaled MERGE key — and the REPLAY lane re-derives both
@@ -3827,7 +3829,9 @@ def _derived_recompute_write_scope(reason: str):
       than claimed away: the alias list is a dedup aid re-derived from each ref
       the journal carries, not a fact ``canonicalUrl`` depends on, and
       ``tools/source_dedup_report.py --backfill`` is the path that repairs a
-      corpus whose aliases matter (#5012 S0a).
+      corpus whose aliases matter (#5012 S0a) — and it is a DECLARED writer of
+      this lane for that reason, not a mention: undeclared, §17.1's handle would
+      refuse the repair the disclosure recommends.
 
     ⛔ It is NOT a scope to open around a mutating write generally: its honest
     use is a single recompute statement whose inputs are ALL journal-carried.

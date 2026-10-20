@@ -1092,8 +1092,9 @@ def test_an_apply_first_declaration_outside_the_sdk_is_checked_too():
             f"  pinned but not declared: "
             f"{sorted(set(pinned) - set(declared))}")
         total += len(declared)
-    assert total == len(_APPLY_FIRST_DECLARED_DOORS) + 3, (
-        "the per-module pins and the sdk pin disagree about how many doors "
+    assert total == sum(len(v) for v in
+                        _APPLY_FIRST_DECLARED_DOORS_BY_MODULE.values()), (
+        "the per-module pins disagree with each other about how many doors "
         f"carry the lane (counted {total})")
 
 
@@ -1101,9 +1102,13 @@ def test_the_derived_recompute_lane_has_its_own_kind():
     """The derived-recompute lane is NOT the census's maximal-trust `declared`.
 
     It appends nothing by construction, so letting `_kind()` return the same
-    `"declared"` a journal-first door gets would put an unjournalled write in
-    the category the flip gate trusts most (#9206 review P1). It has its own
-    kind, and that kind is NOT accepted as "provable" for the arming gate.
+    `"declared"` a journal-first door gets would file an unjournalled write in
+    the category the sdk pin trusts most (#9206 review P1). It has its own kind.
+    ⚠️ The arming gate (`test_arming_the_guard_requires_a_fully_declared_surface`)
+    accounts by containment, not by kind, so this writer is still counted as
+    DECLARED there — which is correct for a lane whose values replay re-derives,
+    and is why the kind must say so explicitly instead of borrowing the
+    journal-first label.
     """
     assert _kind({"scopes": [(1, "_derived_recompute_write_scope")],
                   "writes": [(2, "query", "SET n.x = 1")],

@@ -11319,9 +11319,10 @@ class TortoiseSDK:
             proj.link_source_to_event(url, event_id)
         # ⛔ WHY THAT RECORD EXISTS AT ALL — THE RAW MERGE ABOVE NEEDS A JOURNAL
         # CARRIER (lane L5 #5097, gate item 2). It is a raw graph SET on the
-        # those is ALREADY recorded on this lane (`_write_capture_turns`'s
-        # `capture_redactions` note a few hundred lines up): a raw SET with no
-        # trailing record makes live and replay diverge, so a rebuild silently
+        # capture path, and the rule for those is ALREADY recorded on this lane
+        # (`_write_capture_turns`'s `capture_redactions` note a few hundred lines
+        # up): a raw SET with no trailing record makes live and replay diverge,
+        # so a rebuild silently
         # reverts what the write stored. Measured before this record existed
         # (`capture_session` -> `rebuild()`): the session `:Source` came back
         # with `summary`, `topics`, `sessionId`, `capturedAt`, `eventId`,
