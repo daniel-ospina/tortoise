@@ -1448,14 +1448,19 @@ def _started_epoch(name: str) -> float | None:
 def reap_orphans() -> list[str]:
     """Remove `fdb-lane-*` containers that are PROVABLY out of service.
 
-    ONE proof is armed, and it is a STATE read from the runtime — never a clock:
+    ONE proof is armed, and it is OWNERSHIP — a recorded-worktree existence read
+    (``Path(owner).is_dir()``), not a clock and not a container state:
 
     1. **The owning worktree is gone** (#8180). Ownership is recoverable from
        the container's own name (it is `slug_for()` of the worktree that owns
        it), so the reaping decision is a lookup rather than a guess. This tool
        can therefore only ever remove a container whose owner it has
        POSITIVELY established is gone — never a peer lane's, and never this
-       worktree's own (`stop()` is the only thing that removes that one).
+       worktree's own (`stop()` is the only thing that removes that one). It
+       does not consult the container's STATE at all: an owner that is gone
+       means nothing will start that container again, whatever docker last said
+       about it (`paused`/`restarting`/`created` included — ``_LIVE_ISH_STATES``
+       gates only the state arm below, not this one).
 
     A second proof — **the container is in a TERMINAL state** (`exited`/`dead`,
     ``_TERMINAL_STATES``) — is **WITHHELD BY DEFAULT** (`STOPPED_REAP_ENV`),
@@ -1472,30 +1477,35 @@ def reap_orphans() -> list[str]:
     every lane refuse with `no free port` (measured 2026-10-20: all 110 ports in
     ``PORT_RANGE`` published, **67 held by EXITED containers**). With the arm
     withheld the default REPORTS each such container — its owner worktree, its
-    state, docker's termination facts and the ONE command that releases it from
-    its own worktree — and `pick_port` reports the same remedy when the range is
-    full. The reopen carrying that measurement is on #8180; when the owner rules
-    for it, `TORTOISE_TEST_LANE_REAP_STOPPED=1` (or a new default) arms it with
-    no other change here.
+    state and the ONE command that releases it from its own worktree — and
+    `pick_port` reports the same remedy when the range is full. No `docker
+    inspect` is spent there: nothing is destroyed, so there is no evidence to
+    preserve, and this line runs on EVERY `up`/`uri`. Termination facts belong
+    where a `rm -f` happens, and are read there.
 
     The arm is not merely inert when withheld: the reporting is the point. A
     dead lane's stopped container is invisible to every other instrument, and it
-    is the population that exhausts the port range.
+    is the population that exhausts the port range. The reopen carrying that
+    measurement is on #8180; if the owner rules for it, `STOPPED_REAP_ENV=1`
+    (or a new default) arms the deletion with no other change here.
 
     When the opt-in IS set, the arm keeps the two properties it was reviewed
     for: the state is re-read IMMEDIATELY before the removal (the sweep's
     `docker ps` snapshot can be stale, and a lane restarting reuses the same
     name), and docker's termination facts are read BEFORE the `rm` (#7357) —
     `rm -f` destroys the only evidence of WHY a container stopped, and that
-    lane's own `start()` then reads `absent` and reports nothing. The same
-    pre-removal facts read applies to the armed ownership path.
+    lane's own `start()` then reads `absent` and reports nothing. The armed
+    ownership path above reads them the same way, and only for a container
+    docker reports as STOPPED: for an owner-gone container that is still UP the
+    facts describe a PREVIOUS termination, and `_termination_report(live=False)`
+    would state it as this failure.
 
     Age is not consulted and there is deliberately NO age backstop here. The
     measured defect is a container that outlives its owner, and a clock firing on
     a live owner's database would be a far worse bug than the leak it fixes —
     the rule the whole module defends. `paused`/`restarting`/`created` are
-    live-ish in exactly the same way (``_LIVE_ISH_STATES``) and are never
-    reaped.
+    live-ish in exactly the same way (``_LIVE_ISH_STATES``) and never reach the
+    STATE arm, which fires only on ``_TERMINAL_STATES``.
 
     Fail-closed: if the worktree list or `docker ps` cannot be read, nothing is
     removed and the reason is reported; a state this module does not recognise

@@ -1034,17 +1034,30 @@ def test_graph_count_returns_none_when_docker_cannot_be_asked(monkeypatch):
 
 def test_published_scan_asks_for_all_containers(monkeypatch):
     """The scan must ask for the full list (`-a`/`--all`): a container this tool
-    did not start is still an owner of the port. (`-a` itself is a hedge —
-    measured, only RUNNING containers report a published port.)"""
+    did not start is still an owner of the port, and `-a` is NOT a hedge — a
+    STOPPED container keeps its host port reserved by docker while that port is
+    free at the OS level, so this table is the ONLY thing that refuses it.
+    Measured 2026-10-20 (Docker 29.8.2): `docker ps -a --format '{{.Names}}\t
+    {{.State}}\t{{.Ports}}'` reports `fdb-7846-rdb  exited
+    3000/tcp, 127.0.0.1:16455->6379/tcp` while `bind("127.0.0.1", 16455)`
+    succeeds — which is how 67 of the range's 110 ports came to be held by
+    EXITED containers. (Reading `-a` as "running only" is what would make that
+    measurement look impossible.)"""
     seen = {}
 
     def _fake(*args, **kwargs):
         seen["args"] = args
-        return _R(0, "fdb-lane-x  127.0.0.1:16390->6379/tcp", "")
+        # The second line is a STOPPED container, in docker's real shape: if this
+        # table were read as "running only", 16455 would look free (it IS free at
+        # the OS level) and `docker run -p 16455` would then refuse it.
+        return _R(0, "fdb-lane-x  127.0.0.1:16390->6379/tcp\n"
+                    "fdb-lane-exited  exited  127.0.0.1:16455->6379/tcp", "")
 
     monkeypatch.setattr(tl, "_docker", _fake)
     assert tl._container_publishes(16390) is True
     assert set(seen["args"]) & {"-a", "--all"}, "must not scan running-only"
+    assert tl._container_publishes(16455) is True, (
+        "a stopped container's mapping must still refuse its port")
     assert tl._container_publishes(16490) is False
 
 
