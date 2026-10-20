@@ -20964,26 +20964,71 @@ class TortoiseSDK:
         a concurrent process re-marked it dirty mid-run and its marking
         must survive. ``run_ep=None`` (single-process callers without a
         snapshot) clears unconditionally.
+
+        ⛔ ORDER (#9362). The mirror is the GRAPH's mirror, so it may only be
+        changed by what the graph actually did — never in advance of the
+        write and never by the set the caller ASKED for. Two measured
+        failures came from the old order (mirror subtracted first):
+
+        * the epoch guard keeps a newer marking in the graph while the mirror
+          dropped the root (#1163's hazard, mirror side), so
+          ``dream_health_check``'s ``stale_backlog`` under-reports it;
+        * a sweep whose ``SET`` aborts loses the root for the life of the
+          process — the graph keeps the flag, the mirror forgets it, and
+          ``_hydrate_dirty_roots`` only reads the graph while the mirror is
+          EMPTY, so that process retries only if its mirror later drains
+          (and the roots the aborted sweep dropped are exactly the ones that
+          would have drained it).
+
+        So the write runs FIRST and RETURNS its own verdict per root, and the
+        mirror is then reconciled exactly: cleared roots leave it, roots the
+        graph KEEPS (newer epoch) stay in it, and roots the graph no longer
+        holds at all (cleared by a peer, or deleted) leave it too — keeping
+        those would pin a phantom that blocks hydration forever. Retry state
+        follows the mirror: reset for every root the mirror lost, kept for a
+        retained one (still dirty, still retryable).
         """
         swept = set(affected) | self._unsweepable_dirty_roots(affected)
-        self._dirty_roots -= swept
-        self._reset_retry_state(swept)
         if not swept:
             return
         ids = list(swept)
-        if run_ep is None:
-            self._get_proj().g.query(
-                "MATCH (n:Point) WHERE n.id IN $ids AND n.ep_dirty = true "
-                "SET n.ep_dirty = null, n.ep_dirty_at = null",
-                params={"ids": ids},
-            )
-        else:
-            self._get_proj().g.query(
-                "MATCH (n:Point) WHERE n.id IN $ids AND n.ep_dirty = true "
-                "AND n.ep_dirty_at <= $run_ep "
-                "SET n.ep_dirty = null, n.ep_dirty_at = null",
-                params={"ids": ids, "run_ep": run_ep},
-            )
+        # ONE statement, so the verdict and the clear cannot race each other:
+        # `swept_now` is the epoch decision for this root, returned alongside
+        # the write. A root stamped at a NEWER epoch — or carrying no stamp at
+        # all, which the old `ep_dirty_at <= $run_ep` predicate also excluded
+        # — is left EXACTLY as it is (`SET x = x` is the no-op branch of the
+        # CASE). The predicate is the landed one, unchanged: #9362 moves WHEN
+        # the mirror learns the verdict, never WHICH flags the guard clears.
+        #
+        # ⚠️ Disclosed, not claimed away: the retained branch still issues a SET
+        # on that row (`x = x`), where the old statement wrote nothing for it.
+        # Only reachable for an epoch-retained or unstamped flag — a concurrent
+        # re-stamp, or legacy raw-written state — and #2952 records that any
+        # write to an existing node costs a fulltext index entry. The sweep
+        # already writes on every CLEARED node, so this adds a write only on the
+        # rare retained row, and buys the exact verdict the mirror now needs.
+        # (The `retained` set is graph-dirty by construction; it is not
+        # re-filtered for terminal/outdated points the way `_hydrate_dirty_roots`
+        # filters — unreachable today because `_mark_dirty` never persists those
+        # two classes, and named here so a future change to that rule is not
+        # read as already handled.)
+        rows = self._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids AND n.ep_dirty = true "
+            "WITH n, ($run_ep IS NULL OR n.ep_dirty_at <= $run_ep) AS swept_now "
+            "SET n.ep_dirty = CASE WHEN swept_now THEN null ELSE n.ep_dirty END, "
+            "    n.ep_dirty_at = CASE WHEN swept_now THEN null ELSE n.ep_dirty_at END "
+            "RETURN n.id AS id, swept_now AS swept_now",
+            params={"ids": ids, "run_ep": run_ep},
+        ).result_set
+        retained = {r[0] for r in rows if r[1] is not True}
+        self._dirty_roots -= swept
+        self._dirty_roots |= retained
+        # Retry state is per-MIRROR-ROOT: a root that left the mirror cannot be
+        # retried through it, so its attempts/backoff entries are dead. That is
+        # `swept - retained` — the converged roots AND the phantoms (cleared by
+        # a peer, or deleted), which the landed code also reset, because it
+        # passed the whole `swept` set. Roots the graph KEPT keep their state.
+        self._reset_retry_state(swept - retained)
 
     def _unsweepable_dirty_roots(self, affected: set[str]) -> set[str]:
         """Dirty roots that NO pass can ever clear: the NEUTRAL-LINK ones — a
