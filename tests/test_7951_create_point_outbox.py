@@ -39,7 +39,7 @@ from pathlib import Path
 
 import pytest
 
-from tortoise.projection import _live_write_scope
+from tortoise.projection import _test_fixture_write_scope
 from tortoise.sdk import _journal_snapshot_from_create_map
 
 
@@ -274,10 +274,13 @@ def test_the_journaled_payload_matches_the_live_node_and_replays(env, monkeypatc
     # non-existent ref yields `{}` and let a transit loss pass the suite green).
     source_url = "https://example.test/7951"
     # #9206: §17.1's write handle is ARMED in this suite (the fixture binds a
-    # journal), so the FIXTURE write needs a lane. This is the test-fixture
+    # journal), so the FIXTURE write needs a lane. This is the TEST-FIXTURE
     # declaration, not a product claim: the statement seeds a Source's hash so
-    # the transit map is non-empty, and it appends no record.
-    with _live_write_scope("test-fixture:create_point_source_hash"):
+    # the transit map is non-empty, and it appends no record. ⚠️ It used to be
+    # spelled `_live_write_scope`, whose claim is the OPPOSITE ("the record is
+    # appended FIRST") — a test-only write taking a product lane's name is the
+    # copyable template #9206 review P2 names, so the lane now says what it is.
+    with _test_fixture_write_scope("create_point_source_hash"):
         proj.g.query(
             "MERGE (s:Source {url:$u}) SET s.contentHash=$h",
             params={"u": source_url, "h": "hash-7951"},

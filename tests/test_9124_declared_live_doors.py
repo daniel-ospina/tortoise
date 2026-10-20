@@ -192,14 +192,25 @@ _DECLARATION_DECORATORS = (*_LIVE_LANE_NAMES, *_APPLY_FIRST_LANE_NAMES)
 #: Fixing one means moving the record above the write AND deciding its failure
 #: contract (does a failed append abort the write?), which is #9124 part 2.
 #:
-#: ⚠️ #9206 DECLARED seven of these doors on the apply-first lane
+#: ⚠️ #9206 DECLARED ten doors on the apply-first lane
 #: (`_declares_apply_first_write_lane`) rather than leaving their writes
 #: undeclared, so `create_direct_edge`, `create_operator`, `delete_point`,
 #: `_delete_entity`, `_materialize_session_source`, `_update_entity`,
-#: `_write_capture_turns` and `update_point` have LEFT these inventories. A
-#: declaration does not convert the order: the entries that remain are still
-#: apply-first, and the lane's own pin requires each declared door to append its
-#: record and to be genuinely apply-first.
+#: `_write_capture_turns` and `update_point` have LEFT these inventories —
+#: THREE from this one (`_APPLY_FIRST_DOORS`: `create_direct_edge`,
+#: `create_operator`, `delete_point`), FOUR from `_APPLY_FIRST_HELPERS`
+#: (`_delete_entity`, `_materialize_session_source`, `_update_entity`,
+#: `_write_capture_turns`) and ONE from `_MIXED_ARM_DOORS` (`update_point`) —
+#: eight names, and the three-source split matters: a reader who follows only
+#: this set's pointer will not find the other five. The remaining TWO
+#: (`_stamp_capture_attempt_state`, `_stamp_entity_link_counters`) were never
+#: inventory entries at all: they were inline statements inside
+#: `capture_session`, which is still inventoried for its four provenance stamps
+#: (`#9350`) — a function holding BOTH scoped and unscoped writes is refused by
+#: this census ("presence is not containment"), so the stamps became doors of
+#: their own. A declaration does not convert the order: the entries that remain
+#: are still apply-first, and the lane's own pin requires each declared door to
+#: append its record and to be genuinely apply-first.
 _APPLY_FIRST_DOORS = {
     "approve_merge",         # SET reviewed flags, then PointRevised/… records
     "assess_source",         # SET reliability, then the assessment record
@@ -1458,6 +1469,58 @@ def test_a_whole_door_lane_authorizes_only_the_pinned_nested_writes():
         "cannot see the edge — review the write, then pin it here:\n  "
         + "\n  ".join(f"{door}: added={v['added']} gone={v['gone']}"
                       for door, v in sorted(delta.items())))
+
+
+def test_the_fixture_lane_is_used_only_by_tests():
+    """`_test_fixture_write_scope` is a FIXTURE lane and may not reach product code.
+
+    The three sites it was introduced for (`#9206` review P2) are test setup that
+    seeds state outside every product lane — a `:Source` hash, the
+    `:Point:Object` label pair, a pre-canonical `:Source` — and each appends NO
+    record. They used to be spelled `_live_write_scope`, whose whole claim is the
+    OPPOSITE ("the record is appended FIRST"): a fixture taking a product lane's
+    name is the copyable template the next product writer finds first, and the
+    per-function census cannot see it (`enumerate_handle_surface` runs over
+    `tortoise/` and `tools/`).
+
+    So the lane's honest scope is pinned in the ONE direction that matters: only
+    `tests/` may open it. A `tortoise/` or `tools/` caller would be a product
+    write claiming a fixture's name — the #9068 shape with a new spelling — and
+    it reds here.
+    """
+    offenders: dict[str, int] = {}
+    for sub in ("tortoise", "tools"):
+        for path in sorted((ROOT / sub).rglob("*.py")):
+            rel = str(path.relative_to(ROOT))
+            if rel == "tortoise/projection/__init__.py":
+                # The definition itself (the scope, its reason literal and its
+                # docstring) lives here; every OTHER module is a caller.
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            n = (text.count("_test_fixture_write_scope(")
+                 + text.count("_TEST_FIXTURE_LANE"))
+            if n:
+                offenders[rel] = n
+    assert not offenders, (
+        "the TEST-FIXTURE lane is opened outside `tests/` — it states only \"this "
+        "write exists to set up a test\" and is not a claim a product path may "
+        f"make; declare an honest product lane instead: {offenders!r}")
+
+    # …and the fixture lane really is what those sites use (a pin that could not
+    # fail if a call site silently went back to a product lane's name). Matched
+    # on the CALL form (`with …(`), and this file is excluded because it names
+    # the helper in the assertions below.
+    users = sorted(
+        p.name for p in (ROOT / "tests").rglob("*.py")
+        if p.name != Path(__file__).name
+        and "with _test_fixture_write_scope(" in
+        p.read_text(encoding="utf-8", errors="replace"))
+    assert users == [
+        "test_7951_create_point_outbox.py",
+        "test_7951_update_point_outbox.py",
+        "test_9206_apply_first_lane.py",
+        "test_9206_derived_recompute_lane.py",
+    ], f"the fixture-lane callers changed: {users!r}"
 
 
 def test_the_event_store_declares_every_writer():

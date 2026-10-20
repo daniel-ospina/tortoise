@@ -46,6 +46,7 @@ from tortoise.projection import (
     DirectCacheWriteRefused,
     _GuardedGraph,
     _live_write_scope,
+    _test_fixture_write_scope,
 )
 from tortoise.source_identity import normalize_source_url, resolve_source_key
 
@@ -119,12 +120,15 @@ def _seed_pre_canonical_source(sdk, url: str) -> None:
     """Mint a Source the way the pre-#5012 corpus stores one — `canonicalUrl`
     NULL — so the resolver's adopt-on-touch actually fires.
 
-    The write is a FIXTURE, declared with the live-door scope: it appends no
+    The write is a FIXTURE, declared on the TEST-FIXTURE lane: it appends no
     record and states nothing about the product. (`test_source_dedup_
     registration.py` issues the same statement bare, which is fine only while
-    the handle is measuring.)
+    the handle is measuring.) ⚠️ It used to be spelled `_live_write_scope`,
+    whose whole claim is "the record is appended FIRST" — the one lane this
+    suite exists to say is NOT the lane for an unjournalled write, so a fixture
+    taking that name was the copyable template #9206 review P2 rules out.
     """
-    with _live_write_scope("test-fixture:9206-pre-canonical-source"):
+    with _test_fixture_write_scope("9206-pre-canonical-source"):
         sdk._get_proj().g.query(
             "MERGE (s:Source {url:$url}) ON CREATE SET s.id=$url, "
             "s.sourceKind='document', s.version=1",

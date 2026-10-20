@@ -4189,6 +4189,49 @@ def _declares_apply_first_write_lane(reason: str):
     return _declare
 
 
+#: The reason prefix a TEST FIXTURE write carries. A literal for the same
+#: reason as the product lanes: a fixture's declaration is read back at the write
+#: handle, and it must be visibly NOT a product claim (see
+#: `_test_fixture_write_scope`).
+_TEST_FIXTURE_LANE = "test-fixture"
+
+
+@contextlib.contextmanager
+def _test_fixture_write_scope(reason: str):
+    """The TEST-FIXTURE lane: setup a suite seeds, claiming NOTHING about the product.
+
+    A suite that binds a journal arms §17.1's write handle for its whole run
+    (`#9124`), so a FIXTURE write — seeding a `:Source` hash so a transit map is
+    non-empty, minting the `:Point:Object` label pair no production writer
+    produces, planting a PRE-canonical Source so an adopt-on-touch fires — needs
+    a lane too. Before this, those three sites reached for `_live_write_scope`,
+    whose docstring says the opposite of what they do: **that lane's whole claim
+    is "the record is appended FIRST, then the cache"**, and each of these
+    statements appends nothing.
+
+    ⛔ Why that mattered even though all three are test-only: `#9206`'s own rule
+    is "never reach for the nearest existing lane" (giving
+    `resolve_source_key` the live lane would have claimed a record that does not
+    exist — `#9068`). A fixture spelled with a product lane's name is the
+    copyable template a future product writer finds first, and the census cannot
+    catch it (`enumerate_handle_surface` runs over `tortoise/*.py` and
+    `tools/*.py`). Naming it `test-fixture: <site>` states the truth at no cost.
+
+    ⛔ IT IS NOT A PRODUCT LANE AND MUST NOT BE USED BY ONE. Its scope is the
+    truth "this write exists only to set up a test"; nothing about it is a claim
+    that a product path may make. Pinned by the census
+    (`tests/test_9124_declared_live_doors.py::
+    test_the_fixture_lane_is_used_only_by_tests`), so a `tortoise/` or `tools/`
+    caller reds instead of quietly taking a fixture's name.
+
+    It SHADOWS rather than defers (unlike `_derived_recompute_write_scope`): the
+    reason is what a caller of a fixture wants to read at the handle, and a
+    fixture never wraps a product lane whose claim it would then have to keep.
+    """
+    with _cache_write_authorized(f"{_TEST_FIXTURE_LANE}: {reason}"):
+        yield
+
+
 def _graph_metadata_write_scope(reason: str = "graph-metadata"):
     """The GRAPH-METADATA lane: a write §17.1 does not route through a journal.
 

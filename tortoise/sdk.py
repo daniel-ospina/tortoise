@@ -2681,6 +2681,28 @@ def _write_session_and_turns(
     # `supersede_point`, #9124 part 2): `_emit_event` is best-effort, so a failed
     # append leaves the cache ahead of the journal — counted in
     # `_journal_write_failures`, not reported per call.
+    #
+    # ⛔ THE OTHER DIRECTION IS A STATED, ACCEPTED WINDOW, NOT "LAG" (#9206
+    # review P2, tracked as #9390). The record is appended BEFORE the MERGE, so a
+    # MERGE that ABORTS after its bounded retries (the `#7405` retry re-raises)
+    # leaves an ORPHAN record: a `SessionRecorded` for a `:Session` that was
+    # never written. It converges STRUCTURALLY (the fold MERGEs by `id`, so no
+    # duplicate node) but NOT in its VALUES, because every coalesce-preserved
+    # field here is FIRST-WRITER-WINS ON BOTH SIDES — this statement's
+    # `s.<f>=coalesce(s.<f>, $v)` and `_fold_session_recorded`'s matching arm —
+    # so on a journal-only rebuild the orphan's `capture_lane` / `machine_id` /
+    # `model` / `source` / `client_captured_at` / `actor_user_id` WIN over the
+    # values of the attempt that actually landed: lag converges on replay, this
+    # does not, replay keeps the value the live graph REJECTED. Concretely
+    # (#3516 piece 7): a failed hook capture followed by a landed `store_sync`
+    # backstop restores as `capture_lane="hook"` — which is what the `#3516 §B`
+    # hook-liveness check reads. Bounded to an ABORTED MERGE (an append that
+    # fails instead only loses durability, never attribution), and #9390 owns the
+    # decision: either the fold learns to tell a LANDED record from an orphan
+    # (an attempt/instant it can order on) or the two become one commit point.
+    # Pinned, so this cannot change silently, by
+    # `tests/test_9206_apply_first_lane.py::
+    # test_an_orphan_record_wins_the_replay_fold_attribution_measured`.
     sdk._emit_event("SessionRecorded", **session_record)
     # #7405 (audit G8): the `:Session` MERGE rides the bounded write retry.
     # Before this a rebuild's per-query abort raised out of this writer BEFORE

@@ -39,6 +39,8 @@ from tortoise.projection import (
     DirectCacheWriteRefused,
     _apply_first_write_scope,
     _declares_apply_first_write_lane,
+    _replay_write_scope,
+    _test_fixture_write_scope,
 )
 
 
@@ -397,13 +399,20 @@ def test_the_fold_restores_the_attribution_props(armed_sdk):
 
     The source pin above proves the record CARRIES them; this proves the fold
     APPLIES them, set-if-absent exactly as the live `coalesce` does.
+
+    ⚠️ The folds are driven inside `_replay_write_scope()`, the lane a rebuild
+    opens around a journal record's fold. Without it this test is the ONE thing
+    an ARMED battery reds on (`_fold_session_recorded` issues a raw `MERGE` at
+    the handle — measured with `_HANDLE_GUARD_ENFORCES = True`), and a test that
+    calls a fold must declare the lane the product calls it in.
     """
     proj = armed_sdk._get_proj()
     sid = "sess_9206_attribution"
-    proj._fold_session_recorded({
-        "type": "SessionRecorded", "id": sid, "turn_count": 2,
-        "is_episodic": True, "harness": "pi",
-        "machine_id": "machine-A", "model": "mdl-2026"})
+    with _replay_write_scope():
+        proj._fold_session_recorded({
+            "type": "SessionRecorded", "id": sid, "turn_count": 2,
+            "is_episodic": True, "harness": "pi",
+            "machine_id": "machine-A", "model": "mdl-2026"})
     rows = proj.g.query(
         "MATCH (s:Session {id:$sid}) RETURN s.machine_id, s.model",
         params={"sid": sid}).result_set
@@ -412,12 +421,220 @@ def test_the_fold_restores_the_attribution_props(armed_sdk):
 
     # Set-if-absent, exactly like the live `coalesce`: a later producer cannot
     # relabel the machine that captured the session.
-    proj._fold_session_recorded({
-        "type": "SessionRecorded", "id": sid, "machine_id": "machine-B",
-        "model": "mdl-OTHER"})
+    with _replay_write_scope():
+        proj._fold_session_recorded({
+            "type": "SessionRecorded", "id": sid, "machine_id": "machine-B",
+            "model": "mdl-OTHER"})
     rows = proj.g.query(
         "MATCH (s:Session {id:$sid}) RETURN s.machine_id, s.model",
         params={"sid": sid}).result_set
     assert rows and rows[0][0] == "machine-A" and rows[0][1] == "mdl-2026", (
         "the fold is not first-writer-wins — a later record relabelled the "
         f"capture's machine/model, which the live coalesce would not: {rows!r}")
+
+
+# ── the declared doors the runtime battery did NOT drive (#9206 review) ─────
+#
+# The suite above drives 7 of the declared doors. Four had NO armed exercise,
+# and two of them can fail SILENTLY because their only caller swallows the
+# refusal: `_materialize_session_source` is reached through `capture_session`,
+# which wraps it in `except Exception -> warning`, so a guard refusal there left
+# every assertion green. These drive the helper directly, where the refusal is
+# un-swallowable, and give the two EP doors the runtime half their declarations
+# were missing. `hosted_api._delete_session_sync` stays census-only on purpose:
+# no journal-bound fixture exists for it (a hosted suite runs with no
+# `event_log_path`, so §17.1 is inert there) — its declaration says so where it
+# lives, and `_APPLY_FIRST_DECLARED_DOORS_BY_MODULE` pins the membership.
+
+
+def test_materialize_session_source_writes_and_records_under_the_armed_guard(
+        armed_sdk, enforced):
+    """`_materialize_session_source`, driven DIRECTLY (armed handle).
+
+    This is the door whose ORDER #9206 changed (its record now precedes
+    `link_source_to_event`) and the one the runtime battery could not fail on.
+    """
+    sdk = armed_sdk
+    sid = "sess_9206_source"
+    before = _records_since(sdk).count("SourceCreated")
+    sdk._materialize_session_source(
+        sid, "evt_9206_source", "2026-10-20T00:00:00+00:00",
+        [{"role": "user", "content": "materialize the session source"},
+         {"role": "assistant", "content": "summary and topics are derived"}])
+
+    rows = sdk._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) "
+        "RETURN s.sessionId, s.capturedAt, s.contentHash",
+        params={"u": f"session:{sid}"}).result_set
+    assert rows and rows[0][0] == sid, (
+        "the typed session Source did not land — the door is declared and must "
+        f"complete under an armed handle; rows={rows!r}")
+    assert rows[0][2], f"the transcript hash did not land: rows={rows!r}"
+    assert _records_since(sdk).count("SourceCreated") == before + 1, (
+        "the Source landed with no record of it — the lane would then be "
+        "blessing an unjournalled cache write (#9068)")
+
+
+def test_the_ep_invalidation_doors_clear_and_record_under_the_armed_guard(
+        armed_sdk, enforced):
+    """`ep.invalidate_messages` and `ep.invalidate_factor_messages` (armed).
+
+    Neither was driven under an armed handle anywhere in the battery, so both
+    declarations had a static census pin and NO runtime exercise (#9206
+    review). Each is asserted twice: the `REMOVE` LANDED (the message slots are
+    gone) and its `EdgeMessageChanged` op=clear record followed — the record is
+    stated over the statement's own committed set, which is why the lane is
+    apply-first rather than journal-first.
+    """
+    from tortoise.ep import TortoiseEP
+
+    sdk = armed_sdk
+    src = sdk.create_point("statement", "ep door source")["id"]
+    tgt = sdk.create_point("statement", "ep door target")["id"]
+    sdk.create_operator("IMPL", src, [tgt], label="ep-door")
+    proj = sdk._get_proj()
+
+    def seed_messages() -> None:
+        # FIXTURE: stale EP seeds on every IMPL|NAND edge, the state a
+        # warm-start reads. Declared as a fixture, never as a product lane.
+        with _test_fixture_write_scope("9206-ep-message-seed"):
+            proj.g.query(
+                "MATCH ()-[r:IMPL|NAND]->() SET r.msg_alpha=0.5, "
+                "r.msg_beta=0.5, r.back_msg_alpha=0.5, r.back_msg_beta=0.5")
+
+    def seeded_edges() -> int:
+        rows = proj.g.query(
+            "MATCH ()-[r:IMPL|NAND]->() RETURN count(r.msg_alpha)").result_set
+        return int(rows[0][0]) if rows else 0
+
+    ep = TortoiseEP(proj, emit=sdk._emit_event)
+
+    seed_messages()
+    assert seeded_edges() >= 1, "fixture precondition: no seeding happened"
+    before = _records_since(sdk).count("EdgeMessageChanged")
+    cleared = ep.invalidate_messages()
+    assert cleared >= 1, "the full drop must match the seeded edges"
+    assert seeded_edges() == 0, (
+        "the REMOVE did not land under the armed handle — the declaration is "
+        "what lets the drop reach the handle at all")
+    assert _records_since(sdk).count("EdgeMessageChanged") == before + 1, (
+        "the drop landed with no record — a rebuild would resurrect the seeds "
+        "the live graph just cleared (#330/#5380)")
+
+    seed_messages()
+    before = _records_since(sdk).count("EdgeMessageChanged")
+    cleared = ep.invalidate_factor_messages([src])
+    assert cleared >= 1, (
+        "the operator-neighbourhood drop must match the seeded edges")
+    assert seeded_edges() == 0
+    assert _records_since(sdk).count("EdgeMessageChanged") == before + 1, (
+        "the neighbourhood drop landed with no record (#2422's ghost votes "
+        "would come back on replay)")
+
+
+# ── the DISCLOSED window: an orphan record wins the replay attribution ───────
+#
+# `_write_session_and_turns` appends its `SessionRecorded` BEFORE its `:Session`
+# MERGE — that is what makes the MERGE journal-first — and the append is
+# best-effort while the MERGE raises after its bounded retries. So an ABORTED
+# MERGE leaves an orphan record, and every coalesce-preserved field is
+# first-writer-wins on BOTH sides. This is NOT the "a record the cache lacks is
+# projection lag" residual (lag converges on replay); it is its own, smaller
+# window, disclosed at the emit site and in §17.1's ledger, and owned by #9390.
+
+
+def test_an_orphan_record_wins_the_replay_fold_attribution_measured(
+        armed_sdk, enforced, monkeypatch):
+    """MEASURE the window #9390 owns, so it cannot change silently.
+
+    Sequence, all through the real writer:
+
+    1. attempt 1 appends `SessionRecorded{capture_lane="hook",
+       machine_id="machine-A"}` and then its `:Session` MERGE ABORTS → no node;
+    2. attempt 2 (the `#3516` piece-7 store-sync backstop, a DIFFERENT lane)
+       appends and its MERGE lands → live holds `store_sync` / `machine-B`;
+    3. the fold, applied in journal order as a journal-only rebuild does, keeps
+       attempt 1's values — replay attributes the session to a hook capture that
+       never wrote a row.
+
+    This asserts the CURRENT, DISCLOSED behaviour rather than the desired one:
+    before #9206 the record was emitted from the post-MERGE callback, so attempt
+    1 left no record and the fold saw only `store_sync` — which is what makes it
+    non-vacuous. If #9390 lands a fix (an attempt/instant the fold can order a
+    LANDED record by), the last assertion flips — a reviewed change to a
+    measured window, which is the point of pinning it.
+    """
+    from tortoise import sdk as sdk_mod
+    from tortoise.sdk import TortoiseSDK
+
+    sdk = armed_sdk
+    proj = sdk._get_proj()
+    sid = "sess_9206_orphan"
+    now = "2026-10-20T00:00:00+00:00"
+    turns = [{"role": "user", "content": "the hook tried first"}]
+
+    real = sdk._graph_write_with_retry
+    fail = {"next": True}
+
+    def abort_the_merge(fn, what=None, **kwargs):
+        if what == "capture :Session MERGE" and fail["next"]:
+            fail["next"] = False
+            raise RuntimeError("engine aborted the :Session MERGE")
+        return real(fn, what=what, **kwargs)
+
+    monkeypatch.setattr(sdk, "_graph_write_with_retry", abort_the_merge)
+
+    with pytest.raises(RuntimeError):
+        sdk_mod._write_session_and_turns(
+            proj, sdk, sid, turns, now=now,
+            capture_lane="hook", machine_id="machine-A")
+
+    # The orphan half: a record exists, the node does not.
+    orphans = [r for r in _journal_lines(Path(sdk._journal_path_for_test))
+               if r.get("type") == "SessionRecorded" and r.get("id") == sid]
+    assert len(orphans) == 1 and orphans[0]["capture_lane"] == "hook", (
+        "the aborted attempt left no orphan record — the writer is not "
+        f"journal-first, so this window does not exist: {orphans!r}")
+    before = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN count(s)",
+        params={"sid": sid}).result_set
+    assert before and int(before[0][0]) == 0, (
+        f"the aborted MERGE created a node anyway: {before!r}")
+
+    # Attempt 2: the store-sync backstop, a different lane on the same session.
+    sdk_mod._write_session_and_turns(
+        proj, sdk, sid, turns, now="2026-10-20T00:05:00+00:00",
+        capture_lane="store_sync", machine_id="machine-B")
+
+    live = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.capture_lane, s.machine_id",
+        params={"sid": sid}).result_set
+    assert live and live[0][0] == "store_sync" and live[0][1] == "machine-B", (
+        f"precondition: LIVE must hold the landed attempt's attribution: {live!r}")
+
+    # The replay leg: the fold a journal-only rebuild drives, applied in journal
+    # order into a fresh graph (no destructive wipe needed to measure the fold).
+    records = [r for r in _journal_lines(Path(sdk._journal_path_for_test))
+               if r.get("type") == "SessionRecorded" and r.get("id") == sid]
+    # THREE, not two: the turn store emits its own trailing `SessionRecorded`
+    # (the redaction count, #4911) after the shared writer's.
+    assert len(records) >= 2 and records[0].get("capture_lane") == "hook" \
+        and records[1].get("capture_lane") == "store_sync", (
+        f"expected the orphan THEN the landed attempt's record: {records!r}")
+
+    replay = TortoiseSDK(str(Path(sdk._journal_path_for_test).parent / "replay.db"))
+    try:
+        replay_proj = replay._get_proj()
+        for record in records:
+            replay_proj._fold_session_recorded(record)
+        folded = replay_proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN s.capture_lane, s.machine_id",
+            params={"sid": sid}).result_set
+    finally:
+        replay.close()
+
+    assert folded and folded[0][0] == "hook" and folded[0][1] == "machine-A", (
+        "the DISCLOSED window (#9390) changed shape: a journal-only rebuild no "
+        "longer restores the orphan's attribution. If that is a fix, say so "
+        "where it landed (the emit-site comment and §17.1's ledger name it) — "
+        f"live={live!r} replay={folded!r}")
