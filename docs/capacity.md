@@ -275,9 +275,14 @@ single-node probes at 4 + 1 + 4: the cache's per-label node-params load (the
 lookup is the one term that moves: it probes labels in `EPISTEMIC_LABELS` order
 and breaks only when every seed has RESOLVED (`ep.py:1203-1219`), so it emits
 one statement per label up to the last epistemic label a seed uses — all four
-when a seed resolves under none. Every one of them is index-anchored. The
-operator selector's operator→target leg is NOT one of these: it carries the
-barrier, so it is counted above with the load-bearing `analyze.py` legs. One
+when a seed resolves under none. Every one of them is index-anchored. Three id-set
+statements in `analyze.py` are NOT counted here either, because this census is
+`ep.py`'s: the operator selector's operator→target leg (emitted by
+`_bfs_select_operators`, never by `TortoiseEP.run()`), its per-label draft filter
+and its forward direct-edge sweep. All three carry no barrier and all three are
+measured `Node By Index Scan` — the operator→target leg on the operator's own
+label, `analyze.py:666-671` — while the selector's four BARRIERED legs are the
+viability, incoming, backward and expansion queries, counted above. One
 further id-set statement sits OUTSIDE this census and outside the pinned set: a
 run whose journal is wired (`_emit`, i.e. an event log) and which carries
 evidence priors also re-reads them for the pre-write's journal record, and that
