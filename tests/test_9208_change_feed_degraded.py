@@ -32,37 +32,56 @@ back into a silently short page.
 """
 from __future__ import annotations
 
+import functools
+import os
+import threading
+import time
+from pathlib import Path
+
 import pytest
 
 from tortoise import event_store
 from tortoise.event_store import ChangeFeedDegraded
 
-
-@pytest.fixture(autouse=True)
-def _no_carried_degradation():
-    """The degraded state lives in PROCESS MEMORY, so it must not leak.
-
-    Not cleanup-on-success (that would hide a real leak): the pre-test clear is
-    what makes each case start from "healthy", and the post-test clear is what
-    keeps an intentionally-degraded case from poisoning the rest of the session
-    — several other suites drive DELIBERATE store refusals (the #5379 allocator
-    ceiling), and a process-wide latch would refuse their polls.
-    """
-    event_store.clear_degraded()
-    try:
-        yield
-    finally:
-        event_store.clear_degraded()
+# ⛔ NO module-level `_no_carried_degradation` fixture here any more (#9208
+# review). The suite-wide `tests/conftest.py::_change_feed_state_isolation`
+# already clears `event_store._DEGRADED` before and after every test, and it also
+# NAMES the test that left a latch behind. A second, module-level
+# (function-scoped) autouse fixture is finalised BEFORE a conftest-level one —
+# pytest finalises in the reverse of setup order, and the conftest fixture is set
+# up first — so its silent `clear_degraded()` ran FIRST and the conftest sample
+# then always saw an empty map: the attribution half was dead in the one file
+# whose tests degrade feeds on purpose, i.e. exactly where a future leak is most
+# likely. The consequence of dropping it: a test below that latches a state and
+# forgets to clear it now REDS ITSELF (naming its own nodeid) instead of being
+# silently tidied. Every such test therefore clears in a `finally` — that is the
+# file's contract, not a courtesy. The pin below
+# (`test_this_module_must_not_pre_empt_the_attribution_sample`) reds if a
+# module-level clearing fixture is ever re-added, which would kill the
+# attribution again silently.
 
 
 @pytest.fixture
 def armed_sdk(tmp_path):
-    """A real SDK with a configured JSONL journal — the §17.1 guard is ARMED.
+    """A real SDK with a configured JSONL journal — `_journal_backed` is True.
+
+    ⚠️ WHAT THIS DOES **NOT** DO (#9208 review, P3): it does not put the §17.1
+    third door on the path these tests drive. `DirectCacheWriteRefused` is
+    raised by `FalkorProjection.apply`/`.query` (the fold and the raw-query
+    lane); `event_store` writes through `proj.g`, i.e. `_GuardedGraph.query`,
+    whose refusals are the `=~` operator, the numeric-domain guards and the
+    bulk-wipe L2 — none of which is that door. On `main` the door does not
+    reach `proj.g` at all, so the refusal is SIMULATED here (`_refuse_the_store_leg`)
+    at the statement it would refuse, and the "feed survives an armed door"
+    claim belongs to #9124 part 1 / #9079.
+    `test_the_9124_door_does_not_reach_the_write_handle_yet` is the pin that
+    reds when that changes, so the simulation is re-evaluated rather than
+    remembered.
 
     Same construction as the `#9123`/`#7951` fixtures: `event_log_path` is what
-    arms the guard, and the explicit `db_path` makes the projection embedded
-    when no URI is configured (a URI-set session is redirected to its server, so
-    the file is lane-agnostic rather than embedded-only).
+    arms the journal fold, and the explicit `db_path` makes the projection
+    embedded when no URI is configured (a URI-set session is redirected to its
+    server, so the file is lane-agnostic rather than embedded-only).
     """
     from tortoise.sdk import TortoiseSDK
 
@@ -72,6 +91,28 @@ def armed_sdk(tmp_path):
         yield sdk
     finally:
         sdk.close()
+
+
+def _acknowledges_the_loss_it_latches(func):
+    """Clear the process-global latch this test leaves ON PURPOSE — in a `finally`.
+
+    `tests/conftest.py::_change_feed_state_isolation` FAILS a test that leaves a
+    degraded feed behind, naming the polluter and then clearing it. That
+    attribution is only worth having if the tests which degrade a feed
+    DELIBERATELY acknowledge the loss themselves, so every such test opts in
+    here: the clear happens on the raising path too. A test that latches without
+    this decorator (and without its own clear) now reds ITSELF — which is the
+    contract, not a regression.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        finally:
+            event_store.clear_degraded()
+
+    return wrapper
 
 
 def _graph_events(sdk) -> int:
@@ -107,6 +148,7 @@ def _refuse_the_store_leg(monkeypatch):
     monkeypatch.setattr(event_store, "next_seq", refuse)
 
 
+@_acknowledges_the_loss_it_latches
 def test_a_refused_store_write_is_a_visible_loss_not_an_empty_poll(
         armed_sdk, monkeypatch):
     """THE regression: the feed dies, the write succeeds, the poll lies.
@@ -145,6 +187,7 @@ def test_a_refused_store_write_is_a_visible_loss_not_an_empty_poll(
         f"stuck with no remedy; observed={message!r}")
 
 
+@_acknowledges_the_loss_it_latches
 def test_the_row_write_swallow_is_not_silent_either(armed_sdk, monkeypatch):
     """The SECOND swallow: `append_event` catching its own write failure.
 
@@ -230,12 +273,14 @@ def test_a_duplicate_append_is_not_reported_as_a_loss(armed_sdk, monkeypatch):
 
 
 def test_a_healthy_feed_answers_and_leaves_a_row(armed_sdk):
-    """The indicator the issue asks for, on an ARMED (journal-backed) SDK.
+    """A journal-backed SDK's feed WORKS: one `:GraphEvent` row, one poll.
 
-    Nothing here is a simulation: `create_point` on a journal-backed SDK must
-    leave a `:GraphEvent` row and `poll_events` must return it. This is the
-    case that fails when a declaration is missing under an armed door, and it
-    is also the guard against the degraded state firing on a healthy feed.
+    ⚠️ NOT the issue's Indicator (`with §17.1's third door armed, create_point
+    leaves a :GraphEvent row`): that door is not wired to `proj.g` on this
+    branch, so no armed-door case is expressible here — see `armed_sdk` and
+    `test_the_9124_door_does_not_reach_the_write_handle_yet`. What this pins is
+    the healthy direction plus the false-positive guard: a journal-backed SDK
+    must leave a row and must NOT be reported as degraded.
     """
     sdk = armed_sdk
 
@@ -331,6 +376,7 @@ def test_a_later_success_does_not_un_degrade_the_feed(armed_sdk, monkeypatch):
         "lost event is gone, which is what acknowledging it means")
 
 
+@_acknowledges_the_loss_it_latches
 def test_an_unverifiable_append_is_reported_as_unverified_not_as_a_loss(
         armed_sdk, monkeypatch):
     """The third outcome: the write failed AND the read-back failed.
@@ -369,9 +415,65 @@ def test_an_unverifiable_append_is_reported_as_unverified_not_as_a_loss(
     assert state["stage"] == "append-unverified", (
         "an unreadable store proves neither a loss nor a landing, so the stage "
         f"must say so; observed={state['stage']!r}")
+    assert state["first_stage"] == "append-unverified", (
+        "the FIRST diagnosis must be kept, not overwritten by a later one: it "
+        "is often the only provable one (#9208 review); "
+        f"observed={state['first_stage']!r}")
     with pytest.raises(ChangeFeedDegraded) as excinfo:
         sdk.poll_events()
     assert "append-unverified" in str(excinfo.value)
+
+    # A SECOND, different failure on the same graph: the latest diagnosis moves
+    # and the first is still readable beside it.
+    event_store.record_degraded(sdk._get_proj(), "append", "PointAdded", None,
+                                RuntimeError("row really is gone"))
+    state = event_store.degraded(sdk._get_proj())
+    assert (state["stage"], state["first_stage"]) == ("append", "append-unverified"), (
+        "the later stage must not discard the first failure's diagnosis; "
+        f"observed stage={state['stage']!r} "
+        f"first_stage={state['first_stage']!r}")
+    assert state["lost"] == 2, "both failures are losses, so both are counted"
+
+    # AND THE CONSUMER SEES BOTH (#9208 review): keeping `first_stage` in the
+    # state is only worth anything if the one surface a caller can act on
+    # reports it. Reporting the latest alone would discard the diagnosis this
+    # field was added to preserve.
+    with pytest.raises(ChangeFeedDegraded) as excinfo:
+        sdk.poll_events()
+    detail = str(excinfo.value)
+    assert "The FIRST failure on this graph was at stage 'append-unverified'" in detail, (
+        "the 503 detail must carry the first diagnosis beside the latest; "
+        f"got: {detail[:400]}")
+    assert "stage 'append'" in detail, (
+        "the LATEST diagnosis must still be named, and named as the latest")
+    # ⚠️ AND THE POINTER MUST POINT SOMEWHERE (#9208 review, P3): the FIRST clause
+    # is APPENDED, so the latest stage is named ABOVE it. "the stage named below"
+    # sent the reader past the end of the string, and a presence-only assertion
+    # could not see it — the early clause satisfies `"stage 'append'" in detail`
+    # on its own. So assert the ORDER and the direction word.
+    assert detail.index("stage 'append'") < detail.index("The FIRST failure"), (
+        "the latest stage must be named BEFORE the appended first-failure "
+        f"clause, or no directional pointer can be true; got: {detail[-300:]}")
+    assert "the stage named above is the LATEST" in detail, (
+        "the appended clause must point ABOVE (where the latest stage is named), "
+        f"not 'below' — nothing follows it; got: {detail[-300:]}")
+    assert "below" not in detail.rsplit("The FIRST failure", 1)[1], (
+        "no part of the appended clause may tell the reader to look below "
+        f"itself; got: {detail[-300:]}")
+    # ⛔ AND THE APPENDED CLAUSE MUST QUOTE THE *FIRST* ERROR (#9208 review, P3).
+    # Asserting `"row really is gone" in detail` proved nothing: that is the
+    # LATEST error, rendered in the MAIN clause from `state['error']`, so it is
+    # present whatever the appended clause says — swapping
+    # `state.get('first_error')` for `state.get('error')` in `sdk.poll_events`
+    # left every assertion above green. So read the appended segment itself and
+    # require it to carry the first error and NOT the latest one.
+    appended = detail.rsplit("The FIRST failure", 1)[1]
+    assert "Connection closed by server" in appended, (
+        "the appended clause must quote the FIRST error (the unverifiable one), "
+        f"not just name its stage; got: {appended[:300]}")
+    assert "row really is gone" not in appended, (
+        "the appended clause must quote the FIRST error, not the latest one — "
+        f"the latest already appears in the main clause; got: {appended[:300]}")
 
 
 def test_the_emit_hook_never_raises_even_when_the_recorder_fails(
@@ -434,6 +536,186 @@ def test_the_store_identity_includes_the_server_PORT():
         stub(path="/b.db"))
 
 
+def test_the_9124_door_does_not_reach_the_write_handle_yet(armed_sdk):
+    """VISIBILITY pin for the #9124 dependency, not a proof of this fix.
+
+    Every refusal in this file is SIMULATED at the statement the §17.1 third
+    door would refuse, because on this branch the door does not sit on
+    `proj.g` (see `armed_sdk`). That is a fact about the code, and a fact
+    recorded only in a docstring goes stale silently — so it is asserted here:
+    a mutating statement through the write handle is ACCEPTED today.
+
+    When #9124 part 1 lands the door on this handle, this test goes RED on
+    purpose. That is the moment to (a) re-read `_refuse_the_store_leg` — the
+    measured case then comes from the real door instead of a patch — and (b)
+    turn the armed-door Indicator into a real test
+    (`test_a_healthy_feed_answers_and_leaves_a_row`'s original claim).
+    """
+    from tortoise.projection import DirectCacheWriteRefused
+
+    proj = armed_sdk._get_proj()
+    try:
+        rows = proj.g.query(
+            "CREATE (n:_DoorProbe {id:'probe'}) RETURN n.id").result_set
+    except DirectCacheWriteRefused as exc:  # pragma: no cover — future state
+        pytest.fail(
+            "the §17.1 third door now refuses writes at `proj.g` "
+            f"({exc}). The refusal these tests simulate is now a REAL refusal: "
+            "re-derive `_refuse_the_store_leg` from the live door, restore the "
+            "armed-door Indicator in "
+            "`test_a_healthy_feed_answers_and_leaves_a_row`, and remove this pin "
+            "(#9124 part 1 landed).")
+    assert rows, "the probe write must reach the store while the door is absent"
+
+
+def test_the_degraded_state_is_atomic_across_threads():
+    """The hosted path records from WORKER THREADS while `/health` reads.
+
+    `record_degraded` runs inside `hosted_api._graph_offload` — the dedicated
+    #3498 `graph` pool (`_cp_offload` -> `monitoring.run_control_plane_call`),
+    NOT `asyncio.to_thread`'s shared default pool (#3060) — and
+    `degraded_graphs()` runs on the event loop from the `async def` health
+    route (`_health_payload` -> `_change_feed_health`) — two thread populations,
+    over one module dict. What the lock guarantees, and what is asserted here:
+    `lost` is an exact
+    read-modify-write (that count is quoted to the consumer verbatim, so an
+    undercount is a false number about data loss), and a report taken while
+    writers are live neither raises nor tears.
+
+    ⚠️ NON-VACUITY, STATED HONESTLY — this is a ROBUSTNESS pin, not a
+    red-before-green proof. On CPython the pre-lock shape did not observably
+    fail this harness: `list(dict.items())` is atomic under the GIL, and the
+    unlocked `previous["lost"] + 1` did not undercount in 10/10 trials at both
+    8x60 and 8x20,000 (the GIL's 5 ms switch interval is long relative to one
+    increment, so writers effectively serialise). The lock is taken because the
+    alternative is a CPython-implementation accident, not a contract — it must
+    hold for free-threaded builds, and it reds here if a future refactor puts an
+    await or a hand-off between the read and the write.
+    """
+    from types import SimpleNamespace
+
+    event_store.clear_degraded()
+    proj = SimpleNamespace(_path="/atomic.db", _host=None,
+                           graph_name="atomic", db=None)
+    threads_n, per_thread = 8, 60
+    new_keys = 40
+    start = threading.Barrier(threads_n + 2)  # workers + resizer + this thread
+    # ⚠️ A THIRD gate, because `assert seen` was a race (#9208 review): the
+    # reporter loop only starts after `start.wait()` returns, so on a fast lane
+    # (Linux, where these increments cost ~1 ms not ~190 ms) the writers can
+    # finish their whole workload before the main thread is scheduled again —
+    # and a CORRECT implementation would then fail on `seen == []`. Writers
+    # hold here until the reporter has taken its first sample, so the first
+    # sample is deterministic AND the rest run concurrently with real writes.
+    sampled = threading.Event()
+
+    def record() -> None:
+        start.wait()
+        sampled.wait()
+        for _ in range(per_thread):
+            event_store.record_degraded(proj, "append", "PointAdded", None,
+                                        RuntimeError("lost"))
+
+    def mint_keys() -> None:
+        """New (store, graph) keys — a RESIZE while the reporter iterates."""
+        start.wait()
+        sampled.wait()
+        for i in range(new_keys):
+            event_store.record_degraded(
+                SimpleNamespace(_path=f"/resize-{i}.db", _host=None,
+                                graph_name="r", db=None),
+                "emit", "PointAdded", None, RuntimeError("lost"))
+
+    workers = [threading.Thread(target=record) for _ in range(threads_n)]
+
+    for t in workers:
+        t.start()
+    resizer = threading.Thread(target=mint_keys)
+    resizer.start()
+    start.wait()  # release every thread at once
+    # ⚠️ `sampled.set()` is in a `finally`: if this first sample RAISED, eight
+    # non-daemon workers would block on `sampled.wait()` forever and turn a
+    # report bug into a hung shard (#9208 review, P3).
+    try:
+        seen = [len(event_store.degraded_graphs())]  # the gate's first sample
+    finally:
+        sampled.set()
+    while any(t.is_alive() for t in (*workers, resizer)):
+        try:
+            seen.append(len(event_store.degraded_graphs()))
+        except RuntimeError as exc:  # pragma: no cover — the pre-lock failure
+            pytest.fail(
+                "reporting the degraded state must not raise on a concurrent "
+                f"insert — /health swallows that and reports `degraded: false`: {exc}")
+        time.sleep(0.001)
+    for t in (*workers, resizer):
+        t.join()
+
+    # WHAT THE GATE ACTUALLY GUARANTEES (and what is asserted): the first sample
+    # is taken while every writer is still held at `sampled.wait()`, so it must
+    # see an EMPTY map. The old `assert seen` was a one-element list and could
+    # never fail (#9208 review, P3); this one reds if the gate is ever moved
+    # after the writers are released.
+    assert seen[0] == 0, (
+        "the first sample must precede every write — the writers are held at "
+        f"`sampled.wait()` until it is taken; observed={seen[0]!r}")
+    # The NUMBER of samples is deliberately NOT asserted: it depends on how long
+    # the writers take to finish after the gate opens, which is a timing claim on
+    # a fast lane — the class of latent false red this test already had to remove
+    # (#9208 review). What the gate guarantees is the FIRST sample only.
+    state = event_store.degraded(proj)
+    assert state["lost"] == threads_n * per_thread, (
+        "every loss must be counted — the count is quoted to the consumer as "
+        f"\"N event(s) are unaccounted for\"; observed={state['lost']!r}")
+    assert len(event_store.degraded_graphs()) == new_keys + 1
+    event_store.clear_degraded()
+
+
+def test_the_store_identity_is_one_key_however_the_path_is_spelled(tmp_path):
+    """One database reached through two spellings is ONE store (#9208 review).
+
+    A symlinked deployment directory, a `..`-segment spelling and a
+    `~`-spelled home are the same file. Keyed on the raw string, the state
+    SPLITS: a refused write recorded under one spelling leaves a poll through
+    the other answering `[]` over the lost event — the silence this module
+    exists to break. The canonicalisation is the repo's own
+    (`realpath(abspath(expanduser()))`, cf. `projection._prewipe_db_path_identity`
+    and `fallback_snapshot.snapshot_key`).
+
+    ⚠️ EVERY SPELLING HERE IS BUILT SO IT IS FALSIFIABLE, which cost this test
+    its first version (#9208 review): `str(Path("/tmp") / ".." / "/tmp" / "one.db")`
+    is `'/tmp/one.db'` — pathlib DISCARDS the left side when the right operand is
+    absolute — so the assertion compared a string to itself and would have passed
+    for an identity function. The `..` form is a literal string, and the symlink
+    is a real one created below.
+    """
+    from types import SimpleNamespace
+
+    def key(path):
+        return event_store._graph_key(
+            SimpleNamespace(_path=str(path), _host=None, graph_name="tortoise",
+                            db=None))
+
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    link_dir = tmp_path / "link"
+    link_dir.symlink_to(real_dir, target_is_directory=True)
+    assert key(link_dir / "one.db") == key(real_dir / "one.db"), (
+        "a symlinked deployment directory must key as the database it names: "
+        f"{key(link_dir / 'one.db')!r} != {key(real_dir / 'one.db')!r}")
+
+    dotted = f"{tmp_path}/sub/../one.db"
+    assert key(dotted) == key(tmp_path / "one.db"), (
+        "a `..`-segment spelling of one database must not key apart: "
+        f"{key(dotted)!r} != {key(tmp_path / 'one.db')!r}")
+
+    assert key("~/feed.db") == key(str(Path("~").expanduser() / "feed.db")), (
+        "a `~`-spelled path must key as the database it names")
+    assert key(":memory:") != key(str(Path(":memory:").absolute())), (
+        "`:memory:` names no file — folding the cwd into it would make two "
+        "cwds two keys for one embedded daemon")
+
+
 def test_a_real_projection_reports_the_store_identity_the_key_uses(tmp_path):
     """The `_store_identity` seam against a REAL projection, in BOTH lanes.
 
@@ -461,9 +743,10 @@ def test_a_real_projection_reports_the_store_identity_the_key_uses(tmp_path):
         proj = sdk._get_proj()
         identity = event_store._store_identity(proj)
         if proj._path:
-            assert identity == f"file:{proj._path}", (
+            canonical = os.path.realpath(os.path.abspath(str(proj._path)))
+            assert identity == f"file:{canonical}", (
                 "an embedded projection's identity is its database FILE, "
-                f"got {identity!r}")
+                f"canonically spelled; got {identity!r}")
             return
         pool = proj.db.connection.connection_pool
         port = pool.connection_kwargs["port"]
@@ -488,6 +771,8 @@ def test_an_unconfigured_feed_is_not_degraded(armed_sdk):
     assert event_store.degraded(sdk._get_proj()) is None
     assert sdk.poll_events()["events"] == []
 
+
+@_acknowledges_the_loss_it_latches
 def test_a_dead_feed_on_one_graph_does_not_refuse_another(tmp_path, monkeypatch):
     """The degraded state is per (STORE, GRAPH) — the product's own partition.
 
@@ -535,6 +820,7 @@ def test_a_dead_feed_on_one_graph_does_not_refuse_another(tmp_path, monkeypatch)
         dead.close()
 
 
+@_acknowledges_the_loss_it_latches
 def test_two_stores_under_one_graph_name_do_not_share_a_state(tmp_path,
                                                               monkeypatch):
     """The OTHER half of the composite key: the store identity matters.
@@ -588,3 +874,167 @@ def test_two_stores_under_one_graph_name_do_not_share_a_state(tmp_path,
     finally:
         healthy.close()
         dead.close()
+
+
+def test_every_writer_takes_the_degraded_map_lock_and_the_reader_does_not(
+        monkeypatch):
+    """The lock is a KEEP-IT contract, pinned by acquisition, not by a race.
+
+    `test_the_degraded_state_is_atomic_across_threads` is a robustness pin and
+    says so: under CPython's GIL the pre-lock shape does not observably fail it,
+    so deleting `with _DEGRADED_LOCK` from all three writers leaves that test
+    green (#9208 review). This one is DETERMINISTIC — it counts `__enter__` on a
+    real lock wrapper, with no threads and no timing — and it pins BOTH halves of
+    the documented contract:
+
+    * the three writers (`record_degraded`, `degraded_graphs`, `clear_degraded`)
+      take it, because each is a read-modify-write or a resize-sensitive walk;
+    * `degraded()` does NOT, because it is a single `dict.get` over a dict that
+      `record_degraded` publishes instead of mutating — locking it would
+      serialise every `poll_events` behind an emitting thread's error path.
+
+    MUTATION that reds it: drop any one `with _DEGRADED_LOCK:` in
+    `tortoise/event_store.py`, or "tidy" a lock into `degraded()`.
+    """
+    from types import SimpleNamespace
+
+    class CountingLock:
+        def __init__(self):
+            self.enters = 0
+            self._real = threading.Lock()
+
+        def __enter__(self):
+            self.enters += 1
+            self._real.acquire()
+            return self
+
+        def __exit__(self, *exc_info):
+            self._real.release()
+            return False
+
+    counting = CountingLock()
+    monkeypatch.setattr(event_store, "_DEGRADED_LOCK", counting)
+    event_store.clear_degraded()
+    proj = SimpleNamespace(_path="/locked.db", _host=None, graph_name="locked",
+                           db=None)
+
+    def enters_during(fn):
+        before = counting.enters
+        fn()
+        return counting.enters - before
+
+    assert enters_during(
+        lambda: event_store.record_degraded(proj, "append", "PointAdded", None,
+                                            RuntimeError("lost"))) == 1, (
+        "`record_degraded` must hold _DEGRADED_LOCK across its whole "
+        "read-modify-write — `lost` is an exact count quoted to the consumer")
+    assert enters_during(event_store.degraded_graphs) == 1, (
+        "`degraded_graphs` must SNAPSHOT under the lock; /health walks a dict "
+        "that a peer thread resizes")
+    assert enters_during(lambda: event_store.degraded(proj)) == 0, (
+        "`degraded()` is DOCUMENTED lock-free (one atomic `dict.get` over a "
+        "freshly published dict) — taking the lock here would put every "
+        "`poll_events` behind an emitting thread's error path")
+    assert enters_during(event_store.clear_degraded) == 1, (
+        "`clear_degraded` mutates the map, so it must hold the lock")
+    event_store.clear_degraded()
+
+
+def test_a_leaked_degradation_is_attributed_to_the_test_that_left_it():
+    """The isolation fixture's attribution half NAMES the polluter (#9208 P1).
+
+    `tests/conftest.py`'s `_change_feed_state_isolation` clears before and after
+    every test. The loud half is the AFTER one, and it is the half that can name
+    a polluter: the same fixture's post-test clear runs first, so a pre-test check
+    could never see the previous test's leak — the defect the review found in the
+    old shape, where the message promised attribution it could not deliver.
+
+    The decision is pinned here because a fixture's teardown body cannot be
+    asserted from inside a test: this is the same seam-in-a-module pattern as
+    `tests/_signal_hygiene.py` and `tests/_tmpdir_hygiene.py`.
+    """
+    from tests._change_feed_isolation import leaked_state_message
+
+    assert leaked_state_message([], "tests/test_x.py::t_clean") is None, (
+        "a test that leaves nothing behind must not be failed")
+
+    message = leaked_state_message(
+        [{"store": "file:/a.db", "graph": "tortoise", "stage": "append"},
+         {"store": "file:/a.db", "graph": "tortoise", "stage": "emit"}],
+        "tests/test_x.py::t_polluter")
+    assert "tests/test_x.py::t_polluter" in message, (
+        "the failure must name the test that LEFT the state, not the next one: "
+        f"{message}")
+    assert "tortoise" in message and "2 degraded" in message, (
+        f"it must name the affected graph(s) and how much was left: {message}")
+    assert "clear_degraded" in message, (
+        "it must name the remedy the polluter owes, or the next reader "
+        f"re-derives it: {message}")
+    assert "leaked into this test" not in message, (
+        "the old wording blamed the SUCCESSOR; the attribution must be the "
+        f"polluter: {message}")
+
+
+def test_this_module_must_not_pre_empt_the_attribution_sample():
+    """No module-level autouse fixture may clear the map (#9208 review, P3).
+
+    `tests/conftest.py::_change_feed_state_isolation` is the ONLY place that may
+    clear `event_store._DEGRADED` once per test. pytest finalises in the reverse
+    of setup order, so a module-level autouse fixture is torn down BEFORE the
+    conftest-level one: a `clear_degraded()` there runs first, the conftest
+    sample then always sees an empty map, and attribution is dead — silently,
+    in the one file whose tests degrade feeds on purpose. That is not
+    hypothetical: this module shipped exactly that fixture and the review
+    measured the dead sample, which is why the module fixture was deleted.
+
+    The ordering this rests on, observed in this repo's own pytest:
+
+        conftest-level SETUP -> module-level SETUP -> module-level TEARDOWN
+        -> conftest-level TEARDOWN
+
+    Structural pin, not a behavioural one: it is green on arrival (the module
+    has no autouse fixture today) and its job is to red when one comes back.
+
+    Read off the module's SOURCE, not off pytest's fixture internals: pytest 9
+    no longer leaves a `_pytestfixturefunction` marker on the function object
+    (measured on 9.1.1), so an attribute probe would pass silently for every
+    fixture — a vacuous pin. `ast` is version-independent.
+    """
+    import ast
+    import inspect
+    import sys
+
+    source = inspect.getsource(sys.modules[__name__])
+    tree = ast.parse(source)
+
+    def is_fixture_decorator(node):
+        if not isinstance(node, ast.Call):
+            return False
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(
+            func, "id", "")
+        return name == "fixture"
+
+    def declares_autouse(node):
+        return any(
+            kw.arg == "autouse" and getattr(kw.value, "value", None) is True
+            for kw in node.keywords)
+
+    offenders = []
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        autouse = [d for d in node.decorator_list
+                   if is_fixture_decorator(d) and declares_autouse(d)]
+        if not autouse:
+            continue
+        body = ast.get_source_segment(source, node) or ""
+        if "clear_degraded" in body:
+            offenders.append(node.name)
+
+    assert not offenders, (
+        "a module-level autouse fixture that clears `event_store._DEGRADED` "
+        f"finalises BEFORE the conftest one and kills its attribution: "
+        f"{sorted(offenders)}. Let `tests/conftest.py::"
+        "_change_feed_state_isolation` own the sample, and clear in a `finally` "
+        "inside the test that latches (the file's contract).")

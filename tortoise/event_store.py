@@ -38,8 +38,9 @@ targets — **a `poll_events` caller in a process that emitted for a graph canno
 be told "nothing happened" over lost events.**
 
 ⚠️ AND ONE CONSUMER IS NOT COVERED, named rather than implied: the webhook
-delivery sweep (`webhook_delivery.deliver_due`) reads `read_after` directly, so
-its `if not events: continue` still treats an empty page as "caught up". Wiring
+delivery sweep (`webhook_delivery.dispatch_pending`) reads `read_after`
+directly, so its `if not events: continue` still treats an empty page as
+"caught up". Wiring
 the degraded state into the delivery/retry state machine changes a
 delivery-loss decision that `#8098` deliberately keeps in the dispatch state
 machine, so it is a follow-up, not a silent part of this fix.
@@ -74,6 +75,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import threading
 from datetime import datetime, timezone
 from typing import Any
 
@@ -112,6 +115,48 @@ class ChangeFeedDegraded(RuntimeError):
 #: direction.
 _DEGRADED: dict[tuple[str, str], dict[str, Any]] = {}
 
+#: Guards `_DEGRADED`, because it is touched from BOTH thread populations.
+#:
+#: `record_degraded` runs off the event loop on the hosted path — the write is
+#: offloaded through `hosted_api._graph_offload` (→ `_cp_offload` →
+#: `monitoring.run_control_plane_call`) onto the dedicated #3498 `graph` pool,
+#: NOT `asyncio.to_thread`, whose shared default executor is the #3060
+#: starvation path the repo avoids — so the `:GraphEvent` emit leg executes on a
+#: graph-pool worker, while `degraded_graphs()` is called from the `async def`
+#: `/health` route ON the loop (`_health_payload` → `_change_feed_health`). `sorted(_DEGRADED.items())` materialises a list
+#: while a peer thread may insert, which raises ``RuntimeError: dictionary
+#: changed size during iteration`` — and `/health` swallows that, so it would
+#: answer ``change_feed.degraded: false`` at the exact moment a second feed went
+#: degraded, on the only out-of-process view of the state. The same lock makes
+#: `lost` an atomic read-modify-write; the count is QUOTED TO THE CONSUMER
+#: ("N event(s) are unaccounted for"), so an undercount is a false number about
+#: data loss rather than a cosmetic one.
+_DEGRADED_LOCK = threading.Lock()
+
+
+def _canonical_path(path: str) -> str:
+    """ONE store, ONE key — however its path is spelled.
+
+    Keying on the raw string splits the state for a single database reached
+    through a symlinked deployment directory, a `~`-spelled home, or a relative
+    path: a refused write recorded under one spelling would leave a poll
+    through the other answering `[]` over the lost event — the exact silence
+    this module exists to break. So the path half uses the repo's canonical
+    identity, the same normalisation `projection._prewipe_db_path_identity` and
+    `fallback_snapshot.snapshot_key` apply (`realpath(abspath(expanduser()))`,
+    which is what makes macOS's `/tmp` -> `/private/tmp` compare EQUAL).
+
+    `:memory:` is left ALONE deliberately: it names no file, `abspath` would
+    fold the caller's cwd into the key, and two cwds would then be two keys for
+    the one embedded daemon — an arbitrary identity is worse than a shared one.
+    """
+    if path == ":memory:":
+        return path
+    try:
+        return os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+    except (OSError, ValueError):  # pragma: no cover — defensive
+        return str(path)
+
 
 def _store_identity(proj) -> str:
     """Which STORE this projection talks to — its file, or its HOST:PORT.
@@ -131,7 +176,7 @@ def _store_identity(proj) -> str:
     """
     path = getattr(proj, "_path", None)
     if path:
-        return f"file:{path}"
+        return f"file:{_canonical_path(str(path))}"
     host = getattr(proj, "_host", None)
     if not host:
         return ""
@@ -167,26 +212,45 @@ def record_degraded(proj, stage: str, event_type: str, event_id: str | None,
     ``lost`` counts the events this graph has lost in this process; it only ever
     grows, matching the fact that those rows can never be delivered.
 
+    ``stage``/``event_type``/``error`` describe the MOST RECENT failure, and the
+    FIRST one is kept beside them as ``first_stage``/``first_error``: a graph can
+    fail twice for different reasons (`append-unverified` then `append`), and the
+    first is often the only provable one, so overwriting it would discard the
+    diagnosis a reader needs. Both are recorded rather than one being chosen.
+
     Called from BOTH swallows (`TortoiseSDK._emit_event` and `append_event`) so
     the two cannot record different diagnoses for the same failure, and so a
     reader has one place to look.
     """
     key = _graph_key(proj)
-    previous = _DEGRADED.get(key)
-    state = {
-        "graph": key[1],
-        "stage": stage,
-        "event_type": event_type,
-        "event_id": event_id,
-        "error": f"{type(exc).__name__}: {exc}"[:400],
-        "lost": 1 if previous is None else int(previous["lost"]) + 1,
-    }
-    _DEGRADED[key] = state
-    return state
+    error = f"{type(exc).__name__}: {exc}"[:400]
+    with _DEGRADED_LOCK:
+        previous = _DEGRADED.get(key)
+        state = {
+            "graph": key[1],
+            "stage": stage,
+            "event_type": event_type,
+            "event_id": event_id,
+            "error": error,
+            "first_stage": stage if previous is None else previous["first_stage"],
+            "first_error": error if previous is None else previous["first_error"],
+            "lost": 1 if previous is None else int(previous["lost"]) + 1,
+        }
+        _DEGRADED[key] = state
+        return state
 
 
 def degraded(proj) -> dict[str, Any] | None:
-    """This graph's named degraded state, or ``None`` when its feed is healthy."""
+    """This graph's named degraded state, or ``None`` when its feed is healthy.
+
+    Deliberately LOCK-FREE, unlike the three writers under `_DEGRADED_LOCK`: a
+    single `dict.get` is atomic under the GIL and under free-threaded CPython's
+    per-object dict locks, and `record_degraded` PUBLISHES a freshly built dict
+    (never mutates one in place), so a reader here always sees a whole state.
+    Taking the lock would also serialise every `poll_events` call against an
+    emitting thread's error path for no gain. Keep it that way: this is a single
+    lookup, NOT a read-modify-write (the writers are the read-modify-writes).
+    """
     return _DEGRADED.get(_graph_key(proj))
 
 
@@ -201,16 +265,22 @@ def degraded_graphs() -> list[dict[str, Any]]:
     Sorted by `(store, graph)` so a report is stable across calls (a dict order
     would make an operator diff meaningless).
     """
+    # The SNAPSHOT is taken under the lock and the list is built outside it:
+    # sorting/building under the lock would hold an emitting thread's error path
+    # behind a health reporter. `sorted` on a private list cannot resize under us.
+    with _DEGRADED_LOCK:
+        snapshot = list(_DEGRADED.items())
     return [
         {
             "store": store,
             "graph": state["graph"],
             "stage": state["stage"],
             "event_type": state["event_type"],
+            "first_stage": state["first_stage"],
             "lost": state["lost"],
             "error": state["error"],
         }
-        for (store, _graph), state in sorted(_DEGRADED.items())
+        for (store, _graph), state in sorted(snapshot)
     ]
 
 
@@ -235,12 +305,13 @@ def clear_degraded(graph_name: str | None = None) -> None:
     (``GET /health`` → ``change_feed``), so an operator can at least SEE which
     worker needs it.
     """
-    if graph_name is None:
-        _DEGRADED.clear()
-        return
-    for key, state in list(_DEGRADED.items()):
-        if state["graph"] == str(graph_name):
-            _DEGRADED.pop(key, None)
+    with _DEGRADED_LOCK:
+        if graph_name is None:
+            _DEGRADED.clear()
+            return
+        for key, state in list(_DEGRADED.items()):
+            if state["graph"] == str(graph_name):
+                _DEGRADED.pop(key, None)
 
 
 _SCHEMA_ATTR = "_tortoise_event_schema"
@@ -626,7 +697,9 @@ def reestablish_watermark(proj, carried_last_seq: int | None) -> int | None:
 
 def append_event(proj, seq: int, type_: str, payload: dict, event_id: str,
                  ts: str | None = None) -> bool:
-    """Append a :GraphEvent node. Returns True on append, False on dup-skip.
+    """Append a :GraphEvent node. True on append; False on a dup-skip OR a
+    refused/failed write (the two are told apart below — do not read `False` as
+    "nothing happened").
 
     `payload` is the bare domain dict (JSON string); type/event_id/ts live as
     node properties (canonical) — codec encode/decode wiring is deferred to

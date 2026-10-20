@@ -560,6 +560,17 @@ class ProcessGlobal:
 
 #: Module attributes reset before AND after every test. Add here — not as a
 #: second per-module fixture — so one declaration owns the reset.
+#:
+#: ⚠️ NOT EVERY per-test process-global reset belongs here, and the exception is
+#: documented rather than silent (#9208): `tortoise.event_store._DEGRADED` is
+#: reset per test by `tests/conftest.py::_change_feed_state_isolation`, which
+#: ALSO attributes a leftover to the test that made it (`pytest.fail` naming the
+#: polluter) — a sample-then-fail no attribute-setter can express. Registering it
+#: here as well would additionally force `importlib.import_module(
+#: "tortoise.event_store")` twice per test in every suite that never touches the
+#: event store, which the fixture's defensive import exists to avoid. So this
+#: tuple is the registry for PURE resets; read it as such, not as the complete
+#: list of process globals the harness clears.
 PROCESS_GLOBALS: tuple[ProcessGlobal, ...] = (
     ProcessGlobal(
         "tortoise.embedded_lifecycle._atexit_deadline",

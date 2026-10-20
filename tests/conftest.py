@@ -2428,3 +2428,78 @@ from tests._signal_hygiene import harness_sigalrm_integrity  # noqa: E402, F401
 # mechanism and its safety properties live in `tests/_tmpdir_hygiene.py`;
 # the operator-invoked backlog sweep is `tools/tmpdir_sweep.py`.
 from tests._tmpdir_hygiene import track_tempfile_artifacts  # noqa: E402, F401
+
+# ── #9208: per-test isolation of the change feed's PROCESS-GLOBAL state ────
+# `event_store._DEGRADED` is process memory keyed by (store identity, graph),
+# and a refused `:GraphEvent` write latches it until an explicit
+# `clear_degraded()`. A latch that outlives its test refuses every later
+# `poll_events` for that graph IN THE PROCESS, and `shared_embedded_db` is ONE
+# session-stable path shared by several files — so the first armed-door/refusal
+# test on it would refuse every later poll in the session (#9208 review).
+#
+# Two halves, and the ORDER is the whole point (#9208 review, P1):
+#
+#   * BEFORE the test — CLEAR SILENTLY. That is the isolation: each case starts
+#     from "healthy" whatever ran earlier, so a suite that never degrades
+#     anything cannot be reddened by this fixture.
+#   * AFTER the test — if state is still latched, CLEAR AND FAIL, naming the node
+#     that LEFT it. Attribution has to live in the after half and not in a
+#     pre-test check: this fixture's own post-test clear runs first, so a
+#     pre-test check could never see a leak made by the previous test — the
+#     polluter the old message claimed it named. It could only ever fire for a
+#     session/module-scoped fixture's setup or for state recorded after a test's
+#     own finalizers (#9208 review).
+#
+# The check is EMPTINESS, not key identity: a driver's per-construction identity
+# keeps two concurrent tests from colliding, it does NOT make a leftover
+# invisible. `tests/test_event_store.py`'s #5379 allocator ceiling really does
+# latch one — a refused emit IS a loss — and clears it in a `finally` for this
+# reason; a future test that forgets is named here instead of reddening the next
+# one. The decision lives in `tests/_change_feed_isolation.py` so a test can pin
+# it (it used to be unreachable code inside this fixture).
+#
+# Imported lazily and defensively — BOTH imports, inside the one `try`: this
+# must never be the reason a suite that does not touch the event store fails to
+# run. (A helper import left outside the `try` would error EVERY test at setup
+# on a typo in `tests/_change_feed_isolation.py`, which is precisely the failure
+# mode this guard exists to prevent.)
+#
+# ⛔ WHY `event_store._DEGRADED` IS **NOT** IN `tests/_verdict.py::PROCESS_GLOBALS`
+# (#9208 review). Rule 4 of the harness says a per-test process-global reset
+# belongs in that registry "not as a second per-module fixture", and the
+# ordering would even allow it (this fixture is defined after
+# `_process_global_isolation`, so it tears down FIRST and still samples before
+# the registry's own reset). The reason it cannot carry this one is `_verdict`'s
+# reset is IMPORT-FORCING: `reset_process_globals` does
+# `importlib.import_module("tortoise.event_store")` for every declared dotted
+# name, twice per test, in EVERY suite — including the suites that never touch
+# the event store, which is exactly what the defensive import above exists to
+# avoid (`_reset_hosted_registry_probe` uses a lazy `sys.modules.get` for the
+# same reason). And the attribution half is not expressible there at all:
+# `reset_process_globals` SETS an attribute, it cannot sample-then-`pytest.fail`
+# with the polluter's nodeid. So: the registry keeps its one entry, the sample
+# stays here, and `tests/_verdict.py` carries the cross-reference so the pinned
+# set is not misread as complete.
+
+
+@pytest.fixture(autouse=True)
+def _change_feed_state_isolation(request):
+    try:
+        from tests._change_feed_isolation import leaked_state_message
+        from tortoise import event_store as _event_store
+    except Exception:  # pragma: no cover — importable everywhere in this suite
+        yield
+        return
+
+    # Isolation: a clean start, silently, whatever earlier setup left behind.
+    _event_store.clear_degraded()
+    try:
+        yield
+    finally:
+        # Attribution, and CLEAR BEFORE FAILING: a teardown failure must not
+        # cascade the same red through every remaining test in the shard.
+        leftover = _event_store.degraded_graphs()
+        _event_store.clear_degraded()
+        message = leaked_state_message(leftover, request.node.nodeid)
+        if message is not None:
+            pytest.fail(message)

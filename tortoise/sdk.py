@@ -6839,6 +6839,22 @@ class TortoiseSDK:
             # prescribed an action it had no way to perform; naming the exits
             # (in-process clear, or restart this worker) plus where the state is
             # visible does not.
+            # ⚠️ BOTH DIAGNOSES ARE REPORTED, not just the latest (#9208
+            # review): a graph can fail twice for different reasons
+            # (`append-unverified` then `append`), and the FIRST is often the
+            # only provable one — `record_degraded` keeps it for exactly this
+            # reader, and reporting only the latest would discard it.
+            first = ""
+            if state.get("first_stage") and state["first_stage"] != state["stage"]:
+                # ⚠️ `first` is APPENDED to the message, so the latest stage is
+                # named ABOVE it. An earlier wording said "the stage named
+                # below", which is the one direction that sends the reader
+                # looking past the end of the string for a diagnosis that is
+                # not there (#9208 review).
+                first = (
+                    f" The FIRST failure on this graph was at stage "
+                    f"{state['first_stage']!r} ({state.get('first_error')}); the "
+                    f"stage named above is the LATEST.")
             raise ChangeFeedDegraded(
                 "the :GraphEvent change feed for graph "
                 f"{state['graph']!r} is DEGRADED: a change-feed write was "
@@ -6855,7 +6871,7 @@ class TortoiseSDK:
                 "name>)` inside that worker, or restart that worker. "
                 "`GET /health` reports it under `change_feed`, so the worker "
                 "holding it can be found. The missing events are NOT recovered "
-                "by a later successful write (#9208)")
+                "by a later successful write (#9208)" + first)
         # Expired-cursor check: a NON-ZERO cursor pointing below the graph's
         # min seq was purged/compacted. after_seq == 0 is the "from the start"
         # sentinel (after=None) — it never expires, it just returns all
