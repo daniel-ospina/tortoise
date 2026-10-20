@@ -92,17 +92,29 @@ An environment pair is not a mitigation for that: env is process-global, so it
 is the same single value for every tenant the process serves. A caller that
 cannot name its tenant must refuse.
 
-⚠️ WHERE AN AMBIENT CARRIER WOULD ARRIVE, and this module cannot see it. #9192
+⚠️ WHERE THE AMBIENT CARRIER ARRIVES, and this module cannot see it. #9192
 names a surface THIS TREE DOES NOT CARRY: `record_writer.use_record_tenant`, a
 ContextVar, with a `TORTOISE_RECORD_ORG_ID`/`_GRAPH_ID` fallback for a
-SINGLE-TENANT deployment. When it lands it arrives one layer up, and the rules
-that must hold there are stated where that work is tracked rather than asserted
-as settled here: a supplied pair is never overridden by an ambient one, and a
-process serving several tenants must not be armable from env at all (#9192
-ask 2 — and ask 1, the production caller for the carrier, is what makes the
-ambient pair unnecessary in the first place). The regression pins for the two
-layers are `test_two_tenants_in_one_process_do_not_cross_write` and
-`test_two_tenants_through_the_seam_never_cross_write`.
+SINGLE-TENANT deployment. It is not a future plan: the carrier is **in flight
+in #9231** (`fix/9078-record-write-call-site`), one layer up, and `git grep`
+for any of its symbols is empty on `origin/main` under `tortoise/` while
+#9231's ref carries them all — `RECORD_ORG_ENV`/`RECORD_GRAPH_ENV`,
+`_RECORD_TENANT`, `use_record_tenant()` and `record_tenant()`. Do not read this
+module as the statement of record for what those must do; read #9231. The
+precedence it implements is **scope always wins over env**: `record_tenant()`
+reads the `ContextVar` first and consults the env pair only when the scope set
+nothing (a half-configured pair is refused, not completed). The surface #9192
+ask 2 must be pinned on is that env fallback, because it is reachable from the
+live door with **no caller-supplied pair** — #9231's door calls
+`record_tenant()` and files the write under whatever comes back, so a process
+serving several tenants can be armed entirely from the environment, one pair,
+the same value for every tenant it serves. Until that fallback is pinned,
+"scope wins" is a precedence rule rather than a fail-closed one; ask 1, the
+production caller, is what makes the fallback unnecessary in the first place.
+The regression pins for THIS layer are
+`test_two_tenants_in_one_process_do_not_cross_write` and
+`test_two_tenants_through_the_seam_never_cross_write`; the pin for the arming
+surface belongs with #9231.
 """
 
 from __future__ import annotations
