@@ -885,8 +885,13 @@ def pick_port(lo: int = PORT_RANGE[0], hi: int = PORT_RANGE[1]) -> int:
         if port_is_free(port) and not _container_publishes(port, scan):
             return port
     raise SystemExit(
-        f"test-lane: no free port in {lo}-{hi}; remove stale fdb-lane-* "
-        f"containers (`uv run python tools/test_lane.py list`)"
+        f"test-lane: no free port in {lo}-{hi}; run `uv run python "
+        f"tools/test_lane.py list` to see the lane containers, then clear the "
+        f"stopped ones (`docker ps -a --filter name=fdb-lane- --filter "
+        f"status=exited`). A STOPPED lane container keeps its published port "
+        f"reserved, so stopped containers exhaust this range — `uri` reaps "
+        f"them automatically on its next start (``TORTOISE_TEST_LANE_REAP=1``, "
+        f"the default)"
     )
 
 
@@ -1397,42 +1402,78 @@ def _started_epoch(name: str) -> float | None:
 
 
 def reap_orphans() -> list[str]:
-    """Remove `fdb-lane-*` containers whose OWNING WORKTREE IS GONE (#8180).
+    """Remove `fdb-lane-*` containers that are PROVABLY out of service.
 
-    Ownership is the mechanism, not age: a lane container is named after
-    `slug_for()` of the worktree that owns it, so the container's owner is
-    recoverable from its own name and the reaping decision is a lookup rather
-    than a guess. This tool can therefore only ever remove a container whose
-    owner it has POSITIVELY established is gone — never a peer lane's, and never
-    this worktree's own (`stop()` is the only thing that removes that one).
+    Two proofs, and both are STATES read from the runtime — never a clock:
+
+    1. **The owning worktree is gone** (#8180). Ownership is recoverable from
+       the container's own name (it is `slug_for()` of the worktree that owns
+       it), so the reaping decision is a lookup rather than a guess. This tool
+       can therefore only ever remove a container whose owner it has
+       POSITIVELY established is gone — never a peer lane's, and never this
+       worktree's own (`stop()` is the only thing that removes that one).
+    2. **The container is in a TERMINAL state** (`exited`/`dead`,
+       `_TERMINAL_STATES`) — the same set `start()` already replaces
+       unconditionally. A stopped container serves nothing: it cannot hold a
+       client, it cannot answer a query, and its own lane's next `start()`
+       would `docker rm -f` it anyway, so the reaper destroys nothing the
+       owner has not already forfeited. What it DOES release is the published
+       port, which docker keeps reserved for a stopped container: measured
+       2026-10-20 the fleet's 110-port lane range (``PORT_RANGE``) was fully
+       published with **67 of those ports held by EXITED containers**, and
+       ``uri`` failed outright with ``no free port in 16390-16499``.
 
     Age is not consulted and there is deliberately NO age backstop here. The
     measured defect is a container that outlives its owner, and a clock firing on
     a live owner's database would be a far worse bug than the leak it fixes —
-    the rule the whole module defends.
+    the rule the whole module defends. That is why the state arm reaches only
+    TERMINAL containers: a `running` one whose owner this clone cannot name is
+    still REPORTED and never removed, however ancient it is, because a live
+    database is exactly what the ruling protects. `paused`/`restarting`/
+    `created` are live-ish in exactly the same way (``_LIVE_ISH_STATES``) and
+    are never reaped either.
 
     Fail-closed: if the worktree list or `docker ps` cannot be read, nothing is
-    removed and the reason is reported. Returns one line per container this
-    function ACTED on or decided to KEEP; a name refused by `is_managed()` is not
-    reported (it was never a candidate), so a caller reports what actually
-    happened instead of counting.
+    removed and the reason is reported; a state this module does not recognise
+    is reported, never inferred to be terminal. Returns one line per container
+    this function ACTED on or decided to KEEP; a name refused by `is_managed()`
+    is not reported (it was never a candidate), so a caller reports what
+    actually happened instead of counting.
     """
     slugs = _worktree_slugs()
     if slugs is None:
         return ["reap: skipped — `git worktree list` failed, so ownership "
                 "cannot be determined; NOTHING was removed (fail-closed)"]
     listed = _docker("ps", "-a", "--filter", f"name={NAME_PREFIX}",
-                     "--format", "{{.Names}}")
+                     "--format", "{{.Names}}\t{{.State}}")
     if listed.returncode != 0:
         return ["reap: skipped — `docker ps` failed; NOTHING was removed "
                 "(fail-closed)"]
+    states: dict[str, str] = {}
+    for line in (listed.stdout or "").splitlines():
+        name, _, state = line.partition("\t")
+        name = name.strip()
+        if name:
+            # A missing state is `unknown`, never terminal: the state arm may
+            # only fire on a state docker actually reported.
+            states[name] = state.strip().lower() or "unknown"
     mine = lane_name()
     out: list[str] = []
-    for name in sorted(n for n in (listed.stdout or "").split() if n):
+    for name in sorted(states):
         if not is_managed(name):
             continue
         if name == mine:
             out.append(f"reap: kept {name} — this is THIS worktree's container")
+            continue
+        state = states[name]
+        if state in _TERMINAL_STATES:
+            # Proof 2: a stopped container serves nothing and `start()` on its
+            # own lane replaces it anyway — so this removes no work, and it
+            # releases the port docker still reserves for it.
+            rm = _docker("rm", "-f", name)
+            out.append(f"reap: {'removed' if rm.returncode == 0 else 'FAILED to remove'} "
+                       f"{name} — it is {state} (a stopped container serves "
+                       f"nothing and holds a port from {PORT_RANGE[0]}-{PORT_RANGE[1]})")
             continue
         owner = slugs.get(name[len(NAME_PREFIX):])
         if owner is not None:
@@ -1468,8 +1509,9 @@ def reap_orphans() -> list[str]:
         age = _started_epoch(name)
         age_txt = ("start time unreadable" if age is None
                    else f"{(time.time() - age) / 3600.0:.1f}h old")
-        out.append(f"reap: kept {name} — no owner here, so ownership is NOT "
-                   f"determined ({age_txt}); report only, fail-closed")
+        out.append(f"reap: kept {name} — no owner here and it is {state}, so "
+                   f"ownership is NOT determined ({age_txt}); report only, "
+                   f"fail-closed")
     return out
 
 

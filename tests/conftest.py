@@ -388,6 +388,16 @@ if _is_db_uri_conftest(os.environ.get("TORTOISE_DB_URI")):
     os.environ["TORTOISE_TEST_JOURNAL_FILE"] = _JOURNAL_PATH
     import tests._embedded as _embedded_mod
     _embedded_mod._JOURNAL_FILE = _JOURNAL_PATH
+    # The journal names graphs but not the SERVER they live on, and a stale
+    # journal swept against the wrong instance dropped nothing yet counted
+    # every entry satisfied — deleting the only ownership record those graphs
+    # had (measured 2026-10-20: 0 of 2,331 graphs on the host's two instances
+    # were named by any surviving journal). Bind it here, where the session's
+    # target IS known, so `_stale_sweep` can refuse to consume a journal it is
+    # not sweeping the right instance for. Best-effort (see the helper): an
+    # unbound journal is swept the pre-fix way rather than never.
+    _embedded_mod._bind_journal_instance(
+        _JOURNAL_PATH, os.environ.get("TORTOISE_DB_URI"))
 
 # ── #7357: a test session must not be pointed at the CANONICAL store ──────
 # Declared at conftest IMPORT time, for the same reason as the #4071 block
@@ -1188,6 +1198,15 @@ def _server_graph_hygiene(_redislite_hygiene):
         if stale.get("stale"):
             print(f"[server-graph-hygiene] stale sweep: "
                   f"{len(stale['stale'])} dead session journal(s) dropped")
+        # A journal bound to ANOTHER instance is deliberately NOT consumed (its
+        # graphs are not on this server, so "absent here" proves nothing) —
+        # report it, because the only session that can reap those graphs is one
+        # pointed at that instance.
+        elsewhere = [r for r in stale.get("stale", []) if r.get("skipped")]
+        if elsewhere:
+            print(f"[server-graph-hygiene] {len(elsewhere)} dead journal(s) left "
+                  f"for another instance: "
+                  f"{', '.join(r['skipped'] for r in elsewhere)}")
     except Exception as exc:
         print(f"[server-graph-hygiene] stale sweep skipped: {exc}")
 

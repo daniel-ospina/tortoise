@@ -1189,6 +1189,76 @@ def _uri_default_graph_name() -> str | None:
     return urlparse(uri).path.lstrip("/") or "tortoise"
 
 
+#: Suffix of the sidecar that records WHICH INSTANCE a session journal's
+#: graph names live on. Written once, next to the journal, by the code that
+#: resolves the journal path (``tests/conftest.py``) — the only place that
+#: knows the session's target at import time.
+JOURNAL_INSTANCE_SUFFIX = ".instance"
+
+
+def _uri_instance_key(uri: str | None) -> str | None:
+    """``host:port`` for the instance *uri* targets, or None when it has none.
+
+    The identity a journal is bound to. Port resolution mirrors
+    ``FalkorProjection.from_uri`` (a portless loopback URI IS ``16379``), and
+    ``localhost`` is folded onto ``127.0.0.1`` so the two spellings of the SAME
+    instance cannot read as a mismatch (the fleet uses both: the docker lane's
+    docs say ``localhost``, the canonical address is IPv4-pinned).
+
+    Returning None (embedded/path/non-URI) is deliberate: such a session has no
+    server instance, so it must not be bound to one.
+    """
+    if not uri:
+        return None
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(uri)
+        port = parsed.port
+    except ValueError:
+        return None          # malformed port — binds to nothing, never guesses
+    if not parsed.scheme or not parsed.hostname:
+        return None
+    host = parsed.hostname.lower()
+    if host == "localhost":
+        host = "127.0.0.1"
+    return f"{host}:{port or 16379}"
+
+
+def _journal_instance(journal_file: str) -> str | None:
+    """The instance key recorded beside *journal_file*, or None if unrecorded.
+
+    None is NOT "no instance": it means the journal predates the binding (or
+    its sidecar could not be written), and a caller must treat that as UNKNOWN
+    rather than as a mismatch it can act on.
+    """
+    try:
+        with open(journal_file + JOURNAL_INSTANCE_SUFFIX) as fh:
+            key = fh.read().strip()
+    except OSError:
+        return None
+    return key or None
+
+
+def _bind_journal_instance(journal_file: str, uri: str | None) -> bool:
+    """Record WHICH instance *journal_file*'s graph names live on.
+
+    Called by ``tests/conftest.py`` at import, where the session's target is
+    known. Best-effort by design: an unwritable sidecar leaves the journal
+    UNBOUND, which keeps the pre-fix sweep behaviour instead of refusing every
+    sweep (hygiene never fails the suite). Returns True when a binding was
+    written, so a caller (or a test) can tell "could not bind" from "bound".
+    """
+    key = _uri_instance_key(uri)
+    if not key:
+        return False
+    try:
+        with open(journal_file + JOURNAL_INSTANCE_SUFFIX, "w") as fh:
+            fh.write(key + "\n")
+    except OSError:
+        return False
+    return True
+
+
 def _projection_host(proj) -> str | None:
     """Resolve the projection's server host (cycle-3 P0-1).
 
@@ -1565,10 +1635,11 @@ def _drop_one_graph(proj, g: str, *, drop: bool) -> bool:
 
 
 def _remove_journal_file(journal_file: str) -> None:
-    """Remove the journal AND its cursor sidecar (both are per-session
+    """Remove the journal AND its sidecars (both are per-session
     bookkeeping — a removed journal without its sidecar leaves a stray
-    .cursor file in ACTIVE_SUITES_DIR every docker session)."""
-    for p in (journal_file, journal_file + ".cursor"):
+    .cursor / .instance file in ACTIVE_SUITES_DIR every docker session)."""
+    for p in (journal_file, journal_file + ".cursor",
+              journal_file + JOURNAL_INSTANCE_SUFFIX):
         try:  # noqa: SIM105
             os.remove(p)
         except OSError:
@@ -1914,7 +1985,29 @@ def _stale_sweep(uri: str, *, skip_on_non_loopback: bool = True) -> dict:
     marker (pid+start verified against the live process's start time — the
     recycled-pid guard, #1642 FIX 5). Bare marker-file EXISTENCE is NOT the
     liveness rule. Dead (no matching live marker) → drop its journaled
-    graphs + remove the journal (keep-on-partial defers the remainder)."""
+    graphs + remove the journal (keep-on-partial defers the remainder).
+
+    INSTANCE BINDING (measured defect, 2026-10-20). A journal names graphs but
+    it did not name the SERVER they live on, and `_sweep_drop` treats an ABSENT
+    graph as a satisfied entry — so a stale journal swept against the WRONG
+    instance dropped nothing, called every entry satisfied, and DELETED THE
+    JOURNAL. From that moment the graphs had no ownership record at all: no
+    journal-driven sweep can see them, `wipe_server` is fail-closed to the
+    region's prefixes and only acts on the instance it runs against, and the
+    only journal-blind pass is an explicit operator opt-in. Measured state on
+    the two host instances: **0 of 2,331 graphs** belonged to any surviving
+    journal, while 24 dead-session markers sat in ACTIVE_SUITES_DIR whose
+    journals were gone (this function removes the journal and, until now, left
+    the marker as the only trace that a possession had been consumed).
+
+    So a dead journal is consumed only against the instance it was WRITTEN
+    against (`{journal}.instance`, written by the code that resolves the
+    journal path). A mismatch SKIPS it — the journal survives, its graphs stay
+    attributable, and the session that does run against that instance reaps
+    them. An UNRECORDED journal (legacy, or a sidecar that could not be written)
+    keeps the pre-fix behaviour: unknown is not a mismatch, and refusing here
+    would strand every journal written before this binding existed.
+    """
     from tortoise.embedded_reaper import ACTIVE_SUITES_DIR as _ASD
     from tortoise.embedded_reaper import active_suite_markers
     try:
@@ -1925,7 +2018,9 @@ def _stale_sweep(uri: str, *, skip_on_non_loopback: bool = True) -> dict:
         m["token"].split("-", 1)[1] for m in active_suite_markers()
         if m.get("token") and "-" in m["token"]
     }
+    target = _uri_instance_key(uri)
     results: list[dict] = []
+    consumed_markers: set[str] = set()
     for e in sorted(entries):
         if not e.endswith(".graphs.jsonl"):
             continue
@@ -1933,10 +2028,38 @@ def _stale_sweep(uri: str, *, skip_on_non_loopback: bool = True) -> dict:
         if nonce in live_nonces:
             continue  # a live suite's journal — never touch
         jf = os.path.join(_ASD, e)
+        bound = _journal_instance(jf)
+        if bound is not None and bound != target:
+            # NOT ours to judge: these graphs are on ANOTHER instance, so
+            # "absent here" is not evidence that they are gone. Consuming the
+            # journal would destroy the only ownership record they have. An
+            # UNRESOLVABLE target (None) lands here too — unknown is not
+            # "matches", and the cost of being wrong is an irreversible one.
+            results.append({"journal": e, "skipped": f"bound to {bound}, "
+                            f"this sweep targets {target}",
+                            "journal_removed": False})
+            continue
         with _sweep_proj(uri) as proj:
             res = _sweep_drop(proj, jf, drop=True,
                               skip_on_non_loopback=skip_on_non_loopback)
         results.append({"journal": e, **res})
+        if res.get("journal_removed"):
+            consumed_markers.add(nonce)
+    # Housekeeping: a consumed journal's DEAD marker is now meaningless, and
+    # leaving it is what made "a marker with no journal" the only surviving
+    # trace of the consumption measured above. Only markers whose nonce we just
+    # consumed are touched — a live marker is never removed (its nonce is in
+    # `live_nonces`, so it cannot reach here).
+    for e in sorted(entries):
+        if e.endswith(".graphs.jsonl") or e.endswith(JOURNAL_INSTANCE_SUFFIX):
+            continue
+        if "-" not in e:
+            continue
+        if e.split("-", 1)[1] in consumed_markers:
+            try:  # noqa: SIM105
+                os.remove(os.path.join(_ASD, e))
+            except OSError:
+                pass
     return {"stale": results}
 
 
