@@ -66,9 +66,11 @@ When the ruling lands, this file is the switch that forces the follow-through:
     a tie-averaged remedy MUST leave a leg's GIVEN order untouched when an equal
     score means "position is the rank" — repair the temporal leg first, not after.
   * ``tests/test_bm25_lexical_8488.py::TestReadPath::test_bm25_arm_lifts_the_record_in_the_shipped_read``
-    — its "strict rank improvement" is partly the phantom spread among four
-    dense-tied rows (see #7704's 2026-10-20 round); re-derive that assertion from
-    the lexical leg's own rank/score.
+    — its "strict rank improvement" is ENTIRELY the phantom spread among four
+    dense-tied rows (measured: with ties averaged the read's 2-slot climb goes
+    to zero — the target lands at the SAME index in both reads). The real BM25
+    gain survives in the lexical SCORE, which the following assertion in that
+    test already pins; re-derive the positional assertion, keep the score one.
   * ``tests/test_ranking_w4b.py::test_integration_boost_requirement_is_bounded_by_the_page``
     — its ``{0.0, 1.0}`` similarity span (contested twin at ``0``) assumes the id
     tie-break hands the lower-ULID twin rank 0; with averaged ranks

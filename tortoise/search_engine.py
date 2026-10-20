@@ -2487,11 +2487,14 @@ def rrf_fusion(
     # FINAL-score gap after ``GraphRanker`` min-max normalizes the PAGE, so
     # whether the W4-b contested boost (``W4_CONTESTED_BOOST`` — 0.0175 of
     # final score at ``graph_boost_weight`` 0.35) clears it is a function of the
-    # caller's ``limit``: measured on the twin fixture it does NOT on the
-    # shipped default page (relevance gap 0.0189 > 0.0175) and DOES on a large
-    # one. The full page-scoped accounting is the rationale on
-    # ``W4_CONTESTED_BOOST`` in ``tortoise/ranking.py`` — do not re-derive it
-    # here, and do not read a single page's outcome as the mechanism's promise.
+    # caller's ``limit``. Name the FIXTURE, because the answers differ: it does
+    # NOT clear on the 4-row E2E-1 twin fixture's pages (relevance gap 0.0189 >
+    # 0.0175), while on the recorded 404-point sweep it clears from ``limit``
+    # >= 40, where the contested twin ranks ABOVE its twin (delta -0.0041 —
+    # ``tortoise/ranking.py``). The full page-scoped accounting is the
+    # ``W4_CONTESTED_BOOST`` rationale in ``tortoise/ranking.py`` — do not
+    # re-derive it here, and do not read a single page's outcome as the
+    # mechanism's promise.
     #
     # Whether fusion MAY spread identical evidence by an id — and which remedy is
     # permitted — is an OPEN owner ruling on #7704. The recorded option set is
