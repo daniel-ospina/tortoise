@@ -30,6 +30,8 @@ import importlib.util as _ilu
 import re
 from pathlib import Path
 
+import pytest
+
 from tortoise.cache_projection import RecordNode, RecordView
 from tortoise.reconciliation import reconcile_views
 
@@ -656,3 +658,458 @@ def test_the_census_pin_catches_a_wiring_change_but_not_a_line_move():
     ):
         a, b = _normalise_census(wired, recorded)
         assert a != b, f"a wiring change must redden: {wired}"
+
+# ── §17.1's acceptance line is MEASURED, not hardcoded (#9079) ────────────
+#
+# The issue's acceptance command is
+#
+#     uv run python docs/evidence/7950-capstone/probes/e2e_chain_probe.py \
+#         | grep "ARMED RAW HANDLE"
+#
+# and it must read `refused`. Until #9079 the line was a LITERAL printed one
+# line after the write: it read `SUCCEEDED (direct cache write)` whether the
+# statement landed, was refused, or never ran — and on an armed projection the
+# refusal raised OUT of the probe, so the acceptance grep could never see
+# `refused` at all. The S1 verdict rests on that line, so a hardcoded one is a
+# false PASS in the epic's evidence.
+
+_PINNED_REFUSED = "refused"
+_PINNED_LANDED = "SUCCEEDED (direct cache write)"
+
+#: The token the issue's acceptance command greps for. The probe emits exactly
+#: ONE line carrying it, and that line is the measurement.
+_GREP_TOKEN = "ARMED RAW HANDLE"
+
+#: The S1 summary's marker — a verdict line that is not in the grep population.
+_S1_TOKEN = "S1 ("
+
+
+_REFUSED_STUB = object()
+
+
+def _probe_tree() -> ast.Module:
+    """The probe's AST — read from disk, never by importing `main` (needs a DB)."""
+    return ast.parse(_PROBE.read_text(encoding="utf-8"))
+
+
+def _report(monkeypatch, rows, *, guard_enforces, write_raises=None):
+    """The probe's report for a stub projection with the guard flag SET.
+
+    The mode is no longer an argument: `s1_report_text` reads
+    `tortoise.projection._HANDLE_GUARD_ENFORCES` itself, so the test drives the
+    same source the door consults (`monkeypatch`, so it is restored).
+    """
+    import tortoise.projection as projection
+
+    monkeypatch.setattr(projection, "_HANDLE_GUARD_ENFORCES", guard_enforces)
+    return _PROBE_MODULE.s1_report_text(
+        _stub_projection(read_rows=rows, write_raises=write_raises))
+
+
+def test_the_report_is_one_measured_text_in_both_modes(monkeypatch):
+    """The pin is on the EMITTED TEXT, for all four mode × outcome cells.
+
+    The report is one value, so there is no per-line seam for a hardcoded line
+    to be inserted into (the predecessor pinned a line LIST and let `main` print
+    it one line at a time — a hardcoded line after the loop did not disturb it).
+
+    ⚠️ WHAT THIS PINS, PRECISELY. It asserts the report's STRUCTURE and that its
+    acceptance line carries the MEASURED verdict — not an equality against an
+    expected literal, which would turn every legitimate wording change into a
+    test edit. What closes the remaining gap is the CELL COVERAGE: mode and
+    outcome are independent, so all four combinations are driven, and a verdict
+    read off `guard_enforces` instead of the measurement reds.
+    """
+    landed_refused, landed = _report(monkeypatch, [[1]], guard_enforces=False)
+    refused_refused, refused = _report(
+        monkeypatch, [[0]], guard_enforces=True, write_raises=_probe_refusal())
+    # THE TWO OFF-DIAGONAL CELLS. Mode and outcome are INDEPENDENT — a scope in
+    # flight or an unbound journal lets a write land while the switch is True
+    # (`_refuse_unauthorized_cache_write` returns early on either) — so pinning
+    # only `(False, landed)` and `(True, refused)` would let the verdict be read
+    # off the MODE instead of the measurement and stay green.
+    _, landed_enforcing = _report(monkeypatch, [[1]], guard_enforces=True)
+    _, refused_measuring = _report(monkeypatch, [[0]], guard_enforces=False,
+                                   write_raises=_probe_refusal())
+
+    assert landed_refused is False and refused_refused is True, (
+        "the branch signal must follow the measurement, not the guard mode")
+    assert landed_enforcing.splitlines()[1].endswith(_PINNED_LANDED), (
+        "a write that LANDED was reported as refused because the switch is on")
+    assert refused_measuring.splitlines()[1].endswith(_PINNED_REFUSED), (
+        "a write that was REFUSED was reported as landed because the switch is off")
+
+    landed_lines = landed.splitlines()
+    refused_lines = refused.splitlines()
+
+    for lines, mode, s1 in ((landed_lines, "measures only", "OPEN"),
+                            (landed_enforcing.splitlines(), "enforces", "OPEN"),
+                            (refused_lines, "enforces", "CLOSED"),
+                            (refused_measuring.splitlines(),
+                             "measures only", "CLOSED")):
+        # EXACTLY the three lines, in order — an extra line is a change to the
+        # pin, i.e. a reviewed act rather than an invisible insertion.
+        assert len(lines) == 3, lines
+        assert lines[0].startswith("HANDLE GUARD MODE:"), lines
+        assert mode in lines[0], lines
+        assert lines[1].startswith(_GREP_TOKEN + " (proj.g.query):"), lines
+        assert lines[2].startswith(_S1_TOKEN), lines
+        assert s1 in lines[2], lines
+
+    # the acceptance line carries the MEASURED verdict, both ways
+    assert landed_lines[1].endswith(_PINNED_LANDED), landed_lines
+    assert refused_lines[1].endswith(_PINNED_REFUSED), refused_lines
+    # …and exactly one line is greppable, so the command is unambiguous
+    assert sum(_GREP_TOKEN in ln for ln in landed_lines) == 1
+    assert sum(_GREP_TOKEN in ln for ln in refused_lines) == 1
+    # the two modes differ, so no constant can satisfy both
+    assert landed != refused
+
+
+def test_the_report_is_written_once_as_the_measured_text():
+    """`main` writes the builder's text in ONE statement — no per-line seam."""
+    tree = _probe_tree()
+    main = next(node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name == "main")
+    calls = [node for node in ast.walk(main)
+             if isinstance(node, ast.Call)
+             and getattr(node.func, "id", None) == "s1_report_text"]
+    assert len(calls) == 1, (
+        f"`main` must call `s1_report_text` exactly once, found {len(calls)}")
+    writes = [node for node in ast.walk(main)
+              if isinstance(node, ast.Call)
+              and getattr(node.func, "attr", None) == "write"
+              and isinstance(node.func.value, ast.Attribute)
+              and node.func.value.attr == "stdout"]
+    assert len(writes) == 1, (
+        "`main` must write the report with exactly one `sys.stdout.write`, "
+        f"found {len(writes)}")
+
+
+def test_the_mode_follows_the_guard_flag_and_no_caller_can_supply_it(monkeypatch):
+    """The MODE is read from the guard, not handed in by the caller.
+
+    Pre-fix `s1_report_text(proj, *, guard_enforces)` took the mode as an
+    ARGUMENT and `main` passed `_HANDLE_GUARD_ENFORCES`. Correct at the one call
+    site, pinned nowhere: `guard_enforces=True` there made the epic's deciding
+    artifact announce an ARMED door while `_HANDLE_GUARD_ENFORCES` was still
+    `False` — and no test reddened, because a `True` literal is not a value
+    string and the TOTAL verdict rule sees only `str`/`bytes` (#9079 review, P3).
+
+    Two independent halves, both of which the pre-fix code fails: the emitted
+    MODE tracks the flag (so a stale or invented argument cannot outlive it),
+    and there is NO parameter through which a mode could be asserted at all.
+    """
+    import tortoise.projection as projection
+
+    # ── behaviour: the emitted MODE is the projection module's own switch ──
+    monkeypatch.setattr(projection, "_HANDLE_GUARD_ENFORCES", False)
+    _, measuring = _PROBE_MODULE.s1_report_text(_stub_projection(read_rows=[[1]]))
+    monkeypatch.setattr(projection, "_HANDLE_GUARD_ENFORCES", True)
+    _, enforcing = _PROBE_MODULE.s1_report_text(_stub_projection(read_rows=[[1]]))
+    assert measuring.splitlines()[0].endswith("measures only (refusal NOT armed, #9124 part 2)"), (
+        measuring.splitlines()[0])
+    assert enforcing.splitlines()[0].endswith("enforces"), enforcing.splitlines()[0]
+    # the flag moved NOTHING else: both cells are the landed outcome
+    assert measuring.splitlines()[1:] == enforcing.splitlines()[1:], (
+        "the MODE flag changed a line it does not own")
+
+    # ── structure: there is no argument to falsify ────────────────────────
+    tree = _probe_tree()
+    builder = next(node for node in tree.body
+                   if isinstance(node, ast.FunctionDef)
+                   and node.name == "s1_report_text")
+    params = [a.arg for a in builder.args.args + builder.args.kwonlyargs]
+    assert params == ["proj"], (
+        "`s1_report_text` must take only the projection: a supplied mode can "
+        f"disagree with the guard's own flag, found params={params}")
+    main = next(node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name == "main")
+    call = next(node for node in ast.walk(main)
+                if isinstance(node, ast.Call)
+                and getattr(node.func, "id", None) == "s1_report_text")
+    assert not call.keywords, (
+        "`main` must not pass a mode (or anything else) to the builder: "
+        f"{[kw.arg for kw in call.keywords]}")
+
+
+def test_the_fold_line_names_the_exception_that_was_caught():
+    """The FOLD line keeps the exception name AND stays verdict-free.
+
+    The informative literal `refused (DirectCacheWriteRefused)` was a false
+    positive of the TOTAL verdict rule — `"refused"` is a substring of the
+    CLASS name — so it had been flattened to "blocked (§17.1 refusal)", losing
+    the one record of which exception the fold gate raised (#9079 review, P3).
+    The name is now read off the caught exception, so it is both accurate and
+    unspellable. Both halves are checked, and both red on the pre-fix code
+    (which had no `armed_fold_line` at all).
+    """
+    from tortoise.projection import DirectCacheWriteRefused
+
+    class _FoldRefusal(DirectCacheWriteRefused):
+        """A subclass, so a hardcoded class name cannot satisfy this pin."""
+
+    line = _PROBE_MODULE.armed_fold_line(
+        _stub_projection(read_rows=[[1]],
+                         apply_raises=_FoldRefusal("blocked")))
+    assert type(_FoldRefusal("x")).__name__ in line, line
+    assert DirectCacheWriteRefused.__name__ not in line, (
+        "the line spells the base class instead of naming what was caught: " + line)
+
+    # a fold that does NOT raise is reported as such, so the line is a verdict
+    assert _PROBE_MODULE.armed_fold_line(
+        _stub_projection(read_rows=[[1]])).endswith("NO RAISE")
+
+    # …and the exception name cannot be spelled in the source either: a value
+    # constant carrying it would re-arm the over-block the derivation removes.
+    spelled = [node.value for node in _non_docstring_constants(_probe_tree())
+               if DirectCacheWriteRefused.__name__ in _const_text(node)]
+    assert not spelled, (
+        "the probe spells the exception class in a literal, which the TOTAL "
+        f"verdict rule refuses (it contains a verdict token): {spelled}")
+
+
+def _non_docstring_constants(tree):
+    """String/bytes constants that are VALUES — bare-`Expr` prose is skipped.
+
+    `bytes` is in the population on purpose: `sys.stdout.write(b"…refused".decode())`
+    is a literal verdict that a `str`-only rule does not see.
+    """
+    prose = {id(node.value) for node in ast.walk(tree)
+             if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)}
+    return [node for node in ast.walk(tree)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, (str, bytes))
+            and id(node) not in prose]
+
+
+def _const_text(node) -> str:
+    """The constant's text, whichever of the two shapes it arrived in."""
+    value = node.value
+    return value.decode("utf-8", "replace") if isinstance(value, bytes) else value
+
+
+def _verdict_constant_names() -> set[str]:
+    return {"RAW_HANDLE_REFUSED", "RAW_HANDLE_LANDED"}
+
+
+def _definition_constant_ids(tree) -> set[int]:
+    """`id()` of the value in `RAW_HANDLE_REFUSED = "refused"` (plain or typed)."""
+    out: set[int] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets, value = [node.target], node.value
+        else:
+            continue
+        if isinstance(value, ast.Constant) and any(
+                getattr(t, "id", None) in _verdict_constant_names()
+                for t in targets):
+            out.add(id(value))
+    return out
+
+
+def test_no_string_literal_can_spell_a_verdict():
+    """TOTAL rule over every VALUE-string constant in the probe.
+
+    The predecessor of this pin was a POPULATION search ("does a printed line
+    contain the token?"), and a population defined by a substring is defeated by
+    splitting the token across a concatenation — measured twice in review. This
+    rule has no population: ANY value constant spelling `refused` or `succeeded`
+    fails except the two DEFINITION constants, so a verdict in the source has to
+    come from one of those — i.e. from the measurement.
+
+    ⚠️ Declared residual, not a claim: a fragment split into pieces that are not
+    themselves a verdict spelling (`"refu" + "sed"`), or `chr()` assembly, is not
+    caught here. That is a deliberately obfuscated edit, visible in review; the
+    rule makes the ACCIDENTAL regression — the pre-fix line and every natural
+    variant — impossible to reintroduce silently.
+    """
+    tree = _probe_tree()
+    definitions = _definition_constant_ids(tree)
+    offenders = []
+    for node in _non_docstring_constants(tree):
+        if id(node) in definitions:
+            continue
+        folded = _const_text(node).casefold()
+        if "refused" in folded or "succeeded" in folded:
+            offenders.append(node.value)
+    assert not offenders, (
+        "the probe spells a §17.1 verdict in literal text, so the acceptance "
+        "line could report a verdict that was never measured — build it from "
+        f"`armed_raw_handle_write(proj)` instead: {offenders}")
+
+
+def test_only_the_report_builder_may_name_a_verdict():
+    """The verdict LABELS and CONSTANTS live in one function and nowhere else.
+
+    Total over the module, not a population: any value-string containing the
+    acceptance token or the S1 marker, and any reference to `RAW_HANDLE_*`, must
+    sit inside `s1_report_text` or `armed_raw_handle_write` (which RETURNS the
+    verdict constants). Nowhere else — in particular not `main` — so a hardcoded
+    S1 summary or acceptance line has no constant to reach for; the analogous
+    obfuscation is the declared residual above.
+    """
+    tree = _probe_tree()
+    # WHERE they may live: the function that MEASURES (it returns the constants)
+    # and the function that REPORTS (it builds the lines). Nowhere else — in
+    # particular not `main`.
+    measured_in = {"armed_raw_handle_write", "s1_report_text"}
+    allowed = {id(node) for node in ast.walk(tree)
+               if isinstance(node, ast.FunctionDef) and node.name in measured_in
+               for node in ast.walk(node)}
+    offenders = []
+    for node in _non_docstring_constants(tree):
+        if id(node) in allowed:
+            continue
+        text = _const_text(node)
+        if _GREP_TOKEN in text or _S1_TOKEN in text:
+            offenders.append(text)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in _verdict_constant_names() \
+                and id(node) not in allowed \
+                and not isinstance(node.ctx, ast.Store):
+            offenders.append(f"name:{node.id}")
+    assert not offenders, (
+        "the §17.1 verdict labels/constants are used outside `s1_report_text`, "
+        "so a verdict can be emitted without the measurement behind it: "
+        f"{offenders}")
+
+
+def test_the_verdict_constants_are_the_two_tokens_the_grep_reads():
+    # `refused` is the token the issue's acceptance command greps for; if the
+    # constant is renamed the command silently matches a different word.
+    assert _PROBE_MODULE.RAW_HANDLE_REFUSED == _PINNED_REFUSED
+    assert _PROBE_MODULE.RAW_HANDLE_LANDED == _PINNED_LANDED
+    assert _PINNED_REFUSED != _PINNED_LANDED
+
+
+def _probe_refusal():
+    from tortoise.projection import DirectCacheWriteRefused
+
+    return DirectCacheWriteRefused("the §17.1 handle refused the statement")
+
+
+def _armed_projection(tmp_path):
+    """A journal-backed projection — §17.1's "armed" precondition."""
+    from tortoise.projection import FalkorProjection
+
+    proj = FalkorProjection(str(tmp_path / "capstone-cache.db"))
+    proj._bind_journal(str(tmp_path / "capstone-journal.jsonl"))
+    assert proj._journal_backed
+    return proj
+
+
+def test_the_line_reads_refused_when_the_handle_refuses(tmp_path, monkeypatch):
+    """The S1-GREEN path: the acceptance token is produced by the MEASUREMENT.
+
+    This is the state the issue asks for, and the test does not depend on the
+    default flipping: it arms the door the same way the guard's own suite does,
+    so the day `_HANDLE_GUARD_ENFORCES` lands True the probe reads `refused`
+    with no change here.
+    """
+    import tortoise.projection as projection
+    from tortoise.projection import DirectCacheWriteRefused
+
+    proj = _armed_projection(tmp_path)
+    monkeypatch.setattr(projection, "_HANDLE_GUARD_ENFORCES", True)
+
+    # the write is refused...
+    with pytest.raises(DirectCacheWriteRefused):
+        proj.g.query("CREATE (:Point {id:'p-direct-write-7950'})")
+    # ...and the probe's line says so, instead of asserting the opposite.
+    assert _PROBE_MODULE.armed_raw_handle_write(proj) == _PINNED_REFUSED
+
+    # NON-VACUITY: the refusal is real — nothing reached the cache.
+    created = proj.query("MATCH (n:Point {id:'p-direct-write-7950'}) RETURN count(n)").result_set
+    assert created[0][0] == 0, "the armed handle let the second writer through"
+
+
+def test_the_line_reads_succeeded_when_the_write_lands(tmp_path, monkeypatch):
+    """The MEASURE-mode path, so the helper cannot rot into a constant.
+
+    The MODE is pinned, not inherited: `_HANDLE_GUARD_ENFORCES` is False in the
+    landed state (#9124 part 1), and this test must keep testing the
+    measure-mode branch on the day it flips — otherwise the flip reds it for a
+    probe that is right, which is a false red in the guard's own suite.
+    """
+    import tortoise.projection as projection
+    from tortoise.projection import (
+        _reset_undeclared_handle_writes,
+        undeclared_handle_writes,
+    )
+
+    proj = _armed_projection(tmp_path)
+    monkeypatch.setattr(projection, "_HANDLE_GUARD_ENFORCES", False)
+    _reset_undeclared_handle_writes()
+    try:
+        assert _PROBE_MODULE.armed_raw_handle_write(proj) == _PINNED_LANDED
+        # the write really landed — the token is not merely different
+        created = proj.query(
+            "MATCH (n:Point {id:'p-direct-write-7950'}) RETURN count(n)"
+        ).result_set
+        assert created[0][0] == 1
+        # and measure mode RECORDED it: the census that a flip would refuse
+        assert any("p-direct-write-7950" in key for key in undeclared_handle_writes()), (
+            "measure mode did not record the undeclared write the probe made"
+        )
+    finally:
+        _reset_undeclared_handle_writes()
+
+
+class _StubResult:
+    """The one thing the probe reads off a vendor result."""
+
+    def __init__(self, rows):
+        self.result_set = rows
+
+
+def _stub_projection(*, read_rows, write_raises=None, apply_raises=None):
+    """A projection stand-in: writes return a result, reads return `read_rows`."""
+    import types
+
+    def _query(statement):
+        if "CREATE" in statement:
+            if write_raises is not None:
+                raise write_raises
+            return _StubResult([])
+        return _StubResult(read_rows)
+
+    def _apply(_event):
+        if apply_raises is not None:
+            raise apply_raises
+        return None
+
+    return types.SimpleNamespace(g=types.SimpleNamespace(query=_query),
+                                 query=_query, apply=_apply)
+
+
+def test_a_write_that_neither_landed_nor_was_refused_is_not_a_landing():
+    """The landed token is READ BACK, not inferred from "no exception".
+
+    A dispatched statement that wrote nothing (a stale graph, a rolled-back
+    transaction, a redirect) returns without raising, so "did not raise" answers
+    a different question from "reached the cache". Deleting the read-back from
+    `armed_raw_handle_write` leaves this red while its token still reads
+    SUCCEEDED.
+    """
+    with pytest.raises(RuntimeError, match="neither blocked nor landed"):
+        _PROBE_MODULE.armed_raw_handle_write(_stub_projection(read_rows=[[0]]))
+
+    # …and the same stub WITH the node present is the landing it claims to be,
+    # so the read-back is not simply refusing everything.
+    assert _PROBE_MODULE.armed_raw_handle_write(
+        _stub_projection(read_rows=[[1]])) == _PINNED_LANDED
+
+
+def test_a_broken_probe_is_not_reported_as_a_refusal():
+    """Only `DirectCacheWriteRefused` is a verdict; anything else propagates.
+
+    A swallowed exception here would print `refused` for a probe that never
+    reached the guard — the same false PASS this section exists to remove.
+    """
+    with pytest.raises(ConnectionError):
+        _PROBE_MODULE.armed_raw_handle_write(
+            _stub_projection(read_rows=[[1]],
+                             write_raises=ConnectionError("store unreachable")))

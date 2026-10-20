@@ -388,6 +388,25 @@ if _is_db_uri_conftest(os.environ.get("TORTOISE_DB_URI")):
     os.environ["TORTOISE_TEST_JOURNAL_FILE"] = _JOURNAL_PATH
     import tests._embedded as _embedded_mod
     _embedded_mod._JOURNAL_FILE = _JOURNAL_PATH
+    # The journal names graphs but not the SERVER they live on, and a stale
+    # journal swept against the wrong instance dropped nothing yet counted
+    # every entry satisfied — deleting the only ownership record those graphs
+    # had (measured 2026-10-20: 0 of 2,331 graphs on the host's two instances
+    # were named by any surviving journal). Bind it here, where the session's
+    # target IS known, so `_stale_sweep` can refuse to consume a journal it is
+    # not sweeping the right instance for. Best-effort (see the helper): an
+    # unbound journal is swept the pre-fix way rather than never — so when the
+    # bind fails for a session that DOES have a server target, the instance gate
+    # silently does not apply to it and a wrong-instance sweep can consume the
+    # journal. One line, next to the other `[server-graph-hygiene]` messages,
+    # because nothing else reports it.
+    if not _embedded_mod._bind_journal_instance(
+            _JOURNAL_PATH, os.environ.get("TORTOISE_DB_URI")) \
+            and _embedded_mod._uri_instance_key(
+                os.environ.get("TORTOISE_DB_URI")):
+        print("[server-graph-hygiene] this session's journal could NOT be "
+              "bound to its instance — the stale sweep will treat it as "
+              "UNBOUND (pre-fix behaviour: not instance-gated)")
 
 # ── #7357: a test session must not be pointed at the CANONICAL store ──────
 # Declared at conftest IMPORT time, for the same reason as the #4071 block
@@ -1158,6 +1177,7 @@ def _server_graph_hygiene(_redislite_hygiene):
         _read_journal,
         _session_end_own_sweep,
         _stale_sweep,
+        _sweep_census,
         _sweep_proj,
         _uri_default_graph_name,
     )
@@ -1185,9 +1205,33 @@ def _server_graph_hygiene(_redislite_hygiene):
     # (possibly holding module-import appends) is never classified dead.
     try:
         stale = _stale_sweep(uri, skip_on_non_loopback=True)
-        if stale.get("stale"):
+        # Census by OUTCOME, not by list length: a journal that was SKIPPED was
+        # not dropped, and this counter is the signal a future reader uses to
+        # judge whether the sweep is working (#5084's evidence was exactly this
+        # number). See `_sweep_census` for why `len(stale['stale'])` is wrong.
+        dropped, elsewhere = _sweep_census(stale.get("stale", []))
+        if dropped:
             print(f"[server-graph-hygiene] stale sweep: "
-                  f"{len(stale['stale'])} dead session journal(s) dropped")
+                  f"{len(dropped)} dead session journal(s) dropped")
+        # A journal bound to ANOTHER instance is deliberately NOT consumed (its
+        # graphs are not on this server, so "absent here" proves nothing) —
+        # report it, because the only session that can reap those graphs is one
+        # pointed at that instance.
+        if elsewhere:
+            # Grouped by target: a host with N stranded lane journals printed N
+            # ~70-char reasons at EVERY lane start, and every entry for the same
+            # instance was repeated. Keyed on the reason's own "targets X" tail
+            # so the grouping cannot drift from what the sweep recorded.
+            by_target: dict[str, int] = {}
+            for r in elsewhere:
+                target = r["skipped_instance"].rsplit("this sweep targets ", 1)[-1]
+                by_target[target] = by_target.get(target, 0) + 1
+            shown = sorted(by_target.items())
+            detail = ", ".join(f"{n} for {t}" for t, n in shown[:5])
+            if len(shown) > 5:
+                detail += f", +{len(shown) - 5} more target(s)"
+            print(f"[server-graph-hygiene] {len(elsewhere)} dead journal(s) left "
+                  f"for another instance ({detail})")
     except Exception as exc:
         print(f"[server-graph-hygiene] stale sweep skipped: {exc}")
 
@@ -1477,6 +1521,12 @@ def _assert_backend_identity():
         if isinstance(exc, _conn_class) or (
                 isinstance(exc, RuntimeError)
                 and "health check failed" in str(exc)):
+            # This is the ONE journal-removal site that does not consult the
+            # instance binding, and deliberately so: it fires only on a
+            # connection-class failure reaching the target, so the graphs never
+            # came to exist there — there is no ownership to preserve, and the
+            # binding would only say which endpoint refused. Every other removal
+            # path is gated (`_stale_sweep`, `_session_end_own_sweep`).
             from tests._embedded import _remove_journal_file
             _remove_journal_file(os.environ.get("TORTOISE_TEST_JOURNAL_FILE", ""))
             # #2961: at this point a poisoned-AOF crash loop and a genuine
