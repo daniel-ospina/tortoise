@@ -176,14 +176,19 @@ Also fail-closed by design:
 * ``is_managed()`` (the ``fdb-lane-*`` prefix, minus the protected shared
   instances) is what a removal intent is keyed on, and it is pinned by tests;
 * ````docker ps -a`` is consulted for port collisions, and THAT SCAN is the
-  load-bearing half of the guard for a FOREIGN container publishing on a
-  NON-loopback interface: the host probe still binds ``127.0.0.1:<port>`` freely
-  while ``0.0.0.0:<port>`` is taken. A PEER's container publishes on loopback
+  load-bearing half of the guard in TWO cases: a FOREIGN container publishing
+  on a NON-loopback interface, where the host probe still binds
+  ``127.0.0.1:<port>`` freely while ``0.0.0.0:<port>`` is taken; and a STOPPED
+  container, whose host port is free at the OS level (``bind`` succeeds) but
+  which ``docker run -p`` refuses because docker still holds the mapping.
+  A PEER's RUNNING container publishes on loopback
   (``-p 127.0.0.1:<port>:6379``), which the host probe refuses on its own
-  (measured, Docker 29.4.0).
-  ``-a`` adds nothing measured — neither a stopped nor a created container
-  reports or reserves its published port (Docker 29.4.0) — and is kept only as a
-  cheap hedge;
+  (measured, Docker 29.4.0). ``-a`` is therefore NOT a hedge: a stopped
+  container DOES report its ``host:port->6379/tcp`` mapping there (measured
+  2026-10-20, Docker 29.8.2 — ````docker ps -a --format '{{.Names}}\t{{.State}}\t
+  {{.Ports}}'`` showed `exited` containers with their published ports), which is
+  the only thing that refuses the port and the reason a range full of stopped
+  containers exhausts (67 of 110 held by EXITED containers on that reading);
 * ``DOCKER_HOST`` is deliberately NOT scrubbed (unlike every ``GIT_*``):
   a remote daemon is addressed as-is, so the printed
   ``127.0.0.1:<port>`` URI then names THAT daemon's loopback, not this host's —
@@ -835,14 +840,25 @@ def _published_scan() -> str | None:
     timed-out call is not evidence for it. This tool exists for an overloaded
     host, so a failed scan is an expected case, not an exotic one.
     """
-    # The SCAN is the load-bearing guard, but for FOREIGN containers: one that
-    # publishes on a NON-loopback interface (`-p 16478:6379` -> `0.0.0.0:16478`)
-    # leaves the host probe free to bind 127.0.0.1:16478, so only this table shows
-    # it. A PEER's container publishes on loopback (`-p 127.0.0.1:<port>:6379`,
-    # what `start()` asks for), which the host probe DOES refuse — measured,
-    # Docker 29.4.0. `-a` adds nothing measured — a stopped or created container
-    # reports no `Ports` — so this covers RUNNING containers, and `-a` is kept only
-    # as a cheap hedge.
+    # The SCAN is the load-bearing guard in TWO cases: a FOREIGN container that
+    # publishes on a NON-loopback interface (`-p 16478:6379` -> `0.0.0.0:16478`),
+    # where the host probe stays free to bind 127.0.0.1:16478 so only this table
+    # shows it; and a STOPPED one. A PEER's RUNNING container publishes on
+    # loopback (`-p 127.0.0.1:<port>:6379`, what `start()` asks for), which the
+    # host probe DOES refuse — measured, Docker 29.4.0.
+    #
+    # `-a` is not a hedge: a STOPPED container's host port is FREE at the OS
+    # level (`bind` succeeds) but docker still holds the mapping, and it DOES
+    # report it here. Measured 2026-10-20 on Docker 29.8.2:
+    #
+    #   $ docker ps -a --format '{{.Names}}\t{{.State}}\t{{.Ports}}'
+    #   fdb-7846-rdb  exited  3000/tcp, 127.0.0.1:16455->6379/tcp
+    #
+    # and `bind("127.0.0.1", 16455)` succeeded. So for that port `_container_
+    # publishes` is the ONLY refusal — which is exactly how 67 of the range's 110
+    # ports came to be held by EXITED containers, and why the `reap_orphans`
+    # report exists. Reading `-a` as "adds nothing" would make that measurement
+    # look impossible to the next reader.
     r = _docker("ps", "-a", "--format", "{{.Names}} {{.Ports}}")
     return None if r.returncode != 0 else (r.stdout or "")
 

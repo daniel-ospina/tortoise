@@ -275,9 +275,11 @@ def test_reaper_reaps_a_TERMINAL_container_of_a_live_owner_only_on_OPT_IN(
     cannot obtain that ruling for itself. The line says which opt-in produced the
     deletion, so a later reader can tell an authorised reap from a default one.
 
-    This is a CAPABILITY pin, not a mutation test: it passes on the pre-fix code
-    too (which removed unconditionally) — what it protects is the ability to
-    reach the same outcome once the owner rules."""
+    It is RED on the pre-fix code, but for the honest reason — that code has no
+    opt-in to set — so the teeth here come from the POST-fix behaviour: make the
+    opt-in a no-op and this fails, and make the reap unconditional (drop the
+    `if not _stopped_reap_enabled()` gate) and
+    `..._KEEPS_a_TERMINAL_container_of_a_LIVE_owner_by_DEFAULT` fails instead."""
     owner = tmp_path / "worktree-of-a-long-dead-lane"
     owner.mkdir()
     removed: list = []
