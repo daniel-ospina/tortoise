@@ -64,6 +64,11 @@ What this module pins
   still defines a job with the id ``python-ci-gate`` and no ``name:`` override
   (renaming it silently un-requires the gate — branch protection and Mergify's
   ``check-success=python-ci-gate`` name it);
+* no job reuses its workflow's run-level ``concurrency.group``, and
+  ``supabase-deploy``'s two locks are pinned exactly (a CONSTANT apply lock,
+  an event-scoped run lock, both ``cancel-in-progress: false``) — equal names
+  deadlock the job with ZERO steps, and a constant run group lets a starved
+  ``push`` run hold a dispatch's apply lock (measured 2026-10-20, #9120 x #1095);
 * the guard is NON-VACUOUS: it asserts it parsed a plausible number of
   workflows and that each workflow it makes a claim about actually exists, so a
   renamed file or a glob typo fails here instead of passing silently.
@@ -74,6 +79,7 @@ and ``test_workflow_secret_interpolation.py``.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -540,6 +546,23 @@ def _concurrency_group(block: object) -> str | None:
     return None
 
 
+_EXPRESSION = re.compile(r"\$\{\{\s*(.*?)\s*\}\}")
+
+
+def _normalise_group(group: str) -> str:
+    """Group text with `${{ … }}` spacing collapsed, for exact comparison.
+
+    GitHub ignores the whitespace inside an expression, so `${{github.ref}}`
+    and `${{ github.ref }}` are the SAME group. Comparing raw text would turn a
+    cosmetic reformat into a red, and the assertion message ("must be
+    event-scoped and NOTHING else") would then be false about the artifact in
+    front of the maintainer. Normalising keeps the pin about WHICH contexts a
+    group uses and still fails every change of context (an added
+    `${{ github.run_id }}`, a removed `github.event_name`).
+    """
+    return _EXPRESSION.sub(lambda m: "${{ " + m.group(1) + " }}", group)
+
+
 @pytest.mark.parametrize("path", _workflow_paths(), ids=lambda p: p.name)
 def test_no_job_reuses_the_run_level_concurrency_group(path: Path) -> None:
     """A job group equal to the run group deadlocks: the job never starts."""
@@ -594,17 +617,65 @@ def test_supabase_deploy_apply_lock_is_distinct_from_the_run_lock() -> None:
     # apply group, so two operators can `supabase db push` at once). Exact text
     # pins both properties at once: constant apply lock, event-scoped run lock,
     # and the two distinct from each other.
-    assert run_group == "supabase-deploy-${{ github.event_name }}", (
+    #
+    # The comparison is on NORMALISED text (`${{github.ref}}` == `${{ github.ref }}`),
+    # so a cosmetic reformat is not a false red: the pin is about which contexts
+    # the group uses, not about spacing. Every mutation that changes the contexts
+    # still fails — see `test_group_pin_ignores_whitespace_but_not_extra_context`.
+    assert _normalise_group(run_group) == "supabase-deploy-${{ github.event_name }}", (
         f"the run-level group must be event-scoped and NOTHING else "
         f"({run_group!r}). A constant holds the lock on every run — including "
         "the `push` drift run, which then starves an operator's dispatch apply "
         "(#1095); any extra context (e.g. `github.run_id`) gives every run its "
         "own group, so deploys stop serialising and two applies can interleave."
     )
-    assert apply_group == "supabase-deploy-apply", (
+    assert _normalise_group(apply_group) == "supabase-deploy-apply", (
         f"the apply lock must be the CONSTANT 'supabase-deploy-apply' "
         f"({apply_group!r}): an expression gives every dispatch its own group, "
         "so concurrent applies stop serialising — and collapsing onto the run "
         f"group {run_group!r} is the 2026-10-20 deadlock, where the deploy job "
         "fails with zero steps and no migration can be applied automatically."
     )
+    # ⛔ `cancel-in-progress: false` is the other half of the same promise, and
+    # it is stated as load-bearing in the workflow's own comment (“a cancelled
+    # migration apply leaves the schema half-migrated”). Presence alone is not
+    # it: flipping either lock to `true` left the whole module green, so the
+    # claim in that comment would have been enforced by nothing.
+    assert doc["concurrency"]["cancel-in-progress"] is False, (
+        "the run-level deploy lock must never cancel: a cancelled migration "
+        "apply leaves the schema half-migrated and no re-run repairs it "
+        "deterministically — a superseded run must QUEUE instead (#9115)"
+    )
+    assert doc["jobs"]["deploy"]["concurrency"]["cancel-in-progress"] is False, (
+        "the apply lock must never cancel: two applies interleaved or a "
+        "half-applied schema is exactly the hazard the apply lock exists "
+        "for (#1095)"
+    )
+
+
+def test_group_pin_ignores_whitespace_but_not_extra_context() -> None:
+    """The normaliser the exact pins compare through: cosmetic, and no more.
+
+    A whitespace-only reformat of an expression is the SAME GitHub group, so it
+    must not read as a property change — while every change of CONTEXT (adding
+    `github.run_id`, dropping `github.event_name`) must still be visible to the
+    pin, or the pin would be the vacuous assertion this module replaced.
+    """
+    pinned = "supabase-deploy-${{ github.event_name }}"
+    assert _normalise_group("supabase-deploy-${{github.event_name}}") == (
+        _normalise_group(pinned)
+    ), "a whitespace-only reformat is the same group; it must not be a red"
+    assert _normalise_group("supabase-deploy-${{  github.event_name  }}") == (
+        _normalise_group(pinned)
+    )
+    differing = [
+        "supabase-deploy-${{ github.event_name }}-${{ github.run_id }}",
+        "supabase-deploy-${{ github.ref }}",
+        "supabase-deploy",
+    ]
+    for group in differing:
+        assert _normalise_group(group) != _normalise_group(pinned), (
+            f"{group!r} differs in the CONTEXTS it uses, so the pin must see it "
+            "as different — otherwise every run gets its own group and deploys "
+            "stop serialising"
+        )
