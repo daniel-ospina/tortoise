@@ -668,6 +668,15 @@ def validate_document(client_id: str, document: dict,
             raise CimdError(
                 "client metadata document must use token_endpoint_auth_method "
                 "'none'.")
+        if method not in _KEY_BASED_METHODS:
+            # Unreachable today — the allowlist above admits exactly
+            # {none} ∪ shared-secret ∪ key-based. Written POSITIVELY anyway so
+            # the fallback below cannot silently inherit a method added to
+            # _KNOWN_AUTH_METHODS later (e.g. client_secret_jwt, which is a
+            # shared-secret method and must never ride the "none" fallback).
+            raise CimdError(
+                "client metadata document declares an unsupported "
+                "token_endpoint_auth_method.")
         # A KEY-BASED preference (private_key_jwt / tls_client_auth) is not a
         # shared secret, so §4.1 does not forbid it; we refuse it because we
         # implement neither, so such a client cannot authenticate here. But a

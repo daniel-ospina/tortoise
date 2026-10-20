@@ -378,7 +378,8 @@ def test_document_must_be_self_referential():
 def test_shared_secret_auth_methods_refused(method):
     """§4.1, unconditional: a CIMD client cannot establish a shared secret, so
     advertising "none" ALONGSIDE a secret does not entitle it to one."""
-    with pytest.raises(cimd.CimdError, match="token_endpoint_auth_method"):
+    with pytest.raises(cimd.CimdError,
+                       match=r"must use token_endpoint_auth_method 'none'"):
         _validate(_doc(token_endpoint_auth_method=method,
                        token_endpoint_auth_methods_supported=["none", method]))
 
@@ -388,7 +389,8 @@ def test_unknown_auth_methods_refused_even_with_a_none_fallback(method):
     """An allowlist, not a denylist: only key-based methods may ride the "none"
     fallback. Unhashable (list/dict) and non-string values must raise CimdError
     rather than TypeError — the module's error contract is CimdError."""
-    with pytest.raises(cimd.CimdError, match="token_endpoint_auth_method"):
+    with pytest.raises(cimd.CimdError,
+                       match="unsupported token_endpoint_auth_method"):
         _validate(_doc(token_endpoint_auth_method=method,
                        token_endpoint_auth_methods_supported=["none", method]))
 
@@ -397,8 +399,21 @@ def test_unknown_auth_methods_refused_even_with_a_none_fallback(method):
 def test_key_auth_methods_refused_without_a_none_fallback(method):
     """We implement neither key-based method, so a document that names one and
     does NOT advertise "none" cannot authenticate here."""
-    with pytest.raises(cimd.CimdError, match="token_endpoint_auth_method"):
+    with pytest.raises(cimd.CimdError,
+                       match="or advertise it in "):
         _validate(_doc(token_endpoint_auth_method=method))
+
+
+def test_a_future_known_method_cannot_inherit_the_none_fallback(monkeypatch):
+    """Mutation guard for the invariant the comments assert: `client_secret_jwt`
+    is a SHARED-SECRET method. If someone later adds it to the known set (to
+    give it a specific message), it must still not be admitted via `none`."""
+    monkeypatch.setattr(cimd, "_KNOWN_AUTH_METHODS",
+                        cimd._KNOWN_AUTH_METHODS | {"client_secret_jwt"})
+    with pytest.raises(cimd.CimdError,
+                       match="unsupported token_endpoint_auth_method"):
+        _validate(_doc(token_endpoint_auth_method="client_secret_jwt",
+                       token_endpoint_auth_methods_supported=["none", "client_secret_jwt"]))
 
 
 @pytest.mark.parametrize("method", ["private_key_jwt", "tls_client_auth"])
