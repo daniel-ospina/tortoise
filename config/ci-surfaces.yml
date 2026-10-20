@@ -751,6 +751,16 @@ surfaces:
   # is exactly the PR that could silently drop the receipt. Same #2938
   # dual-membership convention as the two entries above.
   - test_capture_secret_redaction_4911.py
+  # #9350: the capture provenance stamp is JOURNALLED before its cache write,
+  # and the hosted twin journals + replays the same four fields.
+  # DUAL-REGISTERED (also under `core`, where its primary entry carries the
+  # full rationale): `tortoise/hosted_api.py` SELECTS the `api` surface, and a
+  # named-surface match REPLACES the `core` fallback — so a
+  # hosted_api.py-only PR would run `test_hosted_api.py` and never
+  # `test_the_hosted_capture_journals_and_replays_the_same_provenance`, the
+  # only assertion in the tree that the hosted lane journals provenance BEFORE
+  # the write. Same #2938 dual-membership convention as the #4911 entry above.
+  - test_9350_capture_provenance_journalled.py
   # #3551: the shared `_write_session_and_turns` primitive (Session MERGE +
   # turn store). DUAL-REGISTERED (`api` + `core`): the `api` entry is the one
   # that carries a PR-shape requirement — the primitive is called from
@@ -3604,9 +3614,13 @@ surfaces:
   # #9350: the capture provenance stamp's journal carrier, one record per
   # minted id, and the two replay engines restoring `eventId` /
   # `source_session` / `source_harness` / `ingested_at` on a minted Point that
-  # is never promoted. `core` is the home because the files it guards are the
-  # capture writers (`tortoise/sdk.py` + `tortoise/hosted_api.py`) and the two
-  # folds' provenance clauses (`projection/__init__.py`, a `core` fallback).
+  # is never promoted. DUAL-REGISTERED (also under `api`, see the entry there):
+  # the SDK half (`tortoise/sdk.py`, a SHARED_MODULE, so its diff selects the
+  # full matrix) and the two folds' provenance clauses
+  # (`projection/__init__.py`, a `core` fallback) are what `core` claims here;
+  # the HOSTED writer `tortoise/hosted_api.py` SELECTS `api` instead, and a
+  # named-surface match REPLACES the `core` fallback, so it cannot be covered
+  # from this list alone.
   # CARVE-OUT: the fixtures build EMBEDDED stores by db path and drive
   # `rebuild()` / `rebuild_all()`, so it is registered in `carve_out:` below
   # and in `tests/_embedded.py`.
@@ -5576,7 +5590,8 @@ carve_out:
 # `TortoiseSDK(<tmpfile>)` and drive BOTH replay engines against that embedded
 # store, so a URI-set lane would redirect the construction and the embedded
 # replay under test would be gone. Mirror of the
-# `test_9350_capture_provenance_journalled.py` row in the `core` surface above;
+# `test_9350_capture_provenance_journalled.py` rows in the `core` and `api`
+# surfaces above (dual-registered, #2938);
 # the two registries are one set in two homes
 # (tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
 - test_9350_capture_provenance_journalled.py

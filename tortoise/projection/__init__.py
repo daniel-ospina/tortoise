@@ -7854,12 +7854,20 @@ def _apply_one(points: dict[str, dict], ev: dict,
             # disagree on the same journal (the #330 parity contract this
             # function owns) — and a minted Point that is never promoted has
             # no other record carrying them. Presence-conditional and gated
-            # by the SAME ``_annotator_value_ok`` the siblings use: an absent
-            # key never clears a value the revision did not speak about, and
-            # a corrupt journal's non-writable value DROPS rather than
-            # stranding the recovery.
+            # by the store-EXACTNESS bar the `tags` clause above uses
+            # (``_store_holds_prop_value``, which IMPLIES
+            # ``_annotator_value_ok``): an absent key never clears a value the
+            # revision did not speak about, and a corrupt journal's
+            # non-writable value DROPS rather than stranding the recovery.
+            # ⛔ NOT ``_annotator_value_ok`` alone (#9350 review, P2): these
+            # four are free-form scalars, so an ``int`` outside INT64 passes
+            # that predicate while the STORE either CLAMPS it (4.16-4.20) or
+            # refuses to parse it (6.x) — the fold would then hold a value no
+            # engine stores, and the graph half would abort the rebuild after
+            # the wipe. One bar for all three sites (creation carry-forward,
+            # this arm, ``_revise_point``).
             for _pk in _REVISION_PROVENANCE_PROPS:
-                if _pk in ev and _annotator_value_ok(ev[_pk]):
+                if _pk in ev and _store_holds_prop_value(ev[_pk]):
                     p[_pk] = ev[_pk]
     elif t == "OperatorAnnotated":
         # #3689: the explicit annotation record — parity with apply() /
@@ -17325,12 +17333,19 @@ class FalkorProjection(
         # would over-suppress a revision's value for the props nobody
         # restated. Presence-conditional, mirroring the live ``SET`` (an
         # explicit value is a write; an absent key means the revision did not
-        # speak about it) and gated by the shared writability predicate, so a
+        # speak about it) and gated by the store-EXACTNESS predicate, so a
         # corrupt record DROPS instead of stranding the recovery.
+        # ⛔ ``_store_holds_prop_value``, not ``_annotator_value_ok`` alone
+        # (#9350 review, P2): an ``int`` outside INT64 passes the latter, and
+        # emitting the clause for it either CLAMPS the property (4.16-4.20) or
+        # RAISES at parameter parse (6.x) — the second ABORTS `rebuild_all`
+        # after the wipe (#325/#3689), and the first disagrees with the pure
+        # fold forever. The same bar the `tags` clause above and the
+        # ``PointAdded`` carry-forward use, so all three sites cannot disagree.
         for _pk in _REVISION_PROVENANCE_PROPS:
             if _pk in skip_provenance or _pk not in ev:
                 continue
-            if not _annotator_value_ok(ev[_pk]):
+            if not _store_holds_prop_value(ev[_pk]):
                 continue
             set_clauses.append(f"n.{_pk} = ${_pk}")
             params[_pk] = ev[_pk]
