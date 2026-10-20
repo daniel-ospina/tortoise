@@ -32,6 +32,7 @@ back into a silently short page.
 """
 from __future__ import annotations
 
+import functools
 import os
 import threading
 import time
@@ -42,22 +43,18 @@ import pytest
 from tortoise import event_store
 from tortoise.event_store import ChangeFeedDegraded
 
-
-@pytest.fixture(autouse=True)
-def _no_carried_degradation():
-    """The degraded state lives in PROCESS MEMORY, so it must not leak.
-
-    Not cleanup-on-success (that would hide a real leak): the pre-test clear is
-    what makes each case start from "healthy", and the post-test clear is what
-    keeps an intentionally-degraded case from poisoning the rest of the session
-    — several other suites drive DELIBERATE store refusals (the #5379 allocator
-    ceiling), and a process-wide latch would refuse their polls.
-    """
-    event_store.clear_degraded()
-    try:
-        yield
-    finally:
-        event_store.clear_degraded()
+# ⛔ NO module-level `_no_carried_degradation` fixture here any more (#9208
+# review). The suite-wide `tests/conftest.py::_change_feed_state_isolation`
+# already clears `event_store._DEGRADED` before and after every test, and it also
+# NAMES the test that left a latch behind. A second, module-scoped autouse
+# fixture is finalised AFTER a conftest-level one, so its silent
+# `clear_degraded()` ran FIRST and the conftest sample then always saw an empty
+# map — the attribution half was dead in the one file whose tests degrade feeds
+# on purpose, i.e. exactly where a future leak is most likely. The consequence of
+# dropping it: a test below that latches a state and forgets to clear it now
+# REDS ITSELF (naming its own nodeid) instead of being silently tidied. Every
+# such test therefore clears in a `finally` — that is the file's contract, not a
+# courtesy.
 
 
 @pytest.fixture
@@ -90,6 +87,28 @@ def armed_sdk(tmp_path):
         yield sdk
     finally:
         sdk.close()
+
+
+def _acknowledges_the_loss_it_latches(func):
+    """Clear the process-global latch this test leaves ON PURPOSE — in a `finally`.
+
+    `tests/conftest.py::_change_feed_state_isolation` FAILS a test that leaves a
+    degraded feed behind, naming the polluter and then clearing it. That
+    attribution is only worth having if the tests which degrade a feed
+    DELIBERATELY acknowledge the loss themselves, so every such test opts in
+    here: the clear happens on the raising path too. A test that latches without
+    this decorator (and without its own clear) now reds ITSELF — which is the
+    contract, not a regression.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        finally:
+            event_store.clear_degraded()
+
+    return wrapper
 
 
 def _graph_events(sdk) -> int:
@@ -125,6 +144,7 @@ def _refuse_the_store_leg(monkeypatch):
     monkeypatch.setattr(event_store, "next_seq", refuse)
 
 
+@_acknowledges_the_loss_it_latches
 def test_a_refused_store_write_is_a_visible_loss_not_an_empty_poll(
         armed_sdk, monkeypatch):
     """THE regression: the feed dies, the write succeeds, the poll lies.
@@ -163,6 +183,7 @@ def test_a_refused_store_write_is_a_visible_loss_not_an_empty_poll(
         f"stuck with no remedy; observed={message!r}")
 
 
+@_acknowledges_the_loss_it_latches
 def test_the_row_write_swallow_is_not_silent_either(armed_sdk, monkeypatch):
     """The SECOND swallow: `append_event` catching its own write failure.
 
@@ -351,6 +372,7 @@ def test_a_later_success_does_not_un_degrade_the_feed(armed_sdk, monkeypatch):
         "lost event is gone, which is what acknowledging it means")
 
 
+@_acknowledges_the_loss_it_latches
 def test_an_unverifiable_append_is_reported_as_unverified_not_as_a_loss(
         armed_sdk, monkeypatch):
     """The third outcome: the write failed AND the read-back failed.
@@ -745,6 +767,8 @@ def test_an_unconfigured_feed_is_not_degraded(armed_sdk):
     assert event_store.degraded(sdk._get_proj()) is None
     assert sdk.poll_events()["events"] == []
 
+
+@_acknowledges_the_loss_it_latches
 def test_a_dead_feed_on_one_graph_does_not_refuse_another(tmp_path, monkeypatch):
     """The degraded state is per (STORE, GRAPH) — the product's own partition.
 
@@ -792,6 +816,7 @@ def test_a_dead_feed_on_one_graph_does_not_refuse_another(tmp_path, monkeypatch)
         dead.close()
 
 
+@_acknowledges_the_loss_it_latches
 def test_two_stores_under_one_graph_name_do_not_share_a_state(tmp_path,
                                                               monkeypatch):
     """The OTHER half of the composite key: the store identity matters.
