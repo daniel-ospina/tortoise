@@ -4707,6 +4707,16 @@ def _stamp_capture_provenance(sdk, proj, ids, *, event_id, session_id,
         return False
     bound = {"ids": list(_recorded), "eid": event_id, "sid": session_id,
              "harness": harness, "ing": ingested_at, **(params or {})}
+    if "IS NULL" in statement and "$stamp_ids" not in statement:
+        # #9350 review (P2-1): a GUARDED stamp's ``$ids`` is the caller's CLAIM
+        # predicate, not the set journalled above. Without the narrow clause the
+        # WRITTEN set is not a subset of the JOURNALLED set, so an id that became
+        # eligible between the pre-read and the write is stamped with no record —
+        # the §17.1 window this change exists to close. Enforced HERE so a call
+        # site that drops the clause (either lane) fails loudly instead of
+        # silently reverting.
+        raise ValueError(
+            f"a guarded stamp must narrow its write to $stamp_ids ({what})")
     if "$stamp_ids" in statement:
         # #9350: a GUARDED stamp's ``$ids`` is the caller's CLAIM predicate (it
         # arrives through ``params``), so it is NOT the set this call just
@@ -4753,7 +4763,20 @@ def _capture_stamp_targets(sdk, proj, statement: str, params: dict,
     stamp path, and a transient graph-replaced abort on the READ would otherwise
     lose the whole stamp — the #2552 ``operator_counts == {}`` signature the
     retry funnel exists to prevent, one query earlier than before.
+
+    ⛔ ``statement`` must be READ-ONLY, and that is enforced here rather than
+    trusted to the callers: the §17.1 census declares this function as an
+    unresolved *read*, and a statement that writes would let an unjournalled,
+    lane-less write ride a declaration that says "reads" — the #9350 review's
+    P2-2 (measured: a ``SET`` smuggled into a caller's prefix left the arming
+    gate reporting a fully-declared surface).
     """
+    from .projection import _statement_writes
+
+    if _statement_writes(statement):
+        raise ValueError(
+            "_capture_stamp_targets reads the ids a stamp WOULD write, so its "
+            f"statement must be read-only; refusing a writing one ({what})")
     result = sdk._graph_write_with_retry(
         lambda: proj.g.query(statement, params=params), what=what)
     rows = getattr(result, "result_set", None) or []
