@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import ast
 import textwrap
+from functools import lru_cache
 from pathlib import Path
 
 from tortoise.onboarding import state as _os
@@ -126,6 +127,7 @@ _ESCAPE3_CALL_SITES = {
 }
 
 
+@lru_cache(maxsize=None)
 def _parse(rel: str) -> tuple[ast.Module, dict[ast.AST, ast.AST]]:
     tree = ast.parse((_REPO / rel).read_text(encoding="utf-8"))
     parents = {
@@ -364,7 +366,16 @@ def _eager_init_sites() -> dict[tuple[str, str], int]:
 
 def _declaring_functions(tree: ast.Module,
                          parents: dict[ast.AST, ast.AST]) -> set[str]:
-    """Enclosing functions of a `with` that opens a §17.1 declaration."""
+    """Enclosing functions of a `with` that opens a §17.1 declaration.
+
+    ⚠️ Deliberately FUNCTION-granular, not statement-granular: a `with` anywhere
+    inside an escape-(3) function is worth a human look, because that function
+    is the site. The cost is a FALSE RED when an unrelated `with` is added
+    nearby — accepted, and the failure message names both causes so a lane is
+    never told it closed #9157 when it did not. Statement-level resolution
+    (walk the `With` body for the issued statement name, as `_statement_sinks`
+    does) is the fix if that turns out to hurt more than it helps.
+    """
     out: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, (ast.With, ast.AsyncWith)):
@@ -588,14 +599,21 @@ def test_the_escape3_sites_are_the_mint_sites_that_use_eager_init():
     )
 
 
-def test_no_eager_init_site_declares_itself_yet():
+def test_no_escape3_function_opens_a_declaration_anywhere_yet():
     """THE COUPLING: today no escape-(3) function opens a §17.1 declaration.
 
-    This is the assertion the deleted runtime probe only *claimed* to make. It
-    turns RED the day `#9157` lands by putting a `with` over ANY scope opener
-    (`_DECLARATION_PRIMITIVES`) into `sdk.py` / `hosted_api.py` around one of
-    the five sites — which is precisely when the note in `onboarding/state.py`,
-    the opener inventory in `projection/__init__.py` and this file must change
+    WHAT THIS MEASURES IS COARSER THAN ITS NAME USED TO SUGGEST, on purpose: it
+    reds on a declaration-scope `with` ANYWHERE inside an escape-(3) function
+    (`sdk.py` / `hosted_api.py`), not only around one of the five
+    `eager_init_query()` sites. Those functions ARE the sites, so a scope
+    appearing in one is worth a human look either way — but the two possible
+    causes are different, and the failure message names both rather than
+    assuming the interesting one.
+
+    It still turns RED the day `#9157` lands: putting a `with` over any scope
+    opener (`_DECLARATION_PRIMITIVES`) into one of those functions around one of
+    the five sites is precisely when the note in `onboarding/state.py`, the
+    opener inventory in `projection/__init__.py` and this file must change
     together.
 
     ⚠️ What this does NOT see: the honest fix may instead route the statement
@@ -617,11 +635,16 @@ def test_no_eager_init_site_declares_itself_yet():
     }
     escaped = {rel: names for rel, names in escaped.items() if names}
     assert not escaped, (
-        "an escape-(3) site now DECLARES itself — the residual (#9157) is being "
-        f"closed: {escaped}. Update, in the same change: the note in "
-        "`tortoise/onboarding/state.py`, the opener inventory in "
-        "`tortoise/projection/__init__.py`, and this pin — otherwise the "
-        "docstrings keep describing a gap that no longer exists"
+        "a §17.1 declaration scope now appears INSIDE an escape-(3) function: "
+        f"{escaped}. TWO possible causes, check which before acting. "
+        "(a) #9157 is being closed — then update, in the same change: the note "
+        "in `tortoise/onboarding/state.py`, the opener inventory in "
+        "`tortoise/projection/__init__.py`, and this pin, otherwise the "
+        "docstrings keep describing a gap that no longer exists. "
+        "(b) an UNRELATED `with` was added in that function — this pin is "
+        "function-granular on purpose and cannot tell the two apart; move the "
+        "scope out of the escape-(3) function, or tighten this pin to "
+        "statement level."
     )
 
 
@@ -850,7 +873,7 @@ def test_a_diff_to_the_note_itself_selects_this_file():
     `onboarding` arm existed, an `onboarding`-only diff — the exact drift these
     two pins exist to catch — selected every suite EXCEPT this one, so the note
     could go stale green (the #1349/#2938 silent-drop class). The population is
-    the set of files this suite actually reads — the six subjects below, derived
+    the set of files this suite actually reads — the subjects below, derived
     from the pins above rather than copied from the registration. It is
     deliberately NOT every file the suite PARSES: `_declaration_primitives()`
     walks all 242 modules under `tortoise/`, and covering that whole population
@@ -878,6 +901,18 @@ def test_a_diff_to_the_note_itself_selects_this_file():
         # mint path), so a diff there must run this file too (#9150 review P2).
         "tests/test_write_ahead_mint.py",
         "config/ci-surfaces.yml",
+        # One ARM-ONLY subject per CI arm this suite is registered on. Without
+        # these, withdrawing the `api` / `sdk` / `ep` / `eval` rows leaves every
+        # gate green while 24 modules lose the reachability those rows exist
+        # for (measured: `--integrity` exit 0, this file 15 passed, the whole
+        # `test_ci_selection.py` 274 passed) — the arm-withdrawal class the
+        # `api` comment in `config/ci-surfaces.yml` names. Each of these files
+        # resolves SOLELY to its arm, so it is the only subject that can red the
+        # pin when that row goes.
+        "tortoise/selfhost.py",      # api
+        "tortoise/reader.py",        # sdk
+        "tortoise/dream.py",         # ep
+        "tortoise/cross_lens.py",    # eval
     ):
         sel = select([subject], "pull_request", manifest)
         selected = (sel["full"] or sel["test_files"] == "ALL"
