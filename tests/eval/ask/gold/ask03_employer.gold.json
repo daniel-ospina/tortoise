@@ -1,0 +1,7 @@
+{
+  "answer": "I work at Northwind Traders.",
+  "case_id": "ask03_employer",
+  "class": "knowledge-update",
+  "judge_template": "knowledge-update",
+  "schema": "ask-sealed-gold/v1"
+}

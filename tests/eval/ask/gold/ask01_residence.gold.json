@@ -1,0 +1,7 @@
+{
+  "answer": "I live in Porto.",
+  "case_id": "ask01_residence",
+  "class": "knowledge-update",
+  "judge_template": "knowledge-update",
+  "schema": "ask-sealed-gold/v1"
+}

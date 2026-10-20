@@ -3329,6 +3329,18 @@ def _journal_safe_params(params, cypher=None):
 #         writer" is NOT this leg's evidence, because its writer says the
 #         reverse.
 #     See the obligations it states at `_prewipe_restore_write_scope`.
+#   * `_prewipe_synthetic_write_scope(...)` — the PRE-WIPE SYNTHETIC lane: the
+#     `#548` graph-only `:Point`/operator rows `rebuild_all` carries back by
+#     building SYNTHETIC `PointAdded`/`OperatorAdded` events from the same
+#     pre-wipe capture and FOLDING them through the ordinary handle. It is the
+#     restore lane's sibling in CLAIM ("the payload came from THIS graph's own
+#     pre-wipe capture") and its opposite in MECHANISM (a fold, not a restore
+#     statement), which is why it is its own name: "which writes are authorized
+#     by replay" has to be answerable, and a payload synthesized from the cache
+#     is not a record (`#9210`). It is selected PER EVENT from the fold's own
+#     provenance marker (`_fold_lane_for_event` reads `event_source[seq] is
+#     None`), in both passes that write for a creation. See the claims it makes
+#     and the residual it states at the scope itself.
 #   * `onboarding.metadata` (`tortoise/onboarding/state.py`, #9121) — the
 #     onboarding FLOW metadata (`:OnboardingState`, `:OnboardingStep`, the
 #     `COMPLETED_STEP` edges) is graph-resident org-level metadata, not a
@@ -3692,6 +3704,18 @@ def _replay_write_scope():
 #: that renames itself silently is a lane the next reader cannot find.
 _PREWIPE_RESTORE_LANE = "pre-wipe-restore"
 
+#: The reason every `#548` SYNTHETIC-fold write carries. Same pinning reason as
+#: its restore sibling: a test reads it back AT THE WRITE HANDLE, so a lane
+#: that renames itself silently is a lane the next reader cannot find.
+_PREWIPE_SYNTHETIC_LANE = "pre-wipe-synthetic"
+
+#: The one reason TEMPLATE inside that lane. One template, not one per id: the
+#: synthetic fold is ONE code site per pass (`_upsert_point_props` in pass 1a,
+#: `_upsert_point_edges` in pass 2) driven per captured Point, exactly like the
+#: restore lane's per-class template — an id in the reason would make the lane
+#: unenumerable the moment a graph holds many graph-only Points.
+_PREWIPE_SYNTHETIC_REASON = "#548 graph-only :Point folds"
+
 
 def _prewipe_restore_write_scope(reason: str):
     """The PRE-WIPE RESTORE lane: state copied from THIS graph, not replayed.
@@ -3752,12 +3776,18 @@ def _prewipe_restore_write_scope(reason: str):
       gap (`tortoise/backup.py`'s JSONL path) and the `#4664` unrestored
       `:GraphEvent` rows are unchanged by this lane; naming a gap is not
       closing it;
-    * **it covers the DIRECT restore writes only.** `rebuild_all` also carries
-      graph-only Points back by building `synthetic_events` from the same
-      pre-wipe capture and FOLDING them (`events = list(synthetic_events) +
-      journal_events`), so that half is authorized by whatever permit the
-      caller opened over the engine (`"replay"` under the `#9124`/`#9213`
-      shape), not by this lane. Disclosed, not claimed;
+    * **it covers the DIRECT restore writes only** — the second half of the
+      `#548` capture is NOT this lane and no longer rides `"replay"` either:
+      `rebuild_all` carries graph-only Points back by building
+      `synthetic_events` from the same pre-wipe capture and FOLDING them
+      (`events = list(synthetic_events) + journal_events`), and that half
+      declares `_prewipe_synthetic_write_scope` (`#9210`) — the same claim
+      ("the payload came from THIS graph's pre-wipe capture"), a different
+      mechanism. The split is `_fold_lane_for_event`'s: a `None` source
+      ordinal is synthetic, anything else is a record and keeps
+      `"replay"`. ⚠️ An earlier revision of this docstring disclosed that half
+      as riding whatever permit the caller opened; it does not any more, and
+      the pin asserts it at the write handle in both fold passes;
     * **one write in the SAME engine is not a restore and keeps `"replay"`,
       correctly — so it is disclosed here instead of being declared.** On the
       post-restore config-verification FAILURE branch `_rebuild_all_replay`
@@ -3881,6 +3911,96 @@ def _derived_recompute_write_scope(reason: str):
         return
     with _cache_write_authorized(f"{_DERIVED_RECOMPUTE_LANE}: {reason}"):
         yield
+
+
+def _prewipe_synthetic_write_scope(reason: str):
+    """The PRE-WIPE SYNTHETIC lane: graph-only Points carried back by FOLDING.
+
+    `rebuild_all`'s replay permit is the SECOND over-authorization `#9210`
+    names, and it is a different mechanism from the restore legs rather than a
+    different claim. The restore legs put captured state back with their own
+    statements; the SYNTHETIC legs put it back as `PointAdded`/`OperatorAdded`
+    events the engine BUILDS from the same `#548` pre-wipe capture
+    ("SDK-created points written via Cypher may have no corresponding event in
+    the JSONL log. Snapshot them now so they survive the wipe+replay cycle"),
+    prepends to the replay stream and folds through the ordinary handle.
+
+    **No journal record describes those events either** — their source is the
+    DERIVED CACHE — so a fold write they drive is not a projection of a record
+    and the replay lane's contract ("this content came FROM the record") is
+    false for it in exactly the way it is false for the restore legs. They are
+    the only carrier of `:Point` writes made by the writers §17.1's inventory
+    lists as STILL UNDECLARED (`#9206`'s `:Point` writers, `#9207`'s
+    `delete_point`, `hosted_api`'s commit path) across a wipe+replay, so they
+    are load-bearing and cannot simply be dropped.
+
+    What it claims, and what it does NOT:
+
+    * the content came from THIS GRAPH's own pre-wipe capture, not from the
+      record — the same claim the restore lane makes, stated as its own lane
+      because the WIDTH has to be answerable: "which writes are authorized by
+      replay" must not include a write whose payload was synthesized;
+    * it is **not** a restore leg and does not touch `_restore_write`: the
+      synthetic fold runs through the ORDINARY fold helpers
+      (`_upsert_point_props` in pass 1a, `_upsert_point_edges` in pass 2), so
+      the lane is opened by the fold at the event whose `event_source` ordinal
+      is `None` (see `_fold_lane_for_event`) — not by a caller, and not by a
+      funnel a future edit could bypass;
+    * it is bounded by the fold's own provenance marker, and that bound is
+      exact: `event_source[seq] is None` marks a synthetic event (`#4042` built
+      the array for that purpose and `#8018` already reads it at the
+      `from_prewipe_snapshot` argument), so a journal record's fold can never
+      be claimed by this lane — pinned, in the OTHER direction, by the same
+      `#9210` file (its mirror assertion needs a journaled Point's PASS-2
+      write, because a pass-1a-only check is satisfied by the record's own
+      creation and would let a blanket lane pass at pass 2's call site);
+    * ⚠️ **the SELECTION is automatic; the APPLICATION is two hand-placed
+      `with`s.** Each wrapper covers one call (`_upsert_point_props` in pass 1a,
+      `_upsert_point_edges` in pass 2), so a THIRD write added to either arm as
+      a bare `self.g.query(...)` inherits the enclosing `"replay"` silently —
+      the same residual the restore funnel carries, in a narrower surface. One
+      such write exists in the pass-1a arm today: the `#4042` re-create wipe
+      (`MATCH (n:Point {id:$id}) SET n.embedding = NULL, content_hash = NULL, …`,
+      gated on `is_recreate`). It is unreachable for a synthetic event only by
+      list POSITION — synthetic events are the prefix of `events` while
+      `pending_deleted` is filled by journal deletes later — not by a guarantee;
+      a future fold pass that reorders that stream would put it back on this
+      lane's blind side. Closing the class needs `#9124`'s handle guard armed,
+      which is the same unbounded guarantee the restore lane defers to;
+
+    NESTING is the same property the restore lane relies on: the reason is a
+    `ContextVar`, so this declaration SHADOWS the engine's method-wide
+    `_replay_write_scope()` for the write it wraps, and an outer replay permit
+    cannot authorize a synthetic fold even when a caller opened one.
+    """
+    return _cache_write_authorized(f"{_PREWIPE_SYNTHETIC_LANE}: {reason}")
+
+
+#: The no-declaration arm of `_fold_lane_for_event`, shared rather than
+#: re-created per event: `nullcontext` is re-entrant and does nothing on exit,
+#: and a rebuild iterates every record in the journal — one allocation per
+#: record is real work for a state that carries no claim.
+_NO_FOLD_LANE = contextlib.nullcontext()
+
+
+def _fold_lane_for_event(seq: int, event_source):
+    """The declaration a FOLD write runs under, chosen by event PROVENANCE.
+
+    `#9210`: an event whose `event_source` ordinal is `None` was not read from a
+    journal file — it is one of the `#548` synthetic events built from the
+    pre-wipe graph capture — so the writes it drives declare
+    `_prewipe_synthetic_write_scope`. Every other event is a journal record and
+    keeps the engine's `_replay_write_scope()` (i.e. the null context here, so
+    the enclosing permit stays in force untouched).
+
+    This lives at the fold rather than at the caller because BOTH passes that
+    write for a `PointAdded`/`OperatorAdded` event must agree: pass 1a's
+    `_upsert_point_props` and pass 2's `_upsert_point_edges`. A lane opened
+    around the whole method cannot tell them apart, which is the defect.
+    """
+    if event_source is not None and event_source[seq] is None:
+        return _prewipe_synthetic_write_scope(_PREWIPE_SYNTHETIC_REASON)
+    return _NO_FOLD_LANE
 
 
 def _declares_live_write_lane(reason: str):
@@ -11129,12 +11249,25 @@ class FalkorProjection(
         The replay lane's contract ("this content came FROM the record") is
         false for them, and #9210 is what stopped them from claiming it.
 
-        DISCLOSED RESIDUALS of that split, so this docstring does not read as a
-        claim it cannot keep: the graph-only ``:Point`` rows carried back through
-        ``synthetic_events`` ARE folded, so that half stays on this permit, and a
-        twelfth restore written as a bare ``self.g.query(...)`` tomorrow still
-        inherits ``"replay"`` — the funnel is voluntary until #9124's handle
-        guard is armed.
+        The SECOND over-authorized leg is the ``#548`` SYNTHETIC fold, and it is
+        declared too rather than merely disclosed: the graph-only ``:Point`` /
+        operator rows the capture turns into ``synthetic_events`` are folded
+        through the ordinary handle, but their payload came from the SAME
+        pre-wipe capture, not from a record — so the fold opens
+        ``_prewipe_synthetic_write_scope`` for the event whose
+        ``event_source`` ordinal is ``None`` (``_fold_lane_for_event``), in BOTH
+        passes that write for a creation (pass 1a's ``_upsert_point_props`` and
+        pass 2's ``_upsert_point_edges``). Journal records keep this permit.
+
+        DISCLOSED RESIDUAL of that split, so this docstring does not read as a
+        claim it cannot keep: a twelfth restore written as a bare
+        ``self.g.query(...)`` tomorrow still inherits ``"replay"`` — the
+        restore funnel is voluntary until #9124's handle guard is armed. The
+        synthetic half selects its lane automatically from the fold's own
+        provenance marker rather than from a call a writer must remember, but
+        it is still APPLIED by two hand-placed ``with``s, so a third write added
+        to either fold arm inherits this permit — stated, not denied, at
+        ``_prewipe_synthetic_write_scope``.
 
         Without the replay lane, the guard refuses the replay of the first
         ``PointAdded`` record (measured: ``MERGE (n:Point {id:$id}) …
@@ -12408,9 +12541,15 @@ class FalkorProjection(
                 # instead of denying the journal. #8018 review round 3: it does
                 # NOT prove the id lacks a journal record, so the report must
                 # not say so.
-                wrote_embedding, wrote_content_hash, persisted_extras = (
-                    self._upsert_point_props(
-                        p, from_prewipe_snapshot=event_source[seq] is None))
+                # #9210: the SYNTHETIC fold declares its own lane. When
+                # `event_source[seq]` is None this payload was built from the
+                # `#548` pre-wipe capture, so the writes it drives are not a
+                # projection of any record — the replay permit's contract is
+                # false for them (see `_prewipe_synthetic_write_scope`).
+                with _fold_lane_for_event(seq, event_source):
+                    wrote_embedding, wrote_content_hash, persisted_extras = (
+                        self._upsert_point_props(
+                            p, from_prewipe_snapshot=event_source[seq] is None))
                 # #4042: record this creation's per-source-file chronology
                 # anchors (see their declaration above). A synthetic event
                 # has `src is None` and never forms a boundary. #3860
@@ -14356,7 +14495,14 @@ class FalkorProjection(
                     # unsequenced (None → always re-point), silently
                     # disabling the guard for that class (review P2-1).
                     operator_created_seq.setdefault(p["id"], seq)
-                self._upsert_point_edges(p, contains_session=raw_contains_session)
+                # #9210: pass 2 is the OTHER write a synthetic event drives
+                # (the operator's IMPL/NAND edges and the provenance wiring are
+                # re-derived from the captured payload), so it declares the
+                # same lane pass 1a does — otherwise the half a `PointAdded`
+                # payload reaches here would still ride the replay permit.
+                with _fold_lane_for_event(seq, event_source):
+                    self._upsert_point_edges(
+                        p, contains_session=raw_contains_session)
 
         # ── Pass 2 entity-link sweep (#3664) ──────────────────────────────
         # Fold each deferred EntityLinked record into its idempotent about*

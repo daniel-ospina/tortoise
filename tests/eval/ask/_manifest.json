@@ -1,0 +1,22 @@
+{
+  "corpus_hash": "sha256:e0842ccbd6e0676ca051a71e5a6d6d12bec0750816d3f60687f9d78a331e43ff",
+  "files": {
+    "fixtures/ask01_residence.json": "sha256:8c35fe516d06a5b7a530998883c855d4ef000c15f7406e4d15a747be6b2eefca",
+    "fixtures/ask02_diet.json": "sha256:3a6acaea9f7f3b3689a8b418319961a1946332deec5fd65ea44c485fc3f8e03a",
+    "fixtures/ask03_employer.json": "sha256:6109f05ffe1cc78b886a9c86e9897c3f33e709f50fcb672fee5f2f460b1921d4",
+    "fixtures/ask04_badge.json": "sha256:fa959955157e08bfeca2a9208dd162a603263011989a75e385ba615ac7f00e28",
+    "fixtures/ask05_ferry.json": "sha256:2caa98d27dc3348a08d365cfef5cfe04a0b07a57e2c81fbadc897370df8a16c9",
+    "fixtures/ask06_allergy.json": "sha256:cc0a736cefe256b5572d804d567eb43b0e6ca7a260d1c49638113b99352c04eb",
+    "gold/ask01_residence.gold.json": "sha256:2ddc248a658749fe1ba877e1734219a74a4802a75818f401765f04bb711c683e",
+    "gold/ask02_diet.gold.json": "sha256:b2098fbc9ce5379d5cec2fd52f5da20d4e59c6aad66045f6ea55fb28c9284b31",
+    "gold/ask03_employer.gold.json": "sha256:b83d612b71290ae1b15cd3e11b6d9ec99a2c13eb63bb1118fc7262e0f8a34120",
+    "gold/ask04_badge.gold.json": "sha256:c426dd8c234bb3b63e0ebdea10492b4b1f5d990bc4a30fe9b96d8e38ea9f7e77",
+    "gold/ask05_ferry.gold.json": "sha256:ad4f85232e8e65f85b9f0603de38b48cb0f02cf162d30dddff986f6ee13a95fb",
+    "gold/ask06_allergy.gold.json": "sha256:44f48d7f2c6bfe38498b46b3340efdfd46bdf3930f9bdb433903cb8bc11d8968"
+  },
+  "schema": "ask-sealed-manifest/v1",
+  "sealed": {
+    "gold_dir": "gold/",
+    "rule": "the runner's inputs are fixtures/*.json only \u2014 the answer key is never read by the run step"
+  }
+}

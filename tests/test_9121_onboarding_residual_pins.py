@@ -672,6 +672,11 @@ def test_the_opener_inventory_is_pinned_so_a_new_lane_moves_this_file():
         # is neither a live door nor a replay); #9218 landed it and moved this
         # inventory, which is the pin doing its job.
         "_prewipe_restore_write_scope",
+        # #9210's second lane, landed with #9347: the SYNTHETIC fold writes from
+        # the same pre-wipe capture through a fold rather than a restore
+        # statement, which is why it is a distinct opener and a distinct row in
+        # the same bullet list — the pin firing again on the same rule.
+        "_prewipe_synthetic_write_scope",
     }
     derived = _projection_openers()
     assert derived == expected, (
@@ -702,6 +707,9 @@ def test_the_detector_population_is_pinned_by_content():
         "_onboarding_write_scope",
         "_replay_write_scope",
         "_prewipe_restore_write_scope",
+        # #9347 landed the second pre-wipe lane (the synthetic fold), so it joins
+        # the content anchor for the same reason its restore sibling is here.
+        "_prewipe_synthetic_write_scope",
         # those defined OUTSIDE `projection/__init__.py`:
         # `_run` is `tortoise/webhook_delivery.py`'s opener (a name, not the
         # onboarding funnel — `onboarding/state.py::_run` delegates through

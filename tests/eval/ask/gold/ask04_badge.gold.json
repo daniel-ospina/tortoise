@@ -1,0 +1,7 @@
+{
+  "answer": "QX-4417",
+  "case_id": "ask04_badge",
+  "class": "verbatim",
+  "judge_template": "single-session-user",
+  "schema": "ask-sealed-gold/v1"
+}
