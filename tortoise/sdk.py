@@ -20657,17 +20657,22 @@ class TortoiseSDK:
         state, never slept (tests inject a fake clock).
 
         ⛔ ``run_ep`` (#9362 review) — the CAP must not erase another
-        process's marking. ``_sweep_dirty_roots`` now keeps an epoch-retained
-        root in the mirror, so such a root reaches this cap at all; the clear
-        below used to be unguarded, and a local retry policy erasing a peer's
-        newer ``ep_dirty_at`` is a false CLEAN for every other reader. The
-        clear therefore carries the sweep's epoch predicate: a stamp newer than
-        the failing run's world view survives the cap. ``run_ep=None`` (callers
-        with no snapshot) clears unconditionally, and an UNSTAMPED flag is
-        cleared — unlike the sweep, which spares it: the cap's whole job is to
-        stop this process retrying a root it has failed on repeatedly, a peer
-        that does not stamp has no marking to preserve, and sparing it would
-        restore the immortal-retry class #1243 exists to bound.
+        process's marking, and the GRAPH is what decides, exactly as it does for
+        :meth:`_sweep_dirty_roots`. Three outcomes, from one statement:
+
+        * ``retired`` — a dirty flag at or before this run's snapshot: cleared in
+          the graph, dropped from the mirror, recorded as capped;
+        * ``retained`` — a flag a PEER stamped after this run's snapshot: the
+          graph keeps it, the mirror keeps the root, and its attempts are kept
+          too (so the next cap attempt is one pass away, and no false `capped`
+          record is written for a root that is not capped);
+        * ``unknown`` — the statement raised, or no such dirty ``:Point`` exists
+          (deleted, or already cleared): a raise fails SAFE (kept, retryable),
+          an absent root is the phantom case and leaves the mirror.
+
+        An UNSTAMPED flag is retired (``n.ep_dirty_at IS NULL``): the cap's job
+        is to stop this process retrying a root it has failed on repeatedly, and
+        a peer that does not stamp has no marking to preserve.
         """
         now = self._retry_clock()
         for root in roots:
@@ -20675,6 +20680,32 @@ class TortoiseSDK:
                 continue  # already resolved/dropped by another path
             attempts = self._retry_attempts.get(root, 0) + 1
             if attempts > self.retry_attempt_cap:
+                # #9362: the GRAPH decides whether the cap may retire this root
+                # — the same rule the sweep follows one function down. The cap
+                # is this process's local policy; a root a PEER stamped after
+                # this run's snapshot is not this process's to drop, and a root
+                # that is already gone from the graph (deleted, or cleared by a
+                # peer) leaves the mirror with its retry state.
+                verdict = self._retry_cap_verdict(root, run_ep)
+                if verdict == "retained":
+                    # Another process's newer marking. Keep the root AND its
+                    # attempts (so the next cap attempt is one pass away), and
+                    # do not write a `capped` record for a root that is not
+                    # capped — a later epoch-guarded pass retires it.
+                    self._retry_attempts[root] = attempts
+                    self._retry_backoff_until[root] = now + min(
+                        2 ** attempts, 3600)
+                    self._stale_unresolved.pop(root, None)
+                    continue
+                if verdict == "unknown":
+                    # The write failed. Fail SAFE: keep the root retryable
+                    # rather than dropping a root whose graph flag may stand.
+                    self._retry_attempts[root] = attempts
+                    continue
+                # `retired` (this run's snapshot outranks the stamp and the
+                # flag is now gone) or `absent` (no such dirty :Point — the
+                # phantom case): the mirror loses the root, as the landed code
+                # did.
                 self._dirty_roots.discard(root)
                 self._retry_attempts.pop(root, None)
                 self._retry_backoff_until.pop(root, None)
@@ -20684,21 +20715,6 @@ class TortoiseSDK:
                     "backoff_state": "capped",
                     "reason": "non_converged",
                 }
-                # #1163: a capped root is dropped from the dirty set — its
-                # GRAPH flag must go too, or a fresh SDK would rehydrate it
-                # and retry forever (the cap is meaningless cross-process).
-                # #9362: except a marking a peer stamped after the run's
-                # snapshot — that is not this process's root to retire.
-                try:  # noqa: SIM105
-                    self._get_proj().g.query(
-                        "MATCH (n:Point {id:$id}) "
-                        "WHERE n.ep_dirty_at IS NULL OR $run_ep IS NULL "
-                        "      OR n.ep_dirty_at <= $run_ep "
-                        "SET n.ep_dirty = null, n.ep_dirty_at = null",
-                        params={"id": root, "run_ep": run_ep},
-                    )
-                except Exception:  # noqa: BLE001, RUF100
-                    pass
             else:
                 self._retry_attempts[root] = attempts
                 self._retry_backoff_until[root] = now + min(
@@ -20708,6 +20724,34 @@ class TortoiseSDK:
                 # never see a root in both retry_attempts and
                 # stale_unresolved at once.
                 self._stale_unresolved.pop(root, None)
+
+    def _retry_cap_verdict(self, root: str, run_ep: int | None) -> str:
+        """The GRAPH's verdict on retiring a capped root: ``retired``,
+        ``retained`` or ``unknown`` (#9362 review).
+
+        One statement, so the clear and the verdict cannot disagree: a flag a
+        peer stamped AFTER this run's snapshot is left exactly as it is
+        (`SET x = x`), and the row says so. No row means there is no dirty
+        ``:Point`` with that id — deleted, or a flag no reader will see — which
+        the caller treats as the phantom case. A raise is ``unknown``: the
+        caller keeps the root retryable rather than dropping it on a write it
+        did not see succeed.
+        """
+        try:
+            rows = self._get_proj().g.query(
+                "MATCH (n:Point) WHERE n.id = $id AND n.ep_dirty = true "
+                "WITH n, (n.ep_dirty_at IS NULL OR $run_ep IS NULL "
+                "          OR n.ep_dirty_at <= $run_ep) AS retired_now "
+                "SET n.ep_dirty = CASE WHEN retired_now THEN null ELSE n.ep_dirty END, "
+                "    n.ep_dirty_at = CASE WHEN retired_now THEN null ELSE n.ep_dirty_at END "
+                "RETURN retired_now AS retired_now",
+                params={"id": root, "run_ep": run_ep},
+            ).result_set
+        except Exception:  # noqa: BLE001, RUF100 - fail safe, see docstring
+            return "unknown"
+        if not rows:
+            return "absent"
+        return "retired" if rows[0][0] is True else "retained"
 
     def _reset_retry_state(self, roots: set[str]) -> None:
         """Clear attempt/backoff state for roots that CONVERGED."""
@@ -22803,17 +22847,14 @@ class TortoiseSDK:
         affected = set(getattr(ep, "_last_affected", ()) or ())
         if not affected:
             return
-        # Snapshot the mirror for an EXACT undo. `_sweep_dirty_roots` subtracts
-        # `set(affected) | _unsweepable_dirty_roots(affected)` BEFORE it issues
-        # the graph write, so a failure leaves the roots in the graph but gone
-        # from this process's backlog — and `_hydrate_dirty_roots` returns early
-        # while the mirror is non-empty, so a later no-arg pass would never
-        # retry them. Restoring `affected` alone is not enough: the #7505
-        # NEUTRAL-LINK residue is subtracted too and would be lost; and when the
-        # failure happens BEFORE the subtraction (a raise from
-        # `_unsweepable_dirty_roots` itself) re-adding `affected` would
-        # manufacture mirror roots whose graph flag is clean. A snapshot is the
-        # identity in both positions.
+        # #6211/#9362: the sweep is now write-FIRST — it mutates the mirror only
+        # from the graph's own verdict, so a raise can no longer leave roots in
+        # the graph but gone from this process's backlog, and the restore below
+        # is the IDENTITY on every reachable failure (a raise from
+        # `_unsweepable_dirty_roots` or the statement happens BEFORE the mirror
+        # update). It is kept as a cheap defensive identity rather than deleted:
+        # if a future change moves a mirror mutation above a raise point, this is
+        # the line that keeps `compute_confidence`'s targeted clear honest.
         mirror_before = set(self._dirty_roots)
         try:
             self._sweep_dirty_roots(affected, run_ep=run_ep)

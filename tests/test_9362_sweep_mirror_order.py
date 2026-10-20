@@ -385,12 +385,14 @@ def test_run_ep_none_clears_stamped_and_unstamped_alike():
 
 
 def test_retry_cap_does_not_erase_a_peers_newer_marking():
-    """The attempt cap's graph clear is epoch-guarded (#9362 review).
+    """The attempt cap follows the GRAPH's verdict (#9362 review round 2).
 
     A root the sweep RETAINED (a peer stamped it after this run's snapshot) is
-    now in the mirror, so it can reach the retry cap at all. An unguarded cap
-    clear would let this process's local retry policy erase the peer's newer
-    marking — a false CLEAN for every other reader.
+    now in the mirror, so it can reach the retry cap at all. The cap is decided
+    by the graph: a newer marking is neither cleared (a false CLEAN for every
+    other reader) nor dropped from the mirror with a false `capped` record and a
+    reset attempt counter (which would restart the three-failure budget on
+    re-admission). A run that SAW the stamp retires it.
     """
     with _db() as db:
         sdk = TortoiseSDK(db)
@@ -402,20 +404,70 @@ def test_retry_cap_does_not_erase_a_peers_newer_marking():
             cap = sdk.retry_attempt_cap
             sdk._dirty_roots.add(ids[1])
 
-            # A run whose snapshot predates the marking caps the root.
+            # A run whose snapshot predates the marking reaches the cap.
             sdk._retry_attempts[ids[1]] = cap
             sdk._register_failed_attempt({ids[1]}, run_ep=e - 1)
-            assert ids[1] not in sdk._dirty_roots, "a capped root leaves the mirror"
             assert _ep_dirty_at(sdk, ids[1]) == e, (
                 "the cap erased a marking stamped after the run's snapshot — "
                 "another process's dirty root was retired by this one's retry "
                 "policy"
             )
+            assert ids[1] in sdk._dirty_roots, (
+                "the cap dropped a root the graph KEPT: the mirror now claims a "
+                "clean root the graph holds dirty, and hydration (which keys on "
+                "an empty mirror) cannot re-admit it while other roots remain"
+            )
+            assert ids[1] not in sdk._stale_unresolved, (
+                "a root the graph KEPT was recorded as capped"
+            )
+            assert sdk._retry_attempts.get(ids[1]) == cap + 1, (
+                "the attempt counter was reset on a cap that did not happen, so "
+                "the next cap is a full budget away instead of one pass"
+            )
 
             # A run that SAW the stamp may retire it.
-            sdk._dirty_roots.add(ids[1])
-            sdk._retry_attempts[ids[1]] = cap
             sdk._register_failed_attempt({ids[1]}, run_ep=e)
             assert _ep_dirty_at(sdk, ids[1]) is None
+            assert ids[1] not in sdk._dirty_roots
+            assert ids[1] in sdk._stale_unresolved, "a retired root is capped"
+        finally:
+            sdk.close()
+
+
+def test_retry_cap_retires_an_absent_or_unstamped_root():
+    """The cap still bounds retries: an unstamped flag and a deleted point are
+    retired, not spared forever (#1243's immortal-retry class)."""
+    with _db() as db:
+        sdk = TortoiseSDK(db)
+        try:
+            ids = _chain(sdk, 2)
+            sdk.dream(mode="local")
+            cap = sdk.retry_attempt_cap
+
+            # unstamped legacy flag → retired
+            sdk._get_proj().g.query(
+                "MATCH (n:Point {id:$id}) SET n.ep_dirty = true, n.ep_dirty_at = null",
+                params={"id": ids[1]},
+            )
+            sdk._dirty_roots.add(ids[1])
+            sdk._retry_attempts[ids[1]] = cap
+            sdk._register_failed_attempt({ids[1]}, run_ep=sdk._ep_epoch())
+            assert _ep_dirty_ids(sdk) == set(), (
+                "an unstamped flag must still be retired by the cap, or #1243's "
+                "retry loop is unbounded again"
+            )
+            assert ids[1] not in sdk._dirty_roots
+
+            # absent (deleted) point → the phantom leaves the mirror
+            sdk._dirty_roots.add(ids[0])
+            sdk._retry_attempts[ids[0]] = cap
+            sdk._get_proj().g.query(
+                "MATCH (n:Point {id:$id}) DETACH DELETE n",
+                params={"id": ids[0]},
+            )
+            sdk._register_failed_attempt({ids[0]}, run_ep=sdk._ep_epoch())
+            assert ids[0] not in sdk._dirty_roots, (
+                "a deleted root must not pin the mirror (it blocks hydration)"
+            )
         finally:
             sdk.close()

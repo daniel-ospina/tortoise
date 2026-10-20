@@ -468,9 +468,10 @@ now visible to a programmatic caller instead of to a human reading stderr:
   clean), because the dream adapters gate on convergence, the flush guard and
   `_guard_dream_progress` only. That is a different call path with a different
   retry lifecycle, and it is tracked on its own:
-  `daniel-ospina/tortoise#9363`. (The sweep's own mirror-vs-graph ordering, which
-  the best-effort handler above works around for this call site only, is
-  `daniel-ospina/tortoise#9362`.)
+  `daniel-ospina/tortoise#9363`. (The sweep's own mirror-vs-graph ordering is
+  `daniel-ospina/tortoise#9362`: it was write-FIRST as of that change, so the
+  best-effort handler above restores nothing on any reachable failure — it is
+  kept as a defensive identity, not as a workaround.)
 
 ### The full-mode cap is a refusal, not a silent truncation
 
