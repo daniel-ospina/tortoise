@@ -37,7 +37,7 @@ on:
     # tuple, no glob), so a migrations-only change cannot alter anything the
     # image serves; `tortoise/**` already covers a change that can. Same answer
     # as `deploy-hosted.yml`'s paths filter, and the same reason — keep the two
-    # in step (#9326 review P2).
+    # in step.
     # Tag pushes are unaffected: GitHub does not evaluate `paths` for tag
     # pushes, so every `v*` release still builds and publishes.
     paths:

@@ -1,19 +1,20 @@
-"""The record schema ships in the images, and the two build workflows agree (#9325, #9326).
+"""The record schema ships in the images, and the two build workflows agree (#9325).
 
 `tortoise.record_migrations` is a MAPPED package: `pyproject.toml`
 `[tool.setuptools.package-dir]` points it at `supabase/migrations`, so an editable
 install inside a build context that does not contain that tree fails outright —
-`error: package directory 'supabase/migrations' does not exist` — which is the
-`packaging-smoke` red #9325 fixed. Both Dockerfiles therefore COPY the tree.
+`error: package directory 'supabase/migrations' does not exist` — and the image
+never builds. Both Dockerfiles therefore COPY the tree, pinned for each of them by
+`test_each_image_copies_the_record_migrations_tree`.
 
-The second half is the one that went wrong: whether that COPY makes the tree a
-DEPLOY / PUBLISH TRIGGER. It does not, and the two workflows have to answer that
-the same way — `deploy-hosted` listed `supabase/migrations/**` while
-`publish-selfhost` (whose declared invariant is "the exact build-input set of
-its Dockerfile") did not, for the identical COPY line (#9326 review, P2 x2).
+The tree is COPY'd, but it is NOT a deploy or publish trigger, and the two
+workflows must give that answer together
+(`test_the_two_workflows_answer_the_migrations_tree_the_same_way`): they build the
+two images from one identical COPY line, so an answer that differs between them
+means one of them redeploys on a change it cannot observe.
 
 Why "not a trigger" is the answer, and not merely a preference — the reader is
-NAME-GATED (`test_the_record_reader_is_name_gated` below proves it):
+NAME-GATED (`test_the_record_reader_is_name_gated` below measures it):
 
   * adding a `.sql` file does not change anything the image reads, because
     `_read_migrations()` iterates `RECORD_MIGRATIONS`, never the directory;
@@ -22,10 +23,11 @@ NAME-GATED (`test_the_record_reader_is_name_gated` below proves it):
     name in `RECORD_MIGRATIONS` — i.e. in `tortoise/record_projection.py`, which
     `tortoise/**` already triggers.
 
-So the entry added no coverage, while costing a RED push run per migrations-only
-merge: `supabase-deploy` runs its deploys on `workflow_dispatch` only, and
-`deploy-hosted`'s fail-closed `Check migration drift` exits 1 for every
-repo-ahead BLOCKING migration until an operator applies it.
+Listing the tree as a trigger would therefore add no coverage, while costing a RED
+push run per migrations-only merge: `supabase-deploy` runs its deploys on
+`workflow_dispatch` only, and `deploy-hosted`'s fail-closed `Check migration
+drift` exits 1 for every repo-ahead BLOCKING migration until an operator applies
+it.
 
 If a future change makes the tree genuinely observable at runtime (a directory
 glob, a migration applier in the image), the polarity below flips: list it in
@@ -43,7 +45,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise.record_projection import (  # noqa: E402
+from tortoise.record_projection import (
     RECORD_MIGRATIONS,
     _read_migrations,
     table_columns,
@@ -91,12 +93,12 @@ def test_each_image_copies_the_record_migrations_tree(dockerfile: Path):
 
 
 def test_the_two_workflows_answer_the_migrations_tree_the_same_way():
-    """Both-or-neither (#9326 review, ISSUE 2).
+    """Both-or-neither: the two workflows answer the trigger question together.
 
-    One COPY line, added to both Dockerfiles by one change — so a trigger
-    answer that differs between the two workflows is one of them being wrong.
-    This is the polarity the review found broken: `deploy-hosted` listed the
-    tree, `publish-selfhost` did not.
+    Both images COPY the same tree, so a trigger answer that differs between the
+    two workflows means one of them redeploys (or fails to) on a change it cannot
+    observe. Neither lists it — the reader is name-gated, and the reason is
+    recorded on the exclusion in each workflow's `paths:` block.
     """
     hosted = _push_paths(_HOSTED)
     selfhost = _push_paths(_SELFHOST)
