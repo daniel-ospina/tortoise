@@ -846,13 +846,18 @@ def test_a_diff_to_the_note_itself_selects_this_file():
     `test_the_note_and_the_ast_inventory_agree` guard the note in
     `tortoise/onboarding/state.py`, and `tools/ci_selection.py` resolves
     `tortoise/onboarding/` to the `onboarding` surface — a NAMED
-    `SOURCE_PATTERNS` match, which REPLACES the `core` fallback. While this file
-    was registered on `api` + `ep` and NOT on `onboarding`, an
-    `onboarding`-only diff — the exact drift these two pins exist to catch —
-    selected every suite EXCEPT this one, so the note could go stale green (the
-    #1349/#2938 silent-drop class). The population is the set of files this
-    suite actually reads, derived from the pins above rather than from a copy of
-    the registration.
+    `SOURCE_PATTERNS` match, which REPLACES the `core` fallback. Before the
+    `onboarding` arm existed, an `onboarding`-only diff — the exact drift these
+    two pins exist to catch — selected every suite EXCEPT this one, so the note
+    could go stale green (the #1349/#2938 silent-drop class). The population is
+    the set of files this suite actually reads — the six subjects below, derived
+    from the pins above rather than copied from the registration. It is
+    deliberately NOT every file the suite PARSES: `_declaration_primitives()`
+    walks all 242 modules under `tortoise/`, and covering that whole population
+    is what the six arms in `config/ci-surfaces.yml` do (#9150 review: with
+    `api` + `core` + `onboarding` only, the 12 modules resolving solely to
+    `ep`/`sdk`/`eval` — `dream.py` first — could take a new §17.1 opener on a PR
+    that never ran this file).
 
     `config/ci-surfaces.yml` is IN the population: this suite reads it (through
     `load_manifest()`), and it is the one file whose edit silently disables the
@@ -885,6 +890,38 @@ def test_a_diff_to_the_note_itself_selects_this_file():
         "surfaces those files resolve to in `config/ci-surfaces.yml` — a named "
         "match REPLACES the `core` fallback (#9121 review P1)"
     )
+
+
+def test_the_plan_doc_and_the_storage_ledger_carry_the_residual():
+    """The TWO remaining records must name the residual — they had no pin.
+
+    `tortoise/onboarding/state.py` and `tortoise/projection/__init__.py` carry
+    the escape-(3) note and are pinned above. Two more records a lane reads
+    before concluding the onboarding class is covered were silently WITHOUT it
+    (#9150 review):
+
+    * `docs/plans/2026-10-14-7951-atomic-write-outbox.md` — the increment-4
+      tracker, whose `onboarding` entry said the lane is DECLARED and stopped
+      there, i.e. exactly the reading the other records exist to prevent;
+    * `docs/architecture/STORAGE-ARCHITECTURE.md` — §17.1's ledger table, whose
+      own preamble (`:1516`) says it "is the ledger a reader auditing §17.1 for
+      second writers reads, so a new lane belongs here", and whose
+      `onboarding metadata` row claimed `:OnboardingState` outright.
+
+    Both now state `#9157`, and this pin is why they cannot drift back.
+    """
+    for rel, what in (
+        ("docs/plans/2026-10-14-7951-atomic-write-outbox.md", "the increment-4 tracker"),
+        ("docs/architecture/STORAGE-ARCHITECTURE.md", "§17.1's door ledger"),
+    ):
+        flat = " ".join((_REPO / rel).read_text(encoding="utf-8").split())
+        for phrase in ("#9157", "eager_init_query", "select_graph"):
+            assert phrase in flat, (
+                f"{what} (`{rel}`) no longer contains {phrase!r}. An auditor "
+                "reading it concludes there is no second `:OnboardingState` "
+                "writer outside the declared lane, which the five escape-(3) "
+                "sites disprove (#9157)"
+            )
 
 
 def test_the_inventory_cites_the_issue_that_owns_the_journalling_increment():
