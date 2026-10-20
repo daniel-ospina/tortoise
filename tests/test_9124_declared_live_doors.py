@@ -107,7 +107,7 @@ EVENT_STORE_PY = ROOT / "tortoise" / "event_store.py"
 #: a journal-first door as "appends nothing".
 _APPEND_CALL_RE = re.compile(
     r"^(?:_?emit_event|_?apply_and_journal|_?journal_\w+|_?emit_\w+_record"
-    r"|append_event)$")
+    r"|_?emit_edge_message(?:_clear)?|append_event)$")
 
 #: Names the pattern above would call an append but which append NO record — a
 #: helper that normalises params or reads a timestamp. Counting one of these as
@@ -120,6 +120,18 @@ _APPEND_NOT_A_RECORD = {
     "_journal_instant",       # entities.py: reads the record's instant
     "_journal_safe_params",   # projection/__init__.py: sanitises params
 }
+
+#: #9206 — the EP engine's two record carriers, added to `_APPEND_CALL_RE`'s
+#: family above. `tortoise/ep.py` journals every committed belief/message write
+#: through `self._emit_edge_message(...)` / `self._emit_edge_message_clear(...)`
+#: (#5380), and neither name matched the old pattern — so the census read the
+#: two EP doors as "appends NO record" the moment they declared a lane, which is
+#: the exact instrument gap this file's own header warns about ("an opener
+#: missing from `_SCOPE_CALL_NAMES` reported a writer that DOES declare as
+#: undeclared"). Both are real appends: each builds and emits the JSONL record
+#: (`_emit_edge_message` -> `EdgeMessageRecorded`, `_emit_edge_message_clear` ->
+#: `EdgeMessageCleared`), which is why widening the pattern is the fix rather
+#: than adding them to `_APPEND_NOT_A_RECORD`.
 
 #: The scope openers, PLUS the decorator that opens one around a whole door.
 #: `_onboarding_write_scope` is the onboarding funnel's own opener (`with
@@ -827,6 +839,12 @@ def _kind(fact) -> str:
             return "outside-lane"
         if openers & set(_APPLY_FIRST_LANE_NAMES):
             return "apply-first-declared"
+        if openers & {"_derived_recompute_write_scope"}:
+            # #9206 review P1: its own kind, NOT `declared` (the maximal-trust
+            # class). This lane appends nothing BY CONSTRUCTION, so labelling it
+            # `declared` would file an unjournalled write where the arming gate
+            # trusts most and where no "appends a record" requirement applies.
+            return "derived-recompute"
         return "declared"
     if not fact["appends"]:
         return "no-journal"
@@ -1027,6 +1045,71 @@ _APPLY_FIRST_DECLARED_DOORS = {
     "_write_capture_turns",
     "_materialize_session_source",
 }
+
+#: The apply-first lane's membership OUTSIDE `sdk.py`, pinned per module
+#: (#9206 review P1). The pin above enumerates `sdk.py` only, so before this a
+#: declaration in `ep.py`/`hosted_api.py` carried NO record/order/membership
+#: check at all — the lane's own stated failure mode (#9068) was unenforced
+#: everywhere outside one file, while the flip gate accepted those doors as
+#: declared. Enumerating the same surface and running the SAME offender function
+#: over each module closes that gap; the membership is exact per module.
+_APPLY_FIRST_DECLARED_DOORS_BY_MODULE = {
+    "sdk.py": _APPLY_FIRST_DECLARED_DOORS,
+    # #5380 states these records over the REMOVE's own committed set — the
+    # record cannot precede the drop it counts.
+    "ep.py": {"invalidate_messages", "invalidate_factor_messages"},
+    # The session-delete sweep: `EntityMutated` op=delete per removed node
+    # (keyed off the DELETE's own result) + `SessionDeleted` for the container.
+    "hosted_api.py": {"_delete_session_sync"},
+}
+
+
+def test_an_apply_first_declaration_outside_the_sdk_is_checked_too():
+    """The lane's honesty gate is PACKAGE-wide, not one-file (#9206 review P1).
+
+    `tortoise/ep.py` and `tortoise/hosted_api.py` reach the same decorator, so
+    they must pass the same four checks the `sdk.py` pin applies: a record IS
+    appended, every write runs inside the lane, the door is genuinely
+    apply-first, and its membership is pinned here. RED before the pins existed:
+    the two EP doors were accepted by the flip gate as declared while the census
+    (reading them through the `sdk.py`-only surface) never checked them, and its
+    append detector could not see `_emit_edge_message_clear` at all — so the
+    doors that DO append a record read as "appends nothing".
+    """
+    total = 0
+    for module, pinned in sorted(_APPLY_FIRST_DECLARED_DOORS_BY_MODULE.items()):
+        path = ROOT / "tortoise" / module
+        surface = enumerate_handle_surface(path.read_text(), str(path))
+        offenders, declared = _apply_first_declaration_offenders(surface)
+        assert not offenders, (
+            f"an apply-first declaration in {module} is not honest as written:\n  "
+            + "\n  ".join(offenders))
+        assert set(declared) == set(pinned), (
+            f"the apply-first membership in {module} changed. It is pinned "
+            "EXACTLY so the lane can only change with a reviewed line:\n"
+            f"  declared but not pinned: "
+            f"{sorted(set(declared) - set(pinned))}\n"
+            f"  pinned but not declared: "
+            f"{sorted(set(pinned) - set(declared))}")
+        total += len(declared)
+    assert total == len(_APPLY_FIRST_DECLARED_DOORS) + 3, (
+        "the per-module pins and the sdk pin disagree about how many doors "
+        f"carry the lane (counted {total})")
+
+
+def test_the_derived_recompute_lane_has_its_own_kind():
+    """The derived-recompute lane is NOT the census's maximal-trust `declared`.
+
+    It appends nothing by construction, so letting `_kind()` return the same
+    `"declared"` a journal-first door gets would put an unjournalled write in
+    the category the flip gate trusts most (#9206 review P1). It has its own
+    kind, and that kind is NOT accepted as "provable" for the arming gate.
+    """
+    assert _kind({"scopes": [(1, "_derived_recompute_write_scope")],
+                  "writes": [(2, "query", "SET n.x = 1")],
+                  "appends": [], "end_lineno": 3,
+                  "scope_spans": [(1, 3)]}) == "derived-recompute"
+
 
 #: Doors whose apply-first ORDER the census cannot prove: an append attributed
 #: to a NESTED function (or to another arm of the same body) satisfies
@@ -1272,10 +1355,38 @@ def test_every_live_declared_door_is_journal_first():
 #: would be refused by an armed handle. It is therefore absent from this pin on
 #: purpose: listing it would claim a coverage that no longer exists.
 _DECLARED_DOOR_NESTED_INVENTORIED = {
+    # #9124 part 1 (journal-first doors)
     "invalidate_point": {"_mark_dirty"},
     "retract_point": {"_mark_dirty"},
     "supersede_point": {"_mark_dirty"},
+    # #9206 (apply-first doors, + the capture writer whose turn store is the
+    # nested apply-first claim). MEASURED, not assumed: every one of these
+    # reaches `_mark_dirty`, which is inventoried `_NO_JOURNAL` — so the lane
+    # authorizes a write that appends no record, one call edge away from the
+    # per-function census. Pinning the edge is what forces a reviewed line for
+    # it; the write itself is a re-derivable flatten, which is why it is
+    # inventoried rather than journaled.
+    "update_point": {"_mark_dirty"},
+    "delete_point": {"_mark_dirty"},
+    "create_operator": {"_mark_dirty"},
+    "create_direct_edge": {"_mark_dirty"},
+    # Declared doors that reach NO inventoried helper — listed explicitly so a
+    # future nested no-journal call reds HERE rather than being absorbed by an
+    # unpinned door (a door absent from this dict is not measured at all).
+    "_update_entity": set(),
+    "_delete_entity": set(),
+    "_materialize_session_source": set(),
+    "_write_capture_turns": set(),
+    "_write_session_and_turns": set(),
+    "invalidate_messages": set(),
+    "invalidate_factor_messages": set(),
+    "_delete_session_sync": set(),
 }
+
+#: Every module whose declared doors the nested pin above measures. The lane is
+#: declared in three modules (`sdk.py`, `ep.py`, `hosted_api.py`), and a pin that
+#: parses one of them measures nothing for the other two (#9206 review P1).
+_DECLARED_DOOR_NESTED_MODULES = ("sdk.py", "ep.py", "hosted_api.py")
 
 
 def test_a_whole_door_lane_authorizes_only_the_pinned_nested_writes():
@@ -1290,20 +1401,23 @@ def test_a_whole_door_lane_authorizes_only_the_pinned_nested_writes():
     a claim that the listed writes are justified (that is the inventory entry's
     review, and `_mark_dirty`'s writes are a re-derivable flatten).
     """
-    tree = ast.parse(SDK_PY.read_text(), str(SDK_PY))
+    tree = None  # per-module below; `ast.walk` needs one tree at a time
     inventoried = (_NO_JOURNAL | _APPLY_FIRST_HELPERS | _APPLY_FIRST_DOORS
                    | _MIXED_ARM_DOORS)
     measured: dict[str, set[str]] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
-                and node.name in _DECLARED_DOOR_NESTED_INVENTORIED:
-            calls = {
-                callee for sub in ast.walk(node) if isinstance(sub, ast.Call)
-                for callee in [getattr(sub.func, "attr", None)
-                               or getattr(sub.func, "id", None)]
-                if callee in inventoried
-            }
-            measured[node.name] = calls
+    for module in _DECLARED_DOOR_NESTED_MODULES:
+        path = ROOT / "tortoise" / module
+        tree = ast.parse(path.read_text(), str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                    and node.name in _DECLARED_DOOR_NESTED_INVENTORIED:
+                calls = {
+                    callee for sub in ast.walk(node) if isinstance(sub, ast.Call)
+                    for callee in [getattr(sub.func, "attr", None)
+                                   or getattr(sub.func, "id", None)]
+                    if callee in inventoried
+                }
+                measured.setdefault(node.name, set()).update(calls)
     missing = set(_DECLARED_DOOR_NESTED_INVENTORIED) - set(measured)
     assert not missing, (
         "a pinned declared door is not in the source, so the pin measures "

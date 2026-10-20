@@ -2684,12 +2684,13 @@ class _EntityHandlers:
             sets.append("s.created_at=coalesce(s.created_at, $created_at)")
             params["created_at"] = created_at
         # #3516 §B: the producer lane. Folded with coalesce (first writer wins)
-        # to MATCH the live capture write, which is also first-writer-wins. No
-        # producer journals this field YET: no caller passes `capture_lane` to a
-        # journaling writer (the hosted lane passes a journaling callback since
-        # #9206, but still no lane; the SDK lane passes one but never a lane),
-        # so this is a GUARD for the first journaling lane (the store-sync CLI),
-        # not a parity property that holds today.
+        # to MATCH the live capture write, which is also first-writer-wins.
+        # #9206: this arm is LIVE, not a guard — the hosted capture lane passes
+        # `capture_lane` to the shared writer, and that writer now journals it
+        # itself in `SessionRecorded` (measured: `capture_lane="hook"` restores
+        # across a journal-only rebuild). No caller passes `on_session_merged`
+        # any more: the writer IS the journal carrier, so the coalesce below is
+        # the live/replay parity rule, not a future guard.
         lane = ev.get("capture_lane")
         if lane is not None and _annotator_value_ok(lane):
             sets.append("s.capture_lane=coalesce(s.capture_lane, $v_capture_lane)")
@@ -2742,6 +2743,17 @@ class _EntityHandlers:
             if val is not None and _annotator_value_ok(val):
                 sets.append(f"s.{prop}=$v_{prop}")
                 params[f"v_{prop}"] = val
+        # #9206 (review P1): the two ATTRIBUTION props the same session MERGE
+        # writes. Set-if-absent on BOTH sides (the live clause is a `coalesce`),
+        # so a later producer cannot relabel the machine/model that captured the
+        # session — and a journal-only rebuild keeps them instead of restoring
+        # the node without either (measured before this arm).
+        for _prop, _param in (("machine_id", "v_machine_id"),
+                              ("model", "v_model")):
+            _val = ev.get(_prop)
+            if _val is not None and _annotator_value_ok(_val):
+                sets.append(f"s.{_prop}=coalesce(s.{_prop}, ${_param})")
+                params[_param] = _val
         sets.append("s.is_episodic=true")
         if ev.get("actor_user_id") is not None:
             uid = ev["actor_user_id"]

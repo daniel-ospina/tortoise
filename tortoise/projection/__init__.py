@@ -3944,12 +3944,14 @@ def _apply_first_write_scope(reason: str):
       can only state the weaker claim, so it states the weaker claim.
     * the mechanical apply-first doors (#9206) — `create_operator`,
       `create_direct_edge`, `_update_entity`, `_delete_entity`,
-      `_write_session_and_turns`, `_write_capture_turns` and
-      `_materialize_session_source` build their record from the node they just
-      wrote (the snapshot, the landed row count, the emitted id), and moving
-      the record above the write changes each door's commit contract — the
-      decision #9124 part 2 defers per door, not a reordering a lane may take
-      on its own.
+      `_write_capture_turns` and `_materialize_session_source` build their
+      record from the node they just wrote (the snapshot, the landed row count,
+      the emitted id), and moving the record above the write changes each
+      door's commit contract — the decision #9124 part 2 defers per door, not a
+      reordering a lane may take on its own. ⚠️ `_write_session_and_turns` is NOT
+      in that group: it declares the STRONGER `_declares_live_write_lane` (it
+      appends `SessionRecorded` before its `:Session` MERGE, #9206), and only its
+      nested turn store is apply-first.
 
     ⛔ WHAT THIS LANE MAY NEVER COVER — the #9068 defect, and the reason this
     is a DECLARATION and not a bypass. The lane authorizes writes for which a
@@ -3986,10 +3988,11 @@ def _declares_apply_first_write_lane(reason: str):
     The decorator form of `_apply_first_write_scope`, for the doors whose write
     region IS the body (`update_point`, `delete_point`, `create_operator`,
     `create_direct_edge`, `_update_entity`, `_delete_entity`,
-    `_write_session_and_turns`, `_write_capture_turns`,
-    `_materialize_session_source`) — a hand-placed ``with`` would reindent
-    hundreds of lines and bury the semantic change (the declaration) in a
-    mechanical one.
+    `_write_capture_turns`, `_materialize_session_source`) — a hand-placed
+    ``with`` would reindent hundreds of lines and bury the semantic change (the
+    declaration) in a mechanical one. The `ep.py` and `hosted_api.py` doors
+    (`invalidate_messages`, `invalidate_factor_messages`,
+    `_delete_session_sync`) take it the same way.
 
     ⛔ IT IS ONLY HONEST FOR A DOOR THAT APPENDS A RECORD AND IS GENUINELY
     APPLY-FIRST, and both halves are checked rather than described:
@@ -4001,10 +4004,12 @@ def _declares_apply_first_write_lane(reason: str):
     the set can only change with a reviewed line.
 
     ⛔ IT ALSO AUTHORIZES EVERY NESTED CALL, exactly like the journal-first
-    decorator: `update_point` reaches `_mark_dirty`, and `_write_session_and_turns`
+    decorator: `update_point` reaches `_mark_dirty`, and the capture writer
     reaches `_write_capture_turns`. Those edges are pinned by the same
-    nested-writes test, so a new no-journal write reached from a declared door
-    must be reviewed instead of being assumed blessed.
+    nested-writes test (`_DECLARED_DOOR_NESTED_INVENTORIED`), which derives its
+    population from the DECLARED doors (both lane families, every module), so a
+    new no-journal write reached from a declared door must be reviewed instead
+    of being assumed blessed.
 
     A per-call ContextVar scope, released in a ``finally`` (the ``with``), so a
     raising door cannot leak its authorization into the caller's next write. An

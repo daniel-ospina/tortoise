@@ -266,3 +266,122 @@ def test_the_lane_is_not_a_bypass(armed_sdk, enforced):
         proj.g.query("MATCH (n:Point {id:$id}) SET n.x = 1", params={"id": "p1"})
     with pytest.raises(DirectCacheWriteRefused):
         proj.g.query("CREATE (n:Point {id:'9206-bypass'})")
+
+
+# ── the record must DESCRIBE the write it precedes (review P1, #9206) ───────
+#
+# `_write_session_and_turns` declares the JOURNAL-FIRST lane, so the record it
+# appends must describe every property its `:Session` MERGE writes — otherwise
+# the claim is true about the ORDER and false about the CONTENT, and a
+# journal-only rebuild restores a node the live graph never had. Measured
+# before these pins existed: a hosted capture came back with neither
+# `machine_id` nor `model` (the API then serves null attribution).
+
+
+def test_the_session_record_carries_every_property_its_merge_writes():
+    """One invariant, checked against the source: MERGE props ⊆ record keys.
+
+    Driven over the AST so the record's own docstrings (which quote the Cypher)
+    are not read as code, and so a NEW conditional clause added to `merge_sets`
+    reds here until it is also carried by `session_record`.
+    """
+    import ast
+    import re
+
+    from tortoise import sdk as sdk_mod
+
+    tree = ast.parse(Path(sdk_mod.__file__).read_text())
+    fn = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_write_session_and_turns")
+
+    merge_props: set[str] = set()
+    record_keys: set[str] = set()
+    for node in ast.walk(fn):
+        # `merge_sets.append("s.<prop>=…")` — the conditional clauses.
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "append"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "merge_sets"):
+            for arg in node.args:
+                text = arg.value if isinstance(arg, ast.Constant) else ""
+                merge_props |= set(re.findall(r"\bs\.(\w+)\s*=", str(text)))
+        # `session_record = {…}` / `session_record: dict = {…}` — the
+        # unconditional keys (`_write_session_and_turns` uses an AnnAssign).
+        if (isinstance(node, ast.AnnAssign)
+                and isinstance(node.value, ast.Dict)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == "session_record"):
+            for key in node.value.keys:
+                if isinstance(key, ast.Constant):
+                    record_keys.add(str(key.value))
+        if (isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Dict)
+                and any(isinstance(t, ast.Name) and t.id == "session_record"
+                        for t in node.targets)):
+            for key in node.value.keys:
+                if isinstance(key, ast.Constant):
+                    record_keys.add(str(key.value))
+        # `session_record["<key>"] = …` — the conditional keys.
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (isinstance(target, ast.Subscript)
+                        and isinstance(target.value, ast.Name)
+                        and target.value.id == "session_record"
+                        and isinstance(target.slice, ast.Constant)):
+                    record_keys.add(str(target.slice.value))
+
+    # The UNCONDITIONAL clauses of the base field list.
+    base = next(
+        node for node in ast.walk(fn)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "merge_sets"
+                for t in node.targets))
+    assert isinstance(base.value, ast.List), (
+        "the base field list is no longer a literal list — this pin cannot read "
+        "it, so re-derive the invariant instead of deleting it")
+    for elt in base.value.elts:
+        if isinstance(elt, ast.Constant):
+            merge_props |= set(re.findall(r"\bs\.(\w+)\s*=", str(elt.value)))
+
+    assert merge_props, "the pin read no MERGE properties — it would be vacuous"
+    missing = sorted(merge_props - record_keys)
+    assert not missing, (
+        "the record does not describe every property the :Session MERGE "
+        f"writes: {missing}. This door declares the JOURNAL-FIRST lane, so a "
+        "journal-only rebuild would restore the node WITHOUT them (measured: "
+        "machine_id/model). Add the key to `session_record` and the coalesce-"
+        "preserving arm to `_fold_session_recorded`.")
+
+
+def test_the_fold_restores_the_attribution_props(armed_sdk):
+    """`machine_id`/`model` survive the fold — the record's other half.
+
+    The source pin above proves the record CARRIES them; this proves the fold
+    APPLIES them, set-if-absent exactly as the live `coalesce` does.
+    """
+    proj = armed_sdk._get_proj()
+    sid = "sess_9206_attribution"
+    proj._fold_session_recorded({
+        "type": "SessionRecorded", "id": sid, "turn_count": 2,
+        "is_episodic": True, "harness": "pi",
+        "machine_id": "machine-A", "model": "mdl-2026"})
+    rows = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.machine_id, s.model",
+        params={"sid": sid}).result_set
+    assert rows and rows[0][0] == "machine-A" and rows[0][1] == "mdl-2026", (
+        f"the fold dropped the attribution props the record carries: {rows!r}")
+
+    # Set-if-absent, exactly like the live `coalesce`: a later producer cannot
+    # relabel the machine that captured the session.
+    proj._fold_session_recorded({
+        "type": "SessionRecorded", "id": sid, "machine_id": "machine-B",
+        "model": "mdl-OTHER"})
+    rows = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.machine_id, s.model",
+        params={"sid": sid}).result_set
+    assert rows and rows[0][0] == "machine-A" and rows[0][1] == "mdl-2026", (
+        "the fold is not first-writer-wins — a later record relabelled the "
+        f"capture's machine/model, which the live coalesce would not: {rows!r}")

@@ -2532,7 +2532,9 @@ def _write_session_and_turns(
       * ``on_session_merged`` is an OBSERVER hook fired after the MERGE. It is
         NOT the journal carrier any more (#9206: this writer appends
         ``SessionRecorded`` itself, before the MERGE), so ``None`` — or any
-        observer — costs nothing in durability.
+        observer — costs nothing in durability. ⚠️ No caller passes one today (the
+        SDK lane's was removed with the same change; hosted never had one), so
+        the hook exists for observers only.
 
     ⛔ §17.1 (#9206): this writer carries `@_declares_live_write_lane` — it
     appends its OWN `SessionRecorded` before the `:Session` MERGE, so the MERGE
@@ -2551,8 +2553,10 @@ def _write_session_and_turns(
     reuses them for its entity-link pass instead of re-scrubbing) and the total
     redaction count — plus the rest of the post-write state (the offset-aware
     turn ids, the per-kind redaction counts, the ``Session`` record and the
-    MERGE params), which nothing reads today. The journal emit rides the
-    ``on_session_merged`` callback, not the returned ``session_record``.
+    MERGE params), which nothing reads today. The journal emit is THIS BODY'S
+    OWN (``_emit_event("SessionRecorded", **session_record)``, before the MERGE
+    — #9206); ``session_record`` is the same dict it passes, and
+    ``on_session_merged`` is an observer hook that journals nothing.
     """
     turn_count = len(turns)
     # The canonical :Session field list. Order is load-bearing only in that it
@@ -2638,9 +2642,19 @@ def _write_session_and_turns(
     if machine_id:
         merge_sets.append("s.machine_id=coalesce(s.machine_id, $mid)")
         merge_params["mid"] = machine_id
+        # Same set-if-absent rule in the RECORD (#9206 review P1): this MERGE is
+        # declared journal-first, so every property it writes must be described
+        # by the record that precedes it or a journal-only rebuild restores the
+        # node WITHOUT it — measured: a hosted capture came back with neither
+        # `machine_id` nor `model`, i.e. the API served null attribution for the
+        # machine that captured the session. The fold's matching arm is
+        # `_fold_session_recorded`'s (also a coalesce, so live first-writer-wins
+        # and replay agree).
+        session_record["machine_id"] = machine_id
     if model:
         merge_sets.append("s.model=coalesce(s.model, $model)")
         merge_params["model"] = model
+        session_record["model"] = model
     # #9206 §17.1: THE RECORD IS APPENDED HERE, BEFORE THE MERGE, by the writer
     # itself. Two defects are closed in one line and they share a cause (a
     # record whose emission belonged to the CALLER):
@@ -11265,11 +11279,46 @@ class TortoiseSDK:
         ).result_set
         prior_valid_from = _rows[0][0] if _rows else None
         prior_is_episodic = _rows[0][1] if _rows else None
+        # ⛔ §17.1 ORDER (#9206 review P1): THE RECORD IS APPENDED HERE, BEFORE
+        # the `link_source_to_event` write below — not after it (where it used to
+        # sit), and BEFORE the record's own explanatory block explains why it is
+        # `SourceCreated`. Reasons, in the order that matters:
+        #   * this door's lane authorizes BOTH writes, so a raise between them
+        #     must not be able to leave the MERGE standing with no record. It
+        #     CAN: both callers of this helper swallow the exception
+        #     (`capture_session` logs a warning and continues; the hosted lane
+        #     turns it into an additive warning and still returns 200), which is
+        #     deliberate — a provenance failure must not fail a capture — so a
+        #     post-link emit would be SKIPPED on exactly the path that needs it
+        #     most.
+        #   * nothing in the payload comes from the link: `prior_valid_from` /
+        #     `prior_is_episodic` are read back from the MERGE above, in the same
+        #     statement, and `eventId` is the caller's own argument.
+        # The record therefore precedes both writes it describes.
+        self._emit_event(
+            "SourceCreated", id=url,
+            url=url,
+            sourceKind="agentSession",
+            contentHash=content_hash,
+            title=None,
+            ingestedAt=now,
+            updatedAt=now,
+            validFrom=prior_valid_from,
+            is_episodic=prior_is_episodic,
+            _stub_completion=True,
+            **{SOURCE_SEARCH_TEXT_FIELD: search_text},
+            sessionId=session_id,
+            capturedAt=now,
+            summary=summary,
+            topics=topics,
+            **(({"eventId": event_id}) if event_id else {}),
+        )
         if event_id:
             # Anchored ON CREATE by the shared derivation writer (#5199).
+            # AFTER the record on purpose — see the order note above.
             proj.link_source_to_event(url, event_id)
-        # ⛔ THE RAW MERGE ABOVE NEEDS A JOURNAL CARRIER (lane L5 #5097, gate
-        # item 2). It is a raw graph SET on the capture path, and the rule for
+        # ⛔ WHY THAT RECORD EXISTS AT ALL — THE RAW MERGE ABOVE NEEDS A JOURNAL
+        # CARRIER (lane L5 #5097, gate item 2). It is a raw graph SET on the
         # those is ALREADY recorded on this lane (`_write_capture_turns`'s
         # `capture_redactions` note a few hundred lines up): a raw SET with no
         # trailing record makes live and replay diverge, so a rebuild silently
@@ -11327,24 +11376,6 @@ class TortoiseSDK:
         # is the same unjournaled-writer class one writer upstream, not
         # something this record can fix; the recorded value is emitted anyway so
         # the ON CREATE path (no stub) is faithful.
-        self._emit_event(
-            "SourceCreated", id=url,
-            url=url,
-            sourceKind="agentSession",
-            contentHash=content_hash,
-            title=None,
-            ingestedAt=now,
-            updatedAt=now,
-            validFrom=prior_valid_from,
-            is_episodic=prior_is_episodic,
-            _stub_completion=True,
-            **{SOURCE_SEARCH_TEXT_FIELD: search_text},
-            sessionId=session_id,
-            capturedAt=now,
-            summary=summary,
-            topics=topics,
-            **(({"eventId": event_id}) if event_id else {}),
-        )
 
     # ── Update / Delete consolidation (epic #888 W2, PR #912) ─────────
     # One update()/delete() for Points AND entities. The legacy methods
@@ -15042,12 +15073,16 @@ class TortoiseSDK:
                 ),
                 what="create_operator source promote SET",
             )
-        # Dreaming (#85): new edges change propagation — mark all inputs dirty.
-        self._mark_dirty(inputs)
-        # Epic 903-C4 (#1242): a new operator changes the factor graph —
-        # existing direct-edge messages around its endpoints may be stale
-        # (a formerly operator-less claim now has an operator). Drop seeds.
-        self._get_ep().invalidate_messages(inputs)
+        # §17.1 ORDER (#9206 review P2): the two CONSISTENCY writes below
+        # (`_mark_dirty`, the EP message drop) are moved AFTER the record, not
+        # before it. They authorize under this door's lane, and either can raise
+        # on a transport abort — with the record last, that raise left the
+        # operator node and its IMPL/NAND/INPUT edges live with NO
+        # `OperatorAdded`, so a rebuild dropped an operator the graph still
+        # holds (the #7951 2b "applied with no record" shape `update_point`'s
+        # promote arm documents). Neither write is needed to state the record:
+        # both are derived-cache housekeeping over a write that has already
+        # landed, so a failure there is recoverable while a lost record is not.
         result = self.get_point(pid)
         # #1934: merge the structured warnings into the result (warn-not-block
         # contract — consumers may surface or ignore; the shape is stable).
@@ -15061,6 +15096,12 @@ class TortoiseSDK:
             "id": pid, "op_type": op_type, "source_id": source_id,
             "target_ids": list(target_ids),
         }, point=event_point)
+        # Dreaming (#85): new edges change propagation — mark all inputs dirty.
+        self._mark_dirty(inputs)
+        # Epic 903-C4 (#1242): a new operator changes the factor graph —
+        # existing direct-edge messages around its endpoints may be stale
+        # (a formerly operator-less claim now has an operator). Drop seeds.
+        self._get_ep().invalidate_messages(inputs)
         return result
 
     # ── Operator action consolidation (epic #888 W2) ──────────────────

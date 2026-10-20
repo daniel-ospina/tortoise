@@ -13868,10 +13868,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # of client-controlled text.
     #
     # #9206: THE SHARED WRITER JOURNALS ITS `:Session` NODE. Hosted used to pass
-    # no `on_session_merged`, so this lane's `MERGE (s:Session …)` was
+    # no `on_session_merged`, so this lane's session-container MERGE was
     # UNJOURNALLED — a raw graph write with no record, which a journal-only
     # `rebuild()`/`recover_from_log` drops. Since #9206 the shared writer emits
     # `SessionRecorded` itself, BEFORE the MERGE, so no caller can forget it.
+    # (This comment deliberately does NOT spell that statement out: a guard in
+    # `tests/test_write_session_and_turns_3551.py` asserts the shared primitive
+    # is the only carrier of the session-merge text, prose included.)
     _capture_write = await _run_off_loop(
         _CAPTURE_EXECUTOR, _write_session_and_turns, proj, sdk, session_id,
         windowed, now=now, harness=capture_harness,

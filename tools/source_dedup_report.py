@@ -180,13 +180,26 @@ def main(argv: list[str] | None = None) -> int:
                 cu = normalize_source_url(s["url"])
                 if not cu:
                     continue
-                sdk._get_proj().g.query(
-                    "MATCH (s:Source {url:$url}) SET s.canonicalUrl=$cu, "
-                    "s.urlAliases = CASE WHEN $url IN coalesce(s.urlAliases,[]) "
-                    "  THEN coalesce(s.urlAliases,[]) "
-                    "  ELSE coalesce(s.urlAliases,[]) + [$url] END",
-                    params={"url": s["url"], "cu": cu},
-                )
+                # §17.1 LANE (#9206): DERIVED-RECOMPUTE, DECLARED — the same
+                # lane, for the same reason, as `source_identity.
+                # resolve_source_key`'s adopt-on-touch: `canonicalUrl` is
+                # `normalize_source_url(url)`, a pure function of the node's own
+                # `url`, and the replay lane re-derives it (`_mint_source_stub` /
+                # `_upsert_source`). Without the declaration this OPERATOR-FACING
+                # repair path would be refused the moment §17.1's handle is armed
+                # on a journal-bound deployment — i.e. the recovery procedure the
+                # lane's own disclosure points at would be disabled by the very
+                # arming it prepares for.
+                from tortoise.projection import _derived_recompute_write_scope
+                with _derived_recompute_write_scope(
+                        f"tools.source_dedup_report:backfill:{s['url']}"):
+                    sdk._get_proj().g.query(
+                        "MATCH (s:Source {url:$url}) SET s.canonicalUrl=$cu, "
+                        "s.urlAliases = CASE WHEN $url IN coalesce(s.urlAliases,[]) "
+                        "  THEN coalesce(s.urlAliases,[]) "
+                        "  ELSE coalesce(s.urlAliases,[]) + [$url] END",
+                        params={"url": s["url"], "cu": cu},
+                    )
                 adopted += 1
             if not args.json:
                 print(f"backfilled canonicalUrl on {adopted} legacy Source node(s)")

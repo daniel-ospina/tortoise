@@ -278,18 +278,26 @@ def test_the_recompute_lane_has_exactly_one_writer_in_the_package():
     §17.1's lanes are a small closed set and each one is a claim about a
     specific write class; a fallback lane is exactly the kind that grows if
     nobody counts. This is a census, so it is written against the SOURCE (a
-    grep the next reader can repeat), and it names the one writer it expects.
+    grep the next reader can repeat), and it names the writers it expects.
+
+    ⛔ `tools/` IS IN SCOPE (#9206 review P2): the lane's own disclosure points
+    operators at `tools/source_dedup_report.py --backfill`, and that tool issues
+    the SAME statement — so it is a writer of this class, and a census bounded
+    to `tortoise/` could not see it while the arming this PR prepares would
+    refuse the repair path it recommends.
     """
-    root = Path(__file__).resolve().parent.parent / "tortoise"
+    root = Path(__file__).resolve().parent.parent
     writers: dict[str, int] = {}
-    for path in sorted(root.rglob("*.py")):
-        text = path.read_text(encoding="utf-8", errors="replace")
-        n = text.count("_derived_recompute_write_scope(")
-        if n:
-            writers[str(path.relative_to(root))] = n
+    for sub in ("tortoise", "tools"):
+        for path in sorted((root / sub).rglob("*.py")):
+            text = path.read_text(encoding="utf-8", errors="replace")
+            n = text.count("_derived_recompute_write_scope(")
+            if n:
+                writers[str(path.relative_to(root))] = n
     assert writers == {
-        "projection/__init__.py": 1,   # the definition
-        "source_identity.py": 1,       # the ONE writer
+        "tortoise/projection/__init__.py": 1,      # the definition
+        "tortoise/source_identity.py": 1,          # the resolver's adoption
+        "tools/source_dedup_report.py": 1,         # the named repair path
     }, (
         "the derived-recompute lane is used somewhere new — check that the "
         "write is a PURE FUNCTION of journal-carried input and appends "
