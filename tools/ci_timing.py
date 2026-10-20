@@ -402,19 +402,30 @@ def paid_vs_selected(jobs: list[dict], selection: dict, durations: dict,
 DURATION_RE = re.compile(r"^(\d+\.\d+)s\s+(call|setup|teardown)\s+(\S+)")
 COUNT_RE = re.compile(r"(\d+)\s+(passed|failed|error|skipped|xfailed|xpassed)")
 V_PROGRESS_RE = re.compile(r"^(tests/\S+?\.py::[^\s]+?)\s+(PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)\b")
-# The session-summary line, matched by SHAPE: it is the line that reports how long
-# the run took. `no tests ran` / `N deselected` carry no count token, so a
-# count-based test called an honest empty leg "truncated" (#9134 review, P1).
+# The session-summary line is what pytest prints LAST: it reports how long the
+# session took. Matching any line that merely mentions a duration certified
+# truncated legs as complete — pytest echoes a failing test's captured stdout at
+# column 0, so `===== warmup in 1.23s =====` inside a FAILURES block closed the
+# disclosure and dropped that leg's real failures (#9134 review, P1). The scan is
+# therefore anchored to the end of the log, which is where pytest puts the summary.
 _SUMMARY_IN_RE = re.compile(r"\bin \d+(?:\.\d+)?s\b")
 
 
 def _is_summary_line(line: str) -> bool:
-    """True for pytest's session-summary line, in banner and banner-less forms."""
+    """True for pytest's session-summary line, in banner and banner-less forms.
+
+    Banner form: `= 10 passed in 3.00s =`, `==== no tests ran in 0.01s ====`.
+    Banner-less: `1 failed, 3 passed in 0.04s` (pytest -q), `2 deselected in 0.1s`.
+    """
     stripped = line.strip()
-    if not _SUMMARY_IN_RE.search(stripped):
+    if not stripped or not _SUMMARY_IN_RE.search(stripped):
         return False
-    return (stripped.startswith("=") or stripped.startswith("no tests ran")
-            or " deselected" in stripped or " warning" in stripped)
+    # A summary NAMES what happened — a count, `no tests ran`, or a deselection.
+    # A banner alone is not enough: captured stdout is echoed at column 0, so
+    # `===== warmup in 1.23s =====` inside a FAILURES block would otherwise certify
+    # a truncated leg as complete and drop its real failures (#9134 review, P1).
+    return bool(COUNT_RE.search(stripped) or "no tests ran" in stripped
+                or " deselected" in stripped)
 
 
 R_SUMMARY_RE = re.compile(r"^(FAILED|ERROR)\s+(tests/\S+?\.py::[^\s]+)")
@@ -473,6 +484,11 @@ def parse_log(path: Path) -> dict:
                 # turned one unreadable log into a KeyError that killed the whole
                 # artifact run instead of degrading that leg (#9134 review, P2).
                 "summary_seen": False}
+
+    # Any line that NAMES the outcome counts as the summary: a leg's summary is not
+    # always the last line (two legs in the sample end with trailing output after
+    # it), and anchoring to the end published complete legs as truncated.
+    summary_seen = any(_is_summary_line(ln) for ln in lines)
 
     for line in lines:
         # #1477 review P2: the WATCHDOG banner is shell-echoed to the step's
@@ -556,8 +572,6 @@ def parse_log(path: Path) -> dict:
         # Requiring a COUNT token missed the last two (neither names a count), and
         # matching only `-q`'s banner-less form missed the banner form that every
         # `-v` CI leg actually prints (#9134 review, P1).
-        if _is_summary_line(line):
-            summary_seen = True
         if line.startswith("=") and COUNT_RE.search(line):
             for n, key in COUNT_RE.findall(line):
                 if key in counts:
@@ -2591,8 +2605,6 @@ def main() -> int:
         "steps_total_ms": sum(s["duration_ms"] for job in steps.values() for s in job),
         "steps_max_job_ms": max((sum(s["duration_ms"] for s in job) for job in steps.values()), default=0),
         "failed_tests": sorted(failed_tests),
-        "sampled_at": (os.environ.get("CI_TIMING_NOW")
-                       or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")),  # noqa: UP017
     }
     # Dedupe by identity, not position: running the generator twice under the same
     # frozen CI_TIMING_NOW appended the SAME sample twice, so the artifact's history
@@ -2600,8 +2612,11 @@ def main() -> int:
     # committed bytes stopped being any single invocation's output (#9134 review, P2).
     history: list[dict] = []
     seen: set[tuple[object, object]] = set()
-    for h in [row, *load_history(json_path)]:
-        key = (h.get("run_id"), h.get("sampled_at"))
+    for h in [row, *load_history(json_path)]:  # noqa: RUF005
+        # Legacy rows predate `sample_time`; falling back to None is deliberate — two
+        # pre-existing identical rows (the duplicate this fixes) both key to None and
+        # collapse, while two honest samples of one run keep distinct sample times.
+        key = (h.get("run_id") or h.get("sha"), h.get("sample_time"))
         if key in seen:
             continue
         seen.add(key)
