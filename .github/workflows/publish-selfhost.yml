@@ -12,8 +12,8 @@ on:
     # changes. Without this, every merge — docs-only ones included — rebuilt
     # and pushed an identical image (~40 runs/day at 6–15 min ≈ 9h of runner
     # time). This is the exact build-input set of Dockerfile.selfhost
-    # (build context `.`): its COPY directives plus the files that shape the
-    # build context, and nothing else.
+    # (build context `.`): the COPY directives whose content the image can
+    # OBSERVE, plus the files that shape the build context, and nothing else.
     #   Dockerfile.selfhost            the build recipe itself
     #   .dockerignore                  mutates the build context (it excludes
     #                                  e.g. tortoise/*.egg-info from COPY)
@@ -31,6 +31,13 @@ on:
     # build — requirements.txt is the exported artifact the Dockerfile
     # installs, so a lock-only change cannot alter the image); Dockerfile.hosted,
     # docker-compose.yml and fly.toml (different artifacts, not build inputs).
+    # DELIBERATELY NOT listed, though COPY'd (#9231): supabase/migrations/ — the
+    # record's schema ships as a mapped package and the reader is NAME-GATED
+    # (`record_projection._read_migrations()` reads only its `RECORD_MIGRATIONS`
+    # tuple, no glob), so a migrations-only change cannot alter anything the
+    # image serves; `tortoise/**` already covers a change that can. Same answer
+    # as `deploy-hosted.yml`'s paths filter, and the same reason — keep the two
+    # in step (#9326 review P2).
     # Tag pushes are unaffected: GitHub does not evaluate `paths` for tag
     # pushes, so every `v*` release still builds and publishes.
     paths:

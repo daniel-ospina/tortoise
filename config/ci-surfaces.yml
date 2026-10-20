@@ -1393,6 +1393,20 @@ surfaces:
   # even on a push, whose fast pool is built from the manifest, not from the
   # `tests/` glob).
   - test_9190_journal_position.py
+  # #9325/#9326: the record's schema ships as a MAPPED package
+  # (`pyproject.toml` `package-dir` -> `supabase/migrations`), so BOTH Dockerfiles
+  # must COPY that tree or the editable install cannot resolve — and the two
+  # workflows that build them must give the SAME answer on whether the tree is a
+  # rebuild trigger. `core` because the name-gate half pins
+  # `tortoise/record_projection.py` (the `core` fallback). A workflow-only diff
+  # (`.github/workflows/*.yml` is unclassified -> FULL matrix) runs this file
+  # regardless; this entry is what makes it classify at all — `--integrity` reds
+  # an unclassified test file, and a PUSH leg's fast pool is built from the
+  # manifest, not from the `tests/` glob, so without it the file also runs
+  # NOWHERE on a push. Its `test_the_record_reader_is_name_gated` is the evidence
+  # under the 'not a trigger' answer: delete it only together with a real
+  # runtime reader of the directory (see the module docstring).
+  - test_9231_record_migrations_trigger.py
   - test_kind_vocabulary_consistency.py
   # #9123 (§17.1's THIRD lane): the `:EpMeta` epoch declaration. BOTH its
   # subjects — `tortoise/projection/__init__.py` (the new
