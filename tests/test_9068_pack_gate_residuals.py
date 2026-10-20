@@ -23,10 +23,16 @@ cardinality, because a count is the part that goes stale:
   the append, and `test_the_record_door_gates_before_the_append` measures that
   ordering instead of taking this bullet's word for it;
 * the journal-first seam every pipeline writes through — `api.EventAPI._emit`
-  (`#8982`) and `mining.ConversationMiner._emit_event`;
+  (`#8982`), `mining.ConversationMiner._emit_event` and
+  `sdk._journal_event_raw_write` (`#9197`);
 * the hosted commit door's pre-validation (`hosted_api.commit_session`), and the
   two `POST /v1/{objects,subjects}` doors (`hosted_api.create_object` /
-  `hosted_api.create_subject`, via `_require_approved_kind`, #8380).
+  `hosted_api.create_subject`, via `_require_approved_kind`, #8380);
+* the connector folds that write into a JOURNAL-LESS projection, where the cache
+  is the store (#9068) — `connectors/github.py`'s `ingest` and
+  `_fold_webhook_event`, `connectors/linear.py`'s `ingest`, and
+  `connectors/slack.py`'s `ingest` and `_fold_webhook_event`, each through the
+  shared `connectors._gate_kinds` helper.
 
 "And no others" is not prose either: `test_the_door_inventory_is_the_declared_doors_and_no_others`
 re-derives the inventory from the #5475 gate CALL SITES by AST, so a NEW
@@ -71,7 +77,7 @@ looking, and several writers still widen the set today. `#9068` records that;
 this module makes it a *measurement* instead of prose, so the claim's true
 scope is executable and cannot drift back:
 
-* **CENSUS: 13 PASS, 2 XFAIL, 15 total** — recomputed from this file's own AST
+* **CENSUS: 14 PASS, 1 XFAIL, 15 total** — recomputed from this file's own AST
   by `test_the_header_census_matches_this_file`, so this paragraph cannot drift
   again (it did: it said "six" while the file defined nine). The passing tests
   pin the SCOPE and the pin MECHANIC — the door inventory (below); the completeness of
@@ -87,12 +93,12 @@ scope is executable and cannot drift back:
   newest inventory row); the deliberate data-mining leg the gate's back-compat
   rests on; and the **declared** departure (offline re-typing), which PASSES
   because it is the posture rather than a defect;
-* the two XFAILs are `xfail(strict=True, raises=AssertionError)` on the **fixed**
-  behaviour of the two residuals nothing is currently fixing, so closing either
-  one XPASSes its pin and FAILS the suite on purpose rather than letting the pin
+* the one XFAIL is `xfail(strict=True, raises=AssertionError)` on the **fixed**
+  behaviour of the one residual nothing is currently fixing, so closing it
+  XPASSes its pin and FAILS the suite on purpose rather than letting the pin
   rot — the idiom `tests/test_url_keyed_source_write_4649.py` uses for `#5048`.
 
-Both pins are ``xfail(strict=True, raises=AssertionError)``, and each half of
+That pin is ``xfail(strict=True, raises=AssertionError)``, and each half of
 that marker is load-bearing: ``strict`` alone reacts to the ASSERTION, so a pin
 body that raised for ANY other reason would be recorded as an expected failure
 forever — pytest swallows such a raise even when it comes from a FIXTURE, not
@@ -110,31 +116,52 @@ delete the pin), and a pin whose precondition or seam silently changed shape
 reds the suite instead of staying green and stale.
 
 The approved set is `:PackInstall` records **∪** the namespaces mined out of
-the graph's own data (`pack_state.graph_kind_namespaces`, 8 node properties,
-label-agnostic). So "a write widened the set" is a one-line, observable fact:
+the graph's own data (`pack_state.graph_kind_namespaces`, 8 node properties —
+label-agnostic for the seven QUALIFIED spellings, and scoped to the ontology
+labels for the bare `kind` slot since #9068). So "a write widened the set" is a
+one-line, observable fact:
 read the set before, perform ONE write, read it after.
 
 ## What is measured here, and what is only NAMED
 
 **Widening at HEAD, pinned here** (nothing is fixing these):
 
-1. **`:Pipeline.kind` is a mined property** — `pipeline._write_pipeline` writes
-   ``SET p.kind = $kind`` with the pipeline KEY as the value, and
-   `graph_kind_namespaces` scans `kind` label-agnostically, so a procedural
-   config row grants its namespace. Gating the writer alone is not available
-   (the key IS a real ``ns:kind`` spelling, so a gate there would refuse
-   legitimate pipeline edits), and dropping `kind` from the scanned keys
-   narrows the back-compat union — so this is a **decision about the pipeline
-   model**, recorded on `#9068`, not a mechanical patch. **XFAIL.**
+1. **A bare write STRAIGHT into a projection** — a THIRD-PARTY connector, or
+   any caller outside `tortoise/connectors/`, can still widen the set through
+   TWO sinks, and they are open on DIFFERENT shapes:
 
-2. **A bare fold on a journal-less projection** — `connectors/github.py` folds
-   records with ``proj.apply(...)`` (kind ``pm:issue`` from `github_map`), and
-   `FalkorProjection.apply` refuses a direct fold only when ``_journal_backed``
-   — correctly, since with no journal there is no truth store for the cache to
-   be ahead of. So on a journal-less projection the kind is persisted ungated.
-   The fix must reuse `pack_state`'s ONE read core rather than re-deriving
-   "records ∪ data" a second time (that re-derivation is the drift
-   `graph_installed_namespaces` exists to prevent). **XFAIL.**
+   * `proj.apply(...)` — kind `pm:issue` from `github_map`. It refuses a direct
+     fold only when ``_journal_backed``, correctly, since with no journal there
+     is no truth store for the cache to be ahead of. **So this sink is open on
+     a journal-less projection only.**
+   * `proj.link_source_to_entity(url, id, label, source_kind)` — the value lands
+     in the MINED `sourceKind` slot (`projection/edges.py`: `ON CREATE SET
+     s.sourceKind=$sk`). This method has **no `_journal_backed` check at all**
+     (measured: a journal-backed SDK widens too), so **it is open on BOTH
+     shapes**, and the ONLY refusal on that leg is in the
+     `sdk.link_source_to_entity` WRAPPER. A fix that mirrors `apply`'s gate
+     (`if not _journal_backed: refuse`) would therefore leave the
+     journal-backed half open — which is why the pin below carries a
+     journal-backed case as well as the journal-less ones.
+
+   The five IN-REPO connectors no longer take either path **ungated**: `#9068`
+   gates each batch through `connectors._gate_kinds` before its first ``apply``
+   (see `docs/EXPANSION_PACKS.md`), and `github`'s own link call
+   (`connectors/github.py` passes the event record's ``sourceKind``) is covered
+   because that value rides the gated batch. So what survives here is the
+   SEAM, not the shipped connectors. The fix must reuse `pack_state`'s ONE read
+   core rather than re-deriving "records ∪ data" a second time (that
+   re-derivation is the drift `graph_installed_namespaces` exists to prevent).
+   **XFAIL.**
+
+**Closed AT THIS HEAD, so no longer pinned as a widening** — `#9068` itself
+resolved residual 1 without a pipeline-model change: the reader no longer mines
+the bare `kind` slot off a non-ontology label (`pack_state._LABEL_SCOPED_KIND_KEYS`
+/ `_ONTOLOGY_LABELS`), so `:Pipeline`'s key grants its namespace to nothing.
+`test_a_pipeline_row_does_not_grant_its_namespace` is now an ordinary passing
+pin. That narrowing DOES drop `venture` from a graph whose only kind-bearing
+node is a pipeline — the #2714 indicator-2 cost, stated in
+`docs/EXPANSION_PACKS.md` rather than left implicit.
 
 **Closed upstream at this base, and NOT re-pinned here** — `#9070` landed and
 gates the eight seams this module previously only NAMED. This module does not
@@ -177,8 +204,13 @@ being built without ``event_log_path`` (``_bind_journal(None)``), not from the
 engine, and every assertion reads the approval set. Registering the file
 embedded-only (`test_pipeline_2792`'s option) would run the measurement on ONE
 lane instead of both; the honest cost of running it on both is that a URI-set
-run mints five per-test throwaway graphs on the shared server — the `#5084`
-accumulation surface every ``tmp_path``-SDK test already sits on.
+run mints ONE per-test throwaway graph per SDK-constructing test INSTANCE on the
+shared server — the `#5084` accumulation surface every ``tmp_path``-SDK test
+already sits on. Deliberately stated per instance and NOT as a number: each
+parametrised residual-2 case builds its own SDK (and this header is not one of
+the counts `test_the_header_census_matches_this_file` recomputes), so any count
+written here would be the next stale number in a file whose whole argument is
+that counts go stale.
 
 Registered in ``config/ci-surfaces.yml`` on the SIX surfaces a module the
 inventory walks can resolve to (``core``, DUAL-REGISTERED with ``api``,
@@ -403,8 +435,12 @@ def test_the_header_census_matches_this_file() -> None:
 #: whose NAME is in the gate vocabulary and reds when one is unregistered. That
 #: guard exists because the call-site scan is only as complete as this list:
 #: `#9070` added `_refuse_unapproved_kinds_in_record`, and every door behind it
-#: was invisible to this scan until the name was registered here.
+#: was invisible to this scan until the name was registered here. `_gate_kinds`
+#: (#9068) is the same case in the other direction: its NAME is outside
+#: `_GATE_VOCABULARY`, so without this entry the scan reports the HELPER as a
+#: door and its five connector call sites — the actual doors — stay invisible.
 _GATE_HELPERS: frozenset[str] = frozenset({
+    "_gate_kinds",
     "_refuse_unapproved_kind",
     "_refuse_unapproved_kinds",
     "_refuse_unapproved_kinds_in_props",
@@ -420,8 +456,9 @@ _GATE_HELPERS: frozenset[str] = frozenset({
 #: so a new helper cannot arrive unannounced. Anything matching this that is not
 #: in `_GATE_HELPERS` reds `test_the_gate_helper_vocabulary_is_complete`.
 #:
-#: All THREE families are open on the right (`\w*`), and the `(?:.*_)?` prefix
-#: admits any spelling that keeps the words — `_guard_unapproved_kinds` matches.
+#: All FOUR families are open on the right (`\w*`, or the family's own spelling),
+#: and the `(?:.*_)?` prefix admits any spelling that keeps the words —
+#: `_guard_unapproved_kinds` matches.
 #: The third family used to be anchored to the singular spelling, so
 #: `_require_approved_kinds` — the natural plural, and the family
 #: `_refuse_unapproved_kinds` already uses — was returned by NEITHER guard: the
@@ -433,8 +470,14 @@ _GATE_HELPERS: frozenset[str] = frozenset({
 #: `unapproved`/`approved_kind` but drops the verb (`_deny_unapproved_kinds`) is
 #: caught by `test_no_approval_decision_hides_behind_an_unrecognised_name`, which
 #: fails CLOSED over the broad word match rather than trusting this pattern.
+#:
+#: `gate_kinds` is the fourth family (#9068): `connectors._gate_kinds` is a gate
+#: COMPOSER whose name carries neither `unapproved` nor `approved_kind`, so the
+#: word-based guards cannot see it and the call-site scan would report the
+#: HELPER as a door while its five connector call sites stayed invisible.
 _GATE_VOCABULARY = re.compile(
-    r"^(?:.*_)?(?:refuse_unapproved\w*|unapproved_kind\w*|require_approved_kind\w*)$")
+    r"^(?:.*_)?(?:refuse_unapproved\w*|unapproved_kind\w*|require_approved_kind\w*"
+    r"|gate_kinds)$")
 
 #: The broad word match the RENAME guard keys on (deliberately wider than
 #: `_GATE_VOCABULARY`): every DEF whose name carries these words is either a
@@ -453,13 +496,14 @@ _NON_GATE_APPROVAL_DEFS: dict[str, str] = {
         "accessor, so nothing is gated by calling it"),
 }
 
-#: The doors the module docstring states — that header's inventory, executable.
 #: At this base: the two SDK create funnels, the two UPDATE doors, the two
 #: second-writers of a mined property, the two record-building doors, the
 #: raw-`:Event` record half (#9122), the two journal-first emitters, the
 #: commit-door pre-check and the two REST doors (`#9070` landed the update/
 #: journal seams; `#8380` the REST pair; `#9122` the record half, which NARROWS
-#: rather than widens and is pinned by `…the_record_door_gates_before_the_append`).
+#: rather than widens and is pinned by `…the_record_door_gates_before_the_append`),
+#: and the five connector folds gated by `#9068` (each before its first
+#: `apply`, through the shared `connectors._gate_kinds`).
 #: "And no others" is a claim about the BASE: the day a new gate CALL SITE — or a new
 #: gate HELPER, see `_GATE_VOCABULARY` — lands, this reds and the header has to
 #: be updated in the same PR, which is the point. A paragraph asserting a scope
@@ -467,6 +511,11 @@ _NON_GATE_APPROVAL_DEFS: dict[str, str] = {
 #: and that this module exists to close.
 _DOORS: frozenset[str] = frozenset({
     "tortoise/api.py:EventAPI._emit",
+    "tortoise/connectors/github.py:GitHubConnector._fold_webhook_event",
+    "tortoise/connectors/github.py:GitHubConnector.ingest",
+    "tortoise/connectors/linear.py:LinearConnector.ingest",
+    "tortoise/connectors/slack.py:SlackConnector._fold_webhook_event",
+    "tortoise/connectors/slack.py:SlackConnector.ingest",
     "tortoise/hosted_api.py:commit_session",
     "tortoise/hosted_api.py:create_object",
     "tortoise/hosted_api.py:create_subject",
@@ -1030,18 +1079,14 @@ def test_the_data_leg_keeps_existing_vocabulary_writable(
         "data already holds (#2714 indicator 2)")
 
 
-# ── Residual 1: :Pipeline.kind is a mined property ────────────────────────
+# ── Residual 1: :Pipeline.kind is a mined property — FIXED at this head ──
 
 
-# `raises=AssertionError`: ONLY the widening assertion below may xfail this
-# pin. A refusal outside `_REFUSAL`, or any other failure at the seam, is
-# reported FAILED by `_attempt_write` — never recorded as an expected failure.
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "#9068 residual 1 — `pipeline._write_pipeline` persists the pipeline KEY "
-    "into the mined `kind` property (`SET p.kind=$kind`) and "
-    "`pack_state.graph_kind_namespaces` scans `kind` label-agnostically, so a "
-    ":Pipeline row grants its namespace; the fix is a decision about the "
-    "pipeline model, recorded on #9068"))
+# `#9068` residual 1 is FIXED at this head, so this pin is no longer an xfail:
+# the mining leg reads the bare `kind` slot only off ontology labels, and a
+# `:Pipeline` is not one. It stays here as the behavioural pin on the closure
+# (the writer still stores its key in `kind`, which is why the fix had to be in
+# the READER). Reverting `_LABEL_SCOPED_KIND_KEYS` reds it.
 def test_a_pipeline_row_does_not_grant_its_namespace(
         dev_only_sdk: TortoiseSDK) -> None:
     """(1) Failing value is the approval set gaining ``venture``; (2) the
@@ -1059,34 +1104,99 @@ def test_a_pipeline_row_does_not_grant_its_namespace(
         "must not install the `venture` pack")
 
 
-# ── Residual 2: a bare fold on a journal-less projection ──────────────────
+# ── Residual 2: a fold straight into a journal-less projection (still open) ───
 
 
 # `raises=AssertionError`: same mechanic as residual 1's pin — only the
 # widening assertion xfails; a refusal outside `_REFUSAL` or any other seam
 # failure is FAILED, not silently xfailed. The journal-less precondition lives
 # in the fixture (an in-body `assert` would be swallowed by this marker).
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "#9068 residual 2 — `projection.apply` gates a direct fold only when "
-    "`_journal_backed`, so on a journal-less projection (the connectors' "
-    "shape) an `object_kind` is persisted ungated and widens the set"))
-def test_a_journal_less_fold_does_not_widen_the_approval_set(
-        dev_only_sdk: TortoiseSDK) -> None:
-    """(1) Failing value is the approval set gaining ``pm``; (2) the fixture is
-    a fold through the seam the connectors actually use — ``connectors/github``
-    → ``proj.apply(entities["object"])`` — carrying the kind ``github_map``
-    stamps on an issue Object (``pm:issue``), on a projection with NO journal.
+#
+# TWO SINKS, with DIFFERENT exposure. The residual names `apply`, but the
+# projection writes a mined kind property in a second place —
+# `link_source_to_entity` stores the caller's `source_kind` in `sourceKind`
+# (`projection/edges.py`) — and the gate for that leg lives in the
+# `sdk.link_source_to_entity` WRAPPER, not in the projection. `apply` gates
+# only when `_journal_backed`; the link has NO `_journal_backed` check at all,
+# so it is open on both shapes. Hence THREE cases: the journal-less pair plus a
+# journal-backed link, so a fix that mirrors `apply`'s gate cannot leave the
+# journal-backed half both open and unpinned.
+def _fold_a_journal_less_projection(proj) -> None:
+    proj.apply({"type": "ObjectRegistered", "id": "o-fold-1",
+                "name": "FoldProbe", "object_kind": "pm:issue"})
+
+
+def _link_a_journal_less_source(proj) -> None:
+    proj.link_source_to_entity("https://example.test/9068-leak", "o-link-1",
+                               "Object", "marketing:leak")
+
+
+@pytest.fixture()
+def journal_backed_dev_only_sdk(tmp_path: Path) -> Iterator[TortoiseSDK]:
+    """The SAME ``{'dev'}``-approved graph, but on a JOURNAL-BACKED projection.
+
+    The shape contrast the link sink needs: `apply` refuses a direct fold here
+    (`DirectCacheWriteRefused`) while `link_source_to_entity` does not, so this
+    is the only fixture on which that difference is observable. Deliberately a
+    second construction rather than a parameter on ``dev_only_sdk`` — that
+    fixture's journal-less precondition is a guard the other 14 tests rely on.
     """
-    sdk = dev_only_sdk
+    sdk = TortoiseSDK(str(tmp_path / "residuals-jb.db"),
+                      event_log_path=str(tmp_path / "residuals.jsonl"))
+    try:
+        pack_state.set_graph_packs(sdk, packs=[dict(p) for p in _DEV_ONLY])
+        approved = pack_state.graph_installed_namespaces(sdk)
+        if approved != frozenset({"dev"}):
+            raise _PreconditionNotMet(
+                "fixture precondition: the graph must start approved for 'dev' "
+                f"only, got {sorted(approved or ())}")
+        if sdk._get_proj()._journal_backed is not True:
+            raise _PreconditionNotMet(
+                "fixture precondition: this must be the JOURNAL-BACKED shape — "
+                "the link sink's exposure is the one that differs here")
+        yield sdk
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+@pytest.mark.parametrize("writer,namespaced,fixture_name", [
+    pytest.param(_fold_a_journal_less_projection, "pm", "dev_only_sdk",
+                 id="apply-fold-journal-less"),
+    pytest.param(_link_a_journal_less_source, "marketing", "dev_only_sdk",
+                 id="source-link-journal-less"),
+    pytest.param(_link_a_journal_less_source, "marketing",
+                 "journal_backed_dev_only_sdk", id="source-link-journal-backed"),
+])
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "#9068 residual 2 — the projection's two sinks widen the set ungated on "
+    "a direct call: `apply` refuses only when `_journal_backed` (open on a "
+    "journal-less projection), while `link_source_to_entity` has no "
+    "`_journal_backed` check at all (open on BOTH shapes) — its only refusal "
+    "is the `sdk.link_source_to_entity` wrapper"))
+def test_a_journal_less_fold_does_not_widen_the_approval_set(
+        request, writer, namespaced: str, fixture_name: str) -> None:
+    """(1) Failing value is the approval set gaining `namespaced`; (2) the
+    fixture is a write through the seam a caller outside `tortoise/connectors/`
+    actually reaches — `proj.apply(entities["object"])` carrying the kind
+    `github_map` stamps on an issue Object (`pm:issue`), and
+    `proj.link_source_to_entity(..., source_kind='marketing:leak')`, whose
+    `sourceKind` the mining leg also reads — on a projection with NO journal,
+    plus the SAME link on a JOURNAL-BACKED one (where `apply` would refuse).
+
+    One case per (sink, shape): the gate is per CALL SITE and the two sinks do
+    not share an exposure, so a fix at one sink — or in one shape — says
+    nothing about the other.
+    """
+    sdk = request.getfixturevalue(fixture_name)
     proj = sdk._get_proj()
 
-    _attempt_write(
-        lambda: proj.apply({"type": "ObjectRegistered", "id": "o-fold-1",
-                            "name": "FoldProbe", "object_kind": "pm:issue"}))
+    _attempt_write(lambda: writer(proj))
 
-    assert "pm" not in (_approved(sdk) or frozenset()), (
-        "a fold persists a mined kind property, so with no journal to gate it "
-        "the fold itself must consult the graph's approval set")
+    assert namespaced not in (_approved(sdk) or frozenset()), (
+        f"a projection write persists a mined kind property, so the sink "
+        f"itself must consult the graph's approval set — `{namespaced}` "
+        f"entered it ({fixture_name}) with no gate in front of the write")
 
 
 # ── Residual 3: offline re-typing is DELIBERATELY ungated ─────────────────

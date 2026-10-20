@@ -30091,11 +30091,28 @@ class TortoiseSDK:
         — a kind property written by a door that never names it as one (measured:
         ``create_event(..., uses=[{'name': 'x', 'kind': 'marketing:campaign'}])``
         widened a ``dev``-only graph before this check existed).
+
+        The fold's SNAKE spellings are screened too (#9068 review P1). The
+        ``create_*`` doors forward caller ``props`` with ``**props``, and the
+        fold reads ``ev.get("object_kind")`` / ``subject_kind`` /
+        ``document_kind`` — so ``create_object("x", props={"object_kind":
+        "pm:issue"})`` survived a camel-only screen and was folded onto the
+        MINED ``objectKind``: the same widening under a spelling the gate did
+        not know. Both spellings come from ``pack_state``'s ONE declaration
+        (``_KIND_PROP_SPELLINGS``, the map the payload-shaped gates use), never
+        re-spelled here.
         """
         from .pack_state import _KIND_PROP_KEYS as _gated_kind_props
+        from .pack_state import _KIND_PROP_SPELLINGS as _kind_spellings
         for kind_prop in _gated_kind_props:
             if kind_prop in props:
                 self._refuse_unapproved_kind(kind_prop, props.get(kind_prop))
+        # Canonical spelling in the refusal (never the alias): the message tells
+        # the caller which PROPERTY to change, and the alias is not the property
+        # the node ends up carrying.
+        for spelling, kind_prop in _kind_spellings.items():
+            if spelling != kind_prop and spelling in props:
+                self._refuse_unapproved_kind(kind_prop, props.get(spelling))
         uses = props.get("uses")
         if isinstance(uses, dict):
             uses = [uses]

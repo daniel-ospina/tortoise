@@ -3638,6 +3638,14 @@ surfaces:
   - test_write_verb.py
   - test_write_consolidation.py
   - test_writer_inventory.py
+  # #9068: the residual of #5475 — writes that never meet a gated door. Guards
+  # `tortoise/pack_state.py` (the ``kind`` leg's label scope, the record
+  # predicate, the batch refusal), `tortoise/connectors/` (the fold gate on
+  # github/linear/slack ``ingest`` + both webhook paths) and
+  # `tortoise/migrate_kinds.py` (the STATED ungated re-typing). `core` is the
+  # surface those three source files select today, so this is where the guard
+  # must run on a change to any of them.
+  - test_write_doors_9068.py
   # #2280 (CI drift repair): see the api-surface note — these files also
   # landed in #2283 unregistered. Contract (hermetic) + capture Phase-D
   # dedup are fast-lane core; the canonical pipeline needs live FalkorDB.
@@ -5899,6 +5907,18 @@ durations:
   test_pointsuperseded_rebuild.py: 8.7
   test_session_key_http.py: 5.5
   test_write_consolidation.py: 5.3
+  # #9068 (#3400 trap): a file ADDED BY A PR has no CI junit measurement — the
+  # durations refresher samples push-to-main runs only — so an absent key would
+  # drop `duration_coverage_issues()` under the 90% floor. The row exists to
+  # satisfy coverage and carries the flat 2.0 default, per the rule stated on
+  # the `test_venture_pack.py` entry below: a local timing (28 tests measured
+  # 14.4s-25.8s here on 2026-10-19, embedded lane, load-dependent) is a
+  # SHARD-LAYOUT input, and a
+  # weight that does not model CI must not decide what runs together. The tests
+  # that let a fold LAND request the suite's `force_embedder_on` stub, which
+  # keeps this out of the cold HF-model-load cost class. Refresh from the first
+  # post-merge run.
+  test_write_doors_9068.py: 2.0
   test_value_extractor.py: 39.0
   test_venture_pack.py: 2.0  # unmeasured — new in #3419; no sweep has collected it, so it carries the flat default exactly as an absent key would, which is main's own weight for it. Do NOT substitute a local timing here: a measured-on-this-box 67.2 was recorded first, and it is a SHARD-LAYOUT input, so it moved tests/test_tortoise_search.py into the same shard as tests/test_subject_layer_read_surfaces_4889.py and exposed a pre-existing embedded-lane isolation leak (#3750 family) that main's grouping keeps apart. A weight that does not model CI must not be used to decide what runs together.
   # #2729: same rule as the entry directly above — unmeasured, carries the flat
@@ -5916,13 +5936,16 @@ durations:
   # it. The value is this file's own whole-file EMBEDDED-lane reading in a fresh
   # worktree, stated HIGH on the #5048 precedent rather than as a measured CI
   # value — it is not a junit-sweep figure, and a sweep should replace it. Current
-  # shape at the head of this branch: 12 test FUNCTIONS (`CENSUS: 12 PASS, 2
-  # XFAIL, 14 total`, recomputed by the file's own
-  # `test_the_header_census_matches_this_file`), 27 node ids after
-  # parametrisation, 2 xfail; measured 147.65 s on this host, 166.0 s in the
-  # authoring run, hence the weight below. The two heavy rows are the pins
-  # themselves (the SDK fixture builds a store per test, twice); the inventory
-  # tests are AST walks over `tortoise/**` and cost ~1 s together. Not moved into
+  # shape at the head of this branch: 15 test FUNCTIONS (`CENSUS: 14 PASS, 1
+  # XFAIL, 15 total`, recomputed by the file's own
+  # `test_the_header_census_matches_this_file`), 32 node ids after
+  # parametrisation (the residual-2 XFAIL is parametrised over the projection's
+  # TWO ungated sinks × the shapes they are open on — `apply` journal-less, and
+  # `link_source_to_entity` journal-less AND journal-backed), 3 xfail cases; measured 147.65 s on this host, 166.0 s in the
+  # authoring run, hence the weight below. The three heavy cases are the pins
+  # themselves (two stores on the journal-less fixture, one on the journal-backed
+  # one); the inventory tests are AST walks over `tortoise/**` and cost ~1 s
+  # together. Not moved into
   # `slow_files`: 166 s is far under the 360 s bound the watchdog pin derives, and
   # `slow_file_issues` has no duration rule.
   test_9068_pack_gate_residuals.py: 166.0
