@@ -1537,12 +1537,28 @@ def test_the_remaining_floor_shapes_have_no_denominator(tmp_path: Path) -> None:
         "setattr(TestX, 'test_two', lambda self: None)\n",
         encoding="utf-8",
     )
+    # Two shapes that must NOT be omitted: a `pytestmark` that cannot parametrize, and a
+    # runner list aliasing test functions. Firing on either froze 44 exactly-counted rows
+    # in-tree — 41 by the `pytestmark` rule, 5 by the runner-list rule, two files hit by
+    # both, which is why the parts sum past the whole.
+    (tmp_path / "tests" / "sub" / "test_pytestmark_skipif.py").write_text(
+        "import pytest\npytestmark = pytest.mark.skipif(False, reason='x')\n"
+        "def test_a():\n    pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "sub" / "test_runner_list.py").write_text(
+        "def test_a():\n    pass\ndef test_b():\n    pass\n"
+        "tests = [test_a, test_b]\n",
+        encoding="utf-8",
+    )
     (tmp_path / "tests" / "sub" / "test_plain.py").write_text(
         "def test_a():\n    pass\ndef test_b():\n    pass\n", encoding="utf-8")
 
     counts = ci_timing.declared_test_counts(
         ["withconf/test_under_conftest.py", "sub/test_ifblock.py", "sub/test_alias.py",
-         "sub/test_attralias.py", "sub/test_injected.py", "sub/test_plain.py"],
+         "sub/test_attralias.py", "sub/test_injected.py",
+         "sub/test_pytestmark_skipif.py", "sub/test_runner_list.py",
+         "sub/test_plain.py"],
         tmp_path,
     )
     assert "withconf/test_under_conftest.py" not in counts
@@ -1553,6 +1569,8 @@ def test_the_remaining_floor_shapes_have_no_denominator(tmp_path: Path) -> None:
     # the walk now sees the branch, so the count is exact and the row keeps its
     # denominator instead of losing it.
     assert counts["sub/test_ifblock.py"] == 2
+    assert counts["sub/test_pytestmark_skipif.py"] == 1
+    assert counts["sub/test_runner_list.py"] == 2
     assert counts["sub/test_plain.py"] == 2
 
 

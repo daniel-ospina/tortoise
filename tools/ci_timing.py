@@ -698,8 +698,9 @@ def declared_test_counts(keys, repo_root: Path) -> dict[str, int]:
       imported `unittest.TestCase` subclass or a mixin whose methods it
       inherits (`_declares_a_floor`), a name ALIASED to a test or a method
       injected with `setattr` (both closed), and a `params=` fixture in a
-      `conftest.py` above the module (`_conftest_multiplies`). WHAT REMAINS:
-      a multiplier with no
+      `conftest.py` above the module (`_conftest_multiplies`) — though NOT a `params=`
+      fixture imported from a helper module, which no conftest scan can read.
+      WHAT REMAINS: a multiplier with no
       marker, no name and no base to read — a `pytest_generate_tests` hook, or a
       decorator that adds cases through a call this scan cannot follow. That
       residual is DISCLOSED, not bounded: `--durations=15` caps how many nodeids a
@@ -805,7 +806,11 @@ def _has_parametrisation(tree: ast.Module) -> bool:
       `tree.body` only: measured in-tree, `test_event_state_carrier_2788.py`
       counted 7 `def`s beside 9 collected nodeids (#9134 review, P1);
     * a `pytestmark` assignment in ANY form (`=`, `+=`, annotated) at module or
-      class level — it parametrises without a decorator to read;
+      class level **whose value this scan cannot read** — a bare `Name`, a call to a
+      bare name, or anything naming `parametrize`. A READABLE non-parametrizing value
+      (`pytest.mark.skipif`, `pytest.mark.timeout`, a plugin mark) is not a floor and
+      does not omit the file: firing on the assignment alone froze 41 exactly-counted
+      rows in-tree (#9134 review);
     * ANY bare-`Name` decorator (`@CASES`) — the marker is bound to a name, so
       the `parametrize` attribute this function looks for is not in the tree at
       the point of use, and a custom decorator that adds cases is
@@ -862,12 +867,22 @@ def _has_parametrisation(tree: ast.Module) -> bool:
                 if _mentions_parametrize(dec):
                     return True
         # A `pytestmark` assignment at module level OR in a class body, in any
-        # assignment form: the latter parametrises that class's methods and is
-        # not a decorator.
+        # assignment form: the latter parametrises that class's methods and is not a
+        # decorator. ⛔ But the ASSIGNMENT alone proves nothing — it is unprovable only
+        # when the value names a `parametrize` (readable) or is a bare `Name`/`Call` this
+        # scan cannot follow. The in-tree values are non-parametrizing marks (skipif,
+        # timeout, asyncio, bench, embedded_only, slow, a plugin mark), so firing on the
+        # assignment alone froze 41 exactly-counted rows (#9134 review).
         if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             if any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in targets):
-                return True
+                value = getattr(node, "value", None)
+                if value is None or _mentions_parametrize(value):
+                    return True
+                if isinstance(value, ast.Name):
+                    return True
+                if isinstance(value, ast.Call) and not isinstance(value.func, ast.Attribute):
+                    return True
     return False
 
 
@@ -916,7 +931,7 @@ def _declares_a_floor(tree: ast.Module) -> bool:
         # it descends from `unittest.TestCase`, which shows up as a base NAME here; every
         # other base (`Exception`, `HTMLParser`, a test double) contributes no nodeid and
         # freezing those rows cost 30 exactly-counted keys for nothing (#9134 review).
-        if node.name.startswith("Test") and base_names:
+        if node.name.startswith("Test") and [n for n in base_names if n != "object"]:
             return True
         if any(name.endswith("TestCase") for name in base_names):
             return True
@@ -936,9 +951,17 @@ def _is_alias_or_injection(node: ast.stmt) -> bool:
     """True for a statement that adds a collected testcase with no `def` of its own."""
     if isinstance(node, (ast.Assign, ast.AnnAssign)):
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        value = getattr(node, "value", None)
+        # A bare `test*` NAME carries a testcase only when its value is a callable-ish
+        # reference; `tests = [test_a, test_b]` is a runner list and pytest collects
+        # nothing from it (#9134 review).
+        aliases_a_callable = isinstance(value, (ast.Name, ast.Attribute, ast.Lambda))
         for target in targets:
-            if isinstance(target, ast.Name) and target.id.startswith("test"):
+            if (aliases_a_callable and isinstance(target, ast.Name)
+                    and target.id.startswith("test")):
                 return True
+            # `TestX.test_b = ...` targets an existing class, so whatever is assigned
+            # there becomes a collected method.
             if isinstance(target, ast.Attribute) and target.attr.startswith("test"):
                 return True
     call = node.value if isinstance(node, ast.Expr) else node
@@ -975,6 +998,8 @@ def _collectable_statements(body: list[ast.stmt]) -> list[ast.stmt]:
                 out.extend(_collectable_statements(block))
         for handler in getattr(node, "handlers", []) or []:
             out.extend(_collectable_statements(handler.body))
+        for case in getattr(node, "cases", []) or []:
+            out.extend(_collectable_statements(case.body))
     return out
 
 
