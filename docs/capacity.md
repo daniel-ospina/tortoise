@@ -213,6 +213,7 @@ curve, and one of those guards has a **measured failure threshold**.
 | EP affected-claim frontier guard (new **claims** per hop) | **200** (`_EP_GUARD_FRONTIER_CAP`) | `tortoise/ep.py` |
 | Operator-set cap on an explicit-k BFS (the ranking's operator input) | **200 operators**, truncated deterministically by id with a stderr warning — and reported in the caller's RESULT as `truncated` / `operators_seen` / `operators_used` since #6211 | `tortoise/analyze.py` |
 | EP pass query that the engine aborts on its own query timeout | raised as **`EPSubgraphHopError`** (a `ResponseError` subclass) carrying the hop index (or `None` for a pass-level query), phase and frontier size (#6211) | `tortoise/ep.py` |
+| EP id-anchored query planning | the PLAN of every id-set statement the pass emits is asserted to be a `Node By Index Scan` on the frontier, not a label scan of the graph; the one exception is the evidence pre-write's journal read, which names no label so no per-label index can anchor it, and which sits outside the pinned set (#9304). Where the shipped plan was a scan, a `WITH *` anchor barrier (`_EP_ANCHOR_BARRIER`) fixes it — the invariant is the plan, not a syntactic rule, because which sites need the barrier was decided per site by measurement (#6211, below) | `tortoise/ep.py`, `tortoise/analyze.py` |
 | EP degenerate-run guard | fires when the pass has collected **≥ 50%** of the graph's claims, on graphs of **≥ 500** claims | `tortoise/ep.py` |
 | Dreaming per-pass window budget (stale-first) | **200** operators (`TORTOISE_DREAM_WINDOW_BUDGET`) | `tortoise/dream.py` |
 | Dreaming full-mode operator cap (`dream_all`) | **200,000** (`max_total_operators`) | `tortoise/dream.py` |
@@ -227,8 +228,170 @@ set**. Twelve of fourteen per-anchor passes raised the timeout. That ~200 is the
 hop query's own growth (the two-hop pattern traverses operators), and
 `tortoise/analyze.py` separately caps the collected operator set at 200 — it is
 **not** `_EP_GUARD_FRONTIER_CAP`, which bounds **new claims per hop**. The full
-measurement, the traces, and the three distinct failure modes are in **#6211**,
-which is open.
+measurement, the traces, and the three distinct failure modes are in **#6211**.
+
+**The hop's cost tracked the GRAPH, not the frontier (#6211, measured).** The
+shape above looked frontier-proportional, but the frontier was never the anchor
+of the queries that regressed: each id-set hop that ran over an expanding
+traversal WITHOUT an anchor was **planned as a label scan of the traversal's
+other endpoint**, with `n.id IN $ids` applied per record afterwards. (Three
+`ep.py` id-set queries **that traverse** were already `Node By Index Scan`
+without a barrier —
+they are named below.) Measured with `GRAPH.PROFILE` on a 23,353-node /
+160,000-edge fixture (falkordb-server 4.20.6), two-hop bridge at a 30-id
+frontier:
+
+| plan | records walked | wall |
+|---|---|---|
+| `Node By Label Scan (op:Point)` — shipped | 23,353 → 160,000 → **1,280,000** | 1.15 s |
+| `Node By Index Scan (n:Point)` — `WITH *` barrier | 30 → **1,445** | 0.009 s |
+
+That is why a **single-anchor** pass failed too: its floor is the whole graph's
+edge set plus one traversal per edge (`frontier=1` still cost 0.78 s on the
+fixture above), and it grows with every point the map gains. The barrier is now
+at **eleven** sites (seven in `ep.py`, four in `analyze.py`), and **whether it
+does the work differs per site** — that is why
+the invariant is the plan assertion, not a syntactic rule. Barriered and
+load-bearing (removing the barrier reddens the plan test): the seed
+neighbourhood, the plain-seed direct-edge expansion, the bridge hop, Batch 1,
+and all four of the operator selector's **barriered** legs in `analyze.py` —
+the viability
+query (`242.5 ms` -> `12.6 ms`) plus the incoming, backward and expansion legs
+(the last three measured unanchored on the same fixture,
+`Node By Label Scan (op:Point)` / `All Node Scan (a)` / `All Node Scan (p)`;
+one `_bfs_select_operators` call took **1,507 ms** before them and **98 ms** now
+— best of 3, same 168 operators returned). Barriered but NOT load-bearing,
+kept as the engine-6.0.0 predicate-drop guard (#6976): the cache load's
+back-message sweep, the BFS undirected direct-edge sweep and Batch 3, whose two
+`MATCH` / undirected forms anchor on their own.
+
+Three sites in `ep.py` traverse and were already `Node By Index Scan` without a
+barrier on the pre-#9282 tree, so they carry none: `_load_cache`'s message sweep,
+`seed_operators` and `_affected_factors` Batch 2. Those three plus the three
+reads that do not traverse at all are the `ep.py` pass's **19 distinct
+unbarriered id-set statements on a `:Point` seed set** (20 / 21 / 22 when the
+seed lookup reaches `:Subject` / `:Object` / `:Event`) — the traversing sites at
+8 + 1 + 1 (the message sweep is 2 relations × 4 epistemic labels) and the
+single-node probes at 4 + 1 + 4: the cache's per-label node-params load (the
+`ep_alpha` / `ep_beta` probe), the seed lookup and the draft filter. The seed
+lookup is the one term that moves: it probes labels in `EPISTEMIC_LABELS` order
+and breaks only when every seed has RESOLVED (`ep.py:1203-1219`), so it emits
+one statement per label up to the last epistemic label a seed uses — all four
+when a seed resolves under none. Every one of them is index-anchored. Three of
+the operator selector's OWN id-set statements in `analyze.py` are NOT counted
+here either, because this census is
+`ep.py`'s: the operator selector's operator→target leg (emitted by
+`_bfs_select_operators`, never by `TortoiseEP.run()`), its per-label draft filter
+and its forward direct-edge sweep. All three carry no barrier and all three are
+measured `Node By Index Scan` — the operator→target leg on the operator's own
+label, `analyze.py:666-671` — while the selector's four BARRIERED legs are the
+viability, incoming, backward and expansion queries, counted above. One
+further id-set statement sits OUTSIDE this census and outside the pinned set: a
+run whose journal is wired (`_emit`, i.e. an event log) and which carries
+evidence priors also re-reads them for the pre-write's journal record, and that
+read names no label — so a per-label index cannot anchor it (the label-free form
+is deliberate: a `:Point:Object` node must be journaled once, #7853). It is the
+last unanchored id-set statement of the `ep.py` pass, filed as **#9304**; the
+traversal `sdk.py` mirrors that `compute_confidence` also runs
+(`_window_closure`) are a separate, still-open leg of the same call (#9299).
+
+All eleven barriered sites and all six unbarriered ones (three traversing,
+three single-node probes) are in the pinned set: `tests/test_6211_ep_anchor.py`
+captures the statements the pass emits and asserts the PLAN of each (`Node By
+Index Scan`, and no `Node By Label Scan`; the selector test additionally rejects
+`All Node Scan`), never their text; each is reached by the fixture
+(`_load_cache`'s sweeps and Batch 2 directly, `seed_operators` through an
+operator seed — the 300 operators hanging off the hub claim). On this file's own
+fixture (`_build`: ~8.6k nodes, ~8k edges — NOT the 23k/160k PROFILE fixture
+above) that assertion covers the pass's **49 distinct** id-set
+statements (95 emissions) and the operator selector's **12 distinct** (37
+emissions across the two seeds the assertion uses — all seven of the selector's
+id-set legs: four barriered, three not) — zero unanchored in either.
+Against the pre-#9282 tree (`8c3823b92^`) the file's six behavioural tests run `4
+failed, 2 passed` — the emitted-statement plan test, the hop's record bound, the
+OR split's statement counts and the operator selector's four legs fail, while
+the fixture guard and the OR-split row-semantics guard pass, because they pin
+properties that tree already had. (The seventh test in that file pins this
+manifest row, which #9282 itself added: on that tree there is no row to pin, so
+it fails there for a different reason.) #9282 has since landed on `origin/main`,
+so `origin/main` now IS the anchored tree and every baseline in this section names
+the tree before it. The selector's expansion leg is individually discriminating:
+removing its barrier alone reddens the selector test.
+
+The two `OR`-shaped sweeps (`(a.id IN $ids OR b.id IN $ids)`, which can never be
+an index anchor) are split into one anchored sweep per endpoint: the
+target-anchored sweep takes every edge whose target is affected, the
+source-anchored sweep takes the rest (`NOT b.id IN $ids`), so each edge is
+admitted once. How each half keeps that "once" is site-specific, because the
+two sweeps fill different containers. `_affected_factors` Batch 3 appends rows
+to a list, so it de-duplicates on the EDGE's internal id (`id(r)`) — not on the
+row, because a row-keyed dedupe would collapse two byte-identical parallel
+direct edges into one factor, and not on a node id, because a multi-labelled
+endpoint (`:Point:Object`) is matched by one label sweep per label it carries
+and comes back once per label. `_load_cache`'s back-message sweep carries no
+such key: its rows overwrite one `(src, tgt, rel)` entry of `_back_cache`, so a
+multi-labelled endpoint re-reads the same edge once per label and two
+byte-identical parallel edges (unsupported there — last writer wins) share one
+slot. Those are the pre-existing cache semantics, unchanged by the split.
+On the 23k-node / 160k-edge fixture above, engine at the issue's 1,000 ms query
+bound:
+`compute_confidence(anchors=[one claim], max_hops=2)` aborted at hop 1
+(operator_bridge) over a **29-claim** frontier before the change and now
+completes; the hop at a 1,000-id frontier went from **5.55 s** to **0.32 s**,
+and `analyze`'s operator-viability query from **242.5 ms** (`All Node Scan`) to
+**12.6 ms** (`Node By Index Scan`) — identical rows in every case. The affected
+sets are identical before and after, and so are the extracted factor lists as
+SETS (the OR split appends them in a different order — source-anchored rows
+before target-anchored ones — so a list comparison differs in sequence while
+the posteriors agree to ~1e-12, the summation order; `run` shuffles the factor
+list per iteration anyway).
+
+The split's own cost, measured rather than assumed, because it emits MORE
+statements per pass — and it is a real cost, paid on the interactive path.
+Instrumenting the graph handle and counting every query a `TortoiseEP.run()`
+issues on the 40-claim interactive zone that
+`tests/test_ep_local_395.py::test_ac5_interactive_latency_zone` builds, this
+branch emits **11 more statements per pass** than the pre-#9282 tree
+(`8c3823b92^`) (**+22** for the
+two passes one `compute_confidence()` runs). Only the DELTA is quoted here: the
+absolute totals move with how much of the call the recorder sees (a
+`TortoiseEP.g`-level recorder and a graph-handle-level one disagree by the
+sweeps that never reach the pass), and the delta is identical either way.
+Nothing replaces anything — the two splits are the entire delta, and an added
+`WITH *` barrier emits no statement of its own:
+
+| site | pre-#9282 (`8c3823b92^`) | this branch |
+|---|---|---|
+| `_affected_factors` Batch 3 | **1** (one unlabelled `MATCH (a)-[r:IMPL\|NAND]->(b) ... (a.id IN $ids OR b.id IN $ids)`) | **8** (2 anchors x 4 epistemic labels) |
+| `_load_cache` back-message sweep | **4** (target-labelled, `b.id IN $ids` in the same predicate) | **8** (2 anchors x 4 epistemic labels) |
+
+The wall cost of those 11 statements is **not** inside the noise. Three
+independent interleaved blocks of 45 paired runs each (order alternated both
+ways, one child process per run) gave **1.024 s -> 1.108 s, +8 %** — per-block
+medians 1.034/1.126, 1.011/1.108, 1.007/1.099 (+8.9 %, +9.6 %, +9.2 %) — with
+the branch slower in **114 of 135** paired runs (37/45, 40/45, 37/45; sign test
+p < 1e-4). A 6-run sequence had suggested the cost was inside the range; the
+interleaved study is what settles it, and it settles it the other way. The AC5
+guard itself is flaky on this host for BOTH trees — it trips its `< 1.2 s`
+bound on the pre-#9282 tree too, and more often here (#9015 tracks that flake), so
+per-run tallies from one host are not worth quoting as a characterisation.
+
+**That cost is accepted, not denied.** The alternative on the other side is the
+plan this change exists to remove: a label scan of the traversal's endpoint,
+graph-proportional, which aborted the pass outright at a few thousand points.
+Narrowing the fan-out back is not free either — sweeping only the labels
+actually present (`live.epistemic_labels_of`) would also make the endpoint
+duplication disappear, and with it the only observable failure that the
+edge-keyed dedupe exists to catch (a multi-labelled `:Point:Object` endpoint
+swept once per label is what produces the duplicate row).
+Cutting the statement count while keeping that observability is a follow-up, not
+a one-line change.
+
+What remains open after it: the pass **completes slowly** — the same one-anchor
+pass took **89 s** on the fixture, of which ~43 s is a per-message graph read
+(`_read_node`, 45,087 `MATCH (n:Point {id:$id})` calls in one pass) rather than a
+cache hit — and the `ep_dirty` clearing path below. Neither is a hop-budget
+problem, and neither is fixed here.
 
 This is why the frontier guard exists, and why it is a *bound* rather than an
 optimisation: the guard trades an exact closure for staying inside the store's
@@ -256,7 +419,7 @@ now visible to a programmatic caller instead of to a human reading stderr:
   `hop: None`, because there is no hop to name (`draft_filter` is the one phase
   that appears in BOTH shapes: hop-scoped when the loop asks it, `hop: None` on
   the final fail-safe strip). The cache phases are the
-  WIDEST statements a pass makes (16 load sweeps over the whole affected set,
+  WIDEST statements a pass makes (20 load sweeps over the whole affected set,
   plus the write-back) — a different query from factor extraction's single
   largest one, and untyped it would keep the issue's symptom
   reachable on the largest query of the pass; a `cache_flush` timeout is

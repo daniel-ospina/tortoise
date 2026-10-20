@@ -122,6 +122,14 @@ surfaces:
   # `test_7809_hosted_prewarm_warmup_flag.py <- tortoise/hosted_api.py`). The
   # `eval` arm below covers `tortoise/embeddings.py`, which the same guard pins.
   - test_7809_hosted_prewarm_warmup_flag.py
+  # #8693 review (P2): its own registration, not a rider on the #7809 block above.
+  # `test_8693_end_customer_credential_design.py` pins `tortoise/hosted_api.py`
+  # (`rotate`/`DELETE` org pin, owner-class `graphs:create`, the audit action
+  # names), and `tortoise/hosted_api.py` is an EXACT `api` SOURCE_PATTERNS match
+  # that REPLACES the `core` fallback — so `api` is the arm that reaches these
+  # code pins. The DOC half of the same file is reached from `tier1` instead
+  # (a docs-only diff takes the early return, which never consults `core`).
+  - test_8693_end_customer_credential_design.py
   # #2728 review P2: DUAL-REGISTERED with `core` (line ~2688) for the same
   # reason as #7809. `tests/test_pack_selection_by_graph.py` pins
   # `hosted_api._packs_payload` / `_pack_catalog_rows` / `_graph_packs_view` —
@@ -1439,6 +1447,7 @@ surfaces:
   # fallback, so neither arm alone covers both edits — #2938 convention).
   - test_6211_ep_result_shape.py
   - test_6211_ep_scale.py
+  - test_6211_ep_anchor.py
   # #8864: the shared-name MERGE-key guard — the write-side twin of #5509/#3633.
   # `_upsert_object`/`_upsert_subject` (tortoise/projection/entities.py) key the
   # MERGE on the NAME, so a name held by 2+ carriers made `ON MATCH` stamp ONE
@@ -1606,6 +1615,19 @@ surfaces:
   # `sdk.py` are this guard's subjects; an `sdk.py`-only change selects the
   # full matrix, and a `projection/`-only change falls through to `core`.
   - test_7951_enforce_atomic_write.py
+  # #9209 (§17.1's FOURTH door, the handle's NON-CYPHER verbs): pinned on the
+  # projection's write handle, `_GuardedGraph`, i.e. the `core` surface — and
+  # `--integrity` requires every test file to carry a classification, which this
+  # entry satisfies (without it `manifest-integrity` reds on the new file).
+  # Deliberately ONE row, unlike the six-surface #7951 door suites above,
+  # because the subject is exactly one file: a change to
+  # `tortoise/projection/__init__.py` selects the FULL matrix
+  # (`--changed-files tortoise/projection/__init__.py` → `"full": true`), so this
+  # suite runs on any projection change with or without the row. `core` is also
+  # the selector's own default registration surface, pinned by
+  # `test_ci_selection.py::test_register_default_surface_is_core`, and
+  # `--integrity` is clean with this row.
+  - test_9209_handle_non_cypher_wipe.py
   # #9122 (§17.1 raw `:Event` writers): MULTI-REGISTERED on `api`, `core` and
   # `sdk`, and each row is load-bearing for a DIFFERENT subject — verified by
   # re-running `select()` with the row withheld:
@@ -4007,6 +4029,11 @@ surfaces:
   # SHARED_MODULES and select the FULL matrix on their own (measured).
   - test_6211_ep_result_shape.py
   - test_6211_ep_scale.py
+  # #6211 (hop anchoring): the emitted-query PLAN is what this one pins, and the
+  # statements it captures are built in `tortoise/ep.py`. Registration is still
+  # required: `tools/ci_selection.py --integrity` exits 1 on an undeclared test
+  # file, and a file in NO leg runs nowhere (#3514).
+  - test_6211_ep_anchor.py
   - test_ep_mitigation.py
   - test_ep_terminal_ghost.py
   # #2500: the pre-#2490 terminal-EP backfill guard. Dual-registered with
@@ -4956,6 +4983,25 @@ tier1:
 # flat 2.0 default in the durations map), so tier1 is the correct lane. Pinned by
 # tests/test_ci_selection.py::test_b7_runbook_ok_semantics_gate_runs_on_a_runbook_only_diff.
 - test_b7_runbook_ok_semantics_8135.py
+# #8693 review (P1, finding 1): `test_8693_end_customer_credential_design.py`
+# is the guard for the end-customer credential DESIGN DOC
+# (`docs/scoping/2026-10-19-8693-end-customer-credential-design.md`) — half code
+# pins against `tortoise/hosted_api.py`, half the corrected prose. The prose half
+# only breaks on a docs-only edit, and `docs/` is in NON_PYTHON_PREFIXES with the
+# doc matching no SOURCE_PATTERNS entry, so a doc-only diff filters to
+# `changed == []` and takes the docs-only early return — tier1 ONLY. The guard is
+# registered on `api` (which covers `hosted_api.py` edits) but was NOT here, so it
+# was asleep on the one change that can re-stale it: reverting the doc to the
+# three refuted claims in a one-file PR would merge green and only red `main`
+# post-merge (the #1349/#3332/#3616/#4309 silent-drop class, the #8614/#8135
+# shape one doc over). Fast and no-DB (an `ast` parse of `hosted_api.py` plus two
+# doc reads), so tier1 is the correct lane — deliberately NOT the alternative of
+# adding the doc to `SOURCE_PATTERNS["api"]`, which would make a one-file docs
+# edit select the whole `api` surface and re-arm the slow + carve-out legs that
+# docs-only PRs are engineered to skip (#2147/#2148). Pinned by
+# tests/test_ci_selection.py::
+# test_the_end_customer_credential_design_guard_runs_on_its_doc_only_diff.
+- test_8693_end_customer_credential_design.py
 # #8701 review (P1): `test_cross_subdomain_cookie_sync.py` gates the completeness
 # of the key-routing storage-adapter registry (#5735). Its own detector scans a
 # NEW file the moment one lands — but a new file under `website/assets/` (or any
@@ -5427,6 +5473,22 @@ carve_out:
 # (`TORTOISE_TEST_CARVE_OUT=1`), so it is registered here — where the measured
 # weight is the lane it actually runs in.
 - test_source_version_window_3644.py
+# #9209: module-level `pytest.mark.embedded_only` (the `sdk_with_journal` fixture
+# asserts `proj._is_embedded` and counts real nodes on it). Registered here for
+# the #4047/#4524 reason — without it every URI-set lane collects the file and
+# SKIPS every case via the marker hook, a permanently green and permanently
+# unexecuted gate — AND because the fixture's assertion does NOT hold on the
+# docker lane by itself: `TortoiseSDK(<tmpfile>)` reaches
+# `FalkorProjection(explicit_path=True)`, whose URI-aware TEST redirect
+# (`tortoise/projection/__init__.py`, `explicit_path and TORTOISE_DB_URI and
+# TORTOISE_TEST_MODE == "1" and not exempt`) nulls the path and renames the
+# graph, so `_is_embedded` is False and 42 of the suite's 70 cases ERROR.
+# MEASURED at the pre-fix head on a private lane container:
+# `28 passed, 42 errors` (all `AssertionError: this suite must run on the
+# EMBEDDED lane`). Mirrored in tests/_embedded.TEST_NO_REDIRECT_STEMS — the two
+# registries are one set in two homes
+# (tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
+- test_9209_handle_non_cypher_wipe.py
 # #6884: modules that REQUIRE the docker lane — each one module-skips at import
 # when `TORTOISE_DB_URI` is not a usable URI — in the tier-2 PR legs that means
 # present and EMPTY (`URI=""`), not absent (`if not _is_db_uri(...): pytest.skip(...)`
@@ -5709,6 +5771,7 @@ durations:
   test_8864_shared_name_merge_key.py: 2.0  # #8864: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the #3400 flat 2.0s default. Required for the durations half as well as the surface half (#4348 trap): the surface entry alone does not cover it. Local reading on this host (embedded carve-out lane, 8 tests): "8 passed in 5.82s" — the session total, which is conftest/DB setup the #3400 method attributes to no file; NOT substituted for a CI weight. Refresh from the first post-merge run that includes it.
   test_8098_webhook_retry_sweep.py: 8.8  # #8098 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention, not a CI measurement. MEASURED on this host 2026-10-18 at the PR head AFTER the LAST review fixes (embedded carve-out lane, **56 tests**, `--junitxml`): sum of testcase/@time ranged **7.25s** on a quiet host to **24.65s** with the fleet loading this box, max single test 1.65-6.90s (`test_every_test_the_plan_cites_exists`, which rglobs `tests/`). The reading is re-derived with the COUNT at every revision, never carried forward (the neighbouring #3429 row states the same convention): earlier revisions of this row read 39, 48, 49, 51, 53 and 55 tests as the file grew. The 8.8 WEIGHT is deliberately left alone: it is the shard packer's input, and keeping the higher of the readings means a file whose per-test sum is dominated by one cold-lane test is never under-weighted, so do not "correct" it down without a CI junit measurement. Required for the durations half as well as the surface half (#4348 trap): MEASURED this turn, WITHOUT this row `tools/ci_selection.py --integrity` reds the durations coverage floor (the file is in the fast pool, so an absent row also packs it at the flat 2.0s default). Refresh from the first post-merge run that includes it; do NOT drop the row without re-deriving the floor at that head.
   test_9233_webhook_declared_lane.py: 14.0  # #9233 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention, not a CI measurement. MEASURED on this host at the PR head AFTER the review fixes (embedded carve-out lane, 25 tests — 23 when this row was first written, +2 contract pins since; the count is re-derived at every revision and the WEIGHT is left at the coldest reading), whole-file wall): 14.03 s cold (first run after `uv sync --extra embeddings --extra parity`), then 9.90 / 9.98 / 11.12 s warm. Several tests build an embedded SDK each and `test_a_rebuild_does_not_restore_the_store` runs a real `rebuild_all`, so the weight is SDK builds + a journal rebuild, and it is declared at the COLDEST reading so a cold shard leg cannot under-pack. Added on the review advisory that measured this margin over four rounds: the fast pool is 943 files, so WITHOUT this row 849 weighted = 90.03% (0.03 pp above the `duration_coverage_issues()` floor) and the next unmeasured fast file would red the repo-wide gate at 849/944 = 89.94%; WITH it 850 weighted = 90.14%. Refresh from the first post-merge run that includes it; do NOT drop the row without re-deriving the floor at that head.
+  test_9209_handle_non_cypher_wipe.py: 26.8  # #9209 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention, not a CI measurement. MEASURED on this host 2026-10-20 at the PR head AFTER the last review fixes: embedded carve-out lane, `--junitxml`, sum of testcase/@time over ALL **70** collected cases at THIS head (the count is re-derived at every revision, never carried forward: 58 when the row was first written, 59 after one review round, and the last two rounds took it to 70). The WEIGHT stays at the COLDEST reading — 26.8 s, the loaded-box measurement this row already carried — and deliberately NOT the quiet-box 20.56 s or the later 33.54 s re-read: the adjacent rows' convention (#8098/#9233/#3429) is the higher of the readings, never a downward correction without a CI junit measurement, because the packer packs from this number and an under-weight starves a loaded shard leg. Max single test 3.96 s; whole-file wall 21.06 s quiet / 34 s on a box at load 180. Why the row exists at all: the fast pool is 952 files, so WITHOUT it 858 measured = 90.1261% against `DURATION_COVERAGE_MIN` 0.90 and WITH it 859 = 90.2311% (re-derived at this head: the pool grows as PRs add files, so re-derive rather than copying these) — the gate is not red at this head either way, so this row is the #3400 convention (and the shard packer's input: an absent row packs the file at the flat 2.0 s default, a 13x under-weight for a suite that builds a journal-backed embedded SDK per test), not a floor rescue. Do NOT drop it without re-deriving the floor at that head.
   test_installer_preserves_foreign_skill_content.py: 0.6
   test_installer_agents_block_3429.py: 39.4  # #3429 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention. MEASURED on this host in a private tools/test_lane.py container, FOUR consecutive runs, sum of testcase/@time over 58 tests: 37.25s and 38.18s — the weight was their MEAN (37.715 -> 37.7). RE-DERIVED AT THIS HEAD on the review-fix commit, which collects **59** (the `hardlinked` parametrization of `test_a_fenced_documentation_example_does_not_refuse_the_install`), measured from `--junitxml` in the embedded carve-out lane: that NEW test is **1.30s**, and it is the only test-weight delta, so 37.715 + 1.30 = 39.02 -> **39.0**. RE-DERIVED AGAIN at the review-fix head, which collects **60**: `test_a_pre_state_copy_failure_names_a_reachable_cause` measured **0.35s** and **0.42s** under `--junitxml` (sum of `testcase/@time`), and it is the only delta, so 39.02 + 0.385 = 39.405 -> **39.4**. ⚠️ The same head was ALSO measured under fleet contention (load average 118, 51 containers) and gave 47.52s and 49.06s over the 60 — recorded but deliberately NOT adopted, by the same rule as the pair below. ⚠️ The same head was ALSO measured twice under fleet contention (load average 161, 51 containers) and gave 56.35s and 53.93s over the 59 — recorded but deliberately NOT adopted as the weight: the branch added 1.3s of test, so an 18s gap is the dev-host contention those runs were taken in, and baking it in would over-allocate the pool. ⚠️ The origin/main merge of 9ad947e14 carries the QUIET-box pair for the merge base (24.42s and 26.46s over 48 = 0.53s/test, its weight 25.4) against this branch's 0.65s/test pair; the whole spread 0.53-0.93s/test is host load on the same subprocess-bound tests, which is why the derivation here keeps the branch's own adopted quiet-ish pair rather than either the loaded one or the merge-base one. Refresh from the first post-merge push run that includes this file and use THAT pair. Counts for the record: merge base (3a0e2a7d2) collects 48, the earlier revisions of THIS row record the merge-base and in-progress readings (31.92s and 32.62s over 45 tests while the fence work was in progress, 11.95s and 13.58s over all 42 tests before it, and 4.53s/4, 5.8s/10, 7.2s/15, 9.0s/20, 14.4s/25, 20.4s/30, 20.9s/35 and 18.6s/40 before those) — the count and the sum move together and are re-derived at every revision, never carried forward. The file drives the REAL installer in a temp HOME/project, so it is subprocess-bound, not DB-bound, and two of its tests sleep by design (they signal the installer mid-write). The sum is per-test durations; WALL-CLOCK under a loaded fleet has measured 2.8x this. Refresh from the first post-merge push run that includes it; do NOT drop the row without re-deriving the floor at that head.
   test_backup_watcher_health.py: 0.2
@@ -5884,6 +5947,22 @@ durations:
   # are PR-ADDED files, so the push-to-main sweep cannot have measured them yet.
   test_6211_ep_result_shape.py: 19.0
   test_6211_ep_scale.py: 19.0
+  # #6211 (hop anchoring): locally measured on this host, whole file, 7 tests /
+  # 5.4-7.6 s (it builds an 8k-edge fixture and profiles one hop). The count is
+  # re-derived at every revision, never carried forward — an earlier revision of
+  # this row read "5 tests" for a file that already defined six, and
+  # `tests/test_6211_ep_anchor.py::test_the_records_that_state_this_files_size_are_true`
+  # now pins the count against the file's own `def test_` list (#9282 review).
+  # The 9.0 weight is KEPT rather than raised: a 14.1 s whole-file reading was
+  # also taken, but on a host under fleet load (the same class of reading the
+  # #8098/#3429 rows record and deliberately do not adopt), and the weight is a
+  # shard-layout input, not a claim about this file. Upper-bounded like its
+  # siblings: an UNDERstated weight skews the balancer against a PR-added file,
+  # which this is (#3514). REFRESH from the first post-merge push run that
+  # includes it — a re-derived value drops this note's local-basis claim, because
+  # a row's comment holds only while the value AND its stated basis are unchanged
+  # (#8254).
+  test_6211_ep_anchor.py: 9.0
   test_round_trip_parity.py: 0.8
   test_longmem_rerank.py: 6.3
   test_pack_manifest_store_extraction.py: 5.2

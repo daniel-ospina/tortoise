@@ -286,8 +286,10 @@ def test_subdir_scan_keys_sites_repo_relatively_and_compares_in_scope(
 #: Their property sets are hand-declared and verified by a bespoke AST pin named
 #: in ``_ROW_VERIFIERS`` — an exemption here is a claim that a verifier COVERS it,
 #: and ``test_every_exempt_row_has_a_row_verifier`` fails if one does not.
-#: ``rebuild_all`` is excluded separately — it is the whole-schema writer
-#: (``SET s += $props``) and is declared as such.
+#: The whole-schema writer is excluded separately — it is the ONE row declared
+#: ``writes_whole_schema=True`` (``SET s += $props``), so there is no property
+#: name at the site to compare. Since #9124 the write lives in
+#: ``projection._rebuild_all_replay`` (``rebuild_all`` is the entry point).
 #:
 #: ``tortoise/sdk.py::_write_session_and_turns`` was exempted on the reason that
 #: it "builds its ``SET`` clause with an f-string", which is false and made the
@@ -970,8 +972,9 @@ def test_ontology_section_4_8_owner_lists_match_the_declaration() -> None:
 def test_the_set_property_owner_convention_is_stated_in_both_homes() -> None:
     """The ``id`` row's convention must be stated where the row is read.
 
-    ``SESSION_PROPERTY_OWNERS["id"]`` names only ``rebuild_all`` while ten
-    declared writers mint the node with ``MERGE (s:Session {id: …})`` — and the
+    ``SESSION_PROPERTY_OWNERS["id"]`` names only the replay restore (it named
+    ``rebuild_all`` before #9124 moved that write into ``_rebuild_all_replay``)
+    while ten declared writers mint the node with ``MERGE (s:Session {id: …})`` — and the
     module's grouping comment filed ``id`` under "identity + capture shape (the
     shared primitive, #3551)", the opposite of the derived table. The doc pin
     cannot catch it: it compares §4.8 against the same declaration, so both
@@ -992,6 +995,65 @@ def test_the_set_property_owner_convention_is_stated_in_both_homes() -> None:
     assert "MERGE` key is **not** attributed" in _session_section(), (
         "docs/ONTOLOGY.md §4.8 must state the convention its `id` row uses, so a "
         "reader is not told a replay restore owns the Session identity")
+
+
+def _comment_block(path: str, anchor: str) -> str:
+    """The contiguous comment block immediately above ``anchor``'s line.
+
+    A prose home is a COMMENT, and ``inspect.getsource`` drops comments — which
+    is why an explanation can go stale with nothing failing. Pinning one means
+    reading the comment itself, so this slices it out of the file text.
+    """
+    lines = (REPO_ROOT / path).read_text(encoding="utf-8").splitlines()
+    idx = next(i for i, line in enumerate(lines)
+               if line.lstrip().startswith(anchor))
+    block: list[str] = []
+    for line in reversed(lines[:idx]):
+        if line.lstrip().startswith("#"):
+            block.append(line)
+        elif line.strip():
+            break
+    return "\n".join(reversed(block))
+
+
+def test_the_whole_schema_writer_prose_names_the_function_holding_the_write(
+        repo_sites) -> None:
+    """Every home explaining the exemption must name the OWNER the scanner derives.
+
+    ``writes_whole_schema=True`` exempts the row from
+    ``test_scanner_properties_match_the_declaration``, so no assertion reads its
+    site — and the prose that explains the exemption is therefore unverified.
+    It went stale exactly the way unverified prose does: #9124 split
+    ``rebuild_all`` into a public entry point plus ``_rebuild_all_replay``,
+    moving ``SET s += $props`` two frames down, and every code-side comment that
+    placed the write kept naming the entry point. Nothing failed, because a
+    comment cannot fail. This derives the owner from the scan the declaration's
+    ``key`` depends on and requires the three code-side homes to agree with it,
+    so the next re-key reddens here instead of drifting silently.
+    """
+    writers = repo_sites[0]
+    row = next(w for w in session_schema.SESSION_WRITERS
+               if w.writes_whole_schema)
+    assert row.key in {site.key for site in writers}, (
+        f"{row.key} is declared as the whole-schema restore, but the scanner "
+        "attributed no whole-schema write to it")
+    owner = row.key.split("::")[1]
+    homes = {
+        "tortoise/session_schema.py": (
+            f'key="{row.key}"', "the declaration's own commentary"),
+        "tools/session_retrofit_audit.py": (
+            "if not writes:", "the scanner's own commentary"),
+        "tests/test_session_schema_3554.py": (
+            "_FSTRING_WRITERS: frozenset[str]", "this suite's exemption block"),
+    }
+    stale: dict[str, dict[str, str]] = {}
+    for path, (anchor, home) in homes.items():
+        block = _comment_block(path, anchor)
+        if owner not in block:
+            stale[path] = {"home": home, "comment": block.strip()[:300]}
+    assert not stale, (
+        "the prose explaining the whole-schema exemption no longer names the "
+        f"owner the scanner derives ({owner}): {json.dumps(stale, indent=2)}")
 
 
 def _scope_written_properties(src: str, fn_name: str) -> set[str]:

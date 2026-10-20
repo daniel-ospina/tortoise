@@ -74,11 +74,92 @@ MUTATING_QUERY_VERBS = tuple(
 
 #: Every OTHER callable defined on `_GuardedGraph`, with the reason it can put no
 #: mutating statement on the wire. The enumeration test compares the class's own
-#: members (dunders excluded) against this set plus the shared verb tuple, so a
-#: new method is a failure rather than a silent gap.
+#: members (dunders excluded) against this set, the shared verb tuple and the
+#: non-statement-guarded verbs below, so a new method is a failure rather than a
+#: silent gap.
 _NON_MUTATING_HANDLE_METHODS = {
     "_refuse_unauthorized_cache_write",  # the check itself
     "_bar",  # #7162: rewrites the statement text, dispatches nothing
+    # #9209: the two non-Cypher refusal helpers. They RAISE and dispatch nothing,
+    # so they are non-mutating in the sense this bucket means; the verbs that
+    # CONSULT them are in the bucket below, so a helper cannot be smuggled in
+    # here on behalf of an unguarded verb.
+    "_refuse_unauthorized_graph_wipe",
+    "_refuse_key_space_handle_command",
+}
+
+def _wire_reaching_calls(func) -> set[str]:
+    """Calls in `func`'s BODY (never its prose) that reach the client.
+
+    AST-based on purpose: the refusal helpers' DOCSTRINGS quote
+    ``proj.g.execute_command("DEL", …)`` as the evidence for why they exist, so
+    a substring test over `inspect.getsource` reads prose as a dispatch and reds
+    on a method that is correctly filed. Walking the parsed tree sees only real
+    calls.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+    roots = {"self._g", "self._proj.g", "self.g"}
+    # ⛔ ALIASES COUNT (#9223 review, measured): `inner = self._g; return
+    # inner.execute_command(...)` reached the client while this helper returned
+    # an empty set, so a one-line refactor defeated the claim it enforces. Any
+    # local assigned FROM a root is a root.
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Name | ast.Attribute)
+            and ast.unparse(node.value) in roots
+        ):
+            roots |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+    found = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        target = node.func
+        if not isinstance(target, ast.Attribute):
+            continue
+        base = ast.unparse(target.value)
+        if base in roots:
+            found.add(f"{base}.{target.attr}")
+    return found
+
+
+#: #9209 — the third bucket: MUTATING verbs on the handle whose refusal is NOT
+#: the §17.1 statement check, mapped to the guard(s) that must appear in each
+#: verb's own body.
+#:
+#: ⛔ WHY A THIRD BUCKET RATHER THAN ONE OF THE OTHER TWO (#9223 review). The
+#: shared tuple `_HANDLE_MUTATING_VERBS` is not a list of "verbs that write"; it
+#: is the list of verbs that carry a CYPHER STATEMENT, and two other gates
+#: depend on that meaning — `MUTATING_QUERY_VERBS` (below) calls each verb with
+#: a statement positionally, and `tests/test_9124_declared_live_doors.py`
+#: censuses declaration call sites at that same argument index. `delete()`
+#: takes a graph NAME, not a statement, so listing it there would break both
+#: readers and demand a check its body structurally cannot perform. Filing the
+#: two verbs under `_NON_MUTATING_HANDLE_METHODS` would be worse: it would state
+#: in a SECURITY inventory that a mutating verb cannot write. So they get their
+#: own bucket, which is STRICTER than the non-mutating one — membership requires
+#: naming the guard, and the guard is asserted to be in the verb's source.
+_NON_STATEMENT_GUARDED_HANDLE_VERBS = {
+    # `GRAPH.DELETE` carries no Cypher at all: the guard is #9209's non-Cypher
+    # decision, shared with the command channel so the two spellings cannot
+    # drift.
+    "delete": ("_refuse_unauthorized_graph_wipe",),
+    # `CALL <procedure>(…)` IS Cypher text, so this verb is protected by the L2
+    # bulk-wipe classifier applied to the statement the vendor will build — AND
+    # it consults §17.1's statement door on that same reconstructed statement
+    # (measure mode until `_HANDLE_GUARD_ENFORCES`), which is asserted below.
+    # It still cannot sit in `_HANDLE_MUTATING_VERBS`: that tuple's other two
+    # readers take ``args[0]`` as a CYPHER STATEMENT (this verb's ``args[0]`` is
+    # a procedure NAME) and index it positionally.
+    "call_procedure": (
+        "_is_bulk_wipe",
+        "_assert_test_graph",
+        "_refuse_unauthorized_cache_write",
+    ),
 }
 
 
@@ -254,15 +335,101 @@ def test_the_handle_exposes_no_unguarded_mutating_query_verb(armed_sdk):
         name for name, value in vars(_GuardedGraph).items()
         if not name.startswith("__") and callable(value)
     }
-    accounted = set(_HANDLE_MUTATING_VERBS) | set(_NON_MUTATING_HANDLE_METHODS)
+    accounted = (set(_HANDLE_MUTATING_VERBS) | set(_NON_MUTATING_HANDLE_METHODS)
+                 | set(_NON_STATEMENT_GUARDED_HANDLE_VERBS))
     assert public_members == accounted, (
         "`_GuardedGraph` gained or lost a method without this gate noticing. "
-        "A new verb that can put a mutating statement on the wire belongs in "
+        "A new verb that can put a mutating STATEMENT on the wire belongs in "
         "`_HANDLE_MUTATING_VERBS` (shared with the declaration census); a "
+        "MUTATING verb whose refusal is not the statement check belongs in "
+        "`_NON_STATEMENT_GUARDED_HANDLE_VERBS` with the guard named; a "
         "method that cannot write belongs in `_NON_MUTATING_HANDLE_METHODS` "
         f"with the reason. Unaccounted: {sorted(public_members - accounted)}; "
         f"listed but absent: {sorted(accounted - public_members)}"
     )
+
+    # THE THIRD BUCKET IS NOT A WAY OUT OF THE GATE (#9223 review). Each entry
+    # must name a guard that really appears in the verb's own body, and the
+    # buckets must stay disjoint — otherwise `delete`/`call_procedure` could be
+    # moved here to dodge the statement assertion while carrying no guard at
+    # all, which is the silent bypass the review declined to author.
+    assert set(_NON_STATEMENT_GUARDED_HANDLE_VERBS).isdisjoint(
+        _NON_MUTATING_HANDLE_METHODS), (
+        "a verb cannot be both \"cannot write\" and \"writes, guarded by a "
+        "non-statement check\""
+    )
+    assert set(_NON_STATEMENT_GUARDED_HANDLE_VERBS).isdisjoint(
+        MUTATING_QUERY_VERBS), (
+        "a verb in the shared statement tuple must carry "
+        "`_refuse_unauthorized_cache_write`; listing it here too would let it "
+        "skip that assertion"
+    )
+    for verb, guards in _NON_STATEMENT_GUARDED_HANDLE_VERBS.items():
+        body = inspect.getsource(getattr(_GuardedGraph, verb))
+        for guard in guards:
+            assert guard in body, (
+                f"`_GuardedGraph.{verb}` is declared as guarded by `{guard}`, "
+                "but its body does not consult it — an unguarded mutating "
+                "verb declared guarded is worse than an unlisted one"
+            )
+        # ⛔ THE GUARD MUST BE CONSULTED IN CODE, not merely named (#9223
+        # review, measured): the substring assertion above is satisfied by a
+        # DOCSTRING or a COMMENT that names the guard, so a verb whose body was
+        # `"""... `_refuse_unauthorized_graph_wipe` ..."""` followed by
+        # `return self._g.execute_command("FLUSHALL")` passed it. Docstrings and
+        # trailing comments are stripped here before the search.
+        #
+        # WHAT THIS STILL DOES NOT PROVE, stated rather than implied: that the
+        # guard DOMINATES every wire-reaching call on every path. A first attempt
+        # asserted that too and was withdrawn — `call_procedure` has an early
+        # `return self._g.call_procedure(...)` inside an unclassifiable-procedure
+        # branch that RAISES first (so it is safe), while `delete` dispatches
+        # after its guard; a line-order rule cannot tell those apart, and one
+        # that claimed to would be the same "guard map describes a check the code
+        # does not perform" defect this PR exists to remove. A verb that CALLED
+        # its guard with an argument that cannot refuse would also pass. What
+        # actually pins these verbs is BEHAVIOUR: no-op'ing the guards fails 53
+        # of the 70 cases in `tests/test_9209_handle_non_cypher_wipe.py`
+        # (measured in review).
+        code_lines = [
+            line.split("#")[0] for line in body.splitlines()
+        ]
+        # blank the docstring's own lines: parse, then clear the constant's range
+        import ast
+        import textwrap
+
+        tree = ast.parse(textwrap.dedent(body))
+        node = tree.body[0]
+        if (node.body and isinstance(node.body[0], ast.Expr)
+                and isinstance(node.body[0].value, ast.Constant)
+                and isinstance(node.body[0].value.value, str)):
+            for i in range(node.body[0].lineno - 1, node.body[0].end_lineno):
+                code_lines[i] = ""
+        code = "\n".join(code_lines)
+        for guard in guards:
+            assert guard in code, (
+                f"`_GuardedGraph.{verb}` names `{guard}` only in PROSE — its "
+                "docstring or a comment — and never consults it in code, so the "
+                "declaration reads as guarded while nothing refuses this verb"
+            )
+
+    # ⛔ THE BUCKET'S CLAIM IS CHECKED, not just its membership (#9223 review,
+    # measured). `_NON_MUTATING_HANDLE_METHODS` says "this method puts no
+    # mutating statement on the wire", and membership used to be the whole
+    # assertion: adding a `flushall` method that dispatches `FLUSHALL` and filing
+    # it under the bucket with a plausible reason left this gate GREEN. A member
+    # must therefore make no call that reaches the client, which also catches a
+    # future verb that merely delegates.
+    for name in _NON_MUTATING_HANDLE_METHODS:
+        reaching = _wire_reaching_calls(getattr(_GuardedGraph, name))
+        assert not reaching, (
+            f"`_GuardedGraph.{name}` is filed in "
+            "`_NON_MUTATING_HANDLE_METHODS`, but its body calls "
+            f"{sorted(reaching)}: a method that can reach the wire is not "
+            "non-mutating. If it mutates without carrying a statement, it "
+            "belongs in `_NON_STATEMENT_GUARDED_HANDLE_VERBS` with the guard "
+            "that refuses it named"
+        )
     # `execute_command` carries a statement only in its args, so it is checked
     # separately — and this is the assertion that keeps it from being forgotten.
     assert "_refuse_unauthorized_cache_write" in inspect.getsource(

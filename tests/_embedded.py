@@ -308,6 +308,17 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # routing without redirect exemption flips its embedded constructions to
     # the server lane on an out-of-band URI run).
     "test_4921_construct_lock",
+    # #9209: the suite's `sdk_with_journal` fixture asserts `proj._is_embedded`
+    # (and counts real nodes on that embedded projection), and the module is
+    # `pytest.mark.embedded_only`. Without this exemption a URI-set session
+    # redirects the fixture's explicit `db_path` construction to the server,
+    # `_is_embedded` is False, and 42 of its 70 cases ERROR on the fixture
+    # assertion (MEASURED at the pre-fix head: `28 passed, 42 errors`) — the
+    # opposite of the `#9209` docstring's claim that an explicit path alone
+    # keeps the construction embedded. Mirrors the ``carve_out`` row in
+    # ``config/ci-surfaces.yml``; a stem in only one of the two is the silent
+    # hole ``test_carve_out_mirrors_test_no_redirect_stems`` catches.
+    "test_9209_handle_non_cypher_wipe",
     # #8488: the in-process Okapi BM25 lexical arm — module-level
     # ``pytest.mark.embedded_only`` (its subject is the embedded lane and the
     # shipped read's own fusion), so it is exempt from the docker redirect and
