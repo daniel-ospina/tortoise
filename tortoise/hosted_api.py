@@ -9321,19 +9321,28 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
     # C5 (#2114, sweep parity): the enqueue rides the WRITTEN graph — a
     # custom-graph key's write must drain the custom graph, never the org
     # default (sdk is the _data_sdk-resolved graph).
+    #
+    # #9188 review N3: the namespace and the record tenant come from ONE value,
+    # because they must name the same graph. Gating the tenant on
+    # `org["graph_id"]` alone would let a graph-bound credential with a falsy
+    # namespace land its tenant on the ORG-WIDE key — whose drain opens the
+    # DEFAULT graph — i.e. file the pass's rows under a graph it never wrote.
+    # (`_data_sdk` refuses that org first with 403 GRAPH_NOT_FOUND, so it is
+    # latent rather than live; tying the two arguments keeps it that way.)
+    _dream_ns = (org.get("graph_namespace") if org.get("graph_id") else None)
     _enqueue_dream(org["org_id"], list(sdk._dirty_roots),
                    # graph-bound key → ITS custom graph; org-wide/session →
                    # the legacy org-keyed drain (graph_namespace is always
                    # set by C1 even for org-wide keys — org_{id} or a
                    # selfhost org_{name} — so gate on graph_id).
-                   graph_namespace=(org.get("graph_namespace")
-                                    if org.get("graph_id") else None),
-                   # #9188: the record's tenant for the same graph, resolved
+                   graph_namespace=_dream_ns,
+                   # #9188: the record's tenant for the SAME graph, resolved
                    # once from THIS request's credential. Nothing else in the
                    # drain knows it (`_open_sdk` opens a namespace, not a
                    # tenant), and an armed lane otherwise refuses every
                    # dream-emitted record `no_tenant`.
-                   record_tenant=_resolve_record_tenant(org))
+                   record_tenant=(_resolve_record_tenant(org)
+                                  if _dream_ns else None))
     # Log audit event
     await _async_audit(
         request, org["org_id"], "point_create",

@@ -1981,15 +1981,16 @@ def test_the_public_capture_path_writes_the_epistemic_layer(capture_sdk,
 #
 # #9188's remaining half. The MCP lane installs the record's tenant as an
 # ambient `use_record_tenant` scope around `call_next` (#9192), which works
-# because its auth is middleware. The hosted REST lane's auth is a FastAPI
-# dependency, so there is no `with` to hold and the tenant is resolved inside
-# `_data_sdk` — which the capture path submits to `_graph_offload`, so a scope
-# entered there dies with the context copy, and setting it loop-side would mean
-# setting it WITH NO EXIT (one unreleased value inherited by every detached task
-# and every other write door in that context). So that lane carries the tenant
-# BY VALUE on the SDK that performs the write. Confinement is the reason, NOT
-# propagation: a contextvar set on the loop IS copied into `asyncio.to_thread`
-# and `_graph_offload` (measured).
+# because its auth is middleware. The hosted REST lane's auth is a plain FastAPI
+# dependency TODAY (a `yield`-dependency could hold a scope; none does), so no
+# `with` exists to enter, and the tenant is resolved inside `_data_sdk` — which
+# the capture path submits to `_graph_offload`, so a scope entered there dies
+# with the context copy — and setting it loop-side would mean setting it WITH NO
+# EXIT (one unreleased value inherited by every detached task and every other
+# write door in that context). So that lane carries the tenant BY VALUE on the
+# SDK that performs the write. Confinement is the reason, NOT propagation: a
+# contextvar set on the loop IS copied into `asyncio.to_thread` and
+# `_graph_offload` (measured).
 #
 # Until this half landed, EVERY armed write on that lane was refused
 # `no_tenant` — including a graph-bound key whose `graph_id` is a valid
