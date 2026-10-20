@@ -1435,11 +1435,46 @@ def test_a_parametrised_file_has_no_denominator(tmp_path: Path) -> None:
         "    def test_two(self):\n        pass\n",
         encoding="utf-8",
     )
+    # The shapes a second review round found still counted (each measured as a
+    # real floor): a marker bound to a NAME, a parametrised FIXTURE, a
+    # `pytestmark` in a non-`=` assignment form, and a `Test*` class whose base
+    # supplies tests it inherits.
+    (tmp_path / "tests" / "test_param_alias.py").write_text(
+        "import pytest\n"
+        "CASES = pytest.mark.parametrize('x', list(range(8)))\n"
+        "@CASES\n"
+        "def test_one(x):\n    pass\n"
+        "def test_two():\n    pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_fixture_params.py").write_text(
+        "import pytest\n"
+        "@pytest.fixture(params=['embedded', 'docker'])\n"
+        "def leg(request):\n    return request.param\n"
+        "def test_a(leg):\n    pass\n"
+        "def test_b(leg):\n    pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_param_annassign.py").write_text(
+        "import pytest\n"
+        "pytestmark: list = [pytest.mark.parametrize('k', [1, 2])]\n"
+        "def test_a(k):\n    pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_inherited.py").write_text(
+        "import unittest\n"
+        "class BaseHolder(unittest.TestCase):\n"
+        "    def test_inherited(self):\n        pass\n"
+        "class HolderTests(BaseHolder):\n"
+        "    def test_own(self):\n        pass\n",
+        encoding="utf-8",
+    )
 
     counts = ci_timing.declared_test_counts(
         ["test_param_decorator.py", "test_param_module.py", "test_param_class.py",
          "test_plain.py", "test_param_method.py", "test_param_class_body.py",
-         "test_unnamed_case.py"],
+         "test_unnamed_case.py", "test_param_alias.py", "test_fixture_params.py",
+         "test_param_annassign.py", "test_inherited.py"],
         tmp_path,
     )
     assert "test_param_decorator.py" not in counts
@@ -1448,6 +1483,10 @@ def test_a_parametrised_file_has_no_denominator(tmp_path: Path) -> None:
     assert "test_param_method.py" not in counts
     assert "test_param_class_body.py" not in counts
     assert "test_unnamed_case.py" not in counts
+    assert "test_param_alias.py" not in counts
+    assert "test_fixture_params.py" not in counts
+    assert "test_param_annassign.py" not in counts
+    assert "test_inherited.py" not in counts
     # …and the witness still works where it IS provable, so the omission is not
     # "stop counting anything that imports pytest".
     assert counts == {"test_plain.py": 2}

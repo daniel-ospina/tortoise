@@ -652,15 +652,21 @@ def declared_test_counts(keys, repo_root: Path) -> dict[str, int]:
       `observed >= declared` and licensed a 10x discount (#9134 review, P1).
       So a file carrying a `parametrize` marker is OMITTED from this map
       altogether (see `_has_parametrisation`), routing it to the UNKNOWN rule
-      below: raisable, never lowerable. A `pytest_generate_tests` hook
-      parametrises without a marker and is still undetected — that residual
-      keeps the old floor behaviour. It is the ONLY MARKERLESS form left: the
-      two shapes that used to sit beside it are closed — a `parametrize` on a
-      class METHOD (and a class-body `pytestmark`), which this scan used to
-      miss by reading `tree.body` only, and a `unittest.TestCase` subclass
-      under a name that does not start with `Test`, whose test methods the count
-      below cannot see (`_declares_a_floor`). Both were floors, and a floor is
-      the fail-open direction;
+      below: raisable, never lowerable. The same applies to every other shape
+      whose collected count can EXCEED its `def` count, each of which was a
+      floor and each of which is now closed: a `parametrize` on a class METHOD
+      or a class-body `pytestmark` (an earlier scan read `tree.body` only — 7
+      declared beside 9 collected in-tree), a `pytestmark` assigned with `+=`
+      or an annotation, a marker BOUND TO A NAME (`@CASES`), a parametrised
+      FIXTURE (`@pytest.fixture(params=…)` — 16 declared beside 32 collected
+      in-tree), and a `Test*` class with ANY explicit base, including an
+      imported `unittest.TestCase` subclass or a mixin whose methods it
+      inherits (`_declares_a_floor`). WHAT REMAINS: a multiplier with no
+      marker, no name and no base to read — a `pytest_generate_tests` hook, or a
+      decorator that adds cases through a call this scan cannot follow. That
+      residual is bounded, not denied: `--durations=15` caps how many nodeids a
+      leg can report, so over-credit is only reachable for a file whose TRUE
+      collected count is within that cap;
     * the count is what pytest COLLECTS, not every `def` whose name starts with
       `test`: a `@pytest.fixture` named `test_tools` or `test_proj` is a
       FIXTURE, and a nested `def test_inner` inside another test is not
@@ -749,29 +755,63 @@ def _has_parametrisation(tree: ast.Module) -> bool:
     a reading that saw 2 was classified `observed >= declared` (2 >= 2) and let a
     10x discount through (#9134 review, P1).
 
-    Detected forms: a `parametrize` marker on a `pytestmark` assignment, or in
-    the decorators of ANY `def` or `ClassDef` in the module — nested and class-
-    body ones included, because `@pytest.mark.parametrize` on a method of a
-    `Test*` class is exactly as ordinary as one on a module-level function and
-    was MISSED when this scanned `tree.body` only: measured in-tree,
-    `test_event_state_carrier_2788.py` counted 7 `def`s beside 9 collected
-    nodeids, a floor that could license a discount (#9134 review, P1).
-    NOT detected, and stated because it is a real residual: parametrisation
-    applied at collection time by a `pytest_generate_tests` hook (no marker to
-    read). That residual undercounts exactly as before, so what the detection
-    buys is every MARKER form — the hook form keeps the old, documented
-    exposure.
+    Detected forms — every one of them OMITS the file (UNKNOWN: raisable, never
+    lowerable), because a denominator that can be exceeded licenses a discount:
+
+    * a `parametrize` marker anywhere in the module, class bodies included — a
+      `@pytest.mark.parametrize` on a METHOD of a `Test*` class is as ordinary
+      as one on a module-level function and was MISSED by an earlier scan of
+      `tree.body` only: measured in-tree, `test_event_state_carrier_2788.py`
+      counted 7 `def`s beside 9 collected nodeids (#9134 review, P1);
+    * a `pytestmark` assignment in ANY form (`=`, `+=`, annotated) at module or
+      class level — it parametrises without a decorator to read;
+    * ANY bare-`Name` decorator (`@CASES`) — the marker is bound to a name, so
+      the `parametrize` attribute this function looks for is not in the tree at
+      the point of use, and a custom decorator that adds cases is
+      indistinguishable from an alias;
+    * `@pytest.fixture(params=...)` — a parametrised FIXTURE multiplies every
+      test that consumes it: measured in-tree,
+      `tests/test_divergence_conformance.py` declares 16 `def`s and pytest
+      collects 32 nodeids (#9134 review, P1).
+
+    NOT detected, and stated because it is a real residual: a multiplier with no
+    marker, no name and no base to read — a `pytest_generate_tests` hook, or a
+    decorator that adds cases through a call this scan cannot follow. Two things
+    bound that residual rather than pretending it is absent: `--durations=15`
+    caps how many nodeids a leg can even report, so a reading can only be
+    over-credited for a file whose TRUE collected count is within that cap; and
+    the `durations:` map's own rules keep every such row's weight (a held row is
+    never lowered by an unprovable reading).
     """
     for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and any(
-                _mentions_parametrize(dec) for dec in node.decorator_list):
-            return True
-        # A `pytestmark` assignment at module level OR in a class body: the
-        # latter parametrises that class's methods and is not a decorator.
-        if isinstance(node, ast.Assign) and any(
-                isinstance(t, ast.Name) and t.id == "pytestmark" for t in node.targets
-        ) and _mentions_parametrize(node):
-            return True
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            for dec in node.decorator_list:
+                # Only an `ast.Attribute` (or a CALL to one) is a decorator this
+                # scan can read the meaning of. A bare `@NAME`, a `@marks[0]`
+                # subscript or a call to a name may all be an ALIAS for a
+                # parametrizing marker, so the file is unprovable rather than
+                # assumed safe — the fail-closed direction, at the cost of a
+                # denominator the row can live without.
+                if isinstance(dec, ast.Call):
+                    if not isinstance(dec.func, ast.Attribute):
+                        return True
+                    if _mentions_parametrize(dec):
+                        return True
+                    if dec.func.attr == "fixture" and any(
+                            kw.arg == "params" for kw in dec.keywords):
+                        return True
+                    continue
+                if not isinstance(dec, ast.Attribute):
+                    return True
+                if _mentions_parametrize(dec):
+                    return True
+        # A `pytestmark` assignment at module level OR in a class body, in any
+        # assignment form: the latter parametrises that class's methods and is
+        # not a decorator.
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in targets):
+                return True
     return False
 
 
@@ -780,27 +820,34 @@ def _declares_a_floor(tree: ast.Module) -> bool:
 
     `_collected_test_count` counts `test*` methods of classes whose NAME starts
     with `Test`, and pytest additionally collects every `test*` method of a
-    `unittest.TestCase` subclass whatever it is called. A `TestCase` subclass
-    under any other name is therefore invisible to the count, which makes the
-    denominator a FLOOR — the direction that licenses a discount. Measured
-    in-tree: `tests/test_collision_preflight.py` counts 0 against 284 collected
-    nodeids (`CollisionPreflightTest`, `HolderGateTests`, …).
+    `unittest.TestCase` subclass whatever it is called — AND every `test*`
+    method a class INHERITS from a mixin or a shared base. A class carrying any
+    explicit base is therefore a count the AST cannot finish: measured in-tree,
+    `tests/test_collision_preflight.py` counts 0 against 284 collected nodeids
+    (`CollisionPreflightTest`, `HolderGateTests`, …), and a `Test*` subclass of a
+    mixin was 2 declared beside 6 collected (#9134 review, P1).
+
+    ANY explicit base (other than `object`) omits the file, not just a name that
+    ends in `TestCase`: the base is frequently IMPORTED, so its own identity is
+    not in this module at all (`class HolderTests(BaseHolder)`), and a base that
+    contributes no tests costs only a denominator the row can live without —
+    UNKNOWN is fail-closed (raisable, never lowerable), while a wrong-but-lower
+    count is the defect this exists to refuse.
 
     OMITTED rather than counted, for the same reason a parametrised file is: the
     exact collected count is not computable from the AST without re-implementing
     pytest's collection, and a wrong-but-higher count makes `observed >=
     declared` UNSATISFIABLE, holding the row's weight forever with a witness
     naming a testcase that does not exist (the `declared > collected` defect the
-    `declared_test_counts` docstring records). UNKNOWN is fail-closed: raisable,
-    never lowerable.
+    `declared_test_counts` docstring records).
     """
     for node in tree.body:
-        if not isinstance(node, ast.ClassDef) or node.name.startswith("Test"):
+        if not isinstance(node, ast.ClassDef):
             continue
         for base in node.bases:
             base_name = (base.attr if isinstance(base, ast.Attribute)
                          else getattr(base, "id", ""))
-            if isinstance(base_name, str) and base_name.endswith("TestCase"):
+            if base_name != "object":
                 return True
     return False
 
