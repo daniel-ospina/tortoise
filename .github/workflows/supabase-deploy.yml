@@ -84,9 +84,12 @@ on:
   workflow_dispatch:
 
 # A DEPLOY must never be cancelled midway: a cancelled migration apply leaves
-# the schema half-migrated, which no re-run repairs deterministically. One
-# group, never cancelling — a newer push waits for the in-flight deploy instead
-# of aborting it. Bookkeeping, not a merge gate (#9115).
+# the schema half-migrated, which no re-run repairs deterministically. So the
+# run-level lock never cancels — a superseded run of the SAME event queues
+# behind the in-flight one instead of aborting a half-applied schema. Runs of
+# DIFFERENT events do not queue behind each other: as the note below spells
+# out, the group is event-scoped, so a `push` drift run can never hold the lock
+# a `workflow_dispatch` apply needs. Bookkeeping, not a merge gate (#9115).
 #
 # ⛔ The group is EVENT-SCOPED, and that is load-bearing twice over.
 #

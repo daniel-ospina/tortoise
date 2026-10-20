@@ -583,17 +583,28 @@ def test_supabase_deploy_apply_lock_is_distinct_from_the_run_lock() -> None:
     apply_group = _concurrency_group(doc["jobs"]["deploy"].get("concurrency"))
     assert run_group is not None, "the run-level deploy lock (#9115) must stay"
     assert apply_group is not None, "the apply lock (#1095) must stay in place"
-    assert "github.event_name" in run_group, (
-        f"the run-level group is a constant ({run_group!r}); every run of this "
-        "workflow then holds it — including the `push` drift run, which starves "
-        "an operator's dispatch apply (#1095). Scope it by event."
+    # ⛔ EXACT pins, not substring checks. An earlier revision asserted
+    # `"github.event_name" in run_group` and `"${{'" not in apply_group`, and
+    # BOTH were vacuous in the direction that matters: the first is satisfied by
+    # `supabase-deploy-${{ github.event_name }}-${{ github.run_id }}` (every run
+    # gets its own group, so deploys never serialise), and the second — the
+    # literal is `$`, `{`, `{`, `'`, and a real group always has a character
+    # between `{{` and a quote — is satisfied by
+    # `supabase-deploy-apply-${{ github.run_id }}` (every dispatch gets its own
+    # apply group, so two operators can `supabase db push` at once). Exact text
+    # pins both properties at once: constant apply lock, event-scoped run lock,
+    # and the two distinct from each other.
+    assert run_group == "supabase-deploy-${{ github.event_name }}", (
+        f"the run-level group must be event-scoped and NOTHING else "
+        f"({run_group!r}). A constant holds the lock on every run — including "
+        "the `push` drift run, which then starves an operator's dispatch apply "
+        "(#1095); any extra context (e.g. `github.run_id`) gives every run its "
+        "own group, so deploys stop serialising and two applies can interleave."
     )
-    assert apply_group != run_group, (
-        f"the apply lock has collapsed back onto the run lock ({run_group!r}) — "
-        "that is the 2026-10-20 deadlock: the deploy job fails with zero steps "
-        "and no migration can be applied automatically"
-    )
-    assert "${{'" not in apply_group, (
-        f"the apply lock must be a CONSTANT ({apply_group!r}); an expression "
-        "would stop concurrent applies from serialising"
+    assert apply_group == "supabase-deploy-apply", (
+        f"the apply lock must be the CONSTANT 'supabase-deploy-apply' "
+        f"({apply_group!r}): an expression gives every dispatch its own group, "
+        "so concurrent applies stop serialising — and collapsing onto the run "
+        f"group {run_group!r} is the 2026-10-20 deadlock, where the deploy job "
+        "fails with zero steps and no migration can be applied automatically."
     )
