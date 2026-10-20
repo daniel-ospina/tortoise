@@ -1817,11 +1817,13 @@ def _forward_query(method, q, params=None, timeout=None, *, mutating,
     Omitting unset kwargs keeps both call conventions working.
 
     *mutating* is the #7357 arm, supplied by the CALLER because only the caller
-    knows the VERB: a duck-typed proxy has no command tuple to classify, and the
-    same statement text means different things through ``query`` (executes),
-    ``ro_query`` and ``explain`` (neither can apply it). Deriving it from the
-    text alone here made those verbs contradict the rule ``_command_mutating``
-    documents.
+    knows the VERB: a duck-typed proxy has no command tuple to classify.
+    ``query``, ``ro_query`` and ``_query`` all take the arm from the statement
+    TEXT — the vendor's "read-only" verb name is not a guarantee that a write
+    cannot be dispatched (see ``_NON_EXECUTING_COMMANDS``). Only ``explain`` is
+    verb-derived, and it is ``False`` because ``GRAPH.EXPLAIN`` plans without
+    executing. Deriving it here instead would put a classification below the
+    seam that already knows the verb.
 
     #7357: this is also where the duck-typed proxy's five verbs pass, so the
     instance-outage note is applied here — the proxy dispatches straight to the
