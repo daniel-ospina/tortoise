@@ -207,7 +207,7 @@ fixed one.
 | the evidence probe measures each SDK's OWN graph | evidence | same (T9); `docs/evidence/7951-delete-point-outbox/probes/delete_order_probe.py` | done |
 | module-top KNOWN DEVIATIONS corrected | docs | `tortoise/sdk.py` module top | done |
 | the message names this door's own record, and the graph attaches to the cache clause | code | same (T10) | done |
-| test-file classification | config | `config/ci-surfaces.yml` — six-surface dual-registration + a `durations` row; `python tools/ci_selection.py --integrity` green | done |
+| test-file classification | config | `config/ci-surfaces.yml` — six-surface dual-registration + a `durations` row; `python tools/ci_selection.py --integrity` green **and** `python3 tools/registry_integrity.py config/ci-surfaces.yml` exit 0 | done |
 | executable demonstration | evidence | `docs/evidence/7951-delete-point-outbox/` (probe + verbatim log, exit 0; re-measured at this head — section 3 now prints the `record_committed=False` arm) | done |
 | MCP / public SDK surface | none | `tools/surface_manifest.py check` OK (no tool row added, removed or renamed); no tool or public method added/renamed | verified |
 | raw guarded handle `proj.g.query` (this door's `DETACH DELETE`) | **measured** | — | **DETECTED, not yet REFUSING** (#9124 part 1: counted + logged, `_HANDLE_GUARD_ENFORCES` False); the door holds NO live lane since #9207 reversed its order, so part 2 refuses it |

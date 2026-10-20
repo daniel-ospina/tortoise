@@ -1122,3 +1122,54 @@ def test_the_message_names_the_doors_own_record_and_graph():
     assert "PointRevised" in revised_msg, revised_msg
     assert "PointAdded" not in revised_msg, (
         "update_point never writes a PointAdded record: " + revised_msg)
+
+
+# ── T11: the probe's exit code is never narrower than its verdict ──────────
+
+@pytest.mark.parametrize(
+    "reported, recorded, live, restored, expected_ok",
+    [
+        # the ONE passing shape: unconfirmed caller, no record on disk, the
+        # destroy landed, and the replay restored the Point from the truth.
+        (True, 0, 0, 1, True),
+        # each term alone flipped — every one must fail the verdict AND the exit
+        (False, 0, 0, 1, False),   # the caller was not told
+        (True, 1, 0, 1, False),    # the append landed after all
+        (True, 0, 1, 1, False),    # the destroy did not land
+        (True, 0, 0, 0, False),    # the rebuild did NOT restore the Point
+        (True, 0, 2, 0, False),    # several terms wrong at once
+    ],
+)
+def test_the_probe_exit_code_cannot_pass_a_verdict_it_prints_as_lost(
+        reported, recorded, live, restored, expected_ok):
+    """A printed `COMMIT VERDICT: LOST` must not be able to exit 0.
+
+    #9236 review (P3). Section 3's printed sentence is computed from FOUR terms
+    (`reported and recorded == 0 and live == 0 and restored == 1`), but the
+    process exit code was computed from three of them
+    (`cache_first and no_record_ok and reported`). So `restored != 1` — the
+    rebuild did NOT bring the Point back, i.e. the truth never held the destroy
+    the door reported, which falsifies the trade this ordering makes — printed
+    `COMMIT VERDICT: LOST` and still exited 0. The README and the PR body cite
+    "probe exit 0" as the evidence for exactly that section, so a `LOST` verdict
+    would have been quoted as a pass.
+
+    The fix is by construction, not by a second predicate: the sentence and the
+    exit term come from ONE call (`_section3_verdict`), and `main()` returns
+    that same object's `ok`. This test pins the coupling — a subset predicate
+    (the pre-fix `reported`-only shape) reds the `restored=0`, `recorded=1` and
+    `live=1` rows.
+
+    MUTATION: recompute `ok` from any subset of the four terms and the rows
+    whose flipped term is outside that subset fail; recompute the returned
+    sentence independently of `ok` and the sentence assertion fails.
+    """
+    probe = _load_probe()
+    sentence, ok = probe._section3_verdict(reported, recorded, live, restored)
+    assert ok is expected_ok, (
+        f"verdict {ok!r} disagrees with the printed sentence's terms "
+        f"(reported={reported}, recorded={recorded}, live={live}, "
+        f"restored={restored})")
+    assert (sentence == probe._SECTION3_OK) is expected_ok, (
+        "the sentence printed and the term the exit code uses must be the same "
+        f"decision, got sentence={sentence!r} for ok={ok!r}")

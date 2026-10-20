@@ -131,6 +131,31 @@ def _live(proj, pid: str) -> int:
     return _count(proj, "MATCH (n:Point {id:$id}) RETURN count(n)", id=pid)
 
 
+#: The sentence section 3 prints when the destroy is recovered only by a
+#: destructive rebuild — the shape the README and the PR body cite.
+_SECTION3_OK = "REPORTED, REPAIRED ONLY BY A DESTRUCTIVE REBUILD"
+
+
+def _section3_verdict(reported: bool, recorded: int, live: int,
+                     restored: int) -> tuple[str, bool]:
+    """The section-3 sentence AND the term the process exit code uses — ONE call.
+
+    ⚠️ The exit code must never be NARROWER than the sentence printed above it.
+    The README and the PR body cite "probe exit 0" as this section's evidence,
+    so an exit code computed from a SUBSET of these four terms would let a
+    printed `COMMIT VERDICT: LOST` exit 0 — a claim the artifact cannot
+    support.  Both readers of the verdict come from this one call, so the two
+    cannot drift apart (#9236 review, P3); recomputing the terms at the return
+    site is what made them disagree.
+
+    `restored != 1` is the sharp case: the rebuild did not bring the Point
+    back, i.e. the truth never held the destroy this door reported, which
+    falsifies the whole trade the ordering makes.
+    """
+    ok = bool(reported) and recorded == 0 and live == 0 and restored == 1
+    return (_SECTION3_OK if ok else "LOST"), ok
+
+
 def main() -> int:
     from tortoise.sdk import TortoiseSDK
 
@@ -257,8 +282,9 @@ def main() -> int:
             restored = _live(proj3, pid3)
             print(f"Point live after rebuild:        {restored}  "
                   "(1 = the TRUTH still held it and the replay restored it)")
-            print("COMMIT VERDICT: "
-                  f"{'REPORTED, REPAIRED ONLY BY A DESTRUCTIVE REBUILD' if reported and recorded3 == 0 and live3 == 0 and restored == 1 else 'LOST'}")
+            sentence3, commit_ok = _section3_verdict(
+                reported, recorded3, live3, restored)
+            print(f"COMMIT VERDICT: {sentence3}")
         finally:
             sdk3.close()
 
@@ -288,7 +314,10 @@ def main() -> int:
         print("RESIDUAL: the raw handle is NOT closed, and `_delete_entity` is "
               "still apply-first — both recorded on #7951; increment 4a routes "
               "ONE delete door (`delete_point`).")
-        return 0 if (cache_first and no_record_ok and reported) else 1
+        # The exit code reads the SAME verdict object section 3 printed, so a
+        # printed `LOST` can never accompany a passing exit status (#9236
+        # review, P3).  Do not recompute the terms here.
+        return 0 if (cache_first and no_record_ok and commit_ok) else 1
     finally:
         sdk.close()
 
