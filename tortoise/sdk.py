@@ -27,6 +27,7 @@ an extractor/indexer, update the catalog reference.
 """
 from __future__ import annotations  # noqa: I001
 
+import contextlib
 import contextvars
 import hashlib
 import json as _json
@@ -317,6 +318,128 @@ BASELINE_SOURCE_DISPLAY: dict[str, str] = {
         "set_point_baseline()."
     ),
 }
+
+
+# ── #9063: THE CALIBRATION GATE'S DEMAND UNIVERSE, stated once ──────────
+#
+# The gate (_ensure_calibrated) promises "no EP surface runs uncalibrated EP
+# silently" (#1157/#344/#7478), so its universe must be the node set EP
+# CONSUMES — not whatever a human AUDIT surface happens to list. It used to be
+# the second: the gate intersected ``calibrate_summary()``'s rows, so every
+# filter that belongs to the audit silently became a blind spot in the gate.
+# #9063 measured a legacy evidence Point (``is_operator`` absent — a shape EP's
+# own participant predicate ADMITS, ep.py / #3139 / #3154) being consumed and
+# STAMPED with a posterior while the gate saw nothing. The query in
+# ``_uncalibrated_ep_participants`` is now the ONE declaration of that universe,
+# anchored on EP's own non-operator / live shape.
+#
+# TWO filters survive ON PURPOSE, and neither is this gate's call to change:
+#   * EVIDENCE KINDS: a Point of a DERIVED-belief kind (decision, plan,
+#     strategy, vision, goal, target...), or the ``assessment`` record
+#     ``assess_source`` writes (#398), is not an evidence claim; demanding a
+#     prior of it is a different belief model.
+#   * ``:Point`` only: EP propagates confidence across Point/Subject/Object/
+#     Event (#7813 owner ruling, #7853 read widening) and the prior READ path
+#     is already four-label, but an entity cannot be calibrated at all today
+#     (``set_point_baseline`` writes :Point), so gating the labels BEFORE
+#     making them calibratable is a #8175-shaped trap — a gate that can never
+#     be satisfied.
+#
+# Both are the SAME open question — which node kinds must carry a prior? —
+# which #9063 reserves to the owner (belief model). WIDENING EITHER TUPLE IS
+# THAT DECISION; they are single constants because the query is already
+# id-anchored and EP-predicated.
+_CALIBRATION_EVIDENCE_KINDS = ("statement", "observation", "hypothesis")
+_CALIBRATION_GATED_LABELS = ("Point",)
+
+#: The Cypher set of leading/trailing characters that make a string id
+#: UNCALIBRATABLE (#9063) — the MEASURED unresolvable class, not a guess.
+#: ``trim()`` is NOT usable here: on this engine it strips ASCII space only
+#: (``trim('\tabc\t')`` returns the string unchanged), which left tab- and
+#: newline-padded ids in the universe while the scoped, index-anchored arm
+#: (``n.id IN $ids``) could not resolve them — the arms disagreeing in the
+#: fail-open direction.
+#:
+#: The membership is measured, in BOTH directions (embedded engine and a
+#: FalkorDB server, #9261 review): exactly the ASCII whitespace characters are
+#: unresolvable by a labelled id equality. Everything else must stay IN the
+#: universe — in particular NBSP, which ``create_point`` ACCEPTS, which
+#: ``MATCH (n:Point {id:…})`` resolves, and which ``set_point_baseline``
+#: satisfies; excluding it made the gate pass while EP stamped the node
+#: (measured fail-open). ``\v``/``\f`` are the mirror case: refused by every
+#: writer and unresolvable, so a demand there is unsatisfiable (#8175).
+#: ``left``/``right`` are supported on both engines.
+#: The whitespace family a gate conjunct strips: the ID classifier and the kind
+#: normalisation SHARE the ASCII base; only the kind normalisation adds NBSP (see
+#: the two constants below, each with the measurement that set it).
+#:
+#: Why enumerate, rather than ``trim()``: ``trim()`` strips ASCII space ONLY
+#: here, and ``=~`` (regex) is unavailable on this surface (measured:
+#: UnsupportedCypherOperatorError).
+#:
+#: ⚠️ DECLARED BOUNDARY: Unicode spaces beyond NBSP (em space, ideographic
+#: space, ZWSP, BOM…) are NOT in this family. A ``pointKind`` padded with one of
+#: those still escapes the kind normalisation while EP consumes the node and
+#: stamps it — measured, and pre-existing (``origin/main`` compared the raw kind,
+#: so every spelling escaped). Reachability is NOT "hand-written only": the write
+#: door stores a bare kind verbatim with a warning, so ``create_point`` mints the
+#: shape; every such node IS demandable and clearable, so the gap is one of
+#: coverage, not of an unsatisfiable demand. Each further code point costs one
+#: ``replace()`` on every scanned row (measured: seven characters ≈ +5.7 ms at
+#: 2,000 Points; the full Unicode list timed out on an eight-node fixture), so
+#: the boundary is recorded here and filed (#9287) rather than left implicit or
+#: paid for on the hot path.
+#: For IDS: exactly the ASCII whitespace class — measured to be the set an id
+#: equality cannot resolve. NBSP is deliberately NOT here: ``create_point``
+#: ACCEPTS an NBSP-padded id, the labelled equality resolves it and
+#: ``set_point_baseline`` satisfies it, so excluding it made the gate pass while
+#: EP stamped the node (measured fail-open, one review cycle ago).
+_WHITESPACE_CHARS = (" ", "\t", "\n", "\v", "\f", "\r")
+
+#: For KINDS: the same class plus NBSP (a kind is matched by string membership,
+#: not by an id equality, so the resolvability argument above does not apply).
+_KIND_WHITESPACE_CHARS = (*_WHITESPACE_CHARS, "\u00a0")
+
+#: Cypher string literals for the control characters (a raw one would break the
+#: query); the rest of the family is embedded verbatim — none of them is a quote
+#: or a backslash.
+_CYPHER_CHAR_LITERAL = {
+    "\t": r"'\t'", "\n": r"'\n'", "\r": r"'\r'",
+    "\v": r"'\v'", "\f": r"'\f'",
+}
+
+
+def _cypher_ws_literal(ch: str) -> str:
+    return _CYPHER_CHAR_LITERAL.get(ch) or f"'{ch}'"
+
+
+#: The same family as a Cypher list literal.
+_ID_WHITESPACE_SET = ", ".join(_cypher_ws_literal(c) for c in _WHITESPACE_CHARS)
+
+
+def _strip_whitespace(expr: str) -> str:
+    """Cypher: ``expr`` with every whitespace character of the family removed.
+
+    ``trim()`` is NOT enough — on this engine it strips space only, so a
+    ``pointKind`` padded with any other member of the family escaped an
+    exact-membership check while EP (which reads no kind at all) consumed and
+    stamped the node (measured, and NOT a regression: ``origin/main`` compared
+    the raw kind, so it escaped every spelling). Removing the characters
+    wherever they occur also folds an INTERNAL separator (``'state ment'``),
+    which is fail-closed: EP consumes that node too, so demanding a prior for it
+    is the safe direction.
+    """
+    out = expr
+    for ch in _KIND_WHITESPACE_CHARS:
+        out = f"replace({out}, {_cypher_ws_literal(ch)}, '')"
+    return out
+
+
+#: id types an id-equality can resolve. A hand-written array id is not one of
+#: them (and is unhashable in Python, which crashed the post-pass before this
+#: allow-list); ``integer``/``float``/``boolean`` ids ARE resolvable and
+#: satisfiable (measured), so they stay in the universe.
+_ID_RESOLVABLE_TYPES = "['string', 'integer', 'float', 'boolean']"
 
 
 # #913: statuses that make a Point STALE for review_connections(mode=prune)
@@ -762,7 +885,19 @@ class _InMemoryEventLog:
     """Duck-typed EventLog (append/read_all) backing the session-capture
     extraction readback. The graph (via the EventAPI projection) is the
     durable store; this log only carries the events of the current capture so
-    the caller can read the extracted Points back. No file I/O, no temp files."""
+    the caller can read the extracted Points back. No file I/O, no temp files.
+
+    ``durable = False`` is a CONTRACT, not a comment (#9188 review): these
+    records are appended here and NOWHERE else, so `EventAPI._emit` must not
+    hand them to the Postgres record. The record is ``replay(journal)`` — a row
+    from this buffer has no journal record behind it, could never be
+    reproduced, and no replay could ever correct it (the extraction's own
+    in-capture dedup even DELETEs a repeated Point from the graph, leaving the
+    row asserting a Point neither the graph nor any journal holds). The door
+    reads this attribute; every other log defaults to durable.
+    """
+
+    durable = False
 
     def __init__(self):
         self._events: list[dict] = []
@@ -6913,6 +7048,11 @@ class TortoiseSDK:
         log = self._get_event_log()
         if log is None:
             # No journal configured: there is no rebuild source to commit to.
+            # An ARMED record on a journal-less deployment therefore has nothing
+            # to write AND nothing to heal it from — the #9078 hole with no
+            # signal, which is why it is counted rather than left silent (the
+            # journal-less lane is a supported shape: `tortoise/config.py`).
+            self._record_write_without_journal(type_)
             return None
         from .ids import ulid, now_iso  # noqa: I001
         event: dict = {
@@ -7004,7 +7144,6 @@ class TortoiseSDK:
             event["actor_user_id"] = _jsonl_actor
         try:
             log.append(event)
-            return True
         except Exception as exc:
             # The graph mutation already succeeded — a log-write failure must
             # not crash the caller or pretend the write failed. Rebuild parity
@@ -7045,6 +7184,104 @@ class TortoiseSDK:
             # "committed?" must read THIS, not the shared counter above, whose
             # before/after delta can be moved by another thread's failure.
             return False
+        # ── the Postgres record (#9188, epic #7879) ────────────────
+        # The append COMMITTED at this line (§17.1), so the record write runs
+        # after it and before any cache fold: truth first, then the projection.
+        # It is fail-soft for the SAME reason the append's own failure is — the
+        # graph write stands, and raising here would hand the caller a failure
+        # for a record that persisted while killing the fold too. The loss is
+        # observable instead (``monitoring.metrics()["record_write_failures"]``)
+        # and ``replay`` heals it from the journal.
+        self._write_record_projection(event)
+        return True
+
+    def _write_record_projection(self, record: dict) -> None:
+        """Hand one just-appended journal record to the Postgres record (#9188).
+
+        THE production call site. Until this existed, `tortoise/record_projection.py`
+        and `tortoise/record_writer.py` had NO non-test importer, so no user's
+        data ever reached the record (epic #7879, measured on #9078). The
+        behaviour — arming, tenant resolution, the commit, and the counted
+        failure — lives in `record_writer.write_live_record`, because the
+        journal has THREE live append doors (`_emit_event` here,
+        `EventAPI._emit`, `ConversationMiner._emit_event`) and a second
+        implementation of this boundary is how one door's records come to
+        differ from another's.
+
+        Deliberately fail-soft: the graph write and the journal append have
+        already committed, so a record failure is a LOSS TO REPORT (counted in
+        ``monitoring.metrics()["record_write_failures"]``, healed by a replay),
+        never a reason to fail the caller's write.
+        """
+        try:
+            from . import record_writer
+        except Exception as exc:
+            # #5148's rule, applied to this seam too: the graph write and the
+            # journal append already happened, so a failing import hook must
+            # not hand the caller an ImportError for a write that SUCCEEDED.
+            self._record_write_failure("seam_unimportable", exc)
+            return
+        # DURABILITY IS READ, not assumed (#9231 review P1): no log at all is
+        # NOT durable, and a log that declares itself a scratch buffer is not
+        # either. The seam DECLINES it and counts the decline on
+        # `monitoring.metrics()["record_non_journal_skips"]` — not on
+        # `record_write_failures`, since that lane has no journal by design and
+        # nothing was lost (#9231 review P2).
+        log = self._event_log
+        durable = log is not None and getattr(log, "durable", True)
+        record_writer.write_live_record(record, durable=durable)
+
+    def _record_write_failure(self, reason: str, exc: BaseException) -> None:
+        """Count and report one armed record write that did not happen (#9188).
+
+        Never raises: the caller's append has already committed, so a record
+        failure is a LOSS TO REPORT, not a capture failure. Counting is
+        best-effort in the same way (a metrics failure must not mask the
+        record failure).
+        """
+        with contextlib.suppress(Exception):
+            monitoring.record_record_write_failure(reason)
+        _logger.warning(
+            "the record write did not happen (%s) — the journal has the record "
+            "and a replay heals the record: %s", reason, exc,
+        )
+
+    def _record_write_without_journal(self, type_: str) -> None:
+        """Count an ARMED record on a deployment with NO journal (#9188).
+
+        The journal-less lane is supported and default (`tortoise/config.py`),
+        so an operator can arm the record and not the journal — and then nothing
+        is written, nothing is counted, and no replay can heal it, because the
+        record's only sustainable source IS the journal. Counting it is the
+        difference between that being a silent hole and an observable
+        misconfiguration.
+
+        Unarmed is the normal case and costs one env lookup: no counter, no
+        warning. A MALFORMED DSN is not "unarmed" and must not disappear into
+        the swallow below: the journal-less lane is the one shape where the
+        seam's own `malformed_dsn` count can never fire (there is no
+        `write_live_record` call to carry it), so a typo'd
+        ``TORTOISE_RECORD_DSN`` on this lane would otherwise produce no signal
+        at all — the exact silent hole this method exists to close.
+        """
+        try:
+            from . import record_writer
+        except Exception:
+            return
+        try:
+            armed = record_writer.record_dsn() is not None
+        except record_writer.RecordWriteError as exc:
+            self._record_write_failure("malformed_dsn", exc)
+            return
+        if armed:
+            self._record_write_failure(
+                "no_journal",
+                RuntimeError(
+                    f"{type_} was not recorded: the record is armed but this "
+                    "process has no JSONL journal, so the record write has no "
+                    "source (and no replay could heal it)"
+                ),
+            )
 
     def _journal_entity_event(self, event: dict) -> bool | None:
         """Append a canonical entity record to the journal (the WRITE half).
@@ -15147,7 +15384,7 @@ class TortoiseSDK:
             ("gate4_requirements", "requirement"),
         ]
         # Canonical non-operator / operator predicates (parity with ep.py
-        # count_claims and the #943 legacy operator detection).
+        # contested-claim scan and the #943 legacy operator detection).
         not_operator = ("(n.is_operator IS NULL OR n.is_operator = false) "
                         "AND n.op_type IS NULL")
         is_operator = "(n.is_operator = true OR n.op_type IS NOT NULL)"
@@ -22137,6 +22374,61 @@ class TortoiseSDK:
             f"MATCH (n:Point {{id: $id}}) SET {_set_clause} RETURN n.id",
             params={"id": claim_id, "a": alpha, "b": beta, "src": source},
         ).result_set
+        # #9063: a baseline the statement did NOT write must never be reported
+        # as written when the caller's node EXISTS. ``set_point_baseline`` used
+        # to return ``{'alpha': 3.0, 'beta': 1.0, 'source': 'set-by-author'}``
+        # for a :Subject/:Object/:Event — the caller read success, the graph
+        # kept ``baseline_set = NULL``, and the in-memory prior diverged from
+        # the graph, so a caller could believe a node was calibratable when it
+        # was not (measured: this issue's body, and the reviewer's #9057
+        # sweep). Refuse loudly and name the label it found, and leave the
+        # prior it already set in ``self._evidence`` NOT set: the same rule the
+        # numeric-domain guard above follows (a refused write cannot leave the
+        # in-memory prior divergent from the graph).
+        #
+        # SCOPE: this fires on a node that EXISTS and is not a :Point — an
+        # epistemic entity label (the #9063 measured class) or any other
+        # labelled node (a ``:Source`` addressed by its url, a ``:Tag``...),
+        # since none of them can carry a :Point baseline. An id naming NO node
+        # keeps the historical behaviour — an in-memory-only prior, pinned by
+        # ``test_sdk_ep.py::TestEvidence::test_set_returns_data`` — because it
+        # is a different defect (a typo absorbed as success, with a phantom
+        # in-memory prior that ``_hydrate_evidence`` drops on restart) on a
+        # different contract (#9262), not folded in here.
+        if not written:
+            labels: list[str] = []
+            # #7853: id-anchored per-label probe — the indexes are
+            # per-(label, property), so this is four index reads, not a scan.
+            for _q in epistemic_label_queries(
+                    "MATCH (n:{label}) WHERE n.id = $id RETURN labels(n)"):
+                labels.extend(r[0][0] if r[0] else "?" for r in proj.g.query(
+                    _q, params={"id": claim_id}).result_set)
+            if not labels:
+                # Non-epistemic label (Source/Tag/...): an id-keyed scan. This
+                # runs ONLY on the failed-write path, so the success path
+                # stays index-anchored; a ``:Source`` answers by its ``url``
+                # only, which is why the four-label sweep above cannot see it.
+                labels.extend(r[0][0] if r[0] else "?" for r in proj.g.query(
+                    "MATCH (n) WHERE n.id = $id RETURN labels(n)",
+                    params={"id": claim_id}).result_set)
+            # …and a probe that finds the GATED label itself is NOT a label
+            # mismatch: the write can miss for an id-RESOLUTION reason on a
+            # hand-written id (measured: an empty / whitespace-only id, where
+            # the engine's labelled equality misses and the unlabelled scan
+            # hits). Claiming ":Point is not a :Point" is a false diagnosis that
+            # no caller can act on, so that case keeps the historical no-op
+            # behaviour of an id the write did not bind (#9262's family).
+            if labels and labels[0] in _CALIBRATION_GATED_LABELS:
+                labels = []
+            if labels:
+                self._evidence.pop(claim_id, None)
+                raise ValueError(
+                    f"set_point_baseline: {claim_id!r} is a :{labels[0]}, not a "
+                    f":Point — nothing was written. Baselines are writable on "
+                    f":Point only (epistemic-entity priors are the open "
+                    f"belief-model decision in #9063), so the belief you "
+                    f"intended was never stored."
+                )
         # #2884 D3/FIX-3: a baseline clears the posteriors LIVE (`null`), so a
         # rebuild must replay the CLEAR or it resurrects the stale posteriors
         # the live graph no longer holds. `RETURN n.id` binds the journal to
@@ -22380,8 +22672,18 @@ class TortoiseSDK:
         # supporter, and the per-point gate below still keeps a truly EXPLICIT
         # `set_point_baseline` (no `credibility` label) untouched. The label
         # rides the row via `n.credibility`.
+        #
+        # #9063: the non-operator predicate is EP's absence-or-false shape
+        # (#3139/#3154) — the SAME one the calibration gate and its guidance
+        # surface now read (no ``op_type`` conjunct; see
+        # ``_uncalibrated_ep_participants``). The bare ``n.is_operator =
+        # false`` matched ZERO rows on a legacy property-ABSENT Point, which is
+        # now the class the gate DEMANDS and ``calibrate_summary`` LISTS with
+        # "run compute_confidence() to apply" — so leaving the bare form here
+        # made that advice an infinite loop for a source-linked legacy point
+        # (suggest inheritance → run → still uncalibrated → refuse).
         where = (
-            "WHERE n.is_operator = false "
+            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
             "AND (n.pointKind IS NULL OR n.pointKind <> 'assessment') "
             "AND (s.credibilityTier IS NOT NULL OR s.sourceKind IS NOT NULL) "
         )
@@ -22788,6 +23090,14 @@ class TortoiseSDK:
         Checks baseline_set flag on non-operator Points. For uncalibrated
         points, traverses extractedFrom→Source to check for inherited credibilityTier.
 
+        #9063: the non-operator predicate is the GATE's — absence-or-false,
+        with NO ``op_type`` conjunct (EP's factor-input arm has no non-operator
+        filter, so an ``op_type``-bearing node IS a participant) — plus the
+        id-less exclusion, so a legacy Point written before ``is_operator`` was
+        stamped is LISTED here — this is the guidance the
+        calibration gate's error message points at, and it must not be empty
+        for a node the gate just named.
+
         #2199 provenance: calibrated rows carry ``baseline_source`` — the raw
         graph provenance token (one of ``set-by-author`` /
         ``inherited-from-source`` / ``system-default``; None for legacy
@@ -22799,7 +23109,34 @@ class TortoiseSDK:
         class is author-set: never recomputed by inheritance).
         """
         proj = self._get_proj()
-        where = "WHERE n.is_operator = false"
+        # #9063: the absence-or-false HALF of the counting/claim predicates
+        # (``_operator_scope_clauses``, ``summarize_structure``,
+        # ``list_pointkinds``, ``ep``'s contested-claim scan) — deliberately
+        # WITHOUT their ``n.op_type IS NULL`` conjunct (next paragraph) — not
+        # the bare ``n.is_operator = false``. The bare form matches ZERO rows
+        # on a legacy property-ABSENT Point — precisely the class the
+        # calibration gate now NAMES in its error — so "Run
+        # calibrate_summary() for full guidance" opened an empty page for the
+        # node it had just named.
+        #
+        # The predicate is the GATE's, exactly — absence-or-false, with NO
+        # ``op_type`` conjunct (see ``_uncalibrated_ep_participants``: EP's
+        # factor-input arm has no non-operator filter, so a hybrid
+        # ``create_point(op_type=...)`` node is a participant and must be
+        # listed here for its remedy to exist) — plus the id-less exclusion the
+        # gate makes: ``set_point_baseline(None)`` is not a remedy a caller can
+        # run, and such a node is never an EP participant.
+        not_operator = "(n.is_operator IS NULL OR n.is_operator = false)"
+        # The gate's id exclusion, exactly (an UNCALIBRATABLE id — blank or
+        # whitespace-padded — takes an advice ``set_point_baseline`` cannot
+        # land: the engine's labelled id equality misses it, so the row would
+        # advertise a remedy that silently writes nothing).
+        where = (f"WHERE {not_operator} AND n.id IS NOT NULL "
+                 f"AND toLower(typeof(n.id)) IN {_ID_RESOLVABLE_TYPES} "
+                 "AND NOT (toLower(typeof(n.id)) = 'string' "
+                 "         AND (n.id = '' "
+                 f"              OR left(n.id, 1) IN [{_ID_WHITESPACE_SET}] "
+                 f"              OR right(n.id, 1) IN [{_ID_WHITESPACE_SET}]))")
         params = {}
         
         from tortoise.source_credibility import resolve_tier
@@ -22808,7 +23145,25 @@ class TortoiseSDK:
             "AND (n.pointKind IS NULL OR n.pointKind <> 'assessment') "
             "OPTIONAL MATCH (n)-[:extractedFrom]->(s:Source) "
             "RETURN n.id, n.content, n.pointKind, "
-            "coalesce(n.baseline_set, false) AS calibrated, "
+            # #9063: the SAME predicate the gate demands and
+            # ``_hydrate_evidence`` loads — ``baseline_set = true`` AND an
+            # ``ep_alpha`` to load — not Python truthiness of
+            # ``coalesce(baseline_set, false)``: an out-of-contract non-boolean
+            # flag ('true', 1, 'yes'), or a flag set with no ``ep_alpha``,
+            # would otherwise read CALIBRATED here with NO suggestion, while
+            # the gate refuses the run and tells the human to "run
+            # calibrate_summary() for full guidance" — the same empty page this
+            # audit was widened to close.
+            "coalesce(n.baseline_set = true "
+            "         AND n.ep_alpha IS NOT NULL AND n.ep_beta IS NOT NULL,"
+            "         false) AS calibrated, "
+            # #9063: the RAW flag, because it — not the gate's demand — is what
+            # ``_apply_source_inheritance`` freezes on. A row whose flag is set
+            # but which stores no prior is frozen against inheritance while
+            # being gate-demanded, so the "run compute_confidence() to apply"
+            # advice could never clear it (measured loop). This column lets the
+            # audit offer the remedy that actually works.
+            "coalesce(n.baseline_set, false) AS bl_flag, "
             "n.status, "
             # #7739: the legacy ``outdated=true`` flag is terminal without a
             # status write (invalidate_point), so the gate needs BOTH halves
@@ -22822,7 +23177,7 @@ class TortoiseSDK:
         
         results = []
         for row in rows:
-            (pid, content, pk, calibrated, status, outdated,
+            (pid, content, pk, calibrated, bl_flag, status, outdated,
              bl_source, ctier, skind, src_url) = row
             item = {"id": pid, "content": content, "pointKind": pk,
                     "calibrated": calibrated, "status": status,
@@ -22853,7 +23208,19 @@ class TortoiseSDK:
             eff_tier = resolve_tier(ctier, skind)
             
             if not calibrated:
-                if src_url and eff_tier:
+                if bl_flag:
+                    # #9063: a flag with no usable prior behind it. Inheritance
+                    # SKIPS this row (``_apply_source_inheritance`` freezes a
+                    # truthy flag), so "run compute_confidence() to apply" would
+                    # refuse, re-print this same advice, and loop forever — the
+                    # empty-remedy failure this PR closes for the source-linked
+                    # legacy point. The writer here is the remedy that works.
+                    item["suggestion"] = (
+                        f"baseline_set is set but no prior is stored "
+                        f"(ep_alpha/ep_beta missing) — call "
+                        f"set_point_baseline({pid!r}, alpha, beta)"
+                    )
+                elif src_url and eff_tier:
                     item["suggestion"] = (
                         f"Inherited {eff_tier} from Source {src_url} — run "
                         f"compute_confidence() to apply"
@@ -22867,7 +23234,7 @@ class TortoiseSDK:
                     )
                 else:
                     item["suggestion"] = (
-                        f"Call set_point_baseline('{pid}', alpha, beta) "
+                        f"Call set_point_baseline({pid!r}, alpha, beta) "
                         f"or recreate with credibility kwarg"
                     )
             else:
@@ -22880,7 +23247,14 @@ class TortoiseSDK:
                     )
             results.append(item)
 
-        # Deduplicate: keep one entry per Point ID, prefer Source-based suggestions
+        # Deduplicate: keep one entry per Point ID, prefer Source-based
+        # suggestions.
+        # #9063: an UNCALIBRATED sibling wins over a calibrated one first. The
+        # #7822 duplicate-id fan-out lives in one id, and the gate names that
+        # id — so if one node of the fan-out is calibrated and another is not,
+        # reporting the calibrated row ("no suggestion") opens the same empty
+        # page this audit was widened to close (measured: row-order dependent
+        # before this).
         seen = {}
         deduped = []
         for item in results:
@@ -22888,7 +23262,25 @@ class TortoiseSDK:
             if pid not in seen:
                 seen[pid] = item
                 deduped.append(item)
-            elif "Source" in str(item.get("suggestion", "")) and "Source" not in str(seen[pid].get("suggestion", "")):
+                continue
+            prev = seen[pid]
+
+            def _rank(row: dict) -> tuple:
+                """Lower wins. Uncalibrated first (the gate names the id, so its
+                row must show what blocks), then the WRITER advice — a sibling
+                whose flag is frozen against inheritance can only be cleared by
+                ``set_point_baseline``, and the writer binds every node of the
+                fan-out — then the Source advice."""
+                sug = str(row.get("suggestion") or "")
+                if "set_point_baseline" in sug:
+                    which = 0
+                elif "Source" in sug:
+                    which = 1
+                else:
+                    which = 2
+                return (1 if row.get("calibrated") else 0, which)
+
+            if _rank(item) < _rank(prev):
                 for i, d in enumerate(deduped):
                     if d["id"] == pid:
                         deduped[i] = item
@@ -22940,6 +23332,14 @@ class TortoiseSDK:
         surfaces running uncalibrated EP silently, not just the explicit
         compute_confidence surface (#344 only covers the explicit surface).
 
+        #9063: the DEMAND UNIVERSE is EP's own participant predicate
+        (``_uncalibrated_ep_participants``), asked directly. It used to be
+        ``calibrate_summary()``'s rows — a human AUDIT surface whose filters
+        (``n.is_operator = false``, ``pointKind <> 'assessment'``) were chosen
+        for the audit, so nodes EP consumed and STAMPED were invisible to the
+        gate. ``calibrate_summary()`` remains the guidance/audit surface it
+        was written to be; the gate no longer inherits its selection.
+
         Args:
             surface: human-readable caller name for the error message
                 (e.g. "dream", "get_confidence").
@@ -22961,40 +23361,192 @@ class TortoiseSDK:
                 gate) and is never treated as ``None``.
         """
         from .exceptions import CalibrationError
-        summary = self.calibrate_summary()
-        evidence_kinds = {"statement", "observation", "hypothesis"}
-        uncalibrated = [
-            s for s in summary
-            if not s["calibrated"] and s.get("pointKind") in evidence_kinds
-            # #780/PR #1212: draft points never feed EP (factor extraction
-            # and propagation exclude them by default) — demanding
-            # calibration of a draft is noise; the gate only guards live
-            # evidence. Status NULL = live, mirroring _live_only.
-            and s.get("status") != "draft"
-            # #7739: the same rule extends to TERMINAL points — EP's live set
-            # is ``_live_only`` (live.py) = not draft AND NOT terminal, so a
-            # retracted / superseded / outdated / archived point (or the
-            # legacy ``outdated=true`` flag invalidate_point writes without a
-            # status) is one EP will never consume. Demanding its calibration
-            # is the same noise as demanding a draft's. The shared #2498
-            # Python mirror keeps the vocabulary from drifting; status NULL =
-            # live, mirroring _live_only.
-            and not is_terminal_status(s.get("status"),
-                                       s.get("outdated", False))
-        ]
-        # #7739: only now, and only if there is something to scope, ask the
-        # caller for the run's consumed set — an uncalibrated point INSIDE it
-        # still raises; an unrelated lane's point stops freezing this caller.
-        if uncalibrated and scope is not None:
-            scope_set = scope() if callable(scope) else scope
-            uncalibrated = [s for s in uncalibrated if s["id"] in scope_set]
+        # #9063: the universe is EP's OWN participant set, asked id-anchored,
+        # never a human audit surface's rows. #7739's laziness is preserved:
+        # a scoped surface first pays ONE cheap existence probe, so a fully
+        # calibrated graph never evaluates the scope callable at all — and a
+        # SCOPED surface no longer pays the graph-wide ``calibrate_summary()``
+        # scan (which built per-point guidance strings for every Point) just
+        # to answer a boolean.
+        if scope is None:
+            uncalibrated = self._uncalibrated_ep_participants(None)
+        else:
+            if not self._uncalibrated_ep_participants(None, limit=1):
+                return
+            # #7739: only now, and only if there is something to scope, ask
+            # the caller for the run's consumed set — an uncalibrated
+            # participant INSIDE it still raises; an unrelated lane's point
+            # stops freezing this caller. An EMPTY set is a real scope
+            # (nothing reachable → nothing to gate) and is never ``None``.
+            uncalibrated = self._uncalibrated_ep_participants(
+                scope() if callable(scope) else scope)
         if uncalibrated:
-            ids = [s["id"] for s in uncalibrated[:10]]
+            ids = uncalibrated[:10]
             msg = (
                 f"{surface}: {len(uncalibrated)} uncalibrated evidence points. "
                 f"First 10: {ids}. Run calibrate_summary() for full guidance."
             )
             raise CalibrationError(msg)
+
+    def _uncalibrated_ep_participants(self, ids: set[str] | None, *,
+                                      limit: int | None = None) -> list[str]:
+        """Ids of evidence nodes EP consumes that carry no prior (#9063).
+
+        ``ids=None`` asks the whole graph (the honest answer for a ``full``
+        dream and for the cheap existence probe); otherwise only the ids in
+        the run's consumed set — which is what keeps a foreign lane's
+        uncalibrated point from freezing this caller (#7739).
+
+        The predicate is EP's own participant predicate, in BOTH halves:
+
+          * ``(n.is_operator IS NULL OR n.is_operator = false)`` — EP's
+            absence-or-false non-operator shape (#3139/#3154). The audit's
+            bare ``n.is_operator = false`` matched ZERO rows on a legacy point
+            whose property is ABSENT — that point was consumed AND stamped
+            while the gate saw nothing — which is this issue.
+            NO ``op_type IS NULL`` conjunct here, deliberately: EP's
+            factor-INPUT selection (``ep.py`` Batch 2, the ``(o)->(c)`` arm)
+            carries NO non-operator filter, so a HYBRID node
+            (``create_point(op_type=...)`` → ``is_operator = false`` WITH
+            ``op_type``) is a participant and lands in ``_ep_run_scope``
+            (measured). Excluding it would REMOVE coverage the audit had before
+            #9063 (its bare ``is_operator = false`` matched hybrids) — a
+            fail-open, the one direction this gate must never move. A legacy
+            ``op_type``-only operator is in that same consumed set and is now
+            demanded too, which is fail-closed and satisfiable (it is a
+            ``:Point``). ⚠️ RESIDUAL, pre-existing on both trees (#9269): an
+            ``is_operator = true`` node used as a factor input is also consumed
+            and stamped, and is NOT demanded here.
+            NOTE: ``_dedup_match_clauses`` keeps a DIFFERENT form on purpose
+            (#2892/#2949); do not restore parity between the two.
+          * ``n.pointKind`` NULL-or-an-evidence-kind — absent kind is
+            evidence by the repo's own resolution (``backfill_v25`` fills
+            'statement'; EP reads no kind at all), so a legacy kind-less
+            Point is gated like the statement it is. NORMALISED first — case
+            and surrounding whitespace — because the write path accepts an
+            unrecognised kind VERBATIM with only a warning
+            (``create_point('Statement', ...)``, ``' statement'``) and EP reads
+            no kind at all, so each of those is a consumed claim: exact matching
+            left them ungated while a run stamped them (measured). The
+            normalisation is TYPE-GUARDED (``toLower(typeof(...)) =
+            'string'`` — the engine spells it ``'String'``), not
+            applied to whatever is stored: a non-string kind is writable
+            (``create_point(42, ...)`` and a raw array both land), and a bare
+            ``toLower`` on it aborts the whole query with an engine type error —
+            an opaque ``ResponseError`` on a graph ``origin/main`` ran on fine,
+            which no audit advice can resolve. Such a kind is therefore outside
+            the universe exactly as it is on ``origin/main`` (declared residual,
+            out-of-contract), while every STRING spelling that EP consumes is
+            inside it. Non-evidence kinds are the #9063 doctrine decision, not
+            this gate's (see ``_CALIBRATION_EVIDENCE_KINDS``).
+          * ``_live_only`` — EP's live set, so drafts and terminal nodes
+            (including the legacy ``outdated`` flag) are never blockers
+            (#780/#7739), and status NULL counts as live.
+          * ``baseline_set`` not exactly ``true``, OR ``ep_alpha`` absent, OR
+            ``ep_beta`` absent — deliberately the COMPLEMENT of a prior the run
+            can actually APPLY (``n.baseline_set = true AND n.ep_alpha IS NOT
+            NULL`` — what ``_hydrate_evidence`` loads — and a beta to go with
+            it). A node the loader skips, or loads half of, is demanded rather
+            than silently left prior-less or left to crash the run: a falsy-but-
+            not-boolean flag (out of contract, no writer), a ``baseline_set =
+            true`` node with no ``ep_alpha`` (measured: the old form waved it
+            through and a gated run stamped it at ``Beta(1, 1)`` — the #7478
+            class, on both trees), and a node with an alpha but no beta
+            (measured: ``_hydrate_evidence`` loads ``(3.0, None)`` and EP dies on
+            ``ev[1] - 1.0`` with a bare ``TypeError`` — #9275, which the gate now
+            pre-empts with its own diagnosable refusal). Every half is
+            fail-closed and satisfiable: ``set_point_baseline`` writes both.
+
+        Id-anchored by label (#7853): the per-(label, property) index anchors
+        every probe, so the scoped form is an index read over the run's own
+        ids rather than a graph scan. Deduplicated by id — a duplicate Point
+        id (``create_point(..., id=X)`` twice, the tested #7822 fan-out) is
+        ONE node to calibrate, and the error message's count is the caller's
+        only signal — and an UNCALIBRATABLE id (id-less, blank, or carrying
+        surrounding whitespace; reachable only in a hand-written / imported
+        graph, because every id-binding writer refuses such a value on its own
+        post-write check) is excluded IN THE QUERY — a demand for one could
+        never be satisfied and would make the whole-graph and scoped surfaces
+        disagree (measured) — so it can never consume the
+        ``limit=1`` probe's budget. It is excluded because no caller can name it
+        to ``set_point_baseline`` and the run cannot survive it anyway: EP keys
+        claims on ``id``, so an id-less ``:Point`` wired as an operator claim
+        DIES the run with a ``TypeError`` during ordering — nothing is ever
+        stamped on it (#9275). Sorted (``key=str``, so a numeric id cannot raise
+        on a mixed list) for a deterministic message.
+        """
+        if ids is not None and not ids:
+            return []
+        proj = self._get_proj()
+        kinds = ", ".join(f"'{k}'" for k in _CALIBRATION_EVIDENCE_KINDS)
+        where = (
+            f"(n.is_operator IS NULL OR n.is_operator = false) "
+            f"AND (n.pointKind IS NULL "
+            f"     OR (toLower(typeof(n.pointKind)) = 'string' "
+            f"         AND toLower({_strip_whitespace('n.pointKind')}) "
+            f"             IN [{kinds}])) "
+            f"AND {_live_only('n.status')} "
+            "AND (n.baseline_set IS NULL OR n.baseline_set <> true "
+            "     OR n.ep_alpha IS NULL OR n.ep_beta IS NULL) "
+            # A hand-written / imported graph can hold an id-less :Point (no
+            # repo writer mints one). No caller can name it to
+            # ``set_point_baseline``, and an id-less participating claim crashes
+            # the run DURING ORDERING, after the batches have stamped the other
+            # nodes — so the run is not fail-closed, but nothing is ever stamped
+            # ON IT (no id to key) (#9275) — so it must never be reported — and
+            # the filter belongs HERE, in the WHERE clause, not only in the
+            # Python post-pass: ``limit=1`` is applied by the engine BEFORE the
+            # post-pass, so a single id-less row would consume the existence
+            # probe's one budget slot, the probe would answer "nothing to
+            # gate", and the scoped query would find a real offender in the
+            # same state (measured — an order-dependent FAIL-OPEN).
+            "AND n.id IS NOT NULL "
+            # Blank / whitespace-padded id: no caller can calibrate one. The
+            # engine's LABELLED id equality misses these (measured — 
+            # ``MATCH (n:Point {id:' padded '})`` returns nothing while the
+            # unlabelled scan finds the node), so ``set_point_baseline`` cannot
+            # write them, and EP's own selection (which also keys on ``id``)
+            # misses them — a demand here is the #8175 unsatisfiable shape. They
+            # are excluded in BOTH arms, so the whole-graph and scoped surfaces
+            # agree instead of one refusing what the other runs. Reachable only
+            # from a hand-written/imported graph: every writer that binds an id
+            # (``create_point(id=…)``) refuses it on its own post-write check.
+            f"AND toLower(typeof(n.id)) IN {_ID_RESOLVABLE_TYPES} "
+            "AND NOT (toLower(typeof(n.id)) = 'string' "
+            "         AND (n.id = '' "
+            f"              OR left(n.id, 1) IN [{_ID_WHITESPACE_SET}] "
+            f"              OR right(n.id, 1) IN [{_ID_WHITESPACE_SET}]))"
+        )
+        found: list[str] = []
+        for label in _CALIBRATION_GATED_LABELS:
+            if ids is None:
+                query = f"MATCH (n:{label}) WHERE {where} RETURN n.id"
+                params: dict = {}
+            else:
+                query = (f"MATCH (n:{label}) WHERE n.id IN $ids AND {where} "
+                         "RETURN n.id")
+                params = {"ids": list(ids)}
+            if limit is not None:
+                query += f" LIMIT {int(limit)}"
+            found.extend(row[0] for row in proj.g.query(
+                query, params=params).result_set)
+            if limit is not None and len(found) >= limit:
+                break
+        # Dedupe hash-safely: a hand-written ARRAY id is unhashable, and the
+        # `set()` here raised ``TypeError`` — an opaque failure on every gated
+        # surface. (Such an id is now excluded in the WHERE clause as well, so
+        # this is belt-and-braces for any future reachable id type.)
+        seen_ids: set = set()
+        unique: list = []
+        for i in found:
+            if i is None:
+                continue
+            key = (type(i).__name__, str(i))
+            if key in seen_ids:
+                continue
+            seen_ids.add(key)
+            unique.append(i)
+        return sorted(unique, key=str)
 
 
     # ── P0 Group 3: Checkpoint, Diary, Status, Analyze, Ingest ────
@@ -23151,7 +23703,7 @@ class TortoiseSDK:
 
         Deliberate divergence from the #943 counting predicates
         (``summarize_structure`` / ``list_pointkinds`` / ``ep.py``
-        ``count_claims``), which use the stricter ``... AND n.op_type IS
+        contested-claim scan), which use the stricter ``... AND n.op_type IS
         NULL``: for a hybrid node that explicitly declares ``is_operator=false``
         AND carries ``op_type`` (a shape nothing rejects on write), counting
         excludes it but dedup must still match it — otherwise
@@ -29654,11 +30206,28 @@ class TortoiseSDK:
         — a kind property written by a door that never names it as one (measured:
         ``create_event(..., uses=[{'name': 'x', 'kind': 'marketing:campaign'}])``
         widened a ``dev``-only graph before this check existed).
+
+        The fold's SNAKE spellings are screened too (#9068 review P1). The
+        ``create_*`` doors forward caller ``props`` with ``**props``, and the
+        fold reads ``ev.get("object_kind")`` / ``subject_kind`` /
+        ``document_kind`` — so ``create_object("x", props={"object_kind":
+        "pm:issue"})`` survived a camel-only screen and was folded onto the
+        MINED ``objectKind``: the same widening under a spelling the gate did
+        not know. Both spellings come from ``pack_state``'s ONE declaration
+        (``_KIND_PROP_SPELLINGS``, the map the payload-shaped gates use), never
+        re-spelled here.
         """
         from .pack_state import _KIND_PROP_KEYS as _gated_kind_props
+        from .pack_state import _KIND_PROP_SPELLINGS as _kind_spellings
         for kind_prop in _gated_kind_props:
             if kind_prop in props:
                 self._refuse_unapproved_kind(kind_prop, props.get(kind_prop))
+        # Canonical spelling in the refusal (never the alias): the message tells
+        # the caller which PROPERTY to change, and the alias is not the property
+        # the node ends up carrying.
+        for spelling, kind_prop in _kind_spellings.items():
+            if spelling != kind_prop and spelling in props:
+                self._refuse_unapproved_kind(kind_prop, props.get(spelling))
         uses = props.get("uses")
         if isinstance(uses, dict):
             uses = [uses]

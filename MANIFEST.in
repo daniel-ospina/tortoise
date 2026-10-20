@@ -6,3 +6,17 @@
 # resurfacing on the sdist install path. Verified 2026-08-28 (plan-verify
 # gate): with this include, the sdist-rebuilt wheel ships all manifests.
 include tortoise/packs/__init__.py
+# #9231 review P2: the same trap, on the record's SCHEMA. `pyproject.toml` maps
+# `tortoise.record_migrations` at `supabase/migrations` and ships the record's
+# SQL as package data, so an INSTALLED `tortoise` carries the files
+# `record_projection.table_columns()` parses (a wheel has no `supabase/` tree,
+# so without them every armed live write raised before its first statement and
+# the record stayed empty while the static wiring gate read green). The stub is
+# discovered by `packages.find`, NOT owned by any package (`package-dir`
+# remaps the package's sources to `supabase/migrations`), so the sdist does not
+# pick it up on its own — measured: built the sdist without this line and
+# `tortoise/record_migrations/__init__.py` was ABSENT while the 7 SQL files were
+# present. A wheel rebuilt from that sdist would discover no package and ship
+# ZERO record schema — the G1 silent-empty class above, on a path where the
+# writer itself is the consumer.
+include tortoise/record_migrations/__init__.py

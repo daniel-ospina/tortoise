@@ -2073,6 +2073,61 @@ def test_capstone_probe_change_selects_core_not_tier1():
         assert r["full"] is False, (path, r)
 
 
+def test_the_capstone_evidence_bundle_selects_core_not_tier1():
+    # PR #9196 review P1: the S2 verdict's deciding artifacts are committed TEXT
+    # — `s2-wiring-census.log` (the census output), `e2e-chain-probe.log` (the
+    # end-to-end transcript) and `README.md` (the quotes and the S2 rows) — and
+    # `tests/test_7950_capstone_probe.py` now re-MEASURES two of them
+    # (`test_the_s2_census_log_is_a_LIVE_measurement` re-runs the committed
+    # probe; `test_the_evidence_readme_quotes_the_log_it_cites_verbatim` pins the
+    # README to the log).
+    #
+    # The CORE_ALSO entry used to be the `probes/` subdirectory only, so a diff
+    # that touched just a LOG or the README came back with `changed == []` and
+    # took the docs-only early return: a hand-edited number in the artifact the
+    # S2 verdict rests on merged with the pin that guards it NEVER RUN — the
+    # #1349/#3332/#3616 silent-drop class, and the same "stale flag never
+    # revalidated" shape the artifact itself is supposed to catch.
+    #
+    # Measured before widening the entry (2026-10-19, `select()` in-process):
+    # `_sel(["docs/evidence/7950-capstone/s2-wiring-census.log"])` ->
+    # surfaces=[], full=False, test_7950_capstone_probe.py ABSENT.
+    # Mutation check: narrowing the entry back to `probes/` fails assert 1.
+    for path in (
+        "docs/evidence/7950-capstone/s2-wiring-census.log",
+        "docs/evidence/7950-capstone/e2e-chain-probe.log",
+        "docs/evidence/7950-capstone/README.md",
+    ):
+        r = _sel([path])
+        assert "core" in r["surfaces"], (path, r)
+        assert "test_7950_capstone_probe.py" in r["test_files"], (path, r)
+        assert r["full"] is False, (path, r)
+
+
+def test_the_capstone_census_pin_runs_on_a_main_py_change():
+    # PR #9196 review P1: the OTHER direction of the same hole. The census pin
+    # compares each hit's FILE and COUNT (the line ORDINAL is normalised away,
+    # #9196 review P2), and the one live hit is
+    # `tortoise/__main__.py: view = read_record_view(...)`. That file is an
+    # EXACT `api` SOURCE_PATTERNS match and NOT in `CORE_ALSO`, so a named-surface
+    # match REPLACES the `core` fallback: before the `api` registration a
+    # `__main__.py`-only diff returned surfaces=['api'] with the `core`-registered
+    # probe ABSENT, so a diff that ADDED or REMOVED that call site — the wiring
+    # change the pin exists to catch — merged green and only reddened `main` on
+    # the post-merge full selection. The instrument that makes S2's staleness
+    # visible must not be invisible to CI selection on the file its hit lives in
+    # (#1349/#2938/#3154 class).
+    #
+    # Measured before the `api` entry (2026-10-19, `select()` in-process):
+    # `_sel(["tortoise/__main__.py"])` -> surfaces=['api'], full=False, 283 test
+    # files, test_7950_capstone_probe.py ABSENT.
+    # Mutation check: removing the `api` entry fails `test_files` below.
+    r = _sel(["tortoise/__main__.py"])
+    assert "api" in r["surfaces"], r
+    assert "test_7950_capstone_probe.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_supabase_config_change_selects_core_not_tier1():
     # supabase/config.toml is the committed LOCAL-stack config and resolves its
     # providers by `env(NAME)` substitution, so each of those names is required
@@ -2170,6 +2225,62 @@ def test_graph_write_repair_tool_change_selects_core_not_tier1():
         assert "core" in r["surfaces"], (path, r)
         assert "test_graph_write_repair.py" in r["test_files"], (path, r)
         assert set(r["test_files"]) != _tier1(), (path, r)
+
+
+def test_record_wiring_check_tool_change_selects_core_not_tier1():
+    # #9231 review P1 (#9188/#9078): tools/record_wiring_check.py is the ONLY
+    # executor of the claim "the record has a production write call site" — the
+    # defect #9078 measured was precisely that no such caller existed, and no
+    # unit test could see it. Its guard is
+    # tests/test_9078_record_written_by_production_path.py, registered `core`.
+    #
+    # Without the CORE_ALSO entry this is the #1349/#3332/#3616/#4309
+    # silent-drop class: `tools/` is a flat NON_PYTHON_PREFIXES entry and no
+    # SOURCE_PATTERNS row matches the tool, so a wiring-check-only change came
+    # back with `changed == []` and took the docs-only early return. The gate is
+    # therefore never executed on the one file whose whole purpose is to decide
+    # whether the record is wired — the PR that weakens or deletes it merges
+    # green.
+    #
+    # Measured before the fix: `_sel(["tools/record_wiring_check.py"])` ->
+    # surfaces=[], full=False, 51 tier-1 files, guard absent.
+    #
+    # CORE_ALSO (not TOOL_CARVEOUTS) is the deliberate choice: the guard is
+    # DB-free on this path (its Postgres legs skip without TEST_RECORD_DB_URI)
+    # and `core`-registered, so selecting `core` runs it at the lowest CI cost.
+    # Mutation check: removing the CORE_ALSO entry selects no surface, so the
+    # asserts below fail.
+    r = _sel(["tools/record_wiring_check.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_9078_record_written_by_production_path.py" in r["test_files"], r
+    assert r["full"] is False, r
+    assert set(r["test_files"]) != _tier1(), r
+
+
+def test_9078_guard_runs_on_a_main_only_diff():
+    # #9231 review P1: the SAME guard (`test_9078_record_written_by_production_
+    # path.py`) also drives `tortoise/__main__.py` — `cli._cmd_demo(None)` — to
+    # prove the demo lane files nothing from the journal file it deletes. That
+    # path is an EXACT `SOURCE_PATTERNS["api"]` entry, so an `__main__.py`-only
+    # diff selects `api`, REPLACES the `core` fallback (`core` is added only in
+    # the `if not found:` branch, and `CORE_ALSO` does not list `__main__.py`)
+    # and never collected the leg. Since removing `EventLog.scratch(...)` from
+    # `_cmd_demo` is NECESSARILY an `__main__.py`-touching diff, the one change
+    # that can break that leg merged with the leg never run — the
+    # #1349/#2938/#3154/#4367 silent-drop class, the same shape
+    # `test_socket_bound_not_multiplied_2969.py` is dual-registered for.
+    #
+    # Measured before the fix: `_sel(["tortoise/__main__.py"])` ->
+    # surfaces=['api'], full=False, guard ABSENT from test_files.
+    #
+    # Mutation check: deleting the dual `api` arm in config/ci-surfaces.yml
+    # fails the first pair of asserts; the `core` arm is checked by
+    # `test_record_wiring_check_tool_change_selects_core_not_tier1` above, so
+    # neither arm can be dropped believing the other covers it.
+    r = _sel(["tortoise/__main__.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["api"], r
+    assert "test_9078_record_written_by_production_path.py" in r["test_files"], r
 
 
 def test_source_currency_tool_change_selects_core_not_tier1():

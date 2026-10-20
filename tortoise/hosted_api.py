@@ -8136,11 +8136,14 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
 
     ``pool`` (#3669, #3773, #7678) selects the worker pool: ``"auth"``
     (default), ``"telemetry"`` for best-effort work, ``"oauth"`` for the
-    attacker-reachable OAuth client-resolution lane, ``"graph"`` for the
-    DATA-PLANE graph helpers (kept off auth capacity; see
-    ``_graph_offload``, which passes its own ``unavailable`` factory), or
-    ``"org"`` (#7678) for the org-create lane's sequential gate reads and
-    provision write.
+    attacker-reachable OAuth client-resolution lane, ``"graph"`` for the graph
+    helpers — data-plane (``_data_sdk``'s connect, ``_check_org_limit``) AND
+    registry reads, since ``_get_registry()`` uses the same connection — kept
+    off auth capacity; see ``_graph_offload``, which passes its own
+    ``unavailable`` factory and is the only sanctioned way onto that pool.
+    Routing a registry read to ``"auth"`` here hands it the sign-in 503 copy
+    (#3718). Or ``"org"`` (#7678) for the org-create lane's sequential gate
+    reads and provision write.
 
     ``unavailable`` (#3669) overrides the fail-closed error FACTORY. The
     auth/REST lane keeps the repo-standard 503 ``control_plane_unavailable``;
@@ -8188,17 +8191,22 @@ async def _cp_offload(fn, *, op: str, best_effort: bool = False,
 
 
 def _graph_unavailable() -> HTTPException:
-    """#3773: fail-closed 503 for a saturated / bound-missed data-plane offload.
+    """#3773: fail-closed 503 for a saturated / bound-missed GRAPH-lane offload
+    (a data-plane helper or a registry read, #3718).
 
     Deliberately NOT ``_control_plane_unavailable``: that body's copy is
     sign-in specific and would mislead a client retrying a graph write. A
-    graph helper that could not get a worker is a service-capacity failure,
-    and the write did not happen — retryable.
+    helper that could not get a worker is a service-capacity failure: a
+    submission that never ran did NO work (retryable), while one abandoned at
+    the bound — ``bound_miss_running``, the case the chunking rationale cites —
+    may still complete in its worker (CPython #87185: the timeout cancels the
+    await, never the thread). So do not retry a MUTATING call on this code
+    without checking first; a read is safe to retry.
 
     Deliberately distinct from ``org_graph_unavailable`` (a TENANCY/access
     failure on the activation scorecard, activation_scorecard.py): this one
-    means only that the offload could not get a worker, so the request is
-    retryable. The code is body-only today — no client maps it yet (the REST
+    means only that the offload did not complete inside the lane's budget, so
+    the request may be retried. The code is body-only today — no client maps it yet (the REST
     write lane is consumed by agents/SDKs, which treat any 5xx as retryable);
     the dashboard renders a 503 on the auth lane, not this one.
     """
@@ -8212,7 +8220,29 @@ def _graph_unavailable() -> HTTPException:
 
 
 async def _graph_offload(fn, *, op: str, timeout: float | None = None):
-    """#3773: run ONE synchronous DATA-PLANE graph helper off the event loop.
+    """#3773: run ONE synchronous graph helper (data-plane OR registry) off loop.
+
+    REGISTRY reads belong here too (#3718): ``_get_registry()`` uses the
+    existing db connection rather than opening a second one, so a registry
+    attach/query carries the same cold-start and blocking shape this lane's
+    bound exists to cover. Do NOT route them to ``_cp_offload``'s default
+    ``auth`` pool — that is the PostgREST lane's seam, and a bound miss there
+    returns the sign-in 503 copy.
+
+    ONE CALLABLE per submission, but the callable may run a BOUNDED fan-out
+    (#3718's org switcher submits one callable that lists several orgs). The
+    wait bound covers the WHOLE submission, not one round trip, so an uncapped
+    fan-out is out of contract: a caller that fans out must chunk it (see
+    ``_GRAPH_LIST_OFFLOAD_CHUNK`` and, for the Supabase lane, the smaller
+    ``_GRAPH_LIST_CONTROL_PLANE_CHUNK``), or a healthy-but-large fan-out will cross
+    the bound and its worker will be abandoned still holding a pool slot.
+
+    A mode-agnostic op name, not a per-mode one: ``_graph_list_for`` is the same
+    callable on both lanes, and the LANE is chosen by the caller by mode (#3718)
+    — registry reads submit here, Supabase/PostgREST listings submit through
+    ``_cp_offload``, so each leg gets the bound and the 503 copy of the
+    dependency it actually uses. The callable still branches on the mode first,
+    so neither lane builds a handle it will not use.
 
     Thin hosted-side wrapper over the #3498 seam (``_cp_offload`` ->
     ``monitoring.run_control_plane_call``) on the dedicated ``graph`` pool.
@@ -18214,6 +18244,16 @@ async def _user_memberships(user_id: str) -> list[dict]:
         return await _cp_offload(
             lambda: _sb_memberships(get_control_plane(), user_id),
             op="user_memberships")
+    # #3718: this stays INLINE and declared residual (#2446) — the same
+    # registry-Membership read CLASS as the auth path's `_membership_role`,
+    # where off-loading was measured to produce a WRONG ANSWER (an EMPTY member
+    # list in `test_invites_http.py::TestExpiredInviteReMint`). NOTE the
+    # inference: that measurement was taken on `_membership_role`'s read, NOT on
+    # this one — this helper's membership in the class is inferred (same label,
+    # same connection, same thread-visibility question), which is why the
+    # deferral is recorded on #2446 with the measurement quoted and the
+    # inference marked, rather than restated here as measured. Do not off-load
+    # it without reproducing that measurement for THIS query.
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
         "MATCH (m:Membership {user_id:$uid, status:'active'}) "
@@ -18256,6 +18296,47 @@ async def _membership_org(user_id: str, org_id: str) -> dict | None:
     return {"org_id": org_id, "role": rows[0][0]}
 
 
+def _graph_list_for(org_id: str) -> list[dict]:
+    """One org's graph listing (#3718: blocking registry/PostgREST read).
+
+    The MODE BRANCH is here, not left to ``graph_list``'s own short-circuit:
+    in Supabase mode ``_registry_anchor()`` would build (and eagerly attach)
+    a FalkorDB handle BEFORE the callee ever consulted the mode, so the
+    switcher — the first read every client makes — would need a live graph
+    server to resolve orgs that live entirely in PostgREST, and raise a raw
+    ``ConnectionError`` (a 500, not even the lane's 503) when it is down.
+    Reading the mode first keeps the handler's contract ("this endpoint never
+    touches the registry in Supabase mode") true.
+
+    The FalkorDB leg uses the process-lifetime ``_registry_anchor()``, not a
+    fresh ``_make_sdk(namespace="registry")``: the anchor is the documented
+    pattern for registry reads (#1607 — a fresh handle is GC'd with close-on-GC
+    + SHUTDOWN NOSAVE), and it avoids paying ``_ensure_registry_indexes``' 9
+    ``CREATE INDEX`` statements once per org while an offload slot is held.
+    """
+    from tortoise.supabase_control import (
+        get_control_plane,
+        graph_metadata,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        return graph_metadata(get_control_plane(), org_id)
+    return _registry_anchor().graph_list(org_id)
+
+
+#: Orgs per off-loop submission when the switcher lists graphs, PER LANE
+#: (#3718). Each submission gets ONE wait bound and the two lanes do not do
+#: equal work per org: the registry read is one query under the graph lane's
+#: cold-projection allowance (``graph_offload_timeout_s()``, ~30 s), while the
+#: Supabase read is THREE sequential PostgREST round trips (organizations,
+#: default graphs, custom graphs) under the control plane's 10 s
+#: ``CONTROL_PLANE_OFFLOAD_TIMEOUT_S``. Sizing both at 8 would budget 24
+#: round trips against that 10 s, so the branch sizes each by its own bound —
+#: see the chunking rationale in ``list_my_orgs``.
+_GRAPH_LIST_OFFLOAD_CHUNK = 8
+_GRAPH_LIST_CONTROL_PLANE_CHUNK = 3
+
+
 async def _org_node(org_id: str) -> dict | None:
     """Org node/properties for session endpoints (E5/E6/E7/E8).
 
@@ -18274,6 +18355,14 @@ async def _org_node(org_id: str) -> dict | None:
         # endpoints, and by _require_owner_admin's suspension-stamp check).
         return await _cp_offload(
             lambda: _sb_org(get_control_plane(), org_id), op="org_by_id")
+    # #3718: the registry lane stays INLINE and declared residual (#2446) — the
+    # same registry read class as `_membership_role`, where off-loading was
+    # measured to produce a WRONG ANSWER (an EMPTY member list in
+    # `test_invites_http.py::TestExpiredInviteReMint`). That measurement was
+    # taken on `_membership_role`'s read; THIS helper's membership in the class
+    # is an inference (same Team/Membership registry read, same connection, same
+    # thread-visibility question), recorded as such on #2446. Do not off-load it
+    # without reproducing the measurement for THIS read.
     sdk = _registry_anchor()
     rows = sdk._get_registry().query(
         "MATCH (t:Team {id:$id}) RETURN properties(t)",
@@ -18345,21 +18434,82 @@ async def list_my_orgs(user: dict = Depends(get_current_user)):  # noqa: B008
 
     #765 (plan Task 8 reader inventory): graph_list resolves via the
     mode-aware SDK (Supabase → teams.graph_name derivation via the seam;
-    registry → Graph nodes), so this endpoint never touches the registry in
-    Supabase mode."""
+    registry → Graph nodes). The mode branch that keeps this endpoint off the
+    registry in Supabase mode is NOT the callee's short-circuit — it is the
+    call-site branch in ``_graph_list_for`` (#3718), together with the
+    lane-and-chunk choice made on the loop below, because ``_registry_anchor()``
+    binds eagerly and would be built before ``graph_list`` could consult the
+    mode."""
     memberships = await _user_memberships(user["user_id"])
-    out = []
+    resolved = []
     for m in memberships:
         org = await _org_node(m["org_id"])
         if org is None:
             continue
+        resolved.append((m, org))
+
+    # Suspended rows are excluded from graph resolution — they cannot be
+    # selected anyway, and graph_list must not observe the suspension stamp.
+    # #3718: the listing is a blocking registry/PostgREST read, and it used to
+    # run per membership ON the loop. It now costs one OFF-LOOP submission per
+    # chunk — ceil(N / the lane's chunk) submissions for N healthy orgs. (The
+    # membership scan and the per-org Team read stay inline under #2446; see
+    # `_user_memberships`.)
+    #
+    # CHUNKED, not one batch over every org: nothing caps how many active
+    # Memberships a user holds, and each submission gets ONE wait bound. N
+    # sequential reads submitted together consume that budget jointly, so a
+    # large-but-healthy fan-out would cross it — and a bound miss abandons a
+    # worker that keeps holding its pool slot until it returns (CPython
+    # #87185). Chunks keep each submission's fan-out small and predictable.
+    #
+    # WHY NOT `asyncio.to_thread` (the read-half house style), reviewed and
+    # declined: the module's own seam note records that to_thread's SHARED
+    # default executor is the starvation path (#3060, `_submit_off_loop`), and
+    # the graph lane's bound is the truth-telling one for a graph read
+    # (``_graph_unavailable``, not the sign-in copy). The cost concern that
+    # motivated the objection — a chunk holding one of eight graph slots while
+    # it works — is answered at its source instead: `_graph_list_for` uses the
+    # CACHED ``_registry_anchor()``, so a submission is N cheap reads, not N
+    # handle builds plus 9 ``CREATE INDEX`` each.
+    healthy = [m["org_id"] for m, org in resolved
+               if org.get("suspended_at") is None]
+    # #3718: the LANE is chosen on the loop, by MODE, before anything touches a
+    # handle. A Supabase listing is a PostgREST read and belongs on the
+    # control-plane lane: one chunk there is 3 sequential PostgREST round trips
+    # PER ORG (organizations + default + custom graphs), and the graph lane's
+    # bound is the COLD-PROJECTION allowance (~30 s), which a degraded control
+    # plane could consume — after which the 503 names a service that is not in
+    # this path at all (`graph_unavailable`) and the abandoned worker keeps
+    # issuing the chunk's remaining calls while holding a graph slot, turning a
+    # control-plane slowdown into data-plane unavailability. Each lane therefore
+    # gets its own bound AND its own chunk size, so the arithmetic holds on the
+    # tighter one too (3 orgs x 3 round trips inside 10 s).
+    #
+    # The cost of this choice, stated: the Supabase fan-out lands on the
+    # ``auth`` pool — the capacity the graph pool exists to keep free. Chunking
+    # bounds how long ONE chunk holds a slot (a few round trips, not 24), and
+    # that is the whole mitigation; the listing is the app's first read, so it
+    # cannot be deferred off the request path.
+    from tortoise.supabase_control import is_supabase_enabled
+
+    if is_supabase_enabled():
+        offload, chunk_size = _cp_offload, _GRAPH_LIST_CONTROL_PLANE_CHUNK
+    else:
+        offload, chunk_size = _graph_offload, _GRAPH_LIST_OFFLOAD_CHUNK
+
+    graphs_by_org: dict[str, list[dict]] = {}
+    for start in range(0, len(healthy), chunk_size):
+        chunk = healthy[start:start + chunk_size]
+        graphs_by_org.update(await offload(
+            lambda chunk=chunk: {
+                org_id: _graph_list_for(org_id) for org_id in chunk},
+            op="graph_list"))
+
+    out = []
+    for m, org in resolved:
         suspended_at = org.get("suspended_at")
-        graphs = []
-        if suspended_at is None:
-            # Suspended rows are excluded from graph resolution — they
-            # cannot be selected anyway, and graph_list must not observe
-            # the suspension stamp.
-            graphs = _make_sdk(namespace="registry").graph_list(m["org_id"])
+        graphs = graphs_by_org.get(m["org_id"], []) if suspended_at is None else []
         out.append({
             "org_id": m["org_id"],
             "org_name": org.get("name", m["org_id"]),

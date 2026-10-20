@@ -143,7 +143,10 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 INSTALLER = (REPO_ROOT / "website" / "apps" / "dashboard" / "public"
@@ -729,11 +732,22 @@ def test_a_failing_sed_cannot_read_as_already_current(tmp_path):
     assert "✓ AGENTS.md" not in done.stdout, done.stdout
 
 
-def test_a_fenced_documentation_example_does_not_refuse_the_install(tmp_path):
+@pytest.mark.parametrize("hardlinked", [False, True], ids=["single-link", "hardlinked"])
+def test_a_fenced_documentation_example_does_not_refuse_the_install(tmp_path, hardlinked):
     """A FENCE is an example, not content. Refused before: a repo that documents
     the markers in a fence was told its markers were malformed — and the remedy
     said to delete the example. A file with ONLY a fenced example has no block
-    at all, so it must be created, not refused."""
+    at all, so it must be created, not refused.
+
+    `hardlinked` puts this file on the IN-PLACE write arms (`ln AGENTS.md
+    CLAUDE.md`), which is where the mid-write concurrency check lives. That check
+    used to `grep` the file for the marker TEXT — fence-blind and line-blind — so
+    the very example this test is about made it refuse, permanently, naming a
+    concurrent install as the cause and advising a re-run that re-matched the
+    user's own documentation every time (measured rc 3 on both runs). The check
+    now asks whether the target CHANGED (`cmp` against the pre-state copy), which
+    cannot false-positive on documentation.
+    """
     base = _fixture_tree(tmp_path)
     installer = _patched_installer(tmp_path, base)
     home = tmp_path / "home"
@@ -743,6 +757,10 @@ def test_a_fenced_documentation_example_does_not_refuse_the_install(tmp_path):
     example = "## How this file is structured\n\n```\n  " + START + "\n  ...\n  " + END + "\n```\n"
     agents = project / "AGENTS.md"
     agents.write_text("# House rules\n\n" + example, encoding="utf-8")
+    alias = None
+    if hardlinked:
+        alias = project / "CLAUDE.md"
+        alias.hardlink_to(agents)
 
     done = _run(installer, home, project)
 
@@ -759,6 +777,11 @@ def test_a_fenced_documentation_example_does_not_refuse_the_install(tmp_path):
     assert again.returncode == 0, again.stderr
     assert "already current" in _agents_report(again.stdout), again.stdout
     assert agents.read_text(encoding="utf-8") == text
+    if alias is not None:
+        assert agents.stat().st_ino == alias.stat().st_ino, (
+            "the install must not split a hardlinked alias")
+        assert alias.read_text(encoding="utf-8") == text, (
+            "the alias must hold the same bytes — a rename splits the inode")
 
 
 def test_a_non_numeric_version_is_reported_as_such(tmp_path):
@@ -1021,6 +1044,27 @@ def test_a_scratch_dir_failure_reports_a_cause(tmp_path):
     assert done.returncode == 3, done.stdout + done.stderr
     assert "scratch directory" in done.stderr, (
         f"a failure with no cause is not a diagnosis:\n{done.stderr}")
+
+
+def test_a_pre_state_copy_failure_names_a_reachable_cause(tmp_path):
+    """Review P3: the pre-state copy (the bytes the concurrency check compares
+    against) reported a failure as "unreadable, or not a regular file" — and
+    "not a regular file" is already excluded by the `[ -f "$target" ]` guard the
+    copy sits under, so the one reachable cause besides readability (a full or
+    unwritable scratch directory) went unnamed."""
+    stub = ("#!/bin/sh\n"
+            "case \"$*\" in *pre-state-agents.md*) exit 1 ;; esac\n"
+            "exec /bin/cp \"$@\"\n")
+    done, agents = _install_with_stub(tmp_path, "cp", stub, LEGACY_BLOCK)
+
+    assert done.returncode == 3, done.stdout + done.stderr
+    assert "pre-write copy" in done.stderr, (
+        f"the failure must name what it was doing:\n{done.stderr}")
+    assert "not a regular file" not in done.stderr, (
+        "the message must not name a cause the surrounding [ -f ] guard "
+        "excludes:\n" + done.stderr)
+    assert agents.read_text(encoding="utf-8") == LEGACY_BLOCK, (
+        "a failed pre-state copy must write nothing")
 
 
 def test_a_file_that_changes_mid_rewrite_is_not_half_written(tmp_path):
@@ -1295,7 +1339,8 @@ def test_a_pair_that_straddles_an_unterminated_fence_is_refused(tmp_path):
     assert "STRADDLE" in done.stderr, done.stderr
     assert target.read_text(encoding="utf-8") == original, (
         "nothing may be written when the block's window contains the fence line")
-    assert not list(project.glob(".tortoise-agents.*")), "no staged file is left behind"
+    assert not list(project.glob(".tortoise-agents.*")), (
+        "no staged file may be left behind — the refusal must not stage at all")
 
 
 def test_a_read_only_agents_md_with_no_block_still_gets_one(tmp_path):
@@ -1324,7 +1369,9 @@ def test_a_read_only_agents_md_with_no_block_still_gets_one(tmp_path):
         f"the read-only mode must survive: got {oct(target.stat().st_mode & 0o777)}")
 
 
-def test_an_unreadable_mode_refuses_rather_than_loosening_permissions(tmp_path):
+@pytest.mark.parametrize("existing_block", [True, False], ids=["replace", "append"])
+def test_an_unreadable_mode_refuses_rather_than_loosening_permissions(
+        tmp_path, existing_block):
     """Review P3: the mode restore was `chmod … 2>/dev/null || true`, so a failed
     `stat` silently loosened a 0444 file to the umask default and still reported
     success. Fail closed instead: the user's mode is not ours to drop."""
@@ -1335,7 +1382,10 @@ def test_an_unreadable_mode_refuses_rather_than_loosening_permissions(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
     target = project / "AGENTS.md"
-    original = f"# House\n\n{START}\nold\n{END}\n"
+    # BOTH write paths must fail closed: with a block it takes the replace path,
+    # without one it takes the append path, and each reads the mode itself.
+    original = (f"# House\n\n{START}\nold\n{END}\n" if existing_block
+                else "# House\n")
     target.write_text(original, encoding="utf-8")
     target.chmod(0o444)
     # A `stat` that always fails: both the GNU and the BSD form must be defeated.
@@ -1357,3 +1407,384 @@ def test_an_unreadable_mode_refuses_rather_than_loosening_permissions(tmp_path):
     assert "could not read the mode" in done.stderr, done.stderr
     assert target.read_text(encoding="utf-8") == original, "nothing may be written"
     assert (target.stat().st_mode & 0o777) == 0o444, "the mode must be untouched"
+
+
+@pytest.mark.parametrize("existing_block", [True, False], ids=["replace", "append"])
+@pytest.mark.parametrize("read_only", [False, True], ids=["rw", "ro"])
+def test_a_hardlinked_alias_sees_the_block(tmp_path, existing_block, read_only):
+    """Review P2/P1: BOTH write paths went from in-place writing to `cp` + `mv`,
+    which REPLACES the inode. A hardlinked alias of AGENTS.md — `ln AGENTS.md
+    CLAUDE.md` is a common way to dual-name agent files — kept the pre-run bytes
+    and silently diverged, while the report said the block was created/upgraded.
+
+    Measured on the replace path: inode split, the alias still held the stale v1
+    block, and the run reported "✓ upgraded". Measured on the append path: the
+    alias had no block at all.
+
+    The body carries a UNIQUE line and the assertion is EXACT: an earlier version
+    of this test passed against an arm that appended the whole staged copy (i.e.
+    duplicated the user's file) because it counted markers instead of comparing
+    content.
+    """
+    base = _fixture_tree(tmp_path)
+    installer = _patched_installer(tmp_path, base)
+    home = tmp_path / "home"
+    home.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / "AGENTS.md"
+    body = "# House\nUNIQUE-LINE-ONE\n"
+    original = f"{body}\n{START}\nold block\n{END}\nTAIL\n" if existing_block else body
+    target.write_text(original, encoding="utf-8")
+    if read_only:
+        # The in-place arms chmod the target and must put the mode back; without a
+        # 0444 case that restore is a no-op and cannot be observed (review: deleting
+        # it left every test green while a read-only file came back 0644).
+        target.chmod(0o444)
+    alias = project / "CLAUDE.md"
+    alias.hardlink_to(target)
+
+    done = _run(installer, home, project)
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    text = target.read_text(encoding="utf-8")
+    assert target.stat().st_ino == alias.stat().st_ino, (
+        "the install must not split a hardlinked alias")
+    assert alias.read_text(encoding="utf-8") == text, "the alias must hold the same bytes"
+    assert text.count("UNIQUE-LINE-ONE") == 1, (
+        "the user's content must appear exactly once — appending the whole staged "
+        f"copy duplicates it:\n{text[:400]}")
+    assert text.count("# House") == 1, "the original body must not be duplicated"
+    assert text.count("tortoise:block v") == 1, "the alias must see the upgraded block"
+    assert "old block" not in text, "the stale block must be replaced on both paths"
+    assert text.count(START) == 1 and text.count(END) == 1, "exactly one block"
+    if existing_block:
+        assert text.endswith("TAIL\n"), "content after the block must survive"
+    if read_only:
+        assert (target.stat().st_mode & 0o777) == 0o444, (
+            "an in-place write must restore the read-only mode: got "
+            f"{oct(target.stat().st_mode & 0o777)}")
+
+
+def test_a_failed_in_place_rewrite_restores_the_original(tmp_path):
+    """Review P2: the in-place arm truncates the ONLY copy, and `_emit_fail` wipes
+    the tmpdir — so a failed write destroyed the user's file. Measured with a `cat`
+    shim writing 4 bytes and exiting 1: the file came back as "part", with the
+    original text, the block and the trailer all gone, while the message only said
+    "re-run after checking the file".
+
+    The arm now keeps a copy first and restores it, so this asserts the EXACT
+    original bytes are back AND that the failure says so — a rollback that silently
+    "worked" would leave the user unable to tell what happened.
+    """
+    base = _fixture_tree(tmp_path)
+    installer = _patched_installer(tmp_path, base)
+    home = tmp_path / "home"
+    home.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / "AGENTS.md"
+    original = f"# House\nUNIQUE-ONE\n\n{START}\nold block\n{END}\nTAIL\n"
+    target.write_text(original, encoding="utf-8")
+    target.chmod(0o444)
+    alias = project / "CLAUDE.md"
+    alias.hardlink_to(target)
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    fake = shim / "cat"
+    # The in-place rewrite is the ONE-argument `cat` whose argument is the staged
+    # temp file; by the time it runs, the shell has already truncated the target.
+    # Fail there and nowhere else, so the rollback (which cats the BACKUP file) is
+    # not intercepted.
+    fake.write_text(
+        '#!/bin/sh\n'
+        'if [ $# -eq 1 ]; then\n'
+        '  case "$1" in\n'
+        '    *.tortoise-agents.*) printf "PARTIAL" ; exit 1 ;;\n'
+        '  esac\n'
+        'fi\n'
+        'exec /bin/cat "$@"\n',
+        encoding="utf-8")
+    fake.chmod(0o755)
+
+    done = subprocess.run(
+        ["bash", str(installer), "--harness", "codex"], cwd=str(project),
+        env={**os.environ, "HOME": str(home), "PATH": f"{shim}:{os.environ['PATH']}"},
+        capture_output=True, text=True, timeout=180)
+
+    assert done.returncode == 3, (
+        "the injected write failure must be reported:\n" + done.stdout + done.stderr)
+    assert "RESTORED" in done.stderr, (
+        "the failure must say the original was restored:\n" + done.stderr)
+    # The message is not evidence: the first version printed RESTORED and then
+    # deleted the very backup it named. Require the bytes below AND that no
+    # "could NOT be restored" line appears.
+    assert "could NOT be restored" not in done.stderr, done.stderr
+    assert target.read_text(encoding="utf-8") == original, (
+        "the original bytes must be back, verbatim")
+    assert (target.stat().st_mode & 0o777) == 0o444, (
+        f"the read-only mode must be restored: {oct(target.stat().st_mode & 0o777)}")
+    assert target.stat().st_ino == alias.stat().st_ino, "the alias must not be split"
+
+
+def test_a_signal_is_reported_as_a_failure_not_a_success(tmp_path):
+    """Review P1: the trap restored the bytes and RETURNED, so execution fell
+    through into the success report. Measured: rc 0 and a "✓ … upgraded" line over
+    an untouched file — a silent lie.
+
+    A TERM during the in-place write must exit non-zero and leave the file alone.
+    """
+    base = _fixture_tree(tmp_path)
+    installer = _patched_installer(tmp_path, base)
+    home = tmp_path / "home"
+    home.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / "AGENTS.md"
+    original = f"# House\nUNIQUE-ONE\n\n{START}\nold block\n{END}\nTAIL\n"
+    target.write_text(original, encoding="utf-8")
+    # 0444 matters here: it is what makes the in-place window OBSERVABLE (the arm
+    # chmods it writable, and that transition is the signal to send TERM). Without
+    # it the test killed the installer during skill installation and proved nothing
+    # (observed rc=-15, empty output, original bytes untouched).
+    target.chmod(0o444)
+    alias = project / "CLAUDE.md"
+    alias.hardlink_to(target)
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    fake = shim / "cat"
+    # Slow ONLY the in-place rewrite, so the signal lands inside the window.
+    fake.write_text(
+        '#!/bin/sh\n'
+        'if [ $# -eq 1 ]; then\n'
+        '  case "$1" in\n'
+        '    *.tortoise-agents.*) sleep 4 ;;\n'
+        '  esac\n'
+        'fi\n'
+        'exec /bin/cat "$@"\n',
+        encoding="utf-8")
+    fake.chmod(0o755)
+
+    proc = subprocess.Popen(
+        ["bash", str(installer), "--harness", "codex"], cwd=str(project),
+        env={**os.environ, "HOME": str(home), "PATH": f"{shim}:{os.environ['PATH']}"},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    # Wait for the WINDOW rather than guessing a duration: the mode only changes
+    # once the in-place arm has made the file writable, which is the state the
+    # signal must recover from. A fixed sleep raced the skill installation and
+    # sometimes landed before the window (observed: mode 644 left behind because
+    # the signal arrived while the trap was not yet installed).
+    in_window = False
+    for _ in range(120):
+        if proc.poll() is not None:
+            break
+        staged = list(project.glob(".tortoise-agents.*"))
+        if (target.stat().st_mode & 0o777) != 0o444 and staged:
+            in_window = True
+            break
+        time.sleep(0.25)
+    assert in_window, "the in-place window never opened; the test proves nothing"
+    proc.terminate()
+    out, err = proc.communicate(timeout=120)
+
+    assert proc.returncode != 0, (
+        "an interrupted write must not exit 0:\n" + out + err)
+    # The skills above legitimately print ✓, so the check is on the AGENTS.md
+    # claim specifically — that is the line that lied.
+    assert "AGENTS.md" not in out or "upgraded" not in out, (
+        "an interrupted write must not report the AGENTS.md block as upgraded:\n" + out)
+    assert target.read_text(encoding="utf-8") == original, (
+        "the original bytes must be restored")
+    assert (target.stat().st_mode & 0o777) == 0o444, (
+        "the mode must be restored: got "
+        f"{oct(target.stat().st_mode & 0o777)}\nrc={proc.returncode}\n{out}\n{err}")
+    assert not list(project.glob(".tortoise-agents.*")), (
+        "a verified restore must not leave its staging file behind — an untracked "
+        "`.tortoise-agents.*` is one `git add -A` from being committed")
+
+
+def test_a_failed_restore_keeps_the_backup_and_does_not_claim_success(tmp_path):
+    """Review P1: the restore's status was swallowed with `2>/dev/null`, the
+    message said RESTORED unconditionally, and `_emit_fail` then deleted the tmpdir
+    holding the only intact copy. Measured: a 1-byte target, the backup gone, and a
+    claim that it had been restored.
+
+    When the restore cannot be verified the installer must say so and LEAVE the
+    intact copy, naming where it is.
+    """
+    base = _fixture_tree(tmp_path)
+    installer = _patched_installer(tmp_path, base)
+    home = tmp_path / "home"
+    home.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / "AGENTS.md"
+    original = f"# House\nUNIQUE-ONE\n\n{START}\nold block\n{END}\nTAIL\n"
+    target.write_text(original, encoding="utf-8")
+    alias = project / "CLAUDE.md"
+    alias.hardlink_to(target)
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    fake = shim / "cat"
+    # Fail BOTH the in-place write and the restore of the backup: the same I/O
+    # fault, which is what makes an unverified restore dangerous.
+    fake.write_text(
+        '#!/bin/sh\n'
+        'if [ $# -eq 1 ]; then\n'
+        '  case "$1" in\n'
+        '    *.tortoise-agents.*|*orig-agents.md)\n'
+        '      case "$1" in *orig-agents.md) printf "X" ; exit 1 ;; esac\n'
+        '      printf "PARTIAL" ; exit 1 ;;\n'
+        '  esac\n'
+        'fi\n'
+        'exec /bin/cat "$@"\n',
+        encoding="utf-8")
+    fake.chmod(0o755)
+
+    done = subprocess.run(
+        ["bash", str(installer), "--harness", "codex"], cwd=str(project),
+        env={**os.environ, "HOME": str(home), "PATH": f"{shim}:{os.environ['PATH']}"},
+        capture_output=True, text=True, timeout=180)
+
+    assert done.returncode == 3, done.stdout + done.stderr
+    assert "could NOT be restored" in done.stderr, (
+        "an unverified restore must not be reported as a success:\n" + done.stderr)
+    assert "RESTORED" not in done.stderr.replace("could NOT be restored", ""), (
+        "the message must not also claim the restore succeeded:\n" + done.stderr)
+    # The backup lives in the installer's OWN mktemp dir, so it is found by
+    # reading the path out of the message rather than by guessing a location.
+    match = re.search(r"An intact copy is kept at: (\S+)", done.stderr)
+    assert match, "the message must name where the copy is:\n" + done.stderr
+    backup = Path(match.group(1))
+    assert backup.exists(), f"the named copy must exist: {backup}"
+    assert backup.read_text(encoding="utf-8") == original, (
+        "the surviving copy must hold the original bytes")
+
+
+def test_a_signal_whose_restore_fails_still_reports_and_keeps_the_backup(tmp_path):
+    """Review P1: a trap handler is NOT errexit-exempt, so a failing restore inside
+    `on_signal` killed the shell at that line — rc 1, EMPTY stderr, the mode left
+    loosened from 0444 and the backup stranded in an unnamed mktemp dir (measured).
+
+    The signal path must report like the ordinary failure path: say the original
+    could NOT be restored, name the surviving copy, restore the mode, exit 143.
+    """
+    base = _fixture_tree(tmp_path)
+    installer = _patched_installer(tmp_path, base)
+    home = tmp_path / "home"
+    home.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / "AGENTS.md"
+    original = f"# House\nUNIQUE-ONE\n\n{START}\nold block\n{END}\nTAIL\n"
+    target.write_text(original, encoding="utf-8")
+    target.chmod(0o444)
+    alias = project / "CLAUDE.md"
+    alias.hardlink_to(target)
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    fake = shim / "cat"
+    # Slow the in-place write (so the signal lands inside the window) AND fail the
+    # restore of the backup, which is the combination that killed the shell.
+    fake.write_text(
+        '#!/bin/sh\n'
+        'if [ $# -eq 1 ]; then\n'
+        '  case "$1" in\n'
+        '    *.tortoise-agents.*) sleep 4 ; exit 1 ;;\n'
+        '    *orig-agents.md) printf "X" ; exit 1 ;;\n'
+        '  esac\n'
+        'fi\n'
+        'exec /bin/cat "$@"\n',
+        encoding="utf-8")
+    fake.chmod(0o755)
+
+    proc = subprocess.Popen(
+        ["bash", str(installer), "--harness", "codex"], cwd=str(project),
+        env={**os.environ, "HOME": str(home), "PATH": f"{shim}:{os.environ['PATH']}"},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    in_window = False
+    for _ in range(120):
+        if proc.poll() is not None:
+            break
+        if (target.stat().st_mode & 0o777) != 0o444 and list(project.glob(".tortoise-agents.*")):
+            in_window = True
+            break
+        time.sleep(0.25)
+    assert in_window, "the in-place window never opened; the test proves nothing"
+    proc.terminate()
+    out, err = proc.communicate(timeout=180)
+
+    assert proc.returncode == 143, (
+        f"an interrupted write must exit 143, not {proc.returncode}:\n{out}\n{err}")
+    assert "interrupted while writing it in place" in err, (
+        "the signal path must say what happened:\n" + err)
+    assert "could NOT be restored" in err, (
+        "a failed restore must not be silent:\n" + err)
+    # The staged copy is not the recovery artifact — $backup is, and it is named
+    # below — and it is the one leftover that lands in the USER's repo (the same
+    # reason the verified-restore branch removes it).
+    assert not list(project.glob(".tortoise-agents.*")), (
+        "the staged copy must not be left in the project as an untracked file "
+        f"one `git add -A` from being committed: {list(project.glob('.tortoise-agents.*'))}")
+    assert (target.stat().st_mode & 0o777) == 0o444, (
+        "the mode must be restored even when the bytes cannot be: got "
+        f"{oct(target.stat().st_mode & 0o777)}")
+    match = re.search(r"An intact copy is kept at: (\S+)", err)
+    assert match, "the surviving copy must be named:\n" + err
+    assert Path(match.group(1)).exists(), "the named copy must exist"
+    assert "AGENTS.md" not in out or "upgraded" not in out, (
+        "an interrupted write must not report the AGENTS.md block as upgraded:\n" + out)
+
+
+def test_the_append_path_refuses_when_a_concurrent_run_wrote_the_block(tmp_path):
+    """Review P2: renaming made the last writer win, but appending IN PLACE adds a
+    SECOND block pair — measured: two parallel runs on a hardlinked, block-less
+    file, both printing success, leaving `starts=2 ends=2` and a file the next run
+    refuses as MALFORMED. A block that appears between the pre-state read and the
+    append must therefore abort instead of duplicating.
+
+    The state is injected deterministically: the shim writes a block into the
+    target the moment the staged copy is read back, i.e. inside the window.
+    """
+    base = _fixture_tree(tmp_path)
+    installer = _patched_installer(tmp_path, base)
+    home = tmp_path / "home"
+    home.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / "AGENTS.md"
+    original = "# House\nUNIQUE-ONE\n"
+    target.write_text(original, encoding="utf-8")
+    alias = project / "CLAUDE.md"
+    alias.hardlink_to(target)
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    fake = shim / "cat"
+    # When the append arm cats the block, first plant a competing block in the
+    # target — the exact effect of a parallel run winning the race.
+    fake.write_text(
+        '#!/bin/sh\n'
+        'for a in "$@"; do\n'
+        '  case "$a" in\n'
+        '    */block)\n'
+        '      printf "\\n\\n%s\\nother run\\n%s\\n" "<!-- tortoise:start -->" "<!-- tortoise:end -->" >> "$AGENTS_RACE_TARGET"\n'
+        '      ;;\n'
+        '  esac\n'
+        'done\n'
+        'exec /bin/cat "$@"\n',
+        encoding="utf-8")
+    fake.chmod(0o755)
+
+    done = subprocess.run(
+        ["bash", str(installer), "--harness", "codex"], cwd=str(project),
+        env={**os.environ, "HOME": str(home), "PATH": f"{shim}:{os.environ['PATH']}",
+             "AGENTS_RACE_TARGET": str(target)},
+        capture_output=True, text=True, timeout=180)
+
+    text = target.read_text(encoding="utf-8")
+    assert done.returncode == 3, (
+        "a block appearing mid-write must abort, not duplicate:\n" + done.stdout + done.stderr)
+    assert "changed while this one was running" in done.stderr, done.stderr
+    assert text.count(START) == 1 and text.count(END) == 1, (
+        f"exactly one block must remain, got {text.count(START)}/{text.count(END)}:\n{text[:300]}")
+    assert "UNIQUE-ONE" in text, "the user's content must survive"

@@ -43,7 +43,21 @@ onboarding PATCH's read (``patch_onboarding_state``) and the public invite-info
 read (``invite_info``, ``GET /v1/invites/info``). ``invite_info``'s reads are
 off-loaded too — the registry legs via ``asyncio.to_thread``, the Supabase
 control-plane legs via ``_cp_offload`` — so it is no longer in
-``_KNOWN_INLINE_ROUTE_RESIDUAL``. EVERY OTHER async body in
+``_KNOWN_INLINE_ROUTE_RESIDUAL``. ``list_my_orgs`` (``GET /v1/organizations``,
+the switcher every client reads on app load) joined it in the #3718 burn-down,
+for its LISTING half only: the per-org graph listings now run OFF the loop in
+chunks on the MODE's lane — registry → ``_graph_offload``,
+``_GRAPH_LIST_OFFLOAD_CHUNK`` orgs per submission, reading the
+process-lifetime ``_registry_anchor()`` (no per-org construction in the
+worker); Supabase → ``_cp_offload``, ``_GRAPH_LIST_CONTROL_PLANE_CHUNK`` orgs,
+a PostgREST read that builds NO graph handle at all. So the route body left the
+declared residual for ``_OFFLOADED_ASYNC_BODIES``. The one anchor build on the
+REGISTRY path belongs to ``_org_node``, which stays inline and declared here.
+Its membership scan and per-org Team read stay inline — #2446 records a
+thread-dependence MEASURED on `_membership_role`'s read, and these two are the
+same registry-read class by inference (the relay there marks it) — so
+``_user_memberships`` and ``_org_node`` REMAIN in
+``_KNOWN_INLINE_HELPER_RESIDUAL``. EVERY OTHER async body in
 the module that still runs sync FalkorDB I/O inline is enumerated in
 ``_KNOWN_INLINE_ROUTE_RESIDUAL`` / ``_KNOWN_INLINE_HELPER_RESIDUAL`` below —
 that is the declared, non-silent residual (it includes the per-request
@@ -112,6 +126,13 @@ _SEEDED_SESSION = "read-loop-3718-session"
 # read at all.
 _SEEDED_INVITE_TOKEN = "read-loop-3718-invite-token"
 _SEEDED_INVITE_ORG = "read-loop-3718-invite-org"
+# The switcher's seeded default graph — asserted on the response's
+# `default_graph_id`, which is the ONE field the N+1→batched lookup rewrite
+# feeds per row (#3718).
+_SEEDED_DEFAULT_GRAPH_ID = f"{_SEEDED_INVITE_ORG}-default"
+# Enough extra orgs that the listing spans MORE than one
+# `_GRAPH_LIST_OFFLOAD_CHUNK` submission, so the chunk loop is actually walked.
+MULTI_ORG_COUNT = 9
 
 
 def _seed_read_surface():
@@ -412,6 +433,380 @@ def test_read_route_does_not_freeze_the_event_loop(client, monkeypatch):
     assert response.status_code == 200, response.text[:200]
 
 
+# ── the org switcher (GET /v1/organizations), #3718 ───────────────────────
+#
+# The switcher is the FIRST read every client makes (app load). At the shape
+# this change started from it issued 2N+1 sync registry reads on the loop for N
+# memberships: the membership scan, one Team read per membership (``_org_node``)
+# and one ``graph_list`` per membership. The LISTING half is burned down here
+# (``ceil(N / the lane's chunk)`` off-loop submissions); the two registry reads
+# stay inline as declared residual because #2446 records a thread-dependence
+# MEASURED on `_membership_role`'s read, with these two in the same class by
+# inference.
+# All three reach the registry through ``_get_registry()``,
+# so ONE probe on that seam sees the whole path — no per-handler
+# instrumentation, and no reliance on how each read is spelled.
+#
+# BOUNDARY, stated rather than implied (the module header's rule): this pin is
+# MECHANISM-scoped, not request-ownership-scoped. ``_RequestScopedProbe`` above
+# can only own SDKs built on the main thread, and the listing's registry read is
+# off-loaded — it runs on a worker thread through the process-lifetime
+# ``_registry_anchor()`` (no construction of its own; in Supabase mode no graph
+# handle at all) — so the switcher cannot be a ``_READ_CASES`` entry and cannot
+# use the tick-counting harness: the blocking read never happens on the loop, so
+# adding it there would fail with "graph seam was never reached" for the correct
+# implementation. ``_RegistryReadProbe`` therefore patches ``_get_registry`` at
+# CLASS level and records, per query, whether the caller had a running loop.
+# That class-level patch also sees daemon-thread sweeps
+# (``tortoise-boot-sweep``) — the corruption the header records for
+# ``_get_proj`` — but for THIS seam it is harmless: a sweep thread has no
+# running loop, so its reads are recorded ``on_loop=False`` and the assertion
+# ("the listing did not run on the loop") cannot be softened by them.
+
+
+def _seed_org_switcher():
+    """Seed an active Membership + a default Graph node for the session user.
+
+    Runs after ``_seed_read_surface()``: the Team for ``_SEEDED_INVITE_ORG``
+    is already there, so the switcher's per-membership ``_org_node`` resolves
+    and the ``graph_list`` leg is actually reached.
+
+    The Graph node uses the CANONICAL writer's shape, ``id:`` (not
+    ``graph_id:``) — ``graph_list`` maps ``graph_id = props.get("id")``
+    (sdk.py's ``create_graph``), so seeding ``graph_id`` would hand the handler
+    a ``graph_id=None`` row and silently make ``default_graph_id``
+    unassertable.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    reg = ha_mod._make_sdk(namespace="registry")
+    try:
+        g = reg._get_registry()  # warm the registry graph + its indexes
+        g.query(
+            "CREATE (m:Membership {user_id:$uid, org_id:$oid, "
+            "role:'owner', status:'active'})",
+            params={"uid": "read-loop-3718-user", "oid": _SEEDED_INVITE_ORG},
+        )
+        g.query(
+            "CREATE (g:Graph {id:$gid, org_id:$oid, name:'main', "
+            "kind:'default', status:'active'})",
+            params={"gid": _SEEDED_DEFAULT_GRAPH_ID,
+                    "oid": _SEEDED_INVITE_ORG},
+        )
+    finally:
+        reg.close()
+
+
+def _seed_many_orgs(org_ids: list[str]):
+    """Seed one Team + Membership + default Graph per id, for the same user.
+
+    Used to walk the switcher's CHUNK loop: with more orgs than
+    ``_GRAPH_LIST_OFFLOAD_CHUNK``, a chunk result that OVERWRITES instead of
+    accumulating loses every org but the last chunk's (#3718).
+    """
+    import tortoise.hosted_api as ha_mod
+
+    reg = ha_mod._make_sdk(namespace="registry")
+    try:
+        g = reg._get_registry()
+        for org_id in org_ids:
+            g.query(
+                "CREATE (t:Team {id:$oid, name:$oid})",
+                params={"oid": org_id},
+            )
+            g.query(
+                "CREATE (m:Membership {user_id:$uid, org_id:$oid, "
+                "role:'owner', status:'active'})",
+                params={"uid": "read-loop-3718-user", "oid": org_id},
+            )
+            g.query(
+                "CREATE (g:Graph {id:$gid, org_id:$oid, name:'main', "
+                "kind:'default', status:'active'})",
+                params={"gid": f"{org_id}-default", "oid": org_id},
+            )
+    finally:
+        reg.close()
+
+
+class _RegistryReadProbe:
+    """Record every registry graph READ the request makes, and whether it ran
+    ON the loop.
+
+    ``asyncio.get_running_loop()`` succeeds only when the call executes on the
+    loop thread; a worker thread has no running loop. This is the direct
+    mechanism assertion — behavioural, not a source-grep for ``to_thread`` — so
+    a refactor that puts any of these reads back on the loop fails here
+    however it is written.
+    """
+
+    def __init__(self, monkeypatch):
+        self.reads: list[tuple[str, bool]] = []
+        probe = self
+        real = TortoiseSDK._get_registry
+
+        class _RecordingGraph:
+            def __init__(self, graph):
+                self._graph = graph
+
+            def query(self, statement, *args, **kwargs):
+                try:
+                    asyncio.get_running_loop()
+                    on_loop = True
+                except RuntimeError:
+                    on_loop = False
+                probe.reads.append((statement, on_loop))
+                return self._graph.query(statement, *args, **kwargs)
+
+            def __getattr__(self, item):
+                return getattr(self._graph, item)
+
+        def _get_registry(self_sdk, *args, **kwargs):
+            return _RecordingGraph(real(self_sdk, *args, **kwargs))
+
+        monkeypatch.setattr(TortoiseSDK, "_get_registry", _get_registry)
+
+
+def test_org_switcher_listing_runs_off_the_loop(client, monkeypatch):
+    """#3718: the switcher's per-org graph LISTING must run off the loop.
+
+    Scope, stated rather than implied: this test covers the LISTING half of the
+    switcher only. Its membership scan and its per-org Team read stay INLINE as
+    declared residual under #2446 — a thread-dependence MEASURED on
+    `_membership_role`'s registry read (off-loading THAT produced an EMPTY
+    member list in `test_invites_http.py::TestExpiredInviteReMint`), with these
+    two helpers in the same read class by inference — so they are asserted
+    REACHED here but deliberately NOT asserted off-loop. Pretending otherwise
+    would let this pin certify a behaviour the #2446 note records as broken.
+
+    Measured at ``main``: the listing ran ON the loop, once per membership, so
+    the first request of every client issued N blocking registry round trips on
+    the thread that serves every other request.
+    """
+    from tortoise.hosted_api import app
+
+    _seed_read_surface()
+    _seed_org_switcher()
+    _arm_session_endpoints(monkeypatch)
+    probe = _RegistryReadProbe(monkeypatch)
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            return await ac.get("/v1/organizations")
+
+    response = asyncio.run(_run())
+
+    assert response.status_code == 200, response.text[:300]
+    rows = response.json()
+    assert any(r.get("org_id") == _SEEDED_INVITE_ORG for r in rows), (
+        f"the seeded org is missing from the switcher's answer ({rows!r}) — "
+        f"the per-org reads did not run, so this proves nothing (#3718)")
+    assert any(r.get("graph_count") == 1 for r in rows), (
+        f"the seeded Graph node is not in the answer ({rows!r}) — the "
+        f"graph_list leg did not run (#3718)")
+    assert any(r.get("default_graph_id") == _SEEDED_DEFAULT_GRAPH_ID
+               for r in rows), (
+        f"the default graph id is not in the answer ({rows!r}) — the batched "
+        f"listing lost the per-row `graph_id` the switcher resolves its "
+        f"default from (#3718)")
+
+    # Non-vacuity: the two inline legs must still have RUN, or a short-circuit
+    # upstream would make the listing assertion below pass for the wrong reason.
+    for label, needle in {"membership scan": "MATCH (m:Membership",
+                          "Team read (_org_node)": "MATCH (t:Team"}.items():
+        assert [r for r in probe.reads if needle in r[0]], (
+            f"the {label} was never executed — the request short-circuited "
+            f"before it (or the statement changed), so this run proves "
+            f"nothing (#3718)")
+
+    listings = [r for r in probe.reads if "MATCH (g:Graph" in r[0]]
+    assert listings, (
+        "the graph_list read was never executed — the request short-circuited "
+        "before it, so this run proves nothing about the off-load (#3718)")
+    on_loop = [stmt for stmt, loop in listings if loop]
+    assert not on_loop, (
+        f"the graph listing ran ON the event loop ({len(on_loop)} of "
+        f"{len(listings)} call(s)) — one slow registry round trip freezes every "
+        f"concurrent request; GET /v1/organizations is the first read every "
+        f"client makes (the /v1/search precedent off-loads it; #3718)")
+
+
+def test_org_switcher_listing_is_chunked_and_loses_no_row(client, monkeypatch):
+    """#3718: the listing batch is CHUNKED, and every chunk's rows survive.
+
+    The chunk loop exists because one submission must not carry an unbounded
+    fan-out. That shape is only reachable for a user with MORE orgs than
+    ``_GRAPH_LIST_OFFLOAD_CHUNK``, so a one-membership fixture cannot see it —
+    and neither the "last chunk overwrites the earlier ones" regression nor a
+    reverted single unbounded submission would fail the single-org pin above.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    org_ids = [f"read-loop-3718-multi-{i:02d}" for i in range(MULTI_ORG_COUNT)]
+    _seed_read_surface()
+    _seed_org_switcher()
+    _seed_many_orgs(org_ids)
+    _arm_session_endpoints(monkeypatch)
+
+    real = ha_mod._graph_offload
+    ops: list[str] = []
+
+    async def _counting(fn, *, op, **kwargs):
+        ops.append(op)
+        return await real(fn, op=op, **kwargs)
+
+    monkeypatch.setattr(ha_mod, "_graph_offload", _counting)
+
+    async def _run():
+        transport = httpx.ASGITransport(app=ha_mod.app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            return await ac.get("/v1/organizations")
+
+    response = asyncio.run(_run())
+
+    assert response.status_code == 200, response.text[:300]
+    expected_chunks = -(-(MULTI_ORG_COUNT + 1)
+                        // ha_mod._GRAPH_LIST_OFFLOAD_CHUNK)
+    # The expectation is derived from the constant under test, so it moves WITH
+    # it — assert the PREMISE too, or raising the constant to "bigger than any
+    # real user" would make this pin certify the very unbounded submission it
+    # exists to forbid (expected == actual == 1).
+    assert expected_chunks >= 2, (
+        f"this pin's premise is broken: {MULTI_ORG_COUNT + 1} orgs span only "
+        f"{expected_chunks} chunk(s) of {ha_mod._GRAPH_LIST_OFFLOAD_CHUNK} — "
+        f"raise MULTI_ORG_COUNT above the chunk size (or lower the chunk "
+        f"size) so the loop is actually walked (#3718)")
+    listings = ops.count("graph_list")
+    assert listings == expected_chunks, (
+        f"the listing used {listings} submission(s) for "
+        f"{MULTI_ORG_COUNT + 1} healthy orgs, expected {expected_chunks} "
+        f"chunk(s) of {ha_mod._GRAPH_LIST_OFFLOAD_CHUNK} — one unbounded "
+        f"submission puts an uncapped fan-out under a single wait bound "
+        f"(#3718); ops seen: {ops!r}")
+
+    rows = response.json()
+    assert len(rows) == MULTI_ORG_COUNT + 1, (
+        f"the switcher returned {len(rows)} of {MULTI_ORG_COUNT + 1} orgs "
+        f"({rows!r}) (#3718)")
+    lost = [r["org_id"] for r in rows
+            if r.get("graph_count") != 1
+            or r.get("default_graph_id") != f"{r['org_id']}-default"]
+    assert not lost, (
+        f"these orgs lost their graph row: {lost!r} — a chunk's result was "
+        f"overwritten instead of accumulated, so the switcher resolves no "
+        f"default graph for them (#3718)")
+
+
+def test_org_switcher_listing_never_builds_a_graph_handle_in_supabase_mode(
+        monkeypatch):
+    """#3718: the listing's mode branch must be at the CALL SITE.
+
+    ``_registry_anchor()`` builds (and eagerly attaches) a FalkorDB handle
+    BEFORE ``graph_list`` would consult the mode. Leaving the branch to the
+    callee therefore made ``GET /v1/organizations`` — the first read every
+    client makes — need a live graph server to resolve orgs that live entirely
+    in PostgREST, and raise a raw ``ConnectionError`` (a 500, not the lane's
+    503) when that server was down. Measured on the anchor shape with
+    ``TORTOISE_CONTROL_PLANE=supabase`` and an unreachable graph URI.
+    """
+    import tortoise.hosted_api as ha_mod
+    import tortoise.supabase_control as sb
+
+    monkeypatch.setattr(sb, "is_supabase_enabled", lambda: True)
+    monkeypatch.setattr(sb, "get_control_plane", lambda: "cp")
+    monkeypatch.setattr(
+        sb, "graph_metadata",
+        lambda cp, org_id: [{"graph_id": f"{org_id}-pg"}])
+
+    def _explode():
+        raise AssertionError(
+            "the listing built a FalkorDB registry handle in Supabase mode — "
+            "the mode branch is missing at the call site (#3718)")
+
+    monkeypatch.setattr(ha_mod, "_registry_anchor", _explode)
+
+    assert ha_mod._graph_list_for("org-x") == [{"graph_id": "org-x-pg"}]
+
+    monkeypatch.setattr(
+        sb, "user_memberships",
+        lambda cp, uid: [{"org_id": "org-x", "role": "owner"}])
+    monkeypatch.setattr(
+        sb, "org_by_id",
+        lambda cp, org_id: {"id": org_id, "name": "X", "tier": "free"})
+    monkeypatch.setattr(
+        sb, "graph_metadata",
+        lambda cp, org_id: [{"graph_id": f"{org_id}-pg", "kind": "default"}])
+
+    # ROUTE level, not just the helper: the contract this pins is the endpoint's
+    # ("never touches the registry in Supabase mode"). `_org_node` and
+    # `_user_memberships` branch on the mode themselves, and the submission lane
+    # is chosen on the loop, so the whole path must stay FalkorDB-free.
+    #
+    # BOTH lanes are patched with RECORDERS, not one passthrough: `_graph_offload`
+    # delegates to `_cp_offload(pool="graph")`, so replacing only the latter
+    # makes the graph lane indistinguishable from the control-plane lane at this
+    # seam — and the wrong-lane regression this docstring is about (the round-5
+    # P2: Supabase listings riding the graph lane under its cold-projection
+    # bound) would keep this pin green. Measured: with the lane decision forced
+    # to `_graph_offload`, the row assertion alone passes.
+    lanes = {"cp": 0, "graph": 0}
+
+    async def _cp_rec(fn, *, op, **_kwargs):
+        lanes["cp"] += 1
+        return fn()
+
+    async def _graph_rec(fn, *, op, **_kwargs):
+        lanes["graph"] += 1
+        return fn()
+
+    monkeypatch.setattr(ha_mod, "_cp_offload", _cp_rec)
+    monkeypatch.setattr(ha_mod, "_graph_offload", _graph_rec)
+
+    rows = asyncio.run(ha_mod.list_my_orgs({"user_id": "u-3718"}))
+
+    assert [(r["org_id"], r["graph_count"], r["default_graph_id"])
+            for r in rows] == [("org-x", 1, "org-x-pg")], (
+        f"the Supabase-mode switcher did not answer from the control plane: "
+        f"{rows!r} (#3718)")
+    # 1 membership scan + 1 Team read (`_org_node`) + 1 listing submission.
+    # The scan and the Team read are on THIS lane too (they branch on the mode
+    # and enumerate no registry), which is why the count is 3 and not 1.
+    assert lanes == {"cp": 3, "graph": 0}, (
+        f"the Supabase switcher did not run on the control-plane lane only: "
+        f"{lanes!r} (#3718)")
+
+    # And the CHUNK is sized for THIS lane's bound, not the graph lane's: the
+    # Supabase read is 3 PostgREST round trips per org under a 10 s bound, so
+    # the same count the registry lane uses (8) would budget 24 against it.
+    org_count = 9
+    monkeypatch.setattr(
+        sb, "user_memberships",
+        lambda cp, uid: [{"org_id": f"org-{i}", "role": "owner"}
+                         for i in range(org_count)])
+    monkeypatch.setattr(
+        sb, "org_by_id",
+        lambda cp, org_id: {"id": org_id, "name": org_id, "tier": "free"})
+    monkeypatch.setattr(
+        sb, "graph_metadata",
+        lambda cp, org_id: [{"graph_id": f"{org_id}-pg", "kind": "default"}])
+    lanes.update(cp=0, graph=0)
+
+    rows = asyncio.run(ha_mod.list_my_orgs({"user_id": "u-3718"}))
+
+    expected_chunks = -(-org_count // ha_mod._GRAPH_LIST_CONTROL_PLANE_CHUNK)
+    assert expected_chunks >= 2, (
+        f"this pin's premise is broken: {org_count} orgs span only "
+        f"{expected_chunks} chunk(s) (#3718)")
+    assert lanes == {"cp": 1 + org_count + expected_chunks, "graph": 0}, (
+        f"{org_count} Supabase orgs used lanes {lanes!r}, expected "
+        f"{1 + org_count + expected_chunks} control-plane call(s) (1 scan + "
+        f"{org_count} Team reads + {expected_chunks} chunks) and no graph-lane "
+        f"call — the lane or the per-lane chunk size regressed (#3718)")
+    assert len(rows) == org_count, (rows,)
+
+
 # ── AST inventory pin: the sync-FalkorDB-on-the-loop class ─────────────────
 #
 # The #2988 pin in `test_health_ready_nonblocking.py` matches one handler and
@@ -448,7 +843,17 @@ def test_read_route_does_not_freeze_the_event_loop(client, monkeypatch):
 # `_make_sdk` one level down), which is the same helper-mediated boundary the
 # paragraph above names, and which the behavioural probe extension in
 # `tests/test_dataplane_lane_loop_responsiveness.py` (#4660) is the guard for.
-_GRAPH_SEAM_CALLEES = frozenset({"_get_proj", "_get_registry", "dream_health_check"})
+_GRAPH_SEAM_CALLEES = frozenset({"_get_proj", "_get_registry", "dream_health_check",
+                           # #3718: the org switcher's listing seam. Sync by
+                           # design (it returns the rows), and its FalkorDB I/O
+                           # is reached through the cached ``_registry_anchor()``
+                           # — a name this scan does not otherwise know. Without
+                           # this member the switcher's listing was invisible to
+                           # the inventory: reverting it to an inline per-org
+                           # call left ``_has_inline_graph_io(list_my_orgs)``
+                           # EMPTY, so its ``_OFFLOADED_ASYNC_BODIES`` entry
+                           # asserted nothing (measured).
+                           "_graph_list_for"})
 #: SDK CONSTRUCTION seams (#4660) — kept SEPARATE from the graph seams above so
 #: the two classes of violation stay distinguishable in the failure message
 #: (``test_graph_io_is_offloaded``) instead of merging into one count that hides
@@ -486,6 +891,13 @@ _OFFLOAD_BOUNDARY_CALLEES = frozenset({
     "_run_index_off_loop",
     "_cp_offload", "_oauth_offload", "run_control_plane_call",
     "run_on_daemon_worker", "_graph_offload",
+    # #3718: the per-MODE lane alias in ``list_my_orgs``
+    # (``offload = _cp_offload if is_supabase_enabled() else _graph_offload``).
+    # The scan sees the call through the local name, so the alias itself must be
+    # declared here for the listing's ``_graph_list_for`` to be recognised as
+    # OFF-loop — otherwise the correct shape is reported as a violation (the same
+    # failure mode ``_graph_offload`` was added for in #4660).
+    "offload",
 })
 
 #: Async bodies this change OFF-LOADS. A subset assertion: a rename or a
@@ -537,6 +949,22 @@ _OFFLOADED_ASYNC_BODIES = frozenset({
     "backups_create", "backups_restore", "backups_sweep",
     "backups_purge", "backups_rebaseline", "backups_drill",
     "backups_drill_scheduled",
+    # #3718: the org switcher's LISTING half. On the REGISTRY path its per-org
+    # listings build NO handle of their own (they reuse the process-lifetime
+    # ``_registry_anchor()``); on the SUPABASE path the read is PostgREST and
+    # builds no graph handle at all. Either way the body reaches its FalkorDB
+    # seam through the per-mode lane alias (``offload``, declared as a boundary
+    # above) and through ``_graph_list_for`` (declared as a graph seam), so the
+    # set's "no seam, no construction the scan can see" holds for the right
+    # reason — and would fail if either went back inline (verified both ways).
+    # The one anchor build on the REGISTRY request path is ``_org_node``'s, and
+    # that helper stays INLINE under #2446 — which is why `_user_memberships` /
+    # `_org_node` are in ``_KNOWN_INLINE_HELPER_RESIDUAL`` and NOT here.
+    # Behavioural pins:
+    # ``test_org_switcher_listing_runs_off_the_loop``,
+    # ``test_org_switcher_listing_is_chunked_and_loses_no_row`` and
+    # ``test_org_switcher_listing_never_builds_a_graph_handle_in_supabase_mode``.
+    "list_my_orgs",
 })
 
 #: Async bodies whose GRAPH I/O is off-loaded but whose SDK CONSTRUCTION is
@@ -591,7 +1019,7 @@ _KNOWN_INLINE_ROUTE_RESIDUAL = frozenset({
     # (#3718 via #2924); the inventory is posted on #3718.
     "accept_invite_by_id", "agent_token_revoke", "create_graph", "create_org",
     "create_org_graph", "issue_insight", "list_graphs", "list_invites",
-    "list_my_orgs", "list_packs", "list_trash", "rescind_invite", "search",
+    "list_packs", "list_trash", "rescind_invite", "search",
     "session_context", "topic_summary", "upload_pack_manifest",
     "volunteer_context",
 })
@@ -1043,6 +1471,57 @@ def test_on_loop_sdk_construction_residual_is_named_head_on():
     assert set(_OFFLOADED_ASYNC_BODIES_WITH_ON_LOOP_SDK_CONSTRUCTION) <= set(construction), (
         "a declared on-loop SDK-construction body is not flagged by the scan "
         "at all — the declaration has gone vacuous (#4660)")
+
+
+def test_lane_alias_is_only_ever_bound_to_a_real_offload_seam():
+    """#3718: the bare name ``offload`` in the boundary set must stay honest.
+
+    ``offload`` is the switcher's per-MODE lane alias and the only
+    non-underscore, non-imported member of ``_OFFLOAD_BOUNDARY_CALLEES``.
+    Membership is matched on the call's NAME alone, with no scope, so if any
+    future body in ``hosted_api`` binds ``offload`` to something that is NOT an
+    offload seam, that body's sync I/O is skipped by both scans for free — a
+    silent hole in the guard the alias exists to keep honest. Pin the binding
+    sites instead of trusting the reader.
+    """
+    assert "offload" in _OFFLOAD_BOUNDARY_CALLEES, (
+        "the switcher's per-mode lane alias is no longer declared a boundary — "
+        "its `_graph_list_for` call now reads as on-loop I/O (#3718)")
+    seams = {"_cp_offload", "_graph_offload"}
+    assigned: list[tuple[int, str]] = []
+    for node in ast.walk(ast.parse(HOSTED_API.read_text())):
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and node.value:
+            targets, value = [node.target], node.value
+        else:
+            continue
+        # Target names, POSITIONALLY: the alias is assigned in a tuple
+        # (`offload, chunk_size = _cp_offload, <constant>`), so pairing by
+        # index is what tells the seam from the chunk constant beside it.
+        if len(targets) == 1 and isinstance(targets[0], (ast.Tuple, ast.List)):
+            tgt_names = [e.id if isinstance(e, ast.Name) else None
+                         for e in targets[0].elts]
+        else:
+            tgt_names = [t.id if isinstance(t, ast.Name) else None
+                         for t in targets]
+        if "offload" not in tgt_names:
+            continue
+        values = (value.elts if isinstance(value, (ast.Tuple, ast.List))
+                  else [value])
+        if len(values) != len(tgt_names):
+            values = [value] * len(tgt_names)
+        for name, v in zip(tgt_names, values, strict=True):
+            if name == "offload":
+                assigned.append((node.lineno, _callee_name(v)))
+    assert assigned, (
+        "the `offload` alias is gone from hosted_api — if the lane choice was "
+        "rewritten, re-derive this pin rather than deleting it (#3718)")
+    bad = [(line, name) for line, name in assigned if name not in seams]
+    assert not bad, (
+        f"`offload` is bound to something that is not an offload seam at "
+        f"{bad!r} — the boundary set matches on the bare name, so that body's "
+        f"sync I/O would be skipped by BOTH scans (#3718)")
 
 
 def test_residual_names_still_exist():

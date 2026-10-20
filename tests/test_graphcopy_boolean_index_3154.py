@@ -5,10 +5,22 @@ boolean index in its SDK-created position (the pre-#3154 shape), while
 ``NOT n.is_operator``, ``n.is_operator = true`` and ``typeof()`` all stayed
 correct (the DATA was intact — the index was corrupt).
 
-Why it matters: EP anchor selection (`dream.py`), the calibration gate
-(`calibrate_summary`) and dedup all read the ``= false`` form, so a restored
-graph came back with belief propagation, calibration and dedup silently
-disabled — a fail-open state with no error anywhere.
+Why it matters: at the time, EP anchor selection (`dream.py`), the
+calibration audit (`calibrate_summary`) and dedup all read the ``= false``
+form, so a restored graph came back with belief propagation, calibration and
+dedup silently disabled — a fail-open state with no error anywhere. Modern
+readers use an absence-or-false predicate instead (`(x.is_operator IS NULL OR
+x.is_operator = false)`, #3139/#3154): that is what `dream.py` selects on, and
+#9063 moved the CALIBRATION GATE -- plus the ``calibrate_summary`` audit, the
+guidance its error points at -- onto it with NO ``op_type`` conjunct, because
+EP's factor-input arm has no non-operator filter (an ``op_type``-bearing hybrid
+IS a participant). Dedup keeps its OWN two-disjunct form,
+``(n.is_operator IS NULL OR n.is_operator = false) AND (n.op_type IS NULL OR
+n.is_operator = false)`` (#2892/#2949): the bare ``... AND n.op_type IS NULL``
+conjunct belongs to the COUNTING predicates (`summarize_structure` /
+`list_pointkinds` / `ep`'s contested-claim scan / `sdk.query`), and putting it
+in dedup mints a
+duplicate on an idempotent re-write -- do not restore parity there.
 
 Docker/server lane only: the corruption is a FalkorDB ``GRAPH.COPY``
 behaviour and needs a real server. The file skips cleanly when no

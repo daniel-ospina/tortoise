@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import errno
 import gc
+import inspect
 import json
 import logging
 import os
@@ -387,6 +388,53 @@ def test_a_peer_writing_inside_the_window_makes_the_position_unproven(
     assert log.append({"n": "next"}) == 6
 
 
+def test_a_journal_replaced_under_the_append_makes_the_position_unproven(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The size check is intra-descriptor; an INODE swap needs its own witness.
+
+    `append` counts by opening the PATH and writes through the descriptor it
+    already holds. A restore stages the old journal aside and copies a new file
+    onto the path (`os.replace` + `shutil.copy2` → a different inode), and its
+    lock documents that it does not exclude a process already writing — so the
+    swap can land between our open and our count. Counting that inode while
+    writing through ours reports a position this journal does not hold: the next
+    live append at the path legitimately takes the same number, which is two
+    records under one `seq` — the silent duplicate #9190 exists to remove. The
+    record also lands in the inode that is no longer the journal, so the number
+    is meaningless at this path either way.
+    """
+    path = tmp_path / "events.jsonl"
+    log = EventLog(path)
+    assert [log.append({"n": i}) for i in range(3)] == [1, 2, 3]
+    # Both fast paths would answer for the pre-write state and the recount —
+    # where the swap happens — would never run: `log`'s memo is refreshed to the
+    # post-write state by the append it just did, and the cache describes it.
+    # Delete the cache and use a FRESH instance, so the count is a real recount.
+    _cache(path).unlink()
+
+    real_count = log_mod._count_records
+
+    def count_then_restore(target):
+        count = real_count(target)
+        # The restore: a DIFFERENT inode, holding ONE record, moved onto the path.
+        staged = Path(target).with_suffix(".staged")
+        staged.write_text(json.dumps({"n": "restored"}) + "\n", encoding="utf-8")
+        os.replace(staged, target)
+        return count
+
+    monkeypatch.setattr(log_mod, "_count_records", count_then_restore)
+    assert EventLog(path).append({"n": "ours"}) is None, (
+        "a position was reported for a record written to an inode the path no "
+        "longer names")
+    monkeypatch.setattr(log_mod, "_count_records", real_count)
+
+    assert not _cache(path).exists(), (
+        "a cache entry was written for a journal state the path had left")
+    # The path now holds the restored record only; numbering recovers from it.
+    assert [r["n"] for r in read_for_replay(EventLog(path))] == ["restored"]
+    assert EventLog(path).append({"n": "after"}) == 2
+
+
 def test_a_journal_that_cannot_be_read_still_accepts_the_record(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Counting must not become an append failure the write never had.
@@ -463,7 +511,10 @@ def test_a_garbage_sidecar_is_a_recount_not_a_crash(tmp_path: Path):
                 f'"size":{state.st_size},"mtime_ns":{state.st_mtime_ns}}}')
 
     for garbage in ('{"v":2,"records":99',                            # truncated
-                    sidecar("99", version="999"),                     # unknown version
+                    # A PLAUSIBLE count with an unknown version: an absurd one
+                    # would be refused by the size bound even with the version
+                    # gate deleted, so it would pin nothing.
+                    sidecar("1", version="999"),                      # unknown version
                     sidecar("-4"),                                    # negative
                     sidecar("true"),                                  # bool is an int
                     sidecar('"2"'),                                   # string
@@ -475,6 +526,116 @@ def test_a_garbage_sidecar_is_a_recount_not_a_crash(tmp_path: Path):
 
     assert EventLog(path).append({"n": "next"}) == 3
     assert len(read_for_replay(log)) == 3
+
+
+def test_a_retargeted_symlink_neither_mints_nor_loses_a_position(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The witness must stat the path the COUNT opened, not a memoised realpath.
+
+    A journal path is allowed to be (or contain) a symlink — `_lock_key` and
+    `_cache_path` exist precisely to give one journal one lock and one cache
+    across spellings. `key` is the realpath MEMOISED on the instance, so if the
+    witness compared against `key` instead of `self.path`:
+
+    * a retarget that lands inside the window would be INVISIBLE to it (the
+      count read the new target, the record went into the old inode, and `key`
+      still names the old one) — a minted `seq` the journal does not hold;
+    * a retarget BETWEEN two appends would make every later append on the same
+      instance report `None` on a perfectly healthy journal, costing the
+      positions for the instance's whole life.
+
+    Both legs are asserted. The HEALTHY leg needs an instance built BEFORE the
+    retarget — the memo is per-instance, so a fresh `EventLog` re-derives `key`
+    and would pass either way, proving nothing; that is what makes the leg a test
+    of the memo rather than of the code under it. (The minting leg discriminates
+    with a fresh instance too, since the swap happens after its key is fixed.)
+    """
+    real_dir = tmp_path / "real"
+    for name in ("v1", "v2", "v3"):
+        (real_dir / name).mkdir(parents=True)
+    v1 = real_dir / "v1" / "events.jsonl"
+    v2 = real_dir / "v2" / "events.jsonl"
+    v3 = real_dir / "v3" / "events.jsonl"
+    link = tmp_path / "journal"
+    link.symlink_to(v1)
+
+    log = EventLog(link)
+    assert [log.append({"n": i}) for i in range(3)] == [1, 2, 3]
+
+    # A healthy append through the link, before any retarget: the witness must
+    # not fire at all on an ordinary symlinked journal.
+    assert log.append({"n": "healthy"}) == 4, (
+        "a healthy append through a symlinked journal lost its position")
+
+    # THE FALSE-POSITIVE LEG: retarget the link BETWEEN two appends of an
+    # instance whose `key` memo still names v1. Nothing is in flight — both the
+    # count and the write resolve through the link to v2 — so the append is
+    # healthy and must report its position. A witness that stats the memoised
+    # realpath compares v2's fd against v1's path and answers `None`.
+    v2.write_text(json.dumps({"n": "other"}) + "\n", encoding="utf-8")
+    _retarget(link, v2, tmp_path / "between")
+    assert log.append({"n": "post-retarget"}) == 2, (
+        "a healthy append LOST its position because the witness compared "
+        "against the memoised realpath of the link's OLD target")
+
+    # THE MINTING LEG: a retarget INSIDE the count, to a journal holding one
+    # record. The count reads the old target (v2, two records) and the record is
+    # written through the descriptor this append already holds (v2 again), but
+    # the PATH now names v3 — so the number would describe a file this record is
+    # not in, and the next live append to v3 would legitimately take it too.
+    v3.write_text(json.dumps({"n": "third"}) + "\n", encoding="utf-8")
+    real_count = log_mod._count_records
+
+    def count_then_retarget(target):
+        count = real_count(target)
+        _retarget(link, v3, tmp_path / "staged")
+        return count
+
+    monkeypatch.setattr(log_mod, "_count_records", count_then_retarget)
+    assert EventLog(link).append({"n": "swapped"}) is None, (
+        "a position was minted for a record written to an inode the journal path "
+        "no longer names (the witness compared against a STALE realpath)")
+    monkeypatch.setattr(log_mod, "_count_records", real_count)
+
+    # Each target holds exactly its own records, and numbering on any of them is
+    # read from the journal rather than from the number the refused append
+    # declined to claim.
+    assert [r["n"] for r in read_for_replay(EventLog(v1))] == [
+        0, 1, 2, "healthy"]
+    assert [r["n"] for r in read_for_replay(EventLog(v2))] == [
+        "other", "post-retarget", "swapped"]
+    assert [r["n"] for r in read_for_replay(EventLog(link))] == ["third"]
+    assert EventLog(link).append({"n": "after"}) == 2
+
+
+def _retarget(link: Path, target: Path, staged: Path) -> None:
+    """Point *link* at *target* ATOMICALLY (a new symlink, `os.replace`d over it)."""
+    staged.unlink(missing_ok=True)
+    staged.symlink_to(target)
+    os.replace(staged, link)
+
+
+def test_a_sidecar_count_larger_than_the_file_is_refused(tmp_path: Path):
+    """A flip in the `records` DIGITS survives every other check.
+
+    Such a sidecar still names this exact file state, so nothing above rejects
+    it and it would be believed verbatim for ever — a fabricated `seq` no recount
+    could ever correct. A record costs at least one byte, so a count above the
+    byte size is impossible output for this reader's own writer; it is refused
+    and recounted. (This bounds CORRUPTION, not a deliberate forgery — see the
+    same-length replacement the POSITION block names.)
+    """
+    path = tmp_path / "events.jsonl"
+    log = EventLog(path)
+    assert [log.append({"n": i}) for i in range(2)] == [1, 2]
+    state = path.stat()
+    for bogus in (state.st_size + 1, 10 ** 6):
+        _cache(path).write_text(
+            f'{{"v":{log_mod._POSITION_VERSION},"records":{bogus},'
+            f'"size":{state.st_size},"mtime_ns":{state.st_mtime_ns}}}',
+            encoding="utf-8")
+        assert EventLog(path).position() == 2, bogus
+    assert EventLog(path).append({"n": "next"}) == 3
 
 
 def test_a_state_read_that_fails_after_the_count_costs_only_the_cache(
@@ -557,6 +718,11 @@ def test_a_cache_of_another_version_is_not_believed(
     A cache written by an older reader describes the same FILE in terms this one
     may not mean, so the version must send it to the journal — otherwise a
     change to what a field means silently keeps serving the old sense.
+
+    The bogus count is PLAUSIBLE (2 for a 3-record journal) on purpose. An absurd
+    99 would be refused by the SIZE BOUND even with this gate deleted, so the
+    test would pass for the wrong reason and pin nothing: the value has to be one
+    only the version check can reject.
     """
     path = tmp_path / "events.jsonl"
     log = EventLog(path)
@@ -564,7 +730,7 @@ def test_a_cache_of_another_version_is_not_believed(
 
     cached = json.loads(_cache(path).read_text(encoding="utf-8"))
     cached["v"] = log_mod._POSITION_VERSION - 1
-    cached["records"] = 99               # the wrong answer, for the right file
+    cached["records"] = 2                # wrong, but PLAUSIBLE (see below)
     _cache(path).write_text(json.dumps(cached), encoding="utf-8")
 
     assert EventLog(path).position() == 3, (
@@ -870,6 +1036,122 @@ def test_an_unproven_seal_warns_once_per_journal(
             assert log.append({"n": i}) is None
     warns = [r for r in caplog.records if "could not be sized" in r.getMessage()]
     assert len(warns) == 1, f"{len(warns)} warnings for one persistent condition"
+
+
+def test_a_failure_inside_the_seal_report_cannot_fail_the_append(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The seal's report is TOTAL, like the marking handler's.
+
+    `_report_unproven_seal` runs after the record has landed. A `MemoryError`
+    from the dedupe set's insert — or a raising log handler — must not turn a
+    durable record into a reported failure whose retry duplicates it, and the
+    condition it reports (a mount that cannot `seek`) is exactly the environment
+    where odd failures are likely.
+    """
+    path = tmp_path / "events.jsonl"
+    monkeypatch.setattr(EventLog, "_seal_prefix", lambda self, f: None)
+
+    class NoRoom(set):
+        def add(self, _item):
+            raise MemoryError("no room for the report")
+
+    monkeypatch.setattr(log_mod, "_UNPROVEN_SEAL_REPORTED", NoRoom())
+    log = EventLog(path)
+    assert log.append({"n": 0}) is None, (
+        "a MemoryError in the seal report escaped the append")
+    assert [r["n"] for r in read_for_replay(log)] == [0]
+
+
+def test_position_refuses_a_count_taken_on_a_journal_that_was_replaced(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """`position()` counts the PATH through a descriptor it opened earlier.
+
+    A restore can `os.replace` a different inode onto the path DURING that count
+    — a window seconds wide on a large journal. The number is then the other
+    file's, and the `(size, mtime_ns)` re-read this method already does cannot
+    see it: it is the same descriptor, by construction. Caching it would be
+    worse than returning it, because the entry would carry THIS journal's exact
+    state, so a later reader would accept a fabricated count as a fact for ever
+    — the one failure this method must not produce. It raises instead, its
+    documented answer when there is no count to give.
+    """
+    path = tmp_path / "events.jsonl"
+    assert [EventLog(path).append({"n": i}) for i in range(3)] == [1, 2, 3]
+    _cache(path).unlink()
+    before = path.read_bytes()
+
+    real_count = log_mod._count_records
+
+    def count_then_replace(target):
+        count = real_count(target)
+        staged = Path(target).with_suffix(".staged")
+        staged.write_text(json.dumps({"n": "restored"}) + "\n", encoding="utf-8")
+        os.replace(staged, target)
+        return count
+
+    monkeypatch.setattr(log_mod, "_count_records", count_then_replace)
+    with pytest.raises(OSError):
+        EventLog(path).position()
+    monkeypatch.setattr(log_mod, "_count_records", real_count)
+
+    assert not _cache(path).exists(), (
+        "a cache entry was written for a count taken on a journal the path had "
+        "already left")
+    # The path now holds the restored record; numbering recovers from it, so no
+    # later writer inherits the refused number.
+    assert [r["n"] for r in read_for_replay(EventLog(path))] == ["restored"]
+    assert EventLog(path).append({"n": "after"}) == 2
+    assert before != path.read_bytes()
+
+
+def _doc_paragraph(doc: str, needle: str, *, starts: bool = False) -> str:
+    """The blank-line-delimited paragraph of *doc* that contains *needle*.
+
+    Whitespace-collapsed, so a wrapped sentence can be asserted by content and
+    a reflow of the prose does not break the test. With *starts*, the paragraph
+    must BEGIN with the needle — needed for `:raises OSError:`, which the
+    narrative also cites by name.
+    """
+    for para in doc.split("\n\n"):
+        text = " ".join(para.split())
+        if (text.startswith(needle) if starts else needle in text):
+            return text
+    raise AssertionError(f"no paragraph of the docstring starts with "
+                         f"{needle!r}" if starts else
+                         f"no paragraph of the docstring contains {needle!r}")
+
+
+def test_the_documented_raise_set_names_the_replaced_journal_case():
+    """The third raise condition this branch added is in the PUBLISHED contract.
+
+    `:raises OSError:` is what a caller reads, not the inline comment beside the
+    `_path_identity` check. The replaced-during-count case is none of "could not
+    be opened, stat'ed or read" — the journal WAS all three; a DIFFERENT file is
+    at the path now — so without a clause naming it the docstring cannot derive
+    the raise the code performs. Same class as the two prose defects this PR
+    fixed under its own rule ("prose the code does not support").
+
+    The narrative is pinned too, because the two "the journal moved under the
+    count" inputs now have two different answers: a peer appended → the count is
+    returned with the cache left alone; the path stopped naming the counted
+    journal → `OSError`. Collapsing them back into "it leaves the cache alone"
+    is the stale sentence this test exists to catch.
+    """
+    doc = inspect.getdoc(EventLog.position) or ""
+
+    clause = _doc_paragraph(doc, ":raises OSError:", starts=True)
+    assert "stopped naming" in clause, (
+        "the published raise set does not name the replaced-journal case: "
+        f"{clause!r}")
+    assert "count was taken" in clause, clause
+    assert "restore" in clause or "rotation" in clause, clause
+
+    narrative = _doc_paragraph(doc, "position cache through")
+    assert "peer" in narrative.lower(), (
+        "the cache narrative no longer names the peer-append outcome, so the "
+        f"two outcomes read as one: {narrative!r}")
+    assert "restore" in narrative.lower(), narrative
+    assert "raise" in narrative.lower(), narrative
 
 
 def test_position_recounts_and_clears_a_dead_mark(
@@ -1182,9 +1464,12 @@ def test_a_symlinked_sidecar_is_neither_read_nor_written_through(
     wherever a link points" is the primitive nobody should get by dropping a
     symlink into a data directory — and it is the one shape where a cache can
     invent a count out of another file's contents. So the victim holds a
-    perfectly VALID cache payload claiming 99 records for this journal's exact
-    file state: with `O_NOFOLLOW` the link is refused and the journal is counted
-    (3); without it, the 99 is believed.
+    perfectly VALID cache payload claiming 1 record for this journal's exact
+    file state, which holds 2 — a WRONG but PLAUSIBLE count. An absurd 99 would
+    be refused by the size bound even with `O_NOFOLLOW` dropped, and a CORRECT
+    count would be indistinguishable from a recount: either would hide the gate. With
+    `O_NOFOLLOW` the link is refused and the journal is counted (3); without it,
+    the 1 is believed and the record is numbered 2.
     """
     path = tmp_path / "events.jsonl"
     victim = tmp_path / "victim.txt"
@@ -1193,7 +1478,7 @@ def test_a_symlinked_sidecar_is_neither_read_nor_written_through(
     state = path.stat()
 
     victim.write_text(json.dumps({"v": log_mod._POSITION_VERSION,
-                                  "records": 99,
+                                  "records": 1,
                                   "size": state.st_size,
                                   "mtime_ns": state.st_mtime_ns}),
                       encoding="utf-8")
@@ -1334,7 +1619,7 @@ def test_position_reports_a_stat_failure_as_the_same_oserror(
     path = tmp_path / "events.jsonl"
     EventLog(path).append({"n": 0})
 
-    def refuse(_f) -> tuple[int, int]:
+    def refuse(_f) -> tuple[int, int, int, int]:
         raise OSError("EIO")
 
     monkeypatch.setattr(log_mod, "_journal_state", refuse)
@@ -1397,7 +1682,7 @@ def test_a_failing_state_read_costs_the_position_not_the_record(
     assert log.append({"n": "first"}) == 1
     real = log_mod._journal_state
 
-    def always_fails(_f) -> tuple[int, int]:
+    def always_fails(_f) -> tuple[int, int, int, int]:
         raise OSError("EIO")
 
     monkeypatch.setattr(log_mod, "_journal_state", always_fails)
@@ -1406,7 +1691,7 @@ def test_a_failing_state_read_costs_the_position_not_the_record(
 
     calls = {"n": 0}
 
-    def fails_on_the_second_call(f) -> tuple[int, int]:
+    def fails_on_the_second_call(f) -> tuple[int, int, int, int]:
         calls["n"] += 1
         if calls["n"] == 2:                 # the post-write read
             raise OSError("EIO")

@@ -125,8 +125,16 @@ dev = [
 # The physical stub `tortoise/packs/__init__.py` exists ONLY so
 # `packages.find` discovers the mapped package (find cannot see a
 # package_dir-mapped dir); it is a discovery marker, not importable content.
-[tool.setuptools]
-package-dir = {"tortoise.packs" = "packs"}
+[tool.setuptools.package-dir]
+"tortoise.packs" = "packs"
+# #9231 review P2: the record's schema ships as a mapped package for the same
+# reason `tortoise.packs` does — a wheel has no `supabase/` tree, and
+# `record_projection.table_columns()` READS the migrations rather than
+# restating the columns (a second declaration is the one that goes stale).
+# Without the mapping an installed `tortoise` raised before the first
+# statement, so every armed live write failed `write_failed` and the record
+# stayed empty while the static wiring gate read green.
+"tortoise.record_migrations" = "supabase/migrations"
 
 [tool.setuptools.packages.find]
 include = ["tortoise*", "benchmarks*", "battery*"]
@@ -188,6 +196,15 @@ tortoise = ["config/routing.yaml", "../tests/sample_transcript.txt",
 # tortoise/packs/<ns>/manifest.yaml in the wheel (recursive glob — a pack
 # added by a later slice, e.g. #1933 agent-ops, needs no pyproject change).
 "tortoise.packs" = ["**/*.yaml"]
+# The record's own migrations (#9231 review P2). A glob, not a file list: the
+# record's migration history is APPEND-ONLY, so a later forward record
+# migration (a new refusal, a new column — #2782/#8263 both arrive this way)
+# must ship without a second edit, or `table_columns()` would read a wheel's
+# schema as poorer than it is. `record_projection.RECORD_MIGRATIONS` names the
+# files the reader consumes, and a test pins every one of them against THESE
+# patterns, so a name that the glob misses is red in CI, not silently absent on
+# a user's machine.
+"tortoise.record_migrations" = ["*_record_*.sql"]
 
 # --- Lint baseline (#1503) --------------------------------------------------
 # The shared agent-infra python-ci lint (ci.yml `agent-infra-ci` job, #303)
