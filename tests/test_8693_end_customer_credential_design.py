@@ -113,7 +113,13 @@ def _membership_checks(node: ast.AST, needle: str) -> list[tuple[ast.Compare, as
     for sub in ast.walk(node):
         if not isinstance(sub, ast.Compare):
             continue
-        for op, comparator in zip(sub.ops, sub.comparators):
+        # `strict=True` states the real invariant (ruff B905 asks only for an
+        # explicit value): an `ast.Compare` carries exactly as many comparators
+        # as ops — comparator[i] is the right operand of op[i], so `a in b` is
+        # ops [In] with comparators [b], and `a in b in c` is ops [In, In] with
+        # comparators [b, c]. If a future change ever broke that, a loud
+        # ValueError is the right answer here, not a silently shorter walk.
+        for op, comparator in zip(sub.ops, sub.comparators, strict=True):
             if not isinstance(op, (ast.In, ast.NotIn)):
                 continue
             left = sub.left
