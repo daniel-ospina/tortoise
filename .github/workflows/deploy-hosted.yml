@@ -68,6 +68,12 @@ on:
                                       # pricing-only change never redeployed the hosted image,
                                       # so prod kept serving the previous pricing while the
                                       # required pricing-artifact check stayed green.
+      - 'supabase/migrations/**'      # #9231: Dockerfile.hosted COPYs this tree and
+                                      # `record_projection.table_columns()` READS it at /app —
+                                      # the same #4246 failure one step on: a migrations-only
+                                      # change would not redeploy, so the image would keep
+                                      # reading the previous record schema while every check
+                                      # stayed green.
       - 'fly.toml'
       - 'Dockerfile.hosted'
       - 'entrypoint.sh'

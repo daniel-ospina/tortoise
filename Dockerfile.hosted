@@ -113,6 +113,15 @@ COPY tortoise/ tortoise/
 COPY packs/ packs/
 COPY tests/sample_transcript.txt tests/
 COPY product/pricing.json product/pricing.json
+# #9231: `tortoise.record_migrations` is a MAPPED package — pyproject's
+# `[tool.setuptools.package-dir]` points it at `supabase/migrations`, and
+# `record_projection.table_columns()` READS those files at runtime rather than
+# restating the columns (one declaration, so it cannot go stale). Without the
+# tree in the build context the editable install fails outright
+# ("package directory 'supabase/migrations' does not exist") — that is the
+# `packaging-smoke` red — and an image that somehow built would raise before
+# the first armed record write.
+COPY supabase/migrations/ supabase/migrations/
 RUN pip install --no-cache-dir -e . --no-deps
 
 # Embedding model cache — BAAI/bge-small-en-v1.5 is pre-downloaded to
