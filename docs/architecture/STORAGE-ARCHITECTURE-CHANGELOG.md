@@ -714,3 +714,60 @@ lane the three files bound and names the module and the door outside it;
 `tests/test_9399_search_path_claim_scope.py` holds it there by parsing the file
 list OUT of the sentence and re-running the scan over it, so widening the list or
 reverting the qualification reds.
+
+## §13's `aboutObject` read-site table — the fourth correction, and the end of the hand audit (2026-10-20, `#7948`)
+
+The design document's §13 table is the **whole evidence base** for the KEEP ruling on
+`aboutObject` (owner, 2026-09-23), and the document says so itself: *"⚠️ The count is the whole
+argument — the table must name every customer-callable surface"*. It has now been corrected
+**four** times, each by hand, each finding a different part of it wrong:
+
+1. the issue body (`#7948`) — the first eleven-site envelope;
+2. review finding `B2.7` (`REVIEW-CONSOLIDATED-2026-09-23.md`) — three further readers, two of
+   them under-classed as non-customer-callable;
+3. the `#7956` erratum on `B2.7` — that finding was itself incomplete (the customer-callable
+   count was four, not two);
+4. **this one** — two rows cited symbols that exist but **do not read the edge**, one row named
+   no symbol at all, and two readers were absent entirely.
+
+What moved, and why it is the last hand pass: the table is now **executable**
+(`tests/test_7948_about_edge_read_sites.py`). It derives the census from the source's AST and reds
+when a reader under `tortoise/` is undeclared or a declared symbol does not perform the read, so
+the fifth correction is a red test rather than a fifth audit.
+
+- **Row 8 cited `collect_slices`** — which orchestrates the connected-assembly read and never
+  traverses the edge. The reads are in **`spine_rows`** (Object→Points at `assembly.py:2235`,
+  Object→Events at `:2258`), inside `docker_walker_port`. A re-verifier following the row found no
+  traversal and could only conclude the row was wrong.
+- **Row 9 cited `build_subgraph`** — the Cypher is the module constants `_CYPHER_ABOUT` /
+  `_CYPHER_SIBLINGS`, executed by **`_collect_raw`** at `subgraph.py:439`/`:440`.
+- **Row 4 named no symbol at all** (`search(order_by="graph")` is a door, not a site), so its two
+  degree-centrality readers could not be re-verified by anyone. They are
+  **`GraphRanker._fetch_event_signals`** (`ranking.py:703`) and
+  **`StateRanker._fetch_point_signals`** (`ranking.py:1018`).
+- **New row 12 — `_EdgeHandlers._count_about_out`** (`projection/edges.py:1871`). It is the
+  link-verification predicate: `resolve_about_link` asks "did this record leave the Event joined to
+  anything". ⚠️ Reachable only on the **DEFENSIVE** `how: "name"` replay path — no released version
+  and no `origin/main` writes that form — so it cannot fire on data written today.
+- **New row 13 — `session_schema.audit_session_retrofit`** (`session_schema.py:663`), the retrofit
+  audit's recorded-vs-live edge counter, split across two `WITH` stages so the session-origin and
+  turn-Point-origin counts do not cross-multiply.
+- **Row 2's symbol was the SDK door, not the reader.** `topic_summarize` is the entry point; the
+  read is in **`_retrieve_topic_neighborhood`** (`topic_summarization.py:141`, `edge_type` at
+  `:185`).
+- **The count moved eleven → fifteen, and the customer-callable count did not move: four.** The
+  correction is entirely in the non-callable tail, which is where three hand audits kept losing
+  sites.
+- **Line numbers are gone from the table, deliberately.** They were pinned to `c79ba1cf2` and every
+  one of them had rotted; the documents' own rule is *"the symbol name is authoritative, the line
+  number is a convenience"*. Dropping the convenience removes a whole rot class instead of
+  re-pinning it. The test asserts symbols and census membership, never line numbers — a line
+  assertion would red on every unrelated edit, which is a different way to be dead.
+- **The test-file count was restated with its measurement.** `rg -l aboutObject tests/` → **59**
+  at `26aff163c` (36 at the pin; 41 recorded by the `#7956` pass at `1e5fc00ca`). All three count
+  files that **mention** the edge, which is the only thing a grep can measure — the sentence said
+  *"assert"*, which overstated what was behind the number.
+- **The sibling passage in `EXTRACTOR-V4-ARCHITECTURE.md` §16 was corrected in the same pass** (its
+  `assembly.py:573`/`:789`/`:809` pointer, its `:NNNN` citations and its test-file count), because
+  a repair that fixes one copy and leaves the other is how this drift survived the previous three.
+
