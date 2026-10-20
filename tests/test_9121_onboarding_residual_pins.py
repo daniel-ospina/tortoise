@@ -27,12 +27,12 @@ so each assertion has a way to fail:
   exists to see) and `state._run(...)` (the honest fix, which would leave the
   note describing a gap that no longer exists);
 * the day one of those sites is DECLARED — the honest fix, `#9157` —
-  `test_no_eager_init_site_declares_itself_yet` turns RED *when the declaration
-  is a `with` in the same function*, so the note, the guard's opener inventory
-  and this file have to move together instead of drifting back to a universal
-  ("every onboarding write is declared") that the escape disproves. The
-  `_run` route opens its scope in another file and is caught by the linkage
-  pin above;
+  `test_no_escape3_function_opens_a_declaration_anywhere_yet` turns RED *when
+  the declaration is a `with` in the same function*, so the note, the guard's
+  opener inventory and this file have to move together instead of drifting back
+  to a universal ("every onboarding write is declared") that the escape
+  disproves. The `_run` route opens its scope in another file and is caught by
+  the linkage pin below;
 * the fact that the detector is *capable* of firing is not argued, it is
   executed: `test_the_declaration_detector_can_fail` runs it over a synthetic
   declaration **for every recorded opener** and requires a hit, and
@@ -719,7 +719,8 @@ def test_the_detector_population_is_pinned_by_content():
     assert derived == expected, (
         "the detector population changed: derived "
         f"{sorted(derived)} vs recorded {sorted(expected)}. This population is "
-        "what makes `test_no_eager_init_site_declares_itself_yet` able to see a "
+        "what makes `test_no_escape3_function_opens_a_declaration_anywhere_yet` "
+        "able to see a "
         "site declared through ANY opener — narrowing it re-opens the hole "
         "(#9157)"
     )
@@ -728,7 +729,8 @@ def test_the_detector_population_is_pinned_by_content():
 def test_the_declaration_detector_can_fail():
     """The instrument check: `_declaring_functions` must SEE every declaration.
 
-    Without this, `test_no_eager_init_site_declares_itself_yet` would also pass
+    Without this, `test_no_escape3_function_opens_a_declaration_anywhere_yet`
+    would also pass
     if the detector were broken (a renamed helper, a `with` form it stopped
     matching) — an instrument that cannot fail is not evidence. It is run over
     EACH recorded opener: an earlier revision exercised only
