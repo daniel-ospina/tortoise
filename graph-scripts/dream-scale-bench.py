@@ -73,6 +73,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tortoise.graph_delete_guard import safe_graph_delete
+
 STAMP_OLD = "2026-01-15T00:00:00+00:00"
 STAMP_MID = "2026-06-01T00:00:00+00:00"
 STAMP_NEW = "2026-08-01T00:00:00+00:00"
@@ -281,13 +283,24 @@ def main() -> int:
                     raise RuntimeError(
                         f"refusing to drop a graph this run did not mint: "
                         f"{name!r} (expected {expected!r})")
-                # GRAPH.DELETE is a Redis command, not Cypher: ``graph.query``
-                # sends it as a Cypher body — FalkorDB parses it as one and
-                # rejects it, and the old ``except`` swallowed that, so the
-                # documented cleanup silently left the graph behind (#5084).
-                # The canonical channel is the client's ``delete()``.
-                proj.g.delete()
-                print(f"# dropped graph {name}")
+                # The canonical channel is the client's sweep helper: since
+                # #9209 a whole-graph wipe on the WRITE HANDLE refuses a
+                # non-test SERVER graph even on an unarmed projection (L2 is a
+                # name rule, not an §17.1 concept), and this scratch graph
+                # (`org_<ns>_scale_bench`) is not test_-named. Dropping it
+                # through `proj.g.delete()` would therefore be REFUSED and the
+                # `except` below would turn that refusal into the exact silent
+                # leave-behind #5084 fixed. `detach=False`: a DROP needs no
+                # DETACH, and the helper's own docstring calls the DETACH the
+                # materialising half of the AOF-poisoning sequence.
+                if safe_graph_delete(proj.db, name, detach=False):
+                    print(f"# dropped graph {name}")
+                else:
+                    print(
+                        f"# WARNING: drop of {name} was refused or skipped "
+                        "(absent, or the delete lock was not acquired)",
+                        file=sys.stderr,
+                    )
             except Exception as exc:
                 print(f"# WARNING: drop failed: {exc}", file=sys.stderr)
         sdk.close()

@@ -66,6 +66,7 @@ drop a legitimately retried write: `tortoise/sdk.py::_graph_presence` probes
 """
 from __future__ import annotations
 
+import contextlib
 import inspect
 
 import pytest
@@ -74,6 +75,8 @@ from tortoise.projection import (
     DirectCacheWriteRefused,
     FalkorProjection,
     _GuardedGraph,
+    _handle_command_text,
+    _handle_command_words,
     _replay_write_scope,
 )
 
@@ -83,14 +86,23 @@ from tortoise.projection import (
 def sdk_with_journal(tmp_path):
     """A real SDK whose projection is ARMED (`event_log_path` configured).
 
-    Lane-agnostic, like `tests/test_7951_enforce_atomic_write.py`'s fixture: the
-    explicit `db_path` makes the projection embedded when no URI is configured,
-    and the same construction reaches the docker server when one is.
+    Lane-agnostic in NAME only — the explicit `db_path` forces the EMBEDDED
+    branch in every lane (`TortoiseSDK.__init__` takes the URI branch only when
+    `db_uri and db_path is None`), so no case here can reach the shared docker
+    server even when `TORTOISE_DB_URI` is configured (#5084). The fixture
+    ASSERTS that above, so if the branch ever inverts the lane hazard is a red
+    test rather than a silent wipe of every concurrent lane's graphs.
     """
     from tortoise.sdk import TortoiseSDK
 
     journal = tmp_path / "journal.jsonl"
     sdk = TortoiseSDK(str(tmp_path / "noncypher.db"), event_log_path=str(journal))
+    assert sdk._get_proj()._is_embedded, (
+        "this suite must run on the EMBEDDED lane: an explicit `db_path` always "
+        "wins over `TORTOISE_DB_URI`, and a case that reached the shared docker "
+        "server would make this suite's failure mode a real wipe of every other "
+        "lane's graphs (#5084)"
+    )
     sdk.create_entity("subject", "armed-subject", description="a real node")
     try:
         yield sdk
@@ -101,6 +113,20 @@ def sdk_with_journal(tmp_path):
 def _count(proj, graph=None) -> int:
     handle = proj if graph is None else graph
     return int(handle.query("MATCH (n) RETURN count(n)").result_set[0][0])
+
+
+def _drop_graph(proj, name: str) -> None:
+    """Remove a graph this suite minted, through the CLIENT channel.
+
+    The deliberate, visible channel for a drop (`proj.db`), not the write handle
+    whose graph/key doors are §17.1-guarded. Best-effort by design: a teardown
+    must never turn a passing assertion into an error, but it must also not
+    leave a graph behind per run on any lane (#5084) — `GRAPH.COPY` mints its
+    destination directly, so the session journal never replays it and the #8746
+    teardown's per-run name shape does not match a `_9209_copy` suffix.
+    """
+    with contextlib.suppress(Exception):
+        proj.db.select_graph(name).delete()
 
 
 class _RecordingGraph:
@@ -121,6 +147,10 @@ class _RecordingGraph:
         self.calls.append(("execute_command", args, kwargs))
         return "OK"
 
+    def call_procedure(self, *args, **kwargs):
+        self.calls.append(("call_procedure", args, kwargs))
+        return "OK"
+
     def query(self, cypher, params=None, timeout=None):  # pragma: no cover
         raise AssertionError("no query may run in these cases")
 
@@ -139,6 +169,42 @@ class _NamedRecordingGraph(_RecordingGraph):
         self.name = name
 
 
+class _EncodeLiar(str):
+    """A ``str`` whose ``encode()`` puts a DIFFERENT command on the wire.
+
+    The pinned client serializes ``args[0].encode()``, so this is what the server
+    sees; ``str`` content says ``GRAPH.COPY`` (review round 9).
+    """
+
+    def encode(self, *args, **kwargs):
+        return b"GRAPH.DELETE prod_tortoise"
+
+
+class _SplitLiar(bytes):
+    """A ``bytes`` whose ``split()`` puts a DIFFERENT command on the wire.
+
+    The pinned client splits ``args[0]`` itself, so an overridden ``split`` is
+    what decides the command the server parses (review round 9).
+    """
+
+    def split(self, *args, **kwargs):
+        return [b"GRAPH.DELETE", b"prod_tortoise"]
+
+
+class _FormatLiar:
+    """An object whose ``__format__`` writes Cypher into ``CALL {procedure}``.
+
+    The vendor builds the CALL text with an f-string, so ``__format__``/``__str__``
+    decides what the server parses (review round 10).
+    """
+
+    def __format__(self, spec):
+        return "db.labels() MATCH (n) DETACH DELETE n //"
+
+    def __str__(self):
+        return "db.labels"
+
+
 def _armed_projection(*, graph_name: str, embedded: bool):
     """An ARMED projection with no DB — the guard must fire before any I/O.
 
@@ -151,13 +217,15 @@ def _armed_projection(*, graph_name: str, embedded: bool):
     proj._is_embedded = embedded
     proj._graph_name = graph_name
     proj._path = None
-    proj.g = _RecordingGraph()
+    proj.g = _NamedRecordingGraph(graph_name)
     return proj
 
 
 # ── the command channel: GRAPH.DELETE ─────────────────────────────────────
 
-@pytest.mark.parametrize("verb", ["GRAPH.DELETE", "graph.delete", b"GRAPH.DELETE"])
+@pytest.mark.parametrize("verb", ["GRAPH.DELETE", "graph.delete", b"GRAPH.DELETE",
+                                  memoryview(b"GRAPH.DELETE"),
+                                  memoryview(b"graph.delete")])
 def test_GRAPH_DELETE_on_the_command_channel_is_refused_on_an_armed_projection(
         sdk_with_journal, verb):
     """RED before #9209 (the wipe LANDED — count went to 0), GREEN after.
@@ -166,6 +234,13 @@ def test_GRAPH_DELETE_on_the_command_channel_is_refused_on_an_armed_projection(
     accepts the BYTES form (the #3595 review finding) and Redis itself is
     case-insensitive, so a str-only or case-sensitive match would leave the
     door open two ways while appearing closed.
+
+    The two ``memoryview`` cases are the same door one decoder branch over, and
+    they were MEASURED open at the head before this pin: the client's
+    ``Encoder.encode`` passes a ``memoryview`` through UNCHANGED, so the buffer
+    reached the wire as ``GRAPH.DELETE`` — while a decoder that knew only
+    ``bytes``/``bytearray`` returned it untouched and the wrapper forwarded the
+    command. RED there (`DID NOT RAISE`, cache at 0 nodes).
 
     MUTATION: drop the `_DESTRUCTIVE_HANDLE_COMMANDS` branch from
     `_GuardedGraph.execute_command` and this test fails at `pytest.raises`
@@ -200,9 +275,7 @@ def test_GRAPH_DELETE_on_the_command_channel_is_refused_on_an_armed_projection(
     [("FLUSHALL",), ("flushall",), (b"FLUSHALL",), ("FLUSHALL", "ASYNC"),
      ("FLUSHALL ASYNC",), (b"flushall async",), ("FLUSHDB",), ("flushdb", "ASYNC")],
 )
-def test_a_server_wide_flush_is_refused_on_an_armed_projection(
-    sdk_with_journal, args
-):
+def test_a_server_wide_flush_is_refused_on_an_armed_projection(args):
     """Review finding, now a pin: a flush carries no statement and no graph name.
 
     ``_guard_execute_command`` forwards every non-``GRAPH`` command untouched,
@@ -216,18 +289,29 @@ def test_a_server_wide_flush_is_refused_on_an_armed_projection(
     ``"FLUSHALL ASYNC"`` is the same command as ``("FLUSHALL", "ASYNC")`` — a
     classifier that reads one token would close the pair spelling only.
 
-    MUTATION: drop ``FLUSHALL``/``FLUSHDB`` from
-    ``_DESTRUCTIVE_HANDLE_COMMANDS`` and this fails with DID NOT RAISE and the
-    cache at 0 nodes.
+    ⛔ PINNED ON A RECORDING HANDLE, not a live SDK, and that is a review fix
+    (#5084): the assertion's FAILURE mode is a dispatched ``FLUSHALL``, so a
+    live case whose fixture ever reached the shared docker server would wipe
+    every concurrent lane's graphs BEFORE the red test could report anything.
+    ``calls == []`` proves the refusal is pre-dispatch, which is strictly
+    stronger than "the cache still had its nodes". The live-handle pin on
+    ``GRAPH.DELETE`` above keeps the real SDK/arming path covered (that one can
+    only remove the graph it minted itself).
+
+    MUTATION: drop the ``_SERVER_WIDE_COMMANDS`` branch from
+    `_refuse_unauthorized_graph_wipe` and this fails with ``calls`` holding the
+    flush.
     """
-    proj = sdk_with_journal._get_proj()
-    before = _count(proj)
-    assert before > 0
+    proj = _armed_projection(graph_name="test_9209", embedded=False)
+    guarded = _GuardedGraph(proj.g, proj)
 
     with pytest.raises(DirectCacheWriteRefused):
-        proj.g.execute_command(*args)
+        guarded.execute_command(*args)
 
-    assert _count(proj) == before, "the flush reached the server despite the refusal"
+    assert proj.g.calls == [], (
+        f"the flush reached the vendor handle despite the refusal; "
+        f"calls={proj.g.calls!r}"
+    )
 
 
 def test_a_server_wide_flush_is_refused_even_inside_a_declared_scope():
@@ -360,23 +444,31 @@ def test_an_unrelated_non_cypher_verb_leaves_the_armed_cache_intact(
     MUTATION: make `_refuse_unauthorized_graph_wipe` / `_refuse_key_space_handle_
     command` refuse every non-Cypher verb and (1) fails; make them clear/disarm
     anything on the way through and (3) fails.
+
+    The destination is dropped in a `finally` (#9209 review): `GRAPH.COPY`
+    mints it directly, so the session journal never replays it and the #8746
+    teardown's per-run name shape does not match a `_9209_copy` suffix — on a
+    shared server that would be one leftover graph per run.
     """
     proj = sdk_with_journal._get_proj()
     before = _count(proj)
     dst = proj._graph_name + "_9209_copy"
 
-    proj.g.copy(dst)  # must NOT be refused: it removes nothing from this cache
+    try:
+        proj.g.copy(dst)  # must NOT be refused: it removes nothing from this cache
 
-    assert _count(proj) == before, "an unrelated non-Cypher verb changed the cache"
-    assert _count(proj, proj.db.select_graph(dst)) == before, (
-        "GRAPH.COPY did not actually run — the 'cache intact' assertion below "
-        "would be vacuous"
-    )
-    with pytest.raises(DirectCacheWriteRefused):
-        proj.g.delete()
-    assert _count(proj) == before, (
-        "the arming did not survive an unrelated non-Cypher verb"
-    )
+        assert _count(proj) == before, "an unrelated non-Cypher verb changed the cache"
+        assert _count(proj, proj.db.select_graph(dst)) == before, (
+            "GRAPH.COPY did not actually run — the 'cache intact' assertion below "
+            "would be vacuous"
+        )
+        with pytest.raises(DirectCacheWriteRefused):
+            proj.g.delete()
+        assert _count(proj) == before, (
+            "the arming did not survive an unrelated non-Cypher verb"
+        )
+    finally:
+        _drop_graph(proj, dst)
 
 
 # ── the key-space door: the cache IS a Redis key (review round 6) ────────
@@ -436,10 +528,15 @@ def test_a_key_space_command_on_the_graph_key_is_refused(
     )
 
 
-@pytest.mark.parametrize("verb", [b"DEL", "del", "DEL"])
+@pytest.mark.parametrize("verb", [b"DEL", "del", "DEL", memoryview(b"DEL")])
 def test_the_key_space_refusal_is_not_spelling_shaped(sdk_with_journal, verb):
     """Bytes and case, because the client accepts both and Redis is
     case-insensitive — the same two spellings the GRAPH.DELETE cases pin.
+
+    ``memoryview`` joined them in review: the client's ``Encoder.encode`` passes
+    it through UNCHANGED, so the buffer reaches the wire as ``DEL`` while a
+    decoder that only knew ``bytes``/``bytearray`` forwarded the command.
+    RED at the head before this case existed.
     """
     proj = sdk_with_journal._get_proj()
     before = _count(proj)
@@ -448,7 +545,232 @@ def test_the_key_space_refusal_is_not_spelling_shaped(sdk_with_journal, verb):
     assert _count(proj) == before
 
 
-def test_the_joined_key_space_spelling_is_refused_too(sdk_with_journal):
+def test_an_unreadable_procedure_payload_is_refused():
+    """Review round 10 (P1): ``call_procedure`` must not read past what it sends.
+
+    The vendor formats the CALLER's object into ``CALL {procedure}(…)``, so a
+    ``str`` SUBCLASS or a ``__format__``-carrying object decides the statement on
+    the wire. MEASURED at the head before this pin: a ``__format__`` that emits
+    ``MATCH (n) DETACH DELETE n`` was DISPATCHED on a non-test graph while the
+    same wipe as an exact ``str`` was refused by L2 — i.e. the guard judged a
+    statement the server never saw.
+
+    MUTATION: restore `if statement is not None and _is_bulk_wipe(...)` and these
+    payloads are forwarded (`calls` non-empty).
+    """
+    proj = _armed_projection(graph_name="prod_tortoise", embedded=False)
+    guarded = _GuardedGraph(proj.g, proj)
+
+    for payload in (_FormatLiar(), _EncodeLiar("db.labels"),
+                    _SplitLiar(b"db.labels")):
+        with pytest.raises(DirectCacheWriteRefused):
+            guarded.call_procedure(payload, read_only=False)
+
+    # An unreadable EMIT name is the same surface, one argument over.
+    with pytest.raises(DirectCacheWriteRefused):
+        guarded.call_procedure("db.labels", emit=[_EncodeLiar("node")])
+
+    assert proj.g.calls == [], (
+        f"an unreadable procedure payload was dispatched: {proj.g.calls!r}"
+    )
+
+    # The readable half: the statement path still classifies the exact text, so
+    # L2 refuses the real wipe (the guard did not become a wall).
+    with pytest.raises(RuntimeError, match="non-test graph"):
+        guarded.call_procedure("db.labels() MATCH (n) DETACH DELETE n //", False)
+    assert proj.g.calls == [], f"the wipe was dispatched: {proj.g.calls!r}"
+
+
+def test_an_unreadable_head_is_refused_on_an_unarmed_server_projection():
+    """Review round 10 (P2): the unreadable-payload rule follows L2, not the journal.
+
+    Gating it on ``_journal_backed`` alone left an unarmed SERVER projection
+    forwarding a head it could not read — the same asymmetry one layer over
+    (MEASURED: ``'DEL'`` + a str-subclass argument was dispatched, so even
+    ``delete()``'s new name rule could be bypassed by making the TARGET
+    unreadable). An unarmed EMBEDDED projection keeps the pass-through, which is
+    the exemption L2 itself makes.
+    """
+    proj = _armed_projection(graph_name="prod_tortoise", embedded=False)
+    proj._journal_backed = False
+    guarded = _GuardedGraph(proj.g, proj)
+
+    with pytest.raises(DirectCacheWriteRefused):
+        guarded.execute_command(_SplitLiar(b"DEL"), "prod_tortoise")
+    with pytest.raises(DirectCacheWriteRefused):
+        guarded.execute_command("DEL", _EncodeLiar("prod_tortoise"))
+    with pytest.raises(DirectCacheWriteRefused):
+        guarded.call_procedure(_FormatLiar(), read_only=False)
+    assert proj.g.calls == [], (
+        f"an unreadable payload was dispatched on an unarmed server graph: "
+        f"{proj.g.calls!r}"
+    )
+
+    # The embedded exemption is L2's, not a new hole: still pass-through.
+    embedded = _armed_projection(graph_name="prod_tortoise", embedded=True)
+    embedded._journal_backed = False
+    handle = _NamedRecordingGraph("prod_tortoise")
+    assert _GuardedGraph(handle, embedded).execute_command(
+        _SplitLiar(b"COPY"), "x") == "OK"
+    assert _GuardedGraph(handle, embedded).call_procedure(
+        _FormatLiar(), read_only=False) == "OK"
+    assert [c[0] for c in handle.calls] == ["execute_command", "call_procedure"], (
+        "an unarmed EMBEDDED projection is the pre-#9209 pass-through (L2's own "
+        "embedded exemption) — pinning it so a later edit cannot widen or "
+        f"silently narrow it; calls={handle.calls!r}"
+    )
+
+
+def test_the_shared_decoder_sees_a_memoryview_payload():
+    """The THIRD encoding spelling, pinned where the decision actually reads it.
+
+    Review measured a P0 on the head before this: ``memoryview(b"GRAPH.DELETE")``
+    was ALLOWED on an armed projection and reached the server as the refused
+    command, because ``_handle_command_text`` only decoded ``bytes`` /
+    ``bytearray`` and answered ``None`` for a buffer the client forwards
+    verbatim. The same gap existed in the shared decoder
+    ``cypher_guard._as_text``, which is what the #3595 ``=~`` scan reads — so
+    both are pinned here, at the decoder, in addition to the end-to-end cases
+    above.
+
+    MUTATION: drop ``memoryview`` from either ``isinstance`` tuple and this
+    fails (`None` / the raw buffer instead of the command text).
+    """
+    from tortoise.cypher_guard import _as_text
+
+    for payload in (memoryview(b"GRAPH.DELETE"),
+                    memoryview(bytearray(b"GRAPH.DELETE"))):
+        assert _handle_command_text(payload) == "GRAPH.DELETE", (
+            f"{payload!r} must decode — the client passes it to the wire unchanged"
+        )
+        assert _as_text(payload) == "GRAPH.DELETE", (
+            "the shared #3595 decoder must see it too, or the operator guard is "
+            "bypassed one encoding over"
+        )
+        assert _handle_command_words((payload, "g")) == ("GRAPH.DELETE", ("g",))
+
+    # ⛔ THE BUFFER, NOT `bytes(value)` — a review round 8 measurement: a
+    # `bytes` SUBCLASS whose `__bytes__` lies read as `GRAPH.COPY` here while the
+    # client put `GRAPH.DELETE` on the wire (and the armed cache went to 0).
+    # `_handle_command_text` reads the buffer AND refuses a subclass outright
+    # (its `encode()`/`split()` decide the wire, so no read of it can be trusted);
+    # `_as_text` reads the buffer, because the #3595 lane still gains the true
+    # characters from it.
+    class _LyingBytes(bytes):
+        def __bytes__(self):  # the whole point is that it lies
+            return b"GRAPH.COPY"
+
+    class _LyingByteArray(bytearray):
+        def __bytes__(self):
+            return b"GRAPH.COPY"
+
+    lying = _LyingBytes(b"GRAPH.DELETE")
+    assert bytes(lying) == b"GRAPH.COPY", (
+        "non-vacuity: the subclass must actually lie for this pin to mean anything"
+    )
+    assert _handle_command_text(lying) is None, (
+        "a text/bytes SUBCLASS is UNCLASSIFIABLE — its encode()/split() decide "
+        "what the client sends, so the handle must refuse it rather than read it"
+    )
+    assert _handle_command_words((lying, "g"))[0] is None
+    assert _as_text(lying) == "GRAPH.DELETE", (
+        "the shared #3595 decoder must read the BUFFER (not __bytes__), or the "
+        "operator scan is steered by the subclass"
+    )
+    assert _handle_command_text(_LyingByteArray(b"DEL")) is None
+    assert _as_text(_LyingByteArray(b"DEL")) == "DEL"
+
+    # The over-refusal direction, stated so a later "fix" does not remove it:
+    # the client does NOT split a memoryview, so this payload would be ONE token
+    # (`unknown command`) on the wire — refusing it here is fail-closed, not a
+    # misclassification.
+    assert _handle_command_words((memoryview(b"DEL x"),)) == ("DEL", ("x",))
+
+
+def test_a_lying_bytes_subclass_cannot_smuggle_a_wipe_past_the_handle():
+    """Review round 8 (P0), end to end: the classifier must read the BUFFER.
+
+    ``bytes(subclass)`` calls the subclass's ``__bytes__``; the client sends the
+    buffer. So a lying subclass made the guard classify ``GRAPH.COPY`` (inside
+    the ``GRAPH.`` family, so allowed) while the wire carried ``GRAPH.DELETE`` —
+    MEASURED wiping an armed projection. RED at the head before this pin.
+
+    MUTATION: decode with ``bytes(value)`` instead of ``memoryview(value)`` and
+    this fails with DID NOT RAISE.
+    """
+    class _LyingBytes(bytes):
+        def __bytes__(self):
+            return b"GRAPH.COPY"
+
+    proj = _armed_projection(graph_name="test_9209", embedded=False)
+    guarded = _GuardedGraph(proj.g, proj)
+
+    # NO declared scope: the point is the VERB the classifier reads. Pre-fix the
+    # subclass classified as `GRAPH.COPY` (allowed), so the wipe was dispatched;
+    # decoding the buffer classifies `GRAPH.DELETE`, which no undeclared scope
+    # authorizes.
+    with pytest.raises(DirectCacheWriteRefused):
+        guarded.execute_command(_LyingBytes(b"GRAPH.DELETE"), "test_9209")
+
+    assert proj.g.calls == [], (
+        f"the wipe was dispatched despite the refusal: {proj.g.calls!r}"
+    )
+
+
+@pytest.mark.parametrize("payload_factory", [
+    lambda: _EncodeLiar("GRAPH.COPY"),
+    lambda: _SplitLiar(b"GRAPH.COPY"),
+], ids=["str-encode-liar", "bytes-split-liar"])
+def test_a_subclass_that_lies_about_its_wire_form_is_refused(payload_factory):
+    """Review round 9 (P1): the client serializes the CALLER's object.
+
+    ``redis`` calls ``args[0].encode()`` for a ``str`` and ``args[0].split()`` for
+    a ``bytes`` — both overridable, so a subclass put ``GRAPH.DELETE`` on the wire
+    while every base-class read of it said ``GRAPH.COPY`` (MEASURED at the head
+    before this pin: the command was dispatched). No read can be proven to match
+    such a payload, so an armed handle REFUSES an unclassifiable one instead of
+    forwarding it.
+
+    MUTATION: let a subclass through `_handle_command_text` (or drop the
+    `_command_payload_is_unreadable` check from `execute_command`) and this fails
+    with DID NOT RAISE.
+    """
+    proj = _armed_projection(graph_name="test_9209", embedded=False)
+    guarded = _GuardedGraph(proj.g, proj)
+
+    with pytest.raises(DirectCacheWriteRefused):
+        guarded.execute_command(payload_factory(), "test_9209")
+
+    assert proj.g.calls == [], (
+        f"an unreadable payload was dispatched: {proj.g.calls!r}"
+    )
+
+
+def test_a_handle_without_a_name_is_refused_not_judged_by_the_projection():
+    """Review round 9 (P3): L2 must not fall back to the PROJECTION's name.
+
+    `delete()` names the graph it removes. A handle that exposes no ``name``
+    cannot be identified at all, so judging ``proj._graph_name`` would approve a
+    delete of a graph nothing looked at — MEASURED approving a nameless handle's
+    delete because the projection happened to be named ``test_…``.
+    """
+    class _Nameless:
+        def __init__(self):
+            self.calls = []
+
+        def delete(self, *args, **kwargs):
+            self.calls.append(("delete", args, kwargs))
+            return "OK"
+
+    proj = _armed_projection(graph_name="test_9209", embedded=False)
+    nameless = _Nameless()
+
+    with pytest.raises(RuntimeError, match="no `name`"):
+        _GuardedGraph(nameless, proj).delete()
+    assert nameless.calls == [], f"a nameless delete dispatched: {nameless.calls!r}"
+
+
+def test_a_joined_key_space_spelling_is_refused_too(sdk_with_journal):
     """The client splits the first argument, so ``"DEL <graph>"`` in one string
     is the same command as two arguments (`_handle_command_words`).
     """
@@ -468,13 +790,20 @@ def test_a_key_space_command_is_refused_on_NAMESPACE_not_on_a_list(
     swap away the key the cache lives under. The guard must refuse them because
     they leave the ``GRAPH.`` namespace, not because someone enumerated them.
 
+    ``EVAL`` is here for the SCRIPTING channel a review named: it can issue
+    ``redis.call('FLUSHALL')`` / ``redis.call('GRAPH.DELETE', KEYS[1])``
+    SERVER-side, so no client-side per-verb enumeration could ever cover it —
+    the namespace boundary does, because a script command leaves the family.
+
     MUTATION: replace the namespace check with a verb allow-list of the currently
     enumerated commands and this fails (``SET`` would be dispatched).
     """
     proj = sdk_with_journal._get_proj()
     before = _count(proj)
     for args in (("SET", proj._graph_name, "{} "), ("RESTORE", proj._graph_name, 0, "x"),
-                 ("SWAPDB", 0, 1)):
+                 ("SWAPDB", 0, 1),
+                 ("EVAL", "return redis.call('FLUSHALL')", 0),
+                 ("EVALSHA", "deadbeef", 1, proj._graph_name)):
         with pytest.raises(DirectCacheWriteRefused) as exc:
             proj.g.execute_command(*args)
         assert "GRAPH." in str(exc.value), (
@@ -518,12 +847,15 @@ def test_a_graph_namespace_command_that_destroys_nothing_still_passes(
     before = _count(proj)
     dst = proj._graph_name + "_9209_ns_copy"
 
-    proj.g.execute_command("GRAPH.COPY", proj._graph_name, dst)
+    try:
+        proj.g.execute_command("GRAPH.COPY", proj._graph_name, dst)
 
-    assert _count(proj) == before, "GRAPH.COPY changed this cache"
-    assert _count(proj, proj.db.select_graph(dst)) == before, (
-        "GRAPH.COPY did not actually run — 'cache intact' would be vacuous"
-    )
+        assert _count(proj) == before, "GRAPH.COPY changed this cache"
+        assert _count(proj, proj.db.select_graph(dst)) == before, (
+            "GRAPH.COPY did not actually run — 'cache intact' would be vacuous"
+        )
+    finally:
+        _drop_graph(proj, dst)
 
 
 # ── the declaration: a scope authorizes the WRITE, never the GRAPH ────────
@@ -706,40 +1038,97 @@ def test_a_declared_scope_reaches_a_disposable_graph():
     )
 
 
-def test_an_unarmed_projection_passes_through_unchanged():
-    """§17.1 reaches a projection with a journal and nothing else.
+def test_an_unarmed_projection_still_applies_the_name_rule():
+    """L2 is a NAME rule, not an §17.1 concept — so it needs no journal.
 
-    No journal ⇒ no truth store for the cache to be ahead of, so the wipe is the
-    pre-#9209 pass-through (this is the polarity `_journal_backed` documents, and
-    it is why `graph-scripts/dream-scale-bench.py`'s `proj.g.delete()` keeps
-    working). The pass-through covers the handle's whole NON-STATEMENT surface —
-    `delete()` and `execute_command` — and it includes the key-space commands
-    (``DEL``), which have nothing to enforce against without a journal.
+    🔴 THE MEASURED DEFECT THIS PIN REPLACES: the whole refusal used to return
+    early when ``_journal_backed`` was False, so an UNARMED projection
+    dispatched ``proj.g.delete()`` of a non-test SERVER graph while
+    ``proj.g.query("MATCH (n) DETACH DELETE n")`` raised ``non-test graph`` on
+    the same handle, the same graph and the same state — the asymmetry #9209
+    exists to close, and a contract violation of this wrapper's own docstring
+    (L2 "is unconditional — there is deliberately NO bypass attribute").
 
-    ⛔ The STATEMENT path is the asymmetry, and it is `query`'s polarity, not an
-    exception carved here: ``call_procedure`` reconstructs a CYPHER statement, so
-    it goes through L2 regardless of arming — exactly as
-    ``proj.g.query("MATCH (n) DETACH DELETE n")`` refuses a non-test graph on an
-    unarmed projection too. Pinned so a later "consistency" edit cannot quietly
-    remove L2 from it, and so the docstring cannot drift from the code.
+    WHAT IS STILL JOURNAL-SPECIFIC: the DECLARATION check (a scope authorizes
+    "this write is a projection of the journal") and the foreign-target check,
+    which asks whether a declared lane may touch a graph this projection does
+    not own. The server-wide refusal is NOT journal-specific either (a flush on
+    an unarmed ``test_*``-named SERVER projection was measured dispatching), and
+    neither is the name rule applied to a KEY-SPACE command that names this
+    graph — both are pinned below.
+
+    MUTATION: restore the early ``return`` on an unarmed projection and the
+    `pytest.raises` below fail (the wipe is dispatched).
     """
     proj = _armed_projection(graph_name="prod_tortoise", embedded=False)
     proj._journal_backed = False
     guarded = _GuardedGraph(proj.g, proj)
 
-    assert guarded.delete() == "OK"
-    assert guarded.execute_command("GRAPH.DELETE", "prod_tortoise") == "OK"
-    assert guarded.execute_command("DEL", "prod_tortoise") == "OK"
-    assert [c[0] for c in proj.g.calls] == [
-        "delete", "execute_command", "execute_command"
-    ]
+    with pytest.raises(RuntimeError, match="non-test graph"):
+        guarded.delete()
+    with pytest.raises(RuntimeError, match="non-test graph"):
+        guarded.execute_command("GRAPH.DELETE", "prod_tortoise")
+    # The KEY-SPACE spelling of the same wipe, on the same projection: refusing
+    # `delete()` while dispatching `DEL <own graph>` is the same asymmetry one
+    # spelling over (review round 8 measured it).
+    with pytest.raises(RuntimeError, match="non-test graph"):
+        guarded.execute_command("DEL", "prod_tortoise")
+    with pytest.raises(RuntimeError, match="non-test graph"):
+        guarded.execute_command(f"UNLINK {proj._graph_name}")
+    # A server-wide flush needs no name rule to be refused: no disposability
+    # check can speak for every graph on the server, armed or not.
+    with pytest.raises(DirectCacheWriteRefused, match="EVERY graph"):
+        guarded.execute_command("FLUSHALL")
+    assert proj.g.calls == [], (
+        f"an unarmed projection wiped a non-test server graph: {proj.g.calls!r}"
+    )
 
-    # The statement half: same polarity as `query`, armed or not.
+    # The other half, so the guard is not a wall on an unarmed projection:
+    # a read-only probe still answers (`sdk._graph_presence` reads EXISTS and
+    # treats a refusal as "do not retry", #7685) ...
+    assert guarded.execute_command("EXISTS", "prod_tortoise") == "OK"
+    # ... and a key-space command naming a DISPOSABLE graph is dispatched.
+    disposable = _armed_projection(graph_name="test_9209_disposable",
+                                   embedded=False)
+    disposable._journal_backed = False
+    handle = _NamedRecordingGraph("test_9209_disposable")
+    assert _GuardedGraph(handle, disposable).delete() == "OK"
+    assert _GuardedGraph(handle, disposable).execute_command(
+        "DEL", "test_9209_disposable") == "OK"
+    assert [c[0] for c in handle.calls] == ["delete", "execute_command"], (
+        "an unarmed projection must still be able to drop a disposable graph"
+    )
+
+    # The statement path keeps the polarity it always had (`query`'s): L2
+    # applies armed or not, and `call_procedure` reconstructs a statement.
     with pytest.raises(RuntimeError) as exc:
         guarded.call_procedure("db.labels() MATCH (n) DETACH DELETE n //", False)
     assert "non-test graph" in str(exc.value), (
         "call_procedure must apply L2's name check exactly as `query` does — "
         f"message={str(exc.value)!r}"
+    )
+
+
+def test_an_unarmed_foreign_handle_is_judged_by_the_graph_it_REMOVES():
+    """Review round 8 (P3): L2 must judge the TARGET, not the projection's name.
+
+    The wrapper is built in-tree over a graph that is not the projection's
+    (`tortoise/hosted_api.py`), so judging by `_proj._graph_name` approved a
+    foreign handle's delete of `prod_tenant` purely because the projection
+    happened to be named `test_…`. MEASURED on the unarmed path at the head
+    before this pin: `OK [('delete', ())]`.
+
+    MUTATION: pass `graph_name=None` (judge the projection) and the refusal
+    below disappears.
+    """
+    proj = _armed_projection(graph_name="test_9209", embedded=False)
+    proj._journal_backed = False
+    foreign = _NamedRecordingGraph("prod_tenant")
+
+    with pytest.raises(RuntimeError, match="prod_tenant"):
+        _GuardedGraph(foreign, proj).delete()
+    assert foreign.calls == [], (
+        f"a foreign handle wiped a non-test graph: {foreign.calls!r}"
     )
 
 

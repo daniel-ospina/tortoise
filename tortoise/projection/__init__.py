@@ -2695,7 +2695,10 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
 #        round 3.) The wrapper's other query verbs (``ro_query``, ``_query``,
 #        ``profile``, ``explain``, ``execute_command``) are overridden and carry
 #        the #3595 ``=~`` operator guard, but NOT the bulk-wipe check — see
-#        KNOWN GAPS. (The
+#        KNOWN GAPS. (``execute_command`` additionally carries #9124's statement
+#        door, in MEASURE mode: it counts and logs an undeclared handle write
+#        without refusing it until `_HANDLE_GUARD_ENFORCES` is True. That is the
+#        AUTHORITY door, not L2, so this sentence stands as written.) (The
 #        name check itself is not confined to a ``query`` verb: the L1 lane
 #        calls ``_assert_test_graph`` directly from ``rebuild_all`` and
 #        ``_wipe_all_nodes``, which is why the token, not L2, is the gate
@@ -3399,12 +3402,25 @@ def _journal_safe_params(params, cypher=None):
 # server-wide `proj.g.execute_command("FLUSHALL")`, which names no graph at
 # all. GRAPH.DELETE is refused on a journal-backed projection unless a declared
 # write scope is in flight, inside one L2 still refuses a non-test server
-# graph, and a destructive command naming a graph that is NOT this projection's
-# (or NOT the handle's own, for `delete()`) is refused outright — L2 reads THIS
-# projection's name, so it cannot judge another graph's. FLUSHALL/FLUSHDB are
-# refused on ANY armed projection, scope or not: a declaration says "this write
+# graph, and — because L2 is a NAME rule and not an §17.1 concept — an UNARMED
+# projection still refuses a non-test SERVER graph here too, exactly as its
+# Cypher door already did (`query("MATCH (n) DETACH DELETE n")`); only the
+# DECLARATION and foreign-target checks are journal-specific, and L2 judges the
+# graph the verb actually REMOVES rather than this projection's name (measured:
+# gating L2 on the journal let an unarmed `delete()` of `prod_tortoise`
+# through). A destructive command
+# naming a graph that is NOT this projection's
+# (or NOT the handle's own, for `delete()`) is refused outright — and L2 is
+# given the graph the verb actually REMOVES (`graph_name=target`), so a wipe of
+# another graph is judged by ITS name rather than by this projection's. On an
+# armed projection a target that is not the projection's own is refused before
+# that, because a declared lane can only speak for the graph it owns.
+# FLUSHALL/FLUSHDB are
+# refused on ANY projection this handle fronts, journal-backed or not, scope or
+# not: a declaration says "this write
 # is a projection of the journal", and a flush also removes graphs this journal
-# never wrote and no replay can restore. The first argument is SPLIT the way
+# never wrote and no replay can restore — and with no journal there is still no
+# disposability check that can speak for every graph on the server. The first argument is SPLIT the way
 # the client's own serializer splits it (`"GRAPH.DELETE <g>"` in one string is
 # the same command as two arguments), so the coverage is not spelling-shaped.
 # `_GuardedGraph._refuse_unauthorized_graph_wipe` is the single decision for all
@@ -3425,19 +3441,31 @@ def _journal_safe_params(params, cypher=None):
 # `tortoise/sdk.py::_graph_presence` probes `EXISTS` on the retry path, and its
 # caller treats a refusal as "do not retry" — so over-refusing there would drop
 # a legitimate retry silently). `GRAPH.COPY` stays allowed because it is inside
-# the family and removes nothing from this cache.
-# ⛔ NOT claimed closed by any of it: the Cypher-bearing command channel
-# (`execute_command("GRAPH.QUERY", <g>, "MATCH (n) DETACH DELETE n")`), which
-# needs statement recovery (#9124); the private hop `proj.g._g.delete()` (the
+# the family and removes nothing from this cache. The SCRIPTING channel
+# (`EVAL` / `EVALSHA` / `FCALL`) is covered by the same boundary rather than by
+# its own rule: it leaves the `GRAPH.` family, so an armed handle refuses it like
+# any other key-space command — it could otherwise issue `GRAPH.DELETE` or
+# `FLUSHALL` server-side through `redis.call` (named explicitly because a review
+# asked for the escape map to say what happens to it, not because it is open).
+# ⛔ NOT claimed closed by any of it — the residual list, stated at THIS head
+# (rebased onto #9124, which landed a statement door on the command channel):
+# the Cypher-bearing command channel
+# (`execute_command("GRAPH.QUERY", <g>, "MATCH (n) DETACH DELETE n")`) now
+# carries #9124's statement door (`_command_statement` →
+# `_refuse_unauthorized_cache_write`), so it is MEASURED — but #9124 part 1 is
+# MEASURE mode (`_HANDLE_GUARD_ENFORCES` False), so it COUNTS and LOGS and does
+# not yet refuse; the private hop `proj.g._g.delete()` (the
 # `delete()` analogue of escape (2) above — no wrapper can guard a hop below
 # itself); and the handle's other GRAPH.* verbs that write but destroy nothing
 # (`copy`, index/constraint DDL) — refusing those would refuse an operation the
 # cache never lost anything to. `call_procedure` is NOT in that list: it pastes
 # a caller-controlled string into CYPHER position, so it is defined on the
-# wrapper and its reconstructed statement goes through L2 (`_is_bulk_wipe`)
-# exactly as `query`'s does — §17.1's statement door for it is #9124's, stated
-# as open here (on an EMBEDDED armed projection it can still wipe, exactly as
-# `proj.g.query` can, because L2 exempts embedded mode).
+# wrapper, its reconstructed statement goes through L2 (`_is_bulk_wipe`)
+# exactly as `query`'s does, and it also carries #9124's statement door on the
+# statement the vendor will build (measure mode, as above). What remains open
+# for BOTH is the same thing: before #9124 part 2, a bulk wipe on an EMBEDDED
+# armed projection is not refused by the statement door (and L2 exempts
+# embedded mode) — exactly as `proj.g.query` can wipe there today.
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -3454,21 +3482,26 @@ class DirectCacheWriteRefused(RuntimeError):
     own Redis key — or a server-wide `FLUSHALL` / `FLUSHDB`, #9209) is
     issued against a **journal-backed** projection. The projection is the
     derived cache of a journal; a write — or a wipe — it did not receive
-    through its journal is the second writer §17.1 forbids.
+    through its journal is the second writer §17.1 forbids. The whole-graph
+    classes are also refused on a projection with NO journal bound where the
+    rule they enforce needs no journal (L2's NAME rule, and the server-wide
+    refusal, which no disposability check can authorize).
 
     ⚠️ At the HANDLE, the STATEMENT class raises only once
     `_HANDLE_GUARD_ENFORCES` is True (#9124 part 2); until then it records
     the same violation in `undeclared_handle_writes()` and logs it, because
     arming ahead of the declaration programme refuses the product's own
-    write doors.
+    write doors. The #9209 non-Cypher classes are NOT measure-mode — they
+    raise at the door, because a whole-graph wipe carries no statement to
+    record (#9124 measures statements; there is none here to measure).
 
     ⛔ THE CLASSES DO NOT SHARE ONE AUTHORIZATION RULE, and this docstring is
     where a caller looks before writing a `with` block, so stated apart: the
     fold, the raw-query lane, a handle STATEMENT and `GRAPH.DELETE` are
     refused OUTSIDE a sanctioned scope (so declaring one authorizes them);
     `FLUSHALL` / `FLUSHDB` and every KEY-SPACE command are refused on any
-    journal-backed projection, scope or NOT — a declaration says "this write
-    is a projection of the journal", and none of those can say that.
+    projection this handle fronts, scope or NOT — a declaration says "this
+    write is a projection of the journal", and none of those can say that.
     """
 
 
@@ -3787,20 +3820,77 @@ _ARMED_READ_ONLY_COMMANDS: frozenset[str] = frozenset(
 _GRAPH_TARGETING_COMMANDS: frozenset[str] = frozenset({"GRAPH.DELETE"})
 
 
+#: The shapes a command word can arrive in (see `_handle_command_text`). Only
+#: the EXACT types are classifiable: a subclass decides its own wire bytes.
+_TEXT_SHAPES = (str, bytes, bytearray, memoryview)
+
+
 def _handle_command_text(value) -> str | None:
     """Decode one command word so the scan can see it, else return it untouched.
 
     Bytes are accepted because redis-py takes the bytes form and
     ``cypher_guard._as_text`` exists for the same reason (#3595 review) —
     measured on the pinned vendor: ``execute_command(b"GRAPH.DELETE", <graph>)``
-    wipes the graph exactly like the str form. ``None`` means "not a command
-    word", which no caller may read as an authorization: every classification
-    here is a positive match only, so an unparseable payload falls through to
-    the guards it always did.
+    wipes the graph exactly like the str form.
+
+    ⛔ ``memoryview`` is accepted for the same reason, and it was MEASURED
+    bypassing this classifier (#9209 review): ``redis.connection.Encoder.encode``
+    passes a ``memoryview`` through UNCHANGED, so the buffer IS the command word
+    on the wire — byte-identical to the refused two-argument form — while a
+    decoder that returned it untouched made ``_handle_command_words`` answer
+    ``(None, ())``, which this module reads as "not a command" and forwards.
+    ``memoryview(b"GRAPH.DELETE")`` was dispatched on an ARMED projection.
+
+    ⛔ EXACT BUILTIN TYPES ONLY (review round 9). A ``str``/``bytes`` SUBCLASS
+    can override ``encode()`` (the str serializer calls ``args[0].encode()``) or
+    ``split()`` (the bytes serializer calls ``args[0].split()``), so the wire
+    carries something no base-class read of that object can predict — MEASURED:
+    a ``str`` subclass whose ``encode()``/``split()`` returned
+    ``GRAPH.DELETE prod_tortoise`` and a ``bytes`` subclass overriding
+    ``split()`` both reached the server as a ``GRAPH.DELETE`` while this
+    classifier read ``GRAPH.COPY``. A subclass is therefore UNCLASSIFIABLE here,
+    and ``execute_command`` REFUSES one on an armed projection
+    (``_command_payload_is_unreadable``) rather than forwarding a payload it
+    cannot read.
+
+    ``None`` means "not a command word", which no caller may read as an
+    authorization: every classification here is a positive match only.
+
+    NOTE the SPLIT direction is deliberately over-refusing: the pinned client's
+    bytes serializer takes its ``b" " in args[0]`` branch for ``bytes`` but not
+    for ``memoryview`` (its ``in`` compares ints), so ``memoryview(b"DEL x")``
+    is ONE token on the wire while this decoder splits it into a verb and a
+    target and refuses. That is the fail-closed direction — a payload the server
+    would reject as ``unknown command`` is refused here instead — so do not
+    "fix" it back by skipping the split for ``memoryview``.
+
+    ⛔ AND IT DECODES THE BUFFER, never ``bytes(value)`` (review round 8): the
+    client sends the BUFFER, while ``bytes(subclass)`` calls the subclass's
+    ``__bytes__`` — so a lying ``bytes`` subclass made this classifier read
+    ``GRAPH.COPY`` while the wire carried ``GRAPH.DELETE``, and an ARMED cache
+    was wiped (measured, end to end). ``memoryview(value).tobytes()`` reads what
+    the client will actually send, and a ``__bytes__`` cannot override it.
     """
-    if isinstance(value, (bytes, bytearray)):
-        value = bytes(value).decode("utf-8", "replace")
-    return value if isinstance(value, str) else None
+    if isinstance(value, _TEXT_SHAPES):
+        if type(value) not in _TEXT_SHAPES:
+            return None
+        if type(value) is str:
+            return value
+        return memoryview(value).tobytes().decode("utf-8", "replace")
+    return None
+
+
+def _command_payload_is_unreadable(value) -> bool:
+    """True when an argument is a SUBCLASS of a text/bytes shape.
+
+    Such an argument can lie about its wire form (see
+    ``_handle_command_text``): the client calls ``encode()``/``split()`` on the
+    CALLER's object, and a subclass decides both. Nothing a guard reads from it
+    can be proven to be what the server receives, so an armed projection refuses
+    the command instead of forwarding it — the fail-closed direction, and one
+    that does not depend on enumerating which method a subclass overrode.
+    """
+    return isinstance(value, _TEXT_SHAPES) and type(value) not in _TEXT_SHAPES
 
 
 def _handle_command_words(args) -> tuple[str | None, tuple[str, ...]]:
@@ -3850,6 +3940,12 @@ def _call_procedure_statement(procedure, args=None, emit=None) -> str | None:
     ``proj.g.call_procedure("db.labels() MATCH (n) DETACH DELETE n //", False)``
     emptied the graph while the same DETACH DELETE through ``proj.g.query`` was
     refused by L2 on the same non-test graph.
+
+    ⛔ An UNREADABLE ``procedure``/``emit`` yields ``None``, never a guess
+    (review round 10): the vendor formats the CALLER's object into
+    ``CALL {procedure}(…)``, and a ``str`` SUBCLASS or a ``__format__``-carrying
+    object decides what that text is. ``call_procedure`` therefore REFUSES an
+    unreadable payload instead of forwarding one whose statement no check read.
     """
     text = _handle_command_text(procedure)
     if text is None:
@@ -3858,7 +3954,16 @@ def _call_procedure_statement(procedure, args=None, emit=None) -> str | None:
     placeholders = ",".join(f"$param{index}" for index in range(len(proc_args)))
     statement = f"CALL {text}({placeholders})"
     if emit is not None and len(emit) > 0:
-        statement += f"YIELD {','.join(str(word) for word in emit)}"
+        # Render the emit list from the BUFFER, not from ``str(word)``: a
+        # subclass can override ``__str__``/``__format__``, and the vendor joins
+        # the caller's objects too (review round 10).
+        names = []
+        for word in emit:
+            word_text = _handle_command_text(word)
+            if word_text is None:
+                return None
+            names.append(word_text)
+        statement += f"YIELD {','.join(names)}"
     return statement
 
 def _command_statement(args, kwargs) -> str:
@@ -3922,11 +4027,17 @@ class _GuardedGraph:
     and every other FalkorDB client the ``tortoise`` package builds are
     constructed through ``tortoise.cypher_guard.guarded_client``, whose handles
     guard every query entry point against the #3595 ``=~`` operator. For
-    defence in depth this wrapper also overrides every query entry point itself
-    (``query``, ``ro_query``, ``_query``, ``profile``, ``explain``,
-    ``execute_command``, ``delete``, ``call_procedure``), so it does not depend
-    on the inner handle's class to refuse the ``=~`` operator. NOTE the override
-    is NOT uniform: only ``query`` and ``call_procedure`` apply the bulk-wipe
+    defence in depth this wrapper also overrides the Cypher-argument entry
+    points itself (``query``, ``ro_query``, ``_query``, ``profile``, ``explain``,
+    ``execute_command``), so it does not depend on the inner handle's class to
+    refuse the ``=~`` operator. ⛔ The override is NOT uniform, and stating it
+    matters because this docstring is the guard's map of itself: ``delete``
+    carries no statement at all, and ``call_procedure`` (whose procedure string
+    IS Cypher position) applies L2 and NOT ``_guard_unsupported_cypher`` — so for
+    that one verb the #3595 ``=~`` refusal is still reached through the inner
+    handle (the ``cypher_guard``-guarded subclass in production), contrary to the
+    "refuse on its own rather than depend on the inner class" convention
+    ``_bar`` restates. Only ``query`` and ``call_procedure`` apply the bulk-wipe
     check (L2) as well — ``call_procedure`` since #9209 round 3, because the
     vendor builds ``CALL <procedure>($paramN…)`` from a caller-controlled
     string. All SIX query verbs (``query``, ``ro_query``, ``_query``,
@@ -3961,8 +4072,9 @@ class _GuardedGraph:
     ⛔ TWO POLARITIES, stated apart because they are deliberately different:
     ``GRAPH.DELETE`` is refused on a journal-backed projection unless a declared
     write scope is in flight, and inside one L2 still refuses a non-test server
-    graph; ``FLUSHALL`` / ``FLUSHDB`` are refused on ANY journal-backed
-    projection, scope or not — no declaration can claim the graphs they take
+    graph; ``FLUSHALL`` / ``FLUSHDB`` are refused on ANY projection this handle
+    fronts, journal-backed or not, scope or not — no declaration can claim the
+    graphs they take
     were written through this journal.
     """
 
@@ -4148,6 +4260,31 @@ class _GuardedGraph:
         # the client's serializer does, so ``"GRAPH.DELETE <graph>"`` cannot slip
         # past as one token.
         verb, words = _handle_command_words(args)
+        if (verb is None
+                or any(_command_payload_is_unreadable(arg) for arg in args)) \
+                and (getattr(self._proj, "_journal_backed", False)
+                     or not getattr(self._proj, "_is_embedded", False)):
+            # FAIL CLOSED (#9209 review rounds 9-10). Every classification below
+            # is a positive match, so an UNCLASSIFIABLE head would be forwarded —
+            # and a text/bytes SUBCLASS can put a different command on the wire
+            # than any base-class read of it shows (measured: a `GRAPH.DELETE`
+            # reached the server while the classifier read `GRAPH.COPY`). A
+            # command whose head cannot be read cannot be shown to be
+            # non-destructive, and this handle's whole job is that distinction.
+            # Gated like the NAME rule, not like the journal: an unarmed SERVER
+            # projection still refuses (L2 is a name rule), while an unarmed
+            # EMBEDDED one is the pre-#9209 pass-through L2 itself exempts.
+            raise DirectCacheWriteRefused(
+                "Refusing a raw command on the write handle: its head cannot be "
+                "CLASSIFIED (it is not an exact str/bytes/bytearray/memoryview), "
+                "so it cannot be shown to leave the graph intact — the client "
+                "serializes the CALLER's object, and a str/bytes subclass can "
+                "override encode()/split() and put a different command on the "
+                "wire than any read of it shows (docs/architecture/"
+                "STORAGE-ARCHITECTURE.md 17.1). Pass an exact str (or bytes); a "
+                "deliberate key-space/scripted write belongs at the client "
+                "(`proj.db`), where it is visible as what it is."
+            )
         if verb in _DESTRUCTIVE_HANDLE_COMMANDS:
             self._refuse_unauthorized_graph_wipe(
                 verb,
@@ -4162,7 +4299,7 @@ class _GuardedGraph:
             # cache while the enumerated list named none of them. The rule is
             # the NAMESPACE, not the verb list; see
             # `_refuse_key_space_handle_command`.
-            self._refuse_key_space_handle_command(verb)
+            self._refuse_key_space_handle_command(verb, words)
         # #3595 (review round 2, P2): the raw Redis command channel carries
         # `GRAPH.QUERY` / `GRAPH.PROFILE` / ... too, and the guarded handles
         # beneath `self._g` already intercept it — but keep the wrapper's own
@@ -4181,10 +4318,17 @@ class _GuardedGraph:
         handle's escapes were closed. The guard is the same decision as the
         command channel's — one function, so the two spellings cannot drift.
 
-        On a projection with no journal bound this is a transparent pass-through
-        to the vendor handle (``_refuse_unauthorized_graph_wipe`` returns):
-        §17.1 has no truth store to enforce against, and the pre-#9209
-        behaviour is unchanged.
+        On a projection with no journal bound the DECLARATION and foreign-target
+        checks are skipped, and L2's NAME rule still applies — exactly as it
+        does to ``query("MATCH (n) DETACH DELETE n")`` on the same unarmed
+        projection — so a non-test SERVER graph is still refused here, while an
+        embedded projection (which L2's name check exempts) keeps the pre-#9209
+        pass-through. The name L2 judges is the graph this handle REMOVES
+        (``target``), not the projection's: judging the projection's name was
+        measured approving a foreign handle's delete of ``prod_tenant`` because
+        the projection happened to be called ``test_…``. Gating the name rule on
+        the journal was measured dispatching an unarmed ``delete()`` of
+        ``prod_tortoise`` that the Cypher door refuses on the same handle.
 
         The TARGET is passed as this handle's OWN graph (``self._g.name``), not
         as the projection's: the wrapper is also built in-tree over a graph that
@@ -4201,10 +4345,24 @@ class _GuardedGraph:
         declining beats dispatching against a name no check looked at. A wrapper
         over another graph therefore has no in-scope delete path — that is the
         intended trade, so a maintainer reading this does not "fix" it away.
+
+        ⛔ AND A HANDLE WITH NO ``name`` IS REFUSED (#9209 review round 9), not
+        judged by the projection's: with no own name the graph this verb removes
+        cannot be identified at all, and falling back to ``_proj._graph_name`` is
+        exactly the approval-by-wrong-name this door exists to prevent (measured:
+        an unarmed projection called ``test_…`` approved a nameless handle's
+        delete). The pinned vendor's ``Graph`` always exposes ``name`` (a
+        property over ``_name``), so this only refuses a non-vendor stub.
         """
-        self._refuse_unauthorized_graph_wipe(
-            "GRAPH.DELETE", getattr(self._g, "name", None)
-        )
+        target = getattr(self._g, "name", None)
+        if target is None:
+            raise RuntimeError(
+                "Graph guard: refusing a GRAPH.DELETE from a handle that exposes "
+                "no `name` — the graph it removes cannot be identified, so it "
+                "cannot be shown disposable (the pinned vendor's Graph always "
+                "carries `name`)."
+            )
+        self._refuse_unauthorized_graph_wipe("GRAPH.DELETE", target)
         return self._g.delete(*args, **kwargs)
 
     def call_procedure(self, procedure, read_only=True, args=None, emit=None):
@@ -4218,34 +4376,65 @@ class _GuardedGraph:
         n //", False)`` emptied the graph, while the same DETACH DELETE through
         ``proj.g.query`` was refused by L2 on the same non-test graph. So it is
         DEFINED here and the reconstructed statement goes through the same
-        ``_is_bulk_wipe`` → L2 check ``query`` applies — no more, and no less.
+        ``_is_bulk_wipe`` → L2 check ``query`` applies — and through #9124's
+        AUTHORITY door (`_refuse_unauthorized_cache_write`) on that same
+        statement, which on an armed projection is what eventually refuses a
+        mutating procedure (MEASURE mode until `_HANDLE_GUARD_ENFORCES`).
 
         ⛔ L2 HERE IS NOT GATED ON THE JOURNAL, and that is ``query``'s
         polarity: this is a STATEMENT path, and L2 is the test-graph guard every
         statement path applies whether or not a journal is bound (``proj.g.query``
         refuses a bulk ``DETACH DELETE`` on a non-test graph on an UNARMED
-        projection too). So the transparent pass-through an unarmed projection
-        gets for ``delete()`` / ``execute_command`` deliberately does NOT extend
-        to this verb, and the unarmed test pins both halves.
+        projection too). So the pass-through that remains on an unarmed
+        projection for ``delete()`` / ``execute_command`` (a disposable graph, or
+        a classifiable command naming no graph) deliberately does NOT extend to
+        this verb, and the unarmed test pins both halves.
 
-        ⛔ NOT claimed closed by #9209: §17.1's STATEMENT door for procedures —
-        a mutating procedure on an armed projection outside a declared scope.
-        That is #9124's statement-recovery work, exactly as it is for every
-        other Cypher-bearing verb on this handle, and it is why this method
-        applies L2 and no more. Stated exactly, because the difference is a
-        live hole and not a rounding error: on an EMBEDDED armed projection
-        this verb can still wipe the cache, because L2 exempts embedded mode —
-        the same exemption `proj.g.query("MATCH (n) DETACH DELETE n")` gets
-        today, and the same one #9124 removes for every statement-bearing verb.
+        ⛔ §17.1's STATEMENT door for procedures: this method now CONSULTS it
+        (the reconstructed statement goes to `_refuse_unauthorized_cache_write`,
+        exactly as the five query verbs' does), so a mutating procedure is
+        RECORDED as an undeclared handle write on an armed projection. It does
+        not yet REFUSE one: #9124 part 1 is measure mode
+        (`_HANDLE_GUARD_ENFORCES` False), which is the same live hole every
+        other statement-bearing verb on this handle has — not a gap specific to
+        this verb. Stated exactly, because the difference is a live hole and
+        not a rounding error: on an EMBEDDED armed projection this verb can
+        still wipe the cache, because the authority door is measure-only and L2
+        exempts embedded mode — the same exemption
+        `proj.g.query("MATCH (n) DETACH DELETE n")` gets today, and the same one
+        #9124 part 2 removes for every statement-bearing verb.
         """
         statement = _call_procedure_statement(procedure, args=args, emit=emit)
-        if statement is not None:
-            # #9124's door, on the statement THIS verb will actually send: the
-            # same authority check the five query verbs carry, so a mutating
-            # procedure is counted (and, once `_HANDLE_GUARD_ENFORCES` is True,
-            # refused) exactly as `proj.g.query`'s statement would be.
-            self._refuse_unauthorized_cache_write(statement)
-        if statement is not None and _is_bulk_wipe(statement):
+        if statement is None:
+            # The procedure (or an emit name) cannot be read from the object the
+            # client will format into `CALL …` — a str SUBCLASS or a
+            # `__format__`-carrying object decides that text, so L2 would be
+            # judging a statement the server never sees (MEASURED in review
+            # round 10: an object whose `__format__` produced `MATCH (n) DETACH
+            # DELETE n` was dispatched on a non-test graph while the same wipe as
+            # an exact str was refused). Refused wherever a name/L2 check would
+            # otherwise have applied; an unarmed EMBEDDED projection is the
+            # pre-#9209 pass-through, since L2 exempts embedded mode anyway.
+            if getattr(self._proj, "_journal_backed", False) or not getattr(
+                    self._proj, "_is_embedded", False):
+                raise DirectCacheWriteRefused(
+                    "Refusing `call_procedure` on the write handle: its procedure "
+                    "string cannot be CLASSIFIED (it is not an exact str), so "
+                    "the statement the vendor will build cannot be shown to "
+                    "leave the graph intact — the vendor formats the CALLER's "
+                    "object into `CALL <procedure>(…)`, and a str subclass can "
+                    "override __format__/__str__ (docs/architecture/"
+                    "STORAGE-ARCHITECTURE.md 17.1). Pass an exact str."
+                )
+            return self._g.call_procedure(
+                procedure, read_only=read_only, args=args, emit=emit
+            )
+        # #9124's door, on the statement THIS verb will actually send: the same
+        # authority check the five query verbs carry, so a mutating procedure is
+        # counted (and, once `_HANDLE_GUARD_ENFORCES` is True, refused) exactly
+        # as `proj.g.query`'s statement would be.
+        self._refuse_unauthorized_cache_write(statement)
+        if _is_bulk_wipe(statement):
             self._proj._assert_test_graph(
                 "REFUSING to run bulk DETACH DELETE on non-test graph"
             )
@@ -4253,7 +4442,8 @@ class _GuardedGraph:
             procedure, read_only=read_only, args=args, emit=emit
         )
 
-    def _refuse_key_space_handle_command(self, command: str | None) -> None:
+    def _refuse_key_space_handle_command(self, command: str | None,
+                                         words: tuple[str, ...] = ()) -> None:
         """§17.1 at the handle's KEY-SPACE door (#9209, review round 6).
 
         ⛔ THE RULE IS THE NAMESPACE, NOT A VERB LIST, because a FalkorDB graph
@@ -4286,17 +4476,29 @@ class _GuardedGraph:
         ``None`` (an argument no word can be read from — an int, a None, an
         object) is passed through unchanged: every classification here is a
         POSITIVE match, and the client refuses a payload it cannot serialize
-        anyway. Unarmed projections are untouched (pre-#9209 pass-through).
+        anyway. Read-only probes are allowed on ANY projection (they cannot
+        remove or overwrite a key).
+
+        ⛔ UNARMED IS NOT A FREE PASS (review round 8). With no journal there is
+        no §17.1 claim about a DERIVED CACHE, so the namespace rule does not
+        apply — but L2's NAME rule does, so a command whose words name THIS
+        graph (the projection's own name or the handle's) is still refused when
+        that graph is not disposable. Without this, the unarmed path refused
+        ``delete()`` of ``prod_tortoise`` while dispatching
+        ``execute_command("DEL", "prod_tortoise")`` — MEASURED, and the same
+        asymmetry one spelling over.
         """
-        if not getattr(self._proj, "_journal_backed", False):
-            return
         if command is None:
+            return
+        if command in _ARMED_READ_ONLY_COMMANDS:
+            # Reads cannot remove or overwrite a key, and `sdk._graph_presence`
+            # relies on `EXISTS` answering (a refusal there reads as "do not
+            # retry", #7685) — so this exemption is unconditional.
             return
         if command.startswith(_GRAPH_NAMESPACE_PREFIX):
             return
-        if command in _ARMED_READ_ONLY_COMMANDS:
-            return
-        raise DirectCacheWriteRefused(
+        if getattr(self._proj, "_journal_backed", False):
+            raise DirectCacheWriteRefused(
             f"Refusing `{command}` on the write handle of a journal-backed "
             "projection: this channel is GRAPH-scoped, the derived cache is "
             "stored under the graph's own Redis KEY, and a key-space command "
@@ -4312,6 +4514,17 @@ class _GuardedGraph:
             "declared scope authorizes this: a declaration says this write is "
             "a projection of the journal."
         )
+        # UNARMED: no §17.1 claim, but L2's NAME rule still applies to an
+        # explicit name of THIS graph — the same wipe, one spelling over.
+        own_names = {getattr(self._proj, "_graph_name", None),
+                     getattr(self._g, "name", None)}
+        own_names.discard(None)
+        for word in words:
+            if word in own_names:
+                self._proj._assert_test_graph(
+                    f"REFUSING to run {command} on non-test graph",
+                    graph_name=word,
+                )
 
     def _refuse_unauthorized_graph_wipe(self, command: str,
                                        target: str | None = None) -> None:
@@ -4327,11 +4540,15 @@ class _GuardedGraph:
         declares the lane instead of it being inferred.
 
         ``FLUSHALL`` / ``FLUSHDB`` get STRICTLY MORE than that, and the
-        asymmetry is the point: they are refused on any armed projection, in
-        scope or out (``_SERVER_WIDE_COMMANDS``). A declaration means "this
-        write is a projection of the journal"; a flush removes graphs this
-        journal never wrote and no replay can restore, so there is nothing a
-        declaration could truthfully say about it.
+        asymmetry is the point: they are refused on ANY projection this handle
+        fronts, armed or not, in scope or out (``_SERVER_WIDE_COMMANDS``). A
+        declaration means "this write is a projection of the journal"; a flush
+        removes graphs this journal never wrote and no replay can restore, so
+        there is nothing a declaration could truthfully say about it — and, with
+        no journal, there is still no disposability check that could speak for
+        every graph on the server (a review MEASURED an unarmed ``test_*``-named
+        projection dispatching ``FLUSHALL`` while the prose claimed only the
+        declaration check was journal-gated).
 
         ⛔ A declared scope authorizes the WRITE, never the GRAPH. L2
         (``_assert_test_graph``) still runs, so a real server graph
@@ -4339,62 +4556,81 @@ class _GuardedGraph:
         the same polarity #2944 established for the rebuild lane, one door
         over.
 
-        ⛔ AND THE TARGET IS CHECKED, not assumed. L2 reads the PROJECTION's
-        graph name, so a command naming a DIFFERENT graph would otherwise be
-        validated against the wrong one (measured in review: an armed
-        projection named ``test_*`` let
-        ``execute_command("GRAPH.DELETE", "prod_tortoise")`` through inside a
-        scope). This handle addresses exactly one graph; a wipe of any other
-        graph is not a door this wrapper can judge, so it is refused here
-        rather than waved through on a name it does not own.
+        ⛔ AND THE TARGET IS CHECKED, not assumed. A command naming a graph that
+        is NOT this handle's own is refused on an armed projection, and L2 is
+        then given the graph the verb actually REMOVES (``graph_name=target``)
+        rather than the projection's name — judging the projection's name was
+        measured approving a foreign handle's delete of ``prod_tenant`` because
+        the projection happened to be called ``test_…``. This handle addresses
+        exactly one graph; a wipe of any other graph is refused rather than
+        waved through on a name it does not own.
+
+        ⛔ L2 IS NOT GATED ON THE JOURNAL (#9209 review). It is a NAME rule, not
+        an §17.1 concept: it needs no truth store, and only the DECLARATION and
+        foreign-target checks are journal-specific (the server-wide refusal is
+        not, see above). Gating the whole decision on ``_journal_backed`` made
+        an UNARMED projection permit what the Cypher door refuses on the same
+        handle and the same graph —
+        MEASURED: ``proj.g.delete()`` on a non-test server graph was dispatched,
+        while ``proj.g.query("MATCH (n) DETACH DELETE n")`` on that same
+        projection raised ``non-test graph``. That is the asymmetry #9209 exists
+        to close, and it contradicted this wrapper's own contract (L2 "is
+        unconditional — there is deliberately NO bypass attribute").
         """
-        if not getattr(self._proj, "_journal_backed", False):
-            return
+        armed = bool(getattr(self._proj, "_journal_backed", False))
         if command in _SERVER_WIDE_COMMANDS:
             # No target to judge and nothing to name: a flush removes EVERY
-            # graph on the server, so L2 (which reads THIS projection's name)
-            # cannot speak about what it destroys, and no declared scope can
-            # make it a projection of this journal — the graphs it takes were
-            # never written through this journal and cannot be replayed.
+            # graph on the server, so L2 cannot speak about what it destroys
+            # (it reads ONE name), and no declared scope can make it a
+            # projection of this journal — the graphs it takes were never
+            # written through this journal and cannot be replayed. That holds
+            # whether or not a journal is bound.
             raise DirectCacheWriteRefused(
-                f"Refusing `{command}` on the write handle of a journal-backed "
-                "projection: it removes EVERY graph on the server, not just "
-                "this projection's derived cache, so there is no disposability "
-                "check that could authorize it and no replay that could bring "
-                "the others back (docs/architecture/STORAGE-ARCHITECTURE.md "
-                "17.1). No declared scope authorizes a server-wide flush: a "
-                "declaration says this write is a projection of the journal. "
-                "If you really mean to wipe the server, do it at the client "
-                "(`proj.db`), deliberately, where it is visible as what it is."
+                f"Refusing `{command}` on the write handle: it removes EVERY "
+                "graph on the server, not just this handle's graph, so there is "
+                "no disposability check that could authorize it and no replay "
+                "that could bring the others back (docs/architecture/"
+                "STORAGE-ARCHITECTURE.md 17.1). No declared scope authorizes a "
+                "server-wide flush: a declaration says this write is a "
+                "projection of the journal, and the graphs it takes were never "
+                "written through this journal. If you really mean to wipe the "
+                "server, do it at the client (`proj.db`), deliberately, where it "
+                "is visible as what it is."
             )
-        own_graph = getattr(self._proj, "_graph_name", None)
-        if target is not None and own_graph is not None and target != own_graph:
-            raise DirectCacheWriteRefused(
-                f"Refusing `{command} {target}` on the write handle of a "
-                "journal-backed projection: this handle addresses exactly one "
-                "graph, its own derived cache, and that is "
-                f"'{own_graph}' — not '{target}'. A whole-graph destruction of "
-                "any other graph cannot be judged by this door (the "
-                "disposability check reads THIS projection's graph name), so "
-                "it is refused rather than dispatched against the wrong name "
-                "(docs/architecture/STORAGE-ARCHITECTURE.md 17.1)."
-            )
-        if _CACHE_WRITE_AUTHORIZED.get() is None:
-            raise DirectCacheWriteRefused(
-                f"Refusing `{command}` on the write handle of a journal-backed "
-                "projection: it destroys the WHOLE graph, which is this "
-                "journal's derived cache, and no record describes the removal "
-                "(docs/architecture/STORAGE-ARCHITECTURE.md 17.1 — a derived "
-                "cache that is also written to directly is not derived; a "
-                "wipe is worse, because `rebuild_all` can only replay records "
-                "and cannot reconstruct a graph nobody recorded deleting). "
-                "Declare the lane (`_live_write_scope` / "
-                "`_replay_write_scope`) if this really is a rebuild-lane wipe "
-                "of a disposable graph — L2 refuses a non-test server graph "
-                "even then."
-            )
+        if armed:
+            own_graph = getattr(self._proj, "_graph_name", None)
+            if target is not None and own_graph is not None and target != own_graph:
+                raise DirectCacheWriteRefused(
+                    f"Refusing `{command} {target}` on the write handle of a "
+                    "journal-backed projection: this handle addresses exactly one "
+                    "graph, its own derived cache, and that is "
+                    f"'{own_graph}' — not '{target}'. A whole-graph destruction of "
+                    "any other graph cannot be judged by this door (the "
+                    "disposability check reads THIS projection's graph name), so "
+                    "it is refused rather than dispatched against the wrong name "
+                    "(docs/architecture/STORAGE-ARCHITECTURE.md 17.1)."
+                )
+            if _CACHE_WRITE_AUTHORIZED.get() is None:
+                raise DirectCacheWriteRefused(
+                    f"Refusing `{command}` on the write handle of a journal-backed "
+                    "projection: it destroys the WHOLE graph, which is this "
+                    "journal's derived cache, and no record describes the removal "
+                    "(docs/architecture/STORAGE-ARCHITECTURE.md 17.1 — a derived "
+                    "cache that is also written to directly is not derived; a "
+                    "wipe is worse, because `rebuild_all` can only replay records "
+                    "and cannot reconstruct a graph nobody recorded deleting). "
+                    "Declare the lane (`_live_write_scope` / "
+                    "`_replay_write_scope`) if this really is a rebuild-lane wipe "
+                    "of a disposable graph — L2 refuses a non-test server graph "
+                    "even then."
+                )
+        # ALWAYS, armed or not, and judged against the graph the verb REMOVES:
+        # L2 is the name rule the statement door applies on an unarmed projection
+        # too, and judging it by the projection's name is what let a foreign
+        # handle delete a non-test server graph while L2 "approved" a test_-named
+        # name it was not touching (measured in review round 8).
         self._proj._assert_test_graph(
-            f"REFUSING to run {command} on non-test graph"
+            f"REFUSING to run {command} on non-test graph", graph_name=target
         )
 
     def __getattr__(self, name):
@@ -14831,10 +15067,20 @@ class FalkorProjection(
         with _replay_write_scope():
             self.g.query("MATCH (n) DETACH DELETE n")
 
-    def _assert_test_graph(self, reason: str = "") -> None:
+    def _assert_test_graph(self, reason: str = "", *,
+                           graph_name: str | None = None) -> None:
         """L2 of the destructive-op guard: refuse bulk wipe on a non-test graph.
 
         Test graphs must start with 'test_' or 'tortoise_test'.
+
+        ``graph_name`` judges an EXPLICIT name instead of this projection's
+        (``#9209`` review): the write handle can be built over a graph that is
+        NOT the projection's own (``tortoise/hosted_api.py``'s
+        ``_GuardedGraph(proj.db.select_graph(name), proj)``), so a verb judged
+        by ``self._graph_name`` approves a name it is not touching. One
+        decision, one name rule — the caller passes the name the verb actually
+        removes rather than this method growing a second copy of the check.
+        ``None`` keeps every pre-existing call site's meaning (this projection).
         Embedded mode (path=) is exempt from the NAME check — the graph-name
         rule does not apply to it. That is a name-check exemption, NOT a
         supervision exemption: an embedded DB opened with ``path`` is a
@@ -14855,10 +15101,14 @@ class FalkorProjection(
         """
         if getattr(self, "_is_embedded", False):
             return
-        if not self._graph_name.startswith(("test_", "tortoise_test")):
+        name = self._graph_name if graph_name is None else graph_name
+        # A name that is not even a string cannot be shown to be disposable, so
+        # it is refused rather than raising ``AttributeError`` somewhere later.
+        if not isinstance(name, str) or not name.startswith(
+                ("test_", "tortoise_test")):
             msg = (
                 f"Graph guard: operation blocked on non-test graph "
-                f"'{self._graph_name}'. "
+                f"'{name}'. "
                 f"{reason} — destructive bulk ops require a graph name starting "
                 f"with 'test_' or 'tortoise_test'."
             ).rstrip()
