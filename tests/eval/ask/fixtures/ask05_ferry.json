@@ -1,0 +1,32 @@
+{
+  "case_id": "ask05_ferry",
+  "class": "verbatim",
+  "distilled": {
+    "claims": [
+      {
+        "session_id": "commute-2023",
+        "text": "I take the 07:15 ferry to the office.",
+        "valid_from": "2023-03-21"
+      }
+    ],
+    "supersessions": []
+  },
+  "haystack_dates": [
+    "2023/03/21 (Tue) 07:05"
+  ],
+  "haystack_session_ids": [
+    "commute-2023"
+  ],
+  "haystack_sessions": [
+    [
+      {
+        "content": "On weekdays I take the 07:15 ferry to the office.",
+        "role": "user"
+      }
+    ]
+  ],
+  "question": "Which ferry do I take to the office?",
+  "question_date": "2023/06/01 (Thu) 10:00",
+  "question_type": null,
+  "schema": "ask-sealed-fixture/v1"
+}

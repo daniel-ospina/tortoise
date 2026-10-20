@@ -471,6 +471,21 @@ SOURCE_PATTERNS = {
                    # runs on the only change that can break it — which is exactly what the
                    # registration comment in `config/ci-surfaces.yml` claimed it did.
                    "docs/plans/2026-09-22-3525-csp-no-store.md",
+                   # #9121 review (P1): `tests/test_9121_onboarding_residual_pins.py`
+                   # pins the §17.1 escape-(3) residual in TWO records beyond the
+                   # two code modules it already reached — the increment-4 tracker
+                   # and §17.1's own door ledger. Reviewer-measured: both were
+                   # WITHOUT the residual, and an auditor reading either concludes
+                   # the onboarding class has no second writer, which the five
+                   # `eager_init_query()` sites disprove (`#9157`). `docs/` is in
+                   # NON_PYTHON_PREFIXES and is not itself a pattern, so without
+                   # these CONCRETE entries a docs-only edit to either record
+                   # selects NO surface and the pin never runs on the only change
+                   # that can break it — the #1349/#3332 silent-drop class, one
+                   # level up. Named as CONCRETE files, not globs: `select()`
+                   # matches with `startswith` and has no glob support.
+                   "docs/plans/2026-10-14-7951-atomic-write-outbox.md",
+                   "docs/architecture/STORAGE-ARCHITECTURE.md",
                    # #8379 (finding 2): `test_blog_authoring_doc.py` renders the
                    # blog authoring contract with a real CommonMark parser. `docs/` is
                    # in NON_PYTHON_PREFIXES and is not itself a pattern, so without this
@@ -910,7 +925,19 @@ SOURCE_PATTERNS = {
              # THIS table. Same #1349/#2938/#3616 silent-drop class as the
              # entries above. Pinned by
              # tests/test_ci_selection.py::test_write_path_measurement_source_edit_selects_eval.
-             "tests/eval/write_path/"),
+             "tests/eval/write_path/",
+             # #9097: same class, same fix — the SEALED ask exit benchmark's
+             # measurement sources (`corpus.py` globs/hash/manifest,
+             # `generate_corpus.py` renders the sealed gold) live under
+             # `tests/eval/ask/` and are not named `test_*.py`. Without this
+             # entry a `corpus.py`-only change fell to the `tests/` -> `core`
+             # fallback and selected `core`, where NOT ONE of the tests that pin
+             # the corpus contract (`eval/ask/test_ask_corpus.py`) or the exit
+             # bar (`test_measure_ask_distilled.py`) is registered — so the hash
+             # scope or a sealed-gold check could be rewritten with the gate
+             # green. Pinned by
+             # tests/test_ci_selection.py::test_ask_sealed_corpus_source_edit_selects_eval.
+             "tests/eval/ask/"),
     # core is the fallback for any other python-relevant path
 }
 

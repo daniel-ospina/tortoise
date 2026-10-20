@@ -1,0 +1,50 @@
+{
+  "case_id": "ask02_diet",
+  "class": "knowledge-update",
+  "distilled": {
+    "claims": [
+      {
+        "session_id": "diet-old",
+        "text": "I eat a vegetarian diet.",
+        "valid_from": "2023-04-04"
+      },
+      {
+        "session_id": "diet-new",
+        "text": "I eat a vegan diet.",
+        "valid_from": "2023-05-26"
+      }
+    ],
+    "supersessions": [
+      {
+        "new": "I eat a vegan diet.",
+        "old": "I eat a vegetarian diet."
+      }
+    ]
+  },
+  "haystack_dates": [
+    "2023/04/04 (Tue) 08:30",
+    "2023/05/26 (Fri) 08:30"
+  ],
+  "haystack_session_ids": [
+    "diet-old",
+    "diet-new"
+  ],
+  "haystack_sessions": [
+    [
+      {
+        "content": "I eat a vegetarian diet.",
+        "role": "user"
+      }
+    ],
+    [
+      {
+        "content": "I eat a vegan diet.",
+        "role": "user"
+      }
+    ]
+  ],
+  "question": "What diet am I on?",
+  "question_date": "2023/06/01 (Thu) 10:00",
+  "question_type": "knowledge-update",
+  "schema": "ask-sealed-fixture/v1"
+}

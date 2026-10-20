@@ -1,0 +1,7 @@
+{
+  "answer": "The 07:15 ferry",
+  "case_id": "ask05_ferry",
+  "class": "verbatim",
+  "judge_template": "single-session-user",
+  "schema": "ask-sealed-gold/v1"
+}

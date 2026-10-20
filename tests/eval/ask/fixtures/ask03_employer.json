@@ -1,0 +1,50 @@
+{
+  "case_id": "ask03_employer",
+  "class": "knowledge-update",
+  "distilled": {
+    "claims": [
+      {
+        "session_id": "employer-old",
+        "text": "I work at Contoso Ltd.",
+        "valid_from": "2023-01-09"
+      },
+      {
+        "session_id": "employer-new",
+        "text": "I work at Northwind Traders.",
+        "valid_from": "2023-05-15"
+      }
+    ],
+    "supersessions": [
+      {
+        "new": "I work at Northwind Traders.",
+        "old": "I work at Contoso Ltd."
+      }
+    ]
+  },
+  "haystack_dates": [
+    "2023/01/09 (Mon) 09:15",
+    "2023/05/15 (Mon) 09:15"
+  ],
+  "haystack_session_ids": [
+    "employer-old",
+    "employer-new"
+  ],
+  "haystack_sessions": [
+    [
+      {
+        "content": "I work at Contoso Ltd.",
+        "role": "user"
+      }
+    ],
+    [
+      {
+        "content": "I work at Northwind Traders.",
+        "role": "user"
+      }
+    ]
+  ],
+  "question": "Who do I work for?",
+  "question_date": "2023/06/01 (Thu) 10:00",
+  "question_type": "knowledge-update",
+  "schema": "ask-sealed-fixture/v1"
+}
