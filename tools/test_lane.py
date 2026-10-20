@@ -135,6 +135,29 @@ panic for every peer lane, so the ``TORTOISE_TEST_LANE_IMAGE`` seam is
 validated (``assert_pinned_image``) and a floating tag is REFUSED rather than
 copy-pasted back in.
 
+MEMORY — A KERNEL CAP, NOT ONLY `maxmemory` (#7357)
+---------------------------------------------------
+The container is created with ``--memory`` AND ``--memory-swap`` set to the
+same value (``CONTAINER_MEMORY_ENV``, default ``2g``). ``--maxmemory`` is a
+REDIS-side limit; with ``HostConfig.Memory=0`` the container's real ceiling is
+the HOST's, and the host's ceiling is swap. So one runaway instance pages the
+whole box for minutes and starves every neighbour — including the canonical
+graph instance, whose process then goes away and is restarted by its own
+``restart: always`` policy, forever (#7357 measured exactly that). The cap
+converts a fleet-wide outage into ONE container dying alone, in its own cgroup,
+in seconds. It also makes the death LEGIBLE: a container the kernel (or this
+cap) killed used to read as "it may be wedged: run down and retry", so the
+operator retried into the same death and never learned the cause —
+``_termination_report`` now names ``OOMKilled``/``ExitCode``/``RestartCount``
+when docker reports them. Two limits, stated: an EXISTING container keeps the
+limits it was created with — docker cannot change them on ``start``, so the
+reuse path WARNS when that container has no cap and ``down`` + ``start``
+recreates it (as with the image pin) — and a value above the host's real
+headroom still dies (it just dies alone). A container that has already STOPPED
+has those facts read and reported on stderr BEFORE it is removed: this tool sets
+no ``--restart`` policy, so a kill leaves the container ``exited`` and the
+stale-container branch is the one path a memory kill actually takes.
+
 CONTRACT — THE TARGET IS NOT A PARAMETER
 ----------------------------------------
 The container this tool acts on is ALWAYS ``fdb-lane-<sha1(worktree)[:10]>``,
@@ -306,6 +329,311 @@ GIT_TIMEOUT = 30
 IMAGE_PULL_TIMEOUT = 600
 #: How long a fresh or reused container gets to answer PING.
 READY_TIMEOUT = 60
+#: #7357 — the KERNEL (cgroup) memory cap every lane container is created
+#: with, as a docker memory spec. The DEFAULT is PROVISIONAL, exactly like the
+#: CI seam's: it is taken from the SHARED instance's own ceiling (`used_memory
+#: 2.0 GiB of maxmemory 2.0 GiB`), but that ceiling does not justify it.
+#: `maxmemory` bounds the Redis DATASET, and the shared instance REFUSES WRITES
+#: at it — this lane container sets no `--maxmemory` at all (see
+#: LANE_FALKORDB_ARGS), so the cgroup cap here is the ONLY ceiling, and
+#: `HostConfig.Memory` bounds RSS: dataset plus allocator overhead,
+#: fragmentation, client/replication buffers and fork copy-on-write. RSS is
+#: strictly larger than `used_memory`, and `--memory-swap` is EQUAL, so there is
+#: no swap headroom to absorb the margin — a lane that fitted inside the shared
+#: instance's data budget can be SIGKILLed here, where the shared instance would
+#: have failed SOFT with a legible refused write (#7357 review).
+#: Settle it by MEASURING: read the cgroup v2 peak (`/sys/fs/cgroup/.../`
+#: `memory.peak`) or `docker stats --no-stream fdb-lane-<slug>` during a full
+#: suite run on the heaviest lane. Comfortably below 2 GiB -> this default
+#: stands, and the measured peak belongs in this comment; at or near 2 GiB ->
+#: raise it, or give the lane a `--maxmemory` BELOW the cap so Redis refuses
+#: first the way the shared instance does.
+#:
+#: WHY A KERNEL CAP AND NOT ONLY `maxmemory`: `--maxmemory` is a REDIS-side
+#: limit. Without `HostConfig.Memory` the container's real ceiling is the
+#: HOST's, and the host's ceiling is swap — so a runaway instance pages the
+#: whole box for minutes and starves every neighbour, including the canonical
+#: graph instance, whose process then goes away and is restarted by its
+#: `restart: always` policy, forever (#7357: `ExitCode=0`, `OOMKilled=false`,
+#: `Memory=0`, `RestartCount` climbing). A cgroup cap converts that fleet-wide
+#: outage into ONE container dying alone, in seconds, inside its own cgroup.
+#:
+#: `--memory-swap` is set EQUAL to `--memory` on purpose: docker's default is
+#: 2x memory, i.e. the container may swap, and a swapping FalkorDB is the
+#: 96-146 s RDB reload the issue records rather than a fast failure.
+CONTAINER_MEMORY_ENV = "FALKORDB_CONTAINER_MEMORY"
+DEFAULT_CONTAINER_MEMORY = "2g"
+#: The docker memory-spec grammar (`512m`, `2g`, `1.5g`, `2gb`, `2048mb`,
+#: `1t`, bytes) — the LONG form (`kb`/`mb`/`gb`) is valid to docker, so refusing it
+#: would refuse the natural spelling of the very remedy these messages print
+#: ("raise FALKORDB_CONTAINER_MEMORY"). Validated at the seam because the value
+#: is interpolated into an argv: a typo must fail loudly here, not as an opaque
+#: `docker run` refusal later. Group 1 is the NUMBER, so positivity is read
+#: without re-deriving the unit (#7357 review).
+_MEMORY_SPEC_RE = re.compile(r"\+?([0-9]+(?:\.[0-9]+)?)(?:[bkmgt]|[kmgt]b|[kmgt]ib)?\Z")
+
+
+#: Byte multipliers for the units docker honours: `b`, `k`/`kb`/`kib`,
+#: `m`/`mb`/`mib`, `g`/`gb`/`gib`, `t`/`tb`/`tib`. Positivity is decided on the
+#: BYTE COUNT, not the number: docker truncates the spec to an int64, so
+#: `0.0000000001g` and `0.1b` install as `HostConfig.Memory=0` — the UNCAPPED
+#: container this seam exists to prevent, reached through a value that reads as
+#: positive (#7357 review, measured).
+_MEMORY_UNIT_BYTES = {
+    "": 1, "b": 1,
+    "k": 1 << 10, "kb": 1 << 10, "kib": 1 << 10,
+    "m": 1 << 20, "mb": 1 << 20, "mib": 1 << 20,
+    "g": 1 << 30, "gb": 1 << 30, "gib": 1 << 30,
+    "t": 1 << 40, "tb": 1 << 40, "tib": 1 << 40,
+}
+
+def _spec_is_positive(spec: str) -> bool:
+    """Whether *spec* is a POSITIVE byte count.
+
+    `0` (and `0g`, `0.0g`, …) is not a small cap — to docker it means NO limit
+    (`HostConfig.Memory=0`), i.e. exactly the uncapped container #7357 is
+    about, reached by the one value a reader would type to "disable" the cap.
+    The grammar alone accepts it, so the ZERO case is refused separately.
+
+    The test is on BYTES, not on the number: docker truncates the parsed spec to
+    an int64, so `0.0000000001g` (0.107 B) and `0.1b` install as Memory=0 —
+    a positive NUMBER that becomes an UNCAPPED container (#7357 review).
+    """
+    m = _MEMORY_SPEC_RE.match(spec)
+    if not m:
+        return False
+    unit = spec[m.end(1):].lower()
+    return int(float(m.group(1)) * _MEMORY_UNIT_BYTES[unit]) >= 1
+
+
+def _spec_bytes(spec: str) -> int | None:
+    """The BYTE count a docker memory spec denotes, or None if it is not one."""
+    m = _MEMORY_SPEC_RE.match(spec)
+    if not m:
+        return None
+    try:
+        return int(float(m.group(1)) * _MEMORY_UNIT_BYTES[spec[m.end(1):].lower()])
+    except KeyError:  # pragma: no cover - the regex constrains the unit
+        return None
+
+
+def container_memory_cap() -> str:
+    """The kernel memory cap for the container this tool starts (#7357).
+
+    Read at CALL time (not import time) so a lane can raise it per run, and
+    validated so a malformed value cannot reach `docker run`. Fail-closed: an
+    unusable value is refused rather than silently dropped, because a dropped
+    cap is exactly the uncapped container this exists to prevent.
+    """
+    raw = (os.environ.get(CONTAINER_MEMORY_ENV)
+           or DEFAULT_CONTAINER_MEMORY).strip().lower()
+    if not _MEMORY_SPEC_RE.match(raw) or not _spec_is_positive(raw):
+        raise SystemExit(
+            f"test-lane: {CONTAINER_MEMORY_ENV}={raw!r} is not a POSITIVE "
+            f"docker memory spec (e.g. 512m, 2g, 1.5g; `0` means UNLIMITED to "
+            f"docker) — refusing to start the lane with an unusable cap "
+            f"(default {DEFAULT_CONTAINER_MEMORY})"
+        )
+    return raw
+
+
+def _memory_cap_args(cap: str | None = None) -> list[str]:
+    """`--memory`/`--memory-swap` for `docker run` — the pair, never one.
+
+    *cap* is the value `start()` already validated at the TOP of the call (a
+    guard is only as good as its ordering — see the ordering note there); when
+    omitted it is read and validated here, which is what a direct caller (and
+    the seam test) wants.
+    """
+    cap = cap if cap is not None else container_memory_cap()
+    return ["--memory", cap, "--memory-swap", cap]
+
+
+#: `docker inspect --format` for the facts that separate "the server is wedged"
+#: from "the kernel killed it" from "it is looping", in one call.
+_TERMINATION_FORMAT = (
+    "{{.State.OOMKilled}} {{.State.ExitCode}} {{.RestartCount}} "
+    "{{.HostConfig.Memory}}")
+
+#: `docker inspect --format` for the cgroup memory limit (#7357). `0` is
+#: docker's spelling for NO LIMIT.
+_MEMORY_LIMIT_FORMAT = "{{.HostConfig.Memory}}"
+
+
+def _container_memory_limit(name: str) -> int | None:
+    """The container's cgroup memory limit in BYTES, or None when unreadable.
+
+    None is "could not read", never "it is capped": a failed `docker inspect` is
+    not evidence about the limit (#7357).
+    """
+    r = _docker("inspect", "--format", _MEMORY_LIMIT_FORMAT, name)
+    if r.returncode != 0:
+        return None
+    try:
+        return int((r.stdout or "").strip())
+    except ValueError:
+        return None
+
+
+def _note_uncapped_existing(name: str) -> None:
+    """Say it out loud when the container about to be REUSED has no cap (#7357).
+
+    `docker start` cannot add a limit, so a container created before this tool
+    passed `--memory` keeps `HostConfig.Memory=0` for life. Those are precisely
+    the neighbours the issue names as the pressure source, so handing one back
+    silently is how they go on being uncapped: the whole point of the issue is
+    that the failure is not reported. Prints to STDERR because it is a warning.
+
+    `None` is "could not READ", and reporting it as SILENCE makes it
+    indistinguishable from "it is capped" — the same unread fact that lets an
+    uncapped container go unnoticed, and the reuse path is the ONLY place a
+    pre-existing uncapped lane container can be caught (`docker start` cannot add
+    a limit). `graph-scripts/setup.py::_note_uncapped_existing` says so for the
+    same reason (#7357 review); this is the same arm.
+    """
+    limit = _container_memory_limit(name)
+    if limit is None:
+        print(
+            f"test-lane: could not READ the kernel memory limit of {name} (the "
+            f"`docker inspect --format '{_MEMORY_LIMIT_FORMAT}'` query failed — "
+            f"a wedged daemon is one reason), so whether it is capped cannot be "
+            f"confirmed; it is left alone. Check with `docker container inspect "
+            f"-f '{_MEMORY_LIMIT_FORMAT}' {name}`, and recreate it with "
+            f"{CONTAINER_MEMORY_ENV}="
+            f"{os.environ.get(CONTAINER_MEMORY_ENV) or DEFAULT_CONTAINER_MEMORY} "
+            f"(`uv run python tools/test_lane.py down` first) if it reports 0",
+            file=sys.stderr,
+        )
+        return
+    if limit <= 0:
+        print(
+            f"test-lane: WARNING — {name} was created WITHOUT a kernel memory "
+            f"cap (HostConfig.Memory=0, #7357) and `docker start` cannot add "
+            f"one; it can take the host down with it. Run `uv run python "
+            f"tools/test_lane.py down` and retry to recreate it with "
+            f"{CONTAINER_MEMORY_ENV}="
+            f"{os.environ.get(CONTAINER_MEMORY_ENV) or DEFAULT_CONTAINER_MEMORY}",
+            file=sys.stderr,
+        )
+
+
+def _termination_report(name: str, *, live: bool) -> str:
+    """Explain a container that did not answer — or `""` when docker says nothing
+    relevant, or could not be asked.
+
+    #7357's second half is LEGIBILITY, not the cap. Three measured shapes used to
+    read as the same sentence ("it may be wedged: run down and retry"), so the
+    operator retried into the same death and never learned the cause:
+
+    * **killed for memory** — `OOMKilled=true` or `ExitCode=137` (128+SIGKILL:
+      the kernel OOM killer, or this tool's own cgroup cap);
+    * **restarting** — `RestartCount > 0`. This is the CANONICAL instance's own
+      signature in #7357 (`ExitCode=0`, `OOMKilled=false`, `RestartCount`
+      climbing 8 -> 68 -> 150): a restart loop under host memory pressure. It is
+      named as the leading HYPOTHESIS, not as a measurement, because docker
+      exposes no reason for a restart;
+    * **`live`** — the container is Up right now, so those facts describe a
+      PREVIOUS termination and cannot explain a live server that does not answer.
+      Saying "it did not hang" there would be a false diagnosis, and it also
+      suppressed the correct remedy.
+
+    A failed/unknown inspect reports NOTHING rather than guessing: this function
+    exists so the failure names what was measured.
+    """
+    r = _docker("inspect", "--format", _TERMINATION_FORMAT, name)
+    if r.returncode != 0:
+        return ""
+    parts = (r.stdout or "").strip().split()
+    if len(parts) != 4:
+        return ""
+    oom, exit_code, restarts, cap_bytes = parts
+    # The cap that ACTUALLY applies is docker's HostConfig.Memory, not the value
+    # `FALKORDB_CONTAINER_MEMORY` holds now: a lane container outlives runs and
+    # `docker start` cannot change its limit, so a container created at 2g and
+    # OOM-killed while the env says 8g would otherwise be reported as killed by
+    # "its own cgroup cap (…=8g)" — a cap it does not have (#7357 review).
+    try:
+        measured = int(cap_bytes)
+    except ValueError:
+        measured = None
+    if measured == 0:
+        cap_note = (
+            "this container has NO cgroup cap at all (HostConfig.Memory=0) — it "
+            "was created before this tool passed one, and `docker start` cannot "
+            "add it"
+        )
+    elif measured is None:
+        cap_note = ("its cgroup memory limit could not be read, so which cap "
+                    "applies is unknown")
+    else:
+        cap_note = f"its cgroup cap is {measured} bytes"
+        # NORMALIZED exactly as `container_memory_cap()` reads it: an env value
+        # of `2G` or `" 2g "` is a cap this tool accepts, so comparing the RAW
+        # string would report a mismatch — and recommend a destructive recreate —
+        # for a cap that IS the one in effect (#7357 review).
+        wanted = (os.environ.get(CONTAINER_MEMORY_ENV)
+                  or DEFAULT_CONTAINER_MEMORY).strip().lower()
+        if _spec_bytes(wanted) != measured:
+            cap_note += (
+                f", NOT the {CONTAINER_MEMORY_ENV}={wanted} in effect now "
+                f"(`docker start` cannot change it: recreate the container to "
+                f"move the cap)"
+            )
+    try:
+        restarted = int(restarts) > 0
+    except ValueError:
+        return ""
+    # 137 is 128+SIGKILL — the kernel OOM killer, or this very cgroup cap.
+    # Anything else (0 = a clean exit, 143 = our own `docker stop`) is NOT a
+    # memory kill and must not be reported as one.
+    killed = oom.lower() == "true" or exit_code == "137"
+    if live:
+        if not (killed or restarted):
+            return ""
+        return (
+            f" (Docker also reports a PREVIOUS termination for this container "
+            f"— OOMKilled={oom}, ExitCode={exit_code}, RestartCount={restarts}. "
+            f"It is Up now, so that history cannot explain an unanswered PING; "
+            f"it does mean memory pressure has killed or restarted it before, "
+            f"so check {CONTAINER_MEMORY_ENV} and the host before re-running.)"
+        )
+    if killed:
+        if oom.lower() == "true":
+            cause = (
+                f"by the kernel under host memory pressure, or by its own "
+                f"cgroup cap — {cap_note}"
+            )
+            verdict = "KILLED FOR MEMORY"
+        else:
+            # `ExitCode=137` WITHOUT `OOMKilled=true` is a plain SIGKILL, and a
+            # cgroup-cap kill is exactly what DOES set OOMKilled — so naming the
+            # cap here would contradict the evidence in the same sentence.
+            cause = (
+                "by a SIGKILL from outside the container — its own cgroup cap "
+                "did not fire (that sets OOMKilled=true), so the pressure was "
+                "host-level and never reached this container's OOM flag, or "
+                "another process killed it"
+            )
+            verdict = "SIGKILLED (ExitCode=137)"
+        return (
+            f" The container was {verdict} (OOMKilled={oom}, "
+            f"ExitCode={exit_code}, RestartCount={restarts}): it did not hang, "
+            f"it was terminated {cause}. Nothing the client retried could have "
+            f"succeeded, and this being invisible is what made it read as a "
+            f"wedged database."
+        )
+    if restarted:
+        return (
+            f" Docker also reports RestartCount={restarts}: the container has "
+            f"been RESTARTED, so this is not a slow start. The reason is not "
+            f"reported by docker — host memory pressure is the leading "
+            f"hypothesis (#7357: a killed process under an unconditional "
+            f"restart policy comes back, repeatedly), so check free memory and "
+            f"{CONTAINER_MEMORY_ENV} before re-running."
+        )
+    return ""
+
+
 #: The shared instances every lane and the orchestration graph depend on, PLUS
 #: particular peer lanes' private containers that must never be removed. It is
 #: HAND-MAINTAINED, and NONE of its entries carries the NAME_PREFIX — so the
@@ -641,6 +969,17 @@ def container_state(name: str) -> str:
     return "absent" if re.search(r"no such (container|object)\b", err) else "unknown"
 
 
+#: Docker states that are NOT terminal: the container (or its graphs) is still
+#: there and removing it would destroy work. `created` is included because the
+#: user may be about to start it, and `dead`/`exited` are the only states this
+#: tool may replace (#7357 review — a PAUSED container used to be `rm -f`ed).
+_LIVE_ISH_STATES = frozenset({"paused", "restarting", "created", "removing"})
+
+#: Docker states this tool may replace: the container has stopped and its
+#: termination facts are what explain why.
+_TERMINAL_STATES = frozenset({"exited", "dead"})
+
+
 def _graph_count(name: str) -> int | None:
     """Graphs in a container, or None when docker could not be asked.
 
@@ -709,13 +1048,22 @@ def start(port: int | None = None) -> tuple[str, int]:
 
     A requested port is validated FIRST — before `container_state` and before
     the stale-container `docker rm` — so an invalid value cannot reach docker at
-    all (a guard is only as good as its ordering).
+    all (a guard is only as good as its ordering). The memory cap is validated
+    there too, for exactly the same reason (#7357 review F8): it used to be read
+    at the `docker run` call site, i.e. AFTER a stopped lane container had
+    already been `docker rm -f`'d — so a typo destroyed the lane's graphs and
+    then refused to replace the container.
     """
     if port is not None and not (0 < port < 65536):
         raise SystemExit(f"test-lane: --port {port} is not a valid TCP port")
     # #8124: validated FIRST, for the same reason the port is — a floating tag
     # must fail before the orphan sweep and before any container is touched.
     image = assert_pinned_image(IMAGE)
+    # #7357 review F8: validated FIRST — before the orphan sweep, before
+    # `container_state`, and above all before the stale-container `docker rm -f`
+    # below. An unusable cap must refuse while the container (and the graphs in
+    # it) still exist, not after the removal it would never replace.
+    cap = container_memory_cap()
     # #8180: the call site that makes ownership reaping actually BITE. Every lane
     # that starts sweeps containers whose owning worktree is gone, so a lane
     # closed without `down` (measured: `cmux workspace close` never runs it)
@@ -781,12 +1129,56 @@ def start(port: int | None = None) -> tuple[str, int]:
                 f"--port {port} cannot be applied to it; run `uv run python "
                 f"tools/test_lane.py down` first to move it"
             )
+        _note_uncapped_existing(name)
         if not _wait_ready(name, published):
+            # #7357: `live` is decided by a state read taken HERE, after the
+            # wait — not by the one that opened this branch. `_wait_ready` waits
+            # up to READY_TIMEOUT (60 s) of failed PINGs, and the container can
+            # DIE inside that window (the memory-pressure case this issue is
+            # about). Reporting the stale "it is Up now" would then invert the
+            # diagnosis: docker's OOMKilled/ExitCode would be this failure's
+            # CAUSE while the message insisted they were history.
+            now = container_state(name)
+            if now == "running":
+                # Up, so docker's facts describe a PREVIOUS termination: they are
+                # reported as history, never as this failure's cause, and the
+                # "may be wedged" advice stays — for a live server that does not
+                # answer, restarting it IS the remedy.
+                raise SystemExit(
+                    f"test-lane: {name} is running but never answered PING over "
+                    f"its published host port {published} within "
+                    f"{READY_TIMEOUT}s — it may be wedged: run `uv run python "
+                    f"tools/test_lane.py down` and retry."
+                    + _termination_report(name, live=True)
+                )
+            if now == "unknown":
+                # NOTHING is asserted for an unreadable state — not even by
+                # appending `_termination_report`. Two reasons, both measured:
+                # `container_state` keeps "docker could not answer" separate from
+                # "the container is gone" ON PURPOSE, and `down` is a `rm -f` of
+                # the container AND its graphs, so guessing a death from a failed
+                # read is the destructive mistake the absent-vs-unreadable rule
+                # exists to prevent; and `_termination_report` issues its OWN
+                # `docker inspect`, so it does not inherit this read's failure — a
+                # daemon that recovers between the two calls would answer with the
+                # container's PREVIOUS termination and the message would claim the
+                # death it had just called UNKNOWN (#7357 review).
+                raise SystemExit(
+                    f"test-lane: {name} did not answer PING over its published "
+                    f"host port {published} within {READY_TIMEOUT}s AND its "
+                    f"state could not be READ (the `docker inspect` failed — a "
+                    f"wedged or unreachable daemon is one reason), so whether it "
+                    f"died or merely wedged is UNKNOWN. Check the daemon (`docker "
+                    f"info`) before running `uv run python tools/test_lane.py "
+                    f"down`, which would remove the container and its graphs."
+                )
             raise SystemExit(
-                f"test-lane: {name} is running but never answered PING over its "
-                f"published host port {published} within {READY_TIMEOUT}s — it "
-                f"may be wedged: run `uv run python "
-                f"tools/test_lane.py down` and retry"
+                f"test-lane: {name} STOPPED while waiting for its first PING "
+                f"over its published host port {published} (within "
+                f"{READY_TIMEOUT}s; docker now reports its state as {now!r}), "
+                f"so this is a death, not a slow start — run `uv run python "
+                f"tools/test_lane.py down` and retry."
+                + _termination_report(name, live=False)
             )
         return name, published
     if state == "unknown":
@@ -795,17 +1187,62 @@ def start(port: int | None = None) -> tuple[str, int]:
             f"daemon running? (refusing to guess: removing a container that may "
             f"belong to another lane would be unforgivable)"
         )
+    if state not in _TERMINAL_STATES and state != "absent":
+        # #7357 review, and the worst of the class: this path used to `rm -f`
+        # EVERY non-running container. But `paused` is a LIVE database —
+        # `docker pause` is exactly what an operator may reach for to freeze a
+        # runaway instance rather than kill it — and `restarting` is a container
+        # docker is still cycling. Neither is TERMINAL, and their termination
+        # facts read `OOMKilled=false ExitCode=0 RestartCount=0`, so the removal
+        # printed NOTHING: measured, a paused lane container holding a graph was
+        # silently deleted and `start()` returned the replacement as if nothing
+        # had happened. Only a terminal container may be replaced; an
+        # unrecognised state fails CLOSED to a refusal too, because docker may
+        # add one and the default must never be "remove what we do not
+        # understand".
+        if state in _LIVE_ISH_STATES:
+            why = (
+                "its graphs are still there, and `docker pause`/`unpause` (or a "
+                "`restarting` container settling) reaches the state you want "
+                "without destroying anything"
+            )
+        else:
+            why = (
+                "this tool does not recognise that state as terminal, so it "
+                "refuses to remove a container it cannot classify"
+            )
+        raise SystemExit(
+            f"test-lane: {name} is in docker state {state!r}, which is NOT "
+            f"terminal — {why}. Inspect it (`docker container inspect {name}`) "
+            f"and run `uv run python tools/test_lane.py down` if you meant to "
+            f"discard it."
+        )
     if state != "absent":
         # A failed `rm` must be read and reported, not discarded: it leaves a
         # name that makes the `docker run` below fail with "name already in
         # use", which reads as a run problem rather than the removal problem
         # it is.
+        # #7357 review: docker's termination facts are read BEFORE the removal.
+        # `rm -f` destroys the only evidence of WHY the container stopped, and
+        # an OOM-killed lane container takes exactly THIS path: the container is
+        # created with no `--restart` policy, so a kill leaves it `exited`, never
+        # `running` — the reuse branch above never sees it. Without this read the
+        # next `start()` silently removed, recreated and continued, and the
+        # operator never learned the cap (or host pressure) had killed it. Same
+        # evidence-before-`rm -f` rule the fresh path below states for itself.
+        # The ownership guard runs FIRST, so an unmanaged name is refused before
+        # any docker call (read or removal).
+        _assert_removal_allowed(name)
+        prior = _termination_report(name, live=False)
         outcome = _remove_and_describe(name)
         if outcome.startswith("FAILED"):
             raise SystemExit(
                 f"test-lane: {name} exists, is not running, and could not be "
                 f"removed — refusing to start over it ({outcome})"
             )
+        if prior:
+            print(f"test-lane: {name} had stopped before this start{prior}",
+                  file=sys.stderr)
 
     chosen = port if port is not None else pick_port()
     r = _docker(
@@ -815,6 +1252,11 @@ def start(port: int | None = None) -> tuple[str, int]:
         # "container <id> is zombie and can not be killed. Use the `--init`
         # option", leaving a container no `down()` could remove.
         "run", "-d", "--init", "--name", name,
+        # #7357: the KERNEL cap (see CONTAINER_MEMORY_ENV). `--init` and the
+        # cap are independent: one reaps orphaned children, the other bounds
+        # what a runaway instance can take from every neighbour on the host.
+        # `cap` was validated at the TOP of this function (ordering note there).
+        *_memory_cap_args(cap),
         "-p", f"127.0.0.1:{chosen}:6379",
         "-e", "REDIS_ARGS=--appendonly no --save ''",
         # #8071: engine parity with the SHARED instance (see the module
@@ -848,10 +1290,13 @@ def start(port: int | None = None) -> tuple[str, int]:
         raise SystemExit(f"test-lane: docker run failed: {detail} ({outcome})")
 
     if not _wait_ready(name, chosen):
+        # #7357: read docker's termination facts BEFORE removing the container —
+        # `rm -f` destroys the evidence the report is made of.
+        killed = _termination_report(name, live=False)
         logs = _docker("logs", "--tail", "20", name)
         raise SystemExit(
             f"test-lane: {name} never answered PING; {_remove_and_describe(name)}. "
-            f"Logs:\n{logs.stdout}{logs.stderr}"
+            f"Logs:\n{logs.stdout}{logs.stderr}{killed}"
         )
     asked, published = _published_port(name)
     if not asked or published is None:
@@ -868,13 +1313,10 @@ def start(port: int | None = None) -> tuple[str, int]:
     return name, published
 
 
-def _remove_and_describe(name: str) -> str:
-    """Remove a container this tool just created, and say what actually
-    happened — a cleanup whose result is unread is how a running container with
-    a reserved port survives to make every later `start()` refuse.
-
-    Guarded like every other removal intent, so "no removal bypasses the
-    ownership check" is true of the whole module and not just of `stop()`.
+def _assert_removal_allowed(name: str) -> None:
+    """The ownership guard EVERY removal intent must pass, factored out so a
+    read that precedes a removal cannot reach docker for a container this tool
+    does not own (and so the rule lives in one place instead of at call sites).
     """
     if not is_managed(name):
         raise SystemExit(f"test-lane: refusing to remove unmanaged {name!r}")
@@ -887,6 +1329,17 @@ def _remove_and_describe(name: str) -> str:
             f"test-lane: refusing to remove {name!r} — this worktree's container "
             f"is {lane_name()!r}; a peer lane's database is not ours to delete"
         )
+
+
+def _remove_and_describe(name: str) -> str:
+    """Remove a container this tool just created, and say what actually
+    happened — a cleanup whose result is unread is how a running container with
+    a reserved port survives to make every later `start()` refuse.
+
+    Guarded like every other removal intent, so "no removal bypasses the
+    ownership check" is true of the whole module and not just of `stop()`.
+    """
+    _assert_removal_allowed(name)
     rm = _docker("rm", "-f", name)
     return ("removed it" if rm.returncode == 0
             else "FAILED to remove it — check `docker ps -a`")

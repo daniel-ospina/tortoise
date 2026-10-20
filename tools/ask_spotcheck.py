@@ -688,6 +688,10 @@ _SUPERSESSION_FIXTURE = os.path.join(
     _REPO_ROOT, "tests", "fixtures", "ask_spotcheck_supersession.json")
 _SUPERSESSION_ENV = "TORTOISE_SPOTCHECK_SUPERSESSION_FIXTURE"
 
+#: The distilled leg's ONE documented judge opt-out (#9095). Must be exactly
+#: ``mock``; the composition path's #2071 fail-fast is untouched by it.
+_DISTILLED_JUDGE_ENV = "TORTOISE_SPOTCHECK_JUDGE"
+
 #: The arm the D8 gate is evaluated on. The RAW arm is reported too (the paired
 #: read D4 requires), but the promise — *"0% superseded points appear as live
 #: answers"* — is about DISTILLED points, and the raw-turn store has none.
@@ -745,6 +749,12 @@ class _ClaimRender:
 _ANNOTATION_GROUP = re.compile(
     r"\s*(?:\[[^\[\]\n]*\]|\((?i:session date|today|now)[^)\n]*\))")
 _DATE_PREAMBLE = re.compile(r"^Current Date:[^\n]*\n*")
+#: A rendered block STARTS at a block-scope ``[session`` annotation — the one
+#: line ``_render_block`` puts at block scope (continuation lines of a body are
+#: blank or ``  | ``-fenced, so they can never match this at line start).
+_BLOCK_START = re.compile(r"(?m)(?=^\[session)")
+#: The renderer's body fence (``tortoise/retrieval.py::_BODY_FENCE``).
+_BODY_FENCE = "  | "
 _VALID_WINDOW_OPEN = re.compile(r"\[valid ")
 _FLAG_SUPERSEDED_BY = re.compile(r"\[SUPERSEDED BY:")
 _FLAG_CLOSED_WINDOW = re.compile(r"\[valid [^\]]*→")
@@ -835,23 +845,47 @@ def seed_distilled_corpus(sdk: TortoiseSDK, case: dict) -> dict[str, str]:
 def _evidence_blocks(evidence: str) -> list[str]:
     """Split rendered reader evidence into one block per hit.
 
-    ``render_context`` joins blocks with a blank line and prefixes the whole
-    context with a ``Current Date:`` line; the preamble is not a hit, and
-    counting it would make every case look like it rendered something.
+    Split on the TRUSTED ANNOTATION PREFIX (a line that BEGINS with
+    ``[session``), never on blank lines. The renderer's own block invariant
+    makes that boundary the only safe one
+    (``tortoise/retrieval.py::_fence_body``): the first line of a block is the
+    only line of that block at block scope and it carries the annotation;
+    every continuation line of a claim's body is either blank or fenced with
+    ``"  | "``, so an embedded newline can never start a new block. A blank
+    line INSIDE a multi-paragraph claim therefore used to split one hit into
+    two — and neither half could then satisfy the claim-text match, so a
+    superseded claim served LIVE in a multi-paragraph body read as
+    unobserveable. The planting corpus is single-line by construction, so this
+    only bit a caller-supplied corpus (``--supersession-fixture``) — exactly
+    the input the tool documents as arbitrary.
 
-    One caveat inherited from the renderer: a hit whose body contains a BLANK
-    line is fenced line-by-line (``_fence_body``) but its blank line survives
-    unfenced, so such a hit splits into two blocks here. The planted corpus is
-    single-line claims by construction, and a split can only ever SHRINK a body
-    (never fabricate one), so it cannot turn an unflagged render into a green —
-    but a future multi-paragraph corpus should split on the session tag instead.
+    ``render_context`` also prefixes the whole context with a ``Current Date:``
+    line; the preamble is not a hit, and counting it would make every case look
+    like it rendered something.
     """
     blocks: list[str] = []
-    for block in re.split(r"\n[ \t]*\n", str(evidence or "")):
+    for block in re.split(_BLOCK_START, str(evidence or "")):
         block = _DATE_PREAMBLE.sub("", block.strip("\n")).strip("\n")
         if block.strip():
             blocks.append(block)
     return blocks
+
+
+def _unfence_body(text: str) -> str:
+    """Reverse :func:`tortoise.retrieval._fence_body` for text matching.
+
+    A multi-line body renders as ``first line`` + ``  | second line`` (see
+    ``_BODY_FENCE``), so the claim's stored text and its rendered body are
+    never equal until the fence marker is removed. Normalising with the fence
+    left in place would make every multi-line claim look like a claim the
+    instrument could not see — the fail-open direction this whole check exists
+    to close. Only the exact fence marker at a line start is removed, so
+    claim text that legitimately contains ``|`` is untouched.
+    """
+    lines = str(text or "").split("\n")
+    return "\n".join(
+        ln[len(_BODY_FENCE):] if ln.startswith(_BODY_FENCE) else ln
+        for ln in lines)
 
 
 def _strip_annotations(block: str) -> tuple[str, str]:
@@ -902,10 +936,14 @@ def _superseded_live_state(evidence: str, claim_text: str) -> tuple[bool, bool, 
         # unflagged by design. Only distilled claims are in scope.
         if not render.is_claim:
             continue
-        if norm not in _normalize(block):
+        # Compare UNFENCED text on both sides: the renderer makes a
+        # multi-line body ``first line`` + ``  | second line``, so the fence
+        # marker has to come off before the claim text can match. Without this
+        # a multi-paragraph claim that WAS served live reads as `seen == 0`.
+        if norm not in _normalize(_unfence_body(block)):
             continue
         seen = True
-        if norm in _normalize(render.body):
+        if norm in _normalize(_unfence_body(render.body)):
             if render.flagged:
                 flagged = True
             else:
@@ -1210,6 +1248,25 @@ def _record(question: dict, result: dict, judge) -> dict:
     }
 
 
+def _distilled_judge():
+    """The distilled leg's judge: key-free ``MockJudge`` ONLY when
+    ``TORTOISE_SPOTCHECK_JUDGE=mock`` is set explicitly, else the composition
+    path's #2071 judge-key rule.
+
+    The landed leg called ``_require_judge_key()`` unconditionally, so the
+    D8 gate could not be run anywhere without a provider key — including CI,
+    whose only judge is the mock. The opt-out is deliberately narrow: it must
+    be spelled ``mock`` (nothing empty, nothing truthy-by-accident), and it is
+    read HERE rather than inside ``_require_judge_key`` so the 21-question
+    composition path keeps its fail-fast unchanged.
+    """
+    if (os.environ.get(_DISTILLED_JUDGE_ENV, "").strip().lower()
+            == "mock"):
+        return build_judge(mock=True)
+    _require_judge_key()
+    return build_judge()
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="eval-lane ask QA spot-check (issue #2071: full-semantic "
@@ -1233,14 +1290,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.distilled:
         # Same fail-fast posture as the 21-question path: the KU number is
-        # graded, so no judge key means no number — never a silent skip.
+        # graded, so no judge key means no number — never a silent skip. The
+        # ONE documented opt-out is an explicit ``TORTOISE_SPOTCHECK_JUDGE=mock``
+        # (see :func:`_distilled_judge`), which is what makes the leg runnable
+        # in CI and in the hermetic suite.
         try:
-            _require_judge_key()
+            judge = _distilled_judge()
         except (RuntimeError, ValueError) as exc:
             print(f"ask_spotcheck: {exc}", file=sys.stderr)
             return 2
         try:
-            report = run_distilled_leg(fixture=args.supersession_fixture)
+            report = run_distilled_leg(fixture=args.supersession_fixture,
+                                      judge=judge)
         except (FileNotFoundError, ValueError) as exc:
             # No corpus, no number — never an empty run reported as a pass.
             print(f"ask_spotcheck: {exc}", file=sys.stderr)
