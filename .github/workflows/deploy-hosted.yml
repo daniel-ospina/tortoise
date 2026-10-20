@@ -68,6 +68,27 @@ on:
                                       # pricing-only change never redeployed the hosted image,
                                       # so prod kept serving the previous pricing while the
                                       # required pricing-artifact check stayed green.
+      # DELIBERATELY NOT a trigger: `supabase/migrations/**`, even though
+      # Dockerfile.hosted COPYs that tree (#9231). The record reader is
+      # NAME-GATED — `record_projection._read_migrations()` reads only the files
+      # in its `RECORD_MIGRATIONS` tuple (no glob; `_complete()` tests exactly
+      # those names) — so a NEW `.sql` file is invisible to the image. A
+      # legitimate schema change therefore arrives as a new name in that tuple,
+      # i.e. in `tortoise/record_projection.py`, already listed above. Editing a
+      # file the reader DOES read is rejected by `check-migration-append-only
+      # diff` (migrations are append-only) — a red on every migration-touching
+      # PR, though NOT one of `main`'s seven required contexts, so that half is
+      # enforced by review rather than by branch protection. Listing the tree
+      # here would add no coverage and cost a RED push run per migrations-only
+      # merge: `supabase-deploy` deploys on `workflow_dispatch` only, so this
+      # file's fail-closed `Check migration drift` exits 1 for every repo-ahead
+      # BLOCKING migration until an operator applies it — and the run's
+      # `cancel-in-progress` can cancel an in-flight co-move flip. The
+      # schema→app coupling is already handled by `supabase-deploy`'s own
+      # `Dispatch deploy-hosted (the app flip)` step. Both halves are pinned by
+      # `tests/test_9231_record_migrations_trigger.py`, which also measures the
+      # name gate — if the reader ever observes the directory, list the tree in
+      # BOTH workflows and delete that proof with it.
       - 'fly.toml'
       - 'Dockerfile.hosted'
       - 'entrypoint.sh'
@@ -234,7 +255,19 @@ jobs:
           assert len(reg.packs) >= bound, f"container packs {len(reg.packs)} < starter {bound}"
           assert set(reg.packs) >= set(DEFAULT_STARTER_PACKS), "wrong pack set in container"
           assert Path("/app/tests/sample_transcript.txt").exists(), "transcript missing"
+          # #9231: the record schema must RESOLVE INSIDE the image. It is not
+          # restated in code — `record_projection.table_columns()` reads it at
+          # runtime from the COPYd `supabase/migrations` tree — so this is the
+          # invariant the COPY exists for, pinned at
+          # zero added CI cost. The forward ADD COLUMN
+          # (20261018000001_record_point_money_value_2782.sql) is asserted too:
+          # a read that only saw the create-table migrations is a stale schema.
+          from tortoise.record_projection import table_columns
+          cols = table_columns()
+          missing = sorted(c for c in ("node_key", "amount_minor") if c not in cols["point"])
+          assert not missing, f"record schema stale in container: public.point missing {missing}"
           print(f"hosted image pack smoke OK: {len(reg.packs)} >= {bound}")
+          print("hosted image record-schema smoke OK: public.point read from the COPYd migrations")
           '
       # ── Out-of-band failure alert (#2240) ──────────────────────────────
       # A failure HERE leaves `deploy-api` skipped, i.e. the deploy is blocked

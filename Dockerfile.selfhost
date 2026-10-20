@@ -24,6 +24,11 @@ COPY tortoise/ tortoise/
 # example + `tortoise demo` work in-container, CWD /app).
 COPY packs/ packs/
 COPY tests/sample_transcript.txt tests/
+# #9231: the record's schema ships as a MAPPED package (`tortoise.record_migrations`
+# -> `supabase/migrations`); `record_projection.table_columns()` reads those files
+# at runtime. Without the tree the editable install below fails
+# ("package directory 'supabase/migrations' does not exist").
+COPY supabase/migrations/ supabase/migrations/
 COPY pyproject.toml .
 # --no-deps on the editable install: dependencies come from the lock-pinned
 # requirements.txt above; extras resolve here once, at build time (#494).
