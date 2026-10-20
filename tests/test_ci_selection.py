@@ -20,6 +20,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -4753,6 +4754,83 @@ def test_slow_leg_bounds_clear_the_committed_work():
             f"the leg is killed mid-suite and the gate reds before pytest can "
             f"report. Re-derive the budget (and the outer cap above it) from "
             f"the committed `durations` map.")
+
+
+CI_RUNNER_GATE = Path(__file__).resolve().parents[1] / "scripts" / "ci_runner_gate.sh"
+CI_RUNNER_GATE_ABSENT = (
+    f"PRESMISE CROSS-CHECK NOT RUN: agent-infra's ci_runner_gate.sh is not "
+    f"reachable at {CI_RUNNER_GATE} (the `scripts` symlink dangles where "
+    f"$AGENT_INFRA_PATH is unset, as on a runner). The repo-side half of the "
+    f"guard — test-slow's label is VERSION-PINNED — ran and passed. Run this "
+    f"module on a host with $AGENT_INFRA_PATH set to verify that the gate still "
+    f"attaches only `ubuntu-latest`."
+)
+
+
+def test_slow_legs_are_pinned_off_the_ambiguous_runner_label():
+    """2026-10-19: `ubuntu-latest` is not "GitHub-hosted" on this repo.
+
+    `scripts/ci_runner_gate.sh` re-attaches `ubuntu-latest` to the self-hosted
+    ARM64 pool as a fallback, so `runs-on: ubuntu-latest` resolves to a ~2x
+    slower class run to run — and `test-slow` (the leg that IS the critical
+    path) was killed at its 40m watchdog on `pi-runner-vm-2` after executing
+    39.6 min of test time (run 39309984832, `rc=137`). The job then read 42.1m
+    and concluded `failure`, so this leg's wall became main's critical path
+    (`ci_crit_max=42.1m`, up from 22.6m) and the required aggregate red named a
+    KILL rather than a test verdict. (That run was ALSO red for independent,
+    genuine reasons — three fast shards on hosted runners failed real tests — so
+    the pin removes this kill and the critical-path inflation, not the run's
+    redness.)
+
+    The budget cannot absorb that class: 2x the leg would be >=79m against a
+    40m budget built at the `WATCHDOG_HEADROOM` floor, past both
+    `WATCHDOG_CEILING_MIN` and this job's 60m cap. So the leg is pinned to a
+    VERSION-PINNED hosted label (the pool claims `ubuntu-latest`, `self-hosted`,
+    `Linux`, `ARM64` and `self-hosted-arm64` — never `ubuntu-<version>`), the
+    same pin and the same reasoning as `workflow-lint` (#7867).
+
+    A bare `ubuntu-latest` here re-opens exactly that false red, so this reds
+    rather than relying on a comment nobody re-reads."""
+    job = _load_python_ci()["jobs"]["test-slow"]
+    runs_on = job["runs-on"]
+    assert runs_on != "ubuntu-latest", (
+        "test-slow must NOT use `ubuntu-latest`: the fallback gate re-attaches "
+        "that label to the self-hosted ARM64 pool, where this leg needs ~2x its "
+        "budget and is killed at the watchdog (measured: 39.6 min of test time, "
+        "rc=137, job 42.1m). Pin a version-pinned hosted label (`ubuntu-24.04`).")
+    assert isinstance(runs_on, str) and re.fullmatch(r"ubuntu-\d+\.\d+", runs_on), (
+        f"test-slow's runner label {runs_on!r} must be a VERSION-PINNED hosted "
+        f"label (`ubuntu-<version>`): `ubuntu-latest` is claimed by the "
+        f"self-hosted pool whenever the fallback is attached, and a label the "
+        f"pool claims puts this leg back on the class that cannot finish it.")
+
+    if not CI_RUNNER_GATE.exists():
+        # Announced, never silent: on every CI run the symlink dangles, so the
+        # repo-side half of this guard (a VERSION-PINNED label) is what runs there.
+        # The premise half is cross-checked wherever $AGENT_INFRA_PATH resolves —
+        # the repo's own RAIL_AVAILABLE pattern in test_pytest_attribution.py.
+        print(CI_RUNNER_GATE_ABSENT)
+        pytest.skip(CI_RUNNER_GATE_ABSENT)
+    gate = CI_RUNNER_GATE.read_text()
+    # The premise this pin rests on lives in ANOTHER repo's script, reached here
+    # through the tracked `scripts` symlink. Pinning a literal against an external,
+    # changeable fact with nothing asserting that fact is the "comment nobody
+    # re-reads" failure this test criticises: harden the gate to attach a
+    # VERSION-PINNED label instead of `ubuntu-latest` and this test would stay green
+    # while `test-slow` silently returned to the ARM64 pool.
+    fallback = re.search(r'^FALLBACK_LABEL="([^"]+)"', gate, re.MULTILINE)
+    pool = re.search(r'^POOL_LABEL="([^"]+)"', gate, re.MULTILINE)
+    assert fallback and pool, (
+        f"cannot read FALLBACK_LABEL/POOL_LABEL from {CI_RUNNER_GATE} — the "
+        f"premise of this pin is unverifiable, so this test must not pass by "
+        f"skipping it silently")
+    for label in (fallback.group(1), pool.group(1)):
+        assert not re.fullmatch(r"ubuntu-\d+\.\d+", label), (
+            f"ci_runner_gate.sh can attach {label!r} to the self-hosted pool, "
+            f"which is the VERSION-PINNED class test-slow is pinned to: the pin "
+            f"below no longer keeps this leg off the pool. Either the gate must "
+            f"stop attaching version-pinned labels, or test-slow needs a "
+            f"different isolation.")
 
 
 def test_carve_out_shard_bounds_clear_the_committed_work_without_dwarfing_it():
