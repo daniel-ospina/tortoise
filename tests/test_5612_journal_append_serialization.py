@@ -493,8 +493,6 @@ def test_the_append_resolves_the_journal_path_once(
     not one per lock per append (which is what the two locks did before the key
     was passed in).
     """
-    import types
-
     import tortoise.log as log_mod
 
     calls: list[str] = []
@@ -504,9 +502,34 @@ def test_the_append_resolves_the_journal_path_once(
         calls.append(os.fspath(value))
         return real_realpath(value, *args, **kwargs)
 
-    monkeypatch.setattr(log_mod, "os", types.SimpleNamespace(
-        fspath=os.fspath, realpath=spy,
-        path=types.SimpleNamespace(realpath=spy)))
+    class _PathProxy:
+        """``os.path`` with ``realpath`` spied on; everything else forwards."""
+
+        realpath = staticmethod(spy)
+
+        def __getattr__(self, name: str):
+            return getattr(os.path, name)
+
+    class _OsProxy:
+        """``os`` with ``realpath`` spied on; every other attribute forwards.
+
+        The spy is installed on BOTH spellings (``os.realpath``,
+        ``os.path.realpath``), because either may be the one the module calls.
+
+        A PROXY rather than a namespace enumerating the attributes the append
+        path happens to use: an enumerated one turns this test, which counts
+        `realpath` calls, into a tripwire for every new `os` call anywhere on
+        the append path — and its failure then says nothing about the count it
+        is meant to pin (#9190 hit exactly that).
+        """
+
+        realpath = staticmethod(spy)
+        path = _PathProxy()
+
+        def __getattr__(self, name: str):
+            return getattr(os, name)
+
+    monkeypatch.setattr(log_mod, "os", _OsProxy())
 
     path = tmp_path / "graph.jsonl"
     log = EventLog(path)

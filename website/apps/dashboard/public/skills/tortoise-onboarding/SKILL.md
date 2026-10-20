@@ -568,10 +568,24 @@ AND for the version read, the comparison and the rewrite, so a project that
 documents the markers keeps its documentation exactly as written and still gets
 its block created or refreshed.
 
-An UNCLOSED fence is the one ambiguity, and it is refused: the installer says
-`An UNTERMINATED code fence is hiding part of this file` and exits 3 without
-writing, because the markers below it cannot be told apart from an example.
-Close the fence and re-run.
+An UNCLOSED fence is refused only where it creates the ambiguity: when the marker
+state is MALFORMED the installer says `An UNTERMINATED code fence is hiding part
+of this file` and exits 3 without writing, because the markers below the fence
+cannot be told apart from an example. With NO markers at all there is nothing to
+disambiguate — the block is appended where the file ends, which is INSIDE the
+unclosed fence, so the installer warns (`AGENTS.md has an UNTERMINATED code
+fence`) instead of refusing, which would change what the pre-#3429 installer did.
+A block that already sits BELOW the open fence is in the same position as an
+append — it is replaced in place, inside the fence — so that case warns too. A
+clean pair ABOVE the open fence is the one case that does NOT warn: it is
+rewritten where it already sits and stays readable. A pair whose END marker sits
+BELOW the fence **straddles** it, and that is refused: the fence opens inside
+the block, so replacing the block would delete the fence line and quote its
+contents as live instructions. Nothing is written; close the fence or delete the
+stale block by hand. A read-only (`0444`) `AGENTS.md` is upgraded normally and
+kept read-only — the installer stages a writable copy and restores the mode — and
+if the mode cannot be read it refuses rather than rewrite the file with looser
+permissions. Close the fence before re-running.
 
 Never hand-edit inside markers you did not write; the next refresh discards it.
 

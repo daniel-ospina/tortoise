@@ -5155,6 +5155,122 @@ class TestEventReplay:
 
     # ── Tenant isolation ──────────────────────────────────────────────
 
+    def test_a_degraded_change_feed_is_503_not_a_bare_500(self, client,
+                                                        monkeypatch):
+        """#9208: the NAMED degraded state must survive the HTTP boundary.
+
+        `ChangeFeedDegraded` is a `RuntimeError`, so before this arm it escaped
+        to the catch-all handler as `500 {"detail": "Internal server error"}` —
+        stripping the graph name, the refusal and the remedy out of a state whose
+        whole purpose is to be readable by the feed's consumer. 503 is the honest
+        classification: the org's event store refused a write, so the request is
+        not the problem. The mutation itself still succeeds (the emit hook is
+        best-effort by contract), which is exactly why the poll must not answer
+        as if the stream were merely quiet.
+        """
+        from tortoise import event_store
+        from tortoise.projection import DirectCacheWriteRefused
+
+        def refuse(_proj):
+            raise DirectCacheWriteRefused(
+                "Refusing a mutating statement issued at the projection's write "
+                "handle (`proj.g`) ... statement=MERGE (m:GraphEventMeta) ...")
+
+        event_store.clear_degraded()
+        monkeypatch.setattr(event_store, "next_seq", refuse)
+        try:
+            r = client.post("/v1/points", json={
+                "content": "the feed write is refused",
+                "kind": "statement",
+            })
+            assert r.status_code == 200, r.text[:200]
+
+            r = client.get("/v1/events")
+            assert r.status_code == 503, r.text[:300]
+            detail = r.json()["detail"]
+            assert "DEGRADED" in detail
+            assert "DirectCacheWriteRefused" in detail, (
+                "the refusal that caused it must reach the consumer: "
+                f"{detail[:300]}")
+            assert "clear_degraded" in detail
+        finally:
+            monkeypatch.undo()
+            event_store.clear_degraded()
+
+    def test_a_degraded_feed_is_reported_by_health_without_folding_status(
+            self, client, monkeypatch):
+        """#9208: the state must be FINDABLE from outside, and must not be able
+        to restart-loop the one worker that can acknowledge it.
+
+        The degraded state is process memory whose only acknowledgement is a
+        Python call inside the process that holds it, so without a report on
+        ``/health`` an operator sees a permanent 503 on ``GET /v1/events`` for one
+        tenant and nothing anywhere that says why or which worker. This pins the
+        report:
+
+        * ``change_feed.degraded`` flips on the refusal and names the STAGE
+          counts (not the graph — ``/health`` is unauthenticated and tenant graph
+          names are not ours to publish);
+        * ``status`` is UNCHANGED by it. ``db``/``backup_watcher`` answer "can
+          this process serve"; folding one tenant's refused store write into
+          ``status`` would fail a deploy's health check and restart the worker
+          that holds the only acknowledgement path.
+        """
+        import json as _json
+
+        from tortoise import event_store
+        from tortoise.projection import DirectCacheWriteRefused
+
+        def refuse(_proj):
+            raise DirectCacheWriteRefused(
+                "Refusing a mutating statement issued at the projection's write "
+                "handle (`proj.g`) ... statement=MERGE (m:GraphEventMeta) ...")
+
+        event_store.clear_degraded()
+        before = client.get("/health")
+        assert before.status_code == 200, before.text[:300]
+        before_body = before.json()
+        assert before_body["change_feed"]["degraded"] is False, (
+            "a healthy process must not report a degraded feed")
+
+        monkeypatch.setattr(event_store, "next_seq", refuse)
+        try:
+            r = client.post("/v1/points", json={
+                "content": "the feed write is refused",
+                "kind": "statement",
+            })
+            assert r.status_code == 200, r.text[:200]
+
+            # Hold the OTHER two inputs of `status` green for the fold check:
+            # the ambient probe/watcher values move between calls in this
+            # fixture, and the claim under test is the COMPOSITION (does a
+            # degraded feed reach `status`?), not the deployment's health.
+            monkeypatch.setattr(_ha_mod._HEALTH_PROBE, "snapshot",
+                                lambda: {"ok": True, "latency_ms": 0.0,
+                                         "error": None})
+            monkeypatch.setattr(_ha_mod, "_backup_watcher_health",
+                                lambda: {"state": "running", "ok": True,
+                                         "error": None, "expected": True})
+
+            body = client.get("/health").json()
+            feed = body["change_feed"]
+            assert feed["degraded"] is True, feed
+            assert feed["feeds"] == 1, feed
+            assert feed["stages"] == [{"stage": "emit", "feeds": 1}], feed
+            assert body["status"] == "ok", (
+                "a degraded feed must not fold into `status` (db and watcher "
+                f"are green here): {body['status']!r}")
+
+            graph = event_store.degraded_graphs()[0]["graph"]
+            assert graph and graph not in _json.dumps(feed), (
+                "`/health` is unauthenticated — it must report the state "
+                "without publishing a tenant's graph name")
+        finally:
+            monkeypatch.undo()
+            event_store.clear_degraded()
+
+        assert client.get("/health").json()["change_feed"]["degraded"] is False
+
     def test_tenant_cannot_see_other_team_events(self, client):
         """Team A cannot see team B's events — trust boundary.
         #432: team scoping is via graph namespace, not a org_id property."""

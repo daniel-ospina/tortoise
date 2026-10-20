@@ -66,7 +66,9 @@ door                    why it cannot route today                    disposition
 ``connectors/slack``    same                                        **DOCUMENTED**
 ``connectors`` webhooks  dead branch: no production caller of        **DOCUMENTED** (no caller)
                         ``start_webhook``; only a test double
-                        defines ``get_proj``
+                        defines ``get_proj``. #9068 named the write
+                        step ``_fold_webhook_event`` (gate, then
+                        fold) so this inventory sees it by name.
 ======================  ==========================================  ==================
 
 The `connectors/*.ingest` class is the one that would need a
@@ -190,13 +192,17 @@ _DOORS: dict[tuple[str, str], tuple[str, int]] = {
     # `exempt:no-production-caller`)
     ("tortoise/connectors/github.py", "GitHubConnector.ingest"):
         ("exempt:no-journal-handle", 4),
-    ("tortoise/connectors/github.py", "GitHubConnector.start_webhook.Handler.do_POST"):
+    # #9068: the handler's write step is now ONE named method (gate, then
+    # fold) instead of an inline `.apply` inside the nested `do_POST`, so this
+    # inventory sees the door by NAME — and the gate it starts with is what
+    # #9068 added in front of it. Same exemption: no production caller.
+    ("tortoise/connectors/github.py", "GitHubConnector._fold_webhook_event"):
         ("exempt:no-production-caller", 1),
     ("tortoise/connectors/linear.py", "LinearConnector.ingest"):
         ("exempt:no-journal-handle", 1),
     ("tortoise/connectors/slack.py", "SlackConnector.ingest"):
         ("exempt:no-journal-handle", 1),
-    ("tortoise/connectors/slack.py", "SlackConnector.start_webhook.Handler.do_POST"):
+    ("tortoise/connectors/slack.py", "SlackConnector._fold_webhook_event"):
         ("exempt:no-production-caller", 1),
 
     # ── EXEMPT: HISTORICAL ONE-SHOT SCRIPT (outside `tortoise/`) ──────────
@@ -884,19 +890,27 @@ def _seed_legacy_created(proj, rec: dict) -> None:
     A pre-fix binary wrote this node through the raw graph handle with no
     journal bound, so `_seed_legacy_created` issues the equivalent raw write.
     It cannot use `proj.apply` any more: §17.1's guard (this lane) refuses a
-    direct fold on a journal-backed projection — which is the point, and the
-    raw handle it uses instead is the surface that guard does not yet cover
-    (recorded as still-open on #7951). The thing under test here — the
-    backfill's JOURNALING — is unaffected by which path seeded the node.
+    direct fold on a journal-backed projection — which is the point. Since
+    #9124 the raw handle is closed too (§17.1's THIRD door), so seeding a
+    PRE-FIX node now has to declare itself for what it is: a fixture emulating
+    state an older binary produced, not a live writer. `_replay_write_scope()`
+    is that declaration — it names "this content came from the record", which
+    is exactly the pre-fix node's status here (it is the legacy row the
+    backfill is about to journal). Declaring it keeps this helper from
+    re-opening the hole the suite exists to keep shut, and the thing under test
+    — the backfill's JOURNALING — is unaffected by which path seeded the node.
     """
-    proj.g.query(
-        "CREATE (e:Event {eventId:$eventId, eventKind:$eventKind, "
-        "subject:$subject, object:$object, startedAt:$startedAt, "
-        "endedAt:$endedAt, source:$source, sourceKind:$sourceKind})",
-        params={k: rec[k] for k in (
-            "eventId", "eventKind", "subject", "object",
-            "startedAt", "endedAt", "source", "sourceKind")},
-    )
+    from tortoise.projection import _replay_write_scope
+
+    with _replay_write_scope():
+        proj.g.query(
+            "CREATE (e:Event {eventId:$eventId, eventKind:$eventKind, "
+            "subject:$subject, object:$object, startedAt:$startedAt, "
+            "endedAt:$endedAt, source:$source, sourceKind:$sourceKind})",
+            params={k: rec[k] for k in (
+                "eventId", "eventKind", "subject", "object",
+                "startedAt", "endedAt", "source", "sourceKind")},
+        )
 
 
 def test_indexer_sdk_less_fallback_fails_closed_on_a_journal_backed_projection(

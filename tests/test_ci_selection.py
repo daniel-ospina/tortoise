@@ -2014,28 +2014,46 @@ def test_write_op_reachability_guard_runs_on_every_surface_it_pins():
     assert "test_write_op_reachability.py" in r["test_files"], r
 
 
-def test_orchestrator_harness_change_selects_core_not_tier1():
-    # operations/orchestrator-harness/*.sh own tests/test_orchestrator_harness.py
-    # (`core`): the shipped-block pins for lane.sh's heredoc, merged-not-closed.sh's
-    # paged enumeration, refresh-candidates.sh's pool/checked contract and
-    # orch-loop.sh's P0 merge-priority override.
+def test_retired_orchestrator_harness_selects_its_retained_guards():
+    # RETIRED 2026-10-19. The harness moved to agent-infra/scripts/orchestrator-harness/
+    # (single source of truth) and tests/test_orchestrator_harness.py was retired WITH the
+    # copy it drove.
     #
-    # #8469 review P1: `operations/` is a flat NON_PYTHON_PREFIXES entry and no
-    # SOURCE_PATTERNS row matches the harness scripts, so an operations-only diff
-    # came back with `changed == []` and took the docs-only early return — the
-    # guard never ran on the file it guards. Registering the test under `core` is
-    # NOT sufficient: a name in a surface's test_files only runs when that surface
-    # is already selected, and an operations-only diff selects none.
+    # The directory is NOT a dead path, though: two scripts are retained because their fixes are
+    # UNPORTED (`merge-one.sh` — #8484/#8602/#8612; `merged-not-closed.sh` — no landed copy
+    # anywhere, agent-infra#2160 is still open), and they carry hermetic guards of their own
+    # (tests/test_orchestrator_harness_retained.py), as does the guard that keeps the rest
+    # retired (tests/test_harness_pointer_guard.py for tools/check-harness-fork.sh).
     #
-    # Measured before the CORE_ALSO entry: `_sel(["operations/orchestrator-harness/
-    # lane.sh"])` -> surfaces=[], full=False, test_files 33, harness test absent.
-    # CORE_ALSO (not TOOL_CARVEOUTS) is the deliberate choice: the suite is
-    # hermetic and sub-second, so selecting `core` runs it at the lowest CI cost.
-    # Mutation check: removing the CORE_ALSO entry fails assert 1 below.
-    r = _sel(["operations/orchestrator-harness/merged-not-closed.sh"])
+    # Both must run on a change to their subject. `operations/` and `tools/` are flat
+    # NON_PYTHON_PREFIXES entries and no SOURCE_PATTERNS row matches either path, so without the
+    # CORE_ALSO entries an operations-only or tools-only diff came back with `changed == []`, took
+    # the docs-only early return and ran NO surface — the #1349/#3332/#3616 silent-drop class (the
+    # guard would not run on the PR that weakens the guard). A name in a surface's test_files is
+    # NOT sufficient: it only runs when the surface is already selected.
+    #
+    # Mutation check: removing either CORE_ALSO entry restores `surfaces=[]` and reds these asserts.
+    r = _sel(["operations/orchestrator-harness/lane.sh"])
     assert "core" in r["surfaces"], r
-    assert "test_orchestrator_harness.py" in r["test_files"], r
+    assert "test_orchestrator_harness_retained.py" in r["test_files"], r
+    # ⛔ The RETIRED suite must not come back with it: a stale registration schedules a file that
+    # no longer exists and hides the retirement from anyone reading the map.
+    assert "test_orchestrator_harness.py" not in r["test_files"], r
+    # ⛔ `full` MUST STAY FALSE (review finding): a change under this path must not start forcing
+    # a full run — that would be a heavy, silent regression from a retirement. Pinning it makes
+    # this "deliberately retired" rather than "path dropped".
     assert r["full"] is False, r
+
+    # The guard's own path: same class, same requirement.
+    g = _sel(["tools/check-harness-fork.sh"])
+    assert "core" in g["surfaces"], g
+    assert "test_harness_pointer_guard.py" in g["test_files"], g
+    assert g["full"] is False, g
+
+    # The pointer README is a docs change: still no harness suite, still not a full run.
+    r2 = _sel(["operations/orchestrator-harness/README.md"])
+    assert "test_orchestrator_harness.py" not in r2["test_files"], r2
+    assert r2["full"] is False, r2
 
 
 def test_queue_dispatch_and_fleet_state_change_select_core_not_tier1():

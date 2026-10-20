@@ -585,6 +585,46 @@ _KIND_PROP_KEYS: tuple[str, ...] = (
 #:   test on those keys (#5202) in place first.
 _ATTRIBUTABLE_BARE_KIND_KEYS: tuple[str, ...] = ("eventKind",)
 
+#: The labels that may carry an ONTOLOGY kind (#9068).
+#:
+#: Seven of the eight keys in ``_KIND_PROP_KEYS`` need no such guard: they are
+#: SPELLED in the ontology's own vocabulary (``objectKind``, ``pointKind``,
+#: ``eventKind``, ``sourceKind``, ``documentKind``, ``subjectKind``,
+#: ``actionKind``), so a value under one of them can only have been written as
+#: an ontology kind. The bare ``kind`` key is different: ``kind`` is a generic
+#: classification slot that OTHER models in the same graph own for their own
+#: identity, and each owns it differently: ``:Pipeline`` writes a NAMESPACED
+#: string into it (``pipeline._write_pipeline`` stores the pipeline KEY, and
+#: pipeline keys are namespaced by convention: ``venture:deal``), while
+#: ``:Graph`` owns the slot with a package-independent value of its own
+#: (``'default'`` / ``'custom'``, e.g. ``sdk._graph_create`` and
+#: ``hosted_api``). Either way the slot is not ontology-owned, so a mining pass
+#: must not read an ontology kind out of it on those labels.
+#:
+#: Reading ``kind`` off those labels CONFLATED a pipeline key with an ontology
+#: kind: materialising a graph override for ``venture:deal`` put ``venture``
+#: into the graph's approved pack set (measured, #9068) — an ungated live write
+#: widening the very set that is supposed to gate it. The conflation is the
+#: defect, not the pipeline write: gating ``pipeline.py`` instead would start
+#: refusing legitimate pipeline edits (the key IS a real namespaced pipeline
+#: name, not a pack kind), so the mining leg is what stops guessing.
+#:
+#: ``Document`` is the retired D10 label (a document is a ``:Source`` now); it
+#: is listed because a dump restored from a pre-v3.15 export can still hold
+#: ``:Document`` nodes whose legacy ``kind`` values belong to the union.
+_ONTOLOGY_LABELS: tuple[str, ...] = (
+    "Object", "Point", "Event", "Subject", "Source", "Document",
+)
+
+#: Of ``_KIND_PROP_KEYS``, the keys read ONLY off ``_ONTOLOGY_LABELS`` (#9068).
+#: Exactly one — see ``_ONTOLOGY_LABELS`` for why the other seven need no
+#: scope. Adding a GENERIC-spelling key here is a widening guard, never a
+#: compatibility break: a value it stops seeing on a foreign label was never
+#: an ontology kind (the direction is narrowing, the same direction every
+#: other leg of the union fails in).
+_LABEL_SCOPED_KIND_KEYS: tuple[str, ...] = ("kind",)
+
+
 def bare_event_kind_owners(packs_dir: str | os.PathLike | None = None
                            ) -> dict[str, frozenset[str]]:
     """``{bare event kind: the namespaces declaring it}``, from the catalog.
@@ -684,6 +724,28 @@ def graph_kind_namespaces(g) -> frozenset[str]:
     of the write gate admits names no pack, and a bare value no pack declares
     names nothing at all.
 
+    The bare ``kind`` property is read only off the ONTOLOGY labels
+    (``_ONTOLOGY_LABELS`` / ``_LABEL_SCOPED_KIND_KEYS``, #9068): ``kind`` is a
+    generic slot that ``:Pipeline`` (the pipeline key) and ``:Graph``
+    (``kind='default'``) also own, so reading it label-agnostically turned a
+    pipeline key into a pack namespace — an ungated live write widening the
+    approval set. The seven qualified keys stay label-agnostic: their SPELLING
+    is the ontology's.
+
+    Writers this function deliberately does not gate, stated so a reader does
+    not take "the write path is closed" literally (#9068):
+
+    * ``rebuild_all`` / ``recover_from_log`` fold a record that came FROM the
+      journal — refusing at replay would make a committed record unfoldable,
+      strictly worse than the widening;
+    * ``retype.py`` / ``tools/retype_snapshot.py`` transform an OFFLINE dump
+      and never touch a live graph (they validate the target kind against the
+      declared vocabulary instead — ``RetypeError``);
+    * ``migrate_kinds.py`` is a deliberate, operator-run re-typing of the
+      graph's own historical rows: it is the SANCTIONED way to introduce a
+      pack namespace into data written before the pack existed, so its
+      ``SET n.<kindProp>`` is a widening BY DESIGN (see its docstring).
+
     ⚠️ COST: one property scan per key (8) — a whole-graph read. The
     caller's memo does NOT shelter it: ``tenant_view`` folds the approval set
     into its cache key, so the scan runs on every call (measured ~6 ms at
@@ -712,10 +774,20 @@ def graph_kind_namespaces(g) -> frozenset[str]:
     """
     out: set[str] = set()
     bare_attributable: set[str] = set()
+    # #9068: the label scope is a CONSTANT predicate built once, not a per-key
+    # f-string branch — it is the same six labels for every scoped key, and a
+    # predicate assembled per call could drift between keys.
+    ontology_scope = "(" + " OR ".join(
+        f"n:{label}" for label in _ONTOLOGY_LABELS) + ")"
     for key in _KIND_PROP_KEYS:
+        # The generic-spelling keys are read ONLY off the ontology labels;
+        # the qualified ones keep the label-agnostic scan because their
+        # spelling is the ontology's own (`_LABEL_SCOPED_KIND_KEYS`).
+        label_predicate = (
+            f"{ontology_scope} AND " if key in _LABEL_SCOPED_KIND_KEYS else "")
         try:
             rows = g.query(
-                f"MATCH (n) WHERE n.{key} IS NOT NULL "
+                f"MATCH (n) WHERE {label_predicate}n.{key} IS NOT NULL "
                 f"RETURN DISTINCT n.{key}",
             ).result_set
         except Exception as e:  # noqa: BLE001, RUF100

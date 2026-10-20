@@ -128,8 +128,42 @@ def test_coverage_reddens_when_a_served_label_loses_its_index(kind) -> None:
         _assert_covered(SERVED_LABELS, indexed - {victim}, kind)
 
 
+def _ddl_body():
+    """The class member that actually ISSUES ``_ensure_indexes``' DDL.
+
+    ⛔ #9124 SPLIT THE BODY OUT OF THE NAME THESE ORACLES READ. `_ensure_indexes`
+    became a two-line delegator (`with _graph_metadata_write_scope("schema-ddl"):
+    self._ensure_indexes_declared()`) and the DDL sweep moved to
+    `_ensure_indexes_declared`, so `inspect.getsource(FalkorProjection._ensure_indexes)`
+    returned a wrapper holding no statements and all three oracles below measured
+    nothing (measured: 3 failed here, in a file that PR did not touch).
+
+    The delegation is FOLLOWED rather than hard-coded to the private name, so the
+    next split cannot silently re-empty these oracles: if the public method's own
+    body carries no `CREATE INDEX`, the first method it calls that DOES is the DDL
+    body. An unresolvable move raises instead of degrading to an empty set.
+    """
+    source = textwrap.dedent(inspect.getsource(FalkorProjection._ensure_indexes))
+    if "CREATE INDEX" in source:
+        return FalkorProjection._ensure_indexes
+    for match in re.finditer(r"self\.(_\w+)\(", source):
+        candidate = getattr(FalkorProjection, match.group(1), None)
+        if candidate is None or not callable(candidate):
+            continue
+        try:
+            body = textwrap.dedent(inspect.getsource(candidate))
+        except (OSError, TypeError):  # pragma: no cover — defensive
+            continue
+        if "CREATE INDEX" in body:
+            return candidate
+    raise AssertionError(
+        "could not find the method that issues `_ensure_indexes`' CREATE INDEX "
+        "statements — the DDL body moved and these oracles are reading the "
+        "wrapper, so every coverage assertion in this suite would be vacuous")
+
+
 def _ensure_indexes_tree() -> ast.AST:
-    source = inspect.getsource(FalkorProjection._ensure_indexes)
+    source = inspect.getsource(_ddl_body())
     return ast.parse(textwrap.dedent(source))
 
 
@@ -267,7 +301,7 @@ def _range_ddl_labels() -> frozenset:
     the literal labels of every standalone ``CREATE INDEX FOR (...:Label)``
     statement in the body (the two ``:Session`` keys today).
     """
-    source = inspect.getsource(FalkorProjection._ensure_indexes)
+    source = inspect.getsource(_ddl_body())
     declared = ({_POINT_RANGE_INDEX_LABEL}
                 | {label for label, _ in _RANGE_INDEX_LABEL_PROPS})
     literal = set(re.findall(
@@ -282,7 +316,7 @@ def _docstring_range_bullet() -> str:
     FULL-TEXT bullet names ``Subject``/``Object``/``Event``/``Source`` too —
     cannot satisfy a RANGE enumeration claim.
     """
-    doc = inspect.getdoc(FalkorProjection._ensure_indexes) or ""
+    doc = inspect.getdoc(_ddl_body()) or ""
     for chunk in re.split(r"\n\s*\*\s+", doc):
         if chunk.lstrip().startswith("RANGE"):
             return chunk

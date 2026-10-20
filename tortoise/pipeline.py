@@ -504,6 +504,19 @@ def _touch_pipeline(graph, pipeline_key: str, *, actor: str = "") -> None:
 
 
 def _write_pipeline(graph, pipe: Pipeline, *, actor: str = "") -> None:
+    # ⚠️ `p.kind` is the pipeline KEY, not an ontology kind (#9068). It looks
+    # like a widening write — the key is namespaced by convention
+    # (`venture:deal`) and `kind` is one of the properties
+    # `pack_state.graph_kind_namespaces` mines the graph's approved pack set
+    # from — and it WAS one: before #9068 the mining leg read `kind` off any
+    # label, so materialising this override put `venture` into a graph that
+    # never approved that pack (measured: `['dev'] -> ['dev', 'venture']`).
+    # The fix is in the READER (`pack_state._LABEL_SCOPED_KIND_KEYS`: the bare
+    # `kind` slot is read only off ontology labels, and a `:Pipeline` is not
+    # one), NOT here: gating this write instead would start refusing
+    # legitimate pipeline edits, because a namespaced pipeline key is a real
+    # pipeline name and not a pack kind. Renaming the property would be a
+    # pipeline-model change (every stored override carries it).
     graph.query(
         "MERGE (p:Pipeline {pipelineKey:$k}) "
         "SET p.kind=$kind, p.defaultStageId=$defaultStageId, p.source=$source, "
