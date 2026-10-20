@@ -493,15 +493,14 @@ class ConversationMiner:
             # too: it reaches this method when a caller passes ``""`` or when
             # the frontmatter carries an empty ``startedAt`` (``date or
             # startedAt`` yields None for a MISSING date, but an empty
-            # ``startedAt`` survives the ``or``). Stamping it would write
-            # ``validFrom=""`` — a bound ``_covers`` cannot order against any
-            # PARSEABLE query instant, so the point is invisible to every
-            # normal ``get_historical_knowledge`` query. Precisely: it is hidden from
-            # parseable queries only — an unparseable ``at_date`` still matches
-            # it by lexicographic accident, the same boundary ``sdk.py``
-            # records on its read path. ``""`` is neither absent nor a start,
-            # so it is strictly worse than the wall clock this fallback
-            # replaced (#3654).
+            # ``startedAt`` survives the ``or``). ``""`` is neither absent nor
+            # a start, and since the #6140 ruling the read path READS it as an
+            # open start — i.e. it says the same thing as absent, but less
+            # honestly: it stores a value that names no instant, so every
+            # reader has to know the ruling to get the same answer, and the
+            # write boundary warns about it. Store ``None``: the open start
+            # WITHOUT the valueless datum. It is strictly better than the wall
+            # clock this fallback replaced (#3654).
             vf = None
         elif hasattr(session_date, "isoformat"):
             # YAML frontmatter dates arrive as datetime.date/datetime objects
@@ -510,11 +509,12 @@ class ConversationMiner:
         else:
             # STRIP, don't just test the stripped form. Undated-ness above is
             # decided on `str(...).strip()`, so storing it unstripped would
-            # write `" 2026-07-01"` — an unorderable bound `_covers` cannot
-            # match against any parseable query instant, hiding the point from
-            # every normal `get_historical_knowledge` query, i.e. the same harm as the
-            # `""` case above. Whitespace carries no meaning around an ISO
-            # instant.
+            # write `" 2026-07-01"` — a value that names no instant, which the
+            # read path now treats as NO START RECORDED (an OPEN start, the
+            # #6140 ruling) rather than as the date the caller meant. So the
+            # harm is not invisibility: it is that a DATED session silently
+            # becomes an undated one. Whitespace carries no meaning around an
+            # ISO instant.
             vf = str(session_date).strip()
         report = {"wired_nand": 0, "candidates": 0, "replacement_candidates": 0}
         wired_pairs: set[tuple[str, str]] = set()  # (newer, older) — one NAND per pair

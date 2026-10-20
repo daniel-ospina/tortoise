@@ -386,23 +386,21 @@ def test_supersede_falsey_but_present_stored_valid_from_refused(sdk):
     """The guard's PRESENCE predicate is the read path's, not the resolution
     branch's truthiness.
 
-    ``_covers`` gates on ``vf is not None``, so a falsey-but-present stored
-    ``validFrom`` is a real window start there: ``0`` keys as the parseable
-    epoch-0 instant and ``""`` keys as an unparseable start that covers no
-    PARSEABLE instant (an unparseable query instant, by contrast, is covered —
-    see the bullet below). The two forms fail DIFFERENTLY, and both are refused:
+    ``_covers`` gates its start on presence AND orderability, so a
+    falsey-but-present stored ``validFrom`` is a real window start there only
+    when it NAMES an instant: ``0`` keys as the parseable epoch-0 instant,
+    while ``""`` names no instant at all and is, since the #6140 ruling, an OPEN
+    start. The two forms fail DIFFERENTLY, and both are refused:
 
       * ``0`` — trusting the kwarg wrote a predecessor ``validTo`` INSIDE the
         successor's ``[epoch-0, ∞)`` window ⇒ ``ambiguous`` (the overlap this
         guard exists to prevent).
-      * ``""`` — the read path treats the start as present but unorderable, so
-        the successor covers no PARSEABLE query instant (every such instant
-        lands in the predecessor's window end instead), and trusting the kwarg
-        leaves the successor unreachable for those queries rather than
-        visibly overlapping. An unparseable query instant, by contrast, keys
-        as ``(1, <text>)`` and IS covered by it. Refused fail-closed because
-        the write path and ``_covers`` would silently diverge on it — not
-        because of an overlap.
+      * ``""`` — the successor's window is open below, so it covers EVERY
+        instant and the dated kwarg contradicts it outright (there is no
+        instant the kwarg could name that the stored value agrees with). The
+        refusal is the #3980 agreement guard doing its job: two spellings of the
+        successor's start that disagree about whether it has one are a
+        contradiction, not a window that needs ordering.
     """
     old = _make_point(sdk, content="claim v1", validFrom="2026-06-01")
     # epoch-0: present AND parseable to the read path
@@ -542,9 +540,13 @@ def test_supersede_no_kwarg_unparseable_stored_start_is_normalised(sdk):
 
     # The harm, measured on the read path: the predecessor must NOT be treated
     # as covering an instant after its own end. The probe is RELATIVE — see
-    # ``_future_instant``.
+    # ``_future_instant``. The SUCCESSOR does cover it, deliberately: its start
+    # names no instant, so under the #6140 ruling it is an OPEN start and the
+    # window is unbounded below. What must never happen is the PREDECESSOR
+    # answering here — that is the unbounded end #5360 closed.
     out = sdk.get_historical_knowledge(new["id"], _future_instant())
-    assert out["found"] is False, (
+    assert out["found"] is True
+    assert out["valid_point"]["id"] == new["id"], (
         "the predecessor covered a later instant — its end is still unbounded"
     )
 
@@ -748,7 +750,8 @@ def test_restore_ambiguous_overlapping_windows(sdk):
 
 def test_restore_read_path_treats_falsey_but_present_valid_from_as_present(sdk):
     """Pins the READ-path premise the write-path guard is built on: ``_covers``
-    gates on presence (``vf is not None``), NOT on truthiness.
+    gates its START bound on PRESENCE (``vf is not None``) **and ORDERABILITY**
+    — an unorderable start is not a bound at all (the #6140 ruling).
 
     Both halves below bypass the guard by hand-planting the stamps, so they
     measure `get_historical_knowledge` rather than `supersede_point`:
@@ -758,17 +761,25 @@ def test_restore_read_path_treats_falsey_but_present_valid_from_as_present(sdk):
         is covered by BOTH ⇒ ``ambiguous``. This half pins that a
         falsey-but-present start is a real WINDOW BOUND (so the guard is
         necessary for this form), and that trusting the kwarg here produces a
-        visible overlap — it does NOT discriminate presence from truthiness
-        (a truthiness predicate would drop the start, leave the window
-        ``(-∞, ∞)``, and still return ``ambiguous``); part (b) does.
+        visible overlap. It does NOT discriminate presence from truthiness (a
+        truthiness predicate would drop the start, leave the window
+        ``(-∞, ∞)``, and still return ``ambiguous``). Post-#6140 NEITHER part
+        discriminates truthiness from presence: part (b) pins the RULING
+        instead (it fails on the pre-ruling code).
       * successor ``validFrom = ""`` — unparseable to ``_created_sort_key``
-        (``(1, "")``) and never ordered below a parseable key ⇒ the successor
-        covers no PARSEABLE query instant (``2026-06-15`` lands in the
-        predecessor instead). Presence still bites: under a truthiness
-        predicate ``""`` would be skipped and the successor WOULD cover that
-        parseable instant too, flipping the verdict to ``ambiguous``. An
-        unparseable query instant is covered either way — it keys as
-        ``(1, <text>)``, which ``(1, "")`` is never greater than.
+        (``(1, "")``). **#6140, owner ruling 2026-10-11 ("A and C"), reading
+        A: a start that names no instant means NO START WAS RECORDED, so the
+        window is OPEN BELOW and the successor covers ``2026-06-15`` too ⇒
+        ``ambiguous``, not a silent single answer.** Before the ruling the
+        read path gated on presence ALONE and then ordered the value, so
+        ``(1, "")`` sorted after every parseable instant and the successor
+        covered NOTHING — the predecessor came back alone, and a claim
+        genuinely in force read as absent from a dated query. Part (b) now
+        pins the ruling instead: the overlap is reported, never hidden.
+
+    An unparseable QUERY instant is a separate matter and unchanged: it keys
+    as ``(1, <text>)``, which the predecessor's parseable end
+    (``2026-06-20``) is strictly below, so only the successor covers it.
     """
     # (a) validFrom = 0 → a real window start ⇒ overlap ⇒ ambiguous
     old = _make_point(sdk, content="zero v1", validFrom="2026-06-01")
@@ -784,7 +795,8 @@ def test_restore_read_path_treats_falsey_but_present_valid_from_as_present(sdk):
     assert out.get("ambiguous") is True
     assert len(out["candidates"]) == 2
 
-    # (b) validFrom = "" → present but unorderable ⇒ covers no PARSEABLE instant
+    # (b) validFrom = "" → no start recorded ⇒ OPEN below (#6140 reading A), so
+    # the successor covers the parseable instant TOO ⇒ the overlap is reported.
     old2 = _make_point(sdk, content="empty v1", validFrom="2026-06-01")
     new_empty = _make_point(sdk, content="empty v2", validFrom="")
     sdk._get_proj().g.query(
@@ -795,16 +807,194 @@ def test_restore_read_path_treats_falsey_but_present_valid_from_as_present(sdk):
         "n.validTo='2026-06-20'",
         params={"id": old2["id"]})
     out2 = sdk.get_historical_knowledge(new_empty["id"], "2026-06-15")
-    assert out2.get("ambiguous") is not True
+    assert out2.get("ambiguous") is True, (
+        "the unorderable start was still treated as a LOWER BOUND — the #6140 "
+        f"ruling makes the window OPEN below: {out2}"
+    )
     assert out2["found"] is True
-    assert out2["valid_point"]["id"] == old2["id"]
-    # … but only for PARSEABLE instants: an unparseable query keys as
-    # `(1, <text>)`, which the successor's `(1, "")` is NOT greater than, so
-    # the `""` successor itself DOES cover it.
+    assert {c["id"] for c in out2["candidates"]} == {
+        new_empty["id"], old2["id"]}
+    # CONTROL, unchanged by the ruling: an UNPARSEABLE query instant keys as
+    # `(1, <text>)`, above the predecessor's parseable end (2026-06-20), so only
+    # the successor covers it. It passes on the PRE-ruling code too — the
+    # discriminating assertion above is `ambiguous is True`.
     out2b = sdk.get_historical_knowledge(new_empty["id"], "zzz")
     assert out2b.get("ambiguous") is not True
     assert out2b["found"] is True
     assert out2b["valid_point"]["id"] == new_empty["id"]
+
+
+def test_a_start_naming_no_instant_leaves_the_window_open(sdk):
+    """#6140 — the OWNER RULING (2026-10-11): *"A and C (c should be a warning)"*.
+
+    A stored ``validFrom`` that names NO INSTANT — ``""`` (this issue) and
+    ``"not-a-date"`` (the #5360 sibling shape) alike — means **no start was
+    recorded**, so (reading A) the window is OPEN BELOW: the point covers every
+    query instant, including instants before it was written. ONTOLOGY §4.7
+    already forbids inventing a start from the write clock, and the read path
+    must not invent a *lower bound* from an unorderable value either.
+
+    Before the ruling ``_covers`` gated the start on PRESENCE alone
+    (``vf is not None``) and ordered it, so an unparseable start keyed
+    ``(1, <text>)`` — after every parseable instant — and the point covered
+    **nothing**: a dated query answered ``absent`` for a claim that is genuinely
+    in force. That is the defect: the same record behaved differently depending
+    on which half you asked.
+
+    Discriminating: on the unfixed code this point reports ``status="absent"``.
+    The open-END side is deliberately NOT touched here, and it is NOT flagged
+    either: a present-but-unparseable ``validTo`` covers every later instant and
+    still reads ``end_state: "known"`` (``END_UNKNOWN`` needs an ABSENT end plus
+    an ``"unknown"`` declaration), tracked on #9202.
+    """
+    empty = _make_point(sdk, content="start recorded as empty", validFrom="")
+    assert _props(sdk, empty["id"])["validFrom"] == ""
+
+    out = sdk.get_historical_knowledge(empty["id"], "2026-06-15")
+    assert out["found"] is True, (
+        "a start that names no instant hid the point from a dated query — "
+        f"the #6140 (A) reading is OPEN, not absent: {out}"
+    )
+    assert out["status"] == "found"
+    assert out["valid_point"]["id"] == empty["id"]
+
+    # The same reading for the truthy-but-unorderable shape, which reaches the
+    # graph through the same `create_point` props passthrough.
+    other = _make_point(sdk, content="start recorded as TBD", validFrom="TBD")
+    out2 = sdk.get_historical_knowledge(other["id"], "2026-06-15")
+    assert out2["found"] is True
+    assert out2["valid_point"]["id"] == other["id"]
+
+    # The REVIEW-side annotation mirrors the same gate: an absent reply whose
+    # window ends BEFORE the probe still gets a `nearest` answer, because the
+    # unparseable start is not a candidate arm any more. Before the ruling the
+    # start arm was taken, yielded no distance, and the entry was dropped from
+    # `nearest` even though its end distance was computable.
+    old = _make_point(sdk, content="empty start, dated end")
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.validFrom='', n.validTo='2026-01-01'",
+        params={"id": old["id"]})
+    absent = sdk.get_historical_knowledge(old["id"], "2027-01-01")
+    assert absent["found"] is False
+    assert absent.get("nearest", {}).get("id") == old["id"], (
+        "the end distance is computable, so the nearest-window annotation must "
+        f"survive an unparseable start: {absent}"
+    )
+
+
+def test_an_unorderable_valid_from_warns_at_the_write_boundary(sdk, caplog):
+    """#6140 — option C, softened by the owner's ruling: **a warning**.
+
+    *"A and C (c should be a warning)"* — an empty/unparseable start must not
+    be refused (that would make a legacy point impossible to supersede until
+    its window was repaired), and it must not be silent either. The write
+    boundary says which reading is in force, so an operator who stored the value
+    by accident can find it.
+
+    The warning is emitted from ``sdk._refuse_inverted_point_window``, the
+    write boundary ``create_point`` / ``update_point`` route through, so it
+    names the value the CALLER just supplied rather than a bound merged in from
+    the stored opposite side (an unrelated update of a legacy point must not
+    re-warn about a value nobody wrote).
+
+    A legal undated point (no ``validFrom`` at all) must stay SILENT: undated is
+    the documented common case, not a mistake.
+    """
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+        _make_point(sdk, content="empty start warns", validFrom="")
+    warned = [r for r in caplog.records if "no instant" in r.getMessage()]
+    assert warned, (
+        "an empty validFrom was stored with no warning — option C asks for one "
+        f"(records: {[r.name for r in caplog.records]})"
+    )
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+        undated = _make_point(sdk, content="no start recorded at all")
+    assert _props(sdk, undated["id"]).get("validFrom") is None
+    assert not [r for r in caplog.records if "no instant" in r.getMessage()], (
+        "a legal UNDATED point must not warn — only a value that names no "
+        "instant does"
+    )
+
+    # A numeric epoch 0 is a REAL start (the epoch instant), so it is silent too.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+        _make_point(sdk, content="epoch zero start", validFrom=0)
+    assert not [r for r in caplog.records if "no instant" in r.getMessage()], (
+        "validFrom=0 names the epoch instant — it is a real start, not a warning"
+    )
+
+    # ONE warning per write ATTEMPT, even when the attempt re-enters the
+    # boundary: a dedup hit creates, then routes through `update_point` with
+    # the same props, so the same value reaches the write boundary twice while
+    # only one write happens. The update leg is what must stay silent — the
+    # create leg still speaks, because at that point the point may yet be
+    # minted.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+        first = _make_point(sdk, content="dedup warn once", validFrom="TBD",
+                            dedup=True)
+    assert len([r for r in caplog.records
+                if "no instant" in r.getMessage()]) == 1
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+        second = _make_point(sdk, content="dedup warn once", validFrom="TBD",
+                             dedup=True)
+    assert second["id"] == first["id"], "the fixture must reach the dedup hit"
+    hits = [r for r in caplog.records if "no instant" in r.getMessage()]
+    assert len(hits) == 1, (
+        "a dedup hit re-entered the write boundary with a value it already "
+        f"stored — it must warn once, not twice: got {len(hits)}"
+    )
+
+    # Control: a dedup hit that stores an ORDERABLE start says nothing at all.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+        _make_point(sdk, content="dedup warn once", validFrom="2026-06-01",
+                    dedup=True)
+    assert not [r for r in caplog.records if "no instant" in r.getMessage()], (
+        "an ORDERABLE start must never warn"
+    )
+    # The shape that is NOT silent and must still speak exactly once: a dedup
+    # hit whose caller value DIFFERS from the stored start — the update leg is
+    # the write that stores it, while the create leg has already spoken for the
+    # same write (both would fire on the unguarded path).
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+        fourth = _make_point(sdk, content="dedup warn once", validFrom="",
+                             dedup=True)
+    assert fourth["id"] == first["id"]
+    assert _props(sdk, fourth["id"])["validFrom"] == ""
+    hits = [r for r in caplog.records if "no instant" in r.getMessage()]
+    assert len(hits) == 1, (
+        "a dedup hit that CHANGES the stored start to an unparseable one must "
+        f"warn once, not twice: got {len(hits)}"
+    )
+
+    # The UPDATE leg on its own, so the suppression above cannot make this
+    # silent by accident: a plain update that INTRODUCES an unparseable start
+    # is the write, and it must speak. (Without this, deleting the update leg's
+    # warning would leave every assertion above green.)
+    sdk.update_point(first["id"], validFrom="2026-06-01")  # back to a real date
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+        sdk.update_point(first["id"], validFrom="")
+    hits = [r for r in caplog.records if "no instant" in r.getMessage()]
+    assert len(hits) == 1, (
+        "an update that introduces an unparseable start must warn once — the "
+        f"suppression is scoped to the dedup write: got {len(hits)}"
+    )
+    # … and re-writing the value it ALREADY carries introduces nothing.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+        sdk.update_point(first["id"], validFrom="")
+    assert not [r for r in caplog.records if "no instant" in r.getMessage()], (
+        "an unrelated re-write of the value the point already stores must not "
+        "re-warn"
+    )
 
 
 def test_restore_missing_point(sdk):
@@ -1146,8 +1336,10 @@ def test_unparseable_predecessor_start_matches_the_sibling_5358(sdk):
     graph state.  Refusing here would make such a point impossible to
     supersede until its window was repaired: the guard would refuse the very
     write a caller uses to move past the bad point.  The sibling's docstring
-    states the same reasoning — the window already covers no PARSEABLE
-    instant, so the write cannot newly hide it from any parseable query.
+    states the same reasoning — an unorderable start names no instant, so the
+    inversion comparison cannot decide against it.  (Under the #6140 ruling
+    that start is an OPEN one, which is why trusting it as the predecessor's
+    END would be wrong: the resolution falls through instead.)
     """
     old = _make_point(sdk, content="legacy claim", validFrom="TBD")
     new = _make_point(sdk, content="corrected claim", validFrom="2026-06-01")
