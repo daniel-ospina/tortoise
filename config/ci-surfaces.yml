@@ -3549,6 +3549,13 @@ surfaces:
   # test_4997_vector_index_parity.py above. DB-free: the guard precedes all
   # database work, which is what makes the entry placement observable.
   - test_5404_entity_type_guard.py
+  # #8450 (lane L4 / #5096): a retrieval leg that RAISES must not abandon the
+  # rows of the legs that succeeded. Pins the unpatterned engine module
+  # `tortoise/search_engine.py` (degradation_chain's collector), which falls to
+  # the `core` fallback — same rationale as test_5404_entity_type_guard.py
+  # above. DB-free: every runner is a monkeypatched double and `graph=None`, so
+  # the file also runs in the docker legs.
+  - test_8450_leg_raise_keeps_other_legs.py
   # #5407: the range/full-text label sets the index sweep creates must not
   # drift from the labels the VECTOR leg's declared routing resolves to.
   # `_ensure_indexes` declared its sets as inline literals with nothing tying
@@ -7121,6 +7128,7 @@ durations:
   test_4716_capture_operator_ref_remap.py: 1.2
   test_4921_construct_lock.py: 105.3  # #4921: MEASURED (3 tests) — the two forced-interleave tests (two real embedded servers per arm) dominate, so the weight still moves with box load. The run this note used to cite (114.13s summed, 60.06s slowest) is not this value's basis any more and is dropped rather than left pointing at a superseded sample (see the provenance rule above the block). The registration is load-bearing in BOTH halves: the surface entry alone leaves durations coverage below the 90% floor and `tools/ci_selection.py --integrity` reds (#4348 trap — do not drop without re-deriving the floor at that head).
   test_4999_vector_mechanism.py: 0.1
+  test_8450_leg_raise_keeps_other_legs.py: 0.1  # #8450: 6 tests, DETERMINISTIC and hermetic (no DB, no embedder — the legs are monkeypatched doubles and `as_completed` is substituted, so nothing races the 500 ms cap). Test-time sum is under 0.05 s; the only wall the file adds is the shared conftest/embedder warm-up, which is not a per-file junit duration. Registration is load-bearing in BOTH halves: the surface entry alone leaves durations coverage below the 90% floor and `tools/ci_selection.py --integrity` reds (#4348 trap — do not drop without re-deriving the floor at that head).
   test_5359_unchecked_window_writers.py: 0.6
   test_5361_inverted_window_audit.py: 0.4
   test_5361_inverted_window_read_path.py: 0.2
