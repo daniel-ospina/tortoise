@@ -380,15 +380,25 @@ _CONV = [
     {"role": "assistant", "content": "noted"},
 ]
 
-# Needles unique to each stamp (a short fragment can also match a READ, or a
-# like-shaped statement issued by the EP pass that runs after the capture).
+# Needles unique to each stamp's WRITE (a short fragment can also match a READ,
+# or a like-shaped statement issued by the EP pass that runs after the capture).
+# #9350: the guarded stamps (operator label / operator id / retry heal) now issue
+# an id PRE-READ built from the same ``MATCH … WHERE`` prefix as the write — the
+# ids are journalled before the write, and a ``WHERE … IS NULL`` guard means the
+# written set is not known until it runs — so each needle must include the SET it
+# targets or the abort lands on the read instead. That would still be retried
+# (`_capture_stamp_targets` rides the same funnel), but the statement this file
+# exists to prove is re-issued would never be the one aborted.
 _MINTED_STAMP_NEEDLE = "MATCH (n:Point) WHERE n.id IN $ids SET n.eventId"
 _LABEL_STAMP_NEEDLE = (
-    "WHERE c.id IN $ids AND (o.status IS NULL OR o.status = 'draft')")
+    "(o.status IS NULL OR o.status = 'draft') AND o.eventId IS NULL "
+    "AND o.id IN $stamp_ids SET o.eventId")
 _OPERATOR_ID_STAMP_NEEDLE = (
-    "MATCH (o:Point {is_operator:true}) WHERE o.id IN $ids")
+    "MATCH (o:Point {is_operator:true}) WHERE o.id IN $ids "
+    "AND o.eventId IS NULL AND o.id IN $stamp_ids SET o.eventId")
 _RETRY_HEAL_NEEDLE = (
-    "MATCH (s:Session {id:$sid})-[c:CONTAINS]->(n:Point) WHERE n.eventId IS NULL")
+    "coalesce(n.is_episodic, false) <> true "
+    "AND n.id IN $stamp_ids SET n.eventId")
 _ENTITY_LINK_NEEDLE = "SET s.entity_links_attempted=$a"
 _CAPTURE_OK_NEEDLE = "SET s.capture_ok=$ok"
 
@@ -521,11 +531,24 @@ def test_a_rebuild_abort_on_the_operator_label_provenance_stamp_is_retried(
 
 def test_a_rebuild_abort_on_the_operator_id_provenance_stamp_is_retried(
         tmp_path, monkeypatch):
-    """The ``operator_ids`` provenance stamp is retried (#4936)."""
+    """The ``operator_ids`` provenance stamp is retried (#4936).
+
+    #9350: the payload's endpoints are PRE-CREATED, so the capture folds both
+    and mints NOTHING — which is exactly the surface #4936 exists for (the
+    minted-point join cannot reach an operator whose endpoint re-keyed to a
+    pre-existing node, so only ``meta["operator_ids"]`` covers it). Without this
+    the label sweep stamps the operator first and the id stamp has nothing left
+    to write, so the abort would land on a statement that matches no rows and
+    the retry this test exists to prove would never be exercised.
+    """
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
-    _mock_v2(monkeypatch, _default_capture_payload())
+    payload = _default_capture_payload()
     sdk = _sdk(tmp_path, "opidstamp")
     try:
+        for point in payload["points"]:
+            sdk.create_point("statement", point["content"],
+                             _server_id=point["id"])
+        _mock_v2(monkeypatch, payload)
         proxy, result = _capture_with_abort(
             sdk, _OPERATOR_ID_STAMP_NEEDLE, session_id="7405-opid")
         assert result.get("ok") is True, result
@@ -551,6 +574,18 @@ def test_a_rebuild_abort_on_the_retry_heal_provenance_stamp_is_retried(
             "MERGE (s:Session {id:$sid}) "
             "SET s.capture_ok=false, s.capture_extractor='v2'",
             params={"sid": "7405-heal"})
+        # ... AND the claim the failed attempt left behind: a non-episodic Point
+        # wired to the session, still lacking an eventId. That is the node the
+        # heal exists for — without it the heal statement matches no rows, so
+        # the abort would land on a no-op and the retry this test proves would
+        # never be exercised (#9350 made the stamp skip a provably-empty write).
+        proj.g.query(
+            "MATCH (s:Session {id:$sid}) "
+            "MERGE (n:Point {id:$pid}) "
+            "SET n.content='a claim from the failed attempt', "
+            "    n.is_episodic=false "
+            "MERGE (s)-[:CONTAINS]->(n)",
+            params={"sid": "7405-heal", "pid": "pt_7405_heal_claim"})
         proxy, result = _capture_with_abort(
             sdk, _RETRY_HEAL_NEEDLE, session_id="7405-heal")
         assert result.get("ok") is True, result

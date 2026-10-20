@@ -3553,6 +3553,16 @@ surfaces:
   # `test_pipeline_2792`/`test_semantics_write_path_7852`, so it is registered in
   # `carve_out:` below and in `tests/_embedded.py`.
   - test_5097_capture_source_replay.py
+  # #9350: the capture provenance stamp's journal carrier, one record per
+  # minted id, and the two replay engines restoring `eventId` /
+  # `source_session` / `source_harness` / `ingested_at` on a minted Point that
+  # is never promoted. `core` is the home because the files it guards are the
+  # capture writers (`tortoise/sdk.py` + `tortoise/hosted_api.py`) and the two
+  # folds' provenance clauses (`projection/__init__.py`, a `core` fallback).
+  # CARVE-OUT: the fixtures build EMBEDDED stores by db path and drive
+  # `rebuild()` / `rebuild_all()`, so it is registered in `carve_out:` below
+  # and in `tests/_embedded.py`.
+  - test_9350_capture_provenance_journalled.py
   - test_connection_url_redaction_5326.py  # #5326: the password-bearing connection URL (`postgres://user:pw@host`) — the `connection_url` rule in tortoise/security.py: the closed scheme allow-list anchor, the URL-grammar confirmation, each removed #4911 revision answered (no-password class, no dotted-host gate, no greedy span), and the documented residuals. NOT dual-registered under `api`: it asserts nothing about hosted_api.py, and its end-to-end capture half is the DUAL-REGISTERED #4911 file
   - test_security.py
   - test_semantic_extractor.py
@@ -5477,6 +5487,14 @@ carve_out:
 # registries are one set in two homes
 # (tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
 - test_5097_capture_source_replay.py
+# #9350: the capture provenance stamp's journal carrier. The fixtures build
+# `TortoiseSDK(<tmpfile>)` and drive BOTH replay engines against that embedded
+# store, so a URI-set lane would redirect the construction and the embedded
+# replay under test would be gone. Mirror of the
+# `test_9350_capture_provenance_journalled.py` row in the `core` surface above;
+# the two registries are one set in two homes
+# (tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
+- test_9350_capture_provenance_journalled.py
 # #7852 W1: the Layer-2 `semantics` write-path guard is embedded-only — the
 # fixture builds `TortoiseSDK(<tmpfile>)` and drives the real `rebuild_all`
 # replay, so the carve-out is load-bearing (a URI-set lane would redirect it).
