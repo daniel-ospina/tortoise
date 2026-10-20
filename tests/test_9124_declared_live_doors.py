@@ -259,6 +259,17 @@ _UNRESOLVED = {
     # `{_capture_passthrough_read_fields()}`, …) — the #9124 review's P1 shape,
     # which a placeholder substitution used to flatten into a false READ.
     "_count_ep_factors",
+    # #9063: both calibration readers build their Cypher the same way — the
+    # `WHERE` fragment is bound to a LOCAL (`where = f"WHERE {not_operator} …"`)
+    # and interpolated as `proj.g.query(f"MATCH (n:Point) {where} … RETURN …")`,
+    # which the resolver cannot unfold. Checked by hand: the resolvable part of
+    # both statements is a `MATCH … RETURN` read with no write keyword (they
+    # list uncalibrated points; neither writes the cache and neither appends a
+    # record). Listed here rather than silently called a read, per this set's
+    # own rule. (These two rows are why the census reddened on `origin/main`
+    # at e08a669b2 — the entries, not the statements, were missing.)
+    "calibrate_summary",
+    "_uncalibrated_ep_participants",
     "_cross_lens_pool",
     "_entity_name_holders",
     "_epistemic_label",

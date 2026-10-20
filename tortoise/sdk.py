@@ -12325,8 +12325,9 @@ class TortoiseSDK:
         which covers BOTH shapes callers must not conflate: the Point is still
         there, or the graph KEY is ABSENT (the read was never issued, because
         issuing it would re-create the key — the caller re-raises the engine's
-        own loud error, never a success); ``None`` — the read failed too, so
-        the caller must not claim either state.
+        own loud error, never a success); ``None`` — the read-back failed, or
+        answered nothing a verdict can be built from (an EMTPY result set, a cell
+        that is not a count), so the caller must not claim either state.
 
         Reading through the guarded handle is deliberate and safe: §17.1's guard
         at this handle (#9124 part 1) refuses a MUTATING statement only — it
@@ -12397,7 +12398,24 @@ class TortoiseSDK:
             ).result_set
         except Exception:
             return None
-        return not (int(rows[0][0]) if rows else 0)
+        # ⛔ EMPTY `result_set` is NOT a verdict. An aggregate `RETURN count(n)`
+        # always yields one row on this engine, so this is a defensive branch —
+        # but if the read-back is ever restated (a `WHERE`, a `ro_query` path, a
+        # proxy or transport that hands back a truncated result set) then
+        # "no rows" means nothing was established about the cache. Reading it as
+        # `not 0` → ``True`` would assert the one thing this door must never
+        # assert without a read (`tortoise.sdk._sync_witness` takes the same
+        # empty-rows case the other way), and the caller would then append a
+        # destruction record for a Point no read showed absent. Claim nothing.
+        if not rows:
+            return None
+        try:
+            return int(rows[0][0]) == 0
+        except (TypeError, ValueError, IndexError):
+            # A cell that is not a count is not a verdict either, and this must
+            # not raise out of the helper: the caller is about to report the
+            # WRITE's error, which a `TypeError` from here would mask.
+            return None
 
     # ── Invalidate / Supersede (#6999 GAP-12) ────────────────────
 
@@ -12729,8 +12747,10 @@ class TortoiseSDK:
         about CONFIRMATION. The doors that gate on a per-call append outcome do
         so ARM BY ARM, not door by door: `create_point` and `update_point`'s
         NON-promote arm raise `WriteNotLandedError` on `_record_committed is
-        False`, and `delete_point` gates on `_delete_committed =
-        _journal_entity_mutation(...)`. `update_point`'s PROMOTE arm (its record
+        False`, and `delete_point` raises on an append that does not confirm —
+        AFTER a `DETACH DELETE` that already landed (#9207; the cache write is
+        that door's commit point, so its append can only report, never refuse).
+        `update_point`'s PROMOTE arm (its record
         is emitted after the write, return discarded), `invalidate_point` and
         `retract_point` discard the append's return exactly as this door does,
         so the same residual is carried by FOUR doors, not one. Closing it is
@@ -13464,7 +13484,9 @@ class TortoiseSDK:
         cache node and reports success — measured on this branch by forcing
         `_emit_event` to return False: the point came back `status='retracted'`.
         Only `create_point`, `update_point`'s non-promote arm and `delete_point`
-        gate on their append's return; `invalidate_point`, this door and
+        gate on their append's return — and on `delete_point` that gate can only
+        REPORT (the destroy already landed, #9207), not refuse the write;
+        `invalidate_point`, this door and
         `supersede_point` do not. That residual is part 2 of #9124 (it changes
         the failure contract).
 

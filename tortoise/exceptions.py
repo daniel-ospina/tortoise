@@ -648,9 +648,11 @@ class WriteNotLandedError(RuntimeError):
             # its own" (#9207 whole-diff review): this arm is ALSO reachable
             # when the statement raised a transport error over an APPLIED
             # destroy, the read-back proved it gone, and only the append then
-            # failed — the door even logs "the DETACH DELETE applied but raised
-            # on the way back" beside this message. What is true on BOTH paths
-            # is the destroy: it landed.
+            # failed — the door logs exactly that beside this message
+            # (`delete_point: the DETACH DELETE raised (…) and the cache no
+            # longer holds the Point — either this statement applied and the
+            # reply was lost, or the Point was already gone`). What is true on
+            # BOTH paths is the destroy: it landed.
             _cause = (
                 "the destroy LANDED in the cache (the statement returned, or it "
                 "reported a failure after the write had already applied and the "

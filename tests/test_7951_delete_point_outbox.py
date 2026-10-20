@@ -68,7 +68,9 @@ are not equally harmful:
   first cut skipped the probe (T3f); the one arm that pays NEITHER probe nor
   read is the STATE-INDEPENDENT one (write slot / MISCONF), where nothing was
   applied by construction — reading there would auto-create an absent key and be
-  taken as a landed destroy (T3g);
+  taken as a landed destroy (T3g); a read-back that answers NO ROWS is not a
+  verdict either — it says nothing about the cache, so it takes the same
+  "claim nothing" arm instead of reporting a landed destroy (T3i);
 * the message names THIS door's record (`EntityMutated op=delete`, derived from
   the door, never `PointAdded`) and attaches the graph to the CACHE clause, not
   the record's (T10).
@@ -401,8 +403,9 @@ def test_the_landed_destroy_arm_does_not_claim_the_statement_succeeded(env,
     The reason this arm gives the caller must be true whichever way the destroy
     landed. T3 reaches it after the statement RETURNED; here the statement
     APPLIED and then raised a transport error — the door proves the destroy from
-    the read-back, logs "applied but raised on the way back", and only the
-    append then fails. So the arm's cause clause may not say "the `DETACH
+    the read-back, logs that the statement raised and the cache no longer holds
+    the Point, and only the append then fails. So the arm's cause clause may not
+    say "the `DETACH
     DELETE` did not report a failure of its own": on this path it did, and the
     caller would be looking for a fault that is already known not to matter.
 
@@ -779,6 +782,70 @@ def test_a_state_independent_refusal_is_never_read_as_a_landed_destroy(
         "a statement the engine REFUSED must never produce a destruction record")
     assert _live(proj, pid) is True, (
         "premise: the injected slot abort never reached the engine")
+
+
+# ── T3i: an EMPTY read-back is not a verdict ─────────────────────────────
+
+def test_an_empty_read_back_claims_nothing(env, monkeypatch):
+    """"No rows" from the read-back must not be read as "the Point is gone".
+
+    `_delete_landed_anyway` decides whether a destruction record may be written,
+    and the one answer it must never produce without a read is ``True``. An
+    aggregate `RETURN count(n)` always yields one row on this engine, so this is
+    a DEFENSIVE branch — but it stops being defensive the moment the read-back
+    is restated (a `WHERE`, a `ro_query` path, a proxy or a transport that hands
+    back a truncated result set), and then an empty `result_set` read as
+    `not 0` → ``True`` would append `EntityMutated op=delete` for a Point no read
+    showed absent: the #9207 defect mirrored, and unrecoverable in this
+    direction (the repair is a DESTRUCTIVE `rebuild_all`).
+
+    So an empty read-back is the UNVERIFIED arm: no record, and the refusal
+    claims neither store. `tortoise.sdk._sync_witness` treats the same empty-rows
+    case as "not landed" rather than raising it to a verdict.
+
+    MUTATION: restore `return not (int(rows[0][0]) if rows else 0)` in
+    `_delete_landed_anyway` and this reddens on the first assertion — the door
+    returns True and writes a destruction record for a destroy nobody read.
+    """
+    import types
+
+    from tortoise.exceptions import WriteNotLandedError
+
+    sdk, events = env
+    proj = sdk._get_proj()
+    pid = sdk.create_point("observation", "empty read-back")["id"]
+
+    real_query = type(proj.g).query
+    readbacks: list[str] = []
+    failed = {"v": False}
+
+    def fail_then_read_empty(_self, cypher, *args, **kwargs):
+        stmt = cypher or ""
+        if _DELETE_CYPHER in stmt:
+            failed["v"] = True
+            raise ConnectionError("connection reset by peer")
+        if failed["v"] and "RETURN count(n)" in stmt and "> 0" not in stmt:
+            readbacks.append(stmt)
+            return types.SimpleNamespace(result_set=[])
+        return real_query(_self, cypher, *args, **kwargs)
+
+    monkeypatch.setattr(type(proj.g), "query", fail_then_read_empty)
+    try:
+        with pytest.raises(WriteNotLandedError) as ei:
+            sdk.delete_point(pid)
+    finally:
+        monkeypatch.setattr(type(proj.g), "query", real_query)
+
+    assert readbacks, "premise: the read-back was issued (key confirmed present)"
+    assert ei.value.destroy_verified is False, (
+        "no row was read, so the destroy is UNVERIFIED — the door must not claim "
+        "a cache state it did not read")
+    assert ei.value.record_committed is False
+    assert _mutations(events, pid) == [], (
+        "an empty read-back established nothing, so no destruction record may be "
+        "written — the #9207 defect in the other direction")
+    assert _live(proj, pid) is True, (
+        "premise: the injected transport failure never reached the engine")
 
 
 # ── T4: nothing is journaled for a delete that cannot happen ──────────────

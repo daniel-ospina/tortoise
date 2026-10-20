@@ -132,7 +132,9 @@ still recorded), T3d the landed-destroy arm's OWN reason (a lost reply over an A
 fails must not be told "the `DETACH DELETE` did not report a failure of its own", which that path
 falsifies), T3f the presence gate paid on the TRANSPORT family too (a dropped connection over a gone
 key: no read, no record, and the arm that claims nothing), T3g the STATE-INDEPENDENT arm (write
-slot / MISCONF), which cannot have applied, so it pays NEITHER a probe nor a read, T3c the unreadable state (`destroy_verified=False`: no record, and the message is
+slot / MISCONF), which cannot have applied, so it pays NEITHER a probe nor a read, T3i a read-back that
+answers NO ROWS (nothing was established about the cache, so it takes the "claim nothing" arm rather
+than reporting a landed destroy), T3c the unreadable state (`destroy_verified=False`: no record, and the message is
 asserted NOT to claim a store state it did not establish — it neither says the `DETACH DELETE` "did
 not report a failure of its own" (that raise is how the arm is reached), nor that "the cache no longer
 holds this Point", nor that a present node is "behind the TRUTH"; its PRESENT branch must send the
@@ -140,11 +142,13 @@ caller to a re-issue and must NOT send them to `rebuild_all`, which is the ABSEN
 all three clauses were false in the first cut of the shared prose), T4 no record for a no-op delete, T5 the
 record's declared shape, T6 the `:GraphEvent` subscriber row, T7 the journal-less (`None`) arm, T9 the
 evidence probe's own instrumentation, T10 the delete door's own record in the refusal and the graph on
-the cache clause. **T1/T2/T3/T3b/T3c/T3d/T3e/T3f/T3g/T8/T10 were measured RED against #9207's predecessor** (the
+the cache clause. **T1/T2/T3/T3b/T3c/T3d/T3e/T3f/T3g/T3i/T8/T10 were measured RED against #9207's predecessor** (the
 record-first order: at `origin/main` this test file is RED on every row below), and the reason
 differs by row because the old order got each case wrong in its own direction — T10 on its
 `update_point` record-noun assertion (answered `PointAdded` there), T3e/T3f on a presence gate with no
-analogue at that head, T3g on an arm it never classifies, and the rest as follows: T1 read `['journal', 'cache']` (the record first); T2/T3c/T8
+analogue at that head, T3g on the committed arm it raises instead of the engine's own error, T3i on the
+empty-result default (the predecessor has no read-back at all, so the row is red on the raised type and the
+record it leaves behind), and the rest as follows: T1 read `['journal', 'cache']` (the record first); T2/T3c/T8
 read a committed `EntityMutated` op=delete over a cache that never performed the destroy; **T3** is
 different in kind — it reddens on its PREMISE, not on a lie: at `b77d24084` the door appended first,
 so a failed append skipped the `DETACH DELETE`, the node stayed live, and the message ("… skipped the
