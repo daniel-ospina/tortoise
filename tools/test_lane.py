@@ -1593,10 +1593,11 @@ def reap_orphans() -> list[str]:
             # So the DEFAULT reports, and the report is the load-bearing part:
             # this container holds a port out of PORT_RANGE until someone
             # removes it, and no other instrument on the host shows it. No
-            # `docker inspect` is spent here: nothing is being destroyed, so
-            # there is no evidence to preserve, and this runs on EVERY `up`/`uri`
-            # for every stopped peer container (measured ~53 ms per inspect;
-            # 67 of them is ~3.5 s added to every lane start).
+            # `docker inspect` is spent here — nothing is being destroyed, so
+            # there is no evidence to preserve — and this line runs on EVERY
+            # `up`/`uri`: spending it for every stopped peer container
+            # (measured ~53 ms each; 67 of them) would add ~3.5 s to every lane
+            # start, which is exactly why this arm does not.
             if not _stopped_reap_enabled():
                 out.append(
                     f"reap: kept {name} — its owning worktree exists ({owner}) "

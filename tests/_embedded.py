@@ -1237,9 +1237,12 @@ def _journal_instance(journal_file: str) -> str | None:
       cannot say which instance these graphs are on, so this is a MISMATCH, and
       a mismatch SKIPS. Reading it as ``None`` (legacy) would consume the
       journal against whatever instance happens to be sweeping — which is
-      exactly the pre-fix defect, re-entered through a torn write. A 0-byte
-      sidecar is the LIKELIEST torn state: `_bind_journal_instance` creates the
-      file before it writes into it.
+      exactly the pre-fix defect, re-entered through a torn write.
+      Who produces one: a sidecar this process may not READ (see the OSError
+      arm below), one written by an older build, or one a crash left behind.
+      The current writer cannot: `_bind_journal_instance` writes
+      ``<path>.tmp`` and ``os.replace``s it, so a partial write is never
+      visible at the final path.
     * ``"host:port"`` — bound; compare it to the sweep's target.
     """
     path = journal_file + JOURNAL_INSTANCE_SUFFIX

@@ -1837,12 +1837,14 @@ def test_stale_sweep_SKIPS_a_journal_whose_sidecar_is_UNREADABLE(
         monkeypatch, tmp_path):
     """A sidecar that EXISTS but holds nothing usable is not "legacy".
 
-    `_bind_journal_instance` creates the file before it writes into it, so a
-    torn write leaves a 0-byte `.instance` — the likeliest corrupt state there
-    is. Reading that as "unbound" would send the journal down the legacy path and
-    CONSUME it against whatever instance happens to be sweeping, i.e. the very
-    defect this PR exists to remove, re-entered through a crash. Mutation: fold
-    the empty case into `None` (`return key or None`) and this fails.
+    An empty `.instance` is one of the reachable corrupt states (a sidecar this
+    process may not read, one from an older build, one a crash left behind) —
+    the CURRENT writer cannot produce it, because `_bind_journal_instance` writes
+    `<path>.tmp` and `os.replace`s it. Reading the empty case as "unbound" would
+    send the journal down the legacy path and CONSUME it against whatever
+    instance happens to be sweeping, i.e. the very defect this PR exists to
+    remove, re-entered through a corrupt sidecar. Mutation: fold the empty case
+    into `None` (`return key or None`) and this fails.
     """
     import tortoise.embedded_reaper as er
     from tests._embedded import JOURNAL_INSTANCE_SUFFIX, _stale_sweep
