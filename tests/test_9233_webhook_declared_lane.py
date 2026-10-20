@@ -51,10 +51,9 @@ from pathlib import Path
 import pytest
 from cryptography.fernet import Fernet
 
+from tests._declared_lane_probe import LaneProbe
 from tortoise.projection import (
-    _CACHE_WRITE_AUTHORIZED,
     DirectCacheWriteRefused,
-    _GuardedGraph,
     _statement_writes,
 )
 
@@ -140,9 +139,21 @@ class _ScriptedTransport:
         return item, None
 
 
-def _instrument(monkeypatch, *, refuse: bool | str):
-    """Install #9124's predicate on `_GuardedGraph.query`; record every statement
-    the webhook writers issue as ``(statement, reason, writes)``.
+def _instrument(monkeypatch, *, refuse: bool | str, owner) -> LaneProbe:
+    """Install #9124's predicate on `_GuardedGraph.query`, ATTRIBUTED to `owner`.
+    
+    The recorder is `tests/_declared_lane_probe.LaneProbe` (#9256): it records
+    `_CACHE_WRITE_AUTHORIZED` AT THE WRITE — read inside the handle dispatch,
+    which is where #9124's guard will read it, so "the write ran inside a
+    declaration" is observed, not inferred from source — together with the
+    identity of the PROJECTION whose handle issued the statement.
+
+    ⛔ WHY IDENTITY (#9256). This is the suite the defect was FOUND in: the patch
+    is on the CLASS (the handle is `__slots__`-restricted and read-only), so the
+    recorder sees every projection in the process, and a peer projection's
+    `_ensure_indexes` burst was attributed to the delivery store's writers. The
+    attribution assertions read `probe.own()`; `probe.foreign()` is what keeps
+    that filter from being a blindfold.
 
     `refuse` selects which mutating statements the guard REFUSES:
     ``False`` (refuse nothing — the recording mode), ``True`` (refuse every
@@ -150,33 +161,10 @@ def _instrument(monkeypatch, *, refuse: bool | str):
     whether or not a declaration is in flight — used to aim a refusal at ONE
     handler and prove the caller does not swallow it; the swallow is what makes a
     missing declaration silent, so the refusal must be simulable independent of
-    the declaration being present).
-
-    `reason` is `_CACHE_WRITE_AUTHORIZED` AT THE WRITE — read inside the handle
-    dispatch, which is where #9124's guard will read it — so "the write ran
-    inside a declaration" is observed, not inferred from source.
+    the declaration being present). The refusal is never scoped to `owner`: a
+    foreign handle's undeclared write is a real §17.1 violation and is refused.
     """
-    original = _GuardedGraph.query
-    seen: list[tuple[str, str | None, bool]] = []
-
-    def instrumented(self, cypher, params=None, timeout=None):
-        writes = _statement_writes(cypher)
-        reason = _CACHE_WRITE_AUTHORIZED.get()
-        text = " ".join((cypher or "").split())
-        seen.append((text, reason, writes))
-        aimed = isinstance(refuse, str) and refuse.lower() in text.lower()
-        undeclared = (refuse is True and reason is None)
-        if ((aimed or undeclared) and writes
-                and getattr(self._proj, "_journal_backed", False)):
-            raise DirectCacheWriteRefused(
-                "§17.1 third door (#9079/#9124): a mutating statement reached "
-                "`proj.g` with no declaration in flight — statement="
-                + text[:160]
-            )
-        return original(self, cypher, params=params, timeout=timeout)
-
-    monkeypatch.setattr(_GuardedGraph, "query", instrumented)
-    return seen
+    return LaneProbe(owner).install(monkeypatch, refuse=refuse)
 
 
 def _seed_stream(proj, n: int = 2) -> list[int]:
@@ -248,7 +236,7 @@ def test_the_instrument_refuses_an_undeclared_write(sdk_with_journal,
         "the fixture did not arm §17.1 — an unarmed projection is outside the "
         "rule and every assertion in this file would be vacuous"
     )
-    _instrument(monkeypatch, refuse=True)
+    _instrument(monkeypatch, refuse=True, owner=proj)
     with pytest.raises(DirectCacheWriteRefused):
         proj.g.query("CREATE (x:Undeclared9233 {id: 'x'})")
 
@@ -267,10 +255,10 @@ def test_every_webhook_write_declares_its_lane(sdk_with_journal, monkeypatch):
     assert proj._journal_backed is True
     _seed_stream(proj, 2)
 
-    seen = _instrument(monkeypatch, refuse=False)
+    probe = _instrument(monkeypatch, refuse=False, owner=proj)
     _walk_the_write_set(proj)
 
-    writes = [(c, r) for c, r, w in seen if w]
+    writes = [(c, r) for c, r, w in probe.own() if w]
     assert len(writes) >= 6, (
         f"the writers issued {len(writes)} mutating statement(s); the walk no "
         "longer covers the delivery store's write set, so this pin went stale"
@@ -326,7 +314,7 @@ def test_the_armed_guard_does_not_refuse_the_product(sdk_with_journal,
 
     proj = sdk_with_journal._get_proj()
     _seed_stream(proj, 2)
-    _instrument(monkeypatch, refuse=True)
+    _instrument(monkeypatch, refuse=True, owner=proj)
     sub_id = _walk_the_write_set(proj)
 
     assert wd.get_subscription(proj, sub_id) is None, (
@@ -346,10 +334,10 @@ def test_a_read_runs_unscoped(sdk_with_journal, monkeypatch):
     claim this lane does not make.
     """
     proj = sdk_with_journal._get_proj()
-    seen = _instrument(monkeypatch, refuse=False)
+    probe = _instrument(monkeypatch, refuse=False, owner=proj)
     _walk_the_read_set(proj)
 
-    reads = [(c, r) for c, r, w in seen if not w]
+    reads = [(c, r) for c, r, w in probe.own() if not w]
     assert reads, "the read walk issued no statement the classifier calls read-only"
     assert {r for _c, r in reads} == {None}, (
         "a read ran with a declaration in flight — `_run` must scope writes only"
@@ -376,7 +364,7 @@ def test_a_refused_cursor_write_is_not_counted_as_delivered(
                                  types=["PointAdded"], description="9233 refuse")
 
     transport = _ScriptedTransport([200])
-    _instrument(monkeypatch, refuse="SET s.cursor=")
+    _instrument(monkeypatch, refuse="SET s.cursor=", owner=proj)
     with pytest.raises(DirectCacheWriteRefused):
         wd.dispatch_pending(proj, transport=transport)
 
@@ -431,7 +419,7 @@ def test_a_refused_failure_write_is_not_swallowed(sdk_with_journal,
     sub = wd.create_subscription(proj, url="https://hooks.example.com/cb",
                                  types=["PointAdded"], description="9233 attempts")
 
-    _instrument(monkeypatch, refuse="SET s.attempts=")
+    _instrument(monkeypatch, refuse="SET s.attempts=", owner=proj)
     with pytest.raises(DirectCacheWriteRefused):
         wd.dispatch_pending(proj, transport=_ScriptedTransport([500]))
 
@@ -526,7 +514,7 @@ def test_a_refused_failure_write_on_the_decrypt_branch_is_not_swallowed(
 
     monkeypatch.setattr(crypto, "decrypt_token", _no_decrypt)
     transport = _ScriptedTransport([200])
-    _instrument(monkeypatch, refuse="SET s.attempts=")
+    _instrument(monkeypatch, refuse="SET s.attempts=", owner=proj)
     with pytest.raises(DirectCacheWriteRefused):
         wd.dispatch_pending(proj, transport=transport)
 
@@ -596,7 +584,7 @@ def test_a_refused_delivered_receipt_write_is_not_swallowed(
     sub = wd.create_subscription(proj, url="https://hooks.example.com/cb",
                                  types=["PointAdded"], description="9233 rcp")
 
-    _instrument(monkeypatch, refuse="CREATE (r:DeliveryReceipt")
+    _instrument(monkeypatch, refuse="CREATE (r:DeliveryReceipt", owner=proj)
     with pytest.raises(DirectCacheWriteRefused):
         wd.dispatch_pending(proj, transport=_ScriptedTransport([200]))
 
@@ -617,7 +605,7 @@ def test_a_refused_receipt_prune_is_not_swallowed(sdk_with_journal,
     wd.create_subscription(proj, url="https://hooks.example.com/cb",
                            types=["PointAdded"], description="9233 prune")
 
-    _instrument(monkeypatch, refuse="SKIP $keep DETACH DELETE r")
+    _instrument(monkeypatch, refuse="SKIP $keep DETACH DELETE r", owner=proj)
     with pytest.raises(DirectCacheWriteRefused):
         wd.dispatch_pending(proj, transport=_ScriptedTransport([200]))
 
@@ -630,7 +618,7 @@ def test_a_refused_index_ddl_does_not_cache_the_schema_flag(
     from tortoise import webhook_delivery as wd
 
     proj = sdk_with_journal._get_proj()
-    _instrument(monkeypatch, refuse="CREATE INDEX")
+    _instrument(monkeypatch, refuse="CREATE INDEX", owner=proj)
     with pytest.raises(DirectCacheWriteRefused):
         wd.create_subscription(proj, url="https://hooks.example.com/cb",
                                types=[], description="9233 ddl")
@@ -681,10 +669,10 @@ def test_every_declared_statement_writes_only_declared_labels(
     one the declaration named."""
     proj = sdk_with_journal._get_proj()
     _seed_stream(proj, 2)
-    seen = _instrument(monkeypatch, refuse=False)
+    probe = _instrument(monkeypatch, refuse=False, owner=proj)
     _walk_the_write_set(proj)
 
-    declared = [c for c, r, w in seen if w and r is not None]
+    declared = [c for c, r, w in probe.own() if w and r is not None]
     assert declared, "no declared statement was recorded — the walk is stale"
 
     # A LABEL-LESS write (`MATCH (n) DETACH DELETE n`, `CREATE (n {…})`) has an
@@ -1268,7 +1256,7 @@ def test_a_rebuild_does_not_restore_the_store(sdk_with_journal, journal_path,
                                  types=[], description="9233 rebuild")
     assert wd.get_subscription(proj, sub["sub_id"]) is not None
 
-    _instrument(monkeypatch, refuse=False)
+    _instrument(monkeypatch, refuse=False, owner=proj)
     proj.rebuild_all(str(journal_path.parent), confirm_destructive=True)
 
     assert wd.get_subscription(proj, sub["sub_id"]) is None, (
