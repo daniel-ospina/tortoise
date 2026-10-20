@@ -1845,7 +1845,10 @@ def test_the_tenancy_section_names_the_carrier_it_cannot_see():
     Measured non-vacuity: at `bf32ebed` (the head the review found this on)
     `#9231` appears 0 times in `tortoise/record_projection.py` and the tenancy
     section still says `WOULD ARRIVE` — both assertions below red there, and
-    only they do (118 of 118 other legs stay green).
+    only they do (118 of 118 other legs stay green). The fourth assertion (the
+    `TORTOISE_RECORD_SINGLE_TENANT` gate) is red at `113b31af0`, the head the
+    #9192 review found this prose on: it described the arming surface as the
+    env pair alone.
     """
     src = Path(rp.__file__).read_text(encoding="utf-8")
     heading = "TENANCY IS A PER-CALL ARGUMENT AT THIS LAYER"
@@ -1860,6 +1863,18 @@ def test_the_tenancy_section_names_the_carrier_it_cannot_see():
     assert "#9192" in section, (
         "the tenancy section no longer names #9192, the acceptance the arming "
         "pin belongs to"
+    )
+    # #9192 review P3: the prose above stopped being complete when the gate
+    # landed — the pair is honoured only behind the single-tenant DECLARATION.
+    # Prose cannot red a build, so this pins the one symbol that carries the
+    # contract; measured red at `113b31af0` (the section named the pair alone).
+    assert "TORTOISE_RECORD_SINGLE_TENANT" in section, (
+        "the tenancy section still describes the arming surface as the env "
+        "pair alone. Since #9192 the pair is honoured only when the deployment "
+        "declared itself single-tenant via TORTOISE_RECORD_SINGLE_TENANT "
+        "(undeclared => multi-tenant => the write is REFUSED, never filed): a "
+        "lane reading this module would look for a fallback that no longer "
+        "arms, and would not know which variable to set"
     )
     assert "WOULD ARRIVE" not in section, (
         "the tenancy section frames the ambient carrier as a hypothesis "

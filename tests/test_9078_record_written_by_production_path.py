@@ -213,10 +213,13 @@ def _no_ambient_record_env(monkeypatch):
     with a message ("the tenant was guessed") that misdiagnoses an
     env-configured machine as a code defect. The sibling
     ``tests/test_record_writer_seam.py`` clears the DSN for the same reason;
-    this clears all THREE, because this PR is what introduced the pair.
+    this clears all FOUR arming keys (the pair, the DSN, and — since #9192 — the
+    ``TORTOISE_RECORD_SINGLE_TENANT`` declaration that is what makes the pair
+    reachable), because this PR is what introduced the pair.
     """
     for name in (record_writer.RECORD_DSN_ENV, record_writer.RECORD_ORG_ENV,
-                 record_writer.RECORD_GRAPH_ENV):
+                 record_writer.RECORD_GRAPH_ENV,
+                 record_writer.RECORD_SINGLE_TENANT_ENV):
         monkeypatch.delenv(name, raising=False)
     yield
 

@@ -675,3 +675,53 @@ class TestTheArmingModes:
         assert "tk_" in message and "graph-bound" in message, (
             "the org-wide refusal did not name the credential fix, so its only "
             f"advice is unfollowable on this lane: {message}")
+
+
+# ── suite isolation ─────────────────────────────────────────────────────────
+
+
+class TestTheSuiteCannotBeArmedByTheDeveloperMachine:
+    """#9192 review P2: the FOURTH arming key must be cleared for every test.
+
+    `tests/conftest.py::_no_ambient_record_arming` exists because a developer
+    lane armed exactly the way `.env.example` documents armed every test that
+    drives a record door. This PR makes that recipe **four** variables — the
+    `TORTOISE_RECORD_SINGLE_TENANT` declaration is now part of it, and it is the
+    half that makes the pair *reachable* — so the fixture has to clear it too.
+
+    Structural on purpose, and for the same reason the production-caller leg is:
+    the failure mode is a test that plants the pair and expects a REFUSAL without
+    clearing the declaration. Such a test is green in CI (no ambient declaration
+    there) and arms on the developer's machine — exactly the local-env-dependent
+    split the fixture was added to prevent — so no ordinary leg can see it.
+    Parsing the fixture is the only instrument that does.
+    """
+
+    def test_the_autouse_fixture_clears_the_declaration_too(self):
+        src = (REPO_ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        fixture = next(
+            (node for node in tree.body
+             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+             and node.name == "_no_ambient_record_arming"), None)
+        assert fixture is not None, (
+            "`_no_ambient_record_arming` is gone from tests/conftest.py — the "
+            "record's arming keys are ambient for every test again")
+
+        # The clears live in `for name in (...): monkeypatch.delenv(name)`.
+        cleared: set[str] = set()
+        for node in ast.walk(fixture):
+            if not isinstance(node, ast.For) or not isinstance(node.target, ast.Name):
+                continue
+            if not any(isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                       and c.func.attr == "delenv" for c in ast.walk(node)):
+                continue
+            cleared |= {e.value for e in ast.walk(node.iter)
+                        if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+
+        for name in ("TORTOISE_RECORD_DSN", "TORTOISE_RECORD_ORG_ID",
+                     "TORTOISE_RECORD_GRAPH_ID", RECORD_SINGLE_TENANT_ENV):
+            assert name in cleared, (
+                f"tests/conftest.py does not clear {name} per test — a machine "
+                "armed the way `.env.example` documents leaks it into the whole "
+                f"suite (cleared: {sorted(cleared)})")
