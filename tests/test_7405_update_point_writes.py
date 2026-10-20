@@ -2839,9 +2839,15 @@ class _AbortThenRefuseTagMerge:
         return getattr(self._real, name)
 
 
+@pytest.mark.parametrize("arm", ["point", "object"])
 def test_a_landed_promote_is_journaled_before_a_later_arm_can_abort(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, arm):
     """A promote that LANDED must be recorded even when the tag arm aborts.
+
+    `update_point` carries the promote TWICE — a `:Point:Object` arm and a plain
+    `:Point` arm — so both are covered here: a pin on one arm does not red the
+    other, and deleting the `:Point:Object` arm's `_record_promote()` call left
+    the suite green before this parametrization.
 
     `#8830` exempts the promote arm from the outbox ordering — its guarded `SET`
     can legitimately match nothing, so the record may not precede the write. It
@@ -2880,6 +2886,18 @@ def test_a_landed_promote_is_journaled_before_a_later_arm_can_abort(
         pid = sdk.create_point(
             "evidence", f"draft {uuid.uuid4().hex}", status="draft")["id"]
         proj = sdk._get_proj()
+        if arm == "object":
+            # The `:Point:Object` arm of the promote is reached only by a node
+            # carrying both labels; no production path mints one, so the shape
+            # is built by hand (same approach as test_3311).
+            proj.g.query("MATCH (n:Point {id:$id}) SET n:Object",
+                         params={"id": pid})
+            labels = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN labels(n)",
+                params={"id": pid}).result_set
+            assert labels and set(labels[0][0]) == {"Point", "Object"}, (
+                "fixture precondition: the object arm needs BOTH labels — "
+                f"node labels {labels!r}")
         before = len(revised(sdk))
         proxy = _AbortThenRefuseTagMerge(proj.g, _TAGGED_NEEDLE)
         proj.g = proxy

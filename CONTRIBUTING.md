@@ -320,6 +320,19 @@ donated under one of:
 3. a **Contributor Agreement** with Premise Labs (for regular/large
    contributors — ask first).
 
+### Developer Certificate of Origin (DCO)
+
+Every commit in a pull request must also carry a `Signed-off-by:` trailer — add
+it with `git commit -s`. That trailer certifies the
+[Developer Certificate of Origin](https://developercertificate.org): that you
+wrote the contribution, or otherwise have the right to submit it under the
+project's license. It is the durable, auditable record of your grant, because it
+lives in the commit in git history; the PR-description checkbox does not. The
+sign-off **supplements** the BSD-3 donation statement above rather than
+replacing it, and it is not a Contributor License Agreement. If you forget it,
+`git commit -s --amend` fixes the last commit and `git rebase --signoff <base>`
+signs off a whole branch.
+
 ## Review & merge policy
 
 - Outside contributions are **untrusted code**: every PR goes through normal
