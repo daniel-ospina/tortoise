@@ -1244,7 +1244,10 @@ def test_the_artifact_names_the_legs_whose_passes_it_could_not_count(tmp_path: P
     the basename, because 15 of the shipped sample's 17 sources are `pytest.log`
     (#9134 review, P1/P2).
 
-    Non-vacuity: with the disclosure unwired, every assertion below goes red.
+    Non-vacuity: this test pins render_md's disclosure, not main()'s wiring to it —
+    with `summary_less_legs` not passed (the pre-fix call) every assertion below
+    goes red. The wiring itself is pinned by
+    `test_main_wires_the_disclosure_into_the_artifact`.
     """
     (tmp_path / "pytest-log-test-a").mkdir()
     (tmp_path / "pytest-log-test-b").mkdir()
@@ -1275,6 +1278,49 @@ def test_the_artifact_names_the_legs_whose_passes_it_could_not_count(tmp_path: P
     assert "LOWER BOUND" not in md(None)                # silent on a clean run
 
 
+def test_an_unreadable_log_degrades_instead_of_killing_the_run(tmp_path: Path) -> None:
+    """One unreadable log must not become a KeyError for the whole artifact.
+
+    `parse_log` documents an unreadable file as a degraded entry, but its early
+    return predated the `summary_seen` key while `aggregate_logs` reads that key
+    unconditionally — so a single bad log (or a DIRECTORY named `*.log`) aborted
+    the run instead of skipping the leg (#9134 review, P2).
+    """
+    (tmp_path / "pytest-log-broken").mkdir()
+    (tmp_path / "pytest-log-broken" / "pytest.log").mkdir()   # directory, not a file
+    (tmp_path / "pytest-log-ok").mkdir()
+    (tmp_path / "pytest-log-ok" / "pytest.log").write_text("= 3 passed in 1.00s =\n")
+
+    agg = ci_timing.aggregate_logs(tmp_path)
+
+    assert agg["total_counts"]["passed"] == 3, agg["total_counts"]
+    broken = [s for s in agg["log_sources"] if s["error"]]
+    assert broken and broken[0]["summary_seen"] is False, agg["log_sources"]
+
+
+def test_each_summary_less_leg_is_labelled_by_its_own_cause() -> None:
+    """One cause must not be asserted for every leg in the list.
+
+    The first fix derived a single `why` from `any(... "killed" ...)`, so a leg that
+    was never killed was published as watchdog-killed — the same asserted-cause the
+    round was fixing, moved from per-run to per-line (#9134 review, P2).
+    """
+    text = ci_timing.render_md(
+        {"head_sha": "abc123", "created_at": "2026-01-01T00:00:00Z",
+         "conclusion": "success"},
+        {}, {}, {k: 0 for k in ci_timing.COUNT_KEYS}, True, "4242", [], [],
+        summary_less_legs=[
+            {"leg": "pytest-log-test-d", "log": "pytest.log", "killed": True},
+            {"leg": "pytest-log-test-e", "log": "pytest.log", "killed": False},
+        ],
+    )
+    line = next(l for l in text.split("\n") if l.startswith("- summary-less legs"))
+    killed_part, _, plain_part = line.partition("; ")
+    assert "watchdog-killed" in killed_part and "pytest-log-test-d" in killed_part, line
+    assert "pytest-log-test-e" in plain_part, line
+    assert "watchdog-killed" not in plain_part, line
+
+
 def test_a_zero_count_summary_is_not_a_truncated_leg(tmp_path: Path) -> None:
     """`no tests ran in 0.30s` is a SUMMARY of zeroes, not an absent summary.
 
@@ -1283,11 +1329,14 @@ def test_a_zero_count_summary_is_not_a_truncated_leg(tmp_path: Path) -> None:
     lost nothing (#9134 review, P2).
     """
     (tmp_path / "pytest-log-test-a").mkdir()
-    (tmp_path / "pytest-log-test-a" / "pytest.log").write_text(
-        "no tests ran in 0.30s\n")
-    agg = ci_timing.aggregate_logs(tmp_path)
-    assert agg["log_sources"][0]["summary_seen"] is True
-    assert [s for s in agg["log_sources"] if not s["summary_seen"]] == []
+    for body in ("no tests ran in 0.30s\n",                 # -q, banner-less
+                 "===== no tests ran in 0.01s =====\n",    # -v, BANNER form
+                 "===== 2 deselected in 0.10s =====\n",    # banner, no count token
+                 "2 deselected in 0.10s\n"):
+        (tmp_path / "pytest-log-test-a" / "pytest.log").write_text(body)
+        agg = ci_timing.aggregate_logs(tmp_path)
+        assert agg["log_sources"][0]["summary_seen"] is True, body
+        assert [s for s in agg["log_sources"] if not s["summary_seen"]] == [], body
 
 
 def test_main_wires_the_disclosure_into_the_artifact(tmp_path: Path,
