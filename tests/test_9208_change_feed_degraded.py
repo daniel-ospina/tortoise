@@ -32,6 +32,7 @@ back into a silently short page.
 """
 from __future__ import annotations
 
+import ast
 import os
 import threading
 import time
@@ -979,3 +980,87 @@ def test_a_leaked_degradation_is_attributed_to_the_test_that_left_it():
     assert "leaked into this test" not in message, (
         "the old wording blamed the SUCCESSOR; the attribution must be the "
         f"polluter: {message}")
+
+
+def _autouse_fixture_bodies(path: Path) -> dict[str, str]:
+    """Every module-level ``@pytest.fixture(autouse=True)`` body in *path*, by name.
+
+    Read as SOURCE, not imported: the point is to pin the glue that pytest runs
+    (the fixture's wiring and its teardown ORDER), which no test body can assert
+    from the inside. Same seam-as-a-module pattern as
+    ``tests/_change_feed_isolation.py`` / ``tests/_tmpdir_hygiene.py``.
+    """
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    bodies: dict[str, str] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        decorators = [ast.get_source_segment(source, dec) or ""
+                      for dec in node.decorator_list]
+        if any("pytest.fixture" in dec and "autouse=True" in dec
+               for dec in decorators):
+            bodies[node.name] = ast.get_source_segment(source, node) or ""
+    return bodies
+
+
+def test_the_isolation_fixture_is_autouse_and_attributes_in_its_teardown():
+    """The suite-wide fixture is WIRED as the helper's docstring claims (#9208).
+
+    Why this pin exists: the helper test above pins ``leaked_state_message``'s
+    DECISION, but nothing pinned that anything calls it. Deleting
+    ``tests/conftest.py::_change_feed_state_isolation``, dropping its
+    ``autouse=True``, or removing its after-half left the whole suite green
+    (#9249 review) — so the isolation the other tests rely on rested on the
+    author's care rather than on the tree.
+
+    MUTATION that reds it: delete the fixture, drop ``autouse=True``, drop the
+    ``pytest.fail`` call, or move the clear AFTER the fail (which would cascade
+    one polluter's red through every later test in the shard).
+    """
+    conftest = Path(__file__).resolve().parent / "conftest.py"
+    autouse = _autouse_fixture_bodies(conftest)
+
+    body = autouse.get("_change_feed_state_isolation")
+    assert body is not None, (
+        "tests/conftest.py must carry the autouse `_change_feed_state_isolation` "
+        f"fixture — without it a leaked latch poisons a later test silently. "
+        f"Autouse fixtures found: {sorted(autouse)}")
+    assert "leaked_state_message(" in body, (
+        "the fixture must delegate the attribution decision to "
+        f"`tests/_change_feed_isolation`, not re-implement it: {body}")
+    assert "pytest.fail(" in body, (
+        "the after half must FAIL the polluter loudly; clearing silently is the "
+        f"defect this fixture exists to prevent: {body}")
+
+    teardown = body.index("finally:")
+    cleared = body.index("clear_degraded()", teardown)
+    failed = body.index("pytest.fail(", teardown)
+    assert cleared < failed, (
+        "the teardown must CLEAR BEFORE FAILING: a setup/teardown failure that "
+        "left the latch set would red every later test in the shard for a reason "
+        f"already reported. clear at {cleared}, fail at {failed}.")
+
+
+def test_no_autouse_fixture_in_this_file_masks_the_attribution():
+    """This file must NOT carry the module-level clear that hid its own leaks.
+
+    Function-scoped autouse fixtures are torn down in REVERSE setup order, so a
+    module-level autouse clear (the ``_no_carried_degradation`` this file used to
+    have) runs BEFORE the conftest-level one and empties the map before the
+    attribution check samples it — silently forgiving exactly the leaks this file
+    is most likely to make (#9249 review). Every latching test here clears in its
+    own ``finally`` instead.
+
+    MUTATION that reds it: re-add ``@pytest.fixture(autouse=True)`` +
+    ``event_store.clear_degraded()`` at module level in this file.
+    """
+    maskers = {
+        name: body
+        for name, body in _autouse_fixture_bodies(Path(__file__).resolve()).items()
+        if "clear_degraded()" in body
+    }
+    assert not maskers, (
+        "a module-level autouse fixture that clears the degraded map runs BEFORE "
+        "the conftest fixture's attribution check and silences it for this whole "
+        f"file: {sorted(maskers)}. Clear in each test's own `finally` instead.")
