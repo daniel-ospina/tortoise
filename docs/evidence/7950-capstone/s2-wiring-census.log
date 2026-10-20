@@ -3,14 +3,16 @@
 #   cache_projection.read_record_view / FalkorProjection.rebuild_from_record).
 # Measured at: feat/9189-tm@500089165 on 2026-10-19 (the commit that TAKES this
 #   measurement; re-run and byte-identical again after merging origin/main@c172b042f,
-#   which touches no censused `file:line`)
+#   which touches no censused hit line)
 # Command: uv run python docs/evidence/7950-capstone/probes/s2_wiring_census.py
 # Paste of the run as printed, BOTH populations. No expectation block: an expected-value
 #   header above a run's own transcript makes measured-vs-expected unverifiable.
 # The PRODUCTION section is the CLAIM, and it is re-measured rather than trusted —
 #   tests/test_7950_capstone_probe.py::test_the_s2_census_log_is_a_LIVE_measurement
-#   re-runs the committed probe over the tree and compares, hit lines and their
-#   `file:line` included.
+#   re-runs the committed probe over the tree and compares it by COUNT and by the
+#   FILE each hit lives in. The `file:line` below is kept for the human reader; the
+#   line ORDINAL is deliberately NOT pinned, because it moves under any unrelated
+#   edit above the call and pinning it turned such edits into red CI (#9196 review).
 # The `test population:` counts are INFORMATIONAL and deliberately unpinned: they move
 #   whenever any test file mentions one of these names, which is not a claim about
 #   whether the product is wired. They went stale between the origin/main merge and

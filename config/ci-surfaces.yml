@@ -88,12 +88,12 @@ surfaces:
   # diff-carrying — the file is NOT in `carve_out:`, so it rides in
   # `test_files` for the surfaces `select()` matches. The S2 census pin
   # (`test_the_s2_census_log_is_a_LIVE_measurement`) re-measures
-  # `docs/evidence/7950-capstone/s2-wiring-census.log` INCLUDING each hit line's
-  # `file:line`, and its one live hit lives in `tortoise/__main__.py` (the
+  # `docs/evidence/7950-capstone/s2-wiring-census.log` by COUNT and by the FILE
+  # each hit lives in, and its one live hit lives in `tortoise/__main__.py` (the
   # `record-reconcile` verb's `read_record_view(...)` call) — an EXACT
   # `api` SOURCE_PATTERNS match that REPLACES the `core` fallback in `select()`.
   # So an `__main__.py`-only PR selected `api` alone and the pin never ran on the
-  # exact change that shifts its pinned line (measured 2026-10-19:
+  # exact change that adds or removes a censused call site (measured 2026-10-19:
   # `select(['tortoise/__main__.py'])` -> surfaces=['api'], probe ABSENT; with
   # this row, PRESENT). This is the #1349/#2938/#3154
   # silent-drop class. Keep the `core` entry: the probe's other subjects
@@ -105,9 +105,10 @@ surfaces:
   # alone (`census_all(PROD_DIRS, TARGETS)` re-tokenizes 241 `tortoise/` + 132
   # `tools/` files). The earlier "<0.01s/test, durations row 2.0" note predated
   # the pin and under-stated the file ~10x. The durations VALUE stays at the
-  # a weight is a shard-layout input, so a first-cut row without a CI
-  # measurement is the refresher's to fill (the #9003-review rule on the #2818
-  # row); the measured cost is stated on that row's comment instead. Pinned by
+  # flat 2.0 default: a weight is a shard-layout input, so a first-cut row
+  # without a CI measurement is the refresher's to fill (the #9003-review rule
+  # on the #2818 row); the measured cost is stated on that row's comment
+  # instead. Pinned by
   # tests/test_ci_selection.py::test_the_capstone_census_pin_runs_on_a_main_py_change.
   - test_7950_capstone_probe.py
   # #7809: DUAL-REGISTERED with `core` AND `eval` — without this `api` arm the

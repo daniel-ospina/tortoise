@@ -2106,15 +2106,17 @@ def test_the_capstone_evidence_bundle_selects_core_not_tier1():
 
 def test_the_capstone_census_pin_runs_on_a_main_py_change():
     # PR #9196 review P1: the OTHER direction of the same hole. The census pin
-    # compares each hit line INCLUDING its `file:line`, and the one live hit is
-    # `tortoise/__main__.py:727: view = read_record_view(...)`. That file is an
+    # compares each hit's FILE and COUNT (the line ORDINAL is normalised away,
+    # #9196 review P2), and the one live hit is
+    # `tortoise/__main__.py: view = read_record_view(...)`. That file is an
     # EXACT `api` SOURCE_PATTERNS match and NOT in `CORE_ALSO`, so a named-surface
     # match REPLACES the `core` fallback: before the `api` registration a
     # `__main__.py`-only diff returned surfaces=['api'] with the `core`-registered
-    # probe ABSENT, and any edit above line 727 (measured: a one-line ruff import
-    # fix) shifts the hit and reddens the pin — on the post-merge full selection
-    # only. The instrument that makes S2's staleness visible must not be invisible
-    # to CI selection on the file whose line it pins (#1349/#2938/#3154 class).
+    # probe ABSENT, so a diff that ADDED or REMOVED that call site — the wiring
+    # change the pin exists to catch — merged green and only reddened `main` on
+    # the post-merge full selection. The instrument that makes S2's staleness
+    # visible must not be invisible to CI selection on the file its hit lives in
+    # (#1349/#2938/#3154 class).
     #
     # Measured before the `api` entry (2026-10-19, `select()` in-process):
     # `_sel(["tortoise/__main__.py"])` -> surfaces=['api'], full=False, 283 test
