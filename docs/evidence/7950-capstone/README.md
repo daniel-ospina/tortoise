@@ -107,21 +107,28 @@ write: the line read the same whether the statement landed, was refused, or neve
 As of `#9079` the probe reports the OUTCOME — `armed_raw_handle_write` returns the verdict, reads the
 node back before calling a dispatched write a landing, and refuses to report a write that neither
 landed nor was refused. `s1_report_text` builds the complete three-line §17.1 report from that single
-result and `main` writes it once, so the acceptance verdict, the guard's **enforces**/**measures
-only** MODE and the S1 summary all follow one measurement — pinned on the emitted report in ALL
-FOUR mode × outcome cells (the two are independent: a scope in flight or an unbound journal lets a
-write land while the switch is on) in `tests/test_7950_capstone_probe.py`, together with a
-module-wide rule that neither the labels nor the verdict constants are reachable outside the
-measuring/reporting functions.
+result and `main` writes it once, so **the acceptance verdict and the S1 summary follow one
+measurement**, and the guard's **enforces**/**measures only** MODE follows the guard's own
+`_HANDLE_GUARD_ENFORCES` switch — read inside that same call, never supplied by the caller, so a
+mistyped argument cannot announce an armed door that is not armed. All of it is pinned on the emitted
+report in ALL FOUR mode × outcome cells (mode and outcome are independent: a scope in flight or an
+unbound journal lets a write land while the switch is on) in `tests/test_7950_capstone_probe.py`,
+together with a module-wide rule that neither the labels nor the verdict constants are reachable
+outside the measuring/reporting functions.
 
-Three output changes a reader comparing against the block above will notice: a `HANDLE GUARD MODE`
-line and an `S1 (…)` line are now emitted, and the two demonstration lines are labelled
-`SECOND-WRITER MUTATION`. That last one matters for the acceptance command: the block above has
-exactly TWO lines matching `grep "ARMED RAW HANDLE"` (the verdict line and
-`ARMED RAW HANDLE MUTATION`, as `e2e-chain-probe.log:23,26` records), so "the line reads `refused`"
-was never literally true of the grep; the probe now emits exactly ONE matching line.
+**Four** output changes a reader comparing against the block above will notice: a `HANDLE GUARD MODE`
+line and an `S1 (…)` line are now emitted, the two demonstration lines are labelled
+`SECOND-WRITER MUTATION`, and the `ARMED FOLD` line reads
+`blocked (§17.1 DirectCacheWriteRefused)` instead of `refused (DirectCacheWriteRefused)` — the same
+outcome and the same exception, named off the caught exception rather than spelled as a literal (a
+literal `refused (…)` is a substring hit for the verdict rule, which is why a correct line had to be
+reworded; taking `type(exc).__name__` keeps the fact and keeps the source verdict-free). The
+`SECOND-WRITER MUTATION` relabel matters for the acceptance command: the block above has exactly TWO
+lines matching `grep "ARMED RAW HANDLE"` (the verdict line and `ARMED RAW HANDLE MUTATION`, as
+`e2e-chain-probe.log:23,26` records), so "the line reads `refused`" was never literally true of the
+grep; the probe now emits exactly ONE matching line.
 
-The block above predates all three changes; its reading (`SUCCEEDED (direct cache write)`, S1
+The block above predates all four changes; its reading (`SUCCEEDED (direct cache write)`, S1
 NOT-GREEN) is still what an armed *projection* produces today, because `_HANDLE_GUARD_ENFORCES` is
 `False` (`#9124` part 2, blocked on the declaration programme), and the probe now says so in its own
 output instead of leaving it to the reader.

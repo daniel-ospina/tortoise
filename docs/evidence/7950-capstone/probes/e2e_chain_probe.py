@@ -132,7 +132,31 @@ def armed_raw_handle_write(proj) -> str:
     return RAW_HANDLE_LANDED
 
 
-def s1_report_text(proj, *, guard_enforces: bool) -> tuple[bool, str]:
+def armed_fold_line(proj) -> str:
+    """The FOLD lane's §17.1 line, from the OUTCOME of ``proj.apply``.
+
+    ⛔ THE EXCEPTION NAME IS READ OFF THE EXCEPTION, NEVER SPELLED. The line
+    used to be the literal ``"… refused (DirectCacheWriteRefused)"`` — accurate,
+    but it is ALSO the spelling of a verdict, because ``re``-free substring
+    matching on ``"refused"`` hits the class name inside it. That made a
+    correct, informative line a false positive of the TOTAL verdict rule below
+    and it was replaced with ``"blocked (§17.1 refusal)"``, which dropped the
+    one place the caught exception's type was recorded (#9079 review, P3).
+    Taking ``type(exc).__name__`` keeps the fact AND keeps the source
+    verdict-free: the emitted name cannot disagree with what was caught, and no
+    value constant spells either token.
+    """
+    from tortoise.projection import DirectCacheWriteRefused
+
+    try:
+        proj.apply({"type": "PointAdded", "id": "p-fold-7950"})
+    except DirectCacheWriteRefused as exc:
+        return ("ARMED FOLD (proj.apply):          blocked "
+                f"(§17.1 {type(exc).__name__})")
+    return "ARMED FOLD (proj.apply):          NO RAISE"
+
+
+def s1_report_text(proj) -> tuple[bool, str]:
     """The COMPLETE §17.1 report for an armed projection, from ONE measurement.
 
     Returns ``(refused, report)``. ``report`` is every line the probe emits about
@@ -140,6 +164,15 @@ def s1_report_text(proj, *, guard_enforces: bool) -> tuple[bool, str]:
     string, and ``refused`` is the measurement's own branch signal, so `main`
     never has to read a verdict constant to decide whether to run the
     demonstration.
+
+    ⛔ THE MODE IS READ FROM THE GUARD, NOT SUPPLIED BY THE CALLER. This used to
+    take ``guard_enforces=``, and `main` passed `_HANDLE_GUARD_ENFORCES` — a
+    correct argument nobody pinned, so spelling ``guard_enforces=True`` at the
+    one call site made the epic's deciding artifact claim the door was armed
+    while it was not (a `True` literal is invisible to the value-string rule
+    below, which sees only `str`/`bytes`). The flag is now read here, from
+    `tortoise.projection`, so there is no argument to falsify; the acceptance
+    verdict and the S1 summary still follow the MEASUREMENT (#9079 review, P3).
 
     ⛔ WHY ONE STRING. The pins are on EMITTED TEXT, not on the shape of the
     source: a test drives this function with a stub projection in both modes and
@@ -155,6 +188,12 @@ def s1_report_text(proj, *, guard_enforces: bool) -> tuple[bool, str]:
     matched them too and "the line reads refused" was not literally true of the
     command; they are now labelled ``SECOND-WRITER MUTATION``.
     """
+    from tortoise import projection as _projection
+
+    #: The guard's own switch, read at CALL time (a module attribute, never a
+    #: captured copy), so the MODE follows the flag the door actually consults.
+    guard_enforces = _projection._HANDLE_GUARD_ENFORCES
+
     raw_handle = armed_raw_handle_write(proj)
     refused = raw_handle == RAW_HANDLE_REFUSED
     report = "\n".join([
@@ -283,18 +322,12 @@ def main() -> int:
         # (§17.1 with a journal bound) so the demonstration is on the guarded
         # lane, not an unguarded one.
         proj._bind_journal("/tmp/cap7950-journal.jsonl")
-        from tortoise.projection import DirectCacheWriteRefused
-        try:
-            proj.apply({"type": "PointAdded", "id": "p-fold-7950"})
-            print("ARMED FOLD (proj.apply):          NO RAISE")
-        except DirectCacheWriteRefused:
-            print("ARMED FOLD (proj.apply):          blocked (§17.1 refusal)")
+        print(armed_fold_line(proj))
         # ⛔ MEASURED, NOT ASSERTED (#9079): these lines are the issue's
         # acceptance token and S1's verdict, so they are printed from the
-        # measurement — never spelled out beside it.
-        from tortoise.projection import _HANDLE_GUARD_ENFORCES
-        refused, s1_report = s1_report_text(
-            proj, guard_enforces=_HANDLE_GUARD_ENFORCES)
+        # measurement — never spelled out beside it. No keyword: the MODE is
+        # read from the guard inside the builder, so `main` cannot state one.
+        refused, s1_report = s1_report_text(proj)
         # ONE write, ONE value: the report is emitted as the text the
         # measurement produced, so there is no per-line seam a second,
         # unmeasured line could be inserted into.

@@ -692,13 +692,21 @@ def _probe_tree() -> ast.Module:
     return ast.parse(_PROBE.read_text(encoding="utf-8"))
 
 
-def _report(rows, *, guard_enforces, write_raises=None):
+def _report(monkeypatch, rows, *, guard_enforces, write_raises=None):
+    """The probe's report for a stub projection with the guard flag SET.
+
+    The mode is no longer an argument: `s1_report_text` reads
+    `tortoise.projection._HANDLE_GUARD_ENFORCES` itself, so the test drives the
+    same source the door consults (`monkeypatch`, so it is restored).
+    """
+    import tortoise.projection as projection
+
+    monkeypatch.setattr(projection, "_HANDLE_GUARD_ENFORCES", guard_enforces)
     return _PROBE_MODULE.s1_report_text(
-        _stub_projection(read_rows=rows, write_raises=write_raises),
-        guard_enforces=guard_enforces)
+        _stub_projection(read_rows=rows, write_raises=write_raises))
 
 
-def test_the_report_is_one_measured_text_in_both_modes():
+def test_the_report_is_one_measured_text_in_both_modes(monkeypatch):
     """The pin is on the EMITTED TEXT, for all four mode × outcome cells.
 
     The report is one value, so there is no per-line seam for a hardcoded line
@@ -712,16 +720,16 @@ def test_the_report_is_one_measured_text_in_both_modes():
     outcome are independent, so all four combinations are driven, and a verdict
     read off `guard_enforces` instead of the measurement reds.
     """
-    landed_refused, landed = _report([[1]], guard_enforces=False)
+    landed_refused, landed = _report(monkeypatch, [[1]], guard_enforces=False)
     refused_refused, refused = _report(
-        [[0]], guard_enforces=True, write_raises=_probe_refusal())
+        monkeypatch, [[0]], guard_enforces=True, write_raises=_probe_refusal())
     # THE TWO OFF-DIAGONAL CELLS. Mode and outcome are INDEPENDENT — a scope in
     # flight or an unbound journal lets a write land while the switch is True
     # (`_refuse_unauthorized_cache_write` returns early on either) — so pinning
     # only `(False, landed)` and `(True, refused)` would let the verdict be read
     # off the MODE instead of the measurement and stay green.
-    _, landed_enforcing = _report([[1]], guard_enforces=True)
-    _, refused_measuring = _report([[0]], guard_enforces=False,
+    _, landed_enforcing = _report(monkeypatch, [[1]], guard_enforces=True)
+    _, refused_measuring = _report(monkeypatch, [[0]], guard_enforces=False,
                                    write_raises=_probe_refusal())
 
     assert landed_refused is False and refused_refused is True, (
@@ -776,6 +784,89 @@ def test_the_report_is_written_once_as_the_measured_text():
     assert len(writes) == 1, (
         "`main` must write the report with exactly one `sys.stdout.write`, "
         f"found {len(writes)}")
+
+
+def test_the_mode_follows_the_guard_flag_and_no_caller_can_supply_it(monkeypatch):
+    """The MODE is read from the guard, not handed in by the caller.
+
+    Pre-fix `s1_report_text(proj, *, guard_enforces)` took the mode as an
+    ARGUMENT and `main` passed `_HANDLE_GUARD_ENFORCES`. Correct at the one call
+    site, pinned nowhere: `guard_enforces=True` there made the epic's deciding
+    artifact announce an ARMED door while `_HANDLE_GUARD_ENFORCES` was still
+    `False` — and no test reddened, because a `True` literal is not a value
+    string and the TOTAL verdict rule sees only `str`/`bytes` (#9079 review, P3).
+
+    Two independent halves, both of which the pre-fix code fails: the emitted
+    MODE tracks the flag (so a stale or invented argument cannot outlive it),
+    and there is NO parameter through which a mode could be asserted at all.
+    """
+    import tortoise.projection as projection
+
+    # ── behaviour: the emitted MODE is the projection module's own switch ──
+    monkeypatch.setattr(projection, "_HANDLE_GUARD_ENFORCES", False)
+    _, measuring = _PROBE_MODULE.s1_report_text(_stub_projection(read_rows=[[1]]))
+    monkeypatch.setattr(projection, "_HANDLE_GUARD_ENFORCES", True)
+    _, enforcing = _PROBE_MODULE.s1_report_text(_stub_projection(read_rows=[[1]]))
+    assert measuring.splitlines()[0].endswith("measures only (refusal NOT armed, #9124 part 2)"), (
+        measuring.splitlines()[0])
+    assert enforcing.splitlines()[0].endswith("enforces"), enforcing.splitlines()[0]
+    # the flag moved NOTHING else: both cells are the landed outcome
+    assert measuring.splitlines()[1:] == enforcing.splitlines()[1:], (
+        "the MODE flag changed a line it does not own")
+
+    # ── structure: there is no argument to falsify ────────────────────────
+    tree = _probe_tree()
+    builder = next(node for node in tree.body
+                   if isinstance(node, ast.FunctionDef)
+                   and node.name == "s1_report_text")
+    params = [a.arg for a in builder.args.args + builder.args.kwonlyargs]
+    assert params == ["proj"], (
+        "`s1_report_text` must take only the projection: a supplied mode can "
+        f"disagree with the guard's own flag, found params={params}")
+    main = next(node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name == "main")
+    call = next(node for node in ast.walk(main)
+                if isinstance(node, ast.Call)
+                and getattr(node.func, "id", None) == "s1_report_text")
+    assert not call.keywords, (
+        "`main` must not pass a mode (or anything else) to the builder: "
+        f"{[kw.arg for kw in call.keywords]}")
+
+
+def test_the_fold_line_names_the_exception_that_was_caught():
+    """The FOLD line keeps the exception name AND stays verdict-free.
+
+    The informative literal `refused (DirectCacheWriteRefused)` was a false
+    positive of the TOTAL verdict rule — `"refused"` is a substring of the
+    CLASS name — so it had been flattened to "blocked (§17.1 refusal)", losing
+    the one record of which exception the fold gate raised (#9079 review, P3).
+    The name is now read off the caught exception, so it is both accurate and
+    unspellable. Both halves are checked, and both red on the pre-fix code
+    (which had no `armed_fold_line` at all).
+    """
+    from tortoise.projection import DirectCacheWriteRefused
+
+    class _FoldRefusal(DirectCacheWriteRefused):
+        """A subclass, so a hardcoded class name cannot satisfy this pin."""
+
+    line = _PROBE_MODULE.armed_fold_line(
+        _stub_projection(read_rows=[[1]],
+                         apply_raises=_FoldRefusal("blocked")))
+    assert type(_FoldRefusal("x")).__name__ in line, line
+    assert DirectCacheWriteRefused.__name__ not in line, (
+        "the line spells the base class instead of naming what was caught: " + line)
+
+    # a fold that does NOT raise is reported as such, so the line is a verdict
+    assert _PROBE_MODULE.armed_fold_line(
+        _stub_projection(read_rows=[[1]])).endswith("NO RAISE")
+
+    # …and the exception name cannot be spelled in the source either: a value
+    # constant carrying it would re-arm the over-block the derivation removes.
+    spelled = [node.value for node in _non_docstring_constants(_probe_tree())
+               if DirectCacheWriteRefused.__name__ in _const_text(node)]
+    assert not spelled, (
+        "the probe spells the exception class in a literal, which the TOTAL "
+        f"verdict rule refuses (it contains a verdict token): {spelled}")
 
 
 def _non_docstring_constants(tree):
@@ -974,7 +1065,7 @@ class _StubResult:
         self.result_set = rows
 
 
-def _stub_projection(*, read_rows, write_raises=None):
+def _stub_projection(*, read_rows, write_raises=None, apply_raises=None):
     """A projection stand-in: writes return a result, reads return `read_rows`."""
     import types
 
@@ -985,7 +1076,13 @@ def _stub_projection(*, read_rows, write_raises=None):
             return _StubResult([])
         return _StubResult(read_rows)
 
-    return types.SimpleNamespace(g=types.SimpleNamespace(query=_query), query=_query)
+    def _apply(_event):
+        if apply_raises is not None:
+            raise apply_raises
+        return None
+
+    return types.SimpleNamespace(g=types.SimpleNamespace(query=_query),
+                                 query=_query, apply=_apply)
 
 
 def test_a_write_that_neither_landed_nor_was_refused_is_not_a_landing():
