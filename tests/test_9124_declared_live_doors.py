@@ -1417,7 +1417,22 @@ def _modules_reaching_the_handle():
 #: bare-name entry is a SILENT NO-OP: accepted into the set, it changes nothing,
 #: and the gate keeps blocking the statement while its author believes it was
 #: proven read-only. `test_every_proven_read_names_a_real_census_entry` pins it.
-_PROVEN_READS: set[tuple[str, str]] = set()
+_PROVEN_READS: set[tuple[str, str]] = {
+    # Both are the #9063 calibration audit's two READS, and the proof is the
+    # statement form: the interpolated fragment is a WHERE/`{label}` fragment
+    # and nothing else, so no write clause can reach the engine.
+    #
+    # ``calibrate_summary``: `MATCH (n:Point) {where} AND (…) OPTIONAL MATCH
+    # (n)-[:extractedFrom]->(s:Source) RETURN …` — the interpolation is
+    # ``where`` (an is_operator/id-resolvability predicate built below it).
+    # ``_uncalibrated_ep_participants``: `MATCH (n:{label}) WHERE {where}
+    # RETURN n.id` (+ an optional `LIMIT`) — ``label`` comes from
+    # ``_CALIBRATION_GATED_LABELS``, ``where`` from the EP participant
+    # predicate. Wrapping either in a write lane would be the remedy this
+    # register exists to avoid.
+    ("tortoise/sdk.py", "TortoiseSDK.calibrate_summary"),
+    ("tortoise/sdk.py", "TortoiseSDK._uncalibrated_ep_participants"),
+}
 
 
 def test_every_proven_read_names_a_real_census_entry():
