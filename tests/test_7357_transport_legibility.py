@@ -543,3 +543,86 @@ def test_the_helper_is_the_only_source_of_the_wording():
     source = Path(cypher_guard.__file__).read_text(encoding="utf-8")
     assert "quit answering in the middle of this request" not in source
     assert "explain_instance_unavailable" in source
+
+
+# ── the applier's own contract: it must never REPLACE the error ─────────────
+#
+# ``_note_instance_outage``'s docstring promises it "never raises", because it
+# runs inside an ``except`` block on the way to re-raising the ORIGINAL error:
+# a raise from the note would replace the exception being explained with the
+# applier's own — the exact swap the note exists to prevent. That promise is
+# ENFORCED by a belt around the body (and around the arm's derivation, which
+# reads caller-supplied Cypher), so these three tests pin the belt rather than
+# the promise: each one arms a failure INSIDE the note path and asserts the
+# caller still sees its own error.
+
+
+class _ReadOnlyArgsTimeout(redis_exc.TimeoutError):
+    """A transport error whose ``args`` cannot be reassigned (#9352 review P2).
+
+    ``args`` is writable on every built-in exception, so the honest way to arm
+    the failure the contract has to survive is to make ONE exception type that
+    refuses the write — ``exc.args = (…)`` is the note's last statement, and on
+    a type like this it raises ``AttributeError`` from inside the applier.
+    """
+
+    def __setattr__(self, name, value):
+        # ONLY ``args``: ``redis``'s own ``__init__`` assigns ``error_type``
+        # through ``__setattr__``, so a blanket refusal would fail at raise time
+        # and the test would prove nothing about the applier.
+        if name == "args":
+            raise AttributeError("args is read-only on this exception")
+        super().__setattr__(name, value)
+
+
+def test_a_note_that_cannot_be_written_never_replaces_the_error_it_explains():
+    """The append itself fails → the ORIGINAL error still surfaces, unannotated."""
+    exc = _raise_from_handle(_ReadOnlyArgsTimeout(SOCKET_TIMEOUT), READ_STATEMENT)
+
+    # Not AttributeError, not a chained wrapper: the caller's own error.
+    assert type(exc) is _ReadOnlyArgsTimeout
+    assert exc.args == (SOCKET_TIMEOUT,), (
+        "the message was rewritten or replaced — the note must be all-or-nothing")
+    assert cypher_guard.explain_instance_unavailable(exc) is not None, (
+        "precondition: this family IS explainable — otherwise the belt was never reached")
+    assert "quit answering in the middle of this request" not in str(exc)
+
+
+def test_the_applier_swallows_a_failing_helper(monkeypatch):
+    """The belt is around the applier's own body, not only around its callers."""
+    monkeypatch.setattr(
+        cypher_guard, "explain_instance_unavailable",
+        lambda exc, mutating=None: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    exc = redis_exc.TimeoutError(SOCKET_TIMEOUT)
+    exc.args = (SOCKET_TIMEOUT,)
+    # Must not raise, and must not touch the exception.
+    assert cypher_guard._note_instance_outage(exc, mutating=False) is None
+    assert exc.args == (SOCKET_TIMEOUT,)
+
+
+def test_a_failing_arm_derivation_lands_on_the_hedge_and_keeps_the_error(monkeypatch):
+    """The DERIVATION reads caller data, so it is inside the same belt.
+
+    ``_command_mutating`` walks the wire args, the projection's destructive set
+    and the write regexes over the caller's Cypher. A raise from any of those
+    happens on the same error path, so without its own guard it would replace
+    the caller's transport error with a classifier's exception. It is answered
+    with the ``None`` hedge instead — "outcome UNKNOWN, read back first" — which
+    is the conservative arm the docstring promises for an unclassifiable command.
+    """
+    def _boom(args):
+        raise RuntimeError("classifier blew up")
+
+    monkeypatch.setattr(cypher_guard, "_command_mutating", _boom)
+
+    client = _dead_client(redis_exc.TimeoutError(SOCKET_TIMEOUT))
+    with pytest.raises(redis_exc.TimeoutError) as caught:
+        client.execute_command("GRAPH.QUERY", "tortoise", WRITE_STATEMENT)
+
+    message = str(caught.value)
+    assert message.startswith(SOCKET_TIMEOUT)
+    assert "Whether the command took effect is UNKNOWN" in message
+    # The mutation arm must NOT be guessed either way from a classifier failure.
+    assert "OUTCOME IS UNKNOWN" not in message
+    assert "re-issuing this statement is safe" not in message

@@ -119,6 +119,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import functools
+import logging
 import re
 import time
 from contextlib import contextmanager
@@ -133,6 +134,11 @@ from tortoise.numeric_domain import (
     numeric_alteration_reason,
 )
 from tortoise.retry import explain_instance_unavailable
+
+#: The #7357 note's own failure channel. A note that cannot be built is
+#: DEBUG-only: the caller is about to re-raise the ORIGINAL exception, and a
+#: log line at a louder level would itself become the artefact under diagnosis.
+logger = logging.getLogger(__name__)
 
 #: Marker set on the generated classes so the factories are idempotent —
 #: wrapping an already-guarded client/handle again is a no-op, never a second
@@ -1441,17 +1447,43 @@ def _note_instance_outage(exc: BaseException, *, mutating: bool | None) -> None:
     read the message from position 0), and a multi-argument exception is left
     alone because there is no single message to append to and reshaping
     ``args`` here would change a contract callers can see.
+
+    The "never raises" half is ENFORCED, not assumed (#9352 review P2): the
+    body is wrapped, because the classification it calls into reads
+    caller-supplied data (``_as_text`` over the wire args, the projection's
+    write regexes over the caller's Cypher) and because ``exc.args`` is not
+    guaranteed writable on every exception type. Each of those is a raise on
+    the error path, which without this belt would REPLACE the original error
+    with the applier's — the exact swap this function exists to prevent.
     """
-    if len(getattr(exc, "args", ())) != 1 or not isinstance(exc.args[0], str):
-        return
-    explained = explain_instance_unavailable(exc, mutating=mutating)
-    if explained is not None:
-        exc.args = (explained,)
+    try:
+        if len(getattr(exc, "args", ())) != 1 or not isinstance(exc.args[0], str):
+            return
+        explained = explain_instance_unavailable(exc, mutating=mutating)
+        if explained is not None:
+            exc.args = (explained,)
+    except Exception:  # noqa: BLE001, RUF100 — never replace the error being explained
+        logger.debug("instance-outage note failed", exc_info=True)
 
 
 def _explain_instance_unavailable(exc: BaseException, args) -> None:
-    """Applier for a raw command channel: derive the arm from *args* (#7357)."""
-    _note_instance_outage(exc, mutating=_command_mutating(args))
+    """Applier for a raw command channel: derive the arm from *args* (#7357).
+
+    The DERIVATION carries its own belt (#9352 review P2), for the same reason
+    :func:`_note_instance_outage` does: ``_command_mutating`` reads
+    caller-supplied data (``_as_text`` over the wire args, the projection's
+    write regexes over the caller's Cypher, two lazy imports), so a raise from
+    it lands on the SAME error path and would replace the exception being
+    explained just as surely as a raise from the note would. An unclassifiable
+    command falls to the ``None`` hedge, which is the conservative arm the
+    caller is told to treat as "outcome UNKNOWN".
+    """
+    try:
+        mutating = _command_mutating(args)
+    except Exception:  # noqa: BLE001, RUF100 — never replace the error being explained
+        logger.debug("instance-outage classification failed", exc_info=True)
+        mutating = None
+    _note_instance_outage(exc, mutating=mutating)
 
 
 class _GuardedExecuteCommand:
