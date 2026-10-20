@@ -18,6 +18,7 @@ import argparse
 import copy
 import difflib
 import pathlib
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -404,6 +405,73 @@ def _load_manifest_tool():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def _caller_lists(doc: dict) -> tuple[int, list[tuple[str, str, str]]]:
+    """(rows compared, mismatched (name, dependency list, reason list)).
+
+    `reason` is in `NON_DERIVABLE_ROW_KEYS` (it is built from a machine-local call log),
+    so `check` never compares it — but the caller LIST inside it is plain text and must
+    equal the one in the `dependency` column beside it, because the rendered table prints
+    both as the same fact (`Does / depends on` vs `Rationale`).
+    """
+    compared = 0
+    mismatched: list[tuple[str, str, str]] = []
+    for row in doc["rows"]:
+        if not isinstance(row, dict):
+            continue
+        dependency = " ".join(str(row.get("dependency") or "").split())
+        reason = " ".join(str(row.get("reason") or "").split())
+        dep_match = re.search(r"caller categories: (.*)$", dependency)
+        reason_match = re.search(r"callers: (.*)$", reason)
+        if not (dep_match and reason_match):
+            continue  # the "no caller outside tests was found" wording carries no list
+        compared += 1
+        if dep_match.group(1).strip() != reason_match.group(1).strip():
+            mismatched.append((str(row.get("name")), dep_match.group(1), reason_match.group(1)))
+    return compared, mismatched
+
+
+def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
+    """A one-sided edit to either derived-from-one-input column is caught here.
+
+    HONESTLY SCOPED: this is a guard against a HAND-EDIT of one column and against the
+    two columns drifting apart, NOT against a stale row. `sdk:supersede_point`'s drift
+    was recorded-vs-DERIVED — `tools/ask_spotcheck.py` began calling the method (#9126),
+    so the derivation gained `eval-harness` while the recorded row was stale in BOTH
+    fields — and this check cannot see that (the row agreed with itself on the pre-fix
+    tree; it passes there). The recorded-vs-derived half is `test_the_order_lint_passes`
+    above, which runs `tools/surface_manifest.py check`. What nothing else covers is the
+    two columns disagreeing, because `reason` is excluded from `check`; that is this pin,
+    and `test_the_reason_dependency_cross_check_can_fail` proves it fires.
+    """
+    compared, mismatched = _caller_lists(_manifest())
+    assert compared >= 40, (
+        f"only {compared} rows carry a comparable caller list (41 today) — this check "
+        "has stopped reading the manifest's rows and would pass vacuously"
+    )
+    assert not mismatched, (
+        "these rows state one caller set in `dependency` and another in `reason`: "
+        f"{mismatched}. Re-cut the row (or update both fields together) — the rendered "
+        "table prints them as the same fact"
+    )
+
+
+def test_the_reason_dependency_cross_check_can_fail():
+    """Instrument check: a one-sided edit must red the pin above.
+
+    Without this, the comparison could stop matching anything (a reworded column) and the
+    pin would pass on a manifest full of contradictions — the vacuity class this file has
+    been burned by before.
+    """
+    doc = copy.deepcopy(_manifest())
+    row = next(r for r in doc["rows"] if r.get("name") == "sdk:supersede_point")
+    row["reason"] = "no MCP tool binds it; callers: engine, other-tooling, tenant-rest"
+    compared, mismatched = _caller_lists(doc)
+    assert compared >= 40, f"the cross-check reads only {compared} rows on a doctored copy"
+    assert [name for name, _dep, _reason in mismatched] == ["sdk:supersede_point"], (
+        f"a one-sided edit to `reason` did not red the cross-check: {mismatched}"
+    )
 
 
 def test_the_retired_block_matches_the_declaration():
