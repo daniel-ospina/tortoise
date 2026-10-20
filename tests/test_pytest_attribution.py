@@ -745,8 +745,48 @@ def test_rc2_without_the_collection_signature_does_not_claim_a_collection_error(
     )
     result = run_script(log, rc="2")
     assert INCOMPLETE_MARKER in result.stdout, result.stdout
-    assert "COLLECTION-ERROR" not in result.stdout, result.stdout
-    assert "between tests" in result.stdout, result.stdout
+    # The assert names the branch this fixture actually REACHES, and it does so in
+    # that branch's own words. A negative assertion on the COLLECTION ERROR text
+    # would discriminate nothing here: with rc=2 and no collection signature
+    # `KILLED=1`, while that paragraph is gated on `KILLED = 0`, so the text could
+    # never appear whatever the script did with rc. The positive side of the
+    # collection-error text is pinned by
+    # `test_a_quiet_collection_error_is_explained_not_a_kill`, from a fixture that
+    # DOES reach it.
+    assert "the kill landed between tests" in result.stdout, result.stdout
+
+
+def test_a_quiet_collection_error_is_explained_not_a_kill(tmp_path: Path) -> None:
+    """The COLLECTION ERROR paragraph is reachable — and says what it claims.
+
+    This is the same defect the reporter was written for, seen from the other side:
+    a log WINDOW (the old blind `tail -300`) that kept pytest's
+    `Interrupted: N error during collection` line but cut away the `ERROR <path>`
+    record above it, and whose summary is a `-q` one (`1 error in 0.09s`, no `====`
+    banner, so SUMMARY_RE cannot match it). Nothing here is a kill: rc=1, no
+    start line, no NUL hole — so the reader must be told the attributable record is
+    the `ERROR <path>` line rather than be sent hunting for a culprit test.
+
+    The text alone is not the point: the paragraph is the LAST arm of the
+    `none unresolved` elif chain, so a reordering that let the generic
+    `rc=$RC without a session summary` arm win would still leave the log
+    "explained", just wrongly. That reordering reds this test.
+    """
+    log = tmp_path / "pytest.log"
+    log.write_text(
+        "!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n"
+        "1 error in 0.09s\n"
+    )
+    result = run_script(log, rc="1")
+    assert result.returncode == 0, result.stderr
+    # No attributable record survived the window, so the marker still stands.
+    assert INCOMPLETE_MARKER in result.stdout, result.stdout
+    assert "none unresolved" in result.stdout, result.stdout
+    assert "this log carries a COLLECTION ERROR" in result.stdout, result.stdout
+    assert "attributable record is the 'ERROR <path>' line" in result.stdout, result.stdout
+    # Not a kill, and not the generic "rc without a summary" paragraph either.
+    assert "the kill landed between tests" not in result.stdout, result.stdout
+    assert "without a session" not in result.stdout, result.stdout
 
 
 def test_collection_error_is_attributed_not_labelled_unobservable(tmp_path: Path) -> None:
@@ -960,9 +1000,11 @@ def test_incomplete_marker_becomes_a_named_attributable_failure(tmp_path: Path) 
 def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
     """EVERY `/tmp/*.log` tail in these workflows reports through the reporter.
 
-    Seven sites today: 5 `pytest.log` legs, 1 `pmv-pytest.log`, and 1
-    `trackb.log` (the must-pass Track B member, whose log name does not contain
-    "pytest" — it was the coverage gap a first cut missed). The filter is
+    Eight sites today: 5 `pytest.log` tails, 1 `trackb.log` (the must-pass Track B
+    member, whose log name does not contain "pytest" — it was the coverage gap a
+    first cut missed), 1 `pmv-pytest.log`, and 1 `pytest-d14.log`, which is written
+    through `| tee` rather than a tail (this file counts both shapes; the `tee`
+    site is the one a tail-only counter missed). The filter is
     deliberately the LOG TAIL, not the file name: a leg's log name is not a
     contract, and the rail's capture is `gh run view --log-failed` across every
     job, so any of these legs can omit its own failure set.
@@ -995,8 +1037,9 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
     # `test`'s last-failed pre-phase (200), `test` (300), `test-slow` (300),
     # `test-concurrency-falkor` (120) and `test-carve-out` (200) — plus `trackb.log`,
     # plus `pmv-pytest.log` in post-merge-validation.yml, plus `pytest-d14.log` written
-    # through `| tee`. The floor used to be 6 — ONE BELOW reality — so a
-    # single leg could be renamed out from under this check and it stayed green.
+    # through `| tee`. The floor used to be 6 — TWO BELOW reality (8 sites exist at
+    # main) — so a single leg could be renamed out from under this check and it
+    # stayed green; two of them could go before the floor even noticed.
     # A drop here means a leg was lost, not that it got safer; an ADDITION is fine,
     # which is why this is a floor.
     assert tails >= 8, f"only {tails} pytest-log sites found (expected >= 8) — a leg was renamed or dropped"
