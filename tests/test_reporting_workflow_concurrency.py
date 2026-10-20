@@ -68,7 +68,8 @@ What this module pins
   ``supabase-deploy``'s two locks are pinned exactly (a CONSTANT apply lock,
   an event-scoped run lock, both ``cancel-in-progress: false``) — equal names
   deadlock the job with ZERO steps, and a constant run group lets a starved
-  ``push`` run hold a dispatch's apply lock (measured 2026-10-20, #9120 x #1095);
+  ``push`` run hold the RUN lock a dispatch needs, so its apply cannot start
+  (measured 2026-10-20, #9120 x #1095);
 * the guard is NON-VACUOUS: it asserts it parsed a plausible number of
   workflows and that each workflow it makes a claim about actually exists, so a
   renamed file or a glob typo fails here instead of passing silently.
@@ -555,18 +556,28 @@ def _concurrency_group(block: object) -> str | None:
 
 
 _EXPRESSION = re.compile(r"\$\{\{\s*(.*?)\s*\}\}")
+_CONDITION_OPERATOR = re.compile(r"\s*(==|!=|>=|<=|&&|\|\||>|<)\s*")
 
 
 def _normalise_condition(condition: str) -> str:
-    """An `if:` expression with quote style and spacing canonicalised.
+    """An `if:` expression canonicalised: no `${{ }}`, quote style, or spacing.
 
-    `github.event_name == 'workflow_dispatch'` and the same condition written
-    with double quotes are the SAME condition, so a YAML format pass must not
-    red the pin — and the failure message ("revisit the group design") would
+    `if: github.event_name == 'workflow_dispatch'`, the same condition with
+    double quotes, with the operators unpadded, and the wrapped
+    `if: ${{ github.event_name == 'workflow_dispatch' }}` are all the SAME
+    condition — GitHub evaluates an `if:` as an expression with or without the
+    wrapper — so a format pass or a hand-edit copying the documented form must
+    not red the pin, and the failure message ("revisit the group design") would
     then be false about the artifact in front of the maintainer. Only the FORM
-    is normalised: adding, dropping or changing a term still fails.
+    is normalised: adding, dropping or changing a term still fails, wrapped or
+    not.
     """
-    return re.sub(r"\s+", " ", condition.replace('"', "'")).strip()
+    stripped = condition.strip()
+    whole = _EXPRESSION.fullmatch(stripped)
+    if whole is not None:
+        stripped = whole.group(1)
+    collapsed = re.sub(r"\s+", " ", stripped.replace('"', "'")).strip()
+    return _CONDITION_OPERATOR.sub(r" \1 ", collapsed).strip()
 
 
 def _normalise_group(group: str) -> str:
@@ -648,7 +659,7 @@ def test_supabase_deploy_apply_lock_is_distinct_from_the_run_lock() -> None:
     # literal is `$`, `{`, `{`, `'`, and a real group always has a character
     # between `{{` and a quote — is satisfied by
     # `supabase-deploy-apply-${{ github.run_id }}` (every dispatch gets its own
-    # apply group, so two operators can `supabase db push` at once). Exact text
+    # apply group, so the apply lock stops being a lock at all). Exact text
     # pins both properties at once: constant apply lock, event-scoped run lock,
     # and the two distinct from each other.
     #
@@ -668,9 +679,13 @@ def test_supabase_deploy_apply_lock_is_distinct_from_the_run_lock() -> None:
     )
     assert _normalise_group(apply_group) == "supabase-deploy-apply", (
         f"the apply lock must be the CONSTANT 'supabase-deploy-apply' "
-        f"({apply_group!r}): an expression gives every dispatch its own group, "
-        "so concurrent applies stop serialising — and collapsing onto the run "
-        f"group {run_group!r} is the 2026-10-20 deadlock, where the deploy job "
+        f"({apply_group!r}): an expression gives every dispatch its own apply "
+        "lock, so the ONLY thing serialising applies would be the event-scoped "
+        "RUN lock above — the apply lock would no longer be independent of the "
+        "run-level design #1095 exists to change, and a second applying "
+        "workflow (or a push deploy after the #771 flip) would have nothing "
+        "excluding it. Collapsing onto the run group "
+        f"{run_group!r} is the 2026-10-20 deadlock, where the deploy job "
         "fails with zero steps and no migration can be applied automatically."
     )
     # ⛔ `cancel-in-progress: false` is the other half of the same promise, and
@@ -684,9 +699,12 @@ def test_supabase_deploy_apply_lock_is_distinct_from_the_run_lock() -> None:
         "deterministically — a superseded run must QUEUE instead (#9115)"
     )
     assert doc["jobs"]["deploy"]["concurrency"]["cancel-in-progress"] is False, (
-        "the apply lock must never cancel: two applies interleaved or a "
-        "half-applied schema is exactly the hazard the apply lock exists "
-        "for (#1095)"
+        "the apply lock must never cancel a workflow_dispatch run: a cancelled "
+        "apply leaves the schema half-migrated and no re-run repairs it "
+        "deterministically (#1095). If superseded `push` DRIFT runs should "
+        "cancel, that is a different lock — write it as the expression "
+        "`cancel-in-progress: ${{ github.event_name == 'push' }}` and update "
+        "this pin deliberately; the literal `true` must stay red."
     )
     # ⛔ The apply lock is CONSTANT, so it is only safe because a push run can
     # never reach it. TWO things make that true and neither is a group name, so
@@ -753,14 +771,27 @@ def test_if_condition_pin_ignores_quote_style_but_not_extra_terms() -> None:
     or the pin would not hold the property.
     """
     pinned = "github.event_name == 'workflow_dispatch'"
-    assert _normalise_condition('github.event_name  ==  "workflow_dispatch"') == pinned
-    assert _normalise_condition("  github.event_name == 'workflow_dispatch' \n") == pinned
-    for other in (
+    accepted = (
+        'github.event_name  ==  "workflow_dispatch"',
+        "  github.event_name == 'workflow_dispatch' \n",
+        # `if:` is an expression with or without the `${{ }}` wrapper, and the
+        # wrapped form is the one the docs show.
+        "${{ github.event_name == 'workflow_dispatch' }}",
+        "${{github.event_name=='workflow_dispatch'}}",
+    )
+    for form in accepted:
+        assert _normalise_condition(form) == pinned, (
+            f"{form!r} is the SAME condition; it must not red the pin"
+        )
+    rejected = (
         "github.event_name == 'push'",
         "github.event_name != 'workflow_dispatch'",
         "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'",
+        "${{ github.event_name == 'push' }}",
+        "${{ true }}",
         "",
-    ):
+    )
+    for other in rejected:
         assert _normalise_condition(other) != pinned, (
             f"{other!r} is not the dispatch-only condition; the pin must see it"
         )
