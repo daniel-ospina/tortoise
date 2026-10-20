@@ -58,7 +58,15 @@ def _probe_falkordb(candidates: list[str | None]) -> tuple[bool, str | None]:
 FALKORDB_AVAILABLE, _WORKING_URI = _probe_falkordb([
     os.environ.get("TORTOISE_DB_URI"),
     _live_utils.docker_uri("tortoise_test_graphcopy3154"),
-    _live_utils.legacy_uri("tortoise_test_graphcopy3154"),
+    # ⛔ NOT `_live_utils.legacy_uri(...)`, deliberately (#9226). That candidate
+    # IS the canonical store on port 16379 — `tests/_canonical_store_guard.py`
+    # refuses the whole suite for it, because every extra graph on that instance
+    # raises its cache-eviction churn and an eviction racing an in-flight query
+    # aborts EVERY fleet write (#7357). Listing it here bypassed that session
+    # guard: on a box whose 6379 lane is unavailable (this one, at the memory
+    # ceiling) the probe fell THROUGH to the map instance, minted
+    # `test_graphcopy3154_*` graphs there, and ran the module against an engine
+    # the file was never validated on. A test-lane fallback must not be the map.
 ])
 
 pytestmark = pytest.mark.skipif(

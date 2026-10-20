@@ -1186,6 +1186,76 @@ def test_a_language_tagged_line_inside_a_fence_does_not_close_it(tmp_path):
     assert text.count(START) == 2, "expected the example plus the created block"
 
 
+def test_a_block_replaced_BELOW_an_unterminated_fence_still_warns(tmp_path):
+    """Review P1 on my own P3 fix: silencing the warning was wrong in this state.
+
+    A clean pair that sits BELOW an unterminated fence IS replaced inside the
+    fence — it renders as code and is never read — so the warning is TRUE there.
+    The narrow condition (`state_kind = none`) suppressed it; the condition is
+    now "the block's region lies after the fence opened", which covers an append
+    at EOF and a pair below the fence, and excludes a pair above it.
+    """
+    agents = (f"# House\n\n```bash\nnpm run build\n\n{START}\nold block\n{END}\n")
+    done, text = _install(tmp_path, agents)
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "inside it and read as code" in done.stderr, (
+        "a block BELOW an unclosed fence is written inside it and must warn:\n"
+        + done.stderr)
+    assert "old block" not in text, "the stale block is still replaced in place"
+
+
+def test_an_unterminated_fence_does_not_warn_when_the_block_is_replaced_in_place(
+        tmp_path):
+    """Review P3: the warning claimed a fate the block does not have.
+
+    With a CLEAN pair ABOVE an unclosed fence the block is rewritten where it
+    already sits — it is not "written inside" the fence. Warning anyway told the
+    user their (perfectly placed) block was unreadable, which is the same class
+    of false statement as a docs claim, one layer down.
+    """
+    agents = f"# House\n\n{START}\nold block\n{END}\n\n```bash\nnpm run build\n"
+    done, text = _install(tmp_path, agents)
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "inside it and read as code" not in done.stderr, (
+        "a block replaced IN PLACE above the fence is not written inside it:\n"
+        + done.stderr)
+    assert START in text
+    assert "old block" not in text, "the stale block must be replaced"
+
+
+def test_a_read_only_agents_md_can_still_be_upgraded_and_keeps_its_mode(
+        tmp_path):
+    """Review P3: `cp -p` copied the target's mode onto the staged file.
+
+    A 0444 AGENTS.md therefore could not be upgraded although the directory and
+    the `mv` were writable, and the failure named no cause. The upgrade must
+    work AND the read-only mode must survive it — loosening a user's file mode
+    silently is its own defect.
+    """
+    base = _fixture_tree(tmp_path)
+    installer = _patched_installer(tmp_path, base)
+    home = tmp_path / "home"
+    home.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / "AGENTS.md"
+    target.write_text(f"# House\n\n{START}\nold\n{END}\n", encoding="utf-8")
+    target.chmod(0o444)
+
+    done = _run(installer, home, project)
+    text = target.read_text(encoding="utf-8")
+
+    assert done.returncode == 0, (
+        "a read-only AGENTS.md in a writable directory must be upgradeable:\n"
+        + done.stdout + done.stderr)
+    assert "old\n" not in text, "the stale block must be replaced"
+    assert (target.stat().st_mode & 0o777) == 0o444, (
+        "the upgrade must not loosen the user's file mode: got "
+        f"{oct(target.stat().st_mode & 0o777)}")
+
+
 def test_a_block_written_inside_an_unterminated_fence_is_not_silent(tmp_path):
     """The write matches the pre-#3429 installer, so it is not refused — but a
     block inside an open fence renders as code and is never read, so it must warn."""
@@ -1195,3 +1265,95 @@ def test_a_block_written_inside_an_unterminated_fence_is_not_silent(tmp_path):
     assert "UNTERMINATED code fence" in done.stderr, (
         f"a block written inside an open fence must not be silent:\n{done.stderr}")
     assert text.count(START) == 1, "the block IS written (unchanged behaviour)"
+
+
+def test_a_pair_that_straddles_an_unterminated_fence_is_refused(tmp_path):
+    """Review P2: the block's END marker below the fence line puts the fence
+    INSIDE the replace window, so rewriting the block deletes the fence line and
+    promotes whatever it was quoting to live instructions.
+
+    Measured against the condition that warned here: a build snippet inside the
+    fence vanished and the trailing line became prose, while the run reported
+    "✓ upgraded". Destroying a user's code block while reporting success cannot be
+    fixed by warning, so this case is refused and nothing is written.
+    """
+    base = _fixture_tree(tmp_path)
+    installer = _patched_installer(tmp_path, base)
+    home = tmp_path / "home"
+    home.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / "AGENTS.md"
+    original = f"# House\n\n{START}\nold\n\n```bash\nnpm run build\n{END}\nAFTER\n"
+    target.write_text(original, encoding="utf-8")
+
+    done = _run(installer, home, project)
+
+    assert done.returncode == 3, (
+        "a straddling pair must be refused, not rewritten:\n"
+        + done.stdout + done.stderr)
+    assert "STRADDLE" in done.stderr, done.stderr
+    assert target.read_text(encoding="utf-8") == original, (
+        "nothing may be written when the block's window contains the fence line")
+    assert not list(project.glob(".tortoise-agents.*")), "no staged file is left behind"
+
+
+def test_a_read_only_agents_md_with_no_block_still_gets_one(tmp_path):
+    """Review P2: the append path wrote with `>>` straight onto the user's file,
+    so a 0444 AGENTS.md got bash's "Permission denied" and no named cause, while
+    the replace path handled read-only files. Both paths must behave the same."""
+    base = _fixture_tree(tmp_path)
+    installer = _patched_installer(tmp_path, base)
+    home = tmp_path / "home"
+    home.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / "AGENTS.md"
+    target.write_text("# House\n", encoding="utf-8")
+    target.chmod(0o444)
+
+    done = _run(installer, home, project)
+    text = target.read_text(encoding="utf-8")
+
+    assert done.returncode == 0, (
+        "a read-only AGENTS.md with no block must still get one:\n"
+        + done.stdout + done.stderr)
+    assert text.count(START) == 1, "the block must be appended"
+    assert text.startswith("# House\n"), "the user's content must be preserved"
+    assert (target.stat().st_mode & 0o777) == 0o444, (
+        f"the read-only mode must survive: got {oct(target.stat().st_mode & 0o777)}")
+
+
+def test_an_unreadable_mode_refuses_rather_than_loosening_permissions(tmp_path):
+    """Review P3: the mode restore was `chmod … 2>/dev/null || true`, so a failed
+    `stat` silently loosened a 0444 file to the umask default and still reported
+    success. Fail closed instead: the user's mode is not ours to drop."""
+    base = _fixture_tree(tmp_path)
+    installer = _patched_installer(tmp_path, base)
+    home = tmp_path / "home"
+    home.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / "AGENTS.md"
+    original = f"# House\n\n{START}\nold\n{END}\n"
+    target.write_text(original, encoding="utf-8")
+    target.chmod(0o444)
+    # A `stat` that always fails: both the GNU and the BSD form must be defeated.
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    fake = shim / "stat"
+    fake.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fake.chmod(0o755)
+
+    env_path = f"{shim}:{os.environ.get('PATH', '')}"
+    done = subprocess.run(
+        ["bash", str(installer), "--harness", "codex"],
+        cwd=str(project), env={**os.environ, "HOME": str(home), "PATH": env_path},
+        capture_output=True, text=True, timeout=180)
+
+    assert done.returncode == 3, (
+        "an unreadable mode must refuse rather than rewrite with looser "
+        f"permissions:\n{done.stdout}{done.stderr}")
+    assert "could not read the mode" in done.stderr, done.stderr
+    assert target.read_text(encoding="utf-8") == original, "nothing may be written"
+    assert (target.stat().st_mode & 0o777) == 0o444, "the mode must be untouched"

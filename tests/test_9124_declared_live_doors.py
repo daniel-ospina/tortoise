@@ -417,9 +417,7 @@ def _bind_handle_aliases(node, aliases, params=()) -> None:
     """
     if isinstance(node, ast.Assign):
         value, targets = node.value, node.targets
-    elif isinstance(node, ast.AnnAssign):
-        value, targets = node.value, [node.target]
-    elif isinstance(node, ast.NamedExpr):
+    elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
         value, targets = node.value, [node.target]
     elif isinstance(node, ast.withitem):
         value, targets = node.context_expr, [node.optional_vars]
@@ -436,7 +434,7 @@ def _bind_handle_aliases(node, aliases, params=()) -> None:
         return
     if isinstance(value, (ast.Tuple, ast.List)) and len(targets) == 1 \
             and targets[0] is not None:
-        pairs = zip(value.elts, _flatten_target(targets[0]))
+        pairs = zip(value.elts, _flatten_target(targets[0]), strict=False)
         for part, target in pairs:
             if _carries_handle(part, aliases, params):
                 _add_alias_target(target, aliases)
@@ -1350,18 +1348,20 @@ def test_a_duplicate_writer_definition_reds_the_gates(monkeypatch):
 
 #: Entry points whose lane is opened by their ONLY CALLER, so a declaration in
 #: the body would be redundant and misleading — `rebuild_all` wraps
-#: `_rebuild_all_replay` in `_replay_write_scope`, and `_ensure_indexes` wraps
-#: `_ensure_indexes_declared` in `_graph_metadata_write_scope`. They are listed
-#: here rather than left in the flip gate's remainder, where part 2 would read
-#: "declare a lane below" and add exactly that redundant scope.
+#: `_rebuild_all_replay` in `_replay_write_scope`, `_ensure_indexes` wraps
+#: `_ensure_indexes_declared` in `_graph_metadata_write_scope`, and
+#: `rebuild_from_record` wraps `_project_record_view` in `_replay_write_scope`.
+#: They are listed here rather than left in the flip gate's remainder, where part
+#: 2 would read "declare a lane below" and add exactly that redundant scope.
 #:
 #: ⛔ PAIRS ARE `(module, SCOPE-QUALIFIED function)` (#9124 review, round 2). A
 #: bare name would exempt EVERY same-named function in that module — the
-#: collision the census keys away — and both of these are methods of
+#: collision the census keys away — and all three are methods of
 #: `FalkorProjection`, whose module defines plenty of other helpers.
 _CALLER_DECLARED = {
     ("tortoise/projection/__init__.py", "FalkorProjection._rebuild_all_replay"),
     ("tortoise/projection/__init__.py", "FalkorProjection._ensure_indexes_declared"),
+    ("tortoise/projection/__init__.py", "FalkorProjection._project_record_view"),
 }
 
 
@@ -1749,11 +1749,12 @@ def test_the_measure_mode_census_is_what_a_flip_would_refuse(armed_sdk_factory):
     measure mode — and, once the switch is on, one it REFUSES. That is the
     shared-classifier property this whole suite rests on (#3595).
     """
+    import tortoise.projection as projection
     from tortoise.projection import (
-        DirectCacheWriteRefused, _reset_undeclared_handle_writes,
+        DirectCacheWriteRefused,
+        _reset_undeclared_handle_writes,
         undeclared_handle_writes,
     )
-    import tortoise.projection as projection
 
     sdk = armed_sdk_factory()
     proj = sdk._get_proj()
