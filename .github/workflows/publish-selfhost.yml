@@ -34,10 +34,11 @@ on:
     # DELIBERATELY NOT listed, though COPY'd (#9231): supabase/migrations/ — the
     # record's schema ships as a mapped package and the reader is NAME-GATED
     # (`record_projection._read_migrations()` reads only its `RECORD_MIGRATIONS`
-    # tuple, no glob), so a migrations-only change cannot alter anything the
-    # image serves; `tortoise/**` already covers a change that can. Same answer
-    # as `deploy-hosted.yml`'s paths filter, and the same reason — keep the two
-    # in step.
+    # tuple, no glob), so a NEW migration cannot alter anything the image
+    # serves; the change that can — a new name in that tuple — lives in
+    # `tortoise/**`, already listed. Same answer as `deploy-hosted.yml`'s paths
+    # filter, and the same reason; `tests/test_9231_record_migrations_trigger.py`
+    # pins the two answers together and pins the gate they rest on.
     # Tag pushes are unaffected: GitHub does not evaluate `paths` for tag
     # pushes, so every `v*` release still builds and publishes.
     paths:

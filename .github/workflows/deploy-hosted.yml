@@ -72,17 +72,23 @@ on:
       # Dockerfile.hosted COPYs that tree (#9231). The record reader is
       # NAME-GATED — `record_projection._read_migrations()` reads only the files
       # in its `RECORD_MIGRATIONS` tuple (no glob; `_complete()` tests exactly
-      # those names) — so a new `.sql` file is invisible to the image, and
-      # editing one it DOES read is refused by `check-migration-append-only
-      # diff` (migrations are append-only), i.e. such a change must also touch
-      # `tortoise/**`, already listed above. Listing it here would add no
-      # coverage and cost a RED push run per migrations-only merge:
-      # `supabase-deploy` deploys on `workflow_dispatch` only, so this file's
-      # fail-closed `Check migration drift` exits 1 for every repo-ahead
+      # those names) — so a NEW `.sql` file is invisible to the image. A
+      # legitimate schema change therefore arrives as a new name in that tuple,
+      # i.e. in `tortoise/record_projection.py`, already listed above. Editing a
+      # file the reader DOES read is rejected by `check-migration-append-only
+      # diff` (migrations are append-only) — a red on every migration-touching
+      # PR, though NOT one of `main`'s seven required contexts, so that half is
+      # enforced by review rather than by branch protection. Listing the tree
+      # here would add no coverage and cost a RED push run per migrations-only
+      # merge: `supabase-deploy` deploys on `workflow_dispatch` only, so this
+      # file's fail-closed `Check migration drift` exits 1 for every repo-ahead
       # BLOCKING migration until an operator applies it — and the run's
       # `cancel-in-progress` can cancel an in-flight co-move flip. The
       # schema→app coupling is already handled by `supabase-deploy`'s own
-      # `Dispatch deploy-hosted (the app flip)` step.
+      # `Dispatch deploy-hosted (the app flip)` step. Both halves are pinned by
+      # `tests/test_9231_record_migrations_trigger.py`, which also measures the
+      # name gate — if the reader ever observes the directory, list the tree in
+      # BOTH workflows and delete that proof with it.
       - 'fly.toml'
       - 'Dockerfile.hosted'
       - 'entrypoint.sh'
