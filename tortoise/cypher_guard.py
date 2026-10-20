@@ -23,16 +23,24 @@ the HANDLE ITSELF covers all of them, so this module wraps the vendor CLIENT:
 its ``select_graph`` returns a guarded ``Graph`` subclass that overrides EVERY
 query entry point.
 
-**SCOPE — what this covers, and what it does not.** Inside the ``tortoise``
-package every FalkorDB client is constructed through :func:`guarded_client`
-(the projection's embedded and Docker clients, the BGSAVE helper, the session
-indexer, the doctor probe), so every handle those clients yield — including the
-``select_graph(...).query(...)`` sites and the SDK registry handles — is
-guarded. That construction set is no longer a convention: #6882 pins it with an
-AST inventory (a revert to a raw ``FalkorDB(...)`` fails a test) and a runtime
-marker assertion on a real embedded projection. Code OUTSIDE the package that
-builds a raw vendor client is NOT covered. That set is ILLUSTRATIVE, not
-exhaustive — e.g. ``graph-scripts/*.py``,
+**SCOPE — what this covers, and what it does not.** Every ``FalkorDB``
+construction inside the ``tortoise`` package goes through
+:func:`guarded_client` (the projection's embedded and Docker clients, the BGSAVE
+helper, the session indexer, the doctor probe), so every handle those clients
+yield — including the ``select_graph(...).query(...)`` sites and the SDK registry
+handles — is guarded. That construction set is no longer a convention: #6882
+pins it with an AST inventory (a revert to a raw ``FalkorDB(...)`` fails a test)
+and a runtime marker assertion on a real embedded projection.
+
+⛔ TWO IN-PACKAGE EXCEPTIONS, and the pin above cannot see either: the AST
+inventory recognises ``FalkorDB(...)`` / ``guarded_client(...)``, so a module
+that builds a bare ``redis.Redis(...)`` is invisible to it as well as unguarded
+— ``hosted_backup._restore_copy_client`` (raw on purpose, #3813) and
+``acl_graph_users``' admin client. Their commands do NOT carry the #7357 note
+and are NOT operator-guarded; see :class:`_GuardedExecuteCommand`.
+
+Code OUTSIDE the package that builds a raw vendor client is NOT covered. That
+set is ILLUSTRATIVE, not exhaustive — e.g. ``graph-scripts/*.py``,
 ``apps/graph-viz/server/main.py``, ``docs/runbook/m2-d3-gold-rank-docker.py``
 (``db.select_graph(name).delete()``) and ``tests/`` all construct a vendor
 client directly, and any other raw construction is equally uncovered; a guard
@@ -1371,13 +1379,15 @@ def _statement_mutating(statement) -> bool | None:
     direction that invites a duplicated write.
 
     The body is TOTAL (#9358 review P2), not just the import: this function is
-    evaluated as an ARGUMENT at every proxy verb
-    (``mutating=_statement_mutating(q)`` in ``_GuardedHandleProxy``), which
-    runs it BEFORE ``_forward_query``'s ``except`` can catch anything — so a
-    raise here would fail the caller's query outright instead of hedging the
-    note, and it would do it on the READ traffic the ``ro_query`` arm change
-    newly routes through this call. The command channel's derivation carries
-    the same belt in ``_explain_instance_unavailable``; here it belongs in the
+    evaluated as an ARGUMENT at four of the proxy's five verbs
+    (``mutating=_statement_mutating(q)`` in ``_GuardedHandleProxy``; ``explain``
+    derives its arm from ``_NON_EXECUTING_COMMANDS`` through
+    ``_command_mutating`` instead, so it has nothing to classify), which runs it
+    BEFORE ``_forward_query``'s ``except`` can catch anything — so a raise here
+    would fail the caller's query outright instead of hedging the note, and it
+    would do it on the READ traffic the ``ro_query`` arm change newly routes
+    through this call. The command channel's derivation carries the same belt in
+    ``_explain_instance_unavailable``; here it belongs in the
     classifier itself, because there is no single call site to wrap.
 
     ``projection._statement_writes`` is imported lazily: ``tortoise.projection``
@@ -1754,8 +1764,16 @@ class _GuardedHandleProxy:
 
     def explain(self, query, params=None):
         query = _guard_query(query, params, handle=self._handle)
-        # GRAPH.EXPLAIN only PLANS — nothing can have applied.
-        return _forward_query(self._handle.explain, query, params, mutating=False)
+        # The arm comes from the POLICY SET, through the same classifier the
+        # command channel uses — never a literal ``False``. A private copy is
+        # the drift ``_destructive_commands`` rules out for the same class of
+        # duplication: if ``GRAPH.EXPLAIN`` ever left ``_NON_EXECUTING_COMMANDS``
+        # the channel would start classifying the text while the proxy kept
+        # answering "safe to re-issue", and nothing would force them together.
+        return _forward_query(
+            self._handle.explain, query, params,
+            mutating=_command_mutating(
+                ("GRAPH.EXPLAIN", getattr(self._handle, "name", ""), query)))
 
     def execute_command(self, *args, **kwargs):
         args = _guard_execute_command(args, self._client)
@@ -2022,12 +2040,14 @@ def guarded_client_class(base_client):
 def guarded_client(base_client, *args, **kwargs):
     """Construct a guarded instance of *base_client* (the ONE construction seam).
 
-    Every FalkorDB client the ``tortoise`` package builds — the projection's
+    Every ``FalkorDB`` the ``tortoise`` package builds — the projection's
     embedded and Docker clients, the BGSAVE helper, the session indexer, the
     doctor probe — goes through here, so every handle they yield is guarded
     regardless of which call site queries it. A raw vendor client built
     *outside* the package (e.g. ``graph-scripts/``, ``apps/graph-viz/``,
-    ``docs/runbook/``, ``tests/``) is not covered; see the module docstring for
-    that scope boundary.
+    ``docs/runbook/``, ``tests/``) is not covered, and neither are the two
+    IN-package modules that build a bare ``redis.Redis`` instead
+    (``hosted_backup._restore_copy_client``, ``acl_graph_users``' admin
+    client); see the module docstring's SCOPE paragraph for both boundaries.
     """
     return guarded_client_class(base_client)(*args, **kwargs)
