@@ -361,10 +361,10 @@ def test_the_proxy_verbs_agree_with_the_command_channel():
 def test_the_proxy_explain_arm_follows_the_policy_set_not_a_literal(monkeypatch):
     """``explain``'s ``False`` must be DERIVED from ``_NON_EXECUTING_COMMANDS``.
 
-    The proxy passes ``False`` for that verb while the command channel derives it
-    from the set, so a literal there is a second encoding of one policy — the
-    drift ``_destructive_commands`` rules out for the same reason. If a later
-    lane does what the ⛔ block on that set invites and measures
+    The proxy USED TO pass ``False`` for that verb while the command channel
+    derived it from the set — a literal there is a second encoding of one policy,
+    the drift ``_destructive_commands`` rules out for the same reason. If a
+    later lane does what the ⛔ block on that set invites and measures
     ``GRAPH.RO_QUERY``/``EXPLAIN`` on another engine, the set changes and the
     proxy must move with it. Pinned by REMOVING the verb from the set: the
     proxy's arm must then follow the TEXT (the loud arm for a write), which a

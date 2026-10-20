@@ -32,12 +32,15 @@ handles — is guarded. That construction set is no longer a convention: #6882
 pins it with an AST inventory (a revert to a raw ``FalkorDB(...)`` fails a test)
 and a runtime marker assertion on a real embedded projection.
 
-⛔ TWO IN-PACKAGE EXCEPTIONS, and the pin above cannot see either: the AST
-inventory recognises ``FalkorDB(...)`` / ``guarded_client(...)``, so a module
-that builds a bare ``redis.Redis(...)`` is invisible to it as well as unguarded
-— ``hosted_backup._restore_copy_client`` (raw on purpose, #3813) and
-``acl_graph_users``' admin client. Their commands do NOT carry the #7357 note
-and are NOT operator-guarded; see :class:`_GuardedExecuteCommand`.
+⛔ TWO IN-PACKAGE EXCEPTIONS, and the SEAM pin above cannot see either: it
+recognises only ``FalkorDB(...)`` / ``guarded_client(...)``, so a module that
+builds a bare ``redis.Redis(...)`` is invisible to IT as well as unguarded —
+``hosted_backup._restore_copy_client`` (raw on purpose, #3813) and
+``acl_graph_users``' admin client. They are NOT unpinned: the #3065 read-bound
+inventory in the same file enumerates both by name and count
+(``_EXPECTED_SITES``, asserted with ``found == _EXPECTED_SITES``), so a THIRD
+one reds that scan instead of slipping in. Their commands do NOT carry the
+#7357 note and are NOT operator-guarded; see :class:`_GuardedExecuteCommand`.
 
 Code OUTSIDE the package that builds a raw vendor client is NOT covered. That
 set is ILLUSTRATIVE, not exhaustive — e.g. ``graph-scripts/*.py``,
@@ -1838,10 +1841,12 @@ def _forward_query(method, q, params=None, timeout=None, *, mutating,
     knows the VERB: a duck-typed proxy has no command tuple to classify.
     ``query``, ``ro_query`` and ``_query`` all take the arm from the statement
     TEXT — the vendor's "read-only" verb name is not a guarantee that a write
-    cannot be dispatched (see ``_NON_EXECUTING_COMMANDS``). Only ``explain`` is
-    verb-derived, and it is ``False`` because ``GRAPH.EXPLAIN`` plans without
-    executing. Deriving it here instead would put a classification below the
-    seam that already knows the verb.
+    cannot be dispatched (see ``_NON_EXECUTING_COMMANDS``). ``explain`` is the
+    one verb whose arm is POLICY-derived, not a constant: its caller passes
+    ``_command_mutating(("GRAPH.EXPLAIN", …))``, so the arm is ``False`` while
+    ``GRAPH.EXPLAIN`` is a member of ``_NON_EXECUTING_COMMANDS`` and follows the
+    statement TEXT if a later lane removes it. Deriving it here instead would
+    put a classification below the seam that already knows the verb.
 
     #7357: this is also where the duck-typed proxy's five verbs pass, so the
     instance-outage note is applied here — the proxy dispatches straight to the
