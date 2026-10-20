@@ -42,22 +42,22 @@ import pytest
 from tortoise import event_store
 from tortoise.event_store import ChangeFeedDegraded
 
-
-@pytest.fixture(autouse=True)
-def _no_carried_degradation():
-    """The degraded state lives in PROCESS MEMORY, so it must not leak.
-
-    Not cleanup-on-success (that would hide a real leak): the pre-test clear is
-    what makes each case start from "healthy", and the post-test clear is what
-    keeps an intentionally-degraded case from poisoning the rest of the session
-    — several other suites drive DELIBERATE store refusals (the #5379 allocator
-    ceiling), and a process-wide latch would refuse their polls.
-    """
-    event_store.clear_degraded()
-    try:
-        yield
-    finally:
-        event_store.clear_degraded()
+# ⚠️ NO MODULE-LEVEL ISOLATION FIXTURE HERE (#9208 review). This file used to
+# carry its own autouse `_no_carried_degradation` that cleared before and after
+# every test. It made the suite-wide attribution in `tests/conftest.py`'s
+# `_change_feed_state_isolation` INERT for the one file with the most
+# deliberately-degraded feeds: two function-scoped autouse fixtures are torn down
+# in reverse setup order, so the conftest one is set up first and torn down
+# LAST — by then this file's fixture had already cleared the map, so the
+# attribution check (which samples the map in ITS teardown — see
+# `tests/_change_feed_isolation.py`) always saw an empty state. A future test
+# here that forgot to clear was therefore silently forgiven instead of named.
+#
+# The isolation itself is NOT lost: the conftest fixture clears before every
+# test, so each case still starts from "healthy". What is now required of a test
+# that degrades a feed ON PURPOSE is that it clears in its own `finally` — which
+# is exactly what makes a forgotten clear visible, and what `tests/test_event_store.py`
+# (#5379's allocator ceiling) already does.
 
 
 @pytest.fixture
@@ -145,22 +145,29 @@ def test_a_refused_store_write_is_a_visible_loss_not_an_empty_poll(
     assert _point_landed(sdk, point["id"]), (
         "the Point must be in the graph — otherwise this test would be "
         "observing a failed write instead of a lost event")
-    assert _graph_events(sdk) == 0, (
-        "the refusal must have cost the event; a non-zero count means the "
-        "simulated refusal never reached the store leg")
+    try:
+        assert _graph_events(sdk) == 0, (
+            "the refusal must have cost the event; a non-zero count means the "
+            "simulated refusal never reached the store leg")
 
-    with pytest.raises(ChangeFeedDegraded) as excinfo:
-        sdk.poll_events()
+        with pytest.raises(ChangeFeedDegraded) as excinfo:
+            sdk.poll_events()
 
-    message = str(excinfo.value)
-    assert "PointAdded" in message, (
-        f"the named state must name WHAT was lost; observed={message!r}")
-    assert "DirectCacheWriteRefused" in message, (
-        f"the named state must name the refusal that caused it; "
-        f"observed={message!r}")
-    assert "clear_degraded" in message, (
-        f"the refusal must name the acknowledgement path, or the reader is "
-        f"stuck with no remedy; observed={message!r}")
+        message = str(excinfo.value)
+        assert "PointAdded" in message, (
+            f"the named state must name WHAT was lost; observed={message!r}")
+        assert "DirectCacheWriteRefused" in message, (
+            f"the named state must name the refusal that caused it; "
+            f"observed={message!r}")
+        assert "clear_degraded" in message, (
+            f"the refusal must name the acknowledgement path, or the reader is "
+            f"stuck with no remedy; observed={message!r}")
+    finally:
+        # This test LATCHES the process-global degraded state (the refused emit
+        # is recorded), so it owes the clear — see the note where the module
+        # fixture was removed, at the top of this file (#9208 review). In a
+        # `finally` so a mid-test failure does not leak it.
+        event_store.clear_degraded()
 
 
 def test_the_row_write_swallow_is_not_silent_either(armed_sdk, monkeypatch):
@@ -185,16 +192,24 @@ def test_the_row_write_swallow_is_not_silent_either(armed_sdk, monkeypatch):
 
     monkeypatch.setattr(_GuardedGraph, "query", query)
 
-    point = sdk.create_point("statement", "the append itself is refused")
+    try:
+        point = sdk.create_point("statement", "the append itself is refused")
 
-    assert _point_landed(sdk, point["id"]), (
-        "best-effort is the contract: `_emit_event` must not crash the mutation")
-    assert _graph_events(sdk) == 0, "the append was refused — nothing landed"
-    assert event_store.degraded(sdk._get_proj()) is not None, (
-        "a refused row write must be recorded; the outer catch never sees it")
+        assert _point_landed(sdk, point["id"]), (
+            "best-effort is the contract: `_emit_event` must not crash the mutation")
+        assert _graph_events(sdk) == 0, "the append was refused — nothing landed"
+        assert event_store.degraded(sdk._get_proj()) is not None, (
+            "a refused row write must be recorded; the outer catch never sees it")
 
-    with pytest.raises(ChangeFeedDegraded):
-        sdk.poll_events()
+        with pytest.raises(ChangeFeedDegraded):
+            sdk.poll_events()
+    finally:
+        # The clear is OURS, not the isolation fixture's: a module-level
+        # autouse fixture's teardown runs BEFORE the conftest one (it is
+        # set up after it), so clearing there would hide this test's latch
+        # from the attribution check (#9208 review). In a `finally` so a
+        # mid-test failure does not leak it into the rest of the shard.
+        event_store.clear_degraded()
 
 
 def test_a_duplicate_append_is_not_reported_as_a_loss(armed_sdk, monkeypatch):
@@ -382,61 +397,85 @@ def test_an_unverifiable_append_is_reported_as_unverified_not_as_a_loss(
 
     monkeypatch.setattr(_GuardedGraph, "query", query)
 
-    sdk.create_point("statement", "append and read-back both fail")
+    try:
+        sdk.create_point("statement", "append and read-back both fail")
 
-    state = event_store.degraded(sdk._get_proj())
-    assert state is not None
-    assert state["stage"] == "append-unverified", (
-        "an unreadable store proves neither a loss nor a landing, so the stage "
-        f"must say so; observed={state['stage']!r}")
-    assert state["first_stage"] == "append-unverified", (
-        "the FIRST diagnosis must be kept, not overwritten by a later one: it "
-        "is often the only provable one (#9208 review); "
-        f"observed={state['first_stage']!r}")
-    with pytest.raises(ChangeFeedDegraded) as excinfo:
-        sdk.poll_events()
-    assert "append-unverified" in str(excinfo.value)
+        state = event_store.degraded(sdk._get_proj())
+        assert state is not None
+        assert state["stage"] == "append-unverified", (
+            "an unreadable store proves neither a loss nor a landing, so the stage "
+            f"must say so; observed={state['stage']!r}")
+        assert state["first_stage"] == "append-unverified", (
+            "the FIRST diagnosis must be kept, not overwritten by a later one: it "
+            "is often the only provable one (#9208 review); "
+            f"observed={state['first_stage']!r}")
+        with pytest.raises(ChangeFeedDegraded) as excinfo:
+            sdk.poll_events()
+        assert "append-unverified" in str(excinfo.value)
 
-    # A SECOND, different failure on the same graph: the latest diagnosis moves
-    # and the first is still readable beside it.
-    event_store.record_degraded(sdk._get_proj(), "append", "PointAdded", None,
-                                RuntimeError("row really is gone"))
-    state = event_store.degraded(sdk._get_proj())
-    assert (state["stage"], state["first_stage"]) == ("append", "append-unverified"), (
-        "the later stage must not discard the first failure's diagnosis; "
-        f"observed stage={state['stage']!r} "
-        f"first_stage={state['first_stage']!r}")
-    assert state["lost"] == 2, "both failures are losses, so both are counted"
+        # A SECOND, different failure on the same graph: the latest diagnosis moves
+        # and the first is still readable beside it.
+        event_store.record_degraded(sdk._get_proj(), "append", "PointAdded", None,
+                                    RuntimeError("row really is gone"))
+        state = event_store.degraded(sdk._get_proj())
+        assert (state["stage"], state["first_stage"]) == ("append", "append-unverified"), (
+            "the later stage must not discard the first failure's diagnosis; "
+            f"observed stage={state['stage']!r} "
+            f"first_stage={state['first_stage']!r}")
+        assert state["lost"] == 2, "both failures are losses, so both are counted"
 
-    # AND THE CONSUMER SEES BOTH (#9208 review): keeping `first_stage` in the
-    # state is only worth anything if the one surface a caller can act on
-    # reports it. Reporting the latest alone would discard the diagnosis this
-    # field was added to preserve.
-    with pytest.raises(ChangeFeedDegraded) as excinfo:
-        sdk.poll_events()
-    detail = str(excinfo.value)
-    assert "The FIRST failure on this graph was at stage 'append-unverified'" in detail, (
-        "the 503 detail must carry the first diagnosis beside the latest; "
-        f"got: {detail[:400]}")
-    assert "stage 'append'" in detail, (
-        "the LATEST diagnosis must still be named, and named as the latest")
-    # ⚠️ AND THE POINTER MUST POINT SOMEWHERE (#9208 review, P3): the FIRST clause
-    # is APPENDED, so the latest stage is named ABOVE it. "the stage named below"
-    # sent the reader past the end of the string, and a presence-only assertion
-    # could not see it — the early clause satisfies `"stage 'append'" in detail`
-    # on its own. So assert the ORDER and the direction word.
-    assert detail.index("stage 'append'") < detail.index("The FIRST failure"), (
-        "the latest stage must be named BEFORE the appended first-failure "
-        f"clause, or no directional pointer can be true; got: {detail[-300:]}")
-    assert "the stage named above is the LATEST" in detail, (
-        "the appended clause must point ABOVE (where the latest stage is named), "
-        f"not 'below' — nothing follows it; got: {detail[-300:]}")
-    assert "below" not in detail.rsplit("The FIRST failure", 1)[1], (
-        "no part of the appended clause may tell the reader to look below "
-        f"itself; got: {detail[-300:]}")
-    assert "row really is gone" in detail and "unverifiable" not in detail.split(
-        "The FIRST failure")[0], (
-            "the first clause must quote the FIRST error, not the latest one")
+        # AND THE CONSUMER SEES BOTH (#9208 review): keeping `first_stage` in the
+        # state is only worth anything if the one surface a caller can act on
+        # reports it. Reporting the latest alone would discard the diagnosis this
+        # field was added to preserve.
+        with pytest.raises(ChangeFeedDegraded) as excinfo:
+            sdk.poll_events()
+        detail = str(excinfo.value)
+        assert "The FIRST failure on this graph was at stage 'append-unverified'" in detail, (
+            "the 503 detail must carry the first diagnosis beside the latest; "
+            f"got: {detail[:400]}")
+        assert "stage 'append'" in detail, (
+            "the LATEST diagnosis must still be named, and named as the latest")
+        # ⚠️ AND THE POINTER MUST POINT SOMEWHERE (#9208 review, P3): the FIRST clause
+        # is APPENDED, so the latest stage is named ABOVE it. "the stage named below"
+        # sent the reader past the end of the string, and a presence-only assertion
+        # could not see it — the early clause satisfies `"stage 'append'" in detail`
+        # on its own. So assert the ORDER and the direction word.
+        assert detail.index("stage 'append'") < detail.index("The FIRST failure"), (
+            "the latest stage must be named BEFORE the appended first-failure "
+            f"clause, or no directional pointer can be true; got: {detail[-300:]}")
+        assert "the stage named above is the LATEST" in detail, (
+            "the appended clause must point ABOVE (where the latest stage is named), "
+            f"not 'below' — nothing follows it; got: {detail[-300:]}")
+        assert "below" not in detail.rsplit("The FIRST failure", 1)[1], (
+            "no part of the appended clause may tell the reader to look below "
+            f"itself; got: {detail[-300:]}")
+        # ⚠️ AND THE APPENDED CLAUSE MUST QUOTE THE **FIRST** ERROR, not the
+        # latest (#9208 review). The form that stood here asserted
+        # `"unverifiable" not in detail.split("The FIRST failure")[0]` — a token
+        # that appears in NEITHER clause (`append-unverified` is "unverified"),
+        # so it was true for every possible implementation — and NOTHING in the
+        # tree asserted `first_error` at all. Consequence: storing the LATEST
+        # error under the FIRST stage (the exact "a later diagnosis overwrites the
+        # first" defect `first_error` exists to prevent) left the suite green.
+        # Assert the quoted TEXT of both errors instead.
+        first_clause = detail.rsplit("The FIRST failure", 1)[1]
+        assert "Connection closed by server" in first_clause, (
+            "the appended clause must quote the FIRST error — the write's own "
+            f"failure; got: {first_clause[:300]}")
+        assert "row really is gone" not in first_clause, (
+            "the appended clause must never quote the LATEST error: that is the "
+            f"overwrite `first_error` exists to prevent; got: {first_clause[:300]}")
+        assert "row really is gone" in detail.split("The FIRST failure")[0], (
+            "the MAIN clause must quote the LATEST error, so the two diagnoses "
+            f"stay distinguishable by their text too; got: {detail[:400]}")
+    finally:
+        # The clear is OURS, not the isolation fixture's: a module-level
+        # autouse fixture's teardown runs BEFORE the conftest one (it is
+        # set up after it), so clearing there would hide this test's latch
+        # from the attribution check (#9208 review). In a `finally` so a
+        # mid-test failure does not leak it into the rest of the shard.
+        event_store.clear_degraded()
 
 
 def test_the_emit_hook_never_raises_even_when_the_recorder_fails(
@@ -777,6 +816,10 @@ def test_a_dead_feed_on_one_graph_does_not_refuse_another(tmp_path, monkeypatch)
         with pytest.raises(ChangeFeedDegraded):
             dead.poll_events()
     finally:
+        # Tenant_a's latch is this test's OWN: clear it here, not in a
+        # module-level fixture, or `tests/conftest.py`'s attribution check
+        # cannot name the polluter (#9208 review).
+        event_store.clear_degraded()
         healthy.close()
         dead.close()
 
@@ -832,6 +875,9 @@ def test_two_stores_under_one_graph_name_do_not_share_a_state(tmp_path,
         with pytest.raises(ChangeFeedDegraded):
             dead.poll_events()
     finally:
+        # This test's own latch, cleared by the test — see the note where the
+        # module fixture was removed, at the top of this file (#9208 review).
+        event_store.clear_degraded()
         healthy.close()
         dead.close()
 

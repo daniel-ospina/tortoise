@@ -248,6 +248,17 @@ SHARED_MODULES = (
     # induced in an api/eval/ep session would never run on the PR that made it
     # (#1349/#3332/#3910 under-selection class).
     "tests/_canonical_store_guard.py",
+    # #9208: the change-feed isolation contract (`tests/_change_feed_isolation.py`)
+    # is imported by `tests/conftest.py`'s autouse `_change_feed_state_isolation`
+    # fixture, so its attribution decision runs at the teardown of EVERY test on
+    # every surface — a break in it fails every suite, not just `core`'s. The
+    # import is deliberately function-local, so
+    # `tests/test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`
+    # cannot see it (its AST walk stops at function-like nodes): without this
+    # entry a change to the helper selected `core` only, the #1349/#3332/#3910
+    # under-selection class. Same class as the entries above; the surface-scoped
+    # half of the blast radius is what the entry covers.
+    "tests/_change_feed_isolation.py",
     "pyproject.toml",
     "requirements.txt",
     ".github/workflows/python-ci.yml",
