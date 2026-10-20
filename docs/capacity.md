@@ -266,7 +266,7 @@ back-message sweep, the BFS undirected direct-edge sweep and Batch 3, whose two
 `MATCH` / undirected forms anchor on their own.
 
 Three sites in `ep.py` traverse and were already `Node By Index Scan` without a
-barrier on `origin/main`, so they carry none: `_load_cache`'s message sweep,
+barrier on the pre-#9282 tree, so they carry none: `_load_cache`'s message sweep,
 `seed_operators` and `_affected_factors` Batch 2. Those three plus the three
 reads that do not traverse at all are the `ep.py` pass's **19 distinct
 unbarriered id-set statements on a `:Point` seed set** (20 / 21 / 22 when the
@@ -314,10 +314,9 @@ the fixture guard and the OR-split row-semantics guard pass, because they pin
 properties that tree already had. (The seventh test in that file pins this
 manifest row, which #9282 itself added: on that tree there is no row to pin, so
 it fails there for a different reason.) #9282 has since landed on `origin/main`,
-so `origin/main` now IS the anchored tree and every comparison in this section is
-against the tree before it. The
-selector's expansion leg is individually discriminating: removing its barrier
-alone reddens the selector test.
+so `origin/main` now IS the anchored tree and every baseline in this section names
+the tree before it. The selector's expansion leg is individually discriminating:
+removing its barrier alone reddens the selector test.
 
 The two `OR`-shaped sweeps (`(a.id IN $ids OR b.id IN $ids)`, which can never be
 an index anchor) are split into one anchored sweep per endpoint: the
