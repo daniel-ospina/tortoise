@@ -1824,9 +1824,11 @@ CONTROL_PLANE_OAUTH_WORKER_NAME = "tortoise-oauth"
 CONTROL_PLANE_OAUTH_WORKERS = 8
 CONTROL_PLANE_OAUTH_BACKLOG = 64
 
-#: #3773: a FOURTH pool, for the DATA-PLANE (FalkorDB) offload. The write
-#: handlers' per-request graph helpers (``_data_sdk``'s connect / embedded
-#: anchor probe, ``_check_org_limit``'s count query) ran inline on the loop
+#: #3773: a FOURTH pool, for the GRAPH lane offload — FalkorDB work, both
+#: DATA-PLANE and REGISTRY reads (#3718; ``_get_registry()`` uses the existing
+#: connection). The write handlers' per-request graph helpers (``_data_sdk``'s
+#: connect / embedded anchor probe, ``_check_org_limit``'s count query) ran
+#: inline on the loop
 #: immediately before an already off-loaded write, so a blocked loop still
 #: stalled every concurrent request for their duration. They reuse this seam's
 #: bounded multi-worker pool, wait bound and fail-closed error, on a pool of
@@ -1836,8 +1838,14 @@ CONTROL_PLANE_OAUTH_BACKLOG = 64
 #: Occupancy disclosure (the #3669-cycle-2 "not hidden" rule): each WRITE
 #: consumes TWO sequential submissions here (the quota count, then the SDK
 #: open); the REST ``/v1/events`` and ``/v1/dream`` handlers' SDK open also
-#: submits here. The write-triggered ``_dream_worker`` does NOT (it builds
-#: inside the ``_DREAM_EXECUTOR`` item). The graph-bound ``_data_sdk`` path
+#: submits here, and so does the org switcher's chunked graph LISTING (#3718:
+#: one submission per ``_GRAPH_LIST_OFFLOAD_CHUNK`` orgs, on the cached
+#: ``_registry_anchor()`` handle). That listing's Supabase mode is a PostgREST
+#: read and submits on the ``auth`` pool instead, in smaller chunks sized for
+#: THAT pool's 10 s bound rather than this one's
+#: (``_GRAPH_LIST_CONTROL_PLANE_CHUNK``). The write-triggered ``_dream_worker``
+#: does NOT (it builds inside the ``_DREAM_EXECUTOR`` item). The graph-bound
+#: ``_data_sdk`` path
 #: reaches a blocking CONTROL-plane PostgREST read (``_assert_graph_owned`` ->
 #: ``get_control_plane().query("graphs")``), so a control-plane stall parks a
 #: graph slot here and a bound miss on that read reports ``graph_unavailable``.
@@ -1880,7 +1888,7 @@ CONTROL_PLANE_ORG_BACKLOG = 128
 
 
 def graph_offload_timeout_s() -> float:
-    """#3773: the DATA-PLANE graph lane's wait bound, resolved at CALL time.
+    """#3773: the graph lane's wait bound (data-plane and registry), at CALL time.
 
     ``_data_sdk``'s embedded anchor probe and ``_check_org_limit``'s count query
     can each open a COLD projection (connect + version probe +
@@ -2053,8 +2061,8 @@ def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
     auth slots (#3498 review P1); ``pool="oauth"`` (#3669) is a separate pool
     for the attacker-reachable OAuth client-resolution lane, so a CIMD fetch
     flood cannot park the auth slots either; ``pool="graph"`` (#3773) is the
-    DATA-PLANE pool for the write handlers' graph helpers, kept off auth
-    capacity for the same isolation reason; ``pool="org"`` (#7678) keeps the
+    graph-lane pool — FalkorDB work, data-plane AND registry reads (#3718) —
+    kept off auth capacity for the same isolation reason; ``pool="org"`` (#7678) keeps the
     org-create lane's SEQUENTIAL gate reads off auth capacity so a create-org
     request is not the sum of its queue waits behind authentication work. The graph pool's callables SET
     ContextVars (the #2600 actor bind), so it must be reached ONLY through the
@@ -2280,8 +2288,10 @@ async def run_control_plane_call(fn, *, op: str,
     ``pool`` selects the worker: ``"auth"`` (default) for auth-critical
     resolutions, ``"telemetry"`` for best-effort work that must never consume
     auth capacity, ``"oauth"`` (#3669) for the attacker-reachable OAuth
-    client-resolution lane, ``"graph"`` (#3773) for the DATA-PLANE graph
-    helpers — a separate pool for the same isolation reason — or ``"org"``
+    client-resolution lane, ``"graph"`` (#3773) for FalkorDB work — data-plane
+    AND registry reads (#3718); ``_get_registry()`` uses the existing
+    connection, so a registry read belongs here, not on ``"auth"`` — a separate
+    pool for the same isolation reason — or ``"org"``
     (#7678) for the org-create lane's sequential gate reads and provision write.
 
     Fail-closed: a missed bound or a saturated backlog raises

@@ -2255,8 +2255,9 @@ class TestIngestCorpusEventKind5475:
         REACHABLE: the seam really IS gated (the refusal above is the
         evidence), so "not listed as ungated" is true rather than convenient,
         and the paragraph is still present and still names the writers that
-        genuinely never meet a door (``pipeline.py``, the connectors,
-        ``migrate_kinds.py``/``retype.py``).
+        genuinely never meet a door (``pipeline.py``,
+        ``migrate_kinds.py``/``retype.py``) — while the connector folds, which
+        #9068 GATED, are no longer listed as ungated.
         """
         doc = compile_vocab.__doc__ or ""
         marker = "never meets a door at all"
@@ -2267,8 +2268,49 @@ class TestIngestCorpusEventKind5475:
         assert "ingest_corpus(eventKind" not in ungated, (
             "``ingest_corpus``'s eventKind is gated before the raw write, so "
             "the scope note may not list it as a writer that never meets a door")
-        for still_ungated in ("pipeline.py", "proj.apply", "migrate_kinds.py",
-                              "retype.py"):
+        # #9068 gated the connector folds (`github`/`linear`/`slack`, ingest and
+        # both webhook arms). That is a statement about the CONNECTORS' call
+        # sites, NOT about the projection seam, so the map must drop the
+        # connector clause while KEEPING the seam itself named: the projection's
+        # own sinks still widen the set on a direct call (measured, XFAIL-pinned,
+        # and stated in `docs/EXPANSION_PACKS.md`). A note that drops the sink is
+        # how "the connector folds are gated" comes to be read as "the seam is
+        # closed".
+        #
+        # Keyed on the connector NAMES, not on the old note's phrasing: a
+        # phrase-keyed assertion let any other wording re-list them.
+        for connector in ("github", "linear", "slack"):
+            assert connector not in ungated, (
+                f"the `{connector}` fold is gated before the first `apply` "
+                "(#9068), so the scope note may not list it as a writer that "
+                "never meets a door")
+        # The sink must stay named, and named by its MEASUREMENT rather than by
+        # the shape: `link_source_to_entity` has no `_journal_backed` check, so
+        # it is open on both shapes and a "journal-less" framing understates it.
+        assert "link_source_to_entity" in ungated and "sourceKind" in ungated, (
+            "the projection's OWN sinks still widen the approval set on a "
+            "direct call (`FalkorProjection.apply` when `_journal_backed` is "
+            "false, `link_source_to_entity`'s `sourceKind` on BOTH shapes) — "
+            "the gate is per CONNECTOR CALL SITE, not at the seam — so the "
+            "scope note must keep naming them as writers that never meet a door")
+        # ...and it must state the SECOND sink's exposure, because the narrow
+        # "journal-less" framing is the one that got this note wrong: a fixer
+        # mirroring `apply`'s `if not _journal_backed: refuse` leaves the
+        # journal-backed half open while every literal above still passes.
+        # Matched on a WHITESPACE-NORMALISED copy: the docstring wraps at 79
+        # columns, so a literal spanning a line break is not a substring of the
+        # raw text (this assertion red-ed on its first run for exactly that
+        # reason, against a note that already said "both shapes").
+        flat = " ".join(ungated.split())
+        assert "both shapes" in flat, (
+            "`link_source_to_entity` has no `_journal_backed` check at all, so "
+            "it widens on both shapes — a note that scopes it to a journal-less "
+            "projection understates the gap and sends the next fix after the "
+            "wrong half")
+        assert "NOT closed" in ungated, (
+            "the scope note must say plainly that these gaps are not closed — "
+            "a sink named under an implied closure is what a lane acts on next")
+        for still_ungated in ("pipeline.py", "migrate_kinds.py", "retype.py"):
             assert still_ungated in ungated, (
                 f"{still_ungated} is genuinely ungated and must stay named — "
                 "a scope note that drops the real residuals is the same defect "

@@ -158,8 +158,16 @@ class LinearConnector:
                 if (ev := self._cycle_to_event(cycle))]
 
     def ingest(self, proj) -> int:
-        """Poll + apply to projection. Returns count of applied events."""
+        """Poll + apply to projection. Returns count of applied events.
+
+        #9068: the batch is gated BEFORE the first ``apply`` — the connector
+        folds straight into the projection with no SDK door in front of it, so
+        a record naming an unapproved pack namespace would install that pack by
+        writing it (see ``connectors._gate_kinds``).
+        """
         events = self.poll()
+        from tortoise.connectors import _gate_kinds
+        _gate_kinds(proj, events)
         count = 0
         for ev in events:
             proj.apply(ev)

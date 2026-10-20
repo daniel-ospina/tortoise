@@ -451,6 +451,136 @@ not be read"* — never as the claim that everything is already on the graph.
 > (2 active packs · 1 off)" — the count describes the rows the payload carries,
 > never a bare number a reader could mistake for the enforced set.
 
+### The write-gate closure — which writes are gated, and which are not (#5475/#9068)
+
+The closure property from #5475 is **no write may widen a graph's approved pack set**.
+That property is worth reading precisely, because the surfaces it does *not*
+cover are deliberate and a reader who takes "the write path is closed" literally
+will either trust a guarantee that is broader than the code, or try to "fix" one
+of the exceptions and break it.
+
+**Gated — every live door that persists a `pack_state._KIND_PROP_KEYS`
+property:** the SDK entity funnel (`_create_entity`), the point door
+(`create_point`), `update_point` / `update_entity`, `EventAPI._emit`,
+`sdk._apply_and_journal` (the door the **GitHub indexer** writes through —
+`issue_to_object` carries `object_kind='pm:issue'`, so an ungated chokepoint
+let the polling entry point install `pm` on a `dev`-only graph), `sdk._doc_write`,
+`sdk.ingest_corpus` (its `eventKind` keyword on a raw-Cypher writer),
+`sdk._journal_event_raw_write` (the raw `:Event` seam, #9197),
+the conversation miner's emitter (`mining.ConversationMiner._emit_event`),
+`link_source_to_entity` (through the **SDK wrapper** — the projection method
+behind it is NOT gated; see the per-call-site caveat below),
+and the REST object/subject/commit doors. That list is the human-readable
+summary; the EXECUTABLE inventory — and the one to read before adding a door —
+is `tests/test_9068_pack_gate_residuals.py::_DOORS` (19 doors at this head),
+which a new gate call site reds rather than silently widening. The refusal
+is an **input constraint**: a *namespaced* kind may only use a namespace the
+resolved set already holds, and an unapproved spelling is REJECTED (422 /
+`UnapprovedKindNamespace`), never silently normalised — a rewrite would store a
+kind the caller did not write.
+
+Every one of those doors reads the SAME predicate: a pre-built record (the
+SDK's live-write doors and the connector folds) goes through
+`pack_state.kind_spellings_in_payload` →
+`pack_state.refuse_unapproved_kinds_in_payload` — which screens the mined key
+set in BOTH spellings (the fold's snake aliases `object_kind` / `subject_kind` /
+`document_kind`, and `uses[].kind`) — and the `create_*`-style doors screen
+their props with the same key set **and the same spelling leg**
+(`create_object(props={"object_kind": "pm:issue"})` was a live bypass of the
+camel-only props screen until #9068: the fold reads the snake spelling and
+writes the mined camel property; the props door now reads
+`pack_state._KIND_PROP_SPELLINGS`, the same declaration). A per-door list is how
+the widening survived the first closure, so a door that gates individually is a
+bug, not a variation.
+Doors on a hot path (`_apply_and_journal`, `_emit`, the connector batches, the
+`update_*` props) run a cheap pre-check first (`pack_state.payload_names_pack`,
+`connectors._gate_kinds`): a record whose kinds name no pack pays **no graph
+read at all**, so the common case (core kinds, bare spellings) costs the same
+as before the gate — which matters most on the webhook arms, where the "batch"
+is one delivered message (the pre-check walks the record once and hands the
+pairs to the gate, so it is never walked twice).
+
+**Gated — the connector folds (#9068).** `github` / `linear` / `slack` fold
+records with a bare `proj.apply(...)` and never meet an SDK door.
+`FalkorProjection.apply` refuses a direct fold only on a **journal-backed**
+projection (§17.1's single-writer guard), and there the cache is a *derived
+image* of the journal. On a journal-less projection the cache **is** the store,
+so the fold is a real write: each connector `ingest` (and both webhook paths)
+now pre-validates its whole batch against ONE approval-set read before the
+first `apply`, so a refusal leaves the graph untouched rather than
+half-imported. Before that gate, github's `object_kind='pm:issue'` put `pm`
+into a `dev`-only graph's approved set. On the webhook arms the gate runs
+**before** the caller's `on_event` callback (a consumer is told about writes
+that landed, not about deliveries that were refused) and before Slack's
+per-message permalink enrichment (a refused batch must not spend an API call
+per message). A refusal there is answered **422** with the refusal's own message
+— the same posture `hosted_api` takes — not 500: the payload refuses identically
+on every retry, so a 500 buys a retry loop and discards the remedy text.
+
+**The mining leg reads a generic `kind` only off ontology labels (#9068).**
+Seven of the eight kind properties are spelled in the ontology's own vocabulary
+(`objectKind`, `pointKind`, …), so a value under one of them is an ontology kind
+wherever it is found. The bare `kind` slot is not: `:Pipeline` stores its
+namespaced **pipeline key** there (`venture:deal`) and `:Graph` stores its own
+`kind`. Reading those as ontology kinds made materialising a pipeline override
+grant the `venture` pack; the fix is in the reader, not in the pipeline writer
+(the key is a real pipeline name, so gating that writer would start refusing
+legitimate pipeline edits).
+
+**Decision (relayed to #9068):** this is **Option A's READER half** — the
+mining leg stops treating the slot as ontology-owned. The other half of A
+(dropping the duplicate `p.kind` write) is deliberately NOT taken here: it
+cannot pay the upgrade cost below, because every already-stored `:Pipeline` row
+carries `kind` and the scoped reader ignores it whether or not new rows keep
+writing it. The two halves have identical upgrade cost, so the write-drop is a
+pipeline-model clean-up (removing a duplicate of `pipelineKey`), not a security
+control — and nothing in the repo reads `:Pipeline.kind`. `pipeline._write_pipeline`
+now says so at the write site.
+
+⚠️ **Upgrade effect, stated because it NARROWS a back-compat union**
+(`#2714` indicator 2): a graph that holds `:PackInstall` records and whose ONLY
+kind-bearing node for a namespace is a `:Pipeline` row loses that namespace from
+the approval set — writes naming it become refusals until the pack is installed
+(`PUT /v1/graphs/{graph_id}/packs`). The `p.kind` write is deliberately left in
+place (dropping it is a pipeline-model change: every stored override carries the
+property, and nothing in the repo reads it), so this narrowing is a property of
+the READER on both new and existing rows, not of the write.
+
+⚠️ **The connector gate is per CALL SITE, not at the projection seam.**
+`FalkorProjection.apply` still gates a direct fold only when `_journal_backed`,
+so a THIRD-PARTY connector — or any caller outside `tortoise/connectors/` — that
+folds straight into a journal-less projection is still ungated. The projection
+has a **second** ungated sink with WIDER exposure: `link_source_to_entity`
+writes the caller's `source_kind` into the mined `sourceKind` slot
+(`projection/edges.py`'s `ON CREATE SET s.sourceKind=$sk`) and has **no
+`_journal_backed` check at all**, so a direct call widens on BOTH shapes — the
+refusal for that leg lives only in the `sdk.link_source_to_entity` **wrapper**.
+Both gaps are measured and pinned (`tests/test_9068_pack_gate_residuals.py`'s
+`test_a_journal_less_fold_does_not_widen_the_approval_set`: `apply-fold` on a
+journal-less projection, `source-link` on journal-less AND on journal-backed) —
+a residual statement that named only `apply` would be narrower than the
+measurement, and closing `apply` alone would read as closing the seam. Neither
+is claimed closed here.
+
+**Deliberately NOT gated — and why:**
+
+| Writer | Why it is not gated |
+|---|---|
+| `rebuild_all` / `recover_from_log` (replay) | The record came FROM the journal. Refusing at replay would make a committed record unfoldable — strictly worse than the widening. |
+| `migrate_kinds.py` (raw Cypher over a live graph) | An **operator act**: a deliberate re-typing of the graph's own historical rows, with every target spelling a reviewed literal in the file. It is the sanctioned way a pack namespace enters data written *before* the pack existed, so widening the mined set is the point of the run — a gate would refuse the very row the migration exists to rewrite. |
+| `retype.py` / `tools/retype_snapshot.py` | Offline: they transform a dump and never touch a live graph. They enforce the target kind against the **declared vocabulary** instead (`RetypeError`). |
+| `hosted_api._seed_demo_graph` | Raw Cypher for the sample content, but every kind it writes is a **bare** `pointKind` literal from the reviewed `_DEMO_*` tables (`observation`, `statement`, `event`, `workflow`). A bare `pointKind` names no pack, so it cannot widen the approved set. (Note the asymmetry: a bare **`eventKind`** IS attributable, `_ATTRIBUTABLE_BARE_KIND_KEYS` — this writer sets none.) |
+| `sdk._emit_event` (post-mutation payload append) | The pre-write doors are gated instead. The mutations it describes (`PointPromoted`, `Dedupe*`, `create_operator`) have already written their node, so a refusal at the append could only split the journal from the cache. NOT to be confused with `mining.ConversationMiner._emit_event`, which builds its own `EventRecorded` envelope and IS gated before its append (#5475/#8982). |
+| `FalkorProjection.apply` on a journal-less projection | The #9068 gate sits at the five connector CALL SITES, not at this sink (see the per-call-site caveat above). A third-party connector folding directly is still ungated, and that residual is pinned as an XFAIL rather than declared closed. The sink's own refusal is `_journal_backed`-conditional, so on a journal-backed projection it DOES refuse. |
+| `FalkorProjection.link_source_to_entity` on ANY projection | Same per-call-site gate, and unlike `apply` this sink has **no `_journal_backed` check at all**: the caller's `source_kind` reaches the mined `sourceKind` slot (`projection/edges.py`) on a journal-backed projection too. The only refusal on that leg is the `sdk.link_source_to_entity` WRAPPER, so a direct projection call widens on BOTH shapes. Pinned XFAIL, one case per shape, not declared closed. |
+| `pipeline.py`'s `SET p.kind = <pipeline_key>` | The value is a real namespaced **pipeline key** (`venture:deal`), not a pack kind — gating the writer would start refusing legitimate pipeline edits. What had to change was the READER: the mining leg no longer treats a bare `kind` on `:Pipeline`/`:Graph` as an ontology kind (#9068, above), so this write stays ungated and no longer widens the approved set. |
+
+A re-typing that DOES need a namespace the graph has not approved is an
+operator decision: run the migration, or add the pack
+(`PUT /v1/graphs/{graph_id}/packs`). Nothing on a tenant surface can widen the
+set by writing — but "tenant surface" is load-bearing in that sentence, so read
+the table above as the list of what it excludes, not as a footnote.
+
 ## Chains
 
 A chain is an ordered kind path the extractor respects when connecting `about_entities`. Example: the agent-ops `ruleLifecycle` chain `[rule, rationale, ruleRevised]` — a rule must be grounded in its rationale. The chain enforcer rewires reverse-order pairs deterministically (never invents, never drops) and warns on violations. Steps resolve to your pack's kinds, core kinds, or exactly-one other pack's kinds (ambiguous bare names are validation errors — use `ns:kind`).

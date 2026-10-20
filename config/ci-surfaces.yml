@@ -2469,6 +2469,16 @@ surfaces:
   - test_destructive_wipe_guard.py
   - test_session_attribution.py
   - test_ci_selection.py
+  # #9109: `--changed-files <path>` used to answer the fail-closed FULL matrix
+  # silently — indistinguishable from a legitimate full selection, and it was
+  # quoted as "this docs-only diff selects everything" in a live PR. The pin is
+  # the stderr diagnostic that now says which unknown path caused it. Registered
+  # in `core` beside the tool's own suite so it is CLASSIFIED at all (integrity
+  # refuses an unregistered test file) and runs whenever a `core`-tier selection
+  # is taken. `tools/ci_selection.py` is a `TOOL_CARVEOUTS` entry that no
+  # `SOURCE_PATTERNS` row matches, so a selector edit lands in the unknown-path
+  # fail-closed branch -> FULL matrix, where this pin runs too.
+  - test_ci_selection_changed_files_9109.py
   # #6144: the required-status-check set is declared in THREE places — live
   # branch protection, `.mergify.yml`'s queue_conditions/merge_conditions, and
   # `.github/settings.yml`. Nothing read two of them: `.mergify.yml` stated the
@@ -3561,6 +3571,14 @@ surfaces:
   - test_write_verb.py
   - test_write_consolidation.py
   - test_writer_inventory.py
+  # #9068: the residual of #5475 — writes that never meet a gated door. Guards
+  # `tortoise/pack_state.py` (the ``kind`` leg's label scope, the record
+  # predicate, the batch refusal), `tortoise/connectors/` (the fold gate on
+  # github/linear/slack ``ingest`` + both webhook paths) and
+  # `tortoise/migrate_kinds.py` (the STATED ungated re-typing). `core` is the
+  # surface those three source files select today, so this is where the guard
+  # must run on a change to any of them.
+  - test_write_doors_9068.py
   # #2280 (CI drift repair): see the api-surface note — these files also
   # landed in #2283 unregistered. Contract (hermetic) + capture Phase-D
   # dedup are fast-lane core; the canonical pipeline needs live FalkorDB.
@@ -5801,6 +5819,18 @@ durations:
   test_pointsuperseded_rebuild.py: 8.7
   test_session_key_http.py: 5.5
   test_write_consolidation.py: 5.3
+  # #9068 (#3400 trap): a file ADDED BY A PR has no CI junit measurement — the
+  # durations refresher samples push-to-main runs only — so an absent key would
+  # drop `duration_coverage_issues()` under the 90% floor. The row exists to
+  # satisfy coverage and carries the flat 2.0 default, per the rule stated on
+  # the `test_venture_pack.py` entry below: a local timing (28 tests measured
+  # 14.4s-25.8s here on 2026-10-19, embedded lane, load-dependent) is a
+  # SHARD-LAYOUT input, and a
+  # weight that does not model CI must not decide what runs together. The tests
+  # that let a fold LAND request the suite's `force_embedder_on` stub, which
+  # keeps this out of the cold HF-model-load cost class. Refresh from the first
+  # post-merge run.
+  test_write_doors_9068.py: 2.0
   test_value_extractor.py: 39.0
   test_venture_pack.py: 2.0  # unmeasured — new in #3419; no sweep has collected it, so it carries the flat default exactly as an absent key would, which is main's own weight for it. Do NOT substitute a local timing here: a measured-on-this-box 67.2 was recorded first, and it is a SHARD-LAYOUT input, so it moved tests/test_tortoise_search.py into the same shard as tests/test_subject_layer_read_surfaces_4889.py and exposed a pre-existing embedded-lane isolation leak (#3750 family) that main's grouping keeps apart. A weight that does not model CI must not be used to decide what runs together.
   # #2729: same rule as the entry directly above — unmeasured, carries the flat
@@ -5818,13 +5848,16 @@ durations:
   # it. The value is this file's own whole-file EMBEDDED-lane reading in a fresh
   # worktree, stated HIGH on the #5048 precedent rather than as a measured CI
   # value — it is not a junit-sweep figure, and a sweep should replace it. Current
-  # shape at the head of this branch: 12 test FUNCTIONS (`CENSUS: 12 PASS, 2
-  # XFAIL, 14 total`, recomputed by the file's own
-  # `test_the_header_census_matches_this_file`), 27 node ids after
-  # parametrisation, 2 xfail; measured 147.65 s on this host, 166.0 s in the
-  # authoring run, hence the weight below. The two heavy rows are the pins
-  # themselves (the SDK fixture builds a store per test, twice); the inventory
-  # tests are AST walks over `tortoise/**` and cost ~1 s together. Not moved into
+  # shape at the head of this branch: 15 test FUNCTIONS (`CENSUS: 14 PASS, 1
+  # XFAIL, 15 total`, recomputed by the file's own
+  # `test_the_header_census_matches_this_file`), 32 node ids after
+  # parametrisation (the residual-2 XFAIL is parametrised over the projection's
+  # TWO ungated sinks × the shapes they are open on — `apply` journal-less, and
+  # `link_source_to_entity` journal-less AND journal-backed), 3 xfail cases; measured 147.65 s on this host, 166.0 s in the
+  # authoring run, hence the weight below. The three heavy cases are the pins
+  # themselves (two stores on the journal-less fixture, one on the journal-backed
+  # one); the inventory tests are AST walks over `tortoise/**` and cost ~1 s
+  # together. Not moved into
   # `slow_files`: 166 s is far under the 360 s bound the watchdog pin derives, and
   # `slow_file_issues` has no duration rule.
   test_9068_pack_gate_residuals.py: 166.0
@@ -6831,7 +6864,7 @@ durations:
   test_5388_org_enumeration_completeness.py: 2.5
   test_7951_write_doors.py: 6.2
   test_7951_create_point_outbox.py: 3.2  # unmeasured — #7951 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red at 772/858 = 89.98% — the same shape as the `test_7950_capstone_probe.py` row above. Local embedded-lane reading 3.2s (14 tests × ~0.23s). Refresh from the first post-merge run that includes it.
-  test_7951_update_point_outbox.py: 7.2  # unmeasured — #7951 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red (790/878 = 90.0% at the floor, and the file packs at the flat 2.0s default) — the same shape as the `test_7951_create_point_outbox.py` row above. Local embedded-lane reading 7.2s (6 tests; two of them rebuild the graph). Refresh from the first post-merge run that includes it.
+  test_7951_update_point_outbox.py: 7.2  # unmeasured — #7951 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red (790/878 = 90.0% at the floor, and the file packs at the flat 2.0s default) — the same shape as the `test_7951_create_point_outbox.py` row above. Local embedded-lane reading 7.2s (6 tests; two of them rebuild the graph). The count is now 7: `test_the_promote_arm_stays_apply_first_a_recorded_deviation` is parametrized over both promote arms (see #9272), so it collects twice. Refresh from the first post-merge run that includes it.
   test_7951_delete_point_outbox.py: 5.0  # unmeasured — #7951 increment 4a (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), and an absent row packs it at the flat 2.0s default, which drops `duration_coverage_issues()` under the 90% floor — the same shape as the `test_7951_create_point_outbox.py` row above. Local embedded-lane readings 4.3–6.8 s when the file collected 6 tests; at this head it collects 10 (T1-T10, TWO of which call `rebuild_all` — T3 and T8) and measured 7.5 s here on the same lane, so the 5.0 weight is a lower-ish bound in the right neighbourhood rather than a stale one. Refresh from the first post-merge run that includes it.
   test_9079_ep_epoch_declared.py: 7.2  # unmeasured — #9123 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red at 840/934 = 89.9% — the same shape as the `test_7951_create_point_outbox.py` row above. Local embedded-lane readings 5.9/6.0/6.4 s over three runs (6 tests; one calls `rebuild_all`). ⚠️ A longer reading (148 s) is NOT this file's weight: the FIRST `create_point` in a process lazily loads the embedding model — 15.7 s standalone, and 134 s for the one test that pays it under fleet load 65 — after which creates are 0.16 s. That one-time load is paid once per file and is not what this weight packs. Declared above the quiet-box readings so a cold leg cannot under-pack. Refresh from the first post-merge run that includes it.
   test_9079_record_replay_declared.py: 9.0  # unmeasured — #9079 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), and an absent row packs it at the flat 2.0s default. Four tests, each one `rebuild_from_record` round trip in an embedded SDK with NO `create_point` (so the once-per-leg embedding-model load the `test_9079_ep_epoch_declared.py` row above pays is NOT part of this weight); local readings are recorded on the `#9079` PR. Refresh from the first post-merge run that includes it.
@@ -6955,6 +6988,12 @@ durations:
   # the file; a marker on the comment lines above would outlive its own truth
   # (#9110 review P2, the #8254/#2876 stale-basis class).
   test_e1_e2_measurement.py: 2.0  # unmeasured — #9076: flat default until a CI sweep measures this file
+  # The #9109 pin is a file ADDED BY A PR, so it has no CI junit measurement (the
+  # refresher samples push-to-main runs only): it carries the flat default until a
+  # sweep collects it (the #3419/#2788 rule), and the tail LEADS with
+  # `# unmeasured` so `render_refreshed_manifest` drops it on that first sweep
+  # instead of leaving a stale local-basis note attached to a CI value.
+  test_ci_selection_changed_files_9109.py: 2.0  # unmeasured — new in #9109: a file added by a PR has no junit measurement, so it carries the flat default (#3419/#2788 rule) until the first post-merge sweep. Do NOT substitute a local timing here — the weight is a SHARD-LAYOUT input
 on_demand:
   - eval/retrieval/test_integration.py
   - test_perf_lane_volunteer_context.py
