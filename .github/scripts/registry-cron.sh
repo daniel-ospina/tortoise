@@ -1565,7 +1565,29 @@ RUN_STATUS_SAFE="$(redact "$RUN_STATUS")"
 # reads as 0. `graph_totals.backed_up` is the real coverage signal.
 GRAPHS_BACKED_UP="$(printf '%s' "$RUN" | jq -r '.graph_totals.backed_up // 0' 2>/dev/null || echo 0)"
 [ -n "$GRAPHS_BACKED_UP" ] || GRAPHS_BACKED_UP=0
+GRAPHS_ATTEMPTED="$(printf '%s' "$RUN" | jq -r '.graph_totals.attempted // 0' 2>/dev/null || echo 0)"
+[ -n "$GRAPHS_ATTEMPTED" ] || GRAPHS_ATTEMPTED=0
+# ── 4a-bis. WHAT the sweep did with each graph, not just how many it wrote ──
+# #9361: the response already carries `results` — one entry per enumerated
+# team, each with the per-graph status the sweep reached (`backed_up`,
+# `empty_skipped`, `data_loss_candidate`, `aborted_size_guard`, `error`, …).
+# The driver published only `graph_totals.backed_up`, so an incident could
+# assert "backups are NOT running" without ever reading the reason, and three
+# very different runs produced that one sentence: an all-graphs-empty steady
+# state, one guarded graph, and a genuine total outage. The distribution is
+# the datum that tells them apart, and it was in hand the whole time.
+#
+# Graph-level when the run carried a `graphs` map; org-level otherwise (a
+# resolution/error result has no graph map — its own status IS the finding).
+SWEEP_REASONS="$(printf '%s' "$RUN" | jq -r '
+  (.results // {}) as $r
+  | [ $r[] | (.graphs // {} | to_entries[] | (.value.status // "unknown")) ] as $g
+  | (if ($g | length) > 0 then $g else [ $r[] | (.status // "unknown") ] end)
+  | group_by(.) | map("\(.[0])=\(length)") | join(" ")' 2>/dev/null || true)"
 log "sweep status: $RUN_STATUS_SAFE (took ${SWEEP_ELAPSED}s, curl rc=${CURL_RC})"
+if [ -n "$SWEEP_REASONS" ]; then
+  log "sweep per-graph outcomes: ${SWEEP_REASONS} (attempted ${GRAPHS_ATTEMPTED}, backed up ${GRAPHS_BACKED_UP})"
+fi
 
 # ── 4b. enabled-but-backing-up-nothing (#2823 shape, #2796) ─────────────────
 # A sweep that backed up ZERO teams while the R2 pool already holds team
@@ -1631,8 +1653,13 @@ case "$RUN_STATUS" in
       NO_COVERAGE=1
     elif [ "${R2_TEAM_COUNT:-0}" -gt 0 ]; then
       log "sweep backed up 0 teams but the R2 pool holds ${R2_TEAM_COUNT} team prefix(es) — filing SWEEP_NO_COVERAGE (job red)"
+      # #9361: name WHAT the run did with each graph. Without it this body
+      # asserts an outage it has not measured; with it, `empty_skipped=79`
+      # (nothing existed to write) reads differently from `error=79` (the
+      # writes failed), which is the whole difference between "the pool is
+      # residue from when these teams had data" and "backups stopped".
       file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — enabled but 0 teams backed up" \
-        "sweep status=${RUN_STATUS_SAFE} but the R2 pool holds ${R2_TEAM_COUNT} team prefix(es); last_sweep=${LAST_SWEEP_SAFE}. The sweep is enabled yet backed up 0 teams (#2823) — backups are NOT running." ""
+        "sweep status=${RUN_STATUS_SAFE} but the R2 pool holds ${R2_TEAM_COUNT} team prefix(es); last_sweep=${LAST_SWEEP_SAFE}. The sweep is enabled yet backed up 0 teams (#2823). Per-graph outcomes on this run: ${SWEEP_REASONS:-unreported} (attempted ${GRAPHS_ATTEMPTED}). Read those before concluding: all-empty_skipped means the enumerated graphs hold no data to write (the pool is residue), whereas error / data_loss_candidate / aborted_size_guard mean the writes were attempted and did not happen." ""
       NO_COVERAGE=1
     else
       log "sweep found 0 teams and the R2 pool is empty — chronic pre-beta state, no incident"
