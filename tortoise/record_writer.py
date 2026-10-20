@@ -107,6 +107,25 @@ moment a second process writes, and a per-record source of truth already
 exists — the append-only journal. A re-run after a crash re-derives the same
 offset from the same durable facts, so nothing renumbers.
 
+**6. WHO may name the tenant — the scope in a multi-tenant process, the env
+pair only on a DECLARED single-tenant one (#9192).** The tenant is a
+per-request fact, so the per-request carrier (`use_record_tenant`) always wins.
+The env pair is process-global and therefore only correct where the process
+serves one graph; an operator states that with
+:data:`RECORD_SINGLE_TENANT_ENV`. Undeclared ⇒ **multi-tenant** ⇒ the pair is
+IGNORED and the armed write is refused (`no_tenant`, counted + warned), because
+the alternative is not "a less precise tenant", it is tenant A's rows under
+tenant B's organisation with no error at any layer — the row is well-formed and
+the FK only checks the graph exists. An env fallback with no declaration in
+front of it is reachable from the live door on any deployment that sets the
+pair, which is exactly the hazard the declaration removes. This does not remove
+#9078's scope decision 3 — a single-tenant deployment still arms by env — but
+it DOES change the operational contract for an UNDECLARED one: it armed before
+and refuses now, until it declares. That change is what #9192's own ask 2
+requires ("make sure a multi-tenant process can never silently satisfy it from
+env"), it fails closed (counted + warned, nothing misfiled), and the amended
+decision is relayed to #9078.
+
 **THE TRANSACTION.** The seam never calls `commit()` and never calls
 `rollback()` (pinned by a test whose fake connection counts both and asserts
 they are zero). When the caller injects `conn=`, the boundary is unambiguously
@@ -138,6 +157,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from . import record_projection, status_vocabulary
+from .env_truthy import env_flag
 
 _logger = logging.getLogger(__name__)
 
@@ -149,6 +169,7 @@ __all__ = [
     "RECORD_DSN_ENV",
     "RECORD_GRAPH_ENV",
     "RECORD_ORG_ENV",
+    "RECORD_SINGLE_TENANT_ENV",
     "RecordConnectError",
     "RecordWrite",
     "RecordWriteError",
@@ -157,6 +178,7 @@ __all__ = [
     "current_record_tenant",
     "record_dsn",
     "record_tenant",
+    "single_tenant_declared",
     "use_record_tenant",
     "write_live_record",
     "write_records",
@@ -189,6 +211,21 @@ RECORD_DSN_ENV = "TORTOISE_RECORD_DSN"
 #: sets :func:`use_record_tenant` per request, and that always wins.
 RECORD_ORG_ENV = "TORTOISE_RECORD_ORG_ID"
 RECORD_GRAPH_ENV = "TORTOISE_RECORD_GRAPH_ID"
+
+#: The DECLARATION that this deployment serves exactly ONE record tenant, which
+#: is what makes the env pair above a valid answer (#9192). Default ABSENT ⇒
+#: **multi-tenant**, the fail-closed default: the pair is then IGNORED and an
+#: armed write with no request scope is refused (`no_tenant`) rather than filed
+#: under a process-global tenant that every other tenant in the process would
+#: share. Environments differ in whether they can name their tenant at all, so
+#: the declaration is what an operator states — never something we infer from
+#: which module happens to be imported, or from the control plane's mode (a
+#: registry-plane self-host process can serve several orgs too).
+#:
+#: Read with :func:`env_flag` (typo ⇒ the default, never a flip): a typo'd
+#: ``TORTOISE_RECORD_SINGLE_TENANT=yes-please`` leaves the process MULTI-tenant,
+#: which refuses rows rather than misfiling them.
+RECORD_SINGLE_TENANT_ENV = "TORTOISE_RECORD_SINGLE_TENANT"
 
 #: The bound on OPENING the record's connection, in seconds. libpq's default is
 #: ``0`` — wait forever — and the live door opens one connection per journal
@@ -376,17 +413,15 @@ def record_dsn(explicit: str | None = None) -> str | None:
     return dsn
 
 
-#: The TENANT a live write is filed under, per call, resolved by the caller's
-#: own scope (`use_record_tenant`). #9192's hazard is a process-global tenant: a
-#: hosted process serves many tenant graphs, so a module-level or
-#: environment-supplied org/graph files tenant A's rows under tenant B with no
-#: error (the row is well-formed and the FK only checks that the graph exists).
-#: So this is a ContextVar the REQUEST sets. It is NOT the only surface — the
-#: env pair is the single-tenant arming surface, resolved by
-#: :func:`record_tenant` — but it is the only one that can be per-request, so a
-#: scope ALWAYS wins over env (env is process-global: the same single value for
-#: every tenant the process serves, #9192). Neither set ⇒ an armed write is
-#: REFUSED and counted (`no_tenant`), never guessed. Ask
+#: The TENANT a live write is filed under, per call, resolved from the caller's
+#: own scope (`use_record_tenant`) — see :func:`record_tenant`. #9192's hazard is
+#: a PROCESS-GLOBAL tenant: a hosted process serves many tenant graphs, so a
+#: module-level or environment-supplied org/graph files tenant A's rows under
+#: tenant B with no error (the row is well-formed and the FK only checks that
+#: the graph exists). So the carrier a request sets is a ContextVar, and the
+#: env pair is reachable only on a deployment that DECLARED itself single-tenant
+#: (:func:`single_tenant_declared`). A scope ALWAYS wins over env. Neither set ⇒
+#: an armed write is REFUSED and counted (`no_tenant`), never guessed. Ask
 #: :func:`record_tenant` — not :func:`current_record_tenant` — to learn whether
 #: an armed write will be refused.
 _RECORD_TENANT: contextvars.ContextVar[tuple[str, str] | None] = (
@@ -433,6 +468,21 @@ def current_record_tenant() -> tuple[str, str] | None:
     return _RECORD_TENANT.get()
 
 
+def single_tenant_declared() -> bool:
+    """True when this deployment declared it serves exactly ONE record tenant.
+
+    The env pair (:data:`RECORD_ORG_ENV`/:data:`RECORD_GRAPH_ENV`) is
+    PROCESS-GLOBAL, so it can only be correct where the process serves one
+    graph. This is the operator's statement of exactly that (#9192), and the
+    default is the safe direction: **absent ⇒ multi-tenant ⇒ the pair is
+    ignored**. A deployment that sets the pair without the declaration gets
+    refused rows and a warning naming this variable — never a cross-tenant
+    write, which is silent (the row is well-formed and the FK only checks that
+    the graph exists).
+    """
+    return env_flag(RECORD_SINGLE_TENANT_ENV, default=False)
+
+
 def record_tenant() -> tuple[str, str] | None:
     """The tenant a LIVE write is filed under: the scope's, else the env pair.
 
@@ -444,15 +494,52 @@ def record_tenant() -> tuple[str, str] | None:
     the record would require a code change at every call site, which is how a
     capability ends up with no production caller again. A HALF-configured pair
     is not a tenant: it is refused, not completed.
+
+    ⛔ The pair is consulted ONLY when the deployment declared single tenancy
+    (:func:`single_tenant_declared`, #9192). Env is process-global, so on a
+    process serving several tenants it is not a weaker answer than the scope —
+    it is a WRONG one, and it fails silently: tenant A's rows land under tenant
+    B's organisation, well-formed, FK satisfied. So an undeclared process gets
+    ``None`` here (⇒ the write is REFUSED and counted ``no_tenant``), which is
+    the one failure mode a live door may have (#9192).
     """
     scoped = _RECORD_TENANT.get()
     if scoped is not None:
         return scoped
+    if not single_tenant_declared():
+        return None
     org_id = (os.environ.get(RECORD_ORG_ENV) or "").strip()
     graph_id = (os.environ.get(RECORD_GRAPH_ENV) or "").strip()
     if org_id and graph_id:
         return (org_id, graph_id)
     return None
+
+
+def _refused_tenant_env_note() -> str:
+    """Why the env pair did not arm this write — empty when it was not set.
+
+    Only for the refusal WARNING: an operator who set the pair and got refused
+    rows needs the sentence that names the missing declaration, not a generic
+    "no tenant in scope" that reads as if their configuration vanished.
+    """
+    org_id = (os.environ.get(RECORD_ORG_ENV) or "").strip()
+    graph_id = (os.environ.get(RECORD_GRAPH_ENV) or "").strip()
+    if org_id and graph_id:
+        return (
+            f" {RECORD_ORG_ENV}/{RECORD_GRAPH_ENV} ARE set, but this process "
+            f"has not declared itself single-tenant, so the process-global "
+            f"tenant was REFUSED instead of filing every tenant's rows under "
+            f"one graph (#9192): set {RECORD_SINGLE_TENANT_ENV}=1 ONLY in a "
+            f"deployment that serves exactly one graph, and wrap a "
+            f"multi-tenant write in record_writer.use_record_tenant(...)."
+        )
+    if org_id or graph_id:
+        return (
+            f" {RECORD_ORG_ENV}/{RECORD_GRAPH_ENV} is a HALF pair (one set, "
+            f"one empty) — that is a misconfiguration, not a tenant, and it is "
+            f"never completed by guesswork."
+        )
+    return ""
 
 
 def _default_connect(dsn: str) -> Any:
@@ -859,9 +946,8 @@ def write_live_record(record: Mapping[str, Any], *,
         _logger.warning(
             "the record write did not happen (no_tenant) — the record is armed "
             "but no tenant is in scope: wrap the write in "
-            "record_writer.use_record_tenant(org_id, graph_id) or set "
-            "%s/%s for a single-tenant deployment", RECORD_ORG_ENV,
-            RECORD_GRAPH_ENV,
+            "record_writer.use_record_tenant(org_id, graph_id)%s",
+            _refused_tenant_env_note(),
         )
         return None
     org_id, graph_id = tenant

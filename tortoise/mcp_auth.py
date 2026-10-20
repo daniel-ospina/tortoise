@@ -21,6 +21,7 @@ returns True in hosted production (TORTOISE_API_KEY unset).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hmac
 import ipaddress
 import os
@@ -70,6 +71,32 @@ _tool_group: ContextVar[str | None] = ContextVar("_tool_group", default=None)
 # mcp_server.py owns lazy SDK init (URI resolution, 3x retry, test-swap
 # pattern). mcp_auth delegates via a function-level import to avoid the
 # circular import (mcp_server imports mcp_auth at module level).
+
+
+def _record_tenant_scope(org: dict):
+    """The record's tenant for ONE request: a `with` scope, or a no-op.
+
+    #9192. The record's write seam (:mod:`tortoise.record_writer`) refuses an
+    armed write that cannot name its tenant (`no_tenant`) instead of filing it
+    under a process-global guess. This is the per-request carrier that names it
+    — installed by :class:`OrgResolutionMiddleware` around the whole request,
+    from the `(org_id, graph_id)` the resolution just produced, so no tool and
+    no write door has to remember it.
+
+    A credential that resolves NO named graph (session / legacy / OAuth: an
+    org-wide key opens the org's default graph) yields the no-op: the write is
+    then REFUSED and counted rather than attributed to a graph id this layer
+    does not know. Naming the default-graph tenant is #9188's (the record keys
+    on `public.graphs.id`; the default graph need not have a row), and a guess
+    here is the cross-tenant write this whole seam exists to prevent.
+    """
+    from tortoise.record_writer import use_record_tenant
+
+    org_id = (org or {}).get("org_id")
+    graph_id = (org or {}).get("graph_id")
+    if isinstance(org_id, str) and org_id and isinstance(graph_id, str) and graph_id:
+        return use_record_tenant(org_id, graph_id)
+    return contextlib.nullcontext()
 
 
 def _get_base_sdk() -> TortoiseSDK:
@@ -945,10 +972,37 @@ class OrgResolutionMiddleware(BaseHTTPMiddleware):
                         _abuse.get_engine().store)
         except Exception:
             pass  # best-effort — geo telemetry never breaks the request
-        # No .reset() needed: Starlette creates a fresh asyncio task per request;
-        # ContextVars are copy-on-write per task (verified by
-        # test_contextvar_not_leaked_to_next_request).
-        return await call_next(request)
+        # No .reset() needed for the ContextVars above: Starlette creates a
+        # fresh asyncio task per request; ContextVars are copy-on-write per task
+        # (verified by test_contextvar_not_leaked_to_next_request).
+        #
+        # #9192 — THE PRODUCTION CALLER of the record's tenant scope, and the
+        # reason it lives HERE: this dispatch is the ONE place every
+        # authenticated MCP request resolves its `(org_id, graph_id)` (the C5
+        # ContextVars set just above), so a write that runs anywhere under
+        # `call_next` is filed under the REQUEST's tenant — the request task, a
+        # task spawned from it (Starlette runs the downstream app that way), or
+        # an offload that COPIES the context (`asyncio.to_thread`, the repo's
+        # `_submit_off_loop`). ⚠️ A bare `ThreadPoolExecutor.submit` does NOT
+        # copy it (cpython#78195), so a lane that submits without
+        # `copy_context()` must install the scope in the worker instead.
+        # Installing it at a tool would be forgotten by the next tool;
+        # installing it at the write door would be too late (the door knows the
+        # graph, not the control-plane ids).
+        #
+        # It is a SCOPE, not a bare set: a `with` cannot leak this request's
+        # tenant into the next request served on the same connection, and it
+        # nests. And it is deliberately conditional on a NAMED graph: an
+        # org-wide credential (session / legacy / OAuth, `graph_id` None) has no
+        # record tenant, so the armed write is REFUSED and counted (`no_tenant`)
+        # rather than filed under the org's default graph, which the record
+        # cannot name (its layer tables key on `public.graphs.id`, and the
+        # default graph need not have a row). Renaming the default-graph tenant
+        # is #9188's; guessing it here is exactly the cross-tenant write #9192
+        # exists to stop.
+        tenant_scope = _record_tenant_scope(org)
+        with tenant_scope:
+            return await call_next(request)
 
 
 class TransportModeMiddleware(BaseHTTPMiddleware):

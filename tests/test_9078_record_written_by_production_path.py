@@ -517,19 +517,31 @@ def test_an_armed_capture_without_a_tenant_is_refused_and_counted(
 
 def test_the_single_tenant_environment_pair_resolves_a_tenant(capture_sdk,
                                                               monkeypatch):
-    """The single-tenant arming surface (#9078 scope decision 3).
+    """The single-tenant arming surface (#9078 scope decision 3, #9192).
 
     Without it, arming the record needs a code change at every call site — which
     is how a capability ends up with no production caller again. A request scope
     always wins over the pair: env is process-global, so it is the same single
     value for every tenant the process serves (#9192).
+
+    ⛔ AND the pair only counts on a deployment that DECLARED it serves one
+    graph: undeclared (the default) the pair is ignored, so a multi-tenant
+    process cannot arm the record by setting two environment variables. The
+    undeclared leg is pinned first, and by its own test too
+    (``tests/test_9192_tenant_armed_by_request.py``) — a default that silently
+    flipped would make this one pass while the hazard came back.
     """
     monkeypatch.delenv(record_writer.RECORD_ORG_ENV, raising=False)
     monkeypatch.delenv(record_writer.RECORD_GRAPH_ENV, raising=False)
+    monkeypatch.delenv(record_writer.RECORD_SINGLE_TENANT_ENV, raising=False)
     assert record_writer.record_tenant() is None
     monkeypatch.setenv(record_writer.RECORD_ORG_ENV, "org-from-env")
     assert record_writer.record_tenant() is None, "a HALF pair must not be a tenant"
     monkeypatch.setenv(record_writer.RECORD_GRAPH_ENV, "graph-from-env")
+    assert record_writer.record_tenant() is None, (
+        "a process that has not declared itself single-tenant must not be "
+        "armable by a process-global env pair")
+    monkeypatch.setenv(record_writer.RECORD_SINGLE_TENANT_ENV, "1")
     assert record_writer.record_tenant() == ("org-from-env", "graph-from-env")
     with use_record_tenant("org-scoped", "graph-scoped"):
         assert record_writer.record_tenant() == ("org-scoped", "graph-scoped")
@@ -557,15 +569,23 @@ def test_env_example_declares_the_record_tenant_pair():
     arming the record would require a code change at every call site"), which
     the DSN-only block defeated. Same pin shape as
     ``test_bm25_lexical_8488.py::test_env_example_declares_the_bm25_arm_switch``.
+
+    #9192: the block must also carry the DECLARATION that makes the pair a
+    valid answer. Documenting only the pair is actively wrong here now — an
+    operator who copies it onto a multi-tenant process would expect rows and
+    get refusals, with the explanation living only in a warning they have not
+    read yet.
     """
     env = (REPO_ROOT / ".env.example").read_text()
-    for name in (record_writer.RECORD_ORG_ENV, record_writer.RECORD_GRAPH_ENV):
+    for name in (record_writer.RECORD_ORG_ENV, record_writer.RECORD_GRAPH_ENV,
+                 record_writer.RECORD_SINGLE_TENANT_ENV):
         assert name in env, (
             f"{name} (the #9078 single-tenant arming surface) decides whether an "
             "armed record write is filed or refused, and is not declared in "
             ".env.example")
         declared = [line for line in env.splitlines()
-                    if line.strip() in (f"# {name}=", f"{name}=")]
+                    if line.strip() in (f"# {name}=", f"{name}=")
+                    or line.strip().startswith((f"# {name}=", f"{name}="))]
         assert declared, (
             f"{name} must be shown as a commented assignment (the example form "
             "an operator copies), not just named in prose")
