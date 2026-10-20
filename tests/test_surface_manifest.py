@@ -407,29 +407,52 @@ def _load_manifest_tool():
     return mod
 
 
-def _caller_lists(doc: dict) -> tuple[int, list[tuple[str, str, str]]]:
-    """(rows compared, mismatched (name, dependency list, reason list)).
+_NO_CALLER_OUTSIDE_TESTS = "no caller outside tests was found"
+
+
+def _caller_lists(doc: dict) -> tuple[int, list[tuple[str, str, str]], list[str]]:
+    """(rows compared, disagreements, one-sided rows).
 
     `reason` is in `NON_DERIVABLE_ROW_KEYS` (it is built from a machine-local call log),
     so `check` never compares it — but the caller LIST inside it is plain text and must
     equal the one in the `dependency` column beside it, because the rendered table prints
     both as the same fact (`Does / depends on` vs `Rationale`).
+
+    A row is COMPARED only when both columns carry a list, but the other arms are not
+    skips: 30 rows name callers in `dependency` and say "no caller outside tests was
+    found" in `reason`, and that absence is legitimate only while the wording justifying
+    it is still there. Keying the skip on the ABSENCE of a list instead let a one-sided
+    edit delete one column's list and exempt the row from the comparison entirely
+    (`compared` 41 -> 40 still cleared the aggregate floor), which is why those two
+    directions are returned as `one_sided` offenders rather than skipped.
     """
     compared = 0
     mismatched: list[tuple[str, str, str]] = []
+    one_sided: list[str] = []
     for row in doc["rows"]:
         if not isinstance(row, dict):
             continue
         dependency = " ".join(str(row.get("dependency") or "").split())
         reason = " ".join(str(row.get("reason") or "").split())
+        name = str(row.get("name"))
         dep_match = re.search(r"caller categories: (.*)$", dependency)
         reason_match = re.search(r"callers: (.*)$", reason)
-        if not (dep_match and reason_match):
-            continue  # the "no caller outside tests was found" wording carries no list
-        compared += 1
-        if dep_match.group(1).strip() != reason_match.group(1).strip():
-            mismatched.append((str(row.get("name")), dep_match.group(1), reason_match.group(1)))
-    return compared, mismatched
+        if dep_match and reason_match:
+            compared += 1
+            if dep_match.group(1).strip() != reason_match.group(1).strip():
+                mismatched.append((name, dep_match.group(1), reason_match.group(1)))
+        elif dep_match:
+            # Either the reason carries its own list (compared above) or it must still
+            # carry the wording that says why there is none.
+            if _NO_CALLER_OUTSIDE_TESTS not in reason:
+                one_sided.append(
+                    f"{name}: `dependency` names a caller list but `reason` carries neither "
+                    f"a `callers:` list nor the {_NO_CALLER_OUTSIDE_TESTS!r} wording")
+        elif reason_match:
+            one_sided.append(
+                f"{name}: `reason` names a caller list but `dependency` carries no "
+                "`caller categories:` list")
+    return compared, mismatched, one_sided
 
 
 def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
@@ -444,8 +467,18 @@ def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
     above, which runs `tools/surface_manifest.py check`. What nothing else covers is the
     two columns disagreeing, because `reason` is excluded from `check`; that is this pin,
     and `test_the_reason_dependency_cross_check_can_fail` proves it fires.
+
+    Coverage is per ROW, not only in aggregate: a list carried in one column and not the
+    other is reded below, so deleting a column's list cannot exempt the row while the
+    `compared >= 40` floor still clears (measured before that arm existed: the row left
+    the comparison and `compared` fell 41 -> 40, passing).
     """
-    compared, mismatched = _caller_lists(_manifest())
+    compared, mismatched, one_sided = _caller_lists(_manifest())
+    assert not one_sided, (
+        "these rows carry a caller list in ONE column only — either the other column's list "
+        "was deleted (which would exempt the row from this comparison instead of reding it) "
+        f"or the two were reworded apart: {one_sided}"
+    )
     assert compared >= 40, (
         f"only {compared} rows carry a comparable caller list (41 today) — this check "
         "has stopped reading the manifest's rows and would pass vacuously"
@@ -467,10 +500,32 @@ def test_the_reason_dependency_cross_check_can_fail():
     doc = copy.deepcopy(_manifest())
     row = next(r for r in doc["rows"] if r.get("name") == "sdk:supersede_point")
     row["reason"] = "no MCP tool binds it; callers: engine, other-tooling, tenant-rest"
-    compared, mismatched = _caller_lists(doc)
+    compared, mismatched, one_sided = _caller_lists(doc)
     assert compared >= 40, f"the cross-check reads only {compared} rows on a doctored copy"
+    assert not one_sided, f"a two-sided row was reported as one-sided: {one_sided}"
     assert [name for name, _dep, _reason in mismatched] == ["sdk:supersede_point"], (
         f"a one-sided edit to `reason` did not red the cross-check: {mismatched}"
+    )
+
+    # The COVERAGE half. Deleting one column's list must RED the row, not exempt it: keyed
+    # on the absence of a list, the row left the comparison altogether, and the aggregate
+    # floor still cleared at 41 -> 40 (measured before this pin).
+    doc = copy.deepcopy(_manifest())
+    row = next(r for r in doc["rows"] if r.get("name") == "sdk:supersede_point")
+    row["reason"] = "no MCP tool binds it"
+    compared, _mismatched, one_sided = _caller_lists(doc)
+    assert [entry.split(": ", 1)[0] for entry in one_sided] == ["sdk:supersede_point"], (
+        "deleting the `callers:` clause from `reason` exempted the row instead of reding it: "
+        f"one_sided={one_sided}, compared={compared}"
+    )
+
+    doc = copy.deepcopy(_manifest())
+    row = next(r for r in doc["rows"] if r.get("name") == "sdk:supersede_point")
+    row["dependency"] = "no caller categories recorded"
+    _compared, _mismatched, one_sided = _caller_lists(doc)
+    assert [entry.split(": ", 1)[0] for entry in one_sided] == ["sdk:supersede_point"], (
+        "deleting the `caller categories:` clause from `dependency` exempted the row "
+        f"instead of reding it: one_sided={one_sided}"
     )
 
 
