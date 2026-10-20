@@ -96,6 +96,36 @@ original measurement.
 
 **Raw output:** `e2e-chain-probe.log`; bootstrap: `probes/e2e_postgres_bootstrap.py`.
 
+⚠️ **Read the console block above as the 2026-10-14 RUN, not as a measurement of the verdict.** At
+that date the probe printed `SUCCEEDED (direct cache write)` from a **literal**, one line after the
+write: the line read the same whether the statement landed, was refused, or never ran, and on an
+**armed** projection the refusal *raised out of the probe* instead of being reported. So the block's
+`ARMED RAW HANDLE` line was not measured — it happened to agree with reality because
+`projection._HANDLE_GUARD_ENFORCES` is `False`. The issue's own acceptance command
+(`… | grep "ARMED RAW HANDLE"` must read `refused`) could not have reported a refusal at all.
+
+As of `#9079` the probe reports the OUTCOME — `armed_raw_handle_write` returns the verdict, reads the
+node back before calling a dispatched write a landing, and refuses to report a write that neither
+landed nor was refused. `s1_report_text` builds the complete three-line §17.1 report from that single
+result and `main` writes it once, so the acceptance verdict, the guard's **enforces**/**measures
+only** MODE and the S1 summary all follow one measurement — pinned on the emitted report in ALL
+FOUR mode × outcome cells (the two are independent: a scope in flight or an unbound journal lets a
+write land while the switch is on) in `tests/test_7950_capstone_probe.py`, together with a
+module-wide rule that neither the labels nor the verdict constants are reachable outside the
+measuring/reporting functions.
+
+Three output changes a reader comparing against the block above will notice: a `HANDLE GUARD MODE`
+line and an `S1 (…)` line are now emitted, and the two demonstration lines are labelled
+`SECOND-WRITER MUTATION`. That last one matters for the acceptance command: the block above has
+exactly TWO lines matching `grep "ARMED RAW HANDLE"` (the verdict line and
+`ARMED RAW HANDLE MUTATION`, as `e2e-chain-probe.log:23,26` records), so "the line reads `refused`"
+was never literally true of the grep; the probe now emits exactly ONE matching line.
+
+The block above predates all three changes; its reading (`SUCCEEDED (direct cache write)`, S1
+NOT-GREEN) is still what an armed *projection* produces today, because `_HANDLE_GUARD_ENFORCES` is
+`False` (`#9124` part 2, blocked on the declaration programme), and the probe now says so in its own
+output instead of leaving it to the reader.
+
 **The reconciliation readers return the real property maps, so the field half is a real count.** A
 reader that returned `{}` for every key would make `field_mismatches` **structurally zero** —
 `reconcile_views` compares two per-key mappings field by field, and two empty mappings always agree

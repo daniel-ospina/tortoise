@@ -80,6 +80,96 @@ def cache_key_map(
     return out
 
 
+#: The token the issue's acceptance command greps for, and the two values it may
+#: take. Pinned as constants because the LINE is the verdict (#9079).
+RAW_HANDLE_REFUSED = "refused"
+RAW_HANDLE_LANDED = "SUCCEEDED (direct cache write)"
+
+
+def armed_raw_handle_write(proj) -> str:
+    """Attempt §17.1's second-writer write and report what ACTUALLY happened.
+
+    ⛔ THE VERDICT IS MEASURED, NEVER PRINTED FROM A LITERAL (#9079). The caller
+    used to `print("ARMED RAW HANDLE (proj.g.query):  SUCCEEDED (direct cache
+    write)")` unconditionally, one line after the write: the string was the same
+    whether the statement landed, was REFUSED, or never ran. Worse, on an armed
+    projection the refusal *raised out of the probe*, so the acceptance command
+
+    ``uv run python docs/evidence/7950-capstone/probes/e2e_chain_probe.py |
+    grep "ARMED RAW HANDLE"``
+
+    could never read `refused` — the instrument could not express the verdict
+    its own issue requires. The S1 verdict in the README rests on this line, so a
+    hardcoded one is a false PASS in the epic's evidence.
+
+    Returns ``RAW_HANDLE_REFUSED`` when the handle refuses the statement (a
+    ``DirectCacheWriteRefused`` in flight — the §17.1 door doing its job) and
+    ``RAW_HANDLE_LANDED`` when the write REACHED THE CACHE, which is CHECKED: a
+    return without an exception only proves the statement was dispatched, so the
+    landed branch reads the node back and refuses to call a vanished write a
+    success. Any OTHER exception is a broken probe, not a verdict, and
+    propagates: a silently-swallowed error here would report a refusal the guard
+    never made.
+    """
+    from tortoise.projection import DirectCacheWriteRefused
+
+    try:
+        proj.g.query("CREATE (:Point {id:'p-direct-write-7950'})")
+    except DirectCacheWriteRefused:
+        return RAW_HANDLE_REFUSED
+    # The statement was ACCEPTED — now prove it LANDED. Without this read the
+    # token would answer "was it refused?" and be PRINTED as "did it reach the
+    # cache?", which are different questions (a no-op MATCH, a rolled-back
+    # transaction, or a different graph would answer them differently).
+    rows = proj.query(
+        "MATCH (n:Point {id:'p-direct-write-7950'}) RETURN count(n)"
+    ).result_set
+    if not rows or not rows[0][0]:
+        raise RuntimeError(
+            "the §17.1 probe write was neither blocked nor landed: `CREATE "
+            "(:Point {id:'p-direct-write-7950'})` returned without raising and "
+            "the node is absent. That is a broken probe, not a verdict")
+    return RAW_HANDLE_LANDED
+
+
+def s1_report_text(proj, *, guard_enforces: bool) -> tuple[bool, str]:
+    """The COMPLETE §17.1 report for an armed projection, from ONE measurement.
+
+    Returns ``(refused, report)``. ``report`` is every line the probe emits about
+    §17.1 — the guard MODE, the acceptance token and the S1 verdict — as one
+    string, and ``refused`` is the measurement's own branch signal, so `main`
+    never has to read a verdict constant to decide whether to run the
+    demonstration.
+
+    ⛔ WHY ONE STRING. The pins are on EMITTED TEXT, not on the shape of the
+    source: a test drives this function with a stub projection in both modes and
+    compares the whole report, so a verdict that was not measured cannot be
+    printed by anything this function returns. Returning lines and having
+    `main` print them one by one left "add one hardcoded line after the loop"
+    invisible; one value written once has no such seam (`tests/…
+    test_the_report_is_one_measured_text`).
+
+    ⛔ ONE ACCEPTANCE LINE, ON PURPOSE. The issue's acceptance command is
+    ``… | grep "ARMED RAW HANDLE"`` and it must read ``refused``. The
+    demonstration lines further down used to share that prefix, so the grep
+    matched them too and "the line reads refused" was not literally true of the
+    command; they are now labelled ``SECOND-WRITER MUTATION``.
+    """
+    raw_handle = armed_raw_handle_write(proj)
+    refused = raw_handle == RAW_HANDLE_REFUSED
+    report = "\n".join([
+        "HANDLE GUARD MODE:               "
+        + ("enforces" if guard_enforces
+           else "measures only (refusal NOT armed, #9124 part 2)"),
+        f"ARMED RAW HANDLE (proj.g.query):  {raw_handle}",
+        "S1 (second writer on a journal-backed cache): "
+        + ("CLOSED (the second writer was blocked)" if refused
+           else "OPEN (the write reached the cache with no journal record "
+                "behind it)"),
+    ]) + "\n"
+    return refused, report
+
+
 def main() -> int:
     import psycopg2  # the optional `postgres` extra; the probe runs with it
     conn = psycopg2.connect(DSN)
@@ -198,32 +288,50 @@ def main() -> int:
             proj.apply({"type": "PointAdded", "id": "p-fold-7950"})
             print("ARMED FOLD (proj.apply):          NO RAISE")
         except DirectCacheWriteRefused:
-            print("ARMED FOLD (proj.apply):          refused (DirectCacheWriteRefused)")
-        proj.g.query("CREATE (:Point {id:'p-direct-write-7950'})")
-        print("ARMED RAW HANDLE (proj.g.query):  SUCCEEDED (direct cache write)")
-        rep2 = reconcile(_record_keys, _cache_keys)
-        print(f"RECONCILE (after a DIRECT raw-handle cache write): {rep2.render()}")
-        print(f"second-writer signature -> extra_in_cache={rep2.extra_in_cache}")
+            print("ARMED FOLD (proj.apply):          blocked (§17.1 refusal)")
+        # ⛔ MEASURED, NOT ASSERTED (#9079): these lines are the issue's
+        # acceptance token and S1's verdict, so they are printed from the
+        # measurement — never spelled out beside it.
+        from tortoise.projection import _HANDLE_GUARD_ENFORCES
+        refused, s1_report = s1_report_text(
+            proj, guard_enforces=_HANDLE_GUARD_ENFORCES)
+        # ONE write, ONE value: the report is emitted as the text the
+        # measurement produced, so there is no per-line seam a second,
+        # unmeasured line could be inserted into.
+        sys.stdout.write(s1_report)
+        if refused:
+            # §17.1 held: there is no divergence to reconcile and no property to
+            # mark, so the demonstrations below are NOT ATTEMPTED rather than
+            # reported as if they had run. This is the S1-GREEN path; it is
+            # unreachable while `_HANDLE_GUARD_ENFORCES` is False (the
+            # measure-mode default, #9124 part 2), and the MODE line above says
+            # which run this is instead of leaving the reader to infer it.
+            print("SECOND-WRITER MUTATION:           not attempted (the write "
+                  "did not land, so no node was marked)")
+        else:
+            rep2 = reconcile(_record_keys, _cache_keys)
+            print(f"RECONCILE (after a DIRECT raw-handle cache write): {rep2.render()}")
+            print(f"second-writer signature -> extra_in_cache={rep2.extra_in_cache}")
 
-        # ── 5c. a second writer that MUTATES an existing node ─────────────
-        # A key-set comparison cannot see this at all, and a `{}`-valued map
-        # makes it structurally invisible even to the field comparison — so
-        # this is the signature the REAL property maps exist to surface
-        # (finding 3: a value-only divergence was previously unmeasurable).
-        tgt = view.nodes[0]
-        kp = cp.KEY_PROPERTY[tgt.label]
-        proj.g.query(
-            f"MATCH (n:{tgt.label} {{{kp}: $key}}) SET n += $props",
-            {"key": tgt.key,
-             "props": {"second_writer_marker": "direct-cache-write"}})
-        print(f"ARMED RAW HANDLE MUTATION:        {declared_key(tgt.label, tgt.key)} "
-              f"gained an unauthorized property "
-              f"({tgt.label}.second_writer_marker)")
-        rep3 = reconcile(_record_keys, _cache_keys)
-        print("RECONCILE (after a DIRECT raw-handle property WRITE): "
-              f"{rep3.render()}")
-        print("field-mutation signature -> "
-              f"field_mismatches={rep3.field_mismatches}")
+            # ── 5c. a second writer that MUTATES an existing node ─────────
+            # A key-set comparison cannot see this at all, and a `{}`-valued map
+            # makes it structurally invisible even to the field comparison — so
+            # this is the signature the REAL property maps exist to surface
+            # (finding 3: a value-only divergence was previously unmeasurable).
+            tgt = view.nodes[0]
+            kp = cp.KEY_PROPERTY[tgt.label]
+            proj.g.query(
+                f"MATCH (n:{tgt.label} {{{kp}: $key}}) SET n += $props",
+                {"key": tgt.key,
+                 "props": {"second_writer_marker": "direct-cache-write"}})
+            print(f"SECOND-WRITER MUTATION:          {declared_key(tgt.label, tgt.key)} "
+                  f"gained an unauthorized property "
+                  f"({tgt.label}.second_writer_marker)")
+            rep3 = reconcile(_record_keys, _cache_keys)
+            print("RECONCILE (after a DIRECT raw-handle property WRITE): "
+                  f"{rep3.render()}")
+            print("field-mutation signature -> "
+                  f"field_mismatches={rep3.field_mismatches}")
 
         print("CHAIN RESULT: journal -> record -> cache COMPLETED with the shipped modules")
         return 0
