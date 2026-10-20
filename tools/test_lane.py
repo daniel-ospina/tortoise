@@ -176,14 +176,19 @@ Also fail-closed by design:
 * ``is_managed()`` (the ``fdb-lane-*`` prefix, minus the protected shared
   instances) is what a removal intent is keyed on, and it is pinned by tests;
 * ````docker ps -a`` is consulted for port collisions, and THAT SCAN is the
-  load-bearing half of the guard for a FOREIGN container publishing on a
-  NON-loopback interface: the host probe still binds ``127.0.0.1:<port>`` freely
-  while ``0.0.0.0:<port>`` is taken. A PEER's container publishes on loopback
+  load-bearing half of the guard in TWO cases: a FOREIGN container publishing
+  on a NON-loopback interface, where the host probe still binds
+  ``127.0.0.1:<port>`` freely while ``0.0.0.0:<port>`` is taken; and a STOPPED
+  container, whose host port is free at the OS level (``bind`` succeeds) but
+  which ``docker run -p`` refuses because docker still holds the mapping.
+  A PEER's RUNNING container publishes on loopback
   (``-p 127.0.0.1:<port>:6379``), which the host probe refuses on its own
-  (measured, Docker 29.4.0).
-  ``-a`` adds nothing measured — neither a stopped nor a created container
-  reports or reserves its published port (Docker 29.4.0) — and is kept only as a
-  cheap hedge;
+  (measured, Docker 29.4.0). ``-a`` is therefore NOT a hedge: a stopped
+  container DOES report its ``host:port->6379/tcp`` mapping there (measured
+  2026-10-20, Docker 29.8.2 — ````docker ps -a --format '{{.Names}}\t{{.State}}\t
+  {{.Ports}}'`` showed `exited` containers with their published ports), which is
+  the only thing that refuses the port and the reason a range full of stopped
+  containers exhausts (67 of 110 held by EXITED containers on that reading);
 * ``DOCKER_HOST`` is deliberately NOT scrubbed (unlike every ``GIT_*``):
   a remote daemon is addressed as-is, so the printed
   ``127.0.0.1:<port>`` URI then names THAT daemon's loopback, not this host's —
@@ -835,14 +840,25 @@ def _published_scan() -> str | None:
     timed-out call is not evidence for it. This tool exists for an overloaded
     host, so a failed scan is an expected case, not an exotic one.
     """
-    # The SCAN is the load-bearing guard, but for FOREIGN containers: one that
-    # publishes on a NON-loopback interface (`-p 16478:6379` -> `0.0.0.0:16478`)
-    # leaves the host probe free to bind 127.0.0.1:16478, so only this table shows
-    # it. A PEER's container publishes on loopback (`-p 127.0.0.1:<port>:6379`,
-    # what `start()` asks for), which the host probe DOES refuse — measured,
-    # Docker 29.4.0. `-a` adds nothing measured — a stopped or created container
-    # reports no `Ports` — so this covers RUNNING containers, and `-a` is kept only
-    # as a cheap hedge.
+    # The SCAN is the load-bearing guard in TWO cases: a FOREIGN container that
+    # publishes on a NON-loopback interface (`-p 16478:6379` -> `0.0.0.0:16478`),
+    # where the host probe stays free to bind 127.0.0.1:16478 so only this table
+    # shows it; and a STOPPED one. A PEER's RUNNING container publishes on
+    # loopback (`-p 127.0.0.1:<port>:6379`, what `start()` asks for), which the
+    # host probe DOES refuse — measured, Docker 29.4.0.
+    #
+    # `-a` is not a hedge: a STOPPED container's host port is FREE at the OS
+    # level (`bind` succeeds) but docker still holds the mapping, and it DOES
+    # report it here. Measured 2026-10-20 on Docker 29.8.2:
+    #
+    #   $ docker ps -a --format '{{.Names}}\t{{.State}}\t{{.Ports}}'
+    #   fdb-7846-rdb  exited  3000/tcp, 127.0.0.1:16455->6379/tcp
+    #
+    # and `bind("127.0.0.1", 16455)` succeeded. So for that port `_container_
+    # publishes` is the ONLY refusal — which is exactly how 67 of the range's 110
+    # ports came to be held by EXITED containers, and why the `reap_orphans`
+    # report exists. Reading `-a` as "adds nothing" would make that measurement
+    # look impossible to the next reader.
     r = _docker("ps", "-a", "--format", "{{.Names}} {{.Ports}}")
     return None if r.returncode != 0 else (r.stdout or "")
 
@@ -885,8 +901,17 @@ def pick_port(lo: int = PORT_RANGE[0], hi: int = PORT_RANGE[1]) -> int:
         if port_is_free(port) and not _container_publishes(port, scan):
             return port
     raise SystemExit(
-        f"test-lane: no free port in {lo}-{hi}; remove stale fdb-lane-* "
-        f"containers (`uv run python tools/test_lane.py list`)"
+        f"test-lane: no free port in {lo}-{hi}. A STOPPED lane container "
+        f"keeps its published port reserved, so stopped containers are what "
+        f"exhaust this range — `uv run python tools/test_lane.py list` shows "
+        f"every {NAME_PREFIX}* container and its state. A stopped container "
+        f"belongs to its own lane (#8180: reap only what is *yours*; the "
+        f"automatic reap is authorised only when the owning worktree is GONE), "
+        f"so release it from ITS worktree: `cd <that worktree> && uv run "
+        f"python tools/test_lane.py down`. A fleet-wide reap of stopped "
+        f"containers of LIVE owners exists but is OFF by default because it "
+        f"deletes peer lanes' containers — `{STOPPED_REAP_ENV}=1` asks for it "
+        f"(pending the owner ruling on #8180)"
     )
 
 
@@ -978,6 +1003,30 @@ _LIVE_ISH_STATES = frozenset({"paused", "restarting", "created", "removing"})
 #: Docker states this tool may replace: the container has stopped and its
 #: termination facts are what explain why.
 _TERMINAL_STATES = frozenset({"exited", "dead"})
+
+#: Opt-in that lets `reap_orphans` remove a TERMINAL container whose owning
+#: worktree still EXISTS. OFF by default, and that default is the #8180 owner
+#: ruling, not caution: the automatic delete is authorised "when the worktree
+#: that owns it is gone" and the scope is "reap only what is *yours*", so a
+#: container whose owner is alive is that lane's to remove. Measured cost of
+#: keeping the boundary (2026-10-20): 67 of the 110 ports in ``PORT_RANGE``
+#: were held by EXITED containers, so `uri` refused with `no free port`. The
+#: reopen carrying that measurement is on #8180; until the owner rules, the
+#: shipped behaviour REPORTS such a container (with docker's termination facts
+#: and the one command that releases it from its own worktree) and removes
+#: nothing. A lane may not flip that boundary on its own — an env opt-in is a
+#: deliberate operator action, not a default, which is the same shape this
+#: module already uses for the team-namespace sweep (#1884 / #4128).
+STOPPED_REAP_ENV = "TORTOISE_TEST_LANE_REAP_STOPPED"
+
+
+def _stopped_reap_enabled() -> bool:
+    """Whether the OPERATOR asked for the withheld proof-2 reap (#8180).
+
+    Strict ``"1"``: any other spelling is not consent for a deletion that
+    crosses a recorded ownership boundary.
+    """
+    return os.environ.get(STOPPED_REAP_ENV, "0") == "1"
 
 
 def _graph_count(name: str) -> int | None:
@@ -1397,64 +1446,193 @@ def _started_epoch(name: str) -> float | None:
 
 
 def reap_orphans() -> list[str]:
-    """Remove `fdb-lane-*` containers whose OWNING WORKTREE IS GONE (#8180).
+    """Remove `fdb-lane-*` containers that are PROVABLY out of service.
 
-    Ownership is the mechanism, not age: a lane container is named after
-    `slug_for()` of the worktree that owns it, so the container's owner is
-    recoverable from its own name and the reaping decision is a lookup rather
-    than a guess. This tool can therefore only ever remove a container whose
-    owner it has POSITIVELY established is gone — never a peer lane's, and never
-    this worktree's own (`stop()` is the only thing that removes that one).
+    ONE proof is armed, and it is OWNERSHIP — a recorded-worktree existence read
+    (``Path(owner).is_dir()``), not a clock and not a container state:
+
+    1. **The owning worktree is gone** (#8180). Ownership is recoverable from
+       the container's own name (it is `slug_for()` of the worktree that owns
+       it), so the reaping decision is a lookup rather than a guess. This tool
+       can therefore only ever remove a container whose owner it has
+       POSITIVELY established is gone — never a peer lane's, and never this
+       worktree's own (`stop()` is the only thing that removes that one). It
+       does not consult the container's STATE at all: an owner that is gone
+       means nothing will start that container again, whatever docker last said
+       about it (`paused`/`restarting`/`created` included — ``_LIVE_ISH_STATES``
+       gates only the state arm below, not this one).
+
+    A second proof — **the container is in a TERMINAL state** (`exited`/`dead`,
+    ``_TERMINAL_STATES``) — is **WITHHELD BY DEFAULT** (`STOPPED_REAP_ENV`),
+    because it is a DELETION of a container whose owner is alive and #8180's
+    recorded ruling authorises a reap only "when the worktree that owns it is
+    gone", scoped to "reap only what is *yours*". Every registered worktree on
+    a real host still exists (measured 2026-10-20: 565 of 567), so a gate on
+    "the owner is DETERMINED" is satisfied for essentially every lane container
+    and does not narrow the boundary at all — which is why the boundary, not the
+    gate, is what the default has to honour.
+
+    What the withheld arm would buy, and does not spend by default: docker keeps
+    a STOPPED container's published port reserved, so a range full of them makes
+    every lane refuse with `no free port` (measured 2026-10-20: all 110 ports in
+    ``PORT_RANGE`` published, **67 held by EXITED containers**). With the arm
+    withheld the default REPORTS each such container — its owner worktree, its
+    state and the ONE command that releases it from its own worktree — and
+    `pick_port` reports the same remedy when the range is full. No `docker
+    inspect` is spent there: nothing is destroyed, so there is no evidence to
+    preserve, and this line runs on EVERY `up`/`uri`. Termination facts belong
+    where a `rm -f` happens, and are read there.
+
+    The arm is not merely inert when withheld: the reporting is the point. A
+    dead lane's stopped container is invisible to every other instrument, and it
+    is the population that exhausts the port range. The reopen carrying that
+    measurement is on #8180; if the owner rules for it, `STOPPED_REAP_ENV=1`
+    (or a new default) arms the deletion with no other change here.
+
+    When the opt-in IS set, the arm keeps the two properties it was reviewed
+    for: the state is re-read IMMEDIATELY before the removal (the sweep's
+    `docker ps` snapshot can be stale, and a lane restarting reuses the same
+    name), and docker's termination facts are read BEFORE the `rm` (#7357) —
+    `rm -f` destroys the only evidence of WHY a container stopped, and that
+    lane's own `start()` then reads `absent` and reports nothing. The armed
+    ownership path above reads them the same way, and only for a container
+    docker reports as STOPPED: for an owner-gone container that is still UP the
+    facts describe a PREVIOUS termination, and `_termination_report(live=False)`
+    would state it as this failure.
 
     Age is not consulted and there is deliberately NO age backstop here. The
     measured defect is a container that outlives its owner, and a clock firing on
     a live owner's database would be a far worse bug than the leak it fixes —
-    the rule the whole module defends.
+    the rule the whole module defends. `paused`/`restarting`/`created` are
+    live-ish in exactly the same way (``_LIVE_ISH_STATES``) and never reach the
+    STATE arm, which fires only on ``_TERMINAL_STATES``.
 
     Fail-closed: if the worktree list or `docker ps` cannot be read, nothing is
-    removed and the reason is reported. Returns one line per container this
-    function ACTED on or decided to KEEP; a name refused by `is_managed()` is not
-    reported (it was never a candidate), so a caller reports what actually
-    happened instead of counting.
+    removed and the reason is reported; a state this module does not recognise
+    is reported, never inferred to be terminal. Returns one line per container
+    this function ACTED on or decided to KEEP; a name refused by `is_managed()`
+    is not reported (it was never a candidate), so a caller reports what
+    actually happened instead of counting.
     """
     slugs = _worktree_slugs()
     if slugs is None:
         return ["reap: skipped — `git worktree list` failed, so ownership "
                 "cannot be determined; NOTHING was removed (fail-closed)"]
     listed = _docker("ps", "-a", "--filter", f"name={NAME_PREFIX}",
-                     "--format", "{{.Names}}")
+                     "--format", "{{.Names}}\t{{.State}}")
     if listed.returncode != 0:
         return ["reap: skipped — `docker ps` failed; NOTHING was removed "
                 "(fail-closed)"]
+    states: dict[str, str] = {}
+    for line in (listed.stdout or "").splitlines():
+        name, _, state = line.partition("\t")
+        name = name.strip()
+        if name:
+            # A missing state is `unknown`, never terminal: the state arm may
+            # only fire on a state docker actually reported.
+            states[name] = state.strip().lower() or "unknown"
     mine = lane_name()
     out: list[str] = []
-    for name in sorted(n for n in (listed.stdout or "").split() if n):
+    for name in sorted(states):
         if not is_managed(name):
             continue
         if name == mine:
             out.append(f"reap: kept {name} — this is THIS worktree's container")
             continue
         owner = slugs.get(name[len(NAME_PREFIX):])
+        state = states[name]
+        # Ownership is a DETERMINED owner plus what its recorded worktree says.
+        # Resolved ONCE, before either proof, so no arm can report a worktree as
+        # "exists" without having looked at it.
+        present: bool | None = None
         if owner is not None:
-            # The owner IS determined, so ownership alone decides — and a live
-            # owner is never reaped, at any age.
             try:
-                present: bool | None = Path(owner).is_dir()
+                present = Path(owner).is_dir()
             except OSError:
                 # pathlib suppresses ENOENT/ENOTDIR/EBADF/ELOOP but NOT EACCES,
                 # so an inaccessible worktree path raises. "Cannot tell" is the
                 # REPORT-ONLY case: it must never be read as "the owner is gone".
                 present = None
-            if present is None:
-                out.append(f"reap: kept {name} — its owning worktree {owner} "
-                           f"could not be examined (fail-closed, report only)")
-                continue
-            if present:
-                out.append(f"reap: kept {name} — its owning worktree exists ({owner})")
-                continue
+        if owner is not None and present is None:
+            out.append(f"reap: kept {name} — its owning worktree {owner} "
+                       f"could not be examined (fail-closed, report only)")
+            continue
+        if owner is not None and present is False:
+            # Proof 1, the ONLY armed proof: the worktree that owns this
+            # container is gone, so this is what #8180 authorises. #7357: the
+            # facts are read BEFORE the removal — `rm -f` destroys the only
+            # evidence of WHY it stopped, and nobody else will report it now
+            # that its owner is gone.
+            #
+            # The facts are a claim about WHY it stopped, so they may only be
+            # read for a container docker actually reports as STOPPED: this
+            # path also fires for a RUNNING container whose owner worktree was
+            # deleted (a lane container outlives its worktree by design), and a
+            # previous OOM kill reported there is HISTORY, not this failure —
+            # `_termination_report(live=False)` states "it did not hang, it was
+            # terminated", the false diagnosis its own `live` flag exists to
+            # prevent. An unreadable state asserts nothing at all, exactly as
+            # `start()` already refuses to append a report to `unknown`.
+            prior = ("" if state not in _TERMINAL_STATES
+                     else _termination_report(name, live=False))
             rm = _docker("rm", "-f", name)
             out.append(f"reap: {'removed' if rm.returncode == 0 else 'FAILED to remove'} "
-                       f"{name} — its owning worktree {owner} is gone")
+                       f"{name} — its owning worktree {owner} is gone"
+                       + (f"; it was {prior}" if prior else ""))
+            continue
+        if owner is not None and state in _TERMINAL_STATES:
+            # The WITHHELD arm (`STOPPED_REAP_ENV`): a TERMINAL container whose
+            # owning worktree still EXISTS. It is a deletion of a container
+            # whose owner is ALIVE, which #8180's recorded ruling does not
+            # authorise ("when the worktree that owns it is gone", "reap only
+            # what is *yours*") — and a lane may not reverse that on its own. A
+            # gate on "the owner is DETERMINED" does not narrow it: measured
+            # 2026-10-20, 565 of 567 registered worktrees still exist, so nearly
+            # every lane container passes that gate.
+            #
+            # So the DEFAULT reports, and the report is the load-bearing part:
+            # this container holds a port out of PORT_RANGE until someone
+            # removes it, and no other instrument on the host shows it. No
+            # `docker inspect` is spent here — nothing is being destroyed, so
+            # there is no evidence to preserve — and this line runs on EVERY
+            # `up`/`uri`: spending it for every stopped peer container
+            # (measured ~53 ms each; 67 of them) would add ~3.5 s to every lane
+            # start, which is exactly why this arm does not.
+            if not _stopped_reap_enabled():
+                out.append(
+                    f"reap: kept {name} — its owning worktree exists ({owner}) "
+                    f"and it is {state}, so it is a PEER lane's container: "
+                    f"#8180 authorises a reap only when the owning worktree is "
+                    f"gone. It holds a port from {PORT_RANGE[0]}-{PORT_RANGE[1]} "
+                    f"until it is removed, from its OWN worktree: `cd {owner} "
+                    f"&& uv run python tools/test_lane.py down` (or rule on "
+                    f"#8180 to arm `{STOPPED_REAP_ENV}=1`")
+                continue
+            # Re-read the state AT THE MOMENT OF ACTION: the snapshot above was
+            # one `docker ps`, and a lane restarting its own container reuses
+            # the SAME name, so an `exited` read can be stale by the time the
+            # `rm` lands. `unknown` keeps, per this module's absent-vs-
+            # unreadable rule.
+            now = container_state(name)
+            if now not in _TERMINAL_STATES:
+                out.append(f"reap: kept {name} — it read {state} in the sweep "
+                           f"but is {now} at removal time (fail-closed)")
+                continue
+            # Facts are read BEFORE this removal (#7357): the owner's own
+            # `start()` will now read `absent` and report nothing, so this is
+            # the last moment the cause exists.
+            facts = _termination_report(name, live=False)
+            rm = _docker("rm", "-f", name)
+            out.append(f"reap: {'removed' if rm.returncode == 0 else 'FAILED to remove'} "
+                       f"{name} — it is {now} (a stopped container serves "
+                       f"nothing and holds a port from {PORT_RANGE[0]}-{PORT_RANGE[1]}; "
+                       f"reaped only because {STOPPED_REAP_ENV}=1 is set)"
+                       + (f"; it was {facts}" if facts else ""))
+            continue
+        if owner is not None:
+            # The owner IS determined and its worktree exists, so ownership
+            # alone decides — and a live owner is never reaped, at any age.
+            out.append(f"reap: kept {name} — its owning worktree exists ({owner})")
             continue
         # Owner INDETERMINATE: no worktree in THIS clone claims it. That is not
         # proof of death — the container may belong to a different clone of the
@@ -1468,8 +1646,9 @@ def reap_orphans() -> list[str]:
         age = _started_epoch(name)
         age_txt = ("start time unreadable" if age is None
                    else f"{(time.time() - age) / 3600.0:.1f}h old")
-        out.append(f"reap: kept {name} — no owner here, so ownership is NOT "
-                   f"determined ({age_txt}); report only, fail-closed")
+        out.append(f"reap: kept {name} — no owner here and it is {state}, so "
+                   f"ownership is NOT determined ({age_txt}); report only, "
+                   f"fail-closed")
     return out
 
 

@@ -1189,6 +1189,136 @@ def _uri_default_graph_name() -> str | None:
     return urlparse(uri).path.lstrip("/") or "tortoise"
 
 
+#: Suffix of the sidecar that records WHICH INSTANCE a session journal's
+#: graph names live on. Written once, next to the journal, by the code that
+#: resolves the journal path (``tests/conftest.py``) — the only place that
+#: knows the session's target at import time.
+JOURNAL_INSTANCE_SUFFIX = ".instance"
+
+
+def _uri_instance_key(uri: str | None) -> str | None:
+    """``host:port`` for the instance *uri* targets, or None when it has none.
+
+    The identity a journal is bound to. Port resolution mirrors
+    ``FalkorProjection.from_uri`` (a portless loopback URI IS ``16379``), and
+    ``localhost`` is folded onto ``127.0.0.1`` so the two spellings of the SAME
+    instance cannot read as a mismatch (the fleet uses both: the docker lane's
+    docs say ``localhost``, the canonical address is IPv4-pinned).
+
+    Returning None (embedded/path/non-URI) is deliberate: such a session has no
+    server instance, so it must not be bound to one.
+    """
+    if not uri:
+        return None
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(uri)
+        port = parsed.port
+    except ValueError:
+        return None          # malformed port — binds to nothing, never guesses
+    if not parsed.scheme or not parsed.hostname:
+        return None
+    host = parsed.hostname.lower()
+    if host == "localhost":
+        host = "127.0.0.1"
+    # `host:port` alone does not identify a SERVER when a non-default daemon is
+    # in play: `127.0.0.1:16390` exists on EVERY docker daemon, so a journal
+    # minted against daemon A's lane container would read as a MATCH to daemon
+    # B's — the wrong-instance consumption this key exists to prevent. The
+    # variable is folded in raw (not resolved) because writer and reader both
+    # come through here, so only a CHANGE of it matters, and a change is exactly
+    # the case where matching would be wrong.
+    daemon = _canonical_docker_host()
+    return f"{host}:{port or 16379}" + (f"@{daemon}" if daemon else "")
+
+
+#: Spellings of "the default daemon". Folding them to "" matters because the key
+#: is written by one lane and read by another: a lane that exports the default
+#: socket explicitly would otherwise write journals no peer could ever match,
+#: stranding them forever (a journal has no age prune — see `_stale_sweep`).
+_DEFAULT_DOCKER_HOSTS = frozenset({
+    "", "unix:///var/run/docker.sock", "unix:///var/run/docker.sock/",
+    "unix:/var/run/docker.sock", "npipe:////./pipe/docker_engine",
+})
+
+
+def _canonical_docker_host() -> str:
+    """`DOCKER_HOST` foldable to "" when it names the DEFAULT daemon."""
+    raw = os.environ.get("DOCKER_HOST", "").strip()
+    return "" if raw in _DEFAULT_DOCKER_HOSTS else raw
+
+
+def _journal_instance(journal_file: str) -> str | None:
+    """The instance key recorded beside *journal_file*.
+
+    THREE states, and they must not collapse into two, because the caller uses
+    the answer to decide an IRREVERSIBLE action (consuming the only ownership
+    record a set of graphs has):
+
+    * ``None`` — no sidecar at all: the journal predates the binding. LEGACY,
+      and swept the pre-fix way.
+    * ``""`` — a sidecar exists but its content is unusable (empty/torn). We
+      cannot say which instance these graphs are on, so this is a MISMATCH, and
+      a mismatch SKIPS. Reading it as ``None`` (legacy) would consume the
+      journal against whatever instance happens to be sweeping — which is
+      exactly the pre-fix defect, re-entered through a torn write.
+      Who produces one: a sidecar this process may not READ (see the OSError
+      arm below), one written by an older build, or one a crash left behind.
+      The current writer cannot: `_bind_journal_instance` writes
+      ``<path>.tmp`` and ``os.replace``s it, so a partial write is never
+      visible at the final path.
+    * ``"host:port"`` — bound; compare it to the sweep's target.
+    """
+    path = journal_file + JOURNAL_INSTANCE_SUFFIX
+    try:
+        with open(path) as fh:
+            key = fh.read().strip()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        # Exists but cannot be read (EACCES, EISDIR, ...). "Cannot tell" is not
+        # "legacy": nothing may be consumed on the strength of a failed read.
+        return ""
+    return key or ""
+
+
+def _bind_journal_instance(journal_file: str, uri: str | None) -> bool:
+    """Record WHICH instance *journal_file*'s graph names live on.
+
+    Called by ``tests/conftest.py`` at import, where the session's target is
+    known. Best-effort by design: an unwritable sidecar leaves the journal
+    UNBOUND, which keeps the pre-fix sweep behaviour instead of refusing every
+    sweep (hygiene never fails the suite). Returns True when a binding was
+    written, so a caller (or a test) can tell "could not bind" from "bound".
+    """
+    key = _uri_instance_key(uri)
+    if not key:
+        return False
+    path = journal_file + JOURNAL_INSTANCE_SUFFIX
+    tmp = path + ".tmp"
+    try:
+        # The parent dir may not exist yet: this runs at conftest IMPORT, and on
+        # a fresh host (a new TMPDIR, CI's per-job temp root, the #3752
+        # redirect) NOTHING has created ACTIVE_SUITES_DIR — the journal itself
+        # is created later, by `_journal_append`, which makes the dir for this
+        # same reason (cycle-7 P1-1). Without this line the bind silently
+        # fails on exactly the sessions whose journals most need a binding.
+        os.makedirs(os.path.dirname(journal_file) or ".", exist_ok=True)
+        # Write-then-rename: a partially written sidecar must never be visible
+        # (see `_journal_instance` — a torn one reads as "unusable", and an
+        # unusable binding skips a journal for the rest of its life).
+        with open(tmp, "w") as fh:
+            fh.write(key + "\n")
+        os.replace(tmp, path)
+    except OSError:
+        try:  # noqa: SIM105
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+    return True
+
+
 def _projection_host(proj) -> str | None:
     """Resolve the projection's server host (cycle-3 P0-1).
 
@@ -1565,10 +1695,18 @@ def _drop_one_graph(proj, g: str, *, drop: bool) -> bool:
 
 
 def _remove_journal_file(journal_file: str) -> None:
-    """Remove the journal AND its cursor sidecar (both are per-session
+    """Remove the journal AND its sidecars (both are per-session
     bookkeeping — a removed journal without its sidecar leaves a stray
-    .cursor file in ACTIVE_SUITES_DIR every docker session)."""
-    for p in (journal_file, journal_file + ".cursor"):
+    .cursor / .instance file in ACTIVE_SUITES_DIR every docker session).
+
+    An EMPTY path removes nothing: the callers read the path from an env var,
+    and `"" + ".instance"` would be a RELATIVE `.instance` unlinked from the
+    process CWD — a file that is not this journal's. `_read_wiped_cursor`
+    already guards its own `"" + ".cursor"` for the same reason."""
+    if not journal_file:
+        return
+    for p in (journal_file, journal_file + ".cursor",
+              journal_file + JOURNAL_INSTANCE_SUFFIX):
         try:  # noqa: SIM105
             os.remove(p)
         except OSError:
@@ -1603,6 +1741,17 @@ def _sweep_drop(proj, journal_file: str, *, drop: bool = True,
     bookkeeping; the next session's stale sweep retries). Returns a summary
     dict {"dropped", "failed", "preserved", "journal_removed"} or
     {"skipped": ...}.
+
+    RESIDUAL, stated because it is the same defect one level down: the
+    INSTANCE binding is recorded PER JOURNAL (``_journal_instance``), while a
+    journal's ENTRIES are not stamped with the instance they were minted on
+    (``_journal_append_product`` takes only a name). A session that mints on
+    two instances — realistic: a test that points ``TORTOISE_DB_URI``/its own
+    projection at the shared lane mid-run — can therefore still satisfy one
+    instance's entry by absence while sweeping the other. Closing that needs a
+    per-entry instance stamp at the append seam, which is a journal-FORMAT
+    change and is filed rather than smuggled in here. The ``_stale_sweep`` gate
+    is what this module can enforce today.
 
     FAIL-CLOSED name gate (#7795): only the families in
     ``_SWEEP_OWNED_PREFIXES`` are ever DETACH+DELETEd. A name outside them
@@ -1676,7 +1825,37 @@ def _sweep_drop(proj, journal_file: str, *, drop: bool = True,
 
 def _session_end_own_sweep(uri: str, journal_file: str, *,
                            skip_on_non_loopback: bool = True) -> dict:
-    """Session-end sweep of THIS session's journaled graphs (Step 7 item 3)."""
+    """Session-end sweep of THIS session's journaled graphs (Step 7 item 3).
+
+    Gated on the journal's recorded instance exactly like `_stale_sweep`, and
+    for the same reason: this path ends by REMOVING the journal (the only
+    ownership record its graphs have) once every entry is accounted for, and
+    `_sweep_drop` counts an ABSENT graph as satisfied. The two can disagree
+    about the instance — the binding is written at conftest IMPORT while `uri`
+    is read at fixture SETUP — so without this check a journal bound elsewhere
+    is consumed here and its graphs become unattributable, which is the defect
+    this PR removes. Setup-time agreement is the normal case, so this skips
+    nothing in practice; it withholds the irreversible step when it does not.
+
+    The skip is reported under BOTH ``skipped_instance`` (the reason, for the
+    census) and ``skipped`` — the key `tests/conftest.py`'s teardown gate
+    short-circuits on to mean "this sweep did not run". They are not
+    interchangeable: ``skipped_instance`` says WHY, ``skipped`` says the sweep
+    withheld all action, and the E2E-7 survivor gate scores a sweep that did
+    not run as a leak unless the latter is set. Withholding the sweep and then
+    probing the journal's names anyway would raise on state this function
+    deliberately left alone — a false red, not a leak.
+    """
+    bound = _journal_instance(journal_file)
+    target = _uri_instance_key(uri)
+    if bound is not None and bound != target:
+        why = ("its recorded instance binding is UNREADABLE, so which server "
+               "these graphs are on cannot be established"
+               if not bound else f"bound to {bound}")
+        reason = f"{why}, this sweep targets {target}"
+        return {"dropped": [], "failed": [], "preserved": [],
+                "journal_removed": False, "skipped": reason,
+                "skipped_instance": reason}
     with _sweep_proj(uri) as proj:
         return _sweep_drop(proj, journal_file, drop=True,
                            skip_on_non_loopback=skip_on_non_loopback)
@@ -1905,6 +2084,28 @@ def _leftover_sweep(uri: str, *, skip_on_non_loopback: bool = True) -> dict:
             return {"full_sweep": False, "error": str(e)}
 
 
+def _sweep_census(entries: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Split `_stale_sweep`'s per-journal outcomes into DROPPED and DEFERRED.
+
+    A census must count OUTCOMES, not list length. `_stale_sweep` puts a journal
+    it deliberately SKIPPED into the same `stale` list as one it consumed (both
+    belong to dead sessions), so `len(stale)` reports a journal nothing was
+    dropped for as "dropped" — and the operator then reads "N dead session
+    journal(s) dropped" on one line and "N dead journal(s) left for another
+    instance" on the next, two adjacent lines contradicting each other.
+    `journal_removed` is the only field that says a record was consumed.
+
+    The DEFERRED half is keyed on `skipped_instance` specifically:
+    `_sweep_drop` also returns a `skipped` reason for a NON-LOOPBACK target,
+    which is a different fact ("this sweep did not run at all") and must not be
+    reported as "this journal belongs to another instance".
+    """
+    return (
+        [r for r in entries if r.get("journal_removed")],
+        [r for r in entries if r.get("skipped_instance")],
+    )
+
+
 def _stale_sweep(uri: str, *, skip_on_non_loopback: bool = True) -> dict:
     """Session-start stale sweep (Step 7 item 1): drop DEAD sessions'
     journaled graphs.
@@ -1914,7 +2115,29 @@ def _stale_sweep(uri: str, *, skip_on_non_loopback: bool = True) -> dict:
     marker (pid+start verified against the live process's start time — the
     recycled-pid guard, #1642 FIX 5). Bare marker-file EXISTENCE is NOT the
     liveness rule. Dead (no matching live marker) → drop its journaled
-    graphs + remove the journal (keep-on-partial defers the remainder)."""
+    graphs + remove the journal (keep-on-partial defers the remainder).
+
+    INSTANCE BINDING (measured defect, 2026-10-20). A journal names graphs but
+    it did not name the SERVER they live on, and `_sweep_drop` treats an ABSENT
+    graph as a satisfied entry — so a stale journal swept against the WRONG
+    instance dropped nothing, called every entry satisfied, and DELETED THE
+    JOURNAL. From that moment the graphs had no ownership record at all: no
+    journal-driven sweep can see them, `wipe_server` is fail-closed to the
+    region's prefixes and only acts on the instance it runs against, and the
+    only journal-blind pass is an explicit operator opt-in. Measured state on
+    the two host instances: **0 of 2,331 graphs** belonged to any surviving
+    journal, while 24 dead-session markers sat in ACTIVE_SUITES_DIR whose
+    journals were gone (this function removes the journal and, until now, left
+    the marker as the only trace that a possession had been consumed).
+
+    So a dead journal is consumed only against the instance it was WRITTEN
+    against (`{journal}.instance`, written by the code that resolves the
+    journal path). A mismatch SKIPS it — the journal survives, its graphs stay
+    attributable, and the session that does run against that instance reaps
+    them. An UNRECORDED journal (legacy, or a sidecar that could not be written)
+    keeps the pre-fix behaviour: unknown is not a mismatch, and refusing here
+    would strand every journal written before this binding existed.
+    """
     from tortoise.embedded_reaper import ACTIVE_SUITES_DIR as _ASD
     from tortoise.embedded_reaper import active_suite_markers
     try:
@@ -1925,7 +2148,9 @@ def _stale_sweep(uri: str, *, skip_on_non_loopback: bool = True) -> dict:
         m["token"].split("-", 1)[1] for m in active_suite_markers()
         if m.get("token") and "-" in m["token"]
     }
+    target = _uri_instance_key(uri)
     results: list[dict] = []
+    consumed_markers: set[str] = set()
     for e in sorted(entries):
         if not e.endswith(".graphs.jsonl"):
             continue
@@ -1933,10 +2158,57 @@ def _stale_sweep(uri: str, *, skip_on_non_loopback: bool = True) -> dict:
         if nonce in live_nonces:
             continue  # a live suite's journal — never touch
         jf = os.path.join(_ASD, e)
+        bound = _journal_instance(jf)
+        if bound is not None and bound != target:
+            # NOT ours to judge: these graphs are on ANOTHER instance, so
+            # "absent here" is not evidence that they are gone. Consuming the
+            # journal would destroy the only ownership record they have. An
+            # UNRESOLVABLE target (None) lands here too — unknown is not
+            # "matches", and the cost of being wrong is an irreversible one.
+            why = ("its recorded instance binding is UNREADABLE, so which "
+                   "server these graphs are on cannot be established"
+                   if not bound else f"bound to {bound}")
+            results.append({"journal": e,
+                            "skipped_instance": f"{why}, this sweep targets "
+                                                f"{target}",
+                            "journal_removed": False})
+            continue
         with _sweep_proj(uri) as proj:
             res = _sweep_drop(proj, jf, drop=True,
                               skip_on_non_loopback=skip_on_non_loopback)
         results.append({"journal": e, **res})
+        if res.get("journal_removed"):
+            consumed_markers.add(nonce)
+    # NO orphan-sidecar reap here, deliberately. `_bind_journal_instance`
+    # writes `<nonce>.graphs.jsonl.instance` at conftest IMPORT, while a docker
+    # session's MARKER (this loop's liveness record) is written later, in the
+    # autouse session fixture — so during the whole COLLECTION phase a live
+    # session has a sidecar, no marker and no journal (the journal appears on
+    # the first append), which is textually identical to "stranded". A reap
+    # keyed on marker absence therefore deletes a live peer's binding, and
+    # without it that peer's journal reads as LEGACY: the instance gate switches
+    # itself off and the next wrong-instance sweep consumes it — the defect this
+    # PR removes, re-entered. Measured 2026-10-20 on `pytest tests/
+    # --collect-only` for this tree: 2 m 34 s of collection, i.e. the overlap is
+    # the normal case for two concurrent lanes. The residue this leaves is a
+    # sidecar for a session that CRASHES after import and before its first
+    # append (a few dozen bytes); `_remove_journal_file` still reaps the sidecar
+    # of every journal a sweep consumes.
+    # Housekeeping: a consumed journal's DEAD marker is now meaningless, and
+    # leaving it is what made "a marker with no journal" the only surviving
+    # trace of the consumption measured above. Only markers whose nonce we just
+    # consumed are touched — a live marker is never removed (its nonce is in
+    # `live_nonces`, so it cannot reach here).
+    for e in sorted(entries):
+        if e.endswith(".graphs.jsonl") or e.endswith(JOURNAL_INSTANCE_SUFFIX):
+            continue
+        if "-" not in e:
+            continue
+        if e.split("-", 1)[1] in consumed_markers:
+            try:  # noqa: SIM105
+                os.remove(os.path.join(_ASD, e))
+            except OSError:
+                pass
     return {"stale": results}
 
 

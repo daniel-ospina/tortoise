@@ -384,6 +384,41 @@ def test_gate_is_silent_when_the_own_sweep_did_not_complete(
         next(gen)  # teardown completes with no raise
 
 
+def test_gate_is_SILENT_for_the_INSTANCE_GATE_skip_that_withheld_the_sweep(
+        monkeypatch, tmp_path):
+    """The instance gate's skip is a FOURTH "did not run" reason, and it must
+    speak the vocabulary this gate reads (`skipped`).
+
+    `_session_end_own_sweep` withholds the sweep when the journal is bound to
+    ANOTHER instance, because the graphs' absence here proves nothing. That is
+    a deliberate non-action, so the E2E-7 survivor gate — which would probe the
+    very names the sweep left alone and count them as a leak — must short-
+    circuit. It keys on `own['skipped']`, not on the reason string, so the skip
+    has to set that flag: a new skip reason that only sets `skipped_instance`
+    turns a green teardown into a false red.
+
+    Driven through the REAL `_session_end_own_sweep` (not a hand-built dict) so
+    the flag is pinned at its producer, then fed to the REAL fixture generator.
+    Mutation: drop `"skipped": reason` from the instance-skip return and this
+    fails twice over — the flag assertion, and then the gate raising on
+    `test_leak`, which lives on the other instance and was never swept.
+    """
+    from tests import _embedded as emb
+
+    journal = tmp_path / "own0false.graphs.jsonl"
+    journal.write_text("test_leak\n")
+    journal.with_name(journal.name + emb.JOURNAL_INSTANCE_SUFFIX).write_text(
+        "203.0.113.9:16390\n")
+    own = emb._session_end_own_sweep(
+        _live_utils.docker_uri("tortoise_test_matrix"), str(journal))
+    assert own.get("skipped"), own          # the flag the gate short-circuits on
+    assert own["journal_removed"] is False, own
+    gen = _start_teardown(monkeypatch, tmp_path, own=own,
+                          live={"test_leak"}, journal={"test_leak"})
+    with pytest.raises(StopIteration):
+        next(gen)  # no AssertionError: a withheld sweep is not a leak
+
+
 def test_gate_is_silent_on_preserved_and_default_names(monkeypatch, tmp_path):
     gen = _start_teardown(
         monkeypatch, tmp_path, own={"dropped": []},
