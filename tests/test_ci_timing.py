@@ -1491,6 +1491,62 @@ def test_a_parametrised_file_has_no_denominator(tmp_path: Path) -> None:
     assert counts == {"test_plain.py": 2}
 
 
+def test_the_remaining_floor_shapes_have_no_denominator(tmp_path: Path) -> None:
+    """#9134 review P1: four ways a module collects MORE than its `def` count, and a
+    fifth that collects the same but is invisible to a `tree.body`-only walk.
+
+    Each was measured against `pytest --collect-only` on a temp tree: a `def` inside a
+    module-level `if` (3 collected vs 2 declared), `test_b = test_a` (3 vs 2),
+    `setattr(TestX, "test_two", ...)` (4 vs 3), and a `params=` fixture declared in a
+    `conftest.py` ABOVE the module (9 collected vs 3 declared for the module written
+    here, because two of its three tests consume the 4-arm fixture) — the one
+    multiplicand no per-module scan can see, because the multiplication lives in
+    another file.
+    """
+    (tmp_path / "tests" / "sub").mkdir(parents=True)
+    # The conftest gets its OWN directory: a `params=` fixture there omits every module
+    # BELOW it (that is the rule), so sharing `tests/` would omit the four shapes this
+    # test exists to check.
+    (tmp_path / "tests" / "withconf").mkdir()
+    (tmp_path / "tests" / "withconf" / "conftest.py").write_text(
+        "import pytest\n@pytest.fixture(params=['a', 'b', 'c', 'd'])\n"
+        "def legs(request):\n    return request.param\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "withconf" / "test_under_conftest.py").write_text(
+        "def test_a(legs):\n    pass\ndef test_b(legs):\n    pass\n"
+        "def test_c():\n    pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "sub" / "test_ifblock.py").write_text(
+        "def test_a():\n    pass\nif True:\n    def test_b():\n        pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "sub" / "test_alias.py").write_text(
+        "def test_a():\n    pass\ntest_b = test_a\n", encoding="utf-8")
+    (tmp_path / "tests" / "sub" / "test_injected.py").write_text(
+        "class TestX:\n    def test_one(self):\n        pass\n"
+        "setattr(TestX, 'test_two', lambda self: None)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "sub" / "test_plain.py").write_text(
+        "def test_a():\n    pass\ndef test_b():\n    pass\n", encoding="utf-8")
+
+    counts = ci_timing.declared_test_counts(
+        ["withconf/test_under_conftest.py", "sub/test_ifblock.py", "sub/test_alias.py",
+         "sub/test_injected.py", "sub/test_plain.py"],
+        tmp_path,
+    )
+    assert "withconf/test_under_conftest.py" not in counts
+    assert "sub/test_alias.py" not in counts
+    assert "sub/test_injected.py" not in counts
+    # The `if` block is COUNTED, not omitted: what made it a floor was the walk, and
+    # the walk now sees the branch, so the count is exact and the row keeps its
+    # denominator instead of losing it.
+    assert counts["sub/test_ifblock.py"] == 2
+    assert counts["sub/test_plain.py"] == 2
+
+
 def test_a_partial_reading_of_a_parametrised_file_cannot_lower_a_weight(
     tmp_path: Path,
 ) -> None:
@@ -1793,9 +1849,13 @@ def test_every_capture_dated_note_agrees_with_the_capture_stamp() -> None:
     assert stamp, "durations_captured_at is missing or unparseable"
     dates = set(re.findall(r"ci-timing top-15 (\d{4}-\d{2}-\d{2})", text))
     assert dates, "the map carries no capture-dated note, so this guard is vacuous"
-    assert dates == {stamp.group(1)}, (
-        f"notes are dated {sorted(dates)} but durations_captured_at says "
-        f"{stamp.group(1)} — one of the two is stale"
+    # ⛔ NOT `dates == {stamp}`: a refresh rewrites a note only when that row's value
+    # MOVED or it was held, so a correct refresh legitimately leaves older notes beside
+    # the newer stamp — the invariant is that the stamp is the NEWEST figure in the map,
+    # which still catches the defect this guards (a stamp OLDER than the notes it dates).
+    assert max(dates) == stamp.group(1), (
+        f"the newest note is dated {max(dates)} but durations_captured_at says "
+        f"{stamp.group(1)} — the stamp is not the capture the notes came from"
     )
 
 

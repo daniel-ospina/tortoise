@@ -635,6 +635,41 @@ def collector_file_weights(logs_dir: Path) -> dict[str, float]:
             for path, m in collector_file_measurements(logs_dir).items()}
 
 
+def _conftest_multiplies(directory: Path, root: Path) -> bool:
+    """True when a `conftest.py` ABOVE this directory declares a `params=` fixture.
+
+    A fixture defined in `conftest.py` is visible to every test module under that
+    directory, so its `params=` multiplies those modules' nodeids while the module's
+    own AST says nothing about it — the one multiplicand a per-module scan cannot
+    see. Measured on a temp tree: a 3-`def` module under a conftest whose fixture is
+    `params=["a","b","c","d"]` collected 12 nodeids against a declared 3.
+
+    A hit can only OMIT a denominator — raisable, never lowerable — and an
+    unreadable conftest counts as a hit for the same reason.
+    """
+    here = directory
+    while True:
+        conftest = here / "conftest.py"
+        if conftest.is_file():
+            try:
+                tree = ast.parse(conftest.read_text(encoding="utf-8"))
+            except (OSError, SyntaxError, UnicodeDecodeError):
+                return True
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for dec in node.decorator_list:
+                    if not isinstance(dec, ast.Call):
+                        continue
+                    target = dec.func
+                    name = target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", "")
+                    if name == "fixture" and any(kw.arg == "params" for kw in dec.keywords):
+                        return True
+        if here == root or here.parent == here:
+            return False
+        here = here.parent
+
+
 def declared_test_counts(keys, repo_root: Path) -> dict[str, int]:
     """How many `test*` functions each manifest key DECLARES, by AST.
 
@@ -661,12 +696,17 @@ def declared_test_counts(keys, repo_root: Path) -> dict[str, int]:
       FIXTURE (`@pytest.fixture(params=…)` — 16 declared beside 32 collected
       in-tree), and a `Test*` class with ANY explicit base, including an
       imported `unittest.TestCase` subclass or a mixin whose methods it
-      inherits (`_declares_a_floor`). WHAT REMAINS: a multiplier with no
+      inherits (`_declares_a_floor`), a name ALIASED to a test or a method
+      injected with `setattr` (both closed), and a `params=` fixture in a
+      `conftest.py` above the module (`_conftest_multiplies`). WHAT REMAINS:
+      a multiplier with no
       marker, no name and no base to read — a `pytest_generate_tests` hook, or a
       decorator that adds cases through a call this scan cannot follow. That
-      residual is bounded, not denied: `--durations=15` caps how many nodeids a
-      leg can report, so over-credit is only reachable for a file whose TRUE
-      collected count is within that cap;
+      residual is DISCLOSED, not bounded: `--durations=15` caps how many nodeids a
+      READING can report, which does not stop a module from COLLECTING more than
+      this count, so an unthought-of shape can still carry a floor. It is not a
+      regression against main, which had no witness at all, and no in-tree key was
+      measured to over-collect — but it is a hole, not a proof;
     * the count is what pytest COLLECTS, not every `def` whose name starts with
       `test`: a `@pytest.fixture` named `test_tools` or `test_proj` is a
       FIXTURE, and a nested `def test_inner` inside another test is not
@@ -698,7 +738,8 @@ def declared_test_counts(keys, repo_root: Path) -> dict[str, int]:
             tree = ast.parse(candidate.read_text(encoding="utf-8"))
         except (OSError, SyntaxError, UnicodeDecodeError):
             continue
-        if _has_parametrisation(tree) or _declares_a_floor(tree):
+        if (_has_parametrisation(tree) or _declares_a_floor(tree)
+                or _conftest_multiplies(candidate.parent, root)):
             # ⛔ OMITTED, not counted: a count of `def`s is a FLOOR of the collected
             # count, and a floor satisfies `observed >= declared` for a reading that
             # saw only part of the file. An absent denominator is the existing
@@ -776,12 +817,13 @@ def _has_parametrisation(tree: ast.Module) -> bool:
 
     NOT detected, and stated because it is a real residual: a multiplier with no
     marker, no name and no base to read — a `pytest_generate_tests` hook, or a
-    decorator that adds cases through a call this scan cannot follow. Two things
-    bound that residual rather than pretending it is absent: `--durations=15`
-    caps how many nodeids a leg can even report, so a reading can only be
-    over-credited for a file whose TRUE collected count is within that cap; and
-    the `durations:` map's own rules keep every such row's weight (a held row is
-    never lowered by an unprovable reading).
+    decorator that adds cases through a call this scan cannot follow. That residual
+    is DISCLOSED rather than denied, with the direction it fails in stated plainly:
+    `--durations=15` bounds how many nodeids a READING can report, which does not
+    stop a module from COLLECTING more than a count of its `def`s, so an
+    unthought-of shape can still carry a floor. What limits the damage is the map's
+    own rules, not the cap: an unprovable reading can RAISE a row's weight and can
+    never LOWER it, and a held row is never lowered at all.
     """
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -841,6 +883,25 @@ def _declares_a_floor(tree: ast.Module) -> bool:
     naming a testcase that does not exist (the `declared > collected` defect the
     `declared_test_counts` docstring records).
     """
+    for node in _collectable_statements(tree.body):
+        # `test_b = test_a` is a SECOND collected testcase with no `def` of its own;
+        # `setattr(TestX, "test_two", ...)` injects one into a class body. Both were
+        # measured at 2 declared beside 3 collected and 3 beside 4 (#9134 review).
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(isinstance(tg, ast.Name) and tg.id.startswith("test") for tg in targets):
+                return True
+        call = node.value if isinstance(node, ast.Expr) else node
+        if (
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id == "setattr"
+            and len(call.args) >= 2
+            and isinstance(call.args[1], ast.Constant)
+            and isinstance(call.args[1].value, str)
+            and call.args[1].value.startswith("test")
+        ):
+            return True
     for node in tree.body:
         if not isinstance(node, ast.ClassDef):
             continue
@@ -852,6 +913,31 @@ def _declares_a_floor(tree: ast.Module) -> bool:
     return False
 
 
+def _collectable_statements(body: list[ast.stmt]) -> list[ast.stmt]:
+    """The statements pytest collects from a body, descending into BLOCKS.
+
+    A `def` inside a module-level `if`/`try`/`with` IS collected — pytest imports the
+    module and walks the namespace, so the branch condition is irrelevant — while an
+    AST walk of `tree.body` sees only the `If` node. Measured on a temp module with
+    one plain test and one inside `if True:`, `pytest --collect-only` reported 3
+    testcases against a declared 2, a floor that licensed a discount (#9134 review).
+    Nested FUNCTION bodies are still excluded, because pytest collects nothing from
+    inside them.
+    """
+    out: list[ast.stmt] = []
+    for node in body:
+        out.append(node)
+        for attr in ("body", "orelse", "finalbody"):
+            block = getattr(node, attr, None)
+            if isinstance(block, list) and block and isinstance(block[0], ast.stmt):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    continue
+                out.extend(_collectable_statements(block))
+        for handler in getattr(node, "handlers", []) or []:
+            out.extend(_collectable_statements(handler.body))
+    return out
+
+
 def _collected_test_count(tree: ast.Module) -> int:
     """How many testcases pytest collects from a parsed module.
 
@@ -860,10 +946,10 @@ def _collected_test_count(tree: ast.Module) -> int:
     collects neither, and counting them makes the coverage floor unsatisfiable
     for the file (the `declared > collected` defect this docstring records).
     """
-    count = sum(1 for node in tree.body if _is_test_def(node))
-    for node in tree.body:
+    count = sum(1 for node in _collectable_statements(tree.body) if _is_test_def(node))
+    for node in _collectable_statements(tree.body):
         if isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
-            count += sum(1 for sub in node.body if _is_test_def(sub))
+            count += sum(1 for sub in _collectable_statements(node.body) if _is_test_def(sub))
     return count
 
 
