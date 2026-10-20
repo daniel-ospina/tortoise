@@ -1348,9 +1348,18 @@ def record_record_write_failure(reason: str) -> None:
       ``TortoiseSDK._record_write_without_journal`` on the journal-less lane,
       where the seam is never called and this is the only signal);
     * ``no_tenant`` — armed with no tenant in scope, so the write is refused
-      rather than filed under a guessed tenant (#9192); set
-      ``TORTOISE_RECORD_ORG_ID``/``_GRAPH_ID`` or wrap in
-      ``record_writer.use_record_tenant(...)``;
+      rather than filed under a guessed tenant (#9192). Remediation depends on
+      the deployment: a MULTI-TENANT process (the default) wraps the write path
+      in ``record_writer.use_record_tenant(...)`` — the MCP tenant lane does it
+      per request, so a refusal there means the credential named no graph (use a
+      graph-bound key); a deployment that serves exactly ONE graph may instead
+      set ``TORTOISE_RECORD_ORG_ID``/``_GRAPH_ID`` **and**
+      ``TORTOISE_RECORD_SINGLE_TENANT=1``. The pair alone is IGNORED (a
+      process-global tenant on a multi-tenant process files every tenant's rows
+      under one organisation). The warning distinguishes the two situations an
+      operator can be in: an env pair CONFIGURED but undeclared names the
+      missing declaration, and a half-configured pair names the half; with
+      neither set it names the graph-bound credential instead;
     * ``write_failed`` — the record was unreachable or the projection refused
       the record; ``replay`` heals it from the journal;
     * ``circuit_open`` — a connect to the record failed within

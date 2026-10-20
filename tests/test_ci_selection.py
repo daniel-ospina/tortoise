@@ -2322,6 +2322,40 @@ def test_9078_guard_runs_on_a_main_only_diff():
     assert "test_9078_record_written_by_production_path.py" in r["test_files"], r
 
 
+def test_9192_guard_runs_on_the_diff_that_can_break_it():
+    # #9192 review P1: `tests/test_9192_tenant_armed_by_request.py` is the PR's
+    # own proof that a multi-tenant process cannot name its tenant from env. Its
+    # REGISTRATION closed `--integrity` (the required `manifest-integrity` job),
+    # but a registration is not a SELECTION pin: a guard that is registered and
+    # never selected on the diff that can break it certifies nothing (#9196/#9231).
+    #
+    # It is DUAL-registered for the #9078 reason because the two halves of the
+    # fix live under two different selectors. `tortoise/record_writer.py` (the
+    # resolver: `record_tenant` / `single_tenant_declared`) matches no
+    # SOURCE_PATTERN and falls through to `core`; `tortoise/mcp_auth.py`
+    # (`OrgResolutionMiddleware`, the per-request installer) is an EXACT `api`
+    # match, and a named-surface match REPLACES the `core` fallback (`core` is
+    # added only in the `if not found:` branch; `CORE_ALSO` does not list it).
+    #
+    # Measured before the registration: `select(["tortoise/record_writer.py"])`
+    # -> surfaces=['core'] with the file ABSENT (603 files), and
+    # `select(["tortoise/mcp_auth.py"])` -> surfaces=['api'] with it ABSENT (288
+    # files).
+    #
+    # Mutation check: deleting the `core` arm fails the first pair of asserts,
+    # deleting the `api` arm fails the second — neither can be dropped believing
+    # the other covers it.
+    core_sel = _sel(["tortoise/record_writer.py"])
+    assert core_sel["full"] is False, core_sel
+    assert "core" in core_sel["surfaces"], core_sel
+    assert "test_9192_tenant_armed_by_request.py" in core_sel["test_files"], core_sel
+
+    api_sel = _sel(["tortoise/mcp_auth.py"])
+    assert api_sel["full"] is False, api_sel
+    assert api_sel["surfaces"] == ["api"], api_sel
+    assert "test_9192_tenant_armed_by_request.py" in api_sel["test_files"], api_sel
+
+
 def test_source_currency_tool_change_selects_core_not_tier1():
     # #5581: tools/source_currency.py owns tests/test_source_currency_5581.py
     # (`core`) — the §4.6 aggregate, the sourced disclosure, and the flag-gated

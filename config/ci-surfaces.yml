@@ -1229,6 +1229,16 @@ surfaces:
   # tool) and this one is load-bearing for the `__main__.py` diff. Pinned by
   # `tests/test_ci_selection.py::test_9078_guard_runs_on_a_main_only_diff`.
   - test_9078_record_written_by_production_path.py
+  # #9192: DUAL-REGISTERED with `core` (below), for exactly the #2969 reason
+  # above. `tortoise/mcp_auth.py` IS a `SOURCE_PATTERNS["api"]` entry, so a
+  # middleware-only diff selects `api` and REPLACES the `core` fallback
+  # (`select()` adds `core` only in its `if not found:` branch) — measured on
+  # this entry's absence: `--changed-files tortoise/mcp_auth.py` yielded
+  # surfaces=['api'] with the file ABSENT, so the nine legs that justify a
+  # fail-closed tenant change would not have run on the very diff class that
+  # breaks them. `core` remains load-bearing for the other input,
+  # `tortoise/record_writer.py`, which matches no SOURCE_PATTERN.
+  - test_9192_tenant_armed_by_request.py
   battery:
   - test_battery_arms.py
   # (removed a duplicate test_battery_derive_truth_leg.py entry here on the
@@ -1382,6 +1392,15 @@ surfaces:
   # DB-free except its last leg, which SKIPS unless `TEST_RECORD_DB_URI` names a
   # Postgres carrying the record migrations — the `TEST_AUDIT_DB_URI` pattern.
   - test_9078_record_written_by_production_path.py
+  # #9192: the production caller of the record's tenant scope + the arming
+  # gate. `core` is load-bearing for `tortoise/record_writer.py` (no
+  # SOURCE_PATTERN → the `core` fallback); the companion `api` arm above is
+  # load-bearing for `tortoise/mcp_auth.py`, which IS named. Without BOTH, a
+  # diff touching only one of the two files runs none of these legs — the
+  # #1349/#2938/#3154/#4367 silent-drop class. DB-free: it drives a mounted
+  # FastMCP app over an embedded registry with planted credentials and spies on
+  # `record_writer.write_records`, so it needs no graph and no URI.
+  - test_9192_tenant_armed_by_request.py
   # #9190: `EventLog.append()` returns the record's journal position (the `seq`
   # `record_projection.replay_plan` keys `journal_event` on) and
   # `EventLog.position()` exposes the count. Same anchor as the #5612 entry
@@ -6687,6 +6706,11 @@ durations:
   # for a newly-added file, so the duration-coverage floor is not spent; the
   # first post-merge push re-measures it.
   test_9078_record_written_by_production_path.py: 2.0
+  # #9192: nine legs, DB-free (mounted FastMCP app over an embedded registry with
+  # planted credentials; `write_records` is spied, never a real connection).
+  # Entered LOW per the #2517/#4883 precedent for a newly-added file, so the
+  # duration-coverage floor is not spent; the first post-merge push re-measures.
+  test_9192_tenant_armed_by_request.py: 2.0
   test_5917_torn_tail_seal.py: 2.0
   test_longmem_costing.py: 0.2
   test_longmem_errors.py: 0.1
