@@ -124,6 +124,13 @@ From the top-40 pool, `(hit)<-[:CONTAINS]-(Session)-[:CONTAINS]->(gold)`:
 **8/8 gold turns reachable in one hop.** In every case a *sibling* turn of the gold's own session is
 already in the pool — the reader saw the session, just not the turn.
 
+> **`best sibling rank` legend.** Otherwise a 1-based fused rank in the 120-item pool; **`0` is not a
+> rank** — four rows record `0` while `siblings_from_session_in_returned` is 9–11, so no usable
+> non-zero sibling rank was captured for them (the receipt carries the same `best_sibling_rank: 0`;
+> the census generator is not in the tree, so the column's `0` cannot be re-derived here). Read `0` as
+> **n/r — not recorded**. The ✅ conclusion does **not** rest on this column: it rests on
+> `reached_by_one_CONTAINS_hop_from_top40` and on every row carrying ≥ 2 siblings in the returned pool.
+
 ### 2.5 Can a bounded per-session selection pick the gold? (within-session ranks + latency)
 
 One batched session-scoped FTS ordering (`db.idx.fulltext.queryNodes` joined through `CONTAINS`) per
@@ -203,7 +210,11 @@ rendering are untouched.
    candidate set is bounded by the retrieval that already judged the query relevant.
 2. **Relevance floor** on every introduced candidate (session-scoped score > 0 **and** query-token
    overlap) — no candidate enters on structure alone.
-3. **Per-session K** and a **global injected-item cap** (seeds × K ≤ 60, under half the pool).
+3. **Per-session K** and a **global injected-item cap**: at most **60** injected items per query —
+   `min(seeds × K, 60)`, half the 120-item pool. Across the five measured questions the head seeds
+   17/20/23/24/25 sessions, so the uncapped product is 51/60/69/72/75 at K = 3, 85–125 at K = 5 and
+   170–250 at K = 10: the cap binds at every K = 5 and K = 10 cell, and at K = 3 once the head seeds
+   more than 20 sessions.
 4. **Bounded leg weight** `w_session ≤ 1.0` — the leg can never outvote a base consensus. (Our own
    measured dilution from a weak leg is −1.95 nDCG; the VLDB grid's weak-leg downside is −21.5 pt.)
 5. **The reader window remains the final filter** — the leg adds *candidates*, never context. A win that
