@@ -623,8 +623,15 @@ def test_rebuild_all_degrades_when_the_watermark_restore_fails(
     sdk, events = _mk_sdk(tmp_path)
     sdk.create_point("statement", "keep me")
     proj = sdk._get_proj()
+    handed: list[object] = []
 
-    def boom(_proj, _carried):
+    # `**kwargs` on purpose: the engine hands the helper its restore leg
+    # (`restore_reason=`, #9210), so a two-positional stub would raise
+    # `TypeError` BEFORE the simulated driver failure and the test would then
+    # pass while exercising `except Exception` around a bad SIGNATURE instead
+    # of the reachable degradation it documents.
+    def boom(_proj, _carried, **kwargs):
+        handed.append(kwargs.get("restore_reason"))
         raise RuntimeError("simulated watermark write failure")
 
     monkeypatch.setattr(event_store, "reestablish_watermark", boom)
@@ -633,6 +640,10 @@ def test_rebuild_all_degrades_when_the_watermark_restore_fails(
 
     assert counts["nodes"] == 1, "the rebuild itself completed"
     assert _seen_points(sdk) == 1
+    assert handed and isinstance(handed[0], str) and handed[0].startswith(
+        "pre-wipe-restore: :GraphEventMeta watermark"), (
+        "`rebuild_all` restores the watermark it CAPTURED before the wipe, so "
+        f"it must hand the helper that restore leg, not nothing/replay: {handed!r}")
     assert any("could not re-establish" in r.getMessage()
                for r in caplog.records), (
         "a lost watermark must be reported, not swallowed")
@@ -651,8 +662,14 @@ def test_rebuild_journal_only_degrades_when_the_watermark_restore_fails(
     sdk, events = _mk_sdk(tmp_path)
     sdk.create_point("statement", "keep me")
     proj = sdk._get_proj()
+    handed: list[object] = []
 
-    def boom(_proj, _carried):
+    # `**kwargs`: this engine hands the helper its restore leg too (#9210 — the
+    # mark it puts back is the pre-wipe carry, not a log derivation), so a
+    # two-positional stub would fail on the SIGNATURE and the test would pass
+    # without ever reaching the degradation it pins.
+    def boom(_proj, _carried, **kwargs):
+        handed.append(kwargs.get("restore_reason"))
         raise RuntimeError("simulated watermark write failure")
 
     monkeypatch.setattr(event_store, "reestablish_watermark", boom)
@@ -660,6 +677,10 @@ def test_rebuild_journal_only_degrades_when_the_watermark_restore_fails(
         proj.rebuild(EventLog(str(events / "events.jsonl")), confirm_destructive=True)
 
     assert _seen_points(sdk) == 1
+    assert handed and isinstance(handed[0], str) and handed[0].startswith(
+        "pre-wipe-restore: :GraphEventMeta watermark"), (
+        "`rebuild()` restores a mark CAPTURED before its own wipe, so it must "
+        f"hand the helper that restore leg, not nothing/replay: {handed!r}")
     assert any("could not re-establish" in r.getMessage()
                for r in caplog.records)
 

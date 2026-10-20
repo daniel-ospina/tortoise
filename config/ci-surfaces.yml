@@ -6788,15 +6788,18 @@ durations:
   test_graph_delete_hygiene_report.py: 1.8
   test_graph_name_ownership.py: 0.1
   test_graph_storage.py: 5.2
-  # #9210: added by a PR, so no CI reading exists yet (#3400 trap). 4 tests.
+  # #9210: added by a PR, so no CI reading exists yet (#3400 trap). 5 tests (the
+  # `rebuild()` watermark pin is the fifth: it drives the journal engine, whose
+  # wipe+replay costs the same as the `rebuild_all` leg).
   # MEASURED locally in the embedded lane: 27.3 s on a quiet box and 35.1 s
-  # under fleet load, of which ~15 s is the FIRST `create_point`'s one-time
-  # embedding-model load — the same artefact #9123 recorded for its own file.
-  # Declared ABOVE the LOADED reading so a busy leg cannot under-pack it. The
-  # weight is unchanged by the deletion of the eleven table-only parametrized
-  # cases (they never executed product code, so they were never part of this
-  # measurement).
-  test_9210_rebuild_declares_restore.py: 45.0
+  # under fleet load FOR THE FOUR `rebuild_all` TESTS, of which ~15 s is the
+  # FIRST `create_point`'s one-time embedding-model load — the same artefact
+  # #9123 recorded for its own file. The fifth test replays once more, so the
+  # LOADED reading it must clear is ~44 s. Declared ABOVE that so a busy leg
+  # cannot under-pack it. The weight is unchanged by the deletion of the eleven
+  # table-only parametrized cases (they never executed product code, so they
+  # were never part of this measurement).
+  test_9210_rebuild_declares_restore.py: 55.0
   # #4492: added by a PR, so no CI reading exists yet (`--refresh-durations`
   # samples push-to-main runs only). Hermetic — no DB, no network, no PGlite
   # (the SQL is asserted separately by the PGlite suite, which does not run in

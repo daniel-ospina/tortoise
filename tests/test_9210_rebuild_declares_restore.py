@@ -22,13 +22,17 @@ over the journal-carried half. The edge's value still exists only in the
 pre-wipe capture, which is the property this lane is about.
 
 The watermark leg is the one whose STATEMENT lives in another module, and it
-is claimed here anyway: `rebuild_all` hands `event_store.reestablish_watermark`
-its own reason (`restore_reason=…`), and the helper opens the lane around its
-own `MERGE`. That is deliberate — an inner declaration SHADOWS an outer one, so
-`#9224`'s landed `_replay_write_scope()` inside that helper made a `with` at
-this call site inert, and the lane has to be stated at the write. The helper's
-other caller (`rebuild()`) passes nothing and keeps `#9224`'s `"replay"`,
-which is true there: it re-derives the value from the replayed log.
+is claimed here anyway: BOTH rebuild engines hand
+`event_store.reestablish_watermark` this lane's reason (`restore_reason=…`),
+and the helper opens the lane around its own `MERGE`. That is deliberate — an
+inner declaration SHADOWS an outer one, so `#9224`'s landed
+`_replay_write_scope()` inside that helper made a `with` at the call site
+inert, and the lane has to be stated at the write. `rebuild()` states the SAME
+leg (#9210): it too captures the mark off this graph immediately before its own
+wipe, and `:GraphEvent` rows are not replayed (`#4664`), so its value is the
+carry — the earlier claim that it "re-derives the value from the replayed log"
+was false, and is pinned the other way by
+`test_the_journal_engine_also_declares_the_watermark_restore` below.
 
 Handing them the replay permit is therefore an over-authorization: the
 declaration claims a wider write scope than the restore performs. `#9124`'s
@@ -469,6 +473,45 @@ def test_the_restore_lane_does_not_claim_a_record_fold(tmp_path, monkeypatch):
         assert not misattributed, (
             "the pre-wipe restore lane was in force over a write that is not a "
             f"snapshot restore (#9210): {misattributed}")
+    finally:
+        sdk.close()
+
+
+def test_the_journal_engine_also_declares_the_watermark_restore(tmp_path,
+                                                              monkeypatch):
+    """`rebuild()`'s watermark is a PRE-WIPE CARRY too, so it declares here.
+
+    The sibling engine was documented as "re-deriving the value from the
+    replayed log" and therefore as truthfully keeping `#9224`'s `"replay"`. It
+    does the opposite: `rebuild()` calls `capture_watermark(self)` before its
+    own `DETACH DELETE`, and `:GraphEvent` rows are not replayed (`#4664`), so
+    `reestablish_watermark`'s `max(carried, max(:GraphEvent.seq))` normally
+    resolves to the carry — there is no replayed value to derive from. A
+    captured restore authorized by a lane whose contract is "this content came
+    FROM the record" is the same defect #9210 removes, one engine over.
+
+    FAILING VALUE: with the leg dropped at that call site the `MERGE` observes
+    `"replay"` (the false contract) instead of the watermark's own reason.
+    """
+    from tortoise.log import EventLog
+
+    sdk, events = _mk_sdk(tmp_path)
+    try:
+        _, proj, _ = _seed_prewipe_state(sdk, events)
+        seen = _record_authorizations(monkeypatch)
+
+        proj.rebuild(EventLog(str(events / "events.jsonl")),
+                     confirm_destructive=True)
+
+        watermark = [reason for cypher, reason in seen
+                     if _leg_of(cypher) == "watermark"]
+        assert watermark, (
+            "the journal engine never issued its watermark MERGE, so this pin "
+            "would be vacuous")
+        assert all(reason in _LEGS["watermark"][0] for reason in watermark), (
+            "rebuild() restores the :GraphEventMeta mark it CAPTURED before "
+            "its own wipe, so its lane is this restore leg — not the replay "
+            f"lane whose contract is false for it: observed={watermark!r}")
     finally:
         sdk.close()
 

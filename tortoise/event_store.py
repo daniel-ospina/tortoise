@@ -61,11 +61,15 @@ neither the live nor the replay lane:
   the truthful 410 instead of `[]` forever. A declared truncation with a cursor
   contract, not corruption.
 * the watermark in `reestablish_watermark`, whose lane is stated by its CALLER
-  and opened HERE, at the handle: `rebuild()` re-derives the value from the
-  journal's own rebuild and declares the replay lane (`#9224`), while
-  `rebuild_all` puts back the value it CAPTURED before the wipe and names that
-  leg (`pre-wipe-restore: …`, `#9210`). The declaration has to live at the write
-  because an inner scope SHADOWS an outer one (`_cache_write_authorized` is a
+  and opened HERE, at the handle: BOTH rebuild engines put back a value they
+  CAPTURED off this graph immediately before their own wipe (`capture_watermark`
+  → `reestablish_watermark`), so both name that restore leg
+  (`pre-wipe-restore: :GraphEventMeta watermark (#4653)`, `#9210`). Nothing is
+  replayed to derive it from — `:GraphEvent` rows are not restored (#4664) — so
+  the `"replay"` default this helper keeps is the UNDECLARED-caller path, not
+  `rebuild()`'s (#9224's lane was right for a value the log could re-derive;
+  the watermark is not one). The declaration has to live at the write because
+  an inner scope SHADOWS an outer one (`_cache_write_authorized` is a
   `ContextVar`), so a `with` at the call site could not state the lane at all.
 
 ⚠️ The declarations are NOT a licence for the swallow: `append_event` and
@@ -476,17 +480,22 @@ def reestablish_watermark(proj, carried_last_seq: int | None, *,
     """Re-establish ``:GraphEventMeta`` after a wipe+replay (#4653).
 
     ``restore_reason`` states which lane the carried value came from, and it is
-    the CALLER's to state because this helper has two callers with unlike
-    authorization: `FalkorProjection.rebuild_all` puts back a value it CAPTURED
-    from this graph immediately before the wipe, so it names its restore leg
+    the CALLER's to state because this helper restores whatever it is handed:
+    both callers put back a value they CAPTURED from this graph immediately
+    before the wipe, so BOTH name their restore leg
     (``pre-wipe-restore: :GraphEventMeta watermark (#4653)``, #9210) — the replay
-    lane's contract ("this content came FROM the record") is FALSE for it. The
-    journal engine `rebuild()` re-derives the watermark from the replayed log
-    instead, keeps the default, and so keeps this module's landed declaration
-    (#9224). The lane is opened at the write below, never at the call site: the
-    scope is a `ContextVar`, so an inner declaration shadows an outer one, and a
-    `with` around the call would be silently discarded — the exact way the
-    watermark went on declaring `"replay"` while restoring captured state.
+    lane's contract ("this content came FROM the record") is FALSE for it.
+    ⚠️ That includes the journal engine `rebuild()`: it captures the mark with
+    ``capture_watermark`` before its own ``DETACH DELETE``, and since
+    ``:GraphEvent`` rows are not replayed (#4664) the ``max(carried,
+    max(:GraphEvent.seq))`` guard below normally resolves to the CARRY — the
+    earlier claim that this engine "re-derives the watermark from the replayed
+    log" described a value that does not exist. The default is therefore the
+    UNDECLARED-caller fallback (#9224's ``"replay"``), not a caller's lane. The
+    lane is opened at the write below, never at the call site: the scope is a
+    `ContextVar`, so an inner declaration shadows an outer one, and a `with`
+    around the call would be silently discarded — the exact way the watermark
+    went on declaring `"replay"` while restoring captured state.
 
     The ``last_seq`` monotonicity guard is ``hosted_backup._restore_event_meta``'s
     (#3902): ``last_seq = max(carried, max(:GraphEvent.seq))`` — whatever the
@@ -599,14 +608,15 @@ def reestablish_watermark(proj, carried_last_seq: int | None, *,
     # reads the PRE-clause value — Cypher evaluates a SET clause against the
     # state before it.
     # §17.1 (#9124, #9210, #9224): this write never arrives at the handle
-    # undeclared, but WHICH lane it declares is the caller's to state — the
-    # replay lane when `rebuild()` re-derived the value from the replayed log
-    # (#9224's landed declaration), this lane's own named restore leg when
-    # `rebuild_all` is putting back the value it captured before the wipe
-    # (#9210). `_cache_write_authorized` is the same single-writer ContextVar
-    # every scope uses, so an undeclared caller still fails closed on `None`;
-    # the lane is opened here because an inner scope shadows an outer one, so a
-    # `with` at the call site could never be the declaration.
+    # undeclared, but WHICH lane it declares is the caller's to state — both
+    # rebuild engines put back a value CAPTURED before their own wipe and name
+    # this lane's restore leg (#9210), and `restore_reason` is what carries it.
+    # `_cache_write_authorized` is the same single-writer ContextVar every scope
+    # uses, so an undeclared caller still fails closed on `None`; the lane is
+    # opened here because an inner scope shadows an outer one, so a `with` at
+    # the call site could never be the declaration. The `"replay"` default is
+    # the undeclared-caller fallback, kept so a caller that has not stated a
+    # lane is not silently granted a narrower claim than it made.
     from .projection import _cache_write_authorized
     with _cache_write_authorized(restore_reason or "replay"):
         rows = proj.g.query(

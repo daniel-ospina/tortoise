@@ -3599,12 +3599,15 @@ def _prewipe_restore_write_scope(reason: str):
     `with` here could not declare it (an inner scope shadows an outer one); the
     lane is instead handed to `reestablish_watermark(..., restore_reason=...)`,
     which opens it around its own `MERGE`. The helper's OTHER caller, the
-    journal engine `rebuild()` / `_replay_log`, keeps declaring `"replay"` —
-    it re-derives the value from the replayed log, and that write is `#9224`'s
-    declaration. `rebuild()` still restores the `:TeamMeta` marker inside its
-    method-wide `_replay_write_scope()`, which is the same class of defect this
-    lane removes, deliberately left to `#9213` rather than fixed inside one
-    engine's `try` body.
+    journal engine `rebuild()` / `_replay_log`, states the SAME leg: it too
+    `capture_watermark`s the value off this graph immediately before its own
+    wipe, and `:GraphEvent` rows are not replayed (`#4664`), so its value is
+    the carry rather than a derivation from the replayed log — the earlier
+    claim that `rebuild()` "re-derives" it was false, because there is nothing
+    there to derive it from (#9210). ⚠️ `rebuild()` still restores the
+    `:TeamMeta` marker inside its method-wide `_replay_write_scope()`, which IS
+    the same class of defect this lane removes, deliberately left to `#9213`
+    rather than fixed inside one engine's `try` body.
 
     NESTING is the property that makes it load-bearing under an over-broad
     permit: the reason is a `ContextVar`, so an inner restore declaration
@@ -9789,8 +9792,21 @@ class FalkorProjection(
         reconcile_after_replay(self, engine="rebuild")
         # #4653: re-establish the watermark captured above. DEGRADES, never
         # raises — this runs after the wipe (#2943 "no loss without proof").
+        #
+        # §17.1 (#9210): the value put back here is the PRE-WIPE CARRY, not a
+        # replay derivation, so this engine declares the restore leg exactly as
+        # `rebuild_all` does. `capture_watermark` above read it off THIS graph
+        # immediately before `DETACH DELETE`, and `:GraphEvent` rows are not
+        # replayed (#4664), so `reestablish_watermark`'s `max(carried,
+        # max(:GraphEvent.seq))` normally evaluates to the carry itself — there
+        # is no replayed value to derive it from. Leaving the lane at #9224's
+        # `"replay"` default made this the one writer that restores captured
+        # state under a claim saying the content came from the record.
         try:
-            restored = reestablish_watermark(self, carried_last_seq)
+            restored = reestablish_watermark(
+                self, carried_last_seq,
+                restore_reason=f"{_PREWIPE_RESTORE_LANE}: "
+                               ":GraphEventMeta watermark (#4653)")
             if restored is not None:
                 logger.info(
                     "rebuild: re-established the :GraphEventMeta watermark "
@@ -9947,11 +9963,21 @@ class FalkorProjection(
                     require_empty: bool = False) -> dict:
         """#9124: declare the REPLAY lane, then run the rebuild.
 
-        Every write ``rebuild_all`` performs — the whole-graph wipe, and the
-        per-record folds that follow it — is the cache being reconstructed FROM
-        the journal. That is precisely the lane ``_replay_write_scope`` names
-        (#7951), and it is the declaration §17.1's THIRD door requires before it
-        will let a mutating statement reach ``proj.g``.
+        The whole-graph wipe and the per-record folds that follow it are the
+        cache being reconstructed FROM the journal. That is precisely the lane
+        ``_replay_write_scope`` names (#7951), and it is the declaration
+        §17.1's THIRD door requires before it will let a mutating statement
+        reach ``proj.g``.
+
+        ⚠️ ``NOT every write`` in the body rides it, and the exception is the
+        point of #9210: the snapshot-restore legs (``:Batch``, ``:Session``,
+        onboarding, ``:TeamMeta``, the config registry, the derived Point
+        properties, the ``:GraphEventMeta`` watermark) put back state CAPTURED
+        from this graph before the wipe, so each declares its own
+        ``_prewipe_restore_write_scope(...)`` reason and SHADOWS this permit
+        (a ``ContextVar``: the innermost declaration wins). Read the
+        method-wide scope below as the FOLD's declaration, never as the
+        restore's.
 
         Without it, the guard refuses the replay of the first ``PointAdded``
         record (measured: ``MERGE (n:Point {id:$id}) … SET n.content=…`` raises
