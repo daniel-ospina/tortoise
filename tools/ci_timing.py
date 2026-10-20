@@ -413,8 +413,14 @@ def _is_summary_line(line: str) -> bool:
     stripped = line.strip()
     if not _SUMMARY_IN_RE.search(stripped):
         return False
-    return (stripped.startswith("=") or stripped.startswith("no tests ran")
-            or " deselected" in stripped or " warning" in stripped)
+    if (stripped.startswith("=") or stripped.startswith("no tests ran")
+            or " deselected" in stripped or " warning" in stripped):
+        return True
+    # ⛔ A BANNER-LESS count line is also a summary: pytest's `-q` form prints
+    # `10 passed in 3.02s` (and `6 failed, 30697 passed, … in 1300.12s`) with no banner and
+    # none of the words above, so shape alone called it truncated — the docstring claimed
+    # this form was handled (#9134 review, P3).
+    return bool(COUNT_RE.search(stripped))
 
 
 R_SUMMARY_RE = re.compile(r"^(FAILED|ERROR)\s+(tests/\S+?\.py::[^\s]+)")
@@ -2205,6 +2211,26 @@ def load_history(json_path: Path) -> list[dict]:
             and all(isinstance(n, str) for n in row.get("failed_tests", []))]
 
 
+def _dedupe_history(rows: list[dict]) -> list[dict]:
+    """One row per SAMPLE, newest first — preserving order.
+
+    ⛔ The key falls back to `sample_time`: a row written BEFORE `sampled_at` existed has
+    none, so keying on `sampled_at` alone gives it `None` and lets it survive beside its own
+    stamped twin — the shipped artifact carried run 39191149586 twice for exactly that
+    reason, spent one of the flake proxy's comparison slots on a sample compared with
+    itself, and the dedupe could never heal it (#9134 review, P2).
+    """
+    out: list[dict] = []
+    seen: set[tuple[object, object]] = set()
+    for entry in rows:
+        key = (entry.get("run_id"), entry.get("sampled_at") or entry.get("sample_time"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(entry)
+    return out
+
+
 def candidate_flakes(history: list[dict]) -> list[dict]:
     """Nodeid failed in an earlier sample, absent from the failed list of the
     next sample (i.e. it passed next time) → flake candidate. Checks up to the
@@ -2453,18 +2479,13 @@ def aggregate_logs(logs_dir: Path | str) -> dict:
         for k in COUNT_KEYS:
             total_counts[k] += parsed["counts"][k]
         # A leg whose log carries no pytest SUMMARY line reports 0 of everything
-        # while its progress lines still name the testcases that failed. Measured
-        # on run 39191149586 — the capture this PR ships — the artifact carried
-        # `outcome.failed: 5` beside SIX `failed_tests` entries, because one
-        # all-zero log source (`pytest.log`) contributed no counts at all (#9134
-        # review, P2). That run's logs SURVIVE, so the artifact was regenerated
-        # from them rather than the number being edited: the same capture now
-        # reads 6. ⛔ `outcome.failed` is NOT the length of `failed_tests`: this line
+        # while its progress lines still name the testcases that failed, so such a
+        # leg contributes what its progress lines told us (#9134 review, P2).
+        # ⛔ `outcome.failed` is NOT the length of `failed_tests`: this line
         # accumulates FAILED only, while `failed_tests` below takes FAILED *and*
         # ERROR — a pre-existing mismatch in this artifact, not something this
-        # change fixes. A truncation is not an absence of failures, so a
-        # summary-less leg contributes what its progress lines told us — failures
-        # only, never passed/skipped, which a summary-less log cannot establish.
+        # change fixes. Failures only, never passed/skipped: a summary-less log
+        # cannot establish either.
         if not parsed["summary_seen"]:
             for state, key in (("FAILED", "failed"), ("ERROR", "error")):
                 total_counts[key] += sum(
@@ -2598,15 +2619,7 @@ def main() -> int:
     # frozen CI_TIMING_NOW appended the SAME sample twice, so the artifact's history
     # (and the flake proxy built from it) counted one measurement as two, and the
     # committed bytes stopped being any single invocation's output (#9134 review, P2).
-    history: list[dict] = []
-    seen: set[tuple[object, object]] = set()
-    for h in [row, *load_history(json_path)]:
-        key = (h.get("run_id"), h.get("sampled_at"))
-        if key in seen:
-            continue
-        seen.add(key)
-        history.append(h)
-    history = history[: args.max_history]
+    history = _dedupe_history([row, *load_history(json_path)])[: args.max_history]
 
     flakes = candidate_flakes(history)
 

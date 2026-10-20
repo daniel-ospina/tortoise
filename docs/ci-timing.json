@@ -1,128 +1,198 @@
 {
-  "candidate_flakes": [],
+  "candidate_flakes": [
+    {
+      "failed_at": "2026-10-20T18:40:00Z",
+      "passed_at": "2026-10-20T18:40:00Z",
+      "run_id": "39191149586",
+      "test": "tests/test_7925_route_parity.py::test_both_routes_produce_the_same_confidence[IMPL]"
+    },
+    {
+      "failed_at": "2026-10-20T18:40:00Z",
+      "passed_at": "2026-10-20T18:40:00Z",
+      "run_id": "39191149586",
+      "test": "tests/test_7925_route_parity.py::test_both_routes_produce_the_same_confidence[NAND]"
+    },
+    {
+      "failed_at": "2026-10-20T18:40:00Z",
+      "passed_at": "2026-10-20T18:40:00Z",
+      "run_id": "39191149586",
+      "test": "tests/test_ci_timing.py::test_refresh_durations_on_the_real_manifest_of_record"
+    },
+    {
+      "failed_at": "2026-10-20T18:40:00Z",
+      "passed_at": "2026-10-20T18:40:00Z",
+      "run_id": "39191149586",
+      "test": "tests/test_oauth_consent_bridge.py::test_the_spec_cites_live_hosted_api_sites"
+    }
+  ],
   "failed_tests": [
-    "tests/test_7925_route_parity.py::test_both_routes_produce_the_same_confidence[IMPL]",
-    "tests/test_7925_route_parity.py::test_both_routes_produce_the_same_confidence[NAND]",
-    "tests/test_ci_timing.py::test_refresh_durations_on_the_real_manifest_of_record",
-    "tests/test_oauth_consent_bridge.py::test_the_spec_cites_live_hosted_api_sites",
+    "tests/test_entry_point_python_guard.py::test_no_doc_or_usage_advertises_the_form_the_guard_refuses",
+    "tests/test_markers.py::test_namespace_literals_guard_passing_or_routed",
     "tests/test_onboarding_endpoints.py::TestOnboardingTeam::test_create_team_then_session_key_mint_registry",
-    "tests/test_session_key_http.py::TestSessionKeyMintConcurrency::test_registry_mint_blocks_while_team_lock_held"
+    "tests/test_pytest_attribution.py::test_killed_leg_names_the_test_it_was_running[tests/test_session_key_http.py::TestSessionKeyMintConcurrency::test_registry_mint_blocks_while_team_lock_held",
+    "tests/test_session_key_http.py::TestSessionKeyMintConcurrency::test_registry_mint_blocks_while_team_lock_held",
+    "tests/test_uri_env_mutations_declared.py::test_uri_env_mutations_declared"
   ],
   "files": {
     "test_1162_add_operator_local_svbp.py": {
-      "max_ms": 3740.0,
+      "max_ms": 5390.0,
       "tests": 1,
-      "total_ms": 3740.0
+      "total_ms": 5390.0
     },
     "test_1348.py": {
-      "max_ms": 3280.0,
+      "max_ms": 6140.0,
       "tests": 1,
-      "total_ms": 3280.0
+      "total_ms": 6140.0
     },
-    "test_2296_document_created_journal.py": {
-      "max_ms": 6090.0,
+    "test_3276_has_ep_measured.py": {
+      "max_ms": 6250.0,
       "tests": 1,
-      "total_ms": 6090.0
+      "total_ms": 6250.0
     },
-    "test_2350_validity_precision.py": {
-      "max_ms": 5630.0,
+    "test_3516_client_captured_at.py": {
+      "max_ms": 7390.0,
       "tests": 1,
-      "total_ms": 5630.0
+      "total_ms": 7390.0
     },
-    "test_2500_terminal_ep_backfill.py": {
-      "max_ms": 5520.0,
+    "test_3926_error_prop_guard.py": {
+      "max_ms": 6390.0,
       "tests": 1,
-      "total_ms": 5520.0
+      "total_ms": 6390.0
+    },
+    "test_4314_inert_hooks.py": {
+      "max_ms": 20070.0,
+      "tests": 1,
+      "total_ms": 20070.0
+    },
+    "test_4521_revise_point_embedding.py": {
+      "max_ms": 1640.0,
+      "tests": 1,
+      "total_ms": 1640.0
     },
     "test_4921_construct_lock.py": {
       "max_ms": 60040.0,
       "tests": 3,
-      "total_ms": 113870.0
+      "total_ms": 110520.0
     },
     "test_5142_ontology_record.py": {
-      "max_ms": 3820.0,
+      "max_ms": 4460.0,
       "tests": 1,
-      "total_ms": 3820.0
+      "total_ms": 4460.0
     },
     "test_6211_ep_scale.py": {
-      "max_ms": 3320.0,
+      "max_ms": 3120.0,
       "tests": 1,
-      "total_ms": 3320.0
+      "total_ms": 3120.0
     },
     "test_7951_write_doors.py": {
-      "max_ms": 3900.0,
+      "max_ms": 4240.0,
       "tests": 1,
-      "total_ms": 3900.0
+      "total_ms": 4240.0
     },
     "test_8057_probe_embedder_mask.py": {
-      "max_ms": 2590.0,
+      "max_ms": 4510.0,
       "tests": 1,
-      "total_ms": 2590.0
+      "total_ms": 4510.0
     },
-    "test_admin_return_to.py": {
-      "max_ms": 3360.0,
-      "tests": 1,
-      "total_ms": 3360.0
+    "test_9078_record_written_by_production_path.py": {
+      "max_ms": 11620.0,
+      "tests": 2,
+      "total_ms": 23070.0
     },
-    "test_agent_signup_idempotency.py": {
-      "max_ms": 2200.0,
+    "test_9124_declared_live_doors.py": {
+      "max_ms": 23330.0,
+      "tests": 3,
+      "total_ms": 32640.0
+    },
+    "test_9192_tenant_armed_by_request.py": {
+      "max_ms": 3800.0,
       "tests": 1,
-      "total_ms": 2200.0
+      "total_ms": 3800.0
+    },
+    "test_9208_change_feed_degraded.py": {
+      "max_ms": 3210.0,
+      "tests": 1,
+      "total_ms": 3210.0
+    },
+    "test_9209_handle_non_cypher_wipe.py": {
+      "max_ms": 5000.0,
+      "tests": 1,
+      "total_ms": 5000.0
+    },
+    "test_acl_graph_users.py": {
+      "max_ms": 10580.0,
+      "tests": 1,
+      "total_ms": 10580.0
     },
     "test_backup_e2e.py": {
-      "max_ms": 4790.0,
+      "max_ms": 1790.0,
       "tests": 1,
-      "total_ms": 4790.0
+      "total_ms": 1790.0
     },
-    "test_battery_executor_v2.py": {
-      "max_ms": 2040.0,
+    "test_battery_corpus.py": {
+      "max_ms": 12900.0,
       "tests": 1,
-      "total_ms": 2040.0
+      "total_ms": 12900.0
+    },
+    "test_battery_ep_outcome.py": {
+      "max_ms": 2400.0,
+      "tests": 1,
+      "total_ms": 2400.0
     },
     "test_battery_exposure_liveness.py": {
-      "max_ms": 4780.0,
+      "max_ms": 6150.0,
       "tests": 1,
-      "total_ms": 4780.0
-    },
-    "test_battery_real_deadline.py": {
-      "max_ms": 3010.0,
-      "tests": 2,
-      "total_ms": 5010.0
+      "total_ms": 6150.0
     },
     "test_battery_setup.py": {
-      "max_ms": 87780.0,
+      "max_ms": 87690.0,
       "tests": 3,
-      "total_ms": 151120.0
+      "total_ms": 150080.0
+    },
+    "test_body_cap_sweep.py": {
+      "max_ms": 10140.0,
+      "tests": 1,
+      "total_ms": 10140.0
+    },
+    "test_boot_regressions.py": {
+      "max_ms": 3680.0,
+      "tests": 1,
+      "total_ms": 3680.0
+    },
+    "test_bounded_raw_clients_3065.py": {
+      "max_ms": 3650.0,
+      "tests": 1,
+      "total_ms": 3650.0
     },
     "test_capture_loop_responsiveness.py": {
-      "max_ms": 8840.0,
+      "max_ms": 10450.0,
       "tests": 2,
-      "total_ms": 13470.0
+      "total_ms": 15070.0
     },
     "test_capture_phase_d_dedup.py": {
-      "max_ms": 1660.0,
+      "max_ms": 2160.0,
       "tests": 1,
-      "total_ms": 1660.0
+      "total_ms": 2160.0
     },
     "test_capture_secret_redaction_4911.py": {
-      "max_ms": 9580.0,
+      "max_ms": 11320.0,
       "tests": 1,
-      "total_ms": 9580.0
+      "total_ms": 11320.0
     },
     "test_ci_selection.py": {
-      "max_ms": 39250.0,
+      "max_ms": 52060.0,
       "tests": 2,
-      "total_ms": 64880.0
+      "total_ms": 83500.0
     },
-    "test_ci_stall_identify.py": {
-      "max_ms": 2270.0,
-      "tests": 1,
-      "total_ms": 2270.0
+    "test_ci_timing.py": {
+      "max_ms": 3500.0,
+      "tests": 2,
+      "total_ms": 6870.0
     },
     "test_client_surface.py": {
-      "max_ms": 16390.0,
+      "max_ms": 16520.0,
       "tests": 1,
-      "total_ms": 16390.0
+      "total_ms": 16520.0
     },
     "test_codex_capture_hook.py": {
       "max_ms": 4210.0,
@@ -130,19 +200,19 @@
       "total_ms": 4210.0
     },
     "test_collision_preflight.py": {
-      "max_ms": 3480.0,
-      "tests": 7,
-      "total_ms": 23540.0
-    },
-    "test_config.py": {
-      "max_ms": 4000.0,
-      "tests": 1,
-      "total_ms": 4000.0
+      "max_ms": 3430.0,
+      "tests": 5,
+      "total_ms": 16590.0
     },
     "test_consolidation_4way.py": {
-      "max_ms": 4980.0,
+      "max_ms": 5930.0,
       "tests": 2,
-      "total_ms": 8990.0
+      "total_ms": 11190.0
+    },
+    "test_cost_dimensions.py": {
+      "max_ms": 3220.0,
+      "tests": 1,
+      "total_ms": 3220.0
     },
     "test_cursor_capture_hook.py": {
       "max_ms": 4110.0,
@@ -150,347 +220,411 @@
       "total_ms": 4110.0
     },
     "test_dataplane_lane_loop_responsiveness.py": {
-      "max_ms": 4120.0,
+      "max_ms": 4140.0,
       "tests": 3,
-      "total_ms": 11200.0
+      "total_ms": 11350.0
     },
     "test_decide.py": {
-      "max_ms": 7550.0,
-      "tests": 1,
-      "total_ms": 7550.0
-    },
-    "test_destructive_wipe_guard.py": {
-      "max_ms": 16070.0,
-      "tests": 1,
-      "total_ms": 16070.0
-    },
-    "test_embedded_concurrency.py": {
-      "max_ms": 37480.0,
-      "tests": 8,
-      "total_ms": 117810.0
-    },
-    "test_embedded_lifecycle.py": {
-      "max_ms": 12350.0,
-      "tests": 8,
-      "total_ms": 84770.0
-    },
-    "test_entity_identity.py": {
       "max_ms": 5810.0,
       "tests": 1,
       "total_ms": 5810.0
     },
-    "test_ep_local_395.py": {
-      "max_ms": 15410.0,
+    "test_destructive_wipe_guard.py": {
+      "max_ms": 17750.0,
       "tests": 1,
-      "total_ms": 15410.0
+      "total_ms": 17750.0
+    },
+    "test_embedded_concurrency.py": {
+      "max_ms": 40100.0,
+      "tests": 10,
+      "total_ms": 134020.0
+    },
+    "test_embedded_lifecycle.py": {
+      "max_ms": 11390.0,
+      "tests": 7,
+      "total_ms": 70710.0
+    },
+    "test_embedder_provision.py": {
+      "max_ms": 3040.0,
+      "tests": 2,
+      "total_ms": 6070.0
+    },
+    "test_entity_identity.py": {
+      "max_ms": 4850.0,
+      "tests": 1,
+      "total_ms": 4850.0
+    },
+    "test_env_truthy.py": {
+      "max_ms": 9180.0,
+      "tests": 2,
+      "total_ms": 17510.0
+    },
+    "test_ep_local_395.py": {
+      "max_ms": 5920.0,
+      "tests": 1,
+      "total_ms": 5920.0
     },
     "test_ep_selector.py": {
-      "max_ms": 21160.0,
+      "max_ms": 17210.0,
       "tests": 1,
-      "total_ms": 21160.0
+      "total_ms": 17210.0
     },
     "test_epic903_hosted.py": {
-      "max_ms": 3440.0,
+      "max_ms": 3560.0,
       "tests": 1,
-      "total_ms": 3440.0
+      "total_ms": 3560.0
     },
     "test_epic903_lifecycle.py": {
-      "max_ms": 4500.0,
+      "max_ms": 3330.0,
       "tests": 2,
-      "total_ms": 8970.0
+      "total_ms": 6600.0
+    },
+    "test_epic903_observability.py": {
+      "max_ms": 2250.0,
+      "tests": 1,
+      "total_ms": 2250.0
     },
     "test_epic903_scheduler.py": {
-      "max_ms": 18660.0,
+      "max_ms": 15260.0,
       "tests": 1,
-      "total_ms": 18660.0
-    },
-    "test_eval_ingest_retry.py": {
-      "max_ms": 2520.0,
-      "tests": 6,
-      "total_ms": 13250.0
+      "total_ms": 15260.0
     },
     "test_eval_resume_retry_failed.py": {
-      "max_ms": 1840.0,
+      "max_ms": 2330.0,
       "tests": 1,
-      "total_ms": 1840.0
+      "total_ms": 2330.0
     },
     "test_event_store.py": {
-      "max_ms": 7110.0,
+      "max_ms": 7120.0,
       "tests": 2,
-      "total_ms": 9570.0
+      "total_ms": 9640.0
+    },
+    "test_export_cli.py": {
+      "max_ms": 5480.0,
+      "tests": 4,
+      "total_ms": 13830.0
     },
     "test_extractor_reliability.py": {
-      "max_ms": 4890.0,
+      "max_ms": 3570.0,
       "tests": 1,
-      "total_ms": 4890.0
+      "total_ms": 3570.0
     },
-    "test_fly_machines_guard.py": {
-      "max_ms": 4590.0,
+    "test_flip_gate.py": {
+      "max_ms": 1040.0,
+      "tests": 2,
+      "total_ms": 1980.0
+    },
+    "test_fork_safety_3845.py": {
+      "max_ms": 2620.0,
       "tests": 1,
-      "total_ms": 4590.0
+      "total_ms": 2620.0
     },
     "test_from_uri_userinfo.py": {
-      "max_ms": 4000.0,
+      "max_ms": 4990.0,
       "tests": 1,
-      "total_ms": 4000.0
+      "total_ms": 4990.0
     },
     "test_github_index_lifecycle.py": {
-      "max_ms": 9210.0,
+      "max_ms": 10910.0,
       "tests": 1,
-      "total_ms": 9210.0
+      "total_ms": 10910.0
     },
     "test_github_indexer.py": {
-      "max_ms": 34480.0,
-      "tests": 11,
-      "total_ms": 108400.0
+      "max_ms": 46510.0,
+      "tests": 7,
+      "total_ms": 123530.0
     },
     "test_graph_diagnostics.py": {
-      "max_ms": 17380.0,
+      "max_ms": 17210.0,
       "tests": 1,
-      "total_ms": 17380.0
+      "total_ms": 17210.0
     },
-    "test_graph_integrity_gate.py": {
-      "max_ms": 2890.0,
-      "tests": 1,
-      "total_ms": 2890.0
+    "test_graph_write_loop_responsiveness.py": {
+      "max_ms": 2320.0,
+      "tests": 4,
+      "total_ms": 9040.0
     },
     "test_graphcopy_boolean_index_3154.py": {
-      "max_ms": 11930.0,
+      "max_ms": 9650.0,
       "tests": 1,
-      "total_ms": 11930.0
+      "total_ms": 9650.0
     },
     "test_guard.py": {
-      "max_ms": 9380.0,
-      "tests": 1,
-      "total_ms": 9380.0
+      "max_ms": 12480.0,
+      "tests": 2,
+      "total_ms": 21320.0
     },
     "test_harness_benchmark.py": {
-      "max_ms": 15600.0,
-      "tests": 3,
-      "total_ms": 37240.0
+      "max_ms": 12650.0,
+      "tests": 2,
+      "total_ms": 21920.0
+    },
+    "test_heavy_import_guard.py": {
+      "max_ms": 3200.0,
+      "tests": 2,
+      "total_ms": 6380.0
+    },
+    "test_hosted_volunteer_context.py": {
+      "max_ms": 9600.0,
+      "tests": 1,
+      "total_ms": 9600.0
     },
     "test_incident_kinds.py": {
-      "max_ms": 3980.0,
+      "max_ms": 5060.0,
       "tests": 1,
-      "total_ms": 3980.0
+      "total_ms": 5060.0
     },
     "test_ingest_v2_consolidation.py": {
-      "max_ms": 14520.0,
+      "max_ms": 14200.0,
       "tests": 1,
-      "total_ms": 14520.0
+      "total_ms": 14200.0
     },
-    "test_kind_classifier.py": {
-      "max_ms": 1810.0,
+    "test_installer_agents_block_3429.py": {
+      "max_ms": 4110.0,
+      "tests": 2,
+      "total_ms": 8220.0
+    },
+    "test_kind_eval_set.py": {
+      "max_ms": 2640.0,
       "tests": 1,
-      "total_ms": 1810.0
+      "total_ms": 2640.0
     },
     "test_longmem_reader_pinning.py": {
-      "max_ms": 5140.0,
+      "max_ms": 5120.0,
       "tests": 1,
-      "total_ms": 5140.0
+      "total_ms": 5120.0
     },
     "test_longmem_runner.py": {
-      "max_ms": 16500.0,
-      "tests": 5,
-      "total_ms": 33650.0
+      "max_ms": 15480.0,
+      "tests": 9,
+      "total_ms": 42400.0
     },
     "test_longmem_usage_e2e.py": {
-      "max_ms": 3120.0,
+      "max_ms": 5240.0,
       "tests": 1,
-      "total_ms": 3120.0
+      "total_ms": 5240.0
     },
     "test_main_guards.py": {
-      "max_ms": 5410.0,
+      "max_ms": 6750.0,
       "tests": 2,
-      "total_ms": 10510.0
+      "total_ms": 13260.0
     },
     "test_mergify_config_guard.py": {
-      "max_ms": 4520.0,
+      "max_ms": 4160.0,
       "tests": 1,
-      "total_ms": 4520.0
-    },
-    "test_migrate_db.py": {
-      "max_ms": 6120.0,
-      "tests": 3,
-      "total_ms": 17360.0
-    },
-    "test_onboarding_endpoints.py": {
-      "max_ms": 2230.0,
-      "tests": 1,
-      "total_ms": 2230.0
+      "total_ms": 4160.0
     },
     "test_onboarding_state_split_checkpoint.py": {
-      "max_ms": 5560.0,
+      "max_ms": 5340.0,
       "tests": 5,
-      "total_ms": 23680.0
+      "total_ms": 23390.0
     },
     "test_onboarding_w6_capture_disclosure.py": {
-      "max_ms": 3750.0,
-      "tests": 5,
-      "total_ms": 14770.0
+      "max_ms": 2670.0,
+      "tests": 2,
+      "total_ms": 5150.0
+    },
+    "test_operator_alert.py": {
+      "max_ms": 3760.0,
+      "tests": 1,
+      "total_ms": 3760.0
     },
     "test_oracle.py": {
-      "max_ms": 7720.0,
-      "tests": 3,
-      "total_ms": 19730.0
+      "max_ms": 9710.0,
+      "tests": 1,
+      "total_ms": 9710.0
     },
-    "test_orchestrator_harness.py": {
-      "max_ms": 11970.0,
+    "test_orchestrator_harness_retained.py": {
+      "max_ms": 14670.0,
       "tests": 2,
-      "total_ms": 23870.0
+      "total_ms": 29170.0
     },
     "test_org_graph_open_tripwire.py": {
-      "max_ms": 3590.0,
-      "tests": 1,
-      "total_ms": 3590.0
+      "max_ms": 3200.0,
+      "tests": 2,
+      "total_ms": 6350.0
     },
     "test_pack_manifest_store_extraction.py": {
-      "max_ms": 4700.0,
+      "max_ms": 5170.0,
       "tests": 1,
-      "total_ms": 4700.0
+      "total_ms": 5170.0
     },
     "test_pack_shipping_wheel.py": {
-      "max_ms": 27470.0,
+      "max_ms": 26230.0,
       "tests": 1,
-      "total_ms": 40600.0
+      "total_ms": 40700.0
     },
     "test_pi_capture_hooks.py": {
-      "max_ms": 10270.0,
+      "max_ms": 10650.0,
       "tests": 1,
-      "total_ms": 10270.0
+      "total_ms": 10650.0
     },
     "test_projection_lifecycle.py": {
-      "max_ms": 4790.0,
+      "max_ms": 4410.0,
       "tests": 1,
-      "total_ms": 4790.0
+      "total_ms": 4410.0
     },
     "test_quota.py": {
-      "max_ms": 8180.0,
-      "tests": 1,
-      "total_ms": 8180.0
-    },
-    "test_read_routes_loop_responsiveness.py": {
-      "max_ms": 2610.0,
-      "tests": 1,
-      "total_ms": 2610.0
+      "max_ms": 10310.0,
+      "tests": 2,
+      "total_ms": 14310.0
     },
     "test_reaper.py": {
-      "max_ms": 12040.0,
+      "max_ms": 10700.0,
       "tests": 6,
-      "total_ms": 61920.0
+      "total_ms": 56870.0
     },
     "test_retention_promise.py": {
-      "max_ms": 4820.0,
+      "max_ms": 4990.0,
       "tests": 1,
-      "total_ms": 4820.0
+      "total_ms": 4990.0
     },
     "test_retrieval.py": {
-      "max_ms": 11850.0,
-      "tests": 4,
-      "total_ms": 26660.0
+      "max_ms": 11700.0,
+      "tests": 2,
+      "total_ms": 18520.0
     },
     "test_run.py": {
-      "max_ms": 24680.0,
+      "max_ms": 27600.0,
       "tests": 2,
-      "total_ms": 49250.0
+      "total_ms": 54850.0
+    },
+    "test_selfhost_health_probe_executor.py": {
+      "max_ms": 5500.0,
+      "tests": 1,
+      "total_ms": 5500.0
+    },
+    "test_session_schema_3554.py": {
+      "max_ms": 3390.0,
+      "tests": 1,
+      "total_ms": 3390.0
     },
     "test_session_verify.py": {
-      "max_ms": 20310.0,
+      "max_ms": 20390.0,
       "tests": 6,
-      "total_ms": 90490.0
+      "total_ms": 90810.0
     },
     "test_skip_guard.py": {
-      "max_ms": 10540.0,
+      "max_ms": 10050.0,
       "tests": 3,
-      "total_ms": 30570.0
+      "total_ms": 29590.0
     },
     "test_smoke_embedded.py": {
-      "max_ms": 24340.0,
+      "max_ms": 28950.0,
       "tests": 1,
-      "total_ms": 24340.0
+      "total_ms": 28950.0
     },
     "test_source_inheritance_own.py": {
-      "max_ms": 49540.0,
+      "max_ms": 48380.0,
       "tests": 1,
-      "total_ms": 49540.0
+      "total_ms": 48380.0
     },
     "test_surface_manifest.py": {
-      "max_ms": 18900.0,
+      "max_ms": 16790.0,
       "tests": 2,
-      "total_ms": 36030.0
+      "total_ms": 32460.0
     },
     "test_tmpdir_hygiene_4096.py": {
-      "max_ms": 13580.0,
+      "max_ms": 15470.0,
       "tests": 1,
-      "total_ms": 13580.0
-    },
-    "test_tool_registry.py": {
-      "max_ms": 7540.0,
-      "tests": 5,
-      "total_ms": 18260.0
+      "total_ms": 15470.0
     },
     "test_tripwire.py": {
-      "max_ms": 4890.0,
-      "tests": 2,
-      "total_ms": 7350.0
+      "max_ms": 5160.0,
+      "tests": 1,
+      "total_ms": 5160.0
     },
     "test_uri_env_mutations_declared.py": {
-      "max_ms": 14910.0,
+      "max_ms": 9120.0,
       "tests": 2,
-      "total_ms": 19510.0
+      "total_ms": 13620.0
+    },
+    "test_uri_requiring_selection.py": {
+      "max_ms": 59420.0,
+      "tests": 1,
+      "total_ms": 59420.0
     },
     "test_value_extractor.py": {
-      "max_ms": 11870.0,
-      "tests": 5,
-      "total_ms": 49320.0
+      "max_ms": 11770.0,
+      "tests": 4,
+      "total_ms": 42870.0
     },
     "test_vector_arm.py": {
-      "max_ms": 4390.0,
-      "tests": 1,
-      "total_ms": 4390.0
+      "max_ms": 4850.0,
+      "tests": 2,
+      "total_ms": 8450.0
     },
     "test_w4_why_enrichment.py": {
-      "max_ms": 4080.0,
+      "max_ms": 5630.0,
       "tests": 1,
-      "total_ms": 4080.0
+      "total_ms": 5630.0
     },
     "test_website_docs_consistency.py": {
-      "max_ms": 4290.0,
-      "tests": 1,
-      "total_ms": 4290.0
+      "max_ms": 6690.0,
+      "tests": 2,
+      "total_ms": 10690.0
+    },
+    "test_why_layer_rate.py": {
+      "max_ms": 5730.0,
+      "tests": 3,
+      "total_ms": 17070.0
     },
     "test_why_suite_benchmark.py": {
-      "max_ms": 41380.0,
+      "max_ms": 34410.0,
       "tests": 3,
-      "total_ms": 66270.0
-    },
-    "test_wipe_server.py": {
-      "max_ms": 2390.0,
-      "tests": 1,
-      "total_ms": 2390.0
-    },
-    "test_write_op_reachability.py": {
-      "max_ms": 2690.0,
-      "tests": 1,
-      "total_ms": 2690.0
+      "total_ms": 54940.0
     },
     "test_write_path_benchmark.py": {
-      "max_ms": 179170.0,
+      "max_ms": 182880.0,
       "tests": 3,
-      "total_ms": 274480.0
+      "total_ms": 280540.0
     },
     "test_write_path_operator_lane.py": {
-      "max_ms": 5970.0,
+      "max_ms": 10290.0,
       "tests": 2,
-      "total_ms": 11250.0
+      "total_ms": 19410.0
     },
     "test_write_path_runner.py": {
-      "max_ms": 44420.0,
+      "max_ms": 42700.0,
       "tests": 3,
-      "total_ms": 132980.0
+      "total_ms": 128000.0
+    },
+    "test_writer_inventory.py": {
+      "max_ms": 3530.0,
+      "tests": 1,
+      "total_ms": 3530.0
     }
   },
   "history": [
+    {
+      "branch": "main",
+      "conclusion": "failure",
+      "counts": {
+        "error": 0,
+        "failed": 5,
+        "passed": 35291,
+        "skipped": 146,
+        "xfailed": 10,
+        "xpassed": 0
+      },
+      "created_at": "2026-10-20T17:34:10Z",
+      "event": "push",
+      "failed_tests": [
+        "tests/test_entry_point_python_guard.py::test_no_doc_or_usage_advertises_the_form_the_guard_refuses",
+        "tests/test_markers.py::test_namespace_literals_guard_passing_or_routed",
+        "tests/test_onboarding_endpoints.py::TestOnboardingTeam::test_create_team_then_session_key_mint_registry",
+        "tests/test_pytest_attribution.py::test_killed_leg_names_the_test_it_was_running[tests/test_session_key_http.py::TestSessionKeyMintConcurrency::test_registry_mint_blocks_while_team_lock_held",
+        "tests/test_session_key_http.py::TestSessionKeyMintConcurrency::test_registry_mint_blocks_while_team_lock_held",
+        "tests/test_uri_env_mutations_declared.py::test_uri_env_mutations_declared"
+      ],
+      "killed": false,
+      "run_id": "39467226356",
+      "sample_time": "2026-10-20T18:40:00Z",
+      "sampled_at": "2026-10-20T18:40:00Z",
+      "sha": "65023e7d9d8d2c08d98718d8267f94dcd50f6eee",
+      "steps_max_job_ms": 1346000,
+      "steps_total_ms": 9844000
+    },
     {
       "branch": "main",
       "conclusion": "failure",
@@ -516,34 +650,6 @@
       "run_id": "39191149586",
       "sample_time": "2026-10-20T18:40:00Z",
       "sampled_at": "2026-10-20T18:40:00Z",
-      "sha": "8464f850f938ff048666a24ade2081e4518987b6",
-      "steps_max_job_ms": 1300000,
-      "steps_total_ms": 9951000
-    },
-    {
-      "branch": "main",
-      "conclusion": "failure",
-      "counts": {
-        "error": 0,
-        "failed": 6,
-        "passed": 30697,
-        "skipped": 129,
-        "xfailed": 7,
-        "xpassed": 0
-      },
-      "created_at": "2026-10-19T02:41:31Z",
-      "event": "push",
-      "failed_tests": [
-        "tests/test_7925_route_parity.py::test_both_routes_produce_the_same_confidence[IMPL]",
-        "tests/test_7925_route_parity.py::test_both_routes_produce_the_same_confidence[NAND]",
-        "tests/test_ci_timing.py::test_refresh_durations_on_the_real_manifest_of_record",
-        "tests/test_oauth_consent_bridge.py::test_the_spec_cites_live_hosted_api_sites",
-        "tests/test_onboarding_endpoints.py::TestOnboardingTeam::test_create_team_then_session_key_mint_registry",
-        "tests/test_session_key_http.py::TestSessionKeyMintConcurrency::test_registry_mint_blocks_while_team_lock_held"
-      ],
-      "killed": false,
-      "run_id": "39191149586",
-      "sample_time": "2026-10-20T18:40:00Z",
       "sha": "8464f850f938ff048666a24ade2081e4518987b6",
       "steps_max_job_ms": 1300000,
       "steps_total_ms": 9951000
@@ -617,111 +723,6 @@
       "counts": {
         "error": 0,
         "failed": 0,
-        "passed": 103,
-        "skipped": 39,
-        "xfailed": 0,
-        "xpassed": 0
-      },
-      "error": null,
-      "killed": false,
-      "leg": "pytest-log-d14-hosted-api",
-      "log": "pytest-d14.log",
-      "summary_seen": true
-    },
-    {
-      "counts": {
-        "error": 0,
-        "failed": 0,
-        "passed": 2711,
-        "skipped": 15,
-        "xfailed": 0,
-        "xpassed": 0
-      },
-      "error": null,
-      "killed": false,
-      "leg": "pytest-log-test-a",
-      "log": "pytest.log",
-      "summary_seen": true
-    },
-    {
-      "counts": {
-        "error": 0,
-        "failed": 0,
-        "passed": 3427,
-        "skipped": 7,
-        "xfailed": 0,
-        "xpassed": 0
-      },
-      "error": null,
-      "killed": false,
-      "leg": "pytest-log-test-b",
-      "log": "pytest.log",
-      "summary_seen": true
-    },
-    {
-      "counts": {
-        "error": 0,
-        "failed": 1,
-        "passed": 3536,
-        "skipped": 28,
-        "xfailed": 1,
-        "xpassed": 0
-      },
-      "error": null,
-      "killed": false,
-      "leg": "pytest-log-test-c",
-      "log": "pytest.log",
-      "summary_seen": true
-    },
-    {
-      "counts": {
-        "error": 0,
-        "failed": 0,
-        "passed": 440,
-        "skipped": 2,
-        "xfailed": 0,
-        "xpassed": 0
-      },
-      "error": null,
-      "killed": false,
-      "leg": "pytest-log-test-carve-out-a",
-      "log": "pytest.log",
-      "summary_seen": true
-    },
-    {
-      "counts": {
-        "error": 0,
-        "failed": 0,
-        "passed": 310,
-        "skipped": 2,
-        "xfailed": 0,
-        "xpassed": 0
-      },
-      "error": null,
-      "killed": false,
-      "leg": "pytest-log-test-carve-out-b",
-      "log": "pytest.log",
-      "summary_seen": true
-    },
-    {
-      "counts": {
-        "error": 0,
-        "failed": 0,
-        "passed": 593,
-        "skipped": 2,
-        "xfailed": 0,
-        "xpassed": 0
-      },
-      "error": null,
-      "killed": false,
-      "leg": "pytest-log-test-carve-out-c",
-      "log": "pytest.log",
-      "summary_seen": true
-    },
-    {
-      "counts": {
-        "error": 0,
-        "failed": 0,
         "passed": 3,
         "skipped": 0,
         "xfailed": 0,
@@ -729,7 +730,7 @@
       },
       "error": null,
       "killed": false,
-      "leg": "pytest-log-test-concurrency-falkor",
+      "leg": "12284459993",
       "log": "pytest.log",
       "summary_seen": true
     },
@@ -737,44 +738,14 @@
       "counts": {
         "error": 0,
         "failed": 0,
-        "passed": 0,
-        "skipped": 0,
-        "xfailed": 0,
-        "xpassed": 0
-      },
-      "error": null,
-      "killed": false,
-      "leg": "pytest-log-test-d",
-      "log": "pytest.log",
-      "summary_seen": false
-    },
-    {
-      "counts": {
-        "error": 0,
-        "failed": 0,
-        "passed": 3128,
-        "skipped": 8,
-        "xfailed": 2,
-        "xpassed": 0
-      },
-      "error": null,
-      "killed": false,
-      "leg": "pytest-log-test-e",
-      "log": "pytest.log",
-      "summary_seen": true
-    },
-    {
-      "counts": {
-        "error": 0,
-        "failed": 3,
-        "passed": 2651,
+        "passed": 399,
         "skipped": 3,
         "xfailed": 0,
         "xpassed": 0
       },
       "error": null,
       "killed": false,
-      "leg": "pytest-log-test-f",
+      "leg": "12284714859",
       "log": "pytest.log",
       "summary_seen": true
     },
@@ -782,74 +753,29 @@
       "counts": {
         "error": 0,
         "failed": 0,
-        "passed": 3149,
-        "skipped": 2,
-        "xfailed": 2,
-        "xpassed": 0
-      },
-      "error": null,
-      "killed": false,
-      "leg": "pytest-log-test-g",
-      "log": "pytest.log",
-      "summary_seen": true
-    },
-    {
-      "counts": {
-        "error": 0,
-        "failed": 0,
-        "passed": 3279,
-        "skipped": 3,
-        "xfailed": 1,
-        "xpassed": 0
-      },
-      "error": null,
-      "killed": false,
-      "leg": "pytest-log-test-h",
-      "log": "pytest.log",
-      "summary_seen": true
-    },
-    {
-      "counts": {
-        "error": 0,
-        "failed": 1,
-        "passed": 2770,
-        "skipped": 4,
-        "xfailed": 1,
-        "xpassed": 0
-      },
-      "error": null,
-      "killed": false,
-      "leg": "pytest-log-test-i",
-      "log": "pytest.log",
-      "summary_seen": true
-    },
-    {
-      "counts": {
-        "error": 0,
-        "failed": 0,
-        "passed": 2577,
-        "skipped": 10,
+        "passed": 176,
+        "skipped": 39,
         "xfailed": 0,
         "xpassed": 0
       },
       "error": null,
       "killed": false,
-      "leg": "pytest-log-test-slow-a",
-      "log": "pytest.log",
+      "leg": "12285079702",
+      "log": "pytest-d14.log",
       "summary_seen": true
     },
     {
       "counts": {
         "error": 0,
         "failed": 0,
-        "passed": 2016,
-        "skipped": 4,
+        "passed": 337,
+        "skipped": 1,
         "xfailed": 0,
         "xpassed": 0
       },
       "error": null,
       "killed": false,
-      "leg": "pytest-log-test-slow-b",
+      "leg": "12285443023",
       "log": "pytest.log",
       "summary_seen": true
     },
@@ -864,39 +790,219 @@
       },
       "error": null,
       "killed": false,
-      "leg": "pytest-log-test-track-b",
+      "leg": "12285747711",
       "log": "trackb.log",
+      "summary_seen": true
+    },
+    {
+      "counts": {
+        "error": 0,
+        "failed": 1,
+        "passed": 3440,
+        "skipped": 4,
+        "xfailed": 0,
+        "xpassed": 0
+      },
+      "error": null,
+      "killed": false,
+      "leg": "12285927916",
+      "log": "pytest.log",
+      "summary_seen": true
+    },
+    {
+      "counts": {
+        "error": 0,
+        "failed": 1,
+        "passed": 3801,
+        "skipped": 9,
+        "xfailed": 0,
+        "xpassed": 0
+      },
+      "error": null,
+      "killed": false,
+      "leg": "12286073689",
+      "log": "pytest.log",
+      "summary_seen": true
+    },
+    {
+      "counts": {
+        "error": 0,
+        "failed": 0,
+        "passed": 2825,
+        "skipped": 22,
+        "xfailed": 2,
+        "xpassed": 0
+      },
+      "error": null,
+      "killed": false,
+      "leg": "12286312019",
+      "log": "pytest.log",
+      "summary_seen": true
+    },
+    {
+      "counts": {
+        "error": 0,
+        "failed": 2,
+        "passed": 3534,
+        "skipped": 11,
+        "xfailed": 0,
+        "xpassed": 0
+      },
+      "error": null,
+      "killed": false,
+      "leg": "12286428349",
+      "log": "pytest.log",
+      "summary_seen": true
+    },
+    {
+      "counts": {
+        "error": 0,
+        "failed": 1,
+        "passed": 2044,
+        "skipped": 5,
+        "xfailed": 0,
+        "xpassed": 0
+      },
+      "error": null,
+      "killed": false,
+      "leg": "12286473098",
+      "log": "pytest.log",
+      "summary_seen": true
+    },
+    {
+      "counts": {
+        "error": 0,
+        "failed": 0,
+        "passed": 2584,
+        "skipped": 10,
+        "xfailed": 0,
+        "xpassed": 0
+      },
+      "error": null,
+      "killed": false,
+      "leg": "12286641663",
+      "log": "pytest.log",
+      "summary_seen": true
+    },
+    {
+      "counts": {
+        "error": 0,
+        "failed": 0,
+        "passed": 2341,
+        "skipped": 4,
+        "xfailed": 1,
+        "xpassed": 0
+      },
+      "error": null,
+      "killed": false,
+      "leg": "12286653289",
+      "log": "pytest.log",
+      "summary_seen": true
+    },
+    {
+      "counts": {
+        "error": 0,
+        "failed": 0,
+        "passed": 3138,
+        "skipped": 2,
+        "xfailed": 0,
+        "xpassed": 0
+      },
+      "error": null,
+      "killed": false,
+      "leg": "12286956742",
+      "log": "pytest.log",
+      "summary_seen": true
+    },
+    {
+      "counts": {
+        "error": 0,
+        "failed": 0,
+        "passed": 716,
+        "skipped": 2,
+        "xfailed": 0,
+        "xpassed": 0
+      },
+      "error": null,
+      "killed": false,
+      "leg": "12287031442",
+      "log": "pytest.log",
+      "summary_seen": true
+    },
+    {
+      "counts": {
+        "error": 0,
+        "failed": 0,
+        "passed": 3488,
+        "skipped": 7,
+        "xfailed": 2,
+        "xpassed": 0
+      },
+      "error": null,
+      "killed": false,
+      "leg": "12287080940",
+      "log": "pytest.log",
+      "summary_seen": true
+    },
+    {
+      "counts": {
+        "error": 0,
+        "failed": 0,
+        "passed": 2717,
+        "skipped": 24,
+        "xfailed": 4,
+        "xpassed": 0
+      },
+      "error": null,
+      "killed": false,
+      "leg": "12287255524",
+      "log": "pytest.log",
+      "summary_seen": true
+    },
+    {
+      "counts": {
+        "error": 0,
+        "failed": 0,
+        "passed": 3744,
+        "skipped": 3,
+        "xfailed": 1,
+        "xpassed": 0
+      },
+      "error": null,
+      "killed": false,
+      "leg": "12287430046",
+      "log": "pytest.log",
       "summary_seen": true
     }
   ],
   "outcome": {
     "error": 0,
-    "failed": 6,
+    "failed": 5,
     "killed": false,
-    "passed": 30697,
-    "skipped": 129,
-    "xfailed": 7,
+    "passed": 35291,
+    "skipped": 146,
+    "xfailed": 10,
     "xpassed": 0
   },
   "sampled_run": {
     "conclusion": "failure",
-    "created_at": "2026-10-19T02:41:31Z",
-    "head_sha": "8464f850f938ff048666a24ade2081e4518987b6",
-    "run_id": "39191149586",
+    "created_at": "2026-10-20T17:34:10Z",
+    "head_sha": "65023e7d9d8d2c08d98718d8267f94dcd50f6eee",
+    "run_id": "39467226356",
     "sample_time": "2026-10-20T18:40:00Z",
-    "selection": "event=push&branch=main, exclude_pull_requests=true, cancelled skipped; this sample IS run 39191149586 (created 2026-10-19T02:41:31Z), and it is not re-labelled as a newer run"
+    "selection": "event=push&branch=main, exclude_pull_requests=true, cancelled skipped; this sample IS run 39467226356 (created 2026-10-20T17:34:10Z), and it is not re-labelled as a newer run"
   },
   "schema_version": 1,
   "steps": {
     "canary-streak": [
       {
         "conclusion": "success",
-        "duration_ms": 2000,
+        "duration_ms": 1000,
         "name": "Set up job"
       },
       {
         "conclusion": "success",
-        "duration_ms": 6000,
+        "duration_ms": 7000,
         "name": "Run actions/checkout@v4"
       },
       {
@@ -906,17 +1012,17 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 1000,
+        "duration_ms": 0,
         "name": "Download producer-shard artifacts (the P1-7 canary contract)"
       },
       {
         "conclusion": "success",
-        "duration_ms": 3000,
+        "duration_ms": 4000,
         "name": "Download previous streak artifact (chain continuity)"
       },
       {
         "conclusion": "success",
-        "duration_ms": 0,
+        "duration_ms": 1000,
         "name": "Classify run + update the canary streak (epic"
       },
       {
@@ -936,7 +1042,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 1000,
+        "duration_ms": 0,
         "name": "Post Run actions/checkout@v4"
       },
       {
@@ -948,12 +1054,12 @@
     "changes": [
       {
         "conclusion": "success",
-        "duration_ms": 1000,
+        "duration_ms": 0,
         "name": "Set up job"
       },
       {
         "conclusion": "success",
-        "duration_ms": 13000,
+        "duration_ms": 20000,
         "name": "Run actions/checkout@v4"
       },
       {
@@ -963,17 +1069,17 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 4000,
+        "duration_ms": 2000,
         "name": "Install pyyaml"
       },
       {
         "conclusion": "success",
-        "duration_ms": 0,
+        "duration_ms": 1000,
         "name": "Tiered selection"
       },
       {
         "conclusion": "success",
-        "duration_ms": 1000,
+        "duration_ms": 0,
         "name": "Emit push matrix (#1472/#6135)"
       },
       {
@@ -998,14 +1104,14 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 0,
+        "duration_ms": 1000,
         "name": "Complete job"
       }
     ],
     "manifest-integrity": [
       {
         "conclusion": "success",
-        "duration_ms": 0,
+        "duration_ms": 2000,
         "name": "Set up job"
       },
       {
@@ -1020,12 +1126,12 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 3000,
+        "duration_ms": 2000,
         "name": "Install pyyaml"
       },
       {
         "conclusion": "success",
-        "duration_ms": 1000,
+        "duration_ms": 0,
         "name": "Manifest integrity (drift gate, #1262)"
       },
       {
@@ -1035,13 +1141,18 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 1000,
+        "duration_ms": 0,
         "name": "Registry integrity (union merge fails closed, #5373)"
       },
       {
         "conclusion": "success",
         "duration_ms": 1000,
         "name": "Required-set sync (#6144)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Harness single source \u2014 operations/orchestrator-harness/ is a POINTER (#8246)"
       },
       {
         "conclusion": "success",
@@ -1077,12 +1188,12 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 29000,
+        "duration_ms": 26000,
         "name": "Install package"
       },
       {
         "conclusion": "success",
-        "duration_ms": 0,
+        "duration_ms": 1000,
         "name": "Whole-registry compile (all packs, zero validation errors)"
       },
       {
@@ -1092,7 +1203,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 1000,
+        "duration_ms": 0,
         "name": "Post Run actions/checkout@v4"
       },
       {
@@ -1121,22 +1232,22 @@
     "surface-guard": [
       {
         "conclusion": "success",
-        "duration_ms": 0,
+        "duration_ms": 1000,
         "name": "Set up job"
       },
       {
         "conclusion": "success",
-        "duration_ms": 6000,
+        "duration_ms": 2000,
         "name": "Run actions/checkout@v4"
       },
       {
         "conclusion": "success",
-        "duration_ms": 0,
+        "duration_ms": 1000,
         "name": "Run actions/setup-python@v5"
       },
       {
         "conclusion": "success",
-        "duration_ms": 25000,
+        "duration_ms": 30000,
         "name": "Install"
       },
       {
@@ -1146,12 +1257,12 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 3000,
+        "duration_ms": 4000,
         "name": "The surface cannot expand without an explicit human decision"
       },
       {
         "conclusion": "success",
-        "duration_ms": 13000,
+        "duration_ms": 20000,
         "name": "The ordering lint (AC13)"
       },
       {
@@ -1161,7 +1272,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 0,
+        "duration_ms": 1000,
         "name": "Surface target compliance (informational,"
       },
       {
@@ -1188,12 +1299,12 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 5000,
+        "duration_ms": 8000,
         "name": "Run actions/checkout@v4"
       },
       {
         "conclusion": "success",
-        "duration_ms": 1000,
+        "duration_ms": 0,
         "name": "Run actions/setup-python@v5"
       },
       {
@@ -1203,17 +1314,17 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 6000,
+        "duration_ms": 8000,
         "name": "Cache uv + pip dependency caches (#7612)"
       },
       {
         "conclusion": "success",
-        "duration_ms": 19000,
+        "duration_ms": 26000,
         "name": "Run ./.github/actions/install-cpu-torch"
       },
       {
         "conclusion": "success",
-        "duration_ms": 29000,
+        "duration_ms": 42000,
         "name": "Install package + test extras"
       },
       {
@@ -1223,17 +1334,17 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 1000,
+        "duration_ms": 2000,
         "name": "Cache HF embedding model (BAAI/bge-small-en-v1.5)"
       },
       {
         "conclusion": "success",
-        "duration_ms": 4000,
+        "duration_ms": 6000,
         "name": "Embedding model REQUIRED (BAAI/bge-small-en-v1.5) \u2014 dense retrieval leg"
       },
       {
         "conclusion": "success",
-        "duration_ms": 15000,
+        "duration_ms": 8000,
         "name": "Provision FalkorDB services on ephemeral host ports (#6673)"
       },
       {
@@ -1243,7 +1354,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 24000,
+        "duration_ms": 42000,
         "name": "Generate coverage manifest (expected nodeids, epic"
       },
       {
@@ -1262,8 +1373,8 @@
         "name": "Provide rsync for the deploy-step tests (#7026)"
       },
       {
-        "conclusion": "success",
-        "duration_ms": 235000,
+        "conclusion": "failure",
+        "duration_ms": 391000,
         "name": "Run fast test suite (slow files run in the test-slow job)"
       },
       {
@@ -1293,7 +1404,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 0,
+        "duration_ms": 1000,
         "name": "Dump tolerated tempdir-cleanup leaks (issue"
       },
       {
@@ -1312,28 +1423,28 @@
         "name": "Post Provision FalkorDB services on ephemeral host ports (#6673)"
       },
       {
-        "conclusion": "success",
-        "duration_ms": 1000,
+        "conclusion": "skipped",
+        "duration_ms": 0,
         "name": "Post Cache HF embedding model (BAAI/bge-small-en-v1.5)"
       },
       {
-        "conclusion": "success",
+        "conclusion": "skipped",
         "duration_ms": 0,
         "name": "Post Cache uv + pip dependency caches (#7612)"
       },
       {
-        "conclusion": "success",
+        "conclusion": "skipped",
         "duration_ms": 0,
         "name": "Post Run actions/setup-node@v4"
       },
       {
-        "conclusion": "success",
+        "conclusion": "skipped",
         "duration_ms": 0,
         "name": "Post Run actions/setup-python@v5"
       },
       {
         "conclusion": "success",
-        "duration_ms": 0,
+        "duration_ms": 1000,
         "name": "Post Run actions/checkout@v4"
       },
       {
@@ -1350,17 +1461,17 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 6000,
+        "duration_ms": 7000,
         "name": "Run actions/checkout@v4"
       },
       {
         "conclusion": "success",
-        "duration_ms": 1000,
+        "duration_ms": 0,
         "name": "Run actions/setup-python@v5"
       },
       {
         "conclusion": "success",
-        "duration_ms": 0,
+        "duration_ms": 1000,
         "name": "Run actions/setup-node@v4"
       },
       {
@@ -1370,12 +1481,12 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 24000,
+        "duration_ms": 28000,
         "name": "Run ./.github/actions/install-cpu-torch"
       },
       {
         "conclusion": "success",
-        "duration_ms": 38000,
+        "duration_ms": 44000,
         "name": "Install package + test extras"
       },
       {
@@ -1390,12 +1501,12 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 6000,
+        "duration_ms": 7000,
         "name": "Embedding model REQUIRED (BAAI/bge-small-en-v1.5) \u2014 dense retrieval leg"
       },
       {
         "conclusion": "success",
-        "duration_ms": 12000,
+        "duration_ms": 11000,
         "name": "Provision FalkorDB services on ephemeral host ports (#6673)"
       },
       {
@@ -1405,7 +1516,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 34000,
+        "duration_ms": 39000,
         "name": "Generate coverage manifest (expected nodeids, epic"
       },
       {
@@ -1425,7 +1536,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 643000,
+        "duration_ms": 632000,
         "name": "Run fast test suite (slow files run in the test-slow job)"
       },
       {
@@ -1435,7 +1546,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 1000,
+        "duration_ms": 2000,
         "name": "Upload pytest log (measurement artifact,"
       },
       {
@@ -1445,7 +1556,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 1000,
+        "duration_ms": 0,
         "name": "Skip-fail guard: live-FalkorDB tests must run, never skip (#1436)"
       },
       {
@@ -1512,169 +1623,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 6000,
-        "name": "Run actions/checkout@v4"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Run actions/setup-python@v5"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 4000,
-        "name": "Run actions/setup-node@v4"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 6000,
-        "name": "Cache uv + pip dependency caches (#7612)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 29000,
-        "name": "Run ./.github/actions/install-cpu-torch"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 42000,
-        "name": "Install package + test extras"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 1000,
-        "name": "Clean stale redislite orphans (issue"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Cache HF embedding model (BAAI/bge-small-en-v1.5)"
-      },
-      {
-        "conclusion": "success",
         "duration_ms": 7000,
-        "name": "Embedding model REQUIRED (BAAI/bge-small-en-v1.5) \u2014 dense retrieval leg"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 8000,
-        "name": "Provision FalkorDB services on ephemeral host ports (#6673)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Compute docker URI (epic"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 43000,
-        "name": "Generate coverage manifest (expected nodeids, epic"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Canary producer (epic"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Restore pytest last-failed state (#6142)"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Provide rsync for the deploy-step tests (#7026)"
-      },
-      {
-        "conclusion": "failure",
-        "duration_ms": 375000,
-        "name": "Run fast test suite (slow files run in the test-slow job)"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Save pytest last-failed state (#6142)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Upload pytest log (measurement artifact,"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Upload canary-producer artifacts (producer shard only,"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Skip-fail guard: live-FalkorDB tests must run, never skip (#1436)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Dump redislite-hygiene end-sweep decision (issue"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Dump tolerated tempdir-cleanup leaks (issue"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Assert no redislite orphans (issue"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 1000,
-        "name": "Stop FalkorDB services (#6673)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Post Provision FalkorDB services on ephemeral host ports (#6673)"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Post Cache HF embedding model (BAAI/bge-small-en-v1.5)"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Post Cache uv + pip dependency caches (#7612)"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Post Run actions/setup-node@v4"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Post Run actions/setup-python@v5"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Post Run actions/checkout@v4"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Complete job"
-      }
-    ],
-    "test (d)": [
-      {
-        "conclusion": "success",
-        "duration_ms": 2000,
-        "name": "Set up job"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 5000,
         "name": "Run actions/checkout@v4"
       },
       {
@@ -1684,179 +1633,17 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 1000,
-        "name": "Run actions/setup-node@v4"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 12000,
-        "name": "Cache uv + pip dependency caches (#7612)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 27000,
-        "name": "Run ./.github/actions/install-cpu-torch"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 40000,
-        "name": "Install package + test extras"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 1000,
-        "name": "Clean stale redislite orphans (issue"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 2000,
-        "name": "Cache HF embedding model (BAAI/bge-small-en-v1.5)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 6000,
-        "name": "Embedding model REQUIRED (BAAI/bge-small-en-v1.5) \u2014 dense retrieval leg"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 9000,
-        "name": "Provision FalkorDB services on ephemeral host ports (#6673)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Compute docker URI (epic"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 37000,
-        "name": "Generate coverage manifest (expected nodeids, epic"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Canary producer (epic"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Restore pytest last-failed state (#6142)"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Provide rsync for the deploy-step tests (#7026)"
-      },
-      {
-        "conclusion": "failure",
-        "duration_ms": 1155000,
-        "name": "Run fast test suite (slow files run in the test-slow job)"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Save pytest last-failed state (#6142)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 2000,
-        "name": "Upload pytest log (measurement artifact,"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Upload canary-producer artifacts (producer shard only,"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Skip-fail guard: live-FalkorDB tests must run, never skip (#1436)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Dump redislite-hygiene end-sweep decision (issue"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Dump tolerated tempdir-cleanup leaks (issue"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Assert no redislite orphans (issue"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Stop FalkorDB services (#6673)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 1000,
-        "name": "Post Provision FalkorDB services on ephemeral host ports (#6673)"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Post Cache HF embedding model (BAAI/bge-small-en-v1.5)"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Post Cache uv + pip dependency caches (#7612)"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Post Run actions/setup-node@v4"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Post Run actions/setup-python@v5"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Post Run actions/checkout@v4"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Complete job"
-      }
-    ],
-    "test (e)": [
-      {
-        "conclusion": "success",
-        "duration_ms": 1000,
-        "name": "Set up job"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 5000,
-        "name": "Run actions/checkout@v4"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 1000,
-        "name": "Run actions/setup-python@v5"
-      },
-      {
-        "conclusion": "success",
         "duration_ms": 0,
         "name": "Run actions/setup-node@v4"
       },
       {
         "conclusion": "success",
-        "duration_ms": 8000,
+        "duration_ms": 10000,
         "name": "Cache uv + pip dependency caches (#7612)"
       },
       {
         "conclusion": "success",
-        "duration_ms": 25000,
+        "duration_ms": 23000,
         "name": "Run ./.github/actions/install-cpu-torch"
       },
       {
@@ -1905,13 +1692,13 @@
         "name": "Restore pytest last-failed state (#6142)"
       },
       {
-        "conclusion": "success",
+        "conclusion": "skipped",
         "duration_ms": 0,
         "name": "Provide rsync for the deploy-step tests (#7026)"
       },
       {
         "conclusion": "success",
-        "duration_ms": 432000,
+        "duration_ms": 364000,
         "name": "Run fast test suite (slow files run in the test-slow job)"
       },
       {
@@ -1971,7 +1758,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 1000,
+        "duration_ms": 0,
         "name": "Post Run actions/setup-node@v4"
       },
       {
@@ -1981,7 +1768,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 0,
+        "duration_ms": 1000,
         "name": "Post Run actions/checkout@v4"
       },
       {
@@ -1990,177 +1777,15 @@
         "name": "Complete job"
       }
     ],
-    "test (f)": [
+    "test (d)": [
       {
         "conclusion": "success",
         "duration_ms": 2000,
         "name": "Set up job"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 6000,
-        "name": "Run actions/checkout@v4"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 1000,
-        "name": "Run actions/setup-python@v5"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 2000,
-        "name": "Run actions/setup-node@v4"
       },
       {
         "conclusion": "success",
         "duration_ms": 7000,
-        "name": "Cache uv + pip dependency caches (#7612)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 21000,
-        "name": "Run ./.github/actions/install-cpu-torch"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 28000,
-        "name": "Install package + test extras"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Clean stale redislite orphans (issue"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 2000,
-        "name": "Cache HF embedding model (BAAI/bge-small-en-v1.5)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 3000,
-        "name": "Embedding model REQUIRED (BAAI/bge-small-en-v1.5) \u2014 dense retrieval leg"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 13000,
-        "name": "Provision FalkorDB services on ephemeral host ports (#6673)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Compute docker URI (epic"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 27000,
-        "name": "Generate coverage manifest (expected nodeids, epic"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Canary producer (epic"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Restore pytest last-failed state (#6142)"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Provide rsync for the deploy-step tests (#7026)"
-      },
-      {
-        "conclusion": "failure",
-        "duration_ms": 294000,
-        "name": "Run fast test suite (slow files run in the test-slow job)"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Save pytest last-failed state (#6142)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 1000,
-        "name": "Upload pytest log (measurement artifact,"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Upload canary-producer artifacts (producer shard only,"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Skip-fail guard: live-FalkorDB tests must run, never skip (#1436)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Dump redislite-hygiene end-sweep decision (issue"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Dump tolerated tempdir-cleanup leaks (issue"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Assert no redislite orphans (issue"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 1000,
-        "name": "Stop FalkorDB services (#6673)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Post Provision FalkorDB services on ephemeral host ports (#6673)"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Post Cache HF embedding model (BAAI/bge-small-en-v1.5)"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Post Cache uv + pip dependency caches (#7612)"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Post Run actions/setup-node@v4"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Post Run actions/setup-python@v5"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Post Run actions/checkout@v4"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Complete job"
-      }
-    ],
-    "test (g)": [
-      {
-        "conclusion": "success",
-        "duration_ms": 1000,
-        "name": "Set up job"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 6000,
         "name": "Run actions/checkout@v4"
       },
       {
@@ -2175,17 +1800,17 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 8000,
+        "duration_ms": 9000,
         "name": "Cache uv + pip dependency caches (#7612)"
       },
       {
         "conclusion": "success",
-        "duration_ms": 24000,
+        "duration_ms": 22000,
         "name": "Run ./.github/actions/install-cpu-torch"
       },
       {
         "conclusion": "success",
-        "duration_ms": 38000,
+        "duration_ms": 33000,
         "name": "Install package + test extras"
       },
       {
@@ -2200,169 +1825,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 6000,
-        "name": "Embedding model REQUIRED (BAAI/bge-small-en-v1.5) \u2014 dense retrieval leg"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 11000,
-        "name": "Provision FalkorDB services on ephemeral host ports (#6673)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Compute docker URI (epic"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 37000,
-        "name": "Generate coverage manifest (expected nodeids, epic"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Canary producer (epic"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Restore pytest last-failed state (#6142)"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Provide rsync for the deploy-step tests (#7026)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 422000,
-        "name": "Run fast test suite (slow files run in the test-slow job)"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Save pytest last-failed state (#6142)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 1000,
-        "name": "Upload pytest log (measurement artifact,"
-      },
-      {
-        "conclusion": "skipped",
-        "duration_ms": 0,
-        "name": "Upload canary-producer artifacts (producer shard only,"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Skip-fail guard: live-FalkorDB tests must run, never skip (#1436)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Dump redislite-hygiene end-sweep decision (issue"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Dump tolerated tempdir-cleanup leaks (issue"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 1000,
-        "name": "Assert no redislite orphans (issue"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Stop FalkorDB services (#6673)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Post Provision FalkorDB services on ephemeral host ports (#6673)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Post Cache HF embedding model (BAAI/bge-small-en-v1.5)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 1000,
-        "name": "Post Cache uv + pip dependency caches (#7612)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Post Run actions/setup-node@v4"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Post Run actions/setup-python@v5"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Post Run actions/checkout@v4"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Complete job"
-      }
-    ],
-    "test (h)": [
-      {
-        "conclusion": "success",
-        "duration_ms": 1000,
-        "name": "Set up job"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 6000,
-        "name": "Run actions/checkout@v4"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 0,
-        "name": "Run actions/setup-python@v5"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 1000,
-        "name": "Run actions/setup-node@v4"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 8000,
-        "name": "Cache uv + pip dependency caches (#7612)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 24000,
-        "name": "Run ./.github/actions/install-cpu-torch"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 34000,
-        "name": "Install package + test extras"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 1000,
-        "name": "Clean stale redislite orphans (issue"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 2000,
-        "name": "Cache HF embedding model (BAAI/bge-small-en-v1.5)"
-      },
-      {
-        "conclusion": "success",
-        "duration_ms": 4000,
+        "duration_ms": 5000,
         "name": "Embedding model REQUIRED (BAAI/bge-small-en-v1.5) \u2014 dense retrieval leg"
       },
       {
@@ -2372,7 +1835,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 1000,
+        "duration_ms": 0,
         "name": "Compute docker URI (epic"
       },
       {
@@ -2396,8 +1859,8 @@
         "name": "Provide rsync for the deploy-step tests (#7026)"
       },
       {
-        "conclusion": "success",
-        "duration_ms": 399000,
+        "conclusion": "failure",
+        "duration_ms": 424000,
         "name": "Run fast test suite (slow files run in the test-slow job)"
       },
       {
@@ -2422,7 +1885,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 1000,
+        "duration_ms": 0,
         "name": "Dump redislite-hygiene end-sweep decision (issue"
       },
       {
@@ -2437,7 +1900,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 0,
+        "duration_ms": 1000,
         "name": "Stop FalkorDB services (#6673)"
       },
       {
@@ -2446,23 +1909,23 @@
         "name": "Post Provision FalkorDB services on ephemeral host ports (#6673)"
       },
       {
-        "conclusion": "success",
+        "conclusion": "skipped",
         "duration_ms": 0,
         "name": "Post Cache HF embedding model (BAAI/bge-small-en-v1.5)"
       },
       {
-        "conclusion": "success",
+        "conclusion": "skipped",
         "duration_ms": 0,
         "name": "Post Cache uv + pip dependency caches (#7612)"
       },
       {
-        "conclusion": "success",
+        "conclusion": "skipped",
         "duration_ms": 0,
         "name": "Post Run actions/setup-node@v4"
       },
       {
-        "conclusion": "success",
-        "duration_ms": 1000,
+        "conclusion": "skipped",
+        "duration_ms": 0,
         "name": "Post Run actions/setup-python@v5"
       },
       {
@@ -2476,7 +1939,7 @@
         "name": "Complete job"
       }
     ],
-    "test (i)": [
+    "test (e)": [
       {
         "conclusion": "success",
         "duration_ms": 1000,
@@ -2484,7 +1947,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 5000,
+        "duration_ms": 6000,
         "name": "Run actions/checkout@v4"
       },
       {
@@ -2504,12 +1967,12 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 24000,
+        "duration_ms": 29000,
         "name": "Run ./.github/actions/install-cpu-torch"
       },
       {
         "conclusion": "success",
-        "duration_ms": 34000,
+        "duration_ms": 41000,
         "name": "Install package + test extras"
       },
       {
@@ -2519,17 +1982,17 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 2000,
+        "duration_ms": 1000,
         "name": "Cache HF embedding model (BAAI/bge-small-en-v1.5)"
       },
       {
         "conclusion": "success",
-        "duration_ms": 5000,
+        "duration_ms": 6000,
         "name": "Embedding model REQUIRED (BAAI/bge-small-en-v1.5) \u2014 dense retrieval leg"
       },
       {
         "conclusion": "success",
-        "duration_ms": 10000,
+        "duration_ms": 8000,
         "name": "Provision FalkorDB services on ephemeral host ports (#6673)"
       },
       {
@@ -2539,7 +2002,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 37000,
+        "duration_ms": 39000,
         "name": "Generate coverage manifest (expected nodeids, epic"
       },
       {
@@ -2558,8 +2021,8 @@
         "name": "Provide rsync for the deploy-step tests (#7026)"
       },
       {
-        "conclusion": "failure",
-        "duration_ms": 447000,
+        "conclusion": "success",
+        "duration_ms": 423000,
         "name": "Run fast test suite (slow files run in the test-slow job)"
       },
       {
@@ -2573,8 +2036,8 @@
         "name": "Upload pytest log (measurement artifact,"
       },
       {
-        "conclusion": "success",
-        "duration_ms": 2000,
+        "conclusion": "skipped",
+        "duration_ms": 0,
         "name": "Upload canary-producer artifacts (producer shard only,"
       },
       {
@@ -2595,6 +2058,330 @@
       {
         "conclusion": "success",
         "duration_ms": 0,
+        "name": "Assert no redislite orphans (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Stop FalkorDB services (#6673)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Post Provision FalkorDB services on ephemeral host ports (#6673)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Cache HF embedding model (BAAI/bge-small-en-v1.5)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Cache uv + pip dependency caches (#7612)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/setup-node@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Complete job"
+      }
+    ],
+    "test (f)": [
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Set up job"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 8000,
+        "name": "Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Run actions/setup-node@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 5000,
+        "name": "Cache uv + pip dependency caches (#7612)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 28000,
+        "name": "Run ./.github/actions/install-cpu-torch"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 44000,
+        "name": "Install package + test extras"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Clean stale redislite orphans (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Cache HF embedding model (BAAI/bge-small-en-v1.5)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 6000,
+        "name": "Embedding model REQUIRED (BAAI/bge-small-en-v1.5) \u2014 dense retrieval leg"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 9000,
+        "name": "Provision FalkorDB services on ephemeral host ports (#6673)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Compute docker URI (epic"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 41000,
+        "name": "Generate coverage manifest (expected nodeids, epic"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Canary producer (epic"
+      },
+      {
+        "conclusion": "skipped",
+        "duration_ms": 0,
+        "name": "Restore pytest last-failed state (#6142)"
+      },
+      {
+        "conclusion": "skipped",
+        "duration_ms": 0,
+        "name": "Provide rsync for the deploy-step tests (#7026)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 621000,
+        "name": "Run fast test suite (slow files run in the test-slow job)"
+      },
+      {
+        "conclusion": "skipped",
+        "duration_ms": 0,
+        "name": "Save pytest last-failed state (#6142)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Upload pytest log (measurement artifact,"
+      },
+      {
+        "conclusion": "skipped",
+        "duration_ms": 0,
+        "name": "Upload canary-producer artifacts (producer shard only,"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Skip-fail guard: live-FalkorDB tests must run, never skip (#1436)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Dump redislite-hygiene end-sweep decision (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Dump tolerated tempdir-cleanup leaks (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Assert no redislite orphans (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Stop FalkorDB services (#6673)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Provision FalkorDB services on ephemeral host ports (#6673)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Cache HF embedding model (BAAI/bge-small-en-v1.5)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Cache uv + pip dependency caches (#7612)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/setup-node@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Post Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Complete job"
+      }
+    ],
+    "test (g)": [
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Set up job"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 7000,
+        "name": "Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Run actions/setup-node@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 7000,
+        "name": "Cache uv + pip dependency caches (#7612)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 27000,
+        "name": "Run ./.github/actions/install-cpu-torch"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 40000,
+        "name": "Install package + test extras"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Clean stale redislite orphans (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 2000,
+        "name": "Cache HF embedding model (BAAI/bge-small-en-v1.5)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 5000,
+        "name": "Embedding model REQUIRED (BAAI/bge-small-en-v1.5) \u2014 dense retrieval leg"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 7000,
+        "name": "Provision FalkorDB services on ephemeral host ports (#6673)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Compute docker URI (epic"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 33000,
+        "name": "Generate coverage manifest (expected nodeids, epic"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Canary producer (epic"
+      },
+      {
+        "conclusion": "skipped",
+        "duration_ms": 0,
+        "name": "Restore pytest last-failed state (#6142)"
+      },
+      {
+        "conclusion": "skipped",
+        "duration_ms": 0,
+        "name": "Provide rsync for the deploy-step tests (#7026)"
+      },
+      {
+        "conclusion": "failure",
+        "duration_ms": 387000,
+        "name": "Run fast test suite (slow files run in the test-slow job)"
+      },
+      {
+        "conclusion": "skipped",
+        "duration_ms": 0,
+        "name": "Save pytest last-failed state (#6142)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Upload pytest log (measurement artifact,"
+      },
+      {
+        "conclusion": "skipped",
+        "duration_ms": 0,
+        "name": "Upload canary-producer artifacts (producer shard only,"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Skip-fail guard: live-FalkorDB tests must run, never skip (#1436)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Dump redislite-hygiene end-sweep decision (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Dump tolerated tempdir-cleanup leaks (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
         "name": "Assert no redislite orphans (issue"
       },
       {
@@ -2638,7 +2425,169 @@
         "name": "Complete job"
       }
     ],
-    "test-carve-out": [
+    "test (h)": [
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Set up job"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 8000,
+        "name": "Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 2000,
+        "name": "Run actions/setup-node@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 8000,
+        "name": "Cache uv + pip dependency caches (#7612)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 26000,
+        "name": "Run ./.github/actions/install-cpu-torch"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 42000,
+        "name": "Install package + test extras"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Clean stale redislite orphans (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 2000,
+        "name": "Cache HF embedding model (BAAI/bge-small-en-v1.5)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 5000,
+        "name": "Embedding model REQUIRED (BAAI/bge-small-en-v1.5) \u2014 dense retrieval leg"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 11000,
+        "name": "Provision FalkorDB services on ephemeral host ports (#6673)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Compute docker URI (epic"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 35000,
+        "name": "Generate coverage manifest (expected nodeids, epic"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Canary producer (epic"
+      },
+      {
+        "conclusion": "skipped",
+        "duration_ms": 0,
+        "name": "Restore pytest last-failed state (#6142)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Provide rsync for the deploy-step tests (#7026)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 505000,
+        "name": "Run fast test suite (slow files run in the test-slow job)"
+      },
+      {
+        "conclusion": "skipped",
+        "duration_ms": 0,
+        "name": "Save pytest last-failed state (#6142)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Upload pytest log (measurement artifact,"
+      },
+      {
+        "conclusion": "skipped",
+        "duration_ms": 0,
+        "name": "Upload canary-producer artifacts (producer shard only,"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Skip-fail guard: live-FalkorDB tests must run, never skip (#1436)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Dump redislite-hygiene end-sweep decision (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Dump tolerated tempdir-cleanup leaks (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Assert no redislite orphans (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Stop FalkorDB services (#6673)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Post Provision FalkorDB services on ephemeral host ports (#6673)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Cache HF embedding model (BAAI/bge-small-en-v1.5)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Cache uv + pip dependency caches (#7612)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/setup-node@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Complete job"
+      }
+    ],
+    "test (i)": [
       {
         "conclusion": "success",
         "duration_ms": 1000,
@@ -2656,17 +2605,22 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 4000,
-        "name": "Cache pip dependency caches (#7612)"
+        "duration_ms": 1000,
+        "name": "Run actions/setup-node@v4"
       },
       {
         "conclusion": "success",
-        "duration_ms": 18000,
+        "duration_ms": 6000,
+        "name": "Cache uv + pip dependency caches (#7612)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 26000,
         "name": "Run ./.github/actions/install-cpu-torch"
       },
       {
         "conclusion": "success",
-        "duration_ms": 24000,
+        "duration_ms": 41000,
         "name": "Install package + test extras"
       },
       {
@@ -2676,12 +2630,169 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 2000,
+        "duration_ms": 1000,
         "name": "Cache HF embedding model (BAAI/bge-small-en-v1.5)"
       },
       {
         "conclusion": "success",
-        "duration_ms": 4000,
+        "duration_ms": 5000,
+        "name": "Embedding model REQUIRED (BAAI/bge-small-en-v1.5) \u2014 dense retrieval leg"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 8000,
+        "name": "Provision FalkorDB services on ephemeral host ports (#6673)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Compute docker URI (epic"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 43000,
+        "name": "Generate coverage manifest (expected nodeids, epic"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Canary producer (epic"
+      },
+      {
+        "conclusion": "skipped",
+        "duration_ms": 0,
+        "name": "Restore pytest last-failed state (#6142)"
+      },
+      {
+        "conclusion": "skipped",
+        "duration_ms": 0,
+        "name": "Provide rsync for the deploy-step tests (#7026)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 499000,
+        "name": "Run fast test suite (slow files run in the test-slow job)"
+      },
+      {
+        "conclusion": "skipped",
+        "duration_ms": 0,
+        "name": "Save pytest last-failed state (#6142)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Upload pytest log (measurement artifact,"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Upload canary-producer artifacts (producer shard only,"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Skip-fail guard: live-FalkorDB tests must run, never skip (#1436)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Dump redislite-hygiene end-sweep decision (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Dump tolerated tempdir-cleanup leaks (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Assert no redislite orphans (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Stop FalkorDB services (#6673)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Provision FalkorDB services on ephemeral host ports (#6673)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Cache HF embedding model (BAAI/bge-small-en-v1.5)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Cache uv + pip dependency caches (#7612)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/setup-node@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 1000,
+        "name": "Post Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Post Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Complete job"
+      }
+    ],
+    "test-carve-out": [
+      {
+        "conclusion": "success",
+        "duration_ms": 2000,
+        "name": "Set up job"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 7000,
+        "name": "Run actions/checkout@v4"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Run actions/setup-python@v5"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 5000,
+        "name": "Cache pip dependency caches (#7612)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 23000,
+        "name": "Run ./.github/actions/install-cpu-torch"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 34000,
+        "name": "Install package + test extras"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 0,
+        "name": "Clean stale redislite orphans (issue"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 3000,
+        "name": "Cache HF embedding model (BAAI/bge-small-en-v1.5)"
+      },
+      {
+        "conclusion": "success",
+        "duration_ms": 5000,
         "name": "Embedding model REQUIRED (BAAI/bge-small-en-v1.5) \u2014 dense retrieval leg"
       },
       {
@@ -2691,12 +2802,12 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 291000,
+        "duration_ms": 207000,
         "name": "Run carve-out suite (embedded, URI unset \u2014 E2E-4)"
       },
       {
         "conclusion": "success",
-        "duration_ms": 3000,
+        "duration_ms": 4000,
         "name": "Temp-dir guard tests (TMPDIR unset \u2014 the GitHub-runner spelling condition, #3776)"
       },
       {
@@ -2731,7 +2842,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 0,
+        "duration_ms": 1000,
         "name": "Post Run actions/setup-python@v5"
       },
       {
@@ -2748,12 +2859,12 @@
     "test-carve-out (b)": [
       {
         "conclusion": "success",
-        "duration_ms": 1000,
+        "duration_ms": 2000,
         "name": "Set up job"
       },
       {
         "conclusion": "success",
-        "duration_ms": 6000,
+        "duration_ms": 7000,
         "name": "Run actions/checkout@v4"
       },
       {
@@ -2763,17 +2874,17 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 3000,
+        "duration_ms": 4000,
         "name": "Cache pip dependency caches (#7612)"
       },
       {
         "conclusion": "success",
-        "duration_ms": 22000,
+        "duration_ms": 19000,
         "name": "Run ./.github/actions/install-cpu-torch"
       },
       {
         "conclusion": "success",
-        "duration_ms": 32000,
+        "duration_ms": 25000,
         "name": "Install package + test extras"
       },
       {
@@ -2783,22 +2894,22 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 1000,
+        "duration_ms": 2000,
         "name": "Cache HF embedding model (BAAI/bge-small-en-v1.5)"
       },
       {
         "conclusion": "success",
-        "duration_ms": 5000,
+        "duration_ms": 4000,
         "name": "Embedding model REQUIRED (BAAI/bge-small-en-v1.5) \u2014 dense retrieval leg"
       },
       {
         "conclusion": "success",
-        "duration_ms": 5000,
+        "duration_ms": 6000,
         "name": "Generate coverage manifest (carve-out \u2014 expected nodeids, epic"
       },
       {
         "conclusion": "success",
-        "duration_ms": 233000,
+        "duration_ms": 300000,
         "name": "Run carve-out suite (embedded, URI unset \u2014 E2E-4)"
       },
       {
@@ -2860,7 +2971,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 5000,
+        "duration_ms": 7000,
         "name": "Run actions/checkout@v4"
       },
       {
@@ -2870,17 +2981,17 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 3000,
+        "duration_ms": 4000,
         "name": "Cache pip dependency caches (#7612)"
       },
       {
         "conclusion": "success",
-        "duration_ms": 25000,
+        "duration_ms": 26000,
         "name": "Run ./.github/actions/install-cpu-torch"
       },
       {
         "conclusion": "success",
-        "duration_ms": 37000,
+        "duration_ms": 28000,
         "name": "Install package + test extras"
       },
       {
@@ -2895,22 +3006,22 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 6000,
+        "duration_ms": 4000,
         "name": "Embedding model REQUIRED (BAAI/bge-small-en-v1.5) \u2014 dense retrieval leg"
       },
       {
         "conclusion": "success",
-        "duration_ms": 8000,
+        "duration_ms": 5000,
         "name": "Generate coverage manifest (carve-out \u2014 expected nodeids, epic"
       },
       {
         "conclusion": "success",
-        "duration_ms": 544000,
+        "duration_ms": 540000,
         "name": "Run carve-out suite (embedded, URI unset \u2014 E2E-4)"
       },
       {
         "conclusion": "success",
-        "duration_ms": 5000,
+        "duration_ms": 4000,
         "name": "Temp-dir guard tests (TMPDIR unset \u2014 the GitHub-runner spelling condition, #3776)"
       },
       {
@@ -2967,7 +3078,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 6000,
+        "duration_ms": 7000,
         "name": "Run actions/checkout@v4"
       },
       {
@@ -2977,7 +3088,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 6000,
+        "duration_ms": 5000,
         "name": "Cache pip dependency caches (#7612)"
       },
       {
@@ -2987,7 +3098,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 41000,
+        "duration_ms": 43000,
         "name": "Install package + test extras"
       },
       {
@@ -2997,12 +3108,12 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 3000,
+        "duration_ms": 2000,
         "name": "Cache HF embedding model (BAAI/bge-small-en-v1.5)"
       },
       {
         "conclusion": "success",
-        "duration_ms": 6000,
+        "duration_ms": 7000,
         "name": "Embedding model REQUIRED (BAAI/bge-small-en-v1.5) \u2014 dense retrieval leg"
       },
       {
@@ -3079,32 +3190,32 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 6000,
+        "duration_ms": 2000,
         "name": "Run actions/checkout@v4"
       },
       {
         "conclusion": "success",
-        "duration_ms": 0,
+        "duration_ms": 1000,
         "name": "Run actions/setup-python@v5"
       },
       {
         "conclusion": "success",
-        "duration_ms": 4000,
+        "duration_ms": 3000,
         "name": "Cache pip dependency caches (#7612)"
       },
       {
         "conclusion": "success",
-        "duration_ms": 21000,
+        "duration_ms": 27000,
         "name": "Run ./.github/actions/install-cpu-torch"
       },
       {
         "conclusion": "success",
-        "duration_ms": 32000,
+        "duration_ms": 38000,
         "name": "Install package + test extras"
       },
       {
         "conclusion": "success",
-        "duration_ms": 150000,
+        "duration_ms": 192000,
         "name": "Run the embedded_only marker selection (URI unset \u2014"
       },
       {
@@ -3119,7 +3230,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 1000,
+        "duration_ms": 0,
         "name": "Post Cache pip dependency caches (#7612)"
       },
       {
@@ -3141,12 +3252,12 @@
     "test-slow (a)": [
       {
         "conclusion": "success",
-        "duration_ms": 1000,
+        "duration_ms": 2000,
         "name": "Set up job"
       },
       {
         "conclusion": "success",
-        "duration_ms": 6000,
+        "duration_ms": 4000,
         "name": "Run actions/checkout@v4"
       },
       {
@@ -3156,17 +3267,17 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 4000,
+        "duration_ms": 11000,
         "name": "Cache pip dependency caches (#7612)"
       },
       {
         "conclusion": "success",
-        "duration_ms": 26000,
+        "duration_ms": 23000,
         "name": "Run ./.github/actions/install-cpu-torch"
       },
       {
         "conclusion": "success",
-        "duration_ms": 39000,
+        "duration_ms": 31000,
         "name": "Install package + test extras"
       },
       {
@@ -3176,12 +3287,12 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 2000,
+        "duration_ms": 3000,
         "name": "Cache HF embedding model (BAAI/bge-small-en-v1.5)"
       },
       {
         "conclusion": "success",
-        "duration_ms": 6000,
+        "duration_ms": 4000,
         "name": "Embedding model REQUIRED (BAAI/bge-small-en-v1.5) \u2014 dense retrieval leg"
       },
       {
@@ -3191,7 +3302,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 11000,
+        "duration_ms": 15000,
         "name": "Provision FalkorDB services on ephemeral host ports (#6673)"
       },
       {
@@ -3201,12 +3312,12 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 19000,
+        "duration_ms": 17000,
         "name": "Generate coverage manifest (slow legs \u2014 expected nodeids, epic"
       },
       {
         "conclusion": "success",
-        "duration_ms": 1136000,
+        "duration_ms": 964000,
         "name": "Run slow test suite \u2014 leg a (known-slow files,"
       },
       {
@@ -3226,7 +3337,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 2000,
+        "duration_ms": 1000,
         "name": "Upload pytest log (measurement artifact,"
       },
       {
@@ -3236,7 +3347,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 0,
+        "duration_ms": 1000,
         "name": "Post Provision FalkorDB services on ephemeral host ports (#6673)"
       },
       {
@@ -3246,7 +3357,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 1000,
+        "duration_ms": 0,
         "name": "Post Cache pip dependency caches (#7612)"
       },
       {
@@ -3273,7 +3384,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 6000,
+        "duration_ms": 8000,
         "name": "Run actions/checkout@v4"
       },
       {
@@ -3283,17 +3394,17 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 5000,
+        "duration_ms": 4000,
         "name": "Cache pip dependency caches (#7612)"
       },
       {
         "conclusion": "success",
-        "duration_ms": 25000,
+        "duration_ms": 29000,
         "name": "Run ./.github/actions/install-cpu-torch"
       },
       {
         "conclusion": "success",
-        "duration_ms": 40000,
+        "duration_ms": 46000,
         "name": "Install package + test extras"
       },
       {
@@ -3303,12 +3414,12 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 2000,
+        "duration_ms": 1000,
         "name": "Cache HF embedding model (BAAI/bge-small-en-v1.5)"
       },
       {
         "conclusion": "success",
-        "duration_ms": 5000,
+        "duration_ms": 7000,
         "name": "Embedding model REQUIRED (BAAI/bge-small-en-v1.5) \u2014 dense retrieval leg"
       },
       {
@@ -3318,22 +3429,22 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 12000,
+        "duration_ms": 7000,
         "name": "Provision FalkorDB services on ephemeral host ports (#6673)"
       },
       {
         "conclusion": "success",
-        "duration_ms": 0,
+        "duration_ms": 1000,
         "name": "Compute docker URI (epic"
       },
       {
         "conclusion": "success",
-        "duration_ms": 25000,
+        "duration_ms": 28000,
         "name": "Generate coverage manifest (slow legs \u2014 expected nodeids, epic"
       },
       {
-        "conclusion": "success",
-        "duration_ms": 1141000,
+        "conclusion": "failure",
+        "duration_ms": 1211000,
         "name": "Run slow test suite \u2014 leg b (known-slow files,"
       },
       {
@@ -3358,7 +3469,7 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 1000,
+        "duration_ms": 0,
         "name": "Stop FalkorDB services (#6673)"
       },
       {
@@ -3367,17 +3478,17 @@
         "name": "Post Provision FalkorDB services on ephemeral host ports (#6673)"
       },
       {
-        "conclusion": "success",
+        "conclusion": "skipped",
         "duration_ms": 0,
         "name": "Post Cache HF embedding model (BAAI/bge-small-en-v1.5)"
       },
       {
-        "conclusion": "success",
+        "conclusion": "skipped",
         "duration_ms": 0,
         "name": "Post Cache pip dependency caches (#7612)"
       },
       {
-        "conclusion": "success",
+        "conclusion": "skipped",
         "duration_ms": 0,
         "name": "Post Run actions/setup-python@v5"
       },
@@ -3395,12 +3506,12 @@
     "test-track-b": [
       {
         "conclusion": "success",
-        "duration_ms": 0,
+        "duration_ms": 1000,
         "name": "Set up job"
       },
       {
         "conclusion": "success",
-        "duration_ms": 6000,
+        "duration_ms": 8000,
         "name": "Run actions/checkout@v4"
       },
       {
@@ -3410,17 +3521,17 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 25000,
+        "duration_ms": 26000,
         "name": "Install"
       },
       {
         "conclusion": "success",
-        "duration_ms": 8000,
+        "duration_ms": 10000,
         "name": "Provision FalkorDB services on ephemeral host ports (#6673)"
       },
       {
         "conclusion": "success",
-        "duration_ms": 3000,
+        "duration_ms": 2000,
         "name": "Generate coverage manifest (track-b, epic"
       },
       {
@@ -3445,12 +3556,12 @@
       },
       {
         "conclusion": "success",
-        "duration_ms": 0,
+        "duration_ms": 1000,
         "name": "Stop FalkorDB services (#6673)"
       },
       {
         "conclusion": "success",
-        "duration_ms": 1000,
+        "duration_ms": 0,
         "name": "Post Provision FalkorDB services on ephemeral host ports (#6673)"
       },
       {
@@ -3472,22 +3583,22 @@
     "workflow-lint": [
       {
         "conclusion": "success",
-        "duration_ms": 0,
+        "duration_ms": 1000,
         "name": "Set up job"
       },
       {
         "conclusion": "success",
-        "duration_ms": 6000,
+        "duration_ms": 8000,
         "name": "Run actions/checkout@v4"
       },
       {
         "conclusion": "success",
-        "duration_ms": 2000,
+        "duration_ms": 5000,
         "name": "actionlint (workflow syntax + Actions-expression errors)"
       },
       {
         "conclusion": "success",
-        "duration_ms": 0,
+        "duration_ms": 1000,
         "name": "Post Run actions/checkout@v4"
       },
       {

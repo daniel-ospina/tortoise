@@ -1213,6 +1213,37 @@ def test_a_summary_less_leg_still_counts_its_failures(tmp_path: Path) -> None:
     assert agg["total_counts"]["passed"] == 10, agg["total_counts"]
 
 
+def test_history_dedupes_a_legacy_row_without_sampled_at() -> None:
+    """One row per SAMPLE, including a row written before `sampled_at` existed.
+
+    Keying on `sampled_at` alone gave a legacy row `None`, so it survived beside its own
+    stamped twin: the shipped artifact carried run 39191149586 twice, counted one
+    measurement as two, and the dedupe could never heal it because the two keys differed.
+    """
+    twin = {"run_id": "42", "sampled_at": "", "sample_time": "2026-08-18T00:00:00Z"}
+    twin.pop("sampled_at")
+    stamped = {"run_id": "42", "sampled_at": "2026-08-18T00:00:00Z",
+               "sample_time": "2026-08-18T00:00:00Z"}
+    older = {"run_id": "41", "sampled_at": "2026-08-17T00:00:00Z",
+             "sample_time": "2026-08-17T00:00:00Z"}
+
+    kept = ci_timing._dedupe_history([stamped, twin, older])
+
+    assert [row["run_id"] for row in kept] == ["42", "41"]
+
+
+def test_a_banner_less_count_summary_is_a_summary() -> None:
+    """pytest's `-q` form prints `10 passed in 3.02s` — no banner, no `deselected`.
+
+    Shape alone (the `in N.Ns` tail) said "summary seen"; the old predicate ALSO required a
+    banner or one of a few words, so a `-q` leg's passes were dropped and the artifact
+    published the leg as truncated (#9134 review, P3).
+    """
+    assert ci_timing._is_summary_line("10 passed in 3.02s")
+    assert ci_timing._is_summary_line("6 failed, 30697 passed in 1300.12s (0:21:40)")
+    assert not ci_timing._is_summary_line("collecting ... /repo/tests/test_a.py")
+
+
 def test_the_rendered_provenance_names_the_run_it_sampled(monkeypatch) -> None:
     """The `selection:` line must not claim "the latest run" — it must name THIS one.
 
