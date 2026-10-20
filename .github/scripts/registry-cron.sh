@@ -1577,16 +1577,38 @@ GRAPHS_ATTEMPTED="$(printf '%s' "$RUN" | jq -r '.graph_totals.attempted // 0' 2>
 # state, one guarded graph, and a genuine total outage. The distribution is
 # the datum that tells them apart, and it was in hand the whole time.
 #
-# Graph-level when the run carried a `graphs` map; org-level otherwise (a
-# resolution/error result has no graph map — its own status IS the finding).
-SWEEP_REASONS="$(printf '%s' "$RUN" | jq -r '
-  (.results // {}) as $r
-  | [ $r[] | (.graphs // {} | to_entries[] | (.value.status // "unknown")) ] as $g
-  | (if ($g | length) > 0 then $g else [ $r[] | (.status // "unknown") ] end)
-  | group_by(.) | map("\(.[0])=\(length)") | join(" ")' 2>/dev/null || true)"
+# The fallback is PER RESULT, never per run: a result that carries a `graphs`
+# map contributes its GRAPH statuses, a result that carries none (a busy team
+# lock `{"status":"error",…}`, a per-org exception, a graph-list resolution
+# failure `{"status":"error","resolution":true}`) contributes its OWN status.
+# Deciding that globally — "if ANY result had a graphs map, publish only graph
+# statuses" — silently dropped every failing team from the distribution
+# (review P1): a mixed run then published `empty_skipped=78` and the body's
+# "the pool is residue" gloss while one org had failed outright, which is the
+# #9361 defect (a reason that was not the measured one) one level up.
+# NOTE the denominator: the counts mix graph-level and org-level results, so
+# they are only equal to `graph_totals.attempted` when every result resolved a
+# graph map — the log/body name both figures rather than implying they match.
+# Security review: SWEEP_REASONS derives from app-controlled `status` strings —
+# scrub it like every other app-derived value published here (RUN_STATUS_SAFE,
+# STORAGE_ERR_SAFE, LAST_SWEEP_SAFE), even though today's statuses are literals.
+# Redaction runs per STATUS, before the counts are appended: `redact`'s
+# long-token rule (20+ chars of [A-Za-z0-9+/_.=-]) would otherwise swallow a
+# legitimate pair like `data_loss_candidate=1` (21 chars) as a secret shape.
+SWEEP_REASONS="$(
+  printf '%s' "$RUN" | jq -r '
+    [ (.results // {}) | to_entries[] | (.value // {}) as $res
+      | ( ($res.graphs // {}) | to_entries[]
+          | (if (.value | type) == "object" then (.value.status // "unknown") else "unknown" end) ),
+        ( select(((($res.graphs // {}) | length) == 0)) | ($res.status // "unknown") )
+    ] | .[]' 2>/dev/null \
+    | while IFS= read -r sweep_status; do redact "$sweep_status"; echo; done \
+    | sort | uniq -c | awk '{c=$1; $1=""; sub(/^ /, ""); printf "%s%s=%s", (NR>1?" ":""), $0, c}' \
+    || true
+)"
 log "sweep status: $RUN_STATUS_SAFE (took ${SWEEP_ELAPSED}s, curl rc=${CURL_RC})"
 if [ -n "$SWEEP_REASONS" ]; then
-  log "sweep per-graph outcomes: ${SWEEP_REASONS} (attempted ${GRAPHS_ATTEMPTED}, backed up ${GRAPHS_BACKED_UP})"
+  log "sweep per-graph outcomes: ${SWEEP_REASONS} (graph_totals: attempted ${GRAPHS_ATTEMPTED}, backed up ${GRAPHS_BACKED_UP})"
 fi
 
 # ── 4b. enabled-but-backing-up-nothing (#2823 shape, #2796) ─────────────────
@@ -1659,7 +1681,7 @@ case "$RUN_STATUS" in
       # writes failed), which is the whole difference between "the pool is
       # residue from when these teams had data" and "backups stopped".
       file_alert SWEEP_NO_COVERAGE "[DR] SWEEP_NO_COVERAGE — enabled but 0 teams backed up" \
-        "sweep status=${RUN_STATUS_SAFE} but the R2 pool holds ${R2_TEAM_COUNT} team prefix(es); last_sweep=${LAST_SWEEP_SAFE}. The sweep is enabled yet backed up 0 teams (#2823). Per-graph outcomes on this run: ${SWEEP_REASONS:-unreported} (attempted ${GRAPHS_ATTEMPTED}). Read those before concluding: all-empty_skipped means the enumerated graphs hold no data to write (the pool is residue), whereas error / data_loss_candidate / aborted_size_guard mean the writes were attempted and did not happen." ""
+        "sweep status=${RUN_STATUS_SAFE} but the R2 pool holds ${R2_TEAM_COUNT} team prefix(es); last_sweep=${LAST_SWEEP_SAFE}. The sweep is enabled yet backed up 0 teams (#2823). Per-graph outcomes on this run: ${SWEEP_REASONS:-unreported} (graph_totals attempted ${GRAPHS_ATTEMPTED}; a team whose graphs could not be resolved is counted by its own status, so these do not always add up). Read those before concluding: all-empty_skipped means the enumerated graphs hold no data to write (the pool is residue); error means the write was attempted and failed (the sweep or the storage is broken); data_loss_candidate / aborted_size_guard / p0_guard_failed mean a data-protection guard fired and blocked the write (look at the graph, not the storage)." ""
       NO_COVERAGE=1
     else
       log "sweep found 0 teams and the R2 pool is empty — chronic pre-beta state, no incident"
