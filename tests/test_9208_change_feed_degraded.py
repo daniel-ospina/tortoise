@@ -1047,7 +1047,8 @@ def test_a_recorded_store_identity_does_not_move_when_the_cwd_or_a_symlink_does(
     `degraded(proj)` answers `None` and `poll_events` returns `[]` over the
     lost event — the silence this module exists to break.
 
-    MUTATION that reds it: drop `functools.lru_cache` from `_canonical_path`.
+    MUTATION that reds it: drop `@functools.cache` from `_canonical_path`
+    (`functools.lru_cache(maxsize=None)` is the same decorator spelled long).
     """
     from types import SimpleNamespace
 
@@ -1160,14 +1161,23 @@ def test_the_attribution_fixture_fails_the_polluter_and_only_the_polluter():
     child_dir = (repo_root / "tests"
                  / f"_cf_attribution_{os.getpid()}_{uuid.uuid4().hex[:8]}")
     child = child_dir / "attribution_child_case.py"
-    # Strip the ambient PYTEST_* options, not just the URI (#9320 review P2):
-    # `PYTEST_ADDOPTS=--tb=no` suppresses the traceback that CARRIES the
-    # attribution message, which false-REDs a correct fixture. The repo already
-    # strips them for its own child sessions (`tests/test_uri_requiring_selection`)
-    # and pytest's own `pytester` does the same.
+    # ⛔ The child env is EXPLICIT, not inherited (#9320 round 3, P1): stripping
+    # only `TORTOISE_DB_URI` and `PYTEST_*` leaves the child with the PARENT
+    # LANE's shape, and on the docker/full lane that is `EXPECT_URI=1` with no
+    # URI — the child then dies at session start (`tests/conftest.py`:
+    # "TORTOISE_TEST_EXPECT_URI=1 but TORTOISE_DB_URI unset"), names no polluter,
+    # and reds this test on every push. `CARVE_OUT` must be ASSIGNED, not
+    # `setdefault`: the full lane exports it present-but-EMPTY, and an empty
+    # value is falsy, so `setdefault` leaves the embedded lane disarmed. The
+    # `PYTEST_*` strip is the same hazard one level down — `--tb=no` suppresses
+    # the traceback that CARRIES the attribution message (measured).
+    _LANE_VARS = ("TORTOISE_DB_URI", "TORTOISE_TEST_EXPECT_URI",
+                  "TORTOISE_TEST_CARVE_OUT")
     env = {k: v for k, v in os.environ.items()
-           if k != "TORTOISE_DB_URI" and not k.startswith("PYTEST_")}
-    env.setdefault("TORTOISE_TEST_CARVE_OUT", "1")
+           if not k.startswith("PYTEST_") and k not in _LANE_VARS}
+    # The child is the EMBEDDED carve-out lane: no URI, expected-but-absent URI
+    # assertions off, carve-out on.
+    env["TORTOISE_TEST_CARVE_OUT"] = "1"
     try:
         child_dir.mkdir(parents=True)
         child.write_text(_ATTRIBUTION_CHILD, encoding="utf-8")
@@ -1194,6 +1204,16 @@ def test_the_attribution_fixture_fails_the_polluter_and_only_the_polluter():
                 "the child pytest session did not finish in 120s — the "
                 "fixture pin cannot measure anything from a hung session "
                 f"(#9320); output so far:\n{out}{err}")
+        finally:
+            # Kill on EVERY exit, not just the timeout (#9320 round 3, P2): an
+            # exception from `communicate()` that is not `TimeoutExpired`
+            # (`pytest-timeout`'s handler, `KeyboardInterrupt`) would otherwise
+            # leave the child running past this test — and past the `rmtree` of
+            # the module it is executing, which is the orphan this test exists
+            # to avoid; the child is in its own session, so nothing else reaps it.
+            if child_proc.poll() is None:
+                os.killpg(child_proc.pid, 9)
+                child_proc.wait(timeout=30)
         returncode = child_proc.returncode
     finally:
         shutil.rmtree(child_dir, ignore_errors=True)
@@ -1203,6 +1223,11 @@ def test_the_attribution_fixture_fails_the_polluter_and_only_the_polluter():
     assert returncode != 0, (
         "the polluter must red the child session — a green child means the "
         f"fixture cleared the leak silently again:\n{output}")
+    assert ("TORTOISE_TEST_EXPECT_URI=1 but" not in output
+            and "requires TORTOISE_DB_URI" not in output), (
+        "the child died of a LANE mismatch, not of the polluter: the child env "
+        "must be the embedded carve-out shape, whatever lane the PARENT is "
+        f"running (#9320 round 3):\n{output}")
     assert "test_polluter_leaves_a_degraded_feed_behind" in summary, (
         f"the failure must NAME the polluter, not its successor:\n{output}")
     assert "left 1 degraded change feed(s) behind" in output, (
