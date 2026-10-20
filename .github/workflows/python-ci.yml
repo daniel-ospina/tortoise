@@ -469,6 +469,71 @@ jobs:
         # check. Exit 2 = could not measure, which is NOT a pass.
         run: python3 .github/scripts/check-required-set.py
 
+      - name: "Harness single source — operations/orchestrator-harness/ is a POINTER (#8246)"
+        # `operations/orchestrator-harness/` was retired to a pointer at
+        # agent-infra/scripts/orchestrator-harness/ (see its README). Measured 2026-10-19, before
+        # consolidation, the SAME eight files existed in three copies that had all diverged — this
+        # repo's was behind on five and AHEAD on `lane.sh`, and every fix had to be hand-applied in
+        # 3-4 places.
+        #
+        # ⛔ ENFORCED HERE, NOT IN A WORKFLOW OF ITS OWN (review finding — the fail-open). The guard
+        # used to live in `.github/workflows/harness-single-source.yml`, which was wrong on two
+        # counts: (1) a PATH-SCOPED workflow can never be a required context — it does not run at
+        # all on a PR that touches none of its paths, so a `check-success=` gate on it would block
+        # every unrelated merge, which is why it was in neither branch protection nor `.mergify.yml`
+        # and a red on it blocked nothing; and (2) a new workflow also moves
+        # `tools/mergify_config_guard.py`'s gate digest for no enforcement gain. Hosted in THIS job
+        # for the same reason the required-set sync above is: it is a cheap, unconditional,
+        # fail-closed assertion about repo state whose red must block a merge, and it rides the
+        # aggregate (`python-ci-gate`) that is already required. No branch-protection change, no new
+        # required context, no new workflow.
+        #
+        # The NON-VACUITY arms are not decoration: a guard nobody has seen fire is indistinguishable
+        # from a guard that cannot fire, and this one had a real fail-open (a failed `git ls-files`
+        # read as an empty directory and printed "ok"). Each arm below exits 2 today if the guard
+        # regresses to its pre-fix behaviour, so the arms are pinned from both sides.
+        run: |
+          set -euo pipefail
+          # 1) The intended state.
+          bash tools/check-harness-fork.sh operations/orchestrator-harness
+
+          # 2) A planted script is REFUSED (1).
+          printf '#!/bin/sh\n' > operations/orchestrator-harness/lane.sh
+          rc=0
+          bash tools/check-harness-fork.sh operations/orchestrator-harness || rc=$?
+          rm -f operations/orchestrator-harness/lane.sh
+          [ "$rc" -eq 1 ] || { echo "FAIL: a reappearing harness script must exit 1, got $rc"; exit 1; }
+
+          # 3) A missing pointer directory is UNKNOWN (2), not a pass.
+          rc=0
+          bash tools/check-harness-fork.sh /nonexistent-retired-path || rc=$?
+          [ "$rc" -eq 2 ] || { echo "FAIL: an uncheckable location must exit 2, got $rc"; exit 1; }
+
+          # 4) AN UNREADABLE INDEX IS UNKNOWN (2), NOT AN EMPTY DIRECTORY. This is the fail-open the
+          #    review reproduced: `git ls-files … 2>/dev/null` with the exit status ignored printed
+          #    "ok: … a pointer, not a copy" and exited 0 over a directory full of harness scripts.
+          printf 'garbage' > /tmp/harness-guard-index
+          rc=0
+          GIT_INDEX_FILE=/tmp/harness-guard-index bash tools/check-harness-fork.sh \
+            operations/orchestrator-harness || rc=$?
+          [ "$rc" -eq 2 ] || { echo "FAIL: a broken index must exit 2 (never a pass), got $rc"; exit 1; }
+
+          # 5) NON-CANONICAL SPELLINGS of the same CLEAN directory must not read as a fork. Each of
+          #    these exited 1 before the normalisation, naming the deliberately allowed
+          #    `merge-one.sh` as a fork — a false block an operator typing a trailing slash would hit.
+          for d in ./operations/orchestrator-harness operations/orchestrator-harness/ \
+                   "$PWD/operations/orchestrator-harness"; do
+            rc=0
+            bash tools/check-harness-fork.sh "$d" || rc=$?
+            [ "$rc" -eq 0 ] || { echo "FAIL: '$d' is the clean pointer but exited $rc"; exit 1; }
+          done
+
+          # 6) The pointer still names a LIVE location, so a rename of the canonical path is caught
+          #    here instead of by a confused operator. Not a content comparison — tortoise CI has no
+          #    business cloning agent-infra on every PR.
+          grep -q 'agent-infra.*scripts/orchestrator-harness' operations/orchestrator-harness/README.md \
+            || { echo "FAIL: the pointer no longer names agent-infra/scripts/orchestrator-harness/"; exit 1; }
+
   test:
     # #880: split into parallel shards (matrix). #6135: the COUNT is
     # `config/ci-surfaces.yml::fast_shards` and the shape is the selector's

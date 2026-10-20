@@ -500,7 +500,8 @@ EXIT_USAGE = 3
 # (verify/close, not coordinate) and distinct from EXIT_INCOMPLETE because
 # nothing needs re-running. Adding a code is fail-safe for a consumer that reads
 # the EXIT CODE (any non-zero stops it); the one in-repo consumer that parses the
-# VERDICT TEXT instead — operations/orchestrator-harness/refresh-candidates.sh —
+# VERDICT TEXT instead — agent-infra/scripts/orchestrator-harness/refresh-candidates.sh
+# (retired from this repo 2026-10-19; the live controller reads the canonical copy) —
 # gets an explicit LANDED arm in this same change, so the new verdict is not
 # silently defeated there (it used to fall through to "no verdict").
 EXIT_LANDED = 4

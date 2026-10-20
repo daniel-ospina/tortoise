@@ -30,6 +30,12 @@ THE CONTRACTS THIS MODULE PINS
 3. **Best-effort, never a caller's failure.** ``dispatch_pending`` never
    raises: a subscriber's dead endpoint, a TLS failure, or a graph hiccup
    becomes a receipt and a backoff, never an exception on the capture path.
+   ⚠️ **The ONE exception is a §17.1 REFUSAL of this module's own write**
+   (``DirectCacheWriteRefused``): it means the statement never landed, so
+   counting it as a delivery is a cursor that never advances — and
+   ``max_attempts`` can never trip, because the success path never calls
+   ``_mark_failed``. A refusal propagates (#9233 review P1), and
+   ``ensure_subscription_schema`` does not cache its schema flag over one either.
    Delivery never runs inside a mutation: it runs at the END of a tenant's
    dream cycle (``hosted_api`` ``_dream_worker``), from the SCHEDULED RETRY
    SWEEP (#8098 — ``hosted_api._webhook_retry_sweep_pass``), and on demand.
@@ -148,6 +154,83 @@ SIGNATURE_TOLERANCE_S = 300
 
 _SCHEMA_ATTR = "_tortoise_webhook_schema"
 
+# ── §17.1: this store's DECLARED write lane (#9233) ───────────────────────
+#
+# `docs/architecture/STORAGE-ARCHITECTURE.md` §17.1 (the §2.0 owner ruling:
+# Postgres is the record, FalkorDB a derived cache) says every cache write is a
+# projection of the journal. `#7951` enforced that at the FOLD
+# (`FalkorProjection.apply`) and at the PUBLIC raw-query lane
+# (`FalkorProjection.query`). The remaining door is the guarded write handle the
+# SDK itself uses — `proj.g.query` — and `#9124` closes it. This module writes
+# through that handle, so without a declaration the guard refuses the hosted
+# webhook surface the moment it is armed (`hosted_api.create_subscription` →
+# `_webhook_delivery.create_subscription(sdk._get_proj(), …)`).
+#
+# WHY A DECLARATION AND NOT A JOURNAL RECORD. This store is the same class as
+# the `:EpMeta` epoch (`#9123`) and the onboarding metadata (`#9121`): it is
+# GRAPH-NATIVE OPERATIONAL STATE, and NO journal record describes it. A
+# `:ContextSubscription` is a registration, and a `:DeliveryReceipt` is a record
+# of one outbound HTTP attempt — neither is a fact about the corpus, so no
+# record type could fold them (`EventRecorded` would materialise an `:Event`, the
+# `DocumentCreated` trap `#9122` documents). Journalling them would mean a new
+# record type that a replay must apply, for state whose durability requirement
+# — "the retry backoff survives a process restart" — is already met by the
+# cache and whose loss is a re-created subscription, not a lost belief.
+#
+# WHAT THIS LANE DOES **NOT** CLAIM (stated, not flattered):
+#   * It does not make these writes rebuildable. A `rebuild` does not restore
+#     subscriptions or receipts, and nothing here pretends otherwise: the
+#     recovery answer for this class is re-registration, exactly as before this
+#     declaration. This is a declaration of where the write lives, not a
+#     durability upgrade.
+#   * It does not cover a caller that reaches `proj.g` directly. The lane is
+#     per-CALL (`_run` opens it and closes it), so any statement issued outside
+#     this module's funnel is still refused — a writer that does not enter the
+#     funnel is refused, not grandfathered.
+#   * It is opened for any statement the shared classifier (`_statement_writes`)
+#     calls mutating, which is DELIBERATELY conservative, so a read it cannot
+#     prove read-only is declared too. The counterweight is the class check in
+#     `tests/test_9233_webhook_declared_lane.py`: every label the declared
+#     statements write must be `:ContextSubscription` or `:DeliveryReceipt`.
+WEBHOOK_WRITE_LANE = "webhook.delivery-store"
+
+
+def _run(proj, cypher: str, params: dict | None = None):
+    """This module's ONE gateway to the projection's write handle.
+
+    A MUTATING statement is DECLARED — `_cache_write_authorized(WEBHOOK_WRITE_LANE)` —
+    so `#9124` closing the third door (#9079) refuses the second writer without
+    refusing the product's own webhook surface. A statement the classifier can
+    PROVE read-only runs unscoped (there is nothing for the guard to refuse).
+
+    The import is function-local on purpose, the same seam
+    `onboarding.state._onboarding_write_scope` uses: this module is imported by
+    `hosted_api`, which imports the projection, and a module-level import here
+    would make the dependency direction circular.
+
+    ⛔ A REFUSAL MUST NOT BE SWALLOWED ANYWHERE ON THIS PATH. EVERY handler on
+    this path that exists for an ORDINARY failure re-raises
+    `DirectCacheWriteRefused` explicitly, ahead of its broad clause — there is
+    no count to outgrow here, so a new handler must add the arm rather than
+    find itself outside the sentence:
+    `ensure_subscription_schema` (the index DDL's "already exists"),
+    `_write_receipt` (the prune), `_mark_delivered` (the delivered receipt), and
+    in `dispatch_pending` the `_mark_delivered` cursor write, the `_mark_failed`
+    failure write, and the failure write on the undecryptable-secret branch
+    (#9233 review rounds 2-4). A refusal means the statement never reached the
+    store, so treating it as success is the silent-loss shape §17.1 exists to
+    prevent (#9233 review P1 — measured: a refused cursor write reported
+    `delivered=1` with `cursor == 0`, re-POSTing the same event on every pass
+    forever).
+    """
+    from tortoise.projection import _cache_write_authorized, _statement_writes
+
+    if _statement_writes(cypher):
+        with _cache_write_authorized(WEBHOOK_WRITE_LANE):
+            return proj.g.query(cypher, params=params)
+    return proj.g.query(cypher, params=params)
+
+
 #: ``signature`` is deliberately NOT in this list — it is only ever read to
 #: sign a delivery and must never reach a response.
 _PUBLIC_SUB_FIELDS = (
@@ -239,7 +322,17 @@ def _now() -> datetime:
 # ── Schema ────────────────────────────────────────────────────────────────
 
 def ensure_subscription_schema(proj) -> None:
-    """Create the exact-match indexes (idempotent, non-fatal; ``event_store`` pattern)."""
+    """Create the exact-match indexes (idempotent, non-fatal; ``event_store`` pattern).
+
+    ⛔ A §17.1 REFUSAL IS NOT "the index already exists". The broad handler below
+    exists for a store that has the index (`CREATE INDEX` is not idempotent on
+    every engine build); a `DirectCacheWriteRefused` means the statement never
+    reached the store at all, so swallowing it would set `_SCHEMA_ATTR` and leave
+    the graph permanently unindexed behind a DEBUG line — the silent-loss shape
+    this module's declaration exists to prevent (#9233 review P1).
+    """
+    from tortoise.projection import DirectCacheWriteRefused
+
     if getattr(proj, _SCHEMA_ATTR, False):
         return
     for stmt in (
@@ -248,7 +341,11 @@ def ensure_subscription_schema(proj) -> None:
         "CREATE INDEX FOR (r:DeliveryReceipt) ON (r.receipt_id)",
     ):
         try:
-            proj.g.query(stmt)
+            _run(proj, stmt)
+        except DirectCacheWriteRefused:
+            # not "already exists": the write was REFUSED, so the schema flag
+            # must not be set and the caller must not be told it succeeded.
+            raise
         except Exception:  # noqa: BLE001, RUF100
             logger.debug("webhook_delivery: index may already exist: %s", stmt)
     setattr(proj, _SCHEMA_ATTR, True)
@@ -303,7 +400,7 @@ def create_subscription(proj, *, url: str, types=None, description: str = "",
     secret = "whsec_" + ulid().replace("-", "")[:32]
     sub_id = "sub_" + ulid()
     now_dt = now or _now()
-    proj.g.query(
+    _run(proj,
         "CREATE (s:ContextSubscription {"
         "sub_id:$sub_id, url:$url, secret:$secret, types:$types, "
         "description:$description, created_at:$created_at, "
@@ -322,7 +419,7 @@ def create_subscription(proj, *, url: str, types=None, description: str = "",
 
 
 def get_subscription(proj, sub_id: str) -> dict | None:
-    rows = proj.g.query(
+    rows = _run(proj,
         "MATCH (s:ContextSubscription {sub_id:$id}) RETURN properties(s)",
         params={"id": sub_id},
     ).result_set
@@ -332,7 +429,7 @@ def get_subscription(proj, sub_id: str) -> dict | None:
 
 
 def list_subscriptions(proj) -> list[dict]:
-    rows = proj.g.query(
+    rows = _run(proj,
         "MATCH (s:ContextSubscription) RETURN properties(s) "
         "ORDER BY s.created_at ASC"
     ).result_set
@@ -341,7 +438,7 @@ def list_subscriptions(proj) -> list[dict]:
 
 def count_subscriptions(proj, *, include_disabled: bool = False) -> int:
     where = "" if include_disabled else "WHERE s.disabled_at IS NULL "
-    rows = proj.g.query(
+    rows = _run(proj,
         f"MATCH (s:ContextSubscription) {where}RETURN count(s)"
     ).result_set
     return int(rows[0][0]) if rows and rows[0][0] is not None else 0
@@ -349,7 +446,7 @@ def count_subscriptions(proj, *, include_disabled: bool = False) -> int:
 
 def delete_subscription(proj, sub_id: str) -> bool:
     """Delete a subscription and its receipts. Returns False if it never existed."""
-    rows = proj.g.query(
+    rows = _run(proj,
         "MATCH (s:ContextSubscription {sub_id:$id}) RETURN count(s)",
         params={"id": sub_id},
     ).result_set
@@ -358,11 +455,11 @@ def delete_subscription(proj, sub_id: str) -> bool:
     # Two statements, not one OPTIONAL MATCH: an OPTIONAL MATCH fans the row out
     # per receipt, so a `count(s)` RETURN would report the RECEIPT count and a
     # missing subscription could read as a hit once receipts existed.
-    proj.g.query(
+    _run(proj,
         "MATCH (s:ContextSubscription {sub_id:$id}) DETACH DELETE s",
         params={"id": sub_id},
     )
-    proj.g.query(
+    _run(proj,
         "MATCH (r:DeliveryReceipt {sub_id:$id}) DETACH DELETE r",
         params={"id": sub_id},
     )
@@ -372,7 +469,7 @@ def delete_subscription(proj, sub_id: str) -> bool:
 def read_receipts(proj, sub_id: str, limit: int = 50) -> list[dict]:
     """Delivery attempts for a subscription, NEWEST first."""
     limit = max(1, min(int(limit), 200))
-    rows = proj.g.query(
+    rows = _run(proj,
         "MATCH (r:DeliveryReceipt {sub_id:$id}) RETURN properties(r) "
         "ORDER BY r.ts DESC, r.receipt_id DESC LIMIT $limit",
         params={"id": sub_id, "limit": limit},
@@ -384,7 +481,7 @@ def _write_receipt(proj, *, sub_id: str, event: dict, attempt: int, status: str,
                    http_status: int | None, error: str | None,
                    now: datetime, duration_ms: int) -> None:
     ensure_subscription_schema(proj)
-    proj.g.query(
+    _run(proj,
         "CREATE (r:DeliveryReceipt {receipt_id:$rid, sub_id:$sid, "
         "event_id:$eid, seq:$seq, attempt:$attempt, status:$status, "
         "http_status:$http, error:$error, ts:$ts, duration_ms:$ms})",
@@ -396,13 +493,20 @@ def _write_receipt(proj, *, sub_id: str, event: dict, attempt: int, status: str,
         },
     )
     # Prune: keep the newest MAX_RECEIPTS for this subscription.
+    from tortoise.projection import DirectCacheWriteRefused
+
     try:
-        proj.g.query(
+        _run(proj,
             "MATCH (r:DeliveryReceipt {sub_id:$sid}) "
             "WITH r ORDER BY r.ts DESC, r.receipt_id DESC SKIP $keep "
             "DETACH DELETE r",
             params={"sid": sub_id, "keep": MAX_RECEIPTS},
         )
+    except DirectCacheWriteRefused:
+        # Not "the prune is optional": a REFUSAL means the statement never
+        # reached the store, so it propagates like every other refusal on this
+        # path (see `_run`). The broad clause is for an engine that cannot prune.
+        raise
     except Exception:  # noqa: BLE001, RUF100
         logger.debug("webhook_delivery: receipt prune failed for %s", sub_id)
 
@@ -654,9 +758,11 @@ class WebhookTransport:
 def _status_code(value) -> int | None:
     """Coerce a transport's status to an int, or ``None`` when unusable.
 
-    Defensive on purpose: ``dispatch_pending`` promises never to raise, and a
-    transport (or a subclass) that returns a non-numeric status would otherwise
-    raise INSIDE the dispatch loop and escape to the dream worker as a failure.
+    Defensive on purpose: ``dispatch_pending`` never raises for a subscriber or
+    transport failure (a §17.1 refusal of its own write is the ONE exception),
+    and a transport (or a subclass) that returns a non-numeric status would
+    otherwise raise INSIDE the dispatch loop and escape to the dream worker as a
+    failure.
     """
     try:
         return int(value)
@@ -965,7 +1071,7 @@ def _due_subscriptions(proj, now: datetime,
     """
     if head is None:
         head = event_head_seq(proj.g)
-    rows = proj.g.query(
+    rows = _run(proj,
         "MATCH (s:ContextSubscription) "
         f"WHERE {_DUE_PREDICATE} AND {_BEHIND_PREDICATE} "
         "RETURN properties(s) ORDER BY s.created_at ASC",
@@ -976,17 +1082,37 @@ def _due_subscriptions(proj, now: datetime,
 
 def _mark_delivered(proj, sub: dict, event: dict, http_status: int | None,
                     now: datetime, duration_ms: int) -> None:
-    proj.g.query(
+    """Advance the cursor (the at-least-once COMMIT POINT), then record a receipt.
+
+    ⛔ THE TWO WRITES ARE NOT ONE STEP. The cursor moving IS the commit — a crash
+    after it must never re-deliver — so a cursor failure propagates (the caller
+    reports the event as FAILED and retries it first). The RECEIPT is the audit
+    of an already-committed delivery: a receipt failure is logged and does not
+    un-deliver the event, but a REFUSAL still propagates (it means the statement
+    never landed, not that the store hiccuped). Conflating the two reported a
+    committed delivery as failed and stalled the rest of the batch (#9233 review
+    round 2).
+    """
+    from tortoise.projection import DirectCacheWriteRefused
+
+    _run(proj,
         "MATCH (s:ContextSubscription {sub_id:$id}) SET s.cursor=$cursor, "
         "s.attempts=0, s.next_attempt_at=NULL, s.delivered=s.delivered+1, "
         "s.last_error=NULL, s.last_delivery_at=$ts",
         params={"id": sub["sub_id"], "cursor": int(event.get("seq") or 0),
                 "ts": _iso(now)},
     )
-    _write_receipt(proj, sub_id=sub["sub_id"], event=event,
-                   attempt=int(sub.get("attempts") or 0) + 1, status="delivered",
-                   http_status=http_status, error=None, now=now,
-                   duration_ms=duration_ms)
+    try:
+        _write_receipt(proj, sub_id=sub["sub_id"], event=event,
+                       attempt=int(sub.get("attempts") or 0) + 1,
+                       status="delivered", http_status=http_status, error=None,
+                       now=now, duration_ms=duration_ms)
+    except DirectCacheWriteRefused:
+        raise
+    except Exception as e:  # noqa: BLE001, RUF100
+        logger.warning(
+            "webhook_delivery: delivered receipt not recorded for %s: %s",
+            sub.get("sub_id"), redact_error(e))
 
 
 def _mark_failed(proj, sub: dict, event: dict, http_status: int | None,
@@ -1007,7 +1133,7 @@ def _mark_failed(proj, sub: dict, event: dict, http_status: int | None,
     # `last_delivery_at` is deliberately NOT touched here: it records the last
     # SUCCESSFUL delivery (the read path reports it as such). A failed attempt
     # is recorded on the receipt, where the status and the error live.
-    proj.g.query(
+    _run(proj,
         "MATCH (s:ContextSubscription {sub_id:$id}) SET s.attempts=$attempt, "
         "s.next_attempt_at=$next, s.failed=s.failed+1, s.last_error=$err"
         + (", " + disable_clause if disable_clause else ""),
@@ -1026,7 +1152,12 @@ def _mark_failed(proj, sub: dict, event: dict, http_status: int | None,
 
 def dispatch_pending(proj, *, transport=None, now: datetime | None = None,
                      batch: int = DEFAULT_BATCH) -> dict:
-    """Push pending events to every due subscription. NEVER raises.
+    """Push pending events to every due subscription. Best-effort: see the ONE exception.
+
+    Never raises for a subscriber, transport or graph failure — but a §17.1
+    REFUSAL of this module's own write (`DirectCacheWriteRefused`) DOES
+    propagate: it means the statement never landed, so counting it as a delivery
+    is a cursor that never advances (#9233, contract 3 in the module docstring).
 
     Three triggers, one predicate (#8098): the end of a tenant's dream cycle
     (``hosted_api._dream_worker`` — the cadence for NEW events), the SCHEDULED
@@ -1043,6 +1174,8 @@ def dispatch_pending(proj, *, transport=None, now: datetime | None = None,
                "failed": 0, "disabled": 0, "more_pending": 0}
     if not dispatch_enabled():
         return summary
+    from tortoise.projection import DirectCacheWriteRefused
+
     summary["enabled"] = True
     transport = transport or WebhookTransport()
     now_dt = now or _now()
@@ -1086,9 +1219,22 @@ def dispatch_pending(proj, *, transport=None, now: datetime | None = None,
         except Exception as e:
             logger.error("webhook_delivery: cannot decrypt secret for %s: %s",
                          sub.get("sub_id"), redact_error(e))
-            _mark_failed(proj, sub, events[0], None,
-                         "subscription secret unreadable (encryption key "
-                         "rotated or unset)", now_dt, 0)
+            # The failure write is contained here for the SAME reason as the
+            # rejection branch below: the contract is "never raises for a
+            # subscriber, transport or graph failure" (contract 3), and an
+            # escape from the `for sub in subs:` loop would abort delivery for
+            # every REMAINING subscription in the pass. A refusal is the one
+            # exception, so it propagates (#9233 review round 4).
+            try:
+                _mark_failed(proj, sub, events[0], None,
+                             "subscription secret unreadable (encryption key "
+                             "rotated or unset)", now_dt, 0)
+            except DirectCacheWriteRefused:
+                raise
+            except Exception as write_err:  # noqa: BLE001, RUF100
+                logger.warning(
+                    "webhook_delivery: failure write failed for %s: %s",
+                    sub.get("sub_id"), redact_error(write_err))
             continue
         for event in events:
             started = time.monotonic()
@@ -1113,9 +1259,23 @@ def dispatch_pending(proj, *, transport=None, now: datetime | None = None,
             if error is None and 200 <= http_status < 300:
                 try:
                     _mark_delivered(proj, sub, event, http_status, now_dt, duration_ms)
+                except DirectCacheWriteRefused:
+                    # A §17.1 refusal is not a subscriber failure: it means this
+                    # module's own write never landed, so it must be loud rather
+                    # than counted (#9233 review P1).
+                    raise
                 except Exception as e:
+                    # `_mark_delivered` advances the cursor FIRST and only lets a
+                    # CURSOR failure escape (a receipt failure is logged there).
+                    # At-least-once says re-deliver, so the event must not be
+                    # counted as delivered: reporting `delivered` with the cursor
+                    # unmoved is the infinite re-POST this counter exists to make
+                    # visible, and `max_attempts` can never trip because the
+                    # success path never calls `_mark_failed`.
                     logger.warning("webhook_delivery: cursor write failed for %s: %s",
                                    sub.get("sub_id"), redact_error(e))
+                    summary["failed"] += 1
+                    break
                 summary["delivered"] += 1
                 continue
             summary["failed"] += 1
@@ -1123,6 +1283,8 @@ def dispatch_pending(proj, *, transport=None, now: datetime | None = None,
                 if _mark_failed(proj, sub, event, http_status, error, now_dt,
                                 duration_ms):
                     summary["disabled"] += 1
+            except DirectCacheWriteRefused:
+                raise
             except Exception as e:
                 logger.warning("webhook_delivery: failure write failed for %s: %s",
                                sub.get("sub_id"), redact_error(e))

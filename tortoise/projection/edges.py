@@ -314,6 +314,17 @@ _VALID_EDGE_PREDICATES = frozenset({
 })
 
 
+#: The predicates `create_about_edge` accepts — the about* family, hoisted out
+#: of the verb so the §17.1 lane's write set (#9195) can NAME it instead of
+#: re-spelling the literal in the suite. Deliberately NOT the same constant as
+#: `_ABOUT_REPLAY_RELS` above: that one describes what an `EventRecorded`
+#: record may carry, and coupling the two would let a replay-set edit change
+#: which edge types the verb accepts.
+_VALID_ABOUT_EDGE_PREDICATES = frozenset({
+    'aboutSubject', 'aboutObject', 'aboutEvent', 'aboutPoint', 'aboutDocument',
+})
+
+
 # Every structural predicate a WRITER accepts — the union of the three
 # structural write surfaces this module owns:
 #   * create_edge            -> `_VALID_EDGE_PREDICATES`
@@ -327,6 +338,20 @@ _VALID_EDGE_PREDICATES = frozenset({
 # predicate added to any single writer moves the answer with it.
 STRUCTURAL_WRITE_PREDICATES = frozenset(
     _VALID_EDGE_PREDICATES | set(STRUCTURAL_REL_LABELS)
+)
+
+
+#: Every predicate the §17.1 STRUCTURAL-EDGE lane (#9195) can WRITE — the union
+#: of the two declared mints' allow-lists (`create_edge` →
+#: `_VALID_EDGE_PREDICATES`, `create_about_edge` → `_VALID_ABOUT_EDGE_PREDICATES`).
+#: The suite partitions THIS set against `structural_edge_carrier`, so a
+#: predicate accepted by either mint and classified by neither half is a red
+#: test rather than a silent widening (`aboutPoint` is the one member the
+#: generic verb does not accept — #9195 review P2-1).
+#: ⚠️ Neither verb reads this constant to VALIDATE input: it is the lane's
+#: surface for auditors, not a shared allow-list (widening it widens nothing).
+STRUCTURAL_EDGE_LANE_PREDICATES = frozenset(
+    _VALID_EDGE_PREDICATES | _VALID_ABOUT_EDGE_PREDICATES
 )
 
 
@@ -627,6 +652,178 @@ def source_change_notices(g, source_refs, current_versions: dict[str, str] | Non
                 "currentVersion": current,
             })
     return notices
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# §17.1 (#9195) — the STRUCTURAL-EDGE write lane is DECLARED.
+#
+# `docs/architecture/STORAGE-ARCHITECTURE.md` §17.1 (from the §2.0 owner
+# ruling: Postgres is the record, FalkorDB a derived cache) forbids a SECOND
+# writer of the cache. `#7951` enforced that at the fold (`FalkorProjection.
+# apply`) and at the public raw-query lane (`FalkorProjection.query`); `#9079`
+# decomposes closing the third door — the guarded write handle the SDK itself
+# uses, `proj.g.query` — into the writers that legitimately reach it FIRST, and
+# `#9124` is the guard that lands last. This is the FOURTH and last declaration
+# child (`#9123` the `:EpMeta` epoch, `#9121` onboarding metadata, `#9122` the
+# raw `:Event` writers) — ⚠️ "last declaration child" is NOT "#9124 may arm":
+# the about NAME lane and the provenance lane listed under WHAT THIS LANE DOES
+# NOT COVER are still unscoped, so `#9124` must census (or scope) them first.
+#
+# WHAT THE WRITES ARE. `create_edge` and `create_about_edge` each issue exactly
+# ONE mutating statement,
+#
+#   MATCH (s:L {k:$sv}) MATCH (t:M {k:$tv}) MERGE (s)-[:<predicate>]->(t)
+#
+# and `create_edge`'s three typed wrappers (`create_owned_by`,
+# `create_managed_by`, `create_authored_by`) are `return self.create_edge(...)` —
+# so the lane is two mints over one statement shape. The write mints NO node
+# (`MATCH` on both endpoints, never `MERGE`: an absent endpoint returns `False`
+# and writes nothing), NO property (no `SET` on the relationship, no value
+# parameter — the verbs take none, see
+# `docs/architecture/STORAGE-ARCHITECTURE.md` §9.6) and NO identity. Its whole
+# content is `(source, predicate, target)` between two entities that already
+# exist, so the write adds no state of its own: it is a DERIVATION.
+#
+# WHY DECLARED AND NOT JOURNALLED, PRECISELY. Two shapes would have made this
+# write honest without a declaration, and the evidence rejects BOTH:
+#   * `_live_write_scope` — its contract is "journal appended first, then the
+#     fold", and NOTHING is appended on this path: `sdk.create_edge` →
+#     `proj.create_edge` emits no record, so the scope would state a false
+#     ordering.
+#   * journalling — the replay half ALREADY EXISTS and this is NOT a request for
+#     a new resolver: `DirectEdgeCreated` is a flat `{src, tgt, edge_type,
+#     direction}` record whose pass-2b fold re-creates exactly this edge shape,
+#     and MEASURED on this head, emitting that record and running `rebuild_all`
+#     brings `ownedBy`, `dependsOn`, `references` and `memberOf` edges back.
+#     What is missing is the EMISSION: this is a PROJECTION method with no
+#     journal handle, so the gap is on the producer side (an SDK-level edge door
+#     that emits the record) — a bigger change than a declaration child, and it
+#     belongs to the record-store epic (`#7879`) with the write-class row carried
+#     on `#9079`'s census.
+# And the ORDERING is settled the other way round regardless: the declaration
+# lands BEFORE the guard, because a guard that refuses the product's own edge
+# mints is not a guard, it is a regression (measured on `#9079`'s lane: arming it
+# refused these writers; the seed path's REST caller answers 500 — see
+# `selfhost_api.py::POST /onboarding/seed` and
+# `hosted_api.py::POST /v1/onboarding/seed`).
+#
+# ⛔ WHAT THIS LANE CLAIMS, PER RELATION — not one global claim, because one
+# global claim would be false. ``structural_edge_carrier`` answers it from the
+# ONE set the replay engines read, and both halves are MEASURED (an embedded
+# journal-backed SDK, two endpoints, `rebuild_all` from the journal):
+#   * **snapshot-carried** — `DERIVABLE_STRUCTURAL_RELS` (`aboutSubject`,
+#     `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDocument`,
+#     `extractedFrom`): the endpoint Point's immutable snapshot
+#     (`aboutEntities` / the `extractedFrom` prop, resurrected by
+#     `entities._upsert_point_edges` at replay) is a carrier, so an edge minted
+#     HERE is resurrected when that snapshot already carries the same link —
+#     which is how the sanctioned writers write it (`create_point(aboutSubject=
+#     …)`, `extractedFrom=…`) — and NOT when it is a bare assertion on a node
+#     whose record never held it.
+#   * **no carrier emitted by this lane** — every other predicate in
+#     `STRUCTURAL_EDGE_LANE_PREDICATES` (`related`, `dependsOn`, `ownedBy`, `managedBy`,
+#     `authoredBy`, `memberOf`, `hasMember`, `holdsRole`, `reportsTo`,
+#     `participatesIn`, `hasPart`, `performs`, `produces`, `uses`,
+#     `wasDerivedFrom`, `references`, `aboutSource`, `aboutAction`). MEASURED at
+#     this head: mint them live and `rebuild_all` reports `edges: 0` — they are
+#     GONE, whether minted bare or carried by an `ownedBy`/`managedBy`/
+#     `authoredBy` node property, because nothing emitted a record for them.
+#     **This lane does NOT claim durability for them.** It discloses the gap so
+#     the next reader meets it here instead of discovering it, and so that
+#     `#9124`'s census has the class enumerated rather than assumed: the
+#     missing half is the EMISSION from the edge doors (the record type, the
+#     fold and the resolver exist — `DirectEdgeCreated`), tracked on `#9079`'s
+#     census (the folded write-surface map of `#2296`, whose per-write-class
+#     obligation (`#7951`) this row discharges only for the LIVE side).
+#     Declaring this lane does not create that gap and does not bless it — the
+#     gap exists on `origin/main` today, with no declaration anywhere (measured
+#     the same way).
+#
+# ⛔ WHAT THIS LANE DOES NOT COVER — stated, so a reader does not infer it from
+# a green suite. `_EdgeHandlers` holds OTHER edge-minting verbs; they are not
+# this lane and deliberately keep their own shape (each reason below is
+# MEASURED at this head, not inferred from a name):
+#   * `_create_about_edges` / `wire_about_link` — the NAME-resolved `about*`
+#     path: the caller resolves a name through the Subject→Object→Event→Source→
+#     Point cascade and the resolved decision is JOURNALLED (`resolve_about_link`,
+#     `EventRecorded`'s replay links, #8398), so their write belongs to their
+#     journalling door's scope — the live-scoped shape, not this one.
+#     `wire_about_link` also MINTS a `:Subject` stub (a node), so an edge lane
+#     must not authorize it. ⚠️ They are NOT refusal-safe today either: the
+#     about links are written AFTER `_live_write_scope("create_entity")` closes
+#     (`sdk.py`'s about path), so `#9124` would refuse them — measured. That is a
+#     residual this lane discloses and does NOT absorb; `#9124` must census it.
+#   * `_link_source` / `link_source_to_entity` / `link_source_to_event` /
+#     `link_source_to_legacy_event` — the PROVENANCE lane: they `MERGE` a
+#     `:Source` NODE and stamp `r.sourceVersion` (a `:Source` mint under an edge
+#     lane would be the `#9068` shape). ⚠️ They are NOT refusal-safe today
+#     either, exactly like the about lane above: the write funnels through
+#     `self.g.query` in `_link_source` with no scope in flight, and its live
+#     callers — `create_entity`'s `extractedFrom` leg and
+#     `link_source_to_entity` (reached from the REST surface) — issue it AFTER
+#     their enclosing scope closes, so `#9124` would refuse them. Stated as a
+#     residual this lane does NOT absorb: `#9124` must census it.
+#   * `_sync_tags` — `TAGGED` edges plus a `:Tag` MERGE, written from
+#     `create_point`'s own declared scope.
+#   * `_create_edges` / `replay_about_links` — the FOLD: they run inside
+#     `_live_write_scope` / `_replay_write_scope` already.
+# `tests/test_9079_edge_lane_declared.py::test_every_edge_minting_verb_is_
+# declared_or_stated` enumerates those verbs from this module's own AST, so a
+# NEW one fails the suite instead of appearing undeclared.
+#
+# ⛔ AND `references` KEEPS ITS OWN SHAPE. The generic verb writes that edge
+# BARE: no `sourceVersion` anchor, and a later `link_source_to_*` `MERGE`
+# cannot repair it because its stamp is `ON CREATE`-only (`#5213` option 3;
+# §9.6; pinned by `tests/test_references_boundary_5213.py`). This lane does not
+# route it through the anchor and does not claim the anchor for it.
+#
+# ⚠️ THE DECLARATION IS NOT A BYPASS. It is a per-call `with` block — no
+# instance attribute, constructor argument or env var can set it — and it wraps
+# the MUTATING statement only, so a read on this path is not swept into a lane
+# it does not belong to, and a write that does not go through `create_edge`
+# still fails closed.
+# ═══════════════════════════════════════════════════════════════════════════
+
+#: The declared lane name. A refusal never prints it (a refusal fires when NO
+#: reason is in flight), so this value is what a test reads back AT THE WRITE
+#: and what the projection's declaration ledger cites — stable on purpose, so a
+#: reader can grep it.
+STRUCTURAL_EDGE_WRITE_LANE = "structural-edge.derived"
+
+
+def structural_edge_carrier(rel: str) -> str | None:
+    """The replay carrier THIS LANE provides for an edge of relation ``rel``.
+
+    ``"endpoint-snapshot"`` — the endpoint Point's own record is the carrier
+    (`DERIVABLE_STRUCTURAL_RELS`, resurrected by
+    `entities._upsert_point_edges`), so an edge the lane mints survives a
+    rebuild when that record already carries the same link.
+
+    ``None`` — **this verb emits no record and the endpoint snapshot carries no
+    such link, so a rebuild drops the edge.** That is NOT a claim that no replay
+    carrier can exist: the ENGINE has one (`DirectEdgeCreated` + its pass-2b
+    fold), and emitting that record restores these edges (measured). The gap is
+    the EMISSION — this projection verb has no journal handle — so ``None``
+    reads "nothing carried from here", never "nothing could carry it".
+
+    DERIVED from ``DERIVABLE_STRUCTURAL_RELS`` — the one set the replay engines
+    read — rather than a second hand-maintained table, so adding a rel to that
+    set moves this answer with it and the lane's per-relation claim cannot
+    drift from replay's actual behaviour.
+    """
+    return "endpoint-snapshot" if rel in DERIVABLE_STRUCTURAL_RELS else None
+
+
+def _structural_edge_write_scope():
+    """The §17.1 declaration for the structural-edge lane's ONE statement.
+
+    Lazy import on purpose: `tortoise.projection` imports THIS module, so a
+    module-level import would be circular (the same reason `state.py`'s
+    ``_onboarding_write_scope`` imports late, #9121).
+    """
+    from tortoise.projection import _cache_write_authorized
+
+    return _cache_write_authorized(STRUCTURAL_EDGE_WRITE_LANE)
 
 
 class _EdgeHandlers:
@@ -1266,9 +1463,11 @@ class _EdgeHandlers:
         
         Returns True if edge was created.
         """
-        valid = {'aboutSubject', 'aboutObject', 'aboutEvent', 'aboutPoint', 'aboutDocument'}
+        valid = _VALID_ABOUT_EDGE_PREDICATES
         if edge_type not in valid:
-            raise ValueError(f"Invalid about edge type: {edge_type}. Must be one of {valid}")
+            raise ValueError(
+                f"Invalid about edge type: {edge_type}. Must be one of "
+                f"{sorted(valid)}")
         
         # Resolve endpoints via index-backed labeled lookups (issue #327).
         # Source predicate is id-only; target is id OR eventId (legacy OR-set),
@@ -1282,17 +1481,22 @@ class _EdgeHandlers:
         if not sources or not targets:
             return False
         created = False
-        for s in sources:
-            for t in targets:
-                r = self.g.query(
-                    f"MATCH (s:{s['label']} {{{s['key']}:$sv}}) "
-                    f"MATCH (t:{t['label']} {{{t['key']}:$tv}}) "
-                    f"MERGE (s)-[:{edge_type}]->(t) "
-                    f"RETURN count(*) > 0",
-                    params={"sv": s["value"], "tv": t["value"]},
-                )
-                if r.result_set and r.result_set[0][0]:
-                    created = True
+        # §17.1 (#9195): the about-lane's ONE mutating statement, DECLARED. Both
+        # endpoints were just resolved by `MATCH` above, so this writes a bare
+        # relationship and nothing else — the same shape and the same claim as
+        # `create_edge`; read the block above `STRUCTURAL_EDGE_WRITE_LANE`.
+        with _structural_edge_write_scope():
+            for s in sources:
+                for t in targets:
+                    r = self.g.query(
+                        f"MATCH (s:{s['label']} {{{s['key']}:$sv}}) "
+                        f"MATCH (t:{t['label']} {{{t['key']}:$tv}}) "
+                        f"MERGE (s)-[:{edge_type}]->(t) "
+                        f"RETURN count(*) > 0",
+                        params={"sv": s["value"], "tv": t["value"]},
+                    )
+                    if r.result_set and r.result_set[0][0]:
+                        created = True
         return created
 
     def replay_about_links(self, payload: dict, hard_delete_seqs=None,
@@ -1989,16 +2193,22 @@ class _EdgeHandlers:
                         raise ValueError(
                             f"Circular ownership: {target_id} already owned by {source_id}")
         created = False
-        for s in sources:
-            for t in targets:
-                r = self.g.query(
-                    f"MATCH (s:{s['label']} {{{s['key']}:$sv}}) "
-                    f"MATCH (t:{t['label']} {{{t['key']}:$tv}}) "
-                    f"MERGE (s)-[:{predicate}]->(t) RETURN count(*) > 0",
-                    params={"sv": s["value"], "tv": t["value"]},
-                )
-                if r.result_set and r.result_set[0][0]:
-                    created = True
+        # §17.1 (#9195): the lane's ONE mutating statement, DECLARED. Both
+        # endpoints were just resolved by `MATCH` above, so this writes a bare
+        # relationship and nothing else — read the block above
+        # `STRUCTURAL_EDGE_WRITE_LANE` for what the lane claims per relation and
+        # for the carrier gap it discloses rather than blesses.
+        with _structural_edge_write_scope():
+            for s in sources:
+                for t in targets:
+                    r = self.g.query(
+                        f"MATCH (s:{s['label']} {{{s['key']}:$sv}}) "
+                        f"MATCH (t:{t['label']} {{{t['key']}:$tv}}) "
+                        f"MERGE (s)-[:{predicate}]->(t) RETURN count(*) > 0",
+                        params={"sv": s["value"], "tv": t["value"]},
+                    )
+                    if r.result_set and r.result_set[0][0]:
+                        created = True
         return created
 
     def create_owned_by(self, entity_id: str, subject_id: str) -> bool:
