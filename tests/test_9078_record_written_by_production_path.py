@@ -52,6 +52,7 @@ WHAT IS NOT HERE, NAMED SO THE ABSENCE IS VISIBLE.
 from __future__ import annotations
 
 import ast
+import asyncio
 import fnmatch
 import importlib.util
 import json
@@ -2198,3 +2199,68 @@ def test_the_seam_refuses_a_malformed_carried_tenant(monkeypatch):
     after = dict(monitoring.record_write_failure_counts()).get("no_tenant", 0)
     assert after - before == len(malformed), (
         f"a malformed carried tenant was not counted as a refusal: {before} → {after}")
+
+
+def test_the_dream_drain_carries_the_enqueueing_requests_tenant(monkeypatch):
+    """The REST lane's SECOND writer: the dream drain, which opens its own SDK.
+
+    `_enqueue_dream` is called by the point-write handler with the request's
+    resolved graph, and the drain (`_open_sdk`) opens that graph by NAME — a
+    namespace is not a tenant, so without the carry every record the pass emits
+    (`ConfidenceChanged`) is refused `no_tenant` on the very graph whose
+    credential named it, while the request's own writes are filed correctly.
+    Measured as review finding N1; this pins both halves: the enqueue records
+    the answer against its key, and the drain's SDK receives it.
+    """
+    from tortoise import hosted_api
+
+    class _FakeSDK:
+        def __init__(self):
+            self.bound: list[tuple[str, str]] = []
+
+        def _bind_record_tenant(self, org_id, graph_id):
+            self.bound.append((org_id, graph_id))
+
+    graph_ns = "org_org-a_g_dream"
+    key = hosted_api._dream_key("org-a", graph_ns)
+    default_key = hosted_api._dream_key("org-a", None)
+
+    async def _drive() -> None:
+        try:
+            hosted_api._enqueue_dream("org-a", ["root-1"],
+                                     graph_namespace=graph_ns,
+                                     record_tenant=("org-a", "g_dream"))
+            assert hosted_api._DREAM_RECORD_TENANTS.get(key) == (
+                "org-a", "g_dream")
+
+            sdk = _FakeSDK()
+            hosted_api._bind_dream_record_tenant(sdk, key)
+            assert sdk.bound == [("org-a", "g_dream")], sdk.bound
+
+            # …AND that the drain actually calls it. The helper passing on its
+            # own is worth nothing if `_open_sdk` never asks: this is the wire
+            # between the enqueue's answer and the SDK that emits the records.
+            import inspect
+            assert "_bind_dream_record_tenant(sdk, key)" in inspect.getsource(
+                hosted_api._dream_worker), (
+                "the dream drain opens an SDK that never receives the tenant "
+                "the enqueueing request named — every pass-emitted record is "
+                "refused `no_tenant` on an armed lane (review finding N1)")
+
+            # An org-wide/session enqueue names NO graph, so nothing is carried
+            # and the drain's writes stay refused `no_tenant` (the default-graph
+            # decision — never a guess).
+            hosted_api._enqueue_dream("org-a", ["root-2"], record_tenant=None)
+            assert default_key not in hosted_api._DREAM_RECORD_TENANTS
+            default_sdk = _FakeSDK()
+            hosted_api._bind_dream_record_tenant(default_sdk, default_key)
+            assert default_sdk.bound == [], default_sdk.bound
+        finally:
+            for k in (key, default_key):
+                hosted_api._DREAM_QUEUES.pop(k, None)
+                hosted_api._DREAM_RECORD_TENANTS.pop(k, None)
+                task = hosted_api._DREAM_TASKS.pop(k, None)
+                if task is not None:
+                    task.cancel()
+
+    asyncio.run(_drive())

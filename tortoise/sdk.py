@@ -7323,8 +7323,10 @@ class TortoiseSDK:
         the hosted REST lane resolves the tenant inside `_data_sdk`, which the
         capture path submits to `_graph_offload` (a scope entered there dies
         with the copy), and setting it loop-side would mean setting it with no
-        exit — one unreleased value that every detached task and every other
-        write door in that context inherits. Carrying it on the SDK confines it
+        exit (the `_data_sdk` auth seam is a plain dependency; a
+        `yield`-dependency could hold a `with`, and none does) — one unreleased
+        value that every detached task and every other write door in that
+        context inherits. Carrying it on the SDK confines it
         to the write it belongs to. (Propagation is NOT the reason: a contextvar
         set on the loop is copied into `asyncio.to_thread` / `_graph_offload`.)
 

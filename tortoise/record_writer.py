@@ -144,8 +144,8 @@ contextvar set on the loop IS inherited by `asyncio.to_thread` and by
 reach the worker. But that lane resolves the tenant inside `_data_sdk`, which
 for the capture path is itself submitted to `_graph_offload` — a scope entered
 there is discarded with the copy — and to install it loop-side instead it would
-have to be SET WITHOUT A `with`, because REST auth is a FastAPI dependency and
-nothing would exit it at request end. Unreleased ambient state in a request
+have to be SET WITHOUT A `with`, because the REST auth seam is a plain FastAPI
+dependency and none exits one today (a `yield`-dependency could — nothing does). Unreleased ambient state in a request
 context is inherited by every task spawned from it (`_enqueue_dream`, the
 indexing jobs) and by every other write door, and a stale one is tenant A's
 rows under tenant B — the exact hazard decision 6 exists to remove. So that
@@ -472,9 +472,10 @@ def use_record_tenant(org_id: str, graph_id: str):
     ⚠️ Not every lane can hold a `with` around its work: the hosted REST lane
     resolves the tenant inside ``hosted_api._data_sdk``, which the capture path
     submits to ``_graph_offload`` — a scope entered there dies with the context
-    copy — and installing it loop-side instead would mean setting it WITH NO
-    EXIT (REST auth is a dependency, not a middleware), where every detached
-    task and every other write door in that context inherits it. That lane
+    copy — and installing it loop-side instead would mean setting it WITH NO EXIT —
+    today's REST auth seam is a plain dependency, not a `yield`-dependency, so it
+    holds no `with` to hang one on — where every detached task and every other
+    write door in that context inherits it. That lane
     carries the tenant BY VALUE on the SDK it opens (:func:`record_tenant_for`,
     ``write_live_record(..., tenant=)``) instead — one resolution, delivered
     where it cannot escape (#9188). Propagation is not the reason: a contextvar
