@@ -3409,6 +3409,49 @@ class TestReconcileSweep:
         assert self._row(sdk, org_id)[0] == "pro", \
             "no active subscription is not a licence to downgrade"
 
+    def test_an_unlimited_tier_no_subscription_fixes_the_ATTRIBUTION_not_the_count(
+            self, monkeypatch, billing_client, caplog):
+        """What #8946 actually delivers on this arm — and what it does NOT.
+
+        ``_tier_claim`` has ONE call site (the ``noop`` arm) and
+        ``summary["unverified"] += 1`` runs BEFORE the claim is discriminated, so
+        ``"paid"`` and ``"unknown"`` share that bucket and the ``::warning::`` it
+        drives. Pinning both halves here keeps the runbook honest in either
+        direction: the COUNT is unchanged (an unlimited tier with no verifiable
+        subscription is still ``unverified``, never ``skipped`` — that bucket is
+        what keeps a stored-*paid* org out of nothing-to-verify), while the LOG
+        LINE stops naming a cause the code never established. Pre-#8946 this
+        tier read as an unreadable ladder, so the warning said "the pricing
+        ladder could not be read" about a ladder that was read and said
+        unlimited (#8946).
+        """
+        import logging
+
+        import tortoise.pricing as pricing
+        from tortoise import billing as bl
+        org_id = billing_client["org_id"]
+        sdk = billing_client["sdk"]
+        self._seed(sdk, org_id, tier="pro", stripe_customer_id="cus_8946u")
+        monkeypatch.setattr(bl.StripeClient, "list_subscriptions",
+                            lambda self, cid: [])
+        monkeypatch.setattr(
+            pricing, "tier_limits",
+            lambda tier: {"max_graph_nodes": None if tier == "pro" else 10000})
+        caplog.set_level(logging.WARNING, logger=bl._logger.name)
+
+        summary = bl.reconcile_subscriptions(sdk, notifier=False)
+
+        assert summary["unverified"] == 1, summary
+        assert summary["skipped"] == 0, (
+            "an unlimited tier claims MORE than Free, so it is never "
+            "nothing-to-verify")
+        assert self._row(sdk, org_id)[0] == "pro"
+        said = "\n".join(r.getMessage() for r in caplog.records)
+        assert "stored as billed" in said, said
+        assert "ladder could not be read" not in said, (
+            "the ladder WAS read and said unlimited — naming a read failure is "
+            "the #8946 defect this test pins")
+
     def test_one_orgs_store_failure_does_not_abort_the_pass(
             self, monkeypatch, billing_client):
         """The control plane fails with RuntimeError, not a BillingError.

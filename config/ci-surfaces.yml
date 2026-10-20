@@ -6770,7 +6770,7 @@ durations:
   bench/test_smoke_embedded.py: 38.6
   test_about_edges.py: 3.0  # #9017 CI-junit 2026-10-18 (run 39165691659); was 6.2
   test_backfill_sources.py: 1.7  # #9017 CI-junit 2026-10-18 (run 39165691659); was 27.3
-  test_billing.py: 35.3  # #9017 CI-junit 2026-10-18 (run 39165691659); was 27.8. #8946 added four unit tests (152 -> 156 at home) whose CI cost is ~0.2s, so this CI-measured weight is kept rather than replaced: the only readings available here were 137.02s and 167.49s on a loaded host, a 4x distortion of the same suite the CI run timed at 35.3s — which is exactly why this row prefers a CI junit measurement.
+  test_billing.py: 35.3  # #9017 CI-junit 2026-10-18 (run 39165691659); was 27.8. #8946 added EIGHT tests (152 -> 160 at home) whose CI cost is ~0.4s, so this CI-measured weight is kept rather than replaced: the only readings available here were 137.02s and 167.49s on a loaded host, a 4x distortion of the same suite the CI run timed at 35.3s — which is exactly why this row prefers a CI junit measurement.
   test_cli_context.py: 6.6  # #9017 CI-junit 2026-10-18 (run 39165691659)
   test_config.py: 4.0
   test_control_plane.py: 5.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 8.1
