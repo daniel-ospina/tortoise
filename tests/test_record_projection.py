@@ -1823,6 +1823,51 @@ def test_the_environment_cannot_name_the_tenant_of_a_call(
     )
 
 
+def test_the_tenancy_section_names_the_carrier_it_cannot_see():
+    """The #9231 pointer, executable — the prose it pins has been lost TWICE.
+
+    This is guidance, not a safety property, so it is pinned for a reason the
+    review measured rather than for symmetry: the paragraph that tells the next
+    lane where the ambient carrier lives was dropped by a rebase (twice — the
+    `3752faf9` squash, then the rebase onto `41e958de8`), and each time the PR
+    body went on reporting the correction as applied. A docstring cannot red a
+    build, so a dropped pointer survives every leg here; nothing else in this
+    file notices that the artifact a lane actually reads stopped naming the
+    issue.
+
+    WHAT THIS PINS, and what it deliberately does not: a rebase that drops the
+    pointer again, and the framing the review found (`WHERE AN AMBIENT CARRIER
+    WOULD ARRIVE` — a hypothesis — instead of one that is in flight). It does
+    NOT pin the wording of the precedence rule or the symbol list; a reviewer
+    rewriting that prose should stay green, which is why the assertions are a
+    mention and a phrasing that the review called the defect, not a snapshot.
+
+    Measured non-vacuity: at `bf32ebed` (the head the review found this on)
+    `#9231` appears 0 times in `tortoise/record_projection.py` and the tenancy
+    section still says `WOULD ARRIVE` — both assertions below red there, and
+    only they do (118 of 118 other legs stay green).
+    """
+    src = Path(rp.__file__).read_text(encoding="utf-8")
+    heading = "TENANCY IS A PER-CALL ARGUMENT AT THIS LAYER"
+    assert heading in src, f"the tenancy section is gone from {rp.__file__}"
+    section = src.split(heading, 1)[1]
+    assert "#9231" in section, (
+        "the tenancy section no longer names #9231, the ref carrying the "
+        "ambient carrier (`record_writer.use_record_tenant`, `record_tenant()` "
+        "and its env fallback) — a lane reading this module would be told the "
+        "carrier is hypothetical and pointed at no issue"
+    )
+    assert "#9192" in section, (
+        "the tenancy section no longer names #9192, the acceptance the arming "
+        "pin belongs to"
+    )
+    assert "WOULD ARRIVE" not in section, (
+        "the tenancy section frames the ambient carrier as a hypothesis "
+        "(`WHERE AN AMBIENT CARRIER WOULD ARRIVE`) while it is in flight in "
+        "#9231 — the claim/artifact mismatch the #9214 review found"
+    )
+
+
 def test_this_module_has_no_ambient_tenant_READER():
     """The "no ambient tenant" rule, executable rather than prose.
 
