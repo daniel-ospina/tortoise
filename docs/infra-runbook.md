@@ -503,7 +503,13 @@ missing limit key) has the same remedy as `direction: null`: fix the ladder.
 Note that a cap which is present but `null` means **UNLIMITED**, not "unreadable"
 (#8946): `tier_limits` returns it as-is, and since that fix the reconciler ranks
 it ABOVE every finite cap — so an org on such a tier claims `paid`, and a repair
-from it to a finite tier records `direction: "down"`. What that changes for an
+from it to a finite tier records `direction: "down"`. One shape is degenerate and
+reported as such: a ladder that declares the **Free** tier itself `null` —
+nothing can outrank unlimited Free, so a tier sitting at Free's cap (Free itself,
+a `NULL`/unrecognised stored tier) claims `unpaid` and is counted `skipped`,
+while a NAMED tier with a FINITE cap on that same ladder claims nothing provable
+and is counted `unverified` as a config fault (a `pricing.json` whose paid tiers
+sit below an unlimited Free contradicts itself). What that changes for an
 operator is the **attribution**, not the count: `"paid"` and `"unknown"` share
 the `unverified` bucket and the `::warning::` it drives, so an org on an
 unlimited tier with no verifiable subscription is still counted `unverified` and

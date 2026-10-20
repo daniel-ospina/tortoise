@@ -4175,7 +4175,15 @@ class TestTierCapSeparatesTheTwoNones:
         ``free_cap is None`` made Free the only tier claiming paid entitlement on
         a ladder that declares Free itself unlimited — a paid claim for the whole
         free population, and dead code in the one configuration its comment
-        names. Red before the swap: ``_tier_claim("free")`` returned "paid"."""
+        names. Red before the swap: ``_tier_claim("free")`` returned "paid".
+
+        ⛔ And a NAMED tier with a FINITE cap on that degenerate ladder is
+        ``"unknown"``, never ``"unpaid"``: its label says paid while its cap
+        sits below an unlimited Free, so the ladder contradicts itself and a
+        person must look (``skipped`` is the one bucket ``unverified`` exists to
+        keep a stored-PAID org out of). "unpaid" here was this test's own
+        earlier claim; it filed a stored-``pro`` org under nothing-to-verify.
+        """
         from tortoise import billing as bl
 
         # Free unlimited, and a paid tier that is ALSO unlimited: nothing is
@@ -4186,9 +4194,14 @@ class TestTierCapSeparatesTheTwoNones:
         assert bl._tier_claim(None) == "unpaid"  # resolves to Free's cap
         assert bl._tier_claim("bogus-tier") == "unpaid"
 
-        # Free unlimited, paid tier finite: still nothing outranks Free.
+        # Free unlimited, paid tier FINITE: the ladder contradicts itself, so the
+        # answer is "unknown" (a config fault a person looks at) — not "paid"
+        # (nothing outranks unlimited Free) and not "unpaid" (which would skip a
+        # stored-paid org).
         self._with_limits(monkeypatch, self._ladder({"free": None, "pro": 600000}))
-        assert bl._tier_claim("pro") == "unpaid"
+        assert bl._tier_claim("pro") == "unknown"
+        assert bl._tier_claim("free") == "unpaid"
+        assert bl._tier_claim("bogus-tier") == "unpaid"
 
     def test_an_unlimited_tier_ranks_above_every_finite_one(self, monkeypatch):
         from tortoise import billing as bl

@@ -1235,13 +1235,24 @@ def _tier_claim(tier: str | None) -> str:
     Free's cap through an unrecognised label — claims ``"unpaid"``. Testing
     ``cap is None`` first made Free the one tier claiming paid entitlement, and
     left the Free arm dead in the only configuration its own rule describes.
+    ⛔ But a NAMED tier with a FINITE cap on that same degenerate ladder is
+    ``"unknown"``, not ``"unpaid"``: its label says paid while its cap sits
+    below an unlimited Free, which is a pricing file contradicting itself — a
+    config fault a person looks at (#750.8). Answering ``"unpaid"`` would file a
+    stored-``pro`` org under ``skipped`` ("nothing to verify"), which is the one
+    bucket ``unverified`` exists to keep a stored-PAID org out of. Neither
+    branch reads truthiness: ``_UNREADABLE`` is decided before both.
     """
     cap = _tier_cap(tier)
     free_cap = _tier_cap("free")
     if cap is _UNREADABLE or free_cap is _UNREADABLE:
         return "unknown"
     if free_cap is None:
-        return "unpaid"  # nothing can outrank an unlimited FREE tier
+        # Nothing can outrank an unlimited FREE tier. A tier at Free's cap
+        # (Free itself, ``None``, an unrecognised label) claims nothing; a NAMED
+        # tier whose cap is FINITE is a self-contradicting ladder, not a
+        # nothing-to-verify org.
+        return "unpaid" if cap is None else "unknown"
     if cap is None:
         return "paid"  # unlimited outranks any finite cap
     return "paid" if cap > free_cap else "unpaid"
