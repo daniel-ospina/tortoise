@@ -28,7 +28,8 @@ mutation set. It is not a driver either: `psycopg2` is imported lazily inside
 so importing this module costs no driver and the DB-free tests stay DB-free.
 
 ──────────────────────────────────────────────────────────────────────────────
-THE FIVE DECISIONS #9187 ASKED THE SCOPE STAGE TO RESOLVE — AND THE ANSWER
+THE FIVE DECISIONS #9187 ASKED THE SCOPE STAGE TO RESOLVE — AND THE SIXTH
+#9192 ADDED (the tenant's authority, below)
 ──────────────────────────────────────────────────────────────────────────────
 
 **1. Which connection, and whose DSN.** The record's OWN DSN —
@@ -118,13 +119,20 @@ the alternative is not "a less precise tenant", it is tenant A's rows under
 tenant B's organisation with no error at any layer — the row is well-formed and
 the FK only checks the graph exists. An env fallback with no declaration in
 front of it is reachable from the live door on any deployment that sets the
-pair, which is exactly the hazard the declaration removes. This does not remove
-#9078's scope decision 3 — a single-tenant deployment still arms by env — but
-it DOES change the operational contract for an UNDECLARED one: it armed before
-and refuses now, until it declares. That change is what #9192's own ask 2
-requires ("make sure a multi-tenant process can never silently satisfy it from
-env"), it fails closed (counted + warned, nothing misfiled), and the amended
-decision is relayed to #9078.
+pair, which is exactly the hazard the declaration removes.
+
+``OVERRIDES:`` the industry default (and this module's own decision 3 above) of
+inferring single-tenancy from the mere PRESENCE of a process-global pair —
+:data:`RECORD_SINGLE_TENANT_ENV` must be set, because single-tenancy is a
+deployment fact that has to be STATED, and an inferred one is exactly what a
+multi-tenant process would satisfy silently (#9192 ask 2).
+
+This does not remove #9078's scope decision 3 — a single-tenant deployment
+still arms by env — but it DOES change the operational contract for an
+UNDECLARED one: it armed before and refuses now, until it declares. That change
+fails closed (counted + warned, nothing misfiled), and the amended decision is
+relayed to #9078, documented in ``.env.example`` and in
+``monitoring.record_record_write_failure``.
 
 **THE TRANSACTION.** The seam never calls `commit()` and never calls
 `rollback()` (pinned by a test whose fake connection counts both and asserts
@@ -516,11 +524,19 @@ def record_tenant() -> tuple[str, str] | None:
 
 
 def _refused_tenant_env_note() -> str:
-    """Why the env pair did not arm this write — empty when it was not set.
+    """Why the env pair did not arm this write — and what to do instead.
 
-    Only for the refusal WARNING: an operator who set the pair and got refused
-    rows needs the sentence that names the missing declaration, not a generic
-    "no tenant in scope" that reads as if their configuration vanished.
+    Only for the refusal WARNING. Two operator situations produce a `no_tenant`
+    refusal and each needs its own sentence:
+
+    * the pair IS set and the process has not declared itself single-tenant —
+      the operator needs the name of the missing declaration, not a generic "no
+      tenant in scope" that reads as if their configuration vanished;
+    * nothing is set at all (no scope, no pair) — the common case on the MCP
+      lane, where a credential that names no graph installs no scope. Telling
+      that operator to "wrap the write in ``use_record_tenant``" is advice they
+      cannot act on (the lane already does it per request); the actionable
+      sentence is the one naming a graph-bound credential (#9192 review A5).
     """
     org_id = (os.environ.get(RECORD_ORG_ENV) or "").strip()
     graph_id = (os.environ.get(RECORD_GRAPH_ENV) or "").strip()
@@ -539,7 +555,14 @@ def _refused_tenant_env_note() -> str:
             f"one empty) — that is a misconfiguration, not a tenant, and it is "
             f"never completed by guesswork."
         )
-    return ""
+    return (
+        " No tenant was in scope and no env pair is set: on the MCP lane the "
+        "scope is installed from a GRAPH-bound key per request, so this means "
+        "the credential named no graph (use a graph-bound `tk_` key); a "
+        "single-tenant deployment instead sets "
+        f"{RECORD_ORG_ENV}/{RECORD_GRAPH_ENV} AND "
+        f"{RECORD_SINGLE_TENANT_ENV}=1."
+    )
 
 
 def _default_connect(dsn: str) -> Any:
@@ -945,8 +968,7 @@ def write_live_record(record: Mapping[str, Any], *,
         _count_write_failure("no_tenant")
         _logger.warning(
             "the record write did not happen (no_tenant) — the record is armed "
-            "but no tenant is in scope: wrap the write in "
-            "record_writer.use_record_tenant(org_id, graph_id)%s",
+            "but no tenant could be named for this write.%s",
             _refused_tenant_env_note(),
         )
         return None

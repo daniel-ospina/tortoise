@@ -3,10 +3,13 @@
 THE DEFECT THIS PINS. `tortoise/record_writer.py` carries the record's tenant in
 a `ContextVar` (`_RECORD_TENANT`, set by `use_record_tenant`) with a
 process-global fallback (`TORTOISE_RECORD_ORG_ID`/`_GRAPH_ID`). At `f80c522a1`
-the ContextVar had **zero production callers** — all 17 `use_record_tenant(...)`
-call sites were in `tests/` — so the only reachable arming path on a real
-deployment was the env pair. On a process that serves several tenant graphs the
-pair is not a weaker tenant, it is a WRONG one: env is process-global, so tenant
+the ContextVar had **zero production callers** — all 10 `use_record_tenant(...)`
+call sites (`git grep -c` at that ref) were in
+`tests/test_9078_record_written_by_production_path.py`, and
+`tests/test_record_projection.py` names the symbol in prose only — so the only
+reachable arming path on a real deployment was the env pair. On a process that
+serves several tenant graphs the pair is not a weaker tenant, it is a WRONG
+one: env is process-global, so tenant
 A's rows land under tenant B's `(org_id, graph_id)`, well-formed, with the FK
 satisfied. Nothing raises. That is a silent cross-tenant write, which is why
 this issue is a P0-blocker rather than a tidiness note.
@@ -52,6 +55,7 @@ WHAT IS NOT HERE, NAMED SO THE ABSENCE IS VISIBLE.
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 from pathlib import Path
 
@@ -232,6 +236,62 @@ class TestTheProductionCaller:
             "record's tenant is ambient again, and on a multi-tenant process "
             "the only way to arm it is the process-global env pair (#9192)")
 
+    def test_the_env_pair_has_no_reader_outside_the_gated_resolver(self):
+        """The gate is only worth anything if a NEW reader cannot bypass it.
+
+        #9192 review C4: placing the declaration gate inside `record_tenant()` is
+        a placement, not an invariant. Its sibling primitive — `write_records(records,
+        org_id=..., graph_id=...)` — takes the tuple as a required kwarg, and
+        `record_dsn()` reads `TORTOISE_RECORD_DSN` five lines above the resolver,
+        so a future lane that reads `TORTOISE_RECORD_ORG_ID`/`_GRAPH_ID` itself
+        (the obvious copy of its neighbour) reopens the silent cross-tenant write
+        with this whole file green. So the READER gets the same structural pin
+        the SETTER got above: inside the shipped package the env literals may be
+        touched only inside `record_tenant()` / `_refused_tenant_env_note`.
+
+        Deliberately literal-name based: it catches the READ SHAPE, not one
+        spelling of it (`RECORD_ORG_ENV`, the raw literal, `os.environ.get(...)`,).
+        """
+        allowed_functions = {"record_tenant", "_refused_tenant_env_note",
+                             # the declaration gate itself
+                             "single_tenant_declared"}
+        env_literals = {RECORD_ORG_ENV, RECORD_GRAPH_ENV, RECORD_SINGLE_TENANT_ENV}
+        const_names = {"RECORD_ORG_ENV", "RECORD_GRAPH_ENV",
+                       "RECORD_SINGLE_TENANT_ENV"}
+        violations: list[str] = []
+        for path in sorted((REPO_ROOT / "tortoise").rglob("*.py")):
+            rel = path.relative_to(REPO_ROOT)
+            tree = ast.parse(path.read_text(), filename=str(path))
+            allowed_ranges: list[tuple[int, int]] = []
+            for node in ast.walk(tree):
+                if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and node.name in allowed_functions):
+                    allowed_ranges.append((node.lineno, node.end_lineno or node.lineno))
+                # The module-level DEFINITIONS of the constants are not readers.
+                if (isinstance(node, ast.Assign)
+                        and any(isinstance(t, ast.Name) and t.id in const_names
+                                for t in node.targets)):
+                    allowed_ranges.append((node.lineno, node.end_lineno or node.lineno))
+            for node in ast.walk(tree):
+                names: set[str] = set()
+                if isinstance(node, ast.Name) and node.id in const_names:
+                    names.add(node.id)
+                if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                        and node.value in env_literals):
+                    names.add(node.value)
+                if not names:
+                    continue
+                lineno = getattr(node, "lineno", 0)
+                inside = any(lo <= lineno <= hi for lo, hi in allowed_ranges)
+                if not inside:
+                    violations.append(f"{rel}:{lineno} → {sorted(names)}")
+        assert not violations, (
+            "a reader of the process-global record tenant lives outside the "
+            "gated resolver — it bypasses TORTOISE_RECORD_SINGLE_TENANT, which "
+            "is the cross-tenant write #9192 removed. Move it into "
+            "record_writer.record_tenant() or go through record_tenant():\n  "
+            + "\n  ".join(violations))
+
     def test_two_tenants_are_filed_under_their_own_request_tenant(
             self, two_tenant_lane, record_calls, monkeypatch):
         """Two tenants, one process: each write is filed under ITS request.
@@ -264,31 +324,67 @@ class TestTheProductionCaller:
             "is a cross-tenant write, and a refusal here means no tenant was "
             "installed by the tenancy middleware")
 
-    def test_the_tenant_does_not_survive_its_request(
-            self, two_tenant_lane, record_calls, monkeypatch):
-        """The scope is a `with`, so it cannot leak into the NEXT request.
+    def test_the_tenant_does_not_survive_its_request(self, two_tenant_lane):
+        """The scope is a `with` in the SAME context, so it cannot outlive it.
 
-        A bare `set` would leave tenant B's value in place for whatever the same
-        connection serves next — which is how a background write or a later
-        request inherits a stranger's organisation. Asserted after the client is
-        closed: nothing is in scope when no request is.
+        ⛔ THIS LEG DELIBERATELY DOES NOT USE THE MOUNTED CLIENT (#9192 review
+        B1). A `TestClient` runs the app in the portal thread's loop, so the
+        assertions in THIS thread would read `None` whatever the middleware did
+        — the leg passed with a bare, never-reset `_RECORD_TENANT.set(...)`
+        planted in a probe middleware, which is the vacuous-test class. So the
+        middleware is AWAITED DIRECTLY here: `dispatch` runs in this test's own
+        context, which makes any `set` without a reset visible to the assertion
+        after the `await`, while the `with` restores it.
         """
         reg, tenants = two_tenant_lane
-        monkeypatch.delenv(RECORD_SINGLE_TENANT_ENV, raising=False)
-        monkeypatch.delenv(RECORD_ORG_ENV, raising=False)
-        monkeypatch.delenv(RECORD_GRAPH_ENV, raising=False)
+        org = tenants["a"]
+        seen: list = []
 
-        from tortoise.mcp_server import create_http_app
+        from starlette.requests import Request
+        from starlette.responses import JSONResponse
 
-        app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
-                              _registry_sdk=reg)
-        client = _mounted_test_client(app)
-        with client:
-            _write_a_point(client, tenants["a"]["api_key"], "tenant a: leak check")
-            assert record_calls  # the request DID file a record
+        from tortoise.mcp_auth import OrgResolutionMiddleware
 
-        assert current_record_tenant() is None
-        assert record_tenant() is None
+        async def _call_next(_request):
+            # Observed INSIDE the request: the tenant is in scope, and it is the
+            # one the credential resolved.
+            seen.append(current_record_tenant())
+            return JSONResponse({"ok": True})
+
+        def _scope() -> dict:
+            return {
+                "type": "http", "http_version": "1.1", "method": "POST",
+                "scheme": "https", "path": "/mcp", "raw_path": b"/mcp",
+                "query_string": b"", "root_path": "",
+                "headers": [(b"authorization",
+                             f"Bearer {org['api_key']}".encode()),
+                            (b"content-type", b"application/json")],
+                "client": ("127.0.0.1", 54321),
+                "server": ("testserver", 443),
+                "state": {},
+            }
+
+        async def _drive() -> None:
+            middleware = OrgResolutionMiddleware(app=None, registry_sdk=reg)
+
+            async def _receive():
+                return {"type": "http.request", "body": b"",
+                        "more_body": False}
+
+            assert current_record_tenant() is None
+            await middleware.dispatch(Request(_scope()), _call_next)
+            # SAME context as the dispatch ⇒ a bare `set` is still here.
+            assert current_record_tenant() is None, (
+                "the record's tenant outlived its request — the middleware set "
+                "the ContextVar without restoring it, so the next write in this "
+                "context (a background task, a pooled worker, a later request on "
+                "a reused context) would be filed under a stranger's tenant")
+            assert record_tenant() is None
+
+        asyncio.run(_drive())
+        assert seen == [(org["org_id"], org["graph_id"])], (
+            "the middleware did not install the credential's tenant around the "
+            f"request (saw {seen})")
 
 
 # ── 2. the arming modes ─────────────────────────────────────────────────────
@@ -376,8 +472,47 @@ class TestTheArmingModes:
         assert write_live_record({"type": "PointAdded"}) is None
         assert record_calls == []
 
+    @pytest.mark.parametrize("declared", ["", "   ", "0", "false", "no",
+                                          "off", "yes-please", "ture"])
+    def test_any_non_truthy_declaration_is_multi_tenant(
+            self, declared, record_calls, monkeypatch):
+        """The declaration is READ through `env_flag`, not by presence.
+
+        `.env.example` promises an operator that "a typo reads as ABSENT (refused
+        rows, not misfiled rows)". A presence read (`os.environ.get(...) is not
+        None`) satisfies every other leg in this class — the key is DELETED in
+        one and "1" in another — while `TORTOISE_RECORD_SINGLE_TENANT=0`, the
+        operator saying explicitly "I am not single-tenant", would arm the
+        process-global pair. That is the silent cross-tenant write this issue
+        removes, so the vocabulary is pinned here, at the same seam.
+        """
+        _clear_record_env(monkeypatch)
+        monkeypatch.setenv(RECORD_ORG_ENV, "solo-org")
+        monkeypatch.setenv(RECORD_GRAPH_ENV, "solo-graph")
+        monkeypatch.setenv(RECORD_SINGLE_TENANT_ENV, declared)
+
+        from tortoise.record_writer import single_tenant_declared
+
+        assert single_tenant_declared() is False, (
+            f"{RECORD_SINGLE_TENANT_ENV}={declared!r} declared the deployment "
+            "single-tenant — the key is being read for PRESENCE, not truth")
+        assert record_tenant() is None
+        assert write_live_record({"type": "PointAdded"}) is None
+        assert record_calls == []
+
+    @pytest.mark.parametrize("declared", ["1", "true", "TRUE", "yes", "on"])
+    def test_the_truthy_vocabulary_declares(
+            self, declared, record_calls, monkeypatch):
+        """The other half of the same seam: a real declaration still arms."""
+        _clear_record_env(monkeypatch)
+        monkeypatch.setenv(RECORD_ORG_ENV, "solo-org")
+        monkeypatch.setenv(RECORD_GRAPH_ENV, "solo-graph")
+        monkeypatch.setenv(RECORD_SINGLE_TENANT_ENV, declared)
+
+        assert record_tenant() == ("solo-org", "solo-graph")
+
     def test_an_org_wide_credential_is_refused_not_guessed(
-            self, two_tenant_lane, record_calls, monkeypatch):
+            self, two_tenant_lane, record_calls, monkeypatch, caplog):
         """No named graph ⇒ no tenant ⇒ REFUSED, never the org's default graph.
 
         The record's layer tables key on `public.graphs.id` and the default
@@ -403,11 +538,21 @@ class TestTheArmingModes:
                               _registry_sdk=reg)
         client = _mounted_test_client(app)
         before = dict(monitoring.record_write_failure_counts())
-        with client:
-            _write_a_point(client, org_wide["api_key"], "org-wide: no named graph")
+        with client, caplog.at_level("WARNING"):
+            _write_a_point(client, org_wide["api_key"],
+                           "org-wide: no named graph")
         after = dict(monitoring.record_write_failure_counts())
 
         assert record_calls == [], (
             "an org-wide credential filed a record under a tenant it cannot "
             f"name (got {record_calls})")
         assert after.get("no_tenant", 0) > before.get("no_tenant", 0), (before, after)
+        # The remediation must be one this operator can ACT on. "wrap the write
+        # in use_record_tenant" is not: this lane installs that scope per
+        # request, so the actionable sentence names the graph-bound credential
+        # (#9192 review A5).
+        message = "\n".join(record.message for record in caplog.records)
+        assert "no_tenant" in message, message
+        assert "tk_" in message and "graph-bound" in message, (
+            "the org-wide refusal did not name the credential fix, so its only "
+            f"advice is unfollowable on this lane: {message}")

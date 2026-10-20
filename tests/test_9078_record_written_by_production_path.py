@@ -589,6 +589,23 @@ def test_env_example_declares_the_record_tenant_pair():
         assert declared, (
             f"{name} must be shown as a commented assignment (the example form "
             "an operator copies), not just named in prose")
+        # #9192 review D4: showing a VALUE that resolves to the OPPOSITE of the
+        # instruction two lines above it is worse than showing none — `=0`/`=no`
+        # pass a startswith check and mean "multi-tenant" to `env_flag`. So the
+        # shipped example's value is resolved by the SAME reader the code uses.
+        for line in declared:
+            value = line.strip().split("=", 1)[1].strip()
+            if name == record_writer.RECORD_SINGLE_TENANT_ENV:
+                from tortoise.env_truthy import env_flag_from_value
+                assert env_flag_from_value(value, False) is True, (
+                    f".env.example ships {name}={value!r}, which the code reads "
+                    "as NOT single-tenant — the example would declare the "
+                    "opposite of the instruction beside it")
+            else:
+                assert value == "", (
+                    f"{name} must be shown empty in .env.example: an example "
+                    f"tenant id is a value an operator can ship by accident "
+                    f"(read {value!r})")
     # The seam's connect bound is named where the DSN is documented; the block
     # must not go back to claiming the DSN is handed over untouched.
     assert "CONNECT_TIMEOUT_SECONDS" in env, (

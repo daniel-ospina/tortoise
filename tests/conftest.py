@@ -519,16 +519,22 @@ def _no_ambient_record_arming(monkeypatch):
     ``EventAPI``/``TortoiseSDK`` door: the seam filed rows from pytest tmp-dir
     journals into that real record — rows no journal outlives — and the
     ``no_tenant`` legs in ``test_9078_*`` misdiagnosed the machine as a code
-    defect. Clearing all three per test makes the suite hermetic; a test that
+    defect. Clearing all FOUR per test makes the suite hermetic; a test that
     wants the record armed re-arms it with ``monkeypatch.setenv``, which is the
     only way an arming can reach a test now.
+
+    The fourth key is ``TORTOISE_RECORD_SINGLE_TENANT`` (#9192): the pair is
+    INERT without it, so clearing only the pair no longer makes the arming
+    surface hermetic — a lane armed the way ``.env.example`` now documents
+    would leave the DECLARATION ambient, and a test that sets the pair to prove
+    the undeclared refusal would arm instead.
 
     The live door's breaker is PROCESS state by design (``record_writer.
     _breaker_open_until``), so it is reset on both sides too: a test that proves
     the bound must not leak a 60-second silence into the next one.
     """
     for name in ("TORTOISE_RECORD_DSN", "TORTOISE_RECORD_ORG_ID",
-                 "TORTOISE_RECORD_GRAPH_ID"):
+                 "TORTOISE_RECORD_GRAPH_ID", "TORTOISE_RECORD_SINGLE_TENANT"):
         monkeypatch.delenv(name, raising=False)
     from tortoise import record_writer
     record_writer._close_live_breaker()

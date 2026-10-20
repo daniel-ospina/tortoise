@@ -78,9 +78,10 @@ spelling of it defeats both, like any dormant read (measured, all green). What
 escapes BOTH instruments is a read that never fires on a fixture path — a
 body-local fallback to a module constant (`org_id = org_id or
 _DEFAULT_TENANT[0]`, signature still required), or a carrier DEFINED ELSEWHERE
-(a `ContextVar` imported from another module: the `record_writer.use_record_tenant`
-that #9192 names, which this tree does not carry and whose production owner is
-#9188): the scan parses this file only, and no fixture arms that carrier.
+(a `ContextVar` imported from another module — for the record's tenant,
+`record_writer.use_record_tenant`, whose production caller #9192 installed in
+`mcp_auth.OrgResolutionMiddleware`): the scan parses THIS file only, so a read
+of that carrier here is invisible to it, and no fixture in this file arms one.
 Measured: all legs stay green on both. A signature default, however, IS
 caught — by the refusal leg on these entry points, and by the seam leg on
 `RecordWriter.write` / `write_records`. These limits are SUMMARISED here and
@@ -95,29 +96,37 @@ An environment pair is not a mitigation for that: env is process-global, so it
 is the same single value for every tenant the process serves. A caller that
 cannot name its tenant must refuse.
 
-⚠️ WHERE THE AMBIENT CARRIER ARRIVES, and this module cannot see it. #9192
-names a surface THIS TREE DOES NOT CARRY: `record_writer.use_record_tenant`, a
-ContextVar, with a `TORTOISE_RECORD_ORG_ID`/`_GRAPH_ID` fallback for a
-SINGLE-TENANT deployment. It is not a future plan: the carrier is **in flight
-in #9231** (`fix/9078-record-write-call-site`), one layer up, and `git grep`
-for any of its symbols is empty on `origin/main` under `tortoise/` while
-#9231's ref carries them all — `RECORD_ORG_ENV`/`RECORD_GRAPH_ENV`,
-`_RECORD_TENANT`, `use_record_tenant()` and `record_tenant()`. Do not read this
-module as the statement of record for what those must do; read #9231. The
-precedence it implements is **scope always wins over env**: `record_tenant()`
-reads the `ContextVar` first and consults the env pair only when the scope set
-nothing (a half-configured pair is refused, not completed). The surface #9192
-ask 2 must be pinned on is that env fallback, because it is reachable from the
-live door with **no caller-supplied pair** — #9231's door calls
-`record_tenant()` and files the write under whatever comes back, so a process
-serving several tenants can be armed entirely from the environment, one pair,
-the same value for every tenant it serves. Until that fallback is pinned,
-"scope wins" is a precedence rule rather than a fail-closed one; ask 1, the
-production caller, is what makes the fallback unnecessary in the first place.
-The regression pins for THIS layer are
-`test_two_tenants_in_one_process_do_not_cross_write` and
-`test_two_tenants_through_the_seam_never_cross_write`; the pin for the arming
-surface belongs with #9231.
+⚠️ WHERE THE AMBIENT CARRIER ARRIVES, and this module cannot see it (its scan
+parses ONE file). The surface #9192 names is `record_writer.use_record_tenant`,
+a ContextVar with a `TORTOISE_RECORD_ORG_ID`/`_GRAPH_ID` fallback for a
+SINGLE-TENANT deployment. On this tree it EXISTS — the carrier landed in #9231
+(`tortoise/record_writer.py`: `_RECORD_TENANT`, `use_record_tenant()`,
+`record_tenant()`) — and #9192 supplied the two halves it was missing:
+
+* **The production caller.** `mcp_auth.OrgResolutionMiddleware.dispatch`
+  enters `record_writer.use_record_tenant(org_id, graph_id)` around
+  `call_next`, from the `(org_id, graph_id)` that lane already resolves per
+  request — so a write anywhere under the request, on the loop or on a
+  context-copying pool worker, is filed under the REQUEST's tenant. It is
+  installed only when the resolution NAMED a graph: an org-wide credential has
+  no `public.graphs` row the record could key on, so its write is refused
+  (`no_tenant`) rather than guessed. The hosted REST lane has no installer yet
+  and the default-graph tenant id is unnamed — #9188.
+* **The arming gate.** `record_tenant()` reads the `ContextVar` first and
+  consults the env pair ONLY when the deployment declared itself single-tenant
+  (`record_writer.single_tenant_declared()` → `TORTOISE_RECORD_SINGLE_TENANT`,
+  default ABSENT = multi-tenant). Undeclared, the pair is ignored: the armed
+  write is refused and counted `no_tenant`, never filed under a process-global
+  value. So "scope wins over env" is now a fail-closed rule, not a precedence
+  convention — the failure mode left is a named refusal.
+
+The precedence this layer implements is unchanged — **scope always wins**, a
+half-configured pair is refused rather than completed — and the arming surface
+is pinned in `tests/test_9192_tenant_armed_by_request.py`
+(`test_an_undeclared_process_refuses_the_environment_tenant`,
+`test_a_declared_single_tenant_deployment_still_arms_by_env`). The regression
+pins for THIS layer remain `test_two_tenants_in_one_process_do_not_cross_write`
+and `test_two_tenants_through_the_seam_never_cross_write`.
 """
 
 from __future__ import annotations
