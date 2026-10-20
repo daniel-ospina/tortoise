@@ -226,12 +226,13 @@ class TestDe2e6:
         """#3654: the EMPTY string is the other undated form.
 
         ``""`` reaches the miner when a caller passes it directly or when
-        the frontmatter carries an empty ``startedAt``. ``validFrom=""`` is a
-        bound ``_covers`` cannot order against any PARSEABLE query instant, so
-        the point is invisible to every normal ``get_historical_knowledge`` query —
-        hidden from parseable queries only, since an unparseable ``at_date``
-        still matches it lexicographically — which is strictly worse than the
-        wall-clock stamp this change removed.
+        the frontmatter carries an empty ``startedAt``. Since the #6140 ruling
+        the read path reads ``validFrom=""`` as NO START RECORDED — i.e. an
+        open start, the same answer an absent property gives — so the stored
+        ``""`` is not hidden and not wrong, it is just the less honest spelling
+        of the same fact: a datum that names no instant, which every reader has
+        to interpret and which the write boundary warns about. Stamping nothing
+        says it once.
         """
         _mine(sdk, D1_TX, "s-e-d1", "", str(tmp_path))
         rows = sdk._get_proj().g.query(
@@ -252,11 +253,11 @@ class TestDe2e6:
         """Undated-ness is decided on the STRIPPED form, so the stored value
         must be stripped too.
 
-        Storing ``" 2026-07-01T10:00:00Z"`` verbatim would write an
-        unorderable ``validFrom`` — ``_covers`` cannot match it against any
-        parseable query instant, so the point is invisible to every normal
-        ``get_historical_knowledge`` query, the same harm the empty-string guard
-        exists to prevent.
+        Storing ``" 2026-07-01T10:00:00Z"`` verbatim would write a value that
+        names no instant — read, since the #6140 ruling, as NO START RECORDED
+        rather than as the date the caller meant. So the harm is not
+        invisibility: a DATED session would silently become an undated one, and
+        the point would sort as if it had always been true.
         """
         _mine(sdk, D1_TX, "s-p-pad", f"  {T1}  ", str(tmp_path))
         rows = sdk._get_proj().g.query(

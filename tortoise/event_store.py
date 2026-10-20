@@ -15,14 +15,233 @@ on `event_id` (duplicate append) → logs and skips (never crashes the
 mutation) — `event_id` is a server-side ULID, so a collision is a retry
 artifact, never legitimate data. `read_after` additionally dedups (defense in
 depth).
+
+⛔ EVERY OTHER LOSS IS NAMED (#9208). A store write that is REFUSED (e.g.
+§17.1's third door refusing an undeclared write) or that fails for any other
+reason must never be swallowed into the same no-op as a duplicate: the feed
+would simply stop while `poll_events` kept answering `[]`, making "quiet" and
+"dead" the same reply. Such a failure is recorded here as a NAMED degraded
+state (`record_degraded`/`degraded`), and `poll_events` REFUSES to answer while
+it is set. The state is deliberately NOT cleared by a later successful write:
+the events in the gap never reached the store, so a subscriber parked below
+them would silently under-read forever. Acknowledging it is explicit
+(`clear_degraded`).
+
+⚠️ TWO SCOPES, STATED so neither is over-read. It is keyed by STORE + GRAPH
+(the `:GraphEvent` namespace IS the org partition, so one tenant's dead feed
+must not refuse another tenant's poll, and two databases are two stores even
+under one name), and it lives in PROCESS MEMORY — a peer process cannot see it,
+and a peer process cannot ACKNOWLEDGE it either (the acknowledgement is a Python
+call in the process that observed the loss; from outside, the only exit is a
+restart of that worker). What it does guarantee is the property the issue
+targets — **a `poll_events` caller in a process that emitted for a graph cannot
+be told "nothing happened" over lost events.**
+
+⚠️ AND ONE CONSUMER IS NOT COVERED, named rather than implied: the webhook
+delivery sweep (`webhook_delivery.deliver_due`) reads `read_after` directly, so
+its `if not events: continue` still treats an empty page as "caught up". Wiring
+the degraded state into the delivery/retry state machine changes a
+delivery-loss decision that `#8098` deliberately keeps in the dispatch state
+machine, so it is a follow-up, not a silent part of this fix.
+
+§17.1 — THIS MODULE DECLARES ITS OWN LANE (#9124 part 1). Every mutating
+statement here goes through the projection's write handle (`proj.g`), which since
+#9124 DETECTS a write that arrives with no declared lane. The store is a SECOND
+durable store rather than a projection of the JSONL journal, so it belongs to
+neither the live nor the replay lane:
+
+* `_graph_metadata_write_scope` for the store's own bookkeeping — the schema DDL
+  (`ensure_event_schema`), the `:GraphEventMeta` allocator (`next_seq`), the
+  append (`append_event`) and the retention purges. That lane states two
+  obligations and both hold, spelled out at `next_seq`/`append_event`: no journal
+  record describes a `:GraphEvent` row (a payload-only emit writes one with no
+  JSONL record at all — see `capture_watermark`), and a rebuild does not replay
+  the rows (#4664): it CARRIES the counter (`capture_watermark` →
+  `reestablish_watermark`) and raises `first_seq`, so a parked subscriber gets
+  the truthful 410 instead of `[]` forever. A declared truncation with a cursor
+  contract, not corruption.
+* `_replay_write_scope` for `reestablish_watermark`, which only ever runs as part
+  of a wipe+replay: the value it writes came FROM the journal's own rebuild.
+
+⚠️ The declarations are NOT a licence for the swallow: `append_event` and
+`_refresh_first_seq` still catch bare `Exception` (a store failure must never
+crash the mutation), so an UNDECLARED write here would degrade with only a
+WARNING as its trace. #9208 landed the NAMED degraded mode above; what is still
+missing is the DOOR that sets it when a write is REFUSED — that is arming the
+guarded handle (#9124 part 2), not a declaration.
 """
 from __future__ import annotations
 
 import json
 import logging
 from datetime import datetime, timezone
+from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+class ChangeFeedDegraded(RuntimeError):
+    """The `:GraphEvent` change feed is KNOWN-INCOMPLETE in this process.
+
+    A NAMED degraded mode (#9208), the shape `#8577`'s capture drain uses,
+    rather than a silent no-op. Raised by `poll_events` when a change-feed
+    write has been refused or lost: a short page is then indistinguishable from
+    a quiet stream, so answering at all would report success over lost events.
+
+    The alternative the issue also allowed — letting the refusal propagate out
+    of the emitting door — was rejected because `_emit_event` is best-effort BY
+    CONTRACT and many doors emit AFTER their cache write (`delete_point`,
+    `promote_point`, the dedupe folds), so a raise there would report a failed
+    mutation that actually landed. The FEED's consumer is the party that can
+    act on a dead feed, so the signal belongs there.
+    """
+
+
+#: The named degraded state of a GRAPH's change feed (#9208), keyed by
+#: ``(store identity, graph name)``. Empty = no change-feed write has been
+#: refused/lost in this process. A dict per store+graph, not a bool, so the
+#: refusal can NAME the diagnosis instead of only the symptom.
+#:
+#: KEYED BY STORE + GRAPH, not process-global. The `:GraphEvent` store is
+#: per-graph (the namespace IS the org partition), so a dead feed on one tenant
+#: must not refuse another tenant's poll; and the identity half is needed because
+#: the graph name alone does not name a STORE — two embedded databases both called
+#: `tortoise` are different stores. A process-global flag also latched a whole
+#: session on any deliberate, expected refusal (a suite driving the #5379
+#: allocator ceiling on purpose), which is the same over-read in the other
+#: direction.
+_DEGRADED: dict[tuple[str, str], dict[str, Any]] = {}
+
+
+def _store_identity(proj) -> str:
+    """Which STORE this projection talks to — its file, or its HOST:PORT.
+
+    The PORT is part of the identity, not decoration. One host can carry several
+    FalkorDB servers, and this repo's own environment runs two on loopback —
+    `localhost:6379` (the test matrix) and `localhost:16379` (canonical/dev) —
+    both with the default graph name `tortoise`. Keyed on the host alone, a
+    refused write on one would permanently refuse `poll_events` on the other.
+
+    The port is read from the connection pool, the same seam
+    `tests/_embedded._projection_host` uses: `FalkorProjection` records `_host`
+    but not `_port`, and the client keeps it in
+    `connection.connection_pool.connection_kwargs`. Every step is `getattr`-guarded
+    because callers reach here with lightweight projection stubs, and `None`
+    simply degrades to the host-only key rather than raising from an error path.
+    """
+    path = getattr(proj, "_path", None)
+    if path:
+        return f"file:{path}"
+    host = getattr(proj, "_host", None)
+    if not host:
+        return ""
+    port = getattr(proj, "_port", None)
+    if port is None:
+        pool = getattr(getattr(getattr(proj, "db", None), "connection", None),
+                       "connection_pool", None)
+        kwargs = getattr(pool, "connection_kwargs", None)
+        port = kwargs.get("port") if isinstance(kwargs, dict) else None
+    return f"host:{host}:{port}" if port is not None else f"host:{host}"
+
+
+def _graph_key(proj) -> tuple[str, str]:
+    """The store partition key: (store identity, graph name)."""
+    return (_store_identity(proj), str(getattr(proj, "graph_name", None) or ""))
+
+
+def record_degraded(proj, stage: str, event_type: str, event_id: str | None,
+                    exc: BaseException) -> dict[str, Any]:
+    """Record that a `:GraphEvent` write was refused or lost (#9208).
+
+    `stage` names the statement that failed, because the defects share a symptom
+    but not a diagnosis — and a reader must be told WHICH one it is, not only
+    that something went wrong:
+
+    * ``"emit"`` — the hook's own leg (the `seq` allocator, the schema DDL);
+    * ``"append"`` — the row write, and the store PROVABLY does not hold it
+      (the post-failure re-read found nothing), so the event is LOST;
+    * ``"append-unverified"`` — the row write failed AND the store could not be
+      read back, so the row may or may not have landed. Reported as a guess
+      about nothing would be the same collapse this function exists to undo.
+
+    ``lost`` counts the events this graph has lost in this process; it only ever
+    grows, matching the fact that those rows can never be delivered.
+
+    Called from BOTH swallows (`TortoiseSDK._emit_event` and `append_event`) so
+    the two cannot record different diagnoses for the same failure, and so a
+    reader has one place to look.
+    """
+    key = _graph_key(proj)
+    previous = _DEGRADED.get(key)
+    state = {
+        "graph": key[1],
+        "stage": stage,
+        "event_type": event_type,
+        "event_id": event_id,
+        "error": f"{type(exc).__name__}: {exc}"[:400],
+        "lost": 1 if previous is None else int(previous["lost"]) + 1,
+    }
+    _DEGRADED[key] = state
+    return state
+
+
+def degraded(proj) -> dict[str, Any] | None:
+    """This graph's named degraded state, or ``None`` when its feed is healthy."""
+    return _DEGRADED.get(_graph_key(proj))
+
+
+def degraded_graphs() -> list[dict[str, Any]]:
+    """EVERY degraded feed in this process — the read side for surface reports.
+
+    `degraded(proj)` needs a projection, which a reporting surface (``/health``)
+    does not have; the key is `(store, graph)` and only a projection can compute
+    it, so the listing carries `store` alongside the state. Copies, never the
+    live dicts, so a reporter cannot mutate the state by holding one.
+
+    Sorted by `(store, graph)` so a report is stable across calls (a dict order
+    would make an operator diff meaningless).
+    """
+    return [
+        {
+            "store": store,
+            "graph": state["graph"],
+            "stage": state["stage"],
+            "event_type": state["event_type"],
+            "lost": state["lost"],
+            "error": state["error"],
+        }
+        for (store, _graph), state in sorted(_DEGRADED.items())
+    ]
+
+
+def clear_degraded(graph_name: str | None = None) -> None:
+    """Acknowledge the loss and re-enable polling (#9208).
+
+    Explicit on purpose: the events in the gap were never written, so a
+    successful write afterwards does not repair them — clearing on success
+    would restore the silence the state exists to break. An operator (or a
+    replay from the tail) is the acknowledgement.
+
+    ``graph_name=None`` clears EVERY store+graph in this process (the operator's
+    "I have dealt with this", and the test suite's isolation); naming one graph
+    clears that graph in every store.
+
+    ⚠️ THIS IS A PYTHON CALL IN THE PROCESS THAT HOLDS THE STATE, and there is
+    no REST/MCP/CLI surface for it yet (#9208's recorded residual): the state is
+    process memory, so a peer process — including an operator's shell on the same
+    host — cannot clear it, and neither can the HTTP client that receives the
+    503. The exits are (a) this call inside that process, or (b) restarting that
+    worker. `degraded_graphs()` is what makes the state visible from outside
+    (``GET /health`` → ``change_feed``), so an operator can at least SEE which
+    worker needs it.
+    """
+    if graph_name is None:
+        _DEGRADED.clear()
+        return
+    for key, state in list(_DEGRADED.items()):
+        if state["graph"] == str(graph_name):
+            _DEGRADED.pop(key, None)
+
 
 _SCHEMA_ATTR = "_tortoise_event_schema"
 
@@ -74,23 +293,32 @@ def ensure_event_schema(proj) -> None:
     """
     if getattr(proj, _SCHEMA_ATTR, False):
         return
+    # Lazy import: `tortoise.projection` imports THIS module lazily for the same
+    # reason (see its `capture_watermark` call sites), so neither direction can
+    # form an import cycle.
+    from .projection import _graph_metadata_write_scope
     g = proj.g
-    try:
-        # Exact-match index first — the constraint requires it (Pattern Research).
-        g.query("CREATE INDEX FOR (n:GraphEvent) ON (n.event_id)")
-    except Exception:  # noqa: BLE001, RUF100
-        logger.debug("event_store: event_id index may already exist")
-    try:
-        g.query(
-            "GRAPH.CONSTRAINT CREATE tortoise_ge_uid UNIQUE NODE GraphEvent "
-            "PROPERTIES 1 event_id"
-        )
-    except Exception:  # noqa: BLE001, RUF100
-        logger.debug("event_store: unique constraint may already exist")
-    try:
-        g.query("CREATE INDEX FOR (n:GraphEvent) ON (n.seq)")
-    except Exception:  # noqa: BLE001, RUF100
-        logger.debug("event_store: seq index may already exist")
+    # §17.1 (#9124): DDL IS GRAPH METADATA — no journal record describes an
+    # index and a rebuild recreates it, so the schema sweep declares the
+    # graph-metadata lane instead of arriving at the write handle undeclared.
+    # Same reasoning as `FalkorProjection._ensure_indexes`.
+    with _graph_metadata_write_scope("event-store-schema"):
+        try:
+            # Exact-match index first — the constraint requires it (Pattern Research).
+            g.query("CREATE INDEX FOR (n:GraphEvent) ON (n.event_id)")
+        except Exception:  # noqa: BLE001, RUF100
+            logger.debug("event_store: event_id index may already exist")
+        try:
+            g.query(
+                "GRAPH.CONSTRAINT CREATE tortoise_ge_uid UNIQUE NODE GraphEvent "
+                "PROPERTIES 1 event_id"
+            )
+        except Exception:  # noqa: BLE001, RUF100
+            logger.debug("event_store: unique constraint may already exist")
+        try:
+            g.query("CREATE INDEX FOR (n:GraphEvent) ON (n.seq)")
+        except Exception:  # noqa: BLE001, RUF100
+            logger.debug("event_store: seq index may already exist")
     setattr(proj, _SCHEMA_ATTR, True)
 
 
@@ -138,27 +366,34 @@ def next_seq(proj) -> int:
     exactly: each granted bump moves the counter, so the last legal seq is
     handed out once (the live counter test pins it).
     """
-    rows = proj.g.query(
-        # `ON CREATE SET m.last_seq = 0` seeds the PRE-increment value, so the
-        # one CASE below grants `1` to a fresh graph exactly as the pre-#5379
-        # `ON CREATE SET m.last_seq = 1` did; the node is never observable at 0
-        # (the seed and the SET are one query, and the counter is only ever
-        # visible through this call's RETURN, which sees the post-SET value).
-        #
-        # `prev >= 0 AND prev < $max` — never `$max > prev`. FalkorDB 4.20.x
-        # compares an int64 property holding the wrapped `-9223372036854775807`
-        # region (and a parameter as extreme as INT64_MAX) as NEITHER `<` nor
-        # `>=` against a positive constant, so the reversed form would read a
-        # negative counter as "below the cap" and grant it. The form below is
-        # verified correct for every int64 region a counter can hold (#5379).
-        "MERGE (m:GraphEventMeta) "
-        "ON CREATE SET m.last_seq = 0, m.first_seq = 1 "
-        "WITH m, m.last_seq AS prev "
-        "SET m.last_seq = CASE WHEN prev >= 0 AND prev < $max "
-        "THEN prev + 1 ELSE prev END "
-        "RETURN m.last_seq, prev >= 0 AND prev < $max AS granted",
-        params={"max": MAX_SEQ},
-    ).result_set
+    # §17.1 (#9124): the ALLOCATOR is graph metadata. Nothing happened to the
+    # corpus that a replay could re-apply — the counter is an ordering BOUND,
+    # carried across a rebuild by `capture_watermark`/`reestablish_watermark`
+    # rather than recomputed — so this declares the graph-metadata lane, the same
+    # declaration `_advance_ep_version` makes for `:EpMeta` (#9123).
+    from .projection import _graph_metadata_write_scope
+    with _graph_metadata_write_scope("event-store-seq"):
+        rows = proj.g.query(
+            # `ON CREATE SET m.last_seq = 0` seeds the PRE-increment value, so the
+            # one CASE below grants `1` to a fresh graph exactly as the pre-#5379
+            # `ON CREATE SET m.last_seq = 1` did; the node is never observable at 0
+            # (the seed and the SET are one query, and the counter is only ever
+            # visible through this call's RETURN, which sees the post-SET value).
+            #
+            # `prev >= 0 AND prev < $max` — never `$max > prev`. FalkorDB 4.20.x
+            # compares an int64 property holding the wrapped `-9223372036854775807`
+            # region (and a parameter as extreme as INT64_MAX) as NEITHER `<` nor
+            # `>=` against a positive constant, so the reversed form would read a
+            # negative counter as "below the cap" and grant it. The form below is
+            # verified correct for every int64 region a counter can hold (#5379).
+            "MERGE (m:GraphEventMeta) "
+            "ON CREATE SET m.last_seq = 0, m.first_seq = 1 "
+            "WITH m, m.last_seq AS prev "
+            "SET m.last_seq = CASE WHEN prev >= 0 AND prev < $max "
+            "THEN prev + 1 ELSE prev END "
+            "RETURN m.last_seq, prev >= 0 AND prev < $max AS granted",
+            params={"max": MAX_SEQ},
+        ).result_set
     seq, granted = rows[0] if rows else (None, None)
     # `bool` is excluded for the same reason `_validate_event_meta_entry`
     # excludes it: it is an int subclass, and a boolean counter is a corrupt
@@ -344,16 +579,21 @@ def reestablish_watermark(proj, carried_last_seq: int | None) -> int | None:
     # `first_seq` is raised, never lowered (see the docstring), and its `CASE`
     # reads the PRE-clause value — Cypher evaluates a SET clause against the
     # state before it.
-    rows = proj.g.query(
-        "MERGE (m:GraphEventMeta) "
-        "ON CREATE SET m.last_seq = $last, m.first_seq = $first "
-        "ON MATCH SET m.last_seq = CASE WHEN m.last_seq IS NULL "
-        "OR m.last_seq < $last THEN $last ELSE m.last_seq END, "
-        "m.first_seq = CASE WHEN m.first_seq IS NULL "
-        "OR m.first_seq < $first THEN $first ELSE m.first_seq END "
-        "RETURN m.last_seq",
-        params={"last": last_seq, "first": first_seq},
-    ).result_set
+    # §17.1 (#9124): this write only ever runs as part of a wipe+replay — the
+    # value it re-establishes came FROM the rebuild of the journal — so it
+    # declares the REPLAY lane rather than arriving at the handle undeclared.
+    from .projection import _replay_write_scope
+    with _replay_write_scope():
+        rows = proj.g.query(
+            "MERGE (m:GraphEventMeta) "
+            "ON CREATE SET m.last_seq = $last, m.first_seq = $first "
+            "ON MATCH SET m.last_seq = CASE WHEN m.last_seq IS NULL "
+            "OR m.last_seq < $last THEN $last ELSE m.last_seq END, "
+            "m.first_seq = CASE WHEN m.first_seq IS NULL "
+            "OR m.first_seq < $first THEN $first ELSE m.first_seq END "
+            "RETURN m.last_seq",
+            params={"last": last_seq, "first": first_seq},
+        ).result_set
     raw = rows[0][0] if rows else None
     # A NON-NUMERIC stored value is refused, not coerced. `bool` is excluded for
     # the same reason `_validate_event_meta_entry` excludes it. Reaching here
@@ -391,6 +631,12 @@ def append_event(proj, seq: int, type_: str, payload: dict, event_id: str,
     `payload` is the bare domain dict (JSON string); type/event_id/ts live as
     node properties (canonical) — codec encode/decode wiring is deferred to
     the first-upcaster task (#432 Task 4, plan-review P2).
+
+    ``False`` therefore means ONE of two things, and the caller must not read it
+    as "nothing happened": a duplicate (no loss) or a REFUSED/failed write (this
+    event is LOST). The second is recorded as the named degraded state (#9208)
+    that ``degraded()`` reports and ``poll_events`` refuses to answer over; it is
+    not raised, because `_emit_event` is best-effort by contract.
     """
     ensure_event_schema(proj)
     ts = ts or _iso_now()
@@ -406,21 +652,84 @@ def append_event(proj, seq: int, type_: str, payload: dict, event_id: str,
     if existing and existing[0][0] > 0:
         logger.warning("event_store: duplicate event_id %r skipped", event_id)
         return False
+    # §17.1 (#9124): the APPEND is graph metadata, declared. The row is not a
+    # projection of a JSONL record — a payload-only emit writes one with no JSONL
+    # record at all — and a rebuild does not replay it (#4664); the module
+    # docstring states both obligations and the cursor contract (`first_seq` is
+    # raised so a parked subscriber reads a truthful 410, never `[]` forever).
+    from .projection import _graph_metadata_write_scope
     try:
-        proj.g.query(
-            "CREATE (e:GraphEvent {seq:$seq, ts:$ts, type:$type, "
-            "event_id:$event_id, payload:$payload})",
-            params={
-                "seq": int(seq), "ts": ts, "type": type_,
-                "event_id": event_id, "payload": json.dumps(payload, ensure_ascii=False),
-            },
-        )
+        with _graph_metadata_write_scope("event-store-append"):
+            proj.g.query(
+                "CREATE (e:GraphEvent {seq:$seq, ts:$ts, type:$type, "
+                "event_id:$event_id, payload:$payload})",
+                params={
+                    "seq": int(seq), "ts": ts, "type": type_,
+                    "event_id": event_id, "payload": json.dumps(payload, ensure_ascii=False),
+                },
+            )
         return True
-    except Exception:  # noqa: BLE001, RUF100
-        # Belt-and-suspenders: if the store's unique constraint fired (or any
-        # other write error), never crash the mutation — the read path dedups.
-        logger.warning("event_store: append failed for event_id %r — skipped", event_id)
+    except Exception as exc:  # noqa: BLE001, RUF100
+        # Belt-and-suspenders: never crash the mutation on a store write error
+        # — the read path dedups, and `_emit_event` is best-effort by contract.
+        #
+        # #9208: but it must NOT be indistinguishable from the duplicate skip
+        # above. A duplicate loses NOTHING (the row is already there); any
+        # other error loses THIS event, and swallowing it whole left the feed
+        # dead while `poll_events` kept answering `[]` — the exact silent
+        # deletion §17.1's third door must not produce. So the two are told
+        # apart by what the store actually holds, and only a real loss is
+        # recorded as the named degraded state.
+        verified = _event_row_exists(proj, event_id)
+        if verified is True:
+            # The unique constraint fired on a retried `event_id`: the row we
+            # would have written is already in the store, so nothing is lost.
+            logger.warning(
+                "event_store: duplicate event_id %r skipped", event_id)
+            return False
+        if verified is None:
+            # The row write failed AND the read-back failed: neither "lost" nor
+            # "landed" is provable, so the state names the UNCERTAINTY rather
+            # than asserting a loss nobody can confirm.
+            state = record_degraded(proj, "append-unverified", type_,
+                                    event_id, exc)
+            logger.warning(
+                "event_store: append failed for event_id %r and the store could "
+                "not be read back — the change feed is DEGRADED (%s "
+                "unverified, %s: %s); poll_events will refuse to answer until "
+                "this is acknowledged (#9208)",
+                event_id, state["lost"], type(exc).__name__, exc)
+            return False
+        state = record_degraded(proj, "append", type_, event_id, exc)
+        logger.warning(
+            "event_store: append failed for event_id %r — the change feed is "
+            "DEGRADED (%s lost, %s: %s); poll_events will refuse to answer "
+            "until this is acknowledged (#9208)",
+            event_id, state["lost"], type(exc).__name__, exc)
         return False
+
+
+def _event_row_exists(proj, event_id: str) -> bool | None:
+    """Does the store already hold this `event_id`? (#9208's loss discriminator)
+
+    TRI-state on purpose. ``True`` = the row is there, so a failed write lost
+    nothing (the unique-constraint race). ``False`` = the store was read and does
+    NOT hold it, so this event is provably lost. ``None`` = the read itself
+    failed, so neither claim is available.
+
+    Collapsing ``None`` into ``False`` would report "lost" for a transient read
+    error on a store that may have committed — a permanent refusal over an
+    unproven loss. Collapsing it into ``True`` is the opposite lie. The caller
+    names the third outcome instead.
+    """
+    try:
+        rows = proj.g.query(
+            "MATCH (e:GraphEvent {event_id:$id}) RETURN count(e)",
+            params={"id": event_id},
+        ).result_set
+    except Exception:  # noqa: BLE001, RUF100
+        return None
+    return bool(rows and rows[0][0] > 0)
 
 
 def read_after(proj, after_seq: int, types: list[str] | None = None,
@@ -470,11 +779,16 @@ def purge_expired(proj, retention_days: int = 30) -> int:
     from datetime import timedelta
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=int(retention_days))).isoformat()  # noqa: UP017
-    rows = proj.g.query(
-        "MATCH (n:GraphEvent) WHERE n.ts < $cutoff "
-        "WITH n LIMIT 10000 DETACH DELETE n RETURN count(*)",
-        params={"cutoff": cutoff},
-    ).result_set
+    from .projection import _graph_metadata_write_scope
+    # §17.1 (#9124): RETENTION is graph metadata — the rows are the store's own
+    # bookkeeping, deleted by policy, and a rebuild recreates nothing here because
+    # it never replays them (#4664).
+    with _graph_metadata_write_scope("event-store-purge"):
+        rows = proj.g.query(
+            "MATCH (n:GraphEvent) WHERE n.ts < $cutoff "
+            "WITH n LIMIT 10000 DETACH DELETE n RETURN count(*)",
+            params={"cutoff": cutoff},
+        ).result_set
     deleted = int(rows[0][0]) if rows and rows[0][0] is not None else 0
     _refresh_first_seq(proj)
     return deleted
@@ -490,11 +804,15 @@ def purge_overflow(proj, max_events: int) -> int:
     overflow = total - int(max_events)
     if overflow <= 0:
         return 0
-    del_rows = proj.g.query(
-        "MATCH (n:GraphEvent) WITH n ORDER BY n.seq ASC LIMIT $overflow "
-        "DETACH DELETE n RETURN count(*)",
-        params={"overflow": overflow},
-    ).result_set
+    from .projection import _graph_metadata_write_scope
+    # §17.1 (#9124): the size-cap purge is the same graph-metadata lane as
+    # `purge_expired` above (retention by policy, never replayed by a rebuild).
+    with _graph_metadata_write_scope("event-store-purge"):
+        del_rows = proj.g.query(
+            "MATCH (n:GraphEvent) WITH n ORDER BY n.seq ASC LIMIT $overflow "
+            "DETACH DELETE n RETURN count(*)",
+            params={"overflow": overflow},
+        ).result_set
     deleted = int(del_rows[0][0]) if del_rows and del_rows[0][0] is not None else 0
     _refresh_first_seq(proj)
     return deleted
@@ -535,17 +853,21 @@ def _refresh_first_seq(proj) -> None:
     branch instead of the wrap branch. Saturation makes both out-of-domain
     inputs produce a floor above every cursor, so both answer 410.
     """
+    from .projection import _graph_metadata_write_scope
     try:  # noqa: SIM105
-        proj.g.query(
-            "MATCH (m:GraphEventMeta) "
-            "OPTIONAL MATCH (e:GraphEvent) "
-            "WITH m, min(e.seq) AS mn, "
-            "CASE WHEN m.last_seq < 0 THEN $max_int64 "
-            "WHEN m.last_seq + 1 < 0 THEN $max_int64 "
-            "ELSE m.last_seq + 1 END AS nxt "
-            "WITH m, coalesce(mn, nxt) AS floor "
-            "SET m.first_seq = CASE WHEN floor < 0 THEN 0 ELSE floor END",
-            params={"max_int64": MAX_INT64},
-        )
+        # §17.1 (#9124): the purge FLOOR is the same graph-metadata lane as the
+        # purge that triggers it — it describes the store, not the corpus.
+        with _graph_metadata_write_scope("event-store-purge"):
+            proj.g.query(
+                "MATCH (m:GraphEventMeta) "
+                "OPTIONAL MATCH (e:GraphEvent) "
+                "WITH m, min(e.seq) AS mn, "
+                "CASE WHEN m.last_seq < 0 THEN $max_int64 "
+                "WHEN m.last_seq + 1 < 0 THEN $max_int64 "
+                "ELSE m.last_seq + 1 END AS nxt "
+                "WITH m, coalesce(mn, nxt) AS floor "
+                "SET m.first_seq = CASE WHEN floor < 0 THEN 0 ELSE floor END",
+                params={"max_int64": MAX_INT64},
+            )
     except Exception:  # noqa: BLE001, RUF100
         pass  # best-effort watermark
