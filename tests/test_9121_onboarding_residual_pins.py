@@ -65,7 +65,7 @@ from __future__ import annotations
 
 import ast
 import textwrap
-from functools import lru_cache
+from functools import cache
 from pathlib import Path
 
 from tortoise.onboarding import state as _os
@@ -127,7 +127,7 @@ _ESCAPE3_CALL_SITES = {
 }
 
 
-@lru_cache(maxsize=None)
+@cache
 def _parse(rel: str) -> tuple[ast.Module, dict[ast.AST, ast.AST]]:
     tree = ast.parse((_REPO / rel).read_text(encoding="utf-8"))
     parents = {
