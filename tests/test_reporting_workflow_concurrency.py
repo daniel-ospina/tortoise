@@ -514,11 +514,23 @@ def test_the_zero_cost_pr_event_exemption_is_still_true() -> None:
 
 
 def _concurrency_group(block: object) -> str | None:
-    """The literal group name of a `concurrency:` block, or None.
+    """The group name of a `concurrency:` block, or None when it is not a name.
 
-    Accepts both spellings GitHub allows (bare string, or a mapping), and
-    returns None for a block whose group is an expression — an expression is
-    resolved per run and cannot be compared statically.
+    Accepts both spellings GitHub allows (bare string, or a mapping).
+
+    The contract is **textual**: a group containing `${{ … }}` is returned as
+    its literal text, NOT resolved and NOT skipped. That is deliberate and it
+    cuts both ways:
+
+    * two blocks with IDENTICAL text collide, including expression-valued ones
+      (`ci-${{ github.ref }}` twice) — correctly flagged;
+    * two blocks whose expressions differ only in spelling (`${{ github.ref }}`
+      vs `${{github.ref}}`) compare unequal, so a collision there is MISSED.
+
+    Skipping expressions instead would lose the first case to catch the second,
+    which is the worse trade: an unresolved collision deadlocks a job, while a
+    spelling difference is caught by review. Callers must not assume an
+    expression means "no group".
     """
     if isinstance(block, str):
         return block
@@ -552,21 +564,36 @@ def test_no_job_reuses_the_run_level_concurrency_group(path: Path) -> None:
 
 
 def test_supabase_deploy_apply_lock_is_distinct_from_the_run_lock() -> None:
-    """The incident itself, pinned: the apply lock must stay its own group.
+    """The incident itself, pinned: two properties, not one.
 
-    Named separately from the parametrised sweep because this workflow is the
-    one whose deadlock blocks every prod migration — a regression here must fail
-    with the consequence spelled out, not as one row of a generic table.
+    (a) the apply lock is a CONSTANT and differs from the run group — that is the
+        deadlock (#9120 x #1095);
+    (b) the run group is EVENT-SCOPED, so a starved `push` run cannot hold the
+        lock a `workflow_dispatch` needs. A constant run group re-breaks #1095
+        even with distinct names, because every run of the workflow acquires it
+        (#1095's reviewed decision: "workflow-level concurrency is claimed
+        per-run — a push run would still hold the shared group").
+
+    Named separately from the parametrised sweep because a regression here is
+    the one that silently kills the ONLY automated path from repo to prod
+    migrations, and it must fail with that consequence spelled out.
     """
     doc = _load(WORKFLOW_DIR / "supabase-deploy.yml")
     run_group = _concurrency_group(doc.get("concurrency"))
     apply_group = _concurrency_group(doc["jobs"]["deploy"].get("concurrency"))
-    assert run_group == "supabase-deploy", (
-        "the run-level deploy lock (#9115) must stay in place"
-    )
+    assert run_group is not None, "the run-level deploy lock (#9115) must stay"
     assert apply_group is not None, "the apply lock (#1095) must stay in place"
+    assert "github.event_name" in run_group, (
+        f"the run-level group is a constant ({run_group!r}); every run of this "
+        "workflow then holds it — including the `push` drift run, which starves "
+        "an operator's dispatch apply (#1095). Scope it by event."
+    )
     assert apply_group != run_group, (
         f"the apply lock has collapsed back onto the run lock ({run_group!r}) — "
-        "that is the 2026-10-20 deadlock: the deploy job will fail with zero "
-        "steps and no migration can ever be applied"
+        "that is the 2026-10-20 deadlock: the deploy job fails with zero steps "
+        "and no migration can be applied automatically"
+    )
+    assert "${{'" not in apply_group, (
+        f"the apply lock must be a CONSTANT ({apply_group!r}); an expression "
+        "would stop concurrent applies from serialising"
     )
