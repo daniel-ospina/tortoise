@@ -1439,6 +1439,7 @@ surfaces:
   # fallback, so neither arm alone covers both edits — #2938 convention).
   - test_6211_ep_result_shape.py
   - test_6211_ep_scale.py
+  - test_6211_ep_anchor.py
   # #8864: the shared-name MERGE-key guard — the write-side twin of #5509/#3633.
   # `_upsert_object`/`_upsert_subject` (tortoise/projection/entities.py) key the
   # MERGE on the NAME, so a name held by 2+ carriers made `ON MATCH` stamp ONE
@@ -4007,6 +4008,11 @@ surfaces:
   # SHARED_MODULES and select the FULL matrix on their own (measured).
   - test_6211_ep_result_shape.py
   - test_6211_ep_scale.py
+  # #6211 (hop anchoring): the emitted-query PLAN is what this one pins, and the
+  # statements it captures are built in `tortoise/ep.py`. Registration is still
+  # required: `tools/ci_selection.py --integrity` exits 1 on an undeclared test
+  # file, and a file in NO leg runs nowhere (#3514).
+  - test_6211_ep_anchor.py
   - test_ep_mitigation.py
   - test_ep_terminal_ghost.py
   # #2500: the pre-#2490 terminal-EP backfill guard. Dual-registered with
@@ -5884,6 +5890,22 @@ durations:
   # are PR-ADDED files, so the push-to-main sweep cannot have measured them yet.
   test_6211_ep_result_shape.py: 19.0
   test_6211_ep_scale.py: 19.0
+  # #6211 (hop anchoring): locally measured on this host, whole file, 7 tests /
+  # 5.4-7.6 s (it builds an 8k-edge fixture and profiles one hop). The count is
+  # re-derived at every revision, never carried forward — an earlier revision of
+  # this row read "5 tests" for a file that already defined six, and
+  # `tests/test_6211_ep_anchor.py::test_the_records_that_state_this_files_size_are_true`
+  # now pins the count against the file's own `def test_` list (#9282 review).
+  # The 9.0 weight is KEPT rather than raised: a 14.1 s whole-file reading was
+  # also taken, but on a host under fleet load (the same class of reading the
+  # #8098/#3429 rows record and deliberately do not adopt), and the weight is a
+  # shard-layout input, not a claim about this file. Upper-bounded like its
+  # siblings: an UNDERstated weight skews the balancer against a PR-added file,
+  # which this is (#3514). REFRESH from the first post-merge push run that
+  # includes it — a re-derived value drops this note's local-basis claim, because
+  # a row's comment holds only while the value AND its stated basis are unchanged
+  # (#8254).
+  test_6211_ep_anchor.py: 9.0
   test_round_trip_parity.py: 0.8
   test_longmem_rerank.py: 6.3
   test_pack_manifest_store_extraction.py: 5.2

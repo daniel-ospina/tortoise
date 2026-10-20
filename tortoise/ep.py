@@ -45,6 +45,39 @@ _EP_GUARD_FULL_GRAPH_FRACTION = 0.5
 _EP_GUARD_FRONTIER_CAP = 200
 _EP_GUARD_MIN_GRAPH_CLAIMS = 500
 
+# ── The id-anchor barrier (#6211) ──
+# Every EP query that walks an id SET anchors it as `MATCH (n:Label) WHERE
+# n.id IN $ids ...`. That reads as an index read, and FalkorDB does plan the
+# bare form as `Node By Index Scan` — but when the statement CONTINUES into an
+# expanding traversal the planner can anchor the TRAVERSAL instead, and
+# `n.id IN $ids` degrades to a per-record FILTER. It is not a blanket rule:
+# which sites lose the anchor is data- and shape-dependent (measured per site in
+# `docs/capacity.md` §7 — at the BFS undirected sweep below, the traversal is
+# already index-anchored and the barrier only guards #6976; at the bridge hop it
+# is the whole difference), so the invariant is the plan assertion in
+# `tests/test_6211_ep_anchor.py`, not a syntactic rule.
+# Measured on a 23,354-node /
+# 160,000-edge graph (`GRAPH.PROFILE`, falkordb-server 4.20.6), two-hop bridge
+# at a 30-id frontier:
+#
+#   shipped   Node By Label Scan (op:Point) 23,353 -> 160,000 -> 1,280,000
+#             records, 1.15 s          (n.id IN $ids applied to all 1.28 M)
+#   + barrier Node By Index Scan (n:Point) 30 -> 1,445 records, 0.009 s
+#
+# Same rows, same order of magnitude of work as the frontier — not the graph.
+# The cost therefore tracked GRAPH size, which is why the query dies on a few
+# thousand points, why narrowing the seeds never helped (#6211), and why the
+# eager `_live_neighbors_many` was the FIRST query to abort.
+#
+# The barrier is `WITH *`, NOT `WITH <var>`: `WITH <var>` drops any other
+# in-scope variable a later clause still needs (measured on 4.20.4 and 6.0.1,
+# see `cypher_guard._predicate_drop_barrier`, #7162), and `WITH *` anchors the
+# plan identically (measured: 0.0099 s vs 0.0087 s at a 30-id frontier).
+# It is the SAME shape that normaliser inserts for engine 6.0.0, where the
+# missing barrier does not merely cost time — it drops the predicate and
+# returns other nodes' rows (#6976).
+_EP_ANCHOR_BARRIER = "WITH * "
+
 
 try:  # redis-py is a hard dependency of the graph lane; guard anyway (#6211)
     from redis.exceptions import RedisError as _RedisError
@@ -118,7 +151,7 @@ class EPSubgraphHopError(_ResponseError):
                        pass-level queries.
 
                        A pass reads and writes the WHOLE affected set, not just
-                       its frontier: `_load_cache` sweeps 16 statements over it,
+                       its frontier: `_load_cache` sweeps 20 statements over it,
                        `_flush_cache` writes it back, and `run` pre-writes the
                        evidence priors over it. Every one of those is typed
                        too — they are the largest queries of a pass, so an
@@ -385,24 +418,44 @@ class TortoiseEP:
             # #7853/#7902: back-messages live on DIRECT edges
             # (a)-[:IMPL|NAND]->(b). Both endpoints are id-anchored by the
             # write path (#7902 widened create_direct_edge to the four
-            # epistemic labels), so sweep the TARGET label for the index and
-            # widen the SOURCE traversal position with the disjunction
-            # (live.epistemic_disjunction) — a :Subject/:Object/:Event source
+            # epistemic labels), so sweep each endpoint's label in turn and
+            # widen the other traversal position with the disjunction
+            # (live.epistemic_disjunction) — a :Subject/:Object/:Event endpoint
             # direct edge must load its back-message slot.
+            #
+            # #6211: `(a.id IN $ids OR b.id IN $ids)` forces a whole-edge-scan
+            # plan (measured 0.30 s on a 23k-node / 160k-edge graph, flat with
+            # the affected-set size), so the sweep is split into the two
+            # endpoint-anchored halves — the union is the OR's row set, and a
+            # row both halves see is the same edge, so the (src, tgt, rel) key
+            # is written identically either way.
             back_rows: list = []
-            for _q in epistemic_label_queries(
-                "MATCH (a)-[r:IMPL|NAND]->(b:{label}) "
-                f"WHERE {epistemic_disjunction('a')} "
-                "AND coalesce(r.direction, 'bidirectional') IN "
-                "['bidirectional', '<->', '<-'] "
-                "AND (a.id IN $ids OR b.id IN $ids) "
-                "RETURN a.id, b.id, type(r), "
-                "       coalesce(r.back_msg_alpha,0.0), coalesce(r.back_msg_beta,0.0)"
-            ):
-                back_rows.extend(self._hop_query(
-                    _q, {"ids": list(affected_claims)}, hop=None,
-                    phase="cache_load", frontier_size=len(affected_claims),
-                ))
+            for _anchor in ("b", "a"):
+                _conds = [
+                    "coalesce(r.direction, 'bidirectional') IN "
+                    "['bidirectional', '<->', '<-']",
+                ]
+                if _anchor == "b":
+                    # b carries the sweep label, so only the SOURCE needs the
+                    # disjunction (the pre-#6211 shape).
+                    _conds.insert(0, epistemic_disjunction("a"))
+                else:
+                    # a is anchored by its own label; b is the widened end.
+                    _conds.insert(0, epistemic_disjunction("b"))
+                for _q in epistemic_label_queries(
+                    f"MATCH ({_anchor}:{{label}}) WHERE {_anchor}.id IN $ids "
+                    + _EP_ANCHOR_BARRIER +
+                    "MATCH (a)-[r:IMPL|NAND]->(b) "
+                    "WHERE " + " AND ".join(_conds) + " "
+                    "RETURN a.id, b.id, type(r), "
+                    "       coalesce(r.back_msg_alpha,0.0), "
+                    "       coalesce(r.back_msg_beta,0.0)"
+                ):
+                    back_rows.extend(self._hop_query(
+                        _q, {"ids": list(affected_claims)}, hop=None,
+                        phase="cache_load",
+                        frontier_size=len(affected_claims),
+                    ))
             for src, tgt, rel, ma, mb in back_rows:
                 self._back_cache[(src, tgt, rel)] = (float(ma), float(mb))
 
@@ -1211,8 +1264,10 @@ class TortoiseEP:
             if live_a:
                 conds.append(live_a)
             rows = self._hop_query(
-                f"MATCH (a:{_label})-[r:IMPL|NAND]-(b) "
-                "WHERE a.id IN $ids AND " + " AND ".join(conds) + " "
+                f"MATCH (a:{_label}) WHERE a.id IN $ids "
+                + _EP_ANCHOR_BARRIER +
+                "MATCH (a)-[r:IMPL|NAND]-(b) "
+                "WHERE " + " AND ".join(conds) + " "
                 # #3139/#3154: index-independent non-operator predicate
                 # (a bare `= false` is emptied by a GRAPH.COPY'd index).
                 "AND (b.is_operator IS NULL OR b.is_operator = false) "
@@ -1291,10 +1346,15 @@ class TortoiseEP:
                     nbr_rows: list = []
                     # #7853: n is the id-anchored frontier — sweep its labels;
                     # the far endpoint m is widened by traversal.
+                    # #6211: the barrier keeps the plan anchored on n's id
+                    # index; without it the planner scans op:Point and filters
+                    # 1.28 M records (see _EP_ANCHOR_BARRIER).
                     for _qn in epistemic_label_queries(
-                        "MATCH (n:{label})<-[r:IMPL|NAND]-(op:Point)"
+                        "MATCH (n:{label}) WHERE n.id IN $ids "
+                        + _EP_ANCHOR_BARRIER +
+                        "MATCH (n)<-[r:IMPL|NAND]-(op:Point)"
                         "-[r2:IMPL|NAND]->(m) "
-                        "WHERE n.id IN $ids AND m.id <> n.id "
+                        "WHERE m.id <> n.id "
                         f"AND {epistemic_disjunction('m')} "
                         "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
                         f"AND {_live_only('op.status', include_draft)} "
@@ -1318,7 +1378,7 @@ class TortoiseEP:
                     # the HALF-widened state (no factor → recompute from empty
                     # natural parameters), never the both-sides widening.
                     # Draft endpoints never propagate (#780).
-                    conds = ["a.id IN $ids", "b.id <> a.id",
+                    conds = ["b.id <> a.id",
                              epistemic_disjunction("b")]
                     if live_a:
                         conds.append(live_a)
@@ -1327,8 +1387,18 @@ class TortoiseEP:
                     dir_rows: list = []
                     # #7853: a is the id-anchored frontier — sweep its labels;
                     # b is widened by traversal.
+                    # #6211: same barrier as the bridge hop, and for the same
+                    # reason (see _EP_ANCHOR_BARRIER). Measured at THIS site the
+                    # barrier is redundant — the undirected `(a)-[r]-(b)` form is
+                    # already `Node By Index Scan (a:Point)` without it — and it is
+                    # kept as the engine-6.0.0 predicate-drop guard (#6976), not as
+                    # a cost fix: removing the barrier leaves the plan assertion in
+                    # `tests/test_6211_ep_anchor.py` green, while removing the
+                    # bridge hop's reddens it.
                     for _qa in epistemic_label_queries(
-                        "MATCH (a:{label})-[r:IMPL|NAND]-(b) "
+                        "MATCH (a:{label}) WHERE a.id IN $ids "
+                        + _EP_ANCHOR_BARRIER +
+                        "MATCH (a)-[r:IMPL|NAND]-(b) "
                         "WHERE " + " AND ".join(conds) + " "
                         # #3139/#3154: index-independent non-operator form.
                         "AND (a.is_operator IS NULL OR a.is_operator = false) "
@@ -1477,9 +1547,11 @@ class TortoiseEP:
         # widened by traversal. The id-anchored n uses the resolved label when
         # known, else sweeps the four labels.
         template = (
-            "MATCH (n:{label})<-[r:IMPL|NAND]-(op:Point)"
+            "MATCH (n:{label}) WHERE n.id IN $ids "
+            + _EP_ANCHOR_BARRIER +
+            "MATCH (n)<-[r:IMPL|NAND]-(op:Point)"
             "-[r2:IMPL|NAND]->(m) "
-            "WHERE n.id IN $ids AND m.id <> n.id "
+            "WHERE m.id <> n.id "
             f"AND {epistemic_disjunction('m')} "
             "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
             f"AND {_live_only('op.status', include_draft)} "
@@ -1546,13 +1618,17 @@ class TortoiseEP:
         # Draft operators are excluded (#780).
         op_info: dict[str, tuple[str, str | None, str | None]] = {}
         where_b1 = " AND ".join(
-            ["(o.is_operator = true OR o.op_type IS NOT NULL)",
-             "c.id IN $ids"] + ([live_o] if live_o else []) + ([live_c] if live_c else [])
+            ["(o.is_operator = true OR o.op_type IS NOT NULL)"]
+            + ([live_o] if live_o else []) + ([live_c] if live_c else [])
         )
         rows: list = []
         # #7853: c is the affected claim (id-filtered) — id-anchored sweep.
+        # #6211: the anchor needs the barrier, or the plan scans o:Point and
+        # filters every edge (see _EP_ANCHOR_BARRIER).
         for _q in epistemic_label_queries(
-            "MATCH (o:Point)-[r:IMPL|NAND]->(c:{label}) "
+            "MATCH (c:{label}) WHERE c.id IN $ids "
+            + _EP_ANCHOR_BARRIER +
+            "MATCH (o:Point)-[r:IMPL|NAND]->(c) "
             f"WHERE {where_b1} "
             "RETURN DISTINCT o.id, o.op_type, o.label, o.direction"
         ):
@@ -1579,28 +1655,71 @@ class TortoiseEP:
         # (NAND_BASE_WEIGHT — #855 — for NAND, 1.0 for IMPL). Parallel direct
         # edges between the same pair share one message slot (last-writer
         # wins) — unsupported; creation paths must not duplicate edges.
-        dir_rows = self._hop_query(
-            "MATCH (a)-[r:IMPL|NAND]->(b) "
+        # #6211: `(a.id IN $ids OR b.id IN $ids)` cannot be an index anchor —
+        # the plan scans EVERY IMPL|NAND edge in the graph and filters. An edge
+        # qualifies iff it touches the affected set at EITHER end, so two
+        # sweeps — one anchored on each end — return exactly the OR's rows.
+        # The unsplit form is measured at 0.36 s on a 23k-node / 160k-edge
+        # graph REGARDLESS of the affected-set size; each anchored sweep is
+        # bounded by the affected claims' incident edges.
+        # Each edge is admitted EXACTLY ONCE, keyed on the EDGE (`id(r)`): the
+        # target-anchored sweep takes every edge whose target is affected, and
+        # the source-anchored sweep takes the remainder (`NOT b.id IN $ids`).
+        # Two reasons the key is the edge and not the projected row:
+        #   * a multi-labelled endpoint (``:Point:Object`` — a shape the write
+        #     path can mint) is matched by TWO label sweeps, so its edges come
+        #     back once per label; the pre-change single-query OR returned them
+        #     once, and this list is appended to (unlike every other
+        #     label-swept site, which dedupes on a node id);
+        #   * two byte-identical PARALLEL direct edges are two factors, and a
+        #     row-keyed dedupe would collapse them into one.
+        # `id(r)` is unique per edge within the query and stable across the
+        # sweeps, so it separates both cases exactly.
+        # The NULL guard keeps an edge to a node without an `id` property:
+        # `NOT (NULL IN …)` is NULL, which would silently drop the row the OR
+        # form returned.
+        _non_op = ("({x}.is_operator IS NULL OR {x}.is_operator = false) "
+                   "AND {x}.op_type IS NULL")
+        dir_rows: list = []
+        _seen_dir: set = set()
+        for _anchor in ("a", "b"):
+            _other = "b" if _anchor == "a" else "a"
+            _conds = [
+                epistemic_disjunction(_anchor),
+                epistemic_disjunction(_other),
+                # #3139/#3154: index-independent non-operator form — a bare
+                # `= false` drops every direct-edge factor on a GRAPH.COPY'd
+                # graph (Batch 3 silently returns ∅).
+                _non_op.format(x=_anchor),
+                _non_op.format(x=_other),
+            ]
+            _conds.extend([live_a, live_b])
+            if _anchor == "a":
+                # The other sweep owns every edge touching the set from its
+                # TARGET; this one owns the rest.
+                _conds.append("(_other.id IS NULL OR NOT _other.id IN $ids)"
+                              .replace("_other", _other))
             # #7902: both endpoints of a direct edge may carry any of the four
             # epistemic labels (the write path was widened with the same
             # helper). Traversal positions — the label disjunction goes in the
             # WHERE clause (FalkorDB rejects pattern-position disjunction).
-            f"WHERE {epistemic_disjunction('a')} "
-            f"AND {epistemic_disjunction('b')} "
-            # #3139/#3154: index-independent non-operator form — a bare
-            # `= false` drops every direct-edge factor on a GRAPH.COPY'd
-            # graph (Batch 3 silently returns ∅).
-            "AND (a.is_operator IS NULL OR a.is_operator = false) "
-            "AND a.op_type IS NULL "
-            "AND (b.is_operator IS NULL OR b.is_operator = false) "
-            "AND b.op_type IS NULL "
-            "AND (a.id IN $ids OR b.id IN $ids) "
-            f"{('AND ' + live_a + ' AND ' + live_b + ' ') if live_a else ''}"
-            "RETURN a.id, b.id, type(r), coalesce(r.direction, 'bidirectional'), "
-            "       r.weight",
-            {"ids": list(affected_claims)}, hop=None,
-            phase="factor_extraction", frontier_size=len(affected_claims),
-        )
+            for _q in epistemic_label_queries(
+                f"MATCH ({_anchor}:{{label}}) WHERE {_anchor}.id IN $ids "
+                + _EP_ANCHOR_BARRIER +
+                "MATCH (a)-[r:IMPL|NAND]->(b) "
+                "WHERE " + " AND ".join(_conds) + " "
+                "RETURN id(r), a.id, b.id, type(r), "
+                "       coalesce(r.direction, 'bidirectional'), r.weight"
+            ):
+                for _row in self._hop_query(
+                    _q, {"ids": list(affected_claims)}, hop=None,
+                    phase="factor_extraction",
+                    frontier_size=len(affected_claims),
+                ):
+                    if _row[0] in _seen_dir:
+                        continue
+                    _seen_dir.add(_row[0])
+                    dir_rows.append(tuple(_row[1:]))
         for src_id, tgt_id, rel, direction, weight in dir_rows:
             if weight is None:
                 weight = (NAND_BASE_WEIGHT if rel == "NAND" else 1.0)
