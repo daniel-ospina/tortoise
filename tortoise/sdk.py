@@ -22215,6 +22215,40 @@ class TortoiseSDK:
         ``diagnostic: "no_dirty_state_http"`` without the three keys — a caller
         on the hosted surface must read that diagnostic first.
 
+        DIRTY-FLAG CLEARING (#6211, mode 2) — a successful pass retires the
+        flags it recomputed. `ep_dirty` is the graph's cross-process "this
+        claim's belief is stale" marker; before #6211 the only path that
+        retired a CONVERGED PASS's recomputed set was the dreaming adapters'
+        `_sweep_dirty_roots` (the two other writers of the flag — `_mark_dirty`'s
+        terminal-point clear and `_register_failed_attempt`'s retry-cap clear —
+        are lifecycle events, not "this pass recomputed it"). A writer following
+        the documented "compute confidence for my claims" call (`anchors=` /
+        `factors=`) therefore got posteriors and `converged: true` while its own
+        claims stayed `ep_dirty` forever. The two TARGETED branches (`factors=` /
+        `anchors=`) now clear the run's affected claims through
+        `_clear_targeted_pass_dirty`. The NO-ARG branch is unchanged: it clears
+        through the fail-safe `dream` it delegates to, so it inherits THAT
+        pass's gates and nothing here.
+
+        The targeted clear is scaled to what the pass actually did, and it is
+        deliberately STRICTER than the dream adapters, which gate on
+        `converged`, the #1163 stale-run guard and `_guard_dream_progress`
+        (#3139 — an explicit raise on a zero-work pass, NOT a truncation gate)
+        and nothing else: measured, a no-arg pass whose dream selection was
+        capped at 200 of 260 operators still clears, reporting
+        `truncated: true`. This path additionally refuses when the pass was
+        TRUNCATED (a reduced topology's `affected` set is incomplete by
+        construction, so every claim outside it is still stale) and when the
+        run recomputed nothing at all — stated directly here rather than
+        inherited from the Dreamer's raise. A pass that fails, is capped, is
+        truncated, or did no work clears NOTHING (W4 retention, #1243): those
+        roots are still stale and must be retried. A missing epoch snapshot
+        refuses explicitly (the Dreamer cannot reach that state: its snapshot is
+        always an int, `0` when the epoch read failed, which clears nothing).
+        Nothing new is returned for this — the flag itself is the observable,
+        and `ep_dirty_at` records
+        when it was set.
+
         Two diagnostics can accompany the result, both ABSENT when they do not
         apply: ``diagnostic`` — one of ``truncated`` (#395 degeneration guard),
         ``no_factors`` / ``no_dirty_roots`` (nothing to run), ``factors_skipped``;
@@ -22495,7 +22529,150 @@ class TortoiseSDK:
                 for s in ep._last_skipped_factors
             ]
             result.setdefault("diagnostic", "factors_skipped")
+        # #6211 (mode 2): the targeted paths have persisted their posteriors and
+        # their `n.confidence` write-back, so the claims they recomputed are no
+        # longer stale — clear THEIR flags. Runs after the write-back on purpose:
+        # a claim is recomputed when its belief is persisted, not when the factor
+        # pass returns.
+        #
+        # Keyed on the BRANCH PREDICATE, not a hand-set flag: the same condition
+        # that chose the branch chooses whether this method owns the sweep, so a
+        # future branch (or a refactor that moves one) cannot silently strand the
+        # flags again — the #6211 failure reproduced by omission. The no-arg case
+        # is excluded because its fail-safe `dream` already swept, and sweeping a
+        # second time here would restate that rule in a second place.
+        if factors is not None or anchors is not None:
+            self._clear_targeted_pass_dirty(ep, result)
         return result
+
+    def _clear_targeted_pass_dirty(self, ep, result: dict) -> None:
+        """#6211 (mode 2) — a converged TARGETED pass clears its own roots.
+
+        THE DEFECT THIS CLOSES. `ep_dirty` is the graph's cross-process source
+        of truth for "this claim's belief has not been recomputed since it was
+        written", and the ONLY code that retires a CONVERGED PASS's recomputed
+        set is `_sweep_dirty_roots`, called from the three dreaming adapters
+        (`_dream_local` / `_dream_stale_first` / `_dream_full`). Two other
+        writers touch the same flag and are NOT this rule: `_mark_dirty` clears
+        it for TERMINAL points as it re-marks them, and
+        `_register_failed_attempt` clears it when a root hits the retry cap —
+        both are lifecycle events, not "a pass recomputed this belief". The
+        targeted fast path — `compute_confidence(
+        factors=…)` / `compute_confidence(anchors=…)`, the call the graph
+        instruction and `docs/capacity.md` point a writer at — runs `ep.run`
+        directly and never touches the Dreamer, so it wrote posteriors and left
+        the writer's own `ep_dirty` flags set. MEASURED on this head before the
+        change (4-claim IMPL chain, embedded lane): after
+        `compute_confidence(anchors=[c0], max_hops=2)` reported
+        `converged=True, truncated=False` over all 4 claims, all 4 were still
+        `ep_dirty`; the subsequent no-arg pass cleared all 4. A writer therefore
+        had a way to mark claims dirty and no API that cleared them — the
+        issue's second failure mode.
+
+        WHY THIS IS NOT A NEW CLEARING RULE. It is the Dreamer's rule, applied
+        to the second entry point of the same problem, and the SAME method
+        already clears dirty state on its no-arg branch (via `dream`) — two
+        branches of one public method disagreeing about whether a recompute
+        retires its own flag is the inconsistency, not the fix.
+
+        THE GATES, all fail-closed (each refuses when its datum is missing
+        too). TWO are the Dreamer's, THREE are this path's own and STRICTER:
+
+          * ``converged`` — shared with the Dreamer. W4 retention (#1243): a
+            pass that did not converge leaves its roots dirty for the retry.
+          * ``not _flush_skipped`` — shared with the Dreamer. #1163/#6761: the
+            run's posteriors were DROPPED by the stale-run guard after a
+            concurrent process advanced the epoch, so nothing was recomputed.
+          * ``not truncated`` — ADDED HERE, not a Dreamer gate. The adapters
+            consult convergence, the flush guard and `_guard_dream_progress`'s
+            #3139 raise, and NOT truncation: measured, a no-arg pass whose dream
+            selection was capped at 200 of 260 operators still clears while
+            reporting ``truncated: true``. A truncated pass was computed over a
+            REDUCED topology — the operator cap, or the #395 degeneration guard
+            — so its ``affected`` set is incomplete by construction and every
+            claim outside it is still stale. This is why the clearing path was
+            blocked on the reporting half: before it, a capped pass was
+            indistinguishable from a full one and there was nothing sound to
+            gate on.
+          * ``iterations`` > 0 AND a non-empty ``affected`` — ADDED HERE. A pass
+            that ran NO factor recomputed nothing, and sweeping its roots would
+            be the #3139 "no-op that sweeps its own backlog" false PASS. The
+            Dreamer obtains the same protection by RAISING
+            (`_guard_dream_progress` → `DreamNoOpError`) before any sweep; this
+            path states the rule directly and refuses the clear instead of
+            failing the call. Belt-and-braces: the epoch arm below also refuses
+            that shape after the fix in ``TortoiseEP.run``'s entry reset.
+          * ``_run_ep_version >= 0`` — ADDED HERE. The epoch this run SAW is the
+            guard's only protection against erasing a marking newer than the
+            run's world view, and `_sweep_dirty_roots(run_ep=None)` clears
+            UNCONDITIONALLY (the #1163 hazard). `-1` is the "no snapshot this
+            run" sentinel, so this path refuses explicitly. The Dreamer cannot
+            reach that state — its `_last_run_ep_version` is always an int (`0`
+            when the epoch read failed), and `ep_dirty_at <= 0` matches no
+            stamp, i.e. it clears nothing — so this arm is stricter, not merely
+            different.
+
+        The epoch is then passed to `_sweep_dirty_roots`, which clears only
+        `ep_dirty_at <= run_ep`: a concurrent process's newer marking survives,
+        exactly as in the Dreamer. Roots the pass did not reach are retained
+        (W4). The #7505 NEUTRAL-LINK roots are handled by
+        `_unsweepable_dirty_roots` INSIDE the sweep only when this process's
+        dirty mirror is populated — i.e. for the writer's own long-lived SDK,
+        not for a request-scoped caller whose mirror starts empty. That is the
+        pre-existing scope of the sweep, unchanged here: the targeted path is
+        not asked to drain a backlog it never saw, and a hosted caller's
+        neutral-link roots are still the dream drain's work.
+
+        BEST-EFFORT. The posteriors, the `n.confidence` write-back and the
+        `ConfidenceChanged` journal entries have ALREADY landed by the time this
+        runs, so a failed clear must not turn a successful pass into a raised
+        exception — a clear that fails retains the flag (the safe, W4
+        direction) and is logged.
+
+        NOT done here: `_prune_nonexistent_dirty_roots` (the deleted-point
+        zombie pass, #1243 P2-review) stays with the Dreamer. The targeted path
+        does not create zombies — `delete_point` does, and the dream drain is
+        the sweep that owns that class — and a per-read whole-graph prune would
+        put a scan on the interactive fast path.
+        """
+        if not result.get("converged"):
+            return
+        # Fail closed on a MISSING key too: the sole call site always supplies
+        # it (via `_report`), but an absent `truncated` must never read as
+        # "not truncated" — that is the direction that retires a flag on a
+        # reduced topology.
+        if result.get("truncated", True):
+            return
+        if not result.get("iterations"):
+            return
+        if getattr(ep, "_flush_skipped", True):
+            return
+        run_ep = getattr(ep, "_run_ep_version", -1)
+        if not isinstance(run_ep, int) or run_ep < 0:
+            return
+        affected = set(getattr(ep, "_last_affected", ()) or ())
+        if not affected:
+            return
+        # Snapshot the mirror for an EXACT undo. `_sweep_dirty_roots` subtracts
+        # `set(affected) | _unsweepable_dirty_roots(affected)` BEFORE it issues
+        # the graph write, so a failure leaves the roots in the graph but gone
+        # from this process's backlog — and `_hydrate_dirty_roots` returns early
+        # while the mirror is non-empty, so a later no-arg pass would never
+        # retry them. Restoring `affected` alone is not enough: the #7505
+        # NEUTRAL-LINK residue is subtracted too and would be lost; and when the
+        # failure happens BEFORE the subtraction (a raise from
+        # `_unsweepable_dirty_roots` itself) re-adding `affected` would
+        # manufacture mirror roots whose graph flag is clean. A snapshot is the
+        # identity in both positions.
+        mirror_before = set(self._dirty_roots)
+        try:
+            self._sweep_dirty_roots(affected, run_ep=run_ep)
+        except Exception:  # noqa: BLE001, RUF100 - best-effort, see docstring
+            self._dirty_roots |= mirror_before
+            _logger.warning(
+                "#6211: could not clear ep_dirty on %d recomputed claim(s) — "
+                "their flags stay set (retained for the next pass)",
+                len(affected), exc_info=True)
 
     def _hydrate_evidence(self) -> None:
         """Load graph-persisted baselines (baseline_set=true) into _evidence.
