@@ -885,13 +885,12 @@ def pick_port(lo: int = PORT_RANGE[0], hi: int = PORT_RANGE[1]) -> int:
         if port_is_free(port) and not _container_publishes(port, scan):
             return port
     raise SystemExit(
-        f"test-lane: no free port in {lo}-{hi}; run `uv run python "
-        f"tools/test_lane.py list` to see the lane containers, then clear the "
-        f"stopped ones (`docker ps -a --filter name=fdb-lane- --filter "
-        f"status=exited`). A STOPPED lane container keeps its published port "
-        f"reserved, so stopped containers exhaust this range — `uri` reaps "
-        f"them automatically on its next start (``TORTOISE_TEST_LANE_REAP=1``, "
-        f"the default)"
+        f"test-lane: no free port in {lo}-{hi}. A STOPPED lane container "
+        f"keeps its published port reserved, so stopped containers are what "
+        f"exhaust this range — `uv run python tools/test_lane.py list` shows "
+        f"them, and `up`/`uri` reaps the ones whose owning worktree this clone "
+        f"can name (``TORTOISE_TEST_LANE_REAP=1``, the default) before "
+        f"choosing a port"
     )
 
 
@@ -1413,15 +1412,24 @@ def reap_orphans() -> list[str]:
        POSITIVELY established is gone — never a peer lane's, and never this
        worktree's own (`stop()` is the only thing that removes that one).
     2. **The container is in a TERMINAL state** (`exited`/`dead`,
-       `_TERMINAL_STATES`) — the same set `start()` already replaces
-       unconditionally. A stopped container serves nothing: it cannot hold a
-       client, it cannot answer a query, and its own lane's next `start()`
-       would `docker rm -f` it anyway, so the reaper destroys nothing the
-       owner has not already forfeited. What it DOES release is the published
-       port, which docker keeps reserved for a stopped container: measured
-       2026-10-20 the fleet's 110-port lane range (``PORT_RANGE``) was fully
-       published with **67 of those ports held by EXITED containers**, and
-       ``uri`` failed outright with ``no free port in 16390-16499``.
+       `_TERMINAL_STATES`) **and its owner is determined** — i.e. this clone
+       can name the worktree that owns it, and that worktree still exists.
+       A stopped container serves nothing: it cannot hold a client, it cannot
+       answer a query, and its own lane's next `start()` would `docker rm -f`
+       it anyway, so the reaper destroys nothing the owner has not already
+       forfeited. What it DOES release is the published port, which docker
+       keeps reserved for a stopped container: measured 2026-10-20 the fleet's
+       110-port lane range (``PORT_RANGE``) was fully published with **67 of
+       those ports held by EXITED containers**, and ``uri`` failed outright
+       with ``no free port in 16390-16499``.
+
+    The owner gate on proof 2 is load-bearing, not incidental: #5084's ruling
+    (and #8180's) is that a container whose ownership this clone cannot
+    determine is REPORT ONLY. A dead lane's worktree directory still exists —
+    nobody deletes a worktree after a merge — so the entire measured population
+    is reachable through a DETERMINED owner; an unattributable name (a slug no
+    worktree claims, e.g. a hand-named lane from another clone) stays
+    report-only however long it has been stopped.
 
     Age is not consulted and there is deliberately NO age backstop here. The
     measured defect is a container that outlives its owner, and a clock firing on
@@ -1431,7 +1439,8 @@ def reap_orphans() -> list[str]:
     still REPORTED and never removed, however ancient it is, because a live
     database is exactly what the ruling protects. `paused`/`restarting`/
     `created` are live-ish in exactly the same way (``_LIVE_ISH_STATES``) and
-    are never reaped either.
+    are never reaped either, and the state is re-read immediately before the
+    removal so a container that has come back up under the same name keeps.
 
     Fail-closed: if the worktree list or `docker ps` cannot be read, nothing is
     removed and the reason is reported; a state this module does not recognise
@@ -1465,17 +1474,40 @@ def reap_orphans() -> list[str]:
         if name == mine:
             out.append(f"reap: kept {name} — this is THIS worktree's container")
             continue
+        owner = slugs.get(name[len(NAME_PREFIX):])
         state = states[name]
-        if state in _TERMINAL_STATES:
-            # Proof 2: a stopped container serves nothing and `start()` on its
-            # own lane replaces it anyway — so this removes no work, and it
-            # releases the port docker still reserves for it.
+        if owner is not None and state in _TERMINAL_STATES:
+            # Proof 2, and it is gated on a DETERMINED owner (`owner is not
+            # None`) precisely so it never reaches a container this clone
+            # cannot attribute: #5084's ruling is that an INDETERMINATE
+            # container is report-only, and this arm must not become a
+            # loophole through it. A dead lane's worktree directory still
+            # exists, so its slug IS determined and its stopped container IS
+            # reaped — which is the whole measured population (67 of the 110
+            # lane ports were held by exited containers of existing worktrees).
+            #
+            # Re-read the state AT THE MOMENT OF ACTION: the snapshot above was
+            # one `docker ps`, and a lane restarting its own container reuses
+            # the SAME name, so an `exited` read can be stale by the time the
+            # `rm` lands. `unknown` keeps, per this module's absent-vs-
+            # unreadable rule.
+            now = container_state(name)
+            if now not in _TERMINAL_STATES:
+                out.append(f"reap: kept {name} — it read {state} in the sweep "
+                           f"but is {now} at removal time (fail-closed)")
+                continue
+            # #7357: `rm -f` destroys the only evidence of WHY the container
+            # stopped, and `start()` reads it before its own removal for
+            # exactly this reason. This arm removes a container from ANOTHER
+            # lane, whose next `start()` will then see `absent` and report
+            # nothing — so the facts are read here and carried in the line.
+            prior = _termination_report(name, live=False)
             rm = _docker("rm", "-f", name)
             out.append(f"reap: {'removed' if rm.returncode == 0 else 'FAILED to remove'} "
-                       f"{name} — it is {state} (a stopped container serves "
-                       f"nothing and holds a port from {PORT_RANGE[0]}-{PORT_RANGE[1]})")
+                       f"{name} — it is {now} (a stopped container serves "
+                       f"nothing and holds a port from {PORT_RANGE[0]}-{PORT_RANGE[1]})"
+                       + (f"; it was {prior}" if prior else ""))
             continue
-        owner = slugs.get(name[len(NAME_PREFIX):])
         if owner is not None:
             # The owner IS determined, so ownership alone decides — and a live
             # owner is never reaped, at any age.

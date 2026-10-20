@@ -1674,7 +1674,11 @@ def test_stale_sweep_never_consumes_a_journal_bound_to_another_instance(
     still live somewhere else, which is precisely how 2,331 graphs became
     permanently unattributable."""
     import tortoise.embedded_reaper as er
-    from tests._embedded import JOURNAL_INSTANCE_SUFFIX, _stale_sweep
+    from tests._embedded import (
+        JOURNAL_INSTANCE_SUFFIX,
+        _stale_sweep,
+        _uri_instance_key,
+    )
     adir = tmp_path / "suites"
     adir.mkdir()
     monkeypatch.setattr(er, "ACTIVE_SUITES_DIR", str(adir))
@@ -1682,27 +1686,95 @@ def test_stale_sweep_never_consumes_a_journal_bound_to_another_instance(
     nonce = "deadbeefdead"
     journal = adir / f"{nonce}.graphs.jsonl"
     journal.write_text("test_ws_elsewhere_graph\n")
+    # The bound key MUST come from the same accessor the MATCHING sweep below
+    # uses. A hardcoded "127.0.0.1:6379" here made the matching half of this
+    # test red in CI, where `.github/actions/falkordb-provision` assigns
+    # TORTOISE_TEST_DOCKER_PORT an ephemeral port — a red about the test's own
+    # literal, not about the instance gate it exists to pin.
+    bound_uri = _live_utils.docker_base_uri(password="x", host="127.0.0.1")
+    bound_key = _uri_instance_key(bound_uri)
+    assert bound_key, bound_uri
     journal.with_name(journal.name + JOURNAL_INSTANCE_SUFFIX).write_text(
-        "127.0.0.1:6379\n")
+        bound_key + "\n")
     db = _FakeDb(graphs=["test_ws_elsewhere_graph"])
     monkeypatch.setattr("tests._embedded._proj_for_uri",
                         lambda uri: _FakeProj(db))
 
-    # A sweep for a DIFFERENT instance (the lane's private container).
-    res = _stale_sweep("docker://:falkordb@127.0.0.1:6380/tortoise_test_matrix")
+    # A sweep for a DIFFERENT instance (the lane's private container), derived
+    # from the bound key so it can NEVER be the bound one whatever port the
+    # environment supplies.
+    host, _, port = bound_key.rpartition(":")
+    other_uri = (f"docker://:falkordb@{host}:{int(port) + 1}"
+                 f"/tortoise_test_matrix")
+    res = _stale_sweep(other_uri)
     assert db.deleted == [], res          # nothing dropped: wrong instance
     assert journal.exists(), res          # and the OWNERSHIP RECORD survives
-    assert res["stale"][0]["skipped"], res
+    assert res["stale"][0]["skipped_instance"], res
 
     # The same journal, swept by a session pointed at the instance it is
     # bound to: the graphs are dropped and the record is consumed — BOTH
     # halves of the record, journal and `.instance` sidecar, so a stale
     # sidecar cannot outlive its journal and re-bind a future name.
-    _stale_sweep(_live_utils.docker_base_uri(password="x", host="127.0.0.1"))
+    _stale_sweep(bound_uri)
     assert "test_ws_elsewhere_graph" in db.deleted
     assert not journal.exists()
     assert not journal.with_name(
         journal.name + JOURNAL_INSTANCE_SUFFIX).exists()
+
+
+def test_binding_creates_the_coordination_dir_a_fresh_host_lacks(tmp_path):
+    """_bind_journal_instance runs at conftest IMPORT, and on a fresh host
+    nothing has created ACTIVE_SUITES_DIR yet — the journal itself is created
+    later, by the append seam, which makes the dir for this same reason. Without
+    the mkdir the bind silently failed on exactly the sessions whose journals
+    most need one (a first session on a host, a per-job CI temp root, the #3752
+    redirect), restoring the defect this PR exists to fix with no signal.
+    Mutation: drop the `os.makedirs` and this returns False."""
+    from tests._embedded import JOURNAL_INSTANCE_SUFFIX, _bind_journal_instance, _journal_instance
+    journal = tmp_path / "fresh" / "nested" / "abcdef123456.graphs.jsonl"
+    assert _bind_journal_instance(
+        str(journal), "docker://:falkordb@127.0.0.1:6379/g") is True
+    assert journal.with_name(journal.name + JOURNAL_INSTANCE_SUFFIX).exists()
+    assert _journal_instance(str(journal)) == "127.0.0.1:6379"
+
+
+def test_removing_an_EMPTY_journal_path_touches_nothing(monkeypatch, tmp_path):
+    """The journal path comes from an env var, so it can be `""` — and
+    `"" + ".instance"` is a RELATIVE `.instance` unlinked from the process CWD,
+    which is not this journal's file. `_read_wiped_cursor` guards its own
+    `"" + ".cursor"` for the same reason. Mutation: drop the `if not
+    journal_file: return` guard and the sentinel dies."""
+    from tests._embedded import _remove_journal_file
+    monkeypatch.chdir(tmp_path)
+    for name in (".instance", ".cursor"):
+        (tmp_path / name).write_text("sentinel\n")
+    _remove_journal_file("")
+    for name in (".instance", ".cursor"):
+        assert (tmp_path / name).exists(), f"{name} was unlinked from the CWD"
+
+
+def test_the_sweep_census_does_not_call_a_SKIPPED_journal_dropped():
+    """The operator-facing counters, which a reader uses to judge whether the
+    sweep is working (#5084's evidence WAS this number). A dead journal that
+    was deliberately skipped for another instance sits in the same `stale` list
+    as a consumed one, so counting the list reported "N dropped" while the next
+    printed line said "N left for another instance" — a sweep that dropped
+    NOTHING announcing that it dropped something. Mutation: count
+    `len(entries)` and both the dropped and the elsewhere assertions fail."""
+    from tests._embedded import _sweep_census
+    entries = [
+        {"journal": "a.graphs.jsonl", "journal_removed": True},
+        {"journal": "b.graphs.jsonl", "journal_removed": False,
+         "skipped_instance": "bound to 127.0.0.1:6380, this sweep targets "
+                             "127.0.0.1:6379"},
+        # A NON-LOOPBACK target skips the whole sweep under a plain `skipped`
+        # key — a different fact, and not "belongs elsewhere".
+        {"journal": "c.graphs.jsonl", "journal_removed": False,
+         "skipped": "non-loopback '10.0.0.5'"},
+    ]
+    dropped, elsewhere = _sweep_census(entries)
+    assert [r["journal"] for r in dropped] == ["a.graphs.jsonl"], dropped
+    assert [r["journal"] for r in elsewhere] == ["b.graphs.jsonl"], elsewhere
 
 
 def test_the_instance_sidecar_round_trips_what_conftest_writes(tmp_path):
@@ -1758,7 +1830,7 @@ def test_stale_sweep_skips_a_bound_journal_when_the_target_is_UNRESOLVABLE(
     res = _stale_sweep("docker://:falkordb@:6379/tortoise_test_matrix")
     assert db.deleted == [], res
     assert journal.exists(), res
-    assert res["stale"][0]["skipped"], res
+    assert res["stale"][0]["skipped_instance"], res
 
 
 def test_stale_sweep_still_consumes_an_UNBOUND_legacy_journal(

@@ -1252,6 +1252,13 @@ def _bind_journal_instance(journal_file: str, uri: str | None) -> bool:
     if not key:
         return False
     try:
+        # The parent dir may not exist yet: this runs at conftest IMPORT, and on
+        # a fresh host (a new TMPDIR, CI's per-job temp root, the #3752
+        # redirect) NOTHING has created ACTIVE_SUITES_DIR — the journal itself
+        # is created later, by `_journal_append`, which makes the dir for this
+        # same reason (cycle-7 P1-1). Without this line the bind silently
+        # fails on exactly the sessions whose journals most need a binding.
+        os.makedirs(os.path.dirname(journal_file) or ".", exist_ok=True)
         with open(journal_file + JOURNAL_INSTANCE_SUFFIX, "w") as fh:
             fh.write(key + "\n")
     except OSError:
@@ -1637,7 +1644,14 @@ def _drop_one_graph(proj, g: str, *, drop: bool) -> bool:
 def _remove_journal_file(journal_file: str) -> None:
     """Remove the journal AND its sidecars (both are per-session
     bookkeeping — a removed journal without its sidecar leaves a stray
-    .cursor / .instance file in ACTIVE_SUITES_DIR every docker session)."""
+    .cursor / .instance file in ACTIVE_SUITES_DIR every docker session).
+
+    An EMPTY path removes nothing: the callers read the path from an env var,
+    and `"" + ".instance"` would be a RELATIVE `.instance` unlinked from the
+    process CWD — a file that is not this journal's. `_read_wiped_cursor`
+    already guards its own `"" + ".cursor"` for the same reason."""
+    if not journal_file:
+        return
     for p in (journal_file, journal_file + ".cursor",
               journal_file + JOURNAL_INSTANCE_SUFFIX):
         try:  # noqa: SIM105
@@ -1976,6 +1990,28 @@ def _leftover_sweep(uri: str, *, skip_on_non_loopback: bool = True) -> dict:
             return {"full_sweep": False, "error": str(e)}
 
 
+def _sweep_census(entries: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Split `_stale_sweep`'s per-journal outcomes into DROPPED and DEFERRED.
+
+    A census must count OUTCOMES, not list length. `_stale_sweep` puts a journal
+    it deliberately SKIPPED into the same `stale` list as one it consumed (both
+    belong to dead sessions), so `len(stale)` reports a journal nothing was
+    dropped for as "dropped" — and the operator then reads "N dead session
+    journal(s) dropped" on one line and "N dead journal(s) left for another
+    instance" on the next, two adjacent lines contradicting each other.
+    `journal_removed` is the only field that says a record was consumed.
+
+    The DEFERRED half is keyed on `skipped_instance` specifically:
+    `_sweep_drop` also returns a `skipped` reason for a NON-LOOPBACK target,
+    which is a different fact ("this sweep did not run at all") and must not be
+    reported as "this journal belongs to another instance".
+    """
+    return (
+        [r for r in entries if r.get("journal_removed")],
+        [r for r in entries if r.get("skipped_instance")],
+    )
+
+
 def _stale_sweep(uri: str, *, skip_on_non_loopback: bool = True) -> dict:
     """Session-start stale sweep (Step 7 item 1): drop DEAD sessions'
     journaled graphs.
@@ -2035,8 +2071,8 @@ def _stale_sweep(uri: str, *, skip_on_non_loopback: bool = True) -> dict:
             # journal would destroy the only ownership record they have. An
             # UNRESOLVABLE target (None) lands here too — unknown is not
             # "matches", and the cost of being wrong is an irreversible one.
-            results.append({"journal": e, "skipped": f"bound to {bound}, "
-                            f"this sweep targets {target}",
+            results.append({"journal": e, "skipped_instance": f"bound to "
+                            f"{bound}, this sweep targets {target}",
                             "journal_removed": False})
             continue
         with _sweep_proj(uri) as proj:

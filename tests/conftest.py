@@ -395,9 +395,18 @@ if _is_db_uri_conftest(os.environ.get("TORTOISE_DB_URI")):
     # were named by any surviving journal). Bind it here, where the session's
     # target IS known, so `_stale_sweep` can refuse to consume a journal it is
     # not sweeping the right instance for. Best-effort (see the helper): an
-    # unbound journal is swept the pre-fix way rather than never.
-    _embedded_mod._bind_journal_instance(
-        _JOURNAL_PATH, os.environ.get("TORTOISE_DB_URI"))
+    # unbound journal is swept the pre-fix way rather than never — so when the
+    # bind fails for a session that DOES have a server target, the instance gate
+    # silently does not apply to it and a wrong-instance sweep can consume the
+    # journal. One line, next to the other `[server-graph-hygiene]` messages,
+    # because nothing else reports it.
+    if not _embedded_mod._bind_journal_instance(
+            _JOURNAL_PATH, os.environ.get("TORTOISE_DB_URI")) \
+            and _embedded_mod._uri_instance_key(
+                os.environ.get("TORTOISE_DB_URI")):
+        print("[server-graph-hygiene] this session's journal could NOT be "
+              "bound to its instance — the stale sweep will treat it as "
+              "UNBOUND (pre-fix behaviour: not instance-gated)")
 
 # ── #7357: a test session must not be pointed at the CANONICAL store ──────
 # Declared at conftest IMPORT time, for the same reason as the #4071 block
@@ -1168,6 +1177,7 @@ def _server_graph_hygiene(_redislite_hygiene):
         _read_journal,
         _session_end_own_sweep,
         _stale_sweep,
+        _sweep_census,
         _sweep_proj,
         _uri_default_graph_name,
     )
@@ -1195,18 +1205,22 @@ def _server_graph_hygiene(_redislite_hygiene):
     # (possibly holding module-import appends) is never classified dead.
     try:
         stale = _stale_sweep(uri, skip_on_non_loopback=True)
-        if stale.get("stale"):
+        # Census by OUTCOME, not by list length: a journal that was SKIPPED was
+        # not dropped, and this counter is the signal a future reader uses to
+        # judge whether the sweep is working (#5084's evidence was exactly this
+        # number). See `_sweep_census` for why `len(stale['stale'])` is wrong.
+        dropped, elsewhere = _sweep_census(stale.get("stale", []))
+        if dropped:
             print(f"[server-graph-hygiene] stale sweep: "
-                  f"{len(stale['stale'])} dead session journal(s) dropped")
+                  f"{len(dropped)} dead session journal(s) dropped")
         # A journal bound to ANOTHER instance is deliberately NOT consumed (its
         # graphs are not on this server, so "absent here" proves nothing) —
         # report it, because the only session that can reap those graphs is one
         # pointed at that instance.
-        elsewhere = [r for r in stale.get("stale", []) if r.get("skipped")]
         if elsewhere:
             print(f"[server-graph-hygiene] {len(elsewhere)} dead journal(s) left "
                   f"for another instance: "
-                  f"{', '.join(r['skipped'] for r in elsewhere)}")
+                  f"{', '.join(r['skipped_instance'] for r in elsewhere)}")
     except Exception as exc:
         print(f"[server-graph-hygiene] stale sweep skipped: {exc}")
 

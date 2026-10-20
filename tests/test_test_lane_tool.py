@@ -248,10 +248,55 @@ def test_reaper_reaps_a_TERMINAL_container_whose_owner_worktree_still_EXISTS(
     monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
     monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"deadlane": str(owner)})
     monkeypatch.setattr(tl, "_started_epoch", lambda _n: time.time())
+    # The arm re-reads the state at the moment of action; pin that read.
+    monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
     out = tl.reap_orphans()
     assert removed == [("-f", "fdb-lane-deadlane")], (removed, out)
     assert "removed fdb-lane-deadlane" in out[0], out
     assert "exited" in out[0], out
+
+
+def test_reaper_reads_the_TERMINATION_FACTS_before_it_removes(monkeypatch,
+                                                             tmp_path):
+    """#7357's rule, applied to the arm that removes ANOTHER lane's container:
+    `rm -f` destroys the only evidence of WHY it stopped, and this reap runs
+    BEFORE that lane's own `start()` — whose termination report is the read
+    #7357 added. After the removal, that lane reads `absent` and reports
+    nothing, so if the facts are not read and printed HERE they are gone.
+
+    Measured shape this protects: a Docker-daemon restart leaves every lane
+    container `exited`, and one sweep removes the fleet's whole diagnostic in
+    one pass. Mutation: drop the `prior = _termination_report(...)` read (or
+    move it after the `rm`) and one of the two assertions fails."""
+    owner = tmp_path / "worktree-of-a-dead-lane"
+    owner.mkdir()
+    order: list = []
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-deadlane\texited\n", "")
+        if a[0] == "inspect" and a[2] == tl._TERMINATION_FORMAT:
+            order.append("facts")
+            # OOMKilled=true / ExitCode=137 / RestartCount=0 / 2 GiB cap
+            return _R(0, "true 137 0 2147483648\n", "")
+        if a[0] == "inspect":
+            return _R(0, "exited\n", "")
+        if a[0] == "rm":
+            order.append("rm")
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"deadlane": str(owner)})
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)
+    out = tl.reap_orphans()
+    assert removed == [("-f", "fdb-lane-deadlane")], (removed, out)
+    assert order == ["facts", "rm"], (order, out)   # read BEFORE the removal
+    line = out[0]
+    assert "KILLED FOR MEMORY" in line, out
+    assert "OOMKilled=true" in line and "ExitCode=137" in line, out
 
 
 def test_reaper_still_never_reaps_a_RUNNING_container_of_a_live_owner(
@@ -290,6 +335,62 @@ def test_reaper_still_never_reaps_a_RUNNING_container_of_a_live_owner(
         assert "FAILED" not in line, out
 
 
+def test_reaper_never_reaps_a_TERMINAL_container_it_cannot_ATTRIBUTE(
+        monkeypatch):
+    """#5084's ruling, and the reason the state arm is gated on a DETERMINED
+    owner: when this clone cannot name the worktree that owns a container, it
+    is REPORT ONLY — however stopped it is. The measured fleet has such names
+    (`fdb-lane-fix9326`, `fdb-lane-tm9190` — no 10-hex slug, so no worktree can
+    ever claim them), and they may belong to another clone whose lane this tool
+    cannot see. Mutation: drop the `owner is not None` guard and this fails —
+    which is a silent reversal of a recorded owner ruling, not a bug fix."""
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-someoneelse\texited\n"
+                         "fdb-lane-tm9190\tdead\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {})
+    monkeypatch.setattr(tl, "_started_epoch", lambda _n: 0.0)
+    monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
+    out = tl.reap_orphans()
+    assert removed == [], (removed, out)
+    assert all("report only" in line for line in out), out
+
+
+def test_reaper_re_reads_the_state_before_removing(monkeypatch, tmp_path):
+    """The sweep's state came from ONE `docker ps`, and a lane restarting its
+    own container reuses the SAME name — so an `exited` snapshot can be stale
+    by the time the `rm` lands, and `rm -f` would SIGKILL a live FalkorDB
+    mid-suite. The removal is therefore decided by a state read taken at the
+    moment of action (the rule `start()` already states for `_wait_ready`).
+    Mutation: remove the re-read and this fails."""
+    owner = tmp_path / "live-worktree"
+    owner.mkdir()
+    removed: list = []
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-cameback\texited\n", "")
+        if a[0] == "rm":
+            removed.append(a[1:])
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"cameback": str(owner)})
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    out = tl.reap_orphans()
+    assert removed == [], removed
+    assert "at removal time" in out[0], out
+
+
 def test_reaper_never_reaps_THIS_worktrees_own_container_however_stopped(
         monkeypatch):
     """`stop()` is the only thing that may remove this worktree's container.
@@ -311,6 +412,33 @@ def test_reaper_never_reaps_THIS_worktrees_own_container_however_stopped(
     out = tl.reap_orphans()
     assert removed == [], removed
     assert "THIS worktree's container" in out[0], out
+
+
+def test_reaper_carries_the_termination_evidence_into_its_report(
+        monkeypatch, tmp_path):
+    """A peer lane's next `start()` will read `absent` and report NOTHING, so if
+    this arm removes the container it must carry docker's termination facts
+    itself — `rm -f` destroys the only evidence of why it stopped, and an
+    OOM-killed lane reads identically to a clean exit once the container is
+    gone (#7357). Mutation: drop `_termination_report` from the line and this
+    fails."""
+    owner = tmp_path / "dead-worktree"
+    owner.mkdir()
+
+    def fake(*a, **k):
+        if a[0] == "ps":
+            return _R(0, "fdb-lane-oomed\texited\n", "")
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "lane_name", lambda: "fdb-lane-mine")
+    monkeypatch.setattr(tl, "_worktree_slugs", lambda: {"oomed": str(owner)})
+    monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
+    monkeypatch.setattr(tl, "_termination_report",
+                        lambda _n, live: "killed for memory (OOMKilled=true)")
+    out = tl.reap_orphans()
+    assert "removed fdb-lane-oomed" in out[0], out
+    assert "OOMKilled" in out[0], out
 
 
 def test_reaper_reads_the_STATE_from_docker_ps_not_from_its_own_head(
