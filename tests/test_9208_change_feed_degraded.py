@@ -46,15 +46,19 @@ from tortoise.event_store import ChangeFeedDegraded
 # ⛔ NO module-level `_no_carried_degradation` fixture here any more (#9208
 # review). The suite-wide `tests/conftest.py::_change_feed_state_isolation`
 # already clears `event_store._DEGRADED` before and after every test, and it also
-# NAMES the test that left a latch behind. A second, module-scoped autouse
-# fixture is finalised AFTER a conftest-level one, so its silent
-# `clear_degraded()` ran FIRST and the conftest sample then always saw an empty
-# map — the attribution half was dead in the one file whose tests degrade feeds
-# on purpose, i.e. exactly where a future leak is most likely. The consequence of
-# dropping it: a test below that latches a state and forgets to clear it now
-# REDS ITSELF (naming its own nodeid) instead of being silently tidied. Every
-# such test therefore clears in a `finally` — that is the file's contract, not a
-# courtesy.
+# NAMES the test that left a latch behind. A second, module-level
+# (function-scoped) autouse fixture is finalised BEFORE a conftest-level one —
+# pytest finalises in the reverse of setup order, and the conftest fixture is set
+# up first — so its silent `clear_degraded()` ran FIRST and the conftest sample
+# then always saw an empty map: the attribution half was dead in the one file
+# whose tests degrade feeds on purpose, i.e. exactly where a future leak is most
+# likely. The consequence of dropping it: a test below that latches a state and
+# forgets to clear it now REDS ITSELF (naming its own nodeid) instead of being
+# silently tidied. Every such test therefore clears in a `finally` — that is the
+# file's contract, not a courtesy. The pin below
+# (`test_this_module_must_not_pre_empt_the_attribution_sample`) reds if a
+# module-level clearing fixture is ever re-added, which would kill the
+# attribution again silently.
 
 
 @pytest.fixture
@@ -969,3 +973,68 @@ def test_a_leaked_degradation_is_attributed_to_the_test_that_left_it():
     assert "leaked into this test" not in message, (
         "the old wording blamed the SUCCESSOR; the attribution must be the "
         f"polluter: {message}")
+
+
+def test_this_module_must_not_pre_empt_the_attribution_sample():
+    """No module-level autouse fixture may clear the map (#9208 review, P3).
+
+    `tests/conftest.py::_change_feed_state_isolation` is the ONLY place that may
+    clear `event_store._DEGRADED` once per test. pytest finalises in the reverse
+    of setup order, so a module-level autouse fixture is torn down BEFORE the
+    conftest-level one: a `clear_degraded()` there runs first, the conftest
+    sample then always sees an empty map, and attribution is dead — silently,
+    in the one file whose tests degrade feeds on purpose. That is not
+    hypothetical: this module shipped exactly that fixture and the review
+    measured the dead sample, which is why the module fixture was deleted.
+
+    The ordering this rests on, observed in this repo's own pytest:
+
+        conftest-level SETUP -> module-level SETUP -> module-level TEARDOWN
+        -> conftest-level TEARDOWN
+
+    Structural pin, not a behavioural one: it is green on arrival (the module
+    has no autouse fixture today) and its job is to red when one comes back.
+
+    Read off the module's SOURCE, not off pytest's fixture internals: pytest 9
+    no longer leaves a `_pytestfixturefunction` marker on the function object
+    (measured on 9.1.1), so an attribute probe would pass silently for every
+    fixture — a vacuous pin. `ast` is version-independent.
+    """
+    import ast
+    import inspect
+    import sys
+
+    source = inspect.getsource(sys.modules[__name__])
+    tree = ast.parse(source)
+
+    def is_fixture_decorator(node):
+        if not isinstance(node, ast.Call):
+            return False
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(
+            func, "id", "")
+        return name == "fixture"
+
+    def declares_autouse(node):
+        return any(
+            kw.arg == "autouse" and getattr(kw.value, "value", None) is True
+            for kw in node.keywords)
+
+    offenders = []
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        autouse = [d for d in node.decorator_list
+                   if is_fixture_decorator(d) and declares_autouse(d)]
+        if not autouse:
+            continue
+        body = ast.get_source_segment(source, node) or ""
+        if "clear_degraded" in body:
+            offenders.append(node.name)
+
+    assert not offenders, (
+        "a module-level autouse fixture that clears `event_store._DEGRADED` "
+        f"finalises BEFORE the conftest one and kills its attribution: "
+        f"{sorted(offenders)}. Let `tests/conftest.py::"
+        "_change_feed_state_isolation` own the sample, and clear in a `finally` "
+        "inside the test that latches (the file's contract).")
