@@ -270,6 +270,18 @@ _UNRESOLVED = {
     "suggest_entry_points",
     "tortoise_fts_query",
     "traverse",
+    # #9261 (`c172b042f`, the #9063 calibration-gate fix): BOTH of these build
+    # their statement from a COMPUTED local — `where` is an f-string fragment
+    # assembled from `_ID_RESOLVABLE_TYPES` / `_ID_WHITESPACE_SET` and loop
+    # variables (`{label}`), so the enumerator sees `'<unresolved>'` where the
+    # query text is. Hand-checked (2026-10-20): the ONLY handle reach in each is
+    # a `MATCH … OPTIONAL MATCH … RETURN` read — no SET/CREATE/MERGE/DELETE, and
+    # `calibrate_summary` writes nothing itself (its advice only NAMES
+    # `set_point_baseline`). Listed here — not silently called a read — because
+    # that is the census being honest about what it can prove; the gate must go
+    # on demanding a lane for anything it CAN see mutating.
+    "calibrate_summary",
+    "_uncalibrated_ep_participants",
 }
 
 _INVENTORY = {

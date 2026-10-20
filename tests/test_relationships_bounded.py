@@ -835,6 +835,132 @@ def test_no_query_loses_its_id_predicate():
         re.IGNORECASE,
     )
 
+    # ── a barrier held in a MODULE CONSTANT (measured false positive) ─────────
+    # `tortoise/ep.py` builds its id-anchor barrier ONCE (`_EP_ANCHOR_BARRIER =
+    # "WITH * "`, #6211) and splices it into its pass queries as an `ast.Name`.
+    # An AST scan sees only the NAME, and this rail's contract for an
+    # unresolvable fragment is "unknown — assume no barrier", so 5 sites read as
+    # UNBARRED while the shipped query text carries the barrier.
+    #
+    # `WITH *` IS load-bearing, MEASURED on FalkorDB 6.0.1 (ver 60001) with the
+    # shipped shapes (`:Point` A/B/C/D, IMPL A→B and C→D, OP1→A, OP1→B, OP2→C,
+    # 1-id request $ids = ['A']):
+    #   site 1267 shape  unbarred: A/B, B/A, C/D, D/C   WITH *: A/B
+    #   site 1629 shape  unbarred: OP1/A, OP2/C          WITH *: OP1/A
+    #   site 1353/1550   unbarred: A/B, B/A              WITH *: A/B
+    # So the shipped queries are correct and the blind spot is the SCANNER's. It
+    # is closed by folding MODULE-LEVEL string constants — not by weakening the
+    # trigger, and not by inlining the barrier at every call site (which would
+    # re-red the rail the next time a site reuses the constant).
+    #
+    # FAIL-CLOSED BY CONSTRUCTION: a name is folded only when the WHOLE tree
+    # binds it EXACTLY ONCE, and that one binding is a plain module-level
+    # `Assign` whose expression folds to a literal. Every other binding shape
+    # this census enumerates makes it unfoldable — a parameter or local that
+    # SHADOWS the constant (the module value would be a wrong answer at that use
+    # site), a module-level `if`/`for`/`try`/`global` REBINDING, an
+    # `AnnAssign`/`AugAssign`, a call, an f-string, an import alias, a `del`, a
+    # `match` pattern (`MatchAs`/`MatchStar`/`MatchMapping.rest`), a PEP 695 type
+    # parameter. `const_barrier`, `const_not_a_barrier`, `const_rebound`,
+    # `const_unfoldable`, `const_shadowed_by_param` and
+    # `const_conditional_rebind` below pin both directions; the census is a
+    # deliberate list of BINDING NODES, so a shape it does not enumerate is the
+    # one way this can still under-count (review cycle 2 named
+    # `MatchMapping.rest` and PEP 695 params — both are counted now).
+    const: dict[str, str] = {}
+    _TYPE_PARAM_NODES = tuple(
+        n for n in (getattr(ast, name, None)
+                    for name in ("TypeVar", "ParamSpec", "TypeVarTuple"))
+        if n is not None
+    )
+
+    def _const_value(node, known):
+        """Fold an expression to a literal string, or None if it cannot be.
+
+        ``known`` is the set of names ALREADY proven foldable — never `const`
+        itself, so a constant defined in terms of another one inherits that
+        one's proof and nothing weaker.
+        """
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.Name):
+            return known.get(node.id)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left, right = (_const_value(node.left, known),
+                           _const_value(node.right, known))
+            if left is None or right is None:
+                return None
+            return left + right
+        return None
+
+    def _collect_constants(tree) -> None:
+        """Refill ``const`` with this module's provably-constant string names.
+
+        Two passes, both required: candidate VALUES come from module-level plain
+        assignments in source order (so `_B = _A + "x"` can fold), and the name
+        is only accepted if a whole-tree count of its bindings is exactly ONE —
+        the module-level assignment itself. A name bound anywhere else is a
+        name whose value at a use site cannot be proved, which is exactly what
+        the scanner must keep answering `\x00` for.
+        """
+        const.clear()
+        # Pass 1: the module-level plain assignments, and how many there are.
+        module_assigns: dict[str, int] = {}
+        exprs: list[tuple[ast.expr, list[str]]] = []
+        for stmt in tree.body:
+            if not isinstance(stmt, ast.Assign):
+                continue
+            if not all(isinstance(t, ast.Name) for t in stmt.targets):
+                continue  # tuple unpack (`A, B = …`) is not a literal binding
+            names = [t.id for t in stmt.targets]
+            for name in names:
+                module_assigns[name] = module_assigns.get(name, 0) + 1
+            exprs.append((stmt.value, names))
+        # Pass 2: every binding of every name, anywhere in the tree.
+        bindings: dict[str, int] = {}
+
+        def _bind(name: str | None) -> None:
+            if name:
+                bindings[name] = bindings.get(name, 0) + 1
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                _bind(node.id)
+            elif isinstance(node, ast.arg):
+                _bind(node.arg)
+            elif isinstance(node, (ast.Global, ast.Nonlocal)):
+                for name in node.names:
+                    _bind(name)
+            elif isinstance(node, ast.ExceptHandler):
+                _bind(node.name)
+            elif isinstance(node, (ast.MatchAs, ast.MatchStar)):
+                # A `match` pattern BINDS these (`case x:` / `case [*rest]:`)
+                _bind(getattr(node, "name", None))
+            elif isinstance(node, ast.MatchMapping):
+                # `case {**rest}:` binds `rest` — a MatchMapping, not a MatchAs
+                _bind(node.rest)
+            elif isinstance(node, _TYPE_PARAM_NODES):
+                # PEP 695 `def f[T](…)` scopes a TYPE PARAMETER named T
+                _bind(getattr(node, "name", None))
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    _bind((alias.asname or alias.name).split(".")[0])
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                   ast.ClassDef)):
+                _bind(node.name)
+        # Fold, in source order, against names already proven.
+        resolved: dict[str, str] = {}
+        for expr, names in exprs:
+            if not all(module_assigns.get(n) == 1 and bindings.get(n) == 1
+                       for n in names):
+                continue
+            value = _const_value(expr, resolved)
+            if value is None:
+                continue
+            for name in names:
+                resolved[name] = value
+        const.update(resolved)
+
     def _strings(node):
         """The query text a node contributes, or None if it contributes none.
 
@@ -886,6 +1012,11 @@ def test_no_query_loses_its_id_predicate():
             parts = [p for p in (_strings(v) for v in node.values) if p is not None]
             return " \x01 ".join(parts) if parts else None
         if isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)):
+            if isinstance(node, ast.Name) and node.id in const:
+                # A one-assignment module constant is a LITERAL, not a runtime
+                # fragment: resolving it is what lets a barrier held in a
+                # constant be seen (see `const` above).
+                return const[node.id]
             return " \x00 "  # a fragment only known at runtime
         return None
 
@@ -893,6 +1024,7 @@ def test_no_query_loses_its_id_predicate():
         """#6976 offenders in one module's source text."""
         found: set[str] = set()
         tree = ast.parse(source)
+        _collect_constants(tree)
         # The fragments INSIDE an f-string are not queries. The JoinedStr parent
         # already reconstructs the whole string (with `\x00` standing in for the
         # runtime part), and scanning a fragment ALONE TRUNCATES the query — it
@@ -1068,6 +1200,80 @@ def test_no_query_loses_its_id_predicate():
     # No whitespace between the keyword and the predicate (also measured leaking).
     no_space = 'Q = ("MATCH (n:Point) WHERE(n.id = \'p0\') " "MATCH (n)-[r]-(o) RETURN n")'
     assert unbarred(no_space) == ["1 (n)"], no_space
+    # ── the module-constant fold (both directions) ──
+    # A barrier held in a single-assignment module constant IS a barrier: this is
+    # the `ep.py` shape that reddened `test-slow (a)` on main, measured above.
+    const_barrier = (
+        '_BARRIER = "WITH * "\n'
+        'Q = ("MATCH (n:Point) WHERE n.id IN $ids " + _BARRIER '
+        '+ "MATCH (n)-[r]-(o) RETURN n")'
+    )
+    assert unbarred(const_barrier) == [], const_barrier
+    # …and a constant that is NOT a barrier still flags. Resolving a constant must
+    # never be mistaken for resolving the SHAPE: `#6976` fires on what the text
+    # says, and "an anchor comment" is not a barrier (measured: cost only).
+    const_not_a_barrier = (
+        '_ANCHOR = "/* anchor */ "\n'
+        'Q = ("MATCH (n:Point) WHERE n.id IN $ids " + _ANCHOR '
+        '+ "MATCH (n)-[r]-(o) RETURN n")'
+    )
+    assert unbarred(const_not_a_barrier) == ["2 (n)"], const_not_a_barrier
+    # A REBOUND name is unresolvable by construction (the value at the use site
+    # is a guess), so it keeps the unbarred verdict.
+    const_rebound = (
+        '_BARRIER = "WITH * "\n'
+        '_BARRIER = compute()\n'
+        'Q = ("MATCH (n:Point) WHERE n.id IN $ids " + _BARRIER '
+        '+ "MATCH (n)-[r]-(o) RETURN n")'
+    )
+    assert unbarred(const_rebound) == ["3 (n)"], const_rebound
+    # A constant that does not FOLD (a call, an f-string) is still a runtime
+    # fragment — the conservative path is unchanged.
+    const_unfoldable = (
+        'CALL = make_barrier()\n'
+        'Q = ("MATCH (n:Point) WHERE n.id IN $ids " + CALL '
+        '+ "MATCH (n)-[r]-(o) RETURN n")'
+    )
+    assert unbarred(const_unfoldable) == ["2 (n)"], const_unfoldable
+    # A PARAMETER / LOCAL that SHADOWS the constant name is NOT the module value:
+    # folding scope-blind would answer a barrier the code does not have (found by
+    # the review cycle — the module-wide binding count is what closes it).
+    const_shadowed_by_param = (
+        '_BARRIER = "WITH * "\n'
+        'def f(_BARRIER):\n'
+        '    return ("MATCH (n:Point) WHERE n.id IN $ids " + _BARRIER '
+        '+ "MATCH (n)-[r]-(o) RETURN n")\n'
+    )
+    assert unbarred(const_shadowed_by_param) == ["3 (n)"], const_shadowed_by_param
+    # …and the same for a module-level REBINDING the plain-assignment pass alone
+    # cannot see (an `if` body). The value at the use site is a branch's guess.
+    const_conditional_rebind = (
+        '_BARRIER = "WITH * "\n'
+        'if use_other:\n'
+        '    _BARRIER = build()\n'
+        'Q = ("MATCH (n:Point) WHERE n.id IN $ids " + _BARRIER '
+        '+ "MATCH (n)-[r]-(o) RETURN n")'
+    )
+    assert unbarred(const_conditional_rebind) == ["4 (n)"], const_conditional_rebind
+    # …and the two binding shapes review cycle 2 named as uncounted: a
+    # `case {**rest}` mapping rest and a PEP 695 type parameter.
+    const_match_mapping_rest = (
+        '_BARRIER = "WITH * "\n'
+        'def f(v):\n'
+        '    match v:\n'
+        '        case {**_BARRIER}:\n'
+        '            pass\n'
+        '    return ("MATCH (n:Point) WHERE n.id IN $ids " + _BARRIER '
+        '+ "MATCH (n)-[r]-(o) RETURN n")\n'
+    )
+    assert unbarred(const_match_mapping_rest) == ["6 (n)"], const_match_mapping_rest
+    const_type_param = (
+        '_BARRIER = "WITH * "\n'
+        'def f[_BARRIER](v):\n'
+        '    return ("MATCH (n:Point) WHERE n.id IN $ids " + _BARRIER '
+        '+ "MATCH (n)-[r]-(o) RETURN n")\n'
+    )
+    assert unbarred(const_type_param) == ["3 (n)"], const_type_param
 
     offenders: list[str] = []
     scanned = 0
