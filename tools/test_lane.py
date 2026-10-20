@@ -1606,7 +1606,7 @@ def reap_orphans() -> list[str]:
                     f"gone. It holds a port from {PORT_RANGE[0]}-{PORT_RANGE[1]} "
                     f"until it is removed, from its OWN worktree: `cd {owner} "
                     f"&& uv run python tools/test_lane.py down` (or rule on "
-                    f"#8180 to arm `{STOPPED_REAP_ENV}=1`")
+                    f"#8180 to arm `{STOPPED_REAP_ENV}=1`)")
                 continue
             # Re-read the state AT THE MOMENT OF ACTION: the snapshot above was
             # one `docker ps`, and a lane restarting its own container reuses

@@ -1750,8 +1750,9 @@ def _sweep_drop(proj, journal_file: str, *, drop: bool = True,
     projection at the shared lane mid-run — can therefore still satisfy one
     instance's entry by absence while sweeping the other. Closing that needs a
     per-entry instance stamp at the append seam, which is a journal-FORMAT
-    change and is filed rather than smuggled in here. The ``_stale_sweep`` gate
-    is what this module can enforce today.
+    change and is NOT filed — no issue covers it (this comment said "is filed"
+    before anyone checked the tracker). The ``_stale_sweep`` gate is what this
+    module can enforce today.
 
     FAIL-CLOSED name gate (#7795): only the families in
     ``_SWEEP_OWNED_PREFIXES`` are ever DETACH+DELETEd. A name outside them
