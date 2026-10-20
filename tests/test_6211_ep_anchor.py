@@ -55,6 +55,13 @@ WHAT IS PINNED HERE, and why each test is discriminating:
    ``All Node Scan (t)`` at 242.5 ms -> ``Node By Index Scan (op)`` at 12.6 ms
    on the same fixture, and 1.4-1.5 s -> under 0.1 s for the whole selection
    (best of 3).
+5. ``test_the_records_that_state_this_files_size_are_true`` — the manifest row
+   that carries this file's ``durations`` weight states its test COUNT in the
+   comment above it, and that count was wrong when it was written (#9282
+   review): a measured row whose stated count does not match what was measured
+   is the one detail a later reader trusts. The count is pinned to the live
+   ``def test_`` list, so adding a test reddens here instead of leaving the
+   manifest quoting a file size that no longer exists.
 """
 
 from __future__ import annotations
@@ -63,6 +70,7 @@ import os
 import re
 import sys
 import tempfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -424,4 +432,40 @@ def test_the_operator_selection_queries_are_planned_as_index_reads(graph):
     assert not offenders, (
         "the operator-selection query is not index-anchored (#6211):\n"
         + "\n".join(f"  {q}\n      plan: {plan}" for q, plan in offenders)
+    )
+
+
+def test_the_records_that_state_this_files_size_are_true():
+    """The manifest's ``durations`` comment must state this file's real size.
+
+    #9282 review P2: the row above ``test_6211_ep_anchor.py`` in
+    ``config/ci-surfaces.yml`` read *"whole file, 5 tests"* while the file
+    defined six — and the PR body repeated the number twice. The count and the
+    wall time are re-derived TOGETHER at every revision (the #3429/#8098
+    convention); a count carried forward is the detail a reader trusts and
+    cannot check without re-measuring.
+
+    This does not pin the WEIGHT: a weight is a shard-layout input and the
+    refresher owns it (#3400), so only the count is asserted.
+    """
+    here = Path(__file__).resolve()
+    live = len(re.findall(r"^def test_", here.read_text(encoding="utf-8"), re.MULTILINE))
+    manifest = (here.parents[1] / "config" / "ci-surfaces.yml").read_text(encoding="utf-8")
+    block = re.search(
+        r"((?:^  # [^\n]*\n)+)^  test_6211_ep_anchor\.py:", manifest, re.MULTILINE
+    )
+    assert block, (
+        "config/ci-surfaces.yml has no commented durations row for "
+        "test_6211_ep_anchor.py — the row is the only record of how its weight "
+        "was derived"
+    )
+    stated = re.search(r"(\d+) tests? /", block.group(1))
+    assert stated, (
+        "the durations comment for test_6211_ep_anchor.py states no test count, "
+        "so its weight cannot be re-derived:\n" + block.group(1)
+    )
+    assert int(stated.group(1)) == live, (
+        f"config/ci-surfaces.yml says test_6211_ep_anchor.py has {stated.group(1)} "
+        f"tests; the file defines {live}. Re-derive the count AND the wall time "
+        f"together, the way the row's tail already instructs."
     )

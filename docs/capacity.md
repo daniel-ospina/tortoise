@@ -276,7 +276,13 @@ hub claim). On the 23k-node / 160k-edge fixture that assertion covers the pass's
 **49 distinct** id-set statements (95 emissions) and the operator selector's
 **12 distinct** (37 emissions across the two seeds the assertion uses) — zero
 unanchored in
-either. On `origin/main` the same file fails 3 of its 5 tests, and the
+either. Against `origin/main`'s code the file's six behavioural tests run `4
+failed, 2 passed` — the emitted-statement plan test, the hop's record bound, the
+OR split's statement counts and the operator selector's four legs fail, while
+the fixture guard and the OR-split row-semantics guard pass, because they pin
+properties `origin/main` already had. (The seventh test in that file pins this
+manifest row and is not part of that count: `origin/main` carries no `durations`
+row for a PR-added file at all, so it fails there for a different reason.) The
 selector's expansion leg is individually discriminating: removing its barrier
 alone reddens the selector test.
 
