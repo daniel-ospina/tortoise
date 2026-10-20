@@ -1208,8 +1208,24 @@ def _paid_tier_floor(tier: str | None) -> int | None:
     return None if cap is _UNREADABLE else cap
 
 
-def _tier_claim(tier: str | None) -> str:
-    """What a stored ``tier`` CLAIMS — ``"paid"``, ``"unpaid"`` or ``"unknown"``.
+#: The reading behind an ``"unknown"`` from ``_tier_claim_and_reason``. The
+#: reason travels OUT of the same ladder read that produced the verdict, because
+#: ``pricing._load`` caches only on SUCCESS: a second, independent read can see a
+#: different ladder (a file swapped mid-pass) and make the one caller's log line
+#: name a cause the classification never established — the #8946 defect class,
+#: one layer inside its own fix.
+_UNKNOWN_LADDER_UNREADABLE = "ladder_unreadable"
+_UNKNOWN_LADDER_CONTRADICTS = "ladder_contradicts_itself"
+
+
+def _tier_claim_and_reason(tier: str | None) -> tuple[str, str | None]:
+    """``(claim, reason)``, decided by ONE ladder read.
+
+    ``claim`` is what a stored ``tier`` CLAIMS — ``"paid"``, ``"unpaid"`` or
+    ``"unknown"`` — and ``reason`` says WHY when the claim is ``"unknown"``
+    (``_UNKNOWN_LADDER_UNREADABLE`` / ``_UNKNOWN_LADDER_CONTRADICTS``), else
+    ``None``. Both come from the same two ``_tier_cap`` reads, so the caller's
+    log line cannot attribute one reading's verdict to another reading's cause.
 
     The third answer is the point. The pricing ladder can fail to be READ
     (``tier_limits`` raised on a malformed ``pricing.json`` — #750.8, a
@@ -1246,16 +1262,27 @@ def _tier_claim(tier: str | None) -> str:
     cap = _tier_cap(tier)
     free_cap = _tier_cap("free")
     if cap is _UNREADABLE or free_cap is _UNREADABLE:
-        return "unknown"
+        return "unknown", _UNKNOWN_LADDER_UNREADABLE
     if free_cap is None:
         # Nothing can outrank an unlimited FREE tier. A tier at Free's cap
         # (Free itself, ``None``, an unrecognised label) claims nothing; a NAMED
         # tier whose cap is FINITE is a self-contradicting ladder, not a
         # nothing-to-verify org.
-        return "unpaid" if cap is None else "unknown"
+        if cap is None:
+            return "unpaid", None
+        return "unknown", _UNKNOWN_LADDER_CONTRADICTS
     if cap is None:
-        return "paid"  # unlimited outranks any finite cap
-    return "paid" if cap > free_cap else "unpaid"
+        return "paid", None  # unlimited outranks any finite cap
+    return ("paid" if cap > free_cap else "unpaid"), None
+
+
+def _tier_claim(tier: str | None) -> str:
+    """The claim alone — see ``_tier_claim_and_reason`` for the contract.
+
+    Use ``_tier_claim_and_reason`` wherever the answer is reported: a
+    ``"unknown"`` has two causes and they are different faults.
+    """
+    return _tier_claim_and_reason(tier)[0]
 
 
 def _drift_direction(from_tier: str | None, to_tier: str | None) -> str | None:
@@ -1534,7 +1561,7 @@ def reconcile_subscriptions(sdk=None, *, limit: int | None = None,
             # Stripe NAMED no active subscription AND when the customer LIST
             # failed and the org was deliberately left alone, so neither the
             # counter nor its log line may assert that Stripe answered.
-            claim = _tier_claim(before_tier)
+            claim, claim_reason = _tier_claim_and_reason(before_tier)
             if claim == "unpaid":
                 summary["skipped"] += 1
                 _logger.info(
@@ -1552,8 +1579,11 @@ def reconcile_subscriptions(sdk=None, *, limit: int | None = None,
                 # itself (Free declared unlimited while this tier publishes a
                 # finite cap, so no cap proves a paid claim). Naming a cause the
                 # code never established is the #8946 defect class itself.
-                if (_tier_cap(before_tier) is _UNREADABLE
-                        or _tier_cap("free") is _UNREADABLE):
+                # ⛔ The reason comes from the SAME read as the claim — re-deriving
+                # it here would be a second, independent look at a ladder that
+                # ``pricing._load`` only caches on success, so a mid-pass swap
+                # could attribute one reading's verdict to another's cause.
+                if claim_reason == _UNKNOWN_LADDER_UNREADABLE:
                     _logger.warning(
                         "billing reconcile: %s is stored at tier %r but no "
                         "active Stripe subscription could be established AND "

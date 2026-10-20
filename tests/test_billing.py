@@ -3493,6 +3493,58 @@ class TestReconcileSweep:
             "the ladder WAS readable (Free null, this tier 600000) — a read "
             "failure is a cause the code never established")
 
+    def test_a_ladder_that_changes_mid_pass_never_misattributes_the_cause(
+            self, monkeypatch, billing_client, caplog):
+        """The VERDICT and the CAUSE it names must come from ONE ladder read.
+
+        ``pricing._load`` caches only on SUCCESS, so an unreadable — or a
+        mid-deploy-swapped — ``pricing.json`` is re-read on every call. Reading
+        the ladder a SECOND time to pick the message let the classification and
+        the attribution come from different readings: here the claim's own read
+        raises (a genuine READ FAILURE) while the re-read sees a readable but
+        self-contradicting ladder, so the warning said "contradicts itself"
+        about a file that could not be read at the moment it was classified.
+        That is the #8946 defect class — a log line naming a cause the code
+        never established — one layer inside its own fix, so the reason now
+        travels out of the read that produced the claim.
+        """
+        import logging
+
+        import tortoise.pricing as pricing
+        from tortoise import billing as bl
+        org_id = billing_client["org_id"]
+        sdk = billing_client["sdk"]
+        self._seed(sdk, org_id, tier="pro", stripe_customer_id="cus_8946m")
+        monkeypatch.setattr(bl.StripeClient, "list_subscriptions",
+                            lambda self, cid: [])
+
+        pro_reads = []
+
+        def _flaky(tier):
+            if tier == "pro":
+                pro_reads.append(tier)
+                if len(pro_reads) == 1:
+                    # The read that CLASSIFIES the org: a genuine read failure.
+                    raise KeyError(
+                        "pricing.json tier 'pro' missing required keys: "
+                        "['max_graph_nodes']")
+            return {"max_graph_nodes": None if tier == "free" else 600000}
+
+        monkeypatch.setattr(pricing, "tier_limits", _flaky)
+        caplog.set_level(logging.WARNING, logger=bl._logger.name)
+
+        summary = bl.reconcile_subscriptions(sdk, notifier=False)
+
+        assert summary["unverified"] == 1, summary
+        said = "\n".join(r.getMessage() for r in caplog.records)
+        assert "ladder could not be read" in said, (
+            "the read that produced the verdict FAILED, so that is the cause "
+            "the log must name — got " + repr(said))
+        assert "contradicts itself" not in said, (
+            "the contradiction was only visible to a SECOND read of the same "
+            "ladder; naming it attributes a cause the classification never "
+            "saw (#8946)")
+
     def test_one_orgs_store_failure_does_not_abort_the_pass(
             self, monkeypatch, billing_client):
         """The control plane fails with RuntimeError, not a BillingError.
