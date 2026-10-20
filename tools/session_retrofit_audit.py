@@ -664,9 +664,10 @@ def scan_graph_writers(root: Path) -> list[Site]:
             # the predicate is a reviewed diff to the declaration rather than a
             # hardcoded regex here.
             writes = any(rx.search(text) for rx in _write_matchers(alias))
-            # ``SET a += $props`` (the rebuild_all snapshot restore) carries no
-            # property NAME at the site — it is the one writer whose property
-            # set is the whole schema, and it is declared as such.
+            # ``SET a += $props`` (the wipe+replay snapshot restore, which
+            # since #9124 lives in `_rebuild_all_replay`) carries no property
+            # NAME at the site — it is the one writer whose property set is the
+            # whole schema, and it is declared as such.
             if not writes:
                 continue
             props = tuple(sorted({

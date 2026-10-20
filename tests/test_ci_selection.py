@@ -20,6 +20,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -233,6 +234,44 @@ def test_cross_subdomain_cookie_sync_gate_runs_on_a_new_file_diff():
         "a diff that only ADDS an adapter copy in a new website/assets/ file must "
         "select the registry-completeness gate — otherwise the fourth copy merges "
         "green (#8701 review P1, #4309 class)"
+    )
+
+
+def test_the_end_customer_credential_design_guard_runs_on_its_doc_only_diff():
+    """#8693 review (P1, finding 1): the design doc must select its own guard.
+
+    `test_8693_end_customer_credential_design.py` pins the end-customer credential
+    DESIGN DOC — half code pins against `tortoise/hosted_api.py` (`rotate`/
+    `DELETE` org pin, owner-class `graphs:create`, the third audit action name),
+    half the corrected prose of
+    `docs/scoping/2026-10-19-8693-end-customer-credential-design.md`. The prose
+    half only breaks on a docs-only edit to that doc, and `docs/` is in
+    NON_PYTHON_PREFIXES with the doc matching no SOURCE_PATTERNS entry, so a
+    doc-only diff filters to `changed == []` and takes the docs-only early return
+    — tier1 ONLY. Registered on `api` (which covers `hosted_api.py` edits) but not
+    in `tier1`, the guard was asleep on the one change that can re-stale it: the
+    doc reverted to the three refuted claims in a one-file PR would merge green
+    and only red `main` post-merge (the #1349/#3332/#3616/#4309 silent-drop
+    class; the #8614/#8135 shape one doc over). Dropping the tier1 entry re-opens
+    that hole.
+
+    Asserted as `surfaces == []` on purpose, not just "the guard is present": the
+    docs-only early return is the whole reason this registration is needed, and a
+    Python path creeping into the selection would mask the loss of the tier1
+    entry (`test_fly_secret_drift_gate_runs_on_a_runbook_only_diff` shape above).
+    """
+    root = Path(__file__).resolve().parents[1]
+    changed = "docs/scoping/2026-10-19-8693-end-customer-credential-design.md"
+    assert (root / changed).exists(), f"guarded design doc is gone: {changed}"
+    r = _sel([changed])
+    assert r["full"] is False
+    assert r["surfaces"] == []
+    assert "test_8693_end_customer_credential_design.py" in r["test_files"], (
+        f"a {changed}-only diff does not select "
+        "tests/test_8693_end_customer_credential_design.py, so its prose pins "
+        "cannot fire on the only change that can break them — a one-file revert "
+        "to the three refuted claims would merge green (#8693 review P1, #4309 "
+        "silent-drop class)"
     )
 
 
@@ -4866,6 +4905,168 @@ def test_slow_leg_bounds_clear_the_committed_work():
             f"the committed `durations` map.")
 
 
+CI_RUNNER_GATE = Path(__file__).resolve().parents[1] / "scripts" / "ci_runner_gate.sh"
+#: The tracked `scripts` symlink itself, WITHOUT following it: a dangling link is the
+#: runner case (no agent-infra checkout), and it is the ONLY case that may skip.
+SCRIPTS_LINK = Path(__file__).resolve().parents[1] / "scripts"
+CI_RUNNER_GATE_ABSENT = (
+    f"PREMISE CROSS-CHECK NOT RUN: agent-infra's ci_runner_gate.sh is not "
+    f"reachable at {CI_RUNNER_GATE} (the tracked `scripts` symlink dangles where "
+    f"$AGENT_INFRA_PATH is unset, as on a runner). The repo-side half of the "
+    f"guard — test-slow's label is VERSION-PINNED — ran and passed. The premise "
+    f"half is HOST-ONLY AND UNTESTED BY CI: it is a cross-repo fact (the labels "
+    f"agent-infra's gate attaches to the self-hosted pool) that no runner checks "
+    f"out, so a green CI run says nothing about it. Run this module on a host "
+    f"with $AGENT_INFRA_PATH set to verify that the gate still attaches only "
+    f"`ubuntu-latest`. Same shape and same limit as RAIL_ABSENT_REASON in "
+    f"tests/test_pytest_attribution.py."
+)
+
+
+def test_slow_legs_are_pinned_off_the_ambiguous_runner_label():
+    """2026-10-19: `ubuntu-latest` is not "GitHub-hosted" on this repo.
+
+    `scripts/ci_runner_gate.sh` re-attaches `ubuntu-latest` to the self-hosted
+    ARM64 pool as a fallback, so `runs-on: ubuntu-latest` resolves to a ~2x
+    slower class run to run — and `test-slow` (the leg that IS the critical
+    path) was killed at its 40m watchdog on `pi-runner-vm-2` after executing
+    39.6 min of test time (run 39309984832, `rc=137`). The job then read 42.1m
+    and concluded `failure`, so this leg's wall became main's critical path
+    (`ci_crit_max=42.1m`, up from 22.6m) and the required aggregate red named a
+    KILL rather than a test verdict. (That run was ALSO red for independent,
+    genuine reasons — three fast shards on hosted runners failed real tests — so
+    the pin removes this kill and the critical-path inflation, not the run's
+    redness.)
+
+    The budget cannot absorb that class: 2x the leg would be >=79m against a
+    40m budget built at the `WATCHDOG_HEADROOM` floor, past both
+    `WATCHDOG_CEILING_MIN` and this job's 60m cap. So the leg is pinned to a
+    VERSION-PINNED hosted label (the pool claims `ubuntu-latest`, `self-hosted`,
+    `Linux`, `ARM64` and `self-hosted-arm64` — never `ubuntu-<version>`), the
+    same pin and the same reasoning as `workflow-lint` (#7867).
+
+    A bare `ubuntu-latest` here re-opens exactly that false red, so this reds
+    rather than relying on a comment nobody re-reads."""
+    job = _load_python_ci()["jobs"]["test-slow"]
+    runs_on = job["runs-on"]
+    assert runs_on != "ubuntu-latest", (
+        "test-slow must NOT use `ubuntu-latest`: the fallback gate re-attaches "
+        "that label to the self-hosted ARM64 pool, where this leg needs ~2x its "
+        "budget and is killed at the watchdog (measured: 39.6 min of test time, "
+        "rc=137, job 42.1m). Pin a version-pinned hosted label (`ubuntu-24.04`).")
+    assert isinstance(runs_on, str) and re.fullmatch(r"ubuntu-\d+\.\d+", runs_on), (
+        f"test-slow's runner label {runs_on!r} must be a VERSION-PINNED hosted "
+        f"label (`ubuntu-<version>`): `ubuntu-latest` is claimed by the "
+        f"self-hosted pool whenever the fallback is attached, and a label the "
+        f"pool claims puts this leg back on the class that cannot finish it.")
+
+    if not SCRIPTS_LINK.is_dir():
+        # The tracked `scripts` symlink DANGLES (no agent-infra checkout here), which
+        # is every CI runner: the link is a host convenience, not a repo dependency
+        # (`python-ci.yml` is self-contained by decision, fix #555). Announced, never
+        # silent, and the message says out loud that the premise half is untested by
+        # CI — a bare `skipped` would let a green run read as "the pool's labels were
+        # verified", which is the vacuous pass this guard exists to prevent.
+        print(CI_RUNNER_GATE_ABSENT)
+        pytest.skip(CI_RUNNER_GATE_ABSENT)
+    # The link RESOLVED, so agent-infra IS checked out at $AGENT_INFRA_PATH: a missing
+    # gate file now means the premise moved or was renamed out from under this pin,
+    # not that there is no premise to check. That is a FAIL, not a skip — the old
+    # `.exists()` check folded both cases into the skip and so could never report a
+    # premise that had silently stopped existing.
+    assert CI_RUNNER_GATE.is_file(), (
+        f"the `scripts` symlink resolves ({SCRIPTS_LINK} -> "
+        f"{SCRIPTS_LINK.resolve()}) but {CI_RUNNER_GATE.name} is not there: the "
+        f"cross-repo premise of this pin has been moved or renamed, so the premise "
+        f"half can no longer be verified from this host — fix the path (or the pin) "
+        f"rather than letting this guard drift out of reach")
+    gate = CI_RUNNER_GATE.read_text()
+    # The premise this pin rests on lives in ANOTHER repo's script, reached here
+    # through the tracked `scripts` symlink. Pinning a literal against an external,
+    # changeable fact with nothing asserting that fact is the "comment nobody
+    # re-reads" failure this test criticises: harden the gate to attach a
+    # VERSION-PINNED label instead of `ubuntu-latest` and this test would stay green
+    # while `test-slow` silently returned to the ARM64 pool.
+    #
+    # The assignment shape is NOT part of the premise: agent-infra may quote it, drop
+    # the quotes, or `export` it. Only the VALUE is contractual, so the matcher
+    # tolerates the spelling instead of asserting it — but it must still FIND both, or
+    # the premise is unreadable and this test must not pass by not looking.
+    labels = _gate_pool_labels(gate)
+    assert set(labels) == {"FALLBACK_LABEL", "POOL_LABEL"}, (
+        f"cannot read FALLBACK_LABEL/POOL_LABEL from {CI_RUNNER_GATE} (read "
+        f"{sorted(labels) or 'nothing'}) — the premise of this pin is unverifiable, "
+        f"so this test must not pass by not looking. If agent-infra renamed the "
+        f"constants, update the matcher here in the same change that renamed them.")
+    for label in labels.values():
+        assert not re.fullmatch(r"ubuntu-\d+\.\d+", label), (
+            f"ci_runner_gate.sh can attach {label!r} to the self-hosted pool, "
+            f"which is the VERSION-PINNED class test-slow is pinned to: the pin "
+            f"below no longer keeps this leg off the pool. Either the gate must "
+            f"stop attaching version-pinned labels, or test-slow needs a "
+            f"different isolation.")
+
+
+def _gate_pool_labels(gate_text: str) -> dict[str, str]:
+    """The labels `ci_runner_gate.sh` can attach to the self-hosted pool.
+
+    Returned by a helper so the PARSING half of the cross-repo premise is testable
+    WITHOUT agent-infra checked out — the gate file itself is host-only (see
+    `CI_RUNNER_GATE_ABSENT`), but the matcher that reads it is not, and an unreadable
+    matcher is how a guard stays green while protecting nothing.
+
+    Only the VALUE is contractual; the assignment SHAPE is not, so the matcher accepts
+    `export`, either quoting style, none, and leading whitespace. A commented-out
+    assignment is not read — prose is not the value the gate will use.
+    """
+    found: dict[str, str] = {}
+    for name in ("FALLBACK_LABEL", "POOL_LABEL"):
+        match = re.search(
+            rf'^\s*(?:export\s+)?{name}=["\']?([^"\'\s]+)', gate_text, re.MULTILINE
+        )
+        if match:
+            found[name] = match.group(1)
+    return found
+
+
+def test_the_gate_label_matcher_reads_the_spellings_and_rejects_the_unsafe_one():
+    """The premise half's PARSER and its DISCRIMINATOR, executed with no agent-infra.
+
+    `test_slow_legs_are_pinned_off_the_ambiguous_runner_label` skips its cross-repo
+    half on every runner, so without this test the regexes that read
+    `ci_runner_gate.sh` and the `ubuntu-<version>` rejection below them would never
+    execute anywhere — and a guard that cannot fail is not a guard. Three claims are
+    pinned here, all against crafted gate text:
+
+    1. the shipped spelling is read (double-quoted, line start);
+    2. a cosmetic change in agent-infra — `export`, single quotes, no quotes, leading
+       whitespace — does not make the labels unreadable (an unreadable premise must
+       fail loudly on the host, not silently weaken the pin);
+    3. the rejection FIRES: a gate that starts attaching `ubuntu-24.04` to the pool is
+       reported, which is the drift this pin exists to notice.
+    """
+    shipped = 'FALLBACK_LABEL="ubuntu-latest"\nPOOL_LABEL="ubuntu-latest"\n'
+    expected = {"FALLBACK_LABEL": "ubuntu-latest", "POOL_LABEL": "ubuntu-latest"}
+    assert _gate_pool_labels(shipped) == expected
+    for spelling in (
+        "export FALLBACK_LABEL='ubuntu-latest'\nexport POOL_LABEL='ubuntu-latest'\n",
+        "FALLBACK_LABEL=ubuntu-latest\nPOOL_LABEL=ubuntu-latest\n",
+        'FALLBACK_LABEL="ubuntu-latest" # inline note\nPOOL_LABEL="ubuntu-latest"\n',
+    ):
+        assert _gate_pool_labels(spelling) == expected, spelling
+    # A commented-out assignment is not an assignment: prose must not stand in for the
+    # value the gate will actually use.
+    assert _gate_pool_labels('# FALLBACK_LABEL="ubuntu-latest"\n') == {}
+    # The discriminator itself, executed: this is the arm that has never run on a
+    # runner and decides whether the pin still protects anything.
+    drifted = 'FALLBACK_LABEL="ubuntu-latest"\nPOOL_LABEL="ubuntu-24.04"\n'
+    labels = _gate_pool_labels(drifted)
+    assert labels == {"FALLBACK_LABEL": "ubuntu-latest", "POOL_LABEL": "ubuntu-24.04"}
+    assert [lbl for lbl in labels.values() if re.fullmatch(r"ubuntu-\d+\.\d+", lbl)] == [
+        "ubuntu-24.04"
+    ]
+
+
 def test_carve_out_shard_bounds_clear_the_committed_work_without_dwarfing_it():
     """#3239: each shard's watchdog must clear THAT SHARD's committed work with
     the house headroom, and the job's cap must not dwarf the work it backstops.
@@ -5787,9 +5988,18 @@ def test_drift_gate_cannot_skip_the_test_matrix():
     # every declared leg, but the plain sweep is what catches a leg that reaches
     # `needs:` WITHOUT a row (a shape the row-set assertion below forbids, so
     # this is redundancy — deliberately kept and pinned rather than dropped).
-    assert re.search(r"grep -qE 'failure\|cancelled'", script), (
+    #
+    # Pin CODE, not prose (#9240). `script` is the raw `run:` scalar INCLUDING
+    # comment lines, and the aggregate's own rationale comment quotes
+    # `grep -qE 'failure|cancelled'` verbatim — so a raw-string pin stays green
+    # after the functional command is deleted. That is the same
+    # comment-satisfiable class the dead-code ordering hid behind for months.
+    code = "\n".join(line for line in script.splitlines()
+                     if not line.strip().startswith("#"))
+    assert re.search(r"grep -qE 'failure\|cancelled'", code), (
         "the aggregate must keep the `failure|cancelled` sweep over "
-        "`needs.*.result` as defence in depth (#5219)")
+        "`needs.*.result` as defence in depth (#5219) — as a LINE OF CODE, not "
+        "as a mention inside a comment")
 
     # Render the GitHub expressions into literal results and actually RUN the
     # aggregate's script: this is what turns "the words are present" into "a
@@ -5841,10 +6051,19 @@ def test_drift_gate_cannot_skip_the_test_matrix():
                     f"`{leg}`'s row must gate on `{selector}` — the output its "
                     f"own `if:` reads; got {rows[leg]!r}")
 
-        def _render(results: dict, selected: dict) -> str:
-            rendered = script.replace(
+        def _render(results: dict, selected: dict, extra=(), src=None) -> str:
+            """Render the aggregate's GitHub expressions into literal values.
+
+            `extra` appends result words to the `needs.*.result` join WITHOUT
+            adding rows — the only way to reproduce the shape that reaches
+            `needs:` with no row in the table (a need the aggregate cannot
+            name). `src` renders a modified copy of the script (e.g. with a
+            duplicated row) instead of the real one.
+            """
+            rendered = (src if src is not None else script).replace(
                 "${{ join(needs.*.result, ' ') }}",
-                " ".join(results.get(name, "skipped") for name in job_names))
+                " ".join([results.get(name, "skipped") for name in job_names]
+                         + list(extra)))
             # `needs.<job>.result` renders as EMPTY when <job> is absent from
             # `needs:` — GitHub's own semantics, and the reason a leg dropped
             # from the required check's list must fail closed here rather than
@@ -5860,25 +6079,78 @@ def test_drift_gate_cannot_skip_the_test_matrix():
                 f"uses, or it proves nothing; unrendered: {unrendered}")
             return rendered
 
-        def _verdict(results: dict, selected: dict | None = None) -> int:
+        def _verdict(results: dict, selected: dict | None = None,
+                     extra=(), src=None) -> tuple[int, str]:
+            """Render and RUN the aggregate. Returns `(exit code, output)`.
+
+            The OUTPUT is half the contract: a red that does not NAME the leg
+            sends the operator to the job logs, which is exactly the defect
+            #9240 fixes. Asserting only the exit code cannot tell that fix from
+            the code it replaced — the old bare `grep -qE 'failure|cancelled'`
+            bail exits 1 on every red vector below, so exit-code-only coverage
+            is satisfied by the pre-fix script (proved in #9240 review).
+
+            The SHELL is `bash -eo pipefail`, deliberately the stricter of the
+            two GitHub uses: this step declares no `shell:`, so the runner uses
+            its Linux default `bash -e {0}` (the run log's `shell:` line says
+            exactly that), while any step declaring `shell: bash` gets
+            `bash --noprofile --norc -eo pipefail {0}`. Why it matters HERE:
+            the aggregate's LAST-RESORT #5219 backstop is
+            `echo "$RESULTS" | grep -qE 'failure|cancelled'` — a `grep -q`
+            mid-pipeline, the shape this repo has recorded silently INVERTING a
+            branch (the writer takes SIGPIPE, `pipefail` then reports the
+            pipeline as failed while the matched line IS present —
+            `docs/ci/docs-lint-baseline.md`,
+            `tests/test_migration_drift_gate.py`). A verdict that only survives
+            `-e` is one this harness must red, because #9240 makes that sweep
+            the last reachable layer (#9240 review). Errexit is covered too:
+            both shells carry `-e`.
+            """
             sel = dict(SELECTED)
             sel.update(selected or {})
-            return subprocess.run(["bash", "-c", _render(results, sel)],
-                                  capture_output=True).returncode
+            proc = subprocess.run(
+                ["bash", "-eo", "pipefail", "-c",
+                 _render(results, sel, extra, src)],
+                capture_output=True, text=True)
+            return proc.returncode, proc.stdout + proc.stderr
+
+        # The bare sentence the pre-fix aggregate printed for every red. Nothing
+        # may emit it again: it names no leg, which is the whole defect #9240
+        # fixes (agent-infra#2148 sibling).
+        LEGACY = "matrix leg failed or was cancelled"
 
         green = {name: "success" for name in job_names}
-        assert _verdict(green) == 0, (
-            "an all-green matrix must pass the required check")
+        rc, out = _verdict(green)
+        assert rc == 0, "an all-green matrix must pass the required check"
+        assert "::error::" not in out, (
+            f"a green matrix must not emit an error annotation; got {out!r}")
+
         # EVERY leg, not just the last one: a required check that cannot red on
-        # a given leg is a check that does not observe it (#5219).
+        # a given leg is a check that does not observe it (#5219). And every red
+        # must NAME its leg — that is #9240's deliverable, and the reason these
+        # assertions inspect `out` rather than only the exit code.
         for red in ("failure", "cancelled"):
             for leg in job_names:
                 bad = dict(green)
                 bad[leg] = red
-                assert _verdict(bad) == 1, (
+                rc, out = _verdict(bad)
+                assert rc == 1, (
                     f"a `{red}` for `{leg}` must FAIL python-ci-gate — a leg "
                     "the required check does not observe is a leg it cannot "
                     "block (#5219)")
+                assert f"::error::leg '{leg}'" in out, (
+                    f"a `{red}` for `{leg}` must be NAMED — an aggregate that "
+                    "only says 'merge blocked' sends the operator to the job "
+                    f"logs (#9240, agent-infra#2148); got {out!r}")
+                assert LEGACY not in out, (
+                    "the pre-fix bare sentence names no leg — it must never be "
+                    f"the report for a red again (#9240); got {out!r}")
+                # The summary line counts LEGS and must not pad its number with
+                # `wc`'s spaces (the one operator-facing line in this change).
+                assert "❌ 1 leg(s) did not pass" in out, (
+                    f"the summary must count exactly one red leg, unpadded; got "
+                    f"{out!r}")
+
         # An always-run leg has NO selector that can decline it, so a `skipped`
         # one is a lost shard. This is the half of "`skipped` is not a pass"
         # that covers the legs the gate cannot see skip: a silently skipped
@@ -5887,38 +6159,95 @@ def test_drift_gate_cannot_skip_the_test_matrix():
         for leg in ALWAYS:
             lost = dict(green)
             lost[leg] = "skipped"
-            assert _verdict(lost) == 1, (
+            rc, out = _verdict(lost)
+            assert rc == 1, (
                 f"`{leg}` has no diff gate, so a `skipped` {leg} is a lost "
                 "shard and must red the required check")
+            assert f"::error::leg '{leg}'" in out and "SKIPPED" in out, (
+                f"a `skipped` {leg} must be named as SKIPPED; got {out!r}")
         # A leg the selector DID select reporting `skipped` is a lost shard...
         for leg, selector in DECLINABLE.items():
             lost = dict(green)
             lost[leg] = "skipped"
-            assert _verdict(lost) == 1, (
+            rc, out = _verdict(lost)
+            assert rc == 1, (
                 f"`{leg}` skipped although the selector SELECTED it is a lost "
                 "shard — the required check must not certify it (#5219)")
+            assert f"::error::leg '{leg}'" in out, (
+                f"a lost shard must be named, not just counted; got {out!r}")
             # ... while one the selector DECLINED may skip: a diff that does not
             # touch the leg must not be blocked by the gate's own shape.
             declined = dict(green)
             declined[leg] = "skipped"
-            assert _verdict(declined, {selector: "false"}) == 0, (
+            rc, out = _verdict(declined, {selector: "false"})
+            assert rc == 0, (
                 f"`{leg}` skipped because `{selector}` declined it must not "
-                "red the required check")
+                f"red the required check; got {out!r}")
         # A docs-only diff selects nothing at all.
         declined_all = dict(green)
         for leg in DECLINABLE:
             declined_all[leg] = "skipped"
-        assert _verdict(declined_all,
-                        {sel: "false" for sel in DECLINABLE.values()}) == 0, (
-            "an all-declined (docs-only) diff must stay green")
+        rc, out = _verdict(declined_all,
+                           {sel: "false" for sel in DECLINABLE.values()})
+        assert rc == 0, (
+            f"an all-declined (docs-only) diff must stay green; got {out!r}")
         # And the shape #5219 was actually about: a leg dropped from `needs:`
         # must fail closed instead of vanishing — for EVERY leg, not just one.
+        # Its row renders EMPTY, so it is reported as the missing-leg shape BY
+        # NAME, which is why this class was already named pre-fix.
         for leg in job_names:
             dropped = dict(green)
             dropped.pop(leg)
-            assert _verdict(dropped) == 1, (
+            rc, out = _verdict(dropped)
+            assert rc == 1, (
                 f"`{leg}` REMOVED from `needs:` must fail closed, not "
                 "disappear — that is the exact #5219 shape")
+            assert f"::error::leg '{leg}'" in out, (
+                f"a missing `{leg}` must be named — a bare count mismatch "
+                f"sends the operator hunting; got {out!r}")
+
+        # Two red legs must yield TWO named lines, not the first one only (an
+        # `exit` inside the loop would silently report just the first).
+        two = dict(green)
+        two["test"] = "failure"
+        two["test-slow"] = "cancelled"
+        rc, out = _verdict(two)
+        assert rc == 1
+        assert "::error::leg 'test' reported 'failure'" in out, out
+        assert "::error::leg 'test-slow' was CANCELLED" in out, out
+        assert out.count("::error::leg ") == 2, (
+            f"each red leg gets its own line; got {out!r}")
+        assert "❌ 2 leg(s) did not pass" in out, out
+
+        # A duplicate row inspected twice is ONE red leg and must be counted
+        # once — a copy-paste must not inflate the operator's summary.
+        order = ("test|${{ needs.test.result }}|"
+                 "${{ needs.changes.outputs.python }}")
+        row_line = next((ln for ln in script.splitlines()
+                         if ln.strip() == order), None)
+        assert row_line is not None, (
+            "could not find the `test` row to duplicate — the fixture is stale")
+        dup_src = script.replace(row_line, f"{row_line}\n{row_line}", 1)
+        one_red = dict(green)
+        one_red["test"] = "failure"
+        rc, out = _verdict(one_red, src=dup_src)
+        assert rc == 1, (
+            "a duplicated row must not hide its own red; got "
+            f"rc={rc} {out!r}")
+        assert "❌ 1 leg(s) did not pass" in out, (
+            f"the summary must count LEGS, not rows; got {out!r}")
+
+        # The `failure|cancelled` sweep must stay REACHABLE (#9240 review: it
+        # was dead code behind the deleted distinct-count guard). A red result
+        # with no row at all is only visible to that sweep — assert it fires and
+        # says so, instead of being pre-empted by an earlier, blinder bail.
+        rc, out = _verdict(green, extra=("failure",))
+        assert rc == 1, (
+            "a failing need with no row must red the required check — a "
+            f"`skipped`-shaped escape here is a fail-OPEN; got {out!r}")
+        assert "no leg row named it" in out, (
+            "the unrowed-need red must come from the identity-blind sweep, i.e. "
+            f"the sweep must be reachable; got {out!r}")
 
 
 def test_required_gate_covers_the_long_legs():

@@ -1466,7 +1466,58 @@ jobs:
     # config-only PRs (surfaces == [] -> slow_run == false) skip the whole
     # job — the tier-1 smoke in the `test` job still runs.
     if: needs.changes.outputs.slow_run == 'true'
-    runs-on: ubuntu-latest
+    # ⛔ VERSION-PINNED HOSTED LABEL, NOT `ubuntu-latest` (measured 2026-10-19).
+    #
+    # `ubuntu-latest` is NOT "GitHub-hosted" on this repo: `scripts/ci_runner_gate.sh`
+    # re-attaches `ubuntu-latest` to the self-hosted ARM64 pool (`pi-runner-vm-*`)
+    # as a FALLBACK whenever GitHub-hosted looks unhealthy, so the same
+    # `runs-on: ubuntu-latest` resolves to a ~2x slower class, run to run.
+    #
+    # MEASURED, run 39309984832 (main, 2026-10-19T19:19Z): `test-slow (a)` won the
+    # race for `pi-runner-vm-2`, executed **39.6 min of test time** (1561 testcases
+    # in its own junit artifact) and was STILL RUNNING when its 40m in-step watchdog
+    # fired (`rc=137`, "WATCHDOG: pytest killed after 40m"). The job then read 42.1m
+    # and concluded `failure`, so this leg's wall became main's critical path
+    # (`ci_crit_med`/`ci_crit_max` = 42.1m, up from 22.6m) and the REQUIRED
+    # `python-ci-gate` went red naming this leg. The same leg finishes in ~21-22m on
+    # a hosted runner — which is what the committed 18.9m leg weight and the 40m
+    # budget were measured against.
+    # ⚠️ What this pin does NOT claim: that run was ALSO red for real, independent
+    # reasons — three fast shards on GITHUB-HOSTED runners (test (c), test (a),
+    # test (e)) failed in the pytest step with genuine FAILED nodeids (exit code 1,
+    # 8-11 min, well inside their budgets), and this leg's own partial junit records
+    # 1 failure. The pin removes THIS leg's kill and the critical-path inflation it
+    # caused; it does not turn that run green.
+    #
+    # Why ROUTING and not a raised timeout: the 40m budget is 2.11x the leg's
+    # committed weight, i.e. already at the `WATCHDOG_HEADROOM` policy floor (2.0x).
+    # Sizing it for the pool instead would need >=79m (2 x 39.6m), past
+    # `WATCHDOG_CEILING_MIN` (55m) and past this job's own 60m outer cap — and a
+    # budget built for the slowest class would also let a genuinely hung HOSTED leg
+    # hold the REQUIRED aggregate red for 55m, the regression #6135/#6145 exists to
+    # prevent. This leg cannot be carried by the pool inside the policy, so it must
+    # not be schedulable onto it.
+    #
+    # `ubuntu-24.04` is claimed by NO self-hosted runner (the pool carries
+    # `self-hosted,Linux,ARM64,self-hosted-arm64` plus, only while the fallback is
+    # attached, `ubuntu-latest`) — the same pin, and the same reasoning, as
+    # `workflow-lint` (#7867) and finding-provenance.
+    # Cost when GitHub-hosted is healthy: none — the pool only wins these jobs while
+    # the fallback label is attached. During a real GitHub-hosted outage these two
+    # legs WAIT for a hosted runner (the aggregate stays pending — "not answered
+    # yet") instead of being killed into a false red on the class that cannot finish
+    # them, while the fast matrix keeps using the pool.
+    #
+    # ⚠️ NAMED RESIDUAL (not fixed here): the fast matrix (`test (a)`…`test (i)`) is
+    # still `ubuntu-latest`, so the pool can still take it. Its per-shard margin is
+    # thinner than this leg's, not safer: a 9.72m committed estimate against a 20m
+    # budget, and the pool consumed 17.3m and 19.9m of JOB wall on shards (c) and (e)
+    # in the two other main runs measured that evening (39327442614, 39304878787) —
+    # ~78% and ~91% of the 20m pytest budget after ~1.7m of setup. Pinning the whole matrix would remove the fallback the gate exists for,
+    # which is a capacity decision, not a CI-hygiene one; the measurement is filed on
+    # #6897 instead.
+    # Do NOT change it back to `ubuntu-latest`, and never to `self-hosted`.
+    runs-on: ubuntu-24.04
     # #1471: two parallel duration-balanced legs (matrix), mirroring the `test`
     # job's #880 pattern. Serial pytest was 37:44 (run 32241846147, 2026-08-19)
     # — the true critical path of every main push (last python-ci job to
@@ -2848,8 +2899,15 @@ jobs:
         # goes back to naming tests).
         run: |
           set -eo pipefail
+          # #3470: the log is captured through `tee`, so this leg needs the SAME
+          # attribution every `tail -n` leg gets — without it a D14 leg killed at its
+          # 15m watchdog emits no INCOMPLETE marker and its unobservable failure set
+          # is indistinguishable from a clean leg, on a job `python-ci-gate` needs.
+          rc=0
           timeout -s INT -k 10 15m python -m pytest tests/ -m embedded_only \
-            -v --timeout=300 -p no:cacheprovider --junitxml=/tmp/junit-d14.xml -o junit_family=xunit1 2>&1 | tee /tmp/pytest-d14.log
+            -v --timeout=300 -p no:cacheprovider --junitxml=/tmp/junit-d14.xml -o junit_family=xunit1 2>&1 | tee /tmp/pytest-d14.log || rc=$?
+          bash .github/scripts/pytest-attribution.sh --log /tmp/pytest-d14.log --rc "$rc"
+          [ "$rc" -eq 0 ] || exit "$rc"
           # Fail-closed on a silent all-skip — the #2188 review P3-1 shape,
           # widened. The floor is 30 and the number is NOT arbitrary: the four
           # marked files that are ALREADY carve-out registered (precision_leak
@@ -3305,15 +3363,7 @@ jobs:
           RESULTS="${{ join(needs.*.result, ' ') }}"
           echo "matrix results: $RESULTS"
 
-          # 1. Any declared need that failed or was cancelled blocks the merge.
-          #    `join(needs.*.result)` covers EVERY entry in `needs:`, so no leg
-          #    escapes the red check by accident of ordering or naming.
-          if echo "$RESULTS" | grep -qE 'failure|cancelled'; then
-            echo "::error::matrix leg failed or was cancelled — merge blocked"
-            exit 1
-          fi
-
-          # 2. `skipped` is NOT a pass by default. A docs-only diff legitimately
+          #    `skipped` is NOT a pass by default. A docs-only diff legitimately
           #    skips the matrix, so a leg the SELECTOR declined may skip — but a
           #    shard the selector DID select that reports `skipped` is a lost
           #    shard, and this REQUIRED check must not certify it (#5219).
@@ -3323,16 +3373,29 @@ jobs:
           #    `-` means the leg has no diff gate and must therefore always be
           #    SUCCESS (the surface guard's original explicit assertion, applied
           #    to every always-run leg).
-          while IFS='|' read -r leg result selected; do
-            if [ -z "$leg" ]; then continue; fi
-            if [ "$result" = "success" ]; then continue; fi
-            if [ "$result" = "skipped" ] && [ "$selected" = "false" ]; then
-              echo "  $leg: skipped by the selector (not selected for this diff)"
-              continue
-            fi
-            echo "::error::$leg reported '$result' and the selector did not decline it (selected='$selected') — merge blocked"
-            exit 1
-          done <<'LEGS'
+          #
+          #    THIS TABLE NOW RUNS FIRST. It used to be dead code for the red
+          #    class that dominates: a bare `grep -qE 'failure|cancelled'` bail
+          #    sat ABOVE it and exited first, so a `failure` or `cancelled` leg
+          #    reported only "matrix leg failed or was cancelled — merge blocked"
+          #    and never its name. Narrower than "on every red": the table's own
+          #    line (in the form `::error::$leg reported ...`) was REACHED for a
+          #    `skipped`-while-selected leg and for the empty (#5219) missing-leg
+          #    row, because neither matches that sweep — so those two classes
+          #    were already named pre-fix. The two above were not, and they are
+          #    what an operator sees on a normal red (agent-infra#2148 sibling).
+          #    Measured 2026-10-19: 11 open PRs red on this required check, every
+          #    one reporting only the bare sentence while a red shard sat
+          #    un-named.
+          #
+          #    Fail-closed is preserved and made explicit per class:
+          #      failure          -> red, named
+          #      cancelled        -> red, named (a cancelled leg certifies nothing)
+          #      empty (#5219)    -> red, named (a missing leg is not a pass)
+          #      skipped+selected -> red, named (a lost shard is not a pass)
+          #      skipped+declined -> pass (the selector declined this leg)
+          LEGS_FILE="$(mktemp)"
+          cat > "$LEGS_FILE" <<'LEGS'
           changes|${{ needs.changes.result }}|-
           manifest-integrity|${{ needs.manifest-integrity.result }}|-
           workflow-lint|${{ needs.workflow-lint.result }}|-
@@ -3345,4 +3408,67 @@ jobs:
           test-d14-hosted-api|${{ needs.test-d14-hosted-api.result }}|-
           surface-guard|${{ needs.surface-guard.result }}|-
           LEGS
+
+          # Fail closed by construction, and NAME the leg while doing it: every
+          # row class that is not a pass is recorded and reds the step, reported
+          # as "leg 'X' reported '...'" rather than as a bare "merge blocked".
+          # FAILED_LEGS accumulates NAMES (not a counter) so the summary counts a
+          # leg once even if a copy-pasted duplicate row makes the loop inspect it
+          # twice; the loop itself never skips a red row, so a duplicate cannot
+          # mask one.
+          FAILED_LEGS=""
+          while IFS='|' read -r leg result selected; do
+            if [ -z "$leg" ]; then
+              continue
+            fi
+            case "$result" in
+              success)
+                continue
+                ;;
+              skipped)
+                if [ "$selected" = "false" ]; then
+                  echo "  $leg: skipped by the selector (not selected for this diff)"
+                  continue
+                fi
+                echo "::error::leg '$leg' is SKIPPED although the selector selected it (selected='$selected') — a lost shard is not a pass (#5219); merge blocked"
+                FAILED_LEGS="$FAILED_LEGS$leg "
+                ;;
+              cancelled)
+                echo "::error::leg '$leg' was CANCELLED (selector: selected='$selected') — a cancelled leg certifies nothing; merge blocked"
+                FAILED_LEGS="$FAILED_LEGS$leg "
+                ;;
+              '')
+                echo "::error::leg '$leg' reported NO RESULT (empty) — the #5219 missing-leg shape is not a pass; merge blocked"
+                FAILED_LEGS="$FAILED_LEGS$leg "
+                ;;
+              *)
+                echo "::error::leg '$leg' reported '$result' (selector: selected='$selected') — merge blocked"
+                FAILED_LEGS="$FAILED_LEGS$leg "
+                ;;
+            esac
+          done < "$LEGS_FILE"
+
+          if [ -n "$FAILED_LEGS" ]; then
+            # $FAILED_LEGS is DELIBERATELY unquoted: the word-split is what puts
+            # one leg per line for `sort -u`. `wc` pads its output, so strip the
+            # spaces rather than printing them.
+            FAILED=$(printf '%s\n' $FAILED_LEGS | sort -u | wc -l | tr -d ' ')
+            echo "❌ $FAILED leg(s) did not pass — the ::error:: lines above name each one (GitHub shows at most 10 annotations per step; the log carries them all)"
+            rm -f "$LEGS_FILE"
+            exit 1
+          fi
+
+          # Defence in depth (#5219): the plain sweep over `needs.*.result` is
+          # identity-BLIND — it cannot say WHICH leg — so it is the last resort for
+          # a failing/cancelled result that reached `needs:` with no row at all.
+          # The invariant itself is owned by `.github/scripts/check-required-set.py
+          # ::check_gate_legs` (run inside `manifest-integrity`, whose failure the
+          # loop above already reports by name) and by
+          # `tests/test_required_set_sync.py` at test time; this is the narrowest
+          # third layer, and the only one still reachable if that guard is itself
+          # what drifted (pinned by tests/test_ci_selection.py).
+          if echo "$RESULTS" | grep -qE 'failure|cancelled'; then
+            echo "::error::a need reported failure-or-cancelled but no leg row named it — the leg table above has drifted from needs:; merge blocked"
+            exit 1
+          fi
           echo "✅ every declared leg ran to success, or was declined by the selector"

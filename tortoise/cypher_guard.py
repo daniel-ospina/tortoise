@@ -1210,14 +1210,40 @@ def tolerates_altered_numbers(fn):
 
 
 def _as_text(value):
-    """Decode a bytes command/payload so the scan can see its text, else return it.
+    """Decode a bytes-like command/payload so the scan can see it, else return it.
 
     redis-py accepts the BYTES form of ``execute_command``, and the scanner
     reports ``None`` for anything that is not ``str`` — so without this a bytes
     payload would pass the guard untouched (#3595 review).
+
+    ⛔ ``memoryview`` is the THIRD spelling and it is not optional (#9209
+    review): ``redis.connection.Encoder.encode`` passes a ``memoryview``
+    through UNCHANGED, so the buffer is what reaches the wire — while a decoder
+    that only knew ``bytes``/``bytearray`` returned it untouched, which every
+    caller of this function reads as "not a command" and forwards. MEASURED on
+    an armed projection: ``execute_command(memoryview(b"GRAPH.DELETE"), <g>)``
+    was dispatched (the same whole-graph wipe the ``bytes`` form is refused
+    for), and the #3595 ``=~`` scan in ``_guard_execute_command`` was bypassed
+    the same way. Decoding it here covers both, because this is the one shared
+    decoder.
+
+    ⛔ ``bytes(value)`` would be WRONG here (review round 9): ``bytes(subclass)``
+    calls the subclass's ``__bytes__``, so a lying ``bytes`` subclass made the
+    scan read one command while the client sent another. Same for a ``str``
+    SUBCLASS: the characters are copied through ``str.__getitem__`` (an exact
+    ``str``), so an overridden ``split``/``__getitem__`` cannot steer the scan.
+    RESIDUAL, stated rather than papered over: a subclass can still override
+    ``encode()``, which is what the client puts on the wire — no base-class read
+    can prove otherwise, so the projection's write handle REFUSES a
+    text/bytes-subclass payload on an armed projection
+    (``_GuardedGraph.execute_command`` / ``_command_payload_is_unreadable``),
+    which is the door a wipe through ``proj.g`` would use. This decoder is on the
+    client-level channel, where a caller can equally build a bare client.
     """
-    if isinstance(value, (bytes, bytearray)):
-        return bytes(value).decode("utf-8", "replace")
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return memoryview(value).tobytes().decode("utf-8", "replace")
+    if isinstance(value, str) and type(value) is not str:
+        return str.__getitem__(value, slice(None))
     return value
 
 

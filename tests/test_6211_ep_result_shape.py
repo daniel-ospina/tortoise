@@ -434,8 +434,11 @@ def test_a_draft_sweep_inside_the_hop_loop_names_that_hop():
     # Batch 1 of factor extraction (operator discovery over the affected set).
     ("RETURN DISTINCT o.id, o.op_type, o.label, o.direction",
      "factor_extraction"),
-    # Batch 3 (operator-less direct-edge factors).
-    ("RETURN a.id, b.id, type(r)", "factor_extraction"),
+    # Batch 3 (operator-less direct-edge factors). `id(r)` leads the projection
+    # since #6211's anchor change — it is the edge identity the OR split
+    # de-duplicates on, so this fragment must carry it or the fault stops
+    # matching the statement the pass actually emits.
+    ("RETURN id(r), a.id, b.id, type(r)", "factor_extraction"),
     # Batch 2 (an operator's inputs, by idx).
     ("RETURN o.id, c.id, r.idx", "factor_extraction"),
     # The draft sweep: pass-level when asked with no hop.
