@@ -6881,7 +6881,7 @@ durations:
   test_control_plane.py: 5.9  # #9017 CI-junit 2026-10-18 (run 39165691659); was 8.1
   test_cross_tenant_read_isolation.py: 1.9
   test_dream.py: 6.7  # #9017 CI-junit 2026-10-18 (run 39165691659); was 7.9
-  test_embedded_concurrency.py: 131.0  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 7 of 15 testcases = 101.2s in the largest single job (117.8s summed across the legs; 10 distinct testcases seen), a LOWER bound; kept 131.0
+  test_embedded_concurrency.py: 131.0  # ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 7 of 15 testcases = 101.2s in the largest single job (117.8s summed across the legs; 8 distinct testcases seen), a LOWER bound; kept 131.0
   test_embedded_durability_claim.py: 0.5  # unmeasured
   test_embedded_lifecycle.py: 84.8  # ci-timing top-15 2026-10-19 (run 39191149586); was 79.0
   test_enumeration_surfaces.py: 3.0  # #9017 CI-junit 2026-10-18 (run 39165691659); was 5.9

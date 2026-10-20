@@ -2073,18 +2073,16 @@ def aggregate_logs(logs_dir: Path | str) -> dict:
         for k in COUNT_KEYS:
             total_counts[k] += parsed["counts"][k]
         # A leg whose log carries no pytest SUMMARY line reports 0 of everything
-        # while its progress lines still name the testcases that failed — the
-        # artifact STILL shipped in this refresh carries `outcome.failed: 5` beside
-        # SIX `failed_tests` entries (one all-zero log source, `pytest.log`; #9134
-        # review, P2). That capture is of run 39191149586, which ran BEFORE this fix
-        # existed, so it cannot be regenerated here — the NEXT refresh recomputes it —
-        # and the number is left as measured, not edited. A truncation is not an
-        # absence of failures, so a summary-less leg contributes what its progress
-        # lines told us — failures only, never passed/skipped, which a summary-less
-        # log cannot establish.
-        # not an absence of failures, so a summary-less leg contributes what its
-        # progress lines told us — failures only, never passed/skipped, which a
-        # summary-less log cannot establish.
+        # while its progress lines still name the testcases that failed. Measured
+        # on run 39191149586 — the capture this PR ships — the artifact carried
+        # `outcome.failed: 5` beside SIX `failed_tests` entries, because one
+        # all-zero log source (`pytest.log`) contributed no counts at all (#9134
+        # review, P2). That run's logs SURVIVE, so the artifact was regenerated
+        # from them rather than the number being edited: the same capture now
+        # reads 6, and `outcome.failed` agrees with the `failed_tests` list it
+        # ships beside. A truncation is not an absence of failures, so a
+        # summary-less leg contributes what its progress lines told us — failures
+        # only, never passed/skipped, which a summary-less log cannot establish.
         if not any(parsed["counts"].values()):
             for state, key in (("FAILED", "failed"), ("ERROR", "error")):
                 total_counts[key] += sum(
