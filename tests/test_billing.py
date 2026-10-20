@@ -3287,14 +3287,18 @@ class TestReconcileSweep:
                 f"by rank, never by listing order — got {order}")
 
     def test_an_unreadable_ladder_is_unrankable_not_unlimited(self):
-        """``None`` from ``_paid_tier_floor`` means CONFIG FAULT, not unlimited.
+        """``None`` from ``_paid_tier_floor`` is ambiguous: unlimited OR a read failure.
 
         The old docstring said ``None`` = "Team = unlimited" and §4.2 said
         ``direction: null`` = "both caps unlimited". Measured, both are false:
         ``team`` is 600 000 and an unrecognised tier resolves to Free's 10 000
         (``pricing.tier_limits``: "Unknown tiers default to the Free limits").
-        ``None`` is reachable only when the ladder RAISES (#750.8). A runbook
-        that calls it a benign no-op sends the operator past a config fault.
+        ``None`` is reachable when the ladder RAISES (#750.8) — and, since #8946,
+        ALSO from a readable ladder that declares ``max_graph_nodes: null``
+        (unlimited). ``_paid_tier_floor`` keeps returning ``None`` for both, so a
+        consumer that must tell them apart reads ``_tier_cap`` instead (see
+        ``TestTierCapSeparatesTheTwoNones``); a runbook that calls either a benign
+        no-op sends the operator past a config fault.
         """
         import tortoise.pricing as pricing
         from tortoise import billing as bl
@@ -3304,7 +3308,8 @@ class TestReconcileSweep:
         assert bl._paid_tier_floor("bogus-tier") == bl._paid_tier_floor("free")
         assert bl._drift_direction("bogus-tier", "team") == "up"
 
-        # The only path to None: the ladder cannot be read at all.
+        # Two paths to None — an unreadable ladder here, a readable `null` cap
+        # there — and `_drift_direction`/`_tier_claim` tell them apart.
         def _unreadable(tier):
             raise KeyError("pricing.json tier 'pro' missing required keys")
 
@@ -3403,6 +3408,142 @@ class TestReconcileSweep:
         assert summary["repaired"] == 0 and summary["drift"] == []
         assert self._row(sdk, org_id)[0] == "pro", \
             "no active subscription is not a licence to downgrade"
+
+    def test_an_unlimited_tier_no_subscription_fixes_the_ATTRIBUTION_not_the_count(
+            self, monkeypatch, billing_client, caplog):
+        """What #8946 actually delivers on this arm — and what it does NOT.
+
+        ``_tier_claim`` has ONE call site (the ``noop`` arm) and
+        ``summary["unverified"] += 1`` runs BEFORE the claim is discriminated, so
+        ``"paid"`` and ``"unknown"`` share that bucket and the ``::warning::`` it
+        drives. Pinning both halves here keeps the runbook honest in either
+        direction: the COUNT is unchanged (an unlimited tier with no verifiable
+        subscription is still ``unverified``, never ``skipped`` — that bucket is
+        what keeps a stored-*paid* org out of nothing-to-verify), while the LOG
+        LINE stops naming a cause the code never established. Pre-#8946 this
+        tier read as an unreadable ladder, so the warning said "the pricing
+        ladder could not be read" about a ladder that was read and said
+        unlimited (#8946).
+        """
+        import logging
+
+        import tortoise.pricing as pricing
+        from tortoise import billing as bl
+        org_id = billing_client["org_id"]
+        sdk = billing_client["sdk"]
+        self._seed(sdk, org_id, tier="pro", stripe_customer_id="cus_8946u")
+        monkeypatch.setattr(bl.StripeClient, "list_subscriptions",
+                            lambda self, cid: [])
+        monkeypatch.setattr(
+            pricing, "tier_limits",
+            lambda tier: {"max_graph_nodes": None if tier == "pro" else 10000})
+        caplog.set_level(logging.WARNING, logger=bl._logger.name)
+
+        summary = bl.reconcile_subscriptions(sdk, notifier=False)
+
+        assert summary["unverified"] == 1, summary
+        assert summary["skipped"] == 0, (
+            "an unlimited tier claims MORE than Free, so it is never "
+            "nothing-to-verify")
+        assert self._row(sdk, org_id)[0] == "pro"
+        said = "\n".join(r.getMessage() for r in caplog.records)
+        assert "stored as billed" in said, said
+        assert "ladder could not be read" not in said, (
+            "the ladder WAS read and said unlimited — naming a read failure is "
+            "the #8946 defect this test pins")
+
+    def test_a_self_contradicting_ladder_names_ITS_OWN_cause_not_a_read_failure(
+            self, monkeypatch, billing_client, caplog):
+        """Two shapes reach "unknown", and the arm must name the one it saw.
+
+        A ladder that declares Free `null` while a named tier publishes a
+        FINITE cap is READABLE and self-contradicting: no cap can prove a paid
+        claim, so ``_tier_claim`` answers ``"unknown"`` instead of ``"unpaid"``
+        (``skipped`` is "nothing to verify", the one bucket ``unverified``
+        exists to keep a stored-PAID org out of). Pointing that org at "the
+        pricing ladder could not be read" would be the #8946 defect one arm
+        over: a log line naming a cause the code never established, in the one
+        file an operator reads during an incident.
+        """
+        import logging
+
+        import tortoise.pricing as pricing
+        from tortoise import billing as bl
+        org_id = billing_client["org_id"]
+        sdk = billing_client["sdk"]
+        self._seed(sdk, org_id, tier="pro", stripe_customer_id="cus_8946d")
+        monkeypatch.setattr(bl.StripeClient, "list_subscriptions",
+                            lambda self, cid: [])
+        monkeypatch.setattr(
+            pricing, "tier_limits",
+            lambda tier: {"max_graph_nodes": None if tier == "free" else 600000})
+        caplog.set_level(logging.WARNING, logger=bl._logger.name)
+
+        summary = bl.reconcile_subscriptions(sdk, notifier=False)
+
+        assert summary["unverified"] == 1, summary
+        assert summary["skipped"] == 0, (
+            "a stored paid tier on a contradictory ladder is a config fault to "
+            "look at, never nothing-to-verify — got " + repr(summary))
+        assert self._row(sdk, org_id)[0] == "pro"
+        said = "\n".join(r.getMessage() for r in caplog.records)
+        assert "contradicts itself" in said, (
+            "the arm must name the cause it actually saw — got " + repr(said))
+        assert "ladder could not be read" not in said, (
+            "the ladder WAS readable (Free null, this tier 600000) — a read "
+            "failure is a cause the code never established")
+
+    def test_a_ladder_that_changes_mid_pass_never_misattributes_the_cause(
+            self, monkeypatch, billing_client, caplog):
+        """The VERDICT and the CAUSE it names must come from ONE ladder read.
+
+        ``pricing._load`` caches only on SUCCESS, so an unreadable — or a
+        mid-deploy-swapped — ``pricing.json`` is re-read on every call. Reading
+        the ladder a SECOND time to pick the message let the classification and
+        the attribution come from different readings: here the claim's own read
+        raises (a genuine READ FAILURE) while the re-read sees a readable but
+        self-contradicting ladder, so the warning said "contradicts itself"
+        about a file that could not be read at the moment it was classified.
+        That is the #8946 defect class — a log line naming a cause the code
+        never established — one layer inside its own fix, so the reason now
+        travels out of the read that produced the claim.
+        """
+        import logging
+
+        import tortoise.pricing as pricing
+        from tortoise import billing as bl
+        org_id = billing_client["org_id"]
+        sdk = billing_client["sdk"]
+        self._seed(sdk, org_id, tier="pro", stripe_customer_id="cus_8946m")
+        monkeypatch.setattr(bl.StripeClient, "list_subscriptions",
+                            lambda self, cid: [])
+
+        pro_reads = []
+
+        def _flaky(tier):
+            if tier == "pro":
+                pro_reads.append(tier)
+                if len(pro_reads) == 1:
+                    # The read that CLASSIFIES the org: a genuine read failure.
+                    raise KeyError(
+                        "pricing.json tier 'pro' missing required keys: "
+                        "['max_graph_nodes']")
+            return {"max_graph_nodes": None if tier == "free" else 600000}
+
+        monkeypatch.setattr(pricing, "tier_limits", _flaky)
+        caplog.set_level(logging.WARNING, logger=bl._logger.name)
+
+        summary = bl.reconcile_subscriptions(sdk, notifier=False)
+
+        assert summary["unverified"] == 1, summary
+        said = "\n".join(r.getMessage() for r in caplog.records)
+        assert "ladder could not be read" in said, (
+            "the read that produced the verdict FAILED, so that is the cause "
+            "the log must name — got " + repr(said))
+        assert "contradicts itself" not in said, (
+            "the contradiction was only visible to a SECOND read of the same "
+            "ladder; naming it attributes a cause the classification never "
+            "saw (#8946)")
 
     def test_one_orgs_store_failure_does_not_abort_the_pass(
             self, monkeypatch, billing_client):
@@ -4080,3 +4221,173 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     message = str(excinfo.value)
     assert "INCONCLUSIVE [#5049]" in message
     assert "POST /v1/billing/checkout answered" in message
+# ---------------------------------------------------------------------------
+# #8946 — the two ``None``s a ladder read can produce
+# ---------------------------------------------------------------------------
+
+
+class TestTierCapSeparatesTheTwoNones:
+    """``pricing.tier_limits`` requires only the KEY to exist, so a readable
+    ``pricing.json`` may carry ``max_graph_nodes: null`` — an UNLIMITED tier, not
+    a fault. Reading that as "the ladder could not be read" logged a cause the
+    code never established for every org on such a tier, forever (#8946) — and
+    ranked the tier below a finite sibling, which could re-cap it. (The
+    ``unverified`` COUNTER is unchanged: ``"paid"`` and ``"unknown"`` share that
+    bucket; what this fixes is the attribution and the rank.) The two sources
+    separate on the RAISE, which is the only place they differ, so one function
+    reads the ladder and returns ``_UNREADABLE`` for the fault.
+    """
+
+    @staticmethod
+    def _with_limits(monkeypatch, ladder):
+        import tortoise.pricing as pricing
+        monkeypatch.setattr(pricing, "tier_limits", ladder)
+
+    @staticmethod
+    def _ladder(caps):
+        """A fake ``tier_limits`` that keeps the real unknown-tier behaviour:
+        an unrecognised tier resolves to Free's limits (never raises)."""
+        def _limits(tier):
+            key = tier if tier in caps else "free"
+            return {"max_graph_nodes": caps[key]}
+        return _limits
+
+    def test_an_unlimited_cap_claims_paid(self, monkeypatch):
+        # ⛔ Regression guard for the defect itself: this returned "unknown".
+        from tortoise import billing as bl
+        self._with_limits(monkeypatch, self._ladder({"free": 10000, "pro": None, "team": 600000}))
+
+        assert bl._tier_claim("pro") == "paid", "an unlimited tier claims MORE than Free"
+        assert bl._tier_claim("free") == "unpaid"
+        assert bl._tier_claim("team") == "paid"
+        assert bl._tier_cap("pro") is None
+        assert bl._tier_cap("pro") is not bl._UNREADABLE
+
+    def test_unlimited_FREE_outranks_nothing(self, monkeypatch):
+        """⛔ The Free arm is decided FIRST. Testing ``cap is None`` before
+        ``free_cap is None`` made Free the only tier claiming paid entitlement on
+        a ladder that declares Free itself unlimited — a paid claim for the whole
+        free population, and dead code in the one configuration its comment
+        names. Red before the swap: ``_tier_claim("free")`` returned "paid".
+
+        ⛔ And a NAMED tier with a FINITE cap on that degenerate ladder is
+        ``"unknown"``, never ``"unpaid"``: its label says paid while its cap
+        sits below an unlimited Free, so the ladder contradicts itself and a
+        person must look (``skipped`` is the one bucket ``unverified`` exists to
+        keep a stored-PAID org out of). "unpaid" here was this test's own
+        earlier claim; it filed a stored-``pro`` org under nothing-to-verify.
+        """
+        from tortoise import billing as bl
+
+        # Free unlimited, and a paid tier that is ALSO unlimited: nothing is
+        # above an unlimited Free, so neither claims paid.
+        self._with_limits(monkeypatch, self._ladder({"free": None, "pro": None}))
+        assert bl._tier_claim("free") == "unpaid"
+        assert bl._tier_claim("pro") == "unpaid"
+        assert bl._tier_claim(None) == "unpaid"  # resolves to Free's cap
+        assert bl._tier_claim("bogus-tier") == "unpaid"
+
+        # Free unlimited, paid tier FINITE: the ladder contradicts itself, so the
+        # answer is "unknown" (a config fault a person looks at) — not "paid"
+        # (nothing outranks unlimited Free) and not "unpaid" (which would skip a
+        # stored-paid org).
+        self._with_limits(monkeypatch, self._ladder({"free": None, "pro": 600000}))
+        assert bl._tier_claim("pro") == "unknown"
+        assert bl._tier_claim("free") == "unpaid"
+        assert bl._tier_claim("bogus-tier") == "unpaid"
+
+    def test_an_unlimited_tier_ranks_above_every_finite_one(self, monkeypatch):
+        from tortoise import billing as bl
+        self._with_limits(monkeypatch, self._ladder({"free": 10000, "pro": None}))
+        # The price→tier resolution is a different concern (and needs a real
+        # catalog); what #8946 changes is what the CAP is worth once resolved.
+        monkeypatch.setattr(bl, "subscription_plan", lambda sub: (sub["tier"], "month"))
+
+        unlimited = {"tier": "pro", "id": "sub_unlimited"}
+        finite = {"tier": "free", "id": "sub_finite"}
+
+        # ``inf``, not ``None``: ``None`` means UNRANKABLE here, and skipping an
+        # unlimited tier lets a finite-capped sibling win the comparison — a
+        # re-cap of someone who pays for unlimited nodes.
+        assert bl._subscription_rank(unlimited) == float("inf")
+        assert bl._subscription_rank(unlimited) > bl._subscription_rank(finite)
+        assert bl._best_ranked([finite, unlimited])[0] is unlimited
+
+    def test_unlimited_to_finite_is_a_downward_drift(self, monkeypatch):
+        """The UNCHANGED ordering, kept as documentation: ``None`` (unlimited) is
+        ranked by the cap, so a repair off it is a real reduction. ⛔ This pair
+        also held pre-fix, so it is NOT the guard for #8946 — the discriminating
+        drift arms are ``test_one_unreadable_side_is_never_a_drift_verdict`` and
+        ``test_two_unlimited_tiers_are_not_an_upgrade``."""
+        from tortoise import billing as bl
+        self._with_limits(monkeypatch, self._ladder({"pro": None, "team": 600000}))
+
+        assert bl._drift_direction("pro", "team") == "down"
+        assert bl._drift_direction("team", "pro") == "up"
+
+    def test_two_unlimited_tiers_are_not_an_upgrade(self, monkeypatch):
+        """⛔ Two readable UNLIMITED caps are RANKED, not unreadable — the pair is
+        decided by its own arm, before the ``before is None`` reduction arm, so
+        the answer cannot be mistaken for one. The cap did not move, so the
+        answer is the same "otherwise" answer two finite caps of equal value get:
+        never ``None`` (that means the ladder could not be READ) and never
+        ``"up"`` (nothing was raised, and only ``"up"`` pages). Red against the
+        pre-#8946 code, where both-None hit the ``both floors None`` guard and
+        returned ``None``."""
+        from tortoise import billing as bl
+        self._with_limits(monkeypatch, self._ladder({"pro": None, "team": None}))
+
+        assert bl._drift_direction("pro", "team") == "down"
+        assert bl._drift_direction("team", "pro") == "down"
+        # And the readable pair of equal FINITE caps answers identically — the
+        # rule is "not up", not "not unlimited".
+        self._with_limits(monkeypatch, self._ladder({"pro": 600000, "team": 600000}))
+        assert bl._drift_direction("pro", "team") == "down"
+
+    def test_one_unreadable_side_is_never_a_drift_verdict(self, monkeypatch):
+        """⛔ The arm #8946 actually added to ``_drift_direction``: ``tier_limits``
+        raises PER TIER, so one side can be unreadable while the other ranks
+        normally. Pre-fix that compared a real cap against ``None`` and returned
+        ``"down"`` from an unreadable ``from`` and ``"up"`` from an unreadable
+        ``to`` — and ``"up"`` PAGES: a Telegram/Resend page for a payable
+        customer whose entitlement never moved, caused by a config fault (#750.8,
+        "a fault is not a verdict"). Both assertions are red pre-fix."""
+        from tortoise import billing as bl
+
+        def _only_pro_raises(tier):
+            if tier == "pro":
+                raise KeyError("pricing.json tier 'pro' missing required keys")
+            return {"max_graph_nodes": 600000}
+
+        self._with_limits(monkeypatch, _only_pro_raises)
+
+        assert bl._tier_cap("pro") is bl._UNREADABLE
+        assert bl._tier_cap("team") == 600000
+        assert bl._drift_direction("pro", "team") is None  # pre-fix: "down"
+        assert bl._drift_direction("team", "pro") is None  # pre-fix: "up" (pages)
+
+    def test_every_unreadable_shape_claims_unknown(self, monkeypatch):
+        """The catch is BROAD on purpose: the four shapes are not one exception
+        family, and ``_tier_claim`` runs OUTSIDE the per-org ``try`` — an escape
+        aborts the whole pass as an unnamed 500."""
+        import json
+
+        from tortoise import billing as bl
+
+        def _key_error(tier):
+            raise KeyError("missing required keys")
+
+        def _decode_error(tier):
+            raise json.JSONDecodeError("bad", "{", 0)
+
+        def _file_error(tier):
+            raise FileNotFoundError("pricing.json")
+
+        def _attribute_error(tier):
+            raise AttributeError("'list' object has no attribute 'get'")
+
+        for shape in (_key_error, _decode_error, _file_error, _attribute_error):
+            self._with_limits(monkeypatch, shape)
+            assert bl._tier_claim("pro") == "unknown", shape.__name__
+            assert bl._tier_cap("pro") is bl._UNREADABLE, shape.__name__
+            assert bl._drift_direction("pro", "team") is None, shape.__name__

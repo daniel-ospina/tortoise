@@ -650,11 +650,20 @@ def test_a_declared_door_writes_through_the_handle_with_no_declaration_of_its_ow
         armed_sdk, enforced, force_sparse_tfidf):
     """The DOORS part 1 declared still write once the handle is armed.
 
-    This is the dependency the four declarations exist for, executable: with the
-    handle REFUSING, `delete_point` / `retract_point` / `invalidate_point` /
-    `supersede_point` must complete — each appends its record and then writes a
-    cache the guard would otherwise refuse. A door declared too early (i.e.
-    apply-first) would fail here rather than silently pass in measure mode.
+    This is the dependency the declarations exist for, executable: with the
+    handle REFUSING, `retract_point` / `invalidate_point` / `supersede_point`
+    must complete — each appends its record and then writes a cache the guard
+    would otherwise refuse. A door declared too early (i.e. apply-first) would
+    fail here rather than silently pass in measure mode.
+
+    ⚠️ `delete_point` is NOT in this list any more: #9207 reversed its order
+    (the `DETACH DELETE` first, the record after a landed destroy), so its
+    #9124 live-lane declaration was WITHDRAWN and it is inventoried in
+    `_APPLY_FIRST_DOORS`. Keeping it here would assert that an apply-first door
+    rides an armed handle — the exact dishonesty
+    `tests/test_9124_declared_live_doors.py::
+    test_every_live_declared_door_is_journal_first` exists to catch. Its
+    behaviour under an armed handle is pinned by the test below instead.
 
     `force_sparse_tfidf` pins the embedder OFF for the same reason the
     sanctioned-lane test above does: seven `create_point`s against a cold HF
@@ -677,11 +686,49 @@ def test_a_declared_door_writes_through_the_handle_with_no_declaration_of_its_ow
     new = sdk.create_point("statement", "declared-door new")["id"]
     assert sdk.supersede_point(old, new)["invalidated"] is True
 
-    # delete_point
-    doomed = sdk.create_point("statement", "declared-door deleted")["id"]
-    assert sdk.delete_point(doomed) is True
-    proj = sdk._get_proj()
-    assert _count(proj, "Point", "id", doomed) == 0
+
+def test_an_apply_first_door_is_refused_by_the_armed_guard(
+        armed_sdk, enforced, force_sparse_tfidf):
+    """`delete_point` is APPLY-FIRST by decision (#9207) — an armed handle refuses it.
+
+    The other half of the withdrawal above, executable. #9207 reversed this
+    door's order (the `DETACH DELETE` is issued BEFORE the record exists), which
+    is the apply-first shape, so no journal-first lane is honest on it and its
+    writes are UNDECLARED. With the handle refusing, that has to be visible: the
+    statement is REFUSED rather than silently blessed by a lane whose premise no
+    longer holds.
+
+    Two properties are asserted, and the second is #9207's invariant:
+
+    1. the destroy is refused BEFORE it lands (the Point is still served by
+       `get_point` — a refusal that deleted anyway would be the same divergence
+       in the other direction), and
+    2. NOTHING is appended: no destruction record for a destroy the cache never
+       performed.
+
+    NON-VACUITY: on the pre-#9207 shape (append-first, decorated with
+    `@_declares_live_write_lane("delete_point")`) the lane authorizes the write,
+    so no refusal is raised and `pytest.raises` fails — measured by the reversed
+    order reddening this test. `tests/test_9124_declared_live_doors.py`
+    (`_APPLY_FIRST_DOORS`) carries the same fact statically, so neither the
+    inventory nor this behaviour can drift alone.
+    """
+    sdk = armed_sdk
+    doomed = sdk.create_point("statement", "apply-first door refused")["id"]
+    journal = Path(sdk._journal_path_for_test)
+    records_before = journal.read_text() if journal.exists() else ""
+
+    with pytest.raises(DirectCacheWriteRefused):
+        sdk.delete_point(doomed)
+
+    assert sdk.get_point(doomed) is not None, (
+        "the refusal must precede the destroy — a refused DETACH DELETE that "
+        "still removed the Point is the #9207 divergence with the stores "
+        "swapped")
+    records_after = journal.read_text() if journal.exists() else ""
+    assert records_after == records_before, (
+        "a destruction the cache never performed was recorded — the record "
+        f"must follow a LANDED destroy: {records_after[len(records_before):]!r}")
 
 
 # ── the schema-DDL decision (#9124's own, per the issue thread) ───────────

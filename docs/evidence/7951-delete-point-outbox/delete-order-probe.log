@@ -10,30 +10,40 @@ relation 'onBoard': the declaration binds no write path — 'onBoard' is neither
 relation 'funds': semantics 'funds' is retired in favour of 'transacts' (ONTOLOGY §8, #7852) — packs align to the core vocabulary (#7848)
 relation 'producedBy': semantics 'produces' is retired in favour of 'causes' (ONTOLOGY §8, #7852) — packs align to the core vocabulary (#7848)
 relation 'holds': semantics 'holds' is retired in favour of 'ownedBy' (ONTOLOGY §8, #7852) — packs align to the core vocabulary (#7848)
-pack registry /tmp/cell-t3/.worktrees/repair-c2a/packs: 1 pack(s) carry a non-blocking lifecycle declaration note — a `statuses` word shared with the connector vocabulary, or a bare object kind claimed by more than one pack (see registry.lifecycle_warnings): venture: kindDefs 'investment': 'statuses' reuses the shared connector vocabulary word(s) active — this kind owns its own state (the built-in connector fold does not apply to it), but the spelling is ambiguous to a reader; rename or record the intent
-rebuild: the event-log dir /tmp/tt7951-del-p4xvt90i/events differs from the embedded DB dir /tmp/tt7951-del-p4xvt90i — the durable pre-wipe snapshot is written next to the log, so automatic recovery on DB open will not see it; re-run `tortoise rebuild --dir /tmp/tt7951-del-p4xvt90i/events` to recover (#2943)
+pack registry /Users/danielospina/Documents/GitHub/tortoise/.worktrees/fix/p0-delcommit/packs: 1 pack(s) carry a non-blocking lifecycle declaration note — a `statuses` word shared with the connector vocabulary, or a bare object kind claimed by more than one pack (see registry.lifecycle_warnings): venture: kindDefs 'investment': 'statuses' reuses the shared connector vocabulary word(s) active — this kind owns its own state (the built-in connector fold does not apply to it), but the spelling is ambiguous to a reader; rename or record the intent
+§17.1: a mutating statement reached the projection's write handle with NO declared lane (MATCH (n:Point {id:$id}) DETACH DELETE n). The door is MEASURING, not refusing (#9124 part 1): declare the writer (`_live_write_scope` after its journal append, `_replay_write_scope`, or `_graph_metadata_write_scope`) before the guard is armed.
+§17.1: a mutating statement reached the projection's write handle with NO declared lane (UNWIND $ids AS pid MATCH (n:Point {id: pid}) WHERE NOT coalesce(n.status, 'live') IN $terminal AND coalesce(n.outdated, false) = false AND NOT pid IN $stamped SET n.ep_dirty = true, n.ep_dirty_at = $e). The door is MEASURING, not refusing (#9124 part 1): declare the writer (`_live_write_scope` after its journal append, `_replay_write_scope`, or `_graph_metadata_write_scope`) before the guard is armed.
+§17.1: a mutating statement reached the projection's write handle with NO declared lane (MATCH ()-[r:IMPL|NAND]->() REMOVE r.msg_alpha, r.msg_beta, r.back_msg_alpha, r.back_msg_beta RETURN count(r)). The door is MEASURING, not refusing (#9124 part 1): declare the writer (`_live_write_scope` after its journal append, `_replay_write_scope`, or `_graph_metadata_write_scope`) before the guard is armed.
+rebuild: the event-log dir /var/folders/1g/wrx4rqtd2xg2rgx_0f3_tm8m0000gn/T/tt7951-del-fyc_mq4l/events differs from the embedded DB dir /var/folders/1g/wrx4rqtd2xg2rgx_0f3_tm8m0000gn/T/tt7951-del-fyc_mq4l — the durable pre-wipe snapshot is written next to the log, so automatic recovery on DB open will not see it; re-run `tortoise rebuild --dir /var/folders/1g/wrx4rqtd2xg2rgx_0f3_tm8m0000gn/T/tt7951-del-fyc_mq4l/events` to recover (#2943)
 Point prop 'ep_dirty' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
 Point prop 'ep_dirty_at' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
-failed to append EntityMutated event to SDK log /tmp/tt7951-del-fail-a8nr41d6/events/events.jsonl: simulated journal append failure (probe) — the write is LIVE-ONLY and will not survive a rebuild (#4240)
-rebuild: the event-log dir /tmp/tt7951-del-heal-x42r65q_/events differs from the embedded DB dir /tmp/tt7951-del-heal-x42r65q_ — the durable pre-wipe snapshot is written next to the log, so automatic recovery on DB open will not see it; re-run `tortoise rebuild --dir /tmp/tt7951-del-heal-x42r65q_/events` to recover (#2943)
+failed to append EntityMutated event to SDK log /var/folders/1g/wrx4rqtd2xg2rgx_0f3_tm8m0000gn/T/tt7951-del-heal-seli964y/events/events.jsonl: simulated journal append failure (probe) — the write is LIVE-ONLY and will not survive a rebuild (#4240)
+rebuild: the event-log dir /var/folders/1g/wrx4rqtd2xg2rgx_0f3_tm8m0000gn/T/tt7951-del-heal-seli964y/events differs from the embedded DB dir /var/folders/1g/wrx4rqtd2xg2rgx_0f3_tm8m0000gn/T/tt7951-del-heal-seli964y — the durable pre-wipe snapshot is written next to the log, so automatic recovery on DB open will not see it; re-run `tortoise rebuild --dir /var/folders/1g/wrx4rqtd2xg2rgx_0f3_tm8m0000gn/T/tt7951-del-heal-seli964y/events` to recover (#2943)
 Point prop 'ep_dirty' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
 Point prop 'ep_dirty_at' is not declared — persisted via open-set passthrough (#2795); declare it in POINT_PROPS for parity
+§17.1: a mutating statement reached the projection's write handle with NO declared lane (CREATE (n:S1Probe {id:'raw-handle'}) RETURN 'via-raw-handle'). The door is MEASURING, not refusing (#9124 part 1): declare the writer (`_live_write_scope` after its journal append, `_replay_write_scope`, or `_graph_metadata_write_scope`) before the guard is armed.
+§17.1: a mutating statement reached the projection's write handle with NO declared lane (MATCH (n:Point {id:$id}) DETACH DELETE n RETURN count(n)). The door is MEASURING, not refusing (#9124 part 1): declare the writer (`_live_write_scope` after its journal append, `_replay_write_scope`, or `_graph_metadata_write_scope`) before the guard is armed.
+§17.1: a mutating statement reached the projection's write handle with NO declared lane (MATCH (n:Subject {id:$id}) DETACH DELETE n RETURN count(n)). The door is MEASURING, not refusing (#9124 part 1): declare the writer (`_live_write_scope` after its journal append, `_replay_write_scope`, or `_graph_metadata_write_scope`) before the guard is armed.
+§17.1: a mutating statement reached the projection's write handle with NO declared lane (MATCH (n:Object {id:$id}) DETACH DELETE n RETURN count(n)). The door is MEASURING, not refusing (#9124 part 1): declare the writer (`_live_write_scope` after its journal append, `_replay_write_scope`, or `_graph_metadata_write_scope`) before the guard is armed.
+§17.1: a mutating statement reached the projection's write handle with NO declared lane (MATCH (n:Source {id:$id}) DETACH DELETE n RETURN count(n)). The door is MEASURING, not refusing (#9124 part 1): declare the writer (`_live_write_scope` after its journal append, `_replay_write_scope`, or `_graph_metadata_write_scope`) before the guard is armed.
+§17.1: a mutating statement reached the projection's write handle with NO declared lane (MATCH (n:Source {url:$id}) DETACH DELETE n RETURN count(n)). The door is MEASURING, not refusing (#9124 part 1): declare the writer (`_live_write_scope` after its journal append, `_replay_write_scope`, or `_graph_metadata_write_scope`) before the guard is armed.
+§17.1: a mutating statement reached the projection's write handle with NO declared lane (MATCH (n:Event {eventId:$id}) DETACH DELETE n RETURN count(n)). The door is MEASURING, not refusing (#9124 part 1): declare the writer (`_live_write_scope` after its journal append, `_replay_write_scope`, or `_graph_metadata_write_scope`) before the guard is armed.
 journal_backed (guard armed): True
-delete_point order:              ['journal-EntityMutated-delete', 'cache-DETACH-DELETE']
-ORDERING VERDICT: JOURNAL-FIRST
+delete_point order:              ['cache-DETACH-DELETE', 'journal-EntityMutated-delete']
+ORDERING VERDICT: CACHE-FIRST (#9207)
 delete records committed:        1
 Point live after the delete:     0
 Point live after rebuild_all:    0  (0 = the deletion is durable)
-failed append raised:            WriteNotLandedError (operation='delete_point', record_committed=False)
-Point live after refused delete: 1  (1 = nothing was destroyed)
-delete records committed:        0
-REFUSAL VERDICT: NOTHING DESTROYED, NOTHING SKIPPED FROM THE RECORD
-failed cache delete raised:      WriteNotLandedError (operation='delete_point', record_committed=True, record='EntityMutated op=delete')
-record committed despite failure: 1
-caller told COMMITTED (no blind re-issue): True
-Point live before rebuild:       1
-Point live after rebuild:        0
-COMMIT VERDICT: COMMITTED + REPLAY-HEALABLE
+failed cache delete raised:      RuntimeError (operation='?', record_committed='?')
+Point live after refused delete: 1  (1 = the destroy did not land)
+delete records committed:        0  (0 = the journal claims nothing the cache did not do)
+REFUSAL VERDICT: NO RECORD FOR A DESTROY THAT DID NOT HAPPEN
+failed append after the destroy: WriteNotLandedError (operation='delete_point', record_committed=False, record='EntityMutated op=delete')
+record committed despite failure: 0  (0 = the append never landed)
+caller told UNCONFIRMED (not silent): True
+Point live before rebuild:       0  (0 = the destroy landed)
+Point live after rebuild:        1  (1 = the TRUTH still held it and the replay restored it)
+COMMIT VERDICT: REPORTED, REPAIRED ONLY BY A DESTRUCTIVE REBUILD
 RAW HANDLE LANE (proj.g.query):  SUCCEEDED, rows = [['via-raw-handle']]
 delete_entity order:             ['cache-DETACH-DELETE', 'journal-EntityMutated-delete', 'cache-DETACH-DELETE', 'cache-DETACH-DELETE', 'cache-DETACH-DELETE', 'cache-DETACH-DELETE', 'cache-DETACH-DELETE']
 RESIDUAL: the raw handle is NOT closed, and `_delete_entity` is still apply-first — both recorded on #7951; increment 4a routes ONE delete door (`delete_point`).

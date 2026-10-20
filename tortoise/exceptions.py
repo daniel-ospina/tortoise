@@ -473,14 +473,21 @@ class WriteNotLandedError(RuntimeError):
     drift into two messages for one condition — the failure mode the class
     exists to prevent is a caller that cannot tell which arm it is in.
 
-    #7951 — `delete_point` RAISES IT TOO, with ``operation="delete_point"``,
-    and it is the first door to use the COMMITTED arm for a reason other than
-    a read-back miss: it destroys first in the record and then in the cache, so
-    a committed record whose `DETACH DELETE` failed means *destroyed in the
-    truth, still served by the cache*. That arm gets its own ``_headline``,
-    ``_cause`` and ``_contract`` (the create-shaped text said "was not
-    committed" and "a replay will materialise it", both false here: the
-    destruction is committed and the replay REMOVES).
+    #7951 — `delete_point` RAISES IT TOO, with ``operation="delete_point"``.
+    #9207 REVERSED that door's ordering (the `DETACH DELETE` is issued first and
+    the record follows only a LANDED destroy), so the arm this door actually
+    raises is the ``record_committed=False`` one below: the destroy landed and
+    the record did not confirm. The COMMITTED arm is retained as the class's
+    contract for that state but is no longer produced by this door — a record
+    can no longer precede the destruction it describes.
+
+    #9207 — the delete door's ``record_committed=False`` has a THIRD case for
+    the same reason, and it is the one that can say the least: the ``DETACH
+    DELETE`` raised and the read-back raised too (``destroy_verified=False``),
+    so the destroy's landing is UNKNOWN and no record is written. It states
+    that the destroy is unverified — not which store holds what — and tells the
+    caller to establish the cache state first: a present node is re-issued, an
+    absent one is repaired with a destructive ``rebuild_all``.
 
     #7951 — and the delete door's ``record_committed=False`` arm gets its own
     three clauses too (#7951 review round 3). ``False`` from `_emit_event`
@@ -498,7 +505,8 @@ class WriteNotLandedError(RuntimeError):
     def __init__(self, point_id: str, graph: str | None = None,
                  detail: str = "", *, record_committed: bool = False,
                  operation: str = "create_point",
-                 record: str | None = None) -> None:
+                 record: str | None = None,
+                 destroy_verified: bool = False) -> None:
         self.point_id = point_id
         self.graph = graph
         self.operation = operation
@@ -509,18 +517,44 @@ class WriteNotLandedError(RuntimeError):
         # must still get the true noun.
         self.record = record or (
             "EntityMutated op=delete" if operation == "delete_point"
+            else "PointRevised" if operation == "update_point"
             else "PointAdded")
+        if record_committed and destroy_verified:
+            # `record_committed=True` says the record PRECEDED the cache write;
+            # `destroy_verified=True` says a read-back PROVED the destroy landed
+            # before the record was written. No door can be in both, and
+            # rendering the pair produced a message asserting "the Point was
+            # DESTROYED in the record and not in the cache … no read-back is
+            # involved on this arm" — a self-refuting refusal, which is the one
+            # thing this class exists to prevent (#7951, #9207).
+            raise ValueError(
+                "WriteNotLandedError: record_committed=True contradicts "
+                "destroy_verified=True — a committed record cannot precede the "
+                "destroy it describes; pass at most one of them")
         self.detail = detail
         self.record_committed = record_committed
+        # `delete_point` ONLY. `record_committed=False` has two sub-cases on
+        # that door since #9207, and they must NOT share prose: the destroy
+        # LANDED and only the record is unconfirmed, or the door could not
+        # determine whether the destroy landed at all. The flag is therefore
+        # OPT-IN (#9207 review): it defaults to the arm that CLAIMS NOTHING,
+        # because a constructor that forgets it must not assert a cache state
+        # nobody read — the door that knows the destroy landed passes True.
+        # The single message the class used to emit on both cases asserted
+        # "the `DETACH DELETE` did not report a failure of its own", which is the
+        # OPPOSITE of the unverified case, where that raise IS why the arm was
+        # reached — the same class of false claim #9207 exists to remove, one
+        # layer up.
+        self.destroy_verified = destroy_verified
         _where = f" on graph {graph!r}" if graph else ""
         if record_committed:
             if operation == "delete_point":
-                # …and on a DELETE the committed effect points the other way:
-                # the record is the destruction, so a replay does not
-                # materialise this call — it removes the node the cache still
-                # serves (#7951 review round 2). The create-shaped wording,
-                # verbatim, told an MCP caller "was not committed" about a
-                # destruction that IS committed.
+                # NOT PRODUCED BY `delete_point` SINCE #9207 — kept because the
+                # class is the doors' shared contract and a caller may still
+                # construct it. #9207 reversed this door's ordering (the
+                # `DETACH DELETE` now runs first, so a committed record can no
+                # longer precede it), which is why the text below describes the
+                # state and not this door's sequence.
                 # `_where` names the CACHE graph, so it attaches to the cache
                 # clause: "in the record on graph X" pointed a caller at the
                 # store that does NOT hold the destruction (#7951 review
@@ -530,16 +564,14 @@ class WriteNotLandedError(RuntimeError):
                     f"not in the cache{_where}"
                 )
                 _cause = (
-                    "the journal append committed the destruction and the "
-                    "cache delete then failed (the graph is being "
-                    "replaced/rebuilt) — no read-back is involved on this "
-                    "door"
+                    "the destruction record is committed and the cache delete "
+                    "did not land (the graph is being replaced/rebuilt) — no "
+                    "read-back is involved on this arm"
                 )
                 _contract = (
-                    f"The {self.record} record WAS appended before the "
-                    "DETACH DELETE (the #7951 §17.1 outbox ordering), so the "
-                    "TRUTH no longer holds this Point and a replay will REMOVE "
-                    "the stale node from the cache — do NOT re-issue blindly "
+                    f"The {self.record} record is COMMITTED, so the TRUTH no "
+                    "longer holds this Point and a replay will REMOVE the "
+                    "stale node from the cache — do NOT re-issue blindly "
                     "(that would append a second delete record for one "
                     "intent); treat the deletion as COMMITTED and let the "
                     "projection catch up. The cache is `extra_in_cache` "
@@ -560,37 +592,89 @@ class WriteNotLandedError(RuntimeError):
                     "record); treat the write as COMMITTED and let the "
                     "projection catch up."
                 )
-        elif operation == "delete_point":
-            # The DELETE door's unconfirmed arm (#7951 review round 3). The
-            # `DETACH DELETE` was NOT issued — the §17.1 ordering refuses the
-            # destruction when the record does not confirm — but "no record was
-            # committed" is NOT the state: an append can land and then raise.
-            # #5612: the mechanism is no longer a buffered close-time flush
-            # (`EventLog.append` now writes the whole record in ONE unbuffered
-            # `write(2)`); what remains is a partial write followed by an error
-            # (ENOSPC/EIO) and a full write whose close then fails. Either way
-            # the destruction is UNCONFIRMED, not absent, and the caller must
-            # neither read the call as done nor as safely-nothing-happened.
+        elif operation == "delete_point" and not destroy_verified:
+            # The THIRD case (T3c): neither the cache state nor the record's
+            # landing is knowable, so say exactly that and claim NOTHING about
+            # either store. The landed-destroy arm below must not be used here:
+            # its cause clause ("the `DETACH DELETE` did not report a failure of
+            # its own") is false — that raise is how this arm is reached.
             _headline = (
-                f"the destruction of Point {point_id!r} was NOT confirmed"
+                f"the destruction of Point {point_id!r} was NOT VERIFIED"
                 f"{_where}"
             )
             _cause = (
-                "the JSONL journal append did not confirm (it raised), so the "
-                "#7951 §17.1 ordering skipped the `DETACH DELETE` and the "
-                "cache still holds this Point — the op=delete record MAY have "
-                "landed anyway: the journal write can land partially and then "
-                "raise (ENOSPC/EIO), or land and then fail on close"
+                "the `DETACH DELETE` raised AND the cache could not be re-read "
+                "afterwards, so whether the destroy landed is UNKNOWN. No "
+                "record was written, because a record states what the cache "
+                "DID and no read after the failure established that"
+            )
+            # ⚠️ Both branches below state ONLY what a later read makes true.
+            # The first version of this clause said a present node means "the
+            # cache is behind the TRUTH, which no longer records a destruction
+            # for it" — self-contradictory (nothing is behind a truth that does
+            # not claim the destruction) and false, since this arm writes no
+            # record at all.
+            _contract = (
+                "Neither store is known to be consistent. Do NOT read this call "
+                "as a completed delete. Establish the cache state first "
+                "(`get_point`), then: node PRESENT ⇒ the destroy did not land, "
+                "the cache and the TRUTH still agree, and the delete must be "
+                "RE-ISSUED; node ABSENT with no "
+                f"{self.record} record ⇒ the destroy landed unrecorded — the "
+                "cache is BEHIND the TRUTH (`missing_in_cache`: the journal still "
+                "holds the Point, the cache does not) — and the repair is a "
+                "DESTRUCTIVE `rebuild_all`, which re-creates the Point from the "
+                "journal; the delete must then be RE-ISSUED, or the Point the "
+                "rebuild just restored stays live"
+            )
+        elif operation == "delete_point":
+            # The DELETE door's unconfirmed arm, REWRITTEN FOR #9207's ORDER.
+            # The `DETACH DELETE` has ALREADY LANDED when this is raised (it is
+            # issued first, and the record only follows a landed destroy), so
+            # the pre-#9207 text — "the ordering skipped the `DETACH DELETE` and
+            # the cache still holds this Point" — was the opposite of the
+            # truth. "No record was committed" is NOT the state either: an
+            # append can land and then raise (#5612: `EventLog.append` writes
+            # the whole record in ONE unbuffered `write(2)`, so what remains is
+            # a partial write followed by an error (ENOSPC/EIO), or a full
+            # write whose close then fails). Either way the destruction record
+            # is UNCONFIRMED, not known-absent, so the caller must neither read
+            # the call as done nor assume the truth still holds the Point.
+            _headline = (
+                f"the destruction of Point {point_id!r} did NOT confirm"
+                f"{_where}"
+            )
+            # ⚠️ Do NOT say the `DETACH DELETE` "did not report a failure of
+            # its own" (#9207 whole-diff review): this arm is ALSO reachable
+            # when the statement raised a transport error over an APPLIED
+            # destroy, the read-back proved it gone, and only the append then
+            # failed — the door logs exactly that beside this message
+            # (`delete_point: the DETACH DELETE raised (…) and the cache no
+            # longer holds the Point — either this statement applied and the
+            # reply was lost, or the Point was already gone`). What is true on
+            # BOTH paths is the destroy: it landed.
+            _cause = (
+                "the destroy LANDED in the cache (the statement returned, or it "
+                "reported a failure after the write had already applied and the "
+                "read-back proved the Point gone), and the JSONL journal append "
+                "for its record did not confirm (it raised) — the op=delete "
+                "record MAY have landed anyway: the journal write can land "
+                "partially and then raise (ENOSPC/EIO), or land and then fail "
+                "on close. Nothing was written by this door that claims more "
+                "than the cache state it read"
             )
             _contract = (
-                "Nothing was destroyed in the cache on this call, and the "
-                f"{self.record} record's landing is UNCONFIRMED rather than "
-                "absent: if it did land the TRUTH says this Point is gone, so "
-                "the next replay REMOVES the stale node (a replay resolves "
-                "this arm on its own), and re-intending the deletion is "
-                "permitted because a second delete record folds to the same "
-                "end state. Do not treat this call as a completed delete, and "
-                "do not treat the destruction as reversed by the failure."
+                f"The {self.record} record's landing is UNCONFIRMED rather "
+                "than absent: if it did land, the deletion is COMMITTED and "
+                "nothing further is needed. If it did not, the cache no longer "
+                "holds this Point (or it was already absent when the statement "
+                "ran) while the TRUTH still does, and NOTHING repairs that by "
+                "itself — `recover_from_log` rebuilds only an EMPTY graph, and "
+                "`reconcile` only counts the divergence. The repair is a "
+                "DESTRUCTIVE `rebuild_all`, which re-creates the Point from the "
+                "journal; the delete must then be re-issued (a re-issue before "
+                "that returns `False` for the absent node and records nothing). "
+                "Do not treat this call as a completed delete."
             )
         else:
             _headline = f"the Point {point_id!r} was not committed{_where}"

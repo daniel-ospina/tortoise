@@ -500,9 +500,35 @@ org that has already paid through `current_period_end`, so it needs the billing
 owner, not the runbook. A `failed` row whose error names `pricing.json` (a
 missing limit key) has the same remedy as `direction: null`: fix the ladder.
 
-Note that a cap which is present but `null` is returned by `tier_limits` as-is
-— it ranks as unreadable and still mirrors, so it does not raise: the run can
-green, and can even record a `repaired` tier change nobody proved (#8943). And
+Note that a cap which is present but `null` means **UNLIMITED**, not "unreadable"
+(#8946): `tier_limits` returns it as-is, and since that fix the reconciler ranks
+it ABOVE every finite cap — so an org on such a tier claims `paid`, and a repair
+from it to a finite tier records `direction: "down"`. One shape is degenerate and
+reported as such: a ladder that declares the **Free** tier itself `null` —
+nothing can outrank unlimited Free, so a tier sitting at Free's cap (Free itself,
+a `NULL`/unrecognised stored tier) claims `unpaid` and is counted `skipped`,
+while a NAMED tier with a FINITE cap on that same ladder claims nothing provable
+and is counted `unverified` as a config fault (a `pricing.json` whose paid tiers
+sit below an unlimited Free contradicts itself). What that changes for an
+operator is the **attribution**, not the count: a `"paid"` claim from a readable
+ladder and the `"unknown"` claim from a read failure share the `unverified`
+bucket and the `::warning::` it drives, so an org on an unlimited **named** tier
+(with Free FINITE — the degenerate free-unlimited ladder above is the exception:
+there it claims `unpaid` and is counted `skipped` and warns nothing) with no
+verifiable subscription is still counted `unverified` and still warns — only the
+log line changes: for the `"paid"` claim it no longer names a cause the code
+never established ("the pricing ladder could not be read") for a ladder that was
+in fact read and said unlimited. The bucket is the honest one either
+way: `unverified` is the only bucket that keeps a stored-*paid* org out of
+`skipped`. Note also that a
+`direction: "down"` row can be a REAL reduction of entitlement that the ladder
+itself made — check `from_max_nodes` is `null` before reading it as a billing
+mistake; when BOTH of `from_max_nodes` / `to_max_nodes` are `null` the enforced
+cap did not move at all (two unlimited tiers), and only `"up"` ever pages. The
+earlier caveat — that such a cap "ranks as unreadable" and
+could record `a repaired tier change nobody proved` (#8943) — no longer applies
+to a `null` cap; it applies to a ladder that cannot be READ, which is the
+`direction: null` case below. And
 in the **Actions** log `failed[].org_id` is a stable fingerprint (`org-…`), not
 the real id — the JSON payload carries the real one; re-fetch it with the curl
 at the top of this section unchanged (it carries `--max-time 600` and
@@ -545,19 +571,27 @@ customer's writes) and a `direction`:
   pricing ladder could not be READ (`tier_limits` raised — a malformed or
   incomplete `product/pricing.json`, #750.8). That is a **config fault, not a
   no-op**: an unrecognised tier is NOT this case, it resolves to Free's cap and
-  ranks normally. Never paged; investigate the pricing file.
+  ranks normally, and neither is a `null` cap — that means unlimited and
+  ranks ABOVE every finite cap (#8946). ONE unreadable side is enough (#8946):
+  the raise is per tier, so an unreadable tier against a readable one used to
+  be ranked against `None` and could page a false `up`. Never paged;
+  investigate the pricing file.
 - `unverified` — no active subscription could be established for an org whose
   stored tier claims PAID entitlement, **or whose claim could not be decided at
-  all**. Three causes land here and the counter does not distinguish them:
+  all**. Four causes land here and the counter does not distinguish them:
   Stripe answered and named no active subscription; the customer lookup itself
-  failed (a provider error is not a verdict, so the org is left alone); or the
-  pricing ladder could not be READ (#750.8), which makes "is this tier paid?"
-  UNKNOWN rather than "no" — an unread file is not evidence that a stored `pro`
-  org pays nothing, so it is counted here instead of `skipped`. In that third
-  case the counter does not decide the cause, and the Actions warning cannot
-  either — it deliberately enumerates all three. The DISCRIMINATOR IS THE
-  PER-ORG SERVER LOG LINE ("the customer lookup failed" / "the pricing ladder
-  could not be read" / "(Stripe named none, or the customer lookup failed)").
+  failed (a provider error is not a verdict, so the org is left alone); the
+  pricing ladder could not be READ (#750.8); or the ladder IS readable and
+  contradicts itself (Free declared unlimited while the org's tier publishes a
+  finite cap — see the `null` cap note above). Any of them makes "is this tier
+  paid?" UNKNOWN rather than "no" — neither an unread nor a self-contradicting
+  file is evidence that a stored `pro` org pays nothing — so the org is counted
+  here instead of `skipped`. The counter does not decide the cause, and the
+  Actions warning cannot either. The DISCRIMINATOR IS THE PER-ORG SERVER LOG
+  LINE, which names the ladder's own cause ("the pricing ladder could not be
+  read" vs "the pricing ladder contradicts itself") beside the
+  subscription-side ones ("the customer lookup failed" / "(Stripe named none, or
+  the customer lookup failed)").
   Two shapes, and only ONE of them reaches a RED run:
   - orgs whose repair path reads the ladder raise inside
     `mirror_subscription` (`KeyError: pricing.json tier … missing required
@@ -566,13 +600,14 @@ customer's writes) and a `direction`:
     in `failed`, and redden the run with rows naming the error — so a broken
     pricing file is NOT a silent no-op;
   - orgs with no resolvable ACTIVE subscription take the `noop` arm, land in
-    `unverified`, and never fail the run — that much is true of all three
-    causes, which is why `unverified` alone is three-way: ladder, fleet-wide
-    customer-LIST failure, or a Stripe key pointed at the wrong account.
+    `unverified`, and never fail the run — that much is true of all four
+    causes, which is why `unverified` alone is ambiguous: ladder (unread or
+    self-contradicting), fleet-wide customer-LIST failure, or a Stripe key
+    pointed at the wrong account.
 
   A fleet of only the second kind shows a jump in `unverified`, no `failed`
   rows, and exit 0 — read the per-org line before touching
-  `product/pricing.json`. All three mean "nothing was verified", never a mass
+  `product/pricing.json`. All four mean "nothing was verified", never a mass
   cancellation.
   Nothing was verified against a subscription, so this is NOT `unchanged` —
   and it is deliberately not auto-downgraded either. Counted and logged

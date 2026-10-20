@@ -201,9 +201,13 @@ its edges), and a test pins that scope.
 - **4** — the remaining raw-handle doors (`_sync_tags`, `_link_source`, deletes, `onboarding/state.py`,
   `onboarding/seed.py`, `hosted_api.py`, `__main__.py`, connectors), then gate the handle.
   **LANDED SO FAR: the `delete_point` DOOR (increment 4a)** —
-  `docs/plans/2026-10-18-7951-delete-point-outbox.md`: the `EntityMutated` op=delete record is appended
-  BEFORE the `DETACH DELETE`, and a failed append refuses the delete (previously an unrecorded destroy
-  that the next replay UNDID). **STILL OPEN:** `delete_entity` (needs a per-label pre-read), and every
+  `docs/plans/2026-10-18-7951-delete-point-outbox.md`. ⚠️ **#9207 reversed the ORDER**: the
+  `DETACH DELETE` is issued FIRST and the `EntityMutated` op=delete record follows a LANDED destroy,
+  so a failed append no longer refuses the delete (the destroy has already landed; the refusal
+  reports it as `record_committed=False`). The increment-4a sentence below is kept as the record of
+  what 4a shipped, not as the current order: ~~the `EntityMutated` op=delete record is appended
+  BEFORE the `DETACH DELETE`, and a failed append refuses the delete~~ (previously an unrecorded
+  destroy that the next replay UNDID). **STILL OPEN:** `delete_entity` (needs a per-label pre-read), and every
   other door in this list.
 - **5** — wire `reconcile` as the S2 backstop (observed, not merely checkable).
 

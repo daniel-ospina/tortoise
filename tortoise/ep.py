@@ -76,6 +76,19 @@ _EP_GUARD_MIN_GRAPH_CLAIMS = 500
 # It is the SAME shape that normaliser inserts for engine 6.0.0, where the
 # missing barrier does not merely cost time — it drops the predicate and
 # returns other nodes' rows (#6976).
+#
+# ⛔ THE BARRIER MUST BE A LITERAL AT THE SITE, NOT THIS CONSTANT.
+# The static rail in `tests/test_relationships_bounded.py` scans the AST and
+# flattens an `ast.Name` to a runtime fragment, so it cannot resolve this
+# constant's value — a site that writes `+ _EP_ANCHOR_BARRIER +` reads as
+# UNBARRED to the rail and reds it, while the barrier is genuinely present at
+# runtime. Measured both ways: a literal `"WITH * "` at the offending position
+# is accepted, and a module constant whose value is a perfectly valid barrier is
+# still reported. So a hop that the rail flags spells `"WITH * "` out inline;
+# the value is deliberately the SAME as this constant, because `WITH *` (not
+# `WITH <var>`) is the measured fix for the engine predicate drop — `WITH <var>`
+# drops variables bound before the predicate and fails with `'a' not defined`
+# (measured on 4.20.4 and 6.0.1, see `cypher_guard._predicate_drop_barrier`).
 _EP_ANCHOR_BARRIER = "WITH * "
 
 
@@ -1265,7 +1278,9 @@ class TortoiseEP:
                 conds.append(live_a)
             rows = self._hop_query(
                 f"MATCH (a:{_label}) WHERE a.id IN $ids "
-                + _EP_ANCHOR_BARRIER +
+                # Spelled out, not `+ _EP_ANCHOR_BARRIER +`: the rail cannot
+                # resolve the constant (see the comment above it) — #6976.
+                "WITH * "
                 "MATCH (a)-[r:IMPL|NAND]-(b) "
                 "WHERE " + " AND ".join(conds) + " "
                 # #3139/#3154: index-independent non-operator predicate
@@ -1351,7 +1366,9 @@ class TortoiseEP:
                     # 1.28 M records (see _EP_ANCHOR_BARRIER).
                     for _qn in epistemic_label_queries(
                         "MATCH (n:{label}) WHERE n.id IN $ids "
-                        + _EP_ANCHOR_BARRIER +
+                        # Literal, not the constant: the rail cannot resolve a
+                        # module-level Name (#6976).
+                        "WITH * "
                         "MATCH (n)<-[r:IMPL|NAND]-(op:Point)"
                         "-[r2:IMPL|NAND]->(m) "
                         "WHERE m.id <> n.id "
@@ -1397,7 +1414,9 @@ class TortoiseEP:
                     # bridge hop's reddens it.
                     for _qa in epistemic_label_queries(
                         "MATCH (a:{label}) WHERE a.id IN $ids "
-                        + _EP_ANCHOR_BARRIER +
+                        # Literal, not the constant: the rail cannot resolve a
+                        # module-level Name (#6976).
+                        "WITH * "
                         "MATCH (a)-[r:IMPL|NAND]-(b) "
                         "WHERE " + " AND ".join(conds) + " "
                         # #3139/#3154: index-independent non-operator form.
@@ -1548,7 +1567,9 @@ class TortoiseEP:
         # known, else sweeps the four labels.
         template = (
             "MATCH (n:{label}) WHERE n.id IN $ids "
-            + _EP_ANCHOR_BARRIER +
+            # Literal, not the constant: the rail cannot resolve a
+            # module-level Name (#6976).
+            "WITH * "
             "MATCH (n)<-[r:IMPL|NAND]-(op:Point)"
             "-[r2:IMPL|NAND]->(m) "
             "WHERE m.id <> n.id "
@@ -1627,7 +1648,9 @@ class TortoiseEP:
         # filters every edge (see _EP_ANCHOR_BARRIER).
         for _q in epistemic_label_queries(
             "MATCH (c:{label}) WHERE c.id IN $ids "
-            + _EP_ANCHOR_BARRIER +
+            # Literal, not the constant: the rail cannot resolve a
+            # module-level Name (#6976).
+            "WITH * "
             "MATCH (o:Point)-[r:IMPL|NAND]->(c) "
             f"WHERE {where_b1} "
             "RETURN DISTINCT o.id, o.op_type, o.label, o.direction"

@@ -721,6 +721,23 @@ class TestMintedKeyRoundTrip:
 
 # ── #1855: per-team mint lock — registry lane ───────────────────────────────
 
+#: Bounded attempts for the mint-lock observation below. The mint runs on a
+#: WORKER THREAD because that is the property under test (the lock must BLOCK
+#: it), and that same thread boundary is a known hazard: an auth-path registry
+#: read issued from a thread other than the one that built the keepalive anchor
+#: can come back EMPTY (`_membership_role`'s own note — the "inline form passes
+#: 4/4" one — records the measured `test_invites_http.py` instance of it), which
+#: makes `_require_owner_admin` answer the POLICY-A 403 BEFORE the lock is ever
+#: reached. A 403 therefore says NOTHING about the wrapping: it is INCONCLUSIVE
+#: for this property, and reading it as "the mint proceeded" is how the required
+#: `test (a)` shard reddened on a healthy tree (2026-10-20, `{'err':
+#: HTTPException(status_code=403, detail='Requires owner or admin role in
+#: team')}`). A refused attempt mints NOTHING, so retrying cannot disturb
+#: `_count_active_keys`; and the loop still fails LOUDLY when every attempt is
+#: inconclusive, naming the cause instead of mislabelling the outcome.
+_MINT_LOCK_ATTEMPTS = 5
+
+
 class TestSessionKeyMintConcurrency:
     """#1855 — the REGISTRY (selfhost) mint holds the same per-team lock as
     the Supabase lane (_org_mint_lock in hosted_api). The embedded store is
@@ -753,39 +770,61 @@ class TestSessionKeyMintConcurrency:
         monkeypatch.setattr(ha, "_abuse_evaluate_keys", _noop)
 
         lock = _org_mint_lock(tid)
-        lock.acquire()
-        done = threading.Event()
-        outcome = {}
 
-        def _mint():
+        inconclusive: list[dict] = []
+        for attempt in range(1, _MINT_LOCK_ATTEMPTS + 1):
+            done = threading.Event()
+            outcome: dict = {}
+
+            def _mint(done=done, outcome=outcome):  # bind per attempt (B023)
+                try:
+                    asyncio.run(ha.session_key({"purpose": "recovery"}, None,
+                                               {"user_id": _U1}))
+                    outcome["ok"] = True
+                except Exception as e:
+                    outcome["err"] = repr(e)
+                done.set()
+
+            blocked = False
+            lock.acquire()
+            # ⛔ The `try` opens IMMEDIATELY after the acquire — before
+            # `threading.Thread(...)`/`t.start()`, which can raise
+            # `RuntimeError: can't start new thread` on a loaded box. This is a
+            # PROCESS-GLOBAL lock (`_ORG_MINT_LOCKS`), so ANY failure between
+            # acquire and release leaves it held for the rest of the pytest
+            # process and every later mint for this team blocks forever.
+            # Measured 2026-10-19 (main run 39264762684 `test (a)`, plus
+            # 39235544056/39254836130/39255746368 on `test (c)`): exactly that
+            # deadlock was the whole 20m watchdog — a 23.5m job that owned
+            # `ci_crit_med` on main. A failing assertion must not be able to
+            # take the shard with it.
             try:
-                asyncio.run(ha.session_key({"purpose": "recovery"}, None,
-                                           {"user_id": _U1}))
-                outcome["ok"] = True
-            except Exception as e:
-                outcome["err"] = repr(e)
-            done.set()
-
-        t = threading.Thread(target=_mint, daemon=True)
-        # ⛔ The `try` opens IMMEDIATELY after the acquire — before
-        # `threading.Thread(...)`/`t.start()`, which can raise
-        # `RuntimeError: can't start new thread` on a loaded box. This is a
-        # PROCESS-GLOBAL lock (`_ORG_MINT_LOCKS`), so ANY failure between acquire
-        # and release leaves it held for the rest of the pytest process and every
-        # later mint for this team blocks forever. Measured 2026-10-19 (main run
-        # 39264762684 `test (a)`, plus 39235544056/39254836130/39255746368 on
-        # `test (c)`): exactly that deadlock was the whole 20m watchdog — a 23.5m
-        # job that owned `ci_crit_med` on main. A failing assertion must not be
-        # able to take the shard with it.
-        try:
-            t.start()
-            assert not done.wait(timeout=0.75), \
-                f"registry mint proceeded while the team lock was held (wrapping missing?): {outcome}"
-        finally:
-            lock.release()
-        assert done.wait(timeout=10), "registry mint blocked forever after release"
-        assert outcome.get("ok") is True, f"registry mint failed: {outcome}"
-        assert _count_active_keys(reg, tid) == 1
+                t = threading.Thread(target=_mint, daemon=True)
+                t.start()
+                blocked = not done.wait(timeout=0.75)
+            finally:
+                lock.release()
+            if not blocked:
+                # Finished BEFORE the release, so it was never held up by the
+                # lock. That is a failure ONLY if the mint actually completed —
+                # a POLICY-A refusal proves nothing about the wrapping (see
+                # `_MINT_LOCK_ATTEMPTS`) and is retried instead of misreported.
+                assert outcome.get("ok") is not True, (
+                    "the registry mint COMPLETED while the team lock was held — "
+                    f"the with-lock wrapping is missing (attempt {attempt}): "
+                    f"{outcome}")
+                inconclusive.append(outcome)
+                continue
+            assert done.wait(timeout=10), "registry mint blocked forever after release"
+            assert outcome.get("ok") is True, f"registry mint failed: {outcome}"
+            assert _count_active_keys(reg, tid) == 1
+            return
+        pytest.fail(
+            "the registry mint never BLOCKED on the held team lock in "
+            f"{_MINT_LOCK_ATTEMPTS} attempts, and every attempt was refused "
+            "BEFORE the lock — an EMPTY auth-path registry read (the "
+            "thread-bound read in `_membership_role`), not a missing lock "
+            f"wrapping: {inconclusive}")
 
     def test_held_team_lock_refuses_the_mint_instead_of_hanging(self, client,
                                                                 reg,

@@ -161,15 +161,18 @@ class TestArithmetic:
 
     def test_a_null_node_cap_raises_instead_of_reading_as_zero(self,
                                                               synthetic_book):
-        """`tier_limits` documents None as unlimited for the OBJECT-COUNT keys,
-        but a null node cap is UNRANKABLE (billing.py's own rule: never
-        unlimited). Coercing it to 0 would report the maximum possible
-        shortfall as a fabricated finding — and the capture gate would
-        TypeError on the comparison anyway."""
+        """`tier_limits` documents None as unlimited for the OBJECT-COUNT keys
+        — and since #8946 a null NODE cap is unlimited too (it ranks above
+        every finite cap in ``billing._tier_cap``), so what fails here is the
+        ARITHMETIC, not the rank: there is no number to divide the allowance
+        by. Coercing it to 0 would report the maximum possible shortfall as a
+        fabricated finding — and the capture gate would TypeError on the
+        comparison anyway."""
         tier = _tier(allowance=10_000, cap=0)
         tier["max_graph_nodes"] = None
         synthetic_book({"t": tier})
-        with pytest.raises(ValueError, match="max_graph_nodes is null"):
+        with pytest.raises(ValueError,
+                           match="max_graph_nodes is null = unlimited"):
             pricing.allowance_reachability("t", 48.0)
 
 

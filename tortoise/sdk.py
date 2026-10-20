@@ -3045,10 +3045,39 @@ def _deleted_point_payload(id: str) -> dict:
 # rather than writes, so a count from it would be a guess). Plan §7 increment 4
 # tracks the conversion; naming the four is not fixing them.
 #
-# `delete_point` WAS in that list and no longer is (#7951 increment 4a): its
-# `EntityMutated` op=delete record is appended BEFORE the `DETACH DELETE` and
-# its append is the COMMIT POINT, because on a delete the apply-first window is
-# not "the write is lost" but "the deletion is UNDONE by the next replay".
+# `delete_point` is apply-first BY SHAPE since #9207 (the `DETACH DELETE` is
+# issued first and the `EntityMutated` op=delete record follows it, once it has
+# returned) — but it is NOT one of the doors this inventory is about, and the
+# difference is the point of the list. Those doors write the cache ahead of the
+# journal and leave the divergence SILENT. This door writes the cache first
+# precisely so a cache write that cannot be issued (a refusal, an engine error)
+# appends NOTHING — the record can never claim a destruction the cache still
+# serves, which is the divergence #7951's append-first ordering produced on a
+# delete whose cache write did not land (#9207 measured the shape; the trigger is
+# RARE TODAY because §17.1's third door — this same raw handle — is DETECTED but
+# not yet REFUSING: `_HANDLE_GUARD_ENFORCES` is False in #9124 part 1). The
+# window it has instead — a
+# destroy that LANDED whose append then failed — is reported WHENEVER CODE RUNS
+# (`WriteNotLandedError`, `record_committed=False`), and it resolves only through
+# a destructive `rebuild_all` (which re-creates the Point), after which the
+# delete is re-issued. ⚠️ The one window this order CANNOT report is a PROCESS
+# DEATH between the destroy returning and the append (`kill -9`, OOM, power
+# loss): no code runs, nothing raises, and the journal keeps only the
+# `PointAdded` line, so the next `rebuild_all` RE-CREATES the Point. That is the
+# trade #9207 makes — it gives up an unreportable-by-construction crash window to
+# close a window that was reportable only AFTER the damage (a record for a
+# destroy the cache never performed). Removing it entirely is §17.1's atomic
+# write (increment 2b). #7951 increment 4a had this door the other way round.
+#
+# ⚠️ §17.1 DECLARATION STATE, since it is easy to read the above as "no lane is
+# owed here": this door USED to carry `@_declares_live_write_lane(
+# "delete_point")` (#9124 part 1). That declaration was journal-first-only —
+# `_declares_live_write_lane`'s docstring says so — and #9207's reversal makes it
+# false, so it is REMOVED rather than qualified and `delete_point` is inventoried
+# in `tests/test_9124_declared_live_doors.py` (`_APPLY_FIRST_DOORS`, by decision).
+# Until an "apply-first, by decision" lane exists (#9124/#9206), this door's
+# handle writes are MEASURED as undeclared, and an ARMED handle (part 2) refuses
+# them. Neither is silent: the measure is on the census, the refusal raises.
 # ═══════════════════════════════════════════════════════════════════════════
 
 # #7951: the envelope keys ``_emit_event`` OWNS. A record that is journalled
@@ -11298,10 +11327,12 @@ class TortoiseSDK:
           - Entity → delete_entity
         Returns True if a node was found and deleted, False otherwise.
 
-        Can raise instead of returning: the Point branch inherits
-        `delete_point`'s §17.1 refusal, `WriteNotLandedError`
-        (``operation="delete_point"``), when the outbox will not commit the
-        destruction. The entity branch is unchanged.
+        Can raise instead of returning: the Point branch inherits both of
+        `delete_point`'s refusals — `WriteNotLandedError`
+        (``operation="delete_point"``) when the destruction record does not
+        confirm after a landed destroy (``destroy_verified=True``), and the same
+        class with ``destroy_verified=False`` when NEITHER store's state is known.
+        The entity branch is unchanged.
 
         #3300: for the Point branch the `PointRetracted` row is the
         :GraphEvent SUBSCRIBER signal only — rebuild parity comes from the
@@ -12079,34 +12110,74 @@ class TortoiseSDK:
         # payload is the same dict either way — one record shape per call.
         return result
 
-    @_declares_live_write_lane("delete_point")
+    # §17.1 LANE (#9124): NONE, and that is the honest state — #9207 reversed
+    # this door to the APPLY-FIRST shape, so the live-lane declaration it used
+    # to carry here would now be FALSE.
+    #
+    # `@_declares_live_write_lane("delete_point")` (landed by #9124 part 1 /
+    # #9224) asserts "the record is appended, THEN the cache is written". That
+    # was true of #7951 increment 4a — and #9207 reverses the order on measured
+    # evidence (see the block below), which makes the same decorator authorize
+    # a `DETACH DELETE` issued BEFORE any record exists: the #9068 defect
+    # `_declares_live_write_lane`'s own docstring says a declaration must never
+    # bless. It is not a matter of opinion — `tests/test_9124_declared_live_
+    # doors.py::test_every_live_declared_door_is_journal_first` re-derives the
+    # order from this source, and it names `delete_point` as an offender when
+    # the decorator is present. That is why it is gone rather than kept with a
+    # caveat.
+    #
+    # So this door is INVENTORIED, not declared: `_APPLY_FIRST_DOORS` in
+    # `tests/test_9124_declared_live_doors.py` carries it with this reason.
+    # ⚠️ Consequences, stated rather than implied: (a) its handle writes are
+    # MEASURED as undeclared (one WARNING per distinct statement, #9124 part 1
+    # measure mode) instead of being covered by the door's own lane, and (b)
+    # with `_HANDLE_GUARD_ENFORCES` armed (part 2) this door is REFUSED at the
+    # `DETACH DELETE`. Honouring an apply-first door under an armed handle needs
+    # a lane that says "apply-first, by decision" — a §17.1 decision that lives
+    # with #9124/#9206, not a decorator this file may quietly re-purpose. Pinned
+    # executably by `tests/test_9079_handle_write_authority.py::test_an_apply_
+    # first_door_is_refused_by_the_armed_guard`.
     def delete_point(self, id: str) -> bool:
         """Delete a Point and its relationships. Returns True if found.
 
         Implementation behind delete(id) — the consolidated Point/entity
         delete (epic #888 W2).
 
-        §17.1 LANE (#9124): JOURNAL-FIRST, declared. The `EntityMutated
-        op=delete` record is appended BEFORE the `DETACH DELETE` (the outbox
-        ordering below), and every mutating statement in this method follows
-        that append — so the whole method is the live lane's write region and
-        carries `@_declares_live_write_lane`. That ordering is not merely
-        stated here: `tests/test_9124_declared_live_doors.py` re-derives it from
-        the source for every declared door, so a write added above the append
-        reddens there rather than silently widening the lane.
+        §17.1 LANE (#9124): NOT DECLARED — this door is APPLY-FIRST BY DECISION
+        (#9207), so a `@_declares_live_write_lane` here would be a false claim
+        (see the comment above the signature).
 
-        Raises ``WriteNotLandedError`` (``operation="delete_point"``) instead of
-        returning when the §17.1 outbox refuses the destruction: either the
-        `EntityMutated` op=delete record could not be CONFIRMED (the `DETACH
-        DELETE` was then NOT issued — the record may still have landed, since a
-        journal append can write and then raise (a partial `write(2)` stopped by
-        ENOSPC/EIO, or a write whose close failed; #5612 removed the buffered
-        flush), so the refusal reports the record as unconfirmed, never as
-        absent), or the record WAS committed and
-        the cache delete failed (``record_committed=True`` — treat the delete as
-        COMMITTED and do not re-issue it blindly, a replay heals the cache). A
-        no-op id still returns ``False``; ``True`` still means the node was
-        destroyed.
+        THE CACHE WRITE IS THE COMMIT POINT (#9207). The `DETACH DELETE` is
+        issued FIRST, and the `EntityMutated` op=delete record is appended only
+        once it has RETURNED — so the journal cannot claim a destruction it is
+        still serving the node through. That is the state #7951's append-first
+        ordering left behind (measured with §17.1's write door armed, #9124) and
+        the only one in which the record EXCEEDS the cache; repairing it needs a
+        destructive `rebuild_all`, which every caller reads as "the delete
+        happened" while `get_point` disagrees.
+
+        Raises ``WriteNotLandedError`` (``operation="delete_point"``) in TWO
+        windows, and they are distinguishable on the exception:
+
+        * the destroy LANDED and the `EntityMutated` op=delete record did not
+          confirm — ``destroy_verified=True``, ``record_committed=False``. The
+          refusal says so
+        (the record is UNCONFIRMED, never known-absent — a journal append can
+        write and then raise: a partial `write(2)` stopped by ENOSPC/EIO, or a
+        write whose close failed, #5612 having removed the buffered flush). In
+        that state the TRUTH still holds the Point while the cache does not, and
+        nothing repairs it by itself: `recover_from_log` rebuilds only an EMPTY
+        graph, and `rebuild_all` is destructive — it RE-CREATES the Point from
+        the journal (undoing the delete), after which the delete must be
+        re-issued.
+        * NEITHER store's state is known — ``destroy_verified=False``: the
+          `DETACH DELETE` raised and the cache could not be read back (or its
+          graph key was gone, so the read would have re-created it). No record is
+          written and the refusal claims NOTHING about either store; the caller
+          must establish the cache state with `get_point` before acting.
+
+        A no-op id still returns ``False``; ``True`` still means the node was
+        destroyed (or was already absent when the statement ran).
         """
         proj = self._get_proj()
         exists = proj.g.query(
@@ -12144,38 +12215,65 @@ class TortoiseSDK:
         # `(n)<-[:IMPL|NAND]-(op)-[:IMPL|NAND]->(m)` from them, so
         # `_affected_factors` still re-derives the operator's factor.
         neighbor_ids = [cid for cid in neighbor_claims if cid != id]
-        # ── #7951 §17.1 — THE OUTBOX ORDERING ON THE DELETE DOOR ──────────
-        # THE APPEND IS THE COMMIT POINT, and on a DELETE the ordering matters
-        # MORE than on a create. The `EntityMutated` op=delete record is the
-        # ONLY durable carrier of this destruction (`PointRetracted` is a
-        # `:GraphEvent`-only subscriber row, see #3300 below), so a delete that
-        # reached the cache without it is the one wound a replay cannot merely
-        # lose — it UNDOES: `rebuild_all` re-folds the creation record and the
-        # deleted Point comes back as live. Deleting first left that window
-        # open on every hard delete, because `_emit_event` is best-effort
-        # (#4240) and never raises.
+        # ── #9207 — THE CACHE WRITE IS THE COMMIT POINT ON THIS DOOR ──────
+        # #9207 REVISES #7951's ordering here, deliberately and with the
+        # measurement in hand (the OVERRIDES line is recorded on the issue).
         #
-        # So the record is appended BEFORE the `DETACH DELETE`, and a failed
-        # append means the delete is NOT issued: the caller is told rather than
-        # handed a silent success over a destroyed node whose destruction the
-        # record never saw (the same contract `create_point` / `update_point`
-        # took in increments 1 and 2a). The residual window is the
-        # replay-healable one — a crash between the append and the delete
-        # leaves the cache holding a node the TRUTH says is gone, and the next
-        # replay removes it.
+        # #7951 put the `EntityMutated` op=delete APPEND first, so a cache
+        # write that cannot be guaranteed could never destroy a node the
+        # journal had not recorded. That closed the "`rebuild_all` resurrects
+        # it" window — and opened the mirror one: if the `DETACH DELETE` does
+        # NOT land, `delete_point` raised with a destruction record already
+        # committed, so `get_point` still served the Point while the truth
+        # claimed it was gone. A retry cannot be re-issued out of that state —
+        # over a still-present node it appends a SECOND destruction record for
+        # one intent — and only a DESTRUCTIVE `rebuild_all` resolves it.
+        #
+        # ⛔ What that window is NOT is a systematic pre-write refusal, and the
+        # reason is the GUARD'S ARMING STATE, not a gap in its coverage. §17.1's
+        # write surface has three doors (#9124 part 1): the fold
+        # (`FalkorProjection.apply`), the public raw-query lane
+        # (`FalkorProjection.query`) and THIS one — the projection's write
+        # handle (`proj.g`), through which `DETACH DELETE` is issued. The handle
+        # is DETECTED on the same terms as the other two (shared
+        # `_statement_writes` classifier): a mutating statement with no declared
+        # lane is counted and logged. What is not yet live is its REFUSAL —
+        # `_HANDLE_GUARD_ENFORCES` is `False` in the landed state (#9124 part 1,
+        # owner decision option B), so nothing refuses this statement today.
+        # This lane's own probe measured exactly that — `journal_backed (guard
+        # armed): True`, then `RAW HANDLE LANE (proj.g.query): SUCCEEDED`
+        # (docs/evidence/7951-delete-point-outbox/probes/delete_order_probe.py,
+        # delete-order-probe.log). So the reachable trigger TODAY is a generic
+        # engine/transport failure with the node still present: RARE. ⚠️ Once
+        # part 2 arms the handle, the shape changes and this door is REFUSED —
+        # it is apply-first, so it cannot honestly declare a journal-first lane
+        # (see the comment above the signature and `_APPLY_FIRST_DOORS`). The
+        # ordering below is justified by the DIRECTION of the divergence it
+        # leaves, not by its frequency — and the refusal test injects the
+        # failure rather than claiming the door produces it.
+        #
+        # So the destroy is issued FIRST and the record is written only once it
+        # has RETURNED. A cache write that raises appends NOTHING, so #9207's
+        # invariant holds by construction: the journal cannot record a
+        # destruction that the cache still holds the node through.
+        #
+        # What that trades for it, stated so it is not discovered later: if the
+        # append fails AFTER a landed destroy, the cache is destroyed and the
+        # record is not — the mirror window, where the cache LEADS the truth.
+        # Whenever code runs it is reported, never silent (the refusal below),
+        # and it heals in the TRUTH's direction: the truth still holds the
+        # Point, so a replay RESTORES it and the caller re-issues the delete.
+        # ⚠️ The window that is NOT reportable is a PROCESS DEATH between the
+        # statement returning and the append (`kill -9`, OOM, power loss): no
+        # code runs, so nothing raises and nothing is logged, and the next
+        # `rebuild_all` re-creates the Point from the `PointAdded` line. Stated
+        # rather than implied — it is the crash window this order accepts in
+        # exchange for closing one that was systematic. #7951's window could
+        # not be re-issued out of at all — a retry over a still-present node
+        # appends a SECOND destruction record for one intent.
         #
         # The existence probe above still runs FIRST, so a delete of a
         # non-existent id journals nothing and returns False (unchanged).
-        _delete_committed = self._journal_entity_mutation("Point", id, "delete")
-        if _delete_committed is False:
-            from .exceptions import WriteNotLandedError
-            raise WriteNotLandedError(
-                id, getattr(proj, "graph_name", None),
-                "the journal append did not confirm, so the DETACH DELETE "
-                "was NOT issued; if the record did land, a replay will "
-                "remove the Point",
-                operation="delete_point",
-                record="EntityMutated op=delete")
         # #7405: the hard delete rides the bounded write retry. A DETACH DELETE
         # by an explicit id is idempotent — a re-issue after a non-landing ABORT
         # re-deletes a node that is (at worst) already gone, a no-op. The abort
@@ -12183,16 +12281,16 @@ class TortoiseSDK:
         # `retryable_aborted_write` admits (a bare DELETE never rides
         # `retryable_transient`).
         #
-        # #7951 review P1 — THE COMMITTED ARM IS CALLER-FACING, not just the
-        # crash window the comment above describes. The record is already on
-        # disk when this statement runs, so a write that fails here (retry
-        # exhausted, or any engine error) leaves the TRUTH saying destroyed
-        # while the cache still serves the Point and the caller is told the
-        # delete did not happen. That is `WriteNotLandedError`'s
-        # ``record_committed=True`` arm, and it exists precisely so a caller
-        # does not re-issue blindly (a blind retry appends a SECOND delete
-        # record for one intent). Re-raise the engine error only when no record
-        # was committed.
+        # #7951 review P1, PRESERVED IN THE NEW ORDER (#9207): a failure here
+        # is CALLER-FACING, not just a crash window. Nothing has been recorded
+        # yet, so the honest report is the engine's own error. But a raise does
+        # NOT prove "nothing was destroyed": `_graph_write_with_retry` retries
+        # only the aborted-write family, and `retryable_transient` deliberately
+        # excludes the transport family (a timeout / dropped connection) because
+        # there the server may have APPLIED the write and lost the reply. So the
+        # cache is READ BACK before this door decides what to tell the caller —
+        # otherwise a lost reply would destroy the Point with no record and no
+        # report, which is the one direction this door must never produce.
         #
         # ⚠️ SCOPE: this wraps the `DETACH DELETE` ONLY, and that is the one
         # statement whose failure would misreport a LANDED destruction. The
@@ -12208,7 +12306,18 @@ class TortoiseSDK:
         #     failure there is a stale-confidence report, not a state lie.
         # Widening this wrap would convert those into a "the delete did not
         # happen" claim that is FALSE after the DETACH DELETE landed — the
-        # class of wrong answer this whole increment exists to remove.
+        # class of wrong answer this door exists to remove.
+        #
+        # No `RETURN count(n)` here, deliberately: this statement's result is
+        # not used as a gate. A DETACH DELETE either removes every match or
+        # raises, so a normal return — any row count — means the cache no longer
+        # holds the Point: either this call removed it, or it was already absent
+        # (a peer deleted it, or a rebuild's replacement graph has not replayed
+        # it yet). Recording the destruction is TRUE of the cache in both cases,
+        # and gating on a non-zero count would LOSE a delete performed inside a
+        # rebuild window when the re-issue matches nothing (#7405's exemption,
+        # pinned in `tests/test_7405_remaining_writes.py`).
+        _reply_lost: BaseException | None = None
         try:
             self._graph_write_with_retry(
                 lambda: proj.g.query(
@@ -12216,16 +12325,58 @@ class TortoiseSDK:
                 what="delete_point DETACH DELETE",
             )
         except Exception as exc:
-            if _delete_committed:
+            # READ the cache back before deciding: the raise may be a lost reply
+            # over an APPLIED write (`_delete_landed_anyway` returns ``True``),
+            # in which case the destruction must be recorded exactly as on the
+            # happy path — the record follows the CACHE, so an applied destroy
+            # with no record is the silent unrecorded destroy this door exists
+            # to prevent. ``False`` is the clean refusal (#9207's indicator): a
+            # delete refused before it wrote leaves NO destruction record.
+            landed = self._delete_landed_anyway(proj, id, exc)
+            if landed is False:
+                raise
+            if landed is None:
+                # Cannot tell whether the destroy landed, so claim neither. No
+                # record is written: the journal must not describe a cache state
+                # nobody verified (that is the #9207 defect, mirrored).
                 from .exceptions import WriteNotLandedError
                 raise WriteNotLandedError(
                     id, getattr(proj, "graph_name", None),
-                    f"the cache delete failed AFTER the destruction record was "
-                    f"committed ({type(exc).__name__}: {exc})",
-                    operation="delete_point", record_committed=True,
+                    f"the DETACH DELETE raised ({type(exc).__name__}: {exc}) "
+                    "and the cache could not be re-read afterwards, so the "
+                    "destruction is UNVERIFIED and no record was written",
+                    operation="delete_point",
                     record="EntityMutated op=delete",
-                ) from exc
-            raise
+                    destroy_verified=False) from exc
+            _reply_lost = exc
+        if _reply_lost is not None:
+            _logger.warning(
+                "delete_point: the DETACH DELETE raised (%s: %s) and the cache "
+                "no longer holds the Point — either this statement applied and "
+                "the reply was lost, or the Point was already gone. The "
+                "destruction record is written from the cache's own state, "
+                "which is what this door can verify",
+                type(_reply_lost).__name__, _reply_lost)
+        # The destroy LANDED (or the Point was already absent). Only now may
+        # the journal say so.
+        if self._journal_entity_mutation("Point", id, "delete") is False:
+            # ⚠️ RESIDUAL, declared not absorbed: this raise exits BEFORE
+            # `_mark_dirty(neighbor_ids)` and `invalidate_messages()` below, so
+            # the 1-hop neighbours of a destroy that DID land keep their
+            # pre-delete stored confidences until something else dirties those
+            # roots. Bounded, not silent: the caller is told the destroy landed
+            # and that only a DESTRUCTIVE `rebuild_all` repairs the record, and
+            # that rebuild recomputes every root. Named in the plan's §6 so a
+            # later lane does not read this as full bookkeeping.
+            from .exceptions import WriteNotLandedError
+            raise WriteNotLandedError(
+                id, getattr(proj, "graph_name", None),
+                "the destroy landed in the cache, and the journal append for "
+                "its record then did not confirm; if that record did not land "
+                "the TRUTH still holds this Point",
+                operation="delete_point",
+                record="EntityMutated op=delete",
+                destroy_verified=True)
         # #3300 residual: ONE event type must not mean two end-states.
         # `delete_point` hard-deletes; `retract_point` tombstones. The single
         # `PointRetracted` (id=) call emitted BOTH stores, and its fold has
@@ -12244,15 +12395,19 @@ class TortoiseSDK:
         #   * JSONL ONLY (`EntityMutated` is not in _GRAPH_EVENT_TYPES) — the
         #     replay journal carries the honest hard-delete record, whose fold is
         #     `_delete_entity_by_id`. No `state`: the recorded shape carries
-        #     "nothing for a delete". (#7951: that record is appended ABOVE,
-        #     before the delete — it is the COMMIT POINT, not a post-hoc note.)
+        #     "nothing for a delete". (#9207: that record is appended ABOVE,
+        #     AFTER the `DETACH DELETE` proves it landed — it follows the write
+        #     it records, so it can never claim a destruction that did not
+        #     happen.)
         #
         # `PointRetracted` therefore stays AFTER the write it reports: it is the
         # `:GraphEvent` store's statement of what this call DID (hence the
         # unconditional `deleted: true` marker), so stating it before the
-        # `DETACH DELETE` would publish a destruction that may not happen. A
-        # failed append now raises above, so no subscriber row is published for
-        # a delete that was never issued.
+        # `DETACH DELETE` would publish a destruction that may not happen. An
+        # append that refuses (or that LANDS and then raises — the record is then
+        # UNCONFIRMED, never known-absent, #5612) leaves this line unreached, so
+        # no subscriber row is published for a destruction whose record this call
+        # cannot confirm.
         self._emit_event("PointRetracted", _deleted_point_payload(id))
         # Tag GC (#485): delete orphaned :Tag nodes (no incoming TAGGED edges).
         # Idempotent — DETACH DELETE leaves count-0 tags behind that would
@@ -12284,6 +12439,115 @@ class TortoiseSDK:
         """Delete a Point. Returns dict for MCP tool consumption."""
         found = self.delete_point(id)
         return {"deleted": found, "id": id}
+
+    def _delete_landed_anyway(self, proj, point_id: str,
+                              exc: BaseException | None = None) -> bool | None:
+        """Did a FAILED `delete_point` write land in the cache anyway? (#9207)
+
+        `_graph_write_with_retry` retries only the aborted-write family
+        (`retryable_aborted_write`); `retryable_transient` deliberately does NOT
+        admit a timeout or a dropped connection, because there the server may
+        have APPLIED the statement and lost only the reply (`tortoise/retry.py`).
+        So a raise out of the `DETACH DELETE` does not prove "nothing was
+        destroyed" — and on this door that difference decides whether a
+        destruction record must be written. One read settles it.
+
+        ``True`` — the Point is gone, so the write applied and the record must
+        follow it; ``False`` — nothing was destroyed and the refusal is clean,
+        which covers BOTH shapes callers must not conflate: the Point is still
+        there, or the graph KEY is ABSENT (the read was never issued, because
+        issuing it would re-create the key — the caller re-raises the engine's
+        own loud error, never a success); ``None`` — the read-back failed, or
+        answered nothing a verdict can be built from (an EMTPY result set, a cell
+        that is not a count), so the caller must not claim either state.
+
+        Reading through the guarded handle is deliberate and safe: §17.1's guard
+        at this handle (#9124 part 1) refuses a MUTATING statement only — it
+        returns early on `not _statement_writes(statement)` — so a READ here is
+        never refused in EITHER mode (measuring or armed) and cannot turn
+        "unknown" into a spurious verdict.
+
+        ⛔ The read is GATED ON GRAPH PRESENCE, and that gate is not a
+        refinement — it is the difference between a measurement and a silent
+        success. A Cypher read on a graph whose KEY is gone AUTO-CREATES an empty
+        graph on this engine (`tests/test_graph_write_repair.py` pins the same
+        fact; `tortoise/hosted_api.py` notes it for `select`), so after a
+        `graph was deleted or replaced while the query was running` abort the
+        read would answer `count(n) = 0` — "the Point is gone" — while its real
+        effect was to re-materialise the deleted key. The door would then write a
+        destruction record and return True over a graph that no longer exists.
+        So the read only runs on a CONFIRMED present key. An ABSENT key answers
+        ``False`` — the caller re-raises the engine's own error (the loud #7685
+        surface) rather than a success — and a probe that could not answer at all
+        answers ``None`` (unverified). Neither issues a read, so nothing is
+        re-created, and neither claims a destroy.
+
+        ⛔ The STATE-INDEPENDENT arm (write-slot / MISCONF) is answered WITHOUT
+        a probe and WITHOUT a read, because on that arm ``landed`` is ``False``
+        by construction: `tortoise/retry.py` records that the write-slot refusal
+        is raised from `execute_query_write` *before the slot is claimed* and
+        that ``MISCONF`` is a pre-execution command rejection — nothing was
+        applied. A read there can only ADD a wrong answer, never information: it
+        is the read that AUTO-CREATES an absent key, and `#7405`'s retry loop
+        re-issues this arm without consulting `graph_exists` (only the
+        graph-abort family is state-gated), so a rebuild that deletes the key
+        during the 2–8 s backoff is not excluded. Reading then would answer
+        `count(n)=0` and be taken as a landed destroy over a graph that no
+        longer exists — the same silent success the presence gate exists to
+        prevent. Skipping both also keeps `#7405`'s
+        `test_a_write_slot_exhaustion_pays_no_graph_presence_probe` free of the
+        ``EXISTS`` round trip.
+        """
+        from .retry import _ARM_STATE_INDEPENDENT, _abort_arm
+
+        # The state-independent arm is the ONE arm that needs neither half of
+        # the gate: `retry.py` records that its refusal is raised BEFORE the slot
+        # is claimed (write slot) or before execution (MISCONF), so nothing was
+        # applied and the answer is a clean ``False`` with no probe and no read.
+        # Probing here would spend #7405's ``EXISTS`` round trip for nothing, and
+        # READING here is worse than useless — that read AUTO-CREATES an absent
+        # key, and this arm is re-issued without any `graph_exists` check, so a
+        # rebuild that dropped the key during the backoff would make it answer
+        # `count(n)=0` and the door would record a destroy the engine refused.
+        if exc is not None and _abort_arm(exc) == _ARM_STATE_INDEPENDENT:
+            return False   # not landed by construction: no probe, no read, no record
+        # Every other family pays the presence probe. Keying it on the
+        # graph-abort family alone was too narrow: the read below is the read
+        # that AUTO-CREATES an absent key, and a non-family raise (a transport
+        # error, a non-retryable `ResponseError`) does not prove the key is still
+        # there — `retry.py` states that doctrine for the retry predicate itself
+        # ("a raise does not prove the statement did not land").
+        presence = self._graph_presence(proj)
+        if presence is False:
+            return False   # key ABSENT: the caller re-raises the loud #7685 error
+        if presence is None:
+            return None    # probe could not answer: claim nothing
+        # Confirmed present: the read-back is safe to issue.
+        try:
+            rows = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN count(n)",
+                params={"id": point_id},
+            ).result_set
+        except Exception:
+            return None
+        # ⛔ EMPTY `result_set` is NOT a verdict. An aggregate `RETURN count(n)`
+        # always yields one row on this engine, so this is a defensive branch —
+        # but if the read-back is ever restated (a `WHERE`, a `ro_query` path, a
+        # proxy or transport that hands back a truncated result set) then
+        # "no rows" means nothing was established about the cache. Reading it as
+        # `not 0` → ``True`` would assert the one thing this door must never
+        # assert without a read (`tortoise.sdk._sync_witness` takes the same
+        # empty-rows case the other way), and the caller would then append a
+        # destruction record for a Point no read showed absent. Claim nothing.
+        if not rows:
+            return None
+        try:
+            return int(rows[0][0]) == 0
+        except (TypeError, ValueError, IndexError):
+            # A cell that is not a count is not a verdict either, and this must
+            # not raise out of the helper: the caller is about to report the
+            # WRITE's error, which a `TypeError` from here would mask.
+            return None
 
     # ── Invalidate / Supersede (#6999 GAP-12) ────────────────────
 
@@ -12615,8 +12879,10 @@ class TortoiseSDK:
         about CONFIRMATION. The doors that gate on a per-call append outcome do
         so ARM BY ARM, not door by door: `create_point` and `update_point`'s
         NON-promote arm raise `WriteNotLandedError` on `_record_committed is
-        False`, and `delete_point` gates on `_delete_committed =
-        _journal_entity_mutation(...)`. `update_point`'s PROMOTE arm (its record
+        False`, and `delete_point` raises on an append that does not confirm —
+        AFTER a `DETACH DELETE` that already landed (#9207; the cache write is
+        that door's commit point, so its append can only report, never refuse).
+        `update_point`'s PROMOTE arm (its record
         is emitted after the write, return discarded), `invalidate_point` and
         `retract_point` discard the append's return exactly as this door does,
         so the same residual is carried by FOUR doors, not one. Closing it is
@@ -13350,7 +13616,9 @@ class TortoiseSDK:
         cache node and reports success — measured on this branch by forcing
         `_emit_event` to return False: the point came back `status='retracted'`.
         Only `create_point`, `update_point`'s non-promote arm and `delete_point`
-        gate on their append's return; `invalidate_point`, this door and
+        gate on their append's return — and on `delete_point` that gate can only
+        REPORT (the destroy already landed, #9207), not refuse the write;
+        `invalidate_point`, this door and
         `supersede_point` do not. That residual is part 2 of #9124 (it changes
         the failure contract).
 
@@ -30804,9 +31072,11 @@ class TortoiseSDK:
         log or no journal is configured. The per-call value — never a delta of
         the shared ``_journal_write_failures`` counter, which a CONCURRENT
         writer on the same instance can move (#5612) — is what a live door must
-        gate its cache write on: it is the §17.1 COMMIT SIGNAL. Its first
-        consumer is ``delete_point``, where a failed append must leave the node
-        standing instead of destroying a node the journal never recorded.
+        gate its CACHE WRITE on: it is the §17.1 COMMIT SIGNAL (`create_point`,
+        `update_point`: a failed append leaves the node untouched). Its FIRST
+        consumer was ``delete_point``; #9207 reversed that door's ordering, so
+        the delete gates its RECORD on the cache write instead and reads this
+        value to decide whether the destruction it just performed is recorded.
         """
         from tortoise.projection import _ENTITY_MUTATION_IMPLEMENTED_OPS
         if op not in _ENTITY_MUTATION_IMPLEMENTED_OPS:

@@ -159,6 +159,20 @@ _APPLY_FIRST_DOORS = {
     "compute_confidence",    # SET n.confidence per row, then ConfidenceChanged
     "create_direct_edge",    # MERGE/SET the edge, then DirectEdgeCreated
     "create_operator",       # CREATE the operator node, then OperatorAdded
+    # #9207: the `DETACH DELETE` is issued FIRST and the `EntityMutated`
+    # op=delete record follows a LANDED destroy, so this door carries no
+    # live lane — its #9124 part-1 `@_declares_live_write_lane("delete_point")`
+    # was journal-first-only and was WITHDRAWN when the order reversed (the
+    # ordering pin below re-derives that from the source). ⚠️ Unlike the rows
+    # above, the order here is a DECISION, not a remainder waiting to be
+    # converted: #9207 chose cache-first on measured direction (append-first
+    # commits a destruction the cache never performed). Honouring it under an
+    # ARMED handle needs an "apply-first, by decision" lane — a §17.1 decision
+    # (#9124 / #9206), not a re-purposed decorator. Until then its writes are
+    # MEASURED as undeclared, and an armed guard REFUSES them
+    # (`test_9079_handle_write_authority.py::
+    # test_an_apply_first_door_is_refused_by_the_armed_guard`).
+    "delete_point",
     "mitigate_operator",     # CREATE the mitigation, then its records
     "promote_point",         # CAS SET status='live', then PointPromoted
     "record_calibration",    # write the calibration row, then its record
@@ -245,6 +259,17 @@ _UNRESOLVED = {
     # `{_capture_passthrough_read_fields()}`, …) — the #9124 review's P1 shape,
     # which a placeholder substitution used to flatten into a false READ.
     "_count_ep_factors",
+    # #9063: both calibration readers build their Cypher the same way — the
+    # `WHERE` fragment is bound to a LOCAL (`where = f"WHERE {not_operator} …"`)
+    # and interpolated as `proj.g.query(f"MATCH (n:Point) {where} … RETURN …")`,
+    # which the resolver cannot unfold. Checked by hand: the resolvable part of
+    # both statements is a `MATCH … RETURN` read with no write keyword (they
+    # list uncalibrated points; neither writes the cache and neither appends a
+    # record). Listed here rather than silently called a read, per this set's
+    # own rule. (These two rows are why the census reddened on `origin/main`
+    # at e08a669b2 — the entries, not the statements, were missing.)
+    "calibrate_summary",
+    "_uncalibrated_ep_participants",
     "_cross_lens_pool",
     "_entity_name_holders",
     "_epistemic_label",
@@ -270,6 +295,18 @@ _UNRESOLVED = {
     "suggest_entry_points",
     "tortoise_fts_query",
     "traverse",
+    # #9261 (`c172b042f`, the #9063 calibration-gate fix): BOTH of these build
+    # their statement from a COMPUTED local — `where` is an f-string fragment
+    # assembled from `_ID_RESOLVABLE_TYPES` / `_ID_WHITESPACE_SET` and loop
+    # variables (`{label}`), so the enumerator sees `'<unresolved>'` where the
+    # query text is. Hand-checked (2026-10-20): the ONLY handle reach in each is
+    # a `MATCH … OPTIONAL MATCH … RETURN` read — no SET/CREATE/MERGE/DELETE, and
+    # `calibrate_summary` writes nothing itself (its advice only NAMES
+    # `set_point_baseline`). Listed here — not silently called a read — because
+    # that is the census being honest about what it can prove; the gate must go
+    # on demanding a lane for anything it CAN see mutating.
+    "calibrate_summary",
+    "_uncalibrated_ep_participants",
 }
 
 _INVENTORY = {
@@ -958,24 +995,30 @@ def test_every_live_declared_door_is_journal_first():
     assert not offenders, (
         "a live-lane declaration covers a write that precedes its record:\n  "
         + "\n  ".join(offenders))
-    assert {"delete_point", "invalidate_point", "retract_point",
+    assert {"invalidate_point", "retract_point",
             "supersede_point"} <= {_bare_name(n) for n in checked}, (
-        "the four journal-first doors #9124 part 1 declared are not all being "
+        "the journal-first doors #9124 part 1 declared are not all being "
         f"checked ({sorted(checked)}) — the ordering pin would be vacuous for "
-        "them")
+        "them. `delete_point` is deliberately NOT in this set: #9207 reversed "
+        "its order, so it is inventoried as apply-first and carrying a live "
+        "lane on it is the defect this pin exists to catch")
 
 
 #: The inventoried NO-JOURNAL / apply-first helpers each whole-door live lane
 #: reaches TRANSITIVELY (#9124 review, round 3 P2). `@_declares_live_write_lane`
 #: covers the whole body, so a helper's write runs inside the caller's lane —
 #: `_mark_dirty` is inventoried as `no-journal` (it appends nothing) yet its
-#: three `proj.g.query` writes are authorized whenever one of the four doors
+#: three `proj.g.query` writes are authorized whenever one of the three doors
 #: reaches it. The per-FUNCTION census cannot see the edge
 #: (`enumerate_handle_surface` attributes each write to the innermost function
 #: only), so the edge is pinned HERE: it can neither grow nor vanish silently.
-#: Measured on this tree: all four doors reach exactly this one helper.
+#: Measured on this tree: all three doors reach exactly this one helper.
+#: ⚠️ `delete_point` was a FOURTH until #9207 made it apply-first: it holds no
+#: lane now, so the same calls (`_mark_dirty`, and the `DETACH DELETE` itself)
+#: are no longer blessed by a declaration — they are measured as undeclared and
+#: would be refused by an armed handle. It is therefore absent from this pin on
+#: purpose: listing it would claim a coverage that no longer exists.
 _DECLARED_DOOR_NESTED_INVENTORIED = {
-    "delete_point": {"_mark_dirty"},
     "invalidate_point": {"_mark_dirty"},
     "retract_point": {"_mark_dirty"},
     "supersede_point": {"_mark_dirty"},

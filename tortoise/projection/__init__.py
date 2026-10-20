@@ -3626,7 +3626,7 @@ def _declares_live_write_lane(reason: str):
     """Declare a WHOLE entry point as a journal-first live lane (§17.1, #9124).
 
     The equivalent of opening ``with _live_write_scope(reason):`` around the
-    door's body, for the doors whose write region IS the body: `delete_point`,
+    door's whole body, for the doors whose write region IS the body:
     `invalidate_point`, `retract_point` and `supersede_point` each validate,
     append their record, and then write — hundreds of lines with `try/except`
     and retry blocks in between, so a hand-placed ``with`` would reindent the
@@ -3643,10 +3643,13 @@ def _declares_live_write_lane(reason: str):
     there instead of silently widening the lane.
 
     ⛔ IT ALSO AUTHORIZES EVERY NESTED CALL, which is a stated residual rather
-    than an oversight: `delete_point`, `invalidate_point`, `retract_point` and
+    than an oversight: `invalidate_point`, `retract_point` and
     `supersede_point` each call `_mark_dirty`, and `_mark_dirty` writes through
     the handle while appending no record — those writes are covered by the
-    door's lane, and a per-FUNCTION census cannot see the call edge. The
+    door's lane, and a per-FUNCTION census cannot see the call edge. (`delete_point`
+    was a fourth until #9207 made it apply-first; it holds no lane now, so its
+    `_mark_dirty` and `DETACH DELETE` are measured as undeclared instead of
+    being blessed.) The
     measured set is pinned in
     `tests/test_9124_declared_live_doors.py::test_a_whole_door_lane_authorizes_only_the_pinned_nested_writes`,
     so it can only change with a reviewed line there. That pin records the set;
@@ -4130,11 +4133,14 @@ class _GuardedGraph:
         `test_7951_update_point_outbox.py`, `test_7951_delete_point_outbox.py`,
         `test_5048_retract_instant_recorded.py` and
         `test_6239_promote_after_supersede.py`. The reason is a census, not a
-        hunch: the product's own write path is still largely undeclared — the 9
-        apply-first public doors, the 2 mixed-arm doors (`update_point`,
-        `capture_session`) and every writer that appends no record at all, all
-        inventoried in `tests/test_9124_declared_live_doors.py`, which also
-        REFUSES the flip while any module has an undeclared entry point. The
+        hunch: the product's own write path is still largely undeclared — the 10
+        apply-first public doors (`delete_point` joined them in #9207: the
+        `DETACH DELETE` is issued FIRST, so its #9124 live-lane declaration was
+        withdrawn — see `_APPLY_FIRST_DOORS`), the 2 mixed-arm doors
+        (`update_point`, `capture_session`) and every writer that appends no
+        record at all, all inventoried in
+        `tests/test_9124_declared_live_doors.py`, which also REFUSES the flip
+        while any module has an undeclared entry point. The
         detection itself is complete and identical in both modes; only the
         refusal is gated. Do not read this method's presence as "§17.1 is
         enforced at the handle".

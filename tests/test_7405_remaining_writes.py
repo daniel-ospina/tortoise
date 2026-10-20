@@ -897,19 +897,18 @@ def test_a_deterministic_error_on_delete_point_is_not_retried(tmp_path):
 #
 # OWNERSHIP — do not re-derive what a merged suite already guards:
 # `tests/test_7951_delete_point_outbox.py` OWNS the ordering, the refusal arm
-# and replay-healing for this door — T1
-# (`test_delete_point_appends_the_record_before_the_cache_delete`, the
-# record-precedes-the-cache ordering), T2
-# (`test_a_failed_append_does_not_delete_the_point`, the unconfirmed-append
-# refusal plus "the Point is still live"), T3
-# (`test_a_committed_delete_record_is_healed_by_replay`). The tests below do NOT
-# re-assert those invariants from scratch; they pin the one thing T1/T2/T3
-# cannot: that the ordering makes the statement EXEMPT from a row-count witness,
-# OBSERVED on disk at the abort and triangulated by stripping the record. The
-# only delta on the refusal arm (test 3 here) is the failure MECHANISM: T2
-# monkeypatches `log.append`, this one fails it for real at `EventLog.append`'s
-# own `mkdir`, so the whole `_emit_event` → `False` → door-refusal chain runs
-# end to end.
+# and the residual window this door still has — T1
+# (`test_the_cache_delete_lands_before_the_destruction_record`, the
+# cache-precedes-the-record ordering #9207 established), T2
+# (`test_a_failed_cache_write_appends_no_destruction_record`, no record for a
+# destroy the cache did not perform), T3
+# (`test_a_landed_destroy_whose_record_failed_is_reported`). The tests below do
+# NOT re-assert those invariants from scratch; they pin the one thing T1/T2/T3
+# cannot: that the statement is EXEMPT from a row-count witness, OBSERVED on
+# disk at the abort and triangulated by stripping the record. The only delta on
+# the refusal arm (test 3 here) is the failure MECHANISM: T3 stubs
+# `log.append`, this one fails it for real at `EventLog.append`'s own `mkdir`,
+# so the whole `_emit_event` → `False` → door-refusal chain runs end to end.
 #
 # The section above pins that the aborted `DETACH DELETE` is RE-ISSUED. It does
 # not ask what the re-issue DID, and #7405's own census disagreed with itself
@@ -921,20 +920,26 @@ def test_a_deterministic_error_on_delete_point_is_not_retried(tmp_path):
 #
 # WHY the statement is exempt there (measured — see the three tests):
 #
-#   1. The `EntityMutated` op=delete record is appended BEFORE the statement
-#      (the #7951 §17.1 outbox ordering) and it is the destruction's only
-#      durable carrier. A zero-row re-issue therefore cannot lose the deletion:
-#      the replay folds the record (`_delete_entity_by_id`) and the Point ends
-#      ABSENT whether or not the cache statement applied.
+#   1. The `EntityMutated` op=delete record is the destruction's only durable
+#      carrier, and since #9207 it is written once the statement has RETURNED —
+#      whatever its row count. A zero-row re-issue therefore still cannot lose
+#      the deletion: the replay folds the record (`_delete_entity_by_id`) and
+#      the Point ends ABSENT whether or not the cache statement matched.
 #   2. So `count(n) == 0` on a re-issue does NOT mean "the destruction did not
 #      land". During a rebuild it usually means "the replay already applied our
-#      record". A row-count witness would raise a failure for a deletion that HAS
-#      landed — a false NEGATIVE, the same shape the census cites for the
-#      `IS NULL`-guarded stamps — after spending the whole 7-14 s retry budget
-#      re-issuing a statement whose answer cannot change.
+#      record" (or the replacement graph has not re-created the node yet). A
+#      row-count witness would raise a failure for a deletion that HAS landed —
+#      a false NEGATIVE, the same shape the census cites for the `IS NULL`-guarded
+#      stamps — after spending the whole 7-14 s retry budget re-issuing a
+#      statement whose answer cannot change. #9207 relies on exactly this when it
+#      refuses to gate the record on the count: gating would LOSE this delete.
 #   3. The one case where the destruction really is lost — the record does not
-#      confirm — is refused BEFORE the `DETACH DELETE` is issued, loudly, by the
-#      door's own `WriteNotLandedError` arm (pinned here).
+#      confirm — is refused loudly by the door's own `WriteNotLandedError` arm
+#      (pinned here). Since #9207 that refusal FOLLOWS the landed destroy (the
+#      statement is issued first), so the door reads the cache back before it
+#      decides what the failure meant: a destroyed node whose record failed is
+#      reported as UNCONFIRMED, and a lost reply over an APPLIED write is
+#      recognised and recorded rather than silently dropped.
 #
 # ⚠️ SCOPE, and it is load-bearing: this exemption is about the DOOR's carrier,
 # not about the statement's row count. It holds exactly while the door can
@@ -989,9 +994,10 @@ class _AbortThenUnreplayDelete(_AbortOnceGraph):
     point of the fixture is that the caller's own statement is not what removed
     it.
 
-    ``records_at_abort`` snapshots the journal at the moment of the abort, which
-    is how the §17.1 ordering is OBSERVED rather than assumed: the destruction
-    record must already be there.
+    ``records_at_abort`` snapshots the journal at the moment of the abort.
+    #9207 reversed this door's ordering (the destroy is issued first and the
+    record follows it), so the snapshot is now the thing that must NOT contain
+    the record yet — the assert at the call site states it.
     """
 
     def __init__(self, real, needle: str, *, victim: str, log_dir=None) -> None:
@@ -1025,24 +1031,25 @@ def test_a_non_landed_detach_delete_converges_to_absence_on_replay(tmp_path):
     """EXEMPT, proven: a re-issue that matches nothing cannot lose the delete.
 
     The call runs inside a rebuild window: the Point exists when the door's
-    existence probe runs, the destruction record is appended, the engine aborts
-    the `DETACH DELETE` with the graph-replaced literal, and the re-issue matches
-    no rows because the fixture (standing in for the replacement graph's replay
-    not having re-created the Point) removed the node off-statement. The verb
-    answers ``True``, and the destruction is DURABLE: the committed record is
-    what destroys the Point, so the replay below folds it and the Point ends
-    absent.
+    existence probe runs, the engine aborts the `DETACH DELETE` with the
+    graph-replaced literal, and the re-issue matches no rows because the fixture
+    (standing in for the replacement graph's replay not having re-created the
+    Point) removed the node off-statement. The verb answers ``True``, and the
+    destruction is DURABLE: under #9207's ordering the record is written once
+    the statement has RETURNED (any row count — the cache no longer holds the
+    node either way), so the replay below folds it and the Point ends absent.
 
     ⚠️ Two things this test does NOT claim. (a) The cache may serve the Point
     until the NEXT replay: ``rebuild_all`` parses the journal before its wipe, so
     an in-flight rebuild that parsed before our append does not fold our record,
     while its own `PointAdded` fold re-creates the node — that is the §17.1
-    replay-healable window the door already documents (and reports loudly as
-    `WriteNotLandedError(record_committed=True)` when the retry exhausts).
-    (b) It says nothing about a journal-less door — see 6b-ter.
+    replay-healable window the door documents. (b) It says nothing about a
+    journal-less door — see 6b-ter.
 
     This is why the statement carries no `witness`: a row-count witness would
-    raise here, and here the destruction HAS landed.
+    raise here, and here the destroy HAS landed (or the node is already absent).
+    Which is also why #9207 does not gate the record on the row count — gating
+    would LOSE this delete, and recording it is true of the cache either way.
     """
     sdk, log_dir = _sdk_with_journal(tmp_path, "delexempt")
     try:
@@ -1064,14 +1071,18 @@ def test_a_non_landed_detach_delete_converges_to_absence_on_replay(tmp_path):
         assert proxy.applied == 1, (
             "the re-issue DID reach the real graph and matched no rows; it was "
             "not skipped")
-        # The §17.1 ordering, OBSERVED at the abort: the destruction record was
-        # already durable when the statement was refused. The exemption rests on
-        # exactly this, so it is asserted rather than described.
+        # #9207's ordering, OBSERVED at the abort: the journal must NOT yet
+        # carry the destruction. The record follows the statement, which is what
+        # makes it impossible for the journal to claim a destroy the cache still
+        # holds — and the durability asserted below now rests on the record
+        # being written after the (re-issued) statement returned.
         records = proxy.records_at_abort or []
-        assert any(r.get("type") == "EntityMutated" and r.get("op") == "delete"
-                   and r.get("id") == pid for r in records), (
-            "the op=delete record must be in the journal BEFORE the DELETE is "
-            "issued — that record, not the statement, is the destruction")
+        assert not [r for r in records
+                    if r.get("type") == "EntityMutated"
+                    and r.get("op") == "delete" and r.get("id") == pid], (
+            "the op=delete record was appended BEFORE the DELETE was issued — "
+            "the #9207 divergence (a record the cache can outlive): "
+            f"{records!r}")
 
         # THE PROOF: replay the journal. The PointAdded fold re-creates the
         # Point, and the op=delete fold then removes it — with a cache statement
@@ -1097,11 +1108,12 @@ def test_the_delete_exemption_rests_on_the_committed_record(tmp_path):
     ``test_a_non_landed_detach_delete_converges_to_absence_on_replay`` a
     measurement rather than a tautology.
 
-    ⚠️ Stripping a record is NOT a supported flow: the door refuses to issue the
-    `DETACH DELETE` when the append does not confirm (the third test), so the only
-    real producer of this journal is a tamper. The test exists to keep the first
-    test honest — if the append ever moves back under the statement, that test
-    fails, and this one explains why.
+    ⚠️ Stripping a record is NOT a supported flow: the door raises (and the
+    deletion is reported unconfirmed) when the append does not confirm (the third
+    test), so the only real producer of this journal is a tamper. The test exists
+    to keep the first test honest — if the record ever stops being what makes the
+    delete durable, the first test's replay assertion fails, and this one
+    explains why.
     """
     sdk, log_dir = _sdk_with_journal(tmp_path, "deltamper")
     try:
@@ -1134,16 +1146,17 @@ def test_the_delete_exemption_rests_on_the_committed_record(tmp_path):
             sdk.close()
 
 
-def test_a_delete_whose_record_cannot_be_committed_is_refused_before_the_detach_delete(
+def test_a_delete_whose_record_cannot_be_committed_is_refused_loudly(
         tmp_path):
-    """The genuine loss is LOUD — and it is refused before the statement.
+    """The one genuine loss is LOUD — and it now follows a landed destroy.
 
-    The one case in which the destruction really can be lost is the one the
-    exemption does NOT cover: no confirmed destruction record. The §17.1 ordering
-    then skips the `DETACH DELETE` entirely and the door raises
-    `WriteNotLandedError` (the unconfirmed arm). Pinned here because it is the
-    other half of the exemption argument: with the record the replay converges,
-    and without it this call never claims success.
+    The case the exemption does NOT cover: no confirmed destruction record. Under
+    #9207's ordering the `DETACH DELETE` is issued FIRST, so the door raises
+    `WriteNotLandedError` (the unconfirmed arm) AFTER the cache has dropped the
+    node — the mirror window, which heals in the truth's direction (the journal
+    never recorded the destruction, so a replay RESTORES the Point). What must
+    never happen is the silent version: a success returned over an unrecorded
+    destroy. Pinned here because it is the other half of the exemption argument.
 
     The append is made to FAIL FOR REAL — the journal's DIRECTORY is replaced by
     a regular file after the Point is created, so `EventLog.append` raises
@@ -1183,13 +1196,17 @@ def test_a_delete_whose_record_cannot_be_committed_is_refused_before_the_detach_
             "the append did not confirm, so this is the UNCONFIRMED arm — the "
             "committed arm would tell the caller the destruction is durable")
         assert err.operation == "delete_point"
-        assert proxy.matching == 0, (
-            "the DETACH DELETE must NOT be issued when the record did not "
-            "confirm — the ordering is the whole reason the delete is durable")
+        assert proxy.matching >= 1, (
+            "the DESTROY is issued before the append under #9207's ordering, so "
+            "the statement must have run — a skip would mean the record still "
+            "precedes it")
+        assert "did not confirm" in str(err), (
+            "the refusal must report the record as UNCONFIRMED, never as "
+            "absent — an append can land and then raise")
         assert proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN count(n)",
-            params={"id": pid}).result_set[0][0] == 1, (
-            "the Point must survive a refused delete")
+            params={"id": pid}).result_set[0][0] == 0, (
+            "the destroy landed before the append was attempted")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
