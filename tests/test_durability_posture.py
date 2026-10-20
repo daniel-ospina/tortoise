@@ -413,6 +413,30 @@ def test_wrapped_detector_sees_a_claim_split_across_lines(tmp_path):
     assert _claim_lines(target) == []
 
 
+def test_wrapped_detector_sees_the_durability_alternation(tmp_path):
+    """The `durable` half of the predicate must be in the JOINED scan too.
+
+    The `is truth` case above left the durability alternation unexercised: with
+    the `durable`/`durability` branch deleted from `WRAPPED_CLAIM_RE`, every test
+    stayed green — so "the same claim cannot come back in a different wording" was
+    an assertion about an untested half (#9134 review, P2).
+
+    Non-vacuity: drop the durability alternation from `WRAPPED_CLAIM_RE` and this
+    reds while the `is truth` test stays green.
+    """
+    target = tmp_path / "wrapped_durable.py"
+    target.write_text(
+        "x = 1\n"
+        "        the append is this seam's COMMIT POINT (the journal IS our\n"
+        "        durable record), so a refusal raised after it would leave one,\n",
+        encoding="utf-8",
+    )
+    hits = _wrapped_claim_lines(target)
+    assert [lineno for lineno, _ in hits] == [2], hits
+    # The line-at-a-time gate cannot see a claim that spans the newline.
+    assert _claim_lines(target) == []
+
+
 def test_no_wrapped_durability_claim_anywhere_in_the_scanned_roots():
     """A line break must not hide the PREDICATE claim from the gate.
 

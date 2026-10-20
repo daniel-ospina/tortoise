@@ -18,7 +18,7 @@ subjects.team: epistemic-team
 - head_sha: `8464f850f938ff048666a24ade2081e4518987b6`
 - created_at: `2026-10-19T02:41:31Z`
 - conclusion: `failure`
-- sample_time: `2026-10-20T14:39:07Z`
+- sample_time: `2026-10-20T18:40:00Z`
 - selection: latest completed `event=push&branch=main` run, `exclude_pull_requests=true`, cancelled skipped
 - schema_version: `1`
 
@@ -650,6 +650,8 @@ Second-granularity timestamps: sub-10s steps read 0s — do not alarm on those.
 
 - passed: **30697** · failed: **6** · error: **0** · skipped: **129** · xfailed: 7 · xpassed: 0
 - watchdog-killed mid-suite: no
+- summary-less legs — no pytest summary line: `pytest-log-test-d/pytest.log`
+  - their FAILURES are counted (from progress lines); their PASSES and SKIPS are not — a log without a summary cannot establish them. Read `passed` as a LOWER BOUND for the run, not as a total.
 
 ## Flake signal
 
@@ -663,6 +665,8 @@ Second-granularity timestamps: sub-10s steps read 0s — do not alarm on those.
 
 | Sample | Run | Conclusion | Passed | Failed | Error | Skipped | Steps max job (s) |
 |---|---|---|---|---|---|---|---|
+| 2026-10-20T18:40:00Z | 39191149586 | failure | 30697 | 6 | 0 | 129 | 1300 |
+| 2026-10-20T18:40:00Z | 39191149586 | failure | 30697 | 6 | 0 | 129 | 1300 |
 | 2026-10-20T14:39:07Z | 39191149586 | failure | 30697 | 6 | 0 | 129 | 1300 |
 | 2026-10-17T15:56:38Z | 39040632415 | success | 31284 | 0 | 0 | 139 | 1414 |
 | 2026-10-13T03:18:43Z | 38337541559 | success | 28478 | 0 | 0 | 137 | 1232 |
