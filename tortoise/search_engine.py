@@ -2461,6 +2461,32 @@ def rrf_fusion(
         for rank, (pid, _score) in enumerate(ranked):
             rrf_score = w / (k + rank + 1)
             scores[pid] = scores.get(pid, 0.0) + rrf_score
+    # #7704 (MEASURED; the ruling is OPEN — this is a description, not a
+    # contract): the rank consumed above is POSITIONAL, so a leg's own tie
+    # order becomes a fusion RELEVANCE difference between documents whose
+    # evidence is identical. Two rows tied on every leg —
+    #
+    #     rrf_fusion([[("b", 1.0), ("a", 1.0)], [("b", 1.0), ("a", 1.0)]],
+    #                strategy_names=["fts", "vector"], weights={"vector": 1.5})
+    #     -> {'b': 0.04098360655737705, 'a': 0.04032258064516129}
+    #
+    # — land 1.61% apart, ordered by whatever broke the leg's tie; in the search
+    # legs that is ``ORDER BY score DESC, node.<id> ASC`` (#3019), i.e. the ULID,
+    # i.e. creation order. The single-leg path does not fuse (``sdk.py``'s
+    # ``len(raw_results) == 1`` shortcut), so the same two rows keep the SAME
+    # score there: the two paths disagree about identical evidence.
+    #
+    # That is the mechanism behind #7704's product symptom — the W4-b contested
+    # boost (``W4_CONTESTED_BOOST``) is added AFTER fusion and is smaller than
+    # the one-rank difference this tie-break manufactures, so on a fused read
+    # the contested twin ranks below its uncontested twin, and the outcome is a
+    # function of the caller's ``limit`` (the min-max span is the PAGE). Whether
+    # fusion MAY spread identical evidence by an id (tie-averaged ranks) or the
+    # promise should be restated as single-leg/exact-tie only is an OPEN owner
+    # ruling on #7704; the shipped behaviour and its magnitude are pinned by
+    # ``tests/test_rrf_tie_rank_7704.py`` (``xfail(strict=True)`` until that
+    # ruling lands — it reds when a remedy lands so the marker is removed
+    # deliberately). Do not read this comment as a decision either way.
     # R5 (#1544): optional recency multiplier — a multiplier, NOT an additive
     # constant: the RRF score range is ~0.01–0.05 (the SearchScores rrf
     # docstring), so an additive offset would swamp fusion entirely.
