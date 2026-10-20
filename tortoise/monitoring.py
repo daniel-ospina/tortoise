@@ -738,6 +738,34 @@ RECORD_NON_JOURNAL_SKIP_COUNT = Counter(
     "(#9231 review P2)",
     ["reason"],
 )
+# #9307 review F1: an armed write whose journal append SUCCEEDED but could not
+# PROVE the record's position — `EventLog.append` returned ``None``. Its own
+# counter, because it is neither of the two above:
+#
+# * not a LOSS, so not ``RECORD_WRITE_FAILURE_COUNT``: the record IS in the
+#   journal, and a later `replay` writes the missing `journal_event` row. That
+#   counter's zero must keep meaning "no record row was lost" on a healthy
+#   deployment (the same reason #9231 split the non-journal decline out of it);
+# * not a NON-JOURNAL lane, so not ``RECORD_NON_JOURNAL_SKIP_COUNT``: the lane
+#   HAS a journal, and the four ontology layers ARE written — only the layer-1
+#   position row is missing.
+#
+# The population is the ``None`` bullets of `EventLog.append`: a tail that could
+# not be sized, a cross-process lock that could not be taken, a journal that
+# could not be counted, a peer writing unserialised inside the window, an inode
+# swapped under the path. Two of those are documented as REPEATABLE windows on a
+# large journal (#9252), so this is not a one-record curiosity — and before this
+# counter existed, "layer 1 was written for this record" and "layer 1 was
+# skipped because the append could not prove its position" were
+# indistinguishable at every observable surface. That is #9078's own class of
+# invisible gap re-entering through a door the deferral never named.
+#
+# Single writer: ``record_position_unproven`` (the #501/#3677 house shape).
+RECORD_POSITION_UNPROVEN_COUNT = Counter(
+    "tortoise_record_position_unproven_total",
+    "Armed record writes whose journal append could not prove its position, so "
+    "layer 1 got no row until a replay (#9307 review F1)",
+)
 # #4095: an allowlist-dropped telemetry key — the same loss class as the audit
 # drop above, and the exact defect #3821 fixed half-way. #3821's choke point
 # (``hosted_api._report_unregistered``) counts, warns once per site and never
@@ -1368,6 +1396,27 @@ def record_non_journal_skip(reason: str = "no_durable_journal") -> None:
 def record_non_journal_skip_counts() -> dict[str, int]:
     """In-process snapshot of ``RECORD_NON_JOURNAL_SKIP_COUNT``, by reason."""
     return _collect_by_label(RECORD_NON_JOURNAL_SKIP_COUNT, "reason")
+
+
+def record_position_unproven() -> None:
+    """Count one armed write whose journal position was NOT PROVEN (#9307 F1).
+
+    The append succeeded, so the record is in the journal and a later `replay`
+    writes its `journal_event` row; what is missing until then is layer 1's
+    position row for THIS record. Neither a loss nor a non-journal lane, hence
+    a channel of its own — see ``RECORD_POSITION_UNPROVEN_COUNT``.
+
+    Single writer: ``record_writer.write_live_record``'s ``seq is None`` branch,
+    which is a DURABLE journal whose append could not prove its position — NOT
+    the in-memory capture lane, which is declined earlier on ``durable=False``
+    and counted ``no_durable_journal``.
+    """
+    RECORD_POSITION_UNPROVEN_COUNT.inc()
+
+
+def record_position_unproven_count() -> int:
+    """In-process snapshot of ``RECORD_POSITION_UNPROVEN_COUNT``."""
+    return _counter_val(RECORD_POSITION_UNPROVEN_COUNT)
 
 
 def record_write_failure_counts() -> dict[str, int]:
@@ -4540,6 +4589,12 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
         # keeps meaning "no record row was lost" on a healthy armed deployment —
         # every `capture_session` emits through the M2 lane.
         "record_non_journal_skips": record_non_journal_skip_counts(),
+        # #9307 review F1: a DURABLE journal whose append could not prove the
+        # record's position writes no layer-1 row (a replay heals it). Its own
+        # key, so neither the failure counter nor the non-journal skip counter
+        # has to over-claim: this one is the one that says "layer 1 is behind
+        # the journal by N records".
+        "record_position_unproven": record_position_unproven_count(),
         # #7924 review P2: an audit event that reached no durable sink is
         # the same class of failure as a journal write, so it rides THIS
         # payload alongside ``journal_write_failures`` rather than a log line

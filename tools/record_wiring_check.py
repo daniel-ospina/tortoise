@@ -21,15 +21,24 @@ WHAT IT ASSERTS (exit 0 only when all three hold)
    derived from `record_projection.RECORD_MUTATIONS` — the ONE declaration of
    journal→record — never from a hand-written list here. A second list is the
    second declaration that goes stale.
-3. **The live caller does not invent a position.** The live path cannot write
-   `journal_event.seq` (#9190, `record_writer.POSITION_ROW_DEFERRED_ON`), so a
-   live call that omits `position=False` is a FAILURE: an invented position
-   collides with a later replay's numbering in silence.
+3. **The live caller writes the journal's OWN position — never an invented
+   one.** `EventLog.append` reports the record's position (#9190, landed on main
+   in `b3b4c2fb1`), and layer 1 (`public.journal_event`, exposed as
+   `public.record_event_stream`) is written from it. So the live door must carry
+   the ordinal through (`seq=`) and pass `position=seq is not None`, EVERY
+   production call to that door must actually PASS an ordinal (a body that uses
+   a `seq` nobody supplies certifies nothing — `seq` defaults to `None`, which
+   is the silent `position=False` this gate exists to catch), while every OTHER
+   production call to a `position`-taking entry point must still pass the
+   literal `position=False` — a number IT invents collides with a later replay's
+   numbering on `(org_id, graph_id, seq)` in silence.
 
 EXIT CODES — a signal that cannot be read is not a pass.
 
-    0  wired: a production caller + a writer for every layer + no invented position
-    1  NOT wired: no production caller, a layer with no writer, or an invented position
+    0  wired: a production caller + a writer for every layer + the journal's own
+       position on the live path and no invented one anywhere else
+    1  NOT wired: no production caller, a layer with no writer, an invented
+       position, or a live door that drops the ordinal
     2  CANNOT ANSWER: a module could not be parsed, or the fold could not be read
 
 The tool is read-only and DB-free: it must run in every lane, including where
@@ -88,11 +97,13 @@ DECLARED_GAPS: dict[str, str] = {
     "journal_event": (
         "layer 1's relational truth set. Migration 20261012000001 defines "
         "layer 1 AS `public.journal_event` and 20261012000004 exposes it as "
-        "`public.record_event_stream`. It is written by a REPLAY, never by "
-        "the live door: the live path has no journal ordinal (#9190) and an "
-        "invented `seq` collides with a later replay's numbering, so the live "
-        "door defers the row (`position=False`). The view is therefore empty "
-        "until #9190 lands the ordinal."
+        "`public.record_event_stream`. It is WRITTEN — by the fold's POSITION "
+        "leg, from the ordinal `EventLog.append` reports (#9190), which the "
+        "live door now carries through `write_live_record(seq=…)`. It has no "
+        "`RECORD_MUTATIONS` entry because it is not a record TYPE mutation: it "
+        "is the per-record index the layer rows are keyed from, so the writer "
+        "derivation above cannot see it and this declaration is where it is "
+        "named instead of being dropped from `LAYERS`."
     ),
 }
 
@@ -114,8 +125,9 @@ _CALL_NAMES = frozenset({"write_live_record", "write_records", "write", "replay"
 #: `position=False` writes an invented `journal_event.seq`. `replay`/
 #: `replay_plan` are what the parameter actually lives on
 #: (`record_projection.py`), `write_records`/`write` are the raw seam spellings,
-#: and `write_live_record` is NOT here: it takes no `position`, and passes the
-#: literal internally — that is the point of a single door.
+#: and `write_live_record` is NOT here: it takes no `position` parameter — it
+#: takes the ORDINAL (`seq`) and derives the flag internally
+#: (`position=seq is not None`), which is the point of a single door.
 _POSITION_NAMES = frozenset({"write_records", "write", "replay", "replay_plan"})
 
 #: The one LIVE door: the helper every journal-append site calls. Its existence
@@ -352,21 +364,45 @@ def _tables_of(mutation: object) -> tuple[set[str], str | None]:
     return set(), f"effect class {name!r} writes no table this check can see"
 
 
-def live_door_defers_the_position() -> list[str]:
-    """The LIVE door must pass `position=False` as a LITERAL, or not exist.
+#: Where the LIVE door lives, stated once so the rule and its injectable seam
+#: cannot disagree about the module they are talking about.
+_LIVE_DOOR_REL = "tortoise/record_writer.py"
 
-    The live path has no journal ordinal (#9190), so a position row it wrote
-    would be invented — and an invented `seq` collides with a later replay's
-    numbering on the `(org_id, graph_id, seq)` primary key, in silence. Two
-    ways to fail, both checked: the door is missing (the wiring moved and this
-    tool must learn the new place), or its `write_records(...)` call binds
-    `position` to anything but the literal `False`.
+
+def live_door_writes_the_journals_position(
+        source: str | None = None) -> list[str]:
+    """The LIVE door must write layer 1 from the append's ordinal (#9190).
+
+    `EventLog.append` reports the record's journal position, and that number IS
+    `journal_event.seq` — the replay numbers records ``enumerate(records,
+    start=1)`` over the same read, so a live write and a full replay give one
+    record one number by construction. The door therefore has to (a) TAKE the
+    ordinal (`seq`) and (b) bind `position` to `seq is not None`, never to a
+    literal `False` (the pre-#9190 deferral, which left layer 1 empty on every
+    live write) and never to a literal `True` (which would invent a number for
+    a log that reported none — the collision #9190 exists to remove).
+
+    Two ways to fail, both checked: the door is missing (the wiring moved and
+    this tool must learn the new place), or its `write_records(...)` call does
+    not bind `position` to the ordinal-derived expression.
+
+    ``source`` is the INJECTION SEAM, and it exists because a rule that can
+    only be run against the real tree is a rule whose firing cannot be proven:
+    the tree complies, so every assertion about it stays green when this
+    function's body is replaced by ``return []`` — the exact defect the sibling
+    ``position_problems_for_module`` was given a synthetic tree to close, moved
+    one level down (#9307 review F1). Defaults to reading the real module, so
+    ``check()`` and the CLI keep the one call shape.
     """
-    path = REPO_ROOT / "tortoise" / "record_writer.py"
+    if source is None:
+        try:
+            source = (REPO_ROOT / _LIVE_DOOR_REL).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            return [f"{_LIVE_DOOR_REL} could not be read ({exc})"]
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    except (OSError, SyntaxError, UnicodeDecodeError) as exc:
-        return [f"tortoise/record_writer.py could not be read ({exc})"]
+        tree = ast.parse(source, filename=_LIVE_DOOR_REL)
+    except SyntaxError as exc:
+        return [f"{_LIVE_DOOR_REL} could not be parsed ({exc})"]
     door = next(
         (node for node in ast.walk(tree)
          if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -375,9 +411,9 @@ def live_door_defers_the_position() -> list[str]:
     )
     if door is None:
         return [
-            f"tortoise/record_writer.py defines no {_LIVE_DOOR}() — the live "
-            "door moved, and this check no longer knows where the position "
-            "rule lives"
+            f"{_LIVE_DOOR_REL} defines no {_LIVE_DOOR}() — the live door "
+            "moved, and this check no longer knows where the position rule "
+            "lives"
         ]
     problems: list[str] = []
     calls = [
@@ -392,14 +428,56 @@ def live_door_defers_the_position() -> list[str]:
     for call in calls:
         bound = {kw.arg: kw.value for kw in call.keywords if kw.arg}
         value = bound.get("position")
-        if not (isinstance(value, ast.Constant) and value.value is False):
+        if not _is_position_from_ordinal(value):
             problems.append(
                 f"{_LIVE_DOOR}() calls {_call_name(call)}(…) with "
                 f"position={ast.unparse(value) if value is not None else '<unset>'}"
-                " — the live path has no journal ordinal (#9190), so it must "
-                "pass the literal `position=False`"
+                " — the live path must WRITE layer 1 from the journal's own "
+                "position (#9190), so bind `position=seq is not None`. A literal "
+                "`False` is the pre-#9190 deferral (layer 1 stays empty on every "
+                "live write); a literal `True` invents a number for a log that "
+                "reported none and collides with a later replay's numbering"
+            )
+        first_seq = bound.get("first_seq")
+        if not _references_ordinal(first_seq):
+            problems.append(
+                f"{_LIVE_DOOR}() calls {_call_name(call)}(…) with "
+                f"first_seq={ast.unparse(first_seq) if first_seq is not None else '<unset>'}"
+                " — the ordinal the append reported (#9190) must be the number "
+                "the row is keyed on, not a default and not an expression "
+                "that merely mentions it"
             )
     return problems
+
+
+def _is_position_from_ordinal(value: ast.expr | None) -> bool:
+    """Is this `position=` bound to `seq is not None` (the #9190 form)?"""
+    return isinstance(value, ast.Compare) and ast.unparse(value) == "seq is not None"
+
+
+#: The `first_seq=` forms that genuinely USE the append's ordinal. An
+#: allow-list rather than a walk, because "mentions `seq`" is not "uses it":
+#: `first_seq=1 if seq is not None else 1` mentions the ordinal, passes a
+#: predicate built on `any(Name(id="seq"))`, and keys EVERY position row at
+#: seq 1 — one row for a whole journal under `ON CONFLICT DO NOTHING`, i.e. the
+#: "layer 1 is effectively empty" defect this whole rule exists to catch
+#: (#9307 review P2). Add a form here when an honest one appears; the omission
+#: is a false RED (noisy), never a false green (silent).
+_ORDINAL_EXPRESSION_FORMS = frozenset({"seq", "seq if seq is not None else 1"})
+
+
+def _references_ordinal(value: ast.expr | None) -> bool:
+    """Does this expression USE the append's ordinal as the row's number?
+
+    Deliberately not "is a bare Name": the honest spelling may be a conditional
+    (`first_seq=seq if seq is not None else 1` — `write_records` needs a number
+    even when the flag is off), and rejecting that shape would push a lane
+    toward a literal default, which is the defect. What must be true is that the
+    row's `seq` IS the ordinal, not merely that the expression mentions it.
+    """
+    if value is None:
+        return False
+    return ast.unparse(value) in _ORDINAL_EXPRESSION_FORMS
 
 
 def position_problems_for_module(tree: ast.AST, rel: str) -> list[str]:
@@ -425,8 +503,11 @@ def position_problems_for_module(tree: ast.AST, rel: str) -> list[str]:
             problems.append(
                 f"{rel}:{node.lineno} calls {name}(…) with "
                 f"position={ast.unparse(value) if value is not None else '<unset>'}"
-                " — a live caller has no journal ordinal (#9190), so it"
-                " must pass the literal `position=False`"
+                " — a production caller that invents its own `seq` collides "
+                "with a later replay's numbering (#9190), so it must pass the "
+                "literal `position=False`. The LIVE door is the exception, and "
+                "`live_door_writes_the_journals_position` holds it to the "
+                "ordinal the journal reported"
             )
     return problems
 
@@ -435,7 +516,8 @@ def production_callers_defer_the_position() -> list[str]:
     """EVERY production call to a `position`-taking record entry point must pass
     `position=False` as a LITERAL.
 
-    `live_door_defers_the_position` reads only the body of `write_live_record`,
+    `live_door_writes_the_journals_position` reads only the body of the live
+    door,
     so a FOURTH door that calls the seam directly — `write_records([...])`,
     `replay([...], conn)`, `RecordWriter().write([...])`, each of whose signature
     default is `position=True` — satisfies claim 1 (a production caller exists),
@@ -445,8 +527,9 @@ def production_callers_defer_the_position() -> list[str]:
     the function the parameter actually lives on: a door spelled
     `record_projection.replay(...)` was invisible to BOTH checks.
 
-    `write_live_record` is NOT held to this: it takes no `position` parameter
-    and passes the literal internally, which is the point of a single door.
+    `write_live_record` is NOT held to this: it takes no `position` parameter —
+    it takes the ORDINAL (`seq`) and derives the flag internally, which is the
+    point of a single door (and what lets layer 1 be written on the live path).
     """
     problems: list[str] = []
     for path in _iter_package_modules():
@@ -459,6 +542,240 @@ def production_callers_defer_the_position() -> list[str]:
             continue  # `find_production_callers` already reports this
         problems.extend(position_problems_for_module(tree, rel))
     return problems
+
+
+def live_call_sites_pass_the_ordinal() -> list[str]:
+    """Every package call to the LIVE door must carry the append's ordinal.
+
+    Claim 3 above parses the door's BODY, so it certifies that the door USES a
+    `seq` it was given — and says nothing about whether anyone GIVES it one.
+    `write_live_record(record)` is valid Python (`seq: int | None = None`), and
+    it silently takes `position=False`, writes no position row, and leaves layer
+    1 empty on live writes: the exact #9190 defect this gate exists to catch,
+    with the gate still printing WIRED (#9307 review F2). Dropping the argument
+    at one of the three doors, or adding a fourth door without it, is therefore
+    invisible today and must not be.
+
+    So the ORDINAL'S PROVENANCE is checked at every call site: the argument must
+    be a name that is either (a) a REQUIRED parameter of the enclosing function
+    (a door may forward the ordinal, but then an omission upstream is a
+    `TypeError`, not a silent `None`) or (b) assigned in the same scope from a
+    journal `append(...)` call (the append IS the ordinal's only source).
+    """
+    problems: list[str] = []
+    for path in _iter_package_modules():
+        if path.stem in _RECORD_STEMS:
+            continue
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        except (OSError, SyntaxError, UnicodeDecodeError):
+            continue  # `find_production_callers` already reports this
+        problems.extend(ordinal_argument_problems(tree, rel))
+    return problems
+
+
+def ordinal_argument_problems(tree: ast.AST, rel: str) -> list[str]:
+    """The per-module half of :func:`live_call_sites_pass_the_ordinal`.
+
+    Synthetic-module shaped (like :func:`position_problems_for_module`), because
+    a rule that is only ever run against a complying tree cannot be proven to
+    fire.
+    """
+    modules, functions = _record_bindings(tree)
+    problems: list[str] = []
+    for scope, call in _calls_by_scope(tree):
+        owner, name = _resolve_record_call(call, modules, functions)
+        if owner is None or name != _LIVE_DOOR:
+            continue
+        bound = {kw.arg: kw.value for kw in call.keywords if kw.arg}
+        value = bound.get("seq")
+        where = f"{rel}:{call.lineno}"
+        if value is None:
+            problems.append(
+                f"{where} calls {_LIVE_DOOR}() without `seq=` — the ordinal "
+                "defaults to None, so the write silently takes "
+                "`position=False` and layer 1 stays empty on a live write "
+                "(#9190). Pass the append's own ordinal: `seq=<the value "
+                "the journal append returned>`"
+            )
+            continue
+        if not isinstance(value, ast.Name):
+            problems.append(
+                f"{where} calls {_LIVE_DOOR}() with "
+                f"seq={ast.unparse(value)} — an expression the journal never "
+                "reported. The ordinal is the append's return value, never a "
+                "number this code computes (#9190)"
+            )
+            continue
+        origin, detail = _name_origin(scope, value.id)
+        if origin == "required-parameter":
+            continue
+        if origin == "appended":
+            continue
+        if origin == "optional-parameter":
+            problems.append(
+                f"{where} calls {_LIVE_DOOR}(…, seq={value.id}) where "
+                f"`{value.id}` is a parameter of {_function_name(scope)}() "
+                "WITH A DEFAULT — one caller omitting it becomes a silent "
+                "`seq=None` and layer 1 stays empty (#9190). Make the "
+                "parameter required, so the omission is a TypeError"
+            )
+        elif origin == "other":
+            problems.append(
+                f"{where} calls {_LIVE_DOOR}(…, seq={value.id}) where "
+                f"`{value.id}` is assigned in {_function_name(scope)}() from "
+                f"{detail}, not from a journal append — the position row would "
+                "be numbered by something other than the journal (#9190)"
+            )
+        else:
+            problems.append(
+                f"{where} calls {_LIVE_DOOR}(…, seq={value.id}) where "
+                f"`{value.id}` is neither an append result nor a required "
+                f"parameter of {_function_name(scope)}() — this check cannot "
+                "see where the ordinal came from, and an unreadable source is "
+                "not a pass (#9190)"
+            )
+    return problems
+
+
+#: The one spelling that PRODUCES a journal ordinal. `EventLog.append` returns
+#: the record's position (#9190); nothing else may stand in for it.
+_APPEND_NAME = "append"
+
+
+def _function_name(scope: ast.AST) -> str:
+    return getattr(scope, "name", "<module>")
+
+
+#: The names a journal is bound under where a record is appended — `log` in
+#: `sdk.py`, `self.log` in `api.py`, `api.log` in `mining.py`.
+#:
+#: The RECEIVER has to be a journal, not merely something with an `append`: a
+#: list's `append` returns `None`, which the door maps to `position=False`, i.e.
+#: layer 1 silently empty with no error, no counter and a `WIRED` verdict (#9307
+#: review I1). Widening this list is a false RED (noisy) when an honest door
+#: binds its journal under a new name; leaving it as "any `.append`" is a false
+#: GREEN (silent), which is the direction this gate may not fail in.
+_JOURNAL_RECEIVERS = frozenset({"log", "journal", "event_log"})
+
+
+def _is_journal_append(value: ast.expr) -> bool:
+    """Is this `<journal>.append(…)` — the ONE call that yields an ordinal?
+
+    Name-only matching accepted `self._pending.append(rec)` (a list, returns
+    `None`) and so certified a door that writes no position row at all (#9307
+    review I1). The receiver is matched on its FINAL name, so all three shipped
+    spellings — `log.append(…)`, `self.log.append(…)`, `api.log.append(…)` —
+    resolve to a journal.
+    """
+    if not (isinstance(value, ast.Call) and _call_name(value) == _APPEND_NAME):
+        return False
+    func = value.func
+    if not isinstance(func, ast.Attribute):
+        return False  # a bare `append(…)` names no journal to have appended to
+    receiver = func.value
+    if isinstance(receiver, ast.Name):
+        return receiver.id in _JOURNAL_RECEIVERS
+    if isinstance(receiver, ast.Attribute):
+        return receiver.attr in _JOURNAL_RECEIVERS
+    return False
+
+
+def _assignments_in(scope: ast.AST, name: str) -> list[ast.expr]:
+    """Every value assigned to `name` in `scope`'s OWN body.
+
+    Scoped rather than `ast.walk(scope)`, for the reason `_calls_by_scope`
+    exists: `ast.walk` enters a NESTED function, so a helper that happens to do
+    `seq = log.append(record)` made an outer `seq = self._counter + 1` read as
+    "the append's result" — and the gate printed `WIRED` for a door that
+    computes its own number (#9307 review I1).
+    """
+    found: list[ast.expr] = []
+
+    def visit(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.Lambda)):
+                continue  # a nested scope's bindings are not this one's
+            if isinstance(child, ast.Assign):
+                value, targets = child.value, child.targets
+            elif isinstance(child, (ast.AnnAssign, ast.NamedExpr)):
+                value, targets = child.value, [child.target]
+            else:
+                value, targets = None, []
+            if value is not None and any(
+                    isinstance(t, ast.Name) and t.id == name
+                    for t in targets):
+                found.append(value)
+            visit(child)
+
+    visit(scope)
+    return found
+
+
+def _calls_by_scope(tree: ast.AST) -> list[tuple[ast.AST, ast.Call]]:
+    """`(enclosing scope, call)` for every call, per SCOPE.
+
+    `ast.walk` cannot answer this: it enters a nested function and still
+    reports the outer one as the enclosing scope, which would let a helper
+    inside a door inherit the door's `seq`.
+    """
+    found: list[tuple[ast.AST, ast.Call]] = []
+
+    def visit(node: ast.AST, scope: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.Lambda)):
+                visit(child, child)
+                continue
+            if isinstance(child, ast.Call):
+                found.append((scope, child))
+            visit(child, scope)
+
+    visit(tree, tree)
+    return found
+
+
+def _parameters(scope: ast.AST) -> dict[str, ast.expr | None]:
+    """`{parameter: default-or-None}` for one function signature."""
+    args = getattr(scope, "args", None)
+    if not isinstance(args, ast.arguments):
+        return {}
+    positional = [*getattr(args, "posonlyargs", []), *args.args]
+    defaults: list[ast.expr | None] = [None] * (
+        len(positional) - len(args.defaults)) + list(args.defaults)
+    params: dict[str, ast.expr | None] = {
+        arg.arg: default
+        for arg, default in zip(positional, defaults, strict=True)}
+    for arg, default in zip(args.kwonlyargs, args.kw_defaults, strict=True):
+        params[arg.arg] = default
+    return params
+
+
+def _name_origin(scope: ast.AST, name: str) -> tuple[str, str]:
+    """Where `name` comes from in `scope`: `(origin, detail)`.
+
+    Origins: `required-parameter` · `optional-parameter` · `appended` ·
+    `other` (assigned here, but not from an append) · `unknown`.
+
+    `appended` needs EVERY binding of the name in this scope to be a JOURNAL
+    append: one append among other assignments does not prove which value
+    reached the call, and a single non-journal `.append`/computed value is a
+    number the journal never reported. Over-strict is a false RED (noisy);
+    under-strict is a silent empty layer 1 (#9307 review I1).
+    """
+    params = _parameters(scope)
+    if name in params:
+        default = params[name]
+        return (("required-parameter", "") if default is None
+                else ("optional-parameter", ast.unparse(default)))
+    assigned = _assignments_in(scope, name)
+    if assigned and all(_is_journal_append(value) for value in assigned):
+        return "appended", ""
+    if assigned:
+        return "other", ", ".join(sorted({ast.unparse(v) for v in assigned}))
+    return "unknown", ""
 
 
 def check() -> tuple[int, dict[str, object]]:
@@ -503,7 +820,8 @@ def check() -> tuple[int, dict[str, object]]:
                 f"({deferral.splitlines()[0][:60]}…) must be removed — a "
                 "standing exemption turns a future missing writer into a pass"
             )
-    position_problems = (live_door_defers_the_position()
+    position_problems = (live_door_writes_the_journals_position()
+                         + live_call_sites_pass_the_ordinal()
                          + production_callers_defer_the_position())
 
     report: dict[str, object] = {

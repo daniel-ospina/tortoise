@@ -6664,6 +6664,18 @@ durations:
   # of 88: a duration is a property of the runner, and a figure taken from a
   # saturated box over-weights the shard on every future run.
   test_9190_journal_position.py: 6.0
+  # #9078's guard, added by a PR: a new fast-pool file can never have a CI
+  # duration at PR time (`tools/ci_timing.py --refresh-durations` samples
+  # push-to-main runs), so this row carries a LOCAL measurement. Measured on
+  # this host 2026-10-20 at 34 tests, DB-free
+  # (`TORTOISE_TEST_CARVE_OUT=1`, `TORTOISE_DB_URI` unset, so the two
+  # Postgres legs skip): "2 passed, 34 deselected in 12.82s" for the pair
+  # this row and the #9190 sibling now cover, and the whole file ran
+  # 33-passed/2-skipped in 206s — the weight below is the FAST-POOL share,
+  # which is what the split packs. Entered LOW, the #2517/#4883 precedent
+  # for a newly-added file, so the duration-coverage floor is not spent; the
+  # first post-merge push re-measures it.
+  test_9078_record_written_by_production_path.py: 2.0
   test_5917_torn_tail_seal.py: 2.0
   test_longmem_costing.py: 0.2
   test_longmem_errors.py: 0.1

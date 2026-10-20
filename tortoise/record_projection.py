@@ -1716,12 +1716,15 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
     made before the parameter existed byte for byte.
 
     THE POSITION ROW IS OPTIONAL (#9190). ``position=False`` emits the LAYER
-    mutations and no ``journal_event`` row. The live path (#9188) needs it: a
-    journal position is a fact only a bounded replay can derive, and the live
-    chokepoint has none (`EventLog.append` reports nothing and there is no
-    count accessor), so a row written there would have to invent a number —
-    the silent collision #9190 exists to remove. ``True`` (the default) keeps
-    every caller that predates the parameter byte-identical.
+    mutations and no ``journal_event`` row. It is the shape for a caller with NO
+    journal ordinal — an in-memory log, or a lane that is not a journal at all;
+    for such a caller a row written here would have to invent a number, which is
+    the silent collision #9190 exists to remove. The LIVE path is NOT that
+    caller: `EventLog.append` reports the record's position and
+    `EventLog.position()` exposes the count, so `write_live_record` passes
+    ``position=seq is not None`` and layer 1 is populated by production traffic,
+    not only by a replay. ``True`` (the default) keeps every caller that
+    predates the parameter byte-identical.
     """
     plan = replay_plan(records, org_id=org_id, graph_id=graph_id,
                        start_seq=start_seq, position=position)
@@ -1766,8 +1769,11 @@ def replay_plan(records: Sequence[Mapping[str, Any]], *, org_id: str,
     SAME offset from the same durable facts, so a retry never renumbers.
 
     `position=False` omits the per-record row entirely (see :func:`replay`):
-    it is the live path's shape until #9190 gives the chokepoint a real
-    ordinal, and the layer mutations are unaffected.
+    the shape for a caller with NO journal ordinal. The LIVE path is not that
+    caller — `EventLog.append` reports the record's position (#9190), and
+    `record_writer.write_live_record` writes the row from it — so layer 1 is
+    populated by production traffic, not only by a replay. The layer mutations
+    are unaffected either way.
     """
     if start_seq < 1:
         raise RecordProjectionError(
