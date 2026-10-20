@@ -774,7 +774,8 @@ def test_refresh_durations_is_text_preserving_and_carries_forward(tmp_path: Path
     # the machine-readable capture age is written
     assert 'durations_captured_at: "2026-09-28T00:00:00Z"' in text
     assert stats == {"sampled_keys": 2, "manifest_keys": 3, "added_keys": 0,
-                     "carried_forward": 1, "captured_at": "2026-09-28T00:00:00Z"}
+                     "carried_forward": 1, "kept_as_lower_bound": 0,
+                     "captured_at": "2026-09-28T00:00:00Z"}
     # the result is still valid YAML and still passes the manifest-side gate
     manifest = yaml.safe_load(text)
     assert manifest["durations"]["test_alpha.py"] == 12.3
@@ -801,14 +802,20 @@ durations:
 """
 
 
-def test_refresh_durations_clears_a_long_form_unmeasured_tail(tmp_path: Path) -> None:
+def test_refresh_durations_strips_a_long_form_unmeasured_marker_and_keeps_the_record(
+        tmp_path: Path) -> None:
     """#8254 review P3: the marker is a LEADING TOKEN, not the whole tail.
 
     A measured row whose preserved tail still leads with `# unmeasured` asserts
-    the opposite of its fresh value. The old rule used `re.fullmatch`, so it
-    cleared only a BARE marker and wrote the long-form provenance through — the
-    three rows this review found stale. Non-vacuity: the first assertion below
-    fails on the pre-fix code, because the tail is preserved.
+    the opposite of its fresh value, so the MARKER must go. The note behind it is
+    the row's RECORD — clearing the whole tail deleted it, which is the same
+    record-loss the held path was fixed for (#9134 review, P2: the adopted path
+    still set `tail = ""`).
+
+    Non-vacuity: on the pre-fix code the first assertion fails — either the tail
+    was preserved whole (the #8254 `fullmatch` shape) or it was cleared whole
+    (the `tail = ""` shape), and neither leaves the bare marker gone with the
+    rationale surviving.
     """
     path = _bridge_manifest(tmp_path, LONG_FORM_UNMEASURED_MANIFEST)
     text, _ = ci_timing.render_refreshed_manifest(
@@ -816,8 +823,9 @@ def test_refresh_durations_clears_a_long_form_unmeasured_tail(tmp_path: Path) ->
         _bridge_weights(test_alpha=12.34, test_beta=4.5, test_gamma=1.0),
         "T",
     )
-    # the measured row's stale marker is GONE — line is exactly `key: value`
-    assert "  test_alpha.py: 12.3\n" in text
+    # the measured row's stale marker is GONE, and the record behind it survives
+    assert ("  test_alpha.py: 12.3  # #3496: added after the sampled run; "
+            "refresh from CI junit.\n") in text
     assert "# unmeasured —" not in text
     # a comment that only MENTIONS the marker later is preserved verbatim ...
     assert ("  test_beta.py: 4.5  # a note that only mentions unmeasured rows "
@@ -825,6 +833,814 @@ def test_refresh_durations_clears_a_long_form_unmeasured_tail(tmp_path: Path) ->
     # ... and so is a word that merely starts with the marker's letters (\b)
     assert "  test_gamma.py: 1.0  # unmeasuredly worded, not the marker" in text
     assert ci_timing.validate_refreshed_manifest(text) == []
+
+
+def test_an_adopted_unmeasured_row_keeps_its_record_and_appends_the_basis() -> None:
+    """#9134 review P2: an ADOPTED row whose tail leads with `# unmeasured` must
+    not lose the note that follows the marker.
+
+    The neighbouring comment promises "any OTHER trailing comment is preserved
+    verbatim" and the map's own rule is that a tool output does not delete a
+    recorded decision; the held path was fixed for exactly this, the adopted path
+    was not. The marker is falsified by the adoption (the row IS measured now, so
+    it must not survive) while the rationale it prefixes does — and the basis this
+    render used is appended, so the row states when its new value came from.
+
+    Non-vacuity: the pre-fix adopted branch set `tail = ""`, so both the rationale
+    and the appended basis assertions fail; only the marker assertions pass.
+    """
+    text, stats = ci_timing.render_refreshed_manifest(
+        "surfaces:\n  core:\n    - test_url_keyed.py\n"
+        "durations:\n"
+        "  test_url_keyed.py: 170.0  # unmeasured — #4649: 23 tests, live "
+        "FalkorDB, measured locally; the #2876 coverage floor needs the row to "
+        "exist before the sweep reaches it.\n",
+        {"test_url_keyed.py": 6.0},
+        "2026-10-19T05:02:37Z",
+        coverage={"test_url_keyed.py": (23, 23)},
+        sample_label=_LOWER_BOUND_LABEL,
+    )
+    assert stats["kept_as_lower_bound"] == 0
+    row = next(ln for ln in text.split("\n")
+               if ln.strip().startswith("test_url_keyed.py:"))
+    # the marker itself is falsified by the adoption and must not survive ...
+    assert not re.match(r"[ \t]*#\s*unmeasured\b", row.split("#", 1)[1])
+    # ... but the RECORD the marker prefixed does, with this render's basis on it
+    assert "#4649: 23 tests, live FalkorDB, measured locally" in row
+    assert "the #2876 coverage floor needs the row to exist" in row
+    assert row.strip().endswith(f"{_LOWER_BOUND_LABEL}; was 170.0")
+    assert yaml.safe_load(text)["durations"]["test_url_keyed.py"] == 6.0
+
+
+# ── the LOWER-BOUND guard and the re-basing rule (#9134 review, P1/P2) ──────
+#
+# The manifest's `durations:` unit is a file's CI wall time. The refresh's only
+# source is the `--durations=15` block of each job's pytest log, which prints the
+# SLOWEST 15 entries — so a file whose tests did not all land in that block is
+# measured over a SUBSET of its work, and the value it produces is a LOWER BOUND.
+# Landing one as a weight is what #9134 shipped: `test_surface_manifest.py`
+# 199.1 -> 36.0 (5.5x) from a reading that saw 2 of the file's testcases, on a RED
+# run (`--maxfail=20` truncates it further), and the map's own header names the
+# harm — an understated weight "can red `python-ci-gate` with zero test failures".
+LOWER_BOUND_MANIFEST = """\
+surfaces:
+  core:
+    - test_surface_manifest.py
+    - test_6211_ep_scale.py
+    - test_raised.py
+    - test_unchanged.py
+tier1: []
+slow_files: []
+carve_out: []
+push_extra: []
+durations:
+  test_surface_manifest.py: 199.1  # #9017 CI-junit 2026-10-18 (run 39165691659); was 180.7
+  # #6211: locally measured on this host, docker lane, whole-file wall time over
+  # several runs (shape: 23 tests / 12-19 s; scale: 4 tests / 10-19 s incl. the
+  # 3,353-claim fixture build).
+  test_6211_ep_scale.py: 19.0
+  test_raised.py: 87.4
+  test_unchanged.py: 12.0  # #9017 CI-junit 2026-10-18 (run 39165691659); was 11.0
+"""
+
+_LOWER_BOUND_LABEL = "ci-timing top-15 2026-10-19 (run 39191149586)"
+
+
+def _rendered_lower_bound(tmp_path: Path) -> tuple[str, dict]:
+    path = _bridge_manifest(tmp_path, LOWER_BOUND_MANIFEST)
+    return ci_timing.render_refreshed_manifest(
+        path.read_text(),
+        {
+            # 2 of the file's testcases, 36.0 s — the measured 5.5x drop
+            "test_surface_manifest.py": 36.0,
+            # 1 of 4 testcases, 3.3 s — below the note's own 10-19 s floor
+            "test_6211_ep_scale.py": 3.3,
+            # 1 of 12 testcases, and LARGER than the recorded weight
+            "test_raised.py": 108.4,
+            # the value does not move at all
+            "test_unchanged.py": 12.0,
+        },
+        "2026-10-19T05:02:37Z",
+        coverage={
+            "test_surface_manifest.py": (2, 10),
+            "test_6211_ep_scale.py": (1, 4),
+            "test_raised.py": (1, 12),
+            "test_unchanged.py": (2, 10),
+        },
+        sample_label=_LOWER_BOUND_LABEL,
+    )
+
+
+def test_a_partial_reading_cannot_lower_a_recorded_weight(tmp_path: Path) -> None:
+    """THE #9134 P1 DEFECT. A reading that saw 2 of 10 testcases cannot show the
+    file got cheaper, so the recorded weight stands — both rows the review named
+    keep their value, and the row says what the reading actually measured.
+
+    Non-vacuity: on the pre-fix renderer `coverage=`/`sample_label=` do not exist
+    (TypeError), and with the guard removed but the parameters kept the two values
+    become 36.0 and 3.3 — i.e. this assertion is the one that goes red.
+    """
+    text, stats = _rendered_lower_bound(tmp_path)
+    durations = yaml.safe_load(text)["durations"]
+    assert durations["test_surface_manifest.py"] == 199.1
+    assert durations["test_6211_ep_scale.py"] == 19.0
+    assert stats["kept_as_lower_bound"] == 2
+    # A HELD row keeps the note that records the run its surviving value came
+    # from, and the rejected reading is APPENDED — substituting the basis for the
+    # citation is how 13 held rows lost the run that produced their number
+    # (#9134 review, P2).
+    assert ("test_surface_manifest.py: 199.1  # #9017 CI-junit 2026-10-18 "
+            "(run 39165691659); was 180.7"
+            f" — {_LOWER_BOUND_LABEL}: top-15 saw 2 of 10 testcases = 36.0s in "
+            "the largest single job (not summed across legs), a LOWER bound; "
+            "kept 199.1") in text
+    assert ci_timing.validate_refreshed_manifest(text) == []
+
+
+def _rendered_single_test(tmp_path: Path) -> tuple[str, dict]:
+    """A file that declares ONE `def test` — the shape that is unprovable."""
+    path = _bridge_manifest(
+        tmp_path,
+        "surfaces:\n  core:\n    - test_single.py\n"
+        "durations:\n  test_single.py: 42.4  # #9017 CI-junit 2026-10-18 "
+        "(run 39165691659); was 58.1\n",
+    )
+    return ci_timing.render_refreshed_manifest(
+        path.read_text(),
+        # a `venv` + `pip install` wheel test: its cost is fixture time, and one
+        # measured entry is all a single-test file can ever show
+        {"test_single.py": 40.6},
+        "2026-10-19T05:02:37Z",
+        coverage={"test_single.py": (1, 1)},
+        sample_label=_LOWER_BOUND_LABEL,
+    )
+
+
+def test_a_single_test_file_can_never_be_proven_fully_covered(tmp_path: Path) -> None:
+    """THE OTHER HALF OF THE #9134 P1 DEFECT. `declared == 1` makes `observed <
+    declared` unsatisfiable: ANY measured entry gives `observed >= 1`, so a
+    partial reading of a single-test file was classified fully covered and its
+    weight could be lowered — the `test_backup_e2e.py` 13.1 -> 4.8 and
+    `bench/test_smoke_embedded.py` 38.6 -> 24.3 shape.
+
+    Non-vacuity: pre-fix `kept = observed < declared and measured < previous` is
+    False here (1 < 1), so the row is adopted at 40.6 and both assertions fail.
+    """
+    text, stats = _rendered_single_test(tmp_path)
+    assert yaml.safe_load(text)["durations"]["test_single.py"] == 42.4
+    assert stats["kept_as_lower_bound"] == 1
+    row = next(ln for ln in text.split("\n")
+               if ln.strip().startswith("test_single.py:"))
+    # the note says WHY it could not be adopted, not that it saw the only test
+    assert "a single-test file cannot prove full coverage" in row
+    assert "kept 42.4" in row
+
+
+def test_an_absent_denominator_is_unknown_not_fully_covered(tmp_path: Path) -> None:
+    """A witness that DOES NOT COVER the row (no declared count: an unparsable
+    or deleted file) is UNKNOWN, and UNKNOWN must not licence a discount.
+
+    Non-vacuity: pre-fix `observed, declared = (0, 0)` made `observed < declared`
+    False, so the row was adopted at 4.0.
+    """
+    text, _ = ci_timing.render_refreshed_manifest(
+        "surfaces:\n  core:\n    - test_unknown.py\n    - test_covered.py\n"
+        "durations:\n  test_unknown.py: 30.0  # #3554: a local estimate\n"
+        "  test_covered.py: 5.0\n",
+        {"test_unknown.py": 4.0, "test_covered.py": 4.0},
+        "2026-10-19T05:02:37Z",
+        coverage={"test_covered.py": (5, 5)},
+        sample_label=_LOWER_BOUND_LABEL,
+    )
+    durations = yaml.safe_load(text)["durations"]
+    assert durations["test_unknown.py"] == 30.0
+    # the row that DOES have a witness may still be adopted — the rule is about
+    # proof, not about freezing the map
+    assert durations["test_covered.py"] == 4.0
+    row = next(ln for ln in text.split("\n")
+               if ln.strip().startswith("test_unknown.py:"))
+    assert "no declared testcase count" in row
+    assert "#3554: a local estimate" in row
+
+
+def test_a_held_row_states_one_basis_across_refreshes(tmp_path: Path) -> None:
+    """The map is rewritten every week: a held row must not accumulate one basis
+    sentence per refresh (nothing else prunes this file)."""
+    path = _bridge_manifest(
+        tmp_path,
+        "surfaces:\n  core:\n    - test_held.py\n"
+        "durations:\n  test_held.py: 50.0\n",
+    )
+    first, _ = ci_timing.render_refreshed_manifest(
+        path.read_text(), {"test_held.py": 10.0}, "2026-10-19T05:02:37Z",
+        coverage={"test_held.py": (1, 9)}, sample_label=_LOWER_BOUND_LABEL)
+    second, _ = ci_timing.render_refreshed_manifest(
+        first, {"test_held.py": 11.0}, "2026-10-26T05:02:37Z",
+        coverage={"test_held.py": (1, 9)},
+        sample_label="ci-timing top-15 2026-10-26 (run 40000000000)")
+    held_row = next(ln for ln in second.split("\n")
+                    if ln.strip().startswith("test_held.py:"))
+    assert held_row.count("a LOWER bound; kept 50.0") == 1
+    assert "2026-10-19" not in held_row
+    assert "run 40000000000" in held_row
+    assert yaml.safe_load(second)["durations"]["test_held.py"] == 50.0
+
+
+def test_a_partial_reading_may_raise_a_recorded_weight(tmp_path: Path) -> None:
+    """The other direction of the same rule: a partial reading DOES prove the
+    file costs at least that much, so it may raise a weight — a guard that
+    ignored every partial reading would freeze a stale map forever."""
+    text, _ = _rendered_lower_bound(tmp_path)
+    assert yaml.safe_load(text)["durations"]["test_raised.py"] == 108.4
+    assert (f"test_raised.py: 108.4  # {_LOWER_BOUND_LABEL}; was 87.4") in text
+
+
+def test_a_full_coverage_reading_may_lower_a_recorded_weight() -> None:
+    """A reading that saw EVERY declared testcase is comparable to the recorded
+    figure, so it is adopted either way. Without this the map could only ever
+    ratchet upward and a wrong value could never be corrected."""
+    text, stats = ci_timing.render_refreshed_manifest(
+        LOWER_BOUND_MANIFEST,
+        {"test_6211_ep_scale.py": 3.3},
+        "2026-10-19T05:02:37Z",
+        coverage={"test_6211_ep_scale.py": (4, 4)},
+        sample_label=_LOWER_BOUND_LABEL,
+    )
+    assert yaml.safe_load(text)["durations"]["test_6211_ep_scale.py"] == 3.3
+    assert stats["kept_as_lower_bound"] == 0
+
+
+def test_a_rebased_row_replaces_a_stale_provenance_tail(tmp_path: Path) -> None:
+    """#9134 P2: the row is re-derived, but the note still named the OLD run as
+    the basis, so it attested a number that run never produced (the cited run
+    reads 199.1; the committed row said 36.0). The map's own rule — "a note whose
+    cited run is not in the basis is dropped as stale provenance" — is applied by
+    the writer, and the replacement states the basis that IS.
+
+    The row's value MOVES here: a note that IS the citation has nothing that
+    survives a re-base. A HELD row is the opposite case and keeps its citation —
+    see `test_a_partial_reading_cannot_lower_a_recorded_weight`.
+
+    Non-vacuity: pre-fix every tail was preserved verbatim, so the `not in text`
+    assertions fail.
+    """
+    text, _ = ci_timing.render_refreshed_manifest(
+        "surfaces:\n  core:\n    - test_rebased.py\n"
+        "durations:\n  test_rebased.py: 36.0  # #9017 CI-junit 2026-10-18 "
+        "(run 39165691659); was 180.7\n",
+        {"test_rebased.py": 199.1},
+        "2026-10-19T05:02:37Z",
+        coverage={"test_rebased.py": (7, 7)},
+        sample_label=_LOWER_BOUND_LABEL,
+    )
+    row = next(ln for ln in text.split("\n")
+               if ln.strip().startswith("test_rebased.py:"))
+    assert "run 39165691659" not in row
+    assert "CI-junit" not in row
+    assert "was 180.7" not in row
+    assert row.strip() == f"test_rebased.py: 199.1  # {_LOWER_BOUND_LABEL}; was 36.0"
+
+
+def test_a_rebased_row_keeps_a_design_note_and_appends_the_new_basis() -> None:
+    """A NON-provenance note is a record, not stale provenance: the row's own
+    reasoning is kept, and the new basis is APPENDED to it. A tool output must not
+    silently overwrite a recorded decision.
+
+    Asserted on the ROW LINE, not on the standalone block comment above it: the
+    renderer only rewrites rows matching `_DURATION_LINE_RE`, so a block-comment
+    assertion holds for a renderer that deletes every row tail (#9134 review, P3).
+    """
+    text, _ = ci_timing.render_refreshed_manifest(
+        "surfaces:\n  core:\n    - test_designed.py\n"
+        "durations:\n"
+        "  test_designed.py: 19.0  # #6211: locally measured, docker lane — do NOT "
+        "substitute a local timing for a CI reading.\n",
+        {"test_designed.py": 3.3},
+        "2026-10-19T05:02:37Z",
+        coverage={"test_designed.py": (1, 4)},
+        sample_label=_LOWER_BOUND_LABEL,
+    )
+    row = next(ln for ln in text.split("\n")
+               if ln.strip().startswith("test_designed.py:"))
+    assert row.startswith("  test_designed.py: 19.0  # #6211: locally measured")
+    assert "do NOT substitute a local timing" in row
+    assert row.strip().endswith("a LOWER bound; kept 19.0")
+    assert yaml.safe_load(text)["durations"]["test_designed.py"] == 19.0
+
+
+def test_a_rebased_row_keeps_a_rationale_note_and_appends_the_basis() -> None:
+    """The stale-provenance rule is scoped to notes that make a claim about WHICH
+    READING produced the value. A note whose subject is the row's RATIONALE (why
+    it exists, that the coverage half depends on it) is a record, not provenance:
+    it is preserved and the basis this render used is APPENDED. Over-preserving
+    leaves a visible phrase next to the true basis; deleting it would silently
+    remove a decision.
+    """
+    text, _ = ci_timing.render_refreshed_manifest(
+        "surfaces:\n  core:\n    - test_rationale.py\n"
+        "durations:\n"
+        "  test_rationale.py: 5.6  # #2350: a file ADDED BY A PR has no CI record "
+        "of its own, so the #3400 flat default was its FIRST weight; required for "
+        "the coverage half (#4348 trap).\n",
+        {"test_rationale.py": 3.7},
+        "2026-10-19T05:02:37Z",
+        coverage={"test_rationale.py": (2, 142)},
+        sample_label=_LOWER_BOUND_LABEL,
+    )
+    row = next(ln for ln in text.split("\n")
+               if ln.strip().startswith("test_rationale.py:"))
+    assert "required for the coverage half (#4348 trap)" in row
+    assert row.strip().endswith("a LOWER bound; kept 5.6")
+
+
+def test_a_dated_refresh_claim_inside_a_rationale_loses_only_that_clause() -> None:
+    """…but a note that DATES the value (`this value is a CI measurement since the
+    2026-10-17 refresh`) is a claim about the reading even when it sits mid-note,
+    and a re-base makes it false — the #9134 review named this exact row. ONLY THE
+    CLAUSE is dropped: clearing the tail deleted a load-bearing `#4348 trap — do
+    not drop the row without re-deriving the floor` instruction from
+    `test_2350_validity_precision.py` (#9134 review, P2).
+
+    Non-vacuity: the pre-fix `_is_stale_provenance` branch set `tail = ""`, so the
+    `#4348` assertion below fails.
+    """
+    text, _ = ci_timing.render_refreshed_manifest(
+        "surfaces:\n  core:\n    - test_rationale.py\n"
+        "durations:\n"
+        "  test_rationale.py: 3.7  # #2350: a file ADDED BY A PR has no CI record "
+        "of its own, so the #3400 flat default was its FIRST weight — this value "
+        "is a CI measurement since the 2026-10-17 refresh; required for the "
+        "coverage half (#4348 trap — do not drop the row without re-deriving the "
+        "floor at that head).\n",
+        {"test_rationale.py": 5.6},
+        "2026-10-19T05:02:37Z",
+        coverage={"test_rationale.py": (2, 142)},
+        sample_label=_LOWER_BOUND_LABEL,
+    )
+    row = next(ln for ln in text.split("\n")
+               if ln.strip().startswith("test_rationale.py:"))
+    assert "since the 2026-10-17 refresh" not in row
+    assert "#2350: a file ADDED BY A PR" in row
+    assert "(#4348 trap — do not drop the row without re-deriving the floor at that head)" in row
+    assert row.strip().endswith("was 3.7")
+    assert yaml.safe_load(text)["durations"]["test_rationale.py"] == 5.6
+
+
+def test_a_summary_less_leg_still_counts_its_failures(tmp_path: Path) -> None:
+    """`outcome.failed` must not be smaller than `failed_tests`.
+
+    The shipped artifact read `failed: 5` beside SIX `failed_tests` entries: one
+    leg's log had been truncated before pytest's summary line, so it reported 0
+    of everything while its progress lines named a failure. The two fields are
+    the same event counted twice, so a truncation must not make them disagree
+    (#9134 review, P2).
+
+    Non-vacuity: pre-fix `total_counts["failed"]` is 1 while `failed_tests` has
+    3 entries.
+    """
+    (tmp_path / "pytest-a.log").write_text(
+        "FAILED tests/test_a.py::test_1 - AssertionError\n"
+        "= 10 passed, 1 failed in 3.00s =\n")
+    (tmp_path / "pytest-b.log").write_text(
+        "FAILED tests/test_b.py::test_2 - AssertionError\n"
+        "FAILED tests/test_b.py::test_3 - AssertionError\n")
+
+    agg = ci_timing.aggregate_logs(tmp_path)
+
+    assert len(agg["failed_tests"]) == 3
+    assert agg["total_counts"]["failed"] == 3, agg["total_counts"]
+    # a summary-less leg can only report what it saw fail — never passes.
+    assert agg["total_counts"]["passed"] == 10, agg["total_counts"]
+
+
+def test_a_held_row_does_not_strand_the_markers_own_separator() -> None:
+    """The restated marker must replace the WORDS only.
+
+    The map's `test_2296_document_created_journal.py` row was originally written
+    `# unmeasured — by the refresher — #2296: …`. The old restatement consumed
+    the marker's dash and re-added its own, so the row came out as
+    `… (not a full-file measurement) — by the refresher — #2296: …` — one
+    dangling fragment and a doubled dash (#9134 review, P2). The phrase was also
+    false for that row: it says the reading IS the pytest session total, i.e. a
+    full-file measurement; what is missing is the CI-measured one.
+
+    Non-vacuity: pre-fix this asserts nothing (the separator is stranded).
+    """
+    from tools.ci_timing import _restate_unmeasured_marker
+
+    restated = _restate_unmeasured_marker(
+        "  # unmeasured — by the refresher — #2296: WHAT THE NUMBER IS: the "
+        "pytest session total, NOT what the refresher computes.")
+    assert restated == (
+        "  # carried forward (not a full-file CI measurement) — by the "
+        "refresher — #2296: WHAT THE NUMBER IS: the pytest session total, NOT "
+        "what the refresher computes."), restated
+    assert restated.count("—") == 2, restated
+
+
+def test_a_held_row_restates_an_unmeasured_marker_and_keeps_the_rationale() -> None:
+    """A HELD row's value is still carried forward, so its `# unmeasured` meaning
+    must survive in a form that is true — restated, not deleted with the rationale
+    behind it (`test_2296_document_created_journal.py` lost its whole "WHAT THE
+    NUMBER IS" note that way, #9134 review P2).
+
+    Non-vacuity: pre-fix the marker branch set `tail = ""` regardless of `kept`,
+    so the rationale assertions fail.
+    """
+    text, stats = ci_timing.render_refreshed_manifest(
+        "surfaces:\n  core:\n    - test_journal.py\n"
+        "durations:\n"
+        "  test_journal.py: 27.0  # unmeasured by the refresher — #2296: WHAT THE "
+        "NUMBER IS: the pytest session total, NOT what the refresher computes.\n",
+        {"test_journal.py": 6.1},
+        "2026-10-19T05:02:37Z",
+        coverage={"test_journal.py": (1, 10)},
+        sample_label=_LOWER_BOUND_LABEL,
+    )
+    assert stats["kept_as_lower_bound"] == 1
+    row = next(ln for ln in text.split("\n")
+               if ln.strip().startswith("test_journal.py:"))
+    assert "WHAT THE NUMBER IS" in row
+    assert "carried forward (not a full-file CI measurement)" in row
+    # the stale marker token itself must not survive as the leading tail token:
+    # the artifact measured this file, so `# unmeasured` would be a false claim.
+    assert not re.match(r"[ \t]*#\s*unmeasured\b", row.split("#", 1)[1]
+                        if "#" in row else "")
+    assert yaml.safe_load(text)["durations"]["test_journal.py"] == 27.0
+
+
+def test_an_unchanged_row_keeps_its_provenance_tail(tmp_path: Path) -> None:
+    """No churn for a row this render did not change: "a row's comment is kept
+    while the value AND its stated basis are unchanged". 845 of the map's rows are
+    carried forward on a refresh, and rewriting their notes would bury the dozen
+    that actually moved."""
+    text, _ = _rendered_lower_bound(tmp_path)
+    assert ("test_unchanged.py: 12.0  # #9017 CI-junit 2026-10-18 "
+            "(run 39165691659); was 11.0") in text
+
+
+def test_a_note_that_OPENS_with_a_citation_is_not_deleted_whole() -> None:
+    """`_PURE_PROVENANCE_RE` is a PREFIX match, so "opens with a citation" must
+    not be read as "is nothing but a citation".
+
+    `# #9017 CI-junit 2026-10-18 (run 42); was 180.7 — do not drop this row` was
+    classified pure, and the re-base then cleared the whole tail — losing the
+    instruction the note exists for (#9134 review, P2). A note that is genuinely
+    only our basis strings must still classify pure, so the map does not grow a
+    sentence per refresh.
+    """
+    pure = (
+        "  # #9017 CI-junit 2026-10-18 (run 39165691659); was 42.6",
+        "  # ci-timing top-15 2026-10-19 (run 39191149586); was 11.8",
+        "  # #9017 CI-junit 2026-10-18 (run 1); was 20.3 — ci-timing top-15 "
+        "2026-10-19 (run 2): top-15 saw 2 of 15 testcases = 49.2s, a LOWER "
+        "bound; kept 49.2",
+    )
+    for tail in pure:
+        assert ci_timing._is_pure_provenance(tail), tail
+    impure = (
+        "  # #9017 CI-junit 2026-10-18 (run 42); was 180.7 — do not drop this "
+        "row; required for the #4348 floor",
+        "  # #2350: its FIRST weight — this value is a CI measurement since the "
+        "2026-10-17 refresh; required for the durations coverage half",
+    )
+    for tail in impure:
+        assert not ci_timing._is_pure_provenance(tail), tail
+
+
+def test_a_comma_bounded_stale_clause_does_not_take_the_whole_note() -> None:
+    """A clause can be separated by a COMMA.
+
+    With `_CLAUSE_SEPARATORS` holding only ` — `/`; `/`. `, the bounds of a
+    comma-bracketed claim stayed at the extremes of the note, so the head and the
+    tail were both empty and the whole note was cleared — the same record loss
+    clause-by-clause stripping exists to prevent (#9134 review, P2).
+    """
+    stripped = ci_timing._strip_stale_basis_claim(
+        "  # #2350: rationale, this value is a CI measurement since the "
+        "2026-10-17 refresh, and the #4348 trap says do not drop the row")
+    assert "#2350: rationale" in stripped, stripped
+    assert "do not drop the row" in stripped, stripped
+    assert "since the 2026-10-17 refresh" not in stripped, stripped
+
+
+def test_declared_test_counts_counts_test_functions(tmp_path: Path) -> None:
+    """The coverage witness's denominator, unit-tested: module-level, class
+    methods and `test`-prefixed helpers count; a non-test helper does not; a
+    missing or unparsable file is ABSENT (UNKNOWN) rather than 0."""
+    (tmp_path / "tests" / "sub").mkdir(parents=True)
+    (tmp_path / "tests" / "test_alpha.py").write_text(
+        "import pytest\n"
+        "def test_one():\n    pass\n"
+        "def test_two():\n    pass\n"
+        "class TestThing:\n"
+        "    def test_method(self):\n        pass\n"
+        "def helper():\n    pass\n"
+        # pytest registers a fixture-decorated `test*` def as a FIXTURE, never as
+        # a testcase — counting it made `declared > collected` and the row's
+        # floor unsatisfiable (#9134 review, P2).
+        "@pytest.fixture\ndef test_tools():\n    yield None\n"
+        # …and a def nested inside another test is not collected at all.
+        "def test_outer():\n    def test_inner():\n        pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "sub" / "test_beta.py").write_text(
+        "def test_x():\n    pass\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_broken.py").write_text(
+        "def test_open(:\n", encoding="utf-8")
+    counts = ci_timing.declared_test_counts(
+        ["test_alpha.py", "sub/test_beta.py", "test_broken.py", "test_gone.py"],
+        tmp_path,
+    )
+    # 4 = test_one, test_two, TestThing.test_method, test_outer. The
+    # fixture-decorated `test_tools` and the nested `test_inner` are NOT
+    # collected, and counting them is what made `declared > collected`.
+    assert counts == {"test_alpha.py": 4, "sub/test_beta.py": 1}
+
+
+def test_a_parametrised_file_has_no_denominator(tmp_path: Path) -> None:
+    """#9134 review P1: a count of `def`s is a FLOOR of the collected count.
+
+    `@pytest.mark.parametrize` turns one `def` into N testcases. Measured on a
+    2-`def` module whose first test is parametrised over 8 arms, pytest collects
+    9; a reading that saw 2 satisfied `observed >= declared` (2 >= 2) and the
+    witness licensed a 10x discount on a file it had seen a fifth of. Reachable
+    in-tree, not synthetic: a large share of the map's rows come from files
+    carrying `parametrize`, and a row can be recorded as collecting MORE
+    testcases than its `def` count for exactly this reason — one states
+    "collects 7" against 6 `def`s, the off-by-one that made the old comparison
+    pass. (No count of such rows is restated here: it moved the day after it was
+    measured, which is the same re-staling the durations rows are warned about.)
+
+    So a parametrised file is ABSENT from the denominator map: UNKNOWN is not
+    "fully covered", and the row it cannot be resolved for may be RAISED but
+    never LOWERED.
+
+    Non-vacuity: pre-fix the parametrised rows appear in `counts` (as 2), which
+    is what the `not in counts` assertions fail on.
+    """
+    (tmp_path / "tests").mkdir(parents=True)
+    (tmp_path / "tests" / "test_param_decorator.py").write_text(
+        "import pytest\n"
+        "@pytest.mark.parametrize('x', [1, 2, 3, 4, 5, 6, 7, 8])\n"
+        "def test_one(x):\n    pass\n"
+        "def test_two():\n    pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_param_module.py").write_text(
+        "import pytest\n"
+        "pytestmark = pytest.mark.parametrize('y', [1, 2])\n"
+        "def test_a(y):\n    pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_param_class.py").write_text(
+        "import pytest\n"
+        "@pytest.mark.parametrize('z', [1, 2, 3])\n"
+        "class TestThing:\n"
+        "    def test_m(self, z):\n        pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_plain.py").write_text(
+        "def test_a():\n    pass\ndef test_b():\n    pass\n", encoding="utf-8")
+
+    counts = ci_timing.declared_test_counts(
+        ["test_param_decorator.py", "test_param_module.py", "test_param_class.py",
+         "test_plain.py"],
+        tmp_path,
+    )
+    assert "test_param_decorator.py" not in counts
+    assert "test_param_module.py" not in counts
+    assert "test_param_class.py" not in counts
+    # …and the witness still works where it IS provable, so the omission is not
+    # "stop counting anything that imports pytest".
+    assert counts == {"test_plain.py": 2}
+
+
+def test_a_partial_reading_of_a_parametrised_file_cannot_lower_a_weight(
+    tmp_path: Path,
+) -> None:
+    """The END TO END of the same defect, through the real caller shape.
+
+    The denominator omission only matters where coverage is BUILT — the caller
+    maps `declared_test_counts` into `coverage` and skips keys the map omits. A
+    parametrised file therefore arrives with no denominator, `declared` is 0, and
+    a cheaper reading is recorded as the LOWER BOUND it is instead of being
+    adopted. Its sibling `test_the_cli_wires_the_lower_bound_witness` is the
+    provable case (4 declared, 1 seen ⇒ held) and
+    `test_a_full_coverage_reading_may_lower_a_recorded_weight` is the case that
+    MUST still be allowed to correct a row downward.
+
+    Non-vacuity: pre-fix `declared_test_counts` returns 2 for this file, so
+    coverage is (2, 2), `observed >= declared` holds and the row is adopted at
+    2.0 — the assertion on 19.0 fails.
+    """
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "tests" / "test_param.py").write_text(
+        "import pytest\n"
+        "@pytest.mark.parametrize('arm', [1, 2, 3, 4, 5, 6, 7, 8])\n"
+        "def test_one(arm):\n    pass\n"
+        "def test_two():\n    pass\n",
+        encoding="utf-8")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write_log(logs, "pytest-log-test-a.log",
+              """============================= slowest 3 durations =============================
+
+0.50s setup    tests/test_param.py::test_one
+1.00s call     tests/test_param.py::test_one
+0.50s teardown tests/test_param.py::test_one
+
+============================= short test summary info =============================
+""")
+    measurements = ci_timing.collector_file_measurements(logs)
+    declared = ci_timing.declared_test_counts(measurements, repo)
+    coverage = {path: (m["tests"], declared[path])
+                for path, m in measurements.items() if path in declared}
+    # The parametrised file has NO denominator, so the caller supplies no witness
+    # for it — not a floor it could satisfy with a fifth of the file.
+    assert coverage == {}
+    text, stats = ci_timing.render_refreshed_manifest(
+        "surfaces:\n  core:\n    - test_param.py\n"
+        "durations:\n  test_param.py: 19.0\n",
+        {path: m["seconds"] for path, m in measurements.items()},
+        "2026-10-19T05:02:37Z",
+        coverage=coverage,
+        sample_label=_LOWER_BOUND_LABEL,
+    )
+    assert yaml.safe_load(text)["durations"]["test_param.py"] == 19.0
+    assert stats["kept_as_lower_bound"] == 1
+
+
+def test_declared_test_counts_never_attaches_a_basename_twin(tmp_path: Path) -> None:
+    """#9134 review: a key with no file under `tests/` is ABSENT (UNKNOWN).
+
+    The function used to fall back to a UNIQUE basename match, which is exactly
+    the attachment `_resolve_to_manifest_keys` refuses by rule ("a basename
+    therefore never SELECTS a key here" — #6092 F3): it would pair one file's
+    declared count with another file's measured reading.
+
+    Non-vacuity: with the fallback present `sub/test_beta.py` resolves to
+    `tests/other/test_beta.py` and the result is `{"sub/test_beta.py": 2}`.
+    """
+    (tmp_path / "tests" / "other").mkdir(parents=True)
+    (tmp_path / "tests" / "other" / "test_beta.py").write_text(
+        "def test_a():\n    pass\ndef test_b():\n    pass\n", encoding="utf-8")
+    counts = ci_timing.declared_test_counts(["sub/test_beta.py"], tmp_path)
+    assert counts == {}
+
+
+def test_parse_log_counts_distinct_testcases_not_duration_phases(tmp_path: Path) -> None:
+    """THE #9134 P1 ROOT CAUSE. A `--durations` block lists PHASES: one testcase can
+    contribute a setup, a call and a teardown line. `tests` is the COVERAGE
+    WITNESS compared against `declared_test_counts`, so counting ENTRIES let a
+    reading that saw one testcase of a four-test file report three and be
+    classified fully covered — the fail-open direction (#9134 review, P1).
+
+    Non-vacuity: `parse_log` used to add 1 per matched line, so both `tests`
+    assertions below read 3.
+    """
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    log = write_log(logs, "pytest-log-test-a.log",
+                    """============================= slowest 3 durations =============================
+
+2.00s setup    tests/test_alpha.py::test_one
+7.00s call     tests/test_alpha.py::test_one
+0.50s teardown tests/test_alpha.py::test_one
+
+============================= short test summary info =============================
+""")
+    parsed = ci_timing.parse_log(log)
+    assert parsed["files"]["test_alpha.py"]["tests"] == 1
+    assert parsed["file_paths"]["test_alpha.py"]["tests"] == 1
+    # the SECONDS still sum every phase: fixture cost is part of what the file costs
+    assert parsed["files"]["test_alpha.py"]["total_ms"] == pytest.approx(9500.0)
+
+
+def test_a_phase_only_reading_cannot_pass_itself_off_as_full_coverage(
+    tmp_path: Path,
+) -> None:
+    """The end-to-end shape of the same defect: a file declaring 4 tests, read from
+    a block carrying one testcase's setup+call+teardown, must NOT be adopted
+    downward on the strength of "3 of 4 testcases seen".
+
+    Non-vacuity: with entry counting the witness is (3, 4) -> `observed <
+    declared` is False -> the row is adopted at 2.0.
+    """
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "tests" / "test_alpha.py").write_text(
+        "\n".join(f"def test_{i}():\n    pass" for i in range(4)) + "\n",
+        encoding="utf-8")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write_log(logs, "pytest-log-test-a.log",
+              """============================= slowest 3 durations =============================
+
+0.50s setup    tests/test_alpha.py::test_one
+1.00s call     tests/test_alpha.py::test_one
+0.50s teardown tests/test_alpha.py::test_one
+
+============================= short test summary info =============================
+""")
+    measurements = ci_timing.collector_file_measurements(logs)
+    declared = ci_timing.declared_test_counts(measurements, repo)
+    coverage = {path: (m["tests"], declared[path])
+                for path, m in measurements.items() if path in declared}
+    assert coverage == {"test_alpha.py": (1, 4)}
+    text, stats = ci_timing.render_refreshed_manifest(
+        "surfaces:\n  core:\n    - test_alpha.py\n"
+        "durations:\n  test_alpha.py: 19.0\n",
+        {path: m["seconds"] for path, m in measurements.items()},
+        "2026-10-19T05:02:37Z",
+        coverage=coverage,
+        sample_label=_LOWER_BOUND_LABEL,
+    )
+    assert stats["kept_as_lower_bound"] == 1
+    assert yaml.safe_load(text)["durations"]["test_alpha.py"] == 19.0
+
+
+def test_collector_file_measurements_pairs_the_winning_reading_with_its_own_count(
+    tmp_path: Path,
+) -> None:
+    """The witness must describe the SAME reading as the weight it accompanies:
+    the larger of two jobs wins, and its testcase count travels with it — pairing
+    the winner's seconds with the loser's count would make a partial reading look
+    complete and re-open the under-weighting the guard exists to stop."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write_log(logs, "pytest-log-test-a.log",
+              """============================= slowest 2 durations =============================
+
+1.00s call     tests/test_alpha.py::test_one
+8.00s call     tests/test_alpha.py::test_two
+
+============================= short test summary info =============================
+""")
+    write_log(logs, "pytest-log-test-b.log",
+              """============================= slowest 3 durations =============================
+
+2.00s call     tests/test_alpha.py::test_one
+
+============================= short test summary info =============================
+""")
+    measurements = ci_timing.collector_file_measurements(logs)
+    assert measurements["test_alpha.py"] == {"seconds": pytest.approx(9.0),
+                                             "tests": 2}
+    # the long-standing weights-only view is a projection of the same reading
+    assert ci_timing.collector_file_weights(logs) == {
+        "test_alpha.py": pytest.approx(9.0)}
+
+
+def test_the_cli_wires_the_lower_bound_witness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production path is where the guard has to be, not just the library
+    API: `ci-timing.yml` calls `--refresh-durations` and nothing else, so a guard
+    the CLI does not wire is a guard the weekly refresh never applies.
+
+    Non-vacuity: pre-fix the CLI called `refresh_durations(path, weights, stamp)`
+    with no coverage and no label, so both assertions fail.
+    """
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "config").mkdir()
+    (repo / "tests" / "test_alpha.py").write_text(
+        "\n".join(f"def test_{i}():\n    pass" for i in range(4)) + "\n",
+        encoding="utf-8")
+    manifest = repo / "config" / "ci-surfaces.yml"
+    manifest.write_text(
+        "surfaces:\n  core:\n    - test_alpha.py\ndurations:\n  test_alpha.py: 19.0\n",
+        encoding="utf-8")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write_log(logs, "pytest-log-test-a.log",
+              """============================= slowest 1 durations =============================
+
+3.30s call     tests/test_alpha.py::test_0
+
+============================= short test summary info =============================
+""")
+    captured: dict = {}
+
+    def fake_refresh(path, weights, captured_at, **kwargs):
+        captured.update(kwargs, path=path, weights=weights)
+        return 0
+
+    monkeypatch.setattr(ci_timing, "refresh_durations", fake_refresh)
+    monkeypatch.setattr(ci_timing, "_is_the_repo_manifest", lambda _p: False)
+    monkeypatch.setenv("CI_TIMING_NOW", "2026-10-19T05:02:37Z")
+    monkeypatch.setattr(sys, "argv", [
+        "ci_timing.py", "--repo", "o/r", "--run-id", "39191149586",
+        "--logs-dir", str(logs), "--refresh-durations",
+        "--manifest", str(manifest),
+    ])
+    assert ci_timing.main() == 0
+    assert captured["coverage"] == {"test_alpha.py": (1, 4)}
+    assert captured["sample_label"] == (
+        "ci-timing top-15 2026-10-19 (run 39191149586)")
+
 
 
 # A `durations:` key carrying a directory. The rendered artifact's `files` map is
@@ -1279,15 +2095,17 @@ def test_refresh_durations_on_the_real_manifest_of_record() -> None:
     # PyYAML is a second implementation of the same parse, so the completeness
     # check survives without a number that can go stale.
     assert set(entries_before) == set(yaml.safe_load(before)["durations"])
-    # The stamp must be FRESH: the manifest gate rejects a `captured_at` older
-    # than 21 days, so the hardcoded "2026-09-28T00:00:00Z" that used to live
-    # here turned this test red on 2026-10-19 with nothing in the tree changed
-    # (measured: integrity_problems -> "captured 21 days ago ... past the
-    # 21-day bound"). The value itself is not asserted anywhere below — only
-    # that the refresh re-stamps it with something the gate accepts.
-    captured = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # A RELATIVE stamp, not a literal date. The full `integrity_problems` gate
+    # below includes the CAPTURE-AGE term (a map captured more than 21 days ago
+    # is red), so a hardcoded `2026-09-28` was a time bomb: it passed on the day
+    # it was written and went red on its own 22nd day, with no code change at all
+    # (measured 2026-10-19, 21 days + hours on). This test is about the transform,
+    # so its stamp must not be about the calendar. The value itself is not
+    # asserted anywhere below — only that the refresh re-stamps it with something
+    # the gate accepts.
+    stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     new_text, stats = ci_timing.render_refreshed_manifest(
-        before, {"test_bridge_table.py": 123.4}, captured)
+        before, {"test_bridge_table.py": 123.4}, stamp)
     # `manifest_keys` and `carried_forward` are BOTH computed from the INPUT
     # parse (`before`), so on their own they cannot fail when the refresh drops
     # an entry from the OUTPUT — asserting only these two is a tautology. They
@@ -1311,7 +2129,7 @@ def test_refresh_durations_on_the_real_manifest_of_record() -> None:
     # above would claim a property the test does not assert (the input manifest's
     # own stamp is already fresh, so a renderer that IGNORED ``captured_at``
     # would still satisfy every other line here).
-    assert f'durations_captured_at: "{captured}"' in new_text
+    assert f'durations_captured_at: "{stamp}"' in new_text
     assert ci_timing.validate_refreshed_manifest(new_text) == []
     # ... and the FULL `--integrity` gate, not just its duration subset: the
     # refresh must not tilt the push halves or unclassify a file (#3395).

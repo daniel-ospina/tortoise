@@ -44,6 +44,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     )
 
 import argparse
+import ast
 import glob
 import json
 import math
@@ -430,6 +431,15 @@ def parse_log(path: Path) -> dict:
     """
     files: dict[str, dict] = {}
     file_paths: dict[str, dict] = {}
+    # The durations block lists the slowest PHASES, not testcases: one testcase can
+    # contribute a `setup`, a `call` and a `teardown` line (a module fixture is
+    # reported as `3.20s setup tests/test_beta.py::test_four`). `tests` is used as a
+    # COVERAGE WITNESS against the file's declared testcase count
+    # (`declared_test_counts`), so it must count DISTINCT nodeids — counting
+    # entries let a reading that saw 1 of 4 testcases plus two slow fixtures report
+    # 3 "testcases" and be classified fully covered (#9134 review, P1).
+    nodeids: dict[str, set[str]] = {}
+    path_nodeids: dict[str, set[str]] = {}
     counts = {k: 0 for k in COUNT_KEYS}
     outcomes: dict[str, str] = {}
     killed = False
@@ -485,18 +495,25 @@ def parse_log(path: Path) -> dict:
                 m = DURATION_RE.match(line)
                 if m:
                     ms = float(m.group(1)) * 1000
-                    node_path = m.group(3).split("::")[0]
+                    nodeid = m.group(3)
+                    node_path = nodeid.split("::")[0]
                     fname = node_path.split("/")[-1]
+                    rel_path = _tests_relative_path(node_path)
                     # Two accumulators over the same durations: the basename
                     # one feeds the rendered artifact, the path one feeds the
-                    # bridge's resolution.
-                    for target in (
-                        files.setdefault(fname, {"tests": 0, "total_ms": 0.0, "max_ms": 0.0}),
-                        file_paths.setdefault(
-                            _tests_relative_path(node_path),
+                    # bridge's resolution. `seconds` sums every PHASE line (a
+                    # testcase's setup and teardown are part of what the file
+                    # costs), while `tests` counts the DISTINCT nodeids those
+                    # lines belong to.
+                    for target, seen in (
+                        (files.setdefault(fname, {"tests": 0, "total_ms": 0.0, "max_ms": 0.0}),
+                         nodeids.setdefault(fname, set())),
+                        (file_paths.setdefault(
+                            rel_path,
                             {"tests": 0, "total_ms": 0.0, "max_ms": 0.0}),
+                         path_nodeids.setdefault(rel_path, set())),
                     ):
-                        target["tests"] += 1
+                        seen.add(nodeid)
                         target["total_ms"] += ms
                         target["max_ms"] = max(target["max_ms"], ms)
         m = V_PROGRESS_RE.match(line)
@@ -511,6 +528,10 @@ def parse_log(path: Path) -> dict:
             for n, key in COUNT_RE.findall(line):
                 if key in counts:
                     counts[key] = int(n)
+    for fname, entry in files.items():
+        entry["tests"] = len(nodeids[fname])
+    for rel_path, entry in file_paths.items():
+        entry["tests"] = len(path_nodeids[rel_path])
     return {"files": files, "file_paths": file_paths, "counts": counts,
             "outcomes": outcomes, "killed": killed, "error": error}
 
@@ -570,26 +591,189 @@ class DurationsBridgeError(Exception):
     """The bridge refused to render the map (fail-closed)."""
 
 
-def collector_file_weights(logs_dir: Path) -> dict[str, float]:
-    """Per-file seconds from the collector's OWN parser, taking the LARGER
-    value across the sampled jobs (the leg that CARRIES the file spends that
-    time).
+def collector_file_measurements(logs_dir: Path) -> dict[str, dict]:
+    """Per-file measurement from the collector's OWN parser: seconds, and how
+    many of the file's testcases that reading SAW.
 
     Keyed by the tests/-relative PATH (`sub/test_x.py`), not the basename: two
     files that share a basename in different directories are distinct
     measurements, and collapsing them to one key was how a subdir file's time
     could be attached to a top-level file (#6092 review, F3). `parse_log`
     supplies both aggregations — the basename one for the artifact, this path
-    one for resolution.
+    one for resolution — and `tests` is the COVERAGE WITNESS: the source block
+    prints only the slowest `--durations=15` entries of each job, so a file
+    whose tests did not all land in it is measured over a SUBSET of its work.
+    `tests` counts DISTINCT testcases (nodeids), never duration ENTRIES: one
+    testcase can contribute a setup, a call and a teardown line, so an entry
+    count would let a reading that saw 1 of 4 testcases look fully covered —
+    the exact fail-open the witness exists to prevent (#9134 review, P1).
+    `render_refreshed_manifest` consumes that witness through its `coverage`
+    parameter; without it a refresh silently lands a lower bound as a weight
+    (measured on #9134: `test_surface_manifest.py` 199.1 -> 36.0, 5.5x, from a
+    reading that saw 2 of the file's testcases).
     """
-    weights: dict[str, float] = {}
+    out: dict[str, dict] = {}
     for log_path in sorted(Path(logs_dir).rglob("*.log")):
         parsed = parse_log(log_path)
         for path, entry in parsed["file_paths"].items():
             seconds = max(float(entry["total_ms"]) / 1000.0, DURATIONS_VALUE_FLOOR_S)
-            if seconds > weights.get(path, 0.0):
-                weights[path] = seconds
-    return weights
+            # The LARGER reading across jobs wins, and its test count is the one
+            # that describes it — pairing a winning `seconds` with a losing
+            # job's count would make the coverage witness describe a different
+            # measurement than the weight it accompanies.
+            if seconds > out.get(path, {}).get("seconds", 0.0):
+                out[path] = {"seconds": seconds, "tests": int(entry["tests"])}
+    return out
+
+
+def collector_file_weights(logs_dir: Path) -> dict[str, float]:
+    """Per-file seconds only — the long-standing public shape of
+    :func:`collector_file_measurements`, kept because callers and tests read
+    it, and because the weight is what `_resolve_to_manifest_keys` consumes.
+    """
+    return {path: m["seconds"]
+            for path, m in collector_file_measurements(logs_dir).items()}
+
+
+def declared_test_counts(keys, repo_root: Path) -> dict[str, int]:
+    """How many `test*` functions each manifest key DECLARES, by AST.
+
+    The denominator of the coverage witness: a measured reading that saw fewer
+    testcases than the file declares did not see the whole file, so the value it
+    produced is a LOWER BOUND on the file's cost (see
+    `render_refreshed_manifest`'s `coverage` parameter).
+
+    FOUR LIMITS, stated because each of them is a direction this can be wrong:
+
+    * a PARAMETRISED test is ONE `def` but N collected nodeids, so a count of
+      `def`s is a FLOOR of the collected count — and a floor is the WRONG
+      direction for a coverage witness, whose job is to refuse a discount: a
+      reading that saw 2 of the 9 nodeids of a 2-`def` file satisfied
+      `observed >= declared` and licensed a 10x discount (#9134 review, P1).
+      So a file carrying a `parametrize` marker is OMITTED from this map
+      altogether (see `_has_parametrisation`), routing it to the UNKNOWN rule
+      below: raisable, never lowerable. A `pytest_generate_tests` hook
+      parametrises without a marker and is still undetected — that residual
+      keeps the old floor behaviour, and it is the only one left;
+    * the count is what pytest COLLECTS, not every `def` whose name starts with
+      `test`: a `@pytest.fixture` named `test_tools` or `test_proj` is a
+      FIXTURE, and a nested `def test_inner` inside another test is not
+      collected at all. Counting those broke the floor's other side — measured
+      on the tree as this was written, `tests/test_mcp_telemetry.py` counted 21
+      against 20 collected and `tests/test_pre_migration_safety.py` 14 against
+      13, which makes `observed >= declared` UNSATISFIABLE for those rows and
+      holds them at whatever weight they carry forever, with a witness
+      ("saw 20 of 21") that names a testcase that does not exist. Only
+      module-level `test*` defs and `test*` methods of `Test*` classes count, so
+      the count can only ever be ≤ the collected count;
+    * a key the tree does not hold (a file deleted since) is ABSENT from the
+      result rather than guessed, and an absent denominator cannot prove
+      coverage for that row — UNKNOWN is not "fully covered", so a row it
+      cannot be resolved for may be RAISED by a reading but never LOWERED. A
+      basename FALLBACK used to bridge that gap and was deleted: attaching a
+      unique basename match is how `e2e/test_x.py`'s denominator would be
+      paired with `test_x.py`'s reading, the mispairing `_resolve_to_manifest_keys`
+      refuses by rule (#6092 F3, #9134 review);
+    * a file that does not parse is absent for the same reason.
+    """
+    root = Path(repo_root) / "tests"
+    counts: dict[str, int] = {}
+    for key in keys:
+        candidate = root / key
+        if not candidate.is_file():
+            continue
+        try:
+            tree = ast.parse(candidate.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError, UnicodeDecodeError):
+            continue
+        if _has_parametrisation(tree):
+            # ⛔ OMITTED, not counted: a count of `def`s is a FLOOR of the collected
+            # count, and a floor satisfies `observed >= declared` for a reading that
+            # saw only part of the file. An absent denominator is the existing
+            # UNKNOWN path — the row may be RAISED by a reading but never LOWERED.
+            continue
+        counts[key] = _collected_test_count(tree)
+    return counts
+
+
+def _is_fixture_decorated(node: object) -> bool:
+    """True when a def carries `@pytest.fixture` (so pytest registers it as a
+    fixture, never as a testcase)."""
+    for dec in node.decorator_list:
+        target = dec.func if isinstance(dec, ast.Call) else dec
+        if isinstance(target, ast.Attribute) and target.attr == "fixture":
+            return True
+        if isinstance(target, ast.Name) and target.id == "fixture":
+            return True
+    return False
+
+
+def _is_test_def(node: object) -> bool:
+    return (
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name.startswith("test")
+        and not _is_fixture_decorated(node)
+    )
+
+
+def _mentions_parametrize(node: ast.AST) -> bool:
+    """True when this node's subtree names a `parametrize` marker.
+
+    Deliberately syntactic and OVER-inclusive (`pytest.mark.parametrize`,
+    `mark.parametrize`, a bare imported `parametrize`): every hit only makes a
+    denominator UNKNOWN, which is the fail-closed direction, so a false positive
+    costs a row its discount and a false negative costs the discount it should
+    not have had.
+    """
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Attribute) and sub.attr == "parametrize":
+            return True
+        if isinstance(sub, ast.Name) and sub.id == "parametrize":
+            return True
+    return False
+
+
+def _has_parametrisation(tree: ast.Module) -> bool:
+    """True when pytest would collect MORE nodeids than this module has `def`s.
+
+    `@pytest.mark.parametrize` turns one `def` into N testcases, so a count of
+    `def`s is a FLOOR of the collected count — and a floor is the wrong direction
+    for a coverage witness, whose job is to refuse a DISCOUNT. Measured on a
+    2-`def` file whose first test is parametrised over 8 arms: pytest collects 9,
+    a reading that saw 2 was classified `observed >= declared` (2 >= 2) and let a
+    10x discount through (#9134 review, P1).
+
+    Detected forms: a `parametrize` marker on a module-level `pytestmark`
+    assignment, or in the decorators of a module-level `def` or `Test*` class.
+    NOT detected, and stated because it is a real residual: parametrisation
+    applied at collection time by a `pytest_generate_tests` hook (no marker to
+    read). That residual undercounts exactly as before, so what the detection
+    buys is the common case — the hook form keeps the old, documented exposure.
+    """
+    for node in tree.body:
+        is_pytestmark = isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "pytestmark" for t in node.targets)
+        if is_pytestmark and _mentions_parametrize(node):
+            return True
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and any(
+                _mentions_parametrize(dec) for dec in node.decorator_list):
+            return True
+    return False
+
+
+def _collected_test_count(tree: ast.Module) -> int:
+    """How many testcases pytest collects from a parsed module.
+
+    Module-level `test*` defs plus `test*` methods of `Test*` classes. Fixture-
+    decorated defs and defs nested inside another function are excluded: pytest
+    collects neither, and counting them makes the coverage floor unsatisfiable
+    for the file (the `declared > collected` defect this docstring records).
+    """
+    count = sum(1 for node in tree.body if _is_test_def(node))
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+            count += sum(1 for sub in node.body if _is_test_def(sub))
+    return count
 
 
 def _duration_line_key(line: str) -> str:
@@ -803,8 +987,226 @@ def _set_captured_at(lines: list[str], captured_at: str) -> None:
     raise DurationsBridgeError("manifest has no top-level `durations:` key")
 
 
+# A trailing note that IS a provenance citation — its SUBJECT is the run it came
+# from (`# #9017 CI-junit 2026-10-18 (run 39165691659); was 180.7`). The map's own
+# rule for these is stated in the `durations:` header: "a note whose cited run is
+# not in the basis is dropped as stale provenance even where the value survives".
+# A refresh re-bases the value, so a cited run is by definition no longer the
+# basis, and preserving the note verbatim is how #9134 shipped 17 rows whose note
+# attested a number the cited run never produced (`test_surface_manifest.py: 36.0
+# # … run 39165691659; was 180.7` — the cited run reads 199.1).
+#
+# SCOPED TO THE SHAPE, not to the presence of a citation anywhere in the note. 130
+# of this map's tails mention a run id, a junit artifact or a date, and most of
+# them are RATIONALE — `# #2350: a file ADDED BY A PR can never have a CI junit
+# measurement … required for the coverage half (#4348 trap)`, `# #3554 (42 hermetic
+# tests) — NOW CI-MEASURED from run 39040632415`. Deleting those to fix a
+# provenance phrase would delete a record, which the repo rule forbids; they are
+# PRESERVED and the basis this render used is APPENDED to them, so the stale
+# phrase is visible next to the true one instead of silently gone. A note only
+# counts as provenance when the citation is what it OPENS with, after an optional
+# `#<issue>` ref — which is exactly the shape #9017 wrote and the shape the
+# refresher itself writes.
+_PURE_PROVENANCE_RE = re.compile(
+    r"^(?:\d+\s+)?"                       # an optional `#<issue>` ref (its `#` stripped)
+    r"(?:ci-timing\b|CI-junit\b|junit\b|\d{4}-\d{2}-\d{2}\b|run\s+\d{6,}\b)",
+    re.IGNORECASE)
+# …and one CLAUSE inside an otherwise-rational note that is still a claim about
+# WHEN THIS VALUE was measured — `this value is a CI measurement since the
+# 2026-10-17 refresh` (#9134 review named that row). A re-base makes that clause
+# false. It is STRIPPED CLAUSE-BY-CLAUSE and the rest of the note survives: the
+# note also carries why the row exists and, on `test_2350_validity_precision.py`,
+# a load-bearing `#4348 trap — do not drop the row without re-deriving the floor`
+# instruction. Clearing the whole tail to fix one dated clause is what deleted
+# that instruction (#9134 review, P2 — a tool output must not overwrite a record).
+# Narrow on purpose: it matches the dated-refresh CLAIM, not the word "refresh".
+_STALE_BASIS_CLAIM_RE = re.compile(r"\bsince the \d{4}-\d{2}-\d{2} refresh\b",
+                                   re.IGNORECASE)
+
+# The separators that bound a CLAUSE inside a note, so a stale claim can be cut
+# out without taking its neighbours with it. A COMMA is a separator here because
+# prose in this map writes clauses that way: `#2350: its FIRST weight, this value
+# is a CI measurement since the 2026-10-17 refresh, and the #4348 trap says do not
+# drop the row` has no `—`/`;`/`.` anywhere near the clause, so without `", "`
+# both bounds stayed at the extremes and the WHOLE note was cleared — the same
+# record loss the clause-by-clause strip exists to prevent (#9134 review, P2).
+_CLAUSE_SEPARATORS = (" — ", "; ", ". ", ", ")
+
+# A basis a PREVIOUS render of ours appended to the end of a tail
+# (` — ci-timing top-15 2026-10-19 (run 39191149586)[; was 42.4 | : top-15 saw …]`).
+# Stripping it before writing this render's basis is what keeps a row held (or
+# re-based) week after week stating ONE basis instead of growing a sentence per
+# refresh — the map is rewritten every week and nothing else prunes.
+_PRIOR_BASIS_RE = re.compile(
+    r"(?:^[ \t]*#[ \t]*|[ \t]+—[ \t]+)ci-timing top-15 \d{4}-\d{2}-\d{2} \(run [^)]*\)"
+    r"(?:;[ \t]*was [0-9]+(?:\.[0-9]+)?|:[^—]*)?[ \t]*$")
+
+# `# unmeasured` — the marker the map documents as "carried forward and is not a
+# measurement". Recognised by its LEADING token, and its replacement when the row
+# is HELD: the value is still carried forward, so the meaning is RESTATED rather
+# than deleted, which is what clearing the whole tail did to this marker's
+# long-form rows (#9134 review, P2).
+# groups: 1 = the note's own `# ` prefix, 2 = the marker's separator (if any)
+_UNMEASURED_LEAD_RE = re.compile(
+    r"^([ \t]*#[ \t]*)unmeasured\b[ \t]*([—–-])?[ \t]*"
+)
+_CARRIED_FORWARD = "carried forward (not a full-file CI measurement)"
+
+
+# The `  # ` comment marker a tail opens with, captured so a rewritten note can be
+# re-emitted with its own inner `#` intact (`  # #2350: …` keeps the issue ref).
+_NOTE_PREFIX_RE = re.compile(r"^[ \t]*#[ \t]*")
+
+
+def _note_body(tail: str) -> str:
+    """The text of a `  # …` tail, without the comment marker (for MATCHING: the
+    `#` of an issue ref like `#2350` is stripped too, which is what the citation
+    regexes are written against)."""
+    return tail.strip().lstrip("# \t")
+
+
+def _is_stale_provenance(tail: str) -> bool:
+    """Is this trailing note a claim about WHICH READING produced the value (so a
+    re-base falsifies it and the map's rule rewrites it)?
+
+    See `_PURE_PROVENANCE_RE` (the note IS the citation — nothing in it survives a
+    re-base) and `_STALE_BASIS_CLAIM_RE` (the note is a rationale that also DATES
+    the value — only that clause is stale, see `_strip_stale_basis_claim`).
+    """
+    body = _note_body(tail)
+    return bool(_PURE_PROVENANCE_RE.match(body)
+                or _STALE_BASIS_CLAIM_RE.search(body))
+
+
+# OUR OWN basis strings — the shapes `render_refreshed_manifest` writes. A note
+# is "pure provenance" only when it is NOTHING BUT these, joined by ` — `:
+# `#9017 CI-junit 2026-10-18 (run 39165691659); was 42.6`,
+# `ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 3 of 4 testcases =
+# 274.5s, a LOWER bound; kept 275.9`. `_PURE_PROVENANCE_RE` is only a PREFIX
+# match, so using it alone read `#9017 CI-junit 2026-10-18 (run 42); was 180.7 —
+# do not drop this row; required for the #4348 floor` as "nothing survives" and
+# deleted the instruction with it (#9134 review, P2). The remainder after these
+# tokens must be separators only.
+_OUR_BASIS_TOKEN_RE = re.compile(
+    r"(?:\d+\s+)?"          # `#9017 ` — `_note_body` strips the `#`
+    r"(?:ci-timing\s+top-15|CI-junit)\s+\d{4}-\d{2}-\d{2}"
+    r"(?:\s*\(run [^)]*\))?"
+    r"(?::[^—]*|;[ \t]*was[ \t]+[0-9]+(?:\.[0-9]+)?)?"
+    r"|\d{4}-\d{2}-\d{2}(?!\S)",
+    re.IGNORECASE)
+# …and what may be left between two such tokens once they are removed.
+_BASIS_GLUE_RE = re.compile(r"^[\s—–\-;,.()]*$")
+
+
+def _is_pure_provenance(tail: str) -> bool:
+    """Is the whole note nothing but OUR basis citations (so a re-base leaves
+    nothing but what this render writes)?
+
+    Built by SUBTRACTION rather than by a prefix match: every basis token is
+    removed, and what remains must be separators only. A note that opens with a
+    citation and continues into a rationale is therefore NOT pure, which is the
+    direction that cannot lose a record — misreading pure as impure only keeps a
+    slightly stale citation, while the reverse deletes the rationale.
+    """
+    remainder = _OUR_BASIS_TOKEN_RE.sub("", _note_body(tail))
+    return bool(_BASIS_GLUE_RE.match(remainder))
+
+
+def _strip_stale_basis_claim(tail: str) -> str:
+    """Drop ONLY the clause of a rationale that dates the value; keep the record.
+
+    `#2350: … its FIRST weight — this value is a CI measurement since the
+    2026-10-17 refresh; required for the durations coverage half (#4348 trap — do
+    not drop the row without re-deriving the floor)` keeps its `#2350` reasoning,
+    its `#4348` instruction, and loses only `this value is a CI measurement since
+    the 2026-10-17 refresh`. Returns "" when nothing of the note survives.
+    """
+    body = _note_body(tail)
+    match = _STALE_BASIS_CLAIM_RE.search(body)
+    if not match:
+        return tail
+    # Rewrite from the PREFIX-PRESERVING body, so `#2350` keeps its `#`.
+    prefix_match = _NOTE_PREFIX_RE.match(tail)
+    prefix = prefix_match.group(0) if prefix_match else "  # "
+    body = tail[prefix_match.end():] if prefix_match else tail.strip()
+    body = body.rstrip()
+    match = _STALE_BASIS_CLAIM_RE.search(body)
+    if not match:  # pragma: no cover — the matcher above already found it
+        return tail
+    left = 0
+    for sep in _CLAUSE_SEPARATORS:
+        i = body.rfind(sep, 0, match.start())
+        if i != -1:
+            left = max(left, i + len(sep))
+    right = len(body)
+    for sep in _CLAUSE_SEPARATORS:
+        i = body.find(sep, match.end())
+        if i != -1:
+            right = min(right, i)
+    head = body[:left].rstrip().rstrip("—,;. ").rstrip()
+    rest = body[right:].lstrip(" ;—,.").strip()
+    kept = f"{head}; {rest}" if head and rest else (head or rest)
+    return f"{prefix}{kept}" if kept else ""
+
+
+def _restate_unmeasured_marker(tail: str) -> str:
+    """Restate a HELD row's `# unmeasured` marker instead of deleting it.
+
+    A row the guard held keeps a value that is still NOT this run's measurement
+    of the file, so its marker must not silently vanish (#9134 review, P2): the
+    marker WORDS are replaced by `carried forward (not a full-file CI
+    measurement)` and everything after them — the note's own reason — is kept
+    VERBATIM, separator included.
+
+    Replacing the words only is the fix for a second defect in the same path
+    (#9134 review, P2): the old code consumed the marker's separator and re-added
+    its own, so a tail that already read `# unmeasured — by the refresher —
+    #2296: …` came out as `… (not a full-file measurement) — by the refresher —
+    #2296: …` with the ORIGINAL dash stranded beside the new one. The phrase also
+    claimed the row was "not a full-file measurement" when its own note says the
+    reading IS the pytest session total; it is the CI-measured full-file reading
+    that is absent, which is what the added `CI` says.
+    """
+    match = _UNMEASURED_LEAD_RE.match(tail)
+    if not match:
+        return tail
+    prefix, dash, rest = match.group(1), match.group(2), tail[match.end():]
+    # the marker's OWN separator, re-emitted as it was (never beside a second
+    # one, which is what stranded the original dash); ` — ` only when the
+    # original note ran straight on after the marker word.
+    separator = "" if not rest.strip() else (f" {dash} " if dash else " — ")
+    return f"{prefix}{_CARRIED_FORWARD}{separator}{rest}".rstrip()
+
+
+def _strip_unmeasured_marker(tail: str) -> str:
+    """Remove an ADOPTED row's `# unmeasured` MARKER and keep the record after it.
+
+    An adopted reading makes the marker false, but what usually follows it is the
+    row's RATIONALE (`# unmeasured — #7359: added after the sampled run; refresh
+    from CI junit`), and clearing the whole tail deleted that record — the same
+    loss the HELD path was fixed for via `_restate_unmeasured_marker` (#9134
+    review, P2: the adopted path kept `tail = ""`). Only the marker token goes;
+    the rest is re-emitted with its own `# ` prefix so the re-base below can
+    append this sample's basis to it.
+
+    The marker is recognised by its LEADING TOKEN (`_UNMEASURED_LEAD_RE`), not by
+    a `fullmatch` of the whole tail: authors write the long form, so a
+    whole-tail match cleared only the bare shape and left a `# unmeasured` claim
+    standing on a row the refresh had measured (#8254 review, P3 — 3 rows went
+    stale that way). `\b` keeps a token like `# unmeasuredly` out.
+    """
+    match = _UNMEASURED_LEAD_RE.match(tail)
+    if not match:
+        return tail
+    rest = tail[match.end():].strip()
+    return f"  # {rest}" if rest else ""
+
+
 def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
-                              captured_at: str) -> tuple[str, dict]:
+                              captured_at: str, *,
+                              coverage: dict[str, tuple[int, int]] | None = None,
+                              sample_label: str | None = None
+                              ) -> tuple[str, dict]:
     """Return (new manifest text, stats). Pure: callers own the write.
 
     A weight whose tests/-relative path resolves to a key the manifest
@@ -817,6 +1219,34 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
     rendered as a locatable row, or a render that would leave a key with two
     rows, raises :class:`DurationsBridgeError` instead of writing it — see the
     check at the end.
+
+    `coverage` IS THE LOWER-BOUND GUARD (#9134 review, P1). It maps a MEASURED
+    path to `(observed, declared)` — the DISTINCT testcases the reading saw, and
+    the ones the file declares. The reading sums only the testcases that landed
+    in a job's `--durations=15` block, so it is a SUM OVER A SUBSET of the file's
+    work: it can prove a file costs AT LEAST that much (it may RAISE a weight)
+    and it cannot prove the file got faster (it may not LOWER one). Landing it
+    anyway is what a 3-7x under-weight looks like, and the map's header names the
+    harm: an understated weight "can red `python-ci-gate` with zero test failures
+    (#3395)". A row whose reading covers EVERY declared test is comparable to the
+    recorded figure and is adopted either way — without that, a wrong value could
+    never be corrected at all, because the projection rarely covers a whole file.
+    FULL-COVERAGE PROOF requires `declared > 1`: a single-`def` file is satisfied
+    by any measured entry, so its reading can never be trusted to discount, and
+    an ABSENT denominator for the key is UNKNOWN (it may be raised, never
+    lowered). An absent `coverage` (`None`) is the different case — the caller
+    supplied no witness at all, so the pre-#9134 adopt-always behaviour stands:
+    a caller that has no witness must not be reported as having one.
+
+    `sample_label` names the basis written onto every row this render RE-BASES
+    (`ci-timing top-15 2026-10-19 (run 39191149586)`), in the shape the map
+    already uses for a re-derived row. It pairs with the stale-provenance rule
+    above: a note that IS the citation is dropped because it no longer applies, a
+    rationale that merely DATES the value loses only that clause, and either way
+    the replacement says what the basis now is. A HELD row (`kept`) keeps its
+    note — its value did not move, so its cited reading is still the basis — and
+    the rejected reading is appended to it instead of substituted for it. Absent
+    → tails are left alone, so every existing caller and test keeps its output.
     """
     lines = manifest_text.split("\n")
     # Both reads below parse manifest text through PyYAML, and either can raise
@@ -847,6 +1277,20 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
     # file with no duration yet is added below instead of refusing the whole
     # refresh (#4364).
     resolved = _resolve_to_manifest_keys(weights, classified_keys)
+    # The coverage witness is keyed by MEASURED path (that is what the collector
+    # supplies), and the rows are keyed by MANIFEST key — so it is put through the
+    # SAME resolution, which is what makes it impossible for a witness to describe
+    # one file while the weight it guards came from another (the #6092 F3 shape).
+    # Resolution is EXACT-PATH identity (`_resolve_to_manifest_keys` never picks a
+    # key by basename), so a measured path that resolves IS its own manifest key.
+    # Running it here is not decoration: it holds the witness to the same
+    # fail-closed registration rule as the weights, instead of quietly guarding a
+    # row the weights did not resolve to.
+    coverage_by_key: dict[str, tuple[int, int]] = {}
+    if coverage:
+        _resolve_to_manifest_keys({path: 0.0 for path in coverage}, classified_keys)
+        coverage_by_key = dict(coverage)
+    kept_as_lower_bound = 0
     for key in sorted(resolved):
         if key not in entries:
             continue
@@ -855,16 +1299,113 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         match = _DURATION_LINE_RE.match(lines[index])
         assert match is not None  # located by the same regex
         tail = match.group("tail")
-        # A stale `# unmeasured` marker stops being true once measured, and the
-        # marker is recognised by its LEADING TOKEN rather than by the whole
-        # tail: authors write long-form provenance (`# unmeasured — #7359: …`),
-        # and the old whole-tail `fullmatch` cleared only the bare form, so a
-        # measured row kept a `# unmeasured` claim the refresh had falsified
-        # (#8254 review, P3 — 3 rows went stale that way). Any OTHER trailing
-        # comment is preserved verbatim, including one that merely mentions the
-        # word later on; `\b` keeps a token like `# unmeasuredly` out.
-        if re.match(r"[ \t]*#\s*unmeasured\b", tail):
-            tail = ""
+        previous = float(match.group("value"))
+        # COMPARE AT THE PRECISION THE MAP STORES (one decimal). The rows are
+        # written `{value:.1f}`, so a raw-float comparison both mis-reports
+        # `23.7 -> 23.68` as a change (it renders identically) and would keep a
+        # row on a sub-display-precision difference, writing a "a LOWER bound;
+        # kept 23.7" note onto a row whose number never moved.
+        previous = round(previous, 1)
+        measured = round(max(float(seconds), DURATIONS_VALUE_FLOOR_S), 1)
+        observed, declared = coverage_by_key.get(key, (0, 0))
+        # LOWER BOUND, never a discount: a reading that saw fewer testcases than
+        # the file declares cannot establish that the file is CHEAPER than the
+        # recorded figure, so the recorded figure stands and the reading is
+        # recorded as the floor it is. This is deliberately NOT a refusal of the
+        # whole refresh — carrying the row forward is the tool's existing
+        # merge-not-replace contract, and a refusal would let one partial reading
+        # block the other 88 rows.
+        #
+        # WHAT COUNTS AS PROOF, and the two cases that do NOT (both added by the
+        # #9134 review, because each was fail-OPEN in the discount direction):
+        #   * `declared <= 1` — a single-`def` file is unprovable by construction:
+        #     ANY measured entry gives `observed >= 1`, so `observed >= declared`
+        #     is satisfied by a reading that saw one fixture line of a file whose
+        #     cost is a `venv` build or an embedded-server boot. The three rows
+        #     this PR first lowered (test_backup_e2e.py 13.1 -> 4.8,
+        #     bench/test_smoke_embedded.py 38.6 -> 24.3, test_pack_shipping_wheel.py
+        #     42.4 -> 40.6) are exactly that shape;
+        # * an ABSENT denominator — a measured path with no declared count (a file
+        #   this tool cannot parse, a deleted file, or one that is PARAMETRISED, so
+        #   its `def` count is a FLOOR of what pytest collects) is UNKNOWN, not
+        #   "fully covered"; UNKNOWN must not licence a discount. A floor is not a
+        #   denominator: 2 >= 2 held for a file pytest collects 9 from (#9134 review,
+        #   P1).
+        # An absent WITNESS (`coverage=None`) is different: the caller supplied no
+        # evidence at all, and the pre-#9134 adopt-always behaviour stands, so
+        # every existing caller and test keeps its output.
+        provable = coverage is not None and declared > 1 and observed >= declared
+        kept = coverage is not None and not provable and measured < previous
+        new_value = previous if kept else measured
+        if kept:
+            kept_as_lower_bound += 1
+        # An ADOPTED row's `# unmeasured` marker is FALSIFIED by the adoption, so
+        # the marker goes — but the note behind it is the row's record, and the
+        # old `tail = ""` here deleted it along with the marker (#9134 review,
+        # P2). Stripping only the token lets the re-base below append this
+        # sample's basis to the surviving note, which is the treatment a HELD row
+        # already got via `_restate_unmeasured_marker`.
+        if not kept:
+            tail = _strip_unmeasured_marker(tail)
+        if kept and sample_label:
+            # A HELD row keeps its note. Its value did not move, so the reading
+            # its note cites IS still the basis of the surviving value — the
+            # map's rule ("a note whose cited run is not in the basis is dropped")
+            # does not reach it. The renderer used to substitute the rejected
+            # reading's basis for the citation, so 13 held rows lost the run that
+            # actually produced their number (#9134 review, P2).
+            #
+            # The strip first is what keeps a row held week after week stating ONE
+            # basis: this map is rewritten every week and nothing else prunes it.
+            tail = _PRIOR_BASIS_RE.sub("", tail)
+            if declared <= 0:
+                reason = ("no declared testcase count for this file (UNKNOWN), so "
+                          "the reading cannot prove it saw the whole file")
+            elif declared == 1:
+                reason = ("a single-test file cannot prove full coverage from a "
+                          "top-15 projection")
+            else:
+                reason = None
+            # `# unmeasured` stops being true once a leg collected the file at
+            # all, but the value is STILL carried forward — so the marker's
+            # meaning is restated, never deleted along with the rationale that
+            # follows it (`test_2296_document_created_journal.py` lost 27.0's
+            # whole "WHAT THE NUMBER IS" note that way).
+            tail = _restate_unmeasured_marker(tail)
+            # Two shapes: a COUNTED witness states what it saw (`top-15 saw 2 of
+            # 10 testcases = 36.0s`); a witness that cannot count at all
+            # (single-test file, absent denominator) states why the count cannot
+            # decide, then the reading itself.
+            basis = (
+                f"{sample_label}: top-15 saw {observed} of {declared} "
+                f"testcases = {measured:.1f}s in the largest single job "
+                f"(not summed across legs), a LOWER bound; kept {previous:.1f}"
+                if reason is None else
+                f"{sample_label}: {reason}; the reading ({measured:.1f}s) is "
+                f"a LOWER bound; kept {previous:.1f}")
+            tail = f"{tail} — {basis}" if tail.strip() else f"  # {basis}"
+        elif sample_label and new_value != previous:
+            # RE-BASE ONLY WHAT THIS RENDER ACTUALLY CHANGED. The map's rule is "a
+            # row's comment is kept only while the value AND its stated basis are
+            # unchanged" — so a row whose value survives untouched by the reading
+            # keeps its note exactly as it was, and a row whose value moves gets
+            # the basis it was actually re-derived from.
+            tail = _PRIOR_BASIS_RE.sub("", tail)
+            if tail.strip() and _is_stale_provenance(tail):
+                # A note that IS the citation has nothing that survives a re-base
+                # (the cited run is not this sample's, and the basis written below
+                # is). A RATIONALE that merely DATES the value loses only that
+                # clause — deleting the rest is what removed
+                # `test_2350_validity_precision.py`'s `#4348 trap — do not drop
+                # the row` instruction (#9134 review, P2).
+                tail = "" if _is_pure_provenance(tail) else _strip_stale_basis_claim(tail)
+            basis = f"{sample_label}; was {previous:.1f}"
+            # A surviving DESIGN note is kept and the new basis is appended to it,
+            # never substituted for it: notes like "Do NOT substitute a local
+            # timing" or a #5275 recording are decisions, and a tool output does
+            # not silently overwrite one (the reason the 82 non-citing tails in
+            # this map exist).
+            tail = f"{tail} — {basis}" if tail.strip() else f"  # {basis}"
         # Reuse the row's RAW key text (`match.group('key')`), not `key`: a
         # quoted key (`'test_a.py'`) must stay quoted when its value is
         # rewritten, or a key character that needs quoting would become an
@@ -872,7 +1413,7 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         # this lookup finds the quoted row instead of missing it.
         lines[index] = (
             f"{match.group('indent')}{match.group('key')}: "
-            f"{max(float(seconds), DURATIONS_VALUE_FLOOR_S):.1f}{tail}"
+            f"{new_value:.1f}{tail}"
         )
     # A resolved key with no `durations:` line is a REGISTRATION, not a rewrite —
     # append it to the block in the same `  key: value` shape the existing rows
@@ -937,6 +1478,9 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         # stays the INPUT map's size; `added_keys` is what it grew by.
         "added_keys": len(new_keys),
         "carried_forward": len(entries) - (len(resolved) - len(new_keys)),
+        # Rows a partial reading would have LOWERED: the recorded value stands
+        # and the reading is written as the floor it is (#9134 review, P1).
+        "kept_as_lower_bound": kept_as_lower_bound,
         "captured_at": captured_at,
     }
     text = "\n".join(lines)
@@ -1187,8 +1731,17 @@ def _is_the_repo_manifest(manifest_path: Path) -> bool:
 
 
 def refresh_durations(manifest_path: Path, weights: dict[str, float],
-                      captured_at: str, *, dry_run: bool = False) -> int:
+                      captured_at: str, *, dry_run: bool = False,
+                      coverage: dict[str, tuple[int, int]] | None = None,
+                      sample_label: str | None = None) -> int:
     """Render + validate + (unless dry-run) write the refreshed map.
+
+    `coverage` / `sample_label` are passed straight through to
+    :func:`render_refreshed_manifest`, which owns their meaning: a partial
+    reading may raise a weight but never lower one, and a re-based row records
+    the basis it actually came from. `main`'s `--refresh-durations` supplies
+    both from the sampled logs; a caller that supplies neither gets the
+    pre-#9134 adopt-always behaviour.
 
     Exit: 0 written/validated · 1 a manifest-side gate would fail · 2 UNKNOWN
     (no keys, key agreement, unreadable manifest) — never 0 on an unobserved
@@ -1208,7 +1761,8 @@ def refresh_durations(manifest_path: Path, weights: dict[str, float],
         return 2
     try:
         new_text, stats = render_refreshed_manifest(
-            manifest_text, weights, captured_at)
+            manifest_text, weights, captured_at,
+            coverage=coverage, sample_label=sample_label)
         # The readback runs AFTER the renderer returns, so it needs the same
         # mapping as the render itself: `_manifest_of` raises
         # DurationsBridgeError for a document it cannot parse back. This once
@@ -1497,6 +2051,52 @@ def paid_vs_selected_cli(args) -> int:
     return 0
 
 
+def aggregate_logs(logs_dir: Path | str) -> dict:
+    """Sum every leg's `pytest-*.log` under `logs_dir` into the artifact's parts.
+
+    Extracted from `main()` so the aggregation is testable — the summary-less-leg
+    defect below was invisible to every test precisely because it lived inline
+    (#9134 review, P2).
+    """
+    files: dict[str, dict] = {}
+    total_counts = {k: 0 for k in COUNT_KEYS}
+    killed_any = False
+    failed_tests: set[str] = set()
+    log_sources: list[dict] = []
+    for log_path in sorted(glob.glob(str(Path(logs_dir) / "**" / "*.log"), recursive=True)):
+        parsed = parse_log(Path(log_path))
+        for fname, entry in parsed["files"].items():
+            acc = files.setdefault(fname, {"tests": 0, "total_ms": 0.0, "max_ms": 0.0})
+            acc["tests"] += entry["tests"]
+            acc["total_ms"] += entry["total_ms"]
+            acc["max_ms"] = max(acc["max_ms"], entry["max_ms"])
+        for k in COUNT_KEYS:
+            total_counts[k] += parsed["counts"][k]
+        # A leg whose log carries no pytest SUMMARY line reports 0 of everything
+        # while its progress lines still name the testcases that failed — the
+        # artifact STILL shipped in this refresh carries `outcome.failed: 5` beside
+        # SIX `failed_tests` entries (one all-zero log source, `pytest.log`; #9134
+        # review, P2). That capture is of run 39191149586, which ran BEFORE this fix
+        # existed, so it cannot be regenerated here — the NEXT refresh recomputes it —
+        # and the number is left as measured, not edited. A truncation is not an
+        # absence of failures, so a summary-less leg contributes what its progress
+        # lines told us — failures only, never passed/skipped, which a summary-less
+        # log cannot establish.
+        # not an absence of failures, so a summary-less leg contributes what its
+        # progress lines told us — failures only, never passed/skipped, which a
+        # summary-less log cannot establish.
+        if not any(parsed["counts"].values()):
+            for state, key in (("FAILED", "failed"), ("ERROR", "error")):
+                total_counts[key] += sum(
+                    1 for st in parsed["outcomes"].values() if st == state)
+        killed_any = killed_any or parsed["killed"]
+        failed_tests.update(n for n, st in parsed["outcomes"].items() if st in ("FAILED", "ERROR"))
+        log_sources.append({"log": Path(log_path).name, "error": parsed["error"],
+                            "counts": parsed["counts"]})
+    return {"files": files, "total_counts": total_counts, "killed_any": killed_any,
+            "failed_tests": failed_tests, "log_sources": log_sources}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Generate the CI timing measurement artifact (#1477)")
     ap.add_argument("--repo", required=True, help="owner/repo (used for gh api calls)")
@@ -1537,11 +2137,25 @@ def main() -> int:
     if args.refresh_durations:
         captured_at = (os.environ.get("CI_TIMING_NOW")
                        or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))  # noqa: UP017
+        manifest_path = Path(args.manifest)
+        measurements = collector_file_measurements(Path(args.logs_dir))
+        weights = {path: m["seconds"] for path, m in measurements.items()}
+        # THE LOWER-BOUND WITNESS (#9134 review, P1): what the reading SAW, and
+        # what the file declares. Built here, in the production path only, so the
+        # guard cannot be forgotten by the weekly workflow — and so a caller with
+        # no witness is never reported as having one.
+        declared = declared_test_counts(weights, manifest_path.resolve().parent.parent)
+        coverage = {path: (m["tests"], declared[path])
+                    for path, m in measurements.items() if path in declared}
+        sample_label = (f"ci-timing top-15 {captured_at[:10]} "
+                        f"(run {args.run_id.strip() or 'unknown'})")
         return refresh_durations(
-            Path(args.manifest),
-            collector_file_weights(Path(args.logs_dir)),
+            manifest_path,
+            weights,
             captured_at,
             dry_run=args.dry_run,
+            coverage=coverage,
+            sample_label=sample_label,
         )
 
     run_id = args.run_id.strip()
@@ -1569,24 +2183,12 @@ def main() -> int:
             # review round 7).
             print(f"::warning::gh api failed for run {run_id}: {exc}", file=sys.stderr)
 
-    files: dict[str, dict] = {}
-    total_counts = {k: 0 for k in COUNT_KEYS}
-    killed_any = False
-    failed_tests: set[str] = set()
-    log_sources: list[dict] = []
-    for log_path in sorted(glob.glob(str(Path(args.logs_dir) / "**" / "*.log"), recursive=True)):
-        parsed = parse_log(Path(log_path))
-        for fname, entry in parsed["files"].items():
-            acc = files.setdefault(fname, {"tests": 0, "total_ms": 0.0, "max_ms": 0.0})
-            acc["tests"] += entry["tests"]
-            acc["total_ms"] += entry["total_ms"]
-            acc["max_ms"] = max(acc["max_ms"], entry["max_ms"])
-        for k in COUNT_KEYS:
-            total_counts[k] += parsed["counts"][k]
-        killed_any = killed_any or parsed["killed"]
-        failed_tests.update(n for n, st in parsed["outcomes"].items() if st in ("FAILED", "ERROR"))
-        log_sources.append({"log": Path(log_path).name, "error": parsed["error"],
-                            "counts": parsed["counts"]})
+    aggregated = aggregate_logs(args.logs_dir)
+    files = aggregated["files"]
+    total_counts = aggregated["total_counts"]
+    killed_any = aggregated["killed_any"]
+    failed_tests = aggregated["failed_tests"]
+    log_sources = aggregated["log_sources"]
 
     now = (os.environ.get("CI_TIMING_NOW")
            or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))  # noqa: UP017
