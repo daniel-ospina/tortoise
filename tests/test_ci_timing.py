@@ -1562,6 +1562,20 @@ def test_the_remaining_floor_shapes_have_no_denominator(tmp_path: Path) -> None:
     # runner list aliasing test functions. Firing on either froze 44 exactly-counted rows
     # in-tree — 41 by the `pytestmark` rule, 5 by the runner-list rule, two files hit by
     # both, which is why the parts sum past the whole.
+    # A `Test*` class nested in a `Test*` class is collected at ANY depth (measured
+    # three nodeids for three levels: 2 declared was a floor), and a `TC =
+    # TYPE_CHECKING` binding is the same dead guard as the import alias.
+    (tmp_path / "tests" / "sub" / "test_nested_test_class.py").write_text(
+        "class TestA:\n    def test_a(self):\n        pass\n"
+        "    class TestB:\n        def test_b(self):\n            pass\n"
+        "        class TestC:\n            def test_c(self):\n                pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "sub" / "test_tc_assign_alias.py").write_text(
+        "from typing import TYPE_CHECKING\nTC = TYPE_CHECKING\nif TC:\n"
+        "    def test_ghost():\n        pass\ndef test_real():\n    pass\n",
+        encoding="utf-8",
+    )
     (tmp_path / "tests" / "sub" / "test_pytestmark_skipif.py").write_text(
         "import pytest\npytestmark = pytest.mark.skipif(False, reason='x')\n"
         "def test_a():\n    pass\n",
@@ -1571,6 +1585,19 @@ def test_the_remaining_floor_shapes_have_no_denominator(tmp_path: Path) -> None:
     # `parametrize(...)(test_c)` both collect an extra nodeid (measured 3 vs 2) — while a
     # branch that cannot execute (`if TYPE_CHECKING:`, `if False:`) binds nothing, so a
     # `def` inside it must NOT be counted (measured 1 collected against a declared 4).
+    # The `else:` of a DEAD guard still runs at import, so a `def` there is collected —
+    # omitting the whole `if` was a floor (measured 4 collected vs 3 declared). And
+    # `test_a, test_b = f, g` defines two testcases from a tuple of references.
+    (tmp_path / "tests" / "sub" / "test_dead_else.py").write_text(
+        "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n"
+        "    def test_ghost():\n        pass\nelse:\n"
+        "    def test_late():\n        pass\ndef test_a():\n    pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "sub" / "test_unpacked.py").write_text(
+        "def f():\n    pass\ndef g():\n    pass\ntest_a, test_b = f, g\n",
+        encoding="utf-8",
+    )
     (tmp_path / "tests" / "sub" / "test_call_alias.py").write_text(
         "import functools\ndef test_a():\n    pass\n"
         "test_b = functools.partial(test_a)\n",
@@ -1596,6 +1623,8 @@ def test_the_remaining_floor_shapes_have_no_denominator(tmp_path: Path) -> None:
          "sub/test_attralias.py", "sub/test_injected.py",
          "sub/test_pytestmark_skipif.py", "sub/test_runner_list.py",
          "sub/test_call_alias.py", "sub/test_dead_branch.py",
+         "sub/test_dead_else.py", "sub/test_unpacked.py",
+         "sub/test_nested_test_class.py", "sub/test_tc_assign_alias.py",
          "sub/test_plain.py"],
         tmp_path,
     )
@@ -1608,6 +1637,11 @@ def test_the_remaining_floor_shapes_have_no_denominator(tmp_path: Path) -> None:
     # denominator instead of losing it.
     assert counts["sub/test_ifblock.py"] == 2
     assert "sub/test_call_alias.py" not in counts
+    assert "sub/test_unpacked.py" not in counts
+    # the dead BODY is skipped, its `else:` is counted
+    assert counts["sub/test_dead_else.py"] == 2
+    assert counts["sub/test_nested_test_class.py"] == 3
+    assert counts["sub/test_tc_assign_alias.py"] == 1
     # The dead branches are not counted, so the denominator is exact rather than
     # unsatisfiable — the mirror of a floor, and just as fatal to the witness.
     assert counts["sub/test_dead_branch.py"] == 1

@@ -964,8 +964,13 @@ def _is_alias_or_injection(node: ast.stmt) -> bool:
         # bare Name is a plain rename, but it is an alias all the same.
         aliases_a_callable = not isinstance(value, (ast.List, ast.Tuple, ast.Set, ast.Dict))
         for target in targets:
-            if (aliases_a_callable and isinstance(target, ast.Name)
-                    and target.id.startswith("test")):
+            # `test_a, test_b = f, g` unpacks into TWO testcases, and the VALUE is a tuple
+            # of references — so an unpacking target skips the container exclusion that
+            # exists for `tests = [test_a, test_b]` (a runner list, not a testcase).
+            unpacking = isinstance(target, (ast.Tuple, ast.List))
+            flat = list(target.elts) if unpacking else [target]
+            if (unpacking or aliases_a_callable) and any(
+                    isinstance(tg, ast.Name) and tg.id.startswith("test") for tg in flat):
                 return True
             # `TestX.test_b = ...` targets an existing class, so whatever is assigned
             # there becomes a collected method.
@@ -993,7 +998,8 @@ def _type_checking_names(tree: ast.Module) -> frozenset[str]:
                     names.add(alias.asname or alias.name)
         if isinstance(node, ast.Assign):
             value = node.value
-            if isinstance(value, ast.Attribute) and value.attr == "TYPE_CHECKING":
+            if (isinstance(value, ast.Attribute) and value.attr == "TYPE_CHECKING") or (
+                    isinstance(value, ast.Name) and value.id == "TYPE_CHECKING"):
                 names.update(t.id for t in node.targets if isinstance(t, ast.Name))
     return frozenset(names)
 
@@ -1033,9 +1039,15 @@ def _collectable_statements(
     out: list[ast.stmt] = []
     for node in body:
         out.append(node)
-        if _block_cannot_execute(node, type_checking):
-            continue
+        dead = _block_cannot_execute(node, type_checking)
         for attr in ("body", "orelse", "finalbody"):
+            # ⛔ A dead if/while skips its BODY but not its `else:`/`finally:` — those run
+            # at import, so a `def` inside them is collected. Measured: `if
+            # TYPE_CHECKING: … else: def test_late_bound` beside three plain tests
+            # collected 4 against a declared 3, a floor that licensed a 3.3x discount
+            # (#9134 review, P2).
+            if dead and attr == "body":
+                continue
             block = getattr(node, attr, None)
             if isinstance(block, list) and block and isinstance(block[0], ast.stmt):
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -1056,13 +1068,24 @@ def _collected_test_count(tree: ast.Module) -> int:
     collects neither, and counting them makes the coverage floor unsatisfiable
     for the file (the `declared > collected` defect this docstring records).
     """
-    tc = _type_checking_names(tree)
-    count = sum(1 for node in _collectable_statements(tree.body, tc) if _is_test_def(node))
-    for node in _collectable_statements(tree.body, tc):
-        if isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
-            count += sum(
-                1 for sub in _collectable_statements(node.body, tc) if _is_test_def(sub))
-    return count
+    return _count_collected(tree.body, _type_checking_names(tree))
+
+
+def _count_collected(body: list[ast.stmt], tc: frozenset[str]) -> int:
+    """Testcases pytest collects from a body, recursing through `Test*` classes.
+
+    A `Test*` class nested inside a `Test*` class is collected too — at ANY depth, so a
+    fixed two-level walk left depth 3 as a floor (measured 2 declared beside 3 collected).
+    Recursion into a NON-`Test*` class is deliberately absent: pytest collects nothing
+    from `class Helper: class TestInner: …` (measured 0).
+    """
+    total = 0
+    for node in _collectable_statements(body, tc):
+        if _is_test_def(node):
+            total += 1
+        elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+            total += _count_collected(node.body, tc)
+    return total
 
 
 def _duration_line_key(line: str) -> str:

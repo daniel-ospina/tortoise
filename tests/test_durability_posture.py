@@ -173,6 +173,19 @@ def _wrapped_claim_lines(path: Path) -> list[tuple[int, str]]:
     ):
         collapsed = re.sub(r"\s+", " ", line).strip()
         if not collapsed:
+            # ⛔ A blank line ENDS the paragraph: joining across it let two unrelated
+            # sentences form a "… is durable" claim and red a correct edit
+            # (#9134 review, P3).
+            if parts:
+                # ⛔ A NEWLINE, not a delete char: `WRAPPED_CLAIM_RE`'s `.{0,40}` window
+                # cannot cross a newline, so the paragraph really ends here. The sentinel
+                # has to be outside the window's reach, not merely present.
+                parts.append("\n")
+                # ⛔ 2, not 3: the element BEFORE this one already added +1 for the space
+                # that follows it, so the sentinel contributes the newline plus the next
+                # separator — two characters. Advancing 3 drifts one per break and shifts
+                # every reported line number after it (#9134 review).
+                pos += 2
             continue
         starts.append((pos, lineno))
         parts.append(collapsed)
@@ -186,6 +199,44 @@ def _wrapped_claim_lines(path: Path) -> list[tuple[int, str]]:
 
 
 # ── 1. the scan reaches the declared roots ──────────────────────────────────
+
+def test_a_blank_line_ends_the_paragraph_for_wrapped_claims(tmp_path):
+    """The joined re-scan must not cross a paragraph break.
+
+    `WRAPPED_CLAIM_RE` allows up to 40 characters between "is" and "durable", so joining
+    two paragraphs let unrelated prose form a claim and would have red a correct edit.
+    The boundary is a NEWLINE sentinel, which `.` cannot cross; a claim wrapped inside ONE
+    paragraph is still found.
+    """
+    two_paragraphs = tmp_path / "two.md"
+    two_paragraphs.write_text(
+        "The append is the journal's commit point.\n\nThe store is durable under fsync.\n",
+        encoding="utf-8",
+    )
+    wrapped = tmp_path / "wrapped.md"
+    wrapped.write_text(
+        "COMMIT POINT (the journal IS the\ntruth), so a refusal would leave a record.\n",
+        encoding="utf-8",
+    )
+
+    assert _wrapped_claim_lines(two_paragraphs) == []
+    assert len(_wrapped_claim_lines(wrapped)) == 1
+
+    # The recorded line number must survive the breaks: a claim three paragraphs down is
+    # at TRUE line 7. This pins the behaviour, not the arithmetic — the offset advance for
+    # the sentinel was MEASURED at 2 characters (the element before it already counts the
+    # separator space), because a larger advance drifts one per break; a drift that small
+    # stays inside the neighbouring line's interval, so only the offset measurement
+    # distinguishes it, not this assertion.
+    deep = tmp_path / "deep.md"
+    deep.write_text(
+        "first.\n\nsecond.\n\nthird.\n\nCOMMIT POINT (the journal IS the\n"
+        "truth), so a refusal would leave a record.\n",
+        encoding="utf-8",
+    )
+    hits = _wrapped_claim_lines(deep)
+    assert [line for line, _ in hits] == [7], hits
+
 
 def test_scan_reaches_the_declared_roots():
     """Every declared root must exist AND contribute scanned files — a
