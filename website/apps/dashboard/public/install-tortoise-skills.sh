@@ -443,6 +443,10 @@ emit_codex_agents_block() {
   # recovery is exact and the alias is untouched. A signal in that window used to
   # leave a 0444 file writable and print nothing (measured: rc 143, mode 644).
   backup=""
+  # Assigned only when $target exists (below), so "" means "this run never read
+  # the file". The append arm treats that as a CHANGE (fail closed) — reading an
+  # unset variable there would abort under `set -u` instead.
+  pre_state=""
   undo_inplace() {
     [ -n "$backup" ] && [ -f "$backup" ] && cat "$backup" > "$target" 2>/dev/null
     [ -n "$orig_mode" ] && chmod "$orig_mode" "$target" 2>/dev/null
@@ -470,6 +474,11 @@ emit_codex_agents_block() {
       echo "  (skills above ARE installed; only the AGENTS.md block was not upgraded — exit 143)" >&2
       exit 143
     fi
+    # The staged copy is OURS and unneeded here too: the recovery artifact is
+    # $backup (named below), and a leftover `.tortoise-agents.*` is an untracked
+    # file one `git add -A` from being committed — the same reason the verified
+    # branch removes it.
+    [ -n "$staged" ] && rm -f "$staged"
     echo "  ✗ AGENTS.md — interrupted while writing it in place" >&2
     echo "      The original could NOT be restored into $target." >&2
     if [ -n "$backup" ] && [ -f "$backup" ]; then
@@ -550,7 +559,7 @@ ${me}" > "$block" || _emit_fail "could not build the new block text — nothing 
     # hard-link count that decides whether that check runs is read further down.
     pre_state="$tmpdir/pre-state-agents.md"
     cp "$target" "$pre_state" \
-      || _emit_fail "could not read $target (unreadable, or not a regular file) — nothing was changed"
+      || _emit_fail "could not make the pre-write copy of $target (unreadable, or the scratch directory is full or not writable) — nothing was changed"
     # ONE pass decides WHERE the block is, and every reader/writer below obeys
     # its line numbers. Counting with fences but then locating the window with a
     # fence-blind scan is how the fenced-example feature deleted a user's
@@ -810,9 +819,12 @@ EOF
     # install the older in-place write handled.
     cp "$target" "$staged" || { rm -f "$staged"; _emit_fail "could not copy $target — nothing was changed"; }
     # The mode is captured so it can be RESTORED, and the staged copy is made
-    # writable meanwhile: `cp` gives the staged file the umask default, but a
-    # read-only AGENTS.md (0444) must come back out of here still 0444 — and the
-    # old failure named no cause at all.
+    # writable meanwhile: `cp` gives the staged file the TARGET's mode (a plain
+    # `cp` creates the destination with the SOURCE mode masked by the umask — it
+    # is NOT the umask default), so the staged copy of a read-only AGENTS.md
+    # (0444) is 0444 and must be chmod'ed writable to be rewritten at all. The
+    # mode then comes back out of here still 0444 — and the old failure named no
+    # cause at all.
     orig_mode="$(stat -c '%a' "$target" 2>/dev/null || stat -f '%Lp' "$target" 2>/dev/null || true)"
     if [ -z "$orig_mode" ]; then
       rm -f "$staged"
@@ -906,7 +918,9 @@ EOF
         # hardlinked file that only DOCUMENTS the markers was refused permanently,
         # with a cause (a concurrent install) that had been excluded, and the
         # remedy it printed re-matched the user's own documentation on every run.
-        if ! cmp -s "$target" "$pre_state"; then
+        # "" means this run never read the file (it did not exist at the
+        # classifier's `[ -f ]`), so finding one here IS a change.
+        if [ -z "$pre_state" ] || ! cmp -s "$target" "$pre_state"; then
           chmod "$orig_mode" "$target" 2>/dev/null || true
           trap - INT TERM HUP
           rm -f "$staged"

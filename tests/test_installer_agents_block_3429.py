@@ -746,8 +746,7 @@ def test_a_fenced_documentation_example_does_not_refuse_the_install(tmp_path, ha
     concurrent install as the cause and advising a re-run that re-matched the
     user's own documentation every time (measured rc 3 on both runs). The check
     now asks whether the target CHANGED (`cmp` against the pre-state copy), which
-    cannot false-positive on documentation. The second run also exercises the
-    in-place REPLACE arm, since the block is now paired.
+    cannot false-positive on documentation.
     """
     base = _fixture_tree(tmp_path)
     installer = _patched_installer(tmp_path, base)
@@ -1045,6 +1044,27 @@ def test_a_scratch_dir_failure_reports_a_cause(tmp_path):
     assert done.returncode == 3, done.stdout + done.stderr
     assert "scratch directory" in done.stderr, (
         f"a failure with no cause is not a diagnosis:\n{done.stderr}")
+
+
+def test_a_pre_state_copy_failure_names_a_reachable_cause(tmp_path):
+    """Review P3: the pre-state copy (the bytes the concurrency check compares
+    against) reported a failure as "unreadable, or not a regular file" — and
+    "not a regular file" is already excluded by the `[ -f "$target" ]` guard the
+    copy sits under, so the one reachable cause besides readability (a full or
+    unwritable scratch directory) went unnamed."""
+    stub = ("#!/bin/sh\n"
+            "case \"$*\" in *pre-state-agents.md*) exit 1 ;; esac\n"
+            "exec /bin/cp \"$@\"\n")
+    done, agents = _install_with_stub(tmp_path, "cp", stub, LEGACY_BLOCK)
+
+    assert done.returncode == 3, done.stdout + done.stderr
+    assert "pre-write copy" in done.stderr, (
+        f"the failure must name what it was doing:\n{done.stderr}")
+    assert "not a regular file" not in done.stderr, (
+        "the message must not name a cause the surrounding [ -f ] guard "
+        "excludes:\n" + done.stderr)
+    assert agents.read_text(encoding="utf-8") == LEGACY_BLOCK, (
+        "a failed pre-state copy must write nothing")
 
 
 def test_a_file_that_changes_mid_rewrite_is_not_half_written(tmp_path):
@@ -1700,6 +1720,12 @@ def test_a_signal_whose_restore_fails_still_reports_and_keeps_the_backup(tmp_pat
         "the signal path must say what happened:\n" + err)
     assert "could NOT be restored" in err, (
         "a failed restore must not be silent:\n" + err)
+    # The staged copy is not the recovery artifact — $backup is, and it is named
+    # below — and it is the one leftover that lands in the USER's repo (the same
+    # reason the verified-restore branch removes it).
+    assert not list(project.glob(".tortoise-agents.*")), (
+        "the staged copy must not be left in the project as an untracked file "
+        f"one `git add -A` from being committed: {list(project.glob('.tortoise-agents.*'))}")
     assert (target.stat().st_mode & 0o777) == 0o444, (
         "the mode must be restored even when the bytes cannot be: got "
         f"{oct(target.stat().st_mode & 0o777)}")
