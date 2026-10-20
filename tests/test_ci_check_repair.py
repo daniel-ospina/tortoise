@@ -695,8 +695,24 @@ def test_launchd_entry_point_passes_its_own_directory(tmp_path):
     # Run it the way launchd does and require that the tool is actually FOUND. The
     # state dir is redirected so the run cannot touch the developer's real
     # ~/.pi/agent/state, and `--status` is read-only (it never repairs).
+    #
+    # ⛔ `TORTOISE_REPO` is POPPED, never inherited (#9388). The launcher resolves
+    # `REPO="${TORTOISE_REPO:-$(cd "$SCRIPT_DIR/.." && pwd)}"`, so the fleet's
+    # AMBIENT export (`TORTOISE_REPO=<the main checkout>`, set in every lane's
+    # shell) outranks the directory the launchd entry point passes — the launcher
+    # then correctly reports the MAIN checkout's tool, while the assertion below
+    # demands the WORKTREE's, and the nodeid reds in every fleet lane while staying
+    # green in CI (which exports no `TORTOISE_REPO`). Verified red on the ambient
+    # value before this line existed.
+    #
+    # ⛔ NOT `TORTOISE_REPO=str(repo)`, the shape the sibling tests above use: the
+    # tool path would then come from the OVERRIDE, so an entry point that passed a
+    # garbage `CI_REPAIR_SCRIPT_DIR` — the #8375 P0 this test exists for — would
+    # still be green. The override arm is pinned on its own below rather than
+    # folded in here.
     env = {**os.environ, "CI_REPAIR_STATE_DIR": str(tmp_path),
            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
+    env.pop("TORTOISE_REPO", None)
     r = subprocess.run([sys.executable, str(repo / "tools/ci_check_repair_launchd.py"),
                         "--status"], capture_output=True, text=True, timeout=180,
                        cwd=repo, env=env)
@@ -710,6 +726,41 @@ def test_launchd_entry_point_passes_its_own_directory(tmp_path):
     # the launcher's own tool-existence check.
     assert "(present)" in r.stdout, r.stdout
     assert str(repo / "tools/ci_check_repair.py") in r.stdout
+
+
+def test_the_launcher_lets_TORTOISE_REPO_override_the_script_directory(tmp_path):
+    """The arm the fleet's ambient export takes — pinned explicitly (#9388).
+
+    `tools/ci-check-repair-local.sh` resolves `REPO="${TORTOISE_REPO:-<script
+    dir>/..}"`, so an exported `TORTOISE_REPO` OUTRANKS the directory the launchd
+    entry point passes. That precedence is intended (an operator pins the job at a
+    chosen checkout) and it is exactly why the entry-point pin above must clear the
+    variable: under the fleet's export the launcher reports the main checkout's
+    tool, correctly, and an assertion demanding the worktree's path reds.
+
+    Both arms are pinned here so neither can be "fixed" by weakening the other: in
+    THIS one the resolved tool path must come from the override, not from the
+    script's own directory. If a future edit makes the entry point ignore
+    `CI_REPAIR_SCRIPT_DIR`, the test above reds; if one makes the launcher ignore
+    `TORTOISE_REPO`, this one does.
+    """
+    repo = Path(__file__).resolve().parents[1]
+    pinned = tmp_path / "pinned-checkout"
+    (pinned / "tools").mkdir(parents=True)
+    (pinned / "tools/ci_check_repair.py").write_text("", encoding="utf-8")
+    env = {**os.environ, "CI_REPAIR_STATE_DIR": str(tmp_path / "state"),
+           "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+           "TORTOISE_REPO": str(pinned)}
+    r = subprocess.run([sys.executable, str(repo / "tools/ci_check_repair_launchd.py"),
+                        "--status"], capture_output=True, text=True, timeout=180,
+                       cwd=repo, env=env)
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert f"tool       : {pinned}/tools/ci_check_repair.py (present)" in r.stdout, (
+        "the launcher did not resolve the tool from TORTOISE_REPO, so an operator "
+        f"cannot pin the job at a checkout of their choosing: {r.stdout!r}")
+    assert str(repo / "tools/ci_check_repair.py") not in r.stdout, (
+        "the script's own directory still decided the tool path although "
+        f"TORTOISE_REPO was set — the override is not in force: {r.stdout!r}")
 
 
 def test_the_python_guard_refuses_an_old_interpreter_with_exit_2(tmp_path):
