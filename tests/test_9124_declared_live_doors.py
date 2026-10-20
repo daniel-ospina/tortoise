@@ -138,11 +138,33 @@ _SCOPE_CALL_NAMES = (
     "_prewipe_restore_write_scope",
     "_cache_write_authorized",
     "_declares_live_write_lane",
+    # #9206: the APPLY-FIRST lane and its decorator. A declaration, so the
+    # census must SEE it — an opener missing from this tuple reports a writer
+    # that DOES declare as undeclared, and the flip gate would then instruct the
+    # next lane to add a lane that is already there (the #9124 review P2/#9210
+    # shape, one lane over).
+    "_apply_first_write_scope",
+    "_declares_apply_first_write_lane",
+    # #9206: the DERIVED-RECOMPUTE lane (`resolve_source_key`'s adopt-on-touch —
+    # a value re-derived from journal-carried input, appended nowhere). Same
+    # reason as the apply-first pair above: an opener the census cannot see
+    # reports a DECLARED writer as undeclared.
+    "_derived_recompute_write_scope",
 )
 #: The subset that claims "this door appends its record, THEN writes the cache".
 #: Only these are held to the journal-first ordering pin below: a replay or
 #: graph-metadata lane makes no such claim.
 _LIVE_LANE_NAMES = ("_live_write_scope", "_declares_live_write_lane")
+#: The subset that claims the INVERSE order — the cache write is the commit
+#: point and the record that describes it follows, BY DECISION (#9206). Its own
+#: pin (`test_every_apply_first_declared_door_states_an_order_and_a_record`)
+#: requires the door to append a record anyway and to be GENUINELY apply-first,
+#: so the lane can never become an amnesty for an unjournalled cache write.
+_APPLY_FIRST_LANE_NAMES = (
+    "_apply_first_write_scope", "_declares_apply_first_write_lane")
+#: Every lane DECORATOR — the openers whose scope spans the whole function body
+#: (a `with` inside the body spans only its block, handled separately).
+_DECLARATION_DECORATORS = (*_LIVE_LANE_NAMES, *_APPLY_FIRST_LANE_NAMES)
 
 
 # ── the inventories: everything part 1 does NOT declare, and why ───────────
@@ -157,26 +179,29 @@ _LIVE_LANE_NAMES = ("_live_write_scope", "_declares_live_write_lane")
 #: committed record — the #9068 defect, and the opposite of what §17.1 requires.
 #: Fixing one means moving the record above the write AND deciding its failure
 #: contract (does a failed append abort the write?), which is #9124 part 2.
+#:
+#: ⚠️ #9206 DECLARED seven of these doors on the apply-first lane
+#: (`_declares_apply_first_write_lane`) rather than leaving their writes
+#: undeclared, so `create_direct_edge`, `create_operator`, `delete_point`,
+#: `_delete_entity`, `_materialize_session_source`, `_update_entity`,
+#: `_write_capture_turns` and `update_point` have LEFT these inventories. A
+#: declaration does not convert the order: the entries that remain are still
+#: apply-first, and the lane's own pin requires each declared door to append its
+#: record and to be genuinely apply-first.
 _APPLY_FIRST_DOORS = {
     "approve_merge",         # SET reviewed flags, then PointRevised/… records
     "assess_source",         # SET reliability, then the assessment record
+    # #9206: measured apply-first — its provenance stamps (the minted-Point
+    # eventId/source_session/harness SETs and their operator variants) run
+    # BEFORE the first record the door appends. It carried NO declaration and
+    # stays UNdeclared: whether those stamps need their own record (or are
+    # covered by the extraction writers' `PointAdded` payloads) is #9124 part
+    # 2's per-door decision, and blessing them here would be the #9068 defect.
+    # ⚠️ It used to sit in `_MIXED_ARM_DOORS` as "journal-first" because the
+    # census counted the `_emit_event` inside its `on_session_merged=` lambda as
+    # an append — a callback the CALLEE ran, not a record the door appended.
+    "capture_session",
     "compute_confidence",    # SET n.confidence per row, then ConfidenceChanged
-    "create_direct_edge",    # MERGE/SET the edge, then DirectEdgeCreated
-    "create_operator",       # CREATE the operator node, then OperatorAdded
-    # #9207: the `DETACH DELETE` is issued FIRST and the `EntityMutated`
-    # op=delete record follows a LANDED destroy, so this door carries no
-    # live lane — its #9124 part-1 `@_declares_live_write_lane("delete_point")`
-    # was journal-first-only and was WITHDRAWN when the order reversed (the
-    # ordering pin below re-derives that from the source). ⚠️ Unlike the rows
-    # above, the order here is a DECISION, not a remainder waiting to be
-    # converted: #9207 chose cache-first on measured direction (append-first
-    # commits a destruction the cache never performed). Honouring it under an
-    # ARMED handle needs an "apply-first, by decision" lane — a §17.1 decision
-    # (#9124 / #9206), not a re-purposed decorator. Until then its writes are
-    # MEASURED as undeclared, and an armed guard REFUSES them
-    # (`test_9079_handle_write_authority.py::
-    # test_an_apply_first_door_is_refused_by_the_armed_guard`).
-    "delete_point",
     "mitigate_operator",     # CREATE the mitigation, then its records
     "promote_point",         # CAS SET status='live', then PointPromoted
     "record_calibration",    # write the calibration row, then its record
@@ -189,31 +214,30 @@ _APPLY_FIRST_HELPERS = {
     "_apply_capture_ingest_ep",
     "_apply_source_inheritance",
     "_dedup_content_candidates",   # marks the candidate, then records it
-    "_delete_entity",              # DETACH DELETE, then the mutation record
     "_embedding_repair_attempt",
-    "_materialize_session_source",  # MERGE(:Source), then the record
     "_promote_incident_operators",
     "_session_event_write",
     "_stamp_batch_id",             # SET n.batch_id, then _emit_batch_id_record
-    "_update_entity",              # SET, then _journal_entity_mutation
-    "_write_capture_turns",
 }
 
-#: Journal-first BY ORDER, but holding an arm whose record is deliberately
-#: stated after its guarded write — so the door is part 2's, not part 1's:
+#: Journal-first BY ORDER but holding an arm whose record is deliberately stated
+#: after its guarded write — EMPTY since #9206, and kept so the reason the class
+#: existed is still readable rather than deleted along with its last member:
 #:
-#: * `update_point` — the `status='live'` promote arm (a `WHERE`-guarded SET that
-#:   can legitimately match nothing and then RAISES, so journalling first would
-#:   record a promotion the graph refused; the deviation is pinned by
-#:   `tests/test_7951_update_point_outbox.py`). The SAME write region serves the
-#:   journal-first arms, so one `with` cannot separate them.
-#: * `capture_session` — its `:Session` counter writes record their outcome only
-#:   AFTER the write ("the raw SET above has no journal carrier ... emit a
-#:   TRAILING SessionRecorded"), which is the same shape.
-_MIXED_ARM_DOORS = {
-    "capture_session",
-    "update_point",
-}
+#: * `update_point` was the entry: its `status='live'` promote arm appends its
+#:   record AFTER the guarded `SET` (#8830), while the non-promote arm appends
+#:   first. #9206 declared the whole door on the apply-first lane, which states
+#:   exactly that (a write whose record follows, by decision) without
+#:   overclaiming for the promote arm.
+#: * `capture_session` was the other, and it turned out to be MISCLASSIFIED: the
+#:   `append` the census saw was the `_emit_event` call inside the
+#:   `on_session_merged=lambda record: self._emit_event(...)` argument — a
+#:   callback the CALLEE invokes, not a record this door appends before its
+#:   write. #9206 removed that lambda (the shared writer journals its own
+#:   `:Session` now), which moved the door's first real append below its first
+#:   write; it is inventoried under `_APPLY_FIRST_DOORS` with that measurement in
+#:   its own comment.
+_MIXED_ARM_DOORS: set[str] = set()
 
 #: Reach the handle with a write-like statement and append NO record at all, so
 #: there is no lane to declare: each needs either a named graph-metadata lane
@@ -236,7 +260,6 @@ _NO_JOURNAL = {
     "_touch_inherited_at",
     "_write_props",
     "_write_reliability_cache",
-    "_write_session_and_turns",
     "backfill_v25",
     "complete_source",
     "ingest",
@@ -591,8 +614,10 @@ def enumerate_handle_surface(source: str, filename: str = "<src>") -> dict:
                         decorator.func, "attr", None)
                     if opener in _SCOPE_CALL_NAMES:
                         facts[current]["scopes"].append((decorator.lineno, opener))
-                        if opener in _LIVE_LANE_NAMES:
-                            # A lane DECORATOR covers the whole body.
+                        if opener in _DECLARATION_DECORATORS:
+                            # A lane DECORATOR covers the whole body — for BOTH
+                            # claims (#9124's journal-first lane and #9206's
+                            # apply-first one).
                             facts[current]["scope_spans"].append(
                                 (node.lineno,
                                  getattr(node, "end_lineno", node.lineno) or
@@ -783,9 +808,26 @@ def _journal_first_violation(fact) -> str | None:
 
 
 def _kind(fact) -> str:
-    """Classify one function: declared, or which inventory it belongs to."""
+    """Classify one function: declared, or which inventory it belongs to.
+
+    The two DECLARED kinds are kept apart because the claims differ: a
+    journal-first lane asserts the record precedes the write, an apply-first one
+    asserts the opposite ORDER by decision (#9206), and conflating them would
+    let a door take the weaker claim silently — the lane-about-lane defect this
+    suite keeps closing.
+    """
+    openers = {opener for _line, opener in fact["scopes"]}
+    if openers & set(_APPLY_FIRST_LANE_NAMES) and openers & set(_LIVE_LANE_NAMES):
+        # Both claims at once is not a stronger declaration: a later edit cannot
+        # tell which one the door means, and the journal-first pin would pass on
+        # an apply-first body.
+        return "conflicting-lanes"
     if fact["scopes"]:
-        return "declared" if _writes_are_inside_a_lane(fact) else "outside-lane"
+        if not _writes_are_inside_a_lane(fact):
+            return "outside-lane"
+        if openers & set(_APPLY_FIRST_LANE_NAMES):
+            return "apply-first-declared"
+        return "declared"
     if not fact["appends"]:
         return "no-journal"
     return "apply-first" if _journal_first_violation(fact) else "journal-first"
@@ -872,6 +914,13 @@ def test_every_mutating_sdk_entry_point_is_declared_or_inventoried():
             continue
         kind = _kind(fact)
         reason = _inventory_of(name)
+        if kind == "conflicting-lanes":
+            offenders.append(
+                f"{name}:{fact['lineno']} declares BOTH a journal-first and an "
+                f"apply-first lane ({fact['scopes']}) — the door must state ONE "
+                "order; the stronger (journal-first) claim is the one a "
+                "journal-first body earns")
+            continue
         if kind == "outside-lane":
             offenders.append(
                 f"{name}:{fact['lineno']} OPENS a lane ({fact['scopes']}) but "
@@ -879,7 +928,7 @@ def test_every_mutating_sdk_entry_point_is_declared_or_inventoried():
                 "not containment; move the write inside the lane or declare one "
                 "that covers it")
             continue
-        if kind == "declared":
+        if kind in ("declared", "apply-first-declared"):
             if reason is not None:
                 offenders.append(
                     f"{name}:{fact['lineno']} is DECLARED ({fact['scopes']}) but "
@@ -955,6 +1004,215 @@ def test_no_two_census_entries_share_a_bare_function_name():
         "covered by the other's row. Qualify the inventory entry (or split it) "
         "and resolve it the same way in `_inventory_of`:\n  "
         + "\n  ".join(offenders))
+
+
+#: THE APPLY-FIRST LANE'S MEMBERSHIP, PINNED (#9206). One line per door, so a
+#: new `_declares_apply_first_write_lane` (or an inline
+#: `_apply_first_write_scope`) reds here until it is reviewed and listed. The set
+#: may only change with a line in this file — which is what stops a journal-first
+#: door from quietly taking the WEAKER claim because the write region was easier
+#: to wrap that way.
+_APPLY_FIRST_DECLARED_DOORS = {
+    # The apply-first, by decision doors: the record's OUTCOME depends on the
+    # write, and the decision is recorded where the door lives.
+    "delete_point",          # #9207: cache-first, the destroy is the commit point
+    "update_point",          # #8830: the promote arm's guarded SET, then its record
+    # The mechanical apply-first doors (#9206): their record is built from the
+    # node they just wrote, so the append cannot precede the write without
+    # changing the door's commit contract (#9124 part 2).
+    "create_operator",
+    "create_direct_edge",
+    "_update_entity",
+    "_delete_entity",
+    "_write_capture_turns",
+    "_materialize_session_source",
+}
+
+#: Doors whose apply-first ORDER the census cannot prove: an append attributed
+#: to a NESTED function (or to another arm of the same body) satisfies
+#: `_journal_first_violation` while the write that matters still precedes its
+#: record. Each entry names the pin that owns the order proof, so the exemption
+#: is a POINTER to evidence rather than an assertion here.
+_APPLY_FIRST_PROVED_ELSEWHERE = {
+    # The promote arm's `SET` lands first and `_record_promote()` appends after
+    # it; the non-promote arm's append is unconditional in source order, so the
+    # census reads the whole body as journal-first. The order is pinned by
+    # `tests/test_7951_update_point_outbox.py::
+    # test_the_promote_arm_stays_apply_first_a_recorded_deviation` and
+    # `::test_a_refused_promote_journals_no_revision`.
+    "update_point": "tests/test_7951_update_point_outbox.py",
+}
+
+
+def _apply_first_declaration_offenders(surface: dict) -> tuple[list[str], dict]:
+    """The apply-first lane's honesty check, on ANY enumerated surface.
+
+    Factored out of the pin below so the SAME check can be driven over a
+    synthetic module (`test_the_apply_first_pin_flags_a_door_that_appends_
+    nothing`, `..._a_journal_first_door_that_took_the_weaker_lane`). Without
+    that, the pin's non-vacuity would rest on the real tree happening to contain
+    a broken door — i.e. on a defect existing.
+    """
+    offenders = _duplicate_writer_offenders(surface)
+    declared: dict[str, dict] = {}
+    for name, fact in sorted(surface.items(), key=lambda kv: kv[1]["lineno"]):
+        openers = {opener for _line, opener in fact["scopes"]}
+        if not openers & set(_APPLY_FIRST_LANE_NAMES):
+            continue
+        if openers & set(_LIVE_LANE_NAMES):
+            offenders.append(
+                f"{name}:{fact['lineno']} declares BOTH lane families "
+                f"({sorted(openers)}) — one order per door")
+            continue
+        declared[_bare_name(name)] = fact
+        if fact.get("duplicate_writer_defs"):
+            # Already refused above (two writing definitions share one name).
+            continue
+        if not fact["appends"]:
+            offenders.append(
+                f"{name}:{fact['lineno']} declares the APPLY-FIRST lane but "
+                "appends NO record — that is the #9068 defect (a declaration "
+                "blessing an unjournalled cache write). Journal the write or "
+                "retire the path; do not declare it here")
+            continue
+        if not _writes_are_inside_a_lane(fact):
+            offenders.append(
+                f"{name}:{fact['lineno']} declares a lane but writes outside "
+                f"it at line {fact['writes'][0][0]} — presence is not "
+                "containment")
+            continue
+        if _journal_first_violation(fact) is None:
+            if _bare_name(name) in _APPLY_FIRST_PROVED_ELSEWHERE:
+                continue
+            offenders.append(
+                f"{name}:{fact['lineno']} declares the APPLY-FIRST lane, but "
+                "the census reads this door as JOURNAL-FIRST (every write has "
+                "an earlier record at no greater depth). Use "
+                "`_declares_live_write_lane` — the stronger claim — or, if the "
+                "order proof needs a dedicated test, name it in "
+                "`_APPLY_FIRST_PROVED_ELSEWHERE`")
+            continue
+    return offenders, declared
+
+
+def test_every_apply_first_declared_door_states_an_order_and_a_record():
+    """An apply-first declaration is honest OR it reds (#9206).
+
+    The lane's claim is weaker than `_live_write_scope`'s, which is exactly why
+    it needs its own gate — a lane whose check is "some opener appears" would
+    let any door weaken its declaration until it is vacuous. Four properties,
+    each of them something a future write door could otherwise forget:
+
+    1. **A record IS appended.** A door that writes the cache and appends
+       nothing is the #9068 defect (a declaration blessing an unjournalled
+       cache write). The honest remedies there are *journal it* or *retire the
+       path* — never this lane.
+    2. **Every write runs INSIDE the lane.** Presence is not containment; an
+       opener that wraps a read while the write sits outside authorizes nothing
+       and would be refused by an armed handle.
+    3. **The door is GENUINELY apply-first** — a write precedes the record that
+       covers it — unless its dedicated order proof is named in
+       `_APPLY_FIRST_PROVED_ELSEWHERE`. A journal-first door must carry the
+       STRONGER `_declares_live_write_lane`; taking this lane instead would
+       understate (and eventually erode) the guarantee it can actually make.
+    4. **The membership is PINNED.** The lane can only grow or shrink through a
+       reviewed line in this file, so a new door cannot adopt the weaker claim
+       silently.
+
+    Non-vacuity: the check is driven over a synthetic module by the two tests
+    below, AND the declared set here must be non-empty and contain at least one
+    door the census PROVES apply-first.
+    """
+    surface = enumerate_handle_surface(SDK_PY.read_text(), str(SDK_PY))
+    offenders, declared = _apply_first_declaration_offenders(surface)
+    provable = sum(
+        1 for fact in declared.values()
+        if _journal_first_violation(fact) is not None)
+
+    stale = sorted(set(_APPLY_FIRST_PROVED_ELSEWHERE) - set(declared))
+    assert not stale, (
+        "`_APPLY_FIRST_PROVED_ELSEWHERE` names a door that does not declare the "
+        f"apply-first lane any more (or was renamed): {stale} — delete the row, "
+        "or the exemption outlives the claim it was written for")
+    assert not offenders, (
+        "an apply-first declaration is not honest as written:\n  "
+        + "\n  ".join(offenders))
+
+    assert declared, (
+        "no door declares the apply-first lane — the pin would pass vacuously, "
+        "and the lane would be an unexercised claim")
+    assert provable, (
+        "the census PROVES no declared door apply-first — the classification "
+        "this pin rests on has stopped working, so every row above would be "
+        "exempt-via-allowlist")
+    pinned = set(_APPLY_FIRST_DECLARED_DOORS)
+    assert set(declared) == pinned, (
+        "the apply-first lane's membership changed. It is pinned EXACTLY: a new "
+        "door must be added here with its reason (which part of its record "
+        "depends on the write), and a door that left must be deleted — so the "
+        "lane can only change with a reviewed line, never by drift:\n"
+        f"  declared but not pinned: {sorted(set(declared) - pinned)}\n"
+        f"  pinned but not declared: {sorted(pinned - set(declared))}")
+
+
+#: A synthetic door that declares the apply-first lane and appends NOTHING.
+#: The form a future writer takes when it reaches for the lane as a way past a
+#: refusal instead of as a statement about its order.
+_SYNTHETIC_NO_RECORD_DOOR = '''
+class Door:
+    @_declares_apply_first_write_lane("no-record")
+    def writes_without_a_record(self, proj):
+        proj.g.query("MATCH (n:Point {id:$id}) SET n.x = 1")
+'''
+
+#: A synthetic JOURNAL-FIRST door that took the weaker lane. Its record really
+#: does precede its write, so the honest declaration is `_live_write_scope`; the
+#: weaker lane would leave the door's guarantee lower than what it can make.
+_SYNTHETIC_JOURNAL_FIRST_DOOR = '''
+class Door:
+    @_declares_apply_first_write_lane("weaker-than-proven")
+    def appends_then_writes(self, proj):
+        self._emit_event("PointRevised", id="p1")
+        proj.g.query("MATCH (n:Point {id:$id}) SET n.x = 1")
+'''
+
+
+def test_the_apply_first_pin_flags_a_door_that_appends_nothing():
+    """Non-vacuity, first half: the #9068 shape is REFUSED (#9206).
+
+    A door that writes the cache and appends no record cannot take any lane —
+    the honest outcomes are *journal it* or *retire the path*. If this passes
+    silently, the lane is an amnesty and the whole declaration programme is a
+    rubber stamp.
+    """
+    surface = enumerate_handle_surface(
+        _SYNTHETIC_NO_RECORD_DOOR, "<synthetic-no-record>")
+    offenders, declared = _apply_first_declaration_offenders(surface)
+    assert "writes_without_a_record" in declared, (
+        "the enumerator did not see the synthetic door at all, so this "
+        "non-vacuity check would pass for the wrong reason")
+    assert any("appends NO record" in o for o in offenders), (
+        "a door that declares the apply-first lane while appending no record "
+        f"was ACCEPTED — the #9068 defect is open: {offenders}")
+
+
+def test_the_apply_first_pin_flags_a_journal_first_door_that_took_the_weaker_lane():
+    """Non-vacuity, second half: the LANE must match the ORDER (#9206).
+
+    A door whose record precedes its write can make the journal-first claim, and
+    a declaration is only worth the guarantee it states. Accepting the weaker
+    lane here would let a future edit that needs the stronger claim keep passing
+    on yesterday's weaker declaration.
+    """
+    surface = enumerate_handle_surface(
+        _SYNTHETIC_JOURNAL_FIRST_DOOR, "<synthetic-journal-first>")
+    offenders, declared = _apply_first_declaration_offenders(surface)
+    assert "appends_then_writes" in declared, (
+        "the enumerator did not see the synthetic door, so this check would "
+        "pass for the wrong reason")
+    assert any("declares the APPLY-FIRST lane, but the census reads this door "
+               "as JOURNAL-FIRST" in o for o in offenders), (
+        f"a journal-first door took the weaker lane unrefused: {offenders}")
 
 
 def test_every_live_declared_door_is_journal_first():
@@ -1712,7 +1970,7 @@ def _call_is_inside_a_scope(func, callee) -> bool:
         if isinstance(decorator, ast.Call):
             opener = getattr(decorator.func, "id", None) or getattr(
                 decorator.func, "attr", None)
-            if opener in _LIVE_LANE_NAMES:
+            if opener in _DECLARATION_DECORATORS:
                 return True
     for node in _own_body_nodes(func):
         if not isinstance(node, (ast.With, ast.AsyncWith)):

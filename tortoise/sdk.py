@@ -110,6 +110,13 @@ from . import file_indexer  # noqa: F401 — binds the classifier/identity modul
 from .projection import FalkorProjection
 # #7951 §17.1: the single-writer scope the live doors open around their fold.
 from .projection import _declares_live_write_lane, _live_write_scope
+# #9206 §17.1: the APPLY-FIRST declaration — the cache write is the commit point
+# and the record that describes it follows, BY DECISION. A declaration, not a
+# bypass: it is honest only where a record IS still appended (the census pin
+# refuses a door that appends none — the #9068 defect).
+from .projection import (
+    _declares_apply_first_write_lane,
+)
 # #9123 §17.1: the GRAPH-METADATA lane — a write with no journal record that
 # describes it, and whose loss a rebuild absorbs.
 from .projection import _graph_metadata_write_scope
@@ -2148,6 +2155,7 @@ def _capture_turn_ids(proj, session_id: str) -> list[str]:
             if isinstance(r[0], str) and r[0][len(prefix):].isdecimal()]
 
 
+@_declares_apply_first_write_lane("_write_capture_turns")
 def _write_capture_turns(
     proj,
     sdk,
@@ -2459,6 +2467,7 @@ def _write_capture_turns(
     return redacted_total
 
 
+@_declares_live_write_lane("_write_session_and_turns")
 def _write_session_and_turns(
     proj,
     sdk,
@@ -2520,10 +2529,18 @@ def _write_session_and_turns(
       * ``session_existed`` is the caller's own pre-MERGE probe (it also drives
         the caller's replay/retry gate); it is forwarded to the turn writer so
         the fresh-capture hot path keeps its exact query count.
-      * ``on_session_merged`` lets a journaling caller emit its
-        ``SessionRecorded`` record BETWEEN the MERGE and the turn write — the
-        order the SDK lane's live/replay parity depends on. ``None`` is a no-op
-        (hosted journals nothing here).
+      * ``on_session_merged`` is an OBSERVER hook fired after the MERGE. It is
+        NOT the journal carrier any more (#9206: this writer appends
+        ``SessionRecorded`` itself, before the MERGE), so ``None`` — or any
+        observer — costs nothing in durability.
+
+    ⛔ §17.1 (#9206): this writer carries `@_declares_live_write_lane` — it
+    appends its OWN `SessionRecorded` before the `:Session` MERGE, so the MERGE
+    is journal-first. ⚠️ It also delegates the turn store to
+    `_write_capture_turns`, which carries its own APPLY-FIRST declaration
+    (`@_declares_apply_first_write_lane`): the turn Points' `PointAdded` records
+    follow their batched write. That nested claim is stated where it lives, not
+    inherited from this door's stronger one.
 
     ⛔ ``machine_id`` and ``model`` MUST keep the set-if-absent ``coalesce``
     semantics. A plain ``SET s.machine_id=$mid`` would let a re-capture from a
@@ -2624,6 +2641,33 @@ def _write_session_and_turns(
     if model:
         merge_sets.append("s.model=coalesce(s.model, $model)")
         merge_params["model"] = model
+    # #9206 §17.1: THE RECORD IS APPENDED HERE, BEFORE THE MERGE, by the writer
+    # itself. Two defects are closed in one line and they share a cause (a
+    # record whose emission belonged to the CALLER):
+    #
+    #   * the HOSTED capture lane passed no `on_session_merged` at all, so its
+    #     `MERGE (s:Session …)` was UNJOURNALLED — a raw graph write with no
+    #     record, which a journal-only `rebuild()`/`recover_from_log` simply
+    #     drops (#9206 measured it through §17.1's third door);
+    #   * and with no record of its own this writer could not DECLARE a lane
+    #     honestly: the census (`tests/test_9124_declared_live_doors.py`) refuses
+    #     an apply-first declaration on a door that appends nothing — the #9068
+    #     defect — so "every caller must remember to journal" was a precondition
+    #     the type system could not keep.
+    #
+    # The ORDER is #3664's, moved one step earlier: the record must precede the
+    # TURN WRITE (whose `PointAdded` records carry `contains_session`, so a
+    # replay needs the `:Session` node to exist when it folds them), and
+    # appending it before the MERGE satisfies that while ALSO making the MERGE
+    # journal-first — the direction §17.1 requires (a record the cache lacks is
+    # projection lag; a cache node no record describes is the second writer).
+    # The fold is an idempotent `MERGE` by `id` with coalesce-preserved fields,
+    # so a replayed record whose live MERGE later failed converges rather than
+    # duplicating. ⚠️ The append's outcome is not checked (same residual as
+    # `supersede_point`, #9124 part 2): `_emit_event` is best-effort, so a failed
+    # append leaves the cache ahead of the journal — counted in
+    # `_journal_write_failures`, not reported per call.
+    sdk._emit_event("SessionRecorded", **session_record)
     # #7405 (audit G8): the `:Session` MERGE rides the bounded write retry.
     # Before this a rebuild's per-query abort raised out of this writer BEFORE
     # the turn store below, so the capture lost the whole session — row and
@@ -2649,6 +2693,9 @@ def _write_session_and_turns(
         what="capture :Session MERGE",
     )
     if on_session_merged is not None:
+        # An OBSERVER hook, not the journal carrier (#9206: this writer appends
+        # its own `SessionRecorded` above). Both capture lanes pass it or not for
+        # their own reasons; nothing depends on it for durability.
         on_session_merged(session_record)
 
     # The stored text is the WRITER'S OWN definition (#4911's scrubber runs
@@ -3045,6 +3092,14 @@ def _deleted_point_payload(id: str) -> dict:
 # rather than writes, so a count from it would be a guess). Plan §7 increment 4
 # tracks the conversion; naming the four is not fixing them.
 #
+# ⚠️ #9206 changed what "still apply-first" COSTS, not the order: each of these
+# doors now DECLARES the apply-first lane (`_declares_apply_first_write_lane`)
+# instead of leaving its writes undeclared, so an armed handle no longer refuses
+# the product's own write path while the per-door conversion (#9124 part 2)
+# remains open. The declaration states the order; it does not close the window
+# described above, and the lane's census pin refuses a door that appends no
+# record.
+#
 # `delete_point` is apply-first BY SHAPE since #9207 (the `DETACH DELETE` is
 # issued first and the `EntityMutated` op=delete record follows it, once it has
 # returned) — but it is NOT one of the doors this inventory is about, and the
@@ -3073,11 +3128,14 @@ def _deleted_point_payload(id: str) -> dict:
 # owed here": this door USED to carry `@_declares_live_write_lane(
 # "delete_point")` (#9124 part 1). That declaration was journal-first-only —
 # `_declares_live_write_lane`'s docstring says so — and #9207's reversal makes it
-# false, so it is REMOVED rather than qualified and `delete_point` is inventoried
-# in `tests/test_9124_declared_live_doors.py` (`_APPLY_FIRST_DOORS`, by decision).
-# Until an "apply-first, by decision" lane exists (#9124/#9206), this door's
-# handle writes are MEASURED as undeclared, and an ARMED handle (part 2) refuses
-# them. Neither is silent: the measure is on the census, the refusal raises.
+# false, so it was REMOVED rather than qualified. #9206 then DECLARED the order
+# the door actually uses: `@_declares_apply_first_write_lane("delete_point")`,
+# the lane that states "the cache write is the commit point, the record follows,
+# by decision". A declaration is not an amnesty — the lane's census pin fails
+# for a door that appends no record (the #9068 defect) and for a journal-first
+# door that took the weaker lane — and the runtime behaviour is pinned by
+# `tests/test_9079_handle_write_authority.py`
+# (`test_a_declared_apply_first_door_writes_under_the_armed_guard`).
 # ═══════════════════════════════════════════════════════════════════════════
 
 # #7951: the envelope keys ``_emit_event`` OWNS. A record that is journalled
@@ -9266,14 +9324,15 @@ class TortoiseSDK:
         # (the #1532/#2813 duplicated-store class).
         #
         # #3664: the journal's ``SessionRecorded`` for the raw :Session MERGE
-        # must land BETWEEN the MERGE and the turn write (a rebuild otherwise
-        # loses the node, making any EntityLinked edge FROM it unreplayable), so
-        # it rides the ``on_session_merged`` hook rather than following the
-        # whole write. The idempotent fold MERGEs by id and coalesce-preserves
+        # must land BEFORE the turn write (a rebuild otherwise loses the node,
+        # making any EntityLinked edge FROM it unreplayable). #9206 moved it one
+        # step earlier — the shared writer appends it ITSELF, before the MERGE —
+        # so this lane no longer supplies the record and cannot forget it; the
+        # hosted lane, which supplied none, now journals its :Session too. The
+        # idempotent fold MERGEs by id and coalesce-preserves
         # created_at/actor_user_id/capture_lane, mirroring the live SET clauses;
-        # it is
-        # emitted on every capture (the MERGE is itself unconditional) so the
-        # journaled ``turn_count`` tracks the live value on the #1727
+        # it is emitted on every capture (the MERGE is itself unconditional) so
+        # the journaled ``turn_count`` tracks the live value on the #1727
         # longer-replay-payload path.
         #
         # #4194: ``embed_fn`` is the ONE local-encoder batch, computed over the
@@ -9291,8 +9350,6 @@ class TortoiseSDK:
             session_existed=session_existed,
             embed_fn=lambda texts: _capture_turn_embeddings(
                 texts, proj.required_embedding_dim),
-            on_session_merged=lambda record: self._emit_event(
-                "SessionRecorded", **record),
         )
         _capture_redactions = _capture_write["redacted_total"]
 
@@ -11079,6 +11136,7 @@ class TortoiseSDK:
         }
         return extracted, meta
 
+    @_declares_apply_first_write_lane("_materialize_session_source")
     def _materialize_session_source(
         self,
         session_id: str,
@@ -11372,6 +11430,7 @@ class TortoiseSDK:
             return self.delete_point(id)
         return self.delete_entity(id)
 
+    @_declares_apply_first_write_lane("update_point")
     def update_point(self, id: str, *, is_episodic: bool | None = None, **props) -> dict:
         """Update properties on an existing Point. Returns updated point dict.
 
@@ -11679,17 +11738,23 @@ class TortoiseSDK:
         # `test_the_promote_arm_stays_apply_first_a_recorded_deviation` and
         # `test_a_refused_promote_journals_no_revision`.
         #
-        # ⛔ NOT ROUTED THROUGH THE FOLD YET, AND STILL UNDECLARED (#9124).
-        # The non-promote writes below go through the raw guarded handle, whose
-        # §17.1 door now DETECTS an undeclared write (#9124 part 1), so this
-        # door is one of the measured remainder in
-        # `tests/test_9124_declared_live_doors.py`'s MIXED-ARM inventory. It
-        # cannot declare `_live_write_scope` yet, for the reason the promote arm
-        # below states: the SAME write region serves an arm whose record is
-        # stated only AFTER its guarded write, so a scope placed here would
-        # authorize that arm too. Moving these writes onto the fold — and
-        # deciding the promote arm with them — is part 2 (#9124), and that is
-        # when this door declares itself.
+        # ⛔ DECLARED APPLY-FIRST (#9206), and the non-promote arm is the
+        # reason the claim is the weaker one. The writes below go through the
+        # raw guarded handle, whose §17.1 door DETECTS an undeclared write
+        # (#9124 part 1) and REFUSES it once armed (part 2). This door could not
+        # declare `_live_write_scope`: the SAME write region serves the PROMOTE
+        # arm, whose record may only be stated AFTER its guarded write, so a
+        # journal-first declaration here would authorize it falsely. The door
+        # therefore carries `@_declares_apply_first_write_lane("update_point")`
+        # — "a write precedes its record, by decision" — which is TRUE of the
+        # promote arm and merely WEAKER than the non-promote arm's own
+        # behaviour (that arm appends first and aborts with
+        # `WriteNotLandedError` when its append fails; the lane says nothing
+        # against it, and this comment is where the asymmetry is recorded).
+        # Pinned by `tests/test_9124_declared_live_doors.py::
+        # test_every_apply_first_declared_door_states_an_order_and_a_record`
+        # (the door is genuinely apply-first) and by
+        # `tests/test_7951_update_point_outbox.py`'s promote-arm pins.
         # #1904: content_hash is derived from content — keep it out of the
         # event record (mirrors create_point's snapshot strip at emit).
         # #4208: the vector this path just DERIVED from the content is stripped
@@ -12131,42 +12196,42 @@ class TortoiseSDK:
         # payload is the same dict either way — one record shape per call.
         return result
 
-    # §17.1 LANE (#9124): NONE, and that is the honest state — #9207 reversed
-    # this door to the APPLY-FIRST shape, so the live-lane declaration it used
-    # to carry here would now be FALSE.
+    # §17.1 LANE (#9206): the APPLY-FIRST lane — DECLARED, with the order it
+    # actually uses. #9207 reversed this door to the apply-first shape, so the
+    # journal-first declaration it used to carry (`@_declares_live_write_lane`,
+    # #9124 part 1) would now be FALSE: it asserted "the record is appended,
+    # THEN the cache is written".
     #
-    # `@_declares_live_write_lane("delete_point")` (landed by #9124 part 1 /
-    # #9224) asserts "the record is appended, THEN the cache is written". That
-    # was true of #7951 increment 4a — and #9207 reverses the order on measured
-    # evidence (see the block below), which makes the same decorator authorize
-    # a `DETACH DELETE` issued BEFORE any record exists: the #9068 defect
-    # `_declares_live_write_lane`'s own docstring says a declaration must never
-    # bless. It is not a matter of opinion — `tests/test_9124_declared_live_
-    # doors.py::test_every_live_declared_door_is_journal_first` re-derives the
-    # order from this source, and it names `delete_point` as an offender when
-    # the decorator is present. That is why it is gone rather than kept with a
-    # caveat.
+    # ⛔ THE REMEDY IS NOT "NO DECLARATION". Undeclared left the door's writes
+    # MEASURED (#9124 part 1) and, once `_HANDLE_GUARD_ENFORCES` is armed (part
+    # 2), REFUSED — the product's own delete path refused by the guard that
+    # exists to protect it. So #9206 adds the lane this door can honestly claim:
+    # `_declares_apply_first_write_lane`, which states "the cache write IS the
+    # commit point and the record that describes it follows, BY DECISION" — the
+    # exact claim #9207 makes (see the block below). It is a DECLARATION, not a
+    # bypass: a record IS appended for every destroy that lands, and the lane's
+    # census pin refuses a door that appends none (the #9068 defect), so this
+    # cannot become an amnesty for an unjournalled cache write.
     #
-    # So this door is INVENTORIED, not declared: `_APPLY_FIRST_DOORS` in
-    # `tests/test_9124_declared_live_doors.py` carries it with this reason.
-    # ⚠️ Consequences, stated rather than implied: (a) its handle writes are
-    # MEASURED as undeclared (one WARNING per distinct statement, #9124 part 1
-    # measure mode) instead of being covered by the door's own lane, and (b)
-    # with `_HANDLE_GUARD_ENFORCES` armed (part 2) this door is REFUSED at the
-    # `DETACH DELETE`. Honouring an apply-first door under an armed handle needs
-    # a lane that says "apply-first, by decision" — a §17.1 decision that lives
-    # with #9124/#9206, not a decorator this file may quietly re-purpose. Pinned
-    # executably by `tests/test_9079_handle_write_authority.py::test_an_apply_
-    # first_door_is_refused_by_the_armed_guard`.
+    # `tests/test_9124_declared_live_doors.py::test_every_apply_first_declared_
+    # door_states_an_order_and_a_record` pins that this door is GENUINELY
+    # apply-first and appends a record, and
+    # `tests/test_9079_handle_write_authority.py::
+    # test_a_declared_apply_first_door_writes_under_the_armed_guard` pins the
+    # behaviour: under an armed handle `delete_point` completes and appends its
+    # record, while a raw `DETACH DELETE` with no lane is still REFUSED.
+    @_declares_apply_first_write_lane("delete_point")
     def delete_point(self, id: str) -> bool:
         """Delete a Point and its relationships. Returns True if found.
 
         Implementation behind delete(id) — the consolidated Point/entity
         delete (epic #888 W2).
 
-        §17.1 LANE (#9124): NOT DECLARED — this door is APPLY-FIRST BY DECISION
-        (#9207), so a `@_declares_live_write_lane` here would be a false claim
-        (see the comment above the signature).
+        §17.1 LANE (#9206): DECLARED — `@_declares_apply_first_write_lane`,
+        the lane that states this door's order (APPLY-FIRST BY DECISION, #9207).
+        It is deliberately NOT `@_declares_live_write_lane`: that lane claims
+        "the record is appended, THEN the cache is written", which is false
+        here (see the comment above the signature).
 
         THE CACHE WRITE IS THE COMMIT POINT (#9207). The `DETACH DELETE` is
         issued FIRST, and the `EntityMutated` op=delete record is appended only
@@ -14660,6 +14725,7 @@ class TortoiseSDK:
 
     # ── Operators ─────────────────────────────────────────────────
 
+    @_declares_apply_first_write_lane("create_operator")
     def create_operator(self, op_type: str, source_id: str, target_ids: list[str],
                         label: str | None = None,
                         direction: str = "bidirectional",
@@ -18948,6 +19014,7 @@ class TortoiseSDK:
                    reverse=True)
         return items[:limit]
 
+    @_declares_apply_first_write_lane("create_direct_edge")
     def create_direct_edge(self, op_type: str, source_id: str, target_id: str, *,
                            direction: str | None = None,
                            confidence: float | None = None,
@@ -31132,6 +31199,7 @@ class TortoiseSDK:
         # handling are unchanged.
         return self._emit_event(_ENTITY_MUTATION_RECORD_TYPE, **record)
 
+    @_declares_apply_first_write_lane("_update_entity")
     def _update_entity(self, id_val: str, *, _reserved_supplied: tuple = (), **props) -> dict:
         # #2296 review: `_reserved_supplied` is the set of reserved names the
         # CALLER supplied, captured by `update_entity` before it strips them for
@@ -31720,6 +31788,7 @@ class TortoiseSDK:
                 )
         return self._get_entity(post_write_id)
 
+    @_declares_apply_first_write_lane("_delete_entity")
     def _delete_entity(self, id_val: str) -> bool:
         proj = self._get_proj()
         # NOTE (issue #327): deletion covers only canonical entity labels —
