@@ -751,6 +751,16 @@ surfaces:
   # is exactly the PR that could silently drop the receipt. Same #2938
   # dual-membership convention as the two entries above.
   - test_capture_secret_redaction_4911.py
+  # #9350: the capture provenance stamp is JOURNALLED before its cache write,
+  # and the hosted twin journals + replays the same four fields.
+  # DUAL-REGISTERED (also under `core`, where its primary entry carries the
+  # full rationale): `tortoise/hosted_api.py` SELECTS the `api` surface, and a
+  # named-surface match REPLACES the `core` fallback — so a
+  # hosted_api.py-only PR would run `test_hosted_api.py` and never
+  # `test_the_hosted_capture_journals_and_replays_the_same_provenance`, the
+  # only assertion in the tree that the hosted lane journals provenance BEFORE
+  # the write. Same #2938 dual-membership convention as the #4911 entry above.
+  - test_9350_capture_provenance_journalled.py
   # #3551: the shared `_write_session_and_turns` primitive (Session MERGE +
   # turn store). DUAL-REGISTERED (`api` + `core`): the `api` entry is the one
   # that carries a PR-shape requirement — the primitive is called from
@@ -3604,9 +3614,13 @@ surfaces:
   # #9350: the capture provenance stamp's journal carrier, one record per
   # minted id, and the two replay engines restoring `eventId` /
   # `source_session` / `source_harness` / `ingested_at` on a minted Point that
-  # is never promoted. `core` is the home because the files it guards are the
-  # capture writers (`tortoise/sdk.py` + `tortoise/hosted_api.py`) and the two
-  # folds' provenance clauses (`projection/__init__.py`, a `core` fallback).
+  # is never promoted. DUAL-REGISTERED (also under `api`, see the entry there):
+  # the SDK half (`tortoise/sdk.py`, a SHARED_MODULE, so its diff selects the
+  # full matrix) and the two folds' provenance clauses
+  # (`projection/__init__.py`, a `core` fallback) are what `core` claims here;
+  # the HOSTED writer `tortoise/hosted_api.py` SELECTS `api` instead, and a
+  # named-surface match REPLACES the `core` fallback, so it cannot be covered
+  # from this list alone.
   # CARVE-OUT: the fixtures build EMBEDDED stores by db path and drive
   # `rebuild()` / `rebuild_all()`, so it is registered in `carve_out:` below
   # and in `tests/_embedded.py`.
@@ -5576,7 +5590,8 @@ carve_out:
 # `TortoiseSDK(<tmpfile>)` and drive BOTH replay engines against that embedded
 # store, so a URI-set lane would redirect the construction and the embedded
 # replay under test would be gone. Mirror of the
-# `test_9350_capture_provenance_journalled.py` row in the `core` surface above;
+# `test_9350_capture_provenance_journalled.py` rows in the `core` and `api`
+# surfaces above (dual-registered, #2938);
 # the two registries are one set in two homes
 # (tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
 - test_9350_capture_provenance_journalled.py
@@ -7199,19 +7214,26 @@ durations:
   test_graph_delete_hygiene_report.py: 1.8
   test_graph_name_ownership.py: 0.1
   test_graph_storage.py: 5.2
-  # #9210: added by a PR, so no CI reading exists yet (#3400 trap). 7 test
-  # functions, 7 collected cases (both counts are 7 today — the file carries no
+  # #9210: added by a PR, so no CI reading exists yet (#3400 trap). 9 test
+  # functions, 9 collected cases (both counts are 9 today — the file carries no
   # parametrization since the eleven table-only cases were deleted; the sixth is
   # the shape rule's ONE exemption, `_NOT_A_RESTORE_STATEMENTS`, added in round 3
-  # so the rule cannot red on the `config_reset` marker write, and the seventh
-  # pins the sibling `rebuild()` engine's watermark on the engine's `"replay"`
-  # as a DISCLOSED deferral to #9213 — so it reds when that lane changes, not
-  # after someone re-reads the sentence it replaced).
+  # so the rule cannot red on the `config_reset` marker write; the seventh pins
+  # the sibling `rebuild()` engine's watermark on the engine's `"replay"` as a
+  # DISCLOSED deferral to #9213 — so it reds when that lane changes, not after
+  # someone re-reads the sentence it replaced — and the eighth/ninth are the
+  # SYNTHETIC-fold leg: the `#548` graph-only rows are folded back from the
+  # pre-wipe capture in TWO passes (pass 1a's `_upsert_point_props`, pass 2's
+  # `_upsert_point_edges`), so both are pinned, plus an outer-permit shadowing
+  # case for that leg. That is the count moving 7 → 9; the constant test was
+  # also renamed to the plural (`…_match_the_pinned_literals`) because it now
+  # reconciles BOTH lane literals.
   # MEASURED locally in the embedded lane: 27.3 s on a quiet box and 35.1 s
   # under fleet load, of which ~15 s is the FIRST `create_point`'s one-time
   # embedding-model load — the same artefact #9123 recorded for its own file.
   # The whole file measured 7.3 s / 6.2 s warm over two runs on 2026-10-20 with
-  # the seventh case in it (the model already loaded in-process), so the
+  # the seventh case in it, and 6.4 s / 5.8 s on 2026-10-21 with all nine (the
+  # two synthetic cases reuse a warm model in-process, so they add ~1 s), so the
   # declared 45.0 stays ABOVE the highest LOADED reading and a busy leg cannot
   # under-pack it. The
   # weight is unchanged by the deletion of the eleven table-only parametrized

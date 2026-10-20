@@ -518,25 +518,116 @@ def test_a_rebuild_all_of_a_re_creation_drops_the_dead_provenance(
 
 
 def test_a_value_the_store_cannot_hold_is_not_carried():
-    """Carry-forward mirrors the WRITER's outcome, not the key's presence.
+    """Carry-forward mirrors the WRITER's OUTCOME, not the key's presence.
 
-    `_persist_extra_props` writes only a value it can persist, and the #7369
-    transport gate degrades one the store cannot hold to `SET n.<k> = NULL` —
-    which REMOVES the property. So live keeps the stored value for the first
-    case and LOSES it for the second; carrying on `is None` alone got both
-    wrong (dict kept the junk, out-of-int64 kept a value the graph dropped).
+    Three shapes, three different live outcomes — all of them decided by a
+    predicate, none by ``is None``:
+
+    * a value ``_is_persistable_prop_value`` rejects (a map) is a NO-WRITE in
+      ``_persist_extra_props``, so the stored value survives;
+    * a value the ``#7369`` transport gate refuses (a NUL string) is degraded
+      to ``SET n.<k> = NULL`` before dispatch, which REMOVES the property;
+    * a value whose fate is ENGINE-DEPENDENT (an ``int`` outside INT64 —
+      4.16–4.20 CLAMPS it, 6.x refuses it at parameter parse) is written by no
+      consistent outcome at all, so the fold contributes NO property.
+
+    Carrying on ``is None`` alone got the first two wrong (dict kept the junk,
+    the NUL string kept a value live dropped). ⚠️ The third's reason is
+    deliberately NOT "nulled at dispatch": ``_value_ok(2**70)`` is ``True``
+    (measured), so the transport gate does NOT null it — the bar is
+    ``_store_holds_prop_value``'s "the store holds it exactly as stated", the
+    same one the ``tags`` clause and ``consistency._uncarried`` use.
     """
     points: dict = {}
     _add_point(points, id="p1", content="first", context="ctx", **_STAMPED)
     _add_point(points, id="p1", content="second", context="ctx",
                eventId={"not": "a property"},
+               source_harness="bad\x00harness",
                ingested_at=2 ** 70)
     assert points["p1"].get("eventId") == _STAMPED["eventId"], (
         "a value the writer cannot persist is a NO-WRITE, so the stored "
         "provenance survives — the fold overwrote it with junk")
+    assert "source_harness" not in points["p1"], (
+        "a value the #7369 transport gate refuses (a NUL string) is degraded "
+        "to `SET n.<k> = NULL` at dispatch, which REMOVES the property live; "
+        "the fold kept the raw value")
     assert "ingested_at" not in points["p1"], (
-        "a value the store cannot hold is nulled at dispatch (#7369) and so "
-        "REMOVES the property live; the fold kept the raw value")
+        "an out-of-INT64 value has no uniform live outcome (4.16–4.20 clamps "
+        "it, 6.x refuses it at parameter parse), so the fold must contribute "
+        "NO property — it kept the raw value the store never holds")
+
+
+def test_the_revision_fold_drops_a_value_the_store_cannot_hold():
+    """The ``PointRevised`` arm obeys the same bar as the creation arm.
+
+    ``eventId`` through ``ingested_at`` are free-form scalars, so
+    ``_annotator_value_ok`` alone admits an ``int`` outside INT64 (measured:
+    ``_annotator_value_ok(2**70)`` is ``True`` while
+    ``_store_holds_prop_value(2**70)`` is ``False``). Folding it made
+    ``fold()`` hold ``2**70`` while ``rebuild_all`` clamped it to
+    ``9223372036854775807`` (or aborted at parameter parse on 6.x), so the
+    two engines disagreed on the same journal and the recovery could not be
+    cleared by the action ``check_consistency`` recommends.
+    """
+    from tortoise.projection import _apply_one
+
+    points: dict = {}
+    _add_point(points, id="p1", content="a", context="ctx")
+    _apply_one(points, {"type": "PointRevised", "id": "p1",
+                        "eventId": "evt-9350-ok",
+                        "ingested_at": 2 ** 70})
+    assert points["p1"].get("eventId") == "evt-9350-ok", (
+        "the store-holdable field must still fold — the gate drops the "
+        "value, not the record")
+    assert "ingested_at" not in points["p1"], (
+        "the fold kept an INT64-overflowing value the store would clamp or "
+        "refuse; fold() and rebuild_all would disagree on the same journal")
+
+
+def test_a_rebuild_drops_a_provenance_value_the_store_cannot_hold(tmp_path):
+    """The GRAPH half of the same gate — the arm that can abort a recovery.
+
+    ``_revise_point`` emits ``n.<prop> = $<prop>`` for a record it admits. Emit
+    it for an out-of-INT64 value and a 6.x engine RAISES at parameter parse
+    AFTER pass 1a's wipe has already run (#325/#3689: the recovery cannot be
+    re-run), while 4.16–4.20 silently clamps it and the pure fold keeps the raw
+    value — `derived != live` with an unclearable `check_consistency` red. So
+    the clause must be skipped for a value the store cannot hold, exactly as
+    the ``tags`` clause beside it does.
+
+    A journal-ONLY graph: no prior live node, so ``rebuild_all``'s synthetic
+    fold has no property snapshot to re-supply the value from (that snapshot is
+    what a capture-derived fixture would replay instead of the revision under
+    test).
+    """
+    events = tmp_path / "events"
+    events.mkdir()
+    recs = [
+        {"event_id": "ev_add_9350", "ts": "2026-10-20T00:00:00+00:00",
+         "type": "PointAdded", "initiated_by": "raw-producer",
+         "projection_version": 2,
+         "point": {"id": "p1", "content": "c", "context": "ctx",
+                   "status": "live"}},
+        {"event_id": "ev_badprov_9350", "ts": "2026-10-20T00:00:01+00:00",
+         "type": "PointRevised", "id": "p1", "initiated_by": "raw-producer",
+         "projection_version": 2, "eventId": "evt-9350-injected",
+         "ingested_at": 2 ** 70},
+    ]
+    (events / "sdk.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in recs) + "\n", encoding="utf-8")
+
+    sdk = TortoiseSDK(str(tmp_path / "rebuild.db"))
+    try:
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+        props = _point_props(sdk._get_proj(), "p1")
+    finally:
+        sdk.close()
+    assert props.get("eventId") == "evt-9350-injected", (
+        "precondition: the revision's store-holdable field must replay")
+    assert props.get("ingested_at") is None, (
+        f"rebuild_all() wrote ingested_at={props.get('ingested_at')!r} from an "
+        "out-of-INT64 record: clamped on 4.16–4.20 and a parse abort after "
+        "the wipe on 6.x (#325/#3689)")
 
 
 # ── the hosted twin (#9350 acceptance: both lanes are byte-parity) ─────────

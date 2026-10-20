@@ -60,28 +60,37 @@ Three properties, and each one names the wrong behaviour it makes impossible:
 3. the lane does not over-claim in the other direction: nothing observes a
    restore reason unless it IS one of the snapshot-restore statements.
 
+`#9210` has TWO over-authorized legs, and this file pins BOTH. The second is
+the `#548` SYNTHETIC fold: `rebuild_all` carries graph-only Points back by
+building `PointAdded`/`OperatorAdded` events from the same pre-wipe capture and
+FOLDING them, so their writes reached the handle under the replay permit too —
+the same false contract, a different mechanism. That leg declares
+`pre-wipe-synthetic:` (selected from the fold's own provenance marker, in BOTH
+passes that write for a creation), and
+`test_the_synthetic_fold_declares_its_own_lane` /
+`test_an_outer_replay_permit_cannot_cover_the_synthetic_fold` hold it to the
+same three properties above.
+
 MUTATION for every test here: replace a `self._restore_write(..., reason=...)`
 call in `rebuild_all` with the bare `self.g.query(...)` it wraps — tests 1 and
 2 both go red on the observed reason (and 2 goes red with `"replay"`, the
 false contract, rather than with `None`). The watermark leg's mutation is the
 same shape one level down: drop the `restore_reason=` argument at its call
 site, and the helper falls back to `#9224`'s `"replay"` — red on the observed
-reason, which is how the trampoline this PR removes was caught.
+reason, which is how the trampoline this PR removes was caught. The synthetic
+leg mutates per PASS: delete either `with _fold_lane_for_event(seq, event_source):` wrapper and the statements of that pass fall back to
+`"replay"` (measured separately for pass 1a and pass 2 — one unwrapped pass
+does not hide behind the other).
 
 WHAT THIS DOES NOT COVER — the disclosed residual, so it is not read as
-covered by the properties above. THREE things, and the third is not bounded:
+covered by the properties above. TWO things, and the second is not bounded:
 
-1. `rebuild_all` also carries graph-only Points back by building
-   `synthetic_events` from the same pre-wipe capture and FOLDING them, so that
-   half is authorized by whatever permit the caller opened over the engine —
-   `"replay"` under `#9124`/`#9213` — and not by this lane. (The watermark,
-   which HAD been left outside the pin, is claimed again: its lane is now
-   handed to the helper and opened inside it, which is what makes the leg
-   truthful rather than deferred.)
-2. writes an edit adds INSIDE `event_store.reestablish_watermark` inherit the
+1. writes an edit adds INSIDE `event_store.reestablish_watermark` inherit the
    lane their caller stated, rather than the funnel's required-`reason`
-   contract.
-3. **the funnel is VOLUNTARY** — nothing makes `_rebuild_all_replay` route a
+   contract. (The watermark, which HAD been left outside the pin, is claimed
+   again: its lane is now handed to the helper and opened inside it, which is
+   what makes the leg truthful rather than deferred.)
+2. **the funnel is VOLUNTARY** — nothing makes `_rebuild_all_replay` route a
    restore statement through `_restore_write`. A twelfth restore added as a
    bare `self.g.query(...)` inherits the engine's method-wide `"replay"`, and
    `_LEGS` cannot see it (a table of the eleven statements that exist says
@@ -132,9 +141,25 @@ from tortoise.sdk import TortoiseSDK
 #: The declared lane, pinned as a LITERAL (`#9123`'s precedent), not imported:
 #: a lane that renames itself silently is a lane the next reader cannot find,
 #: and a test that imports the name would follow the rename instead of failing
-#: on it. `test_the_lane_constant_matches_the_pinned_literal` reconciles the two
+#: on it. `test_the_lane_constants_match_the_pinned_literals` reconciles the two
 #: so the literal cannot drift off the module's constant either.
 RESTORE = "pre-wipe-restore"
+
+#: The SYNTHETIC fold's lane (`#9210`'s SECOND over-authorized leg): the `#548`
+#: graph-only `:Point`/operator rows are FOLDED back from the pre-wipe capture,
+#: so their writes carry the same claim the restore legs do (the content came
+#: from THIS graph's capture, not from a record) under their own name —
+#: otherwise they inherit the replay permit, whose contract is false for them.
+SYNTHETIC = "pre-wipe-synthetic"
+
+#: The graph-only ids `_seed_prewipe_state` plants: no journal record describes
+#: any of them, so every write their event drives in a rebuild is a SYNTHETIC
+#: fold. `p-graphonly` carries only declared props (pass 1a's node MERGE), the
+#: `-extra` one an open-set prop (pass 1a's `SET n += $extra`), and `-op` an
+#: `IMPL` edge (PASS 2's `_upsert_point_edges`) — the three writes the pin needs
+#: to see, one per pass and one per write shape.
+_GRAPH_ONLY_IDS = frozenset({
+    "p-graphonly", "p-graphonly-extra", "p-graphonly-op"})
 
 
 def _config_registry_parts() -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -275,6 +300,48 @@ def _norm(cypher: str) -> str:
     return " ".join(str(cypher).split())
 
 
+def _record_writes_with_params(monkeypatch):
+    """Record `(statement, lane, params)` for every statement at the handle.
+
+    The synthetic pin needs the PARAMS, not just the statement: the fold writes
+    one statement template per class and the only way to say "this write was
+    driven by a graph-only payload" is the id it binds. Same observation point
+    as `_record_authorizations` — the CLASS (`_GuardedGraph`), where the guard
+    will read it — kept separate so the existing tests' 2-tuples stay as they
+    are rather than re-shaping six call sites for one new assertion.
+    """
+    from tortoise.projection import _GuardedGraph
+
+    real = _GuardedGraph.query
+    seen: list[tuple[str, str | None, dict | None]] = []
+
+    def query(self, cypher: str, params=None, timeout=None):
+        seen.append((cypher, _CACHE_WRITE_AUTHORIZED.get(), params))
+        return real(self, cypher, params=params, timeout=timeout)
+
+    monkeypatch.setattr(_GuardedGraph, "query", query)
+    return seen
+
+
+def _bound_ids(params) -> frozenset[str]:
+    """Every scalar a statement's params bind, stringified (ids land here)."""
+    out: set[str] = set()
+
+    def _walk(value):
+        if isinstance(value, dict):
+            for item in value.values():
+                _walk(item)
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            for item in value:
+                _walk(item)
+        else:
+            out.add(str(value))
+
+    for value in (params or {}).values():
+        _walk(value)
+    return frozenset(out)
+
+
 #: Statement verbs that WRITE. The lane authorizes WRITES, so the "does it
 #: over-claim" half is asserted over these only: a helper the restore calls
 #: also READS under the scope (`reestablish_watermark` probes `:GraphEvent` and
@@ -376,7 +443,8 @@ def _seed_prewipe_state(sdk, events):
     what makes the run a REAL `rebuild_all` (the wipe happens and the replay
     re-creates the node the batch link and the CONTAINS edge point at).
     """
-    created = sdk.create_point("statement", "journaled, so the replay is real")
+    created = sdk.create_point("statement", "journaled, so the replay is real",
+                              tags=["journaled-tag"])
     pid = created["id"] if isinstance(created, dict) else created
     # A journaled `:Subject` is the `onboards` edge's endpoint: the replay
     # re-creates it (`SubjectAdded`), so the edge's `MATCH` has something to
@@ -430,6 +498,20 @@ def _seed_prewipe_state(sdk, events):
     g.query(
         "CREATE (p:Point {id:'p-graphonly', content:'graph only', "
         "content_hash:'c0ffee', status:'live'})")
+    # #9210 (synthetic leg): a graph-only Point carrying an EXTRA property, so
+    # the synthetic fold's OPEN-SET passthrough (`SET n += $extra`) is exercised
+    # too, and a graph-only OPERATOR with an `IMPL` edge, so PASS 2 — the other
+    # write a synthetic event drives (`_upsert_point_edges`) — is exercised.
+    # Without both, the synthetic pin would observe only pass 1a's node MERGE
+    # and claim a two-pass property from one pass.
+    g.query(
+        "CREATE (p:Point {id:'p-graphonly-extra', content:'graph only extra', "
+        "content_hash:'beef', status:'live', mitigation_strength:0.7})")
+    g.query(
+        "MATCH (i:Point {id:'p-graphonly-extra'}) "
+        "CREATE (o:Point {id:'p-graphonly-op', content:'IMPL(p-graphonly-extra)', "
+        "is_operator:true, op_type:'IMPL', status:'live'}) "
+        "CREATE (o)-[:IMPL {idx:0}]->(i)")
     return pid, proj, events
 
 
@@ -798,16 +880,173 @@ def test_the_journal_engines_watermark_stays_disclosed_as_deferred(tmp_path,
         sdk.close()
 
 
-def test_the_lane_constant_matches_the_pinned_literal():
-    """The other half of the pin: the module's constant must spell the lane the
-    tests above pinned, so neither can be renamed past the other.
+def _synthetic_fold_writes(seen):
+    """WRITES at the handle whose params bind a graph-only (no-record) id.
 
-    This is the ONE test here that reaches for the symbol the fix adds; every
-    behavioural test above is written against the literal, which is why they go
-    red on the OBSERVED AUTHORIZATION rather than on an ImportError — a
+    ⚠️ A restore LEG is excluded, and the exclusion is precise rather than
+    convenient: `#4305`'s derived-properties restore also binds a graph-only
+    `:Point` id (`MATCH (n:Point {id:$pid}) SET n += $props`), and it is the
+    OTHER lane's write — `_leg_of` classifies it, and the restore pin already
+    holds it to `pre-wipe-restore:`. What is left after that exclusion is
+    exactly the population this pin is about: the fold writes the synthetic
+    `PointAdded`/`OperatorAdded` event drives through the ordinary handle.
+    """
+    return [(_norm(cypher), reason) for cypher, reason, params in seen
+            if _writes(cypher) and (_bound_ids(params) & _GRAPH_ONLY_IDS)
+            and _leg_of(cypher) is None]
+
+
+def test_the_synthetic_fold_declares_its_own_lane(tmp_path, monkeypatch):
+    """`#9210`'s SECOND leg: the `#548` synthetic fold is NAMED, not inherited.
+
+    The graph-only rows `rebuild_all` carries back are turned into
+    `PointAdded`/`OperatorAdded` events built from the pre-wipe CAPTURE, then
+    prepended to the replay stream and folded through the ordinary handle. No
+    journal record describes them, so the writes they drive are not a
+    projection of a record — and until this lane existed they were authorized
+    by the engine's method-wide `_replay_write_scope()`, i.e. by a contract
+    that is FALSE for them. `rebuild_all`'s docstring disclosed that as a
+    residual; this pin is what makes the disclosure unnecessary.
+
+    MEASURED on the pre-fix tree (this fixture: pass 1a's node MERGE, its
+    open-set `SET n += $extra`, and pass 2's `MERGE (o)-[:IMPL …]->(s)`, all
+    three binding a graph-only id): every one of them observed `"replay"`.
+    Not `None` — `#9213`'s permit is real, which is exactly why the wrong
+    answer was being served. The mutation is the `with _fold_lane_for_event(…):`
+    wrapper at either call site: remove one and that pass's writes fall back to
+    `"replay"` and this test reds.
+
+    BOTH passes are required. Pass 1a writes the node and pass 2 re-derives the
+    operator's edges from the captured payload, so a single-pass check would go
+    green on the first pass while half the synthetic writes stayed on the
+    replay permit.
+    """
+    sdk, events = _mk_sdk(tmp_path)
+    try:
+        pid, proj, _ = _seed_prewipe_state(sdk, events)
+        journal_ids = frozenset({pid})
+        seen = _record_writes_with_params(monkeypatch)
+
+        proj.rebuild_all(str(events), confirm_destructive=True)
+
+        synth = _synthetic_fold_writes(seen)
+        assert synth, (
+            "no write bound a graph-only id, so the synthetic fold never "
+            "reached the handle and this pin would be vacuous: "
+            f"observed statements={[c[:70] for c, _r, _p in seen]!r}")
+        # PASS COVERAGE, asserted rather than assumed: the node MERGE and the
+        # open-set `$extra` write are pass 1a; the `IMPL` edge is pass 2.
+        assert any(c.startswith("MERGE (n:Point {id:$id})") for c, _r in synth), (
+            "pass 1a's synthetic node write was not observed: "
+            f"{[c[:80] for c, _r in synth]!r}")
+        assert any(c.startswith("MATCH (n:Point {id:$id}) SET n += $extra")
+                   for c, _r in synth), (
+            "pass 1a's synthetic OPEN-SET passthrough was not observed, so the "
+            "lane would only be pinned for the fixed SET list: "
+            f"{[c[:80] for c, _r in synth]!r}")
+        assert any("MERGE (o)-[:IMPL" in c for c, _r in synth), (
+            "pass 2's synthetic edge write was not observed, so this test "
+            "would claim a two-pass property from one pass: "
+            f"{[c[:80] for c, _r in synth]!r}")
+
+        wrong = {
+            (c[:110], str(reason)) for c, reason in synth
+            if not (isinstance(reason, str)
+                    and reason.startswith(f"{SYNTHETIC}:"))
+        }
+        assert not wrong, (
+            "the `#548` synthetic fold ran under a declaration whose contract "
+            "is FALSE for it — its payload came from the pre-wipe graph "
+            "CAPTURE, not from a journal record — so it must name "
+            f"`{SYNTHETIC}:` and never the replay lane: observed={wrong!r}")
+
+        # THE OTHER DIRECTION, in the same run and in BOTH passes: a JOURNAL
+        # record's fold must still observe `"replay"`. Without it the new lane
+        # could be a blanket that swallows the record fold too and every
+        # assertion above would still pass — and without the PASS-2 half below,
+        # the very same blanket at pass 2's call site would go unnoticed (a
+        # journaled Point's pass-1a creation already satisfies a pass-1a-only
+        # check, so the `TAGGED` write is what makes pass 2 judgeable).
+        journal = [(_norm(c), reason) for c, reason, params in seen
+                   if _writes(c) and (_bound_ids(params) & journal_ids)
+                   and not (_bound_ids(params) & _GRAPH_ONLY_IDS)]
+        assert any("MERGE (p)-[:TAGGED]->(t)" in c for c, _r in journal), (
+            "no PASS-2 write bound a journaled id, so the over-claim half of "
+            "this pin only reaches pass 1a and a blanket lane at pass 2's "
+            f"call site would pass: observed={[c[:80] for c, _r in journal]!r}")
+        misattributed = [(c[:110], str(r)) for c, r in journal
+                         if isinstance(r, str)
+                         and r.startswith(f"{SYNTHETIC}:")]
+        assert not misattributed, (
+            "a JOURNAL record's fold was authorized by the pre-wipe SYNTHETIC "
+            "lane — the mirror over-claim, and false in the other direction "
+            f"(the payload DID come from the record): {misattributed!r}")
+        assert any(reason == "replay" for _c, reason in journal), (
+            "the journaled Point's own fold did not observe the replay "
+            "permit, so this run cannot show the lane is chosen by "
+            f"PROVENANCE rather than applied blanket: observed={journal!r}")
+    finally:
+        sdk.close()
+
+
+def test_an_outer_replay_permit_cannot_cover_the_synthetic_fold(tmp_path,
+                                                               monkeypatch):
+    """An over-broad permit cannot re-acquire the synthetic fold either.
+
+    Same shadowing property the restore legs are pinned for, stated for the
+    other leg of `rebuild_all`'s width: a caller (or `#9124`'s engine wrapper)
+    that opens `_replay_write_scope()` around the whole rebuild must not be
+    able to authorize a synthetic fold with it. The reason is a `ContextVar`,
+    so the per-event declaration SHADOWS the outer permit.
+
+    NON-VACUITY: the same run must observe `"replay"` on a JOURNAL fold, so the
+    test cannot pass by the outer permit never reaching the handle. (As in the
+    restore pin, the observation cannot tell this test's permit from
+    `rebuild_all`'s own — both spell `"replay"`; what is established is that a
+    replay permit IS in force at the handle and the synthetic writes do not
+    inherit it.)
+    """
+    sdk, events = _mk_sdk(tmp_path)
+    try:
+        pid, proj, _ = _seed_prewipe_state(sdk, events)
+        seen = _record_writes_with_params(monkeypatch)
+
+        with _replay_write_scope():
+            proj.rebuild_all(str(events), confirm_destructive=True)
+
+        synth = _synthetic_fold_writes(seen)
+        assert synth, (
+            "no write bound a graph-only id, so the pin is vacuous: "
+            f"{[c[:70] for c, _r, _p in seen]!r}")
+        wrong = {
+            (c[:110], str(reason)) for c, reason in synth
+            if not (isinstance(reason, str)
+                    and reason.startswith(f"{SYNTHETIC}:"))
+        }
+        assert not wrong, (
+            "an outer `_replay_write_scope()` covered the synthetic fold, so "
+            "the per-event declaration did not shadow it: "
+            f"observed={wrong!r}")
+        assert any(reason == "replay" for c, reason, params in seen
+                   if _writes(c) and pid in _bound_ids(params)), (
+            "the replay permit never reached a journal fold, so this test "
+            "proves nothing about shadowing: "
+            f"{[str(r) for _c, r, _p in seen]!r}")
+    finally:
+        sdk.close()
+
+
+def test_the_lane_constants_match_the_pinned_literals():
+    """The other half of the pin: the module's constants must spell the lanes
+    the tests above pinned, so neither can be renamed past the other.
+
+    These are the tests here that reach for the symbols the fix adds; every
+    behavioural test above is written against the literals, which is why they
+    go red on the OBSERVED AUTHORIZATION rather than on an ImportError — a
     `"replay"` on the current base (whose `#9213` permit is the false
     contract), a `None` on a pre-`#9213` tree.
     """
-    from tortoise.projection import _PREWIPE_RESTORE_LANE
+    from tortoise.projection import _PREWIPE_RESTORE_LANE, _PREWIPE_SYNTHETIC_LANE
 
     assert _PREWIPE_RESTORE_LANE == RESTORE
+    assert _PREWIPE_SYNTHETIC_LANE == SYNTHETIC
