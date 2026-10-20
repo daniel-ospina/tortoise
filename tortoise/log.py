@@ -925,27 +925,72 @@ def _mark_position_cache_dead(key: str, path: Path, exc: BaseException) -> None:
             path, type(exc).__name__, exc, _POSITION_CACHE_DEAD_FOR_S)
 
 
-def _journal_state(f) -> tuple[int, int]:
-    """``(size, mtime_ns)`` of the open journal — one ``fstat``, no seek.
+def _journal_state(f) -> tuple[int, int, int, int]:
+    """``(size, mtime_ns, st_dev, st_ino)`` of the open journal — one ``fstat``.
 
-    The pair the position cache is validated against, and the offset the append
-    checks its own write against. Two syscalls per append: this one before the
-    write and the same call after it. (``_seal_prefix`` still seeks to the end
-    for the tail check — this does not replace that read, it adds the state the
-    position needs, which the append previously had no use for.)
+    The first pair is what the position cache is validated against and the
+    offset the append checks its own write against; the second pair is WHICH
+    FILE that state belongs to (`_identity`), needed because the count opens the
+    PATH and the record is written through this descriptor — see the identity
+    comment in `append`. They come from ONE ``fstat`` on purpose: an append makes
+    two of these calls (before and after the write), and a second syscall for the
+    identity would be paid on every append to answer a question this one already
+    answered. (``_seal_prefix`` still seeks to the end for the tail check — this
+    does not replace that read.)
     """
     st = os.fstat(f.fileno())
-    return st.st_size, st.st_mtime_ns
+    return st.st_size, st.st_mtime_ns, st.st_dev, st.st_ino
+
+
+def _identity(st: os.stat_result) -> tuple[int, int]:
+    """``(st_dev, st_ino)`` — the pair that says WHICH file a stat describes."""
+    return st.st_dev, st.st_ino
+
+
+def _path_identity(path: str | os.PathLike[str]) -> tuple[int, int] | None:
+    """The identity of the file the PATH names now, or ``None``."""
+    try:
+        return _identity(os.stat(path))
+    except _COUNT_MAY_RAISE:
+        return None
+
+
+def _report_unproven_seal(key: str, path: Path) -> None:
+    """Say, ONCE per journal, that an append's seal could not be proven.
+
+    A broken mount makes ``seek`` fail on EVERY append, and a WARNING per record
+    is exactly the noise ``_FLOCK_UNHEALTHY`` and ``_POSITION_CACHE_DEAD`` exist
+    to avoid; the returned ``None`` is the per-call signal, so the log carries
+    the operator-actionable event once. A restart re-reports it.
+
+    Called AFTER the record has landed, so it is TOTAL: a ``MemoryError`` from
+    the set insert or a raising log handler must not turn a durable record into
+    a reported failure whose retry duplicates it. (The condition it reports is a
+    mount that cannot ``seek`` — not the environment to assume anything in.)
+    """
+    with contextlib.suppress(Exception):
+        if key in _UNPROVEN_SEAL_REPORTED:
+            return
+        _UNPROVEN_SEAL_REPORTED.add(key)
+        logging.getLogger(__name__).warning(
+            "EventLog %s: the journal's tail could not be sized, so the record "
+            "just appended carries NO seal: if the previous writer was killed "
+            "mid-record, this record is glued onto that fragment and the next "
+            "replay will skip BOTH. No position is reported for this record. "
+            "(Reported once per journal.)", path)
 
 
 def _read_regular_file(path: Path) -> bytes | None:
     """The file's bytes, or ``None`` if it is not a REGULAR file.
 
-    ``O_NONBLOCK`` is load-bearing, not tidiness: both callers run inside the
-    append's critical section (thread lock + ``flock``), and a FIFO — or any
-    other special file someone left at the cache path — would BLOCK the open or
-    the read there, parking every appender to that journal in every process with
-    nothing distinguishing it from a wedged peer. Non-blocking plus an
+    ``O_NONBLOCK`` is load-bearing, not tidiness: its one caller
+    (`_read_position_cache`) runs inside the journal's critical section (from
+    ``append``, and from ``position()``) — the per-path THREAD lock, always held;
+    the ``flock`` is conditional (see `_lock_exclusive`), so it is the thread
+    lock, not the ``flock``, that keeps this from racing a peer in this process.
+    A FIFO — or any other special file someone left at the cache path — would
+    BLOCK the open or the read there, parking every appender to that journal in
+    every process with nothing distinguishing it from a wedged peer. Non-blocking plus an
     ``S_ISREG`` check makes a special file a cache MISS instead: the cache is an
     optimization, so "not a regular file" is a reason to recount, never to wait.
 
@@ -1013,6 +1058,17 @@ def _read_position_cache(cache: Path, size: int, mtime_ns: int) -> int | None:
         return None
     count = raw.get("records")
     if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+        return None
+    # SHAPE-BOUNDED, because the sidecar is a file anything may have written and
+    # a flip in the `records` digits otherwise survives every check above (it
+    # still describes this exact file state) and is believed verbatim for ever —
+    # a fabricated `seq` no recount can ever correct. Every record costs at
+    # least one byte of separator plus a delimiter, so a count above the byte
+    # size is impossible for any journal this reader would produce: refuse it
+    # and recount. (This bounds CORRUPTION, not tampering — a plausible-looking
+    # forged count is the same class as the same-length replacement the POSITION
+    # block names, and neither is worth a per-append digest.)
+    if count > size:
         return None
     return count
 
@@ -1163,8 +1219,13 @@ class EventLog:
         ``None`` means the append SUCCEEDED but its position is NOT PROVEN,
         and it is a NAMED absence, never a guess — a caller that writes
         ``journal_event`` must leave that row unwritten rather than fabricate
-        a ``seq``. SIX states produce it, and holding the lock does not exclude
-        any of the other five — the lock speaks only to the state that names it.
+        a ``seq``. The bullets below are the STATES, and no number is stated on
+        purpose: two of them name two cases each (a failed ``fstat`` before and
+        after the write; an unusable path that is either a swap or an unreadable
+        ``stat``), so a count is the one thing this list must not invite a reader
+        to re-derive — it has already been miscounted twice. Holding the lock
+        does not exclude any of the others: the lock speaks only to the state
+        that names it.
 
         * the tail could not be SIZED, so the record may not have started on a
           clean line (``_seal_prefix`` returned ``None``). The record is
@@ -1176,9 +1237,20 @@ class EventLog:
           whether the seal was needed;
         * the cross-process lock could not be taken (a wedged peer, or a
           platform with no advisory locks — ``_lock_exclusive`` says so);
-        * the journal could not be READ, so its records could not be counted
-          (an ``OSError``). The record is still appended: the position must not
-          give the append a read dependency it never had;
+        * the journal could not be COUNTED — ``_COUNT_MAY_RAISE``, all three:
+          an unreadable journal (``OSError``: EACCES/EIO, and note that a parse
+          problem is not one — ``read_all`` already skips that damage), a
+          journal too large to hold in memory while counting it
+          (``MemoryError``; the recount materializes the whole file — ~6x its
+          size in RSS, measured in the COST paragraph below, and the ~8x in
+          `_records_before`'s own note and the `POSITION` block), and a record
+          nested deep enough to trip the reader's ``json.loads`` recursion limit
+          (``RecursionError``,
+          which is not a ``ValueError`` and which a foreign/restored journal
+          can carry). None of the three is a ``TypeError`` on a bad argument,
+          so the family is named once, in ``_COUNT_MAY_RAISE``. The record is
+          still appended: the position must not give the append a read
+          dependency it never had;
         * a peer wrote INSIDE this call's window without taking the lock — the
           documented degraded state, where ``_lock_exclusive`` stops
           contending for ``_FLOCK_UNHEALTHY_FOR_S`` after one bounded wait.
@@ -1190,6 +1262,17 @@ class EventLog:
           it (no witness for the offset). Two syscalls, two states, and the
           post-write one is the case where the record is durable and its
           position is simply unknown;
+        * the PATH stopped naming the file this append wrote to — a restore or
+          rotation replaced the journal inside the window (its own lock does not
+          exclude a writer). The count was taken from the path and the record
+          went into the inode we held, so no position is claimed and nothing is
+          cached: the count describes a DIFFERENT file. This one is new with the
+          ordinal and is why the journal's identity is re-read before the
+          witness is trusted — a size check cannot see an inode swap. The same
+          branch fires when the path cannot be ``stat``-ed AT ALL (``ESTALE``,
+          ``EIO`` on the networked volumes this path is hardened for): nothing
+          moved, the position is simply unprovable — fail-closed on an
+          unreadable path, not evidence of a restore;
         * the sidecar could not be MAINTAINED and its ``_POSITION_CACHE_DEAD``
           window is live, so counting was REFUSED rather than paid (see THE
           OTHER SHAPE below). This one is deliberate and self-healing: it is
@@ -1214,10 +1297,12 @@ class EventLog:
         check), which is what keeps two appenders off one number.
 
         COST. The common path adds two ``fstat`` calls (the pre-write state and
-        the post-write offset), a memo compare and one write-through of the
-        sidecar — measured +17 to +25 us on a ~130 us append (dev box,
-        2026-10-15, min of 7; see the ``POSITION`` block for the per-syscall
-        numbers). A cache MISS re-counts the journal INSIDE this critical
+        the post-write offset), ONE ``stat`` of the journal path (the identity
+        witness — the same-as-the-fd check that a restore did not replace the
+        journal under this append), a memo compare and one write-through of the
+        sidecar — measured +20 to +30 us on a ~130 us append (in-process loop on
+        the same dev box, min of 7; the earlier +17 to +25 us figure predates the
+        witness; see the ``POSITION`` block for the per-syscall numbers). A cache MISS re-counts the journal INSIDE this critical
         section, in both time and memory. Measured across runs on this box (a
         loaded fleet box, so ranges not points): 1 MiB 0.007-0.18 s; 3 MiB
         0.16-0.29 s; 20 MiB ~1.95 s with a peak RSS of ~127 MiB (~6x the
@@ -1283,9 +1368,29 @@ class EventLog:
             # caller a failure for a write that already landed, and a retry
             # would duplicate it.
             try:
-                size, mtime_ns = _journal_state(f)
+                size, mtime_ns, dev, ino = _journal_state(f)
             except _COUNT_MAY_RAISE:
-                size = mtime_ns = None
+                size = mtime_ns = dev = ino = None
+            # WHICH FILE this append is writing to, not merely how big it is.
+            # The count below opens the PATH, and a restore can `os.replace` a
+            # DIFFERENT inode onto that path while this append waits for the
+            # lock (`backup.restore` stages the old journal aside and copies the
+            # new one in; its lock documents that a process already writing the
+            # journal is not excluded by it). Counting that inode while writing
+            # through OURS would report a position this journal does not hold —
+            # two records under one `seq`, which is the silent duplicate #9190
+            # exists to remove — and the offset check below cannot see it,
+            # because it is intra-descriptor by construction. So the identity is
+            # read again before any position is claimed, and a swap anywhere in
+            # this window costs the position, never a wrong one.
+            #
+            # The witness stats ``self.path`` — the SAME string the count opens —
+            # not the resolved ``key``: `key` is the realpath MEMOISED on this
+            # instance, so if the journal path is (or contains) a symlink that is
+            # retargeted, `key` keeps naming the old target and the witness would
+            # then disagree with a HEALTHY append (costing its position) and
+            # agree with a swapped one (minting a wrong `seq`).
+            identity = (dev, ino) if size is not None else None
             # Total by contract, given the lock key this caller has already
             # resolved (`_lock_key` below would run `realpath`, the one thing in
             # `_records_before` its guards do not cover): both of its remaining
@@ -1311,20 +1416,7 @@ class EventLog:
                 # that (the bytes are gone into a line a replay refuses), which
                 # is exactly why it must be SAID rather than inferred from a
                 # later discrepancy.
-                # Said ONCE per journal: a broken mount makes `seek` fail on
-                # every append, and a WARNING per record is the noise this file's
-                # other mechanisms (`_FLOCK_UNHEALTHY`, `_POSITION_CACHE_DEAD`)
-                # exist to avoid. The returned `None` is the per-call signal.
-                key = self._lock_key()
-                if key not in _UNPROVEN_SEAL_REPORTED:
-                    _UNPROVEN_SEAL_REPORTED.add(key)
-                    logging.getLogger(__name__).warning(
-                        "EventLog %s: the journal's tail could not be sized, so "
-                        "the record just appended carries NO seal: if the "
-                        "previous writer was killed mid-record, this record is "
-                        "glued onto that fragment and the next replay will skip "
-                        "BOTH. No position is reported for this record. "
-                        "(Reported once per journal.)", self.path)
+                _report_unproven_seal(key, self.path)
             if position is not None and seal is None:
                 # The tail could not be examined, so "this record adds exactly
                 # one to the count" is unproven even though the write landed:
@@ -1336,7 +1428,7 @@ class EventLog:
                 return None
             if position is not None:
                 try:
-                    after, after_mtime = _journal_state(f)
+                    after, after_mtime, _, _ = _journal_state(f)
                 except _COUNT_MAY_RAISE:
                     return None
                 if after != size + len(payload):
@@ -1350,6 +1442,15 @@ class EventLog:
                     # derived is not this record's position: say so, and leave
                     # the cache alone (it would record a boundary nothing
                     # counted).
+                    return None
+                if identity is not None and _path_identity(self.path) != identity:
+                    # The PATH no longer names the file this append wrote to: a
+                    # restore/rotation replaced it inside our window. The
+                    # record landed (in the inode we held), and the count we
+                    # took describes the OTHER file, so `position` is not this
+                    # record's place in this journal. Report no position and
+                    # cache nothing — a cache entry would describe a state no
+                    # later reader will see, and the wrong number would stand.
                     return None
                 # The record we just wrote parses by construction, so it adds
                 # exactly one to the count a replay will read — seals and
@@ -1365,6 +1466,18 @@ class EventLog:
         journal (a symlinked data mount, a relative path) must share the cache
         the way they already share the lock, or each spelling keeps its own
         sidecar and misses on the other's writes.
+
+        "ONE cache" holds for the spelling, WITH ONE EXCEPTION: ``key`` is the
+        instance's MEMOISED resolution, so if a symlinked journal path is
+        retargeted mid-life this instance keeps writing its cache beside the OLD
+        target until it re-derives the key (a restart, or a new instance). The
+        payload then describes a state the old target does not have, so a reader
+        rejects it on ``(size, mtime_ns)`` — a wrong-FILE entry, not a wrong
+        ``seq``, with the same single exception the ``POSITION`` block names (a
+        same-length replacement inside one ``mtime_ns`` tick). Filed as #9285,
+        where the fix is to invalidate this memo when the path's resolution
+        moves. (``append``'s identity witness stats ``self.path`` for exactly
+        this reason — see the comment there.)
         """
         return _position_cache_path(Path(key))
 
@@ -1505,8 +1618,12 @@ class EventLog:
         re-derived when ``self.path`` changes (the same rule ``_lock_key``
         follows), because one process appending repeatedly is the common shape;
         it is REFRESHED here on every answer a caller paid for, so a
-        ``position()`` does not re-read the journal on every call. (Both call
-        sites hold the journal's lock, so writing it here cannot race.)
+        ``position()`` does not re-read the journal on every call. Writing it
+        here cannot race: the memo is this instance's, and both call sites hold
+        the per-path THREAD lock, which is what excludes another thread of this
+        process. (It does NOT exclude another PROCESS — the ``flock`` is
+        conditional, `_lock_exclusive` may return ``False`` — so the memo's
+        validity rests on the ``(size, mtime_ns)`` identity, not on exclusion.)
 
         ``None`` is a NAMED absence, not a zero: the journal could not be READ
         (``OSError`` — EACCES/EIO, not a parse problem, which ``read_all``
@@ -1600,8 +1717,15 @@ class EventLog:
         between the ``exists`` check and the open is re-created empty, which is
         the answer ``0`` for the file that then exists; and it writes the
         position cache through — but only when it holds the cross-process lock
-        AND the journal still holds the state it counted (in the degraded window,
-        or when the journal moved under the count, it leaves the cache alone).
+        AND the journal still holds the state it counted. Two DIFFERENT "the
+        journal moved under the count" cases have two different outcomes, and
+        neither one writes a cache entry: a PEER appended during the count
+        (including in the degraded window, where the lock proves nothing) makes
+        the state re-read differ, so the count is returned and the cache is left
+        alone; and a RESTORE that replaced the journal's inode during the count
+        raises (``:raises OSError:`` below), because the number counted belongs
+        to the file the path has since left and there is no count to give for
+        the one it now names. Neither case caches anything.
 
         Unlike :meth:`append` it RECOUNTS even while the journal's sidecar is in
         its ``_POSITION_CACHE_DEAD`` window: the append path declines that cost
@@ -1612,10 +1736,14 @@ class EventLog:
 
         :raises OSError: the journal exists but could not be opened, stat'ed or
             read (a read-only journal raises here — this method needs the
-            write fd for its lock), so there is no count to give. It raises
-            rather than answering ``0``, which is a fact about an EMPTY journal
-            and would be the same silence this method's ordinal exists to
-            remove.
+            write fd for its lock), **or** the path stopped naming the journal
+            whose count was taken (a restore or a rotation inside the count, so
+            the number the count produced is another file's) — in either case
+            there is no count to give. It raises rather than answering ``0``,
+            which is a fact about an EMPTY journal and would be the same
+            silence this method's ordinal exists to remove; and rather than
+            returning the number of a journal the path has left, which once
+            cached would be a fabricated count no later recount could correct.
         """
         if not self.path.exists():
             return 0
@@ -1623,7 +1751,7 @@ class EventLog:
         with (_append_lock(key), io.FileIO(self.path, mode="a+b") as f):
             locked = _lock_exclusive(f.fileno(), key)
             try:
-                size, mtime_ns = _journal_state(f)
+                size, mtime_ns, dev, ino = _journal_state(f)
             except OSError as exc:
                 raise OSError(
                     f"EventLog {self.path}: cannot stat the journal to count "
@@ -1633,6 +1761,23 @@ class EventLog:
                 # Unreadable journal: nothing to cache, and no number to give.
                 raise OSError(f"EventLog {self.path}: cannot read the journal "
                               f"to count its records")
+            # WHICH FILE the count describes, because `_records_before` counts
+            # by opening the PATH while this descriptor names the journal it was
+            # opened on: a restore can `os.replace` a different inode onto the
+            # path DURING the count (seconds wide on a large journal — see COST
+            # in `append`), and then the number is the other file's. The state
+            # re-read below cannot see that (it is the same descriptor, by
+            # construction), and a cache entry written from it would carry THIS
+            # journal's exact `(size, mtime_ns)` — so a later reader would accept
+            # it as a fact for ever: a fabricated `seq` no recount could correct,
+            # which is the one failure this method must not produce. Same witness
+            # as `append`'s, and the same fail-closed answer — there is no count
+            # to give, which is this method's documented raise.
+            if _path_identity(self.path) != (dev, ino):
+                raise OSError(
+                    f"EventLog {self.path}: the journal at this path is not the "
+                    f"one the count was taken on (it was replaced during the "
+                    f"count), so there is no count to give")
             if locked:
                 # The count is only a statement about THE STATE IT WAS TAKEN
                 # ON, and `flush` does not prove it was exclusive (a peer in
@@ -1645,7 +1790,7 @@ class EventLog:
                 # then serve as a fact — forever, because no later writer can
                 # make it miss.
                 try:
-                    after, after_mtime = _journal_state(f)
+                    after, after_mtime, _, _ = _journal_state(f)
                 except OSError:
                     # Same contract as the pre-count read: this method's one
                     # raise is "there is no count to give", and a successfully
