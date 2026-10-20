@@ -1,9 +1,9 @@
 # #9189 — S2 wiring census: production call sites of the two-store chain
 #   (reconciliation.reconcile / record_projection.replay /
 #   cache_projection.read_record_view / FalkorProjection.rebuild_from_record).
-# Measured at: feat/9189-tm@500089165 on 2026-10-19 (the commit that TAKES this
-#   measurement; re-run and byte-identical again after merging origin/main@c172b042f,
-#   which touches no censused hit line)
+# Measured at: feat/9189-tm@278e27460 on 2026-10-20 (re-cut for the #9196 P1 fix;
+#   the PRODUCTION section is byte-identical before and after that fix, while the
+#   `test population:` half had gone stale from this branch's OWN test additions)
 # Command: uv run python docs/evidence/7950-capstone/probes/s2_wiring_census.py
 # Paste of the run as printed, BOTH populations. No expectation block: an expected-value
 #   header above a run's own transcript makes measured-vs-expected unverifiable.
@@ -15,13 +15,14 @@
 #   edit above the call and pinning it turned such edits into red CI (#9196 review).
 # The `test population:` counts are INFORMATIONAL and deliberately unpinned: they move
 #   whenever any test file mentions one of these names, which is not a claim about
-#   whether the product is wired. They went stale between the origin/main merge and
-#   this re-cut (#9196 review P2: replay read 1 vs a live 2, rebuild_from_record 6 vs
-#   10), so BOTH halves are re-cut here rather than only the pinned one.
+#   whether the product is wired. They have gone stale TWICE: between the origin/main
+#   merge and the first re-cut (#9196 review P2: replay read 1 vs a live 2,
+#   rebuild_from_record 6 vs 10), and again when this branch's own fix rounds added
+#   `read_record_view(...)` fixtures inside tests (2 vs a live 7). Both halves are
+#   re-cut from ONE run of the committed probe at the end of this branch.
 # Population caveat: `scripts` is a committed symlink and `Path.rglob` does not descend
 #   symlinked directories, so that entry contributes 0 files in any checkout — the
 #   header's population claim covers `tortoise/` (241 files) and `tools/` (132) only.
-
 production population: ['tortoise', 'tools', 'scripts']/**/*.py
 
 == reconciliation.reconcile: 0 production call site(s) ==
@@ -37,5 +38,5 @@ production population: ['tortoise', 'tools', 'scripts']/**/*.py
 test population: tests/*.py
   reconciliation.reconcile: 12 test-file hit line(s)
   record_projection.replay: 2 test-file hit line(s)
-  cache_projection.read_record_view: 2 test-file hit line(s)
+  cache_projection.read_record_view: 7 test-file hit line(s)
   FalkorProjection.rebuild_from_record: 10 test-file hit line(s)

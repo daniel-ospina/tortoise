@@ -656,9 +656,9 @@ def _cmd_record_reconcile(args):
         VERDICT_CLEAN,
         exit_code_for,
         log_result,
-        read_cache_view,
         reconcile_record_and_cache,
         record_key_map,
+        scan_cache_view,
     )
 
     # The DSN is resolved by the module that DECLARES the arming surface — not
@@ -737,10 +737,18 @@ def _cmd_record_reconcile(args):
                 f"cache {cache_graph!r} could not be opened "
                 f"({type(e).__name__}) — divergence is UNKNOWN, not zero") from e
         declaration = read_declaration(proj.g)
+        # ONE cache read: the full property maps PLUS, per key, the names the
+        # record PLACES for that label. The `placed` half is what keeps §17.5's
+        # cache-owned scalars (the EP/derived properties the record schema
+        # REFUSES by name) out of `field_mismatches` — without it every
+        # journal-projected point reports a permanent mismatch and this verb
+        # exits 3 forever on a healthy pair (#9196 review, P1).
+        scan = scan_cache_view(proj.g, timeout_ms=timeout_ms)
         result = reconcile_record_and_cache(
             record_key_map(view),
-            read_cache_view(proj.g, timeout_ms=timeout_ms),
+            scan.view,
             declaration=declaration,
+            placed=scan.placed,
         )
     except ReconciliationUnavailable as e:
         print(f"Record↔cache reconciliation UNAVAILABLE: {e}", file=sys.stderr)

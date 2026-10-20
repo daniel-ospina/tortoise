@@ -57,6 +57,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import functools
+import json
 import os
 import sys
 import types
@@ -70,7 +71,7 @@ import pytest
 from tortoise import cache_projection as cp
 from tortoise import record_reconcile as rr
 from tortoise.projection import DirectCacheWriteRefused
-from tortoise.reconciliation import ReconciliationUnavailable
+from tortoise.reconciliation import ReconciliationUnavailable, reconcile_views
 from tortoise.residency import (
     COVERAGE_COMPLETE,
     COVERAGE_PARTIAL,
@@ -621,7 +622,7 @@ def test_a_usage_error_exits_2_not_1(capsys):
 #: The names the verb's body must CALL. `exit_code_for` is in the set on
 #: purpose: a constant returned from the verb is the mutation above.
 _VERB_MUST_CALL = frozenset({
-    "read_cache_view",
+    "scan_cache_view",
     "read_record_view",
     "reconcile_record_and_cache",
     "record_key_map",
@@ -999,3 +1000,214 @@ def test_a_falsy_marker_point_reports_the_WRITER_half_as_divergence(cache_graph)
     assert result.report.divergent_keys == ("Point:p-9189-falsy",)
     assert "form_normalized" not in result.report.render()
     assert result.verdict() == rr.VERDICT_DIVERGENT
+
+
+# ── 8. a JOURNAL-projected cache — the shape production actually runs ─────
+#
+# Every clean-path assertion ABOVE builds the cache with the RECORD-sourced
+# writer (`cp.project_records`), i.e. a cache whose field set was built from the
+# record and therefore agrees with it by construction. Production runs the
+# OTHER writer: the journal fold (`FalkorProjection.rebuild_all`), which also
+# writes the graph's own recomputed scalars — `content_hash`, `ep_dirty`,
+# `ep_dirty_at`, and once EP has run `ep_alpha`/`ep_beta`/`confidence`/… .
+# Those are the CACHE's by decision (§17.5) and the record schema REFUSES them
+# by name (`chk_point_props_no_derived`), so the record can never hold them —
+# and a presence-aware field comparison counted every one as a mismatch. On
+# that population the clean verdict was unreachable: `record-reconcile` would
+# have reported `divergent`, exit 3, forever, on a perfectly healthy pair
+# (#9196 review, P1 — "a signal indistinguishable from noise is not
+# observability", the failure this module exists to prevent).
+
+#: The point the journal below creates.
+_JOURNAL_POINT = "p-9189-journal"
+
+#: The RECORD's own properties for it — written out by hand rather than derived
+#: from the graph, so the record side is not a filtered copy of the cache (a
+#: fixture built that way agrees by construction and would prove nothing).
+_JOURNAL_RECORD_PROPS = {
+    "id": _JOURNAL_POINT,
+    "content": "alpha",
+    "pointKind": "statement",
+    "is_operator": False,
+    "status": "live",
+    "createdAt": "2026-10-19T00:00:00+00:00",
+    "updatedAt": "2026-10-19T00:00:00+00:00",
+}
+
+
+def _journal_point_added() -> dict:
+    """One ``PointAdded`` record in the SDK's own journal spelling."""
+    return {
+        "event_id": "e-9189-journal-1",
+        "ts": "2026-10-19T00:00:00+00:00",
+        "type": "PointAdded",
+        "initiated_by": "sdk",
+        "projection_version": 2,
+        "point": {**_JOURNAL_RECORD_PROPS, "ep_dirty": True,
+                  "ep_dirty_at": 1, "embedding": None},
+    }
+
+
+def _write_journal(tmp_path) -> Path:
+    events = tmp_path / "events"
+    events.mkdir()
+    (events / "events.jsonl").write_text(
+        json.dumps(_journal_point_added()) + "\n", encoding="utf-8")
+    return events
+
+
+def _journal_record_view(graph_props: dict | None = None) -> cp.RecordView:
+    """The record's view of the journal point.
+
+    ``graph_props`` supplies the ONE field the fold re-stamps rather than
+    carries (see :func:`_replay_owned_updated_at`); every other record field is
+    written out by hand, so the record side is not a filtered copy of the cache.
+    """
+    props = dict(_JOURNAL_RECORD_PROPS)
+    if graph_props is not None:
+        props["updatedAt"] = _replay_owned_updated_at(graph_props)
+    return cp.RecordView(nodes=(
+        cp.RecordNode(label="Point", key=_JOURNAL_POINT, props=props),
+    ))
+
+
+def _replay_owned_updated_at(graph_props: dict) -> str:
+    """The cache's ``updatedAt``, which the fold STAMPS with replay-now.
+
+    ``_upsert_point_props`` writes ``n.updatedAt`` unconditionally and the
+    comment on the replay tail says so in as many words (*"``updatedAt`` is
+    replay-owned"*): a journal rebuild does not carry the record's value for it.
+    That is a genuine cache-vs-record difference of a RECORD field — reported by
+    the comparison, not swallowed — and it is outside this pin's subject (the
+    properties the record CANNOT hold). The assertion keeps the provenance
+    honest: if the fold ever stops re-stamping, this helper's premise is gone
+    and the test says so rather than quietly comparing nothing.
+    """
+    stamped = graph_props["updatedAt"]
+    assert stamped != _JOURNAL_RECORD_PROPS["updatedAt"], (
+        "the fold no longer re-stamps updatedAt — drop this override and give "
+        "the record view the journalled value")
+    return stamped
+
+
+@pytest.mark.embedded_only
+def test_a_JOURNAL_projected_cache_reconciles_clean(tmp_path):
+    """§17.5's cache-owned scalars are NOT divergence (#9196 review, P1).
+
+    The cache here is built by the SHIPPED fold from a real journal, so its
+    property set is what the fold produces — not what a test chose. The
+    assertions below are the two halves of the finding:
+
+    * PRE-FIX (every property compared) the same pair reports one
+      ``field_mismatches`` per cache-owned property and is permanently
+      divergent — so the fix is not vacuous;
+    * the shipped path reports zero mismatches, zero divergence, exit 0, AND
+      names the properties it declined to judge (``graph_only``), so they are
+      not silently swallowed either.
+    """
+    from tests._embedded import fresh_embedded_proj
+
+    events = _write_journal(tmp_path)
+    with fresh_embedded_proj(tmp_path) as proj:
+        proj.rebuild_all(str(events), confirm_destructive=True)
+
+        scan = rr.scan_cache_view(proj.g, labels=("Point",))
+        key = f"Point:{_JOURNAL_POINT}"
+        raw = scan.view[key]
+        cache_owned = set(raw) - scan.placed[key]
+        assert {"content_hash", "ep_dirty", "ep_dirty_at"} <= cache_owned, (
+            f"the fold no longer writes cache-owned scalars — this pin has "
+            f"served its purpose: {sorted(raw)}")
+
+        truth = rr.record_key_map(_journal_record_view(raw))
+
+        # The PRE-FIX comparison — every property, presence-aware.
+        pre_fix = reconcile_views(truth, scan.view)
+        assert pre_fix.field_mismatches == len(cache_owned), pre_fix.render()
+        assert pre_fix.divergent == 1, pre_fix.render()
+
+        result = rr.reconcile_record_and_cache(
+            truth, scan.view, placed=scan.placed)
+
+        assert result.report.checked == 1
+        assert result.report.field_mismatches == 0, result.report.render()
+        assert result.report.divergent == 0, result.report.render()
+        assert dict(result.graph_only) == {name: 1 for name in cache_owned}
+        assert result.graph_only_total == len(cache_owned)
+        assert result.verdict() == rr.VERDICT_CLEAN
+        assert rr.exit_code_for(result) == rr.EXIT_CLEAN
+        assert "graph_only=" in rr.log_result(result)
+
+
+@pytest.mark.embedded_only
+def test_the_VERB_exits_0_on_a_JOURNAL_projected_cache(
+        monkeypatch, tmp_path, capsys):
+    """The operator signal on the production shape: exit 0, and it says why.
+
+    Pre-fix this drive exits ``3`` — the fold's own cache-owned properties are
+    counted as disagreements — so a scheduler would alert on a healthy pair,
+    permanently, which is the same outcome as having no observer at all.
+    """
+    from tests._embedded import fresh_embedded_proj
+
+    events = _write_journal(tmp_path)
+    with fresh_embedded_proj(tmp_path) as proj:
+        proj.rebuild_all(str(events), confirm_destructive=True)
+        graph_props = rr.scan_cache_view(
+            proj.g, labels=("Point",)).view[f"Point:{_JOURNAL_POINT}"]
+        rc, conn, projection, _ = _drive_the_verb(
+            monkeypatch, proj.g, _journal_record_view(graph_props))
+
+    printed = capsys.readouterr()
+    assert rc == rr.EXIT_CLEAN, printed.out + printed.err
+    assert "0 divergent of 1 checked" in printed.out, printed.out
+    assert "field_mismatches=0" in printed.out, printed.out
+    assert "graph_only=3" in printed.out, printed.out
+    assert conn.closed and projection.closed
+
+
+def test_a_record_TAIL_property_is_still_compared(cache_graph):
+    """The exclusion is narrow: outside the placement table AND absent from the record.
+
+    The record's ``props`` tail is an OPEN set — a caller-supplied property the
+    projection writes verbatim — so a blanket "compare only placed names"
+    filter would drop it from the cache side and report a faithful projection as
+    divergent. Here the tail property is present on both sides (clean) and then
+    missing from a freshly projected cache (divergent), which is exactly the
+    signal that must survive the cache-owned partition.
+    """
+    with_tail = cp.RecordView(nodes=(
+        cp.RecordNode(label="Point", key="p-9189-tail",
+                      props={"id": "p-9189-tail", "content": "alpha",
+                             "custom_note": "record side"}),
+    ))
+    without_tail = cp.RecordView(nodes=(
+        cp.RecordNode(label="Point", key="p-9189-tail",
+                      props={"id": "p-9189-tail", "content": "alpha"}),
+    ))
+    _project(with_tail, cache_graph)
+
+    scan = rr.scan_cache_view(cache_graph, labels=("Point",))
+    assert "custom_note" in scan.view["Point:p-9189-tail"]
+    assert "custom_note" not in scan.placed["Point:p-9189-tail"], (
+        "the placement table now names the tail property — if that is "
+        "deliberate, this pin needs a different open-set name")
+
+    clean = rr.reconcile_record_and_cache(
+        rr.record_key_map(with_tail), scan.view, placed=scan.placed)
+    assert clean.report.field_mismatches == 0, clean.report.render()
+    assert clean.verdict() == rr.VERDICT_CLEAN
+    assert clean.graph_only == ()
+
+    cache_graph.query("MATCH (n:Point {id:'p-9189-tail'}) DETACH DELETE n")
+    _project(without_tail, cache_graph)
+    scan = rr.scan_cache_view(cache_graph, labels=("Point",))
+    dropped = rr.reconcile_record_and_cache(
+        rr.record_key_map(with_tail), scan.view, placed=scan.placed)
+
+    assert dropped.report.field_mismatches == 1, dropped.report.render()
+    assert dropped.report.divergent == 1
+    assert dropped.graph_only == (), (
+        "a record-held property was classified cache-owned — the partition "
+        "swallowed real divergence")
+    assert dropped.verdict() == rr.VERDICT_DIVERGENT

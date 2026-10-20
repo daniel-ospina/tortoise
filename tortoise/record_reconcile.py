@@ -42,7 +42,16 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   record PLACES, not a whole-graph census, and this trigger deliberately does
   not count or refuse unknown labels: refusing would make every cache
   unreadable (``:Meta`` is always there) and counting would report the
-  declaration as a second writer.
+  declaration as a second writer; (5) **cache-OWNED properties** — the EP and
+  derived scalars §17.5 places on the cache (``ep_alpha``/``ep_beta``/
+  ``ep_dirty``/``content_hash``/``confidence``/…), which the record schema
+  REFUSES by name and so can never hold. They are neither a mismatch nor
+  invisible: :func:`reconcile_record_and_cache` partitions them into a named
+  ``graph_only`` count (the ``form_normalized`` precedent). Counting them as
+  ``field_mismatches`` would make the clean verdict UNREACHABLE on a
+  journal-projected cache — every folded point carries them — which is exactly
+  the "a signal indistinguishable from noise is not observability" failure
+  this observer exists to prevent (#9196 review, P1).
 
 WHERE THE NUMBER LANDS
 ======================
@@ -81,6 +90,7 @@ from .cache_projection import (
     NODE_TABLES,
     RecordView,
     declared_key,
+    projected_properties,
 )
 from .reconciliation import (
     SAMPLE_LIMIT,
@@ -101,14 +111,15 @@ __all__ = [
     "VERDICT_CLEAN",
     "VERDICT_DIVERGENT",
     "VERDICT_UNANSWERABLE",
+    "CacheScan",
     "RecordReconcileResult",
     "exit_code_for",
     "log_result",
     "read_cache_view",
     "reconcile_record_and_cache",
     "record_key_map",
+    "scan_cache_view",
 ]
-
 #: The trigger's log channel. A separate name from the comparison module so a
 #: deployment can route "the observer ran and found nothing" apart from
 #: everything else ``tortoise`` logs.
@@ -173,10 +184,53 @@ def record_key_map(view: RecordView, *, scope: str = "") -> dict[str, dict]:
     }
 
 
+@dataclass(frozen=True)
+class CacheScan:
+    """The cache side as the graph holds it, plus what the record cannot PLACE.
+
+    ``view`` is the FULL property maps — the reader does not decide what is
+    compared, because only the caller holding the RECORD side can tell a
+    deliberately cache-owned property (§17.5: ``ep_alpha``/``content_hash``/…,
+    which the record schema refuses) from a record-placed one the cache
+    dropped. ``placed`` is, per key, the property names the record PLACES for
+    its label (the placement table's projected set plus the contract key).
+
+    It is a pair rather than a filtered ``view`` on purpose: the record's
+    ``props`` tail is an OPEN set, so a name outside ``placed`` may still be
+    record-held (a caller-supplied property the projection wrote verbatim). A
+    blanket placement filter would drop it from the cache side and report a
+    faithful projection as divergent — the same false red, mirrored. The
+    comparison therefore excludes a property only when it is BOTH outside
+    ``placed`` AND absent from the record (#9196 review, P1).
+    """
+
+    view: dict[str, dict]
+    placed: dict[str, frozenset[str]]
+
+
 def read_cache_view(g: Any, *, labels: Iterable[str] | None = None,
                     scope: str = "", timeout_ms: int = CACHE_READ_TIMEOUT_MS
                     ) -> dict[str, dict]:
-    """The CACHE side: the graph's own property maps, keyed the same way.
+    """The CACHE side as ``{declared key: {property: value}}`` — the FULL maps.
+
+    This is :attr:`CacheScan.view`. A caller that also needs the record-placed
+    split (the property names a cache-owned scalar must be told apart from) must
+    use :func:`scan_cache_view` and pass ``placed=`` to
+    :func:`reconcile_record_and_cache` — reading only this function and
+    comparing it directly counts the projection's own graph-owned scalars as
+    mismatches on a journal-projected cache (§17.5; #9196 review, P1).
+
+    See :func:`scan_cache_view` for the read's bounds, refusals and duplicate
+    rule.
+    """
+    return scan_cache_view(g, labels=labels, scope=scope,
+                           timeout_ms=timeout_ms).view
+
+
+def scan_cache_view(g: Any, *, labels: Iterable[str] | None = None,
+                    scope: str = "", timeout_ms: int = CACHE_READ_TIMEOUT_MS
+                    ) -> CacheScan:
+    """Read the CACHE side ONCE, split into the view and its placement marks.
 
     ``labels`` defaults to every label the record places (``NODE_TABLES``). A
     label outside that set is refused rather than interpolated: the label is
@@ -222,7 +276,16 @@ def read_cache_view(g: Any, *, labels: Iterable[str] | None = None,
             f"read the labels the projection writes ({sorted(known)})")
 
     out: dict[str, dict] = {}
+    placed: dict[str, frozenset[str]] = {}
     for label in wanted:
+        # The names the record PLACES for this label: the placement table's
+        # projected set (the schema's authority, minus what it REFUSES by name)
+        # plus the contract key, which the projection writes under its own name
+        # as well as using it as the MERGE key. A name outside this set is
+        # either cache-owned (§17.5's EP/derived scalars — the record schema
+        # refuses them) or a caller-supplied `props`-tail property, which the
+        # RECORD side decides between; the reader marks, the composition judges.
+        placeable = projected_properties(NODE_TABLES[label]) | {KEY_PROPERTY[label]}
         try:
             rows = g.query(
                 f"MATCH (n:{label}) RETURN properties(n)",
@@ -259,7 +322,8 @@ def read_cache_view(g: Any, *, labels: Iterable[str] | None = None,
                     f"equal and report `extra_in_cache=0` over a node the "
                     f"record does not have; divergence is UNKNOWN, not zero")
             out[declared] = props
-    return out
+            placed[declared] = placeable
+    return CacheScan(view=out, placed=placed)
 
 
 # ── the one composition ────────────────────────────────────────────────────
@@ -281,6 +345,19 @@ class RecordReconcileResult:
     report: ReconciliationReport
     declaration: ResidencyDeclaration
     not_hot: int = 0
+    #: Properties the CACHE holds that the record CANNOT place — §17.5's
+    #: EP/derived scalars, which the record schema refuses by name — as
+    #: ``(name, node count)``. Kept OUT of ``field_mismatches`` (counting them
+    #: made the clean verdict unreachable on a journal-projected cache) and kept
+    #: as its OWN count (a comparison that declines to judge a field has to say
+    #: so — the ``form_normalized`` precedent). APPENDED LAST for the same
+    #: positional-rebind reason ``form_normalized`` is.
+    graph_only: tuple[tuple[str, int], ...] = ()
+
+    @property
+    def graph_only_total(self) -> int:
+        """Cache-owned property occurrences the comparison did not judge."""
+        return sum(count for _, count in self.graph_only)
 
     @property
     def checked(self) -> int:
@@ -309,6 +386,8 @@ class RecordReconcileResult:
         payload.update({
             "verdict": self.verdict(),
             "not_hot": self.not_hot,
+            "graph_only": dict(self.graph_only),
+            "graph_only_total": self.graph_only_total,
             "declaration_coverage": self.declaration.coverage,
             "declaration_source": self.declaration.source,
         })
@@ -319,7 +398,9 @@ def reconcile_record_and_cache(
         record: Mapping[str, Mapping],
         cache: Mapping[str, Mapping], *,
         declaration: ResidencyDeclaration | None = None,
-        sample_limit: int = SAMPLE_LIMIT) -> RecordReconcileResult:
+        sample_limit: int = SAMPLE_LIMIT,
+        placed: Mapping[str, frozenset[str]] | None = None,
+        ) -> RecordReconcileResult:
     """Compare the two keyed views, PARTITIONING divergence from residency.
 
     ``record``/``cache`` are ``{declared key: {property: value}}`` — already
@@ -327,6 +408,21 @@ def reconcile_record_and_cache(
     either store. ``declaration`` is the known-hot set (``residency``); ``None``
     means "not read", which is treated as COVERAGE-COMPLETE — the §2.0 default
     where the cache is the whole graph — so an absent key really is divergence.
+
+    ``placed`` is :attr:`CacheScan.placed` — per key, the property names the
+    record PLACES for its label. It enables the **cache-owned partition**: a
+    property the cache holds that the record can neither place nor hold (the
+    EP/derived scalars §17.5 assigns to the cache, which the record schema
+    refuses by name) is NOT a field mismatch and is reported as its own named
+    ``graph_only`` count instead. Without it, a journal-projected cache — the
+    shape production runs — reports a permanent ``field_mismatches`` on every
+    point and can never be clean (#9196 review, P1).
+
+    ⚠️ The exclusion is deliberately NARROW: a property absent from ``placed``
+    is still compared when the RECORD holds it (the record's ``props`` tail is
+    an open set), so a caller-supplied property the projection failed to write
+    stays visible as divergence. ``placed=None`` (a caller with hand-built
+    views) means "no placement knowledge" and compares every field exactly.
 
     ⛔ **A vacuous comparison REFUSES.** If either side is non-empty while every
     one of its property maps is empty, the field comparison would be
@@ -350,13 +446,66 @@ def reconcile_record_and_cache(
                 del truth[key]
                 not_hot += 1
 
-    report = reconcile_views(truth, cached, sample_limit=sample_limit)
+    compared, graph_only = _partition_cache_owned(cached, truth, placed)
+    report = reconcile_views(truth, compared, sample_limit=sample_limit)
     return RecordReconcileResult(
         report=report,
         declaration=declaration if declaration is not None
         else ResidencyDeclaration(source=None),
         not_hot=not_hot,
+        graph_only=graph_only,
     )
+
+
+def _partition_cache_owned(
+        cache: Mapping[str, Mapping],
+        truth: Mapping[str, Mapping],
+        placed: Mapping[str, frozenset[str]] | None,
+        ) -> tuple[dict[str, Any], tuple[tuple[str, int], ...]]:
+    """Split the cache side into what is COMPARED and what is cache-owned.
+
+    A cache property is excluded only when it is **both**
+
+    * outside the record's placement for that label (``placed[key]`` — the
+      schema-authorized property set plus the contract key), and
+    * absent from the RECORD side for that key.
+
+    The first half is what keeps §17.5's EP/derived scalars out of
+    ``field_mismatches``: the record schema REFUSES ``ep_alpha``/``content_hash``/
+    ``confidence``/… by name, so they can never be record-held, and counting
+    their presence on ONE side as a mismatch makes every journal-projected cache
+    permanently divergent (#9196 review, P1).
+
+    The second half is what keeps the exclusion from swallowing real divergence:
+    a record's ``props`` tail is an OPEN set, so a property outside the placement
+    table may still be record-held — and then it is compared, exactly as before.
+
+    ``placed=None`` means the caller has no placement knowledge (hand-built
+    views): nothing is excluded, and every field is compared exactly.
+    """
+    if not placed:
+        return dict(cache), ()
+
+    compared: dict[str, Any] = {}
+    counts: dict[str, int] = {}
+    for key, props in cache.items():
+        if not isinstance(props, Mapping):
+            # A non-mapping value is compared WHOLE by `reconcile_views`; it
+            # carries no property names to partition.
+            compared[key] = props
+            continue
+        record_props = truth.get(key)
+        keep = set(placed.get(key, frozenset()))
+        if isinstance(record_props, Mapping):
+            keep |= set(record_props)
+        kept: dict[str, Any] = {}
+        for name, value in props.items():
+            if name in keep:
+                kept[name] = value
+            else:
+                counts[name] = counts.get(name, 0) + 1
+        compared[key] = kept
+    return compared, tuple(sorted(counts.items()))
 
 
 def _refuse_vacuous(view: Mapping[str, Mapping], side: str) -> None:
@@ -385,6 +534,13 @@ def log_result(result: RecordReconcileResult,
     line = result.report.render()
     if result.not_hot:
         line += f" [not_hot={result.not_hot} — residency, not divergence]"
+    if result.graph_only_total:
+        # A comparison that DECLINES to judge a field has to say so, or the
+        # number it did report reads as covering everything it saw.
+        names = ", ".join(name for name, _ in result.graph_only[:4])
+        more = ", …" if len(result.graph_only) > 4 else ""
+        line += (f" [graph_only={result.graph_only_total} cache-owned "
+                 f"property occurrence(s) not compared ({names}{more})]")
     verdict = result.verdict()
     line = f"{line} verdict={verdict}"
     (logger or logging.getLogger(LOG_NAME)).log(
