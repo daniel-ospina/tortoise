@@ -4532,7 +4532,14 @@ class _EntityHandlers:
         }
         if not guard:
             # ── PLAIN path — legacy/replay calls, byte-identical (SC4) ──
-            self._event_plain_merge(eid, props, embedding, inner)
+            # #5140: the record's OWN instant, for the document `:Source` this
+            # fold can mint (§4.6 marks `ingestedAt` REQUIRED). It rides the
+            # RECORD, not the nested payload — ``EventAPI._emit`` stamps every
+            # journal line with ``ts`` — so a replay reads the value the live
+            # write recorded instead of re-stamping a replay clock (#5024's
+            # rule for `updatedAt`, applied to the same slot).
+            self._event_plain_merge(eid, props, embedding, inner,
+                                    record_ts=event.get("ts"))
             # #388: connector Source materialization at the choke point (all
             # connector events flow here via proj.apply; the guarded meeting
             # path never carries connector metadata, so the gate is plain-path
@@ -4661,8 +4668,16 @@ class _EntityHandlers:
             )
 
     def _event_plain_merge(self, eid: str, props: dict, embedding,
-                           inner: dict) -> None:
-        """The legacy single-statement Event MERGE (+ edges + extra props)."""
+                           inner: dict,
+                           record_ts: str | None = None) -> None:
+        """The legacy single-statement Event MERGE (+ edges + extra props).
+
+        ``record_ts`` is the JOURNAL RECORD's own instant (``ts`` on the
+        envelope, never on the nested payload). It is the transaction-time
+        value the document `:Source` below is stamped with (#5140), so live and
+        replay agree on when Tortoise first saw that source — §4.6's
+        `ingestedAt`, which the record — not the fold — is the authority for.
+        """
         # #4524: the ON MATCH embedding write below can be a SILENT no-op on
         # the embedded engine — a ``vecf32`` overwrite of an existing vector is
         # discarded (#4457). It sits inside ON CREATE/ON MATCH, so clear the
@@ -4726,13 +4741,31 @@ class _EntityHandlers:
             # kept, and a document node minted by THIS writer before the fix
             # (or replayed from an old journal line) is repaired by the next
             # fold instead of staying NULL forever.
+            # #5140 (P2 finding 5): `ingestedAt` — §4.6 marks it REQUIRED on
+            # EVERY `:Source`, and this clause wrote none, so every D10
+            # requirement sweep read a document minted here as a violation
+            # (`MATCH (s:Source) WHERE … OR s.ingestedAt IS NULL …` → 1). Same
+            # class #5082 closed for `sourceKind` on this exact clause: two
+            # writers of one node disagreeing on a REQUIRED field, while the
+            # sibling `_upsert_document` stamps
+            # `s.ingestedAt=coalesce(s.ingestedAt, $now)`.
+            # `coalesce` on BOTH arms: create stamps it, and a node minted by
+            # this writer before the fix (or replayed from an old journal line)
+            # is repaired by the next fold — while an instant a writer already
+            # recorded is never overwritten (#398's never-overwrite contract;
+            # the field means when Tortoise FIRST saw this source). The value is
+            # the record's own `ts` when it carries one — deterministic on
+            # replay — falling back to the write clock only for a synthetic
+            # event applied without one (legacy lines, test fixtures).
             self.g.query(
                 "MERGE (s:Source {url:$id}) "
                 "ON CREATE SET s.id=$id, s.title=$id, "
                 "              s.sourceKind=coalesce(s.sourceKind, 'document'), "
-                "              s.documentKind='transcript' "
-                "ON MATCH SET s.sourceKind=coalesce(s.sourceKind, 'document')",
-                params={"id": obj},
+                "              s.documentKind='transcript', "
+                "              s.ingestedAt=$iat "
+                "ON MATCH SET s.sourceKind=coalesce(s.sourceKind, 'document'), "
+                "             s.ingestedAt=coalesce(s.ingestedAt, $iat)",
+                params={"id": obj, "iat": record_ts or _now_iso()},
             )
             self.g.query(
                 "MATCH (s:Source {url:$id}), (e:Event {eventId:$eid}) "

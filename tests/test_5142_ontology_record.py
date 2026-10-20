@@ -425,6 +425,32 @@ def test_every_document_source_writer_stamps_source_kind() -> None:
         )
 
 
+def test_every_document_source_writer_stamps_ingested_at() -> None:
+    """#5140 (P2 finding 5): §4.6 marks `ingestedAt` REQUIRED on every `:Source`
+    too, and the SAME three writers must therefore stamp it — this is the second
+    REQUIRED field, not a new claim. Two of them (`_event_plain_merge`'s
+    `objectType='Document'` branch and `hosted_api._execute_commit_writes`'
+    `/v1/sessions` transcript MERGE) wrote none, so every D10 requirement sweep
+    read the document they minted as a violation.
+
+    `coalesce` is asserted, not merely the property name: an instant a writer
+    already recorded must never be overwritten (the field means *when Tortoise
+    first saw this source*), and a node minted before the fix is repaired by the
+    next fold. The behavioural half is
+    `tests/test_document_source_ingested_at_5140.py`; this half is the one that
+    covers the hosted writer, whose commit path needs the full request stack.
+    """
+    writers = _document_source_writers()
+    for name, src in writers.items():
+        assert "coalesce(s.ingestedAt" in src, (
+            f"{name} must stamp `ingestedAt` (CREATE-only, `coalesce`) on the "
+            f"document :Source it mints — §4.6 marks it REQUIRED on every "
+            f":Source and the D10 `_required_sweep` harnesses assert it, so a "
+            f"writer that drops it turns those sweeps red on the document it "
+            f"creates (#5140 P2 finding 5, the #5082 class)"
+        )
+
+
 def test_writer_scanner_follows_module_level_constants() -> None:
     """The derivation must not miss a writer that composes its MERGE clause from
     a module-level constant (the #8525 review's P2).
