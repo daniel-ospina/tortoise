@@ -864,7 +864,7 @@ def test_an_adopted_unmeasured_row_keeps_its_record_and_appends_the_basis() -> N
     row = next(ln for ln in text.split("\n")
                if ln.strip().startswith("test_url_keyed.py:"))
     # the marker itself is falsified by the adoption and must not survive ...
-    assert not re.match(r"[ \t]*#\s*unmeasured\b", row.split("#", 1)[1])
+    assert not re.search(r"[\d.]\s*#\s*unmeasured\b", row)
     # ... but the RECORD the marker prefixed does, with this render's basis on it
     assert "#4649: 23 tests, live FalkorDB, measured locally" in row
     assert "the #2876 coverage floor needs the row to exist" in row
@@ -1264,8 +1264,7 @@ def test_a_held_row_restates_an_unmeasured_marker_and_keeps_the_rationale() -> N
     assert "carried forward (not a full-file CI measurement)" in row
     # the stale marker token itself must not survive as the leading tail token:
     # the artifact measured this file, so `# unmeasured` would be a false claim.
-    assert not re.match(r"[ \t]*#\s*unmeasured\b", row.split("#", 1)[1]
-                        if "#" in row else "")
+    assert not re.search(r"[\d.]\s*#\s*unmeasured\b", row)
     assert yaml.safe_load(text)["durations"]["test_journal.py"] == 27.0
 
 
