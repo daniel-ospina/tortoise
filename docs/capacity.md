@@ -231,11 +231,14 @@ hop query's own growth (the two-hop pattern traverses operators), and
 measurement, the traces, and the three distinct failure modes are in **#6211**.
 
 **The hop's cost tracked the GRAPH, not the frontier (#6211, measured).** The
-shape above looked frontier-proportional, but the frontier was never the anchor:
-every id-set query of the pass was **planned as a label scan of the traversal's
-other endpoint**, with `n.id IN $ids` applied per record afterwards. Measured
-with `GRAPH.PROFILE` on a 23,353-node / 160,000-edge fixture (falkordb-server
-4.20.6), two-hop bridge at a 30-id frontier:
+shape above looked frontier-proportional, but the frontier was never the anchor
+of the queries that regressed: each id-set hop that ran over an expanding
+traversal WITHOUT an anchor was **planned as a label scan of the traversal's
+other endpoint**, with `n.id IN $ids` applied per record afterwards. (Three
+`ep.py` id-set queries were already `Node By Index Scan` without a barrier —
+they are named below.) Measured with `GRAPH.PROFILE` on a 23,353-node /
+160,000-edge fixture (falkordb-server 4.20.6), two-hop bridge at a 30-id
+frontier:
 
 | plan | records walked | wall |
 |---|---|---|
@@ -264,12 +267,15 @@ Three sites in `ep.py` traverse and were already `Node By Index Scan` without a
 barrier on `origin/main`, so they carry none: `_load_cache`'s message sweep,
 `seed_operators` and `_affected_factors` Batch 2. Those three plus the three
 reads that do not traverse at all are the `ep.py` pass's **19 distinct
-unbarriered id-set statements** — the traversing sites at 8 + 1 + 1 (the message
-sweep is 2 relations × 4 epistemic labels) and the single-node probes at
-4 + 1 + 4: the cache's per-label node-params load (the `ep_alpha` / `ep_beta`
-probe), the seed lookup (one per label up to the last epistemic label the seeds
-actually use, in `EPISTEMIC_LABELS` order — 1 on a `:Point` seed set, 4 on an
-`:Event` one) and the draft filter. Every one of them is index-anchored. The
+unbarriered id-set statements on a `:Point` seed set** (20 / 21 / 22 when the
+seed lookup reaches `:Subject` / `:Object` / `:Event`) — the traversing sites at
+8 + 1 + 1 (the message sweep is 2 relations × 4 epistemic labels) and the
+single-node probes at 4 + 1 + 4: the cache's per-label node-params load (the
+`ep_alpha` / `ep_beta` probe), the seed lookup and the draft filter. The seed
+lookup is the one term that moves: it probes labels in `EPISTEMIC_LABELS` order
+and breaks only when every seed has RESOLVED (`ep.py:1203-1219`), so it emits
+one statement per label up to the last epistemic label a seed uses — all four
+when a seed resolves under none. Every one of them is index-anchored. The
 operator selector's operator→target leg is NOT one of these: it carries the
 barrier, so it is counted above with the load-bearing `analyze.py` legs. One
 further id-set statement sits OUTSIDE this census and outside the pinned set: a
@@ -279,20 +285,19 @@ read names no label — so a per-label index cannot anchor it (the label-free fo
 is deliberate: a `:Point:Object` node must be journaled once, #7853). It is the
 last unanchored id-set statement of the `ep.py` pass, filed as **#9304**; the
 traversal `sdk.py` mirrors that `compute_confidence` also runs
-(`_window_closure`) are a separate, still-open leg of the same call (#9299). All
-eleven barriered sites and all six unbarriered ones (three traversing, three
-single-node probes) are in the pinned set: `tests/test_6211_ep_anchor.py`
-captures the statements the
-pass emits and asserts the PLAN of each (`Node By Index Scan`, and no
-`Node By Label Scan`; the selector test additionally rejects `All Node Scan`),
-never their text; each is
-reached by the fixture (`_load_cache`'s sweeps and Batch 2 directly,
-`seed_operators` through an operator seed — the 300 operators hanging off the
-hub claim). On the 23k-node / 160k-edge fixture that assertion covers the pass's
-**49 distinct** id-set statements (95 emissions) and the operator selector's
-**12 distinct** (37 emissions across the two seeds the assertion uses) — zero
-unanchored in
-either. Against `origin/main`'s code the file's six behavioural tests run `4
+(`_window_closure`) are a separate, still-open leg of the same call (#9299).
+
+All eleven barriered sites and all six unbarriered ones (three traversing,
+three single-node probes) are in the pinned set: `tests/test_6211_ep_anchor.py`
+captures the statements the pass emits and asserts the PLAN of each (`Node By
+Index Scan`, and no `Node By Label Scan`; the selector test additionally rejects
+`All Node Scan`), never their text; each is reached by the fixture
+(`_load_cache`'s sweeps and Batch 2 directly, `seed_operators` through an
+operator seed — the 300 operators hanging off the hub claim). On the 23k-node /
+160k-edge fixture that assertion covers the pass's **49 distinct** id-set
+statements (95 emissions) and the operator selector's **12 distinct** (37
+emissions across the two seeds the assertion uses) — zero unanchored in either.
+Against `origin/main`'s code the file's six behavioural tests run `4
 failed, 2 passed` — the emitted-statement plan test, the hop's record bound, the
 OR split's statement counts and the operator selector's four legs fail, while
 the fixture guard and the OR-split row-semantics guard pass, because they pin
