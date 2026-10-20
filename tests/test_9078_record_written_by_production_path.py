@@ -55,6 +55,7 @@ import ast
 import fnmatch
 import importlib.util
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -1381,6 +1382,98 @@ def test_the_live_door_threads_the_ordinal_into_the_seam(monkeypatch):
     assert [k["first_seq"] for k in seen] == [1, 7], (
         "the row's number is not the append's ordinal — a live write and a "
         f"full replay would disagree about the same record's seq: {seen}")
+
+
+def test_an_unproven_position_is_counted_warned_and_never_claimed(
+        monkeypatch, caplog):
+    """The `seq is None` branch is a NAMED skip, not the in-memory lane (#9307 F1).
+
+    `EventLog.append` returns ``None`` when it appended the record but could not
+    PROVE its position (an unsizable tail, an unusable cross-process lock, an
+    uncountable journal, a peer writing inside the window, an inode swap). Two of
+    those are documented REPEATABLE windows (#9252), and before this leg existed
+    the door took `position=False` with no counter, no log line and a `WIRED`
+    gate verdict — so "layer 1 was written for this record" and "layer 1 skipped
+    because the append proved nothing" were indistinguishable on every
+    observable surface. That is #9078's invisible-gap class re-entering.
+
+    The SAME paragraph also said this branch was the in-memory capture lane. It
+    is not: that lane is declined earlier on `durable=False` and counted
+    `no_durable_journal`, which this leg pins separately, because a docstring
+    that names the wrong population is what sends the next maintainer looking in
+    the wrong place for the missing rows.
+    """
+    def _fake_write_records(records, **kwargs):
+        return record_writer.RecordWrite(
+            outcome=record_writer.RecordWriteOutcome.APPLIED,
+            events=len(records), statements=1,
+            first_seq=kwargs["first_seq"], last_seq=kwargs["first_seq"],
+            connection=None)
+
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
+                       "postgresql://record:record@127.0.0.1:1/record")
+    monkeypatch.setattr(record_writer, "write_records", _fake_write_records)
+    record = {"type": "PointAdded", "id": "p1"}
+
+    # --- the population: a DURABLE journal, and the layer rows still written ---
+    before = monitoring.record_position_unproven_count()
+    with use_record_tenant(ORG, GRAPH):
+        write = record_writer.write_live_record(record, seq=None)
+    assert write is not None and write.applied, write
+    assert write.events == 1 and write.statements == 1, write
+    after = monitoring.record_position_unproven_count()
+    assert after == before + 1, (
+        "an unproven journal position wrote no position row and reported "
+        f"nothing: record_position_unproven {before} -> {after}")
+    # The watermark must not claim a position this call did not consume. The
+    # seam was handed the default `first_seq=1`; reporting `last_seq=1` says
+    # "position 1 was written", which is the row that is missing.
+    assert write.last_seq == write.first_seq - 1, (
+        "the door reported a consumed journal position it never wrote: "
+        f"first_seq={write.first_seq} last_seq={write.last_seq}")
+
+    # --- it is also SAID OUT LOUD, once per window (not once per record) ------
+    monkeypatch.setattr(record_writer, "_unproven_position_warned_at",
+                        float("-inf"))
+    monkeypatch.setattr(record_writer, "POSITION_UNPROVEN_WARN_SECONDS", 3600.0)
+    with caplog.at_level(logging.WARNING, logger=record_writer.__name__):
+        caplog.clear()
+        with use_record_tenant(ORG, GRAPH):
+            for _ in range(3):
+                record_writer.write_live_record(record, seq=None)
+        told = [r for r in caplog.records if "position_unproven" in r.message]
+    assert len(told) == 1, (
+        "the unproven-position warning did not fire exactly once inside the "
+        f"window: {[r.message for r in caplog.records]}")
+
+    # --- and the NON-journal lane is NOT this branch ---------------------------
+    # `durable=False` returns before the position decision; if this counter moved
+    # here, the docstring's population would be right after all and the two
+    # signals an operator reads ("no journal by design" vs "layer 1 is behind")
+    # would be indistinguishable.
+    skipped_before = dict(monitoring.record_non_journal_skip_counts())
+    unproven_before = monitoring.record_position_unproven_count()
+    with use_record_tenant(ORG, GRAPH):
+        assert record_writer.write_live_record(record, durable=False) is None
+    assert monitoring.record_position_unproven_count() == unproven_before, (
+        "the non-durable lane was counted as an unproven POSITION — it has no "
+        "journal at all and belongs on no_durable_journal")
+    skipped_after = dict(monitoring.record_non_journal_skip_counts())
+    assert skipped_after.get("no_durable_journal", 0) == \
+        skipped_before.get("no_durable_journal", 0) + 1, skipped_after
+
+
+def test_the_unproven_position_skip_is_on_the_health_surface(monkeypatch):
+    """A counter nothing reads is #3677's "signal with no channel" (#9307 F1).
+
+    The hosted app exposes no `/metrics` route, so `monitoring.metrics()` — the
+    payload `tortoise_health` and `serve_health` serve — is where an operator can
+    see that layer 1 is behind the journal. Pinned by presence, because the
+    counter is only worth having if it is reachable from that surface.
+    """
+    assert "record_position_unproven" in monitoring.metrics(), (
+        "the unproven-position counter rides no served surface, so the skip is "
+        "still invisible to an operator")
 
 
 def test_a_dead_record_costs_a_capture_one_connect_not_one_per_record(monkeypatch):

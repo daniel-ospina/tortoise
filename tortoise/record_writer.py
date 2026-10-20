@@ -132,7 +132,7 @@ import logging
 import os
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -145,6 +145,7 @@ __all__ = [
     "CONNECT_TIMEOUT_SECONDS",
     "LIVE_WRITE_BREAKER_SECONDS",
     "POSITION_ORDINAL_SOURCE",
+    "POSITION_UNPROVEN_WARN_SECONDS",
     "RECORD_DSN_ENV",
     "RECORD_GRAPH_ENV",
     "RECORD_ORG_ENV",
@@ -222,6 +223,18 @@ LIVE_WRITE_BREAKER_SECONDS = 60.0
 #: Module-level on purpose: the cost it bounds is per PROCESS, not per call.
 _breaker_open_until = 0.0
 
+#: How often the "position unproven" WARNING may repeat, in seconds. One line
+#: per unproven append would be a warning per record on a large journal whose
+#: `EventLog.append` is in a REPEATABLE unproven window (#9252: the
+#: ``_FLOCK_UNHEALTHY`` / ``_POSITION_CACHE_DEAD`` states), which teaches an
+#: operator to ignore the line. ``0.0`` disables the throttle (every unproven
+#: append warns) — the seam the tests use.
+POSITION_UNPROVEN_WARN_SECONDS = 300.0
+
+#: When the position-unproven warning last fired, on ``time.monotonic()``;
+#: ``-inf`` so the FIRST one always fires.
+_unproven_position_warned_at = float("-inf")
+
 #: The DSN schemes a DB-API Postgres driver accepts. A value outside this set is
 #: a *misconfiguration*, never an unarmed state.
 _DSN_SCHEMES: tuple[str, ...] = ("postgresql://", "postgres://")
@@ -294,7 +307,9 @@ class RecordWrite:
     #: Journal position of ``records[0]`` on an APPLIED call.
     first_seq: int = 1
     #: Journal position of the LAST record consumed (``first_seq - 1`` when
-    #: nothing was consumed — an empty batch, or a not-armed call), so a caller
+    #: nothing was consumed — an empty batch, a not-armed call, or the live
+    #: door's write with no PROVEN ordinal: `write_live_record` reports that
+    #: spelling rather than claiming a position it did not write), so a caller
     #: can advance its offset without re-deriving. Never a rewind: it is always
     #: derived from the caller's own ``first_seq``.
     last_seq: int = 0
@@ -670,6 +685,42 @@ def _count_non_journal_skip(reason: str = "no_durable_journal") -> None:
         monitoring.record_non_journal_skip(reason)
 
 
+def _count_position_unproven() -> None:
+    """Count one armed write whose journal append proved no position (#9307 F1).
+
+    Same swallow and same reason as its siblings: the caller's append is already
+    committed, so a metrics failure may never escape this door.
+    """
+    with contextlib.suppress(Exception):
+        from . import monitoring
+        monitoring.record_position_unproven()
+
+
+def _note_unproven_position(record: Mapping[str, Any]) -> None:
+    """Count AND (at most once per window) WARN that layer 1 skipped a record.
+
+    The skipped record is not lost — it is in the journal, and `replay` writes
+    its `journal_event` row — but a silent skip is exactly the gap #9078 exists
+    to close, so it is named on the metrics surface and in the log rather than
+    left to be noticed by its absence.
+    """
+    global _unproven_position_warned_at
+    _count_position_unproven()
+    now = time.monotonic()
+    if now - _unproven_position_warned_at < POSITION_UNPROVEN_WARN_SECONDS:
+        return
+    _unproven_position_warned_at = now
+    _logger.warning(
+        "no layer-1 position row for this record (position_unproven) — the "
+        "journal append SUCCEEDED but could not prove the record's position "
+        "(see EventLog.append's None states), so layer 1 is one record behind "
+        "the journal until a replay heals it. Counted on "
+        "monitoring.metrics()[\"record_position_unproven\"]; this line repeats "
+        "at most once per %.0fs: %s", POSITION_UNPROVEN_WARN_SECONDS,
+        record.get("type"),
+    )
+
+
 def write_live_record(record: Mapping[str, Any], *,
                       durable: bool = True,
                       seq: int | None = None) -> RecordWrite | None:
@@ -707,6 +758,12 @@ def write_live_record(record: Mapping[str, Any], *,
     contract is enforced, not just intended: every counter call goes through
     :func:`_count_write_failure`, which suppresses its own failures.
 
+    The RETURNED WATERMARK describes journal POSITIONS, so a write with no
+    proven ordinal consumed none: it reports ``last_seq == first_seq - 1``, this
+    class's own "nothing consumed" spelling (see :attr:`RecordWrite.last_seq`),
+    rather than claiming position 1 was written. ``applied`` still answers the
+    other question truthfully — the four ontology layers WERE written.
+
     The transaction is THIS write's own (the journal append was a file append,
     so there is nothing to span): the seam opens the connection, this commits
     it, and it is closed on every path.
@@ -730,9 +787,25 @@ def write_live_record(record: Mapping[str, Any], *,
     numbers records ``enumerate(records, start=1)`` over the same read, so a live
     write and a full replay give one record one number by construction, and the
     position row lands in layer 1 (`public.journal_event`, and the
-    `public.record_event_stream` view over it) on the live path. ``None`` (a log
-    that reports no position — the in-memory capture lane) writes no position
-    row: nothing there could be numbered, and inventing one is the #9190 defect.
+    `public.record_event_stream` view over it) on the live path.
+
+    ``None`` names ONE population, and it is NOT the in-memory capture lane
+    (#9307 review F1 — this paragraph used to say it was, which is false): that
+    lane is declined EARLIER, at ``durable=False``, and counted
+    ``no_durable_journal``, so it never reaches the position decision. What
+    arrives here is a DURABLE journal whose ``append`` SUCCEEDED but could not
+    PROVE the record's position — the ``None`` states listed by
+    :meth:`tortoise.log.EventLog.append` (a tail it could not size, a
+    cross-process lock it could not take, a journal it could not count, a peer
+    writing unserialised inside its window, an inode swapped under the path).
+    Two of those are documented as REPEATABLE windows on a large journal
+    (#9252), so this is not a one-record curiosity. Such a record writes no
+    position row — nothing there could be numbered, and inventing one is the
+    #9190 defect — and the row arrives on a later replay, which re-numbers the
+    SAME journal. The skip is therefore NAMED rather than silent: counted on
+    ``monitoring.metrics()["record_position_unproven"]``, WARNed once per
+    :data:`POSITION_UNPROVEN_WARN_SECONDS`, and the returned watermark does not
+    claim the position it did not consume (see RETURN below).
 
     ⚠️ RESIDUAL — the one shape the paragraph above does not cover: a tenant with
     TWO durable journals. "One record one number by
@@ -805,10 +878,16 @@ def write_live_record(record: Mapping[str, Any], *,
         )
         return None
     connection: Any | None = None
+    if seq is None:
+        # A DURABLE journal whose append could not prove the record's position
+        # (see `seq` above): layer 1 gets no row for this record, which is a
+        # NAMED skip and never a silent one (#9307 review F1).
+        _note_unproven_position(record)
     try:
         # #9190's ordinal, straight from the append. `position=False` only when
-        # the log reported none (the in-memory capture lane): a row needs a
-        # number, and inventing one collides with a later replay's numbering.
+        # a durable journal could not PROVE the record's position (see `seq`): a
+        # row needs a number, and inventing one collides with a later replay's
+        # numbering. Counted and warned above, so the skip is observable.
         write = write_records([record], org_id=org_id, graph_id=graph_id,
                               position=seq is not None,
                               first_seq=seq if seq is not None else 1)
@@ -816,6 +895,13 @@ def write_live_record(record: Mapping[str, Any], *,
         connection = write.connection
         if connection is not None:
             connection.commit()
+        if seq is None:
+            # No position was consumed, so the watermark must not report one
+            # as if it had been (a caller advancing `last_seq + 1` must neither
+            # rewind nor skip): the seam was handed the default `first_seq=1`
+            # for a row-less write, and `first_seq - 1` is this class's own
+            # spelling for "nothing consumed".
+            return replace(write, last_seq=write.first_seq - 1)
         return write
     except Exception as exc:
         if isinstance(exc, RecordConnectError):
