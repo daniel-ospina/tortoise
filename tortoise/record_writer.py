@@ -135,6 +135,27 @@ fails closed (counted + warned, nothing misfiled), and the amended decision is
 relayed to #9078, documented in ``.env.example`` and in
 ``monitoring.record_record_write_failure``.
 
+Decision 6 governs WHERE a per-request tenant comes from, not WHICH MECHANISM
+carries it (#9188). The ambient carrier is :func:`use_record_tenant`, and it is
+the right one wherever a lane can hold a `with` around the work. The hosted
+REST lane cannot, and **the reason is confinement, not propagation**: a
+contextvar set on the loop IS inherited by `asyncio.to_thread` and by
+`_graph_offload` (both copy the context — measured), so ambient state *would*
+reach the worker. But that lane resolves the tenant inside `_data_sdk`, which
+for the capture path is itself submitted to `_graph_offload` — a scope entered
+there is discarded with the copy — and to install it loop-side instead it would
+have to be SET WITHOUT A `with`, because REST auth is a FastAPI dependency and
+nothing would exit it at request end. Unreleased ambient state in a request
+context is inherited by every task spawned from it (`_enqueue_dream`, the
+indexing jobs) and by every other write door, and a stale one is tenant A's
+rows under tenant B — the exact hazard decision 6 exists to remove. So that
+lane carries the tenant BY VALUE instead (`write_live_record(..., tenant=)`),
+resolved once from the same credential dict by :func:`record_tenant_for` and
+bound to the ONE SDK that performs the write. Both carriers outrank the env
+pair and both are this request's own answer; the decision's invariant (never a
+process-global guess, never a cross-request leak) is what they share, and
+neither may be replaced by one.
+
 **THE TRANSACTION.** The seam never calls `commit()` and never calls
 `rollback()` (pinned by a test whose fake connection counts both and asserts
 they are zero). When the caller injects `conn=`, the boundary is unambiguously
@@ -187,6 +208,7 @@ __all__ = [
     "current_record_tenant",
     "record_dsn",
     "record_tenant",
+    "record_tenant_for",
     "single_tenant_declared",
     "use_record_tenant",
     "write_live_record",
@@ -442,10 +464,21 @@ _RECORD_TENANT: contextvars.ContextVar[tuple[str, str] | None] = (
 def use_record_tenant(org_id: str, graph_id: str):
     """File every record write in this scope under ``(org_id, graph_id)``.
 
-    The one way a live write learns its tenant. A hosted request wraps its write
-    path in this; a single-tenant process wraps its writes (or its whole serving
-    loop). It is a ContextVar, so two concurrent requests in one process cannot
-    see each other's tenant, and it nests.
+    The one AMBIENT way a live write learns its tenant. A hosted MCP request
+    wraps its write path in this; a single-tenant process wraps its writes (or
+    its whole serving loop). It is a ContextVar, so two concurrent requests in
+    one process cannot see each other's tenant, and it nests.
+
+    ⚠️ Not every lane can hold a `with` around its work: the hosted REST lane
+    resolves the tenant inside ``hosted_api._data_sdk``, which the capture path
+    submits to ``_graph_offload`` — a scope entered there dies with the context
+    copy — and installing it loop-side instead would mean setting it WITH NO
+    EXIT (REST auth is a dependency, not a middleware), where every detached
+    task and every other write door in that context inherits it. That lane
+    carries the tenant BY VALUE on the SDK it opens (:func:`record_tenant_for`,
+    ``write_live_record(..., tenant=)``) instead — one resolution, delivered
+    where it cannot escape (#9188). Propagation is not the reason: a contextvar
+    set on the loop IS copied into ``asyncio.to_thread`` / ``_graph_offload``.
     """
     if not (isinstance(org_id, str) and org_id
             and isinstance(graph_id, str) and graph_id):
@@ -475,6 +508,57 @@ def current_record_tenant() -> tuple[str, str] | None:
     :func:`use_record_tenant`).
     """
     return _RECORD_TENANT.get()
+
+
+def record_tenant_for(org: Mapping[str, Any] | None, *,
+                     control_plane_ids: bool) -> tuple[str, str] | None:
+    """The record's tenant for ONE request, read off its resolved credential.
+
+    THE ONE DECLARATION of "which ``(org_id, graph_id)`` is a record tenant",
+    shared by every lane that resolves a credential per request: the MCP lane
+    (:func:`tortoise.mcp_auth._record_tenant_scope`, which installs it as a
+    :func:`use_record_tenant` scope) and the hosted REST lane
+    (:func:`tortoise.hosted_api._data_sdk`, which binds it to the SDK it opens —
+    see decision 6 for why that lane carries it by value: CONFINEMENT, not
+    propagation). Two lanes, one answer: a divergence here files one request's
+    rows under another graph.
+
+    ``org`` is the dict an auth seam resolved (``org_id`` + the credential's
+    ``graph_id``). ``None`` is returned — never a guess — for the two shapes
+    this seam must NOT name:
+
+    * ``control_plane_ids`` is False. It is the caller's statement that the
+      resolution did not come from the control plane (``is_supabase_enabled()``
+      — the predicate that chose the resolver). The record's layer tables FK
+      ``(org_id, graph_id) -> public.graphs (org_id, id)``, so only a
+      control-plane graph id can be filed under: the SELF-HOST registry lane's
+      ``graph_id`` is the Falkor ``:Graph`` node id (``g_<hex>``, minted in
+      ``sdk._graph_create``) and registry graphs are never inserted into
+      ``public.graphs``. Installing one would displace a correctly declared
+      single-tenant pair with a value the FK cannot satisfy, turning a
+      recording deployment into ``write_failed`` on every write with a cause
+      nobody could attribute.
+    * the credential named no graph (org-wide key, session/JWT auth). The
+      default graph **need not have a** ``public.graphs`` row
+      (``supabase_control.delete_graph_row``: *"no row exists for the default
+      graph"* — it is derived from ``organizations.graph_name``), so naming it
+      is a control-plane decision (#9188's open question), not a constant this
+      function may invent. Omitting it keeps the write REFUSED and counted
+      (``no_tenant``) — the fail-closed direction — rather than filing the row
+      under a tenant nobody chose.
+
+    ⛔ This is not a fallback chain and must not grow into one: it reads the
+    credential the caller already resolved, and nothing else. The env pair is a
+    different question with its own gate (:func:`single_tenant_declared`).
+    """
+    if not control_plane_ids or not isinstance(org, Mapping):
+        return None
+    org_id = org.get("org_id")
+    graph_id = org.get("graph_id")
+    if (isinstance(org_id, str) and org_id
+            and isinstance(graph_id, str) and graph_id):
+        return (org_id, graph_id)
+    return None
 
 
 def single_tenant_declared() -> bool:
@@ -557,10 +641,10 @@ def _refused_tenant_env_note() -> str:
             f"never completed by guesswork."
         )
     return (
-        " No tenant was in scope and no env pair is set: on the MCP lane the "
-        "scope is installed from a GRAPH-bound key per request, so this means "
-        "the credential named no graph (use a graph-bound `tk_` key); a "
-        "single-tenant deployment instead sets "
+        " No tenant was in scope and no env pair is set: on the MCP and hosted "
+        "REST lanes the tenant is installed from a GRAPH-bound key per "
+        "request, so this means the credential named no graph (use a "
+        "graph-bound `tk_` key); a single-tenant deployment instead sets "
         f"{RECORD_ORG_ENV}/{RECORD_GRAPH_ENV} AND "
         f"{RECORD_SINGLE_TENANT_ENV}=1."
     )
@@ -834,7 +918,9 @@ def _note_unproven_position(record: Mapping[str, Any]) -> None:
 
 def write_live_record(record: Mapping[str, Any], *,
                       durable: bool = True,
-                      seq: int | None = None) -> RecordWrite | None:
+                      seq: int | None = None,
+                      tenant: tuple[str, str] | None = None,
+                      ) -> RecordWrite | None:
     """The LIVE door: one journal record that has ALREADY been appended.
 
     Called at each of the three places the journal is appended on a live write
@@ -933,6 +1019,30 @@ def write_live_record(record: Mapping[str, Any], *,
     derive — do NOT paper it over by declining position rows on the live path,
     which is the #9190 defect this door exists to close.
 
+    ``tenant`` is the ``(org_id, graph_id)`` the CALLER already resolved for
+    this write — carried explicitly by a lane that cannot hold the ambient scope
+    for the whole write (see :func:`use_record_tenant` and decision 6; the
+    reason is confinement, not propagation). Precedence is
+    **carried > scope > env pair**, and the order is a statement about
+    specificity: a carried tenant was resolved by the same request that chose
+    the graph this write went to (the hosted REST lane's ``_data_sdk``), so it
+    is that request's answer travelling with its own SDK object rather than
+    ambient state a worker could inherit from a DIFFERENT request. The scope
+    still wins over the env pair, and the env pair is still refused unless the
+    deployment declared single tenancy — none of #9192's fail-closed rules move.
+    ``None`` (the default) is the historical behaviour, byte-identical: nothing
+    is carried, the scope/env answer stands.
+
+    ⚠️ The carrier is authoritative at THIS DOOR ONLY, and a HALF or non-string
+    pair is refused exactly like an unnamed tenant, never unpacked
+    (#9188 review F4): this is the seam's only injection point, so it must not
+    be the one carrier weaker than the two feeding it. A lane whose records can
+    also reach :meth:`tortoise.api.EventAPI._emit` or
+    :meth:`tortoise.mining.ConversationMiner._emit_event` must give THOSE doors
+    the same answer — they pass no carrier, so they read the scope/env pair, and
+    a lane that mixed the two could split one request's rows across two tenants
+    (#9346).
+
     ``OVERRIDES:`` the module's decision 3 (`Armed but unreachable ⇒ the write
     FAILS (RecordWriteError)`) does not apply to this door, and that is a
     deliberate departure rather than an oversight. Decision 3 governs
@@ -964,7 +1074,20 @@ def write_live_record(record: Mapping[str, Any], *,
             "replay could reproduce the row: %s", record.get("type"),
         )
         return None
-    tenant = record_tenant()
+    tenant = tenant if tenant is not None else record_tenant()
+    if tenant is not None and not (
+            isinstance(tenant, tuple) and len(tenant) == 2
+            and all(isinstance(part, str) and part for part in tenant)):
+        # The seam's ONLY injection point must not be its weakest carrier: an
+        # empty/half pair would be unpacked straight into `write_records` and
+        # file the row under a tenant nobody named (#9188 review F4).
+        _count_write_failure("no_tenant")
+        _logger.warning(
+            "the record write did not happen (no_tenant) — a CARRIED tenant "
+            "was not a (org_id, graph_id) pair of non-empty strings: %r",
+            tenant,
+        )
+        return None
     if tenant is None:
         _count_write_failure("no_tenant")
         _logger.warning(

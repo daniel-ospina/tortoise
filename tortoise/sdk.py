@@ -6072,6 +6072,21 @@ class TortoiseSDK:
         self._graph_name = graph_name
         self._event_log_path = event_log_path
         self._event_log = None  # lazy-init EventLog (#548)
+        # ── the record's tenant for THIS SDK's writes (#9188) ───────────
+        # The Postgres record files every row under `(org_id, graph_id)`, and
+        # the tenant is normally ambient (`record_writer.use_record_tenant`,
+        # installed per request by the MCP lane's middleware). The hosted REST
+        # lane BINDS it here instead, and the reason is CONFINEMENT, not
+        # propagation (measured: a contextvar set on the loop IS copied into
+        # `asyncio.to_thread` / `_graph_offload`). `_data_sdk` — the only place
+        # that lane resolves a tenant — runs INSIDE `_graph_offload` for the
+        # capture path, so a scope entered there dies with the context copy; and
+        # setting it loop-side would mean setting it WITH NO EXIT, where every
+        # detached task and every other write door in that context inherits it.
+        # So the value travels on the SDK the write runs on: this request's own
+        # answer, unable to escape into a concurrent one. `None` (every other
+        # lane) is the historical behaviour, byte-identical.
+        self._record_tenant: tuple[str, str] | None = None
         # #4240 review F1: count journal appends that failed on a CONFIGURED
         # journal. A configured journal that cannot record makes the derived
         # graph live-only, so a failure is a real degradation — it is counted
@@ -7296,7 +7311,49 @@ class TortoiseSDK:
         # nothing was lost (#9231 review P2).
         log = self._event_log
         durable = log is not None and getattr(log, "durable", True)
-        record_writer.write_live_record(record, durable=durable, seq=seq)
+        record_writer.write_live_record(record, durable=durable, seq=seq,
+                                        tenant=self._record_tenant)
+
+    def _bind_record_tenant(self, org_id: str, graph_id: str) -> None:
+        """Bind this SDK's writes to one record tenant (#9188).
+
+        The BY-VALUE half of the tenant carrier. `record_writer.use_record_tenant`
+        is the ambient half (a ContextVar, right wherever a lane can hold a
+        `with` around the work). This is the half a lane needs when it cannot:
+        the hosted REST lane resolves the tenant inside `_data_sdk`, which the
+        capture path submits to `_graph_offload` (a scope entered there dies
+        with the copy), and setting it loop-side would mean setting it with no
+        exit — one unreleased value that every detached task and every other
+        write door in that context inherits. Carrying it on the SDK confines it
+        to the write it belongs to. (Propagation is NOT the reason: a contextvar
+        set on the loop is copied into `asyncio.to_thread` / `_graph_offload`.)
+
+        ⚠️ It is NOT a second resolution: the caller passes what
+        `record_writer.record_tenant_for` derived from the SAME credential dict
+        that chose the graph this SDK is bound to, so the record's tenant and
+        the graph the write lands in cannot disagree by construction. A lane
+        that binds a guessed or process-global tenant recreates #9192's silent
+        cross-tenant write — never call this with anything but a per-request
+        resolution.
+
+        ⚠️ The binding is a PROPERTY OF THIS OBJECT, so it is only as
+        request-scoped as the SDK is. Today every hosted data path builds a
+        fresh SDK per request (`hosted_api._make_sdk`) and the keepalive
+        anchors are never bound — but a future cache of `_data_sdk`'s result
+        would carry this tenant into a later request, which ambient state could
+        not do. Bind a throwaway SDK, never a shared one.
+
+        Validated here rather than at the write because the failure mode of an
+        empty half is a row filed under a graph this write never touched, and
+        finding that at the seam is one drained record too late.
+        """
+        if not (isinstance(org_id, str) and org_id
+                and isinstance(graph_id, str) and graph_id):
+            raise ValueError(
+                "_bind_record_tenant needs a non-empty org_id and graph_id "
+                f"(got {org_id!r}, {graph_id!r})"
+            )
+        self._record_tenant = (org_id, graph_id)
 
     def _record_write_failure(self, reason: str, exc: BaseException) -> None:
         """Count and report one armed record write that did not happen (#9188).

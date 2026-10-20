@@ -94,27 +94,25 @@ def _record_tenant_scope(org: dict, *, control_plane_ids: bool):
     and the caller passes whether the resolution came from the control plane
     (`is_supabase_enabled()`, the same predicate that chose the resolver). The
     record's layer tables FK `(org_id, graph_id) -> public.graphs(org_id, id)`, so
-    ONLY a control-plane resolution carries a graph id the record can key on:
-    `resolve_api_key` returns `api_keys.graph_id`, declared
-    `REFERENCES public.graphs(id)`. The SELF-HOST registry lane resolves
-    `apikey_verify`, whose `graph_id` is the Falkor `:Graph` node id
-    (`g_<hex>`, minted in `sdk._graph_create`) and registry graphs are never
-    inserted into `public.graphs` — so installing that id would replace a
-    correctly declared single-tenant env pair with a value the FK cannot
-    satisfy, turning a recording deployment into `write_failed` on every write
-    with a cause nobody could attribute. That lane therefore installs nothing
-    and keeps arming by declaration (or refuses), which is its pre-#9192
-    behaviour exactly.
-    """
-    from tortoise.record_writer import use_record_tenant
+    ONLY a control-plane resolution carries a graph id the record can key on.
+    The SELF-HOST registry lane's `graph_id` is a Falkor ``:Graph`` node id
+    (``g_<hex>``) that is never inserted into `public.graphs`, so installing it
+    would replace a correctly declared single-tenant pair with a value the FK
+    cannot satisfy — that lane installs nothing and keeps arming by declaration
+    (or refuses), its pre-#9192 behaviour exactly.
 
-    if not control_plane_ids:
+    WHICH ``(org, graph)`` COUNTS is not decided here: it is
+    :func:`tortoise.record_writer.record_tenant_for`, the ONE declaration this
+    lane and the hosted REST lane both call, so the two lanes cannot drift into
+    filing one request's rows under different tenants. This function only wraps
+    that answer in the ambient carrier this lane can use.
+    """
+    from tortoise.record_writer import record_tenant_for, use_record_tenant
+
+    tenant = record_tenant_for(org, control_plane_ids=control_plane_ids)
+    if tenant is None:
         return contextlib.nullcontext()
-    org_id = (org or {}).get("org_id")
-    graph_id = (org or {}).get("graph_id")
-    if isinstance(org_id, str) and org_id and isinstance(graph_id, str) and graph_id:
-        return use_record_tenant(org_id, graph_id)
-    return contextlib.nullcontext()
+    return use_record_tenant(*tenant)
 
 
 def _get_base_sdk() -> TortoiseSDK:

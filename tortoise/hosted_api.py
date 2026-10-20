@@ -6594,6 +6594,59 @@ def _bind_actor_context(org: dict) -> None:
         _current_actor_user_id.set(_actor)
 
 
+def _bind_record_tenant(sdk: TortoiseSDK, org: dict) -> None:
+    """Hand the record the SAME tenant this request's data write goes to (#9188).
+
+    THE REST lane's carrier. The MCP lane installs the tenant as an ambient
+    scope (:func:`tortoise.mcp_auth._record_tenant_scope`) around
+    ``call_next``, which works because its auth is middleware. This lane's is a
+    FastAPI dependency, so there is no `with` to hold: the tenant is resolved
+    HERE — inside ``_data_sdk``, which the capture path submits to
+    ``_graph_offload`` — and a scope entered at this depth dies with the context
+    copy. Setting it loop-side instead would mean setting it WITH NO EXIT, and
+    one unreleased value is inherited by every detached task and every other
+    write door in that context (``_enqueue_dream``, the indexing jobs) — the
+    leak that files tenant A's rows under tenant B. So the tenant travels on
+    the SDK object the write runs on, by value. (Propagation is not the reason:
+    a contextvar set on the loop IS copied into ``asyncio.to_thread``.)
+
+    Until this existed, EVERY armed write on that lane was refused
+    ``no_tenant``, including a graph-bound key whose ``graph_id`` is a
+    perfectly good ``public.graphs`` id — the credential told us the tenant and
+    the record refused to hear it.
+
+    Both lanes resolve it through the one declaration
+    (:func:`tortoise.record_writer.record_tenant_for`), from the same credential
+    dict that chose the graph this SDK is bound to, so the record's tenant and
+    the graph the data lands in cannot disagree.
+
+    ⚠️ SCOPE BOUND, stated so the boundary is not mistaken for coverage: this
+    covers the SDK it is given, opened through ``_data_sdk`` — the data-plane
+    tenancy resolver. Routes that write the org's DEFAULT graph by construction
+    (the onboarding/starter seed runners) are NOT bound here, because the
+    default graph need not have a ``public.graphs`` row and naming it is the
+    open control-plane decision on #9188; binding them to a graph-bound key's
+    id would file their rows under a graph they never wrote.
+
+    Fail-soft and DELIBERATELY so: a record-binding fault must not fail the
+    request (#5148's rule — the record is a derived, replayable store, and this
+    runs before any write). A refusal to name a tenant is not an error either:
+    the seam counts ``no_tenant`` and a replay heals the gap, which is the
+    documented fail-closed direction (#9192), not a regression.
+    """
+    try:
+        from tortoise.record_writer import record_tenant_for
+        from tortoise.supabase_control import is_supabase_enabled
+
+        tenant = record_tenant_for(org, control_plane_ids=is_supabase_enabled())
+        if tenant is None:
+            return
+        sdk._bind_record_tenant(*tenant)
+    except Exception:
+        _logger.warning("could not bind the record tenant for this request",
+                        exc_info=True)
+
+
 def _data_sdk(org: dict) -> TortoiseSDK:
     """C5 #2114 (D-C5-2): the data-plane tenancy resolver — the sync entry
     every org-data surface uses to open its SDK. Off-loop callers use its async
@@ -6618,6 +6671,16 @@ def _data_sdk(org: dict) -> TortoiseSDK:
       stores graph_name == org_{org_id}, but the selfhost legacy lane
       (sdk.org_create org_{name}, #2023) diverges and flipping would
       silently move those orgs' data access.
+
+    #9188: the SDK it returns also carries this request's RECORD tenant
+    (``_bind_record_tenant``), resolved from the same dict by the one
+    declaration — so the Postgres record files the write under the same graph
+    the data went to. It is carried by value because this lane resolves the
+    tenant at this depth (inside the offload, for the capture path) and has no
+    `with` to hold the ambient scope. The default-graph half is deliberately
+    NOT bound (no `public.graphs` row is guaranteed); naming it is a
+    control-plane decision, and until it is made the write is refused
+    `no_tenant` rather than filed under a tenant nobody chose.
     """
     # #2600: bind the actor through the ONE helper — CONDITIONAL (only when the
     # dict carries a gated actor; never erase a value the auth seams set).
@@ -6636,8 +6699,14 @@ def _data_sdk(org: dict) -> TortoiseSDK:
                 detail={"error_code": "GRAPH_NOT_FOUND",
                         "message": "graph not found for key"})
         _assert_graph_owned(org, gid, ns)
-        return _make_sdk(graph_name=ns)
-    return _make_sdk(namespace=org_id)
+        sdk = _make_sdk(graph_name=ns)
+    else:
+        sdk = _make_sdk(namespace=org_id)
+    # #9188: the record's tenant rides THIS SDK (see `_bind_record_tenant`).
+    # After the bind and before the caller can write: an armed record on this
+    # lane is otherwise refused `no_tenant` on every request.
+    _bind_record_tenant(sdk, org)
+    return sdk
 
 
 async def _data_sdk_offloaded(org: dict) -> TortoiseSDK:

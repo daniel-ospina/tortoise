@@ -57,6 +57,7 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -875,17 +876,28 @@ def test_every_real_door_still_passes_the_ordinal(wiring):
             f"{rel}: the shipped door is reported — the rule is wrong, not the door")
         # Locate the SEAM call itself (a module may pass `seq=seq` onward before
         # it reaches the seam, e.g. the SDK's `_write_record_projection` hop),
-        # then drop the keyword on that call's own line.
+        # then drop the keyword from that call's OWN arguments. The call spans
+        # lines once the door passes more than `durable`/`seq` (#9188's tenant
+        # carrier is the first third argument), so the mutation works on the
+        # call's source SEGMENT, not on its last line: a single-line mutation
+        # would silently stop mutating anything the day a keyword was wrapped.
         call = next(node for node in ast.walk(tree)
                     if isinstance(node, ast.Call)
                     and module._call_name(node) == "write_live_record")
         lines = source.splitlines(keepends=True)
-        line = lines[call.end_lineno - 1]
-        assert "seq=seq" in line, (
+        first, last = call.lineno - 1, call.end_lineno - 1
+        segment = "".join(lines[first:last + 1])
+        assert "seq=seq" in segment, (
             f"{rel} no longer spells the ordinal the way this leg mutates it — "
-            f"update the mutation, do not delete the leg: {line!r}")
-        lines[call.end_lineno - 1] = line.replace("seq=seq)", ")")
-        dropped = "".join(lines)
+            f"update the mutation, do not delete the leg: {segment!r}")
+        # `seq=seq` may be the LAST argument (`seq=seq)`) or followed by another
+        # keyword across the wrap (`seq=seq,\n    tenant=...)`), so drop the
+        # keyword together with the separator it leaves behind — either side.
+        if re.search(r"seq=seq,\s*", segment):
+            mutated = re.sub(r"seq=seq,\s*", "", segment, count=1)
+        else:
+            mutated = re.sub(r",\s*seq=seq", "", segment, count=1)
+        dropped = "".join(lines[:first]) + mutated + "".join(lines[last + 1:])
         assert dropped != source, rel
         fired = module.ordinal_argument_problems(
             ast.parse(dropped, filename=rel), rel)
@@ -1960,3 +1972,229 @@ def test_the_public_capture_path_writes_the_epistemic_layer(capture_sdk,
             "the epistemic layer received no row from the capture")
     finally:
         conn.close()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 9. The TENANT on the REST/hosted lane — carried by value, resolved once
+# ════════════════════════════════════════════════════════════════════════════
+#
+# #9188's remaining half. The MCP lane installs the record's tenant as an
+# ambient `use_record_tenant` scope around `call_next` (#9192), which works
+# because its auth is middleware. The hosted REST lane's auth is a FastAPI
+# dependency, so there is no `with` to hold and the tenant is resolved inside
+# `_data_sdk` — which the capture path submits to `_graph_offload`, so a scope
+# entered there dies with the context copy, and setting it loop-side would mean
+# setting it WITH NO EXIT (one unreleased value inherited by every detached task
+# and every other write door in that context). So that lane carries the tenant
+# BY VALUE on the SDK that performs the write. Confinement is the reason, NOT
+# propagation: a contextvar set on the loop IS copied into `asyncio.to_thread`
+# and `_graph_offload` (measured).
+#
+# Until this half landed, EVERY armed write on that lane was refused
+# `no_tenant` — including a graph-bound key whose `graph_id` is a valid
+# `public.graphs` id, i.e. the request had told us the tenant and the record
+# refused to hear it.
+
+
+def test_the_record_tenant_is_resolved_from_the_credential_once():
+    """One declaration of "which `(org, graph)` is a record tenant".
+
+    Both lanes call `record_writer.record_tenant_for`; this pins its answers,
+    including the two shapes it must REFUSE rather than guess. A third
+    resolution written into either lane is how one request's rows end up filed
+    under a different graph than the one its data went to.
+    """
+    bound = {"org_id": "org-a", "graph_id": "g_control_plane_row", "tier": "team"}
+    assert record_writer.record_tenant_for(bound, control_plane_ids=True) == (
+        "org-a", "g_control_plane_row")
+
+    # The SELF-HOST registry lane: `graph_id` is a Falkor `:Graph` node id, and
+    # registry graphs have no `public.graphs` row, so the record's FK cannot
+    # take it. Naming it would turn a recording deployment into `write_failed`
+    # on every write with a cause nobody could attribute (#9192).
+    assert record_writer.record_tenant_for(bound, control_plane_ids=False) is None
+
+    # An org-wide key / session auth names no graph. The DEFAULT graph need not
+    # have a `public.graphs` row (it is derived from `organizations.graph_name`),
+    # so "the default" is a control-plane decision — never a constant invented
+    # here. Refused, counted `no_tenant`, replay-healable: the fail-closed side.
+    for no_graph in ({"org_id": "org-a"}, {"org_id": "org-a", "graph_id": None},
+                     {"org_id": "org-a", "graph_id": ""}):
+        assert record_writer.record_tenant_for(
+            no_graph, control_plane_ids=True) is None, no_graph
+
+    # A half-configured credential is not a tenant, and a non-dict (an
+    # anonymous request's `{"org_id": None}` shape, or `None` itself) is not
+    # either — no exceptions, no completion by guesswork.
+    for bad in ({"graph_id": "g_x"}, {"org_id": "", "graph_id": "g_x"},
+                {"org_id": "org-a", "graph_id": 7}, None, "org-a"):
+        assert record_writer.record_tenant_for(
+            bad, control_plane_ids=True) is None, bad
+
+
+def test_both_tenant_lanes_agree_because_there_is_one_declaration():
+    """The MCP scope and the REST carrier must not answer differently.
+
+    `mcp_auth._record_tenant_scope` wraps `record_tenant_for`; a lane that
+    re-derived the pair (or re-implemented the control-plane id-space rule)
+    would sail through its own tests and silently file the same request's rows
+    under a different tenant on the other transport.
+    """
+    from tortoise import mcp_auth
+
+    for org, control_plane in (
+            ({"org_id": "org-a", "graph_id": "g_row"}, True),
+            ({"org_id": "org-a", "graph_id": "g_hex"}, False),
+            ({"org_id": "org-a"}, True),
+            ({}, True)):
+        expected = record_writer.record_tenant_for(
+            org, control_plane_ids=control_plane)
+        with mcp_auth._record_tenant_scope(org, control_plane_ids=control_plane):
+            assert record_writer.current_record_tenant() == expected, (
+                org, control_plane)
+
+
+def test_the_rest_data_lane_binds_the_resolved_tenant_onto_its_sdk(monkeypatch):
+    """`_data_sdk` is the data-plane tenancy resolver every REST data route uses.
+
+    So it is the one place the REST lane can hand the record a tenant, and it
+    must do it from the SAME credential dict that chose the graph — otherwise
+    the record and the graph disagree. Measured through the public seam it
+    calls: the returned SDK carries the pair, and carries NOTHING for the two
+    shapes that must stay refused.
+
+    ⚠️ NOT covered here, and deliberately: the onboarding/starter seed runners
+    open the org's DEFAULT graph by construction (`_make_sdk(namespace=org_id)`,
+    not this resolver). The default graph need not have a `public.graphs` row,
+    so binding them to a graph-bound key's id would file their rows under a
+    graph they never wrote; naming the default-graph tenant is the open
+    control-plane decision on #9188.
+    """
+    from tortoise import hosted_api, supabase_control
+
+    bound: list[tuple[str, str]] = []
+
+    class _FakeSDK:
+        def _bind_record_tenant(self, org_id, graph_id):
+            bound.append((org_id, graph_id))
+
+    monkeypatch.setattr(hosted_api, "_make_sdk", lambda **kw: _FakeSDK())
+    monkeypatch.setattr(hosted_api, "_assert_graph_owned",
+                        lambda org, gid, ns: None)
+
+    graph_bound = {"org_id": "org-a", "graph_id": "g_row",
+                   "graph_namespace": "org_org-a_g_row"}
+    monkeypatch.setattr(supabase_control, "is_supabase_enabled", lambda: True)
+    hosted_api._data_sdk(dict(graph_bound))
+    assert bound == [("org-a", "g_row")], bound
+
+    # Default graph (org-wide key / session auth): no graphs row is guaranteed,
+    # so nothing is bound and the write stays refused `no_tenant`. This is the
+    # control-plane decision #9188 escalated, NOT an oversight.
+    hosted_api._data_sdk({"org_id": "org-a"})
+    assert bound == [("org-a", "g_row")], (
+        f"a default-graph request bound a tenant nobody named: {bound}")
+
+    # The self-host registry lane's ids are not `public.graphs` ids.
+    monkeypatch.setattr(supabase_control, "is_supabase_enabled", lambda: False)
+    hosted_api._data_sdk({"org_id": "org-a", "graph_id": "g_hex",
+                          "graph_namespace": "org_org-a_g_hex"})
+    assert bound == [("org-a", "g_row")], (
+        f"a registry `g_<hex>` id was bound as a record tenant: {bound}")
+
+
+def test_the_live_door_files_the_sdks_carried_tenant(capture_sdk, monkeypatch):
+    """The load-bearing leg: the carried tenant reaches `write_records`.
+
+    DB-free and executed, because the Postgres legs SKIP without
+    `TEST_RECORD_DSN` and no CI job arms it. It drives the REAL chokepoint
+    (`_write_record_projection`) with a faked `write_records`, so dropping the
+    `tenant=` hop — or the SDK dropping it before the seam — fails here with
+    `no_tenant` and no call at all, which is exactly the defect (an armed REST
+    write refused while the credential had named its graph).
+    """
+    seen: list[dict] = []
+
+    def _fake_write_records(records, **kwargs):
+        seen.append(kwargs)
+        return record_writer.RecordWrite(
+            outcome=record_writer.RecordWriteOutcome.APPLIED,
+            events=len(records), statements=1,
+            first_seq=kwargs["first_seq"], last_seq=kwargs["first_seq"],
+            connection=None)
+
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
+                       "postgresql://record:record@127.0.0.1:1/record")
+    monkeypatch.setattr(record_writer, "write_records", _fake_write_records)
+    monkeypatch.setattr(record_writer, "_default_connect", lambda dsn: pytest.fail(
+        "write_records was faked; the seam must not open a real connection"))
+
+    sdk, _journal = capture_sdk()
+    # The chokepoint reads `durable` off the SDK's log; without a REAL journal
+    # the seam declines the record earlier (`no_durable_journal`) and this leg
+    # would be measuring the wrong refusal.
+    assert sdk._get_event_log() is not None, "the fixture configures a journal"
+    record = {"type": "PointAdded", "id": "p1", "payload": {}}
+
+    # No carried tenant, no scope, no env pair ⇒ refused `no_tenant`, and the
+    # seam never reaches the fold. This is the PRE-FIX behaviour of the REST
+    # lane on EVERY request, so the leg below cannot pass vacuously.
+    failures_before = dict(monitoring.record_write_failure_counts())
+    sdk._write_record_projection(record, seq=1)
+    assert seen == [], (
+        "an armed write with NO tenant reached the fold — a row was filed "
+        "under a tenant nobody named")
+    assert dict(monitoring.record_write_failure_counts()).get(
+        "no_tenant", 0) > failures_before.get("no_tenant", 0)
+
+    # Now the carrier: the same SDK, bound the way `_data_sdk` binds it.
+    sdk._bind_record_tenant("org-rest", "g_rest_row")
+    sdk._write_record_projection(record, seq=1)
+    assert len(seen) == 1, f"the carried tenant did not reach the seam: {seen}"
+    assert (seen[0]["org_id"], seen[0]["graph_id"]) == ("org-rest", "g_rest_row")
+
+    # And a CARRIED tenant outranks ambient state, so a lane that off-loads its
+    # writes cannot have some other request's scope applied to its record.
+    with use_record_tenant("org-other", "g_other_row"):
+        sdk._write_record_projection(record, seq=2)
+    assert (seen[1]["org_id"], seen[1]["graph_id"]) == ("org-rest", "g_rest_row"), (
+        f"ambient state overrode the tenant carried by this SDK: {seen}")
+
+
+def test_binding_a_record_tenant_refuses_an_unnamed_half():
+    """A half pair must fail at the bind, not be discovered a drained record later."""
+    sdk = TortoiseSDK.__new__(TortoiseSDK)  # no graph: the bind is pure state
+    for bad in (("org-a", ""), ("", "g_row"), (None, "g_row"), ("org-a", None)):
+        with pytest.raises(ValueError):
+            sdk._bind_record_tenant(*bad)
+
+
+def test_the_seam_refuses_a_malformed_carried_tenant(monkeypatch):
+    """The carrier is the seam's ONLY injection point — it must not be its weakest.
+
+    `use_record_tenant` and `SDK._bind_record_tenant` both refuse a half pair,
+    so a `tenant=` that unpacked `("", "")` (or a bare string, or a 1-tuple)
+    straight into `write_records` would be the one door through which a row
+    lands under a tenant nobody named, with no error at any layer (#9188
+    review F4). Refused with the same `no_tenant` count as no tenant at all.
+    """
+    calls: list[dict] = []
+
+    def _must_not_write(records, **kwargs):
+        calls.append(kwargs)
+        raise AssertionError(f"a malformed carried tenant reached the fold: {kwargs}")
+
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
+                       "postgresql://record:record@127.0.0.1:1/record")
+    monkeypatch.setattr(record_writer, "write_records", _must_not_write)
+
+    before = dict(monitoring.record_write_failure_counts()).get("no_tenant", 0)
+    malformed = (("", ""), ("org-a", ""), ("", "g_row"), ("org-a",),
+                 ("org-a", "g_row", "extra"), ("org-a", None), "org-a", 7)
+    for bad in malformed:
+        assert record_writer.write_live_record(
+            {"type": "PointAdded", "id": "p1"}, seq=1, tenant=bad) is None, bad
+    assert calls == [], calls
+    after = dict(monitoring.record_write_failure_counts()).get("no_tenant", 0)
+    assert after - before == len(malformed), (
+        f"a malformed carried tenant was not counted as a refusal: {before} → {after}")
