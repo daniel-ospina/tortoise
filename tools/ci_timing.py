@@ -576,7 +576,16 @@ def parse_log(path: Path) -> dict:
         # Requiring a COUNT token missed the last two (neither names a count), and
         # matching only `-q`'s banner-less form missed the banner form that every
         # `-v` CI leg actually prints (#9134 review, P1).
-        if line.startswith("=") and COUNT_RE.search(line):
+        # ⛔ A COUNT line is parsed in EITHER shape: bannered (`=== 10 passed … ===`,
+        # which is also how a captured banner-shaped line carrying counts is read) or
+        # pytest -q's banner-less `1 failed, 2 passed in 3.00s`. Requiring a leading
+        # `=` alone made a `-q` leg report `summary_seen: True` with every count ZERO,
+        # and a seen summary SUPPRESSES the summary-less disclosure — so the leg's real
+        # counts vanished silently, which is exactly the fail-open the disclosure
+        # exists to prevent (#9134 review, P2). This is DELIBERATELY more permissive
+        # than `_is_summary_line`: that predicate decides whether the leg is DISCLOSED,
+        # this one only decides which numbers to credit.
+        if COUNT_RE.search(line) and (line.startswith("=") or _SUMMARY_IN_RE.search(line)):
             for n, key in COUNT_RE.findall(line):
                 if key in counts:
                     counts[key] = int(n)

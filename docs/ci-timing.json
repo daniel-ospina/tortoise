@@ -1,25 +1,25 @@
 {
   "candidate_flakes": [
     {
-      "failed_at": "2026-10-20T18:40:00Z",
+      "failed_at": "2026-10-20T14:39:07Z",
       "passed_at": "2026-10-20T18:40:00Z",
       "run_id": "39191149586",
       "test": "tests/test_7925_route_parity.py::test_both_routes_produce_the_same_confidence[IMPL]"
     },
     {
-      "failed_at": "2026-10-20T18:40:00Z",
+      "failed_at": "2026-10-20T14:39:07Z",
       "passed_at": "2026-10-20T18:40:00Z",
       "run_id": "39191149586",
       "test": "tests/test_7925_route_parity.py::test_both_routes_produce_the_same_confidence[NAND]"
     },
     {
-      "failed_at": "2026-10-20T18:40:00Z",
+      "failed_at": "2026-10-20T14:39:07Z",
       "passed_at": "2026-10-20T18:40:00Z",
       "run_id": "39191149586",
       "test": "tests/test_ci_timing.py::test_refresh_durations_on_the_real_manifest_of_record"
     },
     {
-      "failed_at": "2026-10-20T18:40:00Z",
+      "failed_at": "2026-10-20T14:39:07Z",
       "passed_at": "2026-10-20T18:40:00Z",
       "run_id": "39191149586",
       "test": "tests/test_oauth_consent_bridge.py::test_the_spec_cites_live_hosted_api_sites"
@@ -600,11 +600,11 @@
       "branch": "main",
       "conclusion": "failure",
       "counts": {
-        "error": 0,
+        "error": 1,
         "failed": 5,
         "passed": 35291,
         "skipped": 146,
-        "xfailed": 10,
+        "xfailed": 12,
         "xpassed": 0
       },
       "created_at": "2026-10-20T17:34:10Z",
@@ -620,7 +620,6 @@
       "killed": false,
       "run_id": "39467226356",
       "sample_time": "2026-10-20T18:40:00Z",
-      "sampled_at": "2026-10-20T18:40:00Z",
       "sha": "65023e7d9d8d2c08d98718d8267f94dcd50f6eee",
       "steps_max_job_ms": 1346000,
       "steps_total_ms": 9844000
@@ -648,8 +647,8 @@
       ],
       "killed": false,
       "run_id": "39191149586",
-      "sample_time": "2026-10-20T18:40:00Z",
-      "sampled_at": "2026-10-20T18:40:00Z",
+      "sample_time": "2026-10-20T14:39:07Z",
+      "sampled_at": "2026-10-20T14:39:07Z",
       "sha": "8464f850f938ff048666a24ade2081e4518987b6",
       "steps_max_job_ms": 1300000,
       "steps_total_ms": 9951000
@@ -841,11 +840,11 @@
     },
     {
       "counts": {
-        "error": 0,
+        "error": 1,
         "failed": 2,
         "passed": 3534,
         "skipped": 11,
-        "xfailed": 0,
+        "xfailed": 2,
         "xpassed": 0
       },
       "error": null,
@@ -976,12 +975,12 @@
     }
   ],
   "outcome": {
-    "error": 0,
+    "error": 1,
     "failed": 5,
     "killed": false,
     "passed": 35291,
     "skipped": 146,
-    "xfailed": 10,
+    "xfailed": 12,
     "xpassed": 0
   },
   "sampled_run": {

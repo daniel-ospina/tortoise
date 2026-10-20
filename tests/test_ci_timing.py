@@ -1232,6 +1232,28 @@ def test_history_dedupes_a_legacy_row_without_sampled_at() -> None:
     assert [row["run_id"] for row in kept] == ["42", "41"]
 
 
+def test_a_banner_less_summary_also_PARSES_its_counts(tmp_path: Path) -> None:
+    """A `-q` leg's summary must be counted, not just recognised.
+
+    `_is_summary_line` accepts the banner-less form, but the count branch required a
+    leading `=`. So a `-q` log reported `summary_seen: True` with every count ZERO — and
+    a seen summary SUPPRESSES the summary-less disclosure, so the leg's passes and
+    failures vanished with no note at all. Silent zeros are the fail-open the disclosure
+    exists to prevent (#9134 review, P2).
+    """
+    log = tmp_path / "pytest.log"
+    log.write_text(
+        "tests/test_a.py F\n"
+        "1 failed, 2 passed in 3.00s\n"
+    )
+
+    parsed = ci_timing.parse_log(log)
+
+    assert parsed["summary_seen"] is True
+    assert parsed["counts"]["failed"] == 1
+    assert parsed["counts"]["passed"] == 2
+
+
 def test_a_banner_less_count_summary_is_a_summary() -> None:
     """pytest's `-q` form prints `10 passed in 3.02s` — no banner, no `deselected`.
 
