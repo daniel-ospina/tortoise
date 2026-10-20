@@ -79,9 +79,8 @@ class _FailingSweepWrite:
     read the graph through the REAL projection) passes through untouched.
     """
 
-    def __init__(self, real, *, already_cleared: set[str] | None = None):
+    def __init__(self, real):
         self._real = real
-        self._already_cleared = set(already_cleared or ())
         self.attempts: list[str] = []
 
     def __getattr__(self, name):
@@ -468,6 +467,96 @@ def test_retry_cap_retires_an_absent_or_unstamped_root():
             sdk._register_failed_attempt({ids[0]}, run_ep=sdk._ep_epoch())
             assert ids[0] not in sdk._dirty_roots, (
                 "a deleted root must not pin the mirror (it blocks hydration)"
+            )
+        finally:
+            sdk.close()
+
+
+# ── The cost the retained branch adds (#2952 / the #5166 window) ─
+
+
+class _CountingProjection:
+    """Records every statement that MUTATES the dirty flag.
+
+    Only flag-mutating statements are counted (`SET n.ep_dirty`), so the
+    fixture measures the write the retained branch adds — not the read-only
+    classification queries around it.
+    """
+
+    def __init__(self, real):
+        self._real = real
+        self.flag_writes: list[str] = []
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    @property
+    def g(self):
+        real_g = self._real.g
+        outer = self
+
+        class _G:
+            def __getattr__(self, name):
+                return getattr(real_g, name)
+
+            def query(self, cypher, params=None, **kw):
+                if "SET n.ep_dirty" in " ".join(cypher.split()):
+                    outer.flag_writes.append(cypher)
+                return real_g.query(cypher, params=params, **kw)
+
+        return _G()
+
+
+def test_a_retaining_sweep_costs_one_write_not_one_per_root():
+    """The retained branch stays inside the SINGLE clearing statement.
+
+    This is the #5166 window measured, not eyeballed: on a rebuilt graph the
+    stamps sit AHEAD of this process's reset counter, so an epoch-guarded sweep
+    retains — and where the pre-#9362 statement wrote nothing for those rows and
+    dropped them from the mirror, the merged statement re-writes them (a no-op
+    `SET x = x`) on every converged pass. #2952 records that any write to an
+    existing node costs a fulltext index entry, so the question is not "is there
+    a write" but "is it one write or one per root".
+
+    Pre-fix this probe reads 0 (the retained rows were never written at all); it
+    is 1 here, and it stays 1 no matter how many roots the sweep retains.
+    """
+    with _db() as db:
+        sdk = TortoiseSDK(db)
+        try:
+            ids = _chain(sdk, 6)
+            sdk.dream(mode="local")
+            assert sdk._dirty_roots == set()
+            # A rebuilt graph: every flag stamped ahead of the counter this
+            # process sweeps at. Stamped directly so the classes are exact.
+            for cid in ids:
+                sdk._get_proj().g.query(
+                    "MATCH (n:Point {id:$id}) "
+                    "SET n.ep_dirty = true, n.ep_dirty_at = 500",
+                    params={"id": cid},
+                )
+            sdk._dirty_roots |= set(ids)
+
+            real_proj = sdk._get_proj()
+            counting = _CountingProjection(real_proj)
+            sdk._get_proj = lambda: counting  # type: ignore[method-assign]
+            try:
+                sdk._sweep_dirty_roots(set(ids), run_ep=10)
+            finally:
+                sdk._get_proj = lambda: real_proj  # type: ignore[method-assign]
+
+            assert _ep_dirty_ids(sdk) == set(ids), (
+                "every stamp is newer than the sweep's epoch — all retained"
+            )
+            assert sdk._dirty_roots == set(ids), (
+                "the mirror must keep every root the graph kept"
+            )
+            assert len(counting.flag_writes) == 1, (
+                "a sweep retaining "
+                f"{len(ids)} roots issued {len(counting.flag_writes)} "
+                "flag-mutating statement(s): the retained branch must ride the "
+                "one clearing statement (its cost is one index entry per "
+                "retained row, not one extra statement per row — #2952)"
             )
         finally:
             sdk.close()
