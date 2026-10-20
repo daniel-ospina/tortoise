@@ -1,0 +1,7 @@
+{
+  "answer": "I eat a vegan diet.",
+  "case_id": "ask02_diet",
+  "class": "knowledge-update",
+  "judge_template": "knowledge-update",
+  "schema": "ask-sealed-gold/v1"
+}

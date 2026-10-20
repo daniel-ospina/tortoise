@@ -6609,6 +6609,46 @@ def test_write_path_measurement_source_edit_selects_eval():
             f"still run on {changed}; selected {sorted(selected)}")
 
 
+def test_ask_sealed_corpus_source_edit_selects_eval():
+    """#9097: editing the sealed benchmark's sources must run its pinning tests.
+
+    ``corpus.py`` (the hash scope, the manifest verification and the SEALED
+    loaders) and ``generate_corpus.py`` (the sealed-gold renderer) live under
+    ``tests/eval/ask/`` and are not named ``test_*.py``, so before the
+    ``tests/eval/ask/`` SOURCE_PATTERNS entry a change to them matched no
+    pattern and fell to the ``tests/`` to ``core`` fallback — where neither
+    ``eval/ask/test_ask_corpus.py`` nor ``test_measure_ask_distilled.py`` is
+    registered. The corpus hash scope or a gold-only-edit check could then be
+    rewritten with every gate green, and the published exit-bar verdict would
+    rest on an unpinned instrument.
+
+    Watched RED before the entry existed (surfaces == ['core'], neither pin in
+    test_files), GREEN after.
+    """
+    cases = (
+        # the hash scope / manifest gate / sealed loaders
+        "tests/eval/ask/corpus.py",
+        # the renderer whose output the pre-registered corpus hash covers
+        "tests/eval/ask/generate_corpus.py",
+        # a hand-edited sealed gold — the silent re-key scenario
+        "tests/eval/ask/gold/ask01_residence.gold.json",
+    )
+    for changed in cases:
+        r = _sel([changed])
+        assert r["full"] is False
+        assert "eval" in r["surfaces"], (
+            "a sealed-ask-corpus source edit (" + changed + ") must select the "
+            "eval surface that owns its pinning tests; got "
+            + str(r["surfaces"]))
+        selected = set(r["test_files"]) | set(r["slow_selected"])
+        assert "eval/ask/test_ask_corpus.py" in selected, (
+            "the corpus contract tests must run on " + changed + "; selected "
+            + str(sorted(selected)))
+        assert "test_measure_ask_distilled.py" in selected, (
+            "the exit-bar tests must run on " + changed + "; selected "
+            + str(sorted(selected)))
+
+
 def test_tortoise_api_change_selects_api_and_core():
     # #2938 item 1: mapping `tortoise/api.py` to `api` closes the coverage gap,
     # but its pinning tests are registered across surfaces — CORE_ALSO keeps

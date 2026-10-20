@@ -1,0 +1,32 @@
+{
+  "case_id": "ask04_badge",
+  "class": "verbatim",
+  "distilled": {
+    "claims": [
+      {
+        "session_id": "badge-2023",
+        "text": "my badge number is QX-4417",
+        "valid_from": "2023-04-12"
+      }
+    ],
+    "supersessions": []
+  },
+  "haystack_dates": [
+    "2023/04/12 (Wed) 09:40"
+  ],
+  "haystack_session_ids": [
+    "badge-2023"
+  ],
+  "haystack_sessions": [
+    [
+      {
+        "content": "Facilities reissued my card today \u2014 my badge number is QX-4417.",
+        "role": "user"
+      }
+    ]
+  ],
+  "question": "What is my badge number?",
+  "question_date": "2023/06/01 (Thu) 10:00",
+  "question_type": null,
+  "schema": "ask-sealed-fixture/v1"
+}

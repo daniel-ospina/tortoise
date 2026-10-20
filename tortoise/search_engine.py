@@ -2461,6 +2461,53 @@ def rrf_fusion(
         for rank, (pid, _score) in enumerate(ranked):
             rrf_score = w / (k + rank + 1)
             scores[pid] = scores.get(pid, 0.0) + rrf_score
+    # #7704 (MEASURED; the ruling is OPEN — this is a description, not a
+    # contract): the rank consumed above is POSITIONAL, so a leg's own tie
+    # order becomes a fusion RELEVANCE difference between documents whose
+    # evidence is identical. Two rows tied on every leg —
+    #
+    #     rrf_fusion([[("b", 1.0), ("a", 1.0)], [("b", 1.0), ("a", 1.0)]],
+    #                strategy_names=["fts", "vector"], weights={"vector": 1.5})
+    #     -> {'b': 0.04098360655737705, 'a': 0.04032258064516129}
+    #
+    # — land 1.61% apart, ordered by whatever broke the leg's tie. In the search
+    # legs that is the leg's secondary sort on its own id field (#3019):
+    # ``url`` for source/document, ``eventId`` for events, and for points the
+    # node id — a ULID on the create paths (chronological) but
+    # ``pt_<sha256>`` on the extraction/commit paths
+    # (``commit_schema.point_content_id``), so a tie's order is chronological
+    # for one population and content-hash for the other, and the two id spaces
+    # sort as blocks ('p' after the digits). Arbitrary-but-stable, never a
+    # relevance proxy. The single-leg path does not fuse (``sdk.py``'s
+    # ``len(raw_results) == 1`` shortcut), so the same two rows keep the SAME
+    # score there: the two paths disagree about identical evidence.
+    #
+    # This is the mechanism behind #7704's product symptom, but the symptom is
+    # NOT a property of the mechanism. The fused gap above only becomes a
+    # FINAL-score gap after ``GraphRanker`` min-max normalizes the PAGE, so
+    # whether the W4-b contested boost (``W4_CONTESTED_BOOST`` — 0.0175 of
+    # final score at ``graph_boost_weight`` 0.35) clears it is a function of the
+    # caller's ``limit``. Name the FIXTURE, because the answers differ: it does
+    # NOT clear on the 4-row E2E-1 twin fixture's pages (relevance gap 0.0189 >
+    # 0.0175), while on the recorded 404-point sweep it clears from ``limit``
+    # >= 40, where the contested twin ranks ABOVE its twin (delta -0.0041 —
+    # ``tortoise/ranking.py``). The full page-scoped accounting is the
+    # ``W4_CONTESTED_BOOST`` rationale in ``tortoise/ranking.py`` — do not
+    # re-derive it here, and do not read a single page's outcome as the
+    # mechanism's promise.
+    #
+    # Whether fusion MAY spread identical evidence by an id — and which remedy is
+    # permitted — is an OPEN owner ruling on #7704. The recorded option set is
+    # the rationale on ``W4_CONTESTED_BOOST`` in ``tortoise/ranking.py``: read it
+    # there, not as a re-list here, because two of its members decide OTHER
+    # questions and are NOT #7704 choices — replacing rank-based fusion with
+    # score-based fusion is the OPEN OWNER RULING on #4210, and tie-breaking on
+    # the contested signal reverses #3019's id tie-break, which ``temporal_leg``
+    # consumes positionally (#2976). The equal-evidence invariant itself is
+    # pinned by ``tests/test_rrf_tie_rank_7704.py`` (``xfail(strict=True)`` until
+    # that ruling lands — it reds when a remedy lands so the marker comes off
+    # deliberately); the measured magnitudes live on #7704. Do not read this
+    # comment as a decision either way.
     # R5 (#1544): optional recency multiplier — a multiplier, NOT an additive
     # constant: the RRF score range is ~0.01–0.05 (the SearchScores rrf
     # docstring), so an additive offset would swamp fusion entirely.

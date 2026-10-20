@@ -1,0 +1,7 @@
+{
+  "answer": "Shellfish",
+  "case_id": "ask06_allergy",
+  "class": "verbatim",
+  "judge_template": "single-session-user",
+  "schema": "ask-sealed-gold/v1"
+}
