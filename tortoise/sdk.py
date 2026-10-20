@@ -27,6 +27,7 @@ an extractor/indexer, update the catalog reference.
 """
 from __future__ import annotations  # noqa: I001
 
+import contextvars
 import hashlib
 import json as _json
 import logging
@@ -107,7 +108,7 @@ from .retrieval_metering import metered_query as _metered_query
 from . import file_indexer  # noqa: F401 — binds the classifier/identity module (§4.4); sourceKind registration is registry-owned (source_credibility.SOURCE_KIND_DEFAULTS)
 from .projection import FalkorProjection
 # #7951 §17.1: the single-writer scope the live doors open around their fold.
-from .projection import _live_write_scope
+from .projection import _declares_live_write_lane, _live_write_scope
 # #9123 §17.1: the GRAPH-METADATA lane — a write with no journal record that
 # describes it, and whose loss a rebuild absorbs.
 from .projection import _graph_metadata_write_scope
@@ -3270,6 +3271,16 @@ def _landed_at_least_one(result) -> bool:
 
 _logger = logging.getLogger(__name__)
 
+# #6140 — values whose unorderable-start WARNING was already emitted for the
+# write in flight. A dedup-hit ``create_point`` warns on the create leg and then
+# re-enters the write boundary through ``update_point`` with the same props; the
+# `finally` in that branch clears the entry, so the suppression is scoped to the
+# ONE write and a later write of the same value still warns. A ContextVar (not a
+# module global) so concurrent callers cannot silence each other.
+_WARN_SUPPRESS: contextvars.ContextVar[frozenset[str] | None] = contextvars.ContextVar(
+    "_WARN_SUPPRESS", default=None
+)
+
 # ── #2600 server-resolved human actor ───────────────────────────────────────
 # `_current_actor_user_id` carries the server-resolved human actor for
 # session + write-event stamps. SET ONLY at auth seams (mcp_auth
@@ -5327,8 +5338,10 @@ def _refuse_inverted_point_window(g, props: dict, *,
 
     The PREDICATE is delegated, never re-implemented:
     ``commit_schema.validate_validity_window`` is the ONE HOME for the measure
-    (``_created_sort_key``) and the presence gate (``is not None``) — the same
-    predicate ``_covers`` assumes. This function owns only what the declaration
+    (``_created_sort_key``) and the presence gate (``is not None``). (The READ
+    path's START gate is presence AND orderability since #6140 — an unorderable
+    start is an OPEN start there — so the two agree by both SKIPPING a bound
+    that names no instant, not by sharing one predicate.) This function owns only what the declaration
     explicitly does NOT (its own scope note): resolving the pair a PARTIAL
     write will actually persist. ``point_id is None`` is a fresh create, where
     both bounds are the caller's; otherwise the caller's bound is merged with
@@ -5350,8 +5363,41 @@ def _refuse_inverted_point_window(g, props: dict, *,
     """
     if "validFrom" not in props and "validTo" not in props:
         return
+    # #6140 option C, as the owner ruled it — a WARNING, not a refusal. A
+    # caller handing us a start that names no instant (`""`, `"TBD"`) is told
+    # what that value MEANS (reading A: no start recorded ⇒ the window is open
+    # below), and the write proceeds: refusing would make a legacy point
+    # impossible to update or supersede until its window was repaired. Only the
+    # CALLER's value warns — a bound merged in from the stored opposite side is
+    # not being written, so `commit_schema.validate_validity_window` (which sees
+    # only the merged pair) deliberately stays silent.
+    #
+    # Warn ONCE per value per WRITE. Two re-entry shapes reach this function
+    # for a single write: a dedup-hit `create_point` (create leg, then
+    # `update_point` with the same props) and a duplicate-id fan-out. The
+    # create leg sets ``_WARN_SUPPRESS`` for the re-entry it causes, and the
+    # update leg stays silent for a value the stored node already carries — an
+    # unrelated update of a legacy point re-reads a value nobody is writing.
+    def _warn_unorderable_caller_start(caller_vf: object) -> None:
+        if caller_vf is None:
+            return
+        from tortoise.search_engine import _created_sort_key  # lazy — no cycle
+        if _created_sort_key(caller_vf)[0] == 0:
+            return
+        suppressed = _WARN_SUPPRESS.get()
+        if suppressed is not None and repr(caller_vf) in suppressed:
+            return
+        _logger.warning(
+            "validFrom %r names no instant — it means NO START WAS "
+            "RECORDED, so the window is OPEN below (ONTOLOGY §4.7, "
+            "#6140). Pass an ISO-8601 instant, or omit the property, to "
+            "make the intent explicit.",
+            caller_vf,
+        )
+
     from tortoise.commit_schema import validate_validity_window
     if point_id is None:
+        _warn_unorderable_caller_start(props.get("validFrom"))
         validate_validity_window(props.get("validFrom"), props.get("validTo"))
         return
     rows = g.query(
@@ -5360,12 +5406,16 @@ def _refuse_inverted_point_window(g, props: dict, *,
     ).result_set
     if not rows:
         return
+    warned = False
     for stored_vf, stored_vt in rows:
         # ``get(key, default)`` uses the default only when the key is ABSENT,
         # so a key present with value None still clears the bound (matching
         # `SET n += $props`), while an absent key keeps the stored one.
         effective_vf = props.get("validFrom", stored_vf)
         effective_vt = props.get("validTo", stored_vt)
+        if not warned and "validFrom" in props and props["validFrom"] != stored_vf:
+            _warn_unorderable_caller_start(props["validFrom"])
+            warned = True
         validate_validity_window(effective_vf, effective_vt)
 
 
@@ -5458,8 +5508,9 @@ def _supersede_window_start_source(stored_vf, successor_created_at):
 
     The predicate is PRESENT (not truthy) AND ORDERABLE:
 
-    * PRESENT, not truthy (#3985): the read path gates on ``vf is not None``
-      (``_covers``), so a numeric ``0`` is a REAL window start there — the
+    * PRESENT, not truthy (#3985): the read path gates its start on presence
+      AND orderability (``_covers``), so a numeric ``0`` is a REAL window start
+      there — the
       epoch-0 instant. A truthiness test skipped it and fell back to
       ``successor_created_at``, which lands INSIDE the read path's
       ``[epoch 0, inf)`` window -> the predecessor and the successor then both
@@ -5515,12 +5566,12 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
                         -> now
 
     ``stored_vf`` is taken when it is PRESENT and ORDERABLE. PRESENT, not
-    truthy: ``_covers`` gates on ``is not None``, so a numeric ``0`` is a real
-    window start there — the epoch-0 instant (#3985). ORDERABLE, because a
-    present-but-unparseable start carries no instant and persisting it would
-    leave the window unbounded (#5360). ``successor_created_at`` is taken only
-    when it is truthy and ORDERABLE (#5360); otherwise the resolver falls to
-    ``now``.
+    truthy: ``_covers`` gates its start on presence AND orderability, so a
+    numeric ``0`` is a real window start there — the epoch-0 instant (#3985).
+    ORDERABLE, because a present-but-unparseable start carries no instant and
+    persisting it would leave the window unbounded (#5360). ``successor_created_at``
+    is taken only when it is truthy and ORDERABLE (#5360); otherwise the resolver
+    falls to ``now``.
 
     #3985 changed exactly ONE case: a stored start that is FALSEY but
     orderable (``0``). The old truthiness test skipped it and fell back to
@@ -5530,11 +5581,14 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
 
     Presence is NOT enough on its own: ``is not None`` alone would also absorb
     the falsey-but-UNPARSEABLE ``""``, stamping the predecessor's end ``""`` —
-    which ``_covers`` reads as an OPEN end, so the predecessor would cover
-    every later instant and the successor would never become the answer. The
-    orderability conjunct is what keeps that out; the residual is tracked as
-    #6140. A truthy-but-unparseable stored start (``"TBD"``) also falls
-    through, to ``successor_created_at``.
+    a value that names no instant, which ``_covers`` cannot exclude, so the
+    predecessor would cover every later instant and the successor would never
+    become the answer. The orderability conjunct is what keeps that out. A
+    truthy-but-unparseable stored start (``"TBD"``) also falls through, to
+    ``successor_created_at``. (Under the #6140 ruling this writer and
+    ``_covers`` treat ``""`` the SAME way — as undated — so the two paths no
+    longer disagree about it; what stays closed here is persisting a valueless
+    END.)
 
     Returns the value AS PERSISTED.  The ``stored_vf`` branches stay RAW (no
     ``str()``): a numeric stored value must keep keying as ``(0, float)``
@@ -5543,10 +5597,11 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
     ``(1, text)`` and REINTRODUCES the unbounded predecessor window the
     ``valid_from``-agreement guard exists to prevent.
 
-    Refuses when ANY of the predecessor's own starts is present and the
-    successor's resolved start sorts STRICTLY BEFORE it — the same measure and
-    the same ``is not None`` presence predicate ``_covers`` uses, so the
-    guard's boundary IS the read path's.  Strictly-before only: equality (a
+    Refuses when ANY of the predecessor's own starts is present, ORDERABLE and
+    sorts STRICTLY BEFORE the successor's resolved start — the same measure
+    ``_covers`` orders with, and the same reach: a bound that names no instant
+    is skipped on BOTH sides (#6140's ruling makes such a start an OPEN start on
+    the read path), so the guard's boundary IS the read path's.  Strictly-before only: equality (a
     zero-length predecessor window) is well-formed and accepted.  ``old_vfs``
     is a SEQUENCE, not a scalar: a point id is not unique (the duplicate
     fan-out is a tested shape), and the stamp block below MATCHes and stamps
@@ -5559,10 +5614,13 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
     The refusal fires only when BOTH instants are orderable.  A predecessor
     start that is present-but-unparseable (``""``, ``"TBD"``, ``"2026-6-1"``)
     is SKIPPED, not refused — matching ``_assert_window_start_not_inverted``,
-    the #5358 sibling, which documents the same choice: such a window already
-    covers no PARSEABLE instant, so the write cannot newly hide it from any
-    parseable query instant, whereas refusing would refuse on an
-    ordering-fallback artefact rather than a comparison.  It also matters
+    the #5358 sibling, which documents the same choice: the refusal's premise
+    is "this end PRECEDES the predecessor's start", and an unorderable start
+    names no instant to precede, so a refusal would rest on an
+    ordering-fallback artefact rather than a comparison.  (Under the #6140
+    ruling such a start is an OPEN start, so this write DOES bound a window
+    that was previously unbounded-below — that is the supersession doing its
+    job, not a fact being newly hidden.)  It also matters
     practically: ``create_point`` accepts any caller ``validFrom``, so a
     legacy or imported point carrying a non-ISO start is reachable, and
     refusing here would make such a point impossible to supersede until its
@@ -5596,15 +5654,15 @@ def _supersede_window_end(*, old_id, new_id, old_vfs, valid_from,
     ``successor_created_at`` rather than being persisted. A NUMERIC kwarg is
     deliberately exempt there.
 
-    #3985's residual, stated so the next reader does not "tidy" it: the
-    falsey-but-unparseable ``""`` start still falls through to
-    ``successor_created_at``, so write != read for it.  Making it agree means
-    deciding whether ``""`` should be an OPEN end or an absent one, which is
-    a semantic choice of the same CLASS as #3982's (that one ruled on
-    date-only parsing; this is a different question) and an owner decision —
-    not a predicate alignment.  It is tracked as **#6140**.  What #3985 does
-    fix is the case where the two paths CAN be made to agree without one: a
-    start both paths can order.
+    #6140 CLOSED this residual (owner ruling 2026-10-11, "A and C"): the two
+    paths now AGREE on ``""``, without a semantic choice being forced here.
+    The read path treats a start that names no instant as NO START RECORDED (an
+    OPEN start), and this writer already treats it as absent — it falls through
+    to ``successor_created_at``, exactly as an absent start does. Both sides
+    therefore read ``""`` as "undated": no divergence to align, and the write
+    clock is not borrowed in the sense §4.7 forbids, because the value carried
+    no instant to begin with. What #3985 fixes is the other case — a falsey
+    start both paths CAN order (``0``).
 
     The ``valid_from``-vs-successor agreement guard is NOT here: it is
     reachable only when a kwarg is passed, and it stays inline at its
@@ -7778,7 +7836,17 @@ class TortoiseSDK:
                     # dirty-marking (#490 review P2-1: re-capture would churn
                     # confidence for every point).
                     props["updatedAt"] = now
-                    self.update_point(pid, **props)
+                    # #6140: the CREATE leg of this call already warned about
+                    # an unorderable caller `validFrom` if it had one, and this
+                    # update leg writes the same value — so suppress the repeat
+                    # for the duration of THIS write only.
+                    _vf = props.get("validFrom")
+                    _tok = _WARN_SUPPRESS.set(
+                        frozenset({repr(_vf)}) if _vf is not None else None)
+                    try:
+                        self.update_point(pid, **props)
+                    finally:
+                        _WARN_SUPPRESS.reset(_tok)
                 return self.get_point(pid)
 
         # Issue #52 — warn when caller passes an explicit non-ULID id
@@ -8089,9 +8157,12 @@ class TortoiseSDK:
             raise WriteNotLandedError(pid, getattr(proj, "graph_name", None))
         # #7951 §17.1: the cache write runs inside the live-write scope — the
         # door declares itself to the guard, and every statement below runs
-        # strictly AFTER the append above. (The scope is documentary on the
-        # raw handle: the §17.1 guard covers `FalkorProjection.apply`/`.query`,
-        # and the raw handle's remaining sites are the recorded residual.)
+        # strictly AFTER the append above. Since #9124 the declaration is
+        # LOAD-BEARING rather than documentary: the §17.1 guard now covers the
+        # raw guarded handle too (`proj.g`), which is the handle this `CREATE`
+        # uses, so without the scope an armed handle refuses the create hot
+        # path. The declaration is a lane, not an exemption — the append above
+        # is the commit point and every write here follows it.
         with _live_write_scope("create_point"):
             self._graph_write_with_retry(
                 lambda: proj.g.query(
@@ -11302,12 +11373,17 @@ class TortoiseSDK:
         # `test_the_promote_arm_stays_apply_first_a_recorded_deviation` and
         # `test_a_refused_promote_journals_no_revision`.
         #
-        # ⛔ NOT ROUTED THROUGH THE FOLD YET. The writes below still go through
-        # the raw guarded handle, so no `_live_write_scope` is opened here: the
-        # §17.1 guard covers `FalkorProjection.apply`/`.query`, and a scope
-        # around a raw handle would authorize nothing (the same statement
-        # `create_point`'s scope makes about itself). Moving these writes onto
-        # the fold is increment 3, and that is when this door declares itself.
+        # ⛔ NOT ROUTED THROUGH THE FOLD YET, AND STILL UNDECLARED (#9124).
+        # The non-promote writes below go through the raw guarded handle, whose
+        # §17.1 door now DETECTS an undeclared write (#9124 part 1), so this
+        # door is one of the measured remainder in
+        # `tests/test_9124_declared_live_doors.py`'s MIXED-ARM inventory. It
+        # cannot declare `_live_write_scope` yet, for the reason the promote arm
+        # below states: the SAME write region serves an arm whose record is
+        # stated only AFTER its guarded write, so a scope placed here would
+        # authorize that arm too. Moving these writes onto the fold — and
+        # deciding the promote arm with them — is part 2 (#9124), and that is
+        # when this door declares itself.
         # #1904: content_hash is derived from content — keep it out of the
         # event record (mirrors create_point's snapshot strip at emit).
         # #4208: the vector this path just DERIVED from the content is stripped
@@ -11322,6 +11398,57 @@ class TortoiseSDK:
             and not (_derived_embedding and k == "embedding")
         }
         _promote_arm = 'status' in props
+
+        def _record_promote() -> None:
+            """Append the promote's record where the promote LANDS (#7951 2b).
+
+            The promote arm is APPLY-FIRST by decision (`#8830`): its guarded
+            ``SET`` can legitimately match nothing, so the record may not
+            precede the write. It must not follow the arms that run AFTER it
+            either. The tag sync and ``_mark_dirty`` come later and can raise —
+            a witnessed tag sync that cannot land aborts the whole call — which
+            left a landed promotion with NO record: measured on `main`, a
+            ``update_point(status='live', tags=[...])`` whose TAGGED merge could
+            not land left the node ``status='live'``, told the caller the call
+            had failed, and appended ZERO ``PointRevised`` — a promotion that
+            APPLIED with no record of it at all.
+
+            ⚠️ WHAT THIS CLOSES, AND WHAT IT DOES NOT. The record now exists,
+            and it carries the promotion (``status`` rides ``emit_props``), so
+            the RECORD lane applies it: ``PointRevised`` is a flat
+            ``NodePatch`` in ``record_projection.RECORD_MUTATIONS`` and
+            ``Point.status`` is a primary column, so replaying the record
+            restores ``live``. The GRAPH lane does NOT: ``_revise_point`` has
+            no ``status`` clause (nor does ``_apply_one``'s ``PointRevised``
+            arm), so ``rebuild_all`` over the same journal still replays such a
+            promote as ``draft``. That is a PRE-EXISTING graph live-vs-replay
+            parity gap, listed with ``:Object`` ``version``/``updatedAt`` in
+            ``docs/plans/2026-10-17-7951-update-point-outbox.md`` §6.5 and
+            filed as #9255 — this increment moves *when* the record is
+            appended, it adds no fold. §6.5 also carries the TAG half: the
+            record carries ``tags``, which the fold DOES apply (property +
+            ``_sync_tags``), so a graph rebuild mints the ``TAGGED`` edges this
+            window's aborted sync never wrote — a divergence in the opposite
+            direction, and the reason #9255 needs a decision, not just a
+            clause. Do not restate this docstring as "the promotion survives a
+            rebuild" until that fold lands.
+
+            So the commit point is "after the guarded write, before anything
+            that can strand it" — the point ``invalidate_point`` and
+            ``retract_point`` already use, and the reason this arm was the only
+            apply-first door in its family. It is reached only with a NON-EMPTY
+            ``result_set``: every zero-row promote has already returned (the
+            idempotent live no-op) or raised (the diagnostic above).
+
+            Best-effort, as at the old tail: ``_emit_event`` never raises, and
+            the write it describes has already landed, so a failed append is
+            counted in ``_journal_write_failures`` rather than mis-reported as
+            ``WriteNotLandedError`` — which would claim the opposite of what
+            happened.
+            """
+            self._emit_event("PointRevised", id=id,
+                             new_content=props.get("content"), **emit_props)
+
         if not _promote_arm:
             # The append's OWN per-call outcome is the commit signal — a
             # per-call value, not a delta of the shared
@@ -11453,6 +11580,9 @@ class TortoiseSDK:
                     # the graph-wide EP epoch and persisting `ep_dirty` for a
                     # promote that matched nothing (#8854 review r9 P2).
                     return self.get_point(id)
+                # LANDED: record it HERE, before the tag sync and `_mark_dirty`
+                # below can strand it (#7951 2b — see `_record_promote`).
+                _record_promote()
             else:
                 self._graph_write_with_retry(
                     lambda: proj.g.query(
@@ -11498,6 +11628,9 @@ class TortoiseSDK:
                     # no-op, answered with no writes rather than through the
                     # tail's `_mark_dirty` EP advance.
                     return self.get_point(id)
+                # LANDED: see the `:Object` arm above — same commit point, same
+                # reason (#7951 2b).
+                _record_promote()
             else:
                 # #7405: one key per statement, each an absolute
                 # `SET n += $props` — a re-issue writes the same value to
@@ -11675,33 +11808,28 @@ class TortoiseSDK:
         # Dreaming (#85): property mutations can affect confidence.
         self._mark_dirty([id])
         result = self.get_point(id)
-        # #548: emit PointRevised event for rebuild parity.
-        # The PROMOTE arm's record is stated only now, AFTER its guarded write:
-        # the emit above ran for the unguarded arms (the outbox ordering), and
-        # this one may not precede a `SET` that can legitimately match nothing
-        # (see the outbox block above). The payload is the same dict either
-        # way — one record shape, one commit point per call.
-        # A promote that applies NOTHING never reaches here: a status-only
-        # promote on a live node leaves before this emit on BOTH of its routes —
-        # the PRE-write probe (no PROMOTE WRITE issued, and the `:Object` label
-        # probe is not reached either: the route returns on its status read at
-        # the top of the door, having issued only `RETURN n.status` + `get_point`)
-        # and the POST-write early return
-        # (statement issued, matched nothing) — and every other zero-row
-        # promote raises in the diagnostic above. So this emit is reached only
-        # by a promote that landed, and the `res.result_set` conjunct that used
-        # to guard it was unreachable-false (#8854 review round 11 P3;
-        # mechanism corrected round 12).
-        if _promote_arm:
-            self._emit_event("PointRevised", id=id,
-                             new_content=props.get("content"), **emit_props)
+        # The PROMOTE arm's record is NOT emitted here any more (#7951 2b): it
+        # commits where the promote lands, inside the arm, so the tag sync and
+        # `_mark_dirty` below it cannot strand a landed promotion. The unguarded
+        # arms still record BEFORE their writes (the outbox ordering above); the
+        # payload is the same dict either way — one record shape per call.
         return result
 
+    @_declares_live_write_lane("delete_point")
     def delete_point(self, id: str) -> bool:
         """Delete a Point and its relationships. Returns True if found.
 
         Implementation behind delete(id) — the consolidated Point/entity
         delete (epic #888 W2).
+
+        §17.1 LANE (#9124): JOURNAL-FIRST, declared. The `EntityMutated
+        op=delete` record is appended BEFORE the `DETACH DELETE` (the outbox
+        ordering below), and every mutating statement in this method follows
+        that append — so the whole method is the live lane's write region and
+        carries `@_declares_live_write_lane`. That ordering is not merely
+        stated here: `tests/test_9124_declared_live_doors.py` re-derives it from
+        the source for every declared door, so a write added above the append
+        reddens there rather than silently widening the lane.
 
         Raises ``WriteNotLandedError`` (``operation="delete_point"``) instead of
         returning when the §17.1 outbox refuses the destruction: either the
@@ -11968,15 +12096,19 @@ class TortoiseSDK:
         the SAME key ``_covers`` orders with — and its PRESENCE predicate
         (``is not None``, NOT truthiness: a falsey-but-present ``validFrom``
         such as ``0`` is a real window start; #3985 owns the truthiness
-        divergence elsewhere). Refusal fires only on a DECIDABLE inversion:
+        divergence elsewhere). Since #6140 the read path ALSO requires
+        orderability before a start bounds anything, which this guard already
+        did (it refuses only on a DECIDABLE inversion), so the two skip the same
+        values. Refusal fires only on a DECIDABLE inversion:
         both the stored start and ``now`` must be parseable to an instant.
         An unparseable stored ``validFrom`` (e.g. ``""``) buckets LAST in
         ``_created_sort_key`` (``(1, text)`` vs a parseable ``(0, epoch)``),
         which would read as "greater than now" purely as an ordering-fallback
         artifact — refusing on that would be a guess, not a comparison, so it
-        proceeds and stamps as before (that point's window already covers no
-        PARSEABLE instant, so the write cannot newly hide it from any
-        parseable query instant). EVERY matching node is examined, not just
+        proceeds and stamps as before. (Since the #6140 ruling the read path
+        reads such a start as OPEN, so this write BOUNDS a window that was
+        unbounded below rather than hiding one — the invalidation doing its
+        job.) EVERY matching node is examined, not just
         the first: the writer's stamp block MATCHes **EVERY** node carrying
         the id, and point ids are not unique (the duplicate fan-out is a
         tested shape), so a first-row-only read could pass the guard and still
@@ -11992,7 +12124,8 @@ class TortoiseSDK:
         #5374: the pair comparison itself delegates to the DECLARED contract —
         ``commit_schema.validate_validity_window`` is the ONE HOME for the
         measure (``_created_sort_key``) and the presence gate
-        (``is not None``). This method keeps what the declaration does not
+        (``is not None``) — whose ORDERABILITY conjunct the read path shares
+        since #6140. This method keeps what the declaration does not
         own: the every-matching-node scan (point ids are not unique) and the
         ``retract_point`` refusal message. The other live Point writers that
         persist a window — ``create_point`` / ``update_point`` (caller props)
@@ -12031,9 +12164,16 @@ class TortoiseSDK:
                     f"call retract_point({point_id!r}) instead."
                 ) from None
 
+    @_declares_live_write_lane("invalidate_point")
     def invalidate_point(self, id: str, corrected_by_id: str,
                          *, valid_to_precision: str | None = None) -> dict:
         """Mark a Point outdated, linked to its replacement via CORRECTS edge.
+
+        §17.1 LANE (#9124): JOURNAL-FIRST, declared. The `PointInvalidated`
+        record is appended before the terminal stamp and the `CORRECTS` merge
+        ("validated-emit-then-mutate" below), so every mutating statement in
+        this method follows the append and the method carries
+        `@_declares_live_write_lane`.
 
         Validation contract (#330/#2498) — all checks run BEFORE any write so
         a failure can never leave a partial graph state:
@@ -12196,10 +12336,27 @@ class TortoiseSDK:
             return self.supersede_point(old_id, new_id)
         return self.invalidate_point(old_id, new_id)
 
+    @_declares_live_write_lane("supersede_point")
     def supersede_point(self, old_id: str, new_id: str,
                         *, valid_from: str | None = None,
                         valid_to_precision: str | None = None) -> dict:
         """Atomically replace old Point with new — CORRECTS edge + outdated flag + edge transfer.
+
+        §17.1 LANE (#9124): JOURNAL-FIRST, declared — with ONE stated residual
+        that this declaration does NOT close. The `PointSuperseded` record is
+        appended before any mutating statement (all ~15 of them follow it), so
+        the method carries `@_declares_live_write_lane`. The residual is that
+        the append's RETURN is not checked here, so a FAILED append still
+        proceeds to the cache: the lane is honest about ORDER and says nothing
+        about CONFIRMATION. The doors that gate on a per-call append outcome do
+        so ARM BY ARM, not door by door: `create_point` and `update_point`'s
+        NON-promote arm raise `WriteNotLandedError` on `_record_committed is
+        False`, and `delete_point` gates on `_delete_committed =
+        _journal_entity_mutation(...)`. `update_point`'s PROMOTE arm (its record
+        is emitted after the write, return discarded), `invalidate_point` and
+        `retract_point` discard the append's return exactly as this door does,
+        so the same residual is carried by FOUR doors, not one. Closing it is
+        part 2 of #9124 (it changes the failure contract, not the order).
 
         E6 (#1538) D2 — bi-temporal validity windows: the supersession ALSO
         stamps the old point's window END (``validTo`` = the successor's
@@ -12357,15 +12514,13 @@ class TortoiseSDK:
         # zone-less date-TIME is unaffected and still reads locally.
         #
         # The guard's PRESENCE predicate is the read path's, not the
-        # resolution branch's. `_covers` gates on `vf is not None`, so a
-        # falsey-but-PRESENT stored value is a REAL window start there: `0`
-        # keys as the parseable epoch-0 instant, and `""` keys as an
-        # unparseable start that covers no PARSEABLE instant
-        # (`_created_sort_key("")` = `(1, "")`, and `(1, x) > (0, y)` is
-        # always True) — an unparseable QUERY instant also keys as
-        # `(1, <text>)` and IS covered by it, so `""` only hides the successor
-        # from parseable queries, which land in the predecessor's window end
-        # instead. The resolution
+        # resolution branch's. `_covers` gates its START bound on presence AND
+        # orderability, so a falsey-but-PRESENT stored value is a REAL window
+        # start there when it orders: `0` keys as the parseable epoch-0
+        # instant. `""` names no instant, and since the #6140 ruling (owner,
+        # 2026-10-11) that means NO START RECORDED — an OPEN start covering
+        # every instant — so it is not a bound the resolution branch may take
+        # (persisting it as an END would leave the predecessor unbounded). The resolution
         # branch below delegates to ``_supersede_window_start_source`` — PRESENT
         # (not truthy) AND ORDERABLE: #3985 for the falsey-but-orderable `0`,
         # #5360 for the truthy-but-unparseable stored start and the unparseable `createdAt`.
@@ -12375,9 +12530,10 @@ class TortoiseSDK:
         # (a `validFrom=0` successor's `[epoch0, inf)` window overlaps any
         # predecessor end the kwarg writes at or after epoch 0, and gaps
         # before it). The no-kwarg FALSEY-AND-UNORDERABLE case (`""`) keeps the
-        # pre-existing fallback - its read/write divergence is real and tracked
-        # in #6140; #3985 fixed the falsey-but-ORDERABLE case (`0`), which the
-        # branch above now takes.
+        # pre-existing fallback — which is exactly what an ABSENT start gets, so
+        # the two paths AGREED on it all along once #6140 ruled that `""` means
+        # NO START RECORDED: there is no divergence left to track. #3985 fixed
+        # the falsey-but-ORDERABLE case (`0`), which the branch above now takes.
         vf_rows = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.createdAt, "
             "n.validFromPrecision",
@@ -12916,8 +13072,23 @@ class TortoiseSDK:
             "edges_transferred": transferred,
         }
 
+    @_declares_live_write_lane("retract_point")
     def retract_point(self, id: str) -> dict:
         """Tombstone-retract a Point: status='retracted' (point stays in graph).
+
+        §17.1 LANE (#9124): JOURNAL-FIRST, declared. `PointRetracted` is
+        appended before the CAS `SET` ("append-before-mutation" below), and the
+        method's every mutating statement follows it, so the method carries
+        `@_declares_live_write_lane`.
+
+        ⚠️ ORDER is what the declaration guarantees; CONFIRMATION is not. The
+        append's return is discarded here, so a FAILED append still retracts the
+        cache node and reports success — measured on this branch by forcing
+        `_emit_event` to return False: the point came back `status='retracted'`.
+        Only `create_point`, `update_point`'s non-promote arm and `delete_point`
+        gate on their append's return; `invalidate_point`, this door and
+        `supersede_point` do not. That residual is part 2 of #9124 (it changes
+        the failure contract).
 
         #432: retraction is a TERMINAL state transition, not a deletion — the
         projection keeps the point with status='retracted' and default query
@@ -26798,9 +26969,33 @@ class TortoiseSDK:
         t_key = _created_sort_key(at_date)
 
         def _covers(vf, vt) -> bool:
-            """Window coverage with IS-NULL open ends + mixed-format keys."""
-            if vf is not None and _created_sort_key(vf) > t_key:
-                return False
+            """Window coverage with IS-NULL open ends + mixed-format keys.
+
+            A bound that names NO INSTANT is treated as ABSENT — the two
+            bounds are NOT symmetric, and the asymmetry is the #6140 ruling
+            (owner, 2026-10-11: *"A and C (c should be a warning)"*):
+
+            * START (``vf``) — an unorderable ``""`` / ``"TBD"`` means **no
+              start was recorded**, so the window is OPEN BELOW and covers
+              every instant. Gating on presence alone (``vf is not None``) and
+              then ORDERING the value made such a window cover NOTHING —
+              ``_created_sort_key`` buckets it as ``(1, text)``, after every
+              parseable instant — so a dated query answered ``absent`` for a
+              claim genuinely in force. See ``tests/test_validity_windows.py``
+              ::``test_a_start_naming_no_instant_leaves_the_window_open``.
+            * END (``vt``) — left as it was: an unorderable end cannot be
+              excluded either (``(1, text) < (0, instant)`` is False), so such
+              a window covers every later instant. That is NOT flagged as
+              ``END_UNKNOWN`` — ``validity.end_state`` raises that only for an
+              ``validToPrecision == "unknown"`` declaration on an ABSENT end —
+              so a present-but-unparseable ``validTo`` reads ``end_state:
+              "known"`` today. A pre-existing residual of the END side, out of
+              this ruling's scope and tracked on #9202.
+            """
+            if vf is not None:
+                kf = _created_sort_key(vf)
+                if kf[0] == 0 and kf > t_key:  # unorderable ⇒ open start (#6140)
+                    return False
             if vt is not None and _created_sort_key(vt) < t_key:  # noqa: SIM103
                 return False
             return True
@@ -26889,9 +27084,15 @@ class TortoiseSDK:
         for e in chain:
             vf, vt = e["valid_from"], e["valid_to"]
             dist = None
-            if vf is not None and _created_sort_key(vf) > t_key:
-                kf = _created_sort_key(vf)
-                if kf[0] == 0 and t_key[0] == 0:  # both parseable
+            # Mirror `_covers`' start gate (#6140): a start that names no
+            # instant is an OPEN start, not a bound above every instant, so it
+            # is never the arm that places this entry relative to `t` — the
+            # END is. Without this the entry was skipped entirely (the start
+            # arm was taken, the unparseable key yielded no distance), losing
+            # an annotation whose end distance IS computable.
+            kf = _created_sort_key(vf) if vf is not None else None
+            if kf is not None and kf[0] == 0 and kf > t_key:
+                if t_key[0] == 0:  # both parseable
                     dist = kf[1] - t_key[1]
             elif vt is not None and _created_sort_key(vt) < t_key:
                 kt = _created_sort_key(vt)

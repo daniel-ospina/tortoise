@@ -41,8 +41,27 @@ refused it would be refusing an operation the cache never lost anything to, and
 handle. That asymmetry is the rule, and
 `test_an_unrelated_non_cypher_verb_...` is what keeps it honest. The
 Cypher-bearing raw command
-(``execute_command("GRAPH.QUERY", <g>, "MATCH (n) DETACH DELETE n")``) is NOT
-closed here — it needs statement recovery, which is #9124's door.
+(``execute_command("GRAPH.QUERY", <g>, "MATCH (n) DETACH DELETE n")``) is no
+longer SILENT — #9124 landed the statement recovery (`_command_statement`) and
+the handle runs that door FIRST, then these — but it is MEASURED rather than
+refused until `_HANDLE_GUARD_ENFORCES` flips, exactly like the other six
+statement verbs. The tests below pin both halves of that.
+
+⛔ AND THE SPLIT MUST MIRROR THE SERIALIZER (review round 7), which is the
+cheapest of these lessons and the one that was paid for twice. The classifier
+reads the words the CLIENT will actually send, and an early version read them
+as a naive reader would: MEASURED wiping an armed cache,
+
+    proj.g.execute_command("", "FLUSHDB")                    -> 'OK', nodes 2 -> 0
+    proj.g.execute_command("   ", "DEL", proj._graph_name)   -> 1,    2 -> 0
+    proj.g.execute_command(" ", "GRAPH.DELETE", "victim")   -> graph deleted
+    proj.g.execute_command(memoryview(b"DEL"), name)         -> 2 -> 0
+
+An empty first argument is DROPPED by the serializer's `args[0].split()`, moving
+the verb into the next slot; a `memoryview` command word is accepted by the
+client but was neither decoded nor refused. So the whole payload is normalised
+in ONE place (`_handle_command_words`) and an unreadable payload is a REFUSAL,
+not a pass-through.
 
 ⛔ THE VERB LIST IS NOT THE RULE EITHER (review round 6), and this suite was
 written wrongly once because of it: a FalkorDB graph IS a Redis key, so
@@ -74,7 +93,9 @@ from tortoise.projection import (
     DirectCacheWriteRefused,
     FalkorProjection,
     _GuardedGraph,
+    _is_bulk_wipe,
     _replay_write_scope,
+    _reset_undeclared_handle_writes,
 )
 
 # ── fixtures ──────────────────────────────────────────────────────────────
@@ -741,6 +762,329 @@ def test_an_unarmed_projection_passes_through_unchanged():
         "call_procedure must apply L2's name check exactly as `query` does — "
         f"message={str(exc.value)!r}"
     )
+
+
+# ── review round 7: the words the SERIALIZER sends, not the ones a ────────
+# ── naive reader sees ─────────────────────────────────────────────────────
+#
+# Every case below was MEASURED wiping an armed cache at the head that read
+# `args[0]`/`args[2]` positionally: the serializer DROPS an empty first
+# argument (so the verb travels one slot to the right), and it accepts
+# `memoryview` for a command word (which the guard neither decoded nor
+# refused). The suite's rule is unchanged — the count is read AFTER the
+# attempt, because a refusal raised on top of a completed wipe is worse than
+# no guard at all.
+
+#: (first argument, remaining arguments) spellings of a GRAPH.DELETE / key-space
+#: wipe whose verb is NOT at the position a positional reader looks at.
+_ZERO_WORD_HEAD_SPELLINGS = [
+    ("", "FLUSHDB"),
+    ("", "DEL"),
+    ("   ", "DELETE"),
+    ("\t", "UNLINK"),
+    (" ", "FLUSHALL"),
+]
+
+
+@pytest.mark.parametrize(
+    "head,tail", _ZERO_WORD_HEAD_SPELLINGS,
+    ids=[f"{head!r}-{tail}" for head, tail in _ZERO_WORD_HEAD_SPELLINGS],
+)
+def test_a_zero_word_first_argument_cannot_move_the_verb_past_the_guard(
+        sdk_with_journal, head, tail):
+    """RED before round 7: ``("", "FLUSHDB")`` wiped the whole server (2 -> 0).
+
+    The serializer builds its word list as ``args[0].encode().split() +
+    args[1:]``, so an empty (or whitespace-only) first argument contributes NO
+    word and the verb the client sends is ``args[1]``. A classifier that
+    answered "(no verb, no words)" for that payload was answering about a
+    command the client never sends — and the guard returned, so the wipe ran.
+
+    MUTATION: make `_handle_command_words` return an empty word list whenever
+    the first argument yields no words (the pre-round-7 shape) and every case
+    here fails with DID NOT RAISE, node count 0 for the DEL/UNLINK cases and a
+    flushed server for the flushes.
+    """
+    proj = sdk_with_journal._get_proj()
+    before = _count(proj)
+    assert before > 0, "the armed cache must hold something a wipe could destroy"
+
+    with pytest.raises(DirectCacheWriteRefused) as exc:
+        proj.g.execute_command(head, tail, proj._graph_name)
+
+    # The verb, not the unreadable-payload branch, must be what was classified:
+    # a refusal that fires because it could not read anything is a different
+    # (weaker) claim — it would not catch a readable verb one slot to the right.
+    assert "UNREADABLE" not in str(exc.value), (
+        "the verb travelled into args[1] and the classifier never saw it; "
+        f"message={str(exc.value)!r}"
+    )
+    assert _count(proj) == before, (
+        f"`{tail}` was refused AFTER it destroyed the cache"
+    )
+
+
+def test_a_zero_word_head_cannot_smuggle_a_foreign_graph_delete():
+    """The sharpest form of the same defect: no scope, no target check, no L2.
+
+    ``execute_command(" ", "GRAPH.DELETE", "victim9209")`` at the pre-round-7
+    head deleted a graph this handle does not own — neither the target
+    comparison nor the scope check ran, because neither the verb nor the target
+    was ever read.
+
+    MUTATION: the same one as above. The refusal is asserted to name the graph,
+    so a guard that refused for some other reason (an unreadable payload, a
+    missing scope) does not satisfy it.
+    """
+    proj = _armed_projection(graph_name="test_9209", embedded=False)
+    guarded = _GuardedGraph(proj.g, proj)
+
+    with pytest.raises(DirectCacheWriteRefused, match="not 'victim9209'"):
+        guarded.execute_command(" ", "GRAPH.DELETE", "victim9209")
+
+    assert proj.g.calls == [], (
+        f"a foreign-graph wipe reached the vendor handle: {proj.g.calls!r}"
+    )
+
+
+@pytest.mark.parametrize("verb", [b"DEL", b"del", b"DEL"])
+def test_a_MEMORYVIEW_command_word_is_refused_like_the_bytes_one(
+        sdk_with_journal, verb):
+    """RED before round 7: ``memoryview(b"DEL")`` wiped the cache (2 -> 0).
+
+    The pinned client's encoder accepts ``memoryview`` as a command word — it
+    even takes a separate shrink-wrapped path for it in ``pack`` — so this was
+    a value the client WOULD send and the classifier would not read. Worse, the
+    client then raised ``AttributeError: 'memoryview' object has no attribute
+    'upper'`` from its response-callback lookup, i.e. a refusal-shaped traceback
+    on top of a completed wipe.
+
+    MUTATION: drop ``memoryview`` from `_handle_command_text`'s bytes-like
+    branch and the payload becomes unreadable, so the count assertion below
+    still holds but the CACHE is already at 0 by then — this case fails with
+    DID NOT RAISE on the pre-round-7 shape and with the count at 0.
+    """
+    proj = sdk_with_journal._get_proj()
+    before = _count(proj)
+
+    with pytest.raises(DirectCacheWriteRefused) as exc:
+        proj.g.execute_command(memoryview(verb), proj._graph_name)
+
+    assert "UNREADABLE" not in str(exc.value), (
+        "a memoryview command word is readable — the refusal must classify the "
+        f"verb it carries, not fail on the payload; message={str(exc.value)!r}"
+    )
+    assert _count(proj) == before
+
+
+def test_a_MEMORYVIEW_target_is_read_and_judged():
+    """The target half: a bytes-like GRAPH name must be compared, not skipped.
+
+    ``execute_command("GRAPH.DELETE", memoryview(b"victim"))`` inside a declared
+    scope on a ``test_*`` graph deleted ``victim`` at the pre-round-7 head while
+    the str target was refused — the target decoded to ``None``, and ``None``
+    skipped the comparison entirely.
+
+    Both directions are pinned: the foreign target is refused BY NAME, and a
+    memoryview naming the handle's OWN graph still reaches the vendor handle
+    inside a scope — otherwise "refused" would be satisfied by an over-refusal
+    that treats every bytes-like target as foreign.
+
+    MUTATION: decode only ``bytes``/``bytearray`` in `_handle_command_text` and
+    the foreign-target half fails (DID NOT RAISE); make the target check refuse
+    anything it cannot compare by identity and the own-graph half fails.
+    """
+    proj = _armed_projection(graph_name="test_9209", embedded=False)
+    guarded = _GuardedGraph(proj.g, proj)
+
+    with _replay_write_scope(), pytest.raises(
+        DirectCacheWriteRefused, match="not 'victim9209'"
+    ):
+        guarded.execute_command("GRAPH.DELETE", memoryview(b"victim9209"))
+    assert proj.g.calls == [], f"a foreign delete dispatched: {proj.g.calls!r}"
+
+    with _replay_write_scope():
+        assert guarded.execute_command(
+            memoryview(b"GRAPH.DELETE"), memoryview(b"test_9209")
+        ) == "OK"
+    assert [c[0] for c in proj.g.calls] == ["execute_command"], (
+        "a memoryview naming the handle's own graph must be judged, not refused"
+    )
+
+
+def test_an_unreadable_payload_is_a_REFUSAL_not_a_pass_through():
+    """The fail-closed half: a payload no word can be read from raises.
+
+    ``execute_command("DEL", object())`` is serialized by the client as
+    ``DEL b'<object repr>'``. Before round 7 the guard answered "(no verb, no
+    words)" for such a payload and returned — a pass-through whose effect
+    nothing on this handle can see. The refusal is the answer, and it is
+    distinguishable from the namespace refusal on purpose: the message says the
+    payload is unreadable, so a reader is not told `GRAPH.` was violated when
+    the truth is that the command could not be classified at all.
+
+    MUTATION: restore ``if command is None: return`` in
+    `_refuse_key_space_handle_command` and this fails with DID NOT RAISE.
+    """
+    proj = _armed_projection(graph_name="test_9209", embedded=False)
+    guarded = _GuardedGraph(proj.g, proj)
+
+    with pytest.raises(DirectCacheWriteRefused) as exc:
+        guarded.execute_command("DEL", object())
+
+    assert "UNREADABLE" in str(exc.value), (
+        f"the refusal must say what it could not read; message={str(exc.value)!r}"
+    )
+    assert proj.g.calls == [], f"an unreadable command dispatched: {proj.g.calls!r}"
+
+
+def test_an_unreadable_payload_passes_through_on_an_UNARMED_projection():
+    """... and §17.1 reaches an ARMED projection only (`_journal_backed`).
+
+    Pinned so the fail-closed rule cannot become a wall around every projection
+    stub in the tree: an unarmed projection has no truth store for the cache to
+    be ahead of, so the pre-#9209 pass-through is what it gets.
+    """
+    proj = _armed_projection(graph_name="prod_tortoise", embedded=False)
+    proj._journal_backed = False
+    guarded = _GuardedGraph(proj.g, proj)
+
+    assert guarded.execute_command("DEL", object()) == "OK"
+    assert [c[0] for c in proj.g.calls] == ["execute_command"]
+
+
+def test_an_int_payload_part_is_read_not_refused():
+    """The counter-example: ``RESTORE <key> 0 <payload>`` must still be REFUSED.
+
+    The pinned ``Encoder.encode`` sends ``repr(value)`` for ``int``/``float``, so
+    an integer argument is a legitimate, forwarded payload part — treating it as
+    unreadable turned two key-space wipes into "unreadable payload" refusals,
+    which is the right outcome from the wrong reason (and the reason is what
+    `test_a_key_space_command_is_refused_on_NAMESPACE_not_on_a_list` reads).
+
+    MUTATION: return ``None`` for int/float in `_handle_command_text` and the
+    message assertion fails.
+    """
+    proj = _armed_projection(graph_name="test_9209", embedded=False)
+    guarded = _GuardedGraph(proj.g, proj)
+
+    with pytest.raises(DirectCacheWriteRefused) as exc:
+        guarded.execute_command("RESTORE", "test_9209", 0, "payload")
+
+    assert "UNREADABLE" not in str(exc.value), (
+        f"an int argument is not unreadable; message={str(exc.value)!r}"
+    )
+    assert "GRAPH." in str(exc.value), (
+        f"the namespace refusal must fire; message={str(exc.value)!r}"
+    )
+
+
+# ── the OTHER door: #9124's statement recovery reads the same words ───────
+
+def _force_mode(monkeypatch, *, enforces: bool):
+    """Pin the door's mode for one test, so a future flip cannot shift it.
+
+    `_HANDLE_GUARD_ENFORCES` is a module constant and a code change to flip, so
+    a test flips it on the imported module — the same reference the handle reads
+    at call time (the `tests/test_9079_handle_write_authority.py` precedent).
+    """
+    import tortoise.projection as projection
+
+    monkeypatch.setattr(projection, "_HANDLE_GUARD_ENFORCES", enforces)
+    _reset_undeclared_handle_writes()
+    return projection
+
+
+def test_the_statement_door_reads_the_same_words_as_the_non_cypher_door(
+        monkeypatch):
+    """The shared-split fix, at #9124's door: a single-string GRAPH.QUERY.
+
+    ``_command_statement`` read ``args[0]`` as ONE token and required
+    ``len(args) >= 3``, so ``execute_command("GRAPH.QUERY <g>", "<cypher>")`` —
+    the joined-verb spelling the serializer packs into the same three words as
+    the two-argument form — carried a mutating statement past the §17.1 door
+    entirely: ``"GRAPH.QUERY <g>"`` is not in ``_GRAPH_QUERY_COMMANDS``, so the
+    recoverer answered "no statement". MEASURED at the head: neither counted nor
+    refused.
+
+    Both polarities are pinned, because the door is measure-then-refuse: the
+    census RECORDS it in the landed mode, and the `enforced` mode refuses it.
+
+    MUTATION: index ``args[0]``/``args[2]`` in `_command_statement` again and
+    the measure half fails (the census stays empty).
+    """
+    import tortoise.projection as projection
+
+    _force_mode(monkeypatch, enforces=False)
+    proj = _armed_projection(graph_name="test_9209", embedded=False)
+    proj._path = None
+    guarded = _GuardedGraph(proj.g, proj)
+
+    guarded.execute_command(
+        "GRAPH.QUERY test_9209", "CREATE (n:Point {id:'joined'})"
+    )
+    census = projection.undeclared_handle_writes()
+    assert census, (
+        "a joined GRAPH.QUERY payload carries a statement — the census must see "
+        "it, or the single-string spelling is a silent door"
+    )
+    assert any("joined" in entry for entry in census), (
+        f"the recovered statement must be the one recorded; census={census!r}"
+    )
+
+    # The refusal half, on the mode that raises.
+    _force_mode(monkeypatch, enforces=True)
+    with pytest.raises(DirectCacheWriteRefused):
+        guarded.execute_command(
+            "GRAPH.QUERY test_9209", "CREATE (n:Point {id:'joined'})"
+        )
+    assert proj.g.calls[-1][0] == "execute_command", (
+        "the first (measure-mode) call is expected to dispatch; the second must "
+        f"not; calls={proj.g.calls!r}"
+    )
+    assert len([c for c in proj.g.calls if c[0] == "execute_command"]) == 1, (
+        "the enforced call must be refused BEFORE dispatch"
+    )
+
+
+def test_a_non_DETACH_procedure_wipe_is_caught_by_the_statement_door(
+        monkeypatch):
+    """L2 needs ``DETACH``; the statement door does not — so the hole closed.
+
+    #9209's procedure protection rides on ``_is_bulk_wipe``, whose fast path
+    requires ``DETACH``: ``call_procedure("db.labels() MATCH (n) DELETE n //")``
+    reads as NOT a bulk wipe, so on a non-test server graph it dispatched — and
+    on an EMBEDDED armed projection L2 is a no-op entirely (review round 7 named
+    this as the residue the earlier docstring wrongly described as covered). The
+    statement door #9124 landed covers it, so `call_procedure` now runs that
+    door FIRST, exactly as the six statement verbs do.
+
+    Both halves pinned, both against `_HANDLE_GUARD_ENFORCES` so a flip cannot
+    silently invalidate the test: measure RECORDS, enforced REFUSES before
+    dispatch.
+    """
+    import tortoise.projection as projection
+
+    proj = _armed_projection(graph_name="prod_tortoise", embedded=False)
+    proj.g.call_procedure = lambda *a, **k: "OK"  # record the dispatch
+    guarded = _GuardedGraph(proj.g, proj)
+    statement = "db.labels() MATCH (n) DELETE n //"
+
+    assert not _is_bulk_wipe(f"CALL {statement}()"), (
+        "this case is only meaningful while L2 does NOT classify it — if "
+        "`_is_bulk_wipe` starts matching a non-DETACH delete, pick another form"
+    )
+
+    _force_mode(monkeypatch, enforces=False)
+    guarded.call_procedure(statement, read_only=False)
+    assert projection.undeclared_handle_writes(), (
+        "a non-DETACH procedure wipe must reach §17.1's census — L2 does not "
+        "classify it, so the statement door is the only check that can"
+    )
+
+    _force_mode(monkeypatch, enforces=True)
+    with pytest.raises(DirectCacheWriteRefused):
+        guarded.call_procedure(statement, read_only=False)
 
 
 # ── the drift guard: every forwarded verb is classified ───────────────────

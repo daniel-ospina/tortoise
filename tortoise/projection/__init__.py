@@ -15,7 +15,9 @@ from __future__ import annotations  # noqa: I001
 
 import bisect
 import contextlib
+import functools
 import hashlib
+import inspect
 import json
 import math
 import re
@@ -32,6 +34,7 @@ from pathlib import Path
 from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 from tortoise.cypher_guard import (  # #3595 `=~` guard — the ONE seam
+    _GRAPH_QUERY_COMMANDS,  # #9124: recover the statement a raw command carries
     _guard_execute_command,
     _guard_numeric_literals,  # #8479: the SAME domain, on the statement TEXT
     _guard_numeric_params,  # #7174: the store's numeric domain, same seam
@@ -2730,10 +2733,13 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
 #     ``explain``, ``execute_command``, ``delete`` and ``call_procedure``;
 #     ``__getattr__`` forwards only the remaining, non-Cypher attributes
 #     (``name``, ``schema``, ``copy``, ...). So
-#     ``proj.g._query("MATCH (n) DETACH DELETE n")``, ``proj.g.profile(...)``
-#     (PROFILE executes) and ``proj.g.execute_command("GRAPH.QUERY", <graph>,
-#     "MATCH (n) DETACH DELETE n")`` each reach a whole-graph wipe on a
-#     NON-test server graph passing NEITHER layer. All of these PRE-DATE #2944
+#     ``proj.g._query("MATCH (n) DETACH DELETE n")`` and
+#     ``proj.g.profile(...)`` (PROFILE executes) each reach a whole-graph wipe on
+#     a NON-test server graph without L2 refusing it — and
+#     ``proj.g.execute_command("GRAPH.QUERY", <graph>, "MATCH (n) DETACH DELETE
+#     n")`` reaches the same wipe with L2 not applied at all, though since #9124
+#     it IS MEASURED by §17.1's statement door (see the correction below). All of
+#     these PRE-DATE #2944
 #     (``query`` was the only verb that checked ``_is_bulk_wipe`` before it
 #     too); they are recorded because this comment is the guard's own map of
 #     its holes.
@@ -2753,8 +2759,11 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
 #     every graph on the server — are refused on any armed projection, scope or
 #     not. The Cypher-command wipe above
 #     (``execute_command("GRAPH.QUERY", …,`` ``"MATCH (n) DETACH DELETE n")``)
-#     is NOT closed by that change — it is the statement-recovery door #9124
-#     owns. Nor is ``proj.g._g.delete()``: one private hop past the wrapper
+#     is no longer SILENT: #9124 LANDED the statement-recovery door
+#     (``_command_statement`` → ``_refuse_unauthorized_cache_write``) and the
+#     handle runs it FIRST, then the #9209 refusals — so it is MEASURED (and
+#     refused once ``_HANDLE_GUARD_ENFORCES`` flips), exactly as ``proj.g.query``
+#     is. Nor is ``proj.g._g.delete()``: one private hop past the wrapper
 #     reaches the vendor handle exactly as ``proj.g._query(...)`` does, and no
 #     wrapper can guard a hop below itself — both are named escapes, not
 #     closed doors.
@@ -2765,6 +2774,17 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
 #     a NAMESPACE boundary instead — outside the ``GRAPH.`` family it refuses
 #     every command except read-only probes
 #     (``_GuardedGraph._refuse_key_space_handle_command``).
+#     ⛔ AND THE #3595/#8479 GUARDS ON THE *CLIENT* CHANNEL ARE STILL
+#     TOKEN-SHAPED (PRE-EXISTING, #9267): ``cypher_guard._as_text`` /
+#     ``_guard_execute_command`` read ``args[0]`` as ONE token and require
+#     ``len(args) >= 3``, so a joined ``execute_command("GRAPH.QUERY <g>", <cypher>)``
+#     — the same wire command as the three-argument form, because the client
+#     splits it — skips the operator and numeric-literal guards on every handle
+#     built by ``guarded_client`` (``proj.db`` included). THIS handle is not
+#     exposed to it: ``_command_statement`` reads the shared split above, so the
+#     §17.1 door and #3595's in-wrapper checks still see the statement. The
+#     client-side half is left to #9267 rather than widened into #9209, because
+#     it is a shared guard's normalisation contract, not a handle door.
 #   * ``_is_bulk_wipe`` USED TO over-classify label/LIMIT/WITH-scoped deletes and
 #     ``WHERE id(n) IN [..]``-scoped ones, so ``event_store.purge_overflow`` was
 #     refused on a non-test server graph and
@@ -3304,38 +3324,78 @@ def _journal_safe_params(params, cypher=None):
 #     with the writers. `:TeamMeta` is its documented sibling (#5353 below),
 #     not a vetted precedent: it holds no declaration of its own — its writers
 #     escape at (3).
+#   * `structural-edge.derived` (`tortoise/projection/edges.py`, #9195) — the
+#     SDK's structural-edge mints (`create_edge` and `create_about_edge`, each
+#     with ONE `MERGE`, plus `create_edge`'s three typed wrappers — two mints
+#     over one statement shape). It is a DECLARATION and not a scope for
+#     journalled links: the write mints no node, no property and no identity
+#     (`MATCH` on both endpoints), so its whole content is
+#     `(source, predicate, target)` between two entities that already exist.
+#     What makes it honest is stated PER RELATION there, not globally:
+#     `DERIVABLE_STRUCTURAL_RELS` are snapshot-carried (replay resurrects them
+#     from the endpoint Point's record) and every other allowlisted predicate
+#     has NO replay carrier — measured, and disclosed on the lane rather than
+#     blessed (`#9079`'s census carries the class). `references` keeps its own
+#     shape: the generic verb writes it bare, with no `sourceVersion` anchor
+#     (`#5213` option 3, §9.6).
 #
 # The declaration is not a bypass flag: it is a per-call `with` block (no
 # instance attribute, constructor argument or env var can set it), and the
 # gate REFUSES BY DEFAULT — so a writer that forgets to declare itself fails
 # closed, which is the direction the definitional rule requires.
 #
-# SCOPE — STATED SO IT IS NOT OVER-READ. This closes the FOLD
-# (`FalkorProjection.apply`) and the public raw-query lane
-# (`FalkorProjection.query`) for a journal-backed projection. It does NOT yet
-# refuse a mutating statement issued straight at the guarded handle
-# (`proj.g.query(...)`). That handle is *also* the live path of every SDK
-# writer — `create_point`'s `CREATE (:Point)`, `update_point`'s
-# `SET n += $props` — so a blanket refusal there would break the product's own
-# write path, not a violation of it: the SDK's live doors journal, and there is
-# no runtime signal at the
-# handle that separates a journaled live write from a direct one. Converting
-# that 300+-site surface is §17.1's mechanism (1), the atomic write, and it is
-# recorded as still-open on `#7951` rather than papered over here.
+# SCOPE — STATED SO IT IS NOT OVER-READ. This DETECTS an unauthorized write at
+# the FOLD (`FalkorProjection.apply`), the public raw-query lane
+# (`FalkorProjection.query`) and — since #9124 — the projection's WRITE HANDLE
+# (`proj.g`, `_GuardedGraph`) for a journal-backed projection. The handle is
+# *also* the live path of every SDK writer (`create_point`'s `CREATE (:Point)`,
+# `update_point`'s `SET n += $props`), which is why arming it needed the writers
+# that legitimately write outside the two original scopes to DECLARE themselves
+# first (#9121 onboarding, #9122 the `:Event` writers, #9123 the `:EpMeta`
+# epoch, and the schema DDL in `_ensure_indexes`). With those declarations in
+# place a refusal at the handle means an UNDECLARED writer — which is exactly
+# the second writer §17.1 forbids, and no longer the product's own write path.
+# Every mutating-capable verb is covered (`_HANDLE_MUTATING_VERBS`: `query`,
+# `ro_query`, `_query`, `profile`, `explain`, `execute_command`), because a
+# guard on `query` alone is one private hop or one verb name away from being no
+# guard. Converting the 300+-site surface to the atomic write is §17.1's
+# mechanism (1) and remains open on `#7951`.
 #
-# ⛔ THE RESIDUAL IS THREE ESCAPES, NOT ONE — named so it is stated, not
+# ⛔ THE HANDLE'S *DETECTION* IS COMPLETE; ITS *REFUSAL IS NOT YET ARMED*.
+# Owner decision (option B, #9124) sequences the declaration programme in two
+# changes, because arming the handle first refuses the PRODUCT: measuring the
+# SDK surface (
+# `tests/test_9124_declared_live_doors.py` enumerates it in code, so the number
+# cannot go stale) finds that of the entry points reaching this handle only a
+# handful already append their record BEFORE the cache write. The rest are
+# apply-first — their write precedes the record that describes it — and moving
+# the record above the write changes the commit contract, so each needs its own
+# decision (#9206, #9207, and the promote arm of `update_point` / the unchecked
+# `_emit_event` of `supersede_point`). So:
+#   * PART 1 (landed): every journal-first door declares its lane, `event_store`
+#     declares its own, and `_HANDLE_GUARD_ENFORCES` is **False** — the handle
+#     MEASURES an undeclared write (counter + one WARNING naming the statement)
+#     instead of refusing it, which breaks nothing and prints the census;
+#   * PART 2 (blocked on those declarations): flip `_HANDLE_GUARD_ENFORCES` to
+#     True, so an undeclared write RAISES. Until then this door is a loud
+#     detector, NOT an enforcement point — do not read the guard's presence as
+#     "§17.1 is enforced here".
+#
+# ⛔ THE RESIDUAL IS STILL TWO ESCAPES, NOT ONE — named so it is stated, not
 # discovered. A writer that wants to write this cache directly has:
-#   1. `proj.g.query("CREATE …")`     — the guarded handle itself (the SDK's
-#      own live lane, above);
+#   1. `proj.g.query("CREATE …")`     — the guarded handle itself. **DETECTED
+#      (#9124 part 1)**: a mutating statement outside a declared scope is
+#      counted, logged, and (once `_HANDLE_GUARD_ENFORCES` is True) raises
+#      `DirectCacheWriteRefused`;
 #   2. `proj.g._g.query("CREATE …")`  — one private hop past the handle into
 #      the raw `_GuardedGraph`;
 #   3. `proj.db.select_graph(<g>).query("CREATE …")` — straight at the
 #      falkordb client, naming ANY graph.
-# All three are verified ALLOWED against a journal-backed projection. (2) and
-# (3) are the same class as (1) — they bypass the same fold — and none of the
-# three is guarded in this increment. They are the surface §17.1's atomic
-# write has to close; a lexical inventory cannot, because each is one hop
-# below anything a runtime signal is placed on.
+# (2) and (3) are verified ALLOWED against a journal-backed projection and are
+# NOT guarded in this increment; they are the same class as (1) — they bypass
+# the same fold — and they are the surface §17.1's atomic write has to close.
+# A lexical inventory cannot, because each is one hop below anything a runtime
+# signal is placed on.
 #
 # ⛔ ESCAPE (4) WAS THE WHOLE-GRAPH WIPE, AND ITS NON-CYPHER DOOR IS NOW CLOSED
 # (#9209). The three above are all *statements*, so both of §17.1's doors read
@@ -3375,18 +3435,47 @@ def _journal_safe_params(params, cypher=None):
 # caller treats a refusal as "do not retry" — so over-refusing there would drop
 # a legitimate retry silently). `GRAPH.COPY` stays allowed because it is inside
 # the family and removes nothing from this cache.
-# ⛔ NOT claimed closed by any of it: the Cypher-bearing command channel
-# (`execute_command("GRAPH.QUERY", <g>, "MATCH (n) DETACH DELETE n")`), which
-# needs statement recovery (#9124); the private hop `proj.g._g.delete()` (the
+# ⛔ THE CLASSIFIER IS FAIL-CLOSED, AND THAT IS A REVIEW-ROUND-7 CORRECTION. It
+# reads the words the CLIENT will send, and two spellings put a wipe one
+# position away from where a naive reader looks. MEASURED wiping an armed cache
+# at the head before this correction:
+#     proj.g.execute_command("", "FLUSHDB")                  -> 'OK', 2 -> 0
+#     proj.g.execute_command("   ", "DEL", <own graph>)      -> 1,    2 -> 0
+#     proj.g.execute_command(memoryview(b"DEL"), <own graph>) -> 2 -> 0
+# An EMPTY first argument is dropped by the serializer's
+# `args[0].encode().split()`, so the verb travels in `args[1]`; and a
+# `memoryview` command word is accepted by the pinned client but was neither
+# decoded nor refused. So `_handle_command_words` normalises the WHOLE payload
+# (bytes-likes included), takes the verb from the first word the client will
+# actually SEND, and returns `None` when any part of the payload cannot be
+# read — and `_refuse_key_space_handle_command` treats that `None` as a
+# REFUSAL, not a pass-through: an unreadable command on an armed handle is
+# exactly the payload whose effect nothing here can see.
+# ⛔ NOT claimed closed by any of it: the private hop `proj.g._g.delete()` (the
 # `delete()` analogue of escape (2) above — no wrapper can guard a hop below
-# itself); and the handle's other GRAPH.* verbs that write but destroy nothing
-# (`copy`, index/constraint DDL) — refusing those would refuse an operation the
-# cache never lost anything to. `call_procedure` is NOT in that list: it pastes
-# a caller-controlled string into CYPHER position, so it is defined on the
-# wrapper and its reconstructed statement goes through L2 (`_is_bulk_wipe`)
-# exactly as `query`'s does — §17.1's statement door for it is #9124's, stated
-# as open here (on an EMBEDDED armed projection it can still wipe, exactly as
-# `proj.g.query` can, because L2 exempts embedded mode).
+# itself); the handle's other GRAPH.* verbs that write but destroy nothing
+# (`copy`, index/constraint DDL), because refusing those would refuse an
+# operation the cache never lost anything to; and the TOKEN-SHAPED reading of
+# this channel in `cypher_guard._as_text` / `_guard_execute_command` (which
+# reads `args[0]` as ONE token and requires `len(args) >= 3`, so
+# `execute_command("GRAPH.QUERY <g> <cypher>")` in a single string skips
+# #3595/#8479 on the guarded CLIENTS — pre-existing and filed on its own issue;
+# the handle's own `_command_statement` uses the shared split below, so
+# §17.1's door is not spelling-shaped even where the operator guard still is).
+# The Cypher-bearing raw command itself is NO LONGER SILENT: #9124 landed
+# statement recovery (`_command_statement`) and the handle now runs BOTH
+# decisions — `_refuse_unauthorized_cache_write(statement)` (measure-then-
+# refuse, exactly `proj.g.query`'s polarity) first, then the non-Cypher
+# refusals — so `execute_command("GRAPH.QUERY", <g>, "MATCH (n) DETACH DELETE
+# n")` is counted (and refused once `_HANDLE_GUARD_ENFORCES` flips), not
+# dispatched unseen. `call_procedure` is NOT in the "not claimed" list either:
+# it pastes a caller-controlled string into CYPHER position, so it is DEFINED on
+# the wrapper, its reconstructed statement goes through L2 (`_is_bulk_wipe`)
+# exactly as `query`'s does, and it also runs #9124's statement door — the
+# earlier note here deferred that door to #9124, which has since landed. On an
+# EMBEDDED armed projection it can still wipe, exactly as
+# `proj.g.query("MATCH (n) DETACH DELETE n")` can, because L2 exempts embedded
+# mode and the statement door MEASURES until the flip.
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -3394,24 +3483,124 @@ class DirectCacheWriteRefused(RuntimeError):
     """§17.1: a write reached the derived cache without authorization.
 
     Raised when a fold (`FalkorProjection.apply`), a mutating statement on the
-    public raw-query lane (`FalkorProjection.query`), a whole-graph destruction
-    through the write handle's non-Cypher verbs (`GRAPH.DELETE` via
-    `proj.g.delete()` / `proj.g.execute_command`, #9209), a KEY-SPACE command on
-    that same handle (`DEL` / `UNLINK` / `RENAME` / `EXPIRE 0` … — the cache is
-    stored under the graph's own Redis key, so these are the same wipe), or a
-    server-wide `FLUSHALL` / `FLUSHDB` is attempted against a **journal-backed**
-    projection. The projection is the derived cache of a journal; a write — or a
-    wipe — it did not receive through its journal is the second writer §17.1
-    forbids.
+    public raw-query lane (`FalkorProjection.query`), a mutating statement
+    issued at the projection's write handle (``_GuardedGraph``, i.e.
+    ``proj.g`` — including a ``GRAPH.QUERY`` payload whose statement
+    ``execute_command`` recovers from its args, #9124), a whole-graph
+    destruction through that handle's non-Cypher verbs (``GRAPH.DELETE`` via
+    ``proj.g.delete()`` / ``proj.g.execute_command``, #9209), a KEY-SPACE
+    command on that same handle (``DEL`` / ``UNLINK`` / ``RENAME`` /
+    ``EXPIRE 0`` … — the cache is stored under the graph's own Redis key, so
+    these are the same wipe), or a server-wide ``FLUSHALL`` / ``FLUSHDB`` is
+    attempted against a **journal-backed** projection. The projection is the
+    derived cache of a journal; a write — or a wipe — it did not receive
+    through its journal is the second writer §17.1 forbids.
 
     ⛔ THE CLASSES DO NOT SHARE ONE AUTHORIZATION RULE, and this docstring
     is where a caller looks before writing a `with` block, so stated apart: the
-    fold, the raw-query lane and `GRAPH.DELETE` are refused OUTSIDE a sanctioned
-    scope (so declaring one authorizes them); `FLUSHALL` / `FLUSHDB` and every
-    key-space command are refused on any journal-backed projection, scope or
-    NOT — a declaration says "this write is a projection of the journal", and
-    none of those can say that.
+    fold, the raw-query lane, the handle's statement door and `GRAPH.DELETE`
+    are refused OUTSIDE a sanctioned scope (so declaring one authorizes them);
+    `FLUSHALL` / `FLUSHDB` and every key-space command are refused on any
+    journal-backed projection, scope or NOT — a declaration says "this write is
+    a projection of the journal", and none of those can say that.
+
+    ⚠️ THE HANDLE'S STATEMENT DOOR IS GATED, THE WIPE DOORS ARE NOT. The
+    statement door raises only once `_HANDLE_GUARD_ENFORCES` is True (#9124
+    part 2). Until then it records the same violation in
+    `undeclared_handle_writes()` and logs it, because arming ahead of the
+    declaration programme refuses the product's own write doors. The #9209
+    refusals below — a whole-graph destruction, a server-wide flush, a
+    key-space command — have no such gate: they raise unconditionally on an
+    armed projection, because none of them is a statement any declaration
+    programme could cover.
     """
+
+
+#: #9124 — is §17.1's THIRD door REFUSING, or only MEASURING?
+#:
+#: False is the landed state (part 1): the handle DETECTS an undeclared cache
+#: write, records it in `_UNDECLARED_HANDLE_WRITES` and logs one WARNING per
+#: distinct statement, but does NOT raise. True is part 2, and it is a code
+#: constant rather than an env var or constructor argument on purpose — the
+#: same property the declarations have, so an operator cannot silently turn
+#: enforcement off in production.
+#:
+#: ⛔ DO NOT FLIP THIS UNTIL `tests/test_9124_declared_live_doors.py`'s two
+#: inventories are EMPTY. They are the measured remainder: the doors that are
+#: apply-first today (their cache write precedes the record that describes it,
+#: so they need the order changed and its failure contract decided) and the
+#: writers that journal nothing at all (which need a named lane or a move onto
+#: the fold). Flipping with either inventory non-empty refuses the product's own
+#: writes — measured, see `tests/test_9079_handle_write_authority.py`'s
+#: `enforced` fixture and #9124's issue thread.
+_HANDLE_GUARD_ENFORCES: bool = False
+
+#: The measure-mode census: normalised statement -> how many times the handle
+#: saw it arrive with NO declared lane. A dict rather than a Counter so it can
+#: be read without the locking subtleties of a live Counter view; the lock is
+#: held only for the one increment (the guard sits on the write hot path).
+_UNDECLARED_HANDLE_WRITES: dict[str, int] = {}
+_UNDECLARED_HANDLE_WRITES_LOCK = threading.Lock()
+
+#: The verbs on `_GuardedGraph` that can put a MUTATING statement on the wire.
+#: ONE list, read by the guard's own enumeration test and by the SDK's
+#: declaration census (`tests/test_9124_declared_live_doors.py`), so "what is a
+#: mutating verb" cannot drift between the two readers — the #3595
+#: shared-decision precedent.
+#:
+#: `explain` is listed although `GRAPH.EXPLAIN` only PLANS: it is guarded for
+#: enumeration uniformity, so a verb cannot be one refactor away from unguarded
+#: (refusing a plan costs nothing).
+_HANDLE_MUTATING_VERBS: tuple[str, ...] = (
+    "query", "ro_query", "_query", "profile", "explain", "execute_command",
+)
+
+
+def _normalise_handle_statement(statement: str) -> str:
+    """Collapse a statement to one line so the census keys are readable."""
+    return " ".join((statement or "").split())[:200]
+
+
+def _record_undeclared_handle_write(statement: str) -> None:
+    """MEASURE MODE: count an undeclared write instead of refusing it.
+
+    One WARNING per distinct statement (not per occurrence): the census is what
+    the declaration programme consumes, and a hot door would otherwise bury the
+    log in the same line. The count is still exact, so a reader can tell one
+    call from a thousand.
+    """
+    key = _normalise_handle_statement(statement)
+    with _UNDECLARED_HANDLE_WRITES_LOCK:
+        first = key not in _UNDECLARED_HANDLE_WRITES
+        _UNDECLARED_HANDLE_WRITES[key] = _UNDECLARED_HANDLE_WRITES.get(key, 0) + 1
+    if first:
+        logger.warning(
+            "§17.1: a mutating statement reached the projection's write handle "
+            "with NO declared lane (%s). The door is MEASURING, not refusing "
+            "(#9124 part 1): declare the writer (`_live_write_scope` after its "
+            "journal append, `_replay_write_scope`, or "
+            "`_graph_metadata_write_scope`) before the guard is armed.", key)
+
+
+def undeclared_handle_writes() -> dict[str, int]:
+    """Measure-mode census: every undeclared statement the handle has seen.
+
+    Empty in a process that has written nothing yet, or when every writer
+    declares a lane. Statements recorded while the door was MEASURING are
+    RETAINED if the door is later armed (arming does not clear this dict, and a
+    refusal is not counted at all), so an armed process reports the pre-arm
+    census; `_reset_undeclared_handle_writes()` is the only thing that clears
+    it. This is the ONE reader a test uses to prove the handle actually
+    observes a write (a detector nobody reads is not a detector).
+    """
+    with _UNDECLARED_HANDLE_WRITES_LOCK:
+        return dict(_UNDECLARED_HANDLE_WRITES)
+
+
+def _reset_undeclared_handle_writes() -> None:
+    """Clear the measure-mode census (tests only — no operator surface exposes it)."""
+    with _UNDECLARED_HANDLE_WRITES_LOCK:
+        _UNDECLARED_HANDLE_WRITES.clear()
 
 
 #: The single-writer authorization for the current context. ``None`` = no
@@ -3450,6 +3639,63 @@ def _live_write_scope(reason: str = "live-door"):
 def _replay_write_scope():
     """The replay engines' scope: the record came FROM the journal."""
     return _cache_write_authorized("replay")
+
+
+def _declares_live_write_lane(reason: str):
+    """Declare a WHOLE entry point as a journal-first live lane (§17.1, #9124).
+
+    The equivalent of opening ``with _live_write_scope(reason):`` around the
+    door's body, for the doors whose write region IS the body: `delete_point`,
+    `invalidate_point`, `retract_point` and `supersede_point` each validate,
+    append their record, and then write — hundreds of lines with `try/except`
+    and retry blocks in between, so a hand-placed ``with`` would reindent the
+    whole region and bury the semantic change (the declaration) in a mechanical
+    one. The decorator states the same fact in one line.
+
+    ⛔ IT IS ONLY HONEST FOR A JOURNAL-FIRST DOOR, and that is not a comment —
+    it is checked. Wrapping the whole body also authorizes anything issued
+    BEFORE the append, so a declaration on an apply-first door would bless a
+    cache write with no committed record (the #9068 defect).
+    `tests/test_9124_declared_live_doors.py` therefore pins, for EVERY declared
+    door, that its first mutating handle statement is TEXTUALLY after its first
+    journal append: a later edit that adds a write above the append reddens
+    there instead of silently widening the lane.
+
+    ⛔ IT ALSO AUTHORIZES EVERY NESTED CALL, which is a stated residual rather
+    than an oversight: `delete_point`, `invalidate_point`, `retract_point` and
+    `supersede_point` each call `_mark_dirty`, and `_mark_dirty` writes through
+    the handle while appending no record — those writes are covered by the
+    door's lane, and a per-FUNCTION census cannot see the call edge. The
+    measured set is pinned in
+    `tests/test_9124_declared_live_doors.py::test_a_whole_door_lane_authorizes_only_the_pinned_nested_writes`,
+    so it can only change with a reviewed line there. That pin records the set;
+    it does not claim the nested writes are justified (`_mark_dirty`'s are a
+    re-derivable flatten), and a new no-journal write reached from a declared
+    door must be reviewed instead of being assumed blessed.
+
+    A per-call ContextVar scope, exactly like the inline form: nothing about
+    this is an instance attribute, constructor argument or env switch, and it
+    is released in a ``finally`` (the ``with``), so a raising door cannot leak
+    its authorization into the caller's next write.
+    """
+    def _declare(fn):
+        if inspect.iscoroutinefunction(fn):
+            # An async wrapper would open the scope, return the coroutine and
+            # close it — authorizing NOTHING while looking like it did, which
+            # is the one failure mode this helper must not have.
+            raise TypeError(
+                "_declares_live_write_lane wraps a synchronous door: for an "
+                "async door open `with _live_write_scope(...)` INSIDE the "
+                "coroutine body instead")
+
+        @functools.wraps(fn)
+        def _declared(*args, **kwargs):
+            with _live_write_scope(reason):
+                return fn(*args, **kwargs)
+
+        return _declared
+
+    return _declare
 
 
 def _graph_metadata_write_scope(reason: str = "graph-metadata"):
@@ -3574,23 +3820,49 @@ _GRAPH_TARGETING_COMMANDS: frozenset[str] = frozenset({"GRAPH.DELETE"})
 
 
 def _handle_command_text(value) -> str | None:
-    """Decode one command word so the scan can see it, else return it untouched.
+    """Decode one command word/payload part so the scan can see it, else ``None``.
 
-    Bytes are accepted because redis-py takes the bytes form and
-    ``cypher_guard._as_text`` exists for the same reason (#3595 review) —
-    measured on the pinned vendor: ``execute_command(b"GRAPH.DELETE", <graph>)``
-    wipes the graph exactly like the str form. ``None`` means "not a command
-    word", which no caller may read as an authorization: every classification
-    here is a positive match only, so an unparseable payload falls through to
-    the guards it always did.
+    Every BYTES-LIKE form is accepted, not only ``bytes``: the pinned client's
+    encoder takes a ``memoryview`` for a command word, so
+    ``execute_command(memoryview(b"DEL"), <graph>)`` reaches the server —
+    MEASURED wiping an armed cache, with the client's own ``AttributeError``
+    raised *after* the wipe (a refusal-shaped traceback on top of a completed
+    deletion, which is the one failure mode this guard exists to prevent). An
+    earlier version of this function decoded only ``bytes``/``bytearray``, and
+    the pinned client's acceptance of ``memoryview`` walked straight through it.
+
+    NUMBERS ARE NOT "UNREADABLE": the pinned ``Encoder.encode`` sends
+    ``repr(value)`` for ``int``/``float``, so ``RESTORE <key> 0 <payload>`` and
+    ``EXPIRE <key> 0`` — two of the key-space wipes this door exists for — are
+    legitimate, forwarded payloads. Treating an int as unreadable refused them
+    with a message about an unreadable payload, which is the wrong answer for
+    the right outcome (measured: `test_a_key_space_command_is_refused_on_
+    NAMESPACE_not_on_a_list` reds on the message, not on the refusal).
+
+    ``None`` means the client itself cannot put this value on the wire as text:
+    a ``bool``, an arbitrary object, a released buffer. No caller may read it as
+    an authorization, and no caller may read it as a pass-through either:
+    ``_handle_command_words`` turns it into a payload-level ``None`` that the
+    key-space door REFUSES on an armed projection.
     """
-    if isinstance(value, (bytes, bytearray)):
-        value = bytes(value).decode("utf-8", "replace")
-    return value if isinstance(value, str) else None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        try:
+            return bytes(value).decode("utf-8", "replace")
+        except (TypeError, ValueError):
+            # A released or otherwise unreadable buffer: fail CLOSED upstream.
+            return None
+    if isinstance(value, bool):
+        # The client's own Encoder raises DataError for bool, deliberately.
+        return None
+    if isinstance(value, (int, float)):
+        return repr(value)  # the client's own serialization
+    return None
 
 
-def _handle_command_words(args) -> tuple[str | None, tuple[str, ...]]:
-    """The verb to classify, and the words the client will ACTUALLY send.
+def _handle_command_words(args) -> tuple[str, ...] | None:
+    """The words the client will ACTUALLY send, or ``None`` if unreadable.
 
     ⛔ The first argument is SPLIT, not taken as one token, because the client
     splits it: both serializers in the pinned ``redis`` (7.4.1) do
@@ -3603,36 +3875,62 @@ def _handle_command_words(args) -> tuple[str | None, tuple[str, ...]]:
     byte-identical — a classifier that reads ``args[0]`` as one token closes one
     spelling and leaves the other open, which is the same spelling-shaped
     coverage defect #9209 exists to end (measured in review).
+
+    ⛔ AND THE SPLIT MUST MIRROR THE ZERO-WORD CASE (review round 7). The
+    serializer DROPS an empty first argument (``"".encode().split()`` is
+    ``[]``), so ``execute_command("", "FLUSHDB")`` sends the verb as ``args[1]``
+    — and a reader that answered "(no verb, no words)" for it was answering
+    about a command the client never sends. MEASURED on an armed projection at
+    the head before this correction: ``("", "FLUSHDB")`` wiped the whole server
+    (2 -> 0), ``("   ", "DEL", <own graph>)`` wiped the cache, and
+    ``(" ", "GRAPH.DELETE", "victim")`` deleted a graph this handle does not own
+    — the verb had landed one position left of where the classification looked.
+    Building the word list the way the serializer does — every word of
+    ``args[0]``, then ``args[1:]`` VERBATIM — and taking the verb from the first
+    word of THAT list is what makes the two agree.
+
+    ``args[1:]`` is forwarded unsplit on purpose: the serializer forwards it
+    too, so a graph name containing a space must stay one word.
+
+    ``None`` means the payload carries a part no word can be read from. It is
+    NOT "nothing to classify": the caller must FAIL CLOSED (see
+    ``_refuse_key_space_handle_command``), because the alternative is a
+    pass-through whose effect this module cannot see.
     """
-    if not args:
-        return None, ()
-    text = _handle_command_text(args[0])
-    if text is None:
-        return None, ()
-    words = text.split()
-    if not words:
-        return None, ()
-    rest = tuple(words[1:]) + tuple(
-        word for word in (_handle_command_text(arg) for arg in args[1:])
-        if word is not None
-    )
-    return words[0].upper(), rest
+    words: list[str] = []
+    for index, arg in enumerate(args):
+        text = _handle_command_text(arg)
+        if text is None:
+            return None
+        if index == 0:
+            words.extend(text.split())
+        else:
+            words.append(text)
+    return tuple(words)
 
 
 def _call_procedure_statement(procedure, args=None, emit=None) -> str | None:
     """The statement ``Graph.call_procedure`` will build, or ``None``.
 
-    Mirrors the pinned vendor EXACTLY, including the part that is easy to get
-    wrong: ``args`` are converted to ``$paramN`` PLACEHOLDERS and passed as
-    ``params`` — the vendor's own comment is *"CALL <proc>(1) -> CYPHER
-    param_0=1 CALL <proc>($param_0)"* — so an argument VALUE never reaches the
-    wire statement. Rendering the values here instead would classify a
-    statement the vendor does not send, and it cuts BOTH ways: an arg whose text
-    carries a scoping construct would exempt a real wipe, and a read whose arg
-    merely contains ``DETACH DELETE`` would be refused (verified in review).
-    Only ``procedure`` — and ``emit`` — sit in CYPHER position, which is why
-    they are the caller-controlled surface this guard exists for: on an armed
-    projection,
+    Mirrors the pinned vendor EXACTLY, including the two parts that are easy to
+    get wrong. FIRST, ``args`` become ``$paramN`` PLACEHOLDERS — the vendor's own
+    comment is *"CALL <proc>(1) -> CYPHER param_0=1 CALL <proc>($param_0)"* — so
+    they are not positional arguments in the classified statement. SECOND, and
+    this one was stated wrongly here until review round 7: the values are NOT
+    absent from the wire text. The vendor's ``_query`` PREPENDS
+    ``_build_params_header(params)`` to the statement, so a value arrives as
+    ``CYPHER `param0`="…" CALL <proc>($param0)``. The conclusion still holds —
+    a value is quoted by ``stringify_param_value`` and cannot scope or invent a
+    wipe — but the reason is the header's quoting, not the value's absence, and
+    that inlined header is exactly the statement-literal channel
+    ``cypher_guard._guard_numeric_literals`` (#8479) exists for.
+
+    Rendering the values INLINE here would still be wrong in BOTH directions: an
+    arg whose text carries a scoping construct would make ``_is_bulk_wipe`` read
+    False while the vendor still sent the wipe, and a read whose arg merely
+    contained ``DETACH DELETE`` would be refused (verified in review). Only
+    ``procedure`` — and ``emit`` — sit in CYPHER position, which is why they are
+    the caller-controlled surface this guard exists for: on an armed projection,
     ``proj.g.call_procedure("db.labels() MATCH (n) DETACH DELETE n //", False)``
     emptied the graph while the same DETACH DELETE through ``proj.g.query`` was
     refused by L2 on the same non-test graph.
@@ -3645,6 +3943,47 @@ def _call_procedure_statement(procedure, args=None, emit=None) -> str | None:
     statement = f"CALL {text}({placeholders})"
     if emit is not None and len(emit) > 0:
         statement += f"YIELD {','.join(str(word) for word in emit)}"
+    return statement
+
+
+def _command_statement(args, kwargs) -> str:
+    """Recover the Cypher text a raw ``execute_command`` payload carries.
+
+    ``_GuardedGraph.execute_command`` has no ``cypher`` argument — the statement
+    travels positionally inside a Redis command (``("GRAPH.QUERY", graph,
+    cypher, ...)``, ``cypher_guard._GRAPH_QUERY_COMMANDS``), and the vendor also
+    inlines params into that same string. Recovering it is what keeps the raw
+    command channel from being the one mutating verb on this handle the §17.1
+    check cannot see: a ``GRAPH.QUERY`` never calls ``query``/``ro_query``/
+    ``_query``, so it would otherwise be a silence, not a refusal.
+
+    ⛔ It reads the SAME normalised words as the #9209 door
+    (``_handle_command_words``), not ``args[0]`` as one token, and that is the
+    round-7 sharing: the client splits the first argument, drops an empty one,
+    and accepts a bytes-like one, so a reader that indexed the RAW ``args``
+    classified a different command from the one on the wire —
+    ``execute_command("GRAPH.QUERY <g> <cypher>")`` in a single string skipped
+    this door entirely. One split, one decode, one place to get the zero-word
+    and ``memoryview`` cases right.
+
+    Returns the statement text when the payload IS a graph-query command, else
+    ``""`` — every other command (``GRAPH.DELETE``, ``GRAPH.COPY``, ``INFO``,
+    ``GRAPH.CONFIG``, a non-``GRAPH`` command) carries no Cypher and is left to
+    the existing guards. An unreadable payload is also ``""``: this door reads a
+    statement or nothing, and the fail-closed decision for an unreadable command
+    belongs to the #9209 door that raises on it.
+
+    The shape mirrored here is the one ``cypher_guard._guard_execute_command``
+    already pins (MEASURED against ``falkordb`` 1.6.2: ``args[3]`` is a flag such
+    as ``--compact``, never a params map), so the two readers of this channel
+    cannot disagree about where the Cypher lives.
+    """
+    words = _handle_command_words(args)
+    if words is None or len(words) < 3:
+        return ""
+    verb, statement = words[0], words[2]
+    if verb.upper() not in _GRAPH_QUERY_COMMANDS:
+        return ""
     return statement
 
 
@@ -3678,15 +4017,23 @@ class _GuardedGraph:
     (``query``, ``ro_query``, ``_query``, ``profile``, ``explain``,
     ``execute_command``, ``delete``, ``call_procedure``), so it does not depend
     on the inner handle's class to refuse the ``=~`` operator. NOTE the override
-    is NOT uniform: only ``query`` and ``call_procedure`` apply the bulk-wipe
-    check (L2) as well — ``call_procedure`` since #9209 round 3, because the
-    vendor builds ``CALL <procedure>($paramN…)`` from a caller-controlled
-    string. The five query verbs
-    (``query``, ``ro_query``, ``_query``, ``profile``, ``explain``) carry ALL
-    THREE pre-dispatch refusals — the #3595 operator guard, the #7174
+    is NOT uniform. §17.1's STATEMENT door (`_refuse_unauthorized_cache_write`)
+    is the FIRST call in all six statement verbs — ``query``, ``ro_query``,
+    ``_query``, ``profile``, ``explain``, ``execute_command`` — and also in
+    ``call_procedure``, whose Cypher travels as a procedure string; in MEASURE
+    mode it counts an undeclared write, once `_HANDLE_GUARD_ENFORCES` is True it
+    refuses it (`_HANDLE_MUTATING_VERBS` is the one list of what counts as a
+    mutating statement verb, shared with the declaration census). Only ``query``
+    and ``call_procedure`` apply the bulk-wipe check (L2) as well —
+    ``call_procedure`` since #9209 round 3, because the vendor builds
+    ``CALL <procedure>($paramN…)`` from a caller-controlled string. The five
+    query verbs
+    (``query``, ``ro_query``, ``_query``, ``profile``, ``explain``) additionally
+    carry the other pre-dispatch refusals — the #3595 operator guard, the #7174
     numeric-domain guard on their ``params``, and (since #8479) that same domain
     applied to the statement's own TEXT — while ``execute_command`` carries the
-    operator and statement-text guards (a raw command has no params map to walk;
+    operator and statement-text guards after recovering its statement from
+    ``args`` through the shared split (a raw command has no params map to walk;
     the vendor inlines params into the statement text instead, which is exactly
     the text the #8479 scan reads — see
     ``cypher_guard._guard_numeric_literals``). See KNOWN GAPS in the module
@@ -3717,7 +4064,69 @@ class _GuardedGraph:
         self._g = g
         self._proj = projection
 
+    def _refuse_unauthorized_cache_write(self, statement: str) -> None:
+        """§17.1 at the THIRD door: this handle is not a bypass.
+
+        `FalkorProjection.apply` (the fold) and `FalkorProjection.query` (the
+        public raw-query lane) were closed by #7951. This handle —
+        `proj.g`, the projection's write handle, and the module's "single handle
+        every projection write passes through" — was the stated residual: a
+        mutating statement issued HERE bypassed both. It is MEASURED on the same
+        terms and by the same shared classifier (`_statement_writes`) that the
+        other two doors use, so the three cannot disagree about what a write is.
+
+        ORDER. Called FIRST in every mutating-capable verb, BEFORE any other
+        pre-dispatch guard: a refusal that ran after the `=~`/numeric guards
+        would still be pre-write (they do not dispatch either), but keeping it
+        first makes the refusal the one answer for "may this statement reach
+        the cache at all".
+
+        ONLY a journal-backed projection is measured or refused; an unbound
+        projection (`_journal_backed` False) has no journal to be the single
+        writer OF, so §17.1 has nothing to enforce there (the same arming rule
+        as the fold).
+
+        ⚠️ MEASURE, THEN REFUSE. `_HANDLE_GUARD_ENFORCES` is False in the landed
+        state (#9124 part 1), so a violation is RECORDED (a counter plus one
+        WARNING naming the statement) instead of raised: arming the handle ahead
+        of the declaration programme refuses the product's own write doors —
+        measured on this issue as 16 failed / 4 errors across
+        `test_7951_update_point_outbox.py`, `test_7951_delete_point_outbox.py`,
+        `test_5048_retract_instant_recorded.py` and
+        `test_6239_promote_after_supersede.py`. The reason is a census, not a
+        hunch: the product's own write path is still largely undeclared — the 9
+        apply-first public doors, the 2 mixed-arm doors (`update_point`,
+        `capture_session`) and every writer that appends no record at all, all
+        inventoried in `tests/test_9124_declared_live_doors.py`, which also
+        REFUSES the flip while any module has an undeclared entry point. The
+        detection itself is complete and identical in both modes; only the
+        refusal is gated. Do not read this method's presence as "§17.1 is
+        enforced at the handle".
+        """
+        if _CACHE_WRITE_AUTHORIZED.get() is not None:
+            return
+        if not getattr(self._proj, "_journal_backed", False):
+            return
+        if not _statement_writes(statement):
+            return
+        if not _HANDLE_GUARD_ENFORCES:
+            _record_undeclared_handle_write(statement)
+            return
+        raise DirectCacheWriteRefused(
+            "Refusing a mutating statement issued at the projection's write "
+            "handle (`proj.g`): this projection is the derived cache of a "
+            "journal, so a write it did not receive through that journal is "
+            "the second writer §17.1 forbids "
+            "(docs/architecture/STORAGE-ARCHITECTURE.md §17.1). Write through "
+            "the journal instead (`TortoiseSDK._apply_and_journal` or the "
+            "SDK's public write API); a live door that appends first declares "
+            "`_live_write_scope()`, a replay engine that is replaying the "
+            "journal's own records declares `_replay_write_scope()`. "
+            "statement=" + " ".join((statement or "").split())[:160]
+        )
+
     def query(self, cypher: str, params=None, timeout=None):
+        self._refuse_unauthorized_cache_write(cypher)
         # #3595: refuse an unsupported operator BEFORE it is sent. FalkorDB
         # answers `=~` with an EMPTY result set, so this is the one decision
         # point for the `proj.g` path. The decision itself lives in
@@ -3756,6 +4165,11 @@ class _GuardedGraph:
         )
 
     def ro_query(self, cypher: str, params=None, timeout=None):
+        # The "read-only" verb is mutating-CAPABLE, not read-only: the name is
+        # the vendor's, and a statement handed to it is dispatched the same way.
+        # Guarding it is what stops the check from being one verb-name away from
+        # no check at all.
+        self._refuse_unauthorized_cache_write(cypher)
         # Same refusal for the read-only verb: the raw handle this wrapper
         # holds is guarded too, but keep the projection's own wrapper complete
         # rather than relying on the inner handle's class.
@@ -3770,6 +4184,7 @@ class _GuardedGraph:
     def _query(self, cypher: str, params=None, timeout=None, read_only=False):
         # The vendor's `query`/`ro_query` both delegate to `_query`; a caller
         # reaching `_query` directly must not slip past the refusal either.
+        self._refuse_unauthorized_cache_write(cypher)
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
         _guard_numeric_literals(cypher)
@@ -3781,7 +4196,11 @@ class _GuardedGraph:
 
     def profile(self, cypher: str, params=None):
         # PROFILE/EXPLAIN put the statement on the wire WITHOUT routing through
-        # `_query`, so they carry their own refusal.
+        # `_query`, so they carry their own refusal. `GRAPH.PROFILE` EXECUTES
+        # the statement, so this verb is mutating-capable and must be guarded
+        # exactly like `query`; guarding `query` alone would leave the same
+        # write one verb away.
+        self._refuse_unauthorized_cache_write(cypher)
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
         _guard_numeric_literals(cypher)
@@ -3789,6 +4208,13 @@ class _GuardedGraph:
         return self._g.profile(cypher, params=_journal_safe_params(params, cypher))
 
     def explain(self, cypher: str, params=None):
+        # `GRAPH.EXPLAIN` only PLANS — it does not execute — so it is not in
+        # `_statement_writes`' threat model on its own. It is guarded for
+        # ENUMERATION UNIFORMITY: a verb that is unguarded is a verb a future
+        # refactor can start dispatching, and the cost of guarding it is zero
+        # (a plan is never a write, and a mutating statement is refused before
+        # it is planned).
+        self._refuse_unauthorized_cache_write(cypher)
         _guard_unsupported_cypher(cypher)
         _guard_numeric_params(params)
         _guard_numeric_literals(cypher)
@@ -3796,19 +4222,42 @@ class _GuardedGraph:
         return self._g.explain(cypher, params=_journal_safe_params(params, cypher))
 
     def execute_command(self, *args, **kwargs):
-        # #9209: the guards below read a Cypher STATEMENT, so a command that
+        # ORDER, and why this order (#9124's statement door FIRST, then the
+        # #9209 non-Cypher doors): the statement door MEASURES an undeclared
+        # write today and raises only once `_HANDLE_GUARD_ENFORCES` is True,
+        # while the non-Cypher refusals below raise UNCONDITIONALLY — so a
+        # destructive command must never be able to reach the softer check and
+        # stop there. Neither door is interchangeable with the other:
+        # `_command_statement` recovers Cypher only from the four `GRAPH.*`
+        # QUERY verbs and returns no statement at all for `GRAPH.DELETE` /
+        # `FLUSHALL` / `DEL`, which is exactly why #9209 exists.
+        #
+        # #9124: the raw Redis command channel is a mutating verb on this handle
+        # too — a `GRAPH.QUERY` payload never reaches `query`/`_query`, so an
+        # unguarded channel would be the third door re-opened under another
+        # name. The statement is recovered from the payload (a raw `GRAPH.QUERY`
+        # inlines its params into that same string, so this is the whole write).
+        statement = _command_statement(args, kwargs)
+        if statement:
+            self._refuse_unauthorized_cache_write(statement)
+        # #9209: the guards above read a Cypher STATEMENT, so a command that
         # carries none (``GRAPH.DELETE``, ``FLUSHALL``) reached the graph
-        # untouched. This decision comes FIRST — before the operator/barrier
-        # guards, which do not classify commands at all — so the destructive
-        # class is refused whatever the rest of the chain would have done
-        # with it. The words come from `_handle_command_words`, which splits
-        # the first argument the way the client's serializer does, so
-        # ``"GRAPH.DELETE <graph>"`` cannot slip past as one token.
-        verb, words = _handle_command_words(args)
+        # untouched. The words come from `_handle_command_words`, which splits
+        # the first argument the way the client's serializer does and decodes
+        # every bytes-like argument, so ``"GRAPH.DELETE <graph>"`` cannot slip
+        # past as one token. It returns `None` when no word can be read from the
+        # payload — an empty first argument (``execute_command("", "FLUSHDB")``,
+        # whose verb the serializer moves into the next slot), an unreadable
+        # word — and the refusal below treats that as a REFUSAL, not a
+        # pass-through.
+        words = _handle_command_words(args)
+        verb = words[0].upper() if words else None
         if verb in _DESTRUCTIVE_HANDLE_COMMANDS:
             self._refuse_unauthorized_graph_wipe(
                 verb,
-                words[0] if (verb in _GRAPH_TARGETING_COMMANDS and words) else None,
+                words[1]
+                if (verb in _GRAPH_TARGETING_COMMANDS and len(words) > 1)
+                else None,
             )
         else:
             # #9209 (review round 6): the destructive class is NOT something
@@ -3874,8 +4323,10 @@ class _GuardedGraph:
         projection: ``proj.g.call_procedure("db.labels() MATCH (n) DETACH DELETE
         n //", False)`` emptied the graph, while the same DETACH DELETE through
         ``proj.g.query`` was refused by L2 on the same non-test graph. So it is
-        DEFINED here and the reconstructed statement goes through the same
-        ``_is_bulk_wipe`` → L2 check ``query`` applies — no more, and no less.
+        DEFINED here, and the reconstructed statement goes through the same
+        ``_is_bulk_wipe`` → L2 check ``query`` applies, plus — since #9124
+        landed — the same §17.1 statement door the other Cypher-bearing verbs
+        run (next paragraph).
 
         ⛔ L2 HERE IS NOT GATED ON THE JOURNAL, and that is ``query``'s
         polarity: this is a STATEMENT path, and L2 is the test-graph guard every
@@ -3885,17 +4336,28 @@ class _GuardedGraph:
         gets for ``delete()`` / ``execute_command`` deliberately does NOT extend
         to this verb, and the unarmed test pins both halves.
 
-        ⛔ NOT claimed closed by #9209: §17.1's STATEMENT door for procedures —
-        a mutating procedure on an armed projection outside a declared scope.
-        That is #9124's statement-recovery work, exactly as it is for every
-        other Cypher-bearing verb on this handle, and it is why this method
-        applies L2 and no more. Stated exactly, because the difference is a
-        live hole and not a rounding error: on an EMBEDDED armed projection
-        this verb can still wipe the cache, because L2 exempts embedded mode —
-        the same exemption `proj.g.query("MATCH (n) DETACH DELETE n")` gets
-        today, and the same one #9124 removes for every statement-bearing verb.
+        ⛔ IT ALSO RUNS #9124's STATEMENT DOOR, because that door has LANDED.
+        The earlier note here deferred §17.1 for procedures to #9124's
+        statement-recovery work "exactly as for every other Cypher-bearing verb
+        on this handle"; #9124 landed `_command_statement` and
+        `_refuse_unauthorized_cache_write` on the other six verbs, so this verb
+        now runs the same check FIRST, on the same reconstructed statement,
+        before L2. That order is `query`'s, and it matters because L2 alone is
+        not enough: `_is_bulk_wipe`'s fast path requires `DETACH`, so a
+        procedure carrying `MATCH (n) DELETE n` was never refused by it, and on
+        an EMBEDDED armed projection L2 exempts the graph entirely — measured
+        in review, this verb's `CALL … DETACH DELETE …` protection covered only
+        that one form. With the statement door in place a mutating procedure on
+        an armed projection is MEASURED (counted + warned) and, once
+        `_HANDLE_GUARD_ENFORCES` is True, REFUSED — the same polarity every
+        other statement verb has, with the same gated caveat: in the landed
+        MEASURE mode the wipe is still not blocked, and the reason is stated on
+        `_refuse_unauthorized_cache_write`, not waved away here.
         """
         statement = _call_procedure_statement(procedure, args=args, emit=emit)
+        if statement is not None:
+            # #9124's door: FIRST, exactly as the six statement verbs do it.
+            self._refuse_unauthorized_cache_write(statement)
         if statement is not None and _is_bulk_wipe(statement):
             self._proj._assert_test_graph(
                 "REFUSING to run bulk DETACH DELETE on non-test graph"
@@ -3934,15 +4396,42 @@ class _GuardedGraph:
         one — it removes the projection. A caller who really means it does it at
         the client (`proj.db`), where it is visible as what it is.
 
-        ``None`` (an argument no word can be read from — an int, a None, an
-        object) is passed through unchanged: every classification here is a
-        POSITIVE match, and the client refuses a payload it cannot serialize
-        anyway. Unarmed projections are untouched (pre-#9209 pass-through).
+        ⛔ ``None`` IS A REFUSAL, NOT A PASS-THROUGH (review round 7). It means
+        ``_handle_command_words`` could read no word from the payload at all —
+        an empty first argument whose verb the serializer moves into the next
+        slot (``execute_command("", "FLUSHDB")``), or a word that is neither
+        ``str`` nor bytes-like. MEASURED at the head that returned here: the
+        first spelling flushed the whole server (2 -> 0 nodes) and the second
+        dispatched under a traceback the client raised only AFTER the wipe. The
+        earlier reasoning — "every classification here is a positive match, and
+        the client refuses a payload it cannot serialize anyway" — is the
+        assumption that failed: the pinned client accepts ``memoryview`` for a
+        command word, and it reads the ZERO-WORD first argument as "no command
+        word here" rather than as an error. An unreadable command on an armed
+        handle is exactly the payload whose effect nothing here can see, so it
+        fails closed. Unarmed projections are still untouched (pre-#9209
+        pass-through).
         """
         if not getattr(self._proj, "_journal_backed", False):
             return
         if command is None:
-            return
+            raise DirectCacheWriteRefused(
+                "Refusing an UNREADABLE command payload on the write handle of "
+                "a journal-backed projection: no command word could be read "
+                "from it, so this guard cannot tell whether it removes the "
+                "derived cache — and a FalkorDB graph IS a Redis key, which is "
+                "why the rest of this door is the namespace and not a verb "
+                "list (docs/architecture/STORAGE-ARCHITECTURE.md 17.1). Two "
+                "measured spellings reach here: an empty first argument, whose "
+                "verb the client's serializer moves into the next slot "
+                "(`execute_command(\"\", \"FLUSHDB\")`), and a word that is "
+                "neither `str` nor bytes-like. An unreadable command is "
+                "refused rather than forwarded because the client does not "
+                "reject every such payload — it accepts `memoryview` and drops "
+                "an empty command word. Send a readable command, or do a "
+                "deliberate key-space write at the client (`proj.db`), where "
+                "it is visible as what it is."
+            )
         if command.startswith(_GRAPH_NAMESPACE_PREFIX):
             return
         if command in _ARMED_READ_ONLY_COMMANDS:
@@ -9976,6 +10465,35 @@ class FalkorProjection(
     def rebuild_all(self, log_dir: str, *,
                     confirm_destructive: bool = False,
                     require_empty: bool = False) -> dict:
+        """#9124: declare the REPLAY lane, then run the rebuild.
+
+        Every write ``rebuild_all`` performs — the whole-graph wipe, and the
+        per-record folds that follow it — is the cache being reconstructed FROM
+        the journal. That is precisely the lane ``_replay_write_scope`` names
+        (#7951), and it is the declaration §17.1's THIRD door requires before it
+        will let a mutating statement reach ``proj.g``.
+
+        Without it, the guard refuses the replay of the first ``PointAdded``
+        record (measured: ``MERGE (n:Point {id:$id}) … SET n.content=…`` raises
+        ``DirectCacheWriteRefused``) and the rebuild path — the very tool the
+        journal exists for — breaks. ``rebuild`` (single-log) already declares
+        this scope; ``rebuild_all`` did not, which is the asymmetry this fixes.
+
+        The scope is also what makes the wipe legitimate at the third door: a
+        wipe REMOVES derived state so the record can be replayed into it, and
+        never writes unjournalled state ahead of the journal — the class §17.1
+        forbids.
+        """
+        with _replay_write_scope():
+            return self._rebuild_all_replay(
+                log_dir,
+                confirm_destructive=confirm_destructive,
+                require_empty=require_empty,
+            )
+
+    def _rebuild_all_replay(self, log_dir: str, *,
+                            confirm_destructive: bool = False,
+                            require_empty: bool = False) -> dict:
         """Rebuild from all .jsonl files in a directory. Returns counts.
 
         #3585 (R8/R9): the whole fold runs inside the non-folded-event
@@ -14398,7 +14916,18 @@ class FalkorProjection(
             f"REFUSING to run bulk DETACH DELETE on non-test graph "
             f"({operation})"
         )
-        self.g.query("MATCH (n) DETACH DELETE n")
+        # #9124: the third door (§17.1's write handle) refuses a mutating
+        # statement at `proj.g` unless a sanctioned lane declares it. THIS is a
+        # sanctioned lane, and it is the one the replay engines own: the wipe
+        # REMOVES derived state so the record can be replayed into it — it never
+        # writes unjournalled state ahead of the journal, which is the class
+        # §17.1 forbids. `_replay_write_scope` is the declaration #7951 already
+        # gives the replay engines, so the wipe declares the same thing as the
+        # replay that follows it. Measured without it: `rebuild_all` raises
+        # `DirectCacheWriteRefused` on this literal statement and the rebuild
+        # path breaks (#9124's own acceptance run found it).
+        with _replay_write_scope():
+            self.g.query("MATCH (n) DETACH DELETE n")
 
     def _assert_test_graph(self, reason: str = "") -> None:
         """L2 of the destructive-op guard: refuse bulk wipe on a non-test graph.
@@ -15218,6 +15747,51 @@ class FalkorProjection(
         )
 
     def _ensure_indexes(self) -> None:
+        """Create the store's schema — DECLARED to §17.1 as graph metadata.
+
+        The DDL this function issues is graph metadata in the sense
+        ``_graph_metadata_write_scope`` defines: no journal record describes an
+        index, and a rebuild recreates it (`_ensure_indexes` runs on every
+        projection construction). Without this declaration the handle guard
+        (#9124) would refuse the sweep, and the failure would be SILENT — the
+        creation sites are ``try/except``-logged, so the graph would simply end
+        up with no fulltext indexes and every fulltext query would answer an
+        empty result set. The declaration is scoped to this ONE function on
+        purpose: it authorizes the schema, not a general data lane.
+
+        ⛔ THE LANE CARRIES TWO OBLIGATIONS, AND THE SECOND ONE IS NOT SCHEMA.
+        Measured, not assumed: the sweep's body is DDL, the two ``:Meta``
+        index-version markers it MERGEs, catalogue reads — **and exactly ONE
+        corpus data write**, the ``SET n.search_keys`` flatten inside
+        ``_fix_point_search_keys``, which two ``except`` branches of the sweep
+        reach (the fresh-create branch and the legacy ``already indexed``
+        branch). It is stated here rather than denied, because a lane documented
+        as "schema only" that silently also authorizes a ``:Point`` property
+        write is precisely the widening #9124's review caught. It is not hoisted
+        out because ``_fix_point_search_keys`` is ONE unit — the flatten, the
+        drop→recreate and the ``point_fts_v2`` marker — and splitting it is how
+        the two create branches stop flattening identically (a RESTORE/DR graph
+        reaches the fresh branch with arrays and no index).
+
+        The flatten is admitted under THIS lane's own obligations rather than by
+        accident: it rewrites ``search_keys`` from an array into the space-joined
+        string the SDK write path already stores, so it invents nothing, and a
+        replay of the owning ``PointAdded`` recreates the flat value — a rebuild
+        absorbs its loss (obligation 1) and no comparison reconciles over its
+        VALUE (obligation 2). A write the record could describe but a replay
+        would NOT repair — a node ``CREATE``, a property the write path does not
+        derive — is NOT admitted: that belongs on a live lane, and this one is not
+        a licence for it. The pin is
+        ``tests/test_9079_handle_write_authority.py``:
+        ``test_schema_ddl_survives_the_armed_guard`` (the DDL survives the ARMED
+        guard) plus
+        ``test_the_schema_lane_also_authorizes_the_documented_corpus_fixup``
+        (the flatten is authorized, and the lane ends when the sweep returns).
+        """
+        with _graph_metadata_write_scope("schema-ddl"):
+            self._ensure_indexes_declared()
+
+    def _ensure_indexes_declared(self) -> None:
         """Create this store's indexes, and resolve its vector-index handle.
 
         ⛔ The historical opening line — *"Create indexes on frequently-filtered

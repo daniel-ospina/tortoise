@@ -181,9 +181,16 @@ def test_unparseable_bound_is_not_flagged(sdk):
     written, the start as text. ``_created_sort_key('zzz')`` buckets as
     ``(1, 'zzz')``, so a raw string compare would read this as inverted and a
     check that ignored parseability would flag it.
+
+    The probe instant is placed AFTER the parseable end on purpose. Since the
+    #6140 ruling (owner, 2026-10-11) an unparseable START is an OPEN start, so
+    it no longer forces absence on its own and a probe inside the end bound
+    would land in the FOUND branch — where the #5361 flag set is never emitted,
+    making this assertion vacuous. Probing past the end keeps the honest-absence
+    branch reachable, so the flag assertion still discriminates.
     """
     pid = _plant(sdk, valid_from="zzz", valid_to="2026-01-01")
-    out = sdk.get_historical_knowledge(pid, "2025-01-01")
+    out = sdk.get_historical_knowledge(pid, "2027-01-01")
     assert out["found"] is False
     assert "malformed" not in out, out
 
