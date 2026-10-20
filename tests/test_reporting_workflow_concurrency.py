@@ -557,6 +557,18 @@ def _concurrency_group(block: object) -> str | None:
 _EXPRESSION = re.compile(r"\$\{\{\s*(.*?)\s*\}\}")
 
 
+def _normalise_condition(condition: str) -> str:
+    """An `if:` expression with quote style and spacing canonicalised.
+
+    `github.event_name == 'workflow_dispatch'` and the same condition written
+    with double quotes are the SAME condition, so a YAML format pass must not
+    red the pin — and the failure message ("revisit the group design") would
+    then be false about the artifact in front of the maintainer. Only the FORM
+    is normalised: adding, dropping or changing a term still fails.
+    """
+    return re.sub(r"\s+", " ", condition.replace('"', "'")).strip()
+
+
 def _normalise_group(group: str) -> str:
     """Group text with `${{ … }}` spacing collapsed, for exact comparison.
 
@@ -649,7 +661,10 @@ def test_supabase_deploy_apply_lock_is_distinct_from_the_run_lock() -> None:
         f"({run_group!r}). A constant holds the lock on every run — including "
         "the `push` drift run, which then starves an operator's dispatch apply "
         "(#1095); any extra context (e.g. `github.run_id`) gives every run its "
-        "own group, so deploys stop serialising and two applies can interleave."
+        "own group, so the run-level lock bounds NOTHING (#9115's unbounded "
+        "shape) and whole deploys stop serialising. Applies themselves are still "
+        "serialised by the constant apply lock below — which is exactly why "
+        "this mutation has to be caught HERE."
     )
     assert _normalise_group(apply_group) == "supabase-deploy-apply", (
         f"the apply lock must be the CONSTANT 'supabase-deploy-apply' "
@@ -676,17 +691,21 @@ def test_supabase_deploy_apply_lock_is_distinct_from_the_run_lock() -> None:
     # ⛔ The apply lock is CONSTANT, so it is only safe because a push run can
     # never reach it. TWO things make that true and neither is a group name, so
     # the exact pins above cannot see either one going away:
-    #   * `check-drift` (the push arm) declares no job-level group — give it one
-    #     and a starved push run holds the apply lock again (#1095);
+    #   * `check-drift` (the push arm) never acquires the apply lock — if it
+    #     did, a starved push run would hold the lock an operator's dispatch
+    #     apply needs (#1095);
     #   * `deploy` is dispatch-only — let it run on push and every push run's
     #     deploy job queues on the SAME constant group.
     # Both mutants left the whole module green before these pins existed.
-    assert "concurrency" not in doc["jobs"]["check-drift"], (
-        "check-drift must declare NO job-level group (its own comment says so): "
-        "it runs in a push run, so a group here — above all the constant apply "
-        "lock — lets a starved push run stall an operator's dispatch (#1095)"
+    drift_group = _concurrency_group(doc["jobs"]["check-drift"].get("concurrency"))
+    assert drift_group is None or (
+        _normalise_group(drift_group) != _normalise_group(apply_group)
+    ), (
+        "check-drift must NOT acquire the constant apply lock: it runs in a push "
+        "run, so a starved push run would hold the lock an operator's dispatch "
+        "apply needs (#1095), and no group on this job needs an apply lock."
     )
-    assert str(doc["jobs"]["deploy"].get("if", "")).strip() == (
+    assert _normalise_condition(str(doc["jobs"]["deploy"].get("if", ""))) == (
         "github.event_name == 'workflow_dispatch'"
     ), (
         "deploy must stay DISPATCH-ONLY: the apply lock is a constant, so a push "
@@ -722,4 +741,26 @@ def test_group_pin_ignores_whitespace_but_not_extra_context() -> None:
             f"{group!r} differs in the CONTEXTS it uses, so the pin must see it "
             "as different — otherwise every run gets its own group and deploys "
             "stop serialising"
+        )
+
+
+def test_if_condition_pin_ignores_quote_style_but_not_extra_terms() -> None:
+    """The `if:` pin's normaliser: canonical FORM, exact CONDITION.
+
+    A YAML format pass may switch a quoted scalar's quote style or reflow
+    spaces; that is the same condition and must not red the dispatch-only pin
+    with a message about redesigning the locks. A changed term must still fail,
+    or the pin would not hold the property.
+    """
+    pinned = "github.event_name == 'workflow_dispatch'"
+    assert _normalise_condition('github.event_name  ==  "workflow_dispatch"') == pinned
+    assert _normalise_condition("  github.event_name == 'workflow_dispatch' \n") == pinned
+    for other in (
+        "github.event_name == 'push'",
+        "github.event_name != 'workflow_dispatch'",
+        "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'",
+        "",
+    ):
+        assert _normalise_condition(other) != pinned, (
+            f"{other!r} is not the dispatch-only condition; the pin must see it"
         )
