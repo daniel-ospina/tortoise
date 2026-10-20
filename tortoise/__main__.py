@@ -325,7 +325,11 @@ def _cmd_demo(args):
 
     with NamedTemporaryFile(suffix=".jsonl", mode="w+", delete=False) as tmp:
         tmp.close()
-        log = EventLog(tmp.name)
+        log = EventLog.scratch(tmp.name)
+        # A SCRATCH buffer, never a journal: this file is DELETED a few lines
+        # below, so a record row filed from it could never be reproduced or
+        # healed by a replay. `scratch()` is the ONE place that marker is set
+        # (#9231 review P2) — the demo lane has no journal by construction.
         api = EventAPI(log, initiated_by="extractor", agent_id="mock@0")
         MockExtractor().run(text, transcript.name, api)
         events = log.read_all()
@@ -8963,7 +8967,18 @@ def _cmd_index_github(args):
             pass
 
     log_path = Path(tempfile.gettempdir()) / f"tortoise-index-{repo_name}.jsonl"
-    log = EventLog(str(log_path))
+    # A SCRATCH journal, not a truth set: nothing in this module (or in any
+    # test) ever READS it back — the run's resume/idempotency state is the
+    # content-hash file under `~/.tortoise`, and this path only exists so the
+    # `Log:` line below can be inspected. It sits under the OS temp dir, which
+    # the OS may purge at any time, so a record row filed from it would be
+    # `record != replay(journal)`: unhealable the moment /tmp is cleaned
+    # (#9231 review P2 — the third live site of that class, found by the
+    # widened detector in `tests/test_9078_record_written_by_production_path.py`).
+    # The alternative — relocating the journal to a durable home so this lane
+    # DOES file rows — is a product decision about where a CLI writes, not a
+    # wiring one.
+    log = EventLog.scratch(str(log_path))
     api = EventAPI(log, initiated_by="extractor", agent_id="github-indexer", projection=proj)
 
     # Idempotency: track content hashes to avoid re-indexing

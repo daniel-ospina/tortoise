@@ -4272,7 +4272,13 @@ def tortoise_mine_conversations(transcript: str | None = None,
         import tempfile, os  # noqa: E401
         log = sdk._get_event_log()
         if log is None:
-            log = EventLog(os.path.join(
+            # A SCRATCH buffer, never a journal: the miner appends to it and the
+            # directory is referenced by nothing after this call, so a record
+            # row filed from it can never be replayed or healed. `scratch()` is
+            # the ONE place that marker is set, because the seam reads `durable`
+            # off the log (#9231 review P1/P2) — the sdk returned None, i.e.
+            # this lane is journal-less by design.
+            log = EventLog.scratch(os.path.join(
                 tempfile.mkdtemp(prefix="tortoise_mcp_mine_"), "events.jsonl"))
         api = EventAPI(log, initiated_by="extractor", agent_id="mcp",
                        projection=sdk._get_proj())

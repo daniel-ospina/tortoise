@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 
+from . import record_writer
 from .idempotency import IngestKey, IngestResult
 from .ids import now_iso, ulid
 
@@ -153,6 +154,26 @@ class EventAPI:
         # before the append rather than after.
         self._refuse_unapproved_kinds(event)
         self.log.append(event)
+        # #9188: the Postgres record, AFTER the append (the commit point, §17.1)
+        # and before the fold. This door is a LIVE journal writer — the v1
+        # extractor, `ingest`, `docs_miner`, `mining` and the CLI all append
+        # through it — so without this call every one of their records would
+        # reach the journal and never the record. Best-effort by construction
+        # (`write_live_record` counts and logs, never raises): the append above
+        # already committed.
+        #
+        # ⛔ but only when the log IS a journal. `durable` is the log's own
+        # answer, defaulting True for every duck-typed double and for
+        # `EventLog`; `TortoiseSDK._extract_session_llm` hands this door an
+        # `_InMemoryEventLog` (no file I/O, by design) whose records no journal
+        # ever carries, so a row from it could never be reproduced or healed by
+        # a replay — the record is `replay(journal)`, and a scratch buffer is
+        # not a journal. The seam DECLINES it (no row) and counts the decline on
+        # `monitoring.metrics()["record_non_journal_skips"]`, NOT on
+        # `record_write_failures`: a lane with no journal by design lost nothing a
+        # replay could restore (#9231 review P2).
+        record_writer.write_live_record(
+            event, durable=getattr(self.log, "durable", True))
         if self.projection is not None:
             # #7951 §17.1: journal-first door — the append above is the COMMIT
             # POINT, so the fold runs inside the live-write scope.

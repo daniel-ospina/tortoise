@@ -1148,6 +1148,23 @@ surfaces:
   # `tortoise/mcp_server.py` + `tortoise/hosted_api.py`; the guard must run on
   # the surface change it guards.
   - test_manage_sources_3540.py
+  # #9231 review P1: DUAL-REGISTERED with `core` (below) for the #2969 reason —
+  # this file drives `tortoise/__main__.py` (`cli._cmd_demo(None)`) to prove the
+  # demo lane files nothing from the journal file it deletes, and
+  # `"tortoise/__main__.py"` is an EXACT `SOURCE_PATTERNS["api"]` entry that
+  # REPLACES the `core` fallback in `select()` (`core` is added only in the
+  # `if not found:` branch; `CORE_ALSO` does not list `__main__.py`). Measured
+  # before this arm: `--changed-files tortoise/__main__.py` -> surfaces=['api']
+  # with `test_9078_record_written_by_production_path.py` ABSENT — so a
+  # follow-up that removes the `EventLog.scratch(...)` marker (necessarily a
+  # `__main__.py`-touching diff, the only kind that can break that leg) would
+  # merge with the leg never collected: the #1349/#2938/#3154/#4367
+  # silent-drop class, in the shape `test_socket_bound_not_multiplied_2969.py`
+  # is dual-registered for. Keep BOTH arms: `core` is load-bearing for every
+  # input that falls through to it (`record_writer.py`, `log.py`, the wiring
+  # tool) and this one is load-bearing for the `__main__.py` diff. Pinned by
+  # `tests/test_ci_selection.py::test_9078_guard_runs_on_a_main_only_diff`.
+  - test_9078_record_written_by_production_path.py
   battery:
   - test_battery_arms.py
   # (removed a duplicate test_battery_derive_truth_leg.py entry here on the
@@ -1276,6 +1293,31 @@ surfaces:
   # SOURCE_PATTERN, so a change to it falls through to `core` — registering the
   # guard HERE is what makes the file selected for the code it holds.
   - test_5612_journal_append_serialization.py
+  # #9188 (epic #7879, #9078's wiring child): the record's FIRST production call
+  # site. `core` because most of what it reads is `core`-selected — the three
+  # journal-append doors (`tortoise/sdk.py`, `tortoise/api.py`,
+  # `tortoise/mining.py`), `tortoise/record_writer.py`,
+  # `tortoise/record_projection.py`, `tortoise/monitoring.py`, `tortoise/log.py`
+  # (all the `core` fallback) and `tools/record_wiring_check.py`. NOT the `core`
+  # fallback for that tool: `tools/` is a flat NON_PYTHON_PREFIXES entry, so a
+  # wiring-check-only diff selected NO surface and fell to tier-1 smoke, where
+  # this file is not registered — a PR that disarms the gate would have merged
+  # green with the gate never run (#9231 review P1). The tool is in
+  # `tools/ci_selection.py::CORE_ALSO`, which is what makes an edit to it
+  # select `core` and this file.
+  #
+  # NOT `core`-selected either, and corrected here (#9231 review P1):
+  # `tortoise/__main__.py`, which this file DRIVES (`cli._cmd_demo`) to prove the
+  # demo lane files nothing from the journal it deletes. That path is an exact
+  # `api` SOURCE_PATTERN match, so it selects `api` and REPLACES this fallback;
+  # the file therefore carries a DUAL `api` arm (above). Do not delete one arm
+  # believing the other covers it. `tortoise/mcp_server.py`, `pyproject.toml` and
+  # `tests/conftest.py` are all `SHARED_MODULE`/root → FULL matrix, so they run
+  # this file regardless.
+  #
+  # DB-free except its last leg, which SKIPS unless `TEST_RECORD_DB_URI` names a
+  # Postgres carrying the record migrations — the `TEST_AUDIT_DB_URI` pattern.
+  - test_9078_record_written_by_production_path.py
   # #9190: `EventLog.append()` returns the record's journal position (the `seq`
   # `record_projection.replay_plan` keys `journal_event` on) and
   # `EventLog.position()` exposes the count. Same anchor as the #5612 entry
@@ -5586,7 +5628,7 @@ durations:
   test_8098_webhook_retry_sweep.py: 8.8  # #8098 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention, not a CI measurement. MEASURED on this host 2026-10-18 at the PR head AFTER the LAST review fixes (embedded carve-out lane, **56 tests**, `--junitxml`): sum of testcase/@time ranged **7.25s** on a quiet host to **24.65s** with the fleet loading this box, max single test 1.65-6.90s (`test_every_test_the_plan_cites_exists`, which rglobs `tests/`). The reading is re-derived with the COUNT at every revision, never carried forward (the neighbouring #3429 row states the same convention): earlier revisions of this row read 39, 48, 49, 51, 53 and 55 tests as the file grew. The 8.8 WEIGHT is deliberately left alone: it is the shard packer's input, and keeping the higher of the readings means a file whose per-test sum is dominated by one cold-lane test is never under-weighted, so do not "correct" it down without a CI junit measurement. Required for the durations half as well as the surface half (#4348 trap): MEASURED this turn, WITHOUT this row `tools/ci_selection.py --integrity` reds the durations coverage floor (the file is in the fast pool, so an absent row also packs it at the flat 2.0s default). Refresh from the first post-merge run that includes it; do NOT drop the row without re-deriving the floor at that head.
   test_9233_webhook_declared_lane.py: 14.0  # #9233 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention, not a CI measurement. MEASURED on this host at the PR head AFTER the review fixes (embedded carve-out lane, 25 tests — 23 when this row was first written, +2 contract pins since; the count is re-derived at every revision and the WEIGHT is left at the coldest reading), whole-file wall): 14.03 s cold (first run after `uv sync --extra embeddings --extra parity`), then 9.90 / 9.98 / 11.12 s warm. Several tests build an embedded SDK each and `test_a_rebuild_does_not_restore_the_store` runs a real `rebuild_all`, so the weight is SDK builds + a journal rebuild, and it is declared at the COLDEST reading so a cold shard leg cannot under-pack. Added on the review advisory that measured this margin over four rounds: the fast pool is 943 files, so WITHOUT this row 849 weighted = 90.03% (0.03 pp above the `duration_coverage_issues()` floor) and the next unmeasured fast file would red the repo-wide gate at 849/944 = 89.94%; WITH it 850 weighted = 90.14%. Refresh from the first post-merge run that includes it; do NOT drop the row without re-deriving the floor at that head.
   test_installer_preserves_foreign_skill_content.py: 0.6
-  test_installer_agents_block_3429.py: 25.4  # #3429 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention. MEASURED on this host 2026-10-18 on a private tools/test_lane.py container, TWO consecutive runs, sum of testcase/@time over ALL 48 tests: 24.42s and 26.46s with the box quiet, and 31.92s-76.72s over 45 of these tests with the fleet loaded (the 2.8x below) — the 48 count is this branch's, the base main file has 42 — the reading is re-derived with the count at every revision, never carried forward (earlier rows here said 31.92s and 32.62s over 45 tests, 11.95s and 13.58s over all 42 tests, and before that 4.53s/4, 5.8s/10, 7.2s/15, 9.0s/20, 14.4s/25, 20.4s/30, 20.9s/35 and 18.6s/40 as the review added cases; the count and the sum move together, and this spread shows the host load, not the tests). The file drives the REAL installer in a temp HOME/project, so it is subprocess-bound, not DB-bound. NOTE: the sum is per-test durations; WALL-CLOCK under a loaded fleet has measured 2.8x this. Refresh from the first post-merge push run that includes it; do NOT drop the row without re-deriving the floor at that head.
+  test_installer_agents_block_3429.py: 39.4  # #3429 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention. MEASURED on this host in a private tools/test_lane.py container, FOUR consecutive runs, sum of testcase/@time over 58 tests: 37.25s and 38.18s — the weight was their MEAN (37.715 -> 37.7). RE-DERIVED AT THIS HEAD on the review-fix commit, which collects **59** (the `hardlinked` parametrization of `test_a_fenced_documentation_example_does_not_refuse_the_install`), measured from `--junitxml` in the embedded carve-out lane: that NEW test is **1.30s**, and it is the only test-weight delta, so 37.715 + 1.30 = 39.02 -> **39.0**. RE-DERIVED AGAIN at the review-fix head, which collects **60**: `test_a_pre_state_copy_failure_names_a_reachable_cause` measured **0.35s** and **0.42s** under `--junitxml` (sum of `testcase/@time`), and it is the only delta, so 39.02 + 0.385 = 39.405 -> **39.4**. ⚠️ The same head was ALSO measured under fleet contention (load average 118, 51 containers) and gave 47.52s and 49.06s over the 60 — recorded but deliberately NOT adopted, by the same rule as the pair below. ⚠️ The same head was ALSO measured twice under fleet contention (load average 161, 51 containers) and gave 56.35s and 53.93s over the 59 — recorded but deliberately NOT adopted as the weight: the branch added 1.3s of test, so an 18s gap is the dev-host contention those runs were taken in, and baking it in would over-allocate the pool. ⚠️ The origin/main merge of 9ad947e14 carries the QUIET-box pair for the merge base (24.42s and 26.46s over 48 = 0.53s/test, its weight 25.4) against this branch's 0.65s/test pair; the whole spread 0.53-0.93s/test is host load on the same subprocess-bound tests, which is why the derivation here keeps the branch's own adopted quiet-ish pair rather than either the loaded one or the merge-base one. Refresh from the first post-merge push run that includes this file and use THAT pair. Counts for the record: merge base (3a0e2a7d2) collects 48, the earlier revisions of THIS row record the merge-base and in-progress readings (31.92s and 32.62s over 45 tests while the fence work was in progress, 11.95s and 13.58s over all 42 tests before it, and 4.53s/4, 5.8s/10, 7.2s/15, 9.0s/20, 14.4s/25, 20.4s/30, 20.9s/35 and 18.6s/40 before those) — the count and the sum move together and are re-derived at every revision, never carried forward. The file drives the REAL installer in a temp HOME/project, so it is subprocess-bound, not DB-bound, and two of its tests sleep by design (they signal the installer mid-write). The sum is per-test durations; WALL-CLOCK under a loaded fleet has measured 2.8x this. Refresh from the first post-merge push run that includes it; do NOT drop the row without re-deriving the floor at that head.
   test_backup_watcher_health.py: 0.2
   test_manage_sources_3540.py: 4.4  # #3540 (#3400 trap): a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention, not a CI measurement. MEASURED at the branch head, after the review fixes: sum of testcase/@time over ALL 41 tests = 4.37s (most of it is the one-time `tortoise.mcp_server` import plus the per-leg conftest cost; the review cycles added 11 tests since the 30-test reading, which is why the count and the sum move together). An earlier row claimed 1.52s over "15 tests" when the file already held 24, and a later one claimed 2.29s over 30 when it held 41 — the count and the sum are re-derived together, never carried forward (review P2); the file is DB-free and monkeypatched, so conftest setup is the once-per-leg cost the method attributes to no file. Without this row the file packs at the flat 2.0s default and `tools/ci_selection.py --integrity` reds the durations coverage floor — the surface entry alone does not cover it (#4348 trap). Refresh from the first post-merge run that includes it; do NOT drop the row without re-deriving the floor at that head.
   # The two rows below arrived with the origin/main merge, unmeasured and IN the fast
@@ -6430,24 +6472,23 @@ durations:
   # #9190: a file ADDED BY A PR can never have a CI duration at PR time —
   # `tools/ci_timing.py --refresh-durations` samples push-to-main runs only — so
   # this row carries a LOCAL measurement rather than waiting for one. Measured on
-  # this host 2026-10-19, at the PR head that defines 48 tests in this file and 16
-  # in the #5612 sibling above (64 together):
+  # this host 2026-10-19/20, at the PR head that defines 54 tests in this file and
+  # 16 in the #5612 sibling above (70 together):
   # `TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest
-  # tests/test_9190_journal_position.py -q` -> "48 passed in 5.15s", 4.91s and
-  # 4.64s on three warm repeats; with
-  # `tests/test_5612_journal_append_serialization.py` added -> "64 passed in
-  # 5.90s". Earlier measurements of the same file gave 2.42/2.74/3.06s at 42 tests
-  # and 5.20/4.31/4.68s at 43. The weight is 5.0 — the measured steady state, not
-  # the cheapest run: an UNDER-weight shards poorly (the leg's other files queue
-  # behind it), an over-weight only costs a little packing efficiency, and this
-  # row is re-measured by the first post-merge push anyway.
-  #
-  # Deliberately NO commit sha in this citation: the branch is rebased onto main
-  # repeatedly, so any sha here stops being an ancestor of the merged commit while
-  # the numbers stay true. The counts are the check that ties the figures to a
-  # tree; if they no longer match the file, re-measure.
-  # Refresh from the first post-merge push run that includes the file.
-  test_9190_journal_position.py: 5.0
+  # tests/test_9190_journal_position.py -q` -> "51 passed in 6.13s" and 4.94s on
+  # two warm repeats at 51 tests (the 52nd-54th were then added and run in
+  # ~0.02 s each); with `tests/test_5612_journal_append_serialization.py` added ->
+  # "70 passed in 12.51s" (it read "69 passed in 10.55s" at 53 tests). Earlier
+  # measurements of the same file gave
+  # 2.42/2.74/3.06s at 42 tests, 5.20/4.31/4.68s at 43 and 5.15/4.91/4.64s at 48.
+  # The weight is 6.0 — the measured steady state, not the cheapest run: an
+  # UNDER-weight shards poorly (the leg's other files queue behind it), an
+  # over-weight only costs a little packing efficiency, and this row is
+  # re-measured by the first post-merge push anyway. It is deliberately NOT
+  # raised for the 13-18 s readings taken while this box carried a load average
+  # of 88: a duration is a property of the runner, and a figure taken from a
+  # saturated box over-weights the shard on every future run.
+  test_9190_journal_position.py: 6.0
   test_5917_torn_tail_seal.py: 2.0
   test_longmem_costing.py: 0.2
   test_longmem_errors.py: 0.1

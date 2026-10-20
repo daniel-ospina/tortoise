@@ -27,6 +27,7 @@ an extractor/indexer, update the catalog reference.
 """
 from __future__ import annotations  # noqa: I001
 
+import contextlib
 import contextvars
 import hashlib
 import json as _json
@@ -884,7 +885,19 @@ class _InMemoryEventLog:
     """Duck-typed EventLog (append/read_all) backing the session-capture
     extraction readback. The graph (via the EventAPI projection) is the
     durable store; this log only carries the events of the current capture so
-    the caller can read the extracted Points back. No file I/O, no temp files."""
+    the caller can read the extracted Points back. No file I/O, no temp files.
+
+    ``durable = False`` is a CONTRACT, not a comment (#9188 review): these
+    records are appended here and NOWHERE else, so `EventAPI._emit` must not
+    hand them to the Postgres record. The record is ``replay(journal)`` — a row
+    from this buffer has no journal record behind it, could never be
+    reproduced, and no replay could ever correct it (the extraction's own
+    in-capture dedup even DELETEs a repeated Point from the graph, leaving the
+    row asserting a Point neither the graph nor any journal holds). The door
+    reads this attribute; every other log defaults to durable.
+    """
+
+    durable = False
 
     def __init__(self):
         self._events: list[dict] = []
@@ -7064,6 +7077,11 @@ class TortoiseSDK:
         log = self._get_event_log()
         if log is None:
             # No journal configured: there is no rebuild source to commit to.
+            # An ARMED record on a journal-less deployment therefore has nothing
+            # to write AND nothing to heal it from — the #9078 hole with no
+            # signal, which is why it is counted rather than left silent (the
+            # journal-less lane is a supported shape: `tortoise/config.py`).
+            self._record_write_without_journal(type_)
             return None
         from .ids import ulid, now_iso  # noqa: I001
         event: dict = {
@@ -7155,7 +7173,6 @@ class TortoiseSDK:
             event["actor_user_id"] = _jsonl_actor
         try:
             log.append(event)
-            return True
         except Exception as exc:
             # The graph mutation already succeeded — a log-write failure must
             # not crash the caller or pretend the write failed. Rebuild parity
@@ -7196,6 +7213,104 @@ class TortoiseSDK:
             # "committed?" must read THIS, not the shared counter above, whose
             # before/after delta can be moved by another thread's failure.
             return False
+        # ── the Postgres record (#9188, epic #7879) ────────────────
+        # The append COMMITTED at this line (§17.1), so the record write runs
+        # after it and before any cache fold: truth first, then the projection.
+        # It is fail-soft for the SAME reason the append's own failure is — the
+        # graph write stands, and raising here would hand the caller a failure
+        # for a record that persisted while killing the fold too. The loss is
+        # observable instead (``monitoring.metrics()["record_write_failures"]``)
+        # and ``replay`` heals it from the journal.
+        self._write_record_projection(event)
+        return True
+
+    def _write_record_projection(self, record: dict) -> None:
+        """Hand one just-appended journal record to the Postgres record (#9188).
+
+        THE production call site. Until this existed, `tortoise/record_projection.py`
+        and `tortoise/record_writer.py` had NO non-test importer, so no user's
+        data ever reached the record (epic #7879, measured on #9078). The
+        behaviour — arming, tenant resolution, the commit, and the counted
+        failure — lives in `record_writer.write_live_record`, because the
+        journal has THREE live append doors (`_emit_event` here,
+        `EventAPI._emit`, `ConversationMiner._emit_event`) and a second
+        implementation of this boundary is how one door's records come to
+        differ from another's.
+
+        Deliberately fail-soft: the graph write and the journal append have
+        already committed, so a record failure is a LOSS TO REPORT (counted in
+        ``monitoring.metrics()["record_write_failures"]``, healed by a replay),
+        never a reason to fail the caller's write.
+        """
+        try:
+            from . import record_writer
+        except Exception as exc:
+            # #5148's rule, applied to this seam too: the graph write and the
+            # journal append already happened, so a failing import hook must
+            # not hand the caller an ImportError for a write that SUCCEEDED.
+            self._record_write_failure("seam_unimportable", exc)
+            return
+        # DURABILITY IS READ, not assumed (#9231 review P1): no log at all is
+        # NOT durable, and a log that declares itself a scratch buffer is not
+        # either. The seam DECLINES it and counts the decline on
+        # `monitoring.metrics()["record_non_journal_skips"]` — not on
+        # `record_write_failures`, since that lane has no journal by design and
+        # nothing was lost (#9231 review P2).
+        log = self._event_log
+        durable = log is not None and getattr(log, "durable", True)
+        record_writer.write_live_record(record, durable=durable)
+
+    def _record_write_failure(self, reason: str, exc: BaseException) -> None:
+        """Count and report one armed record write that did not happen (#9188).
+
+        Never raises: the caller's append has already committed, so a record
+        failure is a LOSS TO REPORT, not a capture failure. Counting is
+        best-effort in the same way (a metrics failure must not mask the
+        record failure).
+        """
+        with contextlib.suppress(Exception):
+            monitoring.record_record_write_failure(reason)
+        _logger.warning(
+            "the record write did not happen (%s) — the journal has the record "
+            "and a replay heals the record: %s", reason, exc,
+        )
+
+    def _record_write_without_journal(self, type_: str) -> None:
+        """Count an ARMED record on a deployment with NO journal (#9188).
+
+        The journal-less lane is supported and default (`tortoise/config.py`),
+        so an operator can arm the record and not the journal — and then nothing
+        is written, nothing is counted, and no replay can heal it, because the
+        record's only sustainable source IS the journal. Counting it is the
+        difference between that being a silent hole and an observable
+        misconfiguration.
+
+        Unarmed is the normal case and costs one env lookup: no counter, no
+        warning. A MALFORMED DSN is not "unarmed" and must not disappear into
+        the swallow below: the journal-less lane is the one shape where the
+        seam's own `malformed_dsn` count can never fire (there is no
+        `write_live_record` call to carry it), so a typo'd
+        ``TORTOISE_RECORD_DSN`` on this lane would otherwise produce no signal
+        at all — the exact silent hole this method exists to close.
+        """
+        try:
+            from . import record_writer
+        except Exception:
+            return
+        try:
+            armed = record_writer.record_dsn() is not None
+        except record_writer.RecordWriteError as exc:
+            self._record_write_failure("malformed_dsn", exc)
+            return
+        if armed:
+            self._record_write_failure(
+                "no_journal",
+                RuntimeError(
+                    f"{type_} was not recorded: the record is armed but this "
+                    "process has no JSONL journal, so the record write has no "
+                    "source (and no replay could heal it)"
+                ),
+            )
 
     def _journal_entity_event(self, event: dict) -> bool | None:
         """Append a canonical entity record to the journal (the WRITE half).
