@@ -247,7 +247,13 @@ FALKORDB_MEMORY="$(printf '%s' "$FALKORDB_MEMORY" | tr '[:upper:]' '[:lower:]')"
 # spec to an int64, so `0.0000000001g` (0.107 B) and `0.1b` install as
 # `HostConfig.Memory=0` — the UNCAPPED container this action exists to prevent,
 # reached through a value that reads as positive (#7357 review).
-if ! printf '%s\n' "$FALKORDB_MEMORY" | grep -Eq '^\+?[0-9]+(\.[0-9]+)?([bkmgt]|[kmgt]b|[kmgt]ib)?$' \
+# A HERE-STRING, not a pipe: `printf … | grep -Eq` is the #841 SIGPIPE
+# false-negative idiom — under `set -o pipefail` grep exits at the first match
+# while the writer is still pushing bytes, the writer takes SIGPIPE (141), and
+# the pipeline status becomes non-zero, so this fail-closed gate would reject a
+# VALID cap and print a grammar error. `<<<` backs the grep with a temp file, so
+# there is no earlier writer left to kill. Line anchoring is unchanged.
+if ! grep -Eq '^\+?[0-9]+(\.[0-9]+)?([bkmgt]|[kmgt]b|[kmgt]ib)?$' <<<"$FALKORDB_MEMORY" \
    || [ "$(printf '%s' "$FALKORDB_MEMORY" | wc -l)" -ne 0 ] \
    || ! awk -v v="$FALKORDB_MEMORY" 'BEGIN {
         sub(/^\+/, "", v)

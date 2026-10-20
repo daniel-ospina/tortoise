@@ -134,8 +134,11 @@ services:
     # ingest (≥10k changes/60s) the 2g cap tripped the cgroup OOM killer on
     # BGSAVE forks (issue #1733, crash 2026-08-25 18:05 UTC — 30 pilot
     # questions lost). 8g gives ≥2× headroom over peak heap for BGSAVE
-    # copy-on-write. Keep in sync with any live container:
-    # `docker update --memory 8g falkordb`.
+    # copy-on-write. Keep in sync with any live container — including the swap
+    # half (#7357): `docker update --memory 8g --memory-swap 8g falkordb`.
+    # Without `--memory-swap` the live container keeps whatever swap allowance
+    # it already had, so the compose-declared container and the "kept in sync"
+    # one would differ in exactly the property the paragraph below adds.
     deploy:
       resources:
         limits:

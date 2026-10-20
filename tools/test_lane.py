@@ -330,10 +330,24 @@ IMAGE_PULL_TIMEOUT = 600
 #: How long a fresh or reused container gets to answer PING.
 READY_TIMEOUT = 60
 #: #7357 — the KERNEL (cgroup) memory cap every lane container is created
-#: with, as a docker memory spec. Defaulted to the SHARED instance's own
-#: ceiling (the docker lane refuses writes at `used_memory 2.0 GiB of
-#: maxmemory 2.0 GiB`), so a lane that needs more than this was never a drop-in
-#: for the instance it replaces.
+#: with, as a docker memory spec. The DEFAULT is PROVISIONAL, exactly like the
+#: CI seam's: it is taken from the SHARED instance's own ceiling (`used_memory
+#: 2.0 GiB of maxmemory 2.0 GiB`), but that ceiling does not justify it.
+#: `maxmemory` bounds the Redis DATASET, and the shared instance REFUSES WRITES
+#: at it — this lane container sets no `--maxmemory` at all (see
+#: LANE_FALKORDB_ARGS), so the cgroup cap here is the ONLY ceiling, and
+#: `HostConfig.Memory` bounds RSS: dataset plus allocator overhead,
+#: fragmentation, client/replication buffers and fork copy-on-write. RSS is
+#: strictly larger than `used_memory`, and `--memory-swap` is EQUAL, so there is
+#: no swap headroom to absorb the margin — a lane that fitted inside the shared
+#: instance's data budget can be SIGKILLed here, where the shared instance would
+#: have failed SOFT with a legible refused write (#7357 review).
+#: Settle it by MEASURING: read the cgroup v2 peak (`/sys/fs/cgroup/.../`
+#: `memory.peak`) or `docker stats --no-stream fdb-lane-<slug>` during a full
+#: suite run on the heaviest lane. Comfortably below 2 GiB -> this default
+#: stands, and the measured peak belongs in this comment; at or near 2 GiB ->
+#: raise it, or give the lane a `--maxmemory` BELOW the cap so Redis refuses
+#: first the way the shared instance does.
 #:
 #: WHY A KERNEL CAP AND NOT ONLY `maxmemory`: `--maxmemory` is a REDIS-side
 #: limit. Without `HostConfig.Memory` the container's real ceiling is the

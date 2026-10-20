@@ -1469,39 +1469,7 @@ def _run_ci_provision(tmp_path, *, mode: str, cap: str | None = None,
     bindir = tmp_path / "bin"
     bindir.mkdir(parents=True, exist_ok=True)
     log = tmp_path / "docker.log"
-    stub = bindir / "docker"
-    if mode == "healthy":
-        answers = (
-            '  image) exit 0 ;;&\n'
-            '  port) printf "127.0.0.1:32770\\n" ;;&\n'
-            '  exec) printf "PONG\\n" ;;&\n'
-            '  inspect) printf "false 0\\n" ;;&\n'
-        )
-    elif mode == "killed":
-        # The container never answers, and docker says the kernel killed it.
-        answers = (
-            '  image) exit 0 ;;&\n'
-            '  port) printf "127.0.0.1:32770\\n" ;;&\n'
-            '  exec) exit 1 ;;&\n'
-            '  inspect) printf "true 137\\n" ;;&\n'
-        )
-    else:  # gone
-        # `docker inspect` FAILS: a wedged daemon, a timeout, or a container
-        # removed by hand. That is UNKNOWN, not evidence of absence (see
-        # `inspect_stderr` above for the genuine-absence wording).
-        answers = (
-            '  image) exit 0 ;;&\n'
-            '  port) printf "127.0.0.1:32770\\n" ;;&\n'
-            '  exec) exit 1 ;;&\n'
-            '  inspect) printf "%s" "$INSPECT_STDERR" >&2; exit 1 ;;&\n'
-        )
-    stub.write_text(
-        "#!/usr/bin/env bash\n"
-        'printf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
-        'case "$1" in\n' + answers + "esac\n"
-        "exit 0\n"
-    )
-    stub.chmod(0o755)
+    _write_ci_docker_stub(bindir, mode)
     gh_env = tmp_path / "gh_env"
     gh_env.write_text("")
     env = {
@@ -1524,6 +1492,87 @@ def _run_ci_provision(tmp_path, *, mode: str, cap: str | None = None,
         timeout=120,
     )
     return result, log
+
+
+def _write_ci_docker_stub(bindir: Path, mode: str) -> Path:
+    """Write the stub `docker` for ``mode`` into ``bindir``; return its path.
+
+    Split out of ``_run_ci_provision`` so the stub's OWN properties (the shell it
+    needs) can be asserted without executing provision.sh against it.
+    """
+    # ⛔ `;;` only — NEVER `;;&`. The `;;&` fall-through terminator is bash 4.0+,
+    # and on a macOS dev box `bash` (from PATH) is /bin/bash 3.2.57, where it is
+    # a SYNTAX ERROR (rc 2) rather than a fall-through: every `docker` call then
+    # fails before doing anything, so the "healthy" runs assert a pull failure
+    # and the "should refuse" runs pass for the wrong reason. CI cannot see it
+    # (the ubuntu runner's bash is 5.x), which is exactly why the stub is POSIX
+    # `sh` and `test_the_stubbed_docker_seams_are_POSIX_parseable` runs `sh -n`
+    # over it (#9204 review, P1). Nothing here needs a fall-through: each branch
+    # either exits or prints, and `image`/`port`/`exec`/`inspect` are mutually
+    # exclusive first arguments.
+    if mode == "healthy":
+        answers = (
+            '  image) exit 0 ;;\n'
+            '  port) printf "127.0.0.1:32770\\n" ;;\n'
+            '  exec) printf "PONG\\n" ;;\n'
+            '  inspect) printf "false 0\\n" ;;\n'
+        )
+    elif mode == "killed":
+        # The container never answers, and docker says the kernel killed it.
+        answers = (
+            '  image) exit 0 ;;\n'
+            '  port) printf "127.0.0.1:32770\\n" ;;\n'
+            '  exec) exit 1 ;;\n'
+            '  inspect) printf "true 137\\n" ;;\n'
+        )
+    else:  # gone
+        # `docker inspect` FAILS: a wedged daemon, a timeout, or a container
+        # removed by hand. That is UNKNOWN, not evidence of absence (see
+        # `inspect_stderr` above for the genuine-absence wording).
+        answers = (
+            '  image) exit 0 ;;\n'
+            '  port) printf "127.0.0.1:32770\\n" ;;\n'
+            '  exec) exit 1 ;;\n'
+            '  inspect) printf "%s" "$INSPECT_STDERR" >&2; exit 1 ;;\n'
+        )
+    stub = bindir / "docker"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "$DOCKER_LOG"\n'
+        'case "$1" in\n' + answers + "esac\n"
+        "exit 0\n"
+    )
+    stub.chmod(0o755)
+    return stub
+
+
+def test_the_stubbed_docker_seams_are_POSIX_parseable(tmp_path):
+    """The stub must run under the shell that resolves it, on EVERY platform.
+
+    The P1 this pins (#9204 review): the CI stub was written with `;;&`, a
+    bash-4.0 case terminator. CI is bash 5 (green), but a macOS dev box runs
+    /bin/bash 3.2.57, where `;;&` is a SYNTAX ERROR — the stub exited 2 on
+    every call, so 5 of these tests could not run locally at all. `sh -n` is
+    the portable check: the stub is POSIX, and POSIX shells (dash, bash-3.2 in
+    POSIX mode) reject a bash-4 terminator too, so this reds on Linux as well.
+    """
+    for mode in ("healthy", "killed", "gone"):
+        bindir = tmp_path / mode / "bin"
+        bindir.mkdir(parents=True, exist_ok=True)
+        stub = _write_ci_docker_stub(bindir, mode)
+        assert stub.exists(), f"{mode}: no stub was written"
+        text = stub.read_text()
+        assert ";;&" not in text, (
+            f"{mode}: `;;&` is bash 4+ — on macOS (/bin/bash 3.2) the stub is a "
+            f"syntax error, so every docker call returns 2 before running: {text}"
+        )
+        for shell in ("sh", "bash"):
+            parsed = subprocess.run([shell, "-n", str(stub)],
+                                    capture_output=True, text=True)
+            assert parsed.returncode == 0, (
+                f"{mode}: the stub does not parse under {shell} — "
+                f"{parsed.stderr}{parsed.stdout}"
+            )
 
 
 def test_the_ci_provision_caps_the_container_memory(tmp_path):
