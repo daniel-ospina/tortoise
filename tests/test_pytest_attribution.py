@@ -50,11 +50,13 @@ CI_WORKFLOW = REPO / ".github" / "workflows" / "ci.yml"
 #: a workflow outside it is INVISIBLE here, and its leg can silently omit its own
 #: failure set (#3470). The scope is deliberate and its one known omission is
 #: recorded below: `.github/workflows/ci.yml`'s `hosted-e2e` leg captures
-#: `/tmp/hosted-e2e.log` through `| tee` and has no reporter call, which is #9300
-#: (deferred from this PR because the lane that fixed the rest of the review findings
-#: could not push a `.github/workflows/*` change — its credential carries no
-#: `workflow` scope). #9300 raises this floor to 9 and adds the leg to
-#: `test_a_failing_pytest_still_reds_the_step`'s cases.
+#: `/tmp/hosted-e2e.log` through `| tee` and has no reporter call, which is #9300.
+#: #9300 is its own change (wire the leg in `ci.yml`, add it here, raise the floor
+#: 8 → 9, and add its id to `test_a_failing_pytest_still_reds_the_step`'s cases).
+#: The deferral is scope, not permission: THIS PR does change
+#: `.github/workflows/python-ci.yml` (the `runs-on` pin and the D14 re-raise), so no
+#: credential or workflow-scope limit stands behind #9300 — only the decision to keep
+#: the runner-label fix reviewable on its own terms.
 ATTRIBUTION_WORKFLOWS = [
     WORKFLOW,
     REPO / ".github" / "workflows" / "post-merge-validation.yml",
@@ -80,6 +82,7 @@ def test_the_uncovered_workflow_is_named_not_silently_dropped() -> None:
         "floor to the new inventory, and add the hosted-e2e case to "
         "test_a_failing_pytest_still_reds_the_step (#9300)"
     )
+
 
 # The RAIL this module measures against lives in agent-infra, not here: `scripts`
 # is a tracked symlink to `$AGENT_INFRA_PATH/scripts`, so `EXEMPTION_PY` resolves
@@ -663,29 +666,87 @@ def test_a_kill_inside_a_subtest_names_the_parent(tmp_path: Path) -> None:
     ], result.stdout
 
 
+# The measured artifact: the leg's own session opens, starts two tests, and then a
+# NESTED pytest run (a test that shells out to pytest) prints its own bannered
+# session, its own `ERROR <path>` record and its own bannered summary. The leg's own
+# summary never prints — it died mid-test.
+NESTED_COLLECTION_ERROR_LOG = (
+    "==================================== test session starts ====================================\n"
+    "platform darwin -- Python 3.12.0, pytest-9.1.1\n"
+    "collected 40 items\n"
+    "\n"
+    "tests/test_a.py::test_one PASSED [ 10%]\n"
+    "tests/test_a.py::test_two \n"
+    "==================================== test session starts ====================================\n"
+    "collected 1 item\n"
+    "\n"
+    "ERROR tests/nested_bad.py - ImportError while importing test module\n"
+    "!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n"
+    "=============================== 1 error in 0.09s ===============================\n"
+)
+
+
+@pytest.mark.parametrize("rc", ["137", "2", None])
 def test_a_nested_collection_error_cannot_silence_a_killed_legs_marker(
-    tmp_path: Path,
+    tmp_path: Path, rc: str | None
 ) -> None:
-    """The collection-error suppression must never apply to a KILL.
+    """A nested child's collection error must never switch this leg's marker off.
 
     A nested pytest run's raw stdout lands in the leg's log (the measured artifact
     carries a whole nested session), so a child that hits a collection error would
-    otherwise switch off the marker on a leg that was then killed — restoring exactly
-    the "leg contributes nothing to the #3467 set" defect this file exists for.
+    otherwise restore exactly the "leg contributes nothing to the #3467 set" defect
+    this file exists for: the summary is labelled STALE and then the whole leg
+    silently yields no marker and no culprit.
+
+    ALL THREE ways a leg like this can arrive are exercised, because each one reaches
+    the suppression by a different route and one of them does not involve an exit code
+    at all:
+
+    * ``137`` — the SIGKILL that follows the watchdog's SIGINT;
+    * ``2`` — pytest's own INTERRUPTED code, which is ALSO its collection-error code,
+      so the log's collection signature is what decides it; `COLLECTION_VERDICT` reads
+      the LAST summary whatever session owns it, so it must not be believed alone;
+    * ``None`` — the documented triager path (`--rc` is optional and a hand-run
+      against a downloaded log has no exit code): here `KILLED=0`, so nothing but the
+      ownership of the summary stands between this leg and a false clean.
+
+    The in-flight name is asserted, not just the marker: a marker that names no test
+    is the "kill that names nothing" this section was added for.
+    """
+    log = tmp_path / "pytest.log"
+    log.write_text(NESTED_COLLECTION_ERROR_LOG)
+    result = run_script(log, rc=rc)
+    assert INCOMPLETE_MARKER in result.stdout, result.stdout
+    assert in_flight_lines(result.stdout) == ["tests/test_a.py::test_two"], result.stdout
+    # The child's summary is named as foreign, so the reader is not left wondering
+    # why a leg with `1 error in 0.09s` in its log got an INCOMPLETE marker.
+    assert "STALE session summary" in result.stdout, result.stdout
+    # and the KILL/INCOMPLETE explanation, not the collection-error one (a leg with no
+    # verdict of its own is never "already attributable", whatever else the log carries)
+    assert "COLLECTION ERROR" not in result.stdout, result.stdout
+
+
+def test_a_legs_own_collection_error_still_suppresses_the_marker(tmp_path: Path) -> None:
+    """The control for the test above: ownership is what licenses the suppression.
+
+    Identical collection signature, identical `ERROR <path>` record — but this time the
+    summary closes the LEG's own session (depth 0 at EOF, no start line after it), so
+    the leg IS attributable and the marker must stay off. Without this half, gating the
+    suppression on ownership could be implemented as "never suppress" and both the
+    nested test and a whole-leg regression would read the same.
     """
     log = tmp_path / "pytest.log"
     log.write_text(
-        "ERROR tests/nested_bad.py\n"
+        "==================================== test session starts ====================================\n"
+        "collected 1 item\n"
+        "\n"
+        "ERROR tests/test_bad.py - ImportError while importing test module\n"
         "!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n"
         "=============================== 1 error in 0.09s ===============================\n"
-        "tests/test_a.py::test_two \n"
     )
-    result = run_script(log, rc="137")
-    assert INCOMPLETE_MARKER in result.stdout, result.stdout
-    assert in_flight_lines(result.stdout) == ["tests/test_a.py::test_two"], result.stdout
-    # and the KILL explanation, not the collection-error one (a kill is never a
-    # collection error, whatever else the log carries)
-    assert "COLLECTION ERROR" not in result.stdout, result.stdout
+    result = run_script(log, rc="2")
+    assert INCOMPLETE_MARKER not in result.stdout, result.stdout
+    assert "STALE session summary" not in result.stdout, result.stdout
 
 
 def test_the_legs_own_summary_wins_over_a_nested_one(tmp_path: Path) -> None:
@@ -1052,10 +1113,10 @@ def capture_site(line: str) -> str | None:
     DOCUMENTATION: the D14 site is spelled `tee /tmp/pytest-d14.log` verbatim in this
     PR's description and in `tests/test_markers.py`, so the moment a sentence
     describing it lands in the comment block above the site, the counter reads one
-    MORE than the real sites (9 against 8). A phantom SITE is the dangerous direction:
-    the assertion below is a FLOOR, so one phantom silently re-buys the slack the
-    floor raise exists to remove — and the reporter-window check passes for a comment
-    sitting above the real call.
+    MORE than the real sites (a count of 9 against the 8 real sites the floor pins). A
+    phantom SITE is the dangerous direction: the assertion below is a FLOOR, so one
+    phantom silently re-buys the slack the floor raise exists to remove — and the
+    reporter-window check passes for a comment sitting above the real call.
     """
     stripped = line.strip()
     if stripped.startswith("#"):

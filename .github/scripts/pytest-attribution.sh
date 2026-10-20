@@ -375,9 +375,12 @@ case "${RC:-}" in
     # A real collection error in a non-quiet run prints its OWN bannered summary
     # (`1 error in 0.09s`, measured), so it is a completed leg and the early exit
     # above takes it. The collection signature therefore only decides rc=2 when the
-    # leg has NO owned summary — otherwise a nested child's collection error would
-    # turn this leg's INTERRUPTED run into "not killed" (a false clean).
-    if [ "$COLLECTION_VERDICT" = "0" ]; then
+    # leg OWNS the summary that reports it — otherwise a nested child's collection
+    # error would turn this leg's INTERRUPTED run into "not killed" (a false clean).
+    # `COLLECTION_VERDICT` reads the LAST summary in the file whatever session it
+    # belongs to, so it is necessary but NOT sufficient: ownership is what makes the
+    # `ERROR <path>` record this leg's failure set instead of the child's.
+    if [ "$COLLECTION_VERDICT" = "0" ] || [ "$HAVE_SUMMARY" = "0" ]; then
       KILLED=1
     fi
     ;;
@@ -387,8 +390,12 @@ if [ "$HAVE_SUMMARY" = "1" ] && [ "$KILLED" = "0" ] && [ -z "$IN_FLIGHT" ]; then
   exit 0
 fi
 
+# Gated on HAVE_SUMMARY as well as on the collection verdict: a collection error that
+# belongs to a NESTED child must not switch the marker off for a leg whose own session
+# never closed. Without that gate the leg contributes ZERO keys to the #3467 failure
+# set — the `ids=0` / un-falsifiable comparison this file exists to prevent.
 SUPPRESS_MARKER=0
-if [ "$COLLECTION_VERDICT" = "1" ] && [ "$OBSERVABLE" = "1" ] && [ "$KILLED" = "0" ]; then
+if [ "$HAVE_SUMMARY" = "1" ] && [ "$COLLECTION_VERDICT" = "1" ] && [ "$OBSERVABLE" = "1" ] && [ "$KILLED" = "0" ]; then
   SUPPRESS_MARKER=1
 fi
 if { [ "$HAVE_SUMMARY" = "0" ] || [ "$KILLED" = "1" ]; } && [ "$SUPPRESS_MARKER" = "0" ]; then
@@ -418,7 +425,14 @@ fi
 # stray start lines a nested run's captured stdout put in the log.
 if [ "$KILLED" = "0" ]; then
   [ "$HAVE_SUMMARY" = "1" ] && exit 0
-  [ "$OBSERVABLE" = "1" ] && exit 0
+  # `OBSERVABLE` only licenses silence when the record it reads is THIS LEG's. A log
+  # carrying a collection signature whose summary this leg does not own has an
+  # `ERROR <path>` line that belongs to a nested child (it is already labelled STALE
+  # above), so it cannot stand in for a verdict this leg never produced — the leg's
+  # only actionable report is the in-flight list below.
+  if [ "$OBSERVABLE" = "1" ] && [ "$COLLECTION_ERROR" = "0" ]; then
+    exit 0
+  fi
 fi
 
 if [ -n "$IN_FLIGHT" ]; then
