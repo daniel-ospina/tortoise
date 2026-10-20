@@ -26,13 +26,23 @@ The issue body says the tier is blocked because "there is no end-user auth layer
 and unbuilt; `#524` is open". Measured 2026-10-19, that framing is **stale on both counts and on
 one code fact that changes the design's shape**:
 
+**How this document cites code.** Every reference to `tortoise/hosted_api.py` is a **symbol
+address** — `hosted_api.py::<symbol>` for a definition or handler, `@app.<verb>("<route>")` for a
+registered route — never an absolute line number. The repo's own rule governs
+(`tests/test_extractor_v4_citation_rot.py`, the `#8506` guard): *the symbol name is authoritative,
+the line number is a convenience*. In a 4,700-line module that a merge moves by hundreds of lines, a
+number rots on work that has nothing to do with this design — it did, twice, before this rule was
+applied here — while a renamed or removed symbol still reds. The pin suite that enforces this is
+`tests/test_8693_end_customer_credential_design.py`, which resolves every address below against the
+module at HEAD.
+
 | Issue-body claim | Measured 2026-10-19 | Effect |
 |---|---|---|
-| "`#524` (OAuth 2.1 / token→team mapping) is **open**" | **CLOSED / COMPLETED** 2026-08-14; `tortoise/oauth.py` ships auth-code + PKCE, DCR, RFC 8707 token→team mapping, `/oauth/token`, `/oauth/revoke` (`hosted_api.py:38600-38967`: discovery, `/oauth/authorize`, `/oauth/consent`, `/oauth/token`, `/oauth/revoke`, `/register` DCR) | The v2 upgrade path (§4) is buildable on shipped machinery |
+| "`#524` (OAuth 2.1 / token→team mapping) is **open**" | **CLOSED / COMPLETED** 2026-08-14; `tortoise/oauth.py` ships auth-code + PKCE, DCR, RFC 8707 token→team mapping, `/oauth/token`, `/oauth/revoke` (`@app.get("/.well-known/oauth-protected-resource")`, `@app.get("/oauth/authorize")`, `@app.post("/oauth/consent")`, `@app.post("/oauth/token")`, `@app.post("/oauth/revoke")`, `@app.post("/register")` — discovery, authorize, consent, token, revoke, DCR) | The v2 upgrade path (§4) is buildable on shipped machinery |
 | "blocked on #557 … do not start before #557's **provisioning model** is settled" | **Settled.** Owner decisions Q1–Q7 recorded 2026-08-15 on `#557`; scoping doc `docs/scoping/2026-08-15-557-sub-tenancy-scoping.md` is `doc_status: live`; `#318` (the prerequisite pack-isolation epic) is **CLOSED** with `pack_registry.py`/`pack_state.py` merged | **The blocker named in the issue is met → DESIGN is unblocked** (implementation stays gated on `#557` S1) |
 | "no end-user auth layer" | True, and **still true** — but the tier does not need one: `#557` Q2 chose *key-only for v1* (no end-user account, no consent screen) | §2/§3 design a credential, not an auth layer |
 | (body proposes RFC 8693 as "the external shape") | `#557` Q2 (**owner**, 2026-08-15) chose **key-only for v1**, with RFC 8693-style token exchange as **the designed post-launch upgrade** | §1 D1. RFC 8693 is **not adopted for v1** — it is the recorded v2 step (§4) |
-| (body: delegated credential "mints" a scoped token) | C5 (`#2114`) **landed**: per-graph key binding, `_require_scope`, `_reject_graph_bound_org_surface` are live (`hosted_api.py:6451`, `:6601`, `:6625`) | The delegated credential has a *shipped* enforcement spine; the design composes it rather than inventing one |
+| (body: delegated credential "mints" a scoped token) | C5 (`#2114`) **landed**: per-graph key binding, `_require_scope`, `_reject_graph_bound_org_surface` are live (`hosted_api.py::_assert_graph_owned`, `::_require_scope`, `::_reject_graph_bound_org_surface`) | The delegated credential has a *shipped* enforcement spine; the design composes it rather than inventing one |
 
 **Verdict:** the design work this issue asks for is **unblocked and done here**. What remains
 blocked is *building* it: the end-user team provisioning + the cross-team provisioning/lifecycle
@@ -53,7 +63,7 @@ convergent external practice below was tested against a recorded decision, and a
 | **D2** | **Graph-per-end-user**, provisioning under the embedder's account: each end user = **one team + one graph**; per-end-user metering line items rolled into the embedder's bill; `pro`+ tier; provisioning rate limit in S1 | `#557` owner comment 2026-08-15 (Q1, Q3, Q4, Q6), scoping doc §Context "Model" | **Obeyed.** The credential lives in the end-user's *own team*, so the isolation boundary is the shipped namespace boundary (§5), and per-end-user meter lines fall out of the per-team ledger |
 | **D3** | An end user is **never** a row in the builder's `org_memberships`; the mechanism is a credential the builder's app vends under its own authority. Not a fifth role | `#2427` brief §4.3 | **Obeyed.** No membership, no user row, no identity stored (§2) |
 | **D4** | Enforcement stays in the app-layer resolver behind `authorize(principal, action, resource)`; **no external ReBAC/ABAC engine now** — carries an `OVERRIDES:` ruling | `docs/authorization-architecture.md` §4 (`OVERRIDES:`, `#2083` scope line) | **Obeyed.** The delegated credential is enforced by the existing `_require_scope` / `_reject_minted_delegated_key` / `_assert_graph_owned` spine. No engine, no tuple store |
-| **D5** | `#2297` POLICY A: the **session lane** of key mint is owner/admin-gated; members do not mint durable org keys | `#2297` owner decision 2026-09-05, `hosted_api.py:11662` docstring | **Not engaged.** End users have no session and no membership; the builder-side mint runs on the **key lane** (D13), whose gates are unchanged. No reopen needed |
+| **D5** | `#2297` POLICY A: the **session lane** of key mint is owner/admin-gated; members do not mint durable org keys | `#2297` owner decision 2026-09-05, `hosted_api.py::create_api_key` docstring | **Not engaged.** End users have no session and no membership; the builder-side mint runs on the **key lane** (D13), whose gates are unchanged. No reopen needed |
 
 ### The rejected alternative, recorded so it is not re-invented
 
@@ -74,13 +84,15 @@ nothing cross-team is required.
   this section claimed `POST /v1/graphs` was the only route and reachable with a session token
   alone; that was wrong, and the corrected version is stronger, not weaker. Programmatic creation
   ships under key
-  auth at `POST /v1/organizations/{org_id}/graphs` (`create_org_graph`,
-  `hosted_api.py:19220-19245`). What Design B would need is an **owner-class key carrying
-  `graphs:create`** (`:19242-19244`; the scope is in `_OWNER_SCOPE_ALLOWLIST`, `:11225-11229`) that
-  is **not** a minted child — `deleg=0` keys are rejected outright (`:19237-19241`, "Minted keys
+  auth at `POST /v1/organizations/{org_id}/graphs` (`create_org_graph`, registered by
+  `@app.post("/v1/organizations/{org_id}/graphs")`). What Design B would need is an **owner-class key
+  carrying `graphs:create`** (the scope check inside `hosted_api.py::create_org_graph`; the scope is
+  in `hosted_api.py::_OWNER_SCOPE_ALLOWLIST`) that
+  is **not** a minted child — `deleg=0` keys are rejected outright (the `delegation_depth == 0`
+  guard in `create_org_graph`, "Minted keys
   cannot provision graphs", and the child policy cannot mint `graphs:create` at all). Handing the
   end-user lane that class of key is exactly the owner-class authority §3.3 property 1 refuses to
-  give it. (`POST /v1/graphs`, `:19275`, is the session
+  give it. (`POST /v1/graphs`, `@app.post("/v1/graphs")`, is the session
   alias for the same provisioning service — not the only programmatic path.)
 
 ---
@@ -111,16 +123,16 @@ data into a component whose access story is not designed for it. The credential 
 
 | Property | Value | Why |
 |---|---|---|
-| Class | `tk_` API key, **`delegation_depth = 0`** (a minted child) | C2/C3 child policy: a minted key can never mint, rotate itself, or reach account management (`_reject_minted_delegated_key`, `hosted_api.py:6425`) |
+| Class | `tk_` API key, **`delegation_depth = 0`** (a minted child) | C2/C3 child policy: a minted key can never mint, rotate itself, or reach account management (`hosted_api.py::_reject_minted_delegated_key`) |
 | Lives in | the **end-user's team** (its own org, D2) | keeps the credential off the embedder's `max_api_keys` budget (§1) and makes the team/graph namespace the isolation boundary (§5) |
-| Scopes | `["graphs:read","graphs:write"]` — the full `_MINTABLE_SCOPES` set, nothing else | `graphs:create`/`graphs:delete`/`keys:manage`/`team:manage` are escalation scopes that a key-minted child can never hold (`hosted_api.py:11217-11228`, DB CHECK `chk_minted_key_no_escalation`) |
+| Scopes | `["graphs:read","graphs:write"]` — the full `_MINTABLE_SCOPES` set, nothing else | `graphs:create`/`graphs:delete`/`keys:manage`/`team:manage` are escalation scopes that a key-minted child can never hold (`hosted_api.py::_MINTABLE_SCOPES`, DB CHECK `chk_minted_key_no_escalation`) |
 | Graph binding | **recommended: `graph_id` = the end-user's graph** — but see 3.2 | a graph-bound key is rejected from org-level surfaces outright (`_reject_graph_bound_org_surface`) and pinned by `_assert_graph_owned` — defence in depth over the team boundary |
 | Expiry | **set** (days, `#2426` `expires_in`/`expires_at`), minted by the builder at login | D1 says "short-lived at login"; expiry is the only time bound a child credential has (`Never` must not be the default for this tier — a leaked end-user credential with no expiry is a permanent tenant foothold) |
 | Lineage | `created_by_key_id` = the builder's provisioning key; `created_by` = the acting org actor | already recorded at mint (`supabase_control.py:1056`, `:1161`); it is what makes the compromise trail answerable (§6) |
 
 ### 3.2 The one measured constraint that shapes provisioning
 
-`_ensure_graph_exists` (`hosted_api.py:11449-11460`) refuses to bind a key to a team's **default**
+`_ensure_graph_exists` (`hosted_api.py::_ensure_graph_exists`) refuses to bind a key to a team's **default**
 graph: a graph-bound mint 404s unless the target is a **custom** graph row (`kind != 'default'`),
 because the default graph is addressed by an org-wide key (`teams.graph_name`) and is not
 key-bindable.
@@ -133,7 +145,7 @@ So the choice is structural, not stylistic:
   separate org is a separate graph namespace, `#318`, `docs/authorization-architecture.md` §3.2), but
   it forfeits the second lock.
 - **If `#557` provisions a *custom* graph per end-user team** (creation is already one call inside
-  that team's provisioning, `create_org_graph`, `hosted_api.py:19221`), the credential is
+  that team's provisioning, `create_org_graph`, `hosted_api.py::create_org_graph`), the credential is
   graph-bound, fail-closed on every org-level surface, and survives the team later gaining a second
   graph.
 
@@ -145,7 +157,7 @@ handed to `#557` S1*, not a change to it.
 
 D2/Q1: the embedder mints **per-end-user child keys** and there is **never** a master-tenant
 impersonation surface. Today the mint endpoint acts only on the **caller's own org**
-(`create_api_key` → `_mint_key(org["org_id"], …)`, `hosted_api.py:11662-11920`) — there is no
+(`create_api_key` → `_mint_key(org["org_id"], …)`, `hosted_api.py::create_api_key`) — there is no
 cross-team mint. That capability is `#557` S1 and it is a **surface request**, not something this
 design cuts (§9).
 
@@ -196,7 +208,7 @@ One action, in **the builder's app**, in plain language — no keys, no tokens, 
 - **One action.** No confirm-email, no re-invite, no support ticket, no Tortoise login (there is no
   Tortoise account — D1/§2).
 - **Same powers after Replace.** The replacement inherits the row's class (same team, same graph, same
-  scopes) — the primitive cannot widen or demote (`rotate`, `hosted_api.py:11953`, inherits
+  scopes) — the primitive cannot widen or demote (`rotate`, `hosted_api.py::rotate_api_key`, inherits
   `graph_id`/`scopes`/`delegation_depth`/lineage; body `scopes`/`graph_id` are 422).
 - **Old credential dead, atomically.** `rotate` is create-then-claim-revoke: the displaced row is
   revoke-claimed in the same operation, so there is **no window with both live** — the compromise
@@ -210,15 +222,18 @@ One action, in **the builder's app**, in plain language — no keys, no tokens, 
    end-user's credential id, inside that end-user's team, using the provisioning credential. One
    round trip **from the builder's app** — but **not one shipped call.** Measured at this head, the
    cross-team lifecycle reach does **not** exist: both lifecycle verbs are pinned to the caller's
-   own org — `rotate` at `hosted_api.py:12047`, `DELETE /v1/team/keys/{key_id}` at `:12397`
-   (supabase lane) / `:12425` (registry lane) — each calling
+   own org — `rotate` in `hosted_api.py::rotate_api_key`, `DELETE /v1/team/keys/{key_id}` in
+   `hosted_api.py::revoke_api_key` (both lanes: the supabase lane and the registry lane) — each
+   calling
    `_ensure_key_in_pinned_org(org["org_id"], row.get("org_id"), required=True)`, whose contract is
-   that the resolved org "must own the key UNCONDITIONALLY" (`:6162-6185`). A target key in the
+   that the resolved org "must own the key UNCONDITIONALLY"
+   (`hosted_api.py::_ensure_key_in_pinned_org`). A target key in the
    end-user's team therefore raises `403 "Not your API key"` for a builder-org credential. Key auth
    cannot escape the pin: on the key lane the org is resolved *from the key itself* and `?org_id=`
-   is ignored (the `DELETE` docstring states it, `:12345-12348`). The end-user credential cannot
-   self-rotate either — every `deleg=0` caller is rejected at `:12004`
-   (`_reject_minted_delegated_key(org, "rotate API keys")`). So this step is **one call the builder
+   is ignored (the `revoke_api_key` docstring states it). The end-user credential cannot
+   self-rotate either — every `deleg=0` caller is rejected by
+   `_reject_minted_delegated_key(org, "rotate API keys")`
+   (`hosted_api.py::_reject_minted_delegated_key`). So this step is **one call the builder
    makes plus one capability Tortoise must grant**: the cross-team provisioning authority of §9.1
    extended to the lifecycle verbs. Until that lands, the button 403s for every end user.
 2. **Re-propagate**: the response is the **only** time the new plaintext exists (reveal-once). The
@@ -239,14 +254,16 @@ key = one end-user space, not everything"). Containing it means: revoke the prov
    consults the parent's `revoked_at`; a live child survives its parent's revocation indefinitely
    (`#2427` §2.4).
 2. **No cross-team enumeration** — the provisioning credential's children live in *other* teams, and
-   every key-listing surface is org-scoped (`GET /v1/team/keys`, `hosted_api.py:12187`).
+   every key-listing surface is org-scoped (`GET /v1/team/keys` — `@app.get("/v1/team/keys")`, handler
+`hosted_api.py::list_api_keys`).
 
 **Design position:** per-end-user Replace/Revoke (§5.1, §5.2) does not depend on **either of these
 two containment gaps** — replacing one credential the builder already has on record needs no child
 enumeration and no cascade. **Containment does.** But Replace/Revoke does depend on a capability
 that is equally missing, and §5.2 measures it: the **cross-team lifecycle reach**. "The end-user
 credential is reachable through its own team" is true only for a caller *inside* that team, which
-the builder's credential is not; and the child cannot rotate itself (`:12004`). The tier's stated
+the builder's credential is not; and the child cannot rotate itself
+(`hosted_api.py::_reject_minted_delegated_key`). The tier's stated
 isolation claim ("a stolen child key = one end-user space") is only true for the *child*; the
 *parent* leak is currently unbounded in N **and** the parent cannot revoke what it minted. So
 **three** things must land before this tier is exposed to real end users: `#8694` (cascade) or a
@@ -274,8 +291,8 @@ in-team manager credential), and it is a fallback, not the recommendation.
 | Lock | Mechanism | State |
 |---|---|---|
 | Namespace | the end-user **team** = its own graph namespace (`org_{org_id}`); no tenant selector exists on any surface | **shipped** (`#318`, `docs/authorization-architecture.md` §3.2) |
-| Scope | `tk_` child carries only `graphs:read`/`graphs:write`; `_require_scope` is the FIRST statement of every data handler (write implies read; read never satisfies a write) | **shipped** C5 (`hosted_api.py:6601`) |
-| Graph binding | `_assert_graph_owned` pins a graph-bound key to its own graph and fails closed on a vanished graph; graph-bound keys are 403 on org-level surfaces (`_reject_graph_bound_org_surface`) | **shipped** C5 (`hosted_api.py:6451`, `:6625`) — *available only if §3.2's custom-graph recommendation is taken* |
+| Scope | `tk_` child carries only `graphs:read`/`graphs:write`; `_require_scope` is the FIRST statement of every data handler (write implies read; read never satisfies a write) | **shipped** C5 (`hosted_api.py::_require_scope`) |
+| Graph binding | `_assert_graph_owned` pins a graph-bound key to its own graph and fails closed on a vanished graph; graph-bound keys are 403 on org-level surfaces (`_reject_graph_bound_org_surface`) | **shipped** C5 (`hosted_api.py::_assert_graph_owned`, `::_reject_graph_bound_org_surface`) — *available only if §3.2's custom-graph recommendation is taken* |
 
 Plus the structural dormancy rule: a minted (`deleg=0`) key is rejected from every management surface
 by the DI gate (`_reject_minted_delegated_key`), so an end-user credential can never mint, rotate,
@@ -333,25 +350,25 @@ the builder provides the identity, the affordance, and the containment runbook.*
 
 | Fact | Evidence |
 |---|---|
-| Mint endpoint acts on the caller's own org only | `tortoise/hosted_api.py:11662` → `_mint_key(org["org_id"], …)` |
-| Child mint: `deleg=0`, scopes ∩ `_MINTABLE_SCOPES`, an escalation-scope request is a 403 (never silently stripped) | `hosted_api.py:11842-11874`, `:11217-11228` |
-| Minted keys cannot mint / rotate / reach management | `hosted_api.py:6425` (`_reject_minted_delegated_key`), `:11691-11699`, `:12004` |
-| Data-plane scope enforcement (write implies read, never post-filter) | `hosted_api.py:6601` (`_require_scope`) |
-| Graph-bound key ownership pre-check + org-surface rejection | `hosted_api.py:6451` (`_assert_graph_owned`), `:6625` (`_reject_graph_bound_org_surface`) |
-| A key can only bind a **custom** graph; the default graph is not key-bindable | `hosted_api.py:11449-11460` (404 `Unknown graph`) |
-| Atomic, cap-neutral, class-inheriting replacement | `hosted_api.py:11953` (`rotate`, `#4355`), `tortoise/quota.py:487` (`api_key_occupies_slot`) |
+| Mint endpoint acts on the caller's own org only | `hosted_api.py::create_api_key` → `_mint_key(org["org_id"], …)` |
+| Child mint: `deleg=0`, scopes ∩ `_MINTABLE_SCOPES`, an escalation-scope request is a 403 (never silently stripped) | `hosted_api.py::create_api_key` (child-policy clamp), `hosted_api.py::_MINTABLE_SCOPES` |
+| Minted keys cannot mint / rotate / reach management | `hosted_api.py::_reject_minted_delegated_key` — the definition, and every handler that calls it (mint, rotate, management) |
+| Data-plane scope enforcement (write implies read, never post-filter) | `hosted_api.py::_require_scope` |
+| Graph-bound key ownership pre-check + org-surface rejection | `hosted_api.py::_assert_graph_owned`, `hosted_api.py::_reject_graph_bound_org_surface` |
+| A key can only bind a **custom** graph; the default graph is not key-bindable | `hosted_api.py::_ensure_graph_exists` (404 `Unknown graph`) |
+| Atomic, cap-neutral, class-inheriting replacement | `hosted_api.py::rotate_api_key` (`rotate`, `#4355`), `tortoise/quota.py:487` (`api_key_occupies_slot`) |
 | Key cap per org = 2 / 5 / 10 / 20 (free/solo/pro/team) | `product/pricing.json` → `tiers.*.max_api_keys` |
 | Metering identity is `(org_id, period_start)` | `tortoise/metering.py:6`, `:108`, `get_current_usage` |
 | No embedder/parent linkage in the control plane | `supabase/migrations/0006_teams.sql:23-43` (no parent column); no `embedder` concept in `tortoise/` |
-| Graph creation: **two routes, one service** — key auth exists (`graphs:create`, non-minted key only) plus a session alias | `hosted_api.py:19220-19245` (`POST /v1/organizations/{org_id}/graphs` → `create_org_graph`, `get_current_org_gated`; `deleg=0` rejected `:19237-19241`, scope check `:19242-19244`); `:19275` (`POST /v1/graphs`, session alias) |
-| `rotate` is pinned to the caller's OWN org — a cross-team target key is a 403 | `hosted_api.py:12047` (`_ensure_key_in_pinned_org(…, required=True)`); helper contract `:6162-6185` ("must own the key UNCONDITIONALLY") → `403 "Not your API key"` |
-| `DELETE /v1/team/keys/{key_id}` carries the same pin on **both** lanes; key auth cannot override it | `hosted_api.py:12397` (supabase lane), `:12425` (registry lane); handler docstring "Org-scoped" (`:12335`); the key lane resolves the org from the key and ignores `?org_id=` (`:12345-12348`) |
-| A minted (`deleg=0`) credential cannot rotate anything, itself included | `hosted_api.py:12004` (`_reject_minted_delegated_key(org, "rotate API keys")`) |
-| `api_key_create` and `api_key_rotate` are audited | `hosted_api.py:11916` (`api_key_create`), `:12159` (`api_key_rotate`) |
-| The member self-service / recovery lanes audit a **third** action, `api_key_mint` — not evidence for create/rotate | `hosted_api.py:27354`, `:27571` (`_async_audit(…, "api_key_mint", …)`); named here so the three action names are not conflated (`#2446` lanes) |
-| **Key revoke writes NO audit row** | `hosted_api.py:12333-12451` (handler body, zero `_async_audit`); `supabase_control.revoke_api_key:1377` is a bare PATCH — **gap, filed as #9177** |
+| Graph creation: **two routes, one service** — key auth exists (`graphs:create`, non-minted key only) plus a session alias | `@app.post("/v1/organizations/{org_id}/graphs")` → `create_org_graph` (`key_ctx: dict = Depends(get_current_org_gated)`; `deleg=0` rejected, then the `graphs:create` scope check); `@app.post("/v1/graphs")` (`POST /v1/graphs`, session alias) |
+| `rotate` is pinned to the caller's OWN org — a cross-team target key is a 403 | `hosted_api.py::rotate_api_key` (`_ensure_key_in_pinned_org(…, required=True)`); helper contract `hosted_api.py::_ensure_key_in_pinned_org` ("must own the key UNCONDITIONALLY") → `403 "Not your API key"` |
+| `DELETE /v1/team/keys/{key_id}` carries the same pin on **both** lanes; key auth cannot override it | `hosted_api.py::revoke_api_key` — two `_ensure_key_in_pinned_org(…, required=True)` call sites (supabase lane, registry lane); handler docstring "Org-scoped"; the key lane resolves the org from the key and ignores `?org_id=` |
+| A minted (`deleg=0`) credential cannot rotate anything, itself included | `hosted_api.py::_reject_minted_delegated_key(org, "rotate API keys")`, called from `rotate_api_key` |
+| `api_key_create` and `api_key_rotate` are audited | `hosted_api.py::create_api_key` (audits `api_key_create`), `hosted_api.py::rotate_api_key` (audits `api_key_rotate`) |
+| The member self-service / recovery lanes audit a **third** action, `api_key_mint` — not evidence for create/rotate | `_async_audit(…, "api_key_mint", …)` inside `hosted_api.py::session_key` and `hosted_api.py::_session_key_supabase` (the two `#2446` lanes, resolved by symbol — no line numbers, see §0); named here so the three action names are not conflated |
+| **Key revoke writes NO audit row** | `hosted_api.py::revoke_api_key` (handler body, zero `_async_audit`); `supabase_control.revoke_api_key:1377` is a bare PATCH — **gap, filed as #9177** |
 | Parent revocation does not cascade to children | `#8694` OPEN (`#2427` §2.4) |
-| `#524` OAuth machinery shipped | `tortoise/oauth.py`; `hosted_api.py:38600-38967` (discovery, `/oauth/token`, `/oauth/revoke`, `/register` DCR) |
+| `#524` OAuth machinery shipped | `tortoise/oauth.py`; `@app.get("/.well-known/oauth-protected-resource")`, `@app.get("/oauth/authorize")`, `@app.post("/oauth/consent")`, `@app.post("/oauth/token")`, `@app.post("/oauth/revoke")`, `@app.post("/register")` (DCR) |
 
 ---
 
@@ -368,13 +385,13 @@ method is added, by this design. What the tier needs is named here so the approv
    `DELETE /v1/team/keys/{key_id}` — only for a key whose `created_by_key_id` names the calling
    credential. Without the two lifecycle verbs §5's Replace/Revoke story cannot be built at all: as
    of this head both are pinned to the caller's own org (§5.2, §8) and the child cannot rotate
-   itself (`hosted_api.py:12004`). The authority is the same "teams it provisioned, nothing else"
+   itself (`hosted_api.py::_reject_minted_delegated_key`). The authority is the same "teams it provisioned, nothing else"
    boundary as minting (§3.3 properties 1 and 5) — it is **not** a master token and **not**
    impersonation (D2/Q1).
    **The alternative shape, stated so nobody re-derives it:** a per-end-user *manager* credential
    held **inside** the end-user's team, used to rotate that team's end-user credential. It needs no
    cross-team reach, but it needs a **deleg-NULL provisioning lane** (`rotate` rejects every
-   `deleg=0` caller at `:12004`) and it places an owner-class credential in the very team the end
+   `deleg=0` caller at `hosted_api.py::_reject_minted_delegated_key`) and it places an owner-class credential in the very team the end
    user's graph lives in, which weakens §6.1's dormancy argument. Recorded as the fallback.
    Candidate shapes for the cross-team authority, cheapest first:
    - **S-a (recommended)**: extend the existing mint route with an explicit, separately-authorised

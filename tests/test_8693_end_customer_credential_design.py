@@ -28,9 +28,21 @@ The tests are of two kinds, both deliberate:
   refuted ones absent (these fail on the PRE-FIX document, which is the
   non-vacuity proof for a docs-only fix).
 
+The document cites ``tortoise/hosted_api.py`` by **symbol address**
+(``hosted_api.py::<symbol>``) or **route address** (``@app.<verb>("<route>")``),
+never by absolute line number. That is the repo's own recorded rule — *the symbol
+name is authoritative, the line number is a convenience* — already enforced for the
+extractor-v4 design by ``tests/test_extractor_v4_citation_rot.py``
+(``test_every_quoted_symbol_citation_resolves_at_head``, the ``#8506`` guard). This
+file does not get a second, opposite-polarity instrument: pinning the number reds
+every PR that edits this 4,700-line module on a doc its author has no reason to
+touch, which is exactly what happened twice under #9178. The symbols and routes are
+resolved with ``ast`` here, so a rename/removal still reds.
+
 Every assertion imports nothing that needs a database: the module under test is
-parsed with ``ast`` and only ``_ensure_key_in_pinned_org`` is imported, so this
-file belongs to the fast pool.
+parsed with ``ast``, and only ``_ensure_key_in_pinned_org``, ``_MINTABLE_SCOPES``
+and ``_OWNER_SCOPE_ALLOWLIST`` are imported from it, so this file belongs to the
+fast pool.
 """
 
 from __future__ import annotations
@@ -129,20 +141,67 @@ def _audit_actions(node: ast.AST) -> list[str]:
     return actions
 
 
-_CITED_POINT = re.compile(r":(\d{4,5})\b")
-_CITED_SPAN = re.compile(r"hosted_api\.py:(\d{4,5})-(\d{4,5})")
+_CITED_LINE_NUMBER = re.compile(r"hosted_api\.py:(\d{4,5})")
+#: A **symbol address** in the design doc: ``hosted_api.py::<symbol>`` — the only
+#: form this document is allowed to use for the module (see its §0 note).
+_SYMBOL_ADDRESS = re.compile(r"hosted_api\.py::([A-Za-z_][A-Za-z0-9_.]*)")
+#: A **route address**: ``@app.<verb>("<route>")``, verbatim as registered.
+_ROUTE_ADDRESS = re.compile(r'@app\.(get|post|put|delete|patch)\("([^"]+)"\)')
 
 
-def _source_lines(path: Path) -> list[str]:
-    return path.read_text(encoding="utf-8").splitlines()
+def _module_symbols() -> set[str]:
+    """Every name the module binds at any level: functions, classes, assignments."""
+    names: set[str] = set()
+    for node in ast.walk(_module()):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+    return names
 
 
-def _route_line(src: list[str], route: str) -> int:
-    """1-based line of the ``@app.<verb>("<route>")`` decorator."""
-    for i, line in enumerate(src, 1):
-        if line.startswith("@app.") and f'"{route}"' in line:
-            return i
-    raise AssertionError(f"tortoise/hosted_api.py no longer registers {route}")
+def _registered_routes() -> dict[str, set[str]]:
+    """``{route: {verb, …}}`` read from the ``@app.<verb>("<route>")`` decorators."""
+    routes: dict[str, set[str]] = {}
+    for node in ast.walk(_module()):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for dec in node.decorator_list:
+            if not (
+                isinstance(dec, ast.Call)
+                and isinstance(dec.func, ast.Attribute)
+                and isinstance(dec.func.value, ast.Name)
+                and dec.func.value.id == "app"
+                and dec.args
+                and isinstance(dec.args[0], ast.Constant)
+                and isinstance(dec.args[0].value, str)
+            ):
+                continue
+            routes.setdefault(dec.args[0].value, set()).add(dec.func.attr)
+    return routes
+
+
+def _audit_call_handlers(action: str) -> list[str]:
+    """The enclosing handler of every ``_async_audit(…, "<action>", …)`` call."""
+    owners: list[str] = []
+    for node in ast.walk(_module()):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if action in _audit_actions(node):
+            owners.append(node.name)
+    return owners
+
+
+def _doc_lines_matching(*needles: str) -> list[str]:
+    """Doc lines that contain every needle."""
+    return [
+        line
+        for line in _doc().splitlines()
+        if all(needle in line for needle in needles)
+    ]
 
 
 def _doc() -> str:
@@ -279,67 +338,124 @@ def test_audit_action_names_are_distinct_and_as_documented():
     )
 
 
-def test_the_doc_cites_the_api_key_mint_audit_lines_that_really_are_them():
-    """§8's ``api_key_mint`` row must cite lines that ARE the mint audit calls.
+def test_every_code_address_in_the_design_resolves_at_head():
+    """The design's citations are SYMBOL addresses, and those symbols must exist.
 
-    Non-vacuity: at the #9178 head the row carried ``:27258`` and ``:27475`` — two
-    numbers a merge had invalidated (+96), where ``:27258`` is a comment and
-    ``:27475`` is ``_require_owner_admin(...)``. The old assertion here was
-    ``"api_key_mint" in HOSTED_API.read_text()``, which passes wherever the lanes
-    live; this pin reads the doc's OWN numbers and asks the module what is on them,
-    so the rot that shipped this row fails instead of blessing it.
+    This is the rot instrument, and it is deliberately the *same polarity* the repo
+    already owns in ``tests/test_extractor_v4_citation_rot.py``
+    (``test_every_quoted_symbol_citation_resolves_at_head``, the ``#8506`` guard): the
+    rule is *"the symbol name is authoritative, the line number is a convenience"*.
+    ``tortoise/hosted_api.py`` moves by hundreds of lines on unrelated merges — it did
+    under this very PR, which shipped ``:27258``/``:27475`` and a ``:38600-38967`` span
+    that no longer held ``/oauth/token`` — so pinning the absolute number reds every
+    future PR that touches the module, on a doc its author has no reason to open. A
+    renamed or deleted symbol still reds here, which is the guarantee that matters.
+
+    Non-vacuity: the pre-fix document carried ZERO ``hosted_api.py::`` addresses (it
+    cited numbers only), so the inventory assertion below is red on it.
     """
-    src = _source_lines(HOSTED_API)
-    cited = [
-        int(number)
-        for line in _doc().splitlines()
-        if "api_key_mint" in line and "hosted_api.py" in line
-        for number in _CITED_POINT.findall(line)
-    ]
-    assert cited, (
-        "§8 must still cite the two api_key_mint lanes by line number — the row exists so "
-        "the three audit action names are not conflated"
+    doc = _doc()
+    symbols = _SYMBOL_ADDRESS.findall(doc)
+    routes = _ROUTE_ADDRESS.findall(doc)
+    assert len(symbols) >= 15 and routes, (
+        f"the design doc carries {len(symbols)} symbol address(es) and {len(routes)} route "
+        "address(es) — it has gone back to absolute line numbers, or the extractor broke and "
+        "this guard would otherwise pass vacuously"
     )
-    for number in cited:
-        target = src[number - 1]
-        assert "_async_audit" in target and "api_key_mint" in target, (
-            f"§8 cites hosted_api.py:{number} as an api_key_mint audit call, but that line is "
-            f"{target.strip()[:90]!r} — the citation has rotted (this module moves under "
-            "merges; re-resolve the numbers and update §8 in the same commit)"
-        )
+
+    stale = _CITED_LINE_NUMBER.findall(doc)
+    assert not stale, (
+        f"the design doc cites hosted_api.py by absolute line again ({stale[:5]}) — that is "
+        "the rot class this pin exists to stop (see the doc's §0 note): use a symbol address "
+        "(`hosted_api.py::<symbol>`) or a route address (`@app.<verb>(\"<route>\")`)"
+    )
+
+    known = _module_symbols()
+    unresolved = sorted({name for name in symbols if name not in known})
+    assert not unresolved, (
+        "the design doc addresses symbols that no longer exist in tortoise/hosted_api.py: "
+        f"{unresolved} — a rename or removal moved the evidence out from under the claim"
+    )
+
+    registered = _registered_routes()
+    unresolved_routes = sorted(
+        f'@app.{verb}("{route}")'
+        for verb, route in routes
+        if verb not in registered.get(route, set())
+    )
+    assert not unresolved_routes, (
+        f"the design doc cites routes that are not registered with that verb: "
+        f"{unresolved_routes} — re-resolve §0/§8's #524 claim"
+    )
 
 
-def test_the_doc_oauth_span_really_contains_the_oauth_routes():
-    """§0/§8 cite one ``hosted_api.py:A-B`` span as proof `#524` shipped.
+def test_the_doc_cites_the_two_api_key_mint_lanes_by_their_handlers():
+    """§8's ``api_key_mint`` row must name the lanes, and the lanes must be the mint ones.
 
-    Non-vacuity: the pre-fix span ``:38504-38807`` stopped BEFORE ``/oauth/token``
-    and ``/oauth/revoke`` — the two routes the row names — so the "evidence"
-    pointed at DCR bookkeeping and the consent prelude. This pin requires the
-    cited span to bracket the routes it is cited for.
+    ``api_key_mint`` is the ``#2446`` member self-service / recovery action, a THIRD name
+    from ``api_key_create``/``api_key_rotate``. The code half resolves it structurally:
+    exactly two ``_async_audit(…, "api_key_mint", …)`` call sites, in two different
+    handlers, neither of which is the create/rotate handler.
+
+    Non-vacuity: the pre-fix row named two absolute line numbers (a merge had already
+    invalidated both) and named no handler at all.
     """
-    src = _source_lines(HOSTED_API)
-    routes = {
-        route: _route_line(src, route)
-        for route in (
-            "/.well-known/oauth-protected-resource",
-            "/oauth/token",
-            "/oauth/revoke",
-        )
-    }
-    spans = [
-        (int(start), int(end))
-        for line in _doc().splitlines()
-        if "/oauth/" in line
-        for start, end in _CITED_SPAN.findall(line)
-    ]
-    assert spans, "§0/§8 must still cite the OAuth route span that proves #524 shipped"
-    for start, end in spans:
-        for route, number in routes.items():
-            assert start <= number <= end, (
-                f"the design doc cites hosted_api.py:{start}-{end} as the OAuth evidence, but "
-                f"{route} is registered at :{number} — outside the cited span (re-resolve the "
-                "span and update every row that cites it)"
+    handlers = _audit_call_handlers("api_key_mint")
+    assert sorted(handlers) == ["_session_key_supabase", "session_key"], (
+        f"the api_key_mint lanes moved: {handlers} — §8's third-action row names "
+        "`session_key` and `_session_key_supabase`; update that row in the same commit"
+    )
+    assert set(handlers).isdisjoint({"create_api_key", "rotate_api_key"}), (
+        "api_key_mint is being audited from the create/rotate handler — the three action "
+        "names are exactly what §8's row exists to keep apart"
+    )
+
+    rows = _doc_lines_matching("api_key_mint", "hosted_api.py")
+    assert rows, (
+        "§8 must keep the api_key_mint row — it exists so the three audit action names are "
+        "not conflated"
+    )
+    for row in rows:
+        for handler in ("session_key", "_session_key_supabase"):
+            assert handler in row, (
+                f"§8's api_key_mint row must name the handler `{handler}` it cites — a bare "
+                f"line number rots on any merge that touches the module "
+                f"({row.strip()[:90]}…)"
             )
+
+
+def test_the_doc_cites_the_oauth_routes_as_the_decorators_they_are():
+    """Every row making the ``#524`` claim must cite the ROUTES, not a line span.
+
+    Non-vacuity: the pre-fix §0/§8 rows cited one ``hosted_api.py:A-B`` span, and that
+    span had come to exclude BOTH routes the rows are evidence for — a citation that
+    measures nothing about its own claim.
+    """
+    registered = _registered_routes()
+    for route in ("/oauth/token", "/oauth/revoke"):
+        assert "post" in registered.get(route, set()), (
+            f"{route} is no longer registered with POST — §0/§8's #524 evidence is gone"
+        )
+    assert "/.well-known/oauth-protected-resource" in registered, (
+        "the RFC 9728 discovery route is gone — §0/§8 cite it as part of the #524 evidence"
+    )
+
+    rows = _doc_lines_matching("/oauth/token", "@app.")
+    assert len(rows) >= 2, (
+        f"§0 and §8 both make the #524 claim; only {len(rows)} row(s) cite the module's "
+        "routes for it"
+    )
+    for row in rows:
+        for route in ("/oauth/token", "/oauth/revoke"):
+            assert f'@app.post("{route}")' in row, (
+                f"this #524 row names `{route}` but does not cite it as the decorator "
+                f'`@app.post("{route}")` — cite the route, not a line span '
+                f"({row.strip()[:90]}…)"
+            )
+        assert not _CITED_LINE_NUMBER.search(row), (
+            "this #524 row cites an absolute line span again — it rots on the next merge "
+            "that touches tortoise/hosted_api.py"
+        )
 
 
 def test_revoke_writes_no_audit_row_until_the_doc_is_updated():
@@ -400,10 +516,3 @@ def test_design_doc_keeps_the_corrected_claims():
     assert "api_key_mint" in doc, (
         "§8 must name api_key_mint as a THIRD action, not evidence for create/rotate"
     )
-    for line in doc.splitlines():
-        if "api_key_create" not in line and "api_key_rotate" not in line:
-            continue
-        assert "27258" not in line and "27475" not in line, (
-            "a row about api_key_create/api_key_rotate cites a stale api_key_mint lane "
-            f"({line.strip()[:80]}…) — re-resolve the line numbers (see the citation pins above)"
-        )
