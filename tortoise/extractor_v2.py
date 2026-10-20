@@ -4054,6 +4054,29 @@ _CONDITION_PHRASES = (
 #   * a one-sided EXTRA operator inside an already-shared slot still folds
 #     ("we ship and test" / "we ship and test but we wait") — the extra is read
 #     as the broadening case, and closing it needs syntax.
+#
+# ⚠️ Each residual above has a MECHANICAL-looking fix, and each is FALSIFIED by
+# a pinned test in `tests/test_never_across_fold_5080.py` (#5325).  Recorded
+# here so the next reader does not re-derive them:
+#   * compare the UNION across slots, so a cross-slot `and`/`then` swap becomes
+#     visible — refuses the phase-D restatement pinned as a must-fold ("first
+#     TO unblock the mobile team" / "first AND unblock the mobile team"), whose
+#     two sides are `to` and `and` and share no slot at all.  A cross-slot swap
+#     and a cross-slot rewording are the same shape here, so no read of the
+#     slots can separate them.
+#   * compare each slot as a SEQUENCE instead of a set, so a permutation becomes
+#     visible — closes the pinned `and`/`or` exemplar ONLY: a pair that keeps
+#     `[and, or]` in that order and changes the ATTACHMENT still folds, so the
+#     class stays open and the proxy buys one token.
+#   * declare `but`/`yet` or `because`/`as` EQUIVALENT — folds "we have yet to
+#     ship the build" against "we have but to ship the build" (opposite
+#     meanings: not-yet-shipped against only-need-to-ship), and "we halted as
+#     the tests failed" against "we halted because the tests failed" (`as` may
+#     mean WHILE, and that reading is in the SAME clause-relation family, so no
+#     slot-level signal separates it from the BECAUSE reading).
+# The residuals therefore need what #5325 says they need — a dependency parse or
+# a model over the pair — and every token-list edit above trades a wrong keep
+# (noise) for a wrong drop (memory loss).
 # `before`/`after` are deliberately NOT slots: both are ordinary content tokens
 # (neither is a frame word), so each side keeps its own ordering word and the
 # two-sided substitution rule already refuses the swap.
