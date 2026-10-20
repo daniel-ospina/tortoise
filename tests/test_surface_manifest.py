@@ -468,10 +468,14 @@ def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
     two columns disagreeing, because `reason` is excluded from `check`; that is this pin,
     and `test_the_reason_dependency_cross_check_can_fail` proves it fires.
 
-    Coverage is per ROW, not only in aggregate: a list carried in one column and not the
-    other is reded below, so deleting a column's list cannot exempt the row while the
-    `compared >= 40` floor still clears (measured before that arm existed: the row left
-    the comparison and `compared` fell 41 -> 40, passing).
+    Coverage is per ROW for a ONE-SIDED edit: a list carried in one column and not the other
+    is reded below, so deleting a column's list cannot exempt the row while the floor still
+    clears (measured before that arm existed: the row left the comparison and `compared`
+    fell 41 -> 40). Deleting BOTH columns' lists is NOT this pin's case and it does not
+    claim it: `dependency` is a DERIVED column, so that edit reds
+    `tools/surface_manifest.py check` — measured, exit 1, "row `sdk:supersede_point` was
+    hand-edited" — which `test_the_order_lint_passes` runs. The floor therefore carries no
+    allowance for a row leaving the comparison (41, the measured count, not 40).
     """
     compared, mismatched, one_sided = _caller_lists(_manifest())
     assert not one_sided, (
@@ -479,9 +483,11 @@ def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
         "was deleted (which would exempt the row from this comparison instead of reding it) "
         f"or the two were reworded apart: {one_sided}"
     )
-    assert compared >= 40, (
+    assert compared >= 41, (
         f"only {compared} rows carry a comparable caller list (41 today) — this check "
-        "has stopped reading the manifest's rows and would pass vacuously"
+        "has stopped reading the manifest's rows and would pass vacuously. The bound is "
+        "the measured count, not one below it: the old 40 let a single row leave the "
+        "comparison unnoticed, which is the hole the one-sided arm above closes"
     )
     assert not mismatched, (
         "these rows state one caller set in `dependency` and another in `reason`: "
@@ -501,7 +507,7 @@ def test_the_reason_dependency_cross_check_can_fail():
     row = next(r for r in doc["rows"] if r.get("name") == "sdk:supersede_point")
     row["reason"] = "no MCP tool binds it; callers: engine, other-tooling, tenant-rest"
     compared, mismatched, one_sided = _caller_lists(doc)
-    assert compared >= 40, f"the cross-check reads only {compared} rows on a doctored copy"
+    assert compared >= 41, f"the cross-check reads only {compared} rows on a doctored copy"
     assert not one_sided, f"a two-sided row was reported as one-sided: {one_sided}"
     assert [name for name, _dep, _reason in mismatched] == ["sdk:supersede_point"], (
         f"a one-sided edit to `reason` did not red the cross-check: {mismatched}"
