@@ -4678,6 +4678,20 @@ def _stamp_capture_provenance(sdk, proj, ids, *, event_id, session_id,
     """
     if not ids:
         return True
+    if "IS NULL" in statement and "$stamp_ids" not in statement:
+        # #9350 review (P2-1): a GUARDED stamp's ``$ids`` is the caller's CLAIM
+        # predicate, not the set that WOULD be journalled. Without the narrow
+        # clause the WRITTEN set is not a subset of the JOURNALLED set, so an id
+        # that became eligible between the pre-read and the write is stamped
+        # with no record — the §17.1 window this change exists to close.
+        #
+        # ⛔ The check runs BEFORE the appends (review round 3): raising after
+        # them left the journal holding records for a write that was then
+        # skipped — `rebuild()` would apply provenance the capture never wrote,
+        # the mirror of the defect this issue removes. `_recorded` is computed
+        # first because nothing here depends on the append.
+        raise ValueError(
+            f"a guarded stamp must narrow its write to $stamp_ids ({what})")
     # ONE record per id, for the ids a record CAN name. The SAME filtered list
     # binds the write (#9350 review): the record loop already skipped a non-str
     # / empty id, so binding the raw list would let the write touch an id the
@@ -4707,16 +4721,6 @@ def _stamp_capture_provenance(sdk, proj, ids, *, event_id, session_id,
         return False
     bound = {"ids": list(_recorded), "eid": event_id, "sid": session_id,
              "harness": harness, "ing": ingested_at, **(params or {})}
-    if "IS NULL" in statement and "$stamp_ids" not in statement:
-        # #9350 review (P2-1): a GUARDED stamp's ``$ids`` is the caller's CLAIM
-        # predicate, not the set journalled above. Without the narrow clause the
-        # WRITTEN set is not a subset of the JOURNALLED set, so an id that became
-        # eligible between the pre-read and the write is stamped with no record —
-        # the §17.1 window this change exists to close. Enforced HERE so a call
-        # site that drops the clause (either lane) fails loudly instead of
-        # silently reverting.
-        raise ValueError(
-            f"a guarded stamp must narrow its write to $stamp_ids ({what})")
     if "$stamp_ids" in statement:
         # #9350: a GUARDED stamp's ``$ids`` is the caller's CLAIM predicate (it
         # arrives through ``params``), so it is NOT the set this call just

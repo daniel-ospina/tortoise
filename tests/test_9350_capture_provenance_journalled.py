@@ -618,7 +618,8 @@ def test_a_guarded_stamp_without_the_narrow_clause_is_refused(tmp_path):
     """
     from tortoise.sdk import _stamp_capture_provenance
 
-    sdk = TortoiseSDK(str(tmp_path / "guard.db"))
+    log_path = str(tmp_path / "events" / "guard.jsonl")
+    sdk = TortoiseSDK(str(tmp_path / "guard.db"), event_log_path=log_path)
     try:
         proj = sdk._get_proj()
         with pytest.raises(ValueError, match=r"\$stamp_ids"):
@@ -630,6 +631,16 @@ def test_a_guarded_stamp_without_the_narrow_clause_is_refused(tmp_path):
                 what="unguarded test stamp")
     finally:
         sdk.close()
+    # ⛔ The refusal must come BEFORE the appends: a raise ordered after them
+    # leaves the journal holding records for a write that never happened, and a
+    # journal-only rebuild then applies provenance the capture never wrote — the
+    # mirror of the defect this issue removes (found in review round 3).
+    residue = ([r for r in _records(log_path)
+                if r.get("type") == "PointRevised" and r.get("id") == "p-a"]
+               if os.path.exists(log_path) else [])
+    assert not residue, (
+        "the refused stamp still journalled a record for p-a, so a rebuild "
+        f"would apply provenance that was never written: {residue!r}")
 
 
 def test_the_id_pre_read_refuses_a_statement_that_writes(tmp_path):
@@ -715,7 +726,11 @@ def test_every_guarded_stamp_call_narrows_its_write_to_the_journalled_ids(module
     retry-heal paths are not reached by every capture. This walks the two
     modules instead, so dropping the clause from any of the six sites (three per
     lane) reds CI rather than reverting one race away from §17.1. The minted
-    stamp is UNGUARDED and passes no ``ids`` param, so it is correctly exempt.
+    stamp is UNGUARDED and passes no ``params`` at all, so it is correctly
+    exempt — and the BUCKET SIZES are asserted, because a classifier that
+    quietly files a guarded site under `unguarded` would exempt it silently
+    (measured: keying on `"ids"` alone missed both retry-heal sites, which pass
+    `params={"sid": …}`).
     """
     import ast
     from pathlib import Path
@@ -728,14 +743,17 @@ def test_every_guarded_stamp_call_narrows_its_write_to_the_journalled_ids(module
             continue
         fn = node.func
         name = getattr(fn, "id", None) or getattr(fn, "attr", None)
-        if name not in ("_stamp_capture_provenance", "_stamp_capture_provenance"):
+        if name != "_stamp_capture_provenance":
             continue
         segment = ast.get_source_segment(src, node) or ""
-        if '"ids"' in segment:
-            guarded.append(segment)
-        else:
-            unguarded.append(segment)
-    assert guarded, f"{module}: no guarded call site found — did the wiring move?"
+        (guarded if "params=" in segment else unguarded).append(segment)
+    assert len(guarded) == 3, (
+        f"{module}: expected the three GUARDED stamp sites (operator label "
+        f"sweep, operator ids, retry heal), found {len(guarded)} — a site that "
+        "moved or lost its `params` now escapes the pin below")
+    assert len(unguarded) == 1, (
+        f"{module}: expected exactly ONE unguarded site (the minted-point "
+        f"stamp), found {len(unguarded)}")
     for segment in guarded:
         assert "$stamp_ids" in segment, (
             f"{module}: a guarded _stamp_capture_provenance call does not "
@@ -743,6 +761,3 @@ def test_every_guarded_stamp_call_narrows_its_write_to_the_journalled_ids(module
             "subset of the JOURNALLED set — an id that becomes eligible "
             "between the pre-read and the write is stamped with no record "
             "(#9350):\n" + segment[:600])
-    assert unguarded, (
-        f"{module}: expected the unguarded minted-point stamp to pass no "
-        "`ids` param — if it now does, it needs `$stamp_ids` too")
