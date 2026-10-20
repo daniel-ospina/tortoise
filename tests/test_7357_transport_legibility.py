@@ -20,12 +20,12 @@ not a lost write (#7405) — must never invite a blind re-issue of a statement
 that can mutate.
 
 Wiring is tested where the repo's seam is: ``cypher_guard``'s guarded command
-channel — the ONE channel every in-package FalkorDB client's command passes
-through (handle verbs, the client's own ``execute_command`` and the
-connection's) — plus the duck-typed handle proxy, which dispatches straight to
-its wrapped handle and therefore carries its own application of the same note.
-The tests below drive a real ``guarded_client`` so removing the wiring — not
-merely the helper — reddens them.
+channel — the ONE channel every GUARDED FalkorDB client's command passes through
+(handle verbs, the client's own ``execute_command`` and the connection's) — plus
+the duck-typed handle proxy, which dispatches straight to its wrapped handle and
+therefore carries its own application of the same note. The tests below drive a
+real ``guarded_client`` so removing the wiring — not merely the helper — reddens
+them.
 """
 from __future__ import annotations
 
@@ -177,11 +177,37 @@ def test_a_destructive_command_with_no_statement_is_never_called_safe():
     assert "re-issuing this statement is safe" not in message
 
 
-def test_a_write_through_the_read_only_verb_is_not_treated_as_a_mutation_risk():
-    """``GRAPH.RO_QUERY`` refuses a write outright, so its failure applied nothing."""
+def test_a_write_through_the_read_only_verb_still_says_the_outcome_is_unknown():
+    """``ro_query``'s refusal of a write is ENGINE POLICY, not a property of the verb.
+
+    v4.20.6 answers ``ResponseError("graph.RO_QUERY is to be executed only on
+    read-only queries")`` and applies nothing, so treating the verb as
+    non-executing was true THERE. It is unmeasured on falkordb 6.x (production)
+    and on the embedded engine, and the projection records the opposite reading
+    for the same verb — "The 'read-only' verb is mutating-CAPABLE … a statement
+    handed to it is dispatched the same way". The asymmetry decides the arm: a
+    wrong "safe to re-issue" duplicates a bare non-idempotent ``CREATE`` (the
+    ``retryable_aborted_write`` class) while a wrong "OUTCOME UNKNOWN" only asks
+    for a read-back on the engine that refused.
+
+    P2 (review cycle 4) — the arm used to be ``False`` and this test pinned it.
+    """
     exc = _raise_from_handle(
         redis_exc.TimeoutError(SOCKET_TIMEOUT), WRITE_STATEMENT, read_only=True)
-    assert "re-issuing this statement is safe" in str(exc)
+    message = str(exc)
+    assert "OUTCOME IS UNKNOWN" in message
+    assert "re-issuing this statement is safe" not in message
+
+    # …and the safe arm SURVIVES for the traffic that actually uses the verb.
+    read = _raise_from_handle(
+        redis_exc.TimeoutError(SOCKET_TIMEOUT), READ_STATEMENT, read_only=True)
+    assert "re-issuing this statement is safe" in str(read)
+    assert "OUTCOME IS UNKNOWN" not in str(read)
+    # The channel-level classifier agrees with the handle-level one.
+    assert cypher_guard._command_mutating(
+        ("GRAPH.RO_QUERY", "proj.g", WRITE_STATEMENT)) is True
+    assert cypher_guard._command_mutating(
+        ("GRAPH.RO_QUERY", "proj.g", READ_STATEMENT)) is False
 
 
 def test_a_restart_handshake_says_the_instance_is_loading_and_safe_to_reissue():
@@ -270,12 +296,12 @@ def test_an_explain_plan_is_never_told_its_write_may_have_landed():
     assert "OUTCOME IS UNKNOWN" not in str(caught.value)
 
 
-def test_the_proxy_verbs_agree_with_the_command_channel_on_read_only_verbs():
-    """P2 (review): the arm must follow the VERB, not the statement text.
+def test_the_proxy_verbs_agree_with_the_command_channel():
+    """The proxy has no command tuple, so its arm must match ``_command_mutating``.
 
-    A ``CREATE`` sent through ``ro_query``/``explain`` cannot have applied, and
-    the proxy (which has no command tuple to classify) used to disagree with
-    ``_command_mutating`` on exactly that shape.
+    ``explain`` only PLANS (nothing can have applied, whatever the text), while
+    ``ro_query`` takes its arm from the TEXT — a write there is not provably
+    unapplied (see the engine-policy test above) and a read keeps the safe arm.
     """
 
     class _StubHandle:
@@ -292,14 +318,22 @@ def test_the_proxy_verbs_agree_with_the_command_channel_on_read_only_verbs():
             raise redis_exc.TimeoutError(SOCKET_TIMEOUT)
 
     handle = cypher_guard._guard_handle(_StubHandle())
-    for label, call in (
-        ("ro_query", lambda: handle.ro_query(WRITE_STATEMENT)),
-        ("explain", lambda: handle.explain(WRITE_STATEMENT)),
-    ):
-        with pytest.raises(redis_exc.TimeoutError) as caught:
-            call()
-        assert "re-issuing this statement is safe" in str(caught.value), label
-        assert "OUTCOME IS UNKNOWN" not in str(caught.value), label
+
+    # EXPLAIN plans only → safe even for a write's text.
+    with pytest.raises(redis_exc.TimeoutError) as caught:
+        handle.explain(WRITE_STATEMENT)
+    assert "re-issuing this statement is safe" in str(caught.value)
+    assert "OUTCOME IS UNKNOWN" not in str(caught.value)
+
+    # RO_QUERY is classified by its text, both ways.
+    with pytest.raises(redis_exc.TimeoutError) as caught:
+        handle.ro_query(WRITE_STATEMENT)
+    assert "OUTCOME IS UNKNOWN" in str(caught.value)
+    assert "re-issuing this statement is safe" not in str(caught.value)
+
+    with pytest.raises(redis_exc.TimeoutError) as caught:
+        handle.ro_query(READ_STATEMENT)
+    assert "re-issuing this statement is safe" in str(caught.value)
 
     # …while a write through the EXECUTING verb still gets the loud arm.
     with pytest.raises(redis_exc.TimeoutError) as caught:

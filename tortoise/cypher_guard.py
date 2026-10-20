@@ -1314,25 +1314,31 @@ def _guard_execute_command(args, client=None):
 #: ``_statement_writes`` (``tortoise.projection`` imports THIS module); see
 #: :func:`_destructive_commands`.
 
-#: Query verbs that CANNOT have applied a statement even when its text is a
-#: write: ``GRAPH.RO_QUERY`` and ``GRAPH.EXPLAIN``. MEASURED on the pinned server
-#: (``falkordb/falkordb-server:v4.20.6``, the version ``config/ci-surfaces.yml``
-#: pins), on a fresh graph, ``count(n:W)`` before and after each verb:
+#: Query verb that CANNOT have applied a statement even when its text is a
+#: write: ``GRAPH.EXPLAIN``, which only PLANS. MEASURED on the pinned server
+#: (``falkordb/falkordb-server:v4.20.6``), on a fresh graph, ``count(n:W)``
+#: before and after: ``GRAPH.EXPLAIN "CREATE (:W {i:2})"`` plans it, count 0.
 #:
-#:   GRAPH.RO_QUERY "CREATE (:W {i:1})" -> ResponseError
-#:       "graph.RO_QUERY is to be executed only on read-only queries", count 0
-#:   GRAPH.EXPLAIN  "CREATE (:W {i:2})" -> plans it, count 0
-#:   GRAPH.PROFILE  "CREATE (:W {i:3})" -> EXECUTES it, count 1
-#:
-#: ``GRAPH.PROFILE`` is therefore NOT here and is classified from its text. The
-#: projection's own ``ro_query`` guard stays deliberately ("a statement handed
-#: to it is dispatched the same way"): the engine's refusal is what this note
-#: relies on, and the handle guard is defence in depth for an engine that did
-#: not refuse — dispatch is unchanged either way. That dependency is why THIS
-#: comment carries the server version: if a future engine executes writes on
-#: RO_QUERY, the read-safe arm becomes unsafe and this measurement is the thing
-#: to re-run.
-_NON_EXECUTING_COMMANDS = frozenset({"GRAPH.RO_QUERY", "GRAPH.EXPLAIN"})
+#: ⛔ ``GRAPH.RO_QUERY`` IS DELIBERATELY NOT HERE, and this is a reversal of an
+#: earlier (correct-at-the-time) decision in this module. v4.20.6 refuses a
+#: write on that verb — ``ResponseError("graph.RO_QUERY is to be executed only
+#: on read-only queries")``, count 0 — so on THAT engine nothing can have
+#: applied and ``False`` was true. But that refusal is an ENGINE POLICY, not a
+#: property of the verb, and the policy is unmeasured on the two engines this
+#: package actually runs against in production: falkordb 6.x and the embedded
+#: engine (``config/ci-surfaces.yml`` records production as 6.x; the docker
+#: lane pins v4.20.6). The projection already records the opposite reading for
+#: the same verb and keeps a guard for it — ``tortoise/projection``: "The
+#: 'read-only' verb is mutating-CAPABLE, not read-only: the name is the vendor's,
+#: and a statement handed to it is dispatched the same way". A WRONG ``False``
+#: here tells an agent a re-issue is safe and it duplicates a bare
+#: non-idempotent ``CREATE`` — exactly the class ``retryable_aborted_write``
+#: refuses — while a WRONG ``True`` only costs a read-back on an engine that
+#: refused. The asymmetry decides it: classify the TEXT (a read statement still
+#: answers ``False``, so the safe arm survives for the read-only traffic that
+#: overwhelmingly uses this verb). ``GRAPH.PROFILE`` is absent for the mirror
+#: reason: it EXECUTES the statement (measured: count 1).
+_NON_EXECUTING_COMMANDS = frozenset({"GRAPH.EXPLAIN"})
 
 
 def _destructive_commands() -> frozenset | None:
@@ -1420,13 +1426,12 @@ def _command_mutating(args) -> bool | None:
     if verb not in _GRAPH_QUERY_COMMANDS:
         return None
     if verb in _NON_EXECUTING_COMMANDS:
-        # ``GRAPH.RO_QUERY`` refuses a write statement outright, and
-        # ``GRAPH.EXPLAIN`` only PLANS — it does not execute (the projection
-        # records the same distinction). A transport failure on either cannot
-        # have applied a statement, whatever the statement's text says. This
-        # is why the arm is derived from the VERB here and not from the text
-        # alone: ``g.explain("CREATE …")`` must never be told its write may
-        # have landed.
+        # ``GRAPH.EXPLAIN`` only PLANS — it does not execute. A transport
+        # failure on it cannot have applied a statement, whatever the
+        # statement's text says, which is why the arm comes from the VERB here
+        # and not from the text: ``g.explain("CREATE …")`` must never be told
+        # its write may have landed. ``GRAPH.RO_QUERY`` is NOT in the set — see
+        # its comment above; a write handed to it is classified from its text.
         return False
     return _statement_mutating(_as_text(args[2]) if len(args) >= 3 else None)
 
@@ -1503,7 +1508,7 @@ class _GuardedExecuteCommand:
     RDB reload, an OOM-kill) surfaces as a bare transport error
     (``Timeout reading from socket`` / ``Connection closed by server``) on
     every verb, read and write — so it is annotated once, on the channels every
-    in-package client's command passes through: the vendor handles' verbs, the
+    GUARDED client's command passes through: the vendor handles' verbs, the
     client's own ``execute_command``, and the connection's two command entries
     (all three reach this wrapper; ``_GuardedHandleProxy`` applies the same note
     in its own ``execute_command`` and in ``_forward_query``).
@@ -1515,7 +1520,17 @@ class _GuardedExecuteCommand:
     ``_GuardedHandleProxy.__getattr__`` forwards verbatim (``delete``,
     ``call_procedure``, ``slowlog``, ``schema`` …) on a DUCK-TYPED handle — on a
     real vendor handle those verbs route through ``execute_command`` and are
-    covered. The claim above is exactly these channels, not "every handle".
+    covered.
+
+    ⛔ AND THE TWO IN-PACKAGE CLIENTS THAT BUILD THEIR OWN ``redis.Redis``, named
+    because "in-package" is not the test — going through THIS seam is:
+    ``hosted_backup._restore_copy_client`` (a raw client on purpose, #3813: the
+    restore's ``GRAPH.COPY`` must not inherit an ordinary request's read bound)
+    and ``acl_graph_users``' admin client. A transport failure there still
+    arrives as the bare driver sentence. The claim above is exactly these
+    channels, not "every handle" and not "every client this package builds".
+    Wiring those two is follow-up work on THEIR seam, not a reason to widen this
+    sentence.
     """
 
     __slots__ = ("__weakref__", "_client", "_raw")
@@ -1701,16 +1716,21 @@ class _GuardedHandleProxy:
 
     def ro_query(self, q, params=None, timeout=None):
         q = _guard_query(q, params, handle=self._handle)
-        # The engine refuses a write on this verb, so nothing can have applied:
-        # the arm must not come from the statement's text alone.
+        # The arm comes from the TEXT, not the verb: the vendor's "read-only"
+        # name is not a guarantee that a write cannot be dispatched (see
+        # ``_NON_EXECUTING_COMMANDS``), and a wrong ``False`` invites a
+        # duplicated write while a wrong ``True`` only asks for a read-back.
         return _forward_query(
-            self._handle.ro_query, q, params, timeout, mutating=False)
+            self._handle.ro_query, q, params, timeout,
+            mutating=_statement_mutating(q))
 
     def _query(self, q, params=None, timeout=None, read_only=False):
         q = _guard_query(q, params, handle=self._handle)
+        # ``read_only`` selects the VERB (``GRAPH.RO_QUERY`` vs ``GRAPH.QUERY``),
+        # it does not make the statement a read: both are classified by text.
         return _forward_query(
             self._handle._query, q, params, timeout,
-            mutating=False if read_only else _statement_mutating(q),
+            mutating=_statement_mutating(q),
             read_only=read_only)
 
     def profile(self, query, params=None):
