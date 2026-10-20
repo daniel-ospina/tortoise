@@ -9161,8 +9161,9 @@ class TortoiseSDK:
         """Record the #7405 entity-link counters on the `:Session`, then journal them.
 
         ⛔ WHY THIS IS ITS OWN DOOR (#9206 review). The write and its record
-        used to sit inline in `capture_session`, which is inventoried
-        apply-first and declares NO lane — so with §17.1's handle ARMED this SET
+        used to sit inline in `capture_session`, which declares NO lane and
+        appends no record of its own (it is inventoried `_NO_JOURNAL`; what it
+        still writes is stamps, #9350) — so with §17.1's handle ARMED this SET
         raised `DirectCacheWriteRefused`, and the caller's deliberate
         `except Exception` ("a provenance failure must not fail a capture")
         swallowed the refusal into `extraction_warnings` while it asserted
@@ -11414,7 +11415,16 @@ class TortoiseSDK:
         #   * nothing in the payload comes from the link: `prior_valid_from` /
         #     `prior_is_episodic` are read back from the MERGE above, in the same
         #     statement, and `eventId` is the caller's own argument.
-        # The record therefore precedes both writes it describes.
+        # Why this door is APPLY-FIRST, not journal-first: the `MERGE
+        # (s:Source …)` it also describes was issued ABOVE this emit, with
+        # `prior_valid_from` / `prior_is_episodic` read back from that same
+        # statement. So the record precedes the write whose failure would skip
+        # it (`link_source_to_event`, below) but not the MERGE — a record stated
+        # over the write's own result, which is exactly what §17.1's apply-first
+        # lane declares. ⛔ Precisely: it precedes ONE of the two writes it
+        # describes (the link), not the MERGE — a reader who took the old
+        # "precedes both writes" wording literally would file this door under
+        # the journal-first lane, which its order does not earn.
         self._emit_event(
             "SourceCreated", id=url,
             url=url,

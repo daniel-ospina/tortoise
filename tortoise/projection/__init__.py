@@ -4685,10 +4685,12 @@ class _GuardedGraph:
         `test_6239_promote_after_supersede.py`. The reason is a census, not a
         hunch: the product's own write path is still largely undeclared — the
         apply-first doors inventoried in `_APPLY_FIRST_DOORS` (`approve_merge`,
-        `assess_source`, `capture_session`, `compute_confidence`,
-        `mitigate_operator`, `promote_point`, `record_calibration`,
-        `set_point_baseline`), the helpers inventoried beside them, and every
-        writer that appends no record at all, all inventoried in
+        `assess_source`, `compute_confidence`, `mitigate_operator`,
+        `promote_point`, `record_calibration`, `set_point_baseline`), the
+        helpers inventoried beside them, `capture_session`'s remaining
+        provenance stamps (inventoried where a writer appends NO record of its
+        own — they are owed a record, #9350), and every other writer that
+        appends no record at all, all inventoried in
         `tests/test_9124_declared_live_doors.py`, which also REFUSES the flip
         while any module has an undeclared entry point. The doors #9206 DID
         declare hold the apply-first lane

@@ -119,6 +119,15 @@ _APPEND_CALL_RE = re.compile(
 _APPEND_NOT_A_RECORD = {
     "_journal_instant",       # entities.py: reads the record's instant
     "_journal_safe_params",   # projection/__init__.py: sanitises params
+    # #9206 review P2: `sdk.py`'s "a journal append failed" RECEIPT warning —
+    # it RETURNS a string and touches no journal. It matched `_?journal_\w+`,
+    # and it was the ONLY pattern-matching call in `capture_session`, so the
+    # census credited that door with a commit point it does not have and filed
+    # it as apply-first on the strength of a warning builder. A `_journal_*`
+    # NAME is not a journal write; that is exactly what this set exists to
+    # refuse, and `capture_session` is inventoried under `_NO_JOURNAL` for the
+    # reason the source actually shows.
+    "_journal_write_failure_warning",  # sdk.py: builds a receipt warning string
 }
 
 #: #9206 — the EP engine's two record carriers, added to `_APPEND_CALL_RE`'s
@@ -205,33 +214,16 @@ _DECLARATION_DECORATORS = (*_LIVE_LANE_NAMES, *_APPLY_FIRST_LANE_NAMES)
 #: this set's pointer will not find the other five. The remaining TWO
 #: (`_stamp_capture_attempt_state`, `_stamp_entity_link_counters`) were never
 #: inventory entries at all: they were inline statements inside
-#: `capture_session`, which is still inventoried for its four provenance stamps
-#: (`#9350`) — a function holding BOTH scoped and unscoped writes is refused by
-#: this census ("presence is not containment"), so the stamps became doors of
-#: their own. A declaration does not convert the order: the entries that remain
-#: are still apply-first, and the lane's own pin requires each declared door to
-#: append its record and to be genuinely apply-first.
+#: `capture_session`, which appends NO record of its own and is therefore
+#: inventoried under `_NO_JOURNAL` for its four provenance stamps (`#9350`) — a
+#: function holding BOTH scoped and unscoped writes is refused by this census
+#: ("presence is not containment"), so the stamps became doors of their own.
+#: A declaration does not convert the order: the entries that remain are still
+#: apply-first, and the lane's own pin requires each declared door to append its
+#: record and to be genuinely apply-first.
 _APPLY_FIRST_DOORS = {
     "approve_merge",         # SET reviewed flags, then PointRevised/… records
     "assess_source",         # SET reliability, then the assessment record
-    # #9206: measured apply-first — its provenance stamps (the minted-Point
-    # eventId/source_session/harness SETs and their operator variants) run
-    # BEFORE the first record the door appends. It carried NO declaration and
-    # stays UNdeclared: whether those stamps need their own record (or are
-    # covered by the extraction writers' `PointAdded` payloads) is #9124 part
-    # 2's per-door decision, and blessing them here would be the #9068 defect.
-    # ⚠️ It used to sit in `_MIXED_ARM_DOORS` as "journal-first" because the
-    # census counted the `_emit_event` inside its `on_session_merged=` lambda as
-    # an append — a callback the CALLEE ran, not a record the door appended.
-    # ⚠️ Its TWO state writes (`s.capture_ok`/`s.capture_extractor` and the
-    # entity-link counters) are NOT among those stamps any more: #9206's review
-    # found them undeclared, refused by an ARMED handle and swallowed by the
-    # door's own non-fatal `except` — so each moved into its own DECLARED
-    # apply-first door (`_stamp_capture_attempt_state`,
-    # `_stamp_entity_link_counters`), because each appends the trailing
-    # `SessionRecorded` that carries exactly the values it wrote. What remains
-    # here is the stamps-only remainder (#9350 journals the stamps themselves).
-    "capture_session",
     "compute_confidence",    # SET n.confidence per row, then ConfidenceChanged
     "mitigate_operator",     # CREATE the mitigation, then its records
     "promote_point",         # CAS SET status='live', then PointPromoted
@@ -260,14 +252,16 @@ _APPLY_FIRST_HELPERS = {
 #:   first. #9206 declared the whole door on the apply-first lane, which states
 #:   exactly that (a write whose record follows, by decision) without
 #:   overclaiming for the promote arm.
-#: * `capture_session` was the other, and it turned out to be MISCLASSIFIED: the
-#:   `append` the census saw was the `_emit_event` call inside the
+#: * `capture_session` was the other, and it turned out to be MISCLASSIFIED:
+#:   the `append` the census saw was the `_emit_event` call inside the
 #:   `on_session_merged=lambda record: self._emit_event(...)` argument — a
-#:   callback the CALLEE invokes, not a record this door appends before its
-#:   write. #9206 removed that lambda (the shared writer journals its own
-#:   `:Session` now), which moved the door's first real append below its first
-#:   write; it is inventoried under `_APPLY_FIRST_DOORS` with that measurement in
-#:   its own comment.
+#:   callback the CALLEE invokes, not a record this door appends. #9206 removed
+#:   that lambda (the shared writer journals its own `:Session` now) AND the
+#:   door's two state writes (they are declared doors now), and what is left is
+#:   stamps only: it appends NO record, so it belongs in `_NO_JOURNAL` — its
+#:   first attempt at a home, `_APPLY_FIRST_DOORS`, was only reachable by
+#:   counting `_journal_write_failure_warning` (a warning-string builder) as an
+#:   append. See that entry's comment.
 _MIXED_ARM_DOORS: set[str] = set()
 
 #: Reach the handle with a write-like statement and append NO record at all, so
@@ -276,6 +270,19 @@ _MIXED_ARM_DOORS: set[str] = set()
 #: fold. Measured on #9124; this is the "19 writers that journal nothing" class
 #: in the issue's landing path, at the count the source actually holds.
 _NO_JOURNAL = {
+    # #9206 review P2: the capture door appends NOTHING of its own. Everything
+    # it still writes at the handle is its four provenance stamps
+    # (`eventId`/`source_session`/`source_harness`/`ingested_at`, on the minted
+    # points, their operator variants and the session's CONTAINS members) —
+    # recoverable state with no record, so no lane can honestly describe them
+    # (§17.1's ledger names it; #9350 owes them a record). Its two state writes
+    # moved to declared doors (`_stamp_capture_attempt_state` /
+    # `_stamp_entity_link_counters`) and the `:Session` record moved into the
+    # shared writer. ⛔ It sat in `_APPLY_FIRST_DOORS` for one review round
+    # because the census counted `_journal_write_failure_warning(...)` — the
+    # receipt-warning string builder — as an append; with that false commit
+    # point excluded the door reads `no-journal`, which is what the source says.
+    "capture_session",
     "_clear_reliability_cache",
     "_connect_issue_objects",
     "_extract_session_llm",
@@ -2346,6 +2353,75 @@ def test_the_append_exclusions_append_nothing():
                         "hide a real commit point")
                     break
     assert not offenders, "\n  " + "\n  ".join(offenders)
+
+
+def test_the_capture_door_is_inventoried_as_appending_no_record():
+    """`capture_session` appends nothing of its own — and the census says so.
+
+    #9206 review P2: the door sat in `_APPLY_FIRST_DOORS` because the ONLY call
+    in its body that matches the append pattern is `_journal_write_failure_warning`
+    — the receipt-warning STRING BUILDER (it returns a message; it appends no
+    record). With that false commit point excluded the honest classification is
+    `no-journal`: what remains at the handle is the four provenance stamps
+    (#9350 owes them a record), while the `:Session` record moved into the
+    shared writer and the two state writes became declared doors.
+
+    RED before the fix, twice over: with the exclusion and no inventory move
+    the gate reports the stale `apply-first` row; with the inventory move and no
+    exclusion the same gate reports the door as apply-first. The set of names
+    below is asserted too, so a FUTURE append added to this door (the real fix,
+    #9350) FAILS here instead of slipping under the exclusion.
+    """
+    surface = enumerate_handle_surface(SDK_PY.read_text(), str(SDK_PY))
+    fact = surface["TortoiseSDK.capture_session"]
+    assert fact["appends"] == [], fact["appends"]
+    assert _kind(fact) == "no-journal", _kind(fact)
+    assert "capture_session" in _NO_JOURNAL
+    assert "capture_session" not in _APPLY_FIRST_DOORS
+
+    # The exclusion is LOAD-BEARING: re-read the door's body with the pattern
+    # alone and name every call it would call an append. Exactly one, and it is
+    # excluded — when that stops being true, the door has a real record and
+    # belongs in `_NO_JOURNAL` no longer.
+    tree = ast.parse(SDK_PY.read_text())
+    door = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "capture_session")
+    matched = sorted({
+        name for name in (
+            getattr(call.func, "id", None) or getattr(call.func, "attr", None)
+            for call in ast.walk(door) if isinstance(call, ast.Call))
+        if name and _APPEND_CALL_RE.match(name)})
+    assert matched == ["_journal_write_failure_warning"], matched
+    assert set(matched) <= _APPEND_NOT_A_RECORD, matched
+
+
+def test_the_append_exclusions_cannot_buy_a_door_a_lane():
+    """Non-vacuity for the exclusion above: it changes the VERDICT, nothing else.
+
+    The same synthetic door reads `apply-first` when the call after its write is
+    an ordinary `_journal_*` helper and `no-journal` when it is the excluded
+    warning builder — so the exclusion is the thing doing the work, and the
+    classifier is not simply blind to every `_journal_*` name.
+    """
+    template = '''
+class Door:
+    def capture(self, proj):
+        proj.g.query("MATCH (n:Point) SET n.eventId=$e")
+        self.{call}(1)
+'''
+    allowed = enumerate_handle_surface(
+        template.format(call="_journal_write_failure_warning"),
+        "<synthetic-warning-builder>")["Door.capture"]
+    assert _kind(allowed) == "no-journal", allowed
+    # Control: an ordinary append helper in the SAME position is a real commit
+    # point, and the door reads apply-first (record AFTER the write).
+    real = enumerate_handle_surface(
+        template.format(call="_journal_stamp"),
+        "<synthetic-real-append>")["Door.capture"]
+    assert real["appends"], real
+    assert _kind(real) == "apply-first", real
 
 
 def test_the_caller_declared_exemptions_are_still_caller_declared():
