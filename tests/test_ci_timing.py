@@ -1240,35 +1240,75 @@ def test_the_artifact_names_the_legs_whose_passes_it_could_not_count(tmp_path: P
     Aggregating failures from a summary-less leg while leaving its passes out is
     the right call — the log cannot establish them — but it makes the two columns
     cover different legs, so `passed` is a LOWER BOUND while reading as a total.
-    The artifact must say which legs that applies to (#9134 review, P2).
+    The artifact must say WHICH legs that applies to: the leg (artifact dir), not
+    the basename, because 15 of the shipped sample's 17 sources are `pytest.log`
+    (#9134 review, P1/P2).
 
-    Non-vacuity: with `summary_less_legs` not passed (the pre-fix call), the MD
-    carries no such line and every assertion below goes red.
+    Non-vacuity: with the disclosure unwired, every assertion below goes red.
     """
-    (tmp_path / "pytest-a.log").write_text(
+    (tmp_path / "pytest-log-test-a").mkdir()
+    (tmp_path / "pytest-log-test-b").mkdir()
+    (tmp_path / "pytest-log-test-a" / "pytest.log").write_text(
         "FAILED tests/test_a.py::test_1 - AssertionError\n"
         "= 10 passed, 1 failed in 3.00s =\n")
-    (tmp_path / "pytest-b.log").write_text(
+    (tmp_path / "pytest-log-test-b" / "pytest.log").write_text(
         "FAILED tests/test_b.py::test_2 - AssertionError\n")
     agg = ci_timing.aggregate_logs(tmp_path)
-    truncated = [s["log"] for s in agg["log_sources"] if not any(s["counts"].values())]
-    assert truncated == ["pytest-b.log"], agg["log_sources"]
+    truncated = [s for s in agg["log_sources"] if not s["summary_seen"]]
+    assert [s["leg"] for s in truncated] == ["pytest-log-test-b"], agg["log_sources"]
 
-    def md(names: list[str] | None) -> str:
+    def md(sources: list[dict] | None) -> str:
         return ci_timing.render_md(
             {"head_sha": "abc123", "created_at": "2026-01-01T00:00:00Z",
              "conclusion": "success"},
             {}, {}, agg["total_counts"], agg["killed_any"], "4242", [], [],
-            summary_less_legs=names,
+            summary_less_legs=sources,
         )
 
     text = md(truncated)
-    assert "`pytest-b.log`" in text, text
-    # The complete leg must NOT be named: the note is about truncated legs only.
-    assert "`pytest-a.log`" not in text, text
+    # The leg is named; the complete leg is not.
+    assert "`pytest-log-test-b/pytest.log`" in text, text
+    assert "`pytest-log-test-a/pytest.log`" not in text, text
     assert "LOWER BOUND" in text, text
-    # A run with no truncated legs says nothing at all.
-    assert "LOWER BOUND" not in md(None)
+    # The disclosure must not claim a watchdog kill this log does not show.
+    assert "summary-less legs — no pytest summary line" in text, text
+    assert "LOWER BOUND" not in md(None)                # silent on a clean run
+
+
+def test_a_zero_count_summary_is_not_a_truncated_leg(tmp_path: Path) -> None:
+    """`no tests ran in 0.30s` is a SUMMARY of zeroes, not an absent summary.
+
+    Treating "all counts are zero" as truncation named an honest leg as
+    watchdog-killed and told the reader `passed` was a lower bound for a run that
+    lost nothing (#9134 review, P2).
+    """
+    (tmp_path / "pytest-log-test-a").mkdir()
+    (tmp_path / "pytest-log-test-a" / "pytest.log").write_text(
+        "no tests ran in 0.30s\n")
+    agg = ci_timing.aggregate_logs(tmp_path)
+    assert agg["log_sources"][0]["summary_seen"] is True
+    assert [s for s in agg["log_sources"] if not s["summary_seen"]] == []
+
+
+def test_main_wires_the_disclosure_into_the_artifact(tmp_path: Path,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one call that puts the line in the artifact must be pinned.
+
+    Without this, the wiring in `main()` can vanish and every other test stays
+    green, because they call `render_md` directly (#9134 review, P2).
+    """
+    logs = tmp_path / "logs" / "pytest-log-test-b"
+    logs.mkdir(parents=True)
+    (logs / "pytest.log").write_text("FAILED tests/test_b.py::test_2 - AssertionError\n")
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setattr("sys.argv", ["ci_timing.py", "--repo", "o/r",
+                                     "--logs-dir", str(tmp_path / "logs"),
+                                     "--out-dir", str(out)])
+    assert ci_timing.main() == 0
+    md = (out / "ci-timing.md").read_text()
+    assert "summary-less legs" in md, md[:400]
+    assert "`pytest-log-test-b/pytest.log`" in md, md[:400]
 
 
 def test_a_held_row_does_not_strand_the_markers_own_separator() -> None:

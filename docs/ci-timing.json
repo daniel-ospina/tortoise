@@ -514,6 +514,62 @@
       ],
       "killed": false,
       "run_id": "39191149586",
+      "sample_time": "2026-10-20T18:40:00Z",
+      "sha": "8464f850f938ff048666a24ade2081e4518987b6",
+      "steps_max_job_ms": 1300000,
+      "steps_total_ms": 9951000
+    },
+    {
+      "branch": "main",
+      "conclusion": "failure",
+      "counts": {
+        "error": 0,
+        "failed": 6,
+        "passed": 30697,
+        "skipped": 129,
+        "xfailed": 7,
+        "xpassed": 0
+      },
+      "created_at": "2026-10-19T02:41:31Z",
+      "event": "push",
+      "failed_tests": [
+        "tests/test_7925_route_parity.py::test_both_routes_produce_the_same_confidence[IMPL]",
+        "tests/test_7925_route_parity.py::test_both_routes_produce_the_same_confidence[NAND]",
+        "tests/test_ci_timing.py::test_refresh_durations_on_the_real_manifest_of_record",
+        "tests/test_oauth_consent_bridge.py::test_the_spec_cites_live_hosted_api_sites",
+        "tests/test_onboarding_endpoints.py::TestOnboardingTeam::test_create_team_then_session_key_mint_registry",
+        "tests/test_session_key_http.py::TestSessionKeyMintConcurrency::test_registry_mint_blocks_while_team_lock_held"
+      ],
+      "killed": false,
+      "run_id": "39191149586",
+      "sample_time": "2026-10-20T18:40:00Z",
+      "sha": "8464f850f938ff048666a24ade2081e4518987b6",
+      "steps_max_job_ms": 1300000,
+      "steps_total_ms": 9951000
+    },
+    {
+      "branch": "main",
+      "conclusion": "failure",
+      "counts": {
+        "error": 0,
+        "failed": 6,
+        "passed": 30697,
+        "skipped": 129,
+        "xfailed": 7,
+        "xpassed": 0
+      },
+      "created_at": "2026-10-19T02:41:31Z",
+      "event": "push",
+      "failed_tests": [
+        "tests/test_7925_route_parity.py::test_both_routes_produce_the_same_confidence[IMPL]",
+        "tests/test_7925_route_parity.py::test_both_routes_produce_the_same_confidence[NAND]",
+        "tests/test_ci_timing.py::test_refresh_durations_on_the_real_manifest_of_record",
+        "tests/test_oauth_consent_bridge.py::test_the_spec_cites_live_hosted_api_sites",
+        "tests/test_onboarding_endpoints.py::TestOnboardingTeam::test_create_team_then_session_key_mint_registry",
+        "tests/test_session_key_http.py::TestSessionKeyMintConcurrency::test_registry_mint_blocks_while_team_lock_held"
+      ],
+      "killed": false,
+      "run_id": "39191149586",
       "sample_time": "2026-10-20T14:39:07Z",
       "sha": "8464f850f938ff048666a24ade2081e4518987b6",
       "steps_max_job_ms": 1300000,
@@ -594,7 +650,10 @@
         "xpassed": 0
       },
       "error": null,
-      "log": "pytest-d14.log"
+      "killed": false,
+      "leg": "pytest-log-d14-hosted-api",
+      "log": "pytest-d14.log",
+      "summary_seen": true
     },
     {
       "counts": {
@@ -606,7 +665,10 @@
         "xpassed": 0
       },
       "error": null,
-      "log": "pytest.log"
+      "killed": false,
+      "leg": "pytest-log-test-a",
+      "log": "pytest.log",
+      "summary_seen": true
     },
     {
       "counts": {
@@ -618,7 +680,10 @@
         "xpassed": 0
       },
       "error": null,
-      "log": "pytest.log"
+      "killed": false,
+      "leg": "pytest-log-test-b",
+      "log": "pytest.log",
+      "summary_seen": true
     },
     {
       "counts": {
@@ -630,7 +695,10 @@
         "xpassed": 0
       },
       "error": null,
-      "log": "pytest.log"
+      "killed": false,
+      "leg": "pytest-log-test-c",
+      "log": "pytest.log",
+      "summary_seen": true
     },
     {
       "counts": {
@@ -642,7 +710,10 @@
         "xpassed": 0
       },
       "error": null,
-      "log": "pytest.log"
+      "killed": false,
+      "leg": "pytest-log-test-carve-out-a",
+      "log": "pytest.log",
+      "summary_seen": true
     },
     {
       "counts": {
@@ -654,7 +725,10 @@
         "xpassed": 0
       },
       "error": null,
-      "log": "pytest.log"
+      "killed": false,
+      "leg": "pytest-log-test-carve-out-b",
+      "log": "pytest.log",
+      "summary_seen": true
     },
     {
       "counts": {
@@ -666,7 +740,10 @@
         "xpassed": 0
       },
       "error": null,
-      "log": "pytest.log"
+      "killed": false,
+      "leg": "pytest-log-test-carve-out-c",
+      "log": "pytest.log",
+      "summary_seen": true
     },
     {
       "counts": {
@@ -678,7 +755,10 @@
         "xpassed": 0
       },
       "error": null,
-      "log": "pytest.log"
+      "killed": false,
+      "leg": "pytest-log-test-concurrency-falkor",
+      "log": "pytest.log",
+      "summary_seen": true
     },
     {
       "counts": {
@@ -690,7 +770,10 @@
         "xpassed": 0
       },
       "error": null,
-      "log": "pytest.log"
+      "killed": false,
+      "leg": "pytest-log-test-d",
+      "log": "pytest.log",
+      "summary_seen": false
     },
     {
       "counts": {
@@ -702,7 +785,10 @@
         "xpassed": 0
       },
       "error": null,
-      "log": "pytest.log"
+      "killed": false,
+      "leg": "pytest-log-test-e",
+      "log": "pytest.log",
+      "summary_seen": true
     },
     {
       "counts": {
@@ -714,7 +800,10 @@
         "xpassed": 0
       },
       "error": null,
-      "log": "pytest.log"
+      "killed": false,
+      "leg": "pytest-log-test-f",
+      "log": "pytest.log",
+      "summary_seen": true
     },
     {
       "counts": {
@@ -726,7 +815,10 @@
         "xpassed": 0
       },
       "error": null,
-      "log": "pytest.log"
+      "killed": false,
+      "leg": "pytest-log-test-g",
+      "log": "pytest.log",
+      "summary_seen": true
     },
     {
       "counts": {
@@ -738,7 +830,10 @@
         "xpassed": 0
       },
       "error": null,
-      "log": "pytest.log"
+      "killed": false,
+      "leg": "pytest-log-test-h",
+      "log": "pytest.log",
+      "summary_seen": true
     },
     {
       "counts": {
@@ -750,7 +845,10 @@
         "xpassed": 0
       },
       "error": null,
-      "log": "pytest.log"
+      "killed": false,
+      "leg": "pytest-log-test-i",
+      "log": "pytest.log",
+      "summary_seen": true
     },
     {
       "counts": {
@@ -762,7 +860,10 @@
         "xpassed": 0
       },
       "error": null,
-      "log": "pytest.log"
+      "killed": false,
+      "leg": "pytest-log-test-slow-a",
+      "log": "pytest.log",
+      "summary_seen": true
     },
     {
       "counts": {
@@ -774,7 +875,10 @@
         "xpassed": 0
       },
       "error": null,
-      "log": "pytest.log"
+      "killed": false,
+      "leg": "pytest-log-test-slow-b",
+      "log": "pytest.log",
+      "summary_seen": true
     },
     {
       "counts": {
@@ -786,7 +890,10 @@
         "xpassed": 0
       },
       "error": null,
-      "log": "trackb.log"
+      "killed": false,
+      "leg": "pytest-log-test-track-b",
+      "log": "trackb.log",
+      "summary_seen": true
     }
   ],
   "outcome": {
@@ -803,7 +910,7 @@
     "created_at": "2026-10-19T02:41:31Z",
     "head_sha": "8464f850f938ff048666a24ade2081e4518987b6",
     "run_id": "39191149586",
-    "sample_time": "2026-10-20T14:39:07Z",
+    "sample_time": "2026-10-20T18:40:00Z",
     "selection": "latest completed event=push&branch=main run, exclude_pull_requests=true, cancelled skipped"
   },
   "schema_version": 1,

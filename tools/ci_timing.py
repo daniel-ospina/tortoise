@@ -443,6 +443,10 @@ def parse_log(path: Path) -> dict:
     counts = {k: 0 for k in COUNT_KEYS}
     outcomes: dict[str, str] = {}
     killed = False
+    # A summary line is `=== <n> <state>`; `no tests ran in 0.30s` is one of those
+    # with every count zero. Absence of a summary is a DIFFERENT event from a
+    # summary of zeroes, and only the former loses passes (#9134 review, P2).
+    summary_seen = False
     in_durations = False
     error: str | None = None
     try:
@@ -528,7 +532,13 @@ def parse_log(path: Path) -> dict:
         # to mention `passed`. Requiring that word made a COLLECTION-ERROR leg
         # (`=== 1 error in 0.40s ===`) parse as all-zero, so a leg that failed to collect
         # reported no errors at all (#9134 review, P3).
+        # pytest prints a zero-collection summary WITHOUT the `===` banner
+        # ("no tests ran in 0.30s"), so shape alone would call an honest empty leg
+        # truncated (#9134 review, P2).
+        if line.startswith("no tests ran in"):
+            summary_seen = True
         if line.startswith("=") and COUNT_RE.search(line):
+            summary_seen = True
             for n, key in COUNT_RE.findall(line):
                 if key in counts:
                     counts[key] = int(n)
@@ -537,7 +547,8 @@ def parse_log(path: Path) -> dict:
     for rel_path, entry in file_paths.items():
         entry["tests"] = len(path_nodeids[rel_path])
     return {"files": files, "file_paths": file_paths, "counts": counts,
-            "outcomes": outcomes, "killed": killed, "error": error}
+            "outcomes": outcomes, "killed": killed, "error": error,
+            "summary_seen": summary_seen}
 
 
 # --- durations bridge (#5215 Task 4b / T-B): collector → the map the ---------
@@ -2164,7 +2175,7 @@ def candidate_flakes(history: list[dict]) -> list[dict]:
 
 def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
               run_id: str, history: list[dict], flakes: list[dict],
-              summary_less_legs: list[str] | None = None) -> str:
+              summary_less_legs: list[dict] | None = None) -> str:
     # #1477 review P2: CI_TIMING_NOW lets tests freeze the clock (the
     # back-to-back subprocess invocations in the determinism test otherwise
     # straddle a second boundary and flake).
@@ -2229,12 +2240,18 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
     # silently excludes a whole leg's passes while `failed` counts that leg's
     # failures, so the two columns disagree about which legs they cover.
     if summary_less_legs:
-        legs = ", ".join(f"`{name}`" for name in summary_less_legs)
+        def _label(src: dict) -> str:
+            return f"`{src.get('leg') or '?'}/{src['log']}`"
+
+        named = ", ".join(_label(s) for s in summary_less_legs)
+        saw_watchdog = any(s.get("killed") for s in summary_less_legs)
+        why = ("watchdog-killed before pytest's summary line" if saw_watchdog
+               else "no pytest summary line")
         lines.append(
-            f"- summary-less legs (no pytest summary line; watchdog-truncated): {legs}\n"
+            f"- summary-less legs — {why}: {named}\n"
             f"  - their FAILURES are counted (from progress lines); their PASSES and "
-            f"SKIPS are not — a truncated log cannot establish them. Read `passed` as a "
-            f"LOWER BOUND for the run, not as a total.")
+            f"SKIPS are not — a log without a summary cannot establish them. Read "
+            f"`passed` as a LOWER BOUND for the run, not as a total.")
     lines += [
         "",
         "## Flake signal",
@@ -2390,14 +2407,20 @@ def aggregate_logs(logs_dir: Path | str) -> dict:
         # change fixes. A truncation is not an absence of failures, so a
         # summary-less leg contributes what its progress lines told us — failures
         # only, never passed/skipped, which a summary-less log cannot establish.
-        if not any(parsed["counts"].values()):
+        if not parsed["summary_seen"]:
             for state, key in (("FAILED", "failed"), ("ERROR", "error")):
                 total_counts[key] += sum(
                     1 for st in parsed["outcomes"].values() if st == state)
         killed_any = killed_any or parsed["killed"]
         failed_tests.update(n for n, st in parsed["outcomes"].items() if st in ("FAILED", "ERROR"))
-        log_sources.append({"log": Path(log_path).name, "error": parsed["error"],
-                            "counts": parsed["counts"]})
+        # The LEG is the artifact directory (`pytest-log-test-d`), not the file: 15 of
+        # the shipped sample's 17 sources are all named `pytest.log`, so a basename
+        # cannot identify which leg a disclosure is about (#9134 review, P2).
+        log_sources.append({"leg": Path(log_path).parent.name,
+                            "log": Path(log_path).name, "error": parsed["error"],
+                            "counts": parsed["counts"],
+                            "killed": parsed["killed"],
+                            "summary_seen": parsed["summary_seen"]})
     return {"files": files, "total_counts": total_counts, "killed_any": killed_any,
             "failed_tests": failed_tests, "log_sources": log_sources}
 
@@ -2536,8 +2559,8 @@ def main() -> int:
     }
 
     md = render_md(run, steps, files, total_counts, killed_any, run_id, history, flakes,
-                   summary_less_legs=[s["log"] for s in log_sources
-                                      if not any(s["counts"].values())])
+                   summary_less_legs=[s for s in log_sources
+                                      if not s["summary_seen"]])
     try:
         (out_dir / "ci-timing.md").write_text(md)
         (out_dir / "ci-timing.json").write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")
