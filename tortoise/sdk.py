@@ -7199,7 +7199,7 @@ class TortoiseSDK:
         return True
 
     def _write_record_projection(self, record: dict,
-                                 seq: int | None = None) -> None:
+                                 seq: int | None) -> None:
         """Hand one just-appended journal record to the Postgres record (#9188).
 
         THE production call site. Until this existed, `tortoise/record_projection.py`
@@ -7211,6 +7211,19 @@ class TortoiseSDK:
         `EventAPI._emit`, `ConversationMiner._emit_event`) and a second
         implementation of this boundary is how one door's records come to
         differ from another's.
+
+        ``seq`` is REQUIRED, and that is the point rather than a style choice
+        (#9307 review F2). It is the ordinal the journal append returned, and
+        the seam treats ``None`` as "this log reported no position" — so a
+        default here would make a caller that forgot to pass it take
+        ``position=False`` on a live write, leaving layer 1
+        (`public.journal_event`) empty with no error, no count and a green
+        wiring gate: exactly the #9190 defect this change closes. Required, an
+        omission is a ``TypeError`` at the call site. `None` is still a legal
+        VALUE (`_InMemoryEventLog` reports no position — no row, never an
+        invented number); it is the silent default that is removed, and
+        `tools/record_wiring_check.py::live_call_sites_pass_the_ordinal` holds
+        every caller to it.
 
         Deliberately fail-soft: the graph write and the journal append have
         already committed, so a record failure is a LOSS TO REPORT (counted in

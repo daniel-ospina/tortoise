@@ -60,6 +60,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
+import uuid
 from pathlib import Path
 
 import pytest
@@ -75,7 +76,18 @@ from tortoise.sdk import TortoiseSDK  # noqa: E402
 #: (the `TEST_AUDIT_DB_URI` convention). Unset ⇒ the DB legs SKIP, never pass.
 RECORD_DB_ENV = "TEST_RECORD_DB_URI"
 
-ORG, GRAPH = "org-9188-production-path", "graph-9188-production-path"
+#: A **run-unique** tenant (#9307 review F4). `public.journal_event` is
+#: APPEND-ONLY by trigger, so `_seed_tenant` cannot clear it — which makes a
+#: fixed pair unusable for attribution: on a reused database (a shape
+#: `_ensure_record_schema` explicitly supports) a second run re-numbers a fresh
+#: journal from 1, `_journal_row`'s `ON CONFLICT (org_id, graph_id, seq) DO
+#: NOTHING` absorbs every row, and the count is the PREVIOUS run's maximum. A
+#: revert of the live door would then pass on rows it never wrote. With a pair
+#: this process has never used, the rows can only be this run's: the door wrote
+#: them, or the leg has nothing to count.
+_RUN_TOKEN = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+ORG, GRAPH = (f"org-9188-production-path-{_RUN_TOKEN}",
+              f"graph-9188-production-path-{_RUN_TOKEN}")
 
 #: Journal keys whose emitted VALUE the record's declared column type cannot
 #: hold — a schema/producer DISAGREEMENT, not a folding bug (`_jsonb_or_scalar`
@@ -572,7 +584,7 @@ def test_an_armed_capture_without_a_journal_is_counted_not_silent(
 # ════════════════════════════════════════════════════════════════════════════
 
 
-def test_the_live_path_writes_the_journals_own_position(wiring):
+def test_the_live_path_writes_the_journals_own_position(wiring, tmp_path):
     """Layer 1 is written by production traffic, keyed on the append's ordinal.
 
     #9190 landed the ordinal (`EventLog.append` returns the record's position;
@@ -595,14 +607,19 @@ def test_the_live_path_writes_the_journals_own_position(wiring):
     assert code == 0, (code, report)
     assert record_writer.POSITION_ORDINAL_SOURCE == "#9190"
 
-    # (a) the journal really reports an ordinal, and it is the replay's seq
-    log = EventLog("/tmp/w9078-position.jsonl")
-    log.path.unlink(missing_ok=True)
+    # (a) the journal really reports an ordinal, and it is the replay's seq.
+    #     `EventLog.scratch(tmp_path/…)`, never a fixed path: this file asserts
+    #     ABSOLUTE positions, so a journal at a world-shared location (the
+    #     previous `/tmp/w9078-position.jsonl`) let two concurrent lanes append
+    #     into one file and read each other's numbering — and the unlink a peer
+    #     lane performed mid-test deleted the file under this one. `scratch()`
+    #     is also this file's own convention for a throwaway log, and it is what
+    #     the detector at `SCRATCH_JOURNAL_ROOTS` would demand of `tortoise/`.
+    log = EventLog.scratch(tmp_path / "position.jsonl")
     first = log.append({"type": "SourceCreated", "id": "s1"})
     second = log.append({"type": "SourceCreated", "id": "s2"})
     assert (first, second) == (1, 2), (first, second)
     assert log.position() == 2, log.position()
-    log.path.unlink(missing_ok=True)
 
     # (b) the seam's `seq` is the row's key: the SAME record gets the number the
     # append gave it, and omitting the ordinal writes no row at all
@@ -625,11 +642,15 @@ def test_the_live_path_writes_the_journals_own_position(wiring):
 def test_the_live_door_rule_fires_when_the_ordinal_is_dropped(wiring):
     """The gate reds a live door that defers, invents, or drops the ordinal.
 
-    A rule mutated to `return []` stayed green before, so the synthetic cases
-    are the point: each spelling below is a way this PR's own bug could return.
+    Driven through the REAL rule on a SUPPLIED source, because that is the only
+    shape that proves it fires: the rule's body reduced to `return []` (or
+    either `problems.append` block deleted) leaves every assertion about the
+    COMPLYING tree green, so a leg that merely asserts `[]` there — or that
+    re-derives the condition from `_is_position_from_ordinal` /
+    `_references_ordinal` — certifies nothing about the gate (#9307 review F1).
+    The sibling `test_the_position_rule_fires_on_every_spelling_of_a_new_door`
+    drives `position_problems_for_module` for the same reason.
     """
-    import ast
-
     module, _, _ = wiring
     source = (
         "from tortoise import record_writer\n"
@@ -638,25 +659,159 @@ def test_the_live_door_rule_fires_when_the_ordinal_is_dropped(wiring):
         "graph_id='g', %s)\n"
     )
     good = "position=seq is not None, first_seq=seq if seq is not None else 1"
-    assert module.live_door_writes_the_journals_position.__name__  # loaded
-    # the real tree passes
+    # the real tree complies, through the same code path
     assert module.live_door_writes_the_journals_position() == []
-    # each regression is caught
-    for spelling, why in (
-        ("position=False, first_seq=seq", "the pre-#9190 deferral"),
-        ("position=True, first_seq=seq", "an invented number"),
-        ("position=seq is not None, first_seq=1", "a dropped ordinal"),
-        ("position=seq is not None", "a missing ordinal"),
+    assert module.live_door_writes_the_journals_position(
+        _live_door_source()) == [], (
+        "the injected seam and the real-tree default disagree — the rule must "
+        "read the same door both ways")
+    problems = module.live_door_writes_the_journals_position(source % good)
+    assert problems == [], (good, problems)
+
+    for spelling, why, names in (
+        ("position=False, first_seq=seq", "the pre-#9190 deferral", "position="),
+        ("position=True, first_seq=seq", "an invented number", "position="),
+        ("position=seq is not None, first_seq=1", "a dropped ordinal",
+         "first_seq="),
+        ("position=seq is not None", "a missing ordinal", "first_seq="),
+        # mentions the ordinal without USING it: `any(Name(id='seq'))` accepted
+        # this, and it keys EVERY position row at seq 1 — one row for a whole
+        # journal under `ON CONFLICT DO NOTHING`
+        ("position=seq is not None, first_seq=1 if seq is not None else 1",
+         "an expression that only mentions the ordinal", "first_seq="),
     ):
-        assert spelling != good
-        tree = ast.parse(source % spelling)
-        door = next(n for n in ast.walk(tree)
-                    if isinstance(n, ast.FunctionDef)
-                    and n.name == "write_live_record")
-        bound = {kw.arg: kw.value for kw in door.body[0].value.keywords if kw.arg}
-        assert not (module._is_position_from_ordinal(bound.get("position"))
-                    and module._references_ordinal(bound.get("first_seq"))), (
-            f"{why}: the rule accepted {spelling!r}")
+        fired = module.live_door_writes_the_journals_position(source % spelling)
+        assert fired, f"{why}: the rule accepted {spelling!r}"
+        assert names in fired[0], (
+            f"{why}: the rule fired but blamed the wrong half — expected "
+            f"{names!r} in {fired[0]!r}")
+
+
+def _live_door_source() -> str:
+    """The real live-door module's text, for the injected-seam equivalence leg."""
+    return (REPO_ROOT / "tortoise" / "record_writer.py").read_text(encoding="utf-8")
+
+
+#: Ways a `write_live_record(…)` call can carry — or fail to carry — the
+#: ordinal. Every entry but `honest` must be reported (#9307 review F2).
+_CALL_SITE_SPELLINGS = {
+    "dropped": (
+        'from . import record_writer\n'
+        'def _emit_event(self, record, log):\n'
+        '    seq = log.append(record)\n'
+        '    record_writer.write_live_record(record, durable=True)\n'),
+    "none": (
+        'from . import record_writer\n'
+        'def _emit_event(self, record, log):\n'
+        '    seq = log.append(record)\n'
+        '    record_writer.write_live_record(record, durable=True, seq=None)\n'),
+    "literal": (
+        'from . import record_writer\n'
+        'def _emit_event(self, record, log):\n'
+        '    seq = 1\n'
+        '    record_writer.write_live_record(record, durable=True, seq=seq)\n'),
+    "optional-parameter": (
+        'from . import record_writer\n'
+        'def _write_record_projection(self, record, seq=None):\n'
+        '    record_writer.write_live_record(record, durable=True, seq=seq)\n'),
+    "unreadable": (
+        'from . import record_writer\n'
+        'def _emit_event(self, record, seq):\n'
+        '    def inner():\n'
+        '        record_writer.write_live_record(record, seq=seq)\n'
+        '    return inner\n'),
+    "honest": (
+        'from . import record_writer\n'
+        'def _emit_event(self, record, log):\n'
+        '    seq = log.append(record)\n'
+        '    record_writer.write_live_record(record, durable=True, seq=seq)\n'),
+    "honest-forward": (
+        'from . import record_writer\n'
+        'def _write_record_projection(self, record, seq):\n'
+        '    record_writer.write_live_record(record, durable=True, seq=seq)\n'),
+}
+
+
+@pytest.mark.parametrize("spelling", sorted(_CALL_SITE_SPELLINGS))
+def test_the_ordinal_argument_rule_fires_on_every_way_a_door_drops_it(
+        wiring, spelling):
+    """`seq` defaults to None, so a call site that omits it is SILENT (#9190).
+
+    `write_live_record(record)` is valid Python: it takes `position=False`, writes
+    no position row, and leaves layer 1 empty on a live write — the defect this
+    change closes, with `record_wiring_check` still printing WIRED, because the
+    body-only rule above only certifies that the door USES what it is given
+    (#9307 review F2). Every spelling here is a way to lose it; the two `honest`
+    ones prove the rule is not simply refusing all call sites.
+    """
+    module, _, _ = wiring
+    rel = "tortoise/a_new_door.py"
+    tree = ast.parse(_CALL_SITE_SPELLINGS[spelling], filename=rel)
+    problems = module.ordinal_argument_problems(tree, rel)
+    if spelling.startswith("honest"):
+        assert problems == [], (spelling, problems)
+        return
+    assert problems, f"{spelling}: the ordinal-argument rule did not fire"
+    assert "write_live_record" in problems[0], problems[0]
+
+
+def test_every_real_door_still_passes_the_ordinal(wiring):
+    """The three shipped doors, measured — the revert the rule exists to catch.
+
+    Each door's real source is mutated to drop `seq=`, and the rule must fire for
+    that exact file. This is the non-vacuity half of the leg above: it proves the
+    rule sees the call sites that actually ship, not only a synthetic module.
+    """
+    module, _, report = wiring
+    assert report["position_problems"] == [], report["position_problems"]
+    for rel in ("tortoise/sdk.py", "tortoise/api.py", "tortoise/mining.py"):
+        source = (REPO_ROOT / rel).read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=rel)
+        assert module.ordinal_argument_problems(tree, rel) == [], (
+            f"{rel}: the shipped door is reported — the rule is wrong, not the door")
+        # Locate the SEAM call itself (a module may pass `seq=seq` onward before
+        # it reaches the seam, e.g. the SDK's `_write_record_projection` hop),
+        # then drop the keyword on that call's own line.
+        call = next(node for node in ast.walk(tree)
+                    if isinstance(node, ast.Call)
+                    and module._call_name(node) == "write_live_record")
+        lines = source.splitlines(keepends=True)
+        line = lines[call.end_lineno - 1]
+        assert "seq=seq" in line, (
+            f"{rel} no longer spells the ordinal the way this leg mutates it — "
+            f"update the mutation, do not delete the leg: {line!r}")
+        lines[call.end_lineno - 1] = line.replace("seq=seq)", ")")
+        dropped = "".join(lines)
+        assert dropped != source, rel
+        fired = module.ordinal_argument_problems(
+            ast.parse(dropped, filename=rel), rel)
+        assert fired and any(f"{rel}:" in problem for problem in fired), (rel, fired)
+
+
+def test_the_sdk_forwarding_hop_requires_the_ordinal(wiring):
+    """The SDK's inner hop must not default `seq` to None (#9307 review F2).
+
+    `_emit_event` hands the ordinal to `_write_record_projection`, which hands it
+    to the seam — three links, one of them able to swallow it. With a default, a
+    caller that forgets it takes `position=False` on a live write with no error
+    and no count; required, the omission is a `TypeError` at the call site. Both
+    halves are pinned: the signature, and the gate rule that made it required.
+    """
+    import inspect
+
+    module, _, _ = wiring
+    parameter = inspect.signature(
+        TortoiseSDK._write_record_projection).parameters["seq"]
+    assert parameter.default is inspect.Parameter.empty, (
+        "`_write_record_projection(seq=...)` regained a default — a caller that "
+        "omits it then writes no position row, silently (#9190)")
+    source = (REPO_ROOT / "tortoise" / "sdk.py").read_text(encoding="utf-8")
+    with_default = source.replace("seq: int | None) -> None:",
+                                 "seq: int | None = None) -> None:", 1)
+    assert with_default != source, "the signature spelling changed — re-point this leg"
+    fired = module.ordinal_argument_problems(
+        ast.parse(with_default, filename="tortoise/sdk.py"), "tortoise/sdk.py")
+    assert fired and "WITH A DEFAULT" in fired[0], fired
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1321,10 +1476,12 @@ def _seed_tenant(conn) -> None:
             "ON CONFLICT (id) DO NOTHING", (GRAPH, ORG, GRAPH))
         # `journal_event` is APPEND-ONLY by trigger (a tenant erasure sets
         # `app.record_journal_purge=on`), so this seed CANNOT clear it — and it
-        # no longer needs to: since #9190's ordinal is threaded, the live door
-        # writes position rows, so layer 1 is asserted as a DELTA/at-least, not
-        # as emptiness. Deleting here was itself the #9078 assumption (layer 1
-        # never written) baked into the fixture.
+        # no longer tries. Deleting here was itself the #9078 assumption (layer 1
+        # never written) baked into the fixture. What makes layer 1 assertable
+        # instead is the RUN-UNIQUE `ORG`/`GRAPH` pair above: on a pair no
+        # previous run has used, the only rows the table can hold for this tenant
+        # are the ones this process wrote, so the leg's DELTA is attributable to
+        # this capture and a reverted door reds it (#9307 review F4).
         for table in ("event", "object", "subject", "point", "relation",
                       "session", "source"):
             cur.execute(
@@ -1449,7 +1606,14 @@ def test_the_public_capture_path_writes_the_record(capture_sdk, monkeypatch):
     try:
         _ensure_record_schema(conn)
         _seed_tenant(conn)
+        # The layer-1 count is a property of THIS run (#9307 review F4).
+        # `journal_event` is append-only by trigger, so nothing clears it; taken
+        # as a DELTA it stays correct on a database a previous run migrated, and
+        # the count can only move in the direction the door writes it.
+        before = _count(conn, "journal_event")
         _sdk, journal_path, lost = _capture(capture_sdk, monkeypatch)
+        after = _count(conn, "journal_event")
+        written = after - before
 
         # 1. the event stream, from the production path
         for table in ("event", "source", "session"):
@@ -1462,7 +1626,8 @@ def test_the_public_capture_path_writes_the_record(capture_sdk, monkeypatch):
         #    shipped), and the row count must therefore be at least one per
         #    record the journal carried — never zero, and never more than the
         #    journal holds (an invented number would invent rows).
-        assert _count(conn, "journal_event") >= 1, (
+        records = _journal_records(journal_path)
+        assert written >= 1, (
             "the live door wrote no position row — layer 1 "
             "(`public.journal_event`, exposed as `public.record_event_stream`) "
             "is empty, so the epic's event-stream claim is unmet by the very "
@@ -1470,12 +1635,11 @@ def test_the_public_capture_path_writes_the_record(capture_sdk, monkeypatch):
         # One row per record, at most: a row numbered beyond the journal's own
         # length would be an invented seq (the collision #9190 removes). The
         # journal file is the ground truth for that length.
-        assert _count(conn, "journal_event") <= len(_journal_records(journal_path)), (
-            f"the record holds {_count(conn, 'journal_event')} position row(s) "
-            f"for {len(_journal_records(journal_path))} journal record(s) — a row "
-            "numbered past the journal is an invented seq")
+        assert written <= len(records), (
+            f"the record gained {written} position row(s) for "
+            f"{len(records)} journal record(s) — a row numbered past the "
+            "journal is an invented seq")
 
-        records = _journal_records(journal_path)
         # 3. the semantic + procedural layers, counted against the journal.
         #    `assert objects` FIRST and unconditionally: without it the count
         #    comparison below is satisfiable by `0 >= 0`, i.e. by a capture that

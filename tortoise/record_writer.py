@@ -734,6 +734,21 @@ def write_live_record(record: Mapping[str, Any], *,
     that reports no position — the in-memory capture lane) writes no position
     row: nothing there could be numbered, and inventing one is the #9190 defect.
 
+    ⚠️ RESIDUAL — the one shape the paragraph above does not cover: a tenant with
+    TWO durable journals. "One record one number by
+    construction" holds per JOURNAL FILE, while `journal_event`'s key is per
+    `(org_id, graph_id, seq)`: two durable journals under one tenant each number
+    their records from 1, so the second journal's rows are absorbed by
+    `ON CONFLICT (org_id, graph_id, seq) DO NOTHING` and the existing row keeps
+    the OTHER journal's `event_type`/`payload` while the layer row underneath
+    belongs to a different record. That was reachable before this change only
+    replay-vs-replay; the live path now participates, so it is stated here
+    rather than left to be rediscovered (#9307 review P2, tracked as its own
+    issue). The fix is journal IDENTITY in the key (a column identifying the
+    journal, or a per-tenant ordinal allocator), not a number this door can
+    derive — do NOT paper it over by declining position rows on the live path,
+    which is the #9190 defect this door exists to close.
+
     ``OVERRIDES:`` the module's decision 3 (`Armed but unreachable ⇒ the write
     FAILS (RecordWriteError)`) does not apply to this door, and that is a
     deliberate departure rather than an oversight. Decision 3 governs
