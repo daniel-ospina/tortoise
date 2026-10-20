@@ -248,6 +248,21 @@ SHARED_MODULES = (
     # induced in an api/eval/ep session would never run on the PR that made it
     # (#1349/#3332/#3910 under-selection class).
     "tests/_canonical_store_guard.py",
+    # #9208: the degraded-change-feed attribution decision
+    # (`tests/_change_feed_isolation.py`) is imported by `tests/conftest.py`'s
+    # autouse `_change_feed_state_isolation` fixture, so it runs in EVERY test's
+    # teardown on EVERY surface (api, ep, sdk, onboarding, eval, battery) — a
+    # raise in `leaked_state_message` FAILS every one of them. Same class as
+    # `_verdict.py` / `_signal_hygiene.py` / `_canonical_store_guard.py` above:
+    # not a `test_*.py` file, so the manifest never classifies it — without this
+    # entry a change to it would select `core` only, and a break it induced in
+    # an api/eval/ep test would never run on the PR that made it
+    # (#1349/#3332/#3910 under-selection class). The function-local import in
+    # that fixture is deliberate (a broken helper must never stop the suite
+    # importing), so the AST ratchet
+    # (`tests/test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`)
+    # cannot see it and this registration has to be made by hand.
+    "tests/_change_feed_isolation.py",
     "pyproject.toml",
     "requirements.txt",
     ".github/workflows/python-ci.yml",

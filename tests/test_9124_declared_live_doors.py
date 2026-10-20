@@ -250,6 +250,15 @@ _NO_JOURNAL = {
 #: entry below was checked by hand: the resolvable part of each statement is a
 #: `MATCH … RETURN` read with no write keyword in it.
 _UNRESOLVED = {
+    # #9063/#9261 (merged into `main` as `c172b042f`): the calibration gate's
+    # predicate and its summary audit both run `MATCH … RETURN n.id` reads
+    # against the handle, but their statements are assembled from a `where`
+    # fragment and a per-label loop, so the enumerator cannot PROVE them
+    # read-only and counts them as writes. Both were checked by hand: the
+    # resolvable part of each is a read with no write keyword in it, and
+    # `calibrate_summary` is the audit that only ever RETURNS rows.
+    "_uncalibrated_ep_participants",
+    "calibrate_summary",
     "_assert_lifecycle_guard",
     "_graph_presence",
     "_hop",
@@ -1394,18 +1403,20 @@ def test_a_duplicate_writer_definition_reds_the_gates(monkeypatch):
 
 #: Entry points whose lane is opened by their ONLY CALLER, so a declaration in
 #: the body would be redundant and misleading — `rebuild_all` wraps
-#: `_rebuild_all_replay` in `_replay_write_scope`, and `_ensure_indexes` wraps
-#: `_ensure_indexes_declared` in `_graph_metadata_write_scope`. They are listed
-#: here rather than left in the flip gate's remainder, where part 2 would read
-#: "declare a lane below" and add exactly that redundant scope.
+#: `_rebuild_all_replay` in `_replay_write_scope`, `_ensure_indexes` wraps
+#: `_ensure_indexes_declared` in `_graph_metadata_write_scope`, and
+#: `rebuild_from_record` wraps `_project_record_view` in `_replay_write_scope`.
+#: They are listed here rather than left in the flip gate's remainder, where part
+#: 2 would read "declare a lane below" and add exactly that redundant scope.
 #:
 #: ⛔ PAIRS ARE `(module, SCOPE-QUALIFIED function)` (#9124 review, round 2). A
 #: bare name would exempt EVERY same-named function in that module — the
-#: collision the census keys away — and both of these are methods of
+#: collision the census keys away — and all three are methods of
 #: `FalkorProjection`, whose module defines plenty of other helpers.
 _CALLER_DECLARED = {
     ("tortoise/projection/__init__.py", "FalkorProjection._rebuild_all_replay"),
     ("tortoise/projection/__init__.py", "FalkorProjection._ensure_indexes_declared"),
+    ("tortoise/projection/__init__.py", "FalkorProjection._project_record_view"),
 }
 
 

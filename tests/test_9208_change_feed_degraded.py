@@ -434,9 +434,20 @@ def test_an_unverifiable_append_is_reported_as_unverified_not_as_a_loss(
     assert "below" not in detail.rsplit("The FIRST failure", 1)[1], (
         "no part of the appended clause may tell the reader to look below "
         f"itself; got: {detail[-300:]}")
-    assert "row really is gone" in detail and "unverifiable" not in detail.split(
-        "The FIRST failure")[0], (
-            "the first clause must quote the FIRST error, not the latest one")
+    # ⛔ AND THE APPENDED CLAUSE MUST QUOTE THE *FIRST* ERROR (#9208 review, P3).
+    # Asserting `"row really is gone" in detail` proved nothing: that is the
+    # LATEST error, rendered in the MAIN clause from `state['error']`, so it is
+    # present whatever the appended clause says — swapping
+    # `state.get('first_error')` for `state.get('error')` in `sdk.poll_events`
+    # left every assertion above green. So read the appended segment itself and
+    # require it to carry the first error and NOT the latest one.
+    appended = detail.rsplit("The FIRST failure", 1)[1]
+    assert "Connection closed by server" in appended, (
+        "the appended clause must quote the FIRST error (the unverifiable one), "
+        f"not just name its stage; got: {appended[:300]}")
+    assert "row really is gone" not in appended, (
+        "the appended clause must quote the FIRST error, not the latest one — "
+        f"the latest already appears in the main clause; got: {appended[:300]}")
 
 
 def test_the_emit_hook_never_raises_even_when_the_recorder_fails(
