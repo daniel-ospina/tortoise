@@ -498,6 +498,28 @@ SEAM_FILES_WITH_ALLOWED_LITERALS = {
         # site, the `port=parsed.port or 6379` fallback, is migrated.)
         "docker://:falkordb@localhost:6379",
     ],
+    "tests/test_wipe_server.py": [
+        # Every literal here is an INPUT to the journal-instance gate — a URI
+        # parser (`_uri_instance_key`), the sidecar text it binds/reads, or a
+        # census row — never a connection target. The two `_stale_sweep` calls
+        # that hand one over from a literal do so with `_proj_for_uri`
+        # monkeypatched to `_FakeProj`, so no client is constructed; the one
+        # that sweeps a REAL target takes it from
+        # `_live_utils.docker_base_uri` (#9359).
+        #
+        # They must stay literal: these assertions pin the DEFAULT-port folding
+        # the instance key exists for — `localhost` → `127.0.0.1`, portless →
+        # 16379 — so deriving the port from the seam would delete what they
+        # test, and the seam is where a wrong fold would come from.
+        "docker://:falkordb@localhost:6379/g",
+        "docker://:falkordb@127.0.0.1:6379/g",
+        "docker://:falkordb@127.0.0.1/g",
+        "_journal_instance(str(journal))",
+        r'"127.0.0.1:6379\n")',
+        'write_text("127.0.0.1:16379',
+        "bound to 127.0.0.1:6380, this sweep targets",
+        '_stale_sweep("docker://:falkordb@:6379',
+    ],
 }
 
 
