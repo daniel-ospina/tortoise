@@ -743,8 +743,8 @@ def write_live_record(record: Mapping[str, Any], *,
     the OTHER journal's `event_type`/`payload` while the layer row underneath
     belongs to a different record. That was reachable before this change only
     replay-vs-replay; the live path now participates, so it is stated here
-    rather than left to be rediscovered (#9307 review P2, tracked as its own
-    issue). The fix is journal IDENTITY in the key (a column identifying the
+    rather than left to be rediscovered (#9307 review P2 — tracked on #9318).
+    The fix is journal IDENTITY in the key (a column identifying the
     journal, or a per-tenant ordinal allocator), not a number this door can
     derive — do NOT paper it over by declining position rows on the live path,
     which is the #9190 defect this door exists to close.
