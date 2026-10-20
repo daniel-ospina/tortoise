@@ -1377,7 +1377,9 @@ def test_a_parametrised_file_has_no_denominator(tmp_path: Path) -> None:
     never LOWERED.
 
     Non-vacuity: pre-fix the parametrised rows appear in `counts` (as 2), which
-    is what the `not in counts` assertions fail on.
+    is what the `not in counts` assertions fail on — and for the class-METHOD and
+    class-BODY forms, and the unnamed `TestCase`, pre-fix they appeared with a
+    real FLOOR count (1, 1 and 0), which is the fail-open this closes.
     """
     (tmp_path / "tests").mkdir(parents=True)
     (tmp_path / "tests" / "test_param_decorator.py").write_text(
@@ -1402,15 +1404,50 @@ def test_a_parametrised_file_has_no_denominator(tmp_path: Path) -> None:
     )
     (tmp_path / "tests" / "test_plain.py").write_text(
         "def test_a():\n    pass\ndef test_b():\n    pass\n", encoding="utf-8")
+    # The two MARKER forms that used to slip past a `tree.body`-only scan, both
+    # measured in-tree before this was closed: a `parametrize` on a method of a
+    # `Test*` class (7 declared beside 9 collected on
+    # `test_event_state_carrier_2788.py`), and a `pytestmark` inside the class
+    # body rather than on it.
+    (tmp_path / "tests" / "test_param_method.py").write_text(
+        "import pytest\n"
+        "class TestCommitPath:\n"
+        "    def test_plain(self):\n        pass\n"
+        "    @pytest.mark.parametrize('key', ['a', 'b'])\n"
+        "    def test_lane(self, key):\n        pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_param_class_body.py").write_text(
+        "import pytest\n"
+        "class TestBody:\n"
+        "    pytestmark = pytest.mark.parametrize('k', [1, 2])\n"
+        "    def test_m(self, k):\n        pass\n",
+        encoding="utf-8",
+    )
+    # A `unittest.TestCase` subclass under a name that does not start with `Test`:
+    # `_collected_test_count` sees none of its methods, so the denominator would
+    # be a FLOOR. Measured in-tree at 0 declared beside 284 collected on
+    # `tests/test_collision_preflight.py`.
+    (tmp_path / "tests" / "test_unnamed_case.py").write_text(
+        "import unittest\n"
+        "class HolderGateTests(unittest.TestCase):\n"
+        "    def test_one(self):\n        pass\n"
+        "    def test_two(self):\n        pass\n",
+        encoding="utf-8",
+    )
 
     counts = ci_timing.declared_test_counts(
         ["test_param_decorator.py", "test_param_module.py", "test_param_class.py",
-         "test_plain.py"],
+         "test_plain.py", "test_param_method.py", "test_param_class_body.py",
+         "test_unnamed_case.py"],
         tmp_path,
     )
     assert "test_param_decorator.py" not in counts
     assert "test_param_module.py" not in counts
     assert "test_param_class.py" not in counts
+    assert "test_param_method.py" not in counts
+    assert "test_param_class_body.py" not in counts
+    assert "test_unnamed_case.py" not in counts
     # …and the witness still works where it IS provable, so the omission is not
     # "stop counting anything that imports pytest".
     assert counts == {"test_plain.py": 2}

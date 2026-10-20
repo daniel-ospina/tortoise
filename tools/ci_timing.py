@@ -654,7 +654,13 @@ def declared_test_counts(keys, repo_root: Path) -> dict[str, int]:
       altogether (see `_has_parametrisation`), routing it to the UNKNOWN rule
       below: raisable, never lowerable. A `pytest_generate_tests` hook
       parametrises without a marker and is still undetected — that residual
-      keeps the old floor behaviour, and it is the only one left;
+      keeps the old floor behaviour. It is the ONLY MARKERLESS form left: the
+      two shapes that used to sit beside it are closed — a `parametrize` on a
+      class METHOD (and a class-body `pytestmark`), which this scan used to
+      miss by reading `tree.body` only, and a `unittest.TestCase` subclass
+      under a name that does not start with `Test`, whose test methods the count
+      below cannot see (`_declares_a_floor`). Both were floors, and a floor is
+      the fail-open direction;
     * the count is what pytest COLLECTS, not every `def` whose name starts with
       `test`: a `@pytest.fixture` named `test_tools` or `test_proj` is a
       FIXTURE, and a nested `def test_inner` inside another test is not
@@ -686,7 +692,7 @@ def declared_test_counts(keys, repo_root: Path) -> dict[str, int]:
             tree = ast.parse(candidate.read_text(encoding="utf-8"))
         except (OSError, SyntaxError, UnicodeDecodeError):
             continue
-        if _has_parametrisation(tree):
+        if _has_parametrisation(tree) or _declares_a_floor(tree):
             # ⛔ OMITTED, not counted: a count of `def`s is a FLOOR of the collected
             # count, and a floor satisfies `observed >= declared` for a reading that
             # saw only part of the file. An absent denominator is the existing
@@ -743,21 +749,59 @@ def _has_parametrisation(tree: ast.Module) -> bool:
     a reading that saw 2 was classified `observed >= declared` (2 >= 2) and let a
     10x discount through (#9134 review, P1).
 
-    Detected forms: a `parametrize` marker on a module-level `pytestmark`
-    assignment, or in the decorators of a module-level `def` or `Test*` class.
+    Detected forms: a `parametrize` marker on a `pytestmark` assignment, or in
+    the decorators of ANY `def` or `ClassDef` in the module — nested and class-
+    body ones included, because `@pytest.mark.parametrize` on a method of a
+    `Test*` class is exactly as ordinary as one on a module-level function and
+    was MISSED when this scanned `tree.body` only: measured in-tree,
+    `test_event_state_carrier_2788.py` counted 7 `def`s beside 9 collected
+    nodeids, a floor that could license a discount (#9134 review, P1).
     NOT detected, and stated because it is a real residual: parametrisation
     applied at collection time by a `pytest_generate_tests` hook (no marker to
     read). That residual undercounts exactly as before, so what the detection
-    buys is the common case — the hook form keeps the old, documented exposure.
+    buys is every MARKER form — the hook form keeps the old, documented
+    exposure.
     """
-    for node in tree.body:
-        is_pytestmark = isinstance(node, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "pytestmark" for t in node.targets)
-        if is_pytestmark and _mentions_parametrize(node):
-            return True
+    for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and any(
                 _mentions_parametrize(dec) for dec in node.decorator_list):
             return True
+        # A `pytestmark` assignment at module level OR in a class body: the
+        # latter parametrises that class's methods and is not a decorator.
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "pytestmark" for t in node.targets
+        ) and _mentions_parametrize(node):
+            return True
+    return False
+
+
+def _declares_a_floor(tree: ast.Module) -> bool:
+    """True when `_collected_test_count` would UNDERCOUNT this module.
+
+    `_collected_test_count` counts `test*` methods of classes whose NAME starts
+    with `Test`, and pytest additionally collects every `test*` method of a
+    `unittest.TestCase` subclass whatever it is called. A `TestCase` subclass
+    under any other name is therefore invisible to the count, which makes the
+    denominator a FLOOR — the direction that licenses a discount. Measured
+    in-tree: `tests/test_collision_preflight.py` counts 0 against 284 collected
+    nodeids (`CollisionPreflightTest`, `HolderGateTests`, …).
+
+    OMITTED rather than counted, for the same reason a parametrised file is: the
+    exact collected count is not computable from the AST without re-implementing
+    pytest's collection, and a wrong-but-higher count makes `observed >=
+    declared` UNSATISFIABLE, holding the row's weight forever with a witness
+    naming a testcase that does not exist (the `declared > collected` defect the
+    `declared_test_counts` docstring records). UNKNOWN is fail-closed: raisable,
+    never lowerable.
+    """
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef) or node.name.startswith("Test"):
+            continue
+        for base in node.bases:
+            base_name = (base.attr if isinstance(base, ast.Attribute)
+                         else getattr(base, "id", ""))
+            if isinstance(base_name, str) and base_name.endswith("TestCase"):
+                return True
     return False
 
 
