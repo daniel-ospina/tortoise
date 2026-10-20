@@ -494,12 +494,12 @@ def test_the_real_truncated_artifact_shape_is_not_read_as_a_clean_run(tmp_path: 
     SIGKILLed at its 40m budget. Only the NUL signature distinguishes it.
     """
     body = (
-        "============================= test session starts ==============================\n"
-        "collected 3 items\n\n"
-        "tests/test_event_store.py::test_seq_is_monotonic_under_concurrency_live_falkor PASSED [ 33%]\n"
-        "tests/test_embedded_concurrency.py::test_concurrent_writers_live_falkor_no_lost_writes PASSED [100%]\n\n"
-        "============================== 3 passed in 51.08s ==============================\n"
-    ).encode() + b"\x00" * 4096
+        b"============================= test session starts ==============================\n"
+        b"collected 3 items\n\n"
+        b"tests/test_event_store.py::test_seq_is_monotonic_under_concurrency_live_falkor PASSED [ 33%]\n"
+        b"tests/test_embedded_concurrency.py::test_concurrent_writers_live_falkor_no_lost_writes PASSED [100%]\n\n"
+        b"============================== 3 passed in 51.08s ==============================\n"
+    ) + b"\x00" * 4096
     log = tmp_path / "pytest.log"
     log.write_bytes(body)
     result = run_script(log, rc="137")

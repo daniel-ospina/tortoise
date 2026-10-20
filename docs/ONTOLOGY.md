@@ -820,31 +820,31 @@ silently-empty cell.
 
 | Property | Owning writers (`<module>::<function/constant>`) |
 |----------|--------------------------------------------------|
-| `id` | `rebuild_all` |
-| `created_at` | `_write_session_and_turns`, `_execute_commit_writes`, `_commit_region`, `_seed_demo_graph`, `merge_capture_session`, `ingest_haystack`, `_write_v2_phase_a`, `_fold_session_recorded`, `rebuild_all` |
-| `turn_count` | `_write_session_and_turns`, `_seed_demo_graph`, `merge_capture_session`, `ingest_haystack`, `_write_v2_phase_a`, `_fold_session_recorded`, `rebuild_all` |
-| `is_episodic` | `_write_session_and_turns`, `_link_session`, `_fold_session_recorded`, `_execute_commit_writes`, `_commit_region`, `BACKFILL_STATEMENTS`, `merge_capture_session`, `ingest_haystack`, `_write_v2_phase_a`, `rebuild_all` |
-| `harness` | `_write_session_and_turns`, `_fold_session_recorded`, `rebuild_all` |
-| `capture_lane` | `_write_session_and_turns`, `_fold_session_recorded`, `rebuild_all` |
-| `actor_user_id` | `_write_session_and_turns`, `_fold_session_recorded`, `rebuild_all` |
-| `machine_id` | `_write_session_and_turns`, `rebuild_all` |
-| `model` | `_write_session_and_turns`, `rebuild_all` |
-| `client_captured_at` | `_write_session_and_turns`, `_fold_session_recorded`, `rebuild_all` |
-| `client_captured_at_source` | `_write_session_and_turns`, `_fold_session_recorded`, `rebuild_all` |
-| `source` | `_write_session_and_turns`, `_fold_session_recorded`, `rebuild_all` |
-| `capture_redactions` | `_TURN_WRITE_CYPHER`, `_fold_session_recorded`, `merge_capture_session`, `rebuild_all` |
-| `capture_ok` | `_capture_session_impl`, `capture_session`, `_capture_abandoned_marker`, `_fold_session_recorded`, `rebuild_all` |
-| `capture_extractor` | `_capture_session_impl`, `capture_session`, `_capture_abandoned_marker`, `_fold_session_recorded`, `rebuild_all` |
-| `entity_links_attempted` | `_capture_session_impl`, `capture_session`, `_relink_sessions_after_index`, `_fold_session_recorded`, `rebuild_all` |
-| `entity_links_created` | `_capture_session_impl`, `capture_session`, `_relink_sessions_after_index`, `_fold_session_recorded`, `rebuild_all` |
-| `value_nodes_created` | `_execute_commit_writes`, `rebuild_all` |
-| `value_nodes_held` | `_commit_region`, `rebuild_all` |
-| `draft_count` | `_execute_commit_writes`, `rebuild_all` |
-| `commit_count` | `_execute_commit_writes`, `rebuild_all` |
-| `updated_at` | `_execute_commit_writes`, `_commit_region`, `rebuild_all` |
-| `lme_question_id` | `ingest_haystack`, `_write_v2_phase_a`, `rebuild_all` |
-| `lme_session_index` | `ingest_haystack`, `_write_v2_phase_a`, `rebuild_all` |
-| `lme_source_session_id` | `ingest_haystack`, `_write_v2_phase_a`, `rebuild_all` |
+| `id` | `_rebuild_all_replay` |
+| `created_at` | `_write_session_and_turns`, `_execute_commit_writes`, `_commit_region`, `_seed_demo_graph`, `merge_capture_session`, `ingest_haystack`, `_write_v2_phase_a`, `_fold_session_recorded`, `_rebuild_all_replay` |
+| `turn_count` | `_write_session_and_turns`, `_seed_demo_graph`, `merge_capture_session`, `ingest_haystack`, `_write_v2_phase_a`, `_fold_session_recorded`, `_rebuild_all_replay` |
+| `is_episodic` | `_write_session_and_turns`, `_link_session`, `_fold_session_recorded`, `_execute_commit_writes`, `_commit_region`, `BACKFILL_STATEMENTS`, `merge_capture_session`, `ingest_haystack`, `_write_v2_phase_a`, `_rebuild_all_replay` |
+| `harness` | `_write_session_and_turns`, `_fold_session_recorded`, `_rebuild_all_replay` |
+| `capture_lane` | `_write_session_and_turns`, `_fold_session_recorded`, `_rebuild_all_replay` |
+| `actor_user_id` | `_write_session_and_turns`, `_fold_session_recorded`, `_rebuild_all_replay` |
+| `machine_id` | `_write_session_and_turns`, `_rebuild_all_replay` |
+| `model` | `_write_session_and_turns`, `_rebuild_all_replay` |
+| `client_captured_at` | `_write_session_and_turns`, `_fold_session_recorded`, `_rebuild_all_replay` |
+| `client_captured_at_source` | `_write_session_and_turns`, `_fold_session_recorded`, `_rebuild_all_replay` |
+| `source` | `_write_session_and_turns`, `_fold_session_recorded`, `_rebuild_all_replay` |
+| `capture_redactions` | `_TURN_WRITE_CYPHER`, `_fold_session_recorded`, `merge_capture_session`, `_rebuild_all_replay` |
+| `capture_ok` | `_capture_session_impl`, `capture_session`, `_capture_abandoned_marker`, `_fold_session_recorded`, `_rebuild_all_replay` |
+| `capture_extractor` | `_capture_session_impl`, `capture_session`, `_capture_abandoned_marker`, `_fold_session_recorded`, `_rebuild_all_replay` |
+| `entity_links_attempted` | `_capture_session_impl`, `capture_session`, `_relink_sessions_after_index`, `_fold_session_recorded`, `_rebuild_all_replay` |
+| `entity_links_created` | `_capture_session_impl`, `capture_session`, `_relink_sessions_after_index`, `_fold_session_recorded`, `_rebuild_all_replay` |
+| `value_nodes_created` | `_execute_commit_writes`, `_rebuild_all_replay` |
+| `value_nodes_held` | `_commit_region`, `_rebuild_all_replay` |
+| `draft_count` | `_execute_commit_writes`, `_rebuild_all_replay` |
+| `commit_count` | `_execute_commit_writes`, `_rebuild_all_replay` |
+| `updated_at` | `_execute_commit_writes`, `_commit_region`, `_rebuild_all_replay` |
+| `lme_question_id` | `ingest_haystack`, `_write_v2_phase_a`, `_rebuild_all_replay` |
+| `lme_session_index` | `ingest_haystack`, `_write_v2_phase_a`, `_rebuild_all_replay` |
+| `lme_source_session_id` | `ingest_haystack`, `_write_v2_phase_a`, `_rebuild_all_replay` |
 
 **Who is an owner in this table.** A writer owns a property when it carries a
 `SET <alias>.<prop>` clause for it. A property used only as a `MERGE` key is **not** attributed

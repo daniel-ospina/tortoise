@@ -339,7 +339,7 @@ SESSION_WRITERS: tuple[SessionWriter, ...] = (
             "from a full-path MERGE."),
     ),
     SessionWriter(
-        key="tortoise/projection/__init__.py::rebuild_all",
+        key="tortoise/projection/__init__.py::_rebuild_all_replay",
         kind="replay",
         lane="rebuild_all pre-wipe snapshot restore",
         properties=frozenset(SESSION_PROPERTIES) | {"id"},
@@ -483,7 +483,8 @@ def session_property_owners() -> dict[str, tuple[str, ...]]:
     for the property — that is what a :class:`SessionWriter`'s ``properties``
     enumerates (and what the scanner reads back at the site). A property used
     only as a ``MERGE`` key is NOT attributed: ten writers mint the node with
-    ``MERGE (s:Session {id: …})``, but only ``rebuild_all``'s
+    ``MERGE (s:Session {id: …})``, but only the pre-wipe snapshot restore
+    (``_rebuild_all_replay``, reached through ``rebuild_all``) and its
     ``SET s += $props`` owns ``id``. Without that convention the ``id`` row
     reads as "a replay restore owns the Session id", which is the opposite of
     what the code does — the contradiction the §4.8 table inherits (#3554

@@ -155,7 +155,6 @@ fi
 # CRLF is normalised alongside the NUL strip so that all four pipelines here agree
 # about the same bytes; a stray `\r` would otherwise defeat the `$` anchors in
 # SUMMARY_RE and the banner match.
-NORM='s/.*//'  # no-op marker kept out of the pipelines below
 SESSIONS="$(strip_sgr < "$LOG" | tr -d '\r\000' | SUMMARY_RE="$SUMMARY_RE" awk '
   BEGIN { depth = 0; summaries = 0 }
   $0 ~ /^=+ test session starts =+$/ { depth++; next }

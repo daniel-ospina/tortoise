@@ -4758,7 +4758,7 @@ def test_slow_leg_bounds_clear_the_committed_work():
 
 CI_RUNNER_GATE = Path(__file__).resolve().parents[1] / "scripts" / "ci_runner_gate.sh"
 CI_RUNNER_GATE_ABSENT = (
-    f"PRESMISE CROSS-CHECK NOT RUN: agent-infra's ci_runner_gate.sh is not "
+    f"PREMISE CROSS-CHECK NOT RUN: agent-infra's ci_runner_gate.sh is not "
     f"reachable at {CI_RUNNER_GATE} (the `scripts` symlink dangles where "
     f"$AGENT_INFRA_PATH is unset, as on a runner). The repo-side half of the "
     f"guard — test-slow's label is VERSION-PINNED — ran and passed. Run this "
