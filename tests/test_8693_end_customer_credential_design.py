@@ -113,7 +113,7 @@ def _membership_checks(node: ast.AST, needle: str) -> list[tuple[ast.Compare, as
     for sub in ast.walk(node):
         if not isinstance(sub, ast.Compare):
             continue
-        for op, comparator in zip(sub.ops, sub.comparators):
+        for op, comparator in zip(sub.ops, sub.comparators, strict=False):
             if not isinstance(op, (ast.In, ast.NotIn)):
                 continue
             left = sub.left

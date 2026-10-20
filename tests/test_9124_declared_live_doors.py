@@ -250,15 +250,6 @@ _NO_JOURNAL = {
 #: entry below was checked by hand: the resolvable part of each statement is a
 #: `MATCH … RETURN` read with no write keyword in it.
 _UNRESOLVED = {
-    # #9063/#9261 (merged into `main` as `c172b042f`): the calibration gate's
-    # predicate and its summary audit both run `MATCH … RETURN n.id` reads
-    # against the handle, but their statements are assembled from a `where`
-    # fragment and a per-label loop, so the enumerator cannot PROVE them
-    # read-only and counts them as writes. Both were checked by hand: the
-    # resolvable part of each is a read with no write keyword in it, and
-    # `calibrate_summary` is the audit that only ever RETURNS rows.
-    "_uncalibrated_ep_participants",
-    "calibrate_summary",
     "_assert_lifecycle_guard",
     "_graph_presence",
     "_hop",
@@ -304,18 +295,6 @@ _UNRESOLVED = {
     "suggest_entry_points",
     "tortoise_fts_query",
     "traverse",
-    # #9261 (`c172b042f`, the #9063 calibration-gate fix): BOTH of these build
-    # their statement from a COMPUTED local — `where` is an f-string fragment
-    # assembled from `_ID_RESOLVABLE_TYPES` / `_ID_WHITESPACE_SET` and loop
-    # variables (`{label}`), so the enumerator sees `'<unresolved>'` where the
-    # query text is. Hand-checked (2026-10-20): the ONLY handle reach in each is
-    # a `MATCH … OPTIONAL MATCH … RETURN` read — no SET/CREATE/MERGE/DELETE, and
-    # `calibrate_summary` writes nothing itself (its advice only NAMES
-    # `set_point_baseline`). Listed here — not silently called a read — because
-    # that is the census being honest about what it can prove; the gate must go
-    # on demanding a lane for anything it CAN see mutating.
-    "calibrate_summary",
-    "_uncalibrated_ep_participants",
 }
 
 _INVENTORY = {
