@@ -18,7 +18,7 @@ subjects.team: epistemic-team
 - head_sha: `8464f850f938ff048666a24ade2081e4518987b6`
 - created_at: `2026-10-19T02:41:31Z`
 - conclusion: `failure`
-- sample_time: `2026-10-19T05:02:36Z`
+- sample_time: `2026-10-20T14:39:07Z`
 - selection: latest completed `event=push&branch=main` run, `exclude_pull_requests=true`, cancelled skipped
 - schema_version: `1`
 
@@ -577,7 +577,7 @@ Second-granularity timestamps: sub-10s steps read 0s — do not alarm on those.
 | test_read_routes_loop_responsiveness.py | 1 | 2.6 | 2.6 |
 | test_wipe_server.py | 1 | 2.4 | 2.4 |
 | test_onboarding_endpoints.py | 1 | 2.2 | 2.2 |
-| test_embedded_concurrency.py | 10 | 117.8 | 37.5 |
+| test_embedded_concurrency.py | 8 | 117.8 | 37.5 |
 | test_longmem_runner.py | 5 | 33.6 | 16.5 |
 | test_projection_lifecycle.py | 1 | 4.8 | 4.8 |
 | test_backup_e2e.py | 1 | 4.8 | 4.8 |
@@ -591,7 +591,7 @@ Second-granularity timestamps: sub-10s steps read 0s — do not alarm on those.
 | test_embedded_lifecycle.py | 8 | 84.8 | 12.3 |
 | test_reaper.py | 6 | 61.9 | 12.0 |
 | test_guard.py | 1 | 9.4 | 9.4 |
-| test_event_store.py | 3 | 9.6 | 7.1 |
+| test_event_store.py | 2 | 9.6 | 7.1 |
 | test_capture_loop_responsiveness.py | 2 | 13.5 | 8.8 |
 | test_entity_identity.py | 1 | 5.8 | 5.8 |
 | test_2350_validity_precision.py | 1 | 5.6 | 5.6 |
@@ -641,14 +641,14 @@ Second-granularity timestamps: sub-10s steps read 0s — do not alarm on those.
 | test_source_inheritance_own.py | 1 | 49.5 | 49.5 |
 | test_write_path_runner.py | 3 | 133.0 | 44.4 |
 | test_ci_selection.py | 2 | 64.9 | 39.2 |
-| test_pack_shipping_wheel.py | 2 | 40.6 | 27.5 |
+| test_pack_shipping_wheel.py | 1 | 40.6 | 27.5 |
 | test_run.py | 2 | 49.2 | 24.7 |
 | test_graph_diagnostics.py | 1 | 17.4 | 17.4 |
 | test_client_surface.py | 1 | 16.4 | 16.4 |
 
 ## Outcome (suite totals across jobs)
 
-- passed: **30697** · failed: **5** · error: **0** · skipped: **129** · xfailed: 7 · xpassed: 0
+- passed: **30697** · failed: **6** · error: **0** · skipped: **129** · xfailed: 7 · xpassed: 0
 - watchdog-killed mid-suite: no
 
 ## Flake signal
@@ -663,7 +663,7 @@ Second-granularity timestamps: sub-10s steps read 0s — do not alarm on those.
 
 | Sample | Run | Conclusion | Passed | Failed | Error | Skipped | Steps max job (s) |
 |---|---|---|---|---|---|---|---|
-| 2026-10-19T05:02:36Z | 39191149586 | failure | 30697 | 5 | 0 | 129 | 1300 |
+| 2026-10-20T14:39:07Z | 39191149586 | failure | 30697 | 6 | 0 | 129 | 1300 |
 | 2026-10-17T15:56:38Z | 39040632415 | success | 31284 | 0 | 0 | 139 | 1414 |
 | 2026-10-13T03:18:43Z | 38337541559 | success | 28478 | 0 | 0 | 137 | 1232 |
 | 2026-10-12T04:54:57Z | 38203397437 | success | 27677 | 0 | 0 | 137 | 1052 |

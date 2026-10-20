@@ -166,7 +166,7 @@
     },
     "test_embedded_concurrency.py": {
       "max_ms": 37480.0,
-      "tests": 10,
+      "tests": 8,
       "total_ms": 117810.0
     },
     "test_embedded_lifecycle.py": {
@@ -216,7 +216,7 @@
     },
     "test_event_store.py": {
       "max_ms": 7110.0,
-      "tests": 3,
+      "tests": 2,
       "total_ms": 9570.0
     },
     "test_extractor_reliability.py": {
@@ -351,7 +351,7 @@
     },
     "test_pack_shipping_wheel.py": {
       "max_ms": 27470.0,
-      "tests": 2,
+      "tests": 1,
       "total_ms": 40600.0
     },
     "test_pi_capture_hooks.py": {
@@ -496,7 +496,7 @@
       "conclusion": "failure",
       "counts": {
         "error": 0,
-        "failed": 5,
+        "failed": 6,
         "passed": 30697,
         "skipped": 129,
         "xfailed": 7,
@@ -514,7 +514,7 @@
       ],
       "killed": false,
       "run_id": "39191149586",
-      "sample_time": "2026-10-19T05:02:36Z",
+      "sample_time": "2026-10-20T14:39:07Z",
       "sha": "8464f850f938ff048666a24ade2081e4518987b6",
       "steps_max_job_ms": 1300000,
       "steps_total_ms": 9951000
@@ -791,7 +791,7 @@
   ],
   "outcome": {
     "error": 0,
-    "failed": 5,
+    "failed": 6,
     "killed": false,
     "passed": 30697,
     "skipped": 129,
@@ -803,7 +803,7 @@
     "created_at": "2026-10-19T02:41:31Z",
     "head_sha": "8464f850f938ff048666a24ade2081e4518987b6",
     "run_id": "39191149586",
-    "sample_time": "2026-10-19T05:02:36Z",
+    "sample_time": "2026-10-20T14:39:07Z",
     "selection": "latest completed event=push&branch=main run, exclude_pull_requests=true, cancelled skipped"
   },
   "schema_version": 1,
