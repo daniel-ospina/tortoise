@@ -223,7 +223,8 @@ def test_a_failed_cache_write_leaves_the_revision_replayable(env, monkeypatch):
 
 # ── T4: the promote arm stays apply-first (a RECORDED deviation) ──────────
 
-def test_the_promote_arm_stays_apply_first_a_recorded_deviation(env, monkeypatch):
+@pytest.mark.parametrize("arm", ["point", "object"])
+def test_the_promote_arm_stays_apply_first_a_recorded_deviation(env, monkeypatch, arm):
     """The `status='live'` promote is still apply-first, on purpose.
 
     A deviation PIN, not a defect detector — it passes on the pre-change tree
@@ -232,9 +233,23 @@ def test_the_promote_arm_stays_apply_first_a_recorded_deviation(env, monkeypatch
     first would record a promotion the graph refused. The order is asserted so a
     future change that "completes" the conversion without solving the guarded
     arm reddens HERE rather than shipping a journal that claims refused writes.
+
+    PARAMETRIZED over the two promote arms: `update_point` carries the promote
+    twice (`:Point:Object` and `:Point`) and a spy pinned on one arm does not
+    red the other — the `:Object` arm was measured unpinned before this.
     """
     sdk, _events = env
     pid = sdk.create_point("statement", "a draft claim", status="draft")["id"]
+    proj = sdk._get_proj()
+    if arm == "object":
+        # No production path mints a `:Point:Object`; build the shape by hand.
+        proj.g.query("MATCH (n:Point {id:$id}) SET n:Object", params={"id": pid})
+        labels = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN labels(n)",
+            params={"id": pid}).result_set
+        assert labels and set(labels[0][0]) == {"Point", "Object"}, (
+            "fixture precondition: the object arm needs BOTH labels — "
+            f"node labels {labels!r}")
 
     order = _order_spies(sdk, monkeypatch, r"SET n\.status = 'live'")
 
