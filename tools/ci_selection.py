@@ -1226,7 +1226,23 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `core` surface, and the probe's guard is `core`-registered.
              # Pinned by
              # tests/test_ci_selection.py::test_capstone_probe_change_selects_core_not_tier1.
-             "docs/evidence/7950-capstone/probes/",
+             #
+             # PR #9196 review P1 — WIDENED from `probes/` to the whole bundle:
+             # the probe is no longer the only artifact the guard pins. The same
+             # PR added `test_the_s2_census_log_is_a_LIVE_measurement`, which
+             # re-runs the committed census probe and compares its output to
+             # `s2-wiring-census.log`, and
+             # `test_the_evidence_readme_quotes_the_log_it_cites_verbatim`, which
+             # pins the README's quotes to `e2e-chain-probe.log`. Both LOGS and
+             # the README are hand-editable committed text — so a one-file PR
+             # that re-cuts a number in them took the docs-only early return and
+             # merged with the pin that guards them NEVER RUN (measured:
+             # `select(['docs/evidence/7950-capstone/s2-wiring-census.log'])` →
+             # surfaces=[], probe absent). That is the same #1349/#3332/#3616
+             # shape one level out: the artifact a verdict REST on must not be
+             # editable without the pin that re-measures it running. Pinned by
+             # tests/test_ci_selection.py::test_the_capstone_evidence_bundle_selects_core_not_tier1.
+             "docs/evidence/7950-capstone/",
              # #9076: the E1+E2 evidence bundle
              # (`docs/evidence/7949-capstone/` — the probe, the corpus JSON and its
              # builder, the evidence log) and its structural checker

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util as _ilu
+import re
 from pathlib import Path
 
 from tortoise.cache_projection import RecordNode, RecordView
@@ -306,3 +307,352 @@ def test_the_readme_no_longer_asserts_the_field_half_is_an_open_s2_blocker():
         "the README's verbatim caveat no longer describes the log (it carries a "
         "provenance header block)"
     )
+
+
+# --------------------------------------------------------------------------
+# #9189 review (finding 1): the census is S2's DECIDING ARTIFACT, and the PR
+# that gave `read_record_view` its first production caller left it asserting
+# "0 production call sites" for that function. A lane reading the README then
+# re-derives wiring that has already landed — the stale-flag class the fleet
+# rules name. These two pins keep the log and the prose it feeds together.
+# --------------------------------------------------------------------------
+
+_S2_CENSUS_LOG = _REPO_ROOT / "docs" / "evidence" / "7950-capstone" / "s2-wiring-census.log"
+
+
+def _census_headline_lines() -> list[str]:
+    """The `== <target>: N production call site(s) ==` lines from the log."""
+    return [ln for ln in _S2_CENSUS_LOG.read_text(encoding="utf-8").splitlines()
+            if ln.startswith("== ")]
+
+
+def test_the_s2_census_records_the_callers_that_now_exist():
+    """`0` for `read_record_view` was true before `#9189`, and false after it.
+
+    Pre-fix the committed log (and the S2 row quoting it) reported **0** for
+    `cache_projection.read_record_view` while `tortoise/__main__.py`'s
+    `record-reconcile` verb already called it, so the evidence artifact
+    contradicted the merged code it is the evidence for.
+    """
+    log = _S2_CENSUS_LOG.read_text(encoding="utf-8")
+    assert "== cache_projection.read_record_view: 1 production call site(s) ==" in log, (
+        "the census no longer records the production caller #9189 added — "
+        "re-run docs/evidence/7950-capstone/probes/s2_wiring_census.py")
+    verdict = next(ln for ln in _readme_text().splitlines()
+                   if ln.startswith("| **S2** |") and "divergence is OBSERVED" in ln)
+    assert "all have **0 production call sites**" not in verdict, (
+        "the S2 verdict row still claims every module is unwired: " + verdict)
+
+
+def test_the_s2_census_quote_matches_the_log():
+    """Every headline the README quotes is the log's own, byte for byte.
+
+    The README presents the block as the probe's output; a re-cut log that does
+    not drag the quote with it is a false claim about its own evidence (the
+    #8615 finding, one artifact over).
+    """
+    headlines = _census_headline_lines()
+    assert len(headlines) == 4, f"expected four census headlines, got {headlines}"
+    readme = _readme_text()
+    missing = [ln for ln in headlines if ln not in readme]
+    assert not missing, (
+        "docs/evidence/7950-capstone/README.md quotes census numbers that are "
+        "not in s2-wiring-census.log — re-quote the block after re-measuring:\n"
+        + "\n".join(missing))
+
+
+# --------------------------------------------------------------------------
+# #9189 review (the re-cut census): the log is a MEASUREMENT, and the pattern
+# must see every spelling a wired caller can use. Two ways the deciding
+# artifact could lie, both pinned here.
+# --------------------------------------------------------------------------
+
+_CENSUS_PROBE = (_REPO_ROOT / "docs" / "evidence" / "7950-capstone"
+                 / "probes" / "s2_wiring_census.py")
+
+
+def _load_census_probe():
+    """Load the S2 census probe by path (the directory is hyphenated)."""
+    spec = _ilu.spec_from_file_location("capstone_s2_wiring_census",
+                                       str(_CENSUS_PROBE))
+    assert spec and spec.loader
+    module = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_CENSUS_MODULE = _load_census_probe()
+
+
+def test_the_census_pattern_sees_every_call_spelling(tmp_path):
+    """A wired `reconcile` must be COUNTED, however it is spelled.
+
+    The re-cut pattern's bare-call alternative carries a `(?<![\\w.])`
+    lookbehind, which rejects a dotted receiver — so without its own
+    alternative the MODULE-QUALIFIED spelling
+    (`reconciliation.reconcile(a, b)`, the natural one for a module-level
+    function imported as a module) reads as **0 production call sites** while
+    the reconciler IS wired. That is the stale-evidence failure this census
+    exists to prevent, reproduced inside the census. Pre-fix the BARE-call case
+    fails (only the dotted spelling had an alternative); the dotted case failed
+    against an earlier cut, which is why both are kept in one test.
+    """
+    source = "\n".join([
+        "from tortoise import reconciliation",
+        "reconciliation.reconcile(record_reader, cache_reader)",
+        "x = reconcile(record_reader, cache_reader)",
+        "from tortoise.reconciliation import (",
+        "    reconcile,",
+        ")",
+        "def reconcile(a, b):",          # a definition is NOT a call site
+        "self.reconcile(a, b)",          # nor is a method of the same name
+        "consistency.reconcile(a, b)",   # nor is another module's
+        # ...and PROSE inside a multi-line f-string is not a call site either
+        # (3.12 tokenizes it as FSTRING_START/MIDDLE/END, not one STRING).
+        "note = f\"\"\"",
+        "the reconciler is wired: reconciliation.reconcile(a, b)",
+        "and reconcile(a, b) is the bare spelling",
+        "\"\"\"",
+    ])
+    (tmp_path / "wired.py").write_text(source, encoding="utf-8")
+
+    hits = _CENSUS_MODULE.census(
+        [str(tmp_path)], _CENSUS_MODULE.TARGETS["reconciliation.reconcile"])
+    lines = [h.split(": ", 1)[1] for h in hits]
+
+    assert "reconciliation.reconcile(record_reader, cache_reader)" in lines
+    assert "x = reconcile(record_reader, cache_reader)" in lines
+    assert not any(ln.startswith("def reconcile") for ln in lines)
+    assert not any("self.reconcile(" in ln for ln in lines)
+    assert not any("consistency.reconcile(" in ln for ln in lines)
+    # A multi-line f-string's prose is not a call site. `_prose_lines` claims
+    # STRING *and* FSTRING spans; before that claim held, these two lines
+    # inflated the count.
+    assert not any("the reconciler is wired" in ln for ln in lines)
+    assert not any("is the bare spelling" in ln for ln in lines)
+
+
+def _production_section(text: str) -> list[str]:
+    """The census output ABOVE the test population (the production counts).
+
+    A leading `#` block is the artifact's PROVENANCE header — when the numbers
+    were taken and by which command — and carries no measurement of its own, so
+    it is skipped here. The pin that compares against this section compares
+    measurements, not metadata (#9196 review P2: without a header a reader
+    cannot tell which tree the numbers describe, which is how the informational
+    half went stale unseen).
+    """
+    out: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("#"):
+            continue
+        if line.startswith("test population:"):
+            break
+        out.append(line)
+    return out
+
+
+# A census hit line as the probe prints it: `  <path>:<ordinal>: <source text>`.
+_HIT_LINE = re.compile(r"^(?P<path>[^:]+):(?P<ordinal>\d+):(?P<rest>.*)$")
+
+
+def _without_line_ordinal(line: str) -> str:
+    """`  tortoise/x.py:727: view = ...` -> `  tortoise/x.py: view = ...`.
+
+    A line that is not a hit line (a `== target: N ... ==` headline, the
+    `production population:` header) is returned unchanged.
+    """
+    m = _HIT_LINE.match(line)
+    if not m:
+        return line
+    return f"{m.group('path')}:{m.group('rest')}"
+
+
+def _normalise_census(printed: list[str], recorded: list[str]) -> tuple[list[str], list[str]]:
+    """(live, committed) with each hit line's line ORDINAL dropped.
+
+    What the census CLAIMS is a count per target plus the FILE each caller
+    lives in. The ordinal is not part of that claim, and pinning it makes every
+    unrelated edit above a call into a red `core`/`api` test whose remedy is
+    re-cutting another issue's evidence log (#9196 review P2). Measured: the
+    hits sit in `tortoise/__main__.py` and `tortoise/record_writer.py`, two of
+    the most-edited files in the tree — 4 of the last 50 `origin/main` commits
+    touched the former, and #8969 inserted 45 lines at 83/252/270, all above
+    the `read_record_view` call. The `file:line` stays IN the log for the human
+    reader; it is simply not what the pin compares.
+
+    Dropping the WHOLE hit line would be fail-open, so the file is kept: a
+    caller that moves file, appears, or disappears still reddens.
+    """
+    return (
+        [_without_line_ordinal(ln) for ln in printed if ln],
+        [_without_line_ordinal(ln) for ln in recorded if ln],
+    )
+
+
+_PROVENANCE_COMMIT = re.compile(r"Measured at:.*@[0-9a-f]{7,40}\b")
+_PROVENANCE_DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+
+
+def _provenance_problems(header: list[str]) -> list[str]:
+    """What the log's provenance header fails to state (#9196 review P2).
+
+    The pin is on the SHAPE — when, which tree (by COMMIT), which command — and
+    deliberately not on this PR's branch name. A branch is transient (GitHub
+    deletes it on merge, and the re-cut of the log will be done on whatever
+    branch carries it), so a literal `feat/9189-tm@` pin makes the artifact
+    impossible to re-cut anywhere else: the re-cut writes its own branch, the
+    assertion fails, and the only escape is to edit this literal — i.e. to
+    edit the grader until its own artifact passes.
+    """
+    joined = "\n".join(header)
+    problems: list[str] = []
+    if not header:
+        problems.append("the log carries no `#` provenance header")
+    if "Measured at:" not in joined:
+        problems.append("no `Measured at:` line names the tree measured")
+    if not _PROVENANCE_COMMIT.search(joined):
+        problems.append("`Measured at:` names no commit (`@<sha>`)")
+    if not _PROVENANCE_DATE.search(joined):
+        problems.append("no ISO date says when the numbers were taken")
+    if "probes/s2_wiring_census.py" not in joined:
+        problems.append("the command that produced the numbers is not named")
+    return problems
+
+
+def test_the_s2_census_log_carries_its_provenance():
+    """The log must say WHICH tree its numbers describe (#9196 review P2).
+
+    The production section is re-measured by the pin below, but the
+    `test population:` counts are informational by design — nothing reds when
+    they drift. Their remedy is provenance: a header naming the head, the date
+    and the command, exactly as `e2e-chain-probe.log` carries, so a reader can
+    tell a measurement from a memory. Without it the two stale counts found at
+    #9196 (replay 1 vs 2, rebuild_from_record 6 vs 10) were invisible: nothing
+    in the file said what tree they had been cut from.
+    """
+    text = _S2_CENSUS_LOG.read_text(encoding="utf-8")
+    header = [ln for ln in text.splitlines() if ln.startswith("#")]
+    assert not _provenance_problems(header), (
+        "the census log's provenance header is incomplete: "
+        f"{_provenance_problems(header)} — a log whose numbers cannot be dated "
+        "re-stales silently (the #9196 review's finding)")
+    assert header == text.splitlines()[:len(header)], (
+        "the provenance header must LEAD the file — a header below a "
+        "measurement reads as if it described the lines above it")
+
+
+def test_the_provenance_pin_pins_the_SHAPE_not_this_branch():
+    """A re-cut on ANY branch satisfies the pin; a commit-less header does not.
+
+    Non-vacuity for the fix: the header below is what a re-cut performed on
+    another branch (the normal case — this PR's branch is deleted on merge)
+    writes. The PRE-FIX assertion required the literal `feat/9189-tm@`, so it
+    rejected exactly this header; the shape assertion accepts it and still
+    rejects every header that cannot date its numbers.
+    """
+    re_cut = [
+        "# Measured at: fix/overlay-ordered@0123abc on 2031-02-03",
+        "# Command: uv run python "
+        "docs/evidence/7950-capstone/probes/s2_wiring_census.py",
+    ]
+    assert _provenance_problems(re_cut) == []
+    # ...and the pre-fix literal is NOT what made it pass.
+    assert "feat/9189-tm@" not in "\n".join(re_cut)
+
+    assert _provenance_problems([]) == [
+        "the log carries no `#` provenance header",
+        "no `Measured at:` line names the tree measured",
+        "`Measured at:` names no commit (`@<sha>`)",
+        "no ISO date says when the numbers were taken",
+        "the command that produced the numbers is not named",
+    ]
+    assert _provenance_problems(["# Measured at: fix/x on 2031-02-03"]), (
+        "a header with no commit cannot say which TREE was measured")
+    assert _provenance_problems(["# Measured at: fix/x@0123abc"]), (
+        "a header with no date cannot say WHEN the numbers were taken")
+    assert _provenance_problems(["# Measured at: fix/x@0123abc on 2031-02-03"]), (
+        "a header that names no command cannot be reproduced")
+
+
+def test_the_s2_census_log_is_a_LIVE_measurement(monkeypatch, capsys):
+    """S2's deciding artifact is re-MEASURED, not compared to itself.
+
+    `test_the_s2_census_quote_matches_the_log` pins the README to the log, and
+    both are committed text — so together they cannot detect the TREE moving
+    out from under the claim. That is what makes the log a stale flag rather
+    than a measurement. Here the committed probe is re-run over the production
+    population and the result is compared to the committed log: a new caller, a
+    removed caller, or a line move all redden this instead of silently
+    contradicting the artifact the S2 verdict rests on.
+
+    Only the PRODUCTION population is pinned. The log's `test population:`
+    counts are informational: they move whenever any test file mentions one of
+    these names, which is not a claim about whether the product is wired.
+
+    The hit lines are compared by COUNT and FILE, with each line's ordinal
+    normalised away (`_normalise_census`) — see that helper for why: the
+    ordinal is not part of the claim, and pinning it reddened this `core`/`api`
+    test on every unrelated edit above a censused call (#9196 review P2). A new
+    caller, a removed caller, or a caller that moves to another file still
+    reddens, which is the wiring signal the S2 verdict rests on.
+
+    `tools/ci_selection.py`'s `CORE_ALSO` keeps this evidence bundle selecting
+    the pin, so a log-only edit cannot land with the pin unrun.
+    """
+    monkeypatch.chdir(_REPO_ROOT)
+    measured = _CENSUS_MODULE.census_all(_CENSUS_MODULE.PROD_DIRS,
+                                        _CENSUS_MODULE.TARGETS)
+    printed = [f"production population: {_CENSUS_MODULE.PROD_DIRS}/**/*.py", ""]
+    for name in _CENSUS_MODULE.TARGETS:
+        hits = measured[name]
+        printed.append(f"== {name}: {len(hits)} production call site(s) ==")
+        printed.extend(f"  {h}" for h in hits)
+        printed.append("")
+
+    committed = _S2_CENSUS_LOG.read_text(encoding="utf-8")
+    live, recorded = _normalise_census(printed, _production_section(committed))
+    assert live == recorded, (
+        "s2-wiring-census.log no longer matches a live run of "
+        "docs/evidence/7950-capstone/probes/s2_wiring_census.py — re-run the "
+        "probe and re-cut the log (and anything quoting it):\n"
+        + "\n".join(printed))
+
+
+def test_the_census_pin_catches_a_wiring_change_but_not_a_line_move():
+    """Both directions of the normalisation, because each one alone is a bug.
+
+    Pinning the ordinal (pre-fix) reddens on unrelated PRs; dropping the whole
+    hit line would be FAIL-OPEN — a new or removed caller would then never
+    redden the artifact the S2 verdict rests on. So: a line move agrees, and
+    every wiring change still disagrees.
+    """
+    recorded = [
+        "== cache_projection.read_record_view: 1 production call site(s) ==",
+        "  tortoise/caller.py:375: view = read_record_view(conn)",
+        "",
+    ]
+
+    def live(*hits: str, count: int | None = None) -> list[str]:
+        n = len(hits) if count is None else count
+        return [f"== cache_projection.read_record_view: {n} production "
+                "call site(s) ==", *hits, ""]
+
+    moved = live("  tortoise/caller.py:412: view = read_record_view(conn)")
+
+    # PRE-FIX the ordinal was part of the comparison, so this unrelated line
+    # move (4 of the last 50 commits on origin/main touch this file) reddened.
+    assert ([ln for ln in moved if ln]
+            != [ln for ln in recorded if ln]), "the fixture must move the line"
+    # POST-FIX the same move agrees — the claim did not change.
+    assert _normalise_census(moved, recorded)[0] == _normalise_census(moved, recorded)[1]
+
+    # Every WIRING change still reddens.
+    for wired in (
+        live(),                                             # caller removed
+        live("  tortoise/caller.py:375: view = read_record_view(conn)",
+             "  tortoise/second.py:9: view = read_record_view(conn)"),  # added
+        live("  tortoise/moved.py:375: view = read_record_view(conn)"),   # moved file
+    ):
+        a, b = _normalise_census(wired, recorded)
+        assert a != b, f"a wiring change must redden: {wired}"
