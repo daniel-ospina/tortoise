@@ -31,20 +31,55 @@ No DB, no network, no Docker: every input is a file this module writes to
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / ".github" / "scripts" / "pytest-attribution.sh"
 EXEMPTION_PY = REPO / "scripts" / "ci_exemption.py"
 WORKFLOW = REPO / ".github" / "workflows" / "python-ci.yml"
-# The reporter serves both workflows that print a `/tmp/*pytest.log` tail;
-# post-merge-validation has no nodeid grep, so its tail was its ONLY channel.
-ATTRIBUTION_WORKFLOWS = [WORKFLOW, REPO / ".github" / "workflows" / "post-merge-validation.yml"]
+CI_WORKFLOW = REPO / ".github" / "workflows" / "ci.yml"
+#: The SCOPE of this guard, named rather than implied: these two workflows and no
+#: others. The list is not "every workflow in the repo", and saying so matters —
+#: a workflow outside it is INVISIBLE here, and its leg can silently omit its own
+#: failure set (#3470). The scope is deliberate and its one known omission is
+#: recorded below: `.github/workflows/ci.yml`'s `hosted-e2e` leg captures
+#: `/tmp/hosted-e2e.log` through `| tee` and has no reporter call, which is #9300
+#: (deferred from this PR because the lane that fixed the rest of the review findings
+#: could not push a `.github/workflows/*` change — its credential carries no
+#: `workflow` scope). #9300 raises this floor to 9 and adds the leg to
+#: `test_a_failing_pytest_still_reds_the_step`'s cases.
+ATTRIBUTION_WORKFLOWS = [
+    WORKFLOW,
+    REPO / ".github" / "workflows" / "post-merge-validation.yml",
+]
+
+
+def test_the_uncovered_workflow_is_named_not_silently_dropped() -> None:
+    """The KNOWN gap is pinned, so closing it cannot be mistaken for tidying.
+
+    A coverage floor is only honest about the surface it names. `ci.yml`'s
+    `hosted-e2e` leg writes its only log through `| tee /tmp/hosted-e2e.log` and has
+    no reporter, so it is outside this guard's scope by decision and by record
+    (#9300) — not by accident. When the leg is wired, this test must go and the
+    workflow must be added above: the failure here is the instruction to do both.
+    """
+    body = CI_WORKFLOW.read_text()
+    assert "| tee /tmp/hosted-e2e.log" in body, (
+        "ci.yml no longer captures the hosted-e2e log the way #9300 describes — "
+        "re-check that issue before widening or keeping this guard's scope"
+    )
+    assert CI_WORKFLOW not in ATTRIBUTION_WORKFLOWS, (
+        "ci.yml is now in ATTRIBUTION_WORKFLOWS — delete this test, raise the coverage "
+        "floor to the new inventory, and add the hosted-e2e case to "
+        "test_a_failing_pytest_still_reds_the_step (#9300)"
+    )
 
 # The RAIL this module measures against lives in agent-infra, not here: `scripts`
 # is a tracked symlink to `$AGENT_INFRA_PATH/scripts`, so `EXEMPTION_PY` resolves
@@ -997,40 +1032,69 @@ def test_incomplete_marker_becomes_a_named_attributable_failure(tmp_path: Path) 
 # tests' business, above.)
 
 
-def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
-    """EVERY `/tmp/*.log` tail in these workflows reports through the reporter.
+#: `tail -n 300 <log>` AND `tail -25 <log>` — the flag is spelled both ways in these
+#: workflows, so match the SHAPE, not one spelling. Anchored (`^tail`), so a comment
+#: that merely mentions the spelling cannot be counted as a site.
+_TAIL_SITE_RE = re.compile(r"^tail\s+-n?\s*\d+\s+(\S+)$")
+#: A leg may persist its output through `| tee /tmp/x.log` instead of a tail; both are
+#: "this leg keeps a log", so both owe the reporter a call. This one has to SEARCH a
+#: longer command line (the capture sits mid-pipeline, followed by `|| rc=$?`), so it
+#: is not end-anchored — which is why comment lines are filtered out before matching.
+_TEE_SITE_RE = re.compile(r"\|\s*tee\s+(/tmp/[^\s|]+\.log)")
 
-    Eight sites today: 5 `pytest.log` tails, 1 `trackb.log` (the must-pass Track B
-    member, whose log name does not contain "pytest" — it was the coverage gap a
-    first cut missed), 1 `pmv-pytest.log`, and 1 `pytest-d14.log`, which is written
-    through `| tee` rather than a tail (this file counts both shapes; the `tee`
-    site is the one a tail-only counter missed). The filter is
-    deliberately the LOG TAIL, not the file name: a leg's log name is not a
-    contract, and the rail's capture is `gh run view --log-failed` across every
-    job, so any of these legs can omit its own failure set.
+
+def capture_site(line: str) -> str | None:
+    """The pytest log this workflow line captures, or None if it captures none.
+
+    Comment lines are skipped BEFORE matching. The `tail` branch is anchored, so it
+    cannot count prose — but the `tee` branch cannot be end-anchored (the capture sits
+    mid-pipeline), and an unanchored search over an unfiltered line also matches
+    DOCUMENTATION: the D14 site is spelled `tee /tmp/pytest-d14.log` verbatim in this
+    PR's description and in `tests/test_markers.py`, so the moment a sentence
+    describing it lands in the comment block above the site, the counter reads one
+    MORE than the real sites (9 against 8). A phantom SITE is the dangerous direction:
+    the assertion below is a FLOOR, so one phantom silently re-buys the slack the
+    floor raise exists to remove — and the reporter-window check passes for a comment
+    sitting above the real call.
+    """
+    stripped = line.strip()
+    if stripped.startswith("#"):
+        return None
+    match = _TEE_SITE_RE.search(stripped) or _TAIL_SITE_RE.match(stripped)
+    if match is None:
+        return None
+    target = match.group(1)
+    if not (target.startswith("/tmp/") and target.endswith(".log")):
+        return None
+    return target
+
+
+def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
+    """EVERY `/tmp/*.log` capture in these workflows reports through the reporter.
+
+    Eight sites in the two workflows this guard NAMES (`ATTRIBUTION_WORKFLOWS` —
+    the scope is explicit, and its one known omission, ci.yml's `hosted-e2e` leg,
+    is pinned by `test_the_uncovered_workflow_is_named_not_silently_dropped` and
+    #9300): 5 `pytest.log` tails in python-ci.yml, 1 `trackb.log` (the must-pass
+    Track B member, whose log name does not contain "pytest" — it was the coverage
+    gap a first cut missed), 1 `pmv-pytest.log` in post-merge-validation.yml, and 1
+    `pytest-d14.log`, written through `| tee` rather than a tail (this file counts
+    both shapes; the `tee` site is the one a tail-only counter missed). The filter is
+    deliberately the LOG CAPTURE, not the file name: a leg's log name is not a
+    contract, and the rail's capture is `gh run view --log-failed` across every job,
+    so any of these legs can omit its own failure set.
     """
     tails = 0
     for workflow in ATTRIBUTION_WORKFLOWS:
         lines = workflow.read_text().splitlines()
         for i, ln in enumerate(lines):
-            # `tail -n 300 <log>` AND `tail -25 <log>` — the flag is spelled
-            # both ways in these workflows, so match the shape, not one spelling.
-            m = re.match(r"^tail\s+-n?\s*\d+\s+(\S+)$", ln.strip())
-            # A leg may persist its output through `| tee /tmp/x.log` instead of a
-            # tail; both are "this leg keeps a log", and both owe the reporter a call.
-            m_tee = re.search(r"\|\s*tee\s+(/tmp/[^\s|]+\.log)", ln.strip())
-            if m_tee:
-                target = m_tee.group(1)
-            elif m:
-                target = m.group(1)
-            else:
-                continue
-            if not (target.startswith("/tmp/") and target.endswith(".log")):
+            target = capture_site(ln)
+            if target is None:
                 continue
             tails += 1
             window = "\n".join(lines[i + 1 : i + 14])
             assert f"pytest-attribution.sh --log {target}" in window, (
-                f"{workflow.name}:{i + 1}: the `{target}` tail is not followed by the "
+                f"{workflow.name}:{i + 1}: the `{target}` capture is not followed by the "
                 "reporter — this leg can silently omit its own failure set (#3470)"
             )
     # The measured inventory is 8: five `/tmp/pytest.log` tails in python-ci.yml —
@@ -1040,8 +1104,188 @@ def test_every_pytest_log_tail_is_followed_by_the_reporter() -> None:
     # through `| tee`. The floor used to be 6 against the 7 sites main's tail-only
     # counter measured — ONE below reality — so a single leg could be renamed out from
     # under this check while it stayed green (it took two losses to red it). Counting
-    # the `tee` site as well makes the inventory 8, so this floor has zero slack now:
-    # losing any one leg reds it.
+    # the `tee` site as well makes the inventory 8, so this floor has zero slack NOW,
+    # over the surface it names: losing any one leg in these two workflows reds it.
     # A drop here means a leg was lost, not that it got safer; an ADDITION is fine,
     # which is why this is a floor.
     assert tails >= 8, f"only {tails} pytest-log sites found (expected >= 8) — a leg was renamed or dropped"
+
+
+def test_a_comment_mentioning_the_tee_shape_is_not_a_capture_site() -> None:
+    """Prose is not a capture site — a documented spelling must not inflate the floor.
+
+    The phantom is not hypothetical: the `tee` spelling is documentation in this PR's
+    own body and in `tests/test_markers.py`, and it sits in the comment block directly
+    above the D14 site — an entirely natural edit. An unanchored `re.search` counted
+    every such comment, and because the assertion is a FLOOR, the phantom was
+    invisible: it handed back exactly the one-site slack the floor raise removed.
+    """
+    comment = "          # this leg writes through | tee /tmp/pytest-d14.log"
+    assert capture_site(comment) is None
+    # MUTATION PROOF: the pre-fix unanchored matcher DID count that line. This is the
+    # discrimination the test above depends on, asserted rather than asserted-about.
+    assert re.search(r"\|\s*tee\s+(/tmp/[^\s|]+\.log)", comment.strip())
+    # ...and the real shapes are still sites: filtering comments must not blind the
+    # counter to the lines it exists to find.
+    assert (
+        capture_site(
+            "            -v --timeout=300 2>&1 | tee /tmp/pytest-d14.log || rc=$?"
+        )
+        == "/tmp/pytest-d14.log"
+    )
+    # The ci.yml `hosted-e2e` leg is NOT a site: its workflow is outside
+    # `ATTRIBUTION_WORKFLOWS` (deliberately — #9300), and a v1 of this counter that
+    # scanned it would demand a reporter the leg does not have. Named here so the
+    # deferral is a decision with a test, not an omission.
+    assert (
+        capture_site(
+            "            -q -rs --capture=sys 2>&1 | tee /tmp/hosted-e2e.log || rc=$?"
+        )
+        == "/tmp/hosted-e2e.log"
+    )
+    assert capture_site("          tail -n 300 /tmp/pytest.log") == "/tmp/pytest.log"
+    assert capture_site("              tail -n 200 /tmp/pytest.log") == "/tmp/pytest.log"
+    # a NON-pytest log with a trailing command is not a site either (it would be a
+    # phantom of a different kind: the counter would demand a reporter on a wrangler
+    # log dump)
+    assert capture_site("          tail -50 /tmp/wrangler-app.log || true") is None
+
+
+# ── 4. the STEP's status: naming the test must not swallow the verdict ─────
+#
+# WHY EXECUTION HERE, where §3 reads text: what is pinned is a SHELL-SEMANTIC property
+# — that a red pytest still reds the step once `|| rc=$?` has disarmed `set -e`. A text
+# check on `[ "$rc" -eq 0 ] || exit "$rc"` would be satisfied by the line sitting in a
+# comment or after an unreachable `exit`; #4494 is this repo's record of text/behaviour
+# drift. So the step body is RUN under `bash -e` — the runner's default shell for an
+# unspecified `shell:` — with a `python` stub that exits with the leg's own status.
+#
+# The status asserted is the LEG's (137), not merely "non-zero": deleting the re-raise
+# does not make the D14 step pass by accident, it makes it exit 1 from the later
+# `PASSED >= 30` floor, so a `!= 0` assertion would still be green on the mutation.
+
+STEP_TIMEOUT_S = 120
+
+#: `timeout [-s SIG] [-k DUR] DURATION CMD...` — drop timeout's own flags and its
+#: DURATION positional, then exec CMD (macOS has no `timeout`). Same shim as
+#: `tests/test_ci_guard_invocation.py`, which models these same steps by execution.
+TIMEOUT_SHIM = """#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -s|-k) shift 2 ;;
+    -*) shift ;;
+    *) shift; break ;;
+  esac
+done
+exec "$@"
+"""
+
+
+def _step_run_body(workflow: Path, job: str, step_name_fragment: str) -> str:
+    """The `run:` block of the one step whose name carries `step_name_fragment`.
+
+    A LOCATOR, never the assertion — and a FRAGMENT because a step name cannot carry
+    `#`: in a YAML `name:`, `#` starts a comment after a space, so the D14 step's
+    `(#4164)` is not part of its name at all (YAML parses it as
+    `Run the embedded_only marker selection (URI unset —`). Matching the parsed name
+    exactly would pin that accident instead of the step.
+    """
+    jobs = yaml.safe_load(workflow.read_text())["jobs"]
+    matches = [
+        step for step in jobs[job]["steps"] if step_name_fragment in (step.get("name") or "")
+    ]
+    assert len(matches) == 1, (
+        f"{workflow.name}: expected exactly one step in {job!r} named like "
+        f"{step_name_fragment!r}, found {len(matches)}"
+    )
+    body = matches[0].get("run")
+    assert isinstance(body, str), f"{workflow.name}: {step_name_fragment!r} has no run block"
+    return body
+
+
+def _run_step_body(
+    body: str, tmp_path: Path, pytest_rc: int
+) -> subprocess.CompletedProcess[str]:
+    """Run one step body as the runner does, with pytest exiting `pytest_rc`.
+
+    `/tmp/...` paths are relocated into the sandbox so the run touches no shared file;
+    `python`/`python3` are stubs that emit one pytest start line (so the `tee` writes a
+    real log) and then exit with the leg's status. `bash -e` models the runner's
+    default shell, and `cwd=REPO` is what makes `bash .github/scripts/...` resolve.
+    """
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    script = tmp_path / "step.sh"
+    script.write_text(body.replace("/tmp/", f"{sandbox}/"), encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = (
+        "#!/bin/sh\n"
+        "echo 'tests/e2e/hosted/test_boot.py::test_serves_health '\n"
+        f"exit {pytest_rc}\n"
+    )
+    for name in ("python", "python3"):
+        exe = bin_dir / name
+        exe.write_text(stub, encoding="utf-8")
+        exe.chmod(0o755)
+    shim = bin_dir / "timeout"
+    shim.write_text(TIMEOUT_SHIM, encoding="utf-8")
+    shim.chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"}
+    return subprocess.run(
+        ["bash", "-e", str(script)],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+        timeout=STEP_TIMEOUT_S,
+    )
+
+
+@pytest.mark.parametrize(
+    ("workflow", "job", "step", "log"),
+    [
+        (
+            WORKFLOW,
+            "test-d14-hosted-api",
+            "Run the embedded_only marker selection",
+            "/tmp/pytest-d14.log",
+        ),
+    ],
+    ids=["d14"],
+)
+def test_a_failing_pytest_still_reds_the_step(
+    workflow: Path, job: str, step: str, log: str, tmp_path: Path
+) -> None:
+    """A `| tee` leg that also REPORTS must still fail when its pytest failed.
+
+    `rc=0` + `... | tee <log> || rc=$?` is what lets the reporter run after a kill —
+    and it is also what disarms `set -e`, so the one-line re-raise is the ONLY thing
+    left enforcing "a red suite reds the job". Delete or mangle it and the step
+    reports SUCCESS on a failing suite while the reporter exits 0: a false PASS on a
+    leg `python-ci-gate` requires (AGENTS.md §Product Over Process, category A).
+    Nothing pinned it — the coverage window above matches the reporter call and says
+    nothing about the status.
+
+    The kill's own status (137) is asserted rather than "non-zero" on purpose: on the
+    D14 step, dropping the re-raise lands on the later `PASSED >= 30` floor, which
+    exits 1 — non-zero, and still a false PASS for the 15m watchdog case it is meant
+    to report. Only the exact code separates "the leg's verdict" from "a later gate
+    noticed an empty log".
+
+    The shape exists at TWO sites — ci.yml's `hosted-e2e` leg has the same
+    `| tee`-plus-reporter pipeline — but that leg is not wired yet (#9300), so its
+    case is absent here rather than asserting a pipeline that does not exist.
+    """
+    body = _step_run_body(workflow, job, step)
+    assert f"--log {log}" in body, f"{workflow.name}:{job}: no reporter call for {log}"
+    result = _run_step_body(body, tmp_path, pytest_rc=137)
+    assert result.returncode == 137, (
+        "the step did not exit with the leg's own status — a red pytest was swallowed "
+        f"by `|| rc=$?` and the re-raise is gone or unreachable:\nrc={result.returncode}"
+        f"\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    # ...and the reporter ran FIRST, naming what was in flight when the leg died.
+    assert INCOMPLETE_MARKER in result.stdout, result.stdout
+    assert "tests/e2e/hosted/test_boot.py::test_serves_health" in result.stdout, result.stdout
