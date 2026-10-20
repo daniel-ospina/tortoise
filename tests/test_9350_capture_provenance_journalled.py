@@ -44,9 +44,21 @@ import pytest
 from tests.test_hosted_api import client as client
 from tortoise.log import EventLog
 from tortoise.projection import _CACHE_WRITE_AUTHORIZED, _live_write_scope
-from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import _CAPTURE_PROVENANCE_LANE, TortoiseSDK
 
 PROVENANCE = ("eventId", "source_session", "source_harness", "ingested_at")
+
+#: The declared lane name, pinned as a LITERAL here — the `test_9079` pattern
+#: (`EPOCH_LANE = "graph-metadata:ep-epoch"`, compared exactly).
+#:
+#: ⛔ The literal is the whole point: comparing the write handle's reason only
+#: against the MODULE CONSTANT cannot see a rename, because the expectation and
+#: the write move together — the docstring's "a rename is a red test rather than
+#: a silent relabelling" would then be a claim nothing enforces. Both directions
+#: redden here: a renamed constant fails
+#: ``test_the_stamp_lane_literal_is_pinned``, and a write issued under any other
+#: (even any other ``capture.*``) lane fails the read-back at the handle.
+CAPTURE_LANE = "capture.provenance-stamp"
 
 CONV = [
     {"role": "user",
@@ -213,17 +225,39 @@ def test_the_stamp_is_authorized_by_its_own_lane_under_an_armed_handle(
     finally:
         sdk.close()
     assert lanes, "precondition: the armed capture reached the stamp statement"
-    # The EXACT lane constant, not a prefix: a rename must red here rather than
-    # relabel the write silently (#9350 review).
-    from tortoise.sdk import _CAPTURE_PROVENANCE_LANE
-
-    assert set(lanes) == {_CAPTURE_PROVENANCE_LANE}, (
+    assert all(lane and lane.startswith("capture.") for lane in lanes), (
         "the stamp statement ran under "
-        f"{lanes!r} — not under {_CAPTURE_PROVENANCE_LANE!r}, so the write is "
-        "only authorized by whatever scope the caller happened to hold "
-        "(#9350)")
+        f"{lanes!r} — not under the capture's own lane, so the write is only "
+        "authorized by whatever scope the caller happened to hold (#9350)")
+    # The EXACT lane, compared against the LITERAL pinned in this test (not only
+    # against the module constant): a prefix check passes on any relabelling
+    # inside the lane family, and a constant-only comparison follows a rename
+    # silently (#9350 review).
+    assert set(lanes) == {CAPTURE_LANE}, (
+        "the stamp statement ran under "
+        f"{lanes!r} — not under {CAPTURE_LANE!r}, so the write is only "
+        "authorized by whatever scope the caller happened to hold, or the lane "
+        "was renamed (#9350)")
     records = [r for r in _records(log_path) if r.get("type") == "PointRevised"]
     assert records, "the capture appended no provenance record (#9350)"
+
+
+def test_the_stamp_lane_literal_is_pinned():
+    """The module constant IS the pinned literal — a rename reddens here.
+
+    ``sdk._CAPTURE_PROVENANCE_LANE``'s docstring says the literal is stable ON
+    PURPOSE and that a rename is a red test rather than a silent relabelling.
+    The read-back above compares the lane at the write handle against
+    ``CAPTURE_LANE``; this binds the module constant to that same literal, so
+    the docstring's claim is one this suite ENFORCES rather than restates. A
+    constant-only comparison (no literal in the test) would move with the
+    rename and stay green.
+    """
+    assert _CAPTURE_PROVENANCE_LANE == CAPTURE_LANE, (
+        f"the capture stamp's lane constant is "
+        f"{_CAPTURE_PROVENANCE_LANE!r}, but the pinned literal is "
+        f"{CAPTURE_LANE!r} — a renamed lane is a silent relabelling for every "
+        "operator reading a DirectCacheWriteRefused message (#9350)")
 
 
 @pytest.mark.parametrize("engine", ["rebuild", "rebuild_all"])
