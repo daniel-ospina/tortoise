@@ -24,6 +24,12 @@ Repo-local, zero network, stdlib only (the test_waitlist_form.py pattern):
    pinned so a paraphrase cannot slip past. The availability premise that used
    to sit over it is retired — outbound webhook push shipped (#2081, PR #8104)
    — see `TestAutomateBeatCopy`.
+6. `/investors` Progress cell order + the owner's sanctioned demand headline
+   (PR #9283): the section must OPEN on what exists (`Product & distribution`
+   left of `Early demand`), the headline bullet is pinned verbatim — curly
+   quotation marks included — and the retired `20+ prospective beta testers`
+   line must stay gone. The verbatim quotation is an ACCEPTED RISK recorded by
+   the owner, not a defect to "fix" — see `TestInvestorsProgressCopy`.
 
 Run:  TORTOISE_TEST_CARVE_OUT=1 python -m pytest tests/test_website_static.py -v
       (a URI-less run fails at session setup by construction — epic #1647 P4;
@@ -46,6 +52,9 @@ if str(REPO_ROOT) not in sys.path:  # tests/ and tools/ are not installed packag
 
 PRODUCT_HTML = REPO_ROOT / "website" / "product.html"
 PRICING_JSON = REPO_ROOT / "product" / "pricing.json"
+# The investor one-pager (PR #9283): its Progress section carries owner copy and
+# a left/right cell order that is pure DOM order — see TestInvestorsProgressCopy.
+INVESTORS_HTML = REPO_ROOT / "website" / "investors.html"
 # #4336: the dashboard's display-name map — the second hand-maintained copy of
 # the tier names (product.html renderPricing() carries the first).
 DASHBOARD_PRICING_JS = (REPO_ROOT / "website" / "apps" / "dashboard"
@@ -714,5 +723,133 @@ class TestAutomateBeatCopy:
             "reverted; do not repeat it. LIFECYCLE-event push delivery does "
             "ship: tortoise/webhook_delivery.py + /v1/context/subscriptions."
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 6. /investors Progress: cell order + the owner's sanctioned headline (PR #9283)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _investors_progress_section() -> str:
+    """The `<section id="progress">…</section>` slice, from the SECTION tag.
+
+    Same construction (and the same nested-section guard) as
+    `_automate_beat_markup`: the slice must start at `<section`, and this slice
+    stops at the FIRST `</section>`, so a claim inside a nested section would be
+    invisible to every assertion below.
+    """
+    src = INVESTORS_HTML.read_text(encoding="utf-8")
+    marker = 'id="progress"'
+    assert marker in src, (
+        "#progress moved or was renamed on website/investors.html — this gate's "
+        "subject is gone; re-point it at wherever the Progress section lives "
+        "(PR #9283)")
+    i = src.index(marker)
+    start = src.rindex("<section", 0, i)
+    section = src[start:src.index("</section>", start)]
+    assert "<section" not in section[section.index(">") + 1:], (
+        "a <section> is nested inside #progress — this slice stops at the first "
+        "</section>, so a claim in the nested section would be invisible to "
+        "every assertion in this class (PR #9283)")
+    return section
+
+
+def _progress_cells() -> list[tuple[str, list[str]]]:
+    """`(h3 heading, rendered bullets)` per cell, in DOM order.
+
+    Rendered text (entities decoded) on purpose: the bullet's quotation marks
+    are the `&ldquo;`/`&rdquo;` entities, and a pin on the raw markup would pass
+    on a rewrite that swapped them for plain ASCII quotes.
+    """
+    section = _investors_progress_section()
+    body = section[section.index(">") + 1:]
+    cells = re.findall(r"<h3>(.*?)</h3>\s*<ul[^>]*>(.*?)</ul>", body, re.S)
+    return [
+        (_beat_text(heading), [_beat_text(li) for li in re.findall(r"<li>.*?</li>", bullets, re.S)])
+        for heading, bullets in cells
+    ]
+
+
+class TestInvestorsProgressCopy:
+    """PR #9283: the Progress section's cell order and its sanctioned headline.
+
+    TWO failure modes, both measured on that PR.
+
+    1. **The cell order silently reverts.** `.profile` is
+       `display: grid; grid-template-columns: 1fr 1fr` with no `direction`
+       override, and the only positional rule on the page
+       (`#gtm .profile > div:last-child`) is scoped to `#gtm`. So DOM order IS
+       the rendered left/right order, and the section must OPEN on what exists
+       (`Product & distribution`) rather than on the demand claim. Rendering
+       collapses the difference: there is no diff marker, no test, and no CSS
+       selector that notices a swap.
+
+    2. **The headline bullet is the owner's copy and must not be paraphrased.**
+       A reviewer P2 — "the quotation asserts a verbatim utterance nobody
+       recorded" — was actioned by an agent in `fbd706a` as a rewrite of the
+       owner's line into indirect speech (`asked when they could use it`). The
+       owner reverted the rewrite in `cd864dc` and recorded the P2 as an
+       ACCEPTED RISK: the copy is the owner's, and a reviewer finding does not
+       authorise an agent to rewrite it. This pin makes the next such rewrite
+       fail here instead of shipping, which is the outcome that cost a
+       round trip and a wrong audit record (`tortoise#9283`).
+
+    Scope, stated plainly: this is a hand-maintained SECOND COPY of a prose
+    claim over one static page's markup. A claim injected at runtime, or moved
+    to another page, is green here. It is kept because this specific bullet has
+    already been "corrected" once against the owner's copy.
+    """
+
+    # Rendered left/right order of the two cells: what exists, then the demand.
+    EXPECTED_CELL_ORDER = ("Product & distribution", "Early demand")
+    # The owner's sanctioned line, verbatim — entities decoded, so the curly
+    # quotation marks are pinned too (ASCII quotes are NOT this copy).
+    EXPECTED_DEMAND_HEADLINE = "32 of 34 calls: \u201cwhen can I use it\u201d"
+    # What this PR replaced. It must not come back: "prospective" disclaims the
+    # noun it modifies and a bare count with no denominator is a headcount.
+    RETIRED_LINE = "20+ prospective beta testers"
+
+    def test_progress_opens_on_what_exists(self):
+        """Left cell is `Product & distribution` — DOM order is render order."""
+        cells = _progress_cells()
+        assert len(cells) == 2, (
+            f"#progress must hold exactly two cells, found {len(cells)} — the "
+            "side-by-side read (what exists | what is claimed) is the point of "
+            "the section (PR #9283)")
+        headings = tuple(heading for heading, _ in cells)
+        assert headings == self.EXPECTED_CELL_ORDER, (
+            f"#progress cell order changed: {headings!r} != "
+            f"{self.EXPECTED_CELL_ORDER!r}. The section must open on what "
+            "EXISTS ('Product & distribution'); the demand claim belongs in the "
+            "right cell (PR #9283). DOM order is the rendered order — the grid "
+            "is `1fr 1fr` with no `direction` override and no positional rule "
+            "reaching #progress — so swapping the two <div>s inverts the page.")
+
+    def test_early_demand_headline_is_the_sanctioned_copy_verbatim(self):
+        """The first `Early demand` bullet, character-for-character."""
+        cells = dict(_progress_cells())
+        assert "Early demand" in cells, (
+            f"the 'Early demand' cell is gone (cells: {sorted(cells)}) — this "
+            "gate's subject moved (PR #9283)")
+        first_bullet = cells["Early demand"][0]
+        assert first_bullet == self.EXPECTED_DEMAND_HEADLINE, (
+            f"the Early-demand headline is not the owner's copy verbatim: "
+            f"{first_bullet!r} != {self.EXPECTED_DEMAND_HEADLINE!r}. ⛔ DO NOT "
+            "'fix' this by paraphrasing it to indirect speech: that edit was "
+            "made in fbd706a (a reviewer P2 about the quotation asserting a "
+            "verbatim utterance nobody recorded), reverted by the owner in "
+            "cd864dc, and the P2 recorded as an ACCEPTED RISK. The copy is the "
+            "owner's call. If the copy genuinely changed, get the owner's "
+            "wording and update this pin with it.")
+
+    def test_the_retired_prospective_beta_line_is_gone(self):
+        """`20+ prospective beta testers` must not return anywhere in the section."""
+        section_text = _beat_text(_investors_progress_section())
+        assert self.RETIRED_LINE not in section_text, (
+            f"{self.RETIRED_LINE!r} is back in #progress. It was replaced by a "
+            "pass rate over the calls that actually happened: 'prospective' "
+            "disclaims the noun it modifies, a trailing '+' reads as a floor, "
+            "and a count with no denominator invites the reader to discount it "
+            "(PR #9283)")
 
 

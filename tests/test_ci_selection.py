@@ -2073,6 +2073,61 @@ def test_capstone_probe_change_selects_core_not_tier1():
         assert r["full"] is False, (path, r)
 
 
+def test_the_capstone_evidence_bundle_selects_core_not_tier1():
+    # PR #9196 review P1: the S2 verdict's deciding artifacts are committed TEXT
+    # — `s2-wiring-census.log` (the census output), `e2e-chain-probe.log` (the
+    # end-to-end transcript) and `README.md` (the quotes and the S2 rows) — and
+    # `tests/test_7950_capstone_probe.py` now re-MEASURES two of them
+    # (`test_the_s2_census_log_is_a_LIVE_measurement` re-runs the committed
+    # probe; `test_the_evidence_readme_quotes_the_log_it_cites_verbatim` pins the
+    # README to the log).
+    #
+    # The CORE_ALSO entry used to be the `probes/` subdirectory only, so a diff
+    # that touched just a LOG or the README came back with `changed == []` and
+    # took the docs-only early return: a hand-edited number in the artifact the
+    # S2 verdict rests on merged with the pin that guards it NEVER RUN — the
+    # #1349/#3332/#3616 silent-drop class, and the same "stale flag never
+    # revalidated" shape the artifact itself is supposed to catch.
+    #
+    # Measured before widening the entry (2026-10-19, `select()` in-process):
+    # `_sel(["docs/evidence/7950-capstone/s2-wiring-census.log"])` ->
+    # surfaces=[], full=False, test_7950_capstone_probe.py ABSENT.
+    # Mutation check: narrowing the entry back to `probes/` fails assert 1.
+    for path in (
+        "docs/evidence/7950-capstone/s2-wiring-census.log",
+        "docs/evidence/7950-capstone/e2e-chain-probe.log",
+        "docs/evidence/7950-capstone/README.md",
+    ):
+        r = _sel([path])
+        assert "core" in r["surfaces"], (path, r)
+        assert "test_7950_capstone_probe.py" in r["test_files"], (path, r)
+        assert r["full"] is False, (path, r)
+
+
+def test_the_capstone_census_pin_runs_on_a_main_py_change():
+    # PR #9196 review P1: the OTHER direction of the same hole. The census pin
+    # compares each hit's FILE and COUNT (the line ORDINAL is normalised away,
+    # #9196 review P2), and the one live hit is
+    # `tortoise/__main__.py: view = read_record_view(...)`. That file is an
+    # EXACT `api` SOURCE_PATTERNS match and NOT in `CORE_ALSO`, so a named-surface
+    # match REPLACES the `core` fallback: before the `api` registration a
+    # `__main__.py`-only diff returned surfaces=['api'] with the `core`-registered
+    # probe ABSENT, so a diff that ADDED or REMOVED that call site — the wiring
+    # change the pin exists to catch — merged green and only reddened `main` on
+    # the post-merge full selection. The instrument that makes S2's staleness
+    # visible must not be invisible to CI selection on the file its hit lives in
+    # (#1349/#2938/#3154 class).
+    #
+    # Measured before the `api` entry (2026-10-19, `select()` in-process):
+    # `_sel(["tortoise/__main__.py"])` -> surfaces=['api'], full=False, 283 test
+    # files, test_7950_capstone_probe.py ABSENT.
+    # Mutation check: removing the `api` entry fails `test_files` below.
+    r = _sel(["tortoise/__main__.py"])
+    assert "api" in r["surfaces"], r
+    assert "test_7950_capstone_probe.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_supabase_config_change_selects_core_not_tier1():
     # supabase/config.toml is the committed LOCAL-stack config and resolves its
     # providers by `env(NAME)` substitution, so each of those names is required

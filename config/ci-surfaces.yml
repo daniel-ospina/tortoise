@@ -55,6 +55,62 @@ carve_shards: 3
 
 surfaces:
   api:
+  # #9189: REGISTERED, not diff-carrying — the file is a `carve_out:` member, so
+  # `select()` strips it from `test_files` (`files -= carve`) on every non-full
+  # selection and it RUNS through the carve-out leg instead (`carve_out_run` ->
+  # `runs |= manifest["carve_out"]`). So this row does not decide which leg
+  # runs it, and NEITHER does the `core` row below: `carve_out_run` is true
+  # whenever a matched surface owns ANY carve-out file, and `api` already owned
+  # 11 of them (measured 2026-10-20: `carve_out_by_surface()` -> api 12 WITH
+  # this row, core 28) — an `__main__.py`-only diff (`surfaces=['api']`) and a
+  # `record_reconcile.py`-only diff (`surfaces=['core']`) were both running the
+  # carve-out leg before this row existed.
+  #
+  # What the row actually does, stated as the conditional it is:
+  #   * it classifies the file for `--integrity` (every `tests/**/test_*.py`
+  #     must belong to a surface; the `core` row below already satisfies that,
+  #     so today the `api` row is inert);
+  #   * it becomes LOAD-BEARING the moment the file leaves `carve_out:` (or
+  #     `api` stops owning carve-out files): `tortoise/__main__.py` — the
+  #     trigger's caller — is an EXACT `api` SOURCE_PATTERN that REPLACES the
+  #     `core` fallback, so an `__main__.py`-only diff selects `api` alone and
+  #     would then never run the pin that the reconciler still has a production
+  #     caller — the fail-open direction of #9189's whole point.
+  #
+  # Keep the `core` entry for its `select()` role: the readers and the
+  # comparison live in `tortoise/record_reconcile.py` /
+  # `tortoise/reconciliation.py`, neither of which matches a SOURCE_PATTERN.
+  # PR #9196 review P2: the earlier wording here claimed the `api` entry is
+  # "what carries the file" on an `__main__.py`-only diff. It is not —
+  # `carve_out_run` carries it, and did so before this row.
+  - test_record_reconcile_trigger.py
+  # PR #9196 review P1: DUAL-REGISTERED with `core`, and THIS one IS
+  # diff-carrying — the file is NOT in `carve_out:`, so it rides in
+  # `test_files` for the surfaces `select()` matches. The S2 census pin
+  # (`test_the_s2_census_log_is_a_LIVE_measurement`) re-measures
+  # `docs/evidence/7950-capstone/s2-wiring-census.log` by COUNT and by the FILE
+  # each hit lives in, and its one live hit lives in `tortoise/__main__.py` (the
+  # `record-reconcile` verb's `read_record_view(...)` call) — an EXACT
+  # `api` SOURCE_PATTERNS match that REPLACES the `core` fallback in `select()`.
+  # So an `__main__.py`-only PR selected `api` alone and the pin never ran on the
+  # exact change that adds or removes a censused call site (measured 2026-10-19:
+  # `select(['tortoise/__main__.py'])` -> surfaces=['api'], probe ABSENT; with
+  # this row, PRESENT). This is the #1349/#2938/#3154
+  # silent-drop class. Keep the `core` entry: the probe's other subjects
+  # (`tortoise/reconciliation.py`, `record_writer.py`, `cache_projection.py`)
+  # match no SOURCE_PATTERN and take the `core` fallback.
+  # Cost, MEASURED at #9196 rather than assumed: the file is DB-free
+  # pure-function work, but it is not CHEAP per test — its 16 tests take
+  # 16.6–24.2s locally across runs, of which 14.3–19.3s is this census pin
+  # alone (`census_all(PROD_DIRS, TARGETS)` re-tokenizes 241 `tortoise/` + 132
+  # `tools/` files). The earlier "<0.01s/test, durations row 2.0" note predated
+  # the pin and under-stated the file ~10x. The durations VALUE stays at the
+  # flat 2.0 default: a weight is a shard-layout input, so a first-cut row
+  # without a CI measurement is the refresher's to fill (the #9003-review rule
+  # on the #2818 row); the measured cost is stated on that row's comment
+  # instead. Pinned by
+  # tests/test_ci_selection.py::test_the_capstone_census_pin_runs_on_a_main_py_change.
+  - test_7950_capstone_probe.py
   # #7809: DUAL-REGISTERED with `core` AND `eval` — without this `api` arm the
   # guard is SKIPPED on the exact change it exists to guard. The pre-warm it
   # pins lives in `tortoise/hosted_api.py`, an EXACT `api` SOURCE_PATTERNS match
@@ -3448,6 +3504,17 @@ surfaces:
   # DUAL-REGISTERED with `api` (above) for the hosted /v1/search field.
   - test_residency_marker.py
   - test_reconciliation.py
+  # #9189 (§17.2): the reconciler's PRODUCTION TRIGGER. `tortoise/reconciliation.py`
+  # had a comparison and no production caller (measured at `f96a18da1` and
+  # re-derived for #9189), so "continuous reconciliation" had a mechanism and no
+  # observer. The subject is the new `tortoise/record_reconcile.py` (readers +
+  # the residency/divergence partition + the count's three landing places) and
+  # the `record-reconcile` CLI verb that gives it a non-test, non-docs caller
+  # (`tortoise/__main__.py`, an EXACT `api` SOURCE_PATTERN — hence the DUAL
+  # registration: an `__main__.py`-only PR selects `api`, which REPLACES the
+  # `core` fallback, so a `core`-only entry would never run on the change that
+  # breaks the trigger path — the #1349/#2938/#3154 silent-drop class).
+  - test_record_reconcile_trigger.py
   # #7950 (capstone S2 evidence) / PR #8609 review finding 3: the end-to-end
   # chain probe's RECONCILIATION READERS must map the REAL property sets. They
   # originally returned `{}` per key, which made `field_mismatches`
@@ -5272,6 +5339,27 @@ carve_out:
 - test_projection_lifecycle.py
 - test_reaper.py
 - test_reaper_orphan.py
+# #9189 (§17.2): the record↔cache observer's journal-backed arm is embedded-only
+# — `test_the_guarded_lanes_refuse_the_same_write_while_the_handle_takes_it`
+# binds a real journal to a fresh embedded projection (that arm does not exist
+# on the server lane), so without this row the file was collected-and-SKIPPED by
+# every full selection: a permanently green, permanently unexecuted gate, which
+# is the #4047 shape this list exists to close. Also in `api` + `core` above.
+# PR #9196 review P2: this entry is what RUNS the file. `select()` strips it
+# from `test_files` (`files -= carve`) on every non-full selection, so the
+# `api`/`core` rows never decide the leg — `carve_out_run` does, and it is true
+# for both of those surfaces already (`carve_out_by_surface()` measured api=12,
+# core=28 with this row in place), so neither row changes what runs today.
+# Write the conditional, not the claim: the `api` row becomes load-bearing only
+# if the file LEAVES `carve_out:` — `tortoise/__main__.py`, the `record-reconcile`
+# verb, is an EXACT `api` SOURCE_PATTERN whose match REPLACES the `core`
+# fallback. `record_reconcile.py` matches no `SOURCE_PATTERN`, so a
+# readers-only diff takes `core`. `carve_out_by_surface` files each entry under
+# the FIRST surface `classify_test_file` returns (`api` here), so this file's
+# own `core` entry never reaches the carve-out map; keep it for its `select()`
+# role, do not read it as the carve-out trigger.
+# Mirrored in tests/_embedded.TEST_NO_REDIRECT_STEMS.
+- test_record_reconcile_trigger.py
 # #2814: authoritative-config durability across rebuild_all (the embedded
 # carve-out is load-bearing — the pins exercise the real unconditional wipe,
 # which the server-side bulk-wipe guard refuses on a non-test graph).
@@ -5619,7 +5707,7 @@ durations:
   test_served_skills_parity.py: 2.0  # unmeasured — new in #4643; no sweep has collected it, so it carries the flat default exactly as an absent key would (the #3419/#2788 rule). A local timing is deliberately NOT substituted: the weight is a SHARD-LAYOUT input, so only a measured CI junit value for the leg that carries the file models it. Refresh from the first post-merge main run that includes it.
   test_license_surface_consumer.py: 0.3
   test_7818_plan_record_5362.py: 2.0  # #7818/#5362: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the #3400 flat 2.0s default. Hermetic (one plan-doc read, no fixture/DB); refresh from the first post-merge run that includes it. Required for the durations half as well as the surface half (#4348 trap): without this row the durations coverage fell to 89.9% and `tools/ci_selection.py --integrity` red, which is how this row was found.
-  test_7950_capstone_probe.py: 2.0  # #7950: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the #3400 flat 2.0s default. MEASURED this turn: WITHOUT this row the durations coverage fell to 89.9% (760/845 fast files) and `tools/ci_selection.py --integrity` red — the surface entry alone does not cover it, and the file itself is DB-free pure-function work (<0.01s per test; the local session total is conftest/DB setup). Refresh from the first post-merge run that includes it.
+  test_7950_capstone_probe.py: 2.0  # #7950: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the #3400 flat 2.0s default. MEASURED this turn: WITHOUT this row the durations coverage fell to 89.9% (760/845 fast files) and `tools/ci_selection.py --integrity` red — the surface entry alone does not cover it. The file is DB-free pure-function work, but it is NOT cheap: PR #9196 review P3 measured its 16 tests at 16.6–24.2s locally across runs, of which 14.3–19.3s is the S2 census pin this PR added (`test_the_s2_census_log_is_a_LIVE_measurement` re-tokenizes 241 `tortoise/` + 132 `tools/` files via `census_all(PROD_DIRS, TARGETS)`), so the flat default now under-states the file ~10x for the shard packer. The VALUE deliberately stays at the flat default: a weight is a shard-layout input and this row has no CI measurement yet (the #9003-review pin on the #2818 row states the rule — `tests/test_ci_selection.py::test_2818_new_file_row_carries_the_flat_default_until_a_sweep_collects_it`), so the number is the refresher's to write, not the branch's to hand-pick. Refresh from the first post-merge run that includes it.
   test_8066_served_skill_relay_ratchet.py: 3.5  # #8066 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red at 782/869 = 89.99% — the file is in the fast pool, so its absence packs it at the flat 2.0s default and drops coverage under the 90% floor. Locally measured (embedded carve-out lane, 2 tests): call 2.67s (the registration ratchet's 1097 `select()` calls) + 0.80s (the `tests/**` walk, after the necessary-condition fast path cut it from 16.0s); conftest/collection setup is the once-per-leg cost the #3400 method attributes to no file. Refresh from the first post-merge run that includes it.
   test_7405_remaining_writes.py: 2.2  # #7405/#8698: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so the #3400 flat 2.0s default was its FIRST weight — this value is a CI measurement since the 2026-10-17 refresh, so the read-me-from-junit half of this note is dropped with it (see the provenance rule above the block). Required for the durations half as well as the surface half (#4348 trap): the surface entry alone does not cover it — merging origin/main is where the fast pool crossed the DURATION_COVERAGE_MIN floor, which is how this row was found. NO pool figure or percentage is restated here on purpose (each base merge re-stales it; see the #4387 row above). Do NOT drop the row without re-deriving the floor at that head. Refresh from the first post-merge run that includes it.
   test_7405_update_point_writes.py: 2.0  # #7405/#8737: same #3400 flat default as the row above and for the same reason — a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). Required for the durations half as well as the surface half (#4348 trap): the surface entry alone does not cover it. Refresh from the first post-merge run that includes it.
