@@ -384,11 +384,18 @@ def test_shared_secret_auth_methods_refused(method):
                        token_endpoint_auth_methods_supported=["none", method]))
 
 
-@pytest.mark.parametrize("method", ["client_secret_jwt", "banana", "", [], {}, 1, None, True])
+@pytest.mark.parametrize("method", ["banana", "", [], {}, 1, None, True])
 def test_unknown_auth_methods_refused_even_with_a_none_fallback(method):
     """An allowlist, not a denylist: only key-based methods may ride the "none"
     fallback. Unhashable (list/dict) and non-string values must raise CimdError
-    rather than TypeError — the module's error contract is CimdError."""
+    rather than TypeError — the module's error contract is CimdError.
+
+    `client_secret_jwt` is deliberately NOT in this list: it is a shared-secret
+    method, so a maintainer may legitimately reclassify it into
+    `_SHARED_SECRET_METHODS`, which changes the rationale (and therefore the
+    message) while STRENGTHENING the rule. Pinning its message here would redden
+    on that honest edit. Its invariant is covered by
+    `test_a_future_known_method_cannot_inherit_the_none_fallback`."""
     with pytest.raises(cimd.CimdError,
                        match="unsupported token_endpoint_auth_method"):
         _validate(_doc(token_endpoint_auth_method=method,
@@ -405,13 +412,15 @@ def test_key_auth_methods_refused_without_a_none_fallback(method):
 
 
 def test_a_future_known_method_cannot_inherit_the_none_fallback(monkeypatch):
-    """Mutation guard for the invariant the comments assert: `client_secret_jwt`
-    is a SHARED-SECRET method. If someone later adds it to the known set (to
-    give it a specific message), it must still not be admitted via `none`."""
+    """Mutation guard for the invariant the comments assert: a method that is NOT
+    key-based must never be admitted via the `none` fallback.
+
+    Asserts the INVARIANT (refused at all), not a rationale — a maintainer who
+    correctly reclassifies a shared-secret method produces a different message
+    while strengthening the rule, and this test must not go red on that."""
     monkeypatch.setattr(cimd, "_KNOWN_AUTH_METHODS",
                         cimd._KNOWN_AUTH_METHODS | {"client_secret_jwt"})
-    with pytest.raises(cimd.CimdError,
-                       match="unsupported token_endpoint_auth_method"):
+    with pytest.raises(cimd.CimdError):
         _validate(_doc(token_endpoint_auth_method="client_secret_jwt",
                        token_endpoint_auth_methods_supported=["none", "client_secret_jwt"]))
 
