@@ -97,11 +97,20 @@ class SlackConnector:
         return events
 
     def ingest(self, proj) -> int:
-        """Poll + apply to projection. Returns count of applied events."""
+        """Poll + apply to projection. Returns count of applied events.
+
+        #9068: the batch is gated BEFORE the first ``apply`` — the connector
+        folds straight into the projection with no SDK door in front of it, so
+        a record naming an unapproved pack namespace would install that pack by
+        writing it (see ``connectors._gate_kinds``).
+        """
         events = self.poll()
-        # #388: ingestion-scoped per-message permalink enrichment (see
-        # _enrich_source_urls) — poll() stays API-call-free for standalone
-        # JSONL/preview use; the pure mapper never makes network calls.
+        # #9068 review P3: the gate runs BEFORE the network enrichment. #388's
+        # ``_enrich_source_urls`` spends one ``chat.getPermalink`` call per
+        # message, and on a refused batch every one of those calls was spent on
+        # records that are then dropped wholesale. Gate first, enrich second.
+        from tortoise.connectors import _gate_kinds
+        _gate_kinds(proj, events)
         self._enrich_source_urls(events)
         count = 0
         for ev in events:
@@ -146,6 +155,31 @@ class SlackConnector:
                 ev["sourceUrl"] = permalink
 
     # ── Webhook (Events API) ───────────────────────────────────────
+
+    def _fold_webhook_event(self, ev: dict, on_event=None) -> None:
+        """#9068: the webhook's ONE write step — gate, then fold.
+
+        Extracted so the handler and the tests call the SAME code: the gate
+        used to live inline in ``do_POST``, where only an HTTP round-trip
+        exercised it, so moving it below ``proj.apply`` (or deleting it) red
+        nothing in the suite.
+
+        The gate runs BEFORE ``on_event``: the consumer callback is the
+        caller's commit hook for a record that LANDED, and firing it above the
+        gate meant a refused delivery still reached the consumer (and every
+        retry fired it again).
+
+        Raises ``UnapprovedKindNamespace`` — a DETERMINISTIC refusal, answered
+        422 by the handler.
+        """
+        proj = self.api.get_proj() if self.api else None
+        if proj is not None:
+            from tortoise.connectors import _gate_kinds
+            _gate_kinds(proj, [ev])
+        if on_event:
+            on_event(ev)
+        if proj is not None:
+            proj.apply(ev)
 
     def start_webhook(self, on_event: Callable[[dict], None] | None = None) -> int:
         if not self.webhook_port:
@@ -214,11 +248,24 @@ class SlackConnector:
                     if event_data.get("type") == "message" and "subtype" not in event_data:
                         ev = connector._message_to_event(event_data)
                         if ev:
-                            if on_event:
-                                on_event(ev)
-                            if connector.api:
-                                connector.api.get_proj().apply(ev)
-                except Exception:
+                            connector._fold_webhook_event(ev, on_event=on_event)
+                except Exception as exc:
+                    # #9068 review P3: a #5475 refusal is DETERMINISTIC — the
+                    # same payload refuses identically on every retry, so the
+                    # blanket 500 below buys a retry loop and loses the
+                    # refusal's own remedy text. The SDK's error exists so a
+                    # boundary can tell it apart from a transient failure, and
+                    # ``hosted_api`` answers it 422 for the same reason.
+                    from tortoise.sdk import UnapprovedKindNamespace
+                    if isinstance(exc, UnapprovedKindNamespace):
+                        out = str(exc).encode()
+                        logger.warning("Slack webhook refused: %s", exc)
+                        self.send_response(422)
+                        self.send_header("Content-Type", "text/plain")
+                        self.send_header("Content-Length", str(len(out)))
+                        self.end_headers()
+                        self.wfile.write(out)
+                        return
                     # #331: processing failures must be visible and answered
                     # with HTTP 500 — a silently dropped connection makes
                     # Slack retry blindly with no server-side trace.

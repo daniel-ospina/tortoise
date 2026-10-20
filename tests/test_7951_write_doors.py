@@ -66,7 +66,9 @@ door                    why it cannot route today                    disposition
 ``connectors/slack``    same                                        **DOCUMENTED**
 ``connectors`` webhooks  dead branch: no production caller of        **DOCUMENTED** (no caller)
                         ``start_webhook``; only a test double
-                        defines ``get_proj``
+                        defines ``get_proj``. #9068 named the write
+                        step ``_fold_webhook_event`` (gate, then
+                        fold) so this inventory sees it by name.
 ======================  ==========================================  ==================
 
 The `connectors/*.ingest` class is the one that would need a
@@ -190,13 +192,17 @@ _DOORS: dict[tuple[str, str], tuple[str, int]] = {
     # `exempt:no-production-caller`)
     ("tortoise/connectors/github.py", "GitHubConnector.ingest"):
         ("exempt:no-journal-handle", 4),
-    ("tortoise/connectors/github.py", "GitHubConnector.start_webhook.Handler.do_POST"):
+    # #9068: the handler's write step is now ONE named method (gate, then
+    # fold) instead of an inline `.apply` inside the nested `do_POST`, so this
+    # inventory sees the door by NAME — and the gate it starts with is what
+    # #9068 added in front of it. Same exemption: no production caller.
+    ("tortoise/connectors/github.py", "GitHubConnector._fold_webhook_event"):
         ("exempt:no-production-caller", 1),
     ("tortoise/connectors/linear.py", "LinearConnector.ingest"):
         ("exempt:no-journal-handle", 1),
     ("tortoise/connectors/slack.py", "SlackConnector.ingest"):
         ("exempt:no-journal-handle", 1),
-    ("tortoise/connectors/slack.py", "SlackConnector.start_webhook.Handler.do_POST"):
+    ("tortoise/connectors/slack.py", "SlackConnector._fold_webhook_event"):
         ("exempt:no-production-caller", 1),
 
     # ── EXEMPT: HISTORICAL ONE-SHOT SCRIPT (outside `tortoise/`) ──────────

@@ -7,6 +7,37 @@ Handles all entity types: Point, Object, Subject, Event, Document, Source.
 Usage:
     python3 tortoise/migrate_kinds.py
     python3 tortoise/migrate_kinds.py --dry-run
+
+⛔ THE ONE LIVE WRITER THAT DELIBERATELY WIDENS THE #5475 APPROVED-PACK SET
+(#9068) — stated here because the PR that closed #5475 says "the write path is
+closed", and a reader taking that literally would try to gate this and break it.
+(One other writer is deliberately ungated WITHOUT widening: `pipeline.py`'s
+`SET p.kind` stores a pipeline key the mining leg no longer reads as an
+ontology kind — see `docs/EXPANSION_PACKS.md`. `sdk._emit_event` is ungated too,
+for a different reason: it appends a payload describing a mutation that has
+already written its node. This is the one that intentionally ADDS a namespace.)
+
+``_do_migrate`` ``SET``s a kind PROPERTY with raw Cypher (``proj.g.query``,
+label-scoped, one statement per ``MIGRATIONS`` row), which no door screens.
+That is BY DESIGN, and it is the opposite of the defect the gate closes:
+
+* **It is an OPERATOR act, not a caller write.** There is no tenant-facing
+  surface, no request, and no caller-chosen namespace: every target spelling is
+the literal in ``MIGRATIONS`` below, reviewed with this file.
+* **It is the SANCTIONED way to introduce a namespace into historical data.**
+  The gate refuses a write that names a pack the graph has not approved — and
+a row written BEFORE the pack existed can only be re-spelled by a deliberate
+  re-typing. Widening the mined set is the POINT of the run, not a leak:
+  afterwards ``graph_kind_namespaces`` finds the new namespace in the data and
+  the graph may write it, which is exactly #2714 indicator 2.
+* **The alternative is worse.** Routing it through ``create_*``/``update_*``
+  would make the migration refuse its own first row on every graph that has
+  not installed the pack yet (the pack is what the migration is introducing).
+
+The offline twin (``retype.py`` / ``tools/retype_snapshot.py``) is not gated
+either, for a different reason: it transforms a dump and never touches a live
+graph, and it validates the target kind against the DECLARED vocabulary
+instead (``RetypeError``).
 """
 from __future__ import annotations
 
@@ -94,6 +125,12 @@ def _do_migrate(sdk: TortoiseSDK, dry_run: bool = False) -> dict:
     """Run kind migration across all entity types.
 
     Returns {old_kind: {entity_type: str, new: str, count: int}}.
+
+    ⚠️ UNGATED BY DESIGN — see the module docstring (#9068). The ``SET`` below
+    is a deliberate re-typing of the graph's own historical rows by an
+    operator, and it is the sanctioned way a pack namespace enters data written
+    before the pack existed; the #5475 write gate would refuse exactly the row
+    the migration exists to rewrite.
     """
     proj = sdk._get_proj()
     results: dict[str, dict] = {}

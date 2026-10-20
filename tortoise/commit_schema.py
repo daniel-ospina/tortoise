@@ -211,18 +211,35 @@ def compile_vocab(packs_dir: Path | str | None = None,
     the SDK UPDATE doors (``sdk.update_point`` / ``sdk._update_entity``,
     formerly #8968) and the journal-first seam — ``api.EventAPI._emit``,
     ``sdk._apply_and_journal``, ``sdk._doc_write`` and ``mining``'s own
-    emitter — each BEFORE its journal append (formerly #8982).
+    emitter — each BEFORE its journal append (formerly #8982); #9068 added the
+    snake-spelling leg of the ``create_*`` props screen (the camel-only screen
+    missed ``props={"object_kind": …}``) and the connector folds (``github`` /
+    ``linear`` / ``slack`` ``ingest`` + both webhook arms, gated as a BATCH
+    before the first ``apply``). #9068 also RE-PINS five doors as regressions
+    rather than newly closing them — the three #8982 seams
+    (``sdk._apply_and_journal``, ``api.EventAPI._emit`` and
+    ``sdk.link_source_to_entity``'s ``sourceKind`` leg) and the two #8968
+    UPDATE doors (``update_point`` / ``_update_entity``).
     ⛔ That is NOT every write into a mined property — do not read it as one.
     Still outside it (#9068 carries the measurements): ``entities[].kind`` has no
     Layer-1 membership test (#5202, open); replay/``rebuild_all`` is
     deliberately ungated (the journal is the RECONSTRUCTION SOURCE — never a
     durability authority, which lives only in ``docs/durability-posture.md`` —
     so a record already in it reproduces faithfully); and a set of writers
-    never meets a door at all —
-    ``tortoise/pipeline.py``'s ``SET p.kind = <pipeline_key>`` (which also shows
-    the mining leg conflates an ontology kind with any ``kind``), the connectors'
-    direct ``proj.apply`` on a journal-less projection, and raw-Cypher / offline
-    re-typing (``tortoise/migrate_kinds.py``, ``tortoise/retype.py``).
+    never meets a door at all — ``tortoise/pipeline.py``'s
+    ``SET p.kind = <pipeline_key>`` (still ungated, and harmless to the approval
+    set since #9068 scopes the mining leg's bare ``kind`` read to the ontology
+    labels — a pipeline KEY is not an ontology kind), raw-Cypher / offline
+    re-typing (``tortoise/migrate_kinds.py``, ``tortoise/retype.py``), and the
+    projection's OWN two sinks, which do NOT share an exposure:
+    ``FalkorProjection.apply`` refuses a direct write only when
+    ``_journal_backed`` (so it is open on a **journal-less** projection, where
+    the cache IS the store), while ``link_source_to_entity`` writes the caller's
+    ``sourceKind`` with **no ``_journal_backed`` check at all** (open on both
+    shapes — a journal-backed SDK widens too) and its only refusal is in the
+    ``sdk.link_source_to_entity`` **wrapper**. #9068's connector gates sit in
+    FRONT of the connectors' calls, not in front of either sink: the gaps are
+    measured, pinned XFAIL and NOT closed.
     (``sdk.ingest_corpus`` writes its remaining fields with raw Cypher too, but
     its one mined input — ``eventKind`` — IS gated, and the rest are snake-case
     keys ``graph_kind_namespaces`` does not mine, so it is not a widening path.)

@@ -270,6 +270,13 @@ class GitHubConnector:
         Entity chains are applied BEFORE the poll path so the produces edge
         always lands on the real pm:issue Object (id = entity_id) — never a
         name-stub with a random id.
+
+        #9068: EVERY payload is built first and gated as ONE batch before the
+        first ``apply``. The connector folds straight into the projection
+        (no SDK door in front of it), so a record naming an unapproved pack
+        namespace would install that pack by writing it. Validating first
+        means a refusal leaves the graph untouched instead of half-imported,
+        and the two batches share ONE approval-set read.
         """
         # Entity extraction for issues (ONTOLOGY_v2.5 §1.1, PM domain extension)
         try:
@@ -279,12 +286,38 @@ class GitHubConnector:
 
         count = 0
         covered: set[int] = set()
+        chains: list[dict] = []
+        chain_records: list[dict] = []
         for issue in raw_issues:
             entities = self._issue_to_entities(issue)
             if not entities:
                 continue
             covered.add(issue.get("number"))
+            chains.append(entities)
+            if entities.get("object"):
+                chain_records.append(entities["object"])
+            if entities.get("event"):
+                chain_records.append(entities["event"])
+            chain_records.extend(entities.get("subjects") or ())
 
+        # Poll path — PRs always (entity path doesn't cover PRs); issue
+        # events only when the entity path did not cover them (#1155 dedup).
+        covered_event_ids = {
+            f"github-issue-{self.repo}-{n}-created" for n in covered if n
+        }
+        poll_events = [ev for ev in self.poll()
+                       if ev.get("eventId") not in covered_event_ids]
+
+        # #9068: the gate — before any write, one approval-set read, both
+        # batches. `_gate_kinds` returns the set it decided against so the
+        # second call does not read the graph again (and returns the
+        # "not read" sentinel when a batch names no pack, so a bare batch
+        # never pays a whole-graph scan).
+        from tortoise.connectors import _gate_kinds
+        approved = _gate_kinds(proj, chain_records)
+        _gate_kinds(proj, poll_events, approved=approved)
+
+        for entities in chains:
             # Apply Object (ObjectRegistered → FalkorDB)
             if entities.get("object"):
                 proj.apply(entities["object"])
@@ -336,19 +369,39 @@ class GitHubConnector:
 
             count += 1
 
-        # Poll path — PRs always (entity path doesn't cover PRs); issue
-        # events only when the entity path did not cover them (#1155 dedup).
-        covered_event_ids = {
-            f"github-issue-{self.repo}-{n}-created" for n in covered if n
-        }
-        for ev in self.poll():
-            if ev.get("eventId") in covered_event_ids:
-                continue  # absorbed by the entity path (one Event per issue)
+        for ev in poll_events:
             proj.apply(ev)
             count += 1
         return count
 
     # ── Webhook (GAP-11) ───────────────────────────────────────────
+
+    def _fold_webhook_event(self, ev: dict, on_event=None) -> None:
+        """#9068: the webhook's ONE write step — gate, then fold.
+
+        Extracted so the handler and the tests call the SAME code: the gate
+        used to live inline in ``do_POST``, where only an HTTP round-trip
+        exercised it — moving it below ``proj.apply`` (or deleting it) red
+        nothing in the suite.
+
+        The gate runs BEFORE ``on_event``. The consumer callback is the
+        caller's commit hook for a record that landed; firing it above the
+        gate meant a REFUSED delivery still reached the consumer, and every
+        retry fired it again for a write that never happened.
+
+        Raises ``UnapprovedKindNamespace`` — a DETERMINISTIC refusal, answered
+        422 by the handler (a retry refuses identically). The graph is
+        untouched when it does, because the gate is the first thing that
+        touches it.
+        """
+        proj = self.api.get_proj() if self.api else None
+        if proj is not None:
+            from tortoise.connectors import _gate_kinds
+            _gate_kinds(proj, [ev])
+        if on_event:
+            on_event(ev)
+        if proj is not None:
+            proj.apply(ev)
 
     def start_webhook(self, on_event: Callable[[dict], None] | None = None) -> int:
         """Start webhook server on configured port. Returns port number.
@@ -399,11 +452,28 @@ class GitHubConnector:
                 try:
                     ev = connector._webhook_to_event(event_type, payload)
                     if ev:
-                        if on_event:
-                            on_event(ev)
-                        if connector.api:
-                            connector.api.get_proj().apply(ev)
-                except Exception:
+                        connector._fold_webhook_event(ev, on_event=on_event)
+                except Exception as exc:
+                    # #9068 review P3: a #5475 refusal is DETERMINISTIC — the
+                    # same payload refuses identically on every retry, so the
+                    # blanket 500 below would buy a retry loop, a traceback per
+                    # delivery, and the loss of the refusal's own remedy text
+                    # ("Next steps: … add the pack"). The SDK's error exists so
+                    # a boundary can tell this apart from a transient failure,
+                    # and ``hosted_api`` answers it 422 for the same reason —
+                    # answer it the same way here.
+                    from tortoise.sdk import UnapprovedKindNamespace
+                    if isinstance(exc, UnapprovedKindNamespace):
+                        out = str(exc).encode()
+                        logger.warning(
+                            "GitHub webhook refused (event=%s): %s",
+                            event_type, exc)
+                        self.send_response(422)
+                        self.send_header("Content-Type", "text/plain")
+                        self.send_header("Content-Length", str(len(out)))
+                        self.end_headers()
+                        self.wfile.write(out)
+                        return
                     # #331: processing failures must be visible and answered
                     # with HTTP 500 — a silently dropped connection makes
                     # GitHub retry blindly with no server-side trace.
