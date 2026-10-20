@@ -142,10 +142,11 @@ from __future__ import annotations
 
 import os
 import re
-import pytest
 import subprocess
 import time
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 INSTALLER = (REPO_ROOT / "website" / "apps" / "dashboard" / "public"
@@ -731,11 +732,23 @@ def test_a_failing_sed_cannot_read_as_already_current(tmp_path):
     assert "✓ AGENTS.md" not in done.stdout, done.stdout
 
 
-def test_a_fenced_documentation_example_does_not_refuse_the_install(tmp_path):
+@pytest.mark.parametrize("hardlinked", [False, True], ids=["single-link", "hardlinked"])
+def test_a_fenced_documentation_example_does_not_refuse_the_install(tmp_path, hardlinked):
     """A FENCE is an example, not content. Refused before: a repo that documents
     the markers in a fence was told its markers were malformed — and the remedy
     said to delete the example. A file with ONLY a fenced example has no block
-    at all, so it must be created, not refused."""
+    at all, so it must be created, not refused.
+
+    `hardlinked` puts this file on the IN-PLACE write arms (`ln AGENTS.md
+    CLAUDE.md`), which is where the mid-write concurrency check lives. That check
+    used to `grep` the file for the marker TEXT — fence-blind and line-blind — so
+    the very example this test is about made it refuse, permanently, naming a
+    concurrent install as the cause and advising a re-run that re-matched the
+    user's own documentation every time (measured rc 3 on both runs). The check
+    now asks whether the target CHANGED (`cmp` against the pre-state copy), which
+    cannot false-positive on documentation. The second run also exercises the
+    in-place REPLACE arm, since the block is now paired.
+    """
     base = _fixture_tree(tmp_path)
     installer = _patched_installer(tmp_path, base)
     home = tmp_path / "home"
@@ -745,6 +758,10 @@ def test_a_fenced_documentation_example_does_not_refuse_the_install(tmp_path):
     example = "## How this file is structured\n\n```\n  " + START + "\n  ...\n  " + END + "\n```\n"
     agents = project / "AGENTS.md"
     agents.write_text("# House rules\n\n" + example, encoding="utf-8")
+    alias = None
+    if hardlinked:
+        alias = project / "CLAUDE.md"
+        alias.hardlink_to(agents)
 
     done = _run(installer, home, project)
 
@@ -761,6 +778,11 @@ def test_a_fenced_documentation_example_does_not_refuse_the_install(tmp_path):
     assert again.returncode == 0, again.stderr
     assert "already current" in _agents_report(again.stdout), again.stdout
     assert agents.read_text(encoding="utf-8") == text
+    if alias is not None:
+        assert agents.stat().st_ino == alias.stat().st_ino, (
+            "the install must not split a hardlinked alias")
+        assert alias.read_text(encoding="utf-8") == text, (
+            "the alias must hold the same bytes — a rename splits the inode")
 
 
 def test_a_non_numeric_version_is_reported_as_such(tmp_path):
@@ -1392,10 +1414,7 @@ def test_a_hardlinked_alias_sees_the_block(tmp_path, existing_block, read_only):
     project.mkdir()
     target = project / "AGENTS.md"
     body = "# House\nUNIQUE-LINE-ONE\n"
-    if existing_block:
-        original = f"{body}\n{START}\nold block\n{END}\nTAIL\n"
-    else:
-        original = body
+    original = f"{body}\n{START}\nold block\n{END}\nTAIL\n" if existing_block else body
     target.write_text(original, encoding="utf-8")
     if read_only:
         # The in-place arms chmod the target and must put the mode back; without a
@@ -1739,7 +1758,7 @@ def test_the_append_path_refuses_when_a_concurrent_run_wrote_the_block(tmp_path)
     text = target.read_text(encoding="utf-8")
     assert done.returncode == 3, (
         "a block appearing mid-write must abort, not duplicate:\n" + done.stdout + done.stderr)
-    assert "another install wrote a Tortoise block" in done.stderr, done.stderr
+    assert "changed while this one was running" in done.stderr, done.stderr
     assert text.count(START) == 1 and text.count(END) == 1, (
         f"exactly one block must remain, got {text.count(START)}/{text.count(END)}:\n{text[:300]}")
     assert "UNIQUE-ONE" in text, "the user's content must survive"

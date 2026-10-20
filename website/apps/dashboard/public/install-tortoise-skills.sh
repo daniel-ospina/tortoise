@@ -437,7 +437,7 @@ emit_codex_agents_block() {
   local state="" prev_version="" same_bytes=0
   local state_kind="" c_start c_startline c_end c_endline c_fence_start
   local c_near_s c_near_e c_mangled_s c_mangled_e c_fence_open
-  local block_inside_fence orig_mode links backup
+  local block_inside_fence orig_mode links backup pre_state
   # An IN-PLACE write (the hardlinked-alias arms) truncates the user's only copy,
   # so the original is kept first and restored on any failure — same inode, so the
   # recovery is exact and the alias is untouched. A signal in that window used to
@@ -539,6 +539,18 @@ emit_codex_agents_block() {
 ${me}" > "$block" || _emit_fail "could not build the new block text — nothing was changed"
 
   if [ -f "$target" ]; then
+    # The bytes the classifier is about to read are KEPT, so "did the file change
+    # since this run read it?" can be answered later by `cmp` — the same primitive
+    # the rollback already uses to verify a restore. It is the only honest way to
+    # ask that question: the marker text appears in prose and in fenced
+    # documentation EXAMPLES, which the classifier deliberately ignores, so a
+    # `grep` for the marker refuses files whose only markers are an example, names
+    # a concurrent install that never ran, and can never succeed on a re-run.
+    # It is taken unconditionally (one copy of a markdown file) because the
+    # hard-link count that decides whether that check runs is read further down.
+    pre_state="$tmpdir/pre-state-agents.md"
+    cp "$target" "$pre_state" \
+      || _emit_fail "could not read $target (unreadable, or not a regular file) — nothing was changed"
     # ONE pass decides WHERE the block is, and every reader/writer below obeys
     # its line numbers. Counting with fences but then locating the window with a
     # fence-blind scan is how the fenced-example feature deleted a user's
@@ -883,12 +895,22 @@ EOF
         # A concurrent run may have written the block since the pre-state was read.
         # Renaming used to make the last writer win; appending IN PLACE would add a
         # SECOND pair and leave a file the next run refuses as MALFORMED (measured).
-        # Cheap optimistic check: fail closed instead of duplicating.
-        if grep -qF -- "$ms" "$target" 2>/dev/null || grep -qF -- "$me" "$target" 2>/dev/null; then
+        # Fail closed instead of duplicating.
+        #
+        # The question is "did the target CHANGE since this run read it?", and the
+        # pre-state copy is the only sound way to ask it. A `grep` for the marker
+        # text is fence-blind AND line-blind: it matches prose and fenced/indented
+        # documentation examples — exactly the states the classifier above decided
+        # are NOT a block (state_kind=none, pinned by
+        # `test_a_fenced_documentation_example_does_not_refuse_the_install`) — so a
+        # hardlinked file that only DOCUMENTS the markers was refused permanently,
+        # with a cause (a concurrent install) that had been excluded, and the
+        # remedy it printed re-matched the user's own documentation on every run.
+        if ! cmp -s "$target" "$pre_state"; then
           chmod "$orig_mode" "$target" 2>/dev/null || true
           trap - INT TERM HUP
           rm -f "$staged"
-          _emit_fail "another install wrote a Tortoise block while this one was running, so nothing was appended (re-run to upgrade it)"
+          _emit_fail "$target changed while this one was running (another install, or an editor, wrote it), so nothing was appended (re-run to upgrade it)"
         fi
         # ONLY the new bytes: $staged is a COPY of $target plus the block, so
         # `cat "$staged" >> "$target"` would duplicate the user's whole file
