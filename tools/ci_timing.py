@@ -2186,7 +2186,8 @@ def candidate_flakes(history: list[dict]) -> list[dict]:
 # --- rendering --------------------------------------------------------------
 
 def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
-              run_id: str, history: list[dict], flakes: list[dict]) -> str:
+              run_id: str, history: list[dict], flakes: list[dict],
+              summary_less_legs: list[str] | None = None) -> str:
     # #1477 review P2: CI_TIMING_NOW lets tests freeze the clock (the
     # back-to-back subprocess invocations in the determinism test otherwise
     # straddle a second boundary and flake).
@@ -2243,6 +2244,21 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
         f"error: **{counts['error']}** · skipped: **{counts['skipped']}** · "
         f"xfailed: {counts['xfailed']} · xpassed: {counts['xpassed']}",
         f"- watchdog-killed mid-suite: {'yes' if killed else 'no'}",
+    ]
+    # #9134 review P2: a leg whose log carries no pytest SUMMARY line contributes
+    # its failures (read off the progress lines) but NOT its passes or skips — a
+    # summary-less log cannot establish them. Stating that only where the reader
+    # can see which legs are affected: without it, `passed` is a plain number that
+    # silently excludes a whole leg's passes while `failed` counts that leg's
+    # failures, so the two columns disagree about which legs they cover.
+    if summary_less_legs:
+        legs = ", ".join(f"`{name}`" for name in summary_less_legs)
+        lines.append(
+            f"- summary-less legs (no pytest summary line; watchdog-truncated): {legs}\n"
+            f"  - their FAILURES are counted (from progress lines); their PASSES and "
+            f"SKIPS are not — a truncated log cannot establish them. Read `passed` as a "
+            f"LOWER BOUND for the run, not as a total.")
+    lines += [
         "",
         "## Flake signal",
         "",
@@ -2542,7 +2558,9 @@ def main() -> int:
         "history": history,
     }
 
-    md = render_md(run, steps, files, total_counts, killed_any, run_id, history, flakes)
+    md = render_md(run, steps, files, total_counts, killed_any, run_id, history, flakes,
+                   summary_less_legs=[s["log"] for s in log_sources
+                                      if not any(s["counts"].values())])
     try:
         (out_dir / "ci-timing.md").write_text(md)
         (out_dir / "ci-timing.json").write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")

@@ -416,10 +416,20 @@ def test_wrapped_detector_sees_a_claim_split_across_lines(tmp_path):
 def test_no_wrapped_durability_claim_anywhere_in_the_scanned_roots():
     """A line break must not hide the PREDICATE claim from the gate.
 
-    ``tortoise/api.py`` reads `(the journal IS the` / `reconstruction source)`
-    today, and the predicate the gate looks for spans both lines — so the shape
-    that would slip past a line-oriented scan is live, and a gate that reported
-    clean on it would be failing open, which is what this forbids.
+    This is a FORWARD guard, and the docstring used to say otherwise: it cited
+    ``tortoise/api.py`` (`the journal IS the` / `reconstruction source`) as a
+    live instance of a wrapped claim the gate would miss. That is wrong twice
+    over. `api.py` carries the `source` shape, not the `is truth` / `is durable`
+    predicate this scan joins — and `source` is exactly the family the SCOPE
+    paragraph below says is deliberately NOT joined. Measured when this was
+    corrected: the repo-wide scan finds **0** hits, so there is no live
+    wrapped instance of the covered predicates anywhere in the scanned roots.
+
+    The guard still earns its place, because the failure it forbids is silent by
+    construction: a reword that wraps the predicate across a newline would leave
+    a line-at-a-time scan reporting clean while the claim stands — a gate that
+    fails open is worse than no gate, since it certifies what it did not read.
+    What is NOT claimed is that such a claim exists today.
 
     SCOPE: the joined re-scan covers only the two predicate alternations
     (`is truth` / `is durable`), not `source of truth`. That is deliberate and

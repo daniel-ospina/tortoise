@@ -1234,6 +1234,43 @@ def test_a_collection_error_leg_reports_its_error(tmp_path: Path) -> None:
     assert agg["total_counts"]["passed"] == 0
 
 
+def test_the_artifact_names_the_legs_whose_passes_it_could_not_count(tmp_path: Path) -> None:
+    """A truncated leg's failures are counted and its passes are not.
+
+    Aggregating failures from a summary-less leg while leaving its passes out is
+    the right call — the log cannot establish them — but it makes the two columns
+    cover different legs, so `passed` is a LOWER BOUND while reading as a total.
+    The artifact must say which legs that applies to (#9134 review, P2).
+
+    Non-vacuity: with `summary_less_legs` not passed (the pre-fix call), the MD
+    carries no such line and every assertion below goes red.
+    """
+    (tmp_path / "pytest-a.log").write_text(
+        "FAILED tests/test_a.py::test_1 - AssertionError\n"
+        "= 10 passed, 1 failed in 3.00s =\n")
+    (tmp_path / "pytest-b.log").write_text(
+        "FAILED tests/test_b.py::test_2 - AssertionError\n")
+    agg = ci_timing.aggregate_logs(tmp_path)
+    truncated = [s["log"] for s in agg["log_sources"] if not any(s["counts"].values())]
+    assert truncated == ["pytest-b.log"], agg["log_sources"]
+
+    def md(names: list[str] | None) -> str:
+        return ci_timing.render_md(
+            {"head_sha": "abc123", "created_at": "2026-01-01T00:00:00Z",
+             "conclusion": "success"},
+            {}, {}, agg["total_counts"], agg["killed_any"], "4242", [], [],
+            summary_less_legs=names,
+        )
+
+    text = md(truncated)
+    assert "`pytest-b.log`" in text, text
+    # The complete leg must NOT be named: the note is about truncated legs only.
+    assert "`pytest-a.log`" not in text, text
+    assert "LOWER BOUND" in text, text
+    # A run with no truncated legs says nothing at all.
+    assert "LOWER BOUND" not in md(None)
+
+
 def test_a_held_row_does_not_strand_the_markers_own_separator() -> None:
     """The restated marker must replace the WORDS only.
 
