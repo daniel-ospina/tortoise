@@ -1213,6 +1213,27 @@ def test_a_summary_less_leg_still_counts_its_failures(tmp_path: Path) -> None:
     assert agg["total_counts"]["passed"] == 10, agg["total_counts"]
 
 
+def test_a_collection_error_leg_reports_its_error(tmp_path: Path) -> None:
+    """A summary line is `=== <n> <state>` and need not mention `passed`.
+
+    The parser required the word `passed` on the summary line, so a leg that failed to
+    COLLECT (`=== 1 error in 0.40s ===`, no progress lines at all) parsed as zero of
+    everything: the artifact reported no errors for the leg that produced nothing, and
+    the summary-less recovery could not help because there was no progress line to read
+    (#9134 review, P3).
+    """
+    (tmp_path / "pytest-collect.log").write_text(
+        "ERROR tests/test_bad.py\n"
+        "======= 1 error in 0.40s =======\n",
+        encoding="utf-8",
+    )
+
+    agg = ci_timing.aggregate_logs(tmp_path)
+
+    assert agg["total_counts"]["error"] == 1, agg["total_counts"]
+    assert agg["total_counts"]["passed"] == 0
+
+
 def test_a_held_row_does_not_strand_the_markers_own_separator() -> None:
     """The restated marker must replace the WORDS only.
 
@@ -1546,6 +1567,22 @@ def test_the_remaining_floor_shapes_have_no_denominator(tmp_path: Path) -> None:
         "def test_a():\n    pass\n",
         encoding="utf-8",
     )
+    # A CALL assigned to a `test*` name is still an alias — `functools.partial(test_c)` and
+    # `parametrize(...)(test_c)` both collect an extra nodeid (measured 3 vs 2) — while a
+    # branch that cannot execute (`if TYPE_CHECKING:`, `if False:`) binds nothing, so a
+    # `def` inside it must NOT be counted (measured 1 collected against a declared 4).
+    (tmp_path / "tests" / "sub" / "test_call_alias.py").write_text(
+        "import functools\ndef test_a():\n    pass\n"
+        "test_b = functools.partial(test_a)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "sub" / "test_dead_branch.py").write_text(
+        "from typing import TYPE_CHECKING, TYPE_CHECKING as TC\nif TC:\n"
+        "    def test_ghost():\n        pass\nif False:\n"
+        "    def test_ghost2():\n        pass\nif TYPE_CHECKING:\n"
+        "    def test_ghost3():\n        pass\ndef test_real():\n    pass\n",
+        encoding="utf-8",
+    )
     (tmp_path / "tests" / "sub" / "test_runner_list.py").write_text(
         "def test_a():\n    pass\ndef test_b():\n    pass\n"
         "tests = [test_a, test_b]\n",
@@ -1558,6 +1595,7 @@ def test_the_remaining_floor_shapes_have_no_denominator(tmp_path: Path) -> None:
         ["withconf/test_under_conftest.py", "sub/test_ifblock.py", "sub/test_alias.py",
          "sub/test_attralias.py", "sub/test_injected.py",
          "sub/test_pytestmark_skipif.py", "sub/test_runner_list.py",
+         "sub/test_call_alias.py", "sub/test_dead_branch.py",
          "sub/test_plain.py"],
         tmp_path,
     )
@@ -1569,6 +1607,10 @@ def test_the_remaining_floor_shapes_have_no_denominator(tmp_path: Path) -> None:
     # the walk now sees the branch, so the count is exact and the row keeps its
     # denominator instead of losing it.
     assert counts["sub/test_ifblock.py"] == 2
+    assert "sub/test_call_alias.py" not in counts
+    # The dead branches are not counted, so the denominator is exact rather than
+    # unsatisfiable — the mirror of a floor, and just as fatal to the witness.
+    assert counts["sub/test_dead_branch.py"] == 1
     assert counts["sub/test_pytestmark_skipif.py"] == 1
     assert counts["sub/test_runner_list.py"] == 2
     assert counts["sub/test_plain.py"] == 2

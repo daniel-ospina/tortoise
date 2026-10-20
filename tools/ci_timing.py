@@ -524,7 +524,11 @@ def parse_log(path: Path) -> dict:
         if m:
             outcomes[m.group(2)] = m.group(1)
             continue
-        if line.startswith("=") and "passed" in line:
+        # ⛔ Shape, not vocabulary: a summary line is `=== <n> <state>` and does not have
+        # to mention `passed`. Requiring that word made a COLLECTION-ERROR leg
+        # (`=== 1 error in 0.40s ===`) parse as all-zero, so a leg that failed to collect
+        # reported no errors at all (#9134 review, P3).
+        if line.startswith("=") and COUNT_RE.search(line):
             for n, key in COUNT_RE.findall(line):
                 if key in counts:
                     counts[key] = int(n)
@@ -952,10 +956,13 @@ def _is_alias_or_injection(node: ast.stmt) -> bool:
     if isinstance(node, (ast.Assign, ast.AnnAssign)):
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         value = getattr(node, "value", None)
-        # A bare `test*` NAME carries a testcase only when its value is a callable-ish
-        # reference; `tests = [test_a, test_b]` is a runner list and pytest collects
-        # nothing from it (#9134 review).
-        aliases_a_callable = isinstance(value, (ast.Name, ast.Attribute, ast.Lambda))
+        # ⛔ A container literal is a RUNNER LIST (`tests = [test_a, test_b]`), which pytest
+        # collects nothing from; anything else assigned to a `test*` name is an alias that
+        # collects a second nodeid — including a CALL, which is how
+        # `test_c = pytest.mark.parametrize("x",[1,2,3])(test_c)` and
+        # `test_c = functools.partial(test_c)` multiply a testcase (#9134 review). Only a
+        # bare Name is a plain rename, but it is an alias all the same.
+        aliases_a_callable = not isinstance(value, (ast.List, ast.Tuple, ast.Set, ast.Dict))
         for target in targets:
             if (aliases_a_callable and isinstance(target, ast.Name)
                     and target.id.startswith("test")):
@@ -976,7 +983,43 @@ def _is_alias_or_injection(node: ast.stmt) -> bool:
     )
 
 
-def _collectable_statements(body: list[ast.stmt]) -> list[ast.stmt]:
+def _type_checking_names(tree: ast.Module) -> frozenset[str]:
+    """Every module-level name bound to `typing.TYPE_CHECKING`, aliases included."""
+    names = {"TYPE_CHECKING"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "typing":
+            for alias in node.names:
+                if alias.name == "TYPE_CHECKING":
+                    names.add(alias.asname or alias.name)
+        if isinstance(node, ast.Assign):
+            value = node.value
+            if isinstance(value, ast.Attribute) and value.attr == "TYPE_CHECKING":
+                names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+    return frozenset(names)
+
+
+def _block_cannot_execute(node: ast.stmt, type_checking: frozenset[str] = frozenset({"TYPE_CHECKING"})) -> bool:
+    """True for an `if`/`while` whose body can never run at import time.
+
+    A `def` under `if TYPE_CHECKING:` or `if False:` is never bound, so pytest collects
+    nothing from it — counting it makes `observed >= declared` UNSATISFIABLE and holds the
+    row's weight forever, the mirror of the floor this module exists to refuse. Measured
+    on a module with three such guards beside one real test: 1 collected, and the count
+    said 4 (#9134 review, P2).
+    """
+    if not isinstance(node, (ast.If, ast.While)):
+        return False
+    test = node.test
+    if isinstance(test, ast.Constant) and not test.value:
+        return True
+    if isinstance(test, ast.Name) and test.id in type_checking:
+        return True
+    return isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+
+
+def _collectable_statements(
+    body: list[ast.stmt], type_checking: frozenset[str] = frozenset({"TYPE_CHECKING"}),
+) -> list[ast.stmt]:
     """The statements pytest collects from a body, descending into BLOCKS.
 
     A `def` inside a module-level `if`/`try`/`with` IS collected — pytest imports the
@@ -990,16 +1033,18 @@ def _collectable_statements(body: list[ast.stmt]) -> list[ast.stmt]:
     out: list[ast.stmt] = []
     for node in body:
         out.append(node)
+        if _block_cannot_execute(node, type_checking):
+            continue
         for attr in ("body", "orelse", "finalbody"):
             block = getattr(node, attr, None)
             if isinstance(block, list) and block and isinstance(block[0], ast.stmt):
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     continue
-                out.extend(_collectable_statements(block))
+                out.extend(_collectable_statements(block, type_checking))
         for handler in getattr(node, "handlers", []) or []:
-            out.extend(_collectable_statements(handler.body))
+            out.extend(_collectable_statements(handler.body, type_checking))
         for case in getattr(node, "cases", []) or []:
-            out.extend(_collectable_statements(case.body))
+            out.extend(_collectable_statements(case.body, type_checking))
     return out
 
 
@@ -1011,10 +1056,12 @@ def _collected_test_count(tree: ast.Module) -> int:
     collects neither, and counting them makes the coverage floor unsatisfiable
     for the file (the `declared > collected` defect this docstring records).
     """
-    count = sum(1 for node in _collectable_statements(tree.body) if _is_test_def(node))
-    for node in _collectable_statements(tree.body):
+    tc = _type_checking_names(tree)
+    count = sum(1 for node in _collectable_statements(tree.body, tc) if _is_test_def(node))
+    for node in _collectable_statements(tree.body, tc):
         if isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
-            count += sum(1 for sub in _collectable_statements(node.body) if _is_test_def(sub))
+            count += sum(
+                1 for sub in _collectable_statements(node.body, tc) if _is_test_def(sub))
     return count
 
 
@@ -2321,8 +2368,10 @@ def aggregate_logs(logs_dir: Path | str) -> dict:
         # all-zero log source (`pytest.log`) contributed no counts at all (#9134
         # review, P2). That run's logs SURVIVE, so the artifact was regenerated
         # from them rather than the number being edited: the same capture now
-        # reads 6, and `outcome.failed` agrees with the `failed_tests` list it
-        # ships beside. A truncation is not an absence of failures, so a
+        # reads 6. ⛔ `outcome.failed` is NOT the length of `failed_tests`: this line
+        # accumulates FAILED only, while `failed_tests` below takes FAILED *and*
+        # ERROR — a pre-existing mismatch in this artifact, not something this
+        # change fixes. A truncation is not an absence of failures, so a
         # summary-less leg contributes what its progress lines told us — failures
         # only, never passed/skipped, which a summary-less log cannot establish.
         if not any(parsed["counts"].values()):
