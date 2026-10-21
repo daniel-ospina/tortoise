@@ -7822,12 +7822,32 @@ class TortoiseSDK:
             # Gated on is-None (not key-absence) exactly like `createdAt`: a
             # producer that hands over a record read back off the journal keeps
             # its recorded instant verbatim.
-            _record_ts = None
+            #
+            # ⛔ THE HAND-OFF IS THE DICT'S OWN `ts`, NOT WHAT THIS CALL MINTED
+            # (a #9445 review P1 this block used to get wrong). On the non-None
+            # branch the dict ALREADY carries an instant, and handing over
+            # `None` there made `_emit_event` mint a FRESH one while the fold
+            # read the dict's — two clocks on exactly the field this block
+            # exists to close, which also made the comment above false of the
+            # RECORD (it held for the node only). `ts` is stripped from the
+            # payload by `_journal_record_payload`, so nothing else carries the
+            # instant to `_emit_event`: the value the envelope gets and the value
+            # the fold reads must be ONE read on EVERY branch.
+            #
+            # Two shapes reach the non-None branch, and both need the same
+            # hand-off: (1) a producer handing over a record it read back off
+            # the journal (the case the sentence above names), and (2) a RETRY
+            # of the same dict after a failed append — `_emit_event` is
+            # best-effort, this door stamps the CALLER's dict in place, so
+            # attempt 1 leaves `ts=T1` behind; attempt 2 must journal T1, not
+            # re-mint a T2 the fold never read. (`createdAt` just above is
+            # retry-safe for a different reason — it travels in the PAYLOAD;
+            # `ts` deliberately does not.)
             if (event.get("type") in _JOURNALED_ENTITY_EVENT_TYPES
                     and event.get("ts") is None):
                 from .ids import now_iso
-                _record_ts = now_iso()
-                event["ts"] = _record_ts
+                event["ts"] = now_iso()
+            _record_ts = event.get("ts")
             _failures_before = self._journal_write_failures
             self._journal_entity_event(event, recorded_ts=_record_ts)
             if self._journal_write_failures > _failures_before:

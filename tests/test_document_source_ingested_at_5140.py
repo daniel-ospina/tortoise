@@ -34,6 +34,11 @@ from tortoise.projection import FalkorProjection
 #: `ts`, so this is the value the fold must read — not a replay clock.
 RECORD_TS = "2026-01-02T03:04:05+00:00"
 
+#: A deliberately DISTINCT instant for the door tests' pre-set-`ts` cases: using
+#: `RECORD_TS` would let a re-minted record instant collide with the value the
+#: fold read and hide the two-clock divergence the assertions target.
+PRESET_TS = "2021-07-08T09:10:11+00:00"
+
 
 def _proj() -> FalkorProjection:
     """A throwaway embedded graph (no docker lane, no shared state)."""
@@ -306,6 +311,102 @@ def test_apply_and_journal_document_does_not_diverge_live_vs_rebuild():
             "the fold instant and the record's `ts` must be ONE clock read — "
             f"record ts {rec[0]['ts']!r} vs live ingestedAt {live!r}")
     finally:
+        sdk.close()
+
+
+def test_apply_and_journal_honours_a_caller_supplied_ts():
+    """Input: a record the caller ALREADY stamped (`ts` pre-set on the dict).
+
+    That is the "handed over a record read back off the journal" shape the
+    door's own comment names, and it is the branch its sibling test above never
+    reached.
+
+    FAILS PRE-FIX (#9445 review, P1): the is-None gate left `_record_ts` at
+    `None` while the dict carried an instant, so `_emit_event` minted the
+    record's envelope `ts` a SECOND time — the fold read the caller's instant
+    and a replay read the fresh mint. Both assertions below fail on that code:
+    `rec[0]["ts"] == live` (two clocks, not one) and `live == rebuilt`.
+    """
+    from tortoise.log import EventLog
+
+    sdk, log = _journaled_sdk()
+    try:
+        proj = sdk._get_proj()
+        record = _applied_record("doc-9434-preset.md")
+        record["ts"] = PRESET_TS
+        sdk._apply_and_journal(proj, record)
+        live = _ingested_at(proj, "doc-9434-preset.md")
+        assert live == PRESET_TS, (
+            "the fold must read the instant the caller put on the dict; "
+            f"got {live!r}")
+        proj.rebuild_all(os.path.dirname(log), confirm_destructive=True)
+        rebuilt = _ingested_at(proj, "doc-9434-preset.md")
+        assert live == rebuilt, (
+            "`derived = replay(journal)` must hold for this field on the "
+            f"pre-set-`ts` branch too: live {live!r} vs rebuilt {rebuilt!r}")
+        rec = [e for e in EventLog(log).read_all()
+               if e.get("type") == "EventRecorded"]
+        assert len(rec) == 1, f"expected one EventRecorded line, got {len(rec)}"
+        assert rec[0]["ts"] == live, (
+            "the record must carry the instant the fold read, not a second "
+            f"clock read — record ts {rec[0]['ts']!r} vs live {live!r}")
+    finally:
+        sdk.close()
+
+
+def test_a_retry_after_a_failed_append_journals_the_instant_the_fold_reads(
+        monkeypatch):
+    """Input: one record dict, a FAILED append, then the same dict retried.
+
+    `_emit_event` is best-effort (a raised append logs, counts, returns without
+    raising) and this door stamps the CALLER's dict in place, so attempt 1 leaves
+    `ts` behind. Attempt 2 therefore takes the NON-None branch — the branch the
+    pre-fix code handed `None` from, re-minting the record's instant while the
+    fold read attempt 1's.
+
+    FAILS PRE-FIX on `rec[0]["ts"] == live` and on `live == rebuilt`: the retried
+    write stores one instant live and replays a different one, which is the
+    `#5024` `derived = replay(journal)` break this PR closes everywhere else.
+    """
+    from tortoise.log import EventLog
+
+    sdk, log = _journaled_sdk()
+    real_append = EventLog.append
+    try:
+        proj = sdk._get_proj()
+        record = _applied_record("doc-9434-retry.md")
+
+        def _raise_append(self, event):
+            raise OSError("disk full (test)")
+
+        monkeypatch.setattr(EventLog, "append", _raise_append)
+        sdk._apply_and_journal(proj, record)
+        assert _ingested_at(proj, "doc-9434-retry.md") is None, (
+            "a failed append must not fold — the record is not committed")
+        assert record.get("ts"), (
+            "the door stamps the caller's dict in place; without that the retry "
+            "would take the is-None branch and this test would be vacuous")
+        first_ts = record["ts"]
+
+        monkeypatch.setattr(EventLog, "append", real_append)
+        sdk._apply_and_journal(proj, record)
+        live = _ingested_at(proj, "doc-9434-retry.md")
+        assert live == first_ts, (
+            "the retried fold must read the instant attempt 1 left on the dict; "
+            f"got {live!r} vs {first_ts!r}")
+        proj.rebuild_all(os.path.dirname(log), confirm_destructive=True)
+        rebuilt = _ingested_at(proj, "doc-9434-retry.md")
+        assert live == rebuilt, (
+            "`derived = replay(journal)` must hold on the retry path: "
+            f"live {live!r} vs rebuilt {rebuilt!r}")
+        rec = [e for e in EventLog(log).read_all()
+               if e.get("type") == "EventRecorded"]
+        assert len(rec) == 1, f"expected one EventRecorded line, got {len(rec)}"
+        assert rec[0]["ts"] == live, (
+            "the record must carry the instant the fold read, not a re-mint — "
+            f"record ts {rec[0]['ts']!r} vs live {live!r}")
+    finally:
+        monkeypatch.setattr(EventLog, "append", real_append)
         sdk.close()
 
 
