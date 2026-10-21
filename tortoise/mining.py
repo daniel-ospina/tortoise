@@ -272,6 +272,18 @@ class ConversationMiner:
         started_at = session_started_at or _now()
         batch_id = batch_id or ulid()
 
+        # 0. Record the version of the content this run READS, before ANY
+        # writer can anchor against it (#5199). The capture path already runs
+        # its materialization first for exactly this reason (sdk.py #8501:
+        # *"call it BEFORE extraction — that ordering is what gives the
+        # extracted Points a `contentHash` to record as `sourceVersion`"*).
+        # Mining did not: every writer auto-created the session `:Source` with
+        # `contentHash=''` (#205), so both the mined Points' `extractedFrom`
+        # anchor and the derived meeting Event's `references` anchor were
+        # stamped from an empty stub and read `unknown` forever.
+        if api.projection is not None:
+            self._record_source_version(api.projection, source_id, transcript)
+
         # 1. Run extractor: Points + IMPL/NAND operators
         extractor = self._make_extractor()
         extractor.run(transcript, source_id, api)
@@ -611,6 +623,72 @@ class ConversationMiner:
     # ── Phase-2 entity reification (W-1 write phase, DE2E-1) ──────
 
     @staticmethod
+    def _record_source_version(proj, source_id: str, transcript: str) -> str | None:
+        """Record the version of the content this mine READ on its Source.
+
+        #5199 — the derivation anchor lands now, but this producer had no
+        version to give it.
+
+        ``_reify_entities`` completes the provenance chain with
+        ``link_source_to_entity(session_id, meeting_event, "Event")``, and that
+        Source usually does not exist yet: the writer auto-creates it (#205)
+        with ``contentHash=''``, while the version of the mined content lives on
+        the session ``:Event``'s ``file_hash`` (written by ``ingest_corpus``).
+        The anchor is stamped from ``s.contentHash`` — so it was stamped from
+        the empty stub, and the derived meeting ``:Event`` was permanently
+        unversioned: ``entity_currency`` answered ``unknown`` even before any
+        revision, and a revision could therefore never stale it. That is
+        exactly the gap #5199 names, surviving the landing of the anchor
+        because the production writer had no version to record.
+
+        The version recorded is the one THIS call read (``transcript``), never a
+        guess: ``content_hash`` is the same sha256 ``ingest_corpus`` writes as
+        the session Event's ``file_hash``, so the two writers agree by
+        construction. ``SET`` (not ``ON CREATE``) is right HERE — this is the
+        source's CURRENT version, and advancing it on a revised content is what
+        makes the OLD anchor on the derivation link read ``stale`` (the anchor
+        itself stays ``ON CREATE``, so a re-link never erases the drift).
+
+        Uses ``_mint_source_stub`` rather than a hand-rolled MERGE so the node
+        is created through the ONE shared create path (the same shape
+        ``link_source_to_entity`` would have minted), and returns its resolved
+        ``url`` key. Returns ``None`` when the ref is not writable — the link
+        writer refuses such a ref too, so there is nothing to anchor.
+
+        Not replay-transferable: ``references`` is in neither
+        ``STRUCTURAL_REL_LABELS`` nor ``DERIVABLE_STRUCTURAL_RELS``, so this
+        anchor adds nothing to the replay surface (see
+        ``projection/edges.py::_DERIVATION_ANCHOR_SET``). The Points the same
+        run creates carry their own journaled ``sourceVersionTransit``, so
+        their anchors survive a rebuild independently of this stamp.
+        """
+        from .projection.edges import _mint_source_stub
+
+        key = _mint_source_stub(proj.g, source_id)
+        if key is None:
+            return None
+        version = content_hash(transcript)
+        # Read-then-skip: this runs twice on the ordinary path (before
+        # extraction for the Points, and again at the Event link), and a
+        # second identical write would move `updatedAt` for no content
+        # change — which the `CASE` deliberately guards against anyway.
+        current = proj.g.query(
+            "MATCH (s:Source {url:$url}) RETURN s.contentHash",
+            params={"url": key},
+        ).result_set
+        if current and current[0][0] == version:
+            return version
+        proj.g.query(
+            "MATCH (s:Source {url:$url}) "
+            "SET s.updatedAt = CASE WHEN s.contentHash IS NULL "
+            "        OR s.contentHash <> $ch THEN $now "
+            "        ELSE coalesce(s.updatedAt, $now) END, "
+            "    s.contentHash = $ch",
+            params={"url": key, "ch": version, "now": now_iso()},
+        )
+        return version
+
+    @staticmethod
     def _object_id(name: str) -> str:
         """Deterministic canonical Object id (plan §4.1/§4.4): ``obj_`` +
         sha256 of the domain-separated canonical name, truncated to 16 hex
@@ -704,7 +782,12 @@ class ConversationMiner:
                 "MATCH (n:Point) WHERE n.id IN $ids SET n.eventId=$eid",
                 params={"ids": pids, "eid": meeting_event},
             )
-        # Complete the provenance chain: Source -[:references]-> Event
+        # Complete the provenance chain: Source -[:references]-> Event.
+        # #5199: the version must be ON the Source FIRST — the anchor is
+        # stamped from `s.contentHash` in the same statement that MERGEs the
+        # link, so stamping it afterwards would leave the note empty forever
+        # (the anchor is `ON CREATE` only, by design).
+        self._record_source_version(proj, source_id, transcript)
         proj.link_source_to_entity(source_id, meeting_event, "Event")
         return wired
 
