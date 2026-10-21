@@ -41,6 +41,27 @@ WHAT THIS GATE DELIBERATELY DOES NOT DO (#5064, bounded slice)
 * It does not check that a cited test file is REGISTERED in the CI manifest —
   that surface is owned by `tools/ci_selection.py --integrity`. The gate checks
   that the path exists, not that CI runs it.
+
+⭐ WHAT IT DOES CHECK ABOUT ORDER (#5064's Verification Checklist: *"a mechanism
+whose precondition is unbuilt cannot be marked implemented"*). A row may declare
+`preconditions:` — the OTHER declared mechanisms that must be in place first, so
+the ordering is written down rather than discovered at implementation time
+(#5064's refactor direction item 3: *"a **precondition** (the fan-out cap gates
+deduplication) is ordered in the registry rather than discovered at
+implementation time"*). The gate refuses four shapes, all fail-closed:
+
+  * a precondition that is not a DECLARED mechanism (nothing can ever say
+    whether it is built, so the dependant's claim is unverifiable);
+  * a self-reference (`implemented` would require itself — vacuously true);
+  * a CYCLE (`a → b → a` satisfies every per-row rule while nothing can be
+    built first, so it is judged over the set);
+  * an `implemented` row on top of a precondition that is NOT implemented —
+    the same `declared ⇒ present` inference this gate exists to kill, applied
+    to *order* instead of existence.
+
+Ordering is declarable on a `not-implemented` row too, because that is where it
+matters most: the absent mechanism records what it waits for, so the next lane
+meets an ordering instead of a surprise.
 """
 
 from __future__ import annotations
@@ -81,6 +102,62 @@ NOT_IMPLEMENTED = "not-implemented"
 #: It is deliberately NOT accepted here, so a `descriptive` row FAILS CLOSED
 #: until that question is settled — the safe direction, and an allow-list.
 STATES = (IMPLEMENTED, NOT_IMPLEMENTED)
+
+#: The optional ORDERING field: the other declared mechanisms a row must wait
+#: for (#5064's refactor direction item 3 — *"a precondition … is ordered in the
+#: registry rather than discovered at implementation time"*). Read by
+#: `_precondition_cycles` and by the per-row rule in `gate_errors`.
+PRECONDITIONS = "preconditions"
+
+
+def _precondition_cycles(edges: dict[str, list[str]]) -> list[list[str]]:
+    """Every precondition cycle, each reported ONCE, as the path that closes it.
+
+    Judged over the SET rather than per row, because a cycle satisfies every
+    per-row rule: `a → b → a` with both rows `implemented` names a precondition
+    that IS implemented, twice. Left unchecked the ordering is silently
+    unsatisfiable — nothing in the cycle can be built first — while the gate
+    reports nothing, which is the same class of defect as a declared-but-absent
+    mechanism (true by construction, and invisible).
+
+    Iterative (a registry is data, not a stack budget) and colour-marked: a
+    GREY target closes a cycle over the current path; a BLACK node is finished
+    and cannot take part in a cycle that has not been reported yet. Cycles are
+    deduplicated by their node SET, so two entry points into one loop report it
+    once.
+    """
+    WHITE, GREY, BLACK = 0, 1, 2
+    color: dict[str, int] = {}
+    cycles: list[list[str]] = []
+    reported: set[frozenset[str]] = set()
+    for start in edges:
+        if color.get(start, WHITE) != WHITE:
+            continue
+        color[start] = GREY
+        path = [start]
+        stack: list[tuple[str, object]] = [(start, iter(edges.get(start, ())))]
+        while stack:
+            node, it = stack[-1]
+            descended = False
+            for nxt in it:  # type: ignore[union-attr]
+                seen = color.get(nxt, WHITE)
+                if seen == WHITE:
+                    color[nxt] = GREY
+                    path.append(nxt)
+                    stack.append((nxt, iter(edges.get(nxt, ()))))
+                    descended = True
+                    break
+                if seen == GREY:  # a back edge: `path[path.index(nxt):]` is a loop
+                    cycle = [*path[path.index(nxt):], nxt]
+                    key = frozenset(cycle)
+                    if key not in reported:
+                        reported.add(key)
+                        cycles.append(cycle)
+            if not descended:
+                color[node] = BLACK
+                stack.pop()
+                path.pop()
+    return cycles
 
 
 def load_registry(path: Path = REGISTRY) -> dict:
@@ -181,6 +258,22 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
     # `mechanisms` value of `yaml.safe_load("mechanisms:\n")` is `None`.
     if not isinstance(mechanisms, list):
         return [f"mechanisms must be a list, got {type(mechanisms).__name__}"]
+
+    #: The declared set, read BEFORE any row is judged. A precondition may name
+    #: a row that appears LATER in the list, so a single pass would judge the
+    #: ordering against a set it has not finished reading — and would refuse a
+    #: legal forward reference, i.e. a WRONG verdict from a gate whose job is to
+    #: refuse a *missing* mechanism. `state_by_id` is what the ordering rule
+    #: resolves against; `setdefault` keeps the FIRST row's state so a duplicate
+    #: id (reported on its own) cannot be laundered by the later copy.
+    declared_ids: list[str] = []
+    state_by_id: dict[str, object] = {}
+    for row in mechanisms:
+        row_id = row.get("id") if isinstance(row, dict) else None
+        if isinstance(row_id, str) and row_id:
+            declared_ids.append(row_id)
+            state_by_id.setdefault(row_id, row.get("state"))
+    id_set = set(declared_ids)
 
     #: Field -> the KIND of artifact it must name. A declared path that EXISTS
     #: but is the wrong kind (a README satisfying `code:`, a source file
@@ -303,6 +396,58 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
         else:
             errors.extend(_path_violations(mid, "declared_in", declared_in, root, "doc"))
 
+        # ⭐ THE ORDERING — keyed on the field rather than on `state`, so an
+        # absent row can record what it waits for (the case that matters most:
+        # the next lane meets the ordering instead of a surprise). The SHAPE is
+        # validated for both states; only the `implemented` polarity depends on
+        # the precondition's own state, below. A bare string (`preconditions:
+        # fanout_cap`) would iterate CHARACTER BY CHARACTER and a mapping would
+        # iterate its KEYS, so the empty-ordering fail-open is closed with an
+        # allow-list like every other field here.
+        declared_preconditions: list[str] = []
+        # `in row` rather than `row.get(...) is not None`: an EXPLICIT
+        # `preconditions:` with no value parses to `None` and would then read as
+        # "not ordered" — a declaration of nothing that looks like a
+        # declaration. Omission is clean; present-and-empty is a violation.
+        if PRECONDITIONS in row:
+            preconditions = row.get(PRECONDITIONS)
+            if not isinstance(preconditions, list) or not preconditions:
+                errors.append(
+                    f"{mid}: `{PRECONDITIONS}` must be a non-empty list of "
+                    f"declared mechanism ids (got {preconditions!r}) — omit the "
+                    f"field on a mechanism that is not ordered"
+                )
+            elif not all(
+                isinstance(p, str) and p.strip() for p in preconditions
+            ):
+                errors.append(
+                    f"{mid}: `{PRECONDITIONS}` entries must be non-empty "
+                    f"strings: {preconditions!r}"
+                )
+            elif len(set(preconditions)) != len(preconditions):
+                errors.append(
+                    f"{mid}: `{PRECONDITIONS}` names a mechanism twice: "
+                    f"{preconditions!r}"
+                )
+            else:
+                for precondition in preconditions:
+                    if precondition == mid:
+                        errors.append(
+                            f"{mid}: lists itself as a {PRECONDITIONS[:-1]} — a "
+                            f"mechanism cannot be built on itself (the rule "
+                            f"would be satisfied by construction)"
+                        )
+                    elif precondition not in id_set:
+                        errors.append(
+                            f"{mid}: {PRECONDITIONS[:-1]} {precondition!r} is not "
+                            f"a declared mechanism — an ordering must name a row "
+                            f"in this registry, or nothing can ever say whether "
+                            f"it is built and the dependant's claim is "
+                            f"unverifiable"
+                        )
+                    else:
+                        declared_preconditions.append(precondition)
+
         # The polarity is read FROM `STATES`, so the accepted set and the
         # message naming it cannot drift (cycle-2 review P2).
         state = row.get("state")
@@ -316,6 +461,29 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
             continue
 
         if state == IMPLEMENTED:
+            # ⭐ THE ORDER RULE (#5064's checklist: *"a mechanism whose
+            # precondition is unbuilt cannot be marked implemented"*). This is
+            # the `declared ⇒ present` inference one level up: the row is
+            # truthfully `implemented` in itself while what it is built on is
+            # recorded as absent, so the substrate cannot exist and no verdict
+            # says so. A precondition whose own state is unreadable counts as
+            # NOT implemented — the safe direction, and its own row is already
+            # the row that reports the bad state.
+            unbuilt = [
+                p for p in declared_preconditions
+                if state_by_id.get(p) != IMPLEMENTED
+            ]
+            if unbuilt:
+                errors.append(
+                    f"{mid}: implemented, but its declared "
+                    f"{PRECONDITIONS[:-1]}(s) {sorted(unbuilt)} are not "
+                    f"implemented — a mechanism cannot ship on top of one this "
+                    f"registry records as absent. Mark this row "
+                    f"`not-implemented` with its tracking issue, or build the "
+                    f"{PRECONDITIONS[:-1]} first (#5064: the ordering is "
+                    f"declared, not discovered)"
+                )
+
             if not isinstance(row.get("code"), list) or not row.get("code"):
                 errors.append(f"{mid}: implemented but declares no code path")
             else:
@@ -424,6 +592,38 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
                     f"{mid}: not-implemented with no real tracking_issue "
                     f"(got {issue!r}) — an unbuilt mechanism needs a home"
                 )
+
+    # ── the ordering must itself be orderable: a cycle is not an ordering ────
+    # Judged over the SET, after the rows: `a → b → a` satisfies every per-row
+    # rule, so no single row can report it. Unknown ids and self-references are
+    # dropped here — they are already a violation on the row that declares them,
+    # and re-reporting them as a cycle would be a second verdict for one defect.
+    edges: dict[str, list[str]] = {}
+    for row in mechanisms:
+        if not isinstance(row, dict):
+            continue
+        row_id = row.get("id")
+        if not isinstance(row_id, str) or not row_id:
+            continue
+        edges.setdefault(row_id, [])
+        row_preconditions = row.get(PRECONDITIONS)
+        if not isinstance(row_preconditions, list):
+            continue
+        for precondition in row_preconditions:
+            if (
+                isinstance(precondition, str)
+                and precondition != row_id
+                and precondition in id_set
+            ):
+                edges[row_id].append(precondition)
+    for cycle in _precondition_cycles(edges):
+        errors.append(
+            "precondition cycle: "
+            + " → ".join(cycle)
+            + " — an ordering that returns to its start is not an ordering: "
+            "nothing in the cycle can be built first, so the substrate it "
+            "orders never lands and no row-level rule says so"
+        )
 
     return errors
 
@@ -1285,6 +1485,192 @@ def test_gate_does_not_swallow_an_unlisted_probe_exception(monkeypatch) -> None:
                 }
             ]
         )
+
+
+# ── the ORDERING of the declared set: a precondition cannot be unbuilt ──────
+#
+# #5064's refactor direction, item 3, names this as part of the substrate:
+#
+#   *"a **precondition** (the fan-out cap gates deduplication) is ordered in the
+#   registry rather than discovered at implementation time"*
+#
+# and its Verification Checklist carries the row that executes it:
+#
+#   `precondition ordering | unit | a mechanism whose precondition is unbuilt
+#    cannot be marked implemented`
+#
+# The registry shipped (`#7553`) with the state model and the code anchor but
+# no ordering: `preconditions:` was an UNKNOWN FIELD, and `gate_errors` read
+# only the keys it knew, so a row could declare `state: implemented` on top of
+# a mechanism that does not exist yet and stay green — the exact
+# `declared ⇒ present` inference one level up, applied to *order* instead of
+# existence. These cases are the mutation proof for the ordering rule: each one
+# passes the gate WITHOUT it (that is why they are written against the same
+# `gate_errors` the registry is judged by, not against a helper).
+
+
+def _absent_row(**overrides) -> dict:
+    """A validly MARKED `not-implemented` row — the unbuilt precondition."""
+    row = {
+        "id": "y",
+        "name": "y",
+        "declared_in": ["config/v4-mechanisms.yml"],
+        "state": "not-implemented",
+        "tracking_issue": 5006,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_gate_accepts_an_implemented_row_whose_preconditions_are_implemented() -> None:
+    """The control: a BUILT precondition is not a violation.
+
+    Without this case the three fail-closed cases below could be passing
+    because the rule always fires.
+    """
+    errors = gate_errors(
+        [
+            _implemented_row(id="a"),
+            _implemented_row(id="b", preconditions=["a"]),
+        ]
+    )
+    assert errors == [], errors
+
+
+def test_gate_fails_closed_on_an_implemented_row_whose_precondition_is_unbuilt() -> None:
+    """THE rule: `implemented` on top of an unbuilt precondition is a violation.
+
+    This is #5064's checklist row verbatim. The precondition row here is
+    perfectly well MARKED (`not-implemented` + a tracking issue) — the defect is
+    the ORDER: the dependant claims to be shipped while what it is built on is
+    recorded as absent.
+    """
+    errors = gate_errors([_absent_row(id="a"), _implemented_row(id="b", preconditions=["a"])])
+    assert any("precondition" in e and "b" in e for e in errors), errors
+    # The MARKED row itself is not the defect: it must stay clean, or the
+    # verdict would be about the absent mechanism rather than the ordering.
+    assert not any(e.startswith("a:") for e in errors), errors
+
+
+def test_gate_fails_closed_on_a_precondition_that_is_not_a_declared_mechanism() -> None:
+    """A precondition must name a row in THIS registry.
+
+    An ordering against `5009` (an issue number), a typo (`fanoutcap`), or a
+    mechanism from another registry is not an ordering: nothing can ever say
+    whether it is built, so the dependant's claim is unverifiable and fails
+    closed.
+    """
+    errors = gate_errors([_implemented_row(id="b", preconditions=["fanoutcap"])])
+    # ⚠️ The message must be the UNDECLARED-ID one, not the unbuilt-ordering
+    # one: a mutated gate that lets the unknown id through still reds the row
+    # ("precondition(s) ['fanoutcap'] are not implemented"), so an
+    # `any("fanoutcap" in e)` assertion passed while the rule it names was GONE
+    # (measured — mutation M3 survived on the earlier wording).
+    assert any("an ordering must name a row in this registry" in e for e in errors), errors
+
+
+def test_gate_fails_closed_on_a_self_precondition() -> None:
+    """A mechanism cannot be its own precondition.
+
+    Self-reference would make the rule vacuous (`implemented` requires
+    itself — true by construction) and is a data error a reader would never
+    suspect from a green gate.
+    """
+    errors = gate_errors([_implemented_row(id="b", preconditions=["b"])])
+    assert any("itself" in e for e in errors), errors
+
+
+def test_gate_fails_closed_on_a_precondition_cycle() -> None:
+    """An ordering that returns to its start is not an ordering.
+
+    `a → b → a` with both rows `implemented` passes the per-row rule (each names
+    a precondition that IS implemented), so the cycle has to be judged over the
+    SET. Left unchecked it defeats the ordering silently: nothing can be built
+    first, so the substrate never lands and no gate says so.
+    """
+    errors = gate_errors(
+        [
+            _implemented_row(id="a", preconditions=["b"]),
+            _implemented_row(id="b", preconditions=["a"]),
+        ]
+    )
+    assert any("cycle" in e for e in errors), errors
+
+
+def test_gate_fails_closed_on_a_preconditions_value_that_is_not_a_list() -> None:
+    """The field's own shape guards, same polarity as `symbols:`.
+
+    `preconditions: fanout_cap` (a bare string) iterates CHARACTER BY CHARACTER;
+    `{}` iterates keys. Both must be a verdict, not a silently empty ordering.
+    """
+    for value in ("fanout_cap", {}, ["  "], [], None):
+        errors = gate_errors([_implemented_row(id="b", preconditions=value)])
+        assert any("preconditions" in e for e in errors), (value, errors)
+
+
+def test_gate_accepts_a_precondition_declared_by_a_not_implemented_row() -> None:
+    """Ordering is recorded on ABSENT rows too — that is its whole point.
+
+    `near_dup_merge` is `not-implemented` and carries the ordering today; a
+    marked-absent row declaring its precondition is the case the registry
+    actually ships, so it must be clean. So must a row that declares NO ordering
+    (the field omitted) — and only that: an explicit `preconditions:` with no
+    value is refused above, because an empty declaration must not read as one.
+    """
+    assert gate_errors([_absent_row(id="a"), _absent_row(id="b", preconditions=["a"])]) == []
+    assert gate_errors([_absent_row()]) == []
+
+
+def test_gate_pins_the_preconditions_branches_the_ordering_cases_do_not_reach() -> None:
+    """The two operands no ordering case above reaches, plus the forward reference.
+
+    ⚠️ Found by an independent review of this diff (P2, confidence 90): the
+    duplicate-entry guard and the non-string-entry operand were UNPINNED — a
+    mutation turning either into a no-op left all 45 cases green while the gate
+    silently accepted `preconditions: ["a", "a"]` or `[123]`. The rule is only
+    as real as the case that fails without it, so both are pinned here by their
+    OWN message (an `any("preconditions" in e)` assertion would pass on the
+    shape message every case above already emits).
+
+    The forward reference is the third half: a dependant row listed BEFORE its
+    precondition must be ACCEPTED — the pre-pass that resolves the declared set
+    exists for exactly that, it is the wrong-verdict direction this gate must
+    not have, and nothing exercised it.
+    """
+    duplicate = gate_errors(
+        [_implemented_row(id="a"), _implemented_row(id="b", preconditions=["a", "a"])]
+    )
+    assert any("names a mechanism twice" in e for e in duplicate), duplicate
+
+    non_string = gate_errors([_implemented_row(id="b", preconditions=[123])])
+    assert any("entries must be non-empty strings" in e for e in non_string), non_string
+
+    # The control for the two above: both rows are otherwise clean, so the
+    # verdict is about the ordering field and nothing else.
+    assert gate_errors([_implemented_row(id="a"), _implemented_row(id="b")]) == []
+
+    # A precondition declared LATER in the list than its dependant.
+    forward = gate_errors(
+        [_implemented_row(id="b", preconditions=["a"]), _implemented_row(id="a")]
+    )
+    assert forward == [], forward
+
+
+def test_registry_orders_the_fanout_precondition_under_near_dup_merge() -> None:
+    """The REAL registry carries the documented ordering, not just fixtures.
+
+    #5010 ("the fan-out cap … the precondition for ever deriving `aboutObject`",
+    as #5064's own symptom table summarises it: *"the adopted fan-out cap (200)
+    has no implementation — and it is the precondition for ever deduplicating"*)
+    and #5064's refactor direction, which names the same pair as its ordering
+    example. If a regression drops the field, every fixture case above still
+    passes — this is the pin that the ordering survives in the file the gate
+    actually reads.
+    """
+    rows = {r["id"]: r for r in load_registry()["mechanisms"]}
+    assert rows["near_dup_merge"].get("preconditions") == ["fanout_cap"]
+    assert rows["fanout_cap"].get("preconditions") in (None, [])
+    assert gate_errors(load_registry()["mechanisms"]) == []
 
 
 def test_load_registry_refuses_a_non_mapping_document(tmp_path) -> None:
