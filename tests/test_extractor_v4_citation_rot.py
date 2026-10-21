@@ -478,18 +478,33 @@ _SYMBOL = r"[A-Za-z_][A-Za-z0-9_.]*(?:\(\))?"
 #: A cited Python file, as the document writes them (`quota.py`,
 #: `projection/entities.py`).
 _CITED_FILE = r"[A-Za-z0-9_./-]+\.py"
-#: `sym` (`file.py:NNN`) — the symbol immediately precedes its citation.
-_SYM_THEN_CITATION = re.compile(rf"`({_SYMBOL})`\s*\(`?({_CITED_FILE}):(\d+)")
+#: `sym` (`file.py`) or `sym` (`file.py:NNN`) — the symbol immediately precedes
+#: its citation. ⚠️ **The line number is OPTIONAL, and that is the durable
+#: form.** The census prose drops `:NNNN` hints deliberately (they rotted six of
+#: seven times against the head that rewrote them, and every unrelated edit to
+#: `sdk.py` moves them again), so the binding this guard can actually keep true
+#: is symbol-to-FILE. Requiring the number here would make the honest form
+#: unciteable — and would silently shrink this arm's inventory to whatever still
+#: carries a hint, which is the vacuity the count floor below exists to catch.
+_SYM_THEN_CITATION = re.compile(
+    rf"`({_SYMBOL})`\s*\(`?({_CITED_FILE})(?::(\d+))?"
+)
 #: `file.py:NNN` (`sym`) — the citation immediately precedes its symbol.
 _CITATION_THEN_SYM = re.compile(rf"`?({_CITED_FILE}):(\d+)`?\s*\(`({_SYMBOL})`")
 
 
 def _quoted_symbol_citations() -> list[tuple[int, str, str, str]]:
-    """Every `(doc_line, symbol, cited_file, cited_line)` the tight forms bind."""
+    """Every `(doc_line, symbol, cited_file, cited_line)` the tight forms bind.
+
+    `cited_line` is empty for the symbol-only form (`sym` (`file.py`)), which is
+    the preferred one: the number is a convenience the document drops on purpose.
+    """
     found: list[tuple[int, str, str, str]] = []
     for lineno, line in enumerate(_doc_text().splitlines(), start=1):
         for match in _SYM_THEN_CITATION.finditer(line):
-            found.append((lineno, match.group(1), match.group(2), match.group(3)))
+            found.append(
+                (lineno, match.group(1), match.group(2), match.group(3) or "")
+            )
         for match in _CITATION_THEN_SYM.finditer(line):
             found.append((lineno, match.group(3), match.group(1), match.group(2)))
     return found
