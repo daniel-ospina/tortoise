@@ -1133,6 +1133,28 @@ def test_the_plan_doc_and_the_storage_ledger_carry_the_CLOSED_residual():
             "NOT closed: this fix removes one class from that hole, and a record "
             "that reads as 'escape (3) closed' is the worse over-claim"
         )
+        # ⛔ AND THE STILL-OPEN CLAIM MUST NAME AN INSTANCE A READER CAN CHECK
+        # (#9409 review, P3). "Escape (3) is structural" is unfalsifiable on its
+        # own, so the record reads as a formality; the measured instance is
+        # `__main__.py::_cmd_key_create`, which still mints its `:TeamMeta` on a
+        # raw `select_graph(...)` handle. Naming it is what makes the sentence
+        # auditable — and it is the site a later lane will close, so the record
+        # is also the pointer to that work.
+        for phrase in ("_cmd_key_create", "select_graph"):
+            assert phrase in flat, (
+                f"{what} (`{rel}`) says escape (3) is not closed but no longer "
+                f"names {phrase!r} — the claim is then unfalsifiable and reads "
+                "as a formality. Name the measured instance "
+                "(`tortoise/__main__.py::_cmd_key_create` mints its `:TeamMeta` "
+                "on a raw `select_graph(...)` handle) so a reader can check it "
+                "and a later lane can close it (#9409 review)"
+            )
+        for stale in ("BUT NOT the five", "meet neither `state._run` nor"):
+            assert stale not in flat, (
+                f"{what} (`{rel}`) still carries {stale!r} — the present-tense "
+                "residual this fix closed, in the mirror image; the pin used to "
+                "assert phrase PRESENCE, so stale text satisfied it (#9409 review)"
+            )
 
 
 def test_the_inventory_cites_the_issue_that_owns_the_journalling_increment():

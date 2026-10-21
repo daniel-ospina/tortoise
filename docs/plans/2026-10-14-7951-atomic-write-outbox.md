@@ -224,7 +224,9 @@ its edges), and a test pins that scope.
   (`sdk.py::org_create`, `hosted_api.py::provision_tenant`, `hosted_api.py::register_user` (two
   statements) and `hosted_api.py::_eager_provision_org_graph`), so the declaration covers the class
   end to end. ⚠️ **Escape (3) itself is NOT closed** — it is structural, and a writer holding a
-  driver handle can still take it; what changed is that this class no longer does, and the docstring
+  driver handle can still take it (`tortoise/__main__.py::_cmd_key_create` still mints its
+  `:TeamMeta` on a raw `select_graph(...)` handle today, which is the instance to check against);
+  what changed is that this class no longer does, and the docstring
   and pin now say exactly that instead of the old universal. The inventory is derived from the AST of
   the whole package and pinned by `tests/test_9121_onboarding_residual_pins.py` (which now asserts
   the declared ROUTE for all five); the route is stated at `tortoise/onboarding/state.py` (the
