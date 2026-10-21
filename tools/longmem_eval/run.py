@@ -100,8 +100,7 @@ from tortoise.shared_state.concurrency import flock_exclusive
 # spot-check producer and the test monkeypatch share one symbol.
 from ..embedder_probe import DEFAULT_MODEL_ID, PROBE_MODELS, inject_model
 from . import dataset as ds
-from . import encode_cache
-from . import measurement_posture
+from . import encode_cache, measurement_posture
 from . import usage as lme_usage
 from .dataset_audit import audit_dataset
 from .errors import (

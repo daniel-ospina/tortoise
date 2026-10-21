@@ -12,6 +12,7 @@ import json
 
 import pytest
 
+from tools.longmem_eval import measurement_posture
 from tools.longmem_eval.w7_publish import (
     JUDGE_PIN,
     _fraction_at_k,
@@ -119,9 +120,6 @@ def test_seal_changes_on_answer_key_edit():
     # order-independence: question order does not change the digest
     assert seal_answer_keys(list(reversed(instances)))["digest"] == \
         s1["digest"]
-
-
-from tools.longmem_eval import measurement_posture
 
 
 def _posture(ingest_mode: str = "v2", *, activated: bool = False) -> dict:

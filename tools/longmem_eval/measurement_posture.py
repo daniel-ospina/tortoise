@@ -168,11 +168,9 @@ def build(*, ingest_mode: str,
         }
     requested = bool(activation.get("requested"))
     layer = belief_layer_state(requested=requested, activation=activation)
-    beliefs_activated: bool | None = None
-    if layer == BELIEF_LAYER_UNKNOWN:
-        beliefs_activated = None
-    else:
-        beliefs_activated = layer == BELIEF_LAYER_ACTIVATED
+    beliefs_activated: bool | None = (
+        None if layer == BELIEF_LAYER_UNKNOWN
+        else layer == BELIEF_LAYER_ACTIVATED)
     return {
         "ingest_mode": str(ingest_mode or ""),
         "beliefs_activated": beliefs_activated,

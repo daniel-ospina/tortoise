@@ -16,7 +16,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tools.longmem_eval import measurement_posture as mp  # noqa: E402
+from tools.longmem_eval import measurement_posture as mp
 
 
 def _manifest(**over) -> dict:
