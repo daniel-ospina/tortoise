@@ -213,23 +213,45 @@ def test_generate_is_deterministic_and_bounds_history(tmp_path: Path, fake_env: 
     assert (out1 / "ci-timing.md").read_bytes() == (out3 / "ci-timing.md").read_bytes()
 
     # history accumulation: seeding the committed json (the repo docs/ path)
-    # gives a second sample → 2 rows; --max-history=1 bounds it back to 1
+    # gives a second sample → 2 rows; --max-history=1 bounds it back to 1.
+    # The second sample is a DIFFERENT run (4243): one run is one row, see the
+    # re-sample case below (#9134 review, P1).
     repo_docs = tmp_path / "repo" / "docs"
     repo_docs.mkdir(parents=True)
     shutil.copy(out1 / "ci-timing.json", repo_docs / "ci-timing.json")
     run2 = subprocess.run(  # noqa: F841
         [sys.executable, str(tools),
+         "--repo", "daniel-ospina/tortoise", "--run-id", "4243",
+         "--logs-dir", str(tmp_path / "logs"), "--out-dir", str(repo_docs)],
+        capture_output=True, text=True, check=True,
+        env=dict(os.environ, CI_TIMING_NOW="2026-08-19T00:00:00Z"),
+    )
+    seeded = json.loads((repo_docs / "ci-timing.json").read_text())['history']
+    assert [row["run_id"] for row in seeded] == ["4243", "4242"]
+
+    # A re-sample of an ALREADY-SAMPLED run SUPERSEDES its row instead of appending a
+    # second one: a run is immutable, so two rows for it could only disagree (the shipped
+    # artifact carried run 39191149586 twice with `error: 1` and `error: 0`). The newer
+    # sample keeps the run's seat in the history.
+    run4 = subprocess.run(  # noqa: F841
+        [sys.executable, str(tools),
          "--repo", "daniel-ospina/tortoise", "--run-id", "4242",
          "--logs-dir", str(tmp_path / "logs"), "--out-dir", str(repo_docs)],
         capture_output=True, text=True, check=True,
+        env=dict(os.environ, CI_TIMING_NOW="2026-08-20T00:00:00Z"),
     )
-    assert len(json.loads((repo_docs / "ci-timing.json").read_text())["history"]) == 2
+    resampled = json.loads((repo_docs / "ci-timing.json").read_text())["history"]
+    # …and the re-sample LEADS: history is newest-first and `main()` prepends it.
+    assert [row["run_id"] for row in resampled] == ["4242", "4243"]
+    assert resampled[0]["sample_time"] == "2026-08-20T00:00:00Z"
+
     run3 = subprocess.run(  # noqa: F841
         [sys.executable, str(tools),
-         "--repo", "daniel-ospina/tortoise", "--run-id", "4242",
+         "--repo", "daniel-ospina/tortoise", "--run-id", "4244",
          "--logs-dir", str(tmp_path / "logs"), "--out-dir", str(repo_docs),
          "--max-history", "1"],
         capture_output=True, text=True, check=True,
+        env=dict(os.environ, CI_TIMING_NOW="2026-08-21T00:00:00Z"),
     )
     assert len(json.loads((repo_docs / "ci-timing.json").read_text())["history"]) == 1
 
@@ -1046,6 +1068,50 @@ def test_a_held_row_states_one_basis_across_refreshes(tmp_path: Path) -> None:
     assert yaml.safe_load(second)["durations"]["test_held.py"] == 50.0
 
 
+def test_a_held_row_keeps_the_basis_that_produced_a_raised_value(tmp_path: Path) -> None:
+    """A raise's basis is the ONLY record of where the surviving value came from.
+
+    The renderer prunes the previous render's HELD basis so a row held week after week
+    states one basis. Applied blindly to a row whose previous render ADOPTED a raise, it
+    deleted the raise's basis too, leaving 16 shipped rows stating a weight no note in
+    the file attributes to any reading — `test_reaper.py` went 40.5 -> 61.9 and the
+    surviving note said only `kept 61.9` (#9134 review, P2).
+
+    Non-vacuity: pre-fix the second render's row reads
+    `… 2026-10-20 (run 2): … a LOWER bound; kept 61.9` with no `; was 40.5` in sight.
+    """
+    first, _ = ci_timing.render_refreshed_manifest(
+        "surfaces:\n  core:\n    - test_raised.py\n"
+        "durations:\n  test_raised.py: 40.5\n",
+        {"test_raised.py": 61.9}, "2026-10-19T05:02:37Z",
+        coverage={"test_raised.py": (1, 9)}, sample_label=_LOWER_BOUND_LABEL)
+    assert "; was 40.5" in first
+
+    second, _ = ci_timing.render_refreshed_manifest(
+        first, {"test_raised.py": 56.9}, "2026-10-20T05:02:37Z",
+        coverage={"test_raised.py": (1, 9)},
+        sample_label="ci-timing top-15 2026-10-20 (run 2)")
+    row = next(ln for ln in second.split("\n")
+               if ln.strip().startswith("test_raised.py:"))
+    assert yaml.safe_load(second)["durations"]["test_raised.py"] == 61.9
+    assert "; was 40.5" in row, row  # the raise's basis survives the hold
+    assert "a LOWER bound; kept 61.9" in row  # …beside the rejected reading
+    assert "2026-10-19" in row and "run 2" in row
+
+    # …and it does NOT grow a clause per refresh: the third render prunes the PREVIOUS
+    # HELD basis only, so the row keeps one `was` and one `kept`.
+    third, _ = ci_timing.render_refreshed_manifest(
+        second, {"test_raised.py": 55.0}, "2026-10-27T05:02:37Z",
+        coverage={"test_raised.py": (1, 9)},
+        sample_label="ci-timing top-15 2026-10-27 (run 3)")
+    row = next(ln for ln in third.split("\n")
+               if ln.strip().startswith("test_raised.py:"))
+    assert row.count("; was 40.5") == 1, row
+    assert row.count("a LOWER bound; kept 61.9") == 1, row
+    assert "2026-10-20" not in row, row  # the previous HELD basis was pruned
+    assert "2026-10-27" in row, row
+
+
 def test_a_partial_reading_may_raise_a_recorded_weight(tmp_path: Path) -> None:
     """The other direction of the same rule: a partial reading DOES prove the
     file costs at least that much, so it may raise a weight — a guard that
@@ -1230,6 +1296,44 @@ def test_history_dedupes_a_legacy_row_without_sampled_at() -> None:
     kept = ci_timing._dedupe_history([stamped, twin, older])
 
     assert [row["run_id"] for row in kept] == ["42", "41"]
+
+
+def test_history_keeps_one_row_per_run_not_one_per_sample() -> None:
+    """⛔ A run is IMMUTABLE: a second sample of it is a re-reading, not a second event.
+
+    Keying on `(run, sample_time)` kept both, so the shipped artifact published run
+    39191149586 twice with CONTRADICTORY numbers — `error: 1` from the fixed parser at
+    2026-10-20T18:40:00Z beside the pre-fix `error: 0` at 2026-10-20T14:39:07Z, with the
+    same six `failed_tests` in both. One run cannot have two error totals, and the later
+    reading — the one produced by the fixed parser — is the one to keep (#9134 review,
+    P1).
+
+    Non-vacuity: pre-fix both rows survive (``["39191149586", "39191149586",
+    "39467226356"]``), which is exactly the contradictory pair the artifact shipped.
+    """
+    zero = {key: 0 for key in ci_timing.COUNT_KEYS}
+    failed = ["tests/test_x.py::test_a"]
+    corrected = {"run_id": "39191149586", "sample_time": "2026-10-20T18:40:00Z",
+                 "counts": dict(zero, error=1), "failed_tests": failed}
+    stale = {"run_id": "39191149586", "sample_time": "2026-10-20T14:39:07Z",
+             "sampled_at": "2026-10-20T14:39:07Z",
+             "counts": dict(zero, error=0), "failed_tests": failed}
+    other = {"run_id": "39467226356", "sample_time": "2026-10-20T18:40:00Z",
+             "counts": dict(zero, error=1), "failed_tests": []}
+
+    kept = ci_timing._dedupe_history([corrected, other, stale])
+
+    assert [row["run_id"] for row in kept] == ["39191149586", "39467226356"]
+    assert kept[0] is corrected, "the corrected reading must win over the pre-fix one"
+    assert kept[0]["counts"]["error"] == 1
+    # Position does not decide it either: a re-sample appended below its own older row
+    # still supersedes it (both rows describe the same immutable run).
+    assert ci_timing._dedupe_history([stale, corrected])[0] is corrected
+    # A row with NO identity is kept, never collapsed with every other such row: two
+    # rows nothing distinguishes are not provably one sample.
+    anonymous = [{"sample_time": "2026-10-20T00:00:00Z"},
+                 {"sample_time": "2026-10-19T00:00:00Z"}]
+    assert ci_timing._dedupe_history(anonymous) == anonymous
 
 
 def test_a_banner_less_summary_also_PARSES_its_counts(tmp_path: Path) -> None:
@@ -1790,6 +1894,88 @@ def test_a_flake_pair_is_ordered_by_when_the_samples_were_taken() -> None:
     assert len(flakes) == 1
     assert flakes[0]["failed_at"] == "2026-10-20T18:40:00Z"
     assert flakes[0]["passed_at"] == "2026-10-20T18:41:00Z"
+
+
+def test_a_flake_claim_is_dropped_when_a_sample_at_that_instant_still_fails_it() -> None:
+    """`passed_at` is an INSTANT, not a run — every sample at it can refute the claim.
+
+    The pair being compared is not the whole claim. The shipped table published four
+    nodeids as "passed again at 2026-10-20T18:40:00Z" while the artifact's own sample of
+    a DIFFERENT run at exactly that instant listed all four as failed (#9134 review, P1).
+    A claim contradicted by any sample stamped at or after `passed_at` is not emitted.
+
+    Non-vacuity: pre-fix this returns one flake, `passed_at = 2026-10-20T18:40:00Z`,
+    contradicted by `row0` in the same fixture.
+    """
+    failed = ["tests/t.py::test_x"]
+    row0 = {"run_id": "1", "created_at": "2026-10-19T02:41:31Z",
+            "sample_time": "2026-10-20T18:40:00Z", "failed_tests": failed}
+    middle = {"run_id": "2", "created_at": "2026-10-20T17:34:10Z",
+              "sample_time": "2026-10-20T18:40:00Z", "failed_tests": []}
+    oldest = {"run_id": "3", "created_at": "2026-10-18T02:00:00Z",
+              "sample_time": "2026-10-20T14:39:07Z", "failed_tests": failed}
+
+    assert ci_timing.candidate_flakes([row0, middle, oldest]) == []
+
+    # The SAME pair WITHOUT the contradicting third sample is still claimed: the guard
+    # drops contradicted claims, it does not stop finding flakes.
+    flakes = ci_timing.candidate_flakes([middle, oldest])
+    assert [flake["test"] for flake in flakes] == failed
+    assert flakes[0]["passed_at"] == "2026-10-20T18:40:00Z"
+
+
+def test_the_shipped_artifact_lists_each_run_once() -> None:
+    """The committed data must be what the fixed generator produces (#9134 review, P1).
+
+    The shipped artifact carried run 39191149586 twice with `error: 1` and `error: 0` for
+    the same six `failed_tests`. A run is immutable, so one error total is not a
+    preference — and `_dedupe_history`'s behavioural test cannot protect data that was
+    committed before the fix.
+    """
+    snapshot = json.loads((REPO_ROOT / "docs" / "ci-timing.json").read_text())
+    history = snapshot["history"]
+    runs = [row.get("run_id") or row.get("sha") for row in history]
+    assert len(runs) == len(set(runs)), f"a run is listed more than once: {runs}"
+    for run_id in {run for run in runs if run}:
+        totals = {row["counts"]["error"] for row in history
+                  if (row.get("run_id") or row.get("sha")) == run_id}
+        assert len(totals) == 1, (
+            f"run {run_id} carries contradictory error totals in the committed "
+            f"history: {sorted(totals)}")
+
+
+def test_the_artifact_and_the_map_cite_the_same_run() -> None:
+    """The two artifacts this tool ships must be grounded on ONE capture.
+
+    `docs/ci-timing.md`/`.json` name the sampled run; every `durations:` note names the
+    run its reading came from. The shipped pair disagreed — the artifact sampled
+    39191149586 while the map's newest notes (and its stamp) cited 39467226356 — and no
+    gate parsed one against the other, so the mismatch was silent by construction
+    (#9134 review, P1).
+
+    A refresh that moves NO row rewrites no note, so the note date cannot be required to
+    equal the artifact's sample date; the stamp (`durations_captured_at`, rewritten by
+    every refresh) is the handle for that case.
+    """
+    snapshot = json.loads((REPO_ROOT / "docs" / "ci-timing.json").read_text())
+    sampled = snapshot["sampled_run"]["run_id"]
+    sampled_date = str(snapshot["sampled_run"]["sample_time"])[:10]
+    text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    stamp = re.search(r'^durations_captured_at:\s*"(\d{4}-\d{2}-\d{2})', text, re.M)
+    assert stamp, "durations_captured_at is missing or unparseable"
+    notes = re.findall(r"ci-timing top-15 (\d{4}-\d{2}-\d{2}) \(run ([^)]+)\)", text)
+    assert notes, "the map carries no capture-dated note, so this guard is vacuous"
+    newest = max(date for date, _ in notes)
+    newest_runs = {run for date, run in notes if date == newest}
+    if newest == sampled_date:
+        assert sampled in newest_runs, (
+            f"the artifact samples run {sampled} at {sampled_date}, but the map's "
+            f"{newest} notes cite {sorted(newest_runs)} — the two shipped artifacts "
+            f"are grounded on different runs")
+    else:
+        assert sampled_date == stamp.group(1), (
+            f"the map's stamp {stamp.group(1)} and the artifact's sample date "
+            f"{sampled_date} disagree, and no note records the artifact's run")
 
 
 def test_a_negated_guard_skips_the_DEAD_side(tmp_path: Path) -> None:

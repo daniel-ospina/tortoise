@@ -396,10 +396,18 @@ def test_canonical_doc_is_itself_a_claim_hit():
 # two tests close it: the detector must see a wrapped claim (or the file scan
 # below proves nothing), and the file scan must find none anywhere.
 def test_wrapped_detector_sees_a_claim_split_across_lines(tmp_path):
-    """Non-vacuity for :func:`_wrapped_claim_lines`: the exact pre-fix shape at
-    ``tortoise/api.py`` (subject + ``truth`` on either side of a newline) is
-    reported, at the line the claim STARTS on. Deleting the join — or falling
-    back to the line-at-a-time scan — must fail this."""
+    """Non-vacuity for :func:`_wrapped_claim_lines`: a claim split by a newline
+    (subject + ``truth`` on either side) is reported, at the line the claim STARTS
+    on. Deleting the join — or falling back to the line-at-a-time scan — must fail
+    this.
+
+    The fixture is NOT quoted from ``tortoise/api.py``: that file carries the
+    ``reconstruction source`` shape, not the ``is truth`` / ``is durable``
+    predicate this scan joins (see
+    ``test_no_wrapped_durability_claim_anywhere_in_the_scanned_roots``, which says
+    so and is the authority — an earlier revision of this docstring claimed the
+    opposite, #9134 review, P3).
+    """
     target = tmp_path / "wrapped.py"
     target.write_text(
         "x = 1\n"

@@ -1453,10 +1453,41 @@ _CLAUSE_SEPARATORS = (" — ", "; ", ". ", ", ")
 # (` — ci-timing top-15 2026-10-19 (run 39191149586)[; was 42.4 | : top-15 saw …]`).
 # Stripping it before writing this render's basis is what keeps a row held (or
 # re-based) week after week stating ONE basis instead of growing a sentence per
-# refresh — the map is rewritten every week and nothing else prunes.
+# refresh — the map is rewritten every week and nothing else prunes. A prior
+# ADOPTED basis inside this shape (`; was 42.4`) is the exception:
+# `_strip_prior_held_basis` keeps it, because it is the only record of what
+# produced the surviving value.
 _PRIOR_BASIS_RE = re.compile(
     r"(?:^[ \t]*#[ \t]*|[ \t]+—[ \t]+)ci-timing top-15 \d{4}-\d{2}-\d{2} \(run [^)]*\)"
     r"(?:;[ \t]*was [0-9]+(?:\.[0-9]+)?|:[^—]*)?[ \t]*$")
+
+# …and the shape of an ADOPTED basis inside that match (`; was 42.4`). It records
+# the reading that PRODUCED the row's surviving value, so it is not pruned by a
+# later hold (see `_strip_prior_held_basis`, #9134 review, P2).
+_PRIOR_ADOPTED_BASIS_RE = re.compile(r";[ \t]*was [0-9]+(?:\.[0-9]+)?[ \t]*$")
+
+
+def _strip_prior_held_basis(tail: str) -> str:
+    """Drop a PRIOR HELD basis, keep a prior ADOPTED one.
+
+    A row held week after week must state ONE held basis, so the previous render's
+    `… a LOWER bound; kept N` is pruned before this render's is appended.
+
+    ⛔ A prior ADOPTED basis (`ci-timing top-15 …; was 42.4`) is the ONLY record of
+    what produced the surviving value, so pruning it makes the row state a weight
+    that no note in the file attributes to any reading: 16 shipped rows had exactly
+    that shape (each raised by this branch's first refresh, then held by the
+    second, with the raise's basis stripped — `test_reaper.py` 40.5 -> 61.9 whose
+    surviving note only said `kept 61.9`, #9134 review, P2). Keeping it costs one
+    clause and it can never grow: the NEXT render finds the held basis at the end
+    of the tail, prunes that, and the adopted basis stays put.
+    """
+    match = _PRIOR_BASIS_RE.search(tail)
+    if match is None:
+        return tail
+    if _PRIOR_ADOPTED_BASIS_RE.search(match.group(0)):
+        return tail
+    return tail[: match.start()].rstrip()
 
 # `# unmeasured` — the marker the map documents as "carried forward and is not a
 # measurement". Recognised by its LEADING token, and its replacement when the row
@@ -1772,9 +1803,15 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
             # reading's basis for the citation, so 13 held rows lost the run that
             # actually produced their number (#9134 review, P2).
             #
+            # Only the PRIOR HELD basis is pruned; a prior ADOPTED one is the
+            # surviving value's provenance and is kept (#9134 review, P2).
+            #
             # The strip first is what keeps a row held week after week stating ONE
             # basis: this map is rewritten every week and nothing else prunes it.
-            tail = _PRIOR_BASIS_RE.sub("", tail)
+            # It prunes only a PRIOR HELD basis — a prior ADOPTED one
+            # (`…; was 42.4`) is the surviving value's provenance and stays
+            # (#9134 review, P2).
+            tail = _strip_prior_held_basis(tail)
             if declared <= 0:
                 reason = ("no declared testcase count for this file (UNKNOWN), so "
                           "the reading cannot prove it saw the whole file")
@@ -2269,27 +2306,57 @@ def load_history(json_path: Path) -> list[dict]:
             and all(isinstance(n, str) for n in row.get("failed_tests", []))]
 
 
-def _dedupe_history(rows: list[dict]) -> list[dict]:
-    """One row per SAMPLE, newest first — preserving order.
+def _history_sample_time(entry: dict) -> str:
+    """WHEN this sample was taken, as the comparable string the dedupe orders on.
 
-    ⛔ The key is `(run, WHEN it was sampled)` — never `sampled_at` alone: a row written
-    before that field existed has none, so it keyed to `None` and survived beside its own
-    stamped twin. The shipped artifact carried run 39191149586 twice for exactly that
-    reason, spent one of the flake proxy's comparison slots on a sample compared with
-    itself, and the dedupe could never heal it (#9134 review, P2). `sample_time` is the
-    timestamp every row has; `sampled_at` is its fallback, and a row carrying neither
-    collapses with its twin — which is right, because two rows indistinguishable on
-    (run, when) ARE one sample.
+    `sample_time` is the field every rendered row carries; `sampled_at` is the
+    fallback for a row written before that field existed; a row carrying neither
+    sorts first, so it can never displace a stamped row for the same run.
+    """
+    return str(entry.get("sample_time") or entry.get("sampled_at") or "")
+
+
+def _dedupe_history(rows: list[dict]) -> list[dict]:
+    """One row per RUN — the newest sample of it — newest first, preserving order.
+
+    ⛔ THE KEY IS THE RUN, NOT THE SAMPLE INSTANT (#9134 review, P1). A run is
+    IMMUTABLE, so a second sample of run X is a re-reading of X, not a second
+    event: keying on `(run, sample_time)` kept both and the shipped artifact
+    published one run twice with CONTRADICTORY numbers — run 39191149586 at
+    2026-10-20T18:40:00Z (the fixed parser's `error: 1`) beside the same run at
+    2026-10-20T14:39:07Z (the pre-fix parser's `error: 0`), the same six
+    `failed_tests` in both. One run cannot have two error totals. The earlier
+    key also could not heal the same-instant twin it was written for unless the
+    two `sample_time`s were EQUAL, and a re-sample never is.
+
+    The NEWEST sample of a run wins, which is the fail-closed direction for every
+    field this artifact publishes: a re-sample happens to re-read a run with a
+    corrected parser or a corrected leg aggregation, so the later reading is the
+    one to keep. The winning row takes the position of the key's FIRST appearance
+    in the input; `main()` prepends the fresh sample, so a re-sample of a run
+    leads the history, while a row that arrives BELOW its own older twin keeps the
+    older row's seat instead of moving.
+
+    A row with neither `run_id` nor `sha` (the `--run-id ""` path, e.g. when no
+    eligible run was found) is keyed by WHEN it was sampled instead — that is all
+    it has, and keying it by run identity alone would collapse every such sample
+    into one. The frozen-clock twin this dedupe was FIRST written for is exactly
+    that shape: two invocations under one `CI_TIMING_NOW`, which must stay ONE
+    sample (#6092 review, P2).
     """
     out: list[dict] = []
-    seen: set[tuple[object, object]] = set()
+    index: dict[object, int] = {}
     for entry in rows:
-        key = (entry.get("run_id") or entry.get("sha"),
-               entry.get("sample_time") or entry.get("sampled_at"))
-        if key in seen:
+        key: object = entry.get("run_id") or entry.get("sha")
+        if not key:
+            key = ("@sample", _history_sample_time(entry))
+        seat = index.get(key)
+        if seat is None:
+            index[key] = len(out)
+            out.append(entry)
             continue
-        seen.add(key)
-        out.append(entry)
+        if _history_sample_time(entry) > _history_sample_time(out[seat]):
+            out[seat] = entry
     return out
 
 
@@ -2306,10 +2373,40 @@ def candidate_flakes(history: list[dict]) -> list[dict]:
     says it recovered from (measured: run 39467226356 created 2026-10-20T17:34:10Z
     "passing" run 39191149586's 2026-10-19T02:41:31Z failure). A pair whose samples
     share an instant cannot order them at all, so it is skipped rather than guessed:
-    a flake claim is a claim about time (#9134 review, P2).
+    a flake claim is a claim about time (#9134 review, P2). And a pair that CAN be
+    ordered can still be CONTRADICTED: `passed_at` is an instant, not a run, so the
+    claim is dropped when any other sample stamped at or after it still lists the
+    nodeid as failed (see `listed_failed_at_or_after`, #9134 review, P1).
     """
     def sampled_at(row: dict) -> tuple[str, str]:
         return (str(row.get("created_at") or ""), str(row.get("sample_time") or ""))
+
+    def listed_failed_at_or_after(
+            nodeid: str, passed_at: object, newer: dict) -> bool:
+        """Does ANY sample stamped at or after `passed_at` still list `nodeid` as
+        failed?
+
+        ⛔ The pair being compared is not the whole claim. `passed_at` is an
+        INSTANT, and two runs can be sampled at the same instant, so "it passed
+        again at T" is contradicted by a DIFFERENT run's sample at T (or later)
+        that still records the nodeid failing — which is exactly what the shipped
+        table did: four nodeids announced as "passed again at
+        2026-10-20T18:40:00Z" while the artifact's own sample at that instant
+        listed all four as failed (#9134 review, P1). The claim is about time, so
+        every row sharing that time can refute it; `newer` is exempt because the
+        claim is `nodeid not in newer.failed_tests` by construction.
+        """
+        moment = str(passed_at or "")
+        if not moment:
+            return False
+        for row in history:
+            if row is newer:
+                continue
+            if _history_sample_time(row) < moment:
+                continue
+            if nodeid in row.get("failed_tests", []):
+                return True
+        return False
 
     out: list[dict] = []
     for i in range(min(3, len(history) - 1)):
@@ -2323,6 +2420,8 @@ def candidate_flakes(history: list[dict]) -> list[dict]:
         prev_failed = set(older.get("failed_tests", []))
         cur_failed = set(newer.get("failed_tests", []))
         for nodeid in sorted(prev_failed - cur_failed):
+            if listed_failed_at_or_after(nodeid, newer.get("sample_time"), newer):
+                continue
             out.append({
                 "test": nodeid,
                 "failed_at": older.get("sample_time"),
@@ -2454,7 +2553,16 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
         # check (`_No candidate flakes…_` flagged at 669:1 and :80), while the
         # #1483 stub's earlier underscore placeholders had masked it (#8254
         # review, P1). One style here, not per-line patches of the artifact.
-        lines.append("*No candidate flakes in the sampled window yet (needs ≥ 2 consecutive samples).*")
+        # ⛔ The sentence has to be TRUE of the data that produced it. "needs ≥ 2
+        # consecutive samples" was rendered onto an artifact that carried FIVE and
+        # still showed no flake, because the newest pair shares an instant (two runs
+        # sampled at one moment cannot be ordered) and a claim a same-instant sample
+        # contradicts is dropped (candidate_flakes, #9134 review, P1): the reader was
+        # told the data was insufficient when it was merely not orderable.
+        lines.append(
+            "*No candidate flakes in the sampled window — no pair of samples both "
+            "orders a transition and survives a sample at the same instant still "
+            "recording the failure.*")
     lines += [
         "",
         "## History (bounded to last 52 samples)",
