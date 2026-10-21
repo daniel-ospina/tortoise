@@ -149,7 +149,9 @@ returning its `{}` would report every writer it contains as a measured absence �
 the identical fail-open shape as the `rg 'aboutObject {'` zero, one level down
 (third review cycle on this file).
 
-WHAT IS PINNED (one entry per test, in file order)
+WHAT IS PINNED (one entry per test — the set is pinned by
+`test_the_pin_index_names_every_leg`, the ORDER is not; entries have been
+appended as legs were added, so read it as an index, not as the file's order)
 -----------------------------------------------
 1. `test_the_absolute_property_free_sentences_do_not_reappear` — the retracted
    sentences are matched MARKER-INSENSITIVELY (`*`, backticks, whitespace) against
@@ -194,9 +196,9 @@ WHAT IS PINNED (one entry per test, in file order)
    projection's `idx`). Its RETRACTED wording was pinned; any other route back to
    the one-name absolute there was not.
 7. `test_the_code_still_agrees_with_the_corrected_evidence` — each recorded
-   writer still writes what the documents claim it writes (`confidence` for the
-   originating three; the map/inline forms for the re-materializing two, `idx`
-   included). If that code is removed, the document has re-rotted in the
+   writer still writes what the documents claim it writes (the named form on
+   the originating writers; the property-MAP/inline forms on the re-materializing
+   sites, `idx` included). If that code is removed, the document has re-rotted in the
    other direction and this reds instead of the doc quietly lying again.
 8. `test_the_named_and_map_form_writer_populations_are_disjoint` — no site is
    recorded twice, the map population has not shrunk below the shipped sites, no
@@ -305,6 +307,19 @@ WHAT IS PINNED (one entry per test, in file order)
    while the same section's §11.1 footnote and §13 say the set those names sit in
    is open. Pinned PER PASSAGE, because a section-wide marker test stayed green
    when only the table row was reverted (measured) — `#9403` review cycle 2.
+
+25. `test_the_unmeasured_share_retraction_is_pinned` — §13's "a statement
+   about the row's SHAPE, not about the population's share" points at §11.1's
+   retraction of the share claim, and nothing pinned that sentence: deleting it
+   left every leg green, so the cross-reference could outlive its referent.
+   Section-scoped, mutation-checked (`#9403` review, P2).
+
+26. `test_the_pin_index_names_every_leg` — this index is prose indexing
+   code, so it re-stales: at `#9403` review it carried 24 entries against 25
+   tests while its heading claimed "one entry per test, in file order". The leg
+   compares the indexed SET to the module's actual test functions (so it names
+   itself too), and the heading no longer claims an order an appended index does
+   not have.
 
 NOT promised: this does not re-open stored-vs-derived (the ruling stands, and
 the edge stays), and it does not decide §11.4 rule 1's tension with `#1370`
@@ -502,8 +517,11 @@ RETRACTED_INTRODUCED_HERE: frozenset[str] = frozenset({
 })
 
 #: The writers the corrected passages must NAME, and the code shape that makes
-#: each one a property-bearing `about*` writer. These are the ORIGINATORS — the
-#: sites that put the named property on the edge.
+#: each one a property-bearing `about*` writer. The axis here is the WRITE FORM (a
+#: literal `SET r.<name>` in the source), NOT causality: two of these ORIGINATE the
+#: property and one RE-MATERIALIZES it on replay — a split this comment does not
+#: assert, because `test_the_writer_classification_separates_the_causal_axis_from_
+#: the_write_form` is what pins it, in the documents.
 RECORDED_WRITERS: dict[tuple[str, str], tuple[str, ...]] = {
     ("tortoise/session_link.py", "link_entity"): (
         'MERGE (s)-[r:{edge_type}]->(t) SET r.confidence=$conf',
@@ -811,6 +829,9 @@ def _query_call_containing(body: str, needle: str) -> str:
 #: main` makes `01b5486ec` reachable. Depth is raised only until the rev resolves,
 #: so the cost is one shallow branch fetch and the bound is the point at which
 #: `01b5486ec` is genuinely too old to reach — reported by the skip message.
+#: One numbered entry of the "WHAT IS PINNED" index.
+_PIN_INDEX_ENTRY = re.compile(r"^\d+\. `(test_[A-Za-z0-9_]+)`", re.M)
+
 _SHALLOW_DEPTHS = (120, 400, 1500)
 
 
@@ -1128,6 +1149,36 @@ CORRECTED_SECTIONS: tuple[tuple[str, str, str, str], ...] = (
         "EXTRACTOR",
     ),
 )
+
+
+def test_the_pin_index_names_every_leg():
+    """The "WHAT IS PINNED" index must name every test in this module.
+
+    The index is prose, and prose that indexes code re-stales: measured at
+    `#9403` review, it carried 24 entries against 25 tests (the share-retraction
+    leg was missing) while its own heading claimed "one entry per test, in file
+    order" — and neither the missing entry nor the order claim was pinned, so a
+    reader trusting the index would not learn the module had grown. This leg
+    compares the two SETS, which is the claim that can be true; the heading no
+    longer claims file order, because order is not what an appended index has.
+    """
+    source = (ROOT / "tests/test_9397_about_edge_properties.py").read_text(
+        encoding="utf-8"
+    )
+    defined = {
+        node.name
+        for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
+    }
+    indexed = set(_PIN_INDEX_ENTRY.findall(source))
+    assert indexed <= defined, (
+        "the pin index names legs that do not exist: "
+        f"{sorted(indexed - defined)}"
+    )
+    assert not (defined - indexed), (
+        "these legs are not in the WHAT IS PINNED index, so the index no longer "
+        f"describes this module: {sorted(defined - indexed)}"
+    )
 
 
 def test_the_unmeasured_share_retraction_is_pinned():
