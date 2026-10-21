@@ -30,7 +30,9 @@ each one asserts it found its subject.
 from __future__ import annotations
 
 import ast
+import html
 import re
+import unicodedata
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -327,43 +329,69 @@ def test_the_deletion_set_rows_cite_live_sites() -> None:
 
 # ── The spec's `hosted_api.py` citations: SYMBOLS, never line numbers ───────
 
-#: Every form this tree writes a `hosted_api.py` LINE citation in, and the one the guard must
-#: catch for each: `:39152`, `#L39152`, a space-separated `L39152`, a space or a newline after the
-#: separator (CommonMark renders a wrapped code span as one space), the fullwidth colon, and the
-#: bare `:<n>` CONTINUATION the §1 table uses for `session_auth.py:588` → `` (`:600`) ``. Each was
-#: let through by an earlier version of this guard (measured), because the check read one line at
-#: a time and knew one separator. So:
+#: Every form this tree writes a `hosted_api.py` LINE citation in: `:39152`, `#L39152`, a
+#: space-separated `L39152`, `:L39152`, the prose `line 39152`, a space or a newline after the
+#: separator (CommonMark renders a wrapped code span as one space), the fullwidth colon, an HTML
+#: entity for the dot, a zero-width joiner before the digits, and the bare `:<n>` CONTINUATION the
+#: §1 table uses for `session_auth.py:588` → `` (`:600`) ``. Each was green under some earlier
+#: version of this guard (measured), and each was green for the same reason: the guard normalised
+#: ONE spelling of one token at ONE level of the document.
 #:
-#:  * `_HOSTED_ANCHOR_RE` matches the explicit forms — the number adjacent to the filename, which
-#:    it may reach through `:`, `#L`, `L` or the prose word `line`, plus any whitespace, and it
-#:    also tolerates an `L` AFTER the colon (`hosted_api.py:L39432`, the sibling spelling this
-#:    doc's house style of separate code spans invites); `_stray_anchors` FOLDS the body first
-#:    (whitespace runs to one space, the fullwidth colon to ASCII), so a wrapped or padded anchor
-#:    is one shape again and the offset still points at a real line;
-#:  * `_BARE_ANCHOR_RE` + `_NEAREST_FILE_RE` catch the continuation idiom per BLOCK (`_blocks`),
-#:    attributing the number to the nearest FILE TOKEN of ANY extension to its LEFT rather than
-#:    to "any file named on the line" (see `_NEAREST_FILE_RE` for why the looser rule
-#:    over-reported) — compared through `_file_basename`, which folds the case and strips a regex
-#:    escape, so the repository-relative spelling `tortoise/hosted_api.py` (§1's
-#:    `Canonical code:` line), `HOSTED_API.PY` and `hosted_api\\.py` all attribute exactly like
-#:    the plain name. Each of those was green under an earlier version (measured).
+#: ⛔ SO THERE IS NOW EXACTLY ONE NORMALISER AND ONE SCAN. `_fold_doc` turns the WHOLE document
+#: into one text — blockquote markers stripped the way the block parser strips them, HTML entities
+#: decoded, NFKC-folded, zero-width/combining characters dropped WITHOUT a word break, whitespace
+#: runs folded to one space, the fullwidth colon folded to ASCII — while keeping, per character,
+#: the RAW LINE and TWO boundaries: the BLOCK (blank-line-separated paragraph or table, or a list
+#: item) and the RUN (blank-line-separated region, list items included). Every rule is then
+#: decided by POSITION on that single text:
+#:
+#:  * an explicit anchor inside the provenance note may only quote `_NOTE_QUOTED_ANCHORS`;
+#:  * anywhere else it is a violation;
+#:  * a bare anchor carries a note violation when it falls inside the note, and otherwise belongs
+#:    to the nearest FILE TOKEN in its RUN — compared through `_file_basename`, which strips a
+#:    regex escape and folds the case, so `tortoise/hosted_api.py`, `HOSTED_API.PY` and
+#:    `hosted_api\.py` attribute like the plain name.
+#:
+#: ⛔ THE TWO BOUNDARIES ARE NOT INTERCHANGEABLE: a BOUNDARY MAY FILTER A MATCH'S SPAN, BUT IT MAY
+#: NEVER REMOVE THE OWNER A READER WOULD INFER (#9485 review). One primitive doing both jobs is how
+#: the evasion arrived — the block opened at a list item took the owner away from every anchor
+#: written inside one, so `1. `:99998`` under a `hosted_api.py` paragraph was GREEN while the same
+#: number with no marker was RED.
+#:
+#: Two pre-sliced texts with two normalisations was the defect: an anchor is a TWO-TOKEN
+#: construct, so any split the slice boundary fell inside was invisible to both halves — a new
+#: anchor wrapped across the note's own boundary was green while the failure message said it was
+#: caught (measured).
 #:
 #:    ⛔ The owner token is ANY extension, NOT `*.py`: a `:<n>` belonging to a `.ts`/`.yml`/`.md`
 #:    cited in the same table row (or paragraph) as a `hosted_api.py` mention was reported as a
 #:    `hosted_api.py` anchor, i.e. an honest citation redded with a message naming a file the
 #:    editor did not touch (§10's `Bindings` row after the `hosted_api.py` rows — measured).
 _HOSTED_ANCHOR_RE = re.compile(
-    r"hosted_api\\?\.py\s*(?::\s*(?:#?L)?|#?L|line\s+)\s*(\d+)", re.IGNORECASE)
+    r"hosted_api\\?\.py\s*(?::\s*(?:#?L)?|#?L|line)\s*(\d+)", re.IGNORECASE)
 #: The NUMBER of a line anchor, in every spelling this doc family writes it: the bare `:<n>`
 #: continuation, `#L<n>` / `L<n>` in their own code span (`` `hosted_api.py`, `L39432` `` — the
 #: natural way to re-add one here, and green until this arm existed), and the prose `line <n>`.
 #:
-#: ⚠️ The `L` arms require TWO digits: a one-digit `L1`/`L2` in prose is the guard LAYER's name
-#: (`L1` = the per-call opt-in, `L2` = the non-test-graph check), not a line number, and this
-#: module is full of both. No real citation is lost — `hosted_api.py` starts at line 1, so a
-#: `L10` and up still reds — and the lookbehind keeps a letter-prefixed token (`FAIL12`) out.
+#: ⚠️ The `L` arms require TWO digits. Not because one digit is ambiguous HERE — this module
+#: carries no `L<n>` of its own — but because in this TREE a one-digit `L1`/`L2` is a LAYER's
+#: name (`projection/__init__.py` — `L1` the per-call opt-in, `L2` the non-test-graph check;
+#: `commit_schema.py` — `L1` replay, `L2` adjudication), and a guard that redded the next
+#: document to borrow that spelling would be reporting a label as a citation. No real anchor is
+#: lost: `hosted_api.py` starts at line 1, so `L10` and up still reds, and the lookbehind keeps a
+#: letter-prefixed token (`FAIL12`) out. The prose `line` arm carries the same two-digit floor,
+#: for the same reason.
+#:
+#: ⚠️ `line` takes ZERO OR MORE spaces, not one or more — in BOTH arms. `:`/`#L`/`L` always
+#: tolerated none, so they survived `_fold_doc` DELETING a zero-width character instead of
+#: gapping it; `line\s+` did not, and `line\u200b39432` folded to the bare word `line39432` and
+#: matched nothing (a regression the previous fold's `gap = True` had accidentally covered —
+#: measured). Whitespace tolerance is the rule here everywhere else, so the separator is the one
+#: place it should not have been tighter. Cost, measured: the widened arm also matches prose of
+#: the form `agenda line45`, which reds only when a `hosted_api.py` token governs that block —
+#: i.e. only where the number is being attributed to `hosted_api.py` anyway.
 _BARE_ANCHOR_RE = re.compile(
-    r":\s*(\d+)|(?<![\w#])#?L\s*(\d{2,})|(?<![\w])line\s+(\d+)", re.IGNORECASE)
+    r":\s*(\d+)|(?<![\w#])#?L\s*(\d{2,})|(?<![\w])line\s*(\d{2,})", re.IGNORECASE)
 #: The nearest FILE TOKEN to the LEFT of a bare anchor, which is what the continuation
 #: belongs to. It is matched WHOLE (it may carry a directory) and compared by BASENAME, so
 #: `tortoise/hosted_api.py` attributes its continuation exactly like `hosted_api.py` does. A
@@ -371,117 +399,156 @@ _BARE_ANCHOR_RE = re.compile(
 #: `Redemption` row names `hosted_api.py` AND carries `session_auth.py:588`, so the loose rule
 #: reported the row's legitimate anchor to a DIFFERENT file (measured).
 #:
-#: ANY extension, not `*.py` (the same defect one level down): `_blocks` merges a whole table
-#: into one block, so a `:<n>` belonging to a `.ts`/`.yml` cited at-or-after a `hosted_api.py`
-#: row was attributed to `hosted_api.py` — a false red on an honest edit, naming a file the
-#: editor never opened (measured: §10's `Bindings` row `config/required-bindings.yml` `:12`).
-#: The nearest file-like token is the owner whatever its extension; only a `hosted_api.py`
-#: ownership reds, so widening the token set can only REMOVE reports, never add one.
+#: ANY extension, not `*.py` (the same defect one level down): a table is one block, so a `:<n>`
+#: belonging to a `.ts`/`.yml` cited at-or-after a `hosted_api.py` row was attributed to
+#: `hosted_api.py` — a false red on an honest edit, naming a file the editor never opened
+#: (measured: §10's `Bindings` row `config/required-bindings.yml` `:12`). The nearest file-like
+#: token is the owner whatever its extension; only a `hosted_api.py` ownership reds, so widening
+#: the token set can only REMOVE reports, never add one.
 #:
-#: The scan is per BLOCK (`_blocks`), not per line: a continuation whose governing
-#: `hosted_api.py` mention sits on an earlier line of the same paragraph or table IS attributed,
+#: In the BODY the scan is per RUN — not per line, and not document-wide: a continuation whose
+#: governing `hosted_api.py` sits on an earlier line of the same paragraph or table IS attributed,
 #: and one separated by a blank line is not. Same-LINE-only was a hole — `` …`hosted_api.py` ``
 #: then `` `:39205` `` reads clean, yet CommonMark joins the pair into one sentence (measured).
-#: And every regex here is case-insensitive and tolerates an escaped dot, because `HOSTED_API.PY:…`
-#: and `hosted_api\\.py:…` are the same citation to a reader (both were green — measured).
+#: ⚠️ The RUN, not the BLOCK: a list item interrupting a paragraph starts a new block (so a match
+#: may not span into it) but stays in the same run (so an anchor inside it keeps its owner) —
+#: deriving ownership from the block was a one-token evasion of this whole guard (#9485 review).
+#: ⚠️ The NOTE region is the exception and is deliberate: there the search is document-wide (a
+#: bare number in the note is a citation even when the file that governs it sits in the paragraph
+#: above), and an UNOWNED one flags too — see `_hits`, which is the only place either rule lives.
 _NEAREST_FILE_RE = re.compile(
     r"[\w./-]+\\?\.(?:py|pyi|ts|tsx|js|jsx|mjs|cjs|yml|yaml|json|jsonc|md|mdx|sh|bash|sql|toml"
     r"|cfg|ini|conf|html|css|txt|lock)",
     re.IGNORECASE)
 
 
-def _collapse(text: str) -> str:
-    """Fold whitespace runs and the fullwidth colon, so one anchor is one shape."""
-    return re.sub(r"\s+", " ", text.replace("\uff1a", ":"))
-
-
-def _fold(raw: str) -> tuple[str, list[int]]:
-    """`_collapse`, plus the raw line each folded character came from.
-
-    Scanning line by line was the hole the review found: a code span wrapped across two lines is
-    invisible to a per-line regex, yet CommonMark renders the newline as a space, so the document
-    still reads ``hosted_api.py: 39286``. Folding the WHOLE body first puts the anchor back in one
-    shape; the parallel line list keeps the failure message pointing at a real line.
-    """
-    out: list[str] = []
-    origin: list[int] = []
-    line, gap = 1, False
-    for char in raw:
-        if char == "\n":
-            line, gap = line + 1, True
-            continue
-        if char in " \t":
-            gap = True
-            continue
-        if gap and out:
-            out.append(" ")
-            origin.append(line)
-        gap = False
-        out.append(":" if char == "\uff1a" else char)
-        origin.append(line)
-    return "".join(out), origin
-
-
 def _file_basename(token: str) -> str:
-    """`token`'s file name, case-folded, with any regex escape removed.
+    r"""`token`'s file name, case-folded, with any regex escape removed.
 
-    The escape is the whole point: `_NEAREST_FILE_RE` tolerates `hosted_api\\.py`, and comparing
-    the RAW token left the backslash in it, so `hosted_api\\.py` matched and then failed
-    equality — the `\\?` was inert for the continuation arm while the explicit arm closed
-    (measured). One normaliser, used by both arms, so they cannot disagree again.
+    The escape is the whole point: `_NEAREST_FILE_RE` tolerates `hosted_api\.py`, and comparing
+    the RAW token left the backslash in it, so `hosted_api\.py` matched and then failed equality —
+    the `\\?` was inert for the continuation arm while the explicit arm closed (measured). One
+    normaliser, used by both arms, so they cannot disagree again.
     """
     return token.replace("\\", "").rsplit("/", 1)[-1].lower()
 
 
-def _blocks(outside: list[tuple[int, str]]) -> list[list[tuple[int, str]]]:
-    """`outside` split into blank-line-separated blocks: a paragraph or one table.
+#: The start of a markdown LIST ITEM on a raw line, after whatever indentation and blockquote
+#: markers the line carries. A list item is its OWN BLOCK even when no blank line separates it
+#: from the paragraph that introduces it, and it is its own block **exactly when CommonMark says
+#: it is**:
+#:
+#:   * an ORDERED item interrupts a paragraph only when it starts at `1` — `2.` and up are a lazy
+#:     paragraph continuation (CommonMark's own example: `The number of windows in my house is` /
+#:     `14.  The number of doors is 6.` is ONE paragraph). So the marker set is `1[.)]`, never
+#:     `\d+[.)]`: accepting any digit INVENTED a block the parser does not see, which made
+#:     ``… `hosted_api.py`, L`` + `12. first` GREEN — a coverage REGRESSION against `main`, whose
+#:     fold kept `L 12` in one block and reported it (measured, #9485 review);
+#:   * a BULLET (`-`, `*`, `+`) interrupts a paragraph unconditionally, so it is an opener too.
+#:     Omitting it made the constant's own claim ("a list item is its OWN BLOCK") false for the
+#:     class it names — it implemented ordered items only, the instance, not the class (#9485
+#:     review).
+#:
+#: `_fold_doc` therefore opens a BLOCK here, the same way it opens one at a blank line — without
+#: that, the fold produced `… in this order: 1. first` and the continuation arm reported `: 1` as a
+#: `hosted_api.py` citation the editor never wrote (measured, #9485 review: the shape the
+#: always-loaded note said could not be reported).
+#:
+#: ⚠️ And a block boundary is the SPAN FILTER's, NOT the owner rule's — see `_fold_doc`'s RUN.
+_LIST_ITEM_RE = re.compile(r"^\s*(?:1[.)]|[-*+])(?:\s|$)")
 
-    The continuation rule used to read ONE LINE, and a code span wrapped across two lines left it
-    green — `` …`hosted_api.py` `` / `` `:39205` `` — even though CommonMark renders the pair as
-    one sentence naming the file and then a line number (measured). A block is the smallest unit
-    that keeps that attribution possible while still refusing to reach across a paragraph break,
-    where the file name really can belong to a different claim.
+
+def _fold_doc(raw: str) -> tuple[str, list[int], list[int], list[int]]:
+    """The ONE normaliser: `(text, raw_line_of_each_char, block_of_each_char, run_of_each_char)`.
+
+    Folds every spelling of an anchor to one shape and remembers where each character came from,
+    so a violation can be reported at a real line while the RULES are decided on normalised text.
+    Blockquote markers are stripped here rather than per caller, because that is what the block
+    parser does before inline parsing — a code span wrapped across two `>` lines renders as one
+    sentence, so an anchor split there is one anchor, not two fragments no rule can see.
+
+    ⛔ TWO BOUNDARIES, TWO JOBS — they are not interchangeable, and confusing them is what the
+    #9485 review found. A boundary may FILTER A MATCH'S SPAN, but it may never REMOVE THE OWNER a
+    reader would infer:
+
+    * a BLOCK is a blank-line-separated paragraph or table — OR a list item (see
+      `_LIST_ITEM_RE`), which starts one with no blank line to announce it. Both are boundaries a
+      markdown parser agrees with, so neither is an opinion this module invented. Blocks answer
+      ONE question: may a match span this change? It may not, because the join is a folding
+      artifact (`_hits` filter).
+    * a RUN is a contiguous region between BLANK LINES — list items do NOT start a new run. Runs
+      answer the OTHER question: what does this anchor belong to? A list item interrupting a
+      paragraph is a new block but the same sentence's neighbourhood, so `` `hosted_api.py` `` +
+      `1. `:99998`` still has an owner. Deriving ownership from BLOCKS instead deleted it, which
+      was a one-token evasion of the guard's whole purpose: a reintroduced line number was
+      invisible whenever its line was prefixed `1. ` (measured — RED at `99026d7f8`, GREEN at
+      `49d62d3bd`, RED again here).
+
+    The two are deliberately kept apart rather than collapsed: using RUNS for the span filter
+    resurrects the false positive this module was fixed for (the colon ending `… in this order:`
+    and the `1` of the next list item share a run, so `: 1` would match again), and using BLOCKS
+    for ownership is the evasion above.
+
+    ⚠️ Blocks are joined by ONE space, and that join is a FOLDING ARTIFACT, never a citation: a
+    paragraph ending in a bare `hosted_api.py` would otherwise read as one token with a `:39205`
+    opening the next paragraph (or the next list item). `_hits` therefore refuses a match in EITHER
+    arm whose SPAN crosses a block change — the explicit arm because its `\\s*` eats the join, and
+    the continuation arm because all three of its alternatives (`:`, `L`, `line`) do (measured:
+    without it, `"Read hosted_api.py"` + a blank line + `":39205 names the handler."` was reported
+    as a citation the editor never wrote — GREEN on `main`, which folded per block).
     """
-    blocks: list[list[tuple[int, str]]] = []
-    current: list[tuple[int, str]] = []
-    for index, line in outside:
-        if not line.strip():
-            if current:
-                blocks.append(current)
-                current = []
+    out: list[str] = []
+    line_of: list[int] = []
+    block_of: list[int] = []
+    run_of: list[int] = []
+    block, run, gap = 0, 0, False
+    for index, line in enumerate(raw.splitlines()):
+        stripped = re.sub(r"^\s*(?:>\s?)+", "", line)
+        if not stripped.strip():
+            # A blank line ends BOTH: the paragraph (block) and the ownership window (run).
+            block += 1
+            run += 1
+            gap = True
             continue
-        current.append((index, line))
-    if current:
-        blocks.append(current)
-    return blocks
+        if _LIST_ITEM_RE.match(stripped):
+            # A list item opens a BLOCK with no blank line to announce it, so the previous line's
+            # `:`/`L`/`line` opener must not reach into it (`gap` is already True: the join is
+            # still ONE space, it is the SPAN filter that refuses it). The RUN does NOT move: the
+            # item is still the neighbourhood a bare anchor in it belongs to.
+            block += 1
+        for char in unicodedata.normalize("NFKC", html.unescape(stripped)):
+            # `Cf` covers every zero-width form this doc could carry (space, joiners, BOM) and `Mn`
+            # a combining mark, and NFKC has already turned the fullwidth colon into `:`, so this
+            # branch is the whole of the rule and there is no second list to drift out of date.
+            #
+            # ⚠️ DROPPED, never GAPPED. A zero-width character INSIDE the file name is exactly how a
+            # citation survives a paste — `hosted_api.py` carrying a soft hyphen, a ZWJ or a
+            # word-joiner — and it still RENDERS as `hosted_api.py:39205`. Treating it as a gap
+            # re-split the token this fold exists to rejoin, so all five spellings were GREEN (the
+            # `_EVASION_SHAPES` rows below pin each one). Whitespace is the only thing that gaps;
+            # a combining mark never separates two words, so it needs no gap either.
+            if unicodedata.category(char) in ("Cf", "Mn"):
+                continue
+            if char in " \t":
+                gap = True
+                continue
+            if gap and out:
+                out.append(" ")
+                line_of.append(index + 1)
+                block_of.append(block)
+                run_of.append(run)
+            gap = False
+            out.append(char)
+            line_of.append(index + 1)
+            block_of.append(block)
+            run_of.append(run)
+        gap = True
+    return "".join(out), line_of, block_of, run_of
 
 
-def _bare_continuations(raw: str) -> list[str]:
-    """Every bare `:<n>` continuation in `raw` that belongs to `hosted_api.py`.
-
-    The note half of the guard. `_stray_anchors` scans the body OUTSIDE the provenance note by
-    design (the note is allowed to quote the stale pair), which left the ONE region that already
-    holds anchors exempt from the CONTINUATION rule too: `_HOSTED_ANCHOR_RE` sees only the
-    explicit forms, so `` > Verified against `hosted_api.py`, `:39286`. `` inside the note left
-    `quoted == {'23284','23409'}` and `stray == []` — green, anchor added (measured). Applying
-    the continuation rule to the note's own text closes it: the note's legitimate quotation is
-    the EXPLICIT `hosted_api.py:23409` / `:23284-23292` pair, so no honest note line carries a
-    continuation.
-
-    An `:<n>` sitting INSIDE an explicit anchor (`hosted_api.py:23409`) is that anchor, not a
-    continuation — the explicit scan already owns it, and flagging it would make the note's own
-    quotation illegal.
-    """
-    folded = _collapse(raw)
-    explicit = [match.span() for match in _HOSTED_ANCHOR_RE.finditer(folded)]
-    found: list[str] = []
-    for match in _BARE_ANCHOR_RE.finditer(folded):
-        if any(start <= match.start() < end for start, end in explicit):
-            continue
-        owners = _NEAREST_FILE_RE.findall(folded[:match.start()])
-        if owners and _file_basename(owners[-1]) == "hosted_api.py":
-            found.append(match.group(0))
-    return found
+def _collapse(text: str) -> str:
+    """`_fold_doc`'s text without the lineage — for callers that only need the shape."""
+    return _fold_doc(text)[0]
 
 
 #: The ONLY anchors the `#3524` provenance note may quote — the stale issue body it quotes.
@@ -491,22 +558,153 @@ def _bare_continuations(raw: str) -> list[str]:
 _NOTE_QUOTED_ANCHORS = frozenset({"23409", "23284"})
 
 
+def _hits(
+        raw: str, note_start: int, note_end: int,
+) -> tuple[list[tuple[str, int, bool]], list[tuple[str, int, bool]]]:
+    """`(explicit_anchors, bare_anchors)` as `(token, raw_line, is_in_note)`.
+
+    ONE scan over ONE folded text, and the ONLY place either rule is decided; the public helpers
+    below format its result for their callers. Splitting the decision out is what stops the arms
+    drifting: every previous round's defect was one arm normalising or bounding differently from
+    the other.
+
+    The owner rule differs by region, deliberately:
+
+    * in the BODY, a bare anchor belongs to the nearest file token in its own RUN — the
+      blank-line-delimited neighbourhood `_fold_doc` tracks alongside the block. NOT its own
+      BLOCK: a block boundary exists to refuse a span, and letting it also decide ownership
+      removed the owner a reader infers from the paragraph a list item interrupts, which was a
+      one-token evasion while its line was prefixed `1. ` (measured, #9485 review). The RUN is
+      the same rule stated without that leak — and it still stops at a BLANK line, which is what
+      keeps `"The base is in `hosted_api.py`.\n\nAnd `:39205`."` legal, exactly as `main` did;
+      * in the BODY, the anchor is flagged only when that owner is `hosted_api.py`. §10's
+      `Redemption` row names `hosted_api.py` AND carries `session_auth.py:588`, so the loose
+      "any file in the block" rule reported that row's legitimate anchor to a different file
+      (measured);
+    * in the NOTE, the search is document-wide and an UNOWNED anchor is also a violation — the
+      note exists to quote anchors, so a bare number in it is a citation even when the file name
+      that governs it sits in the paragraph above (measured green before). A number owned by a
+      DIFFERENT file stays legal, because the note legitimately quotes `oauth.py:1425,1592`.
+    """
+    text, line_of, block_of, run_of = _fold_doc(raw)
+    in_note = [note_start < line <= note_end for line in line_of]
+    anchors: list[tuple[str, int, bool]] = []
+    explicit: list[tuple[int, int]] = []
+    for match in _HOSTED_ANCHOR_RE.finditer(text):
+        if block_of[match.start()] != block_of[match.end() - 1]:
+            # The explicit arm's `\s*` reaches across the single space that joins two BLOCKS in
+            # the folded text, so `hosted_api.py` ending one paragraph and `:39205` opening the
+            # next would read as one citation — a false red naming a file the editor never
+            # opened. The continuation arm below refuses the same span crossing, so the two arms
+            # cannot disagree about where a block ends (#9485 review).
+            continue
+        explicit.append(match.span())
+        anchors.append((match.group(0), line_of[match.start()], in_note[match.start()]))
+    bare: list[tuple[str, int, bool]] = []
+    for match in _BARE_ANCHOR_RE.finditer(text):
+        if block_of[match.start()] != block_of[match.end() - 1]:
+            # ⛔ FILTER THE SPAN, not just the owner (#9485 review). Every alternative here has
+            # its own `\s*`, so a colon (or an `L`/`line`) ending one BLOCK and the digits
+            # opening the next matches across the join `_fold_doc` inserts — e.g. a paragraph
+            # ending in a bare `hosted_api.py` whose next paragraph is an ordered list, where the
+            # colon carries NO digits at all. The owner search then finds `hosted_api.py` in the
+            # colon's own block and reports "bare continuation ': 1' belongs to `hosted_api.py`"
+            # for a citation the editor never wrote — the false red `_fold_doc` exists to prevent.
+            # Filtering is lossless: `main` folded per block, so it could not form this match
+            # either, and every real hit lives inside ONE block.
+            continue
+        if any(start <= match.start() < end for start, end in explicit):
+            # The number INSIDE an explicit anchor is that anchor, not a continuation.
+            continue
+        note = in_note[match.start()]
+        run = run_of[match.start()]
+        owner = None
+        for candidate in _NEAREST_FILE_RE.finditer(text, 0, match.start()):
+            # BODY: the ownership window is the RUN, not the block (see the docstring). NOTE: the
+            # window is the whole document, and staying in the same run is not enough there.
+            if note or run_of[candidate.start()] == run:
+                owner = candidate.group(0)
+        is_hosted = owner is not None and _file_basename(owner) == "hosted_api.py"
+        if is_hosted or (note and owner is None):
+            bare.append((match.group(0), line_of[match.start()], note))
+    return anchors, bare
+
+
+def _anchor_violations(
+        raw: str, note_start: int, note_end: int,
+) -> tuple[list[str], list[str], list[str]]:
+    """`(new anchors in the note, bare anchors in the note, stray anchors outside it)`.
+
+    Decided by POSITION on one folded text: a violation belongs to the note when the character it
+    starts on came from a note line, and to the body otherwise. That is what makes a NEW anchor
+    added across the note's own boundary visible — the previous shape sliced the document first
+    and then folded each half, so the split itself was a blind spot (measured: the note gained
+    `` `hosted_api.py: `` at end of line with its digits on the next quoted line, and every
+    assertion stayed green while the message claimed that exact shape was caught).
+    """
+    anchors, bare = _hits(raw, note_start, note_end)
+    note_new = sorted({_anchor_digits(token) for token, _, note in anchors
+                       if note and _anchor_digits(token) not in _NOTE_QUOTED_ANCHORS})
+    note_bare = sorted({token for token, _, note in bare if note})
+    stray = [f"line {line}: {token!r}" for token, line, note in anchors if not note]
+    stray += [f"line {line}: bare continuation {token!r} belongs to `hosted_api.py`"
+              for token, line, note in bare if not note]
+    return note_new, note_bare, stray
+
+
+def _anchor_digits(token: str) -> str:
+    """The number inside an explicit anchor token, e.g. `hosted_api.py:23409` → `23409`."""
+    match = _HOSTED_ANCHOR_RE.search(token)
+    return match.group(1) if match else ""
+
+
+def _stray_anchors(lines: list[str], note_start: int, note_end: int) -> list[str]:
+    """The violations outside the note, each reported at the line it is REALLY on.
+
+    ⛔ This returns the BODY bucket only, so it is not on its own a guard on the document: a
+    violation that STARTS inside the note is dropped here by construction. A caller that means to
+    guard the whole spec must call `_anchor_violations` on the whole document and assert all THREE
+    buckets. Pairing this helper with a note SLICE is what made the note's boundary a blind spot
+    one edge later — an anchor opening on the note's last line and closing just below it was
+    classified as a note violation by position and then discarded by both halves (measured: the
+    whole-document call returned `(['39286'], [], [])` while the guard stayed green).
+    """
+    return _anchor_violations("\n".join(lines), note_start, note_end)[2]
+
+
+def _bare_continuations(raw: str, note_start: int, note_end: int) -> list[str]:
+    """Every bare anchor in `raw` the guard flags, decided on the region the CALLER names.
+
+    Kept as a named helper because the note tests assert on this arm ALONE. `_hits` remains the
+    only place the rule is written, so this cannot drift from it — but the REGION is the
+    caller's, and that changes which rule bites: `(0, 0)` puts every character in the body, where
+    only a `hosted_api.py` OWNER flags, while a span covering all of `raw` also applies the note
+    rule (document-wide owner search, and an UNOWNED anchor is a violation). An earlier version
+    hardcoded `(0, 0)` and its docstring still claimed "body or note" — a comment describing
+    code it did not have (measured: an unowned `:39286` in a note returned `[]`).
+    """
+    _, bare = _hits(raw, note_start, note_end)
+    return [token for token, _, _ in bare]
+
+
 def _note_anchor_violations(note_raw: str) -> tuple[list[str], list[str]]:
     """What the provenance note does NOT have licence for: `(new_anchors, continuations)`.
 
-    ONE rule in ONE place, because both halves of the guard call it: the primary guard accepted a
-    pruned quotation (subset) while `test_the_provenance_note_cannot_smuggle_a_bare_continuation`
-    pinned set EQUALITY, so the honest cleanup the guard's own message invites redded its
-    neighbour with a bare two-set diff and no instruction (measured). Sharing the helper makes
-    that disagreement unrepresentable.
+    The whole fragment is treated as the note, so both arms are reported and the body bucket is
+    empty by construction. ONE rule in ONE place, because both halves of the guard call it: the
+    primary guard accepted a pruned quotation (subset) while
+    `test_the_provenance_note_cannot_smuggle_a_bare_continuation` pinned set EQUALITY, so the
+    honest cleanup the guard's own message invites redded its neighbour with a bare two-set diff
+    and no instruction (measured).
 
-    `new_anchors` is a subset violation, not an equality: the note may quote `23409` and `23284`,
-    may prune either, and may not gain anything else. `continuations` is the note half of
-    `_bare_continuations`: the note is exempt from the body scan, so the `:<n>` continuation form
-    has to be checked inside it too (an anchor added there in that spelling was green before).
+    ⚠️ It sees only `note_raw`, so it can say nothing about an anchor that STRADDLES the
+    fragment's edge. That is why the document-level guard in
+    `test_the_spec_cites_no_hosted_api_line_numbers` does NOT build itself out of this helper plus
+    `_stray_anchors`: it calls `_anchor_violations` once on the whole document and asserts all
+    three buckets (#9485 review).
     """
-    quoted = set(_HOSTED_ANCHOR_RE.findall(_collapse(note_raw)))
-    return sorted(quoted - _NOTE_QUOTED_ANCHORS), _bare_continuations(note_raw)
+    note_new, note_bare, _ = _anchor_violations(note_raw, 0, len(note_raw.splitlines()))
+    return note_new, note_bare
 
 
 def _provenance_note_bounds(lines: list[str]) -> tuple[int, int]:
@@ -530,43 +728,19 @@ def _provenance_note_bounds(lines: list[str]) -> tuple[int, int]:
     return note_start, note_end
 
 
-def _stray_anchors(lines: list[str], note_start: int, note_end: int) -> list[str]:
-    """Every `hosted_api.py` line anchor outside the note, each with the line it is REALLY on.
+def _spec_violations(raw: str) -> tuple[list[str], list[str], list[str]]:
+    """`(new anchors in the note, bare anchors in the note, stray anchors outside it)`.
 
-    The body is scanned with the note REMOVED, so an index into that shortened list is not a line
-    number of the file: reporting one as such named a line `note_end - note_start` early (7 in this
-    spec) — an unrelated table row — for essentially every anchor a future editor could add, which
-    is the one message this guard ever produces.
+    ONE call on the WHOLE document, all three buckets returned TOGETHER — the grouping is the fix,
+    not a convenience. The guard assembled its verdict from two SLICES instead:
+    `_note_anchor_violations(note_raw)` folded the note alone (so digits below the quotation were
+    not in the text it read) and `_stray_anchors(...)` is bucket [2] alone (so a violation that
+    STARTS in the note was thrown away by construction). The note's trailing edge therefore fell
+    in the gap between the two halves, and the answer the whole-document scan already held was
+    discarded (measured: `(['39286'], [], [])` while the guard was green). Every document-level
+    caller goes through here, so the three buckets cannot be audited separately again.
     """
-    outside = [
-        (index, re.sub(r"^\s*(?:>\s?)+", "", line))
-        for index, line in enumerate(lines)
-        if not note_start <= index < note_end]
-    stray: list[str] = []
-    for block in _blocks(outside):
-        raw = "\n".join(text for _, text in block)
-        folded, origin = _fold(raw)
-        explicit: list[tuple[int, int]] = []
-        for match in _HOSTED_ANCHOR_RE.finditer(folded):
-            lineno = block[origin[match.start()] - 1][0] + 1
-            explicit.append(match.span())
-            stray.append(f"line {lineno}: {match.group(0)!r}")
-        for match in _BARE_ANCHOR_RE.finditer(folded):
-            if any(start <= match.start() < end for start, end in explicit):
-                # The `:<n>` INSIDE an explicit anchor is that anchor, not a continuation: the
-                # explicit scan already owns it, and flagging it would double-report one citation.
-                continue
-            owners = _NEAREST_FILE_RE.findall(folded[:match.start()])
-            # BASENAME, not the matched token: `tortoise/hosted_api.py` is the repository-relative
-            # spelling this very document uses for the same file, so a continuation after it
-            # belongs to `hosted_api.py` too (exact equality let it through — measured), and the
-            # comparison is case-folded for the same reason (`HOSTED_API.PY:…` was green).
-            if owners and _file_basename(owners[-1]) == "hosted_api.py":
-                lineno = block[origin[match.start()] - 1][0] + 1
-                stray.append(
-                    f"line {lineno}: bare continuation {match.group(0)!r} belongs to "
-                    "`hosted_api.py`")
-    return stray
+    return _anchor_violations(raw, *_provenance_note_bounds(raw.splitlines()))
 
 
 #: `(section heading prefix, row prefix, citations that row must carry)` — the sites the old line
@@ -634,10 +808,106 @@ _EVASION_SHAPES = (
     ("See `hosted_api.py:L39432`.", [1]),
     # the prose spelling of a line citation
     ("See `hosted_api.py`, line 39432.", [1]),
+    # …and the SAME prose anchor carrying a zero-width character between the word and the digits
+    # — the one separator that `_fold_doc`'s no-gap drop could not repair, because both arms wrote
+    # `line\s+` while `:`/`#L`/`L` accepted none. The previous fold's `gap = True` produced
+    # `line 39432` and caught it by accident; that made these two rows a REGRESSION pin, not a new
+    # capability (measured at the second review round).
+    ("See `hosted_api.py`, line\u200b39432.", [1]),
+    ("See `hosted_api.py`, line\u00ad39432.", [1]),
+    ("See `hosted_api.py` for the handler flow — the `line\u200b39432` branch.", [1]),
     # NEGATIVE (I1): the continuation's owner is the nearest FILE TOKEN of any extension, not the
     # nearest `*.py` — an honest `.ts`/`.yml` anchor after a `hosted_api.py` mention is not ours
     ("See `hosted_api.py`, and the BFF `token.ts`, `:152`.", []),
     ("| a | `hosted_api.py` |\n| b | `config/required-bindings.yml`, `:12` |", []),
+    # NEGATIVE: the block boundary itself. With block tracking removed the owner search reaches
+    # back across the paragraph break and CREDITES this number to the previous block's file — the
+    # row is what pins the block (each revert of block tracking alone leaves the rest green once
+    # the owner rule accepts any extension: §10's `.yml` row no longer depends on it).
+    ("The base is in `hosted_api.py`.\n\nAnd `:39205`.", []),
+    # NEGATIVE: the folded text joins BLOCKS with one space, and the explicit arm's `\s*` reached
+    # across that join, so a paragraph ENDING in a bare `hosted_api.py` plus one OPENING with
+    # `:39205` read as one citation. `main` folded per block, where this was impossible, so all
+    # three were GREEN there and RED at the head that introduced one whole-document fold — a false
+    # red naming a citation the editor never wrote. These rows pin the block filter on the
+    # EXPLICIT arm (the continuation arm was already filtered).
+    ("Read hosted_api.py\n\n:39205 names the handler.", []),
+    ("Read hosted_api.py\n\nL39205 names the handler.", []),
+    ("Read hosted_api.py\n\nline 39205 names the handler.", []),
+    # …and the MIRROR the span filter above exists for (#9485 review): the `:`/`L`/`line` opener
+    # ending one block and the digits opening the next, so the match's START is in the OWNER's own
+    # block (which is why filtering on the owner block instead of the span leaves all three red).
+    # `main` folded per block and could not form any of them, so RED here was a new false red. The
+    # `:` row is the live shape: a colon ending a sentence before an ordered list reads as `: 1`.
+    ("Read `hosted_api.py` in this order:\n\n1. first", []),
+    ("See `hosted_api.py`, L\n\n39205 names the handler.", []),
+    ("See `hosted_api.py`, line\n\n39205 names the handler.", []),
+    # …and the SAME ordered list with NO blank line before it, which is the shape the block model
+    # above did not know: CommonMark lets an ordered list interrupt a paragraph ONLY when it starts
+    # at `1` (a `2.` and up is a lazy paragraph continuation), so `… in this order:` + `1. first`
+    # is a paragraph AND a list, not one sentence. The blank line is not what makes these
+    # non-citations — the BLOCK is. Without `_LIST_ITEM_RE`'s block open the fold produced
+    # `… in this order: 1. first` and this row reported the list marker as a `hosted_api.py`
+    # continuation (measured at the #9485 review — the very shape `MEMORY.md` says cannot be
+    # reported, which is why the block MODEL grew here rather than the sentence growing a
+    # qualifier).
+    ("Read `hosted_api.py` in this order:\n1. first", []),
+    # …and the `L` twin of it, which is GREEN for a different reason: the `L` arm requires TWO
+    # digits, so `L 1` is not an anchor at all. Pinned anyway, because widening that floor to one
+    # digit would bring the shape back through the span filter's blind side.
+    ("See `hosted_api.py`, L\n1. first", []),
+    # ⛔ THE EVASION `420bf6031` OPENED, and the row that would have caught it. A bare `:n` alone
+    # on a line prefixed `1. ` is a citation a reader infers from the `hosted_api.py` paragraph
+    # directly above it; opening a block at the list item took its OWNER away, so it went GREEN
+    # while the same number with no marker stayed RED (measured at the #9485 review: RED at
+    # `99026d7f8`, GREEN at `49d62d3bd`). The owner is now decided on the RUN — the
+    # blank-line-delimited neighbourhood — so a list item interrupting a paragraph does not sever
+    # it, and the SPAN filter still refuses the `: 1` the list MARKER would otherwise become.
+    ("See `hosted_api.py`\n1. `:99998`.", [2]),
+    # …and the same continuation one token earlier, with no marker at all, which was already RED
+    # and must stay RED: the two rows are one mechanism (ownership across a boundary), and the row
+    # above is the one that reds if the RUN goes back to being a BLOCK.
+    ("See `hosted_api.py`\n`:99998`.", [2]),
+    # ⛔ THE BULLET TWIN of the row above, and it is RED on purpose. A bullet is a list item
+    # (CommonMark interrupts a paragraph with one unconditionally), so `_LIST_ITEM_RE` opens a
+    # BLOCK at it — but the same fail-closed ownership applies: a bare `:n` alone in an item under
+    # a `hosted_api.py` paragraph is attributed to it. A GREEN row here would pin the widening of
+    # the evasion above (`- ` instead of `1. `) as expected-green.
+    ("See the builder in `hosted_api.py`:\n- `:99998` is the handler.", [2]),
+    # …while a BULLET whose item names its OWN file stays legal, so `_LIST_ITEM_RE`'s bullet half
+    # is a block boundary and not an exemption: the nearest token to the LEFT of the anchor is the
+    # `.ts`, and only a `hosted_api.py` ownership reds.
+    ("- the builder `hosted_api.py`\n- then the BFF `token.ts`, `:152`.", []),
+    # ⛔ RESTORED COVERAGE, not a new capability: on `main` (which had no list-item branch at all)
+    # `L 12` and `line 12` are ONE folded block and red, owned by `hosted_api.py`. `_LIST_ITEM_RE`
+    # accepted any `\d+` marker, so `12.` INVENTED a block CommonMark does not see (a non-`1`
+    # marker is a lazy paragraph continuation), the opener landed in block N and the digits in
+    # N+1, and the span filter dropped a real citation. Both rows asserted `[]` — a regression
+    # pinned as expected-green, the worst kind of test. They red again from the marker set being
+    # `1[.)]` (#9485 review).
+    ("See `hosted_api.py`, L\n12. first", [1]),
+    ("See `hosted_api.py`, line\n12. first", [1]),
+    # …while a continuation INSIDE one list item is still ours: opening a block at a list item
+    # must not become an exemption for the item that names the file.
+    ("1. the builder `hosted_api.py`\n   then `:39205`.", [2]),
+    # a WRAPPED EXPLICIT anchor inside a blockquote: the marker is stripped, so the code span and
+    # its digits are one token again. Pins the `^\\s*(?:>\\s?)+` strip, which is load-bearing and
+    # would otherwise be pinned only by the note test below.
+    ("> See `hosted_api.py:\n> 39286`.", [1]),
+    # an HTML entity for the dot, and a zero-width joiner between the colon and the digits: both
+    # render as `hosted_api.py:39286` to a reader, so both are the same citation
+    ("See `hosted_api&#46;py:39286`.", [1]),
+    ("See `hosted_api.py:\u200b39286`.", [1]),
+    # …and the same zero-width character INSIDE the name, which is the paste artifact that renders
+    # as the citation. `_fold_doc` drops it WITHOUT gapping, so the token stays one word; the
+    # earlier `gap = True` split it into `hosted _api.py`, and every one of these five was GREEN
+    # (measured at the #9485 review). Whitespace is the only gap — a leading zero-width before the
+    # digits above never showed the defect, because the arm's `\s*` happened to rescue it.
+    ("See `hosted\u200b_api.py:39205`.", [1]),
+    ("See `hosted\u200c_api.py:39205`.", [1]),
+    ("See `hosted\u200d_api.py:39205`.", [1]),
+    ("See `hosted\u2060_api.py:39205`.", [1]),
+    ("See `hosted\u00ad_api.py:39205`.", [1]),
 )
 
 
@@ -649,9 +919,19 @@ def test_the_anchor_scan_catches_every_shape_at_any_offset(fragment: str, expect
     already caught; this covers the ones that were not, and the negatives that keep the block
     boundary and the OWNER rule honest.
 
-    What each row can and cannot prove, measured rather than assumed. Reverting `_blocks` reds the
-    three wrapped rows, and reverting `_file_basename`'s escape strip reds the escaped-continuation
-    row — those are single-mechanism rows. The `IGNORECASE` flags and the case FOLD are NOT
+    What each row can and cannot prove, measured rather than assumed. Reverting `_fold_doc`'s
+    BLOCK TRACKING reds the `:39205` negative below (with the boundary gone the owner search reaches
+    back across the paragraph break), reverting its `^\\s*(?:>\\s?)+` strip reds the
+    wrapped-blockquote EXPLICIT row (and the note test's wrapped row) — ONE row here, not two: the
+    `>`-continuation row does not depend on the strip, because the `>` sitting between the two
+    tokens is not a digit and the owner search still finds `hosted_api.py` to its left (measured: a
+    strip revert leaves it green at `[2]`).
+    Reverting `_file_basename`'s escape strip reds the escaped-continuation row — those are
+    single-mechanism rows. `html.unescape` is pinned by one row here; the `Cf` drop by SIX — a
+    joiner before the digits and the same joiner, ZWNJ, ZWJ, word-joiner and soft hyphen INSIDE the
+    name, which red only once the drop stops gapping the token in two (measured at the #9485
+    review: with `gap = True` on the `Cf`/`Mn` branch all five INSIDE rows are GREEN);
+    NFKC is pinned by the fullwidth-colon row of the form test below. The `IGNORECASE` flags and the case FOLD are NOT
     individually load-bearing, because the two arms overlap: `HOSTED_API.PY:39286` is caught by
     the explicit arm even if the continuation arm's regex is case-sensitive, and vice versa. So
     reverting either flag alone stays green — that redundancy is deliberate (each arm covers the
@@ -662,6 +942,29 @@ def test_the_anchor_scan_catches_every_shape_at_any_offset(fragment: str, expect
     colon, `#?L`/`line` as a continuation), and the two negatives need the owner scan to accept a
     non-`.py` file token — under the `*.py`-only scan both negatives reported the `hosted_api.py`
     mention to their left, naming a file the editor never touched.
+
+    The three MIRROR rows (a `:`/`L`/`line` opener ending one block, digits opening the next) pin
+    the SPAN filter on the continuation arm, and they are single-mechanism: filter on the match's
+    OWNER block instead of its span and all three red again, because the opener sits in the
+    `hosted_api.py` paragraph (measured — that is the shape a review found: a paragraph ending in
+    a bare `hosted_api.py` followed by an ordered list was reported as a `: 1` continuation).
+
+    The NO-BLANK-LINE list row (`… in this order:` then `1. first`) pins the BLOCK OPEN at a list
+    item: reverting that one branch makes the fold join the paragraph and the marker with one
+    space, and the continuation arm matches the list's own number. The row immediately after the
+    list rows is the other direction of the same mechanism — a continuation INSIDE one list item
+    still reds, so the block open is a boundary between items, not an exemption for lists.
+
+    ⛔ And the boundary is the SPAN's, never the OWNER's (#9485 review). The `1. ` and `- `
+    continuation rows and `test_a_body_continuation_cannot_hide_behind_a_list_item_marker` pin
+    that: ownership is decided on the RUN (blank-line-delimited), so an anchor written inside a
+    list item keeps the owner of the paragraph the list interrupts. Reverting `_hits` to
+    `block_of` for the owner reds them, and NOTHING else — which is the point: the two primitives
+    are load-bearing separately.
+
+    The two `12.` rows are the OPPOSITE mutation: they went GREEN when `_LIST_ITEM_RE` accepted any
+    `\\d+`, because `12.` invented a block CommonMark does not see and the span filter dropped a
+    real `L 12`/`line 12` citation. Restoring `\\d+[.)]` reds them again (measured: `[]` → `[1]`).
     """
     lines = fragment.splitlines()
     reported = _stray_anchors(lines, 0, 0)
@@ -717,10 +1020,17 @@ def test_the_spec_cites_no_hosted_api_line_numbers() -> None:
     raw = SPEC.read_text()
     lines = raw.splitlines()
     note_start, note_end = _provenance_note_bounds(lines)
-    note_raw = "\n".join(lines[note_start:note_end])
     rest_raw = "\n".join(lines[:note_start] + lines[note_end:])
 
-    note_new_anchors, note_bare = _note_anchor_violations(note_raw)
+    # ⛔ ONE call on the WHOLE document, all THREE buckets. Slicing the note and taking
+    # `_stray_anchors`' body bucket discarded the answer the scan already had: an anchor that
+    # STARTS on the note's last line and completes on the line just below the quotation is a note
+    # violation by POSITION, which `_note_anchor_violations(note_raw)` cannot see (the digits are
+    # outside the slice) and `_stray_anchors` throws away (it returns bucket [2] only). Both
+    # halves were blind, one edge later than the defect this PR set out to close (measured — see
+    # `test_an_anchor_wrapped_across_the_notes_TRAILING_boundary_is_refused`, which drives this
+    # same helper on a smuggled document and is the row that reds if this goes back to slices).
+    note_new_anchors, note_bare, stray = _spec_violations(raw)
     assert not note_new_anchors, (
         f"the provenance note quotes the issue-body anchors {note_new_anchors} that it has no "
         "licence for; the only anchors it may quote are `hosted_api.py:23409` and "
@@ -746,7 +1056,6 @@ def test_the_spec_cites_no_hosted_api_line_numbers() -> None:
     # continuation whose nearest file TOKEN (any extension, not just `*.py`) is hosted_api.py
     # (§10 writes ``session_auth.py:588`` AND names hosted_api.py in the same row, so "the line
     # mentions the file" would over-report).
-    stray = _stray_anchors(lines, note_start, note_end)
     assert not stray, (
         f"the spec cites hosted_api.py by a LINE NUMBER again: {sorted(stray)}. A line number is "
         "valid only at the commit it was written against — cite the symbol or the route string "
@@ -778,6 +1087,43 @@ def test_the_spec_cites_no_hosted_api_line_numbers() -> None:
         _only_line(HOSTED, token)
 
 
+def test_a_body_continuation_cannot_hide_behind_a_list_item_marker() -> None:
+    """A `:n` injected under the body's `hosted_api.py` mention is caught WHATEVER its marker.
+
+    ⛔ The regression this pins (#9485 review, P1): `_fold_doc` opens a BLOCK at a list item, and
+    the block is what `_hits` uses to find an anchor's OWNER — two jobs on one primitive, and only
+    the span filter is justified. Every continuation written inside a list item therefore lost its
+    owner, so a reintroduced line number went GREEN the moment its line was prefixed `1. ` while
+    the same number with no marker stayed RED (measured: RED at `99026d7f8`, GREEN at `49d62d3bd`,
+    RED again once the owner is decided on the RUN rather than the BLOCK).
+
+    Driven on the REAL document by injecting one line under the body sentence that names
+    `tortoise/hosted_api.py`, because that is the shape the whole-document guard actually sees: a
+    synthetic fragment proves the rule, this proves the guard.
+
+    ⚠️ The bullet and `2.` markers are here on purpose. A bullet interrupts a paragraph
+    unconditionally, so `_LIST_ITEM_RE` opens a block at it — but the same fail-closed ownership
+    has to survive, or the widening becomes a second channel for the same evasion (`- :99998`).
+    `2.` is CommonMark's lazy continuation, so it never opens a block at all and the number is
+    simply inside the paragraph.
+    """
+    lines = SPEC.read_text().splitlines()
+    anchor_line = next(
+        (i for i, line in enumerate(lines) if "tortoise/hosted_api.py" in line), None)
+    assert anchor_line is not None, (
+        "the body no longer names `tortoise/hosted_api.py` — this probe needs the mention a "
+        "reader would attribute an injected continuation to, so restore it or move the probe")
+    for marker in ("", "1. ", "2. ", "- "):
+        injected = [*lines[:anchor_line + 1], f"{marker}`:99998`", *lines[anchor_line + 1:]]
+        _, _, stray = _spec_violations("\n".join(injected))
+        assert any("99998" in entry and "hosted_api.py" in entry for entry in stray), (
+            f"a bare continuation injected directly under the body's `tortoise/hosted_api.py` "
+            f"mention must be reported with that owner even when its line is prefixed {marker!r} "
+            f"— got stray={stray}. A list item starts a BLOCK (so a match may not span into it) "
+            "but it does not start a run (so the owner a reader infers survives); deriving "
+            "ownership from the block is what made this evasion GREEN.")
+
+
 def test_the_anchor_scan_catches_every_form_at_the_line_it_is_on() -> None:
     """The ban must cover each citation form AND name the line a reader can actually open.
 
@@ -791,9 +1137,12 @@ def test_the_anchor_scan_catches_every_form_at_the_line_it_is_on() -> None:
     line be reported twice (an explicit anchor also carries a bare `:<n>`; the message names the
     line once, as one citation).
 
-    The expected numbers are the REAL ones: the note is removed before the scan, so an index into
-    the shortened body used to be reported as a file line (2 early, here) — the one message this
-    guard produces sent the reader to an unrelated row.
+    The expected numbers are the REAL document lines, and nothing is re-indexed: `_stray_anchors`
+    passes the FULL `lines` and `_hits` classifies each match by the note's `[start, end)` span,
+    so a violation is reported at the line it is really on. (An earlier shape REMOVED the note and
+    scanned the remainder, so an index into the shortened body was reported as a file line — 2
+    early here — and the one message this guard produces sent the reader to an unrelated row. The
+    note is no longer removed, so that hazard is gone rather than merely avoided.)
     """
     lines = [
         "| row | `hosted_api.py:39152` |",
@@ -817,6 +1166,159 @@ def test_the_anchor_scan_catches_every_form_at_the_line_it_is_on() -> None:
         "quotation on lines 3-4 excluded; got "
         f"{reported} from {stray}"
     )
+
+
+#: `(note fragment appended to the live note, why)` — the shape that ADDS an anchor inside the ONE
+#: region anchors are legal in. The note arm used to normalise its slice separately from the body's,
+#: so the note's own boundary was a blind spot: a wrap that split `hosted_api.py:` from its digits
+#: across two `>` lines was GREEN (measured) while the guard's message claimed that shape was
+#: caught.
+_NOTE_SMUGGLES = (
+    ("`hosted_api.py:\n> 39286` is the authorize handler", "explicit anchor wrapped across `>` lines"),
+)
+
+
+@pytest.mark.parametrize("smuggle,why", _NOTE_SMUGGLES)
+def test_the_provenance_note_rejects_an_anchor_wrapped_across_its_own_lines(
+        smuggle: str, why: str) -> None:
+    """The note may quote ONLY the explicit `#3524` pair — including when the anchor is wrapped."""
+    lines = SPEC.read_text().splitlines()
+    note_start, note_end = _provenance_note_bounds(lines)
+    injected = lines[:note_end - 1] + ["> " + part if not part.startswith(">") else part
+                                      for part in smuggle.splitlines()] + lines[note_end - 1:]
+    # The `N` injected lines push the note's own last line from `note_end - 1` to
+    # `note_end + N - 1`, so the half-open span becomes `[note_start, note_end + N)`.
+    #
+    # ⛔ The probed index comes from the INJECTION and the bound from that index, never the other
+    # way round (#9485 review): deriving it from the bound (`shifted_end - 1`) let the bound and
+    # the probe move together, so shortening the bound by one kept every assertion green —
+    # re-measured here, the shortened bound left all 49 tests passing. ONE `shifted_end`, used by
+    # BOTH calls below, with the assertion at the end as its constraint: it anchors the note's
+    # original last line and requires it in a note bucket, which only holds while the bound still
+    # covers that line. Shorten it by one and the line reads as BODY, the anchor lands in `stray`,
+    # and the assertion reds (measured).
+    last_note_index = note_end - 1 + len(smuggle.splitlines())
+    assert injected[last_note_index] == lines[note_end - 1], (
+        "the note's original last line must sit at this index after the injection, or the probe "
+        "below anchors the wrong line")
+    shifted_end = last_note_index + 1
+    note_new, note_bare, _ = _anchor_violations(
+        "\n".join(injected), note_start, shifted_end)
+    assert note_new or note_bare, (
+        f"a note that gains {why} must be refused: it reads as a quotation of #3524 while naming a "
+        f"site this doc is citing — got note_new={note_new} note_bare={note_bare}")
+
+    # …and the span must COVER the note's original last line, which the injection shifts to this
+    # index. Pinned by placing an anchor THERE and requiring it in a note bucket: with the bound
+    # one short that line reads as BODY and the anchor lands in `stray`, which this test never
+    # looks at — so the off-by-one would otherwise have stayed invisible (measured).
+    on_last_note_line = [
+        *injected[:last_note_index],
+        lines[note_end - 1] + " see `hosted_api.py:99999`",
+        *injected[last_note_index + 1:],
+    ]
+    last_new, _, last_stray = _anchor_violations(
+        "\n".join(on_last_note_line), note_start, shifted_end)
+    assert "99999" in last_new and not last_stray, (
+        "the note's own last line is part of the note, so an anchor it gains belongs in a note "
+        f"bucket — got note_new={last_new} stray={last_stray}")
+
+
+def test_an_anchor_wrapped_across_the_notes_TRAILING_boundary_is_refused() -> None:
+    """The note boundary has TWO edges, and the trailing one was blind in both halves.
+
+    `_provenance_note_bounds` returns a half-open span, so an anchor that STARTS on the note's
+    last line and completes on the line just below the quotation is classified by POSITION as a
+    note violation. The guard could not see it: it folded the note's SLICE (which cannot contain
+    the digits, they are below it) and read `_stray_anchors`, which returns the BODY bucket only
+    — so the violation landed in bucket [0] of a call nobody made, and both halves stayed green.
+    Measured before the fix: `_anchor_violations(raw, note_start, note_end)` already returned
+    `(['39286'], [], [])` while every assertion in the guard passed.
+
+    Not reachable through `_NOTE_SMUGGLES`: that table injects BEFORE the note's last line, which
+    can only put digits INSIDE the quotation. This row injects AFTER it — the other edge, and the
+    direction a future editor copying a citation into the note's closing sentence would hit.
+
+    Non-vacuous by construction: this drives `_spec_violations`, the SAME helper
+    `test_the_spec_cites_no_hosted_api_line_numbers` uses, so restoring that guard's old
+    two-slice shape (`_note_anchor_violations` + `_stray_anchors`) reds the assertion below. Both
+    halves of that shape are asserted here to be blind, so the mechanism is measured, not claimed.
+    """
+    lines = SPEC.read_text().splitlines()
+    note_start, note_end = _provenance_note_bounds(lines)
+    injected = [
+        *lines[:note_end - 1],
+        lines[note_end - 1] + " See `hosted_api.py:",
+        "39286` names the handler.",
+        *lines[note_end:],
+    ]
+    note_new, note_bare, stray = _spec_violations("\n".join(injected))
+    assert note_new == ["39286"] and not stray, (
+        "an anchor that opens on the note's last line and closes on the line just below it is ONE "
+        "citation, and the note may quote only the `#3524` pair it owns — it must be reported as "
+        f"a NOTE violation, not dropped; got note_new={note_new} note_bare={note_bare} "
+        f"stray={stray}")
+
+    # …and the shape that dropped it, measured: the note's own SLICE never contains the digits,
+    # and the body bucket never contains a violation that starts in the note — so BOTH halves of
+    # the old two-call guard returned nothing here (verified at the pre-fix head).
+    assert _note_anchor_violations("\n".join(injected[note_start:note_end])) == ([], []), (
+        "this row is only interesting while the note SLICE cannot see the digits — the anchor "
+        "closes below it, which is exactly why slicing lost the citation")
+    assert _stray_anchors(injected, note_start, note_end) == [], (
+        "the body bucket alone cannot report a violation that STARTS inside the note — that is "
+        "the gap `_spec_violations` exists to close, not a bug in this row")
+
+
+def test_a_note_anchor_is_bounded_by_position_and_owned_document_wide() -> None:
+    """Three readings the note arm has to get right, each measured on the pre-fix shape.
+
+    1. A `:<n>` in the note whose file name sits in the BODY paragraph above is still a citation:
+       the note's whole reason for existing is that a number in it is quoted from #3524, so it
+       cannot borrow an owner from prose outside the quotation. Pre-fix this was GREEN (the note
+       slice saw no owner at all).
+    2. A `:<n>` the note attributes to a DIFFERENT file stays legal — the live note quotes
+       `oauth.py:1425,1592`. This is the observable difference between a document-wide search and
+       a block-scoped one, which would see no owner and refuse it.
+    3. A `:<n>` with NO owner anywhere is refused: the note exists to quote anchors, so an
+       unmoored number in it is a citation. Dropping the unowned branch made this row pass
+       (measured).
+    """
+    hosted_above = [
+        "The handler is in `hosted_api.py`.",
+        "",
+        "> **Provenance (#3524)** — the stale body quoted nothing that resolves today.",
+        "> Unmoored `:39286`.",
+    ]
+    start, end = _provenance_note_bounds(hosted_above)
+    _, bare, _ = _anchor_violations("\n".join(hosted_above), start, end)
+    assert bare == [":39286"], (
+        "a bare anchor inside the note must be refused whatever block its owner sits in; got "
+        f"{bare}")
+
+    other = [
+        "The handler is in `oauth.py`.",
+        "",
+        "> **Provenance (#3524)** — the stale body quoted nothing that resolves today.",
+        "> Its `:1425` is retired.",
+    ]
+    start, end = _provenance_note_bounds(other)
+    _, bare, _ = _anchor_violations("\n".join(other), start, end)
+    assert bare == [], (
+        "a number the note attributes to ANOTHER file must stay legal — the note quotes "
+        f"`oauth.py:1425,1592` in the live document; got {bare}")
+
+    unowned = [
+        "Nothing here names a source file.",
+        "",
+        "> **Provenance (#3524)** — the stale body quoted nothing that resolves today.",
+        "> Unmoored `:39286`.",
+    ]
+    start, end = _provenance_note_bounds(unowned)
+    _, bare, _ = _anchor_violations("\n".join(unowned), start, end)
+    assert bare == [":39286"], (
+        "the note exists to quote anchors, so a bare number in it is a citation even with no file "
+        f"name to attribute it to; got {bare}")
 
 
 def test_the_provenance_note_cannot_smuggle_a_bare_continuation() -> None:
@@ -845,9 +1347,19 @@ def test_the_provenance_note_cannot_smuggle_a_bare_continuation() -> None:
         "this case is only interesting while the EXPLICIT scan cannot see it — the note's own "
         "quoted set would otherwise catch it and the continuation scan would be vacuous here"
     )
-    assert _bare_continuations(escaping) == [":39286"], (
+    assert _bare_continuations(escaping, 0, len(escaping.splitlines())) == [":39286"], (
         "the note's continuation form must be caught: `hosted_api.py` followed by a bare `:39286` "
-        f"is a new citation, got {_bare_continuations(escaping)}"
+        f"is a new citation, got {_bare_continuations(escaping, 0, len(escaping.splitlines()))}"
+    )
+
+    # …and it is the NOTE rule this helper is being asked for, not the body rule. An anchor the
+    # note cannot attribute to ANY file is a citation there, while the body rule (no owner → no
+    # report) says nothing about it. Hardcoding `(0, 0)` made this `[]` (measured).
+    unowned_one = "> Unmoored `:39286`."
+    assert _bare_continuations(unowned_one, 0, len(unowned_one.splitlines())) == [":39286"], (
+        "an UNOWNED bare anchor inside the note is a citation; the body rule cannot see it, which "
+        f"is why this helper must be given the note's bounds — got "
+        f"{_bare_continuations(unowned_one, 0, len(unowned_one.splitlines()))}"
     )
 
     # PRUNING the quotation is legal (the subset rule), and ADDING an explicit anchor is not —
@@ -874,10 +1386,11 @@ def test_the_provenance_note_cannot_smuggle_a_bare_continuation() -> None:
         "the live note may quote at most `hosted_api.py:23409` / `:23284-23292` and carry no "
         f"continuation; got {_note_anchor_violations(note_raw)}"
     )
-    assert _bare_continuations(note_raw) == [], (
+    assert _bare_continuations(note_raw, 0, len(note_raw.splitlines())) == [], (
         "the note's own quoted pair `hosted_api.py:23409` / `hosted_api.py:23284-23292` is an "
-        "EXPLICIT anchor, so the continuation rule must leave it alone; it flagged "
-        f"{_bare_continuations(note_raw)}"
+        "EXPLICIT anchor, and `oauth.py:1425,1592` has a DIFFERENT owner, so the continuation "
+        "rule must leave both alone; it flagged "
+        f"{_bare_continuations(note_raw, 0, len(note_raw.splitlines()))}"
     )
 
 
