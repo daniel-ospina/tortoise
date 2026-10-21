@@ -30,12 +30,14 @@ doc:
    its capture executor is process-wide) must not be able to file one tenant's
    rows under another: the row would be well-formed and the FK to
    `public.graphs` only checks that the graph exists, so nothing would raise.
-   Five legs: two tenants in one process never cross-write; a third tenant
+   Six legs: two tenants in one process never cross-write; a third tenant
    planted in the ENVIRONMENT never reaches a plan a caller asked for; a caller
    that cannot name its tenant REFUSES rather than inheriting one (each
    coordinate on its own); the module is scanned to prove it has no ambient
-   reader to inherit FROM; and the same substitution is pinned at the write
-   site (`tests/test_record_writer_seam.py`).
+   reader to inherit FROM; every function GIVEN the pair is scanned to prove no
+   body REBINDS it (the one fallback shape a signature check and every fixture
+   are blind to); and the same substitution is pinned at the write site
+   (`tests/test_record_writer_seam.py`).
 
    ⛔ SCOPE, so the pin is not over-read: this file holds the fold every writer
    funnels through. The write site — where a caller names the pair — is pinned
@@ -49,7 +51,12 @@ doc:
    #9192's own ask 2, and it cannot be pinned at either layer until this tree
    carries that carrier: neither entry point here has a tenant env pair or a
    ContextVar, which is what the AST scan below turns into an executable
-   statement — within the limits that scan declares.
+   statement — within the limits that scan declares. What CAN be pinned today is
+   the structural half of that ask, and it is: the pair is a required argument
+   that no body in either record module reassigns, so the only way a write can
+   be filed under a tenant the caller did not name is a carrier reaching the
+   fold from OUTSIDE these two modules — which is #9231's surface, not this
+   file's.
 
 WHY THE PLACEMENT TABLE IS IMPORTED, NOT RE-DECLARED. `#7968`'s
 `tests/test_record_schema_placement.py` already parses §17.5 and resolves its
@@ -63,6 +70,7 @@ subject is the same statement set this module emits.
 from __future__ import annotations
 
 import ast
+import builtins
 import json
 import re
 from pathlib import Path
@@ -72,6 +80,7 @@ import pytest
 
 from tests.test_record_schema_placement import parse_placement
 from tortoise import record_projection as rp
+from tortoise import record_writer as rw
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -1894,27 +1903,41 @@ def test_this_module_has_no_ambient_tenant_READER():
     every fixture path — one that fires only when the pair is absent, or that
     sits in a branch the record set does not reach. That read is one wire away
     from cross-tenant on the process the rule has to hold on, and this scan is
-    the only thing that reds it.
+    what reds it when the read is not also a REBINDING of a tenant parameter.
+    Measured on this tree (121 legs across this file and
+    `tests/test_record_writer_seam.py`): a dormant env read ASSIGNED to
+    `org_id` inside `mutations_for` reds this scan and
+    `test_no_entry_point_rebinds_the_tenant_it_was_given` and nothing else (2 of
+    121); the same read reached through a resolver helper that never names a
+    parameter (`replay_plan(records, org_id=_ambient()[0], …)`) reds THIS scan
+    alone (1 of 121). That last one is the shape only this instrument can see,
+    and it is why the leg below does not make this one redundant.
 
     ⛔ WHAT THIS SCAN CANNOT SEE, measured, because the gap is where the real
     carrier lives: it parses THIS module only, and it matches env and
-    `contextvars` names. So a read through an import — a `ContextVar` (or a
+    `contextvars` names. A read through an import — a `ContextVar` (or a
     `use_record_tenant`-style getter) defined one layer up and called here — is
-    caught by nothing in this file: measured, a sibling-module `ContextVar`
-    imported and applied in `mutations_for`
-    (`_t = RECORD_TENANT.get(None); if _t is not None: org_id = org_id or
-    _t[0]`) leaves all 118 green, because the carrier is unset on every fixture
-    path — so even a fold that would honour it is invisible to both layers. That is the shape #9192 names, and
-    it is closed by the production owner of the carrier (#9188), not here.
+    invisible to it: measured, a sibling-module `ContextVar` imported and
+    applied in `mutations_for` (`_t = RECORD_TENANT.get(None); if _t is not
+    None: org_id = org_id or _t[0]`) leaves this scan and every value leg green,
+    because the carrier is unset on every fixture path. It is caught by
+    `test_no_entry_point_rebinds_the_tenant_it_was_given` instead, since that
+    shape rebinds a parameter — measured, planted in `mutations_for` and again
+    in `RecordWriter.write`, each reds that leg alone (1 of 121). The two
+    instruments are complementary by construction: this scan asks which READERS
+    exist, the other asks whether the value a caller NAMED can be replaced, and
+    a fallback that names no tenant parameter answers neither — it is #9192's
+    arming surface, whose production owner is #9188/#9231.
     What this scan misses, and only this scan: an OBFUSCATED read
     (`getattr(os, "environ")`, `__import__("os")`) — an env-first read spelled
     that way still reds the value legs (measured, three of them); only a
-    DORMANT spelling of it escapes every leg, like any dormant read. What
-    escapes BOTH layers: a read that never fires on a fixture path — a
+    DORMANT spelling of it escapes the value legs, like any dormant read. A
     module-level constant applied in a function BODY (`org_id = org_id or
-    _DEFAULT_TENANT[0]`, signature still required), or a carrier DEFINED
-    ELSEWHERE (measured, all 118 green on each). A signature default is NOT in
-    either gap; the refusal leg catches it.
+    _DEFAULT_TENANT[0]`, signature still required) is NOT in that gap any more:
+    it reds the rebinding leg (measured, 1 of 121), including when the default
+    is a literal — the spelling a rule keyed on "names something foreign" would
+    pass and a rule keyed on "`or`-selects an alternative" does not. A signature
+    default is also NOT in either gap; the refusal leg catches it.
     """
     tree = ast.parse(Path(rp.__file__).read_text(encoding="utf-8"))
     ambient_modules = {"contextvars"}
@@ -1958,6 +1981,235 @@ def test_this_module_has_no_ambient_tenant_READER():
         f"({sorted(set(hits))}) — tenancy is a per-call argument here, and an "
         f"ambient value is one value for every tenant the process serves"
     )
+
+
+#: The pair every layer row is keyed by. A function that carries either name as a
+#: PARAMETER has been TOLD its tenant; nothing in its own body may replace it.
+_TENANT_COORDINATES = frozenset({"org_id", "graph_id"})
+
+#: What a body may still mention when it re-derives a coordinate from the value it
+#: was GIVEN. `str(org_id)` and `org_id.strip()` are normalisations of the caller's
+#: own value; `org_id or _DEFAULT_TENANT[0]` is a fallback to somewhere else, and
+#: only a fallback can move a write onto another tenant.
+_BUILTIN_NAMES = frozenset(dir(builtins))
+
+
+def _tenant_scope_nodes(fn: ast.AST) -> Any:
+    """Every node in `fn`'s OWN scope — a nested `def`/`lambda` binds its own names."""
+    stack = list(ast.iter_child_nodes(fn))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda,
+                             ast.ClassDef)):
+            continue
+        yield node
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _bound_target_names(target: ast.AST) -> Any:
+    """The names a binding target assigns TO (`d[org_id] = …` assigns to `d`)."""
+    for node in ast.walk(target):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            yield node
+
+
+def _tenant_binding_pairs(fn: ast.AST) -> Any:
+    """`(bound name, the expression it is bound to)` for every binding in `fn`.
+
+    Every shape a fallback takes in a body, not just `=`: a walrus, a loop
+    unpack (`for org_id, graph_id in record_tenant():`), a `with … as` clause and
+    an augmented assignment all rebind the parameter just as quietly. A
+    COMPREHENSION target is deliberately not a binding here: it has its own
+    scope, so it cannot replace the parameter it shadows.
+    """
+    for node in _tenant_scope_nodes(fn):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                for name in _bound_target_names(target):
+                    yield name, node.value
+        elif isinstance(node, ast.AnnAssign):
+            if node.value is not None:
+                for name in _bound_target_names(node.target):
+                    yield name, node.value
+        elif isinstance(node, ast.AugAssign) or isinstance(node, ast.NamedExpr):
+            for name in _bound_target_names(node.target):
+                yield name, node.value
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            for name in _bound_target_names(node.target):
+                yield name, node.iter
+        elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+            for name in _bound_target_names(node.optional_vars):
+                yield name, node.context_expr
+
+
+def _tenant_rebindings(source: str, where: str) -> tuple[list[str], list[str]]:
+    """Functions in `source` that were GIVEN a tenant coordinate and rebound it.
+
+    Returns `(examined function names, violations)`. Takes source TEXT rather
+    than a path so the leg below can measure the scan on synthetic sources
+    instead of asserting its own discriminating power in prose.
+
+    A rebinding is permitted only when it re-derives the CALLER's value: it must
+    still mention the coordinate, mention nothing but builtins besides it, and
+    choose between no alternatives (no `or`/`and`, no `… if … else …`). That is
+    what separates `org_id.strip()` from `org_id or "a-default"` — both mention
+    only the coordinate, and only one of them can file the write somewhere else.
+    """
+    examined: list[str] = []
+    violations: list[str] = []
+    for fn in ast.walk(ast.parse(source)):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        params = {argument.arg for argument in
+                  (*fn.args.posonlyargs, *fn.args.args, *fn.args.kwonlyargs)}
+        carried = params & _TENANT_COORDINATES
+        if not carried:
+            continue
+        examined.append(fn.name)
+        for name, value in _tenant_binding_pairs(fn):
+            if name.id not in carried:
+                continue
+            mentioned = {node.id for node in ast.walk(value)
+                         if isinstance(node, ast.Name)}
+            foreign = sorted(mentioned - {name.id} - _BUILTIN_NAMES)
+            selects = any(isinstance(node, (ast.BoolOp, ast.IfExp))
+                          for node in ast.walk(value))
+            if name.id not in mentioned:
+                why = "a value that does not mention it at all"
+            elif foreign:
+                why = f"an expression naming {foreign}"
+            elif selects:
+                why = "an expression that chooses between alternatives"
+            else:
+                continue
+            violations.append(
+                f"{where}:{name.lineno} `{fn.name}()` was GIVEN `{name.id}` and "
+                f"rebinds it to {why}"
+            )
+    return examined, violations
+
+
+def test_no_entry_point_rebinds_the_tenant_it_was_given():
+    """#9192 ask 2: a caller's tenant cannot be REPLACED inside a body.
+
+    WHAT THIS ADDS, and why no existing leg could. The refusal leg pins the
+    SIGNATURE (the pair is required, each coordinate on its own); the value legs
+    pin what a plan BINDS; the ambient scan pins which module-level READERS
+    exist. None of them can see the shape #9214's own review measured as escaping
+    the lot: `mutations_for` keeping its required keyword parameters and then
+    doing `org_id = org_id or _DEFAULT_TENANT[0]` in the body. The signature is
+    still required, no environment or `contextvars` name appears, and the
+    fallback is DORMANT on every fixture path — so all of them stay green while
+    the fold, once that branch fires, files the caller's rows under another
+    tenant. Measured on this tree (121 legs across this file and
+    `tests/test_record_writer_seam.py`, planted in `mutations_for` and again in
+    `RecordWriter.write`, then restored): 120 of 121 stay green and only this
+    one reds.
+
+    WHY THIS SHAPE IS THE WHOLE CLASS. A parameter is the caller's value; every
+    way a fallback can reach it — a module constant, a `ContextVar` imported from
+    a sibling module, `os.environ` under an alias, a loop unpack, a walrus, a
+    `with … as` — is an ASSIGNMENT to that parameter. Forbidding the assignment
+    forbids the class, where forbidding `os.environ` forbids one spelling of it.
+    A re-derivation of the value the caller already gave (`org_id.strip()`,
+    `str(graph_id)`) mentions nothing but that value and stays green: the rule
+    separates normalisation from substitution, which is the only distinction that
+    matters here.
+
+    BOTH record modules, because the seam is what a production caller touches —
+    a rebinding added in `record_writer` would be one call above the fold this
+    file guards.
+
+    ⛔ WHAT THIS DOES NOT CATCH, stated so the green is not over-read: a fallback
+    that never names the parameter — a helper that resolves a pair and passes it
+    INTO the fold (`replay_plan(records, org_id=_ambient()[0], …)`) — is a new
+    function without the parameters, invisible to a body rule. In
+    `record_projection` the env scan above reds it; in `record_writer` it is the
+    ambient carrier itself, which is #9231's surface and legitimate there for a
+    single-tenant install. Nor does it catch a carrier that reaches the fold
+    through the SEAM's own arguments from outside both modules — that is the
+    arming surface (ask 2's carrier half), and it belongs with #9231.
+    """
+    examined: list[str] = []
+    violations: list[str] = []
+    for module in (rp, rw):
+        names, found = _tenant_rebindings(
+            Path(module.__file__).read_text(encoding="utf-8"),
+            Path(module.__file__).name,
+        )
+        examined.extend(names)
+        violations.extend(found)
+
+    # Non-vacuity: the scan must be looking at the functions that take the pair,
+    # not merely finding nothing in whatever it happened to parse. A rename, a
+    # module split, or a scan that stopped descending reds here instead of
+    # reporting a clean sweep of nothing.
+    assert {"mutations_for", "replay_plan", "replay", "write", "write_records"} <= set(
+        examined
+    ), f"the rebinding scan examined {sorted(examined)} — it is not looking at " \
+       f"the entry points that carry the tenant pair"
+    assert not violations, (
+        "a record entry point replaces the tenant it was GIVEN:\n  "
+        + "\n  ".join(violations)
+        + "\nEvery fallback — a module constant, a sibling carrier, an aliased "
+          "env read — arrives as an assignment to the parameter, and one value "
+          "for every tenant the process serves is a cross-tenant write with no "
+          "error. Delete the assignment; a caller that cannot name its tenant "
+          "must refuse."
+    )
+
+
+def test_the_rebinding_scan_sees_every_shape_a_fallback_takes():
+    """The rule above, measured on synthetic sources rather than asserted.
+
+    A scan is only worth the shapes it can be shown to catch. Each case here is
+    the source of a REAL fallback shape (the body-local constant and the
+    sibling-module carrier are the two #9214's review measured as escaping every
+    other leg), and each negative case is a legitimate body that must stay green
+    — otherwise the rule would be "no assignment to a parameter", which would
+    red a normalisation and be turned off by the first lane it inconvenienced.
+    """
+    def reds(body: str) -> bool:
+        _examined, violations = _tenant_rebindings(
+            "def f(records, *, org_id, graph_id):\n" + body, "<synthetic>"
+        )
+        return bool(violations)
+
+    # A fallback to a module constant, DORMANT on every fixture path — the shape
+    # no value leg can see because it never fires.
+    assert reds("    if False:\n        org_id = org_id or _DEFAULT_TENANT[0]\n")
+    # …and the same shape with no name to notice: a LITERAL default, which a
+    # rule keyed on "mentions something foreign" would pass.
+    assert reds("    if False:\n        org_id = org_id or 'a-literal-default'\n")
+    # A value that does not re-derive the caller's coordinate at all.
+    assert reds("    org_id = 'hardcoded-org'\n")
+    assert reds("    graph_id = 'x' if org_id else 'y'\n")
+    # A carrier defined one module up and applied in the body (the measured
+    # escape from both the value legs and the ambient scan).
+    assert reds(
+        "    _t = RECORD_TENANT.get(None)\n"
+        "    if _t is not None:\n"
+        "        org_id = org_id or _t[0]\n"
+    )
+    # An env read under an alias — the spelling the ambient scan catches only
+    # when it appears in `record_projection`.
+    assert reds("    graph_id = _os.environ['TORTOISE_RECORD_GRAPH_ID']\n")
+    # The same substitution without an `=`.
+    assert reds("    for org_id, graph_id in record_tenant():\n        pass\n")
+    assert reds("    if (org_id := ambient()[0]):\n        pass\n")
+    assert reds("    with scope() as org_id:\n        pass\n")
+    assert reds("    org_id += _SUFFIX\n")
+
+    # …and the legitimate bodies that must NOT red.
+    assert not reds("    org_id = org_id.strip()\n    graph_id = str(graph_id)\n")
+    assert not reds("    org_id: str\n")  # annotation only, no value
+    assert not reds("    def g():\n        org_id = ambient()\n")  # own scope
+    assert not reds("    labels = [org_id for org_id in (org_id,)]\n")  # own scope
+    # A function that does not take the pair is not this rule's subject at all.
+    examined, violations = _tenant_rebindings(
+        "def h(records):\n    org_id = ambient()\n", "<synthetic>"
+    )
+    assert (examined, violations) == ([], [])
 
 
 def test_a_write_that_cannot_name_its_tenant_refuses_instead_of_falling_back(
