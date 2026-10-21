@@ -902,3 +902,32 @@ not name, and a number that read as a count of something it did not count.
   more"*: four → six is two). A comment making a numeric claim inside a file whose whole subject is
   numeric claims is not cosmetic.
 
+### Follow-up, same day — the EIGHTH correction: the shape that can only be DECLARED now has its members (`PR #9398`, third review, remaining half)
+
+The seventh entry below turned the empty-pattern shape into a derived class and closed it. The
+review's other half was still open, and it is the half no derivation can reach:
+
+- **§13 said the call-time-name class was covered — and then said it had *"no member today"*, which
+  was false.** A relationship name assembled entirely from a value computed at call time (a dict
+  lookup, an instance attribute) resolves to nothing, so no census can find it; the document
+  therefore has to name it. Two about\*-specific readers of exactly that shape are live:
+  `session_link.link_entity` — the **existence pre-probe** before minting an `about*` edge, whose
+  `edge_type` **defaults to `"aboutObject"` and whose every capture-path caller takes the default** —
+  and `subject_binding.bind_point_subjects`, the **re-probe** after a refused link, whose
+  `edge_type` comes from `_ROLE_TARGET["object"]`. Both read the edge on the write path, which row
+  12's precedent (`_count_about_out`) already admits as a row.
+- **One of the two was resolvable all along.** The resolver now follows **function-parameter
+  defaults**, so `link_entity`'s pre-probe is DERIVED (row 19) instead of hand-declared and the
+  class statement is no longer a matter of trust for that member. The other is a genuine dict lookup
+  and stays un-derivable: `bind_point_subjects` is **row 20** and is registered in the guard's
+  `UNDERIVABLE_CALL_TIME`.
+- **The declaration is now checked in both directions**, which is what makes it a class rather than
+  an example: every registered member must be a §13 row (the previous revision declared the class
+  and named nobody) and must still be un-derivable (if the resolver learns to follow it, the entry is
+  stale and reds). The mechanism arm gained the parameter-default case, so the new derivation shape
+  is pinned on synthetic sources like the other five.
+- **The count moved twenty-two → TWENTY-FOUR sites on eighteen → TWENTY rows.** The
+  customer-callable count is unchanged (**seven rows, ten sites**) — both new readers are on the
+  default-ON write path, not customer doors. The headline's four numerals and their units are
+  asserted, so the count and the table cannot drift apart.
+

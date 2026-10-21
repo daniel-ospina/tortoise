@@ -81,7 +81,16 @@ WHAT THIS PINS
    writer must not. Without this arm the resolver could regress to
    literal-only and the table would silently go back to being un-checked in the
    class that produced the fourth correction.
-6. **`test_the_prose_counts_match_the_table`** — the NUMBERS. §13 states its
+6. **`test_the_undeclarable_shape_is_declared_by_name`** — the shape NEITHER
+   census can derive: a relationship name assembled entirely from a call-time
+   value (a dict lookup, an instance attribute). Nothing derives it, so §13 must
+   name it — and the declaration is checked in both directions, because the
+   revision before this one SAID the class was "declared by name instead" while
+   declaring nothing at all, with two about*-specific readers of the shape live
+   (`link_entity`, `bind_point_subjects`). A parameter default is resolvable and
+   is therefore derived (row 19); the dict-lookup member is row 20 and is also
+   registered here.
+7. **`test_the_prose_counts_match_the_table`** — the NUMBERS. §13 states its
    counts in prose and the other arms check only the rows, so the numerals are
    read out of the sentences that state them and compared to the table. A
    demoted `reach` cell with a stale headline is the `#7956` erratum's direction
@@ -99,13 +108,15 @@ WHAT THE CENSUS CANNOT SEE (stated, not silently excluded)
   left undeclared: the class is derived by arm 3's shape walk, and every member
   must be a row or an `EMPTY_PATTERN` entry. A pattern assembled **entirely from
   a variable** (no bracket text anywhere in the source) is still out of reach of
-  that walk, so it must be declared by name.
+  that walk, so it must be declared by name — arm 6 checks that declaration —
+  while a parameter DEFAULT (the shape `link_entity` uses) is resolvable and is
+  derived instead.
 * **Resolution is one level deep per binding.** A rel name assembled from a
   value that is itself computed at call time (a function argument, a dict
   lookup, a value stored on an instance at construction) is not resolved; the
   placeholder it leaves behind is a *gap the literal around it still fills*, so
   a query whose rel pattern is readable still derives. Anything assembled
-  entirely from such values must be declared by name (arm 3) or a row will be
+  entirely from such values must be declared by name (arm 6) or a row will be
   missing.
 * **Write arms are out of scope.** A `MERGE`/`CREATE` that mints the edge is a
   writer, separated from a reader by the governing Cypher clause — not by a
@@ -291,6 +302,30 @@ EMPTY_PATTERN: tuple[tuple[str, str, str], ...] = (
         "_hub_degrees",
         "hub-degree counting for the fan-out cap — it counts every edge of a "
         "node, whatever its type",
+    ),
+)
+
+#: The readers of the SECOND un-derivable shape: a relationship name assembled
+#: ENTIRELY from a call-time value (a dict lookup, an instance attribute, a value
+#: passed in from a caller). The resolver follows a name one level deep and then
+#: leaves a gap, so such a reader derives nothing from either census — it is the
+#: one shape that can only be DECLARED. Each entry is
+#: `(filename, symbol, the value it interpolates)`.
+#:
+#: ⚠️ This is not a second hand list standing in for a scan: the arm below
+#: asserts every entry is a §13 ROW *and* that neither census derives it. If the
+#: resolver ever learns to follow it the entry goes stale and reds; if a row is
+#: dropped the entry reds; and a new reader of the shape has nowhere to hide
+#: except here, which is a reviewed declaration rather than silence. (The first
+#: member of this class that IS resolvable — a parameter default — is derived
+#: instead: `session_link.link_entity`.)
+UNDERIVABLE_CALL_TIME: tuple[tuple[str, str, str], ...] = (
+    (
+        "tortoise/subject_binding.py",
+        "bind_point_subjects",
+        '`edge_type`, from `_ROLE_TARGET["object"][1]` — a dict lookup at call '
+        "time, so the re-probe `MATCH (s:Point)-[r:{edge_type}]->(t)` names no "
+        "relationship and no constant resolves it",
     ),
 )
 
@@ -540,15 +575,38 @@ def _own_assigns(fn: ast.AST) -> dict[str, ast.AST]:
     return out
 
 
+def _param_defaults(fn: ast.AST) -> dict[str, ast.AST]:
+    """A function's parameter DEFAULTS, by name.
+
+    `link_entity(..., edge_type="aboutObject")` interpolates the *parameter*, not
+    a local, and the default is where its value lives when every caller takes it
+    — which is the case for the whole default capture path. Without this table
+    the existence pre-probe that reads the edge on the write path is invisible
+    even though the edge name is spelled one line above the query.
+    """
+    out: dict[str, ast.AST] = {}
+    args = fn.args  # type: ignore[attr-defined]
+    positional = list(args.posonlyargs) + list(args.args)
+    paired = positional[len(positional) - len(args.defaults):]
+    for arg, default in zip(paired, args.defaults, strict=True):
+        out.setdefault(arg.arg, default)
+    for arg, default in zip(args.kwonlyargs, args.kw_defaults, strict=True):
+        if default is not None:
+            out.setdefault(arg.arg, default)
+    return out
+
+
 def _scope(file: _File, node: ast.AST | None) -> dict[str, dict[str, ast.AST]]:
-    """The bindings visible at `node`: loop vars, locals, class attrs, globals.
+    """The bindings visible at `node`: loop vars, locals, params, attrs, globals.
 
     Innermost-first on every table: a loop variable shadows a local of the same
-    name, which shadows the class attribute, which shadows the module global.
+    name, which shadows a parameter default, which shadows the class attribute,
+    which shadows the module global.
     """
     scope: dict[str, dict[str, ast.AST]] = {
         "loop": {},
         "local": {},
+        "param": {},
         "cls": {},
         "module": file.index.consts,
     }
@@ -563,6 +621,7 @@ def _scope(file: _File, node: ast.AST | None) -> dict[str, dict[str, ast.AST]]:
             seen_fn = True
             for name, value in file.own_assigns(cur).items():
                 scope["local"].setdefault(name, value)
+            scope["param"] = _param_defaults(cur)
         if isinstance(cur, ast.ClassDef):
             scope["cls"] = {**file.index.classes.get(cur.name, {}), **scope["cls"]}
         cur = file.parents.get(cur)
@@ -615,7 +674,7 @@ def _resolve(
     if isinstance(node, ast.Name):
         if node.id in scope["loop"]:
             return _resolve(scope["loop"][node.id], scope, file, depth + 1)
-        for table in ("local", "cls", "module"):
+        for table in ("local", "param", "cls", "module"):
             bound = scope[table].get(node.id)
             if bound is not None:
                 return _resolve(bound, scope, file, depth + 1)
@@ -1133,11 +1192,18 @@ def test_every_declared_symbol_still_performs_the_read():
     site_symbols: set[tuple[str, str]] = {
         (path.rsplit("/", 1)[-1], symbol) for path, symbol in _census()
     } | {(path.rsplit("/", 1)[-1], symbol) for path, symbol in _empty_pattern_sites()}
+    # A reader of the un-derivable shape is declared by name, so it cannot be a
+    # derived site — `test_the_undeclarable_shape_is_declared_by_name` owns it
+    # (it checks the symbol exists, is a row, and is still not derived).
+    declared_by_name = {
+        (filename.rsplit("/", 1)[-1], _last(symbol))
+        for filename, symbol, _why in UNDERIVABLE_CALL_TIME
+    }
 
     problems: list[str] = []
     for number, _site_cell, _reach, pairs in _declared_rows():
         for key in pairs:
-            if key in site_symbols:
+            if key in site_symbols or key in declared_by_name:
                 continue
             problems.append(
                 f"row {number}: `{key[1]}` ({key[0]}) is declared as a reader but no "
@@ -1234,11 +1300,63 @@ _MECHANISM_CASES: tuple[tuple[str, str, bool], ...] = (
         True,
     ),
     (
+        "parameter default",
+        'def read(g, rel="aboutObject"):\n'
+        '    g.query(f"MATCH (n)-[:{rel}]->(m) RETURN n")\n',
+        True,
+    ),
+    (
         "MERGE writer",
         'def write(g):\n    g.query("MERGE (n)-[:aboutObject]->(m) RETURN n")\n',
         False,
     ),
 )
+
+
+def test_the_undeclarable_shape_is_declared_by_name():
+    """The class NO census can derive is declared, and the declaration is checked.
+
+    A relationship name assembled entirely from a call-time value (a dict lookup,
+    an instance attribute) resolves to nothing — no literal, no constant, no
+    empty pattern — so it cannot be derived and must be declared by name in §13.
+    Both directions are checked, because each has already failed once:
+
+    * **every entry is a §13 row** — the previous revision of §13 said this class
+      was "declared by name instead" while it declared nothing at all, and two
+      about*-specific readers of the shape (`link_entity`, `bind_point_subjects`)
+      were in neither the table nor any list.
+    * **every entry is still un-derivable** — if the resolver learns to follow
+      it, the entry is stale and the class statement is wrong.
+    """
+    rows = {pair for _n, _cell, _reach, pairs in _declared_rows() for pair in pairs}
+    derived = set(_census()) | set(_empty_pattern_sites())
+
+    problems: list[str] = []
+    for filename, symbol, why in UNDERIVABLE_CALL_TIME:
+        target = ROOT / filename
+        if not target.exists() or symbol not in target.read_text(encoding="utf-8"):
+            problems.append(
+                f"`{symbol}` no longer exists in {filename} — re-verify the row "
+                "and this declaration"
+            )
+            continue
+        if (filename.rsplit("/", 1)[-1], _last(symbol)) not in rows:
+            problems.append(
+                f"{filename}::{symbol} reads the edge ({why}) and no §13 row "
+                "names it — the class is declared here precisely because nothing "
+                "derives it, so the row is the only place a re-verifier can see it"
+            )
+        if (filename, _last(symbol)) in derived:
+            problems.append(
+                f"{filename}::{symbol} is DECLARED as un-derivable and one of "
+                "the censuses now derives it — delete the entry and keep the row"
+            )
+
+    assert not problems, (
+        "the shape that names no relationship type at all is the one shape only "
+        "a declaration can cover, so the declaration must be complete and must "
+        "not be stale:\n  - " + "\n  - ".join(problems)
+    )
 
 
 def test_the_census_derives_a_relationship_name_built_at_runtime():
