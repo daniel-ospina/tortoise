@@ -202,8 +202,8 @@ def _bounded_server_socket_kwargs() -> dict[str, Any]:
     rather than one. The five consumers (this module's host branch,
     ``session_indexer``'s graph-entity lookup, ``backup``'s BGSAVE, the
     ``doctor`` probe in ``__main__``, and the ACL admin client in
-    ``acl_graph_users``, which builds its ``redis.Redis`` through
-    ``guarded_client``) all spread this dict,
+    ``acl_graph_users`` — the only ``redis.Redis`` of the five, and itself
+    built through ``guarded_client`` since #7357) all spread this dict,
     which is why the pin lives here rather than at five constructors that
     could each forget it.
 

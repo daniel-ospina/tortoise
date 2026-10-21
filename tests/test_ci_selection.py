@@ -1771,30 +1771,35 @@ def test_socket_bound_2969_guard_runs_on_every_spread_site():
 
 
 def test_7357_note_guard_runs_on_every_surface_its_subjects_select():
-    # #7357: `tests/test_7357_transport_legibility.py` pins WHAT the two
-    # in-package clients' command channel says when the instance goes away. Its
-    # subjects span TWO surfaces and one of them was asleep: the suite's ACL
-    # subject, `tortoise/acl_graph_users.py`, is an exact
+    # PR #9393 review (three cycles, P2): `tests/test_7357_transport_legibility.py`
+    # pins the instance-outage NOTE on the two in-package raw clients
+    # (`hosted_backup._restore_copy_client`, `acl_graph_users._admin_client`) and
+    # the classifier arms behind it (`tortoise/retry.py`). Its registration was
+    # `core`-only — but `tortoise/acl_graph_users.py` is an exact
     # SOURCE_PATTERNS["api"] entry and is deliberately NOT in `CORE_ALSO`, so an
-    # `acl_graph_users.py`-only diff selected `api`, REPLACED the `core`
-    # fallback, and never collected the suite — the only test that pins the ACL
-    # channel's arm (the hedge, and the classifier answer it depends on) did not
-    # run on the diff it guards (the #2938/#1349 silent-drop class).
-    # `tortoise/hosted_backup.py` IS in `CORE_ALSO`, so the restore half already
-    # ran under both surfaces — which is exactly why the ACL half's absence went
-    # unnoticed. Registration is DUAL for that reason.
-    # Mutation check: deleting the `api` arm fails the first assert; deleting the
-    # `core` row fails the loop over the two core-only subjects.
-    r = _sel(["tortoise/acl_graph_users.py"])
-    assert r["full"] is False, r
-    assert r["surfaces"] == ["api"], r
-    assert "test_7357_transport_legibility.py" in r["test_files"], r
-    for core_source in ("tortoise/retry.py", "tortoise/cypher_guard.py"):
-        r = _sel([core_source])
-        assert r["full"] is False, (core_source, r)
-        assert r["surfaces"] == ["core"], (core_source, r)
+    # `acl_graph_users.py`-only diff selected `api`, REPLACED the `core` fallback,
+    # and never ran the only test that pins what the seam SAYS on that channel —
+    # the #1349/#2938/#9190 silent-drop class. The anti-REVERT half
+    # (`test_bounded_raw_clients_3065.py`) is an AST inventory: it pins THAT the
+    # client goes through the seam, not WHAT the seam emits.
+    # Mutation check: deleting the `api` arm fails the first loop; deleting the
+    # `core` row fails the second.
+    for api_source in ("tortoise/acl_graph_users.py",):
+        r = _sel([api_source])
+        assert r["full"] is False, (api_source, r)
+        assert r["surfaces"] == ["api"], (api_source, r)
         assert "test_7357_transport_legibility.py" in r["test_files"], (
-            core_source, r)
+            api_source, r)
+    # `hosted_backup.py` is a `CORE_ALSO` entry, so it selects BOTH; the two
+    # modules that match no named pattern fall through to the `core` fallback.
+    for name, expected in (
+            ("tortoise/hosted_backup.py", ["api", "core"]),
+            ("tortoise/retry.py", ["core"]),
+            ("tortoise/cypher_guard.py", ["core"])):
+        r = _sel([name])
+        assert r["full"] is False, (name, r)
+        assert r["surfaces"] == expected, (name, r)
+        assert "test_7357_transport_legibility.py" in r["test_files"], (name, r)
 
 
 def test_record_schema_pin_runs_on_migration_or_doc_change():
