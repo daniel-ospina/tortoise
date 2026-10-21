@@ -843,6 +843,79 @@ def check(text: str) -> tuple[list[str], dict]:
                     f"[V12] the control's share={ctl_share} is not "
                     f"{ctl_prefix}/{ctl_objects} — the share is not its own counts")
         state["control"] = ctl
+    # ── V15: the bar is bound to the population it was argued for ──────────
+    # V9 checks that the threshold the run USED is the one the artifact FROZE.
+    # That is half a bar: the artifact freezes a NUMBER and a POPULATION, and a
+    # log can satisfy V9 while measuring a corpus the bar was never argued over
+    # (#9076 — the numerator/denominator mismatch the issue refuses one level up).
+    bind = log.kv(log.one("prereg-binding "))
+    if bind:
+        statuses = ("MATCHED", "MISMATCH", "UNPINNED", "BELOW_FLOOR")
+        if bind.get("status") not in statuses:
+            findings.append(f"[V15] the prereg-binding status is "
+                            f"{bind.get('status')!r}, not one of {statuses}")
+        # The binding must be about the corpus this log MEASURED — otherwise it
+        # is a claim about a file nobody ran (the same class as a threshold the
+        # run did not use).
+        measured_sha = log.kv(log.one("corpus=")).get("corpus_sha256", "")
+        if not measured_sha:
+            findings.append("[V15] the log prints a prereg-binding but no "
+                            "corpus sha256 to reconcile it against")
+        elif bind.get("corpus_sha256") != measured_sha:
+            findings.append(
+                f"[V15] the binding names corpus_sha256={bind.get('corpus_sha256')} "
+                f"but the run measured {measured_sha} — the binding is about a "
+                f"corpus this log did not run")
+        if bind.get("status") == "MATCHED":
+            nums = (bind.get("objects", ""), bind.get("declared_floor", ""))
+            if all(n.isdigit() for n in nums) and int(nums[0]) < int(nums[1]):
+                findings.append(
+                    f"[V15] the binding is MATCHED while objects={nums[0]} is "
+                    f"under declared_floor={nums[1]} — a below-floor run cannot be "
+                    f"bound-ready")
+        if bind.get("status") == "BELOW_FLOOR":
+            nums = (bind.get("objects", ""), bind.get("declared_floor", ""))
+            if not all(n.isdigit() for n in nums):
+                findings.append(f"[V15] a below-floor binding states no readable "
+                                f"objects=/declared_floor= ({nums})")
+            elif int(nums[0]) >= int(nums[1]):
+                findings.append(
+                    f"[V15] the binding says BELOW_FLOOR but objects={nums[0]} "
+                    f"is not under declared_floor={nums[1]}")
+        if bind.get("status") == "MISMATCH" and not (
+                set(bind.get("reason", "").split(","))
+                & {"corpus-sha256", "corpus-path", "below-floor"}):
+            findings.append(f"[V15] a MISMATCH states no recognised reason "
+                            f"(reason={bind.get('reason')!r}) — the refusal is "
+                            f"then unauditable")
+        # Rows that must reconcile in the other direction: a MATCHED binding is
+        # the ONLY shape a scored log may carry, and an UNPREREGISTERED log that
+        # matched still has to say why it did not score. These are the two
+        # fail-open directions — a scoring log with an unbound bar, and a
+        # refusal with no reason.
+        if result in ("GREEN", "RED") and bind.get("status") != "MATCHED":
+            findings.append(f"[V15] the log SCORED against a bar whose binding is "
+                            f"{bind.get('status')!r} — an unbound bar is not a bar "
+                            f"for this population")
+        if (result == "UNPREREGISTERED" and bind.get("status") == "MATCHED"
+                and not log.one("prereg-error=")):
+            findings.append("[V15] the binding MATCHED and no reason is stated for "
+                            "refusing to score — a bound bar must produce a verdict")
+        if result in ("GREEN", "RED") and not bind.get("objects", "").isdigit():
+            findings.append("[V15] the binding does not state the denominator "
+                            "(objects=) the bar was checked against")
+    else:
+        declared = log.one("prereg_declared=")
+        if result in ("GREEN", "RED"):
+            findings.append("[V15] the log SCORED a run but carries no "
+                            "prereg-binding line — the bar's corpus was never "
+                            "compared to the measured one")
+        elif declared and not log.one("prereg-error="):
+            findings.append("[V15] a pre-registration was supplied and the run "
+                            "refused to score, but the log states neither "
+                            "prereg-binding nor prereg-error — the refusal has "
+                            "no reason")
+    state["prereg_binding"] = bind or None
     state["result"] = result
     return findings, state
 
