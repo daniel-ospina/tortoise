@@ -2159,6 +2159,24 @@ def test_the_document_population_counts_match_the_census():
         f"§11.1 no longer states 'written by {words[named]} in the named form', which is "
         f"what `RECORDED_WRITERS` holds ({named})"
     )
+    ordinals = {2: "second", 3: "third", 4: "fourth", 5: "fifth", 6: "sixth"}
+    assert f"sees {words[named]} of the {words[total]}" in storage, (
+        f"§13's census sentence no longer matches the tables: it must say "
+        f"'sees {words[named]} of the {words[total]}' (RECORDED_WRITERS={named}, total={total})"
+    )
+    # `_flat` normalises the hyphen out of "NAMED-form", and the sentence appears twice
+    # (lowercase once, capitalised once), so match the space form and require BOTH
+    # occurrences to carry the ordinal the table implies.
+    ordinal_hits = re.findall(rf"\b{ordinals[named]} NAMED form writer\b", storage, re.I)
+    assert len(ordinal_hits) == 2, (
+        f"§11.1 must say '{ordinals[named]} NAMED form writer' in both places it names "
+        f"that writer (RECORDED_WRITERS={named}); found {len(ordinal_hits)}"
+    )
+    for wrong in ("second", "fourth", "fifth"):
+        assert f"{wrong} NAMED form writer" not in storage.lower(), (
+            f"§11.1 still calls that writer the '{wrong}' NAMED-form writer while "
+            f"RECORDED_WRITERS={named} makes it the {ordinals[named]}"
+        )
     assert f"{words[len(NOT_AN_ABOUT_WRITER)]} declared false positives" in storage, (
         "§13's declared-false-positive count no longer matches `NOT_AN_ABOUT_WRITER` "
         f"({len(NOT_AN_ABOUT_WRITER)})"
@@ -3125,6 +3143,20 @@ def test_the_guard_states_its_own_execution_and_probe_coverage_honestly():
         assert gap_anchor in outside, (
             f"the header promises probes for gaps 1-5 with a recorded control, but this "
             f"probe anchor is gone: {gap_anchor!r}. Delete the claim or keep the probe."
+        )
+
+    # The gap-4 anchor above is the block's COMMENT, so it survives a per-entry
+    # deletion: measured at `#9403` review, dropping the "space after the opening
+    # bracket" spelling left every leg green while this header still said each
+    # spelling was measured. So the needles are pinned by CONTENT too.
+    for spelling_needle in (
+        "-[r :aboutObject]->",   # whitespace before the type colon
+        "-[ r:aboutObject]->",   # whitespace after the opening bracket
+        "{tags:[",               # a `]` inside the inline property map
+    ):
+        assert spelling_needle in outside, (
+            f"the gap-4 probe for this spelling is gone ({spelling_needle!r}), so the "
+            "header's 'each measured' is false for it"
         )
 
     assert "Gap 6" in header and "STATED and not pinned" in header, (
