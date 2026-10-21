@@ -325,13 +325,35 @@ def test_the_deletion_set_rows_cite_live_sites() -> None:
 
 # ── The spec's `hosted_api.py` anchors, recomputed the same way ──────────────
 
-#: `hosted_api.py` anchors the spec cites as EVIDENCE. The provenance note's QUOTATIONS of #3524's
-#: stale issue body (`hosted_api.py:23409`, `:23284-23292`) are deliberately not here: a quotation
-#: of the issue cannot be remapped when the source moves. These can, and did — the §5/§8 §10 rows
-#: were off by ~3,300 lines (`:34756` naming backup-restore code) while `_oauth_base` alone had been
-#: corrected, so each table mixed one live anchor with a dead one and read as authoritative. An
-#: anchor is satisfied when the item's line STARTS a citation, for the same reason as §7's: a
-#: broad range that merely contains the site is what let the round-2 singletons go stale.
+#: Every form this tree writes a `hosted_api.py` LINE citation in: `:39152`, `#L39152`, and the
+#: bare `: 39152` continuation the §4 table uses for `oauth.py`. A guard that knew only the first
+#: form let the other two through (measured).
+_HOSTED_ANCHOR_RE = re.compile(r"hosted_api\.py(?:\s*#L|\s*:)\s*(\d+)")
+
+#: `(line prefix, citations that line must carry)` — the sites the old line anchors pointed at.
+#: Pinned PER LINE: a document-wide presence check is satisfied by an unrelated occurrence of the
+#: same route string, so it stays green after the row is deleted or gutted (measured: deleting
+#: §10's `Redemption` row passed, because the route string also occurs in a §9 plan step).
+_SPEC_ROW_CITATIONS = (
+    ("| `/oauth/authorize` carries", ('`@app.get("/oauth/authorize")`',)),
+    ("- **Not inert:**", ('`@app.get("/oauth/authorize")`',)),
+    ("| **Redemption** |", ('`@app.post("/oauth/consent")`',)),
+    ("| **Endpoint stability** |", ("`_oauth_base(request)`",)),
+    # §5's paragraph, not a table row: the pair of well-known routes and their source.
+    ('`@app.get("/.well-known/oauth-authorization-server")`',
+     ("`@app.get(\"/.well-known/oauth-authorization-server\")`", "`/mcp` twin")),
+)
+
+#: The four `hosted_api.py` SYMBOLS/ROUTES the spec names as evidence, and the tokens that must
+#: still resolve to exactly ONE line each.
+#:
+#: ⛔ These used to be LINE anchors, and the spec used to cite them by number. Both were retired:
+#: the numbers drifted ~50 lines behind the source and the §4/§5/§10 tables then pointed at the
+#: wrong functions while reading as authoritative. The spec now cites the route string or the
+#: symbol, and `test_the_spec_cites_no_hosted_api_line_numbers` pins that it does so IN THE ROW
+#: THAT MAKES THE CLAIM, while forbidding any line anchor outside the `#3524` provenance note.
+#: What survives of the old rule is `_only_line`: a symbol citation is only checkable while the
+#: symbol it names still exists exactly once.
 _HOSTED_ANCHORS = {
     "the well-known authorization-server routes":
         '@app.get("/.well-known/oauth-authorization-server")',
@@ -345,48 +367,70 @@ def test_the_spec_cites_no_hosted_api_line_numbers() -> None:
     """The spec must cite hosted_api.py by SYMBOL or ROUTE, never by line number.
 
     ⛔ THIS GUARD USED TO REQUIRE THE OPPOSITE, and that is why it was replaced rather than
-    repaired. It demanded that every `hosted_api.py:<n>` anchor match a live site — which is a
-    check that has to be re-derived after EVERY source edit and silently becomes the defect
-    between edits. It did: on `main` at `fa7b27b66` the spec cited `39152/39225/39233/39379`
-    while the sites had moved to `39205/39278/39286/39432`, so four anchors were ~50 lines off
-    and the only thing that noticed was a red shard (measured: the whole §4/§5/§10 evidence
-    table pointed at the wrong functions).
+    repaired. It demanded that every `hosted_api.py:<n>` anchor match a live site — a check that
+    has to be re-derived after EVERY source edit and silently becomes the defect between edits.
+    It did: on `main` at `fa7b27b66` the spec cited `39152/39225/39233/39379` while the sites had
+    moved to `39205/39278/39286/39432`, so the whole §4/§5/§10 evidence table named the wrong
+    functions and only a red shard noticed.
 
     A line number is valid only at the commit it was written against; a symbol or a route is
-    valid while the code exists. So the prohibition is what gets pinned: NO line anchor may
-    return, and every symbol the spec leans on must still be findable EXACTLY ONCE in
-    `hosted_api.py` (`_only_line`, the same resolver the oauth-side anchors use) — that is what
-    makes a symbol citation checkable rather than decorative. A quotation of another artifact's
-    stale anchor (the `#3524` provenance note, whose lines start with `>`) is not a citation
-    this spec owns and stays excluded.
+    valid while the code exists. So the PROHIBITION is pinned, and it is scoped by IDENTITY, not
+    by syntax:
+
+    * the ONE blockquote this doc owns — the `#3524` provenance note — is identified by its
+      content, and the anchors inside it are asserted to be exactly the quoted issue-body pair.
+      A blanket "skip every line starting with `>`" is what an earlier version did, and it let a
+      stale anchor ride in any NEW blockquote (measured: `> Verified against \
+      `hosted_api.py:39286`.` passed);
+    * every other line — including other blockquotes — may carry no anchor at all, in any of the
+      forms this tree writes (`:` , `#L`, and the bare `: <n>` continuation);
+    * and the replacement citations are pinned IN THEIR OWN ROWS, not document-wide: a
+      document-wide `in body` check passes after the §10 `Redemption` row is deleted or gutted,
+      because the same route string also occurs in a §9 plan step (measured).
     """
-    spec = SPEC.read_text()
-    body = "\n".join(line for line in spec.splitlines() if not line.startswith(">"))
-    cited = sorted({int(m.group(1)) for m in re.finditer(r"hosted_api\.py:(\d+)", body)})
-    assert not cited, (
-        f"the spec cites hosted_api.py by LINE NUMBER again: {cited}. A line number is valid "
-        "only at the commit it was written against — cite the symbol or the route string "
-        "(the live ones are named in `_HOSTED_ANCHORS`), so the citation cannot rot between "
-        "edits. If a number came back by copy-paste from another doc, quote it as a quotation "
-        "(a `>` line) or drop it."
+    lines = SPEC.read_text().splitlines()
+    note_start = next(
+        i for i, line in enumerate(lines)
+        if line.startswith(">") and "#3524" in line and "Provenance" in line)
+    note_end = note_start
+    while note_end < len(lines) and lines[note_end].startswith(">"):
+        note_end += 1
+    note, rest = lines[note_start:note_end], lines[:note_start] + lines[note_end:]
+
+    quoted = set(_HOSTED_ANCHOR_RE.findall("\n".join(note)))
+    assert quoted == {"23409", "23284"}, (
+        f"the provenance note quotes the issue-body anchors {sorted(quoted)}; it must quote "
+        "exactly `hosted_api.py:23409` and `hosted_api.py:23284-23292` (#3524's stale body). A "
+        "NEW anchor here is a citation this doc owns, and belongs in the rows below instead."
     )
-    # The replacement is not merely "fewer numbers": the spec must actually NAME what it used to
-    # point at, or the citations are gone rather than converted. Each of the four sites the old
-    # anchors mapped to is asserted present by the string a reader can search for, and every
-    # anchor this file knows must still resolve uniquely (a symbol citation is only checkable
-    # while the symbol exists).
+    stray = sorted({
+        (i + 1, match.group(0))
+        for i, line in enumerate(rest)
+        for match in _HOSTED_ANCHOR_RE.finditer(line)})
+    assert not stray, (
+        f"the spec cites hosted_api.py by LINE NUMBER again (line, text): {stray}. A line number "
+        "is valid only at the commit it was written against — cite the symbol or the route "
+        "string (the live ones are named in `_HOSTED_ANCHORS`), so the citation cannot rot "
+        "between edits. Quoting a rotted number does not make it a quotation: the provenance "
+        "note is the only blockquote this doc may put an anchor in, and only the two it owns."
+    )
+
+    # The replacement is not merely "fewer numbers": each row must still NAME what it used to
+    # point at, pinned in its OWN row so deleting or gutting an evidence row reds here.
+    for row_prefix, citations in _SPEC_ROW_CITATIONS:
+        row = next((line for line in rest if line.startswith(row_prefix)), None)
+        assert row is not None, (
+            f"the spec no longer has a line starting {row_prefix!r} — the evidence pinned there "
+            "moved or was deleted")
+        for citation in citations:
+            assert citation in row, (
+                f"the line starting {row_prefix.strip()!r} no longer cites {citation!r}; it is "
+                "the symbol/route that replaced a rotted line anchor, so its absence means the "
+                "citation was dropped rather than converted")
+    # …and every anchor this file knows must still resolve uniquely: a symbol citation is only
+    # checkable while the symbol exists.
     for token in _HOSTED_ANCHORS.values():
         _only_line(HOSTED, token)
-    for cited_text in (
-        "`_oauth_base`",                       # the base builder
-        "/.well-known/oauth-authorization-server",  # both metadata routes
-        "`GET /oauth/authorize`",               # the authorize handler
-        "`POST /oauth/consent`",                # the consent handler
-    ):
-        assert cited_text in body, (
-            f"the spec no longer names {cited_text!r} — the line anchors were supposed to be "
-            "replaced by symbols/routes, not deleted"
-        )
 
 
 # ── The spec's own load-bearing clauses ─────────────────────────────────────
