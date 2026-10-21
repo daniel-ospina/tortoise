@@ -35,11 +35,13 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
+from pydantic import ValidationError
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:  # tools/ is not an installed package
     sys.path.insert(0, str(REPO_ROOT))
 
+from tortoise.commit_schema import Point, point_content_id  # noqa: E402
 from tools.ci_selection import load_manifest, select  # noqa: E402, I001
 from tests._html_links import (  # noqa: E402
     _AnchorHrefParser,
@@ -183,6 +185,95 @@ def test_both_pages_name_expectation_propagation(page: Path) -> None:
         f"describe belief the way it is actually computed (tortoise/ep.py), and EP is "
         f"the claim the competitive analysis is built on."
     )
+
+
+# ── #9510: a published claim must be true of the path it names ────────────────
+
+
+def test_commit_schema_requires_a_source_on_every_extracted_claim() -> None:
+    """The evidence under the FAQ's narrowed traceability sentence.
+
+    `website/faq.html` claims traceability for *extracted* claims only. That is
+    true because the extraction contract REQUIRES a source: `Point.source_ref` is
+    `Field(min_length=1)` with no default, so an extracted Point cannot validate
+    without one, and `""` is refused too.
+
+    It is deliberately NOT claimed for *every* claim. `sdk.create_point` accepts a
+    fresh claim with no source and no provenance and returns
+    `advisories: [{code: 'no_source'}]` — advisory only, nothing is refused, and
+    `audit`'s `missing_sourceKind` check exists precisely because unsourced claims
+    occur ("PROVENANCE ADVISORY (#8171)", tortoise/sdk.py). The pre-fix sentence
+    spread the commit-path requirement over a door that does not enforce it — the
+    same defect class #9510 exists to remove.
+    """
+    content = "the production port is 16379"
+    base = {
+        "id": point_content_id(content),
+        "content": content,
+        "pointKind": "statement",
+        "reason": "NEW",
+        "confidence": 0.5,
+        "c_cal": 0.5,
+    }
+    assert base["id"].startswith("pt_")
+    with pytest.raises(ValidationError):
+        Point.model_validate(base)
+    with pytest.raises(ValidationError):
+        Point.model_validate({**base, "source_ref": ""})
+    sourced = Point.model_validate({**base, "source_ref": "doc:runbook"})
+    assert sourced.source_ref == "doc:runbook"
+
+
+def test_faq_ties_only_extracted_claims_to_their_source() -> None:
+    """The FAQ may not universalise the commit path's source requirement.
+
+    Pre-fix wording — "every claim is tied to the source it was drawn from" — was
+    false of the point-creation door (see the test above). The scoped sentence is
+    pinned so it cannot drift back, and the universal is pinned ABSENT so
+    restoring it is a red test rather than a silent overclaim.
+    """
+    text = _normalise(_read(FAQ))
+    assert "every extracted claim carries the source it was drawn from" in text
+    assert "every claim is tied to the source" not in text
+    assert "every claim carries the source" not in text
+
+
+def test_the_belief_mechanism_is_documented_on_docs_first() -> None:
+    """`faq.html`'s own maintainer note forbids mechanism prose on that page.
+
+    The note (in the source above the TOC) reads: "The full technical account of
+    the belief model lives on /docs ... Update /docs first and let this page
+    follow. Keep mechanism prose here to the minimum needed to answer an
+    objection." Pre-fix, the FAQ was the only page describing what a NAND and an
+    IMPL do to a score, so the page carried more mechanism than the page it defers
+    to — the reverse of the order the note mandates. The mechanism now lives on
+    docs.html's Confidence (EP) card and the FAQ answers the objection only.
+    """
+    note = re.sub(r"\s+", " ", _read(FAQ))
+    assert "Keep mechanism prose here to the minimum" in note, (
+        "faq.html's maintainer note is gone — this test enforces a rule the file "
+        "states. Re-anchor it here or retire both deliberately."
+    )
+    docs, faq = _normalise(_read(DOCS)), _normalise(_read(FAQ))
+    for mechanism in (
+        "joint-truth penalty",
+        "toward the source's level",
+        "per-edge weight",
+    ):
+        assert mechanism in docs, (
+            f"website/docs.html no longer states {mechanism!r}. The mechanism account "
+            f"belongs on /docs: the FAQ defers to it ('Update /docs first and let "
+            f"this page follow') and must not be the only page carrying it."
+        )
+    for moved in (
+        "penalty on both claims being true",
+        "pulls its target toward the source's level",
+    ):
+        assert moved not in faq, (
+            f"website/faq.html restates the mechanism ({moved!r}). Update /docs first "
+            f"and keep this page to the objection-level claim — that is the file's "
+            f"own maintainer note."
+        )
 
 
 # ── Ontology citation hygiene ────────────────────────────────────────────────
