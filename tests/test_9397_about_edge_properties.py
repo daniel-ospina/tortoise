@@ -1730,12 +1730,27 @@ def test_the_corrected_passages_carry_no_bare_edges_line_citation():
 def test_the_references_paragraph_scopes_property_freedom_to_source_version():
     """§9.6 said identity/mention and referential-containment `references` links
     "stay **property-free**" — the same unqualified absolute this PR retracts for
-    `aboutObject`, 70 lines above the correction (third review cycle). Read as
-    written it is FALSE at HEAD for the same reason: a record-projected relation
-    is stamped `{idx:$idx}` unconditionally by
-    `cache_projection.relation_statement` (`cache_projection.py:717`) and
-    `_rebuild_all_replay` re-applies the journal's attributes over an allowlisted
-    `etypes`, so a `references` link is not property-free either.
+    `aboutObject`, 70 lines above the correction (third review cycle).
+
+    The absolute is retracted because it is an absolute, not because a
+    `references` edge carries a property today. No writer that MINTS one of
+    these links stamps a property on it: `link_source_to_entity`'s
+    non-derivation branch is `MERGE (s)-[:references]->(e)` with no `SET`
+    (`projection/edges.py`), and so are the containment writers
+    (`projection/entities.py`, `hosted_api.py`'s session→external MERGE),
+    `graph-scripts/backfill_references.py`, and the bare `create_edge` escape
+    hatch (it takes no property parameter). `session_source_migration._move_out`
+    re-points an existing edge with `ON CREATE SET r2 = properties(r)` — it
+    PRESERVES attrs, never mints one.
+
+    `cache_projection.relation_statement` *does* stamp `{idx:$idx}` +
+    `SET r += $props`, but only for record-projected `public.relation` rows, and
+    no record kind emits a `references` relation: `EntityLinked` is about*-only,
+    `DirectEdgeCreated` is IMPL/NAND, and `DirectEdgeRepoint` is IMPL/NAND plus
+    the `SUPERSEDE_STRUCTURAL_RELS` transfer — a set that excludes `references`.
+    So "a `references` link is not property-free" overstates: today it IS, which
+    is exactly why the word must be scoped to the fact the paragraph establishes
+    rather than to a general emptiness claim.
 
     The FACT the paragraph establishes is narrower and true: those forms carry
     no `sourceVersion`. The word is scoped here rather than the paragraph
@@ -1759,10 +1774,10 @@ def test_the_references_paragraph_scopes_property_freedom_to_source_version():
     ]
     assert not live, (
         "§9.6 still makes the retracted absolute claim "
-        f"{live} — a `references` link stamped by the record projection carries "
-        "`idx` (`cache_projection.py:717`), so 'property-free' is false here "
-        "exactly as it was for `aboutObject`. Scope the word: those links carry "
-        "**no `sourceVersion`**."
+        f"{live} — the word is retracted because it is an ABSOLUTE, not because "
+        "a `references` edge carries a property today (no writer that mints one "
+        "stamps anything on it). Scope it to the fact the paragraph establishes: "
+        "those links carry **no `sourceVersion`**."
     )
 
 
