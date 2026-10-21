@@ -6291,6 +6291,153 @@ def test_build_end_sweep_report_threads_observed_natural_exits():
                       "left": 6, "before": 6}
 
 
+# ── #8599: the pre-discovery self-exit the identity could not see ─────────
+# `exited` (#6984) only counts a `candidate` alive AT discovery and dead at
+# kill time. A server that shuts itself down between the pre-sweep probe and
+# `reap()`'s discovery is in `before` and in neither `reaped`, `exited` nor
+# `left`, so `reaped + exited + left >= before` reds a run whose pytest passed
+# (measured on PR #8595: before=4, reaped=1, exited=0, left=2, rc 0). The
+# builder now measures it from the PID SETS — alive at the pre-sweep probe,
+# not acted on, gone at the post-sweep probe — never as `before - reaped -
+# left`, which would make the identity a tautology (#6984's own objection).
+
+
+def test_live_embedded_server_pids_passes_the_probe_through(monkeypatch):
+    """The pid probe is the PROBE, not a count: identities, `[]` and `None`.
+
+    Three different answers again: a wrapper that returned a count (`3`), a
+    constant `[]`, or a `None` where an empty list belongs cannot satisfy all
+    three cases at once — and a count would make the vanished-server
+    measurement compare pids against integers and credit every one of them.
+    """
+    import tortoise.embedded_reaper as _R
+
+    monkeypatch.setattr(_R, "_pgrep_redis_servers_or_none", lambda: [])
+    assert _R.live_embedded_server_pids() == []
+    monkeypatch.setattr(
+        _R, "_pgrep_redis_servers_or_none", lambda: [111, 222, 333])
+    assert _R.live_embedded_server_pids() == [111, 222, 333]
+    monkeypatch.setattr(_R, "_pgrep_redis_servers_or_none", lambda: None)
+    assert _R.live_embedded_server_pids() is None
+
+
+def test_build_end_sweep_report_counts_a_server_that_self_exits_before_discovery():
+    """#8599: the window #6984 could not see is now a MEASURED natural exit.
+
+    Replay of the recorded failure: three servers are live at the pre-sweep
+    probe, the sweep acts on none of them, and only two are live afterwards —
+    one shut itself down before `reap()` ever discovered it. Without the pid
+    set the report reads `exited=0`, so the gate's identity
+    `0 + 0 + 2 >= 3` fails and reds a green run. Here `exited` must be 1 and
+    the identity must hold.
+
+    `probe` is a spy that FAILS if called: with a pid probe in hand the counts
+    come from the same reading, so a builder that still called the count probe
+    would take `before`/`left` from a DIFFERENT reading than the set it
+    measures against — the window this change exists to close.
+    """
+    from tortoise.embedded_reaper import build_end_sweep_report
+
+    def count_probe():
+        raise AssertionError(
+            "with a pid probe supplied, the counts must come from that same "
+            "reading — two readings re-open the #8599 window")
+
+    readings = iter([[111, 222, 333], [222, 333]])
+    calls = []
+
+    def pid_probe():
+        value = next(readings)
+        calls.append(value)
+        return value
+
+    report = build_end_sweep_report(
+        lambda: _scan_aware([]), deadline=1030.0, probe=count_probe,
+        clock=lambda: 1000.0, pid_probe=pid_probe)
+
+    assert calls == [[111, 222, 333], [222, 333]], (
+        "the pid probe must be read exactly twice — before the sweep, then "
+        "after")
+    assert report == {"reaped": 0, "exited": 1, "cleared": True,
+                      "left": 2, "before": 3}
+    reaped, exited = report["reaped"], report["exited"]
+    assert reaped + exited + report["left"] >= report["before"], (
+        "the gate's accounting identity must hold for the recorded #8599 "
+        "shape; a report that reds a green run is the defect")
+
+
+def test_the_vanished_term_never_absorbs_a_server_the_sweep_killed():
+    """A KILLED server is `reaped`, never also a natural exit (#8599).
+
+    If the vanished set ignored the acted-on pids, every swept server would be
+    counted twice — `reaped` and `exited` — and the identity would be
+    satisfiable by any run that killed anything, retiring the control while
+    appearing to keep it. Both servers here are in `before`; only the one the
+    sweep did NOT act on may be credited as an exit, and the one it killed
+    must show up as `reaped` alone.
+    """
+    from tortoise.embedded_reaper import build_end_sweep_report
+
+    killed = _scan_aware([{"pid": 111, "classification": "candidate"}])
+
+    report = build_end_sweep_report(
+        iter([killed, _scan_aware([])]).__next__, deadline=1030.0,
+        probe=lambda: 0, clock=lambda: 1000.0,
+        pid_probe=iter([[111, 222], [222]]).__next__)
+
+    assert report["reaped"] == 1, "the kill must reach the report"
+    assert report["exited"] == 0, (
+        "pid 111 was killed by the sweep, so it is `reaped` — crediting it "
+        "as a natural exit too would double-count it")
+
+
+def test_the_vanished_term_adds_to_the_sweep_observed_exits():
+    """The two windows ADD: a discovered-then-dead candidate and a vanished one.
+
+    `exited` carries both halves (#6984's observed branch and #8599's set
+    difference), so a builder that overwrote one with the other loses a real
+    exit and re-opens one of the two false reds.
+    """
+    from tortoise.embedded_reaper import build_end_sweep_report
+
+    empty = _scan_aware([])
+    empty.exited = 1  # #6984: one candidate died between discovery and kill
+
+    report = build_end_sweep_report(
+        iter([empty]).__next__, deadline=1030.0, probe=lambda: 0,
+        clock=lambda: 1000.0,
+        pid_probe=iter([[111, 222, 333], [333]]).__next__)
+
+    assert report["exited"] == 3, (
+        "1 observed natural exit + 2 vanished = 3; a report carrying only "
+        "one of the two halves leaves the other as an identity shortfall")
+    assert report["before"] == 3 and report["left"] == 1
+
+
+def test_a_failed_pid_probe_falls_back_to_the_count_probe_without_crediting_exits():
+    """A failed pid probe measures NO vanished servers — 0, not an inference.
+
+    `None` is "not measured", never "measured none": with no set to compare, a
+    builder that inflated `exited` (or crashed on `None`) would turn an
+    unmeasured run into a favourable verdict. The counts fall back to the
+    count probe, so an older/monkeypatched count-only seam keeps working.
+    """
+    from tortoise.embedded_reaper import build_end_sweep_report
+
+    empty = _scan_aware([])
+    empty.exited = 2
+
+    report = build_end_sweep_report(
+        iter([empty]).__next__, deadline=1030.0,
+        probe=iter([4, 4]).__next__, clock=lambda: 1000.0,
+        pid_probe=lambda: None)
+
+    assert report == {"reaped": 0, "exited": 2, "cleared": True,
+                      "left": 4, "before": 4}, (
+        "a failed pid probe must leave the report to the count probe and "
+        "credit no vanished servers")
+
+
 def test_conftest_sweep_returns_build_end_sweep_report():
     """Reject the enumerated unpinned-report shapes at the `_sweep` call site.
 
@@ -6314,7 +6461,10 @@ def test_conftest_sweep_returns_build_end_sweep_report():
     * a builder call whose arguments are not exactly the three positional
       ones — a `lambda: _run_sweep(...)`, the `deadline` name, and
       `embedded_reaper.live_embedded_server_count` (a fabricated probe,
-      e.g. `lambda: 999`, is a different shape and is rejected).
+      e.g. `lambda: 999`, is a different shape and is rejected) — plus the
+      single `pid_probe` keyword naming `embedded_reaper.live_embedded_server_pids`
+      (the #8599 identity seam: a count-only call site cannot see a server that
+      self-exits before discovery).
 
     This test does not prove the call site correct in general; it rejects the
     shapes listed above (#4740).
@@ -6397,10 +6547,16 @@ def test_conftest_sweep_returns_build_end_sweep_report():
     )
     call = builder_return.value
     assert isinstance(call, ast.Call)  # narrows the type for the reader
-    assert len(call.args) == 3 and call.keywords == [], (
-        "the builder call must pass exactly 3 positional arguments and no "
-        "keywords — the sweep lambda, the deadline, and the live-server "
-        "probe; any other arity leaves an argument unpinned (#4740)"
+    # #8599: exactly ONE keyword is admitted — `pid_probe`, the identity seam
+    # the accounting identity is measured against. Everything else about the
+    # arity check is unchanged: a fabricated probe still hands the gate a
+    # bound (or an identity) the run never measured.
+    assert len(call.args) == 3 and [k.arg for k in call.keywords] == [
+        "pid_probe"], (
+        "the builder call must pass exactly 3 positional arguments — the "
+        "sweep lambda, the deadline, and the live-server count probe — plus "
+        "the single `pid_probe` keyword (#8599); any other arity or keyword "
+        "leaves an argument unpinned (#4740)"
     )
     sweep_lambda, deadline_arg, probe_arg = call.args
     assert (
@@ -6425,6 +6581,23 @@ def test_conftest_sweep_returns_build_end_sweep_report():
         "argument 3 must be `embedded_reaper.live_embedded_server_count` — "
         "the real probe; a fabricated probe (e.g. `lambda: 999`) hands the "
         "gate a bound the run never measured (#4740)"
+    )
+    # #8599: the identity seam must be the REAL pid probe, for the same reason.
+    # A production call site that drops it (or names a fabricated one) restores
+    # the pre-discovery hole: a server that self-exits before discovery is then
+    # in neither `reaped`, `exited` nor `left`, and the gate reds a green run.
+    pid_probe_arg = call.keywords[0].value
+    assert (
+        isinstance(pid_probe_arg, ast.Attribute)
+        and isinstance(pid_probe_arg.value, ast.Name)
+        and pid_probe_arg.value.id == "embedded_reaper"
+        and pid_probe_arg.attr == "live_embedded_server_pids"
+    ), (
+        "argument `pid_probe` must be "
+        "`embedded_reaper.live_embedded_server_pids` — the real PID probe "
+        "(#8599); a count-only call site cannot measure a server that "
+        "self-exits before discovery and re-opens the false red the "
+        "accounting identity exists to avoid"
     )
     undocumented = [
         n for n in returns

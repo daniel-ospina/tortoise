@@ -909,6 +909,14 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
                     # marks a failed probe. The module-attribute call and
                     # probe (see the import block above) are pinned by
                     # `test_conftest_sweep_returns_build_end_sweep_report`.
+                    # #8599: `pid_probe` is the IDENTITY seam — the same two
+                    # readings as PID SETS, so a server that self-exits before
+                    # `reap()` discovers it is counted as an observed natural
+                    # exit instead of reading as a broken sweep (the identity
+                    # `reaped + exited + left >= before` would otherwise red a
+                    # green run: before=4, reaped=1, exited=0, left=2). It is a
+                    # keyword, not a fourth positional, so the count probe's
+                    # slot and the fallback contract stay where they were.
                     return embedded_reaper.build_end_sweep_report(
                         lambda: _run_sweep(
                             dry_run=False, batch_size=SWEEP_BATCH_SIZE,
@@ -929,6 +937,7 @@ def _redislite_hygiene(_reclaim_session_tmpdirs):
                             deadline=deadline),
                         deadline,
                         embedded_reaper.live_embedded_server_count,
+                        pid_probe=embedded_reaper.live_embedded_server_pids,
                     )
                 finally:
                     if prev is None:
