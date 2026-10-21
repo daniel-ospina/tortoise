@@ -2019,13 +2019,13 @@ main() {
               # #9480: a SECONDARY RATE LIMIT is not a broken monitor. The
               # incident simply stays OPEN — the safe state — and the next pass
               # that can search closes it, so failing the run adds no safety.
-              # What it does add is a false OUTAGE report on a service the three
-              # confirmation probes above just found UP, and it fires exactly
-              # when OUR OWN traffic is highest (a secondary limit is a function
-              # of our request rate — the same reason #9402 moved the open-PR
-              # surface to REST). Any OTHER search error (auth, 5xx, malformed)
-              # still means the monitor cannot read its own state and still fails
-              # loudly below.
+              # What it does add is a false OUTAGE report on a service the probe
+              # and its RECOVERY_CONFIRM_PROBES confirmation(s) above just found
+              # UP, and it fires exactly when OUR OWN traffic is highest (a
+              # secondary limit is a function of our request rate — the same
+              # reason #9402 moved the open-PR surface to REST). Any OTHER search
+              # error (auth, 5xx, malformed) still means the monitor cannot read
+              # its own state and still fails loudly below.
               if grep -qiE 'rate limit|too many requests|abuse detection' "$RUN_TMP/search.err" 2>/dev/null; then
                 warn "issue search was RATE LIMITED on the recovery path — leaving any ${kind_loop} incident OPEN (nothing was closed; the search could not even confirm one exists). The service is UP; the next pass retries. This is NOT a monitor failure."
                 continue

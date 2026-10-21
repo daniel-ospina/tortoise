@@ -2087,7 +2087,7 @@ tracked as **#5798**.
   secondary limit is a function of OUR traffic — the same pressure that moved the
   open-PR surface to REST, #9402). The carve-out is **narrow**: every other
   search error (`401`, `5xx`, `404`, malformed body) still reaches a loud `fail`
-  + `exit 1`, because a monitor that cannot read its own state is broken even
+  and `exit 1`, because a monitor that cannot read its own state is broken even
   when the service is up. Both directions are pinned by harness cases
   46b/46c/46d.
   Read the run log for `RATE LIMITED` before treating a green run as "no
