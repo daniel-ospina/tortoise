@@ -1700,6 +1700,46 @@ def test_docs_lint_baseline_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_extractor_tooling_change_selects_core_and_ep_not_tier1():
+    # #2786 review P2: `tools/probe_extractor.py` (the classification prompt put
+    # in front of the model) and `tools/calibration_harness.py` (the harness whose
+    # `VOCAB` the `minted` metric reads) are the two TOOLING copies of the core
+    # object-kind vocabulary. #2786 makes both DERIVE from
+    # `pack_registry.CANONICAL_OBJECT_KINDS`, and the guards that pin them live in
+    # TWO surfaces: `tests/test_kind_vocabulary_consistency.py` is `core` (the
+    # canonical-derivation legs), and `tests/test_calibration_tools.py` is `ep`
+    # (it imports BOTH tools at module level).
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and neither file had a
+    # SOURCE_PATTERNS row, so a tooling-only diff selected NO surface and fell
+    # back to the 52-file tier-1 smoke set, which contains NEITHER guard.
+    # MEASURED on the PR head: `select(["tools/probe_extractor.py",
+    # "tools/calibration_harness.py"])` -> surfaces=[], full=False, 52 files,
+    # both guards absent. So the exact drift the guard exists to prevent —
+    # someone retyping a stale `core:<kind>` into a tool — was green on the very
+    # PR that introduces it. Same #1349/#3332/#3616 silent-drop class as
+    # tools/docs_lint_baseline.py above.
+    #
+    # Both halves are asserted because the fix has both: the CORE_ALSO entries
+    # add `core` (the vocabulary guard), and the `ep` SOURCE_PATTERNS rows add
+    # `ep` (the harness/probe behaviour guard) — and a SOURCE_PATTERNS match
+    # REPLACES the `core` fallback, which is exactly why the two must be paired.
+    #
+    # Mutation check: removing a CORE_ALSO entry fails the `core` assert
+    # (`surfaces` becomes `["ep"]`); removing an `ep` SOURCE_PATTERNS entry fails
+    # the `ep` assert. Neither guard is in tier-1, so the pre-fix selection ran
+    # neither — that is what makes these asserts non-vacuous.
+    for path in ("tools/probe_extractor.py", "tools/calibration_harness.py"):
+        r = _sel([path])
+        assert r["full"] is False, (path, r)
+        assert "core" in r["surfaces"], (path, r["surfaces"])
+        assert "test_kind_vocabulary_consistency.py" in r["test_files"], (
+            path, "the vocabulary guard is not selected by a change to the tool it pins")
+        assert "ep" in r["surfaces"], (path, r["surfaces"])
+        assert "test_calibration_tools.py" in r["test_files"], (
+            path, "the harness/probe behaviour guard is not selected by a change to it")
+
+
 def test_e1_e2_evidence_bundle_change_selects_core_not_the_docs_only_return():
     # #9076: the E1+E2 evidence bundle (`docs/evidence/7949-capstone/` — the probe,
     # the corpus JSON + builder, the evidence log) and its structural checker

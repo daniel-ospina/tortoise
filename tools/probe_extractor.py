@@ -35,6 +35,14 @@ from pathlib import Path as _Path
 # packs (PackRegistry, the canonical source — same lineage as the value brief)
 import yaml
 
+# The ONE canonical object-kind set (#2786). Imported, never re-typed: the vocabulary this
+# probe compiles and the kind semantics below must agree with §5, and a hand-typed copy is
+# exactly how they stopped agreeing.
+sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+from tortoise.pack_registry import (
+    CANONICAL_OBJECT_KINDS as _CANONICAL_OBJECT_KINDS,
+)
+
 
 def _compile_vocab(packs_dir: _Path) -> dict:
     """Compile {namespace: {kind: {description, nearMisses, examples}}} from
@@ -81,19 +89,55 @@ def _render_kind_semantics(vocab: dict, ns: str, kinds: list[str]) -> str:
     return "\n".join(lines)
 
 
-# Core kind semantics (ONTOLOGY §5 + canonical descriptions)
-CORE_OBJECT_KINDS = "Project, WorkItem, document, tag, user, skill, tool, agent, workflow, agreement, standard, concept, other"
+# Core kind semantics (ONTOLOGY §5 + canonical descriptions).
+#
+# ⛔ `CORE_OBJECT_KINDS` is DERIVED from the canonical set — never a fourth hand-typed copy.
+# Measured before this change it still carried `document` (retired as an `objectKind` by D10 — a
+# document is a `:Source`, ONTOLOGY §4.4) and `concept` (never a §5 objectKind — removed from
+# the extractor's core brief by T12/#1272, which maps it to `core:other`), while OMITTING five
+# kinds §5 declares (`Problem`, `strategy`, `plan`, `goal`, `target`).
+# ⚠ HONESTY ABOUT ITS REACH (#2786 review): no PRODUCTION path renders this constant — the
+# prompt's kind menu is `CORE_SEMANTICS` below, rendered into `core_lines`; its only in-repo
+# reader is the guard `tests/test_kind_vocabulary_consistency.py`
+# ::test_extraction_probe_object_kinds_are_the_canonical_set, which pins its contents. It is
+# kept DERIVED rather than deleted so that a consumer (an out-of-repo probe script) cannot pick
+# up a stale list, and it is NOT the surface this change fixes; the prompt was fixed in TWO
+# places — the two retired descriptions dropped from `CORE_SEMANTICS` AND the confusable-kind
+# paragraph rewritten to route abstract models to `core:other` — and the built-prompt leg reds
+# if EITHER is reverted (measured: restoring the paragraph alone re-fails it).
+CORE_OBJECT_KINDS = ", ".join(sorted(_CANONICAL_OBJECT_KINDS))
 CORE_SUBJECT_KINDS = "organization, team, role, legalPerson, naturalPerson, other"
+# The DESCRIBED SUBSET of the canonical set — the entries that carry the confusable-kind hints,
+# and the ONLY core kinds the prompt's menu renders. ⛔ Every key must be a canonical
+# `objectKind`: a description is an instruction ("emit this when…"), so a stale key asks the
+# model for a kind no read path can resolve (`document` and `concept` did exactly that).
+# The subset is deliberately not the whole axis (a canonical kind with no hint is left
+# undescribed), so the legs that guard it are TWO-directional together: no stale key (the
+# `semantics_are_canonical_kinds` leg) and no silently narrowed/widened subset (the
+# `described_subset_is_sized` leg) — `UNDESCRIBED_CORE_KINDS` below is the sized exception, and
+# adding or dropping a description is a reviewed edit, never a quiet one. Completing the
+# descriptions is rubric authoring and belongs to the calibration lane, not a vocabulary guard.
+# Guarded by `tests/test_kind_vocabulary_consistency.py`
+# ::test_extraction_probe_semantics_are_canonical_kinds,
+# ::test_extraction_probe_described_subset_is_sized and
+# ::test_extraction_probe_descriptions_carry_text (the key sets AND the values: an emptied
+# description renders an empty instruction while every set-level leg stays green).
 CORE_SEMANTICS = {
     "Project": "A top-level initiative or product line",
     "WorkItem": "A unit of work (epic, issue, task)",
     "tool": "A tool, CLI, or utility used in the work",
     "workflow": "A reusable procedural sequence",
-    "document": "A document artifact",
     "standard": "A standard, spec, or canonical reference",
-    "concept": "An abstract idea or model — INCLUDING the system's own concepts (points, decisions, claims, options, criteria, lifecycle, the state-centric model). Sessions ABOUT the ontology produce concepts; do NOT force them into other/architecture/standard.",
     "other": "No fitting kind — the EXPLICIT uncertain/other bucket (never forced)",
 }
+# The canonical kinds `CORE_SEMANTICS` deliberately leaves UNDESCRIBED (#2786 review): an
+# exception SIZED, like the point axis's, so a description silently dropped (narrowing the
+# prompt's menu) or silently added is a failing test rather than a quiet drift. Completing
+# these is rubric authoring — the calibration lane's, not a vocabulary guard's.
+UNDESCRIBED_CORE_KINDS = frozenset({
+    "Problem", "tag", "user", "skill", "agent", "agreement",
+    "strategy", "plan", "goal", "target",
+})
 NEAR_MISS_ENTITY_KINDS = (
     "product-strategy:useCase, product-strategy:userJourney, "
     "product-strategy:jobToBeDone, product-strategy:valueProposition, "
@@ -139,7 +183,7 @@ THE CLAIM GATE (iteration 6 — the corrected discriminator): glue = talk ABOUT 
 
 ## Entity axis (what entities are mentioned) — CLOSED vocab WITH semantics (criteria v1 §2)
 Type every entity mention against the kind SEMANTICS below — never name-matching, never minted kinds. Prefer the MOST SPECIFIC kind; near-miss (⚠) → the closest kind WITH the flag and the confusable sibling named; no fit or low confidence → core:other EXPLICITLY + a pack-proposal note (never forced nearest-kind).
-CONFUSABLE GUARD: product-strategy:architecture is for the DESIGN/STRUCTURE of a solution ("the four-node chain architecture") — NOT for abstract models ("the state-centric model" → core:concept), NOT for implementation details ("Object MERGE key", "rate bucket" → dev:code or core:concept), NOT for work items ("quota fix" → dev:issue is wrong — it is a work item → core:WorkItem).
+CONFUSABLE GUARD: product-strategy:architecture is for the DESIGN/STRUCTURE of a solution ("the four-node chain architecture") — NOT for abstract models ("the state-centric model" → core:other: §5 declares NO `concept` object kind, so an abstract model with no fitting kind is the EXPLICIT other bucket), NOT for implementation details ("Object MERGE key", "rate bucket" → dev:code or core:other), NOT for work items ("quota fix" → dev:issue is wrong — it is a work item → core:WorkItem).
 
 CORE:
 {core_lines}
