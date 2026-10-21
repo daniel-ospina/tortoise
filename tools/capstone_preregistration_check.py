@@ -91,13 +91,33 @@ unparseable pins) — a check that cannot read its subject must never report suc
 
 from __future__ import annotations
 
+import sys
+
+# #5128 shape: refuse a <3.12 interpreter BEFORE the imports below. `from
+# __future__ import annotations` is deliberately the ONLY statement allowed
+# above this — a module-level 3.12+-only construct would otherwise fail first,
+# and it would fail with an unattributed traceback instead of this message. The
+# gate that enforces this shape is tests/test_entry_point_python_guard.py, not a
+# style rule; the position is load-bearing, so it is not cosmetic ordering.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    # 2 is this tool's own "environment/usage error" code (`main` returns 1 only
+    # for FINDINGS), so an old interpreter stays legible in a runner that keys on
+    # the exit code alone — the same contract the sibling e1_e2_census_check.py
+    # carries.
+    print(
+        f"tools/capstone_preregistration_check.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/capstone_preregistration_check.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
 import argparse
 import hashlib
 import importlib
 import json
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
