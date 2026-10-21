@@ -1169,11 +1169,20 @@ def test_no_two_census_entries_share_a_bare_function_name():
 #: anchor had already rotted", "`(line ~700)` in `_handle_query_calls`") — went
 #: green: `sdk.py:~23508`, `sdk.py (line ~23508)` and `` `sdk.py` ~23508 `` all
 #: missed. Same rot: the number still points at whatever function holds that
-#: line. The tilde is a separator like any other, so it is admitted; a note that
-#: merely mentions a MAGNITUDE (`sdk.py is ~37k lines`) still cannot match,
-#: because that text carries letters between the path and the digits.
+#: line. The tilde is a separator like any other, so it is admitted.
+#: ⛔ AND THE MAGNITUDE GUARD (review, measured): admitting `~` made
+#: `sdk.py ~37k lines` — a LENGTH statement, not a citation — match, because the
+#: tilde consumed the separator and `37` is a digit run. The sentence above named
+#: letters between the path and the digits as what kept a magnitude out;
+#: `sdk.py is ~37k lines` alone does not hold that line (it passes on the word
+#: "is"), and `sdk.py ~37k lines` went red with no letters at all. `(?![\dkK])`
+#: is what actually does the work: `\d+` cannot backtrack into the run (`3`
+#: leaves `7k`, which fails the same lookahead), so neither `sdk.py ~37k lines`
+#: nor `sdk.py ~ 37k lines` matches, while every digit-final spelling above still
+#: does. Both spellings are in `must_not_match`.
 _SDK_LINE_ANCHOR = re.compile(
-    r"sdk\.py[\s,:`@#()~]*(?:(?:at\s+)?line[\s:,#~]*)?(?:at\s+)?[Ll]?#?\d+",
+    r"sdk\.py[\s,:`@#()~]*(?:(?:at\s+)?line[\s:,#~]*)?(?:at\s+)?[Ll]?#?\d+"
+    r"(?![\dkK])",
     re.IGNORECASE)
 
 #: ⛔ NO LOCAL WRITE-CLAUSE REGEX HERE. What counts as a write is
@@ -2138,6 +2147,12 @@ def test_the_line_anchor_matches_every_spelling():
         "the sdk.py module",
         "CITED BY SYMBOL, NEVER BY `sdk.py:<line>`",
         "sdk.py is ~37k lines",
+        # ⛔ …and the MAGNITUDE statement WITHOUT the word "is" (review,
+        # measured): admitting `~` made the tilde spelling match, so the control
+        # above passed only because of the letters in "is". Both are length
+        # statements, not citations, and both must stay green.
+        "sdk.py ~37k lines",
+        "sdk.py ~ 37k lines",
     ]
     for variant in must_not_match:
         assert not _SDK_LINE_ANCHOR.search(variant), (
