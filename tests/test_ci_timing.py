@@ -1642,7 +1642,7 @@ def test_an_embedded_nodeid_is_not_a_verdict(tmp_path: Path) -> None:
 def test_a_spaced_param_survives_a_summary_less_leg(tmp_path: Path) -> None:
     """A progress line is the ONLY evidence on a killed leg, and a spaced id must survive it.
 
-    The short-summary capture was widened but `V_PROGRESS_RE` kept `[^\s]+` for the id, so a
+    The short-summary capture was widened but the progress pattern kept a no-space id, so a
     parameter containing a space was still lost from `failed_tests` AND from the count whenever
     the log is truncated before the summary block — which is exactly the watchdog-killed shape
     this artifact has to publish honestly (#9134 review, P2).
@@ -1769,6 +1769,46 @@ def test_a_spaced_param_is_not_truncated_at_the_space(tmp_path: Path) -> None:
         "tests/test_x.py::test_spaced[server bay]",
     }
     assert agg["total_counts"]["failed"] == 3
+
+
+def test_a_reason_containing_a_verdict_word_is_not_that_verdict(tmp_path: Path) -> None:
+    """pytest's skip/xfail reason is parenthesised and may itself SPELL a verdict.
+
+    `XFAIL (expected FAILED) [ 12%]` is one xfail. A rule that allowed arbitrary text between the
+    verdict and the marker re-anchored on the reason's own word and published
+    `('…::test_xf XFAIL (expected', 'FAILED')` — a failure for a test that never failed, and on a
+    summary-less leg a fabricated count as well (#9134 review, P1).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "tests/test_x.py::test_xf XFAIL (expected FAILED) [ 12%]\n"
+        "tests/test_x.py::test_skip SKIPPED (the ERROR case) [ 12%]\n")
+    parsed = ci_timing.parse_log(leg / "pytest.log")
+    assert parsed["outcomes"] == {
+        "tests/test_x.py::test_xf": "XFAIL",
+        "tests/test_x.py::test_skip": "SKIPPED",
+    }
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == set()
+    assert agg["total_counts"].get("failed", 0) == 0
+    assert agg["total_counts"].get("error", 0) == 0
+
+
+def test_a_param_containing_the_separator_is_not_truncated(tmp_path: Path) -> None:
+    """`test_p[a - b]` is an id; the separator is the ` - ` OUTSIDE its brackets.
+
+    Truncating at the first ` - ` published `…::test_p[a`, a nodeid pytest never reports — the
+    same harm as truncating a spaced id, for the same reason (a pattern cannot tell the id's own
+    punctuation from the format's). The split is bracket-aware.
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "FAILED tests/test_x.py::test_p[a - b] - AssertionError: boom\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {"tests/test_x.py::test_p[a - b]"}
+    assert agg["total_counts"]["failed"] == 1
 
 
 def test_an_unreadable_log_degrades_instead_of_killing_the_run(tmp_path: Path) -> None:
