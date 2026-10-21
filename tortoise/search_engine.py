@@ -2712,7 +2712,24 @@ def degradation_chain(
         try:
             for future in concurrent.futures.as_completed(futures, timeout=deadline):
                 strategy_name = futures[future]
-                strategy_results = future.result()  # already done — no timeout needed
+                # #8450 (lane L4, #5096): PER-FUTURE, never the loop's outer
+                # handler. `future.result()` used to run unguarded here, so a
+                # RAISING worker escaped into the `except Exception` below —
+                # which only logs — and every future `as_completed` had not yet
+                # yielded was ABANDONED with its rows, while that leg's own
+                # private trace still said ``reason="ok"``. The docstring's
+                # contract is per-strategy ("one strategy down, others
+                # continue"); the TimeoutError arm below already re-reads its
+                # own stragglers for exactly this reason, and this is the same
+                # salvage for a leg that raised instead of timing out.
+                try:
+                    strategy_results = future.result()  # already done — no timeout needed
+                except Exception as e:  # a leg's failure is not the read's
+                    logger.warning(
+                        "%s strategy raised — degraded, other legs continue: %s",
+                        strategy_name, e,
+                    )
+                    continue
                 if strategy_results:
                     results[strategy_name] = strategy_results
                 else:
@@ -2754,6 +2771,9 @@ def degradation_chain(
                     timed_out.add(strategy_name)
                     f.cancel()
         except Exception as e:
+            # #8450: now the LAST RESORT only — a leg that raises is absorbed
+            # per-future above, so reaching here means the COLLECTOR itself
+            # failed (e.g. ``as_completed``), which does bound the whole call.
             logger.warning("Strategy execution failed: %s — degraded", e)
 
         # R3 (#1542) D4: merge the private lists in FIXED order (fts, vector,

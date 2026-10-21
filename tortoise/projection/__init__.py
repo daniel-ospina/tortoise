@@ -5760,6 +5760,28 @@ _ANNOTATOR_SHORT_ALIASES: dict[str, str] = {
     "directness": "annotator_directness",
 }
 
+# #9350: the capture provenance stamp's four fields (W5 Phase F, #2104).
+#
+# ``capture_session`` writes them onto the ids a capture MINTED, and until
+# #9350 it did so with a raw write at the projection's handle and NO record —
+# so a journal-only rebuild lost them for every minted Point that is never
+# promoted (``_apply_capture_ingest_ep``'s ``PointPromoted`` snapshot is a full
+# ``get_point`` and is what accidentally carried them for the promoted ones).
+# The W2 benchmark grades ``provenance_accuracy`` over exactly these fields.
+#
+# The write is now journalled as one ``PointRevised`` per minted id, so BOTH
+# fold engines have to carry the fields or the record would be a carrier with
+# no fold — the #3299 class (a live mutation replay silently reverts). Declared
+# HERE, beside the other declared prop groups, because the two arms below must
+# spell the same set: the graph fold (``_revise_point``) and the pure fold
+# (``_apply_one``'s ``PointRevised`` arm).
+_REVISION_PROVENANCE_PROPS: tuple[str, ...] = (
+    "eventId",
+    "source_session",
+    "source_harness",
+    "ingested_at",
+)
+
 
 def _annotator_value_ok(val) -> bool:
     """True when a journaled annotator dim can be written to FalkorDB.
@@ -7828,6 +7850,38 @@ def _apply_one(points: dict[str, dict], ev: dict,
                 prev = points.get(p["id"])
                 if isinstance(prev, dict) and "tags" in prev:
                     p = {**p, "tags": prev["tags"]}
+            # #9350: the SAME omitted-key carry-forward, one prop group wider.
+            # The graph fold MERGEs and `_persist_extra_props` writes only the
+            # keys the payload states (and skips a key stated as `None`), so a
+            # later creation that restates only `content` KEEPS the stored
+            # provenance. Replacing the entry outright below would drop it, and
+            # `fold()` / `rebuild_all` would disagree on the same journal — the
+            # exact asymmetry the `tags` clause above exists to prevent. Gated
+            # on the same `journal_recreate` boundary so a re-created node does
+            # not inherit a dead incarnation's `eventId`.
+            _prev = points.get(p["id"])
+            if isinstance(_prev, dict):
+                _carried: dict = {}
+                _dropped: set = set()
+                for _pk in _REVISION_PROVENANCE_PROPS:
+                    if _pk not in _prev:
+                        continue
+                    if p.get(_pk) is None or not _is_persistable_prop_value(p[_pk]):
+                        # The writer's OUTCOME, not the key's presence: an absent
+                        # key, an explicit `None` and a value
+                        # `_is_persistable_prop_value` rejects all write NO
+                        # property on a MERGE'd node, so the stored value
+                        # survives — the same split `_stated_tags` spells.
+                        _carried[_pk] = _prev[_pk]
+                    elif not _store_holds_prop_value(p[_pk]):
+                        # ... while a value the writer CAN pass but the store
+                        # cannot hold is degraded to `SET n.<k> = NULL` at
+                        # dispatch (#7369), which REMOVES the property. Folding
+                        # the raw value would keep it.
+                        _dropped.add(_pk)
+                if _carried or _dropped:
+                    p = {**{_k: _v for _k, _v in p.items() if _k not in _dropped},
+                         **_carried}
         points[p["id"]] = p
         # Flatten speaker from point's provenance into node data
         # #331: non-dict provenance (null/string) must not crash flattening.
@@ -7912,6 +7966,28 @@ def _apply_one(points: dict[str, dict], ev: dict,
             # non-persistable value must DROP, never strand the rebuild.
             for _pk in ("validFromPrecision", "validToPrecision"):
                 if _pk in ev and _annotator_value_ok(ev[_pk]):
+                    p[_pk] = ev[_pk]
+            # #9350: fold the capture provenance stamp's four fields. The
+            # live write is the capture's own ``PointRevised`` carrier (one
+            # per minted id, appended BEFORE the cache write), so the pure
+            # fold must restore them or ``fold()`` and ``rebuild_all``
+            # disagree on the same journal (the #330 parity contract this
+            # function owns) — and a minted Point that is never promoted has
+            # no other record carrying them. Presence-conditional and gated
+            # by the store-EXACTNESS bar the `tags` clause above uses
+            # (``_store_holds_prop_value``, which IMPLIES
+            # ``_annotator_value_ok``): an absent key never clears a value the
+            # revision did not speak about, and a corrupt journal's
+            # non-writable value DROPS rather than stranding the recovery.
+            # ⛔ NOT ``_annotator_value_ok`` alone (#9350 review, P2): these
+            # four are free-form scalars, so an ``int`` outside INT64 passes
+            # that predicate while the STORE either CLAMPS it (4.16-4.20) or
+            # refuses to parse it (6.x) — the fold would then hold a value no
+            # engine stores, and the graph half would abort the rebuild after
+            # the wipe. One bar for all three sites (creation carry-forward,
+            # this arm, ``_revise_point``).
+            for _pk in _REVISION_PROVENANCE_PROPS:
+                if _pk in ev and _store_holds_prop_value(ev[_pk]):
                     p[_pk] = ev[_pk]
     elif t == "OperatorAnnotated":
         # #3689: the explicit annotation record — parity with apply() /
@@ -12111,6 +12187,14 @@ class FalkorProjection(
         # over-suppress the revision's value for the prop nobody restated).
         last_vfp_write_by_source: dict[tuple[tuple[str, str], int], int] = {}
         last_vtp_write_by_source: dict[tuple[tuple[str, str], int], int] = {}
+        # #9350: the same open-set conditional-write class, per PROP, for the
+        # four capture provenance fields — an open-set prop the creation's
+        # ``_persist_extra_props`` writes only when the payload carries a
+        # non-None value. Keyed ``((kind, id), ordinal) -> {prop: seq}`` so a
+        # creation that restated ONE of the four suppresses only that one
+        # (the #2350 per-end rule, applied to the four-field group).
+        last_prov_write_by_source: dict[
+            tuple[tuple[tuple[str, str], int], str], int] = {}
         # #4305: id-WIDE (cross-file) journal-owned derived markers for the
         # pass-1b restore tail. The per-source anchors above are a WITHIN-file
         # chronology boundary; the restore tail runs AFTER every journal file,
@@ -12308,12 +12392,26 @@ class FalkorProjection(
                     # needs an explicit rule for state the journal never
                     # authored"), and it is the same premise as the sibling
                     # fields: a re-creation is a FRESH node live.
+                    #
+                    # #9350: the four capture-provenance props are wiped for the
+                    # SAME reason, and they need it HERE because the pure fold's
+                    # creation arm mirrors this wipe (`_apply_one`'s
+                    # `journal_recreate` gate): pass 1a never folds the delete,
+                    # so the re-create MERGEs onto the still-present dead node
+                    # and `_upsert_point_props` writes only the keys the payload
+                    # states — without this, a re-creation that omits them
+                    # inherits the dead incarnation's `eventId`/`source_session`
+                    # and the rebuilt node diverges from live AND from `fold()`.
+                    # The wipe runs BEFORE `_upsert_point_props`, so a
+                    # re-creation that DOES restate them still writes them.
                     self.g.query(
                         "MATCH (n:Point {id:$id}) "
                         "SET n.embedding = NULL, n.content_hash = NULL, "
                         "    n.embedding_verbatim = NULL, "
                         "    n.sourceVersionTransit = NULL, "
-                        "    n.tags = NULL",
+                        "    n.tags = NULL, "
+                        "    n.eventId = NULL, n.source_session = NULL, "
+                        "    n.source_harness = NULL, n.ingested_at = NULL",
                         params={"id": p["id"]})
                 # Property parity with apply()/apply_one (#330): the shared
                 # helper writes ALL node properties incl. authoredBy,
@@ -12367,6 +12465,13 @@ class FalkorProjection(
                     # test would wrongly count as a write).
                     if "mitigation_strength" in persisted_extras:
                         last_ms_write_by_source[key] = seq
+                    # #9350: the capture provenance fields are the same
+                    # open-set conditional-write class — the boundary is the
+                    # creation that actually WROTE each prop (the writer's own
+                    # reported key set), never a second copy of its condition.
+                    for _prov in _REVISION_PROVENANCE_PROPS:
+                        if _prov in persisted_extras:
+                            last_prov_write_by_source[(key, _prov)] = seq
                     # #2897: `tags` rides the same reported set (its own
                     # explicit clause placed it there) — the pass-1b boundary
                     # for a tag EDIT.
@@ -12861,6 +12966,7 @@ class FalkorProjection(
                 skip_tags = False
                 skip_valid_from_precision = False
                 skip_valid_to_precision = False
+                skip_provenance: frozenset[str] = frozenset()
                 if isinstance(rid, str) and src is not None:
                     # #3860 composition: a PointRevised revises a ``:Point``,
                     # so its anchor key carries the same kind-scoped inner key
@@ -12915,6 +13021,15 @@ class FalkorProjection(
                         skip_valid_to_precision = (
                             last_recreate_seq_by_source.get(key, -1) > seq
                             or last_vtp_write_by_source.get(key, -1) > seq)
+                        # #9350: one boundary per provenance prop, on the
+                        # SAME rule — the creation that actually restated it
+                        # (read from the writer's reported key set), or a hard
+                        # delete→recreate for the revision half.
+                        skip_provenance = frozenset(
+                            _prov for _prov in _REVISION_PROVENANCE_PROPS
+                            if (last_recreate_seq_by_source.get(key, -1) > seq
+                                or last_prov_write_by_source.get(
+                                    (key, _prov), -1) > seq))
                 wrote_embedding, wrote_content_hash = self._revise_point(
                     ev, set_updated_at=True,
                     skip_annotator_dims=(
@@ -12933,7 +13048,8 @@ class FalkorProjection(
                     skip_mitigation_strength=skip_mitigation_strength,
                     skip_tags=skip_tags,
                     skip_valid_from_precision=skip_valid_from_precision,
-                    skip_valid_to_precision=skip_valid_to_precision)
+                    skip_valid_to_precision=skip_valid_to_precision,
+                    skip_provenance=skip_provenance)
                 if isinstance(rid, str):
                     # #4305: id-wide journal-owned derived marks — the revision
                     # wrote (or explicitly wiped) each field it was not told
@@ -17137,7 +17253,8 @@ class FalkorProjection(
                       skip_mitigation_strength: bool = False,
                       skip_tags: bool = False,
                       skip_valid_from_precision: bool = False,
-                      skip_valid_to_precision: bool = False
+                      skip_valid_to_precision: bool = False,
+                      skip_provenance: frozenset[str] = frozenset()
                       ) -> tuple[bool, bool]:
         """Apply PointRevised event — update content, context, and re-compute embedding.
 
@@ -17201,6 +17318,17 @@ class FalkorProjection(
         written through the update door was dropped by replay and
         `end_state` flipped `unknown` -> `open` (fabricated coverage,
         #2349) while `check_consistency` red the healthy live graph.
+
+        ``skip_provenance`` (#9350) is the same class again, one entry per
+        CAPTURE PROVENANCE prop (`_REVISION_PROVENANCE_PROPS`: ``eventId``,
+        ``source_session``, ``source_harness``, ``ingested_at``). The capture
+        path journals one ``PointRevised`` per minted id carrying those four
+        fields ahead of its cache write, and this fold is what makes a
+        journal-only rebuild restore them for a minted Point that is never
+        promoted. The boundary is per prop — a later same-file creation that
+        restated one of the four did not clear the others live — and it is
+        read from the creation's reported ``persisted_extra_keys``, exactly
+        as ``mitigation_strength``'s anchor is.
 
         Returns ``(embedding_written, content_hash_written)`` (#4305) — the
         same conditional-write outcome ``_upsert_point_props`` reports, and
@@ -17338,6 +17466,35 @@ class FalkorProjection(
                 and _annotator_value_ok(ev["validToPrecision"])):
             set_clauses.append("n.validToPrecision = $validToPrecision")
             params["validToPrecision"] = ev["validToPrecision"]
+
+        # #9350: fold the capture provenance stamp (``eventId``,
+        # ``source_session``, ``source_harness``, ``ingested_at``). The
+        # capture journals one ``PointRevised`` per minted id BEFORE the cache
+        # write, so this clause is what makes ``rebuild()``/``rebuild_all()``
+        # restore provenance for a minted Point that is never promoted — the
+        # ONLY record that carries it. `skip_provenance` is per-PROP and not a
+        # single shared anchor, for the reason #2350 states for the two
+        # precision ends: a later same-file creation that restated only one of
+        # the four did not clear the other three live, so one shared anchor
+        # would over-suppress a revision's value for the props nobody
+        # restated. Presence-conditional, mirroring the live ``SET`` (an
+        # explicit value is a write; an absent key means the revision did not
+        # speak about it) and gated by the store-EXACTNESS predicate, so a
+        # corrupt record DROPS instead of stranding the recovery.
+        # ⛔ ``_store_holds_prop_value``, not ``_annotator_value_ok`` alone
+        # (#9350 review, P2): an ``int`` outside INT64 passes the latter, and
+        # emitting the clause for it either CLAMPS the property (4.16-4.20) or
+        # RAISES at parameter parse (6.x) — the second ABORTS `rebuild_all`
+        # after the wipe (#325/#3689), and the first disagrees with the pure
+        # fold forever. The same bar the `tags` clause above and the
+        # ``PointAdded`` carry-forward use, so all three sites cannot disagree.
+        for _pk in _REVISION_PROVENANCE_PROPS:
+            if _pk in skip_provenance or _pk not in ev:
+                continue
+            if not _store_holds_prop_value(ev[_pk]):
+                continue
+            set_clauses.append(f"n.{_pk} = ${_pk}")
+            params[_pk] = ev[_pk]
 
         if new_content is not None:
             # Re-compute embedding when content changes (even to empty — wipe
