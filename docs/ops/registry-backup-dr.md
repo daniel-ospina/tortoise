@@ -521,7 +521,12 @@ by the same `KIND_OWNERS` rule. See
 
 **Publication redaction:** `config_error`/`storage_error`, the raw sweep body,
 the purge failure body and `last_sweep` (whose `graph_failures[].error` carries
-raw per-graph exception text) are published into a **public** GitHub issue +
+raw per-graph exception text, and whose `graph_failures[].error_kind` names the
+CAUSE CLASS when one was recognised — `transport` for a connection/parser
+teardown or a transport-class failure, absent otherwise, so **read it before
+triaging the graph's data**: `transport` means the box or the connection was the
+problem, and the same graph may back up cleanly on the next run — #6977) are
+published into a **public** GitHub issue +
 Telegram **and** the public Actions log. `redact()` normalises to one line and
 scrubs credential *shapes*: URI/DSN userinfo (with or without a scheme, matched
 to the last `@` of the token, so an empty username `docker://:pw@host` — this

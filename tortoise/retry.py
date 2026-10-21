@@ -488,12 +488,79 @@ def explain_graph_abort(
 # `explain_graph_abort` deliberately leaves alone: nothing was aborted by the
 # engine (so its anchored family does not match), and its ``EXISTS`` probe would
 # answer about a graph nobody is asking after.
+
+#: The strings a read on a TORN-DOWN connection parser raises (#6977).
+#: ``redis/_parsers/socket.py``'s ``SocketBuffer.close()`` closes the buffer and
+#: THEN rebinds the reference to ``None``, so a read landing in either window
+#: raises a plain ``ValueError`` (``I/O operation on closed file.``, from the
+#: closed buffer) or ``AttributeError`` (``'NoneType' object has no attribute
+#: 'readline'`` / ``'read'`` — the two accessors ``resp2`` reads through, header
+#: and bulk string). The vendor offers NO class for this state and there is no
+#: server answer to inspect: these strings are the whole signal. They are not
+#: UNIQUE to the vendor in the abstract (``I/O operation on closed file.`` is the
+#: stdlib ``io`` message), so the arm is scoped to the two types the vendor
+#: raises and is only one of the producers the note names: `hosted_api`
+#: ``_data_plane_db`` (#3750) records the same string when a client pool is
+#: disconnected under a live handle, which is why the note says CONNECTION
+#: lifetime rather than container. Matching on message text is refused everywhere
+#: else in this module (``hosted_backup._is_client_read_timeout`` states the
+#: rule, and this arm stays off the CLASS-based families for the same reason) — it
+#: is used here only because there is no alternative discriminator for a state
+#: that has no class.
+_DEAD_READER_MESSAGES = (
+    "I/O operation on closed file.",
+    "'NoneType' object has no attribute 'readline'",
+    "'NoneType' object has no attribute 'read'",
+)
+
+
+def is_dead_reader(exc: BaseException) -> bool:
+    """True when *exc* is a read racing a connection parser's teardown (#6977).
+
+    The measured shape, not an inference: the intermittent
+    ``test_sweep_enumerates_supabase_control_plane`` red carries exactly these
+    strings (nothing in this tree raises them but the vendor parser — the graph
+    side never sees a parser at all). Both accessors are admitted because
+    ``SocketBuffer`` reads through both: ``readline()`` for the reply header and
+    ``read()`` for every bulk string, i.e. the dump path.
+
+    **The HEAD of the message, never the whole message.** ``cypher_guard``'s
+    ``_note_instance_outage`` appends :data:`_LEGIBLE_OPENER` + a diagnosis IN
+    PLACE before the error reaches its caller, so an equality test on the whole
+    string answers False on the production path — measured on the guarded
+    handle, where this predicate is the thing that decides whether a teardown is
+    re-issued at all. Matching the head is also what the guard's own contract
+    promises (``tests/test_7357_transport_legibility.py``: *"The driver sentence
+    stays at position 0: every caller that matches on it (and every retry
+    predicate) reads from there"*).
+
+    Whether the vendor also CHAINS an originating transport error is not
+    observable in the reported signatures (they arrive as ``str(e)``), so this
+    arm covers the case where there is none; :func:`is_instance_unavailable`
+    walks the chain as well, for the shape
+    ``hosted_backup._is_client_read_timeout`` records.
+    """
+    if not isinstance(exc, (ValueError, AttributeError)):
+        return False
+    return str(exc).partition(_LEGIBLE_OPENER)[0].strip() in _DEAD_READER_MESSAGES
+
+
 def is_instance_unavailable(exc: BaseException) -> bool:
     """True when *exc* is the INSTANCE going away, not the engine refusing.
 
-    Three exclusions and one reuse, all deliberate — and the exclusion is BY
-    TYPE, never a ``ConnectionError`` subclass walk:
+    Two admissions, three exclusions and one reuse, all deliberate — and the
+    exclusion is BY TYPE, never a ``ConnectionError`` subclass walk:
 
+    - a read racing a connection parser's teardown IS a transport outcome — the
+      instance may have gone away, or the client's own read bound expired and
+      redis-py tore the connection down mid-parse (``hosted_backup`` records
+      that reading of the same ``ValueError``) — observed at the window where
+      the parser has already closed or cleared its socket buffer (#6977):
+      ``is_dead_reader`` admits those states, which carry no transport class and
+      therefore cannot be admitted below. This arm runs FIRST because the
+      answered-refusal checks below have no class to match (a
+      ``ValueError``/``AttributeError`` is never a server answer) and the
+      transport fallback has no class to recognise.
     - an ANSWERED refusal is never an instance outage. On the pinned ``redis``
       (7.4.1, measured) ``AuthenticationError``, ``AuthorizationError`` and
       ``MaxConnectionsError`` all SUBCLASS ``ConnectionError``, so a plain
@@ -528,22 +595,80 @@ def is_instance_unavailable(exc: BaseException) -> bool:
         # ORDER-CRITICAL: admitted BEFORE the answered-refusal checks below, which
         # would otherwise exclude it (the parser maps "LOADING" to this class).
         return True
-    for name in ("ResponseError", "AuthenticationError", "AuthorizationError",
-                 "MaxConnectionsError", "ExternalAuthProviderError"):
-        answered = getattr(_re, name, None)
-        if answered is not None and isinstance(exc, answered):
-            return False
-    if _answered_by_server(exc):
+    if _answered_refusal(exc):
         return False
     # A legibility predicate must never REPLACE the exception it explains, so a
     # classifier that cannot run (a broken optional import inside
     # ``retryable_transient``) answers "not this family" rather than raising
-    # from inside an ``except`` block.
+    # from inside an ``except`` block. The dead-reader arm lives INSIDE this belt
+    # for the same reason (#6977 review): it calls ``str(exc)``, and a hostile
+    # ``__str__`` must not raise out of an ``except`` block.
     try:
-        return retryable_transient(exc)
+        if is_dead_reader(exc):
+            return True
+        # #6977: a masked teardown can still CARRY its originating transport
+        # error in the chain — the shape ``hosted_backup._is_client_read_timeout``
+        # records (``ValueError`` chained behind ``TimeoutError``). ``retryable_transient``
+        # is the module's one transport classifier, so walk the chain through it
+        # rather than writing a second test next to the dead-reader arm. Bounded,
+        # and deduplicated by identity: a self-referential chain terminates.
+        #
+        # #6977 review P1: the exclusions above are per-EXCEPTION, not per-family,
+        # so they are re-applied to EVERY link. Without that, a data failure whose
+        # ``__context__`` happens to be `-ERR max number of clients reached` (which
+        # the vendor parser maps to the plain `ConnectionError`) or a `MISCONF`
+        # refusal was admitted as an outage — the exact smuggling (#8827) the
+        # answered-refusal arm exists to stop, and it would relabel a data failure
+        # as `transport` on a public incident.
+        seen: set[int] = set()
+        link: BaseException | None = exc
+        while link is not None and id(link) not in seen:
+            seen.add(id(link))
+            # The top link is already exclusion-checked above, and it MUST still be
+            # classified here — this loop is the transport fallback, not only the
+            # chain walk.
+            if (link is exc or not _answered_refusal(link)) and retryable_transient(link):
+                return True
+            # Follow the chain the way Python reports it: an explicit
+            # ``raise ... from`` (``__cause__``) wins; ``raise ... from None``
+            # SUPPRESSES the context the author deliberately detached, so the walk
+            # stops there; only then is the implicit ``__context__`` followed.
+            # Ignoring ``__suppress_context__`` was measured to admit a data
+            # failure the author had explicitly detached from a transport error.
+            if link.__cause__ is not None:
+                link = link.__cause__
+            elif link.__suppress_context__:
+                link = None
+            else:
+                link = link.__context__
+        return False
     except Exception:  # noqa: BLE001, RUF100
         logger.debug("transport classification unavailable", exc_info=True)
         return False
+
+
+def _answered_refusal(exc: BaseException) -> bool:
+    """True when *exc* is a refusal the SERVER produced, never an instance outage.
+
+    The single definition of the answered-refusal exclusion, shared by the
+    top-level arm and by every link the chain walk visits: a link that carries
+    an answered refusal must not smuggle one into the family any more than the
+    top-level exception may. ``BusyLoadingError`` answers False — LOADING is the
+    one answer this module treats as an instance event (see
+    :func:`is_instance_unavailable`), and that reading does not change because
+    the error arrived chained.
+    """
+    import redis.exceptions as _re
+
+    busy_loading = getattr(_re, "BusyLoadingError", None)
+    if busy_loading is not None and isinstance(exc, busy_loading):
+        return False
+    for name in ("ResponseError", "AuthenticationError", "AuthorizationError",
+                 "MaxConnectionsError", "ExternalAuthProviderError"):
+        answered = getattr(_re, name, None)
+        if answered is not None and isinstance(exc, answered):
+            return True
+    return _answered_by_server(exc)
 
 
 def _answered_by_server(exc: BaseException) -> bool:
@@ -667,15 +792,37 @@ def explain_instance_unavailable(
             "assuming the instance is gone."
         )
         return text + _LEGIBLE_OPENER + explains
-    explains = (
-        "the instance quit answering in the middle of this request (a closed "
-        "connection, or the client's read timeout expiring) — which is what a "
-        "container restart/reload or an OOM-kill of the instance looks like "
-        "from the client, and equally what a query slower than the client's "
-        "timeout looks like. This is NOT the engine's 'graph was deleted or "
-        "replaced' abort, and it is not evidence that the graph or its data "
-        "was lost. "
-    )
+    if is_dead_reader(exc):
+        # #6977: the recorded cause of THIS shape is connection lifetime, not a
+        # container restart — `hosted_api._data_plane_db` (#3750) records the
+        # same ``ValueError`` when a pool is disconnected out from under a live
+        # handle, and `hosted_backup` records it when the CLIENT's read bound
+        # expires and redis-py tears the connection down mid-parse. Saying "the
+        # instance quit answering" here would send the operator after the wrong
+        # thing, so this arm names the mechanism and leaves the container as one
+        # possibility among three. The shared `mutating` arm below still applies:
+        # whether the statement took effect does not depend on who closed the
+        # socket.
+        explains = (
+            "the connection this command was reading through was torn down "
+            "mid-read: redis-py closed the parser's socket buffer while a "
+            "reply was being parsed. That is a CONNECTION-LIFETIME event, not "
+            "a verdict about the graph — a client pool disconnecting, the "
+            "client's read bound expiring, or the instance going away all "
+            "surface this way, and this message does not say which. This is "
+            "NOT the engine's 'graph was deleted or replaced' abort, and it "
+            "is not evidence that the graph or its data was lost. "
+        )
+    else:
+        explains = (
+            "the instance quit answering in the middle of this request (a closed "
+            "connection, or the client's read timeout expiring) — which is what a "
+            "container restart/reload or an OOM-kill of the instance looks like "
+            "from the client, and equally what a query slower than the client's "
+            "timeout looks like. This is NOT the engine's 'graph was deleted or "
+            "replaced' abort, and it is not evidence that the graph or its data "
+            "was lost. "
+        )
     if mutating is True:
         explains += (
             "The statement's OUTCOME IS UNKNOWN: it may have landed with only "
