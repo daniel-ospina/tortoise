@@ -424,9 +424,11 @@
                  #2409 — "for outside product should be hello@" / "Where the
                  outside surface shows an address, it is hello@" — and this page
                  is unambiguously the outside surface. Every other public page
-                 in this directory (aviso-privacidad, contact, docs, dpa,
-                 license, privacy, tos — 8 of 8) already shows hello@, and the
-                 guard in tests/test_contact_form.py states the rule outright:
+                 here that shows an address shows hello@ (contact, docs, dpa,
+                 license, privacy, tos — plus this page), and the one recorded
+                 exception is the investor one-pager (#8568, ADDRESS_EXCEPTIONS
+                 in tests/test_contact_form.py); the Spanish aviso-privacidad
+                 was retired in #9486. The guard states the rule outright:
                  "no outside surface may show a competing address." The founder
                  address was also recorded as a BLACK HOLE on #2409 (its
                  FORWARD_TO is unbound), so a design partner writing to it would

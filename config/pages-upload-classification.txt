@@ -30,7 +30,6 @@ public _headers
 public _redirects
 public 404.html
 public assets
-public aviso-privacidad.html
 public blog
 public consent.js
 public contact.html
