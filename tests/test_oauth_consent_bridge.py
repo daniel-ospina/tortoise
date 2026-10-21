@@ -342,7 +342,8 @@ def test_the_deletion_set_rows_cite_live_sites() -> None:
 #: decoded, NFKC-folded, zero-width/combining characters dropped WITHOUT a word break, whitespace
 #: runs folded to one
 #: space, the fullwidth colon folded to ASCII — while keeping, per character, the RAW LINE and the
-#: BLOCK (blank-line-separated paragraph or table) it came from. Every rule is then decided by
+#: BLOCK (blank-line-separated paragraph or table, or a list item) it came from. Every rule is
+#: then decided by
 #: POSITION on that single text:
 #:
 #:  * an explicit anchor inside the provenance note may only quote `_NOTE_QUOTED_ANCHORS`;
@@ -414,6 +415,18 @@ def _file_basename(token: str) -> str:
     return token.replace("\\", "").rsplit("/", 1)[-1].lower()
 
 
+#: The start of a markdown LIST ITEM on a raw line — `1.` / `1)` at line start, after whatever
+#: indentation and blockquote markers the line carries. A list item is its OWN BLOCK even when no
+#: blank line separates it from the paragraph that introduces it: CommonMark lets an ordered list
+#: starting at `1` interrupt a paragraph, so `… in this order:` + newline + `1. first` is a
+#: paragraph followed by a list, NOT one sentence. `_fold_doc` therefore opens a block here, the
+#: same way it opens one at a blank line — without that, the fold produced
+#: `… in this order: 1. first` and the continuation arm reported `: 1` as a `hosted_api.py`
+#: citation the editor never wrote (measured, #9485 review: the shape the always-loaded note said
+#: could not be reported).
+_LIST_ITEM_RE = re.compile(r"^\s*\d+[.)](?:\s|$)")
+
+
 def _fold_doc(raw: str) -> tuple[str, list[int], list[int]]:
     """The ONE normaliser: `(text, raw_line_of_each_char, block_of_each_char)`.
 
@@ -423,13 +436,17 @@ def _fold_doc(raw: str) -> tuple[str, list[int], list[int]]:
     parser does before inline parsing — a code span wrapped across two `>` lines renders as one
     sentence, so an anchor split there is one anchor, not two fragments no rule can see.
 
+    A BLOCK is a blank-line-separated paragraph or table — OR a list item, which starts a block
+    even with no blank line before it (see `_LIST_ITEM_RE`). Both are block boundaries a markdown
+    parser agrees with, so neither is an opinion this module invented.
+
     ⚠️ Blocks are joined by ONE space, and that join is a FOLDING ARTIFACT, never a citation: a
     paragraph ending in a bare `hosted_api.py` would otherwise read as one token with a `:39205`
-    opening the next paragraph. `_hits` therefore refuses a match in EITHER arm whose SPAN crosses
-    a block change — the explicit arm because its `\\s*` eats the join, and the continuation arm
-    because all three of its alternatives (`:`, `L`, `line`) do (measured: without it,
-    `"Read hosted_api.py"` + a blank line + `":39205 names the handler."` was reported as a
-    citation the editor never wrote — GREEN on `main`, which folded per block).
+    opening the next paragraph (or the next list item). `_hits` therefore refuses a match in EITHER
+    arm whose SPAN crosses a block change — the explicit arm because its `\\s*` eats the join, and
+    the continuation arm because all three of its alternatives (`:`, `L`, `line`) do (measured:
+    without it, `"Read hosted_api.py"` + a blank line + `":39205 names the handler."` was reported
+    as a citation the editor never wrote — GREEN on `main`, which folded per block).
     """
     out: list[str] = []
     line_of: list[int] = []
@@ -441,11 +458,15 @@ def _fold_doc(raw: str) -> tuple[str, list[int], list[int]]:
             block += 1
             gap = True
             continue
+        if _LIST_ITEM_RE.match(stripped):
+            # A list item opens a block with no blank line to announce it, so the previous line's
+            # `:`/`L`/`line` opener must not reach into it (`gap` is already True: the join is
+            # still ONE space, it is the SPAN filter that refuses it).
+            block += 1
         for char in unicodedata.normalize("NFKC", html.unescape(stripped)):
             # `Cf` covers every zero-width form this doc could carry (space, joiners, BOM) and `Mn`
-            # a combining mark, and NFKC has already turned the fullwidth colon into `:` — so there
-            # is no separate character list to drift out of date (a list was here, and every one of
-            # its members was already `Cf`: removing either left the same joiner row red).
+            # a combining mark, and NFKC has already turned the fullwidth colon into `:`, so this
+            # branch is the whole of the rule and there is no second list to drift out of date.
             #
             # ⚠️ DROPPED, never GAPPED. A zero-width character INSIDE the file name is exactly how a
             # citation survives a paste — `hosted_api.py` carrying a soft hyphen, a ZWJ or a
@@ -749,6 +770,20 @@ _EVASION_SHAPES = (
     ("Read `hosted_api.py` in this order:\n\n1. first", []),
     ("See `hosted_api.py`, L\n\n39205 names the handler.", []),
     ("See `hosted_api.py`, line\n\n39205 names the handler.", []),
+    # …and the SAME ordered list with NO blank line before it, which is the shape the block model
+    # above did not know: CommonMark lets an ordered list interrupt a paragraph, so
+    # `… in this order:` + `1. first` is a paragraph AND a list, not one sentence. The blank line
+    # is not what makes these non-citations — the BLOCK is. Without `_LIST_ITEM_RE`'s block open
+    # the fold produced `… in this order: 1. first` and all three rows reported the list marker as
+    # a `hosted_api.py` continuation (measured at the #9485 review — the very shape `MEMORY.md`
+    # says cannot be reported, which is why the block MODEL grew here rather than the sentence
+    # growing a qualifier).
+    ("Read `hosted_api.py` in this order:\n1. first", []),
+    ("See `hosted_api.py`, L\n12. first", []),
+    ("See `hosted_api.py`, line\n12. first", []),
+    # …while a continuation INSIDE one list item is still ours: opening a block at a list item
+    # must not become an exemption for the item that names the file.
+    ("1. the builder `hosted_api.py`\n   then `:39205`.", [2]),
     # a WRAPPED EXPLICIT anchor inside a blockquote: the marker is stripped, so the code span and
     # its digits are one token again. Pins the `^\\s*(?:>\\s?)+` strip, which is load-bearing and
     # would otherwise be pinned only by the note test below.
@@ -807,6 +842,13 @@ def test_the_anchor_scan_catches_every_shape_at_any_offset(fragment: str, expect
     OWNER block instead of its span and all three red again, because the opener sits in the
     `hosted_api.py` paragraph (measured — that is the shape a review found: a paragraph ending in
     a bare `hosted_api.py` followed by an ordered list was reported as a `: 1` continuation).
+
+    The three NO-BLANK-LINE list rows (`… in this order:` then `1. first`, and the `L`/`line`
+    twins) pin `_LIST_ITEM_RE`: reverting that one branch reds all three, because without a block
+    open at a list item the fold joins the paragraph and the marker with one space and the
+    continuation arm matches the list's own number. The row immediately after them is the other
+    direction of the same mechanism — a continuation INSIDE one list item still reds, so the block
+    open is a boundary between items, not an exemption for lists.
     """
     lines = fragment.splitlines()
     reported = _stray_anchors(lines, 0, 0)
@@ -989,15 +1031,27 @@ def test_the_provenance_note_rejects_an_anchor_wrapped_across_its_own_lines(
     """The note may quote ONLY the explicit `#3524` pair — including when the anchor is wrapped."""
     lines = SPEC.read_text().splitlines()
     note_start, note_end = _provenance_note_bounds(lines)
+    # The `N` injected lines push the note's own last line from `note_end - 1` to
+    # `note_end + N - 1`, so the half-open span becomes `[note_start, note_end + N)`.
+    #
+    # ⛔ ONE bound, used by BOTH calls below (#9485 review: the first call used
+    # `note_end + N` and the second recomputed the same value inline, so nothing constrained the
+    # variable the first call was given — shortening it alone left every assertion green). The
+    # second call's assertion IS the constraint: it places an anchor on the note's original last
+    # line and requires it in a note bucket, which only holds while `shifted_end - 1` is that
+    # line's index. Shorten the bound by one and the line reads as BODY, the anchor lands in
+    # `stray`, and the assertion reds (measured).
     injected = lines[:note_end - 1] + ["> " + part if not part.startswith(">") else part
                                       for part in smuggle.splitlines()] + lines[note_end - 1:]
-    # The `N` injected lines push the note's own last line to `note_end + N - 1`, so the span is
-    # `[note_start, note_end + N)` — the half-open bound is the new `note_end`. Ending it one
-    # short classified that last note line as BODY: harmless for this smuggle, but an anchor
-    # living there would have landed in `stray` (which this test does not read) instead of a
-    # note bucket, i.e. the test would have looked green while checking the wrong region (that is
-    # the assertion below, not a comment).
-    shifted_end = note_end + len(smuggle.splitlines())
+    # ⛔ `last_note_index` is derived from the INJECTION, never from the bound — deriving it from
+    # the bound (`shifted_end - 1`) is what made the off-by-one invisible: shortening the bound
+    # moved the probed index with it, so both stayed consistent and every assertion stayed green
+    # (#9485 review, re-measured here before this line existed).
+    last_note_index = note_end - 1 + len(smuggle.splitlines())
+    assert injected[last_note_index] == lines[note_end - 1], (
+        "the note's original last line must sit at this index after the injection, or the probe "
+        "below anchors the wrong line")
+    shifted_end = last_note_index + 1
     note_new, note_bare, _ = _anchor_violations(
         "\n".join(injected), note_start, shifted_end)
     assert note_new or note_bare, (
@@ -1008,14 +1062,13 @@ def test_the_provenance_note_rejects_an_anchor_wrapped_across_its_own_lines(
     # index. Pinned by placing an anchor THERE and requiring it in a note bucket: with the bound
     # one short that line reads as BODY and the anchor lands in `stray`, which this test never
     # looks at — so the off-by-one would otherwise have stayed invisible (measured).
-    last_note_index = note_end + len(smuggle.splitlines()) - 1
     on_last_note_line = [
         *injected[:last_note_index],
         lines[note_end - 1] + " see `hosted_api.py:99999`",
         *injected[last_note_index + 1:],
     ]
     last_new, _, last_stray = _anchor_violations(
-        "\n".join(on_last_note_line), note_start, note_end + len(smuggle.splitlines()))
+        "\n".join(on_last_note_line), note_start, shifted_end)
     assert "99999" in last_new and not last_stray, (
         "the note's own last line is part of the note, so an anchor it gains belongs in a note "
         f"bucket — got note_new={last_new} stray={last_stray}")
