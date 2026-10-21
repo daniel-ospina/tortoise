@@ -23,10 +23,8 @@ Canonical sources these tests key off:
   * `docs/ONTOLOGY.md` — the ontology (linked by both pages, never version-pinned inline)
   * `tortoise/ep.py`   — how `confidence` is computed
 
-Unconditional (no network, no browser, no DB) for the page pins below: they are
-plain string pins on the checked-in HTML, matching the harness contract of
-`tests/test_signup_form_safety.py`. The `source_ref` pin additionally imports the
-Point model, because the sentence it pins is a claim about the commit contract.
+Unconditional (no network, no browser, no DB): plain string pins on the checked-in
+HTML, matching the harness contract of `tests/test_signup_form_safety.py`.
 """
 from __future__ import annotations
 
@@ -43,6 +41,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:  # tools/ is not an installed package
     sys.path.insert(0, str(REPO_ROOT))
 
+# isort order for the first-party block is `tests` < `tools` < `tortoise`; keep it
+# sorted so no `I001` suppression is needed (it lands on the block's first line,
+# so an import added above it is what breaks the suppression).
 from tests._html_links import (  # noqa: E402
     _AnchorHrefParser,
     blog_entry_hrefs,
@@ -192,7 +193,7 @@ def test_both_pages_name_expectation_propagation(page: Path) -> None:
 # ── #9510: a published claim must be true of the path it names ────────────────
 
 
-def test_commit_schema_requires_a_source_ref() -> None:
+def test_commit_schema_requires_a_source_on_every_extracted_claim() -> None:
     """The evidence under the FAQ's narrowed traceability sentence.
 
     `website/faq.html` claims traceability for *extracted* claims only. That is
@@ -236,11 +237,6 @@ def test_faq_ties_only_extracted_claims_to_their_source() -> None:
     """
     text = _normalise(_read(FAQ))
     assert "every extracted claim carries the source it was drawn from" in text
-    # The universal must stay absent. The quantifier may be separated from the
-    # claim noun by intervening words and the verb need not be "carry": the defect
-    # was the quantifier spreading a commit-path requirement over doors that do
-    # not enforce it (#9510), and "all such claims must carry a source" restores it.
-    #
     # A SMELL DETECTOR, NOT A PROOF. It catches the phrasings this page has
     # actually shipped the defect in; it cannot decide the general case, and the
     # general case is a REVIEW judgement, not a lexical one.
@@ -305,20 +301,45 @@ def test_faq_ties_only_extracted_claims_to_their_source() -> None:
     )
 
 
+#: Formula-level mechanism vocabulary. `faq.html`'s own note above the TOC rules it
+#: out ("Keep mechanism prose here to the minimum needed to answer an objection");
+#: the account belongs on `/docs`, which the FAQ defers to.
+_MECHANISM_MARKERS = (
+    "joint-truth penalty",
+    "difference coupling",
+    "per-edge weight",
+    "exp(-w",
+)
+
+
+def _mechanism_hits(text: str) -> list[str]:
+    """The formula-level mechanism phrases present in ``text``."""
+    return [marker for marker in _MECHANISM_MARKERS if marker in text]
+
+
 def test_the_belief_mechanism_is_documented_on_docs_first() -> None:
     """`faq.html`'s own maintainer note forbids mechanism prose on that page.
 
     The note (in the source above the TOC) reads: "The full technical account of
     the belief model lives on /docs ... Update /docs first and let this page
     follow. Keep mechanism prose here to the minimum needed to answer an
-    objection." Pre-fix, the FAQ was the only page describing what a NAND and an
-    IMPL do to a score, so the page carried more mechanism than the page it defers
-    to — the reverse of the order the note mandates. The NAND/IMPL formulas now
-    live on docs.html's Confidence (EP) card; this gate pins the two formulas and
-    the two mechanism phrases out of the FAQ, and pins the note itself, so the
-    rule cannot be deleted silently. It does not police every remaining mechanism
-    phrase (the FAQ still answers what a directed contradiction does), which is
-    the note's own "minimum needed to answer an objection" allowance.
+    objection."
+
+    Measured history, so the premise of the guard is not a guess: `origin/main`'s
+    `faq.html` named neither relation (`grep -c "NAND\\|IMPL"` → 0) while
+    `docs.html` already carried a NAND/IMPL account on its Confidence (EP) card.
+    What this change adds is DEPTH, not location — the formula-level account
+    (`tortoise/quadrature.py`: NAND is a joint-truth penalty, IMPL a difference
+    coupling) is now on /docs, and the FAQ answer that used to stand alone
+    defers to it. Both halves are asserted, and both are false on the pre-fix
+    tree, so this test fails on the defect it guards: /docs carries the
+    mechanism, and the FAQ points at /docs for it.
+
+    The FAQ keeps ONE mechanism sentence — the one that answers the objection
+    (mutual vs directed contradiction). It is pinned so the exception the note
+    allows cannot widen into an account, and `_mechanism_hits` is exercised on a
+    sample that DOES contain the formula-level vocabulary, so the refusal below
+    is a live detector rather than a `not in` on strings the file never held.
     """
     note = re.sub(r"\s+", " ", _read(FAQ))
     assert "Keep mechanism prose here to the minimum" in note, (
@@ -336,17 +357,39 @@ def test_the_belief_mechanism_is_documented_on_docs_first() -> None:
             f"belongs on /docs: the FAQ defers to it ('Update /docs first and let "
             f"this page follow') and must not be the only page carrying it."
         )
-    for moved in (
-        "penalty on both claims being true",
-        "pulls its target toward the source's level",
+    assert "what each relation does to a score" in faq, (
+        "website/faq.html no longer points at /docs for the mechanism. The deferral "
+        "is the half that keeps mechanism prose off this page — its own note says "
+        "'Update /docs first and let this page follow'."
+    )
+    # The objection-level contradiction sentence is the one mechanism paragraph the
+    # note permits (it answers "does a contradiction delete the losing belief?");
+    # pinned so the permitted exception cannot quietly grow.
+    assert (
+        "on both sides for a mutual contradiction, on the target only for a directed one"
+        in faq
+    ), (
+        "website/faq.html lost (or reworded) the objection-level contradiction "
+        "sentence. If it moved to /docs, update this pin deliberately: it is the only "
+        "mechanism sentence the page's own note allows."
+    )
+    assert _mechanism_hits(faq) == [], (
+        f"website/faq.html restates the mechanism ({_mechanism_hits(faq)}). Update "
+        f"/docs first and keep this page to the objection-level claim — that is the "
+        f"file's own maintainer note."
+    )
+    sample = _normalise(
+        "<p>A <strong>NAND</strong> is a joint-truth penalty and carries a per-edge "
+        "weight: <code>exp(-w&middot;c<sub>a</sub>&middot;c<sub>b</sub>)</code>.</p>"
+    )
+    assert _mechanism_hits(sample) == [
         "joint-truth penalty",
+        "per-edge weight",
         "exp(-w",
-    ):
-        assert moved not in faq, (
-            f"website/faq.html restates the mechanism ({moved!r}). Update /docs first "
-            f"and keep this page to the objection-level claim — that is the file's "
-            f"own maintainer note."
-        )
+    ], (
+        "the formula-level detector no longer fires on mechanism vocabulary, so the "
+        "assertion above proves nothing — this sample must hit it."
+    )
 
 
 # ── Ontology citation hygiene ────────────────────────────────────────────────
