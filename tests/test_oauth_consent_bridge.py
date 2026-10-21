@@ -389,10 +389,13 @@ _BARE_ANCHOR_RE = re.compile(
 #: token is the owner whatever its extension; only a `hosted_api.py` ownership reds, so widening
 #: the token set can only REMOVE reports, never add one.
 #:
-#: The scan is per BLOCK, not per line and not document-wide: a continuation whose governing
-#: `hosted_api.py` sits on an earlier line of the same paragraph or table IS attributed, and one
-#: separated by a blank line is not. Same-LINE-only was a hole — `` …`hosted_api.py` `` then
-#: `` `:39205` `` reads clean, yet CommonMark joins the pair into one sentence (measured).
+#: In the BODY the scan is per BLOCK — not per line, and not document-wide: a continuation whose
+#: governing `hosted_api.py` sits on an earlier line of the same paragraph or table IS attributed,
+#: and one separated by a blank line is not. Same-LINE-only was a hole — `` …`hosted_api.py` ``
+#: then `` `:39205` `` reads clean, yet CommonMark joins the pair into one sentence (measured).
+#: ⚠️ The NOTE region is the exception and is deliberate: there the search is document-wide (a
+#: bare number in the note is a citation even when the file that governs it sits in the paragraph
+#: above), and an UNOWNED one flags too — see `_hits`, which is the only place either rule lives.
 _NEAREST_FILE_RE = re.compile(
     r"[\w./-]+\\?\.(?:py|pyi|ts|tsx|js|jsx|mjs|cjs|yml|yaml|json|jsonc|md|mdx|sh|bash|sql|toml"
     r"|cfg|ini|conf|html|css|txt|lock)",
@@ -421,8 +424,9 @@ def _fold_doc(raw: str) -> tuple[str, list[int], list[int]]:
 
     ⚠️ Blocks are joined by ONE space, and that join is a FOLDING ARTIFACT, never a citation: a
     paragraph ending in a bare `hosted_api.py` would otherwise read as one token with a `:39205`
-    opening the next paragraph. `_hits` therefore refuses an explicit match whose span crosses a
-    block change, the way it already block-filters the continuation arm (measured: without it,
+    opening the next paragraph. `_hits` therefore refuses a match in EITHER arm whose SPAN crosses
+    a block change — the explicit arm because its `\\s*` eats the join, and the continuation arm
+    because all three of its alternatives (`:`, `L`, `line`) do (measured: without it,
     `"Read hosted_api.py"` + a blank line + `":39205 names the handler."` was reported as a
     citation the editor never wrote — GREEN on `main`, which folded per block).
     """
@@ -498,13 +502,24 @@ def _hits(
             # The explicit arm's `\s*` reaches across the single space that joins two BLOCKS in
             # the folded text, so `hosted_api.py` ending one paragraph and `:39205` opening the
             # next would read as one citation — a false red naming a file the editor never
-            # opened. The continuation arm below is block-filtered for exactly this reason; the
-            # two arms must not disagree about where a block ends (#9485 review).
+            # opened. The continuation arm below refuses the same span crossing, so the two arms
+            # cannot disagree about where a block ends (#9485 review).
             continue
         explicit.append(match.span())
         anchors.append((match.group(0), line_of[match.start()], in_note[match.start()]))
     bare: list[tuple[str, int, bool]] = []
     for match in _BARE_ANCHOR_RE.finditer(text):
+        if block_of[match.start()] != block_of[match.end() - 1]:
+            # ⛔ FILTER THE SPAN, not just the owner (#9485 review). Every alternative here has
+            # its own `\s*`, so a colon (or an `L`/`line`) ending one BLOCK and the digits
+            # opening the next matches across the join `_fold_doc` inserts — e.g. a paragraph
+            # ending in a bare `hosted_api.py` whose next paragraph is an ordered list, where the
+            # colon carries NO digits at all. The owner search then finds `hosted_api.py` in the
+            # colon's own block and reports "bare continuation ': 1' belongs to `hosted_api.py`"
+            # for a citation the editor never wrote — the false red `_fold_doc` exists to prevent.
+            # Filtering is lossless: `main` folded per block, so it could not form this match
+            # either, and every real hit lives inside ONE block.
+            continue
         if any(start <= match.start() < end for start, end in explicit):
             # The number INSIDE an explicit anchor is that anchor, not a continuation.
             continue
@@ -716,6 +731,14 @@ _EVASION_SHAPES = (
     ("Read hosted_api.py\n\n:39205 names the handler.", []),
     ("Read hosted_api.py\n\nL39205 names the handler.", []),
     ("Read hosted_api.py\n\nline 39205 names the handler.", []),
+    # …and the MIRROR the span filter above exists for (#9485 review): the `:`/`L`/`line` opener
+    # ending one block and the digits opening the next, so the match's START is in the OWNER's own
+    # block (which is why filtering on the owner block instead of the span leaves all three red).
+    # `main` folded per block and could not form any of them, so RED here was a new false red. The
+    # `:` row is the live shape: a colon ending a sentence before an ordered list reads as `: 1`.
+    ("Read `hosted_api.py` in this order:\n\n1. first", []),
+    ("See `hosted_api.py`, L\n\n39205 names the handler.", []),
+    ("See `hosted_api.py`, line\n\n39205 names the handler.", []),
     # a WRAPPED EXPLICIT anchor inside a blockquote: the marker is stripped, so the code span and
     # its digits are one token again. Pins the `^\\s*(?:>\\s?)+` strip, which is load-bearing and
     # would otherwise be pinned only by the note test below.
@@ -755,6 +778,12 @@ def test_the_anchor_scan_catches_every_shape_at_any_offset(fragment: str, expect
     colon, `#?L`/`line` as a continuation), and the two negatives need the owner scan to accept a
     non-`.py` file token — under the `*.py`-only scan both negatives reported the `hosted_api.py`
     mention to their left, naming a file the editor never touched.
+
+    The three MIRROR rows (a `:`/`L`/`line` opener ending one block, digits opening the next) pin
+    the SPAN filter on the continuation arm, and they are single-mechanism: filter on the match's
+    OWNER block instead of its span and all three red again, because the opener sits in the
+    `hosted_api.py` paragraph (measured — that is the shape a review found: a paragraph ending in
+    a bare `hosted_api.py` followed by an ordered list was reported as a `: 1` continuation).
     """
     lines = fragment.splitlines()
     reported = _stray_anchors(lines, 0, 0)
