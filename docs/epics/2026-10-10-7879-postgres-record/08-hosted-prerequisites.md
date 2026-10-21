@@ -230,7 +230,7 @@ catch it **skips**, twice over (§G run 1 vs run 2). ⚠️ #9264 *itself* is a 
 (`_SCHEMA_DISAGREEMENTS`, A8), so arming this leg does not turn it red — **R4** deletes the pin.
 **Cheapest item in the list, and it is the one that makes the rest verifiable.** Land it early.
 
-### R4 — Fix the two schema↔producer disagreements (#9264) · **M** · schema or code + decision · **BLOCKER**
+### R4 — Fix the two schema↔producer disagreements (#9264, **OPEN**) · **M** · schema or code + decision · **BLOCKER**
 
 **What:** `session.capture_redactions` is `jsonb`, the producer emits an **integer** — so the `SessionRecorded` carrying
 `capture_redactions` is **refused** (`DatatypeMismatch`, counted on `record_write_failures`) and the
@@ -369,7 +369,7 @@ calibrates after beta from measured consumption.
 
 | # | what | why it is not on the list |
 |---|---|---|
-| **N1** | **The read path and its cutover** (`#7970`) | §2.0 defers it in the owner's own words (§0.1). The instruments exist and are off. |
+| **N1** | **The read path and its cutover** (`#7970`, **OPEN**) | §2.0 defers it in the owner's own words (§0.1). The instruments exist and are off. |
 | **N2** | **`pgvector` / moving the vector index into Postgres** (`#4997`, **CLOSED 2026-10-05** — its analysis is what this item rests on; §12.1c **V1**, §14.3) | **NOT DECIDED — owner's call.** Embeddings are already durable as `jsonb` (A5). Note the settled blocker if it is decided: **`pgvectorscale` is unavailable on Supabase** (§14), so it would be `pgvector` proper. |
 | **N3** | **A FalkorDB → Postgres backfill / migration-safety apparatus** | Owner scope ruling 2026-10-10: no customers, no apparatus designed. The dual-write is journal-first by construction (§3/§17.1). |
 | **N4** | **Journal completeness** (`#5089`) | A **precondition owned by another epic** (this epic's *blocked-by (soft)*) — ⚠️ **and that epic CLOSED COMPLETED on 2026-10-12**, so the soft block is discharged *as a ticket*. What is not discharged is the measurement: §17.1's surface (**387 mutating sites / 211 functions / 32 files**) is quoted here, not re-verified by this lane. Named, not re-filed: a projection replayed from an unfaithful journal is faithfully wrong. |
@@ -399,7 +399,7 @@ measured them, plus that section's date where it pins one. **`MEASURED` means a 
 | record row width | **1,263–1,266 B** median, **1,421–1,423 B** mean | `§17.4.6`; `docs/evidence/7983-cost-magnitudes/README.md`, measured 2026-10-17 | **MEASURED** |
 | keyed miss cost | **5.2 blocks** mean (4 median, 7 max), **2,312 B** on the wire, **0.048–0.053 ms** server | DETOASTED, 200 samples; `§17.4.6` / `docs/evidence/7983-cost-magnitudes/README.md`, 2026-10-17 | **MEASURED** |
 | full-scope rebuild (one table) | **115,605 blocks / 947.0 MB / 2,629–2,694 ms** at 89,701 rows | DETOASTED; a per-table **floor**, not the rebuild total; `§17.4.6` / `docs/evidence/7983-cost-magnitudes/README.md`, 2026-10-17 | **MEASURED** |
-| **edge count** | — | per-type populations ARE recorded — **27,310** `aboutObject`, **4,748** operator-joining, **14,567** `extractedFrom`, measured on the live graph — per-type: `EXTRACTOR-V4-ARCHITECTURE.md` §2.4.3 gives the **27,310** `aboutObject` and the **14,567** `extractedFrom`, `STORAGE-ARCHITECTURE.md` §11.3 the **4,748** joining edges — that figure's source pins **no** measurement date (2026-09-23 there is the owner-ruling date in the section heading, not a measured-on stamp); §2.4.3's two figures ARE dated 2026-09-23 (the `extractedFrom` figure also in `#4333`'s brief, 2026-09-24). ⚠️ **27,310 is the `aboutObject` population, not the edge total** — it is the same figure §11.1's `edges` column shows for "today", so a reader who takes that column as the total will sum the three and get 46,625. What is missing is the **total**: `tools/edge_census.py:224` runs the per-type `MATCH ()-[r]->()` census, but no in-tree record keeps its output, and the drill's **10,000** edges (`#3895`) is ONE graph's manifest count inside a real archive artifact (`node_count` 9,997 / `edge_count` 10,000), not a census and not the fleet total | ⛔ **ESTIMATED / UNMEASURED** (the total) |
+| **edge count** | — | per-type populations ARE recorded — **27,310** `aboutObject`, **4,748** operator-joining, **14,567** `extractedFrom`, measured on the live graph — per-type: `EXTRACTOR-V4-ARCHITECTURE.md` §2.4.3 gives the **27,310** `aboutObject` and the **14,567** `extractedFrom`, `STORAGE-ARCHITECTURE.md` §11.3 the **4,748** joining edges — that figure's source pins **no** measurement date (2026-09-23 there is the owner-ruling date in the section heading, not a measured-on stamp); §2.4.3's two figures ARE dated 2026-09-23 (the `extractedFrom` figure also in `#4333`'s brief, 2026-09-24). ⚠️ **27,310 is the `aboutObject` population, not the edge total** — it is the same figure §11.1's `edges` column shows for "today", so a reader who takes that column as the total will sum the three and get 46,625. What is missing is the **total**: `tools/edge_census.py:224` runs the per-type `MATCH ()-[r]->()` census, but no in-tree record keeps a census of the **live** graph (the tool's probe-graph receipt is `docs/research/2026-09-25-4503-edge-accounting/measurement.md`), and the drill's **10,000** edges (`#3895`) is ONE graph's manifest count inside a real archive artifact (`node_count` 9,997 / `edge_count` 10,000), not a census and not the fleet total | ⛔ **ESTIMATED / UNMEASURED** (the total) |
 | journal bytes per record | **9,176 B** per create (92% the vector's decimal text), **196 B** per revision. ⚠️ The source's headline **≈8.8 MB per 1,000 creates** does not follow from these inputs — 9,176 B × 1,000 = **9.2 MB**, and its own after-placeholder growth (8,606 B) gives **8.6 MB** — so only the order of magnitude (≈9 MB per 1,000; **8.6–9.2 GB** at 1,000,000) | `tools/journal_growth.py`; `STORAGE-ARCHITECTURE.md` §5.2, 2026-10-17 | **MEASURED** (per-record size; **the rate is not**) |
 | **writes/day** | — | **hosted capture is off by owner ruling 2026-10-14**, so the hosted write rate is **zero today and no historical rate exists**. The per-record size above is the only measured input. | ⛔ **UNMEASURED** |
 | **reads/day** | — | no tenant serves a workload. `tortoise/read_ledger.py` is the instrument; its one exercise (**f = 8.64%**, 200 proxy queries over 10,457 keys, one graph, one date) is explicitly *"NOT `f` FOR THE COST MODEL"* (§17.4.6) | ⛔ **UNMEASURED** |
@@ -418,7 +418,8 @@ Postgres, and §17.4 already prices both stores.
 **Order — and the reason each item sits where it does:**
 
 1. **R1** arm the record → *nothing exists to observe until this*
-2. **R2** land the schema → *R1 without R2 is a 500*
+2. **R2** land the schema → *R1 without R2 writes nothing, counted on `record_write_failures` and
+   never raised*
 3. **R3** CI proof → *so items 4–9 cannot regress silently; measured, this is how a NEW #9264-class disagreement would hide*
 4. **R4** the two schema↔producer disagreements → *so the session/point record is complete*
 5. **R6** tenancy enforced → *the bypass rule must be answered before the first hosted customer's data
