@@ -310,7 +310,17 @@ def test_create_operator_default_promotes_source(sdk):
 
 def test_create_operator_draft_status_survives_event_payload(sdk, tmp_path):
     """The OperatorAdded event must carry the draft status so JSONL replay
-    (projection/entities.py coalesce default 'live') preserves it."""
+    (projection/entities.py coalesce default 'live') preserves it.
+
+    Find the RECORD, not the last line (#9349). `create_operator` deliberately
+    emits `OperatorAdded` BEFORE the derived-cache housekeeping that follows it
+    — `_mark_dirty` and `invalidate_messages`, whose clear arm journals an
+    `EdgeMessageChanged` record (see the comment above the emit: a lost record
+    is not recoverable while a failed cache invalidation is). So the operator
+    record is the last `OperatorAdded`, not the last event on the stream; the
+    parity claim this test exists for is about the record's payload, and it is
+    unaffected by an unrelated later invalidation.
+    """
     import json
 
     sdk2 = TortoiseSDK(db_path=str(tmp_path / "t.db"),
@@ -323,11 +333,17 @@ def test_create_operator_draft_status_survives_event_payload(sdk, tmp_path):
     ) else None
     if log is None:
         lines = open(str(tmp_path / "events.jsonl")).read().splitlines()  # noqa: SIM115
-        log = json.loads(lines[-1]) if lines else None
-    assert log is not None, "OperatorAdded event must be written to the JSONL log"
-    assert log.get("type") == "OperatorAdded", f"last event is {log.get('type')}"
-    assert log.get("point", {}).get("id") == op["id"]
-    assert log["point"].get("status") == "draft", (
+        entries = [json.loads(line) for line in lines if line.strip()]
+    else:
+        entries = [log]
+    records = [e for e in entries if e.get("type") == "OperatorAdded"]
+    assert records, (
+        "OperatorAdded event must be written to the JSONL log — no such record on "
+        f"the stream (types seen: {[e.get('type') for e in entries]})"
+    )
+    record = records[-1]
+    assert record.get("point", {}).get("id") == op["id"]
+    assert record["point"].get("status") == "draft", (
         "OperatorAdded event must carry status:'draft' for replay parity"
     )
 

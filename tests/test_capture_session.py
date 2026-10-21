@@ -4226,7 +4226,9 @@ def test_capture_session_stamping_failure_warns_and_leaves_points(sdk, monkeypat
     monkeypatch.setattr(_raw, "query", _boom_stamp)
     res = sdk.capture_session(CONV)
     assert res["ok"] is True, res
-    assert any("Event" in w or "event" in w.lower() for w in res["warnings"]), res
+    # #8501: the EVENT MINT and the provenance STAMP are separate halves now, so
+    # this failure is reported as the stamp it is — the mint succeeded here.
+    assert any("provenance stamp failed" in w for w in res["warnings"]), res
     unstamped = proj.g.query(
         "MATCH (n:Point) WHERE n.id IN $ids AND n.eventId IS NULL RETURN count(n)",
         params={"ids": [p["id"] for p in res["points"]]}).result_set
@@ -5633,6 +5635,31 @@ def test_fresh_team_captures_by_default(consent_client):
                             json={"conversation": _CONV, "harness": "claude"})
     assert r.status_code == 200, r.text
     assert _session_count() == 1, "default-on team must capture"
+
+
+def test_hosted_capture_anchors_its_extractedfrom_links(consent_client):
+    """#8501 — the hosted lane records the version each captured Point was read
+    from, exactly as the SDK lane does (#1727/#4014 byte-parity).
+
+    FAILS BEFORE: the session `:Source` was still the empty-hash stub while
+    extraction created the Points, so every `extractedFrom` link carried a NULL
+    `sourceVersion` (the hosted half of the same ordering defect) — and a
+    revised transcript could never mark those Points stale.
+    """
+    r = consent_client.post("/v1/sessions",
+                            json={"conversation": _CONV, "harness": "claude"})
+    assert r.status_code == 200, r.text
+
+    rows = _graph().g.query(
+        "MATCH (p:Point)-[r:extractedFrom]->(s:Source) "
+        "RETURN p.id, r.sourceVersion, s.contentHash").result_set
+    assert rows, "the hosted capture produced no extractedFrom link — guard"
+    unanchored = [row for row in rows if not row[1]]
+    assert not unanchored, (
+        f"hosted capture left Points unanchored (#8501): {unanchored!r}")
+    for pid, recorded, current in rows:
+        assert current and recorded == current, (
+            f"hosted {pid} recorded {recorded!r}, read from {current!r}")
 
 
 def test_off_switch_stops_capture_409(consent_client):
