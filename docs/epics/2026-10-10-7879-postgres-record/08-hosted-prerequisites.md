@@ -290,17 +290,19 @@ boundary. This is the one item whose *answer* is a policy call rather than an im
 
 ### R7 — Raw text and the S1 narrative in Postgres (§9.1) · **L** · schema + code · **BLOCKER**
 
-**What:** **there is no dedicated table for it** — the only carrier today is the `point.content`
-column (see below) — `grep -riE 'narrative|raw_turn|raw_text|transcript'` over all
+**What:** **there is no dedicated table for it** — the text is carried as data, in the `point.content`
+column and in the layer-1 `journal_event.payload` mirror of the record that wrote it (see below) —
+`grep -riE 'narrative|raw_turn|raw_text|transcript'` over all
 65 migrations returns **0**; `public.session` carries `turn_count` and **no turns**. §9.1 is explicit
 that *"the narrative is not something we're suggesting to store in the graph (same as raw) but store
 in supabase"*, and §9.4 makes the **link** load-bearing (*"at answer time, send the source's VERBATIM
 text, not the extracted claim"* — measured 15.9 / 22.0 pts).
 **What it blocks:** §9.1's placement rule, the verbatim-evidence fetch path, **and the destroy-the-
-graph acceptance itself** — the record has **no narrative/transcript home**: a captured turn's text
-survives only as an episodic `point.content` row (`…03_record_epistemic.sql:56`; the §G run wrote 4) and,
-since `#3947` (CLOSED), in the journal a `rebuild_all` replays, so what a *record*-sourced rebuild cannot
-reproduce is the §9.1 narrative and its redaction count — not "the raw text" in the abstract. This item is not in the epic's four scope items; it is a §9.1 requirement, and that gap is
+graph acceptance itself** — the record has **no narrative-first home**: a captured turn's text
+is carried as data — an episodic `point.content` row (`…03_record_epistemic.sql:56`; the §G run wrote
+4) and the `journal_event.payload` that mirrors the record, plus, since `#3947` (CLOSED), the journal
+entry a `rebuild_all` replays — so what a *record*-sourced rebuild cannot reproduce is the §9.1
+narrative and its redaction count, not "the raw text" in the abstract. This item is not in the epic's four scope items; it is a §9.1 requirement, and that gap is
 the finding (see §E).
 **Decision needed:** none — §9.1 and the 2026-09-23 owner quote already place it. Only *which table
 shape* is open, and that is an engineering choice inside the existing schema discipline.
