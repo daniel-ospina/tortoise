@@ -4,20 +4,31 @@ The contract (``docs/epics/2026-10-10-7879-postgres-record/02-identity-and-place
 §1.1/§1.4, pinned by ``tests/test_identity_contract.py``) fixes **one stable key
 per label** and states that an id which does not match a minted shape is
 **opaque and valid** — it does not require existing ids to match a format. Two
-stores cannot agree on a node whose key is not agreed, though, so the live ids
-``STORAGE-ARCHITECTURE.md`` §17.5 measured in "two incompatible formats" are the
-migration debt this module mechanises.
+stores cannot agree on a node whose key is not agreed, though, so the legacy ids
+``STORAGE-ARCHITECTURE.md`` §17.5 measured are the migration debt this module
+mechanises.
 
-## What the census actually finds (and why the frame needed correcting)
+## What the census actually finds, and which label it is safe to re-key
 
 §17.5 and #8607 both describe **~9,700 legacy ids** as ``8,700 <hex>-<hex>`` +
 ``1,000 p-NNNNNNN`` + ``~30 EV-*``. ``<hex>-<hex12>`` is **the form
 ``tortoise/ids.py::ulid()`` mints** (``sdk._ULID_RE``), so those 8,700 are
-already canonical by the contract's own predicate: the census counted two
-*formats*, and only one of them is non-conforming. :func:`census` reports the
-split instead of inheriting the label, so the real population of ids that need
-a rename is the ``p-NNNNNNN`` and ``EV-*`` groups — and the number a lane plans
-against is the measured one, never the carried one.
+already canonical: the census counted two *formats*, and only one of them is
+non-conforming. :func:`census` reports the split instead of inheriting the
+label.
+
+**Scope is a declared decision, not a property name.** Only ``:Point`` is
+re-keyed here, and the reason is on the label, in :data:`REKEY_SCOPE`.
+:data:`DECLARED_OUT_OF_SCOPE` carries the reason for every other label —
+``:Event`` in particular, whose ``eventId`` is the journal-keyed identity with
+**no sanctioned re-keying path** (``sdk.update_entity`` refuses it: *"No
+sanctioned internal re-keying path exists"*), and whose ``id`` **mirrors**
+``eventId`` (§1.1), so renaming one of them half-way leaves the legacy id
+addressable. Those labels are **counted and reported, never rewritten**, and a
+label the record's contract does not key at all (``:GraphEvent``,
+``Meta`` — both present in a real ``dump_graph`` artifact) is counted as
+out-of-contract rather than refused: a census that cannot be produced on the
+snapshot it documents is not a census.
 
 ## Division of labour — the same one ``tortoise/retype.py`` states
 
@@ -25,8 +36,9 @@ The issue's own words: *"the model should label and the script should only do
 mechanics (batch, validate, assert a partition invariant: every node exactly
 once, counts reconcile to the total)"*. Here there is **no classification to
 supply**: the contract already decides what is canonical (it is a predicate,
-:func:`is_canonical`), so the mechanics are the whole job — census the
-snapshot, plan a total single-valued rename, refuse anything unprovable.
+:func:`is_canonical`), and which label may be re-keyed is declared above. The
+mechanics are the whole job — census the snapshot, plan a total single-valued
+rename, refuse anything unprovable.
 
 ## Offline, because a wrong pass must cost a re-run and not a repair
 
@@ -41,14 +53,6 @@ changes. That is also what makes the pass **reversible**: the plan carries
 ``old``/``new`` per node, and :func:`apply_plan` with ``revert=True`` puts the
 original keys back.
 
-## Scope, declared rather than assumed
-
-Only labels whose contract key is a **minted id** are rewritten — today
-``:Point``/``:Event``/``:Session`` (``id``/``eventId``/``id``). The
-``name``/``url``-keyed labels (``:Subject``/``:Object``/``:Source``) are
-**reported and never rewritten**: their key is semantic content, and §1.2
-clause 2 is explicit — *"a rename is a new node"*, not a re-key of this one.
-
 ## The mapping, and why it is not a new id scheme
 
 ``new = entity_name_id(label, old)`` — the **existing** canonical minter
@@ -60,45 +64,50 @@ there is no second minter to drift. The resulting handle is canonical by
 
 ## Fail-closed invariants (each raises :class:`LegacyIdError` with EVERY one)
 
-1. **Partition.** Every node is classified into exactly one bucket, and every
-   id-keyed node is either canonical (untouched) or renamed exactly once. A
-   node that cannot be classified — no labels, an ambiguous identity, an
-   unknown label, an id-keyed label with no key — is a problem, never a
-   silent skip.
-2. **Single-valued.** Two distinct ``(label, legacy id)`` pairs never map to
-   one canonical id: two nodes becoming one key is a merge, and §1.4 forbids
-   exactly that. (Also checked against the dump as a whole, because two nodes
-   may carry the SAME legacy id — that is the duplicate-identity case
-   ``tools/graph_census.py`` reports — and renaming both would merge them.)
+1. **Partition.** Every node is classified into exactly one bucket — in scope
+   and canonical, in scope and renamed, declared out of scope, or
+   out-of-contract — and every in-scope node is either canonical (untouched) or
+   renamed exactly once. A node that cannot be classified *within* the in-scope
+   labels (no key, ambushed by another label's key, surrounding whitespace) is
+   a problem, never a silent skip.
+2. **Single-valued.** Two distinct legacy ids never map to one canonical id:
+   two nodes becoming one key is a merge, and §1.4 forbids exactly that. Checked
+   both for a repeated legacy value and for a repeated ``dump_id``.
 3. **Non-colliding.** A mapped canonical id must not already exist in the
-   snapshot. A real pass over a live graph cannot contain one; a plan that
-   does is built from the wrong snapshot or from a minter that drifted.
+   snapshot. A real pass over a live graph cannot contain one; a plan that does
+   is built from the wrong snapshot or from a minter that drifted.
 4. **Fixed point.** The canonical predicate is closed under the rename, so
-   re-planning the OUTPUT yields an empty plan (#8607 indicator 2). §1.2
-   clause 1 — *"minted once, never changed"* — is therefore not bent: it
-   governs ids that match a minted shape, and :func:`is_canonical` is what
-   decides that, so a canonical id is never a rename candidate.
-5. **Counts reconcile.** Nodes in == out; every node keeps exactly one key;
-   the renames plus the untouched ids account for every node in the snapshot;
-   every edge is preserved verbatim (endpoints are ``dump_id``, which nothing
-   here touches); the dump's own ``node_count``/``edge_count`` still match the
-   lists it carries.
+   re-planning the OUTPUT yields an empty plan (#8607 indicator 2). §1.2 clause
+   1 — *"minted once, never changed"* — is a deliberate exception for exactly
+   the population §1.4 names (legacy keys), and is not an exception for an id
+   that already matches a minted shape: such an id is never a rename candidate,
+   which is what the predicate decides.
+5. **Counts reconcile.** Nodes in == out; every in-scope node keeps exactly one
+   key; the renames plus the untouched canonical ids account for every in-scope
+   node; the edge list is preserved verbatim (compared as a digest, not by
+   identity) and a non-list ``edges`` is refused rather than read as empty; the
+   dump's own ``node_count``/``edge_count`` still match the lists it carries.
 6. **Bound to its snapshot.** The plan carries ``dump_sha256`` over each node's
-   ``dump_id``, labels and contract key, and :func:`apply_plan` recomputes it
-   and refuses a mismatch. ``dump_id`` is the store's INTERNAL id — positional
-   and reused after deletions — so a plan applied to a refreshed snapshot of
-   the same size would rewrite a different node's key and every count would
-   still reconcile.
+   ``dump_id``, labels and contract key **and over the edge list**, and
+   :func:`apply_plan` recomputes it and refuses a mismatch. ``dump_id`` is the
+   store's INTERNAL id — positional and reused after deletions — so a plan
+   applied to a refreshed snapshot of the same size would rewrite a different
+   node's key and every count would still reconcile; and a revert must restore
+   the original *topology*, not only the original keys.
 
 ## What this module does NOT do, and says so
 
 * **It does not touch the record.** A node's Postgres row is a projection of
-  the journal; a rename reaches it through the write path, not through a
-  second writer here (``#7951``/``#7969`` own that direction).
+  the journal; a rename reaches it through the write path, not through a second
+  writer here (``#7951``/``#7969`` own that direction).
 * **It does not journal the rename.** §1.4 rule 2 requires the LIVE pass to be
   a journal event so ``replay(journal)`` reproduces it — a write-path change
   (``#7951``), not a snapshot transform. The plan this module produces **is**
-  the payload that pass would journal: the old→new pairs, one per node.
+  the payload that pass would journal: the old→new pairs, one per node. ⚠️ A
+  snapshot rewritten by this tool and restored into a graph is one whose ids the
+  journal does not yet carry, so ``rebuild == live`` holds only once that door
+  exists.
+* **It does not re-key ``:Event`` or ``:Session``** — see :data:`DECLARED_OUT_OF_SCOPE`.
 * **It does not decide whether the pass should run.** The owner's 2026-10-10
   scope ruling and the launch criterion put it at P1 (``#8607``); this module
   is the mechanics, not the go-ahead.
@@ -119,14 +128,45 @@ from tortoise.sdk import _CROCKFORD_ULID_RE, _ULID_RE, _is_canonical_entity_id
 #: Census buckets.
 CANONICAL = "canonical"
 LEGACY = "legacy"
-NAME_KEYED = "name-keyed"
+OUT_OF_SCOPE = "out-of-scope"
+#: The bucket key for a node whose labels the record's key contract does not
+#: key at all. A real ``dump_graph`` artifact carries these (``:GraphEvent``,
+#: ``Meta``), so they are COUNTED, never refused.
+UNCONTRACTED = "<out-of-contract>"
 
-#: The contract's key properties whose VALUE is a minted id (Iface E §1.1:
-#: ``:Point``→``id``, ``:Event``→``eventId``, ``:Session``→``id``). The other
-#: two spellings — ``:Subject``/``:Object``→``name`` and ``:Source``→``url`` —
-#: are content, not a minted handle, and a rename of them is a new node
-#: (§1.2 clause 2), so they are out of this pass by declaration.
-MINTED_KEY_PROPERTIES: frozenset[str] = frozenset({"id", "eventId"})
+#: The labels this pass may re-key, each with the reason it is in scope.
+#:
+#: **The scope is a recorded decision, not a side effect of a property name.**
+#: An earlier revision keyed scope on the property name (``id``/``eventId``),
+#: which silently swept in ``:Session`` — whose ``id`` is caller-supplied — and
+#: declared ``:Event`` re-keyable, whose ``eventId`` has no sanctioned re-keying
+#: path at all. Both are refused here, with the reason in
+#: :data:`DECLARED_OUT_OF_SCOPE`.
+REKEY_SCOPE: dict[str, str] = {
+    "Point": (
+        "identity `id` minted by `tortoise/ids.py::ulid()`, and §1.4 rule 1 is "
+        "the recorded authorisation to rename a legacy key value"
+    ),
+}
+
+#: Every other label, with the reason it is counted and never rewritten.
+DECLARED_OUT_OF_SCOPE: dict[str, str] = {
+    "Event": (
+        "`eventId` is the journal-keyed Event identity and there is NO "
+        "sanctioned re-keying path (sdk.update_entity refuses it: 'No "
+        "sanctioned internal re-keying path exists'), and `id` MIRRORS "
+        "`eventId` (§1.1) so a one-sided rename leaves the legacy id "
+        "addressable — the journaled pass (#7951) must own it"
+    ),
+    "Session": (
+        "`id` is the caller-supplied MERGE key (`session_<hex12>` when the SDK "
+        "mints the default, otherwise the customer's own id), i.e. content the "
+        "harness will supply again — §1.4: opaque and valid"
+    ),
+    "Subject": "keyed on `name` (§1.1); §1.2 clause 2 — a rename of a name is a NEW node",
+    "Object": "keyed on `name` (§1.1); §1.2 clause 2 — a rename of a name is a NEW node",
+    "Source": "keyed on `url` (§1.1)",
+}
 
 
 class LegacyIdError(RuntimeError):
@@ -177,6 +217,11 @@ def is_canonical(value: object) -> bool:
     (``_ENTITY_ID_RE``, ``[a-z]{2,8}-<16..64 hex>``) exists to answer "may an
     UNRESOLVED value be treated as a name?", and using it here would declare a
     large part of the legacy population canonical.
+
+    ⚠️ This is only applied to labels in :data:`REKEY_SCOPE`. It is **not** a
+    census of every minting surface: ``:Event``'s ``ev_<sha256[:62]>``
+    (``_session_capture_event_id``) does not match it, which is one more reason
+    ``:Event`` is out of scope by declaration rather than by predicate.
     """
     return isinstance(value, str) and shape(value) != LEGACY
 
@@ -204,11 +249,18 @@ def _labels(node: Mapping[str, Any]) -> list[str]:
 
 
 def _node_label(node: Mapping[str, Any]) -> tuple[str | None, str | None]:
-    """``(label, problem)`` — the ONE label whose contract key this node carries.
+    """``(label, problem)`` — the ONE contract label this node is keyed by.
 
-    A node carrying ``:Point:Session`` keys on two different properties, so it
-    is ambiguous and is REFUSED rather than resolved by list order (the write
-    path would key it by one and the record by the other).
+    * a label set the record's contract does not key at all →
+      ``(UNCONTRACTED, None)``: counted, never refused (a real dump carries
+      ``:GraphEvent`` and ``Meta``);
+    * two labels that carry **different** key properties, each present →
+      a problem (the identity is genuinely undecidable);
+    * no key present and more than one contract label → a problem, whatever the
+      order of the ``labels`` array (a fallback to ``known[0]`` would make the
+      same malformed node a problem or a silent skip depending on list order);
+    * exactly one label claims a key, or exactly one contract label →
+      that label.
     """
     dump_id = node.get("dump_id")
     labels = _labels(node)
@@ -216,10 +268,7 @@ def _node_label(node: Mapping[str, Any]) -> tuple[str | None, str | None]:
         return None, f"dump_id {dump_id!r} carries no label"
     known = [label for label in labels if label in KEY_PROPERTY]
     if not known:
-        return None, (
-            f"dump_id {dump_id!r} has labels {sorted(labels)}, none of which the "
-            "record's key contract (public.node_identity) knows"
-        )
+        return UNCONTRACTED, None
     props = _props(node)
     claiming = [
         label
@@ -227,23 +276,65 @@ def _node_label(node: Mapping[str, Any]) -> tuple[str | None, str | None]:
         if isinstance(props.get(KEY_PROPERTY[label]), str)
         and str(props.get(KEY_PROPERTY[label])).strip()
     ]
-    if len(claiming) > 1:
+    # A multi-label node that claims two DIFFERENT key properties is ambiguous.
+    # `:Point` + `:Session` both key on `id`, which is one key, not two.
+    if len({KEY_PROPERTY[label] for label in claiming}) > 1:
         return None, (
-            f"dump_id {dump_id!r} is ambiguous: labels {sorted(labels)} each "
-            "carry their own contract key ("
+            f"dump_id {dump_id!r} is ambiguous: labels {sorted(labels)} carry "
+            "different contract keys ("
             + ", ".join(f"{lab}.{KEY_PROPERTY[lab]}" for lab in claiming)
             + ")"
+        )
+    # An IN-SCOPE label present but keyless is a problem even when another
+    # label supplies a key: a `:Point` with no `id` is unaddressable in the
+    # record, and whether it is refused must not depend on a co-label being
+    # name-keyed (that is the "problem or a silent skip by list order" defect).
+    unkeyed_in_scope = [label for label in known if label in REKEY_SCOPE and label not in claiming]
+    if unkeyed_in_scope:
+        legend = unkeyed_in_scope[0]
+        return None, (
+            f"dump_id {dump_id} is a :{legend} with no `{KEY_PROPERTY[legend]}` — "
+            "the layer's identity property; it cannot be normalised or "
+            f"addressed (labels {sorted(labels)})"
+        )
+    if not claiming and len(known) > 1:
+        return None, (
+            f"dump_id {dump_id!r} carries {sorted(labels)} and none of their "
+            "contract keys — its identity is undecidable"
         )
     return (claiming or known)[0], None
 
 
+def _edge_digest(edges: object) -> str:
+    """sha256 over the edge list, order-insensitively.
+
+    Folded into the snapshot fingerprint: a revert must restore the original
+    **topology**, not only the original keys, and `restore_graph` links edges by
+    `dump_id`, so a mutated edge list is a different artifact with identical
+    node keys.
+    """
+    rows = []
+    if isinstance(edges, list):
+        for edge in edges:
+            if isinstance(edge, dict):
+                rows.append(
+                    [str(k) for k in sorted(edge)]
+                    + [json.dumps(edge[k], sort_keys=True) for k in sorted(edge)]
+                )
+            else:
+                rows.append(["<malformed>", repr(edge)])
+    rows.sort()
+    return hashlib.sha256(json.dumps(rows, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
 def _dump_fingerprint(dump: Mapping[str, Any]) -> str:
-    """sha256 over each node's ``dump_id``, labels and contract key.
+    """sha256 over each node's ``dump_id``, labels and contract key, plus edges.
 
     ``dump_id`` alone is not a snapshot identity (positional, and reused after
     deletions); the node's own key is what the plan rewrites, so binding both
-    is what turns a stale plan into a MISMATCH instead of a silent rewrite of a
-    different node whose counts would still reconcile.
+    turns a stale plan into a MISMATCH instead of a silent rewrite of a
+    different node whose counts would still reconcile. The edge digest is here
+    for the same reason on the other half of the artifact.
     """
     nodes = dump.get("nodes")
     rows: list[list[str]] = []
@@ -259,11 +350,13 @@ def _dump_fingerprint(dump: Mapping[str, Any]) -> str:
                     str(node.get("dump_id")),
                     ",".join(sorted(_labels(node))),
                     label or "",
-                    "" if label is None else str(props.get(KEY_PROPERTY[label]) or ""),
+                    ""
+                    if label is None or label not in KEY_PROPERTY
+                    else str(props.get(KEY_PROPERTY[label]) or ""),
                 ]
             )
     rows.sort()
-    blob = json.dumps(rows, separators=(",", ":"))
+    blob = json.dumps(rows, separators=(",", ":")) + "|" + _edge_digest(dump.get("edges"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
@@ -275,29 +368,28 @@ class Census:
     """What is in the snapshot, counted — the number a pass is planned against."""
 
     nodes: int = 0
-    id_keyed: int = 0
+    #: Nodes whose label is in :data:`REKEY_SCOPE` — the population the plan and
+    #: its ledger are over.
+    in_scope: int = 0
     canonical: int = 0
     legacy: int = 0
-    #: ``canonical shape -> count`` and ``legacy shape -> count``. The legacy
-    #: map carries each `legacy` value's own shape name ("legacy"), so the
-    #: report names the population instead of implying it.
     canonical_shapes: dict[str, int] = field(default_factory=dict)
     legacy_shapes: dict[str, int] = field(default_factory=dict)
-    #: ``label -> {"canonical"|"legacy"|"name-keyed": count}``
+    #: ``label -> count`` for the labels :data:`DECLARED_OUT_OF_SCOPE` names.
+    out_of_scope: dict[str, int] = field(default_factory=dict)
+    #: ``label set -> count`` for nodes the record's key contract does not key.
+    uncontracted: dict[str, int] = field(default_factory=dict)
+    #: ``label -> {canonical|legacy|out-of-scope|unkeyed: count}``
     by_label: dict[str, dict[str, int]] = field(default_factory=dict)
-
-    @property
-    def name_keyed(self) -> int:
-        """Nodes whose key is content (``name``/``url``) — out of scope."""
-        return sum(b.get(NAME_KEYED, 0) for b in self.by_label.values())
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "nodes": self.nodes,
-            "id_keyed": self.id_keyed,
+            "in_scope": self.in_scope,
             "canonical": self.canonical,
             "legacy": self.legacy,
-            "name_keyed": self.name_keyed,
+            "out_of_scope": dict(sorted(self.out_of_scope.items())),
+            "uncontracted": dict(sorted(self.uncontracted.items())),
             "canonical_shapes": dict(sorted(self.canonical_shapes.items())),
             "legacy_shapes": dict(sorted(self.legacy_shapes.items())),
             "by_label": {
@@ -307,53 +399,62 @@ class Census:
         }
 
 
+def _bump(bucket: dict[str, int], key: str) -> None:
+    bucket[key] = bucket.get(key, 0) + 1
+
+
 def census(dump: Mapping[str, Any]) -> Census:
     """Count the snapshot's identity keys by bucket and by label.
 
-    Reads, never rewrites. A node :func:`_node_label` cannot resolve is
-    **reported as a problem by** :func:`build_plan`; here it is counted under
-    ``by_label["<unresolved>"]`` so the totals still add up and the census of a
-    malformed snapshot cannot look smaller than it is.
+    Reads, never rewrites. Uses the **same** key accessor as
+    :func:`build_plan`, so the two can never disagree about what is legacy.
     """
     nodes = dump.get("nodes")
     if not isinstance(nodes, list):
         raise LegacyIdError(["the dump carries no `nodes` list — nothing to census"])
     canon_shapes: dict[str, int] = {}
     legacy_shapes: dict[str, int] = {}
+    out_of_scope: dict[str, int] = {}
+    uncontracted: dict[str, int] = {}
     by_label: dict[str, dict[str, int]] = {}
-    id_keyed = canonical = legacy = 0
+    in_scope = canonical = legacy = 0
     for node in nodes:
         label = None if not isinstance(node, dict) else _node_label(node)[0]
         if label is None:
-            by_label.setdefault("<unresolved>", {}).setdefault(LEGACY, 0)
-            by_label["<unresolved>"][LEGACY] += 1
+            _bump(by_label.setdefault("<unresolved>", {}), OUT_OF_SCOPE)
             continue
-        key_prop = KEY_PROPERTY[label]
-        if key_prop not in MINTED_KEY_PROPERTIES:
-            by_label.setdefault(label, {}).setdefault(NAME_KEYED, 0)
-            by_label[label][NAME_KEYED] += 1
+        if label == UNCONTRACTED:
+            _bump(uncontracted, ",".join(sorted(_labels(node))) or "<no-labels>")
+            _bump(by_label.setdefault(UNCONTRACTED, {}), OUT_OF_SCOPE)
             continue
-        value = _props(node).get(key_prop)
-        value = value if isinstance(value, str) else ""
-        id_keyed += 1
-        name = shape(value) if value else "missing"
-        if name == LEGACY or name == "missing":
+        if label not in REKEY_SCOPE:
+            _bump(out_of_scope, label)
+            _bump(by_label.setdefault(label, {}), OUT_OF_SCOPE)
+            continue
+        in_scope += 1
+        raw = _props(node).get(KEY_PROPERTY[label])
+        value = raw.strip() if isinstance(raw, str) else ""
+        if not value:
+            _bump(by_label.setdefault(label, {}), "unkeyed")
+            continue
+        name = shape(value)
+        if name == LEGACY:
             legacy += 1
-            legacy_shapes[name] = legacy_shapes.get(name, 0) + 1
-            by_label.setdefault(label, {}).setdefault(LEGACY, 0)
-            by_label[label][LEGACY] += 1
+            _bump(legacy_shapes, name)
+            _bump(by_label.setdefault(label, {}), LEGACY)
         else:
             canonical += 1
-            canon_shapes[name] = canon_shapes.get(name, 0) + 1
-            by_label.setdefault(label, {}).setdefault(CANONICAL, 0)
-            by_label[label][CANONICAL] += 1
+            _bump(canon_shapes, name)
+            _bump(by_label.setdefault(label, {}), CANONICAL)
     return Census(
         nodes=len(nodes),
-        id_keyed=id_keyed,
+        in_scope=in_scope,
         canonical=canonical,
         legacy=legacy,
         canonical_shapes=canon_shapes,
         legacy_shapes=legacy_shapes,
+        out_of_scope=out_of_scope,
+        uncontracted=uncontracted,
         by_label=by_label,
     )
 
@@ -394,7 +495,7 @@ class LegacyIdPlan:
 
     @property
     def is_empty(self) -> bool:
-        """True iff every id-keyed node is already canonical — a fixed point."""
+        """True iff every in-scope node is already canonical — a fixed point."""
         return not self.renames
 
 
@@ -418,6 +519,7 @@ def build_plan(dump: Mapping[str, Any]) -> LegacyIdPlan:
     #: one label are ONE identity to the write path already, so renaming both
     #: to the same canonical id would merge them (invariant 2).
     legacy_seen: dict[tuple[str, str], int] = {}
+    seen_dump_ids: dict[int, str] = {}
 
     for node in nodes:
         if not isinstance(node, dict):
@@ -430,23 +532,41 @@ def build_plan(dump: Mapping[str, Any]) -> LegacyIdPlan:
                 "addressable by dump_id for its edges to survive"
             )
             continue
+        if dump_id in seen_dump_ids:
+            problems.append(
+                f"dump_id {dump_id} is carried by two nodes — the dump is not "
+                "addressable, so every edge on it is ambiguous"
+            )
+            continue
+        seen_dump_ids[dump_id] = str(node.get("labels"))
         label, problem = _node_label(node)
         if problem is not None:
             problems.append(problem)
             continue
-        assert label is not None
-        key_prop = KEY_PROPERTY[label]
-        if key_prop not in MINTED_KEY_PROPERTIES:
-            # Declared out of scope (§1.2 clause 2) — counted, never rewritten.
+        if label is None or label == UNCONTRACTED or label not in REKEY_SCOPE:
+            # Declared out of scope (a reason per label in
+            # DECLARED_OUT_OF_SCOPE / the record does not key it) — counted by
+            # `census`, never rewritten.
             continue
-        value = _props(node).get(key_prop)
-        if not isinstance(value, str) or not value.strip():
+        key_prop = KEY_PROPERTY[label]
+        raw = _props(node).get(key_prop)
+        if not isinstance(raw, str) or not raw.strip():
             problems.append(
                 f"dump_id {dump_id} is a :{label} with no `{key_prop}` — the "
                 "layer's identity property; it cannot be normalised or addressed"
             )
             continue
-        value = value.strip()
+        if raw != raw.strip():
+            # Trimming IS a rename of the key value, and this plan only records
+            # renames it can prove: a silent trim would leave a revert unable to
+            # restore the artifact, and a re-export would re-introduce it.
+            problems.append(
+                f"dump_id {dump_id} carries {key_prop}={raw!r} with surrounding "
+                "whitespace — fix it in the source before normalising, because a "
+                "silent trim is a key change this plan cannot prove on a revert"
+            )
+            continue
+        value = raw
         if is_canonical(value):
             # Invariant 4: a canonical id is never a candidate. A snapshot that
             # carries the same canonical id twice is a duplicate identity, not
@@ -496,13 +616,15 @@ def build_plan(dump: Mapping[str, Any]) -> LegacyIdPlan:
                 "a fixed point"
             )
 
+    if not problems:
+        _check_dump_counts(dump, problems)
     # Invariant 5, the ledger's own halves: the renames and the untouched nodes
-    # must account for the whole id-keyed population.
+    # must account for the whole in-scope population.
     reported = census(dump)
     if not problems:
-        if reported.id_keyed != len(renames) + reported.canonical:
+        if reported.in_scope != len(renames) + reported.canonical:
             problems.append(
-                f"partition hole: {reported.id_keyed} id-keyed nodes but "
+                f"partition hole: {reported.in_scope} in-scope nodes but "
                 f"{len(renames)} renames + {reported.canonical} canonical — "
                 "some node is counted in neither bucket"
             )
@@ -510,7 +632,6 @@ def build_plan(dump: Mapping[str, Any]) -> LegacyIdPlan:
             problems.append(
                 f"partition hole: {len(renames)} renames planned for {reported.legacy} legacy ids"
             )
-        _check_dump_counts(dump, problems)
 
     if problems:
         raise LegacyIdError(problems)
@@ -526,9 +647,17 @@ def _check_dump_counts(dump: Mapping[str, Any], problems: list[str]) -> None:
 
     A snapshot whose ``node_count`` disagrees with its ``nodes`` is a TRUNCATED
     export (``#5062``), and normalising a truncated snapshot would rewrite a
-    population that is not the graph's.
+    population that is not the graph's. A non-list ``edges``/``nodes`` is
+    refused here too: reading it as empty is the silent-drop this module exists
+    not to be.
     """
     for declared, key in (("node_count", "nodes"), ("edge_count", "edges")):
+        if key in dump and not isinstance(dump.get(key), list):
+            problems.append(
+                f"the dump's `{key}` is not a list ({type(dump.get(key)).__name__}) "
+                "— reading it as empty would silently drop it"
+            )
+            continue
         if declared not in dump:
             continue
         rows = dump.get(key)
@@ -575,13 +704,20 @@ def apply_plan(
             )
 
     nodes_in = dump.get("nodes")
-    edges_in = dump.get("edges")
+    problems: list[str] = []
     if not isinstance(nodes_in, list):
         raise LegacyIdError(["the dump carries no `nodes` list"])
-    edges = edges_in if isinstance(edges_in, list) else []
+    edges_in = dump.get("edges", [])
+    if not isinstance(edges_in, list):
+        raise LegacyIdError(
+            [
+                f"the dump's `edges` is not a list ({type(edges_in).__name__}) — "
+                "reading it as empty would silently drop every edge"
+            ]
+        )
+    edge_digest_before = _edge_digest(edges_in)
 
     by_dump_id: dict[int, Rename] = {rename.dump_id: rename for rename in plan.renames}
-    problems: list[str] = []
     out_nodes: list[dict] = []
     applied = 0
     for node in nodes_in:
@@ -603,6 +739,14 @@ def apply_plan(
             )
             out_nodes.append(node)
             continue
+        if rename.label not in _labels(node):
+            problems.append(
+                f"dump_id {dump_id} does not carry the planned label "
+                f"{rename.label!r} (labels {_labels(node)}) — the plan names a "
+                "different node"
+            )
+            out_nodes.append(node)
+            continue
         props[rename.key_property] = give
         out_nodes.append({**node, "props": props})
         applied += 1
@@ -614,24 +758,31 @@ def apply_plan(
         )
 
     out: dict = {**dump, "nodes": out_nodes}
-    if "edges" in dump:
-        out["edges"] = edges
-    # Invariant 5: nodes in == out, and the counts the dump declares still hold.
+    # Invariant 5: nodes in == out, edges unchanged (compared as a digest), and
+    # the counts the dump declares still hold.
     if len(out_nodes) != len(nodes_in):
         problems.append(f"{len(nodes_in)} nodes in, {len(out_nodes)} out")
-    edges_out = out.get("edges")
-    edges_out = edges_out if isinstance(edges_out, list) else []
-    if edges_out != edges:
+    if _edge_digest(out.get("edges", [])) != edge_digest_before:
         problems.append("the edge list changed — a key rename must not touch edges")
-    for declared, rows in (("node_count", out_nodes), ("edge_count", edges_out)):
-        if declared in out and int(out[declared]) != len(rows):
+    if "nodes" in dump and not isinstance(dump.get("nodes"), list):
+        problems.append("the dump's `nodes` is not a list")
+    if "edges" in dump and not isinstance(dump.get("edges"), list):
+        problems.append("the dump's `edges` is not a list")
+    for declared, rows in (("node_count", out_nodes), ("edge_count", edges_in)):
+        if declared not in out:
+            continue
+        try:
+            declared_n = int(out[declared])
+        except (TypeError, ValueError):
+            problems.append(f"the dump's {declared} is not an integer: {out[declared]!r}")
+            continue
+        if declared_n != len(rows):
             problems.append(
-                f"the output's {declared} ({out[declared]}) no longer matches its "
-                f"{len(rows)} row(s)"
+                f"the output's {declared} ({declared_n}) no longer matches its {len(rows)} row(s)"
             )
     if revert:
         # A revert's own proof: the restored artifact must BE the snapshot the
-        # plan was built from, not merely look like it.
+        # plan was built from, not merely look like it (node keys AND edges).
         restored = _dump_fingerprint(out)
         if restored != plan.dump_sha256:
             problems.append(
@@ -642,19 +793,19 @@ def apply_plan(
     if problems:
         raise LegacyIdError(problems)
 
-    after = census(out)
     before = census(dump)
+    after = census(out)
     report = {
         "mode": "revert" if revert else "apply",
         "dump_sha256": plan.dump_sha256,
         "nodes_in": len(nodes_in),
         "nodes_out": len(out_nodes),
-        "edges_in": len(edges),
-        "edges_out": len(edges_out),
+        "edges_in": len(edges_in),
+        "edges_out": len(out.get("edges", [])),
         # The ledger, both directions and both buckets — a caller reconciles on
         # these and never has to infer a count from another.
-        "id_keyed_in": before.id_keyed,
-        "id_keyed_out": after.id_keyed,
+        "in_scope_in": before.in_scope,
+        "in_scope_out": after.in_scope,
         "canonical_before": before.canonical,
         "canonical_after": after.canonical,
         "legacy_before": before.legacy,
