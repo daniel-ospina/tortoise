@@ -37,11 +37,14 @@ THE TWO ADDRESSES — A POINT (#5581) AND AN ENTITY (#5199)
 ``point_currency``/``read_links`` walk ``(Point)-[:extractedFrom]->(Source)``.
 ``entity_currency``/``read_entity_links`` walk the OTHER provenance hop,
 ``(Source)-[:references]->(:Object|:Event|:Source)`` (a document IS a
-``:Source`` post-D10, and it is addressed by ``url``), for the classes the graph reasons
-about that never carry an ``extractedFrom`` link — asking *"is this object still
-about the content we hold?"* used to require guessing a Point that extracts from
-the same source. Same pair, same aggregate, same object shape; the difference is
-only which link set is addressed, which is why neither path owns a vocabulary.
+``:Source`` post-D10, and it is addressed by ``url``), for the reasoning classes
+that never carry an ``extractedFrom`` link (``:Object`` / ``:Event``) and for
+document ``:Source`` derivation targets — which may carry **both** hops
+(``extractedFrom`` to the corpus source, ``references`` from it) — asking *"is
+this object still about the content we hold?"* used to require guessing a Point
+that extracts from the same source. Same pair, same aggregate, same object
+shape; the difference is only which link set is addressed, which is why neither
+path owns a vocabulary.
 
 ⛔ An ``:Object`` reads ``unknown`` — **by decision, not by omission**: the
 2026-09-25 owner ruling (option A) keeps identity/mention ``references`` links
