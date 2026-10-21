@@ -356,7 +356,7 @@ change and needs the ordering-across-three-doors question answered.
 its own hard rule is decisive: *"The meter must be wired into the gate before any allowance is
 configured"*. ⚠️ **The gate is NOT on `main`** — it lives on the unmerged
 `feat/5331-node-to-byte-cap` branch, where it is **fail-closed** and raises `QuotaCheckError` when no
-reading is supplied (`STORAGE-ARCHITECTURE.md:86-91` (the standing statement: the **meter** is fail-soft, the **gate** is fail-closed and raises `QuotaCheckError`) — the changelog lines at `:341-352` are the same text kept as a build record, under the "Removed wording" archive), and
+reading is supplied (`STORAGE-ARCHITECTURE.md:86-91` (the standing statement: the **meter** is fail-soft, the **gate** is fail-closed and raises `QuotaCheckError`) — the `STORAGE-ARCHITECTURE-CHANGELOG.md` lines at `:341-352` are the same statements kept as a build record, under that file's "Removed wording" archive), and
 `grep` finds `max_storage_bytes` in **no** module here. So the item has two ordered halves:
 land the gate (code, from that branch), then wire the meter into it — and only then configure
 an allowance. Configuring the key today is inert rather than a 500; configuring it after the gate
