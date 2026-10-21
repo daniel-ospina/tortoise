@@ -1499,11 +1499,30 @@ def run_fts_query(
 #: themselves — a vector leg that failed is degraded on its own entry.)
 #:
 #: The measurement's need — "a truncated corpus must not read as a clean BM25
-#: measurement" — is served more precisely by :data:`LEXICAL_DECLINED_KEY`:
-#: the entry records ``ran=True, declined=True, degraded=False, count=0`` with
-#: NO ``mechanism`` key (BM25 produced no rows, so it may not claim to have),
-#: the read's recorded status stays truthful, and a baseline can count
-#: declines exactly instead of inferring them from a blanket degradation.
+#: measurement" — is what :data:`LEXICAL_DECLINED_KEY` makes ANSWERABLE, and
+#: it is not yet answered by any consumer in this tree: the entry records
+#: ``ran=True, declined=True, degraded=False, count=0`` with NO ``mechanism``
+#: key (BM25 produced no rows, so it may not claim to have), so a baseline can
+#: count declines exactly instead of inferring them from a blanket
+#: degradation — but no in-tree fold counts it yet, and the TWO folds that
+#: read the old carrier now record a declining arm as a RUN, not an impairment,
+#: deliberately:
+#:
+#: * ``retrieval_preflight.merge_leg_trace`` — the shared interpreter both
+#:   ``arms/a4_tortoise`` and ``parity/mabench_tortoise`` record through — folds
+#:   only ``degraded``, so the run record's (and the parity cell's)
+#:   ``retrieval_degraded`` no longer fires on a decline, and a decline is
+#:   therefore NOT distinguishable there from the arm being OFF.
+#: * ``retrieval_metering`` tallies the decline as a leg run, not a degraded one.
+#:
+#: That is the correct polarity for both (neither claims an impairment, which is
+#: what this whole note is about), but it does mean the decline's measurement
+#: signal is carried ONLY by the trace entry: a measurement that wants it must
+#: read :data:`LEXICAL_DECLINED_KEY` off the trace — which is exactly what
+#: #8486's baseline has to do, and why the key exists. Whoever wires it must not
+#: route it back through ``degraded``; the parity lane already persists the raw
+#: entries (``capability_gate.leg_trace``), so the signal survives in that
+#: artifact even while the boolean does not carry it.
 #:
 #: ⛔ Cost, stated and NOT measured. Unlike ``run_vector_query``'s embedded
 #: brute force — which scores inside the engine and returns ``limit`` rows —

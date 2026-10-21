@@ -892,11 +892,23 @@ class TestDeclineIsNotAReadDegradation:
     leg-local: ``read_status.classify_leg_trace`` reports the whole READ as
     ``degraded`` when any entry carries it, and ``ask_lane`` folds it into
     ``retrieval_degraded`` the same way. So on a store at the cap, enabling the
-    arm relabelled every successful read "the memory layer is IMPAIRED" — the
-    recorded term for an outage or an absent leg, and precisely what
-    ``read_status``'s load-bearing property forbids for a read that answered
-    with rows. Nothing was impaired: every leg ran, and the shipped lexical leg
-    answered over the WHOLE label; only the arm's alternative SCORER declined.
+    arm relabelled every successful read "the memory layer is IMPAIRED".
+
+    Why that relabel was WRONG — stated on the term's own ground, not on the
+    row count. ``degraded`` is the recorded term for a store that did not
+    answer or a leg that did not run, and it deliberately OUTRANKS a
+    successful read: a rows-returning read with a genuinely missing leg IS
+    correctly ``degraded``, because a partial result is not a clean one
+    (``classify_read_status`` folds it on top of the content mapping;
+    ``tests/test_read_status.py``'s
+    ``test_a_leg_that_did_not_run_is_the_boundary_degraded_term`` pins
+    exactly that, ``hit_count=3`` and all). Nothing was
+    impaired HERE: every leg ran, and the shipped lexical leg answered over
+    the WHOLE label; only the arm's alternative SCORER declined. So the
+    decline is not an impairment to record — not "a degraded read with rows
+    is forbidden" (no such property exists, and a lane that believed in one
+    could "fix" the classifier into calling a genuinely absent vector leg on
+    a rows-returning read a clean hybrid read).
 
     ``mechanism="bm25"`` had the mirror-image problem: the key answers "which
     path produced these rows", and a declined arm produced none, so #8486's
@@ -906,14 +918,21 @@ class TestDeclineIsNotAReadDegradation:
     Mutations, each verified to red the test named beside it:
 
     * restore ``degraded=True`` on the decline branch →
-      ``test_a_declined_arm_does_not_report_the_read_degraded`` and
-      ``test_a_declined_arm_entry_is_not_itself_degraded`` red;
+      ``test_a_declined_arm_does_not_report_the_read_degraded``,
+      ``test_a_declined_arm_entry_is_not_itself_degraded`` and
+      ``test_the_shared_trace_fold_does_not_read_the_decline_as_a_degradation``
+      red;
     * restore ``mechanism=LEXICAL_MECHANISM_BM25`` for a declined entry →
       ``test_a_declined_arm_claims_no_bm25_mechanism`` reds;
     * delete the ``declined=declined`` passthrough in ``_record`` → the
       decline becomes invisible and the three decline tests red on their
       guards (the control test below does not trigger a decline, so it is
       deliberately unaffected — that is what makes it a control).
+
+    Non-vacuity is claimed PER MUTATION, never as "all of these tests are red
+    on the pre-fix tree": this module imports ``LEXICAL_DECLINED_KEY`` at
+    module scope, so reverting ``tortoise/search_engine.py`` alone reds the
+    file at COLLECTION and proves nothing about any assertion here.
     """
 
     @staticmethod
@@ -1009,6 +1028,36 @@ class TestDeclineIsNotAReadDegradation:
         assert entry.get(LEXICAL_DECLINED_KEY) is True, (
             "the decline must stay VISIBLE once it stops claiming degraded: "
             f"{entry}")
+
+    def test_the_shared_trace_fold_does_not_read_the_decline_as_a_degradation(
+            self, force_sparse_tfidf):
+        """The RECORDING half: the folds both battery lanes share see a run.
+
+        ``retrieval_preflight.merge_leg_trace`` is the single interpreter of
+        this trace shape — ``arms/a4_tortoise`` and ``parity/mabench_tortoise``
+        both record their ``retrieval_degraded`` through it — and it reads ONLY
+        ``degraded``. So the decline must keep that flag false, or the two
+        battery lanes relabel a complete measurement as impaired: the same
+        false positive this class removes from the read's status, one layer
+        out. What a measurement needs instead is the ``declined`` key on the
+        entry; counting it is the baseline's job (see
+        :data:`LEXICAL_DECLINED_KEY`), and it must never be routed back through
+        ``degraded`` to get there.
+        """
+        from battery.runner.retrieval_preflight import merge_leg_trace
+
+        graph, _ids = _graph_with_corpus()
+        trace: list[dict] = []
+        run_bm25_query(graph, QUERY, entity_type="point", limit=20,
+                       corpus_cap=1, leg_trace=trace)
+        assert trace[-1].get(LEXICAL_DECLINED_KEY) is True, (
+            f"guard: the arm must have declined; {trace}")
+        legs: list[str] = []
+        assert merge_leg_trace(legs, trace) is False, (
+            "the shared fold the battery lanes record through must not report "
+            f"an impaired measurement for a decline; trace={trace}")
+        assert "fts" in legs, (
+            f"the declined arm still RAN that leg slot; legs={legs}")
 
     def test_a_clean_arm_loss_is_not_a_decline(
             self, force_sparse_tfidf):
