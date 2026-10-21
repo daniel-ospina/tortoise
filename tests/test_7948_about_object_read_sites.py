@@ -174,10 +174,14 @@ WHAT THIS PINS
 16. `test_no_untyped_walk_lacks_a_row_or_a_stated_exclusion` — the
    UNTYPED-WALK class is now DERIVED from the tree, not hand-listed: every
    relationship bracket carrying no type at all, in a read clause, must own a
-   §13 row or appear in `_EXCLUDED_UNTYPED`. This is the class that was wrong
-   five times running — each pass re-applied §13's inclusion rule by hand and
-   reached a different count, the last one finding 27 sites where the tree had
-   33 (the backup's all-edge dump and the `backfill_v25` count among the six).
+   §13 row or appear in `_EXCLUDED_UNTYPED` **with the code fact that bounds
+   that walk** — in its own clause, or in an earlier clause of the same query
+   that binds one of its endpoints (Cypher matches each `MATCH` pattern
+   independently, so a constraint written for another walk does not count). This
+   is the class that was wrong five times running — each pass re-applied §13's
+   inclusion rule by hand and reached a different count, the last one finding 27
+   sites where the tree had 33 (the backup's all-edge dump and the
+   `backfill_v25` count among the six).
 17. `test_every_stated_exclusion_is_still_true` — an exclusion is not a
    promise: its code facts are asserted inside the excluded symbol's span, and
    (16) requires the fact that bounds THIS walk to sit in the walk's own clause —
@@ -682,6 +686,8 @@ def _reads_literally(value: str) -> bool:
     the file is green on the shipped rule, seventeen of them at `73e3c68b4`).
     """
     for match in _EDGE_PATTERN.finditer(value):
+        if _in_pattern_comprehension(value, match.start()):
+            return True
         clauses = _CLAUSE.findall(value[: match.start()])
         if clauses and " ".join(clauses[-1].upper().split()) in _READ_CLAUSES:
             return True
@@ -929,6 +935,36 @@ def _query_text(node: ast.AST, docstrings: set[int]) -> tuple[str, int] | None:
     return None
 
 
+def _in_pattern_comprehension(query: str, start: int) -> bool:
+    """Is the bracket at `start` inside a Cypher PATTERN COMPREHENSION?
+
+    Cypher opens one with a `[` that is still unclosed when the relationship
+    bracket is reached — `[(n)-[r]->(m) | r]`, `size([(n)-[r]->(m) | r])`. No
+    other construct puts a relationship bracket inside an unclosed `[` of the
+    same query string, so the delimiter test is exact rather than a heuristic.
+    """
+    depth = 0
+    for char in reversed(query[:start]):
+        if char == "]":
+            depth += 1
+        elif char == "[":
+            if depth == 0:
+                return True
+            depth -= 1
+    return False
+
+
+def _clause_opening_at(query: str, start: int):
+    """The LAST clause that starts the expression containing `start`.
+
+    For a walk inside a pattern comprehension the comprehension is the thing
+    that reads, so the segment is attributed to the clause that introduces the
+    comprehension (`SET`, `WITH`, `RETURN`) rather than to no clause at all.
+    """
+    prior = [clause for clause in _CLAUSE.finditer(query) if clause.start() < start]
+    return prior[-1] if prior else None
+
+
 def _untyped_read_segments(query: str) -> list[tuple[int, str, tuple[str, ...]]]:
     """Every UNTYPED relationship bracket in a READ clause, with its CLAUSE segment.
 
@@ -952,10 +988,25 @@ def _untyped_read_segments(query: str) -> list[tuple[int, str, tuple[str, ...]]]
         if ":" in _PROPERTY_MAP.sub("", match.group(1)):
             continue  # a typed read, or a run-time type name
         prior = [clause for clause in clauses if clause.start() < match.start()]
-        if not prior:
-            continue
-        start = prior[-1]
-        if " ".join(start.group(1).upper().split()) not in _READ_CLAUSES:
+        start = prior[-1] if prior else None
+        readable = start is not None and (
+            " ".join(start.group(1).upper().split()) in _READ_CLAUSES
+        )
+        if not readable:
+            # ⚠️ A PATTERN COMPREHENSION is a read whatever clause introduces it.
+            # In `SET n.deg = size([(n)-[r]->(m) | r])` the last clause before the
+            # bracket is `SET`, so a walk that enumerates every relationship type
+            # was discarded — a fail-open in the one direction this census exists
+            # to close. A comprehension ENUMERATES the edges it walks. It also has
+            # to survive carrying NO clause at all (`RETURN` is not in `_CLAUSE`),
+            # which is why this is not folded into the clause test.
+            if not _in_pattern_comprehension(query, match.start()):
+                continue
+            start = _clause_opening_at(query, match.start())
+        if start is None:
+            following = [clause for clause in clauses if clause.start() > match.end()]
+            end = following[0].start() if following else len(query)
+            found.append((match.start(), query[:end], ()))
             continue
         following = [clause for clause in clauses if clause.start() > match.end()]
         end = following[0].start() if following else len(query)
@@ -1006,6 +1057,30 @@ def _untyped_read_brackets(query: str) -> list[int]:
     return [offset for offset, _segment, _earlier in _untyped_read_segments(query)]
 
 
+def _record_untyped_site(
+    found: dict[str, list[tuple[int, str, tuple[str, ...]]]],
+    module: str,
+    lineno: int,
+    segment: str,
+    earlier: tuple[str, ...],
+) -> None:
+    """Record one untyped walk, deduped on `(line, clause)` — never on text alone.
+
+    ⚠️ **The identity is the SITE, not the query string.** Deduping on the text
+    dropped the second copy of an identical walk in another symbol of the same
+    module — measured: `hosted_backup.py` already carries `MATCH ()-[r]->()
+    RETURN count(r)` five times, so a sixth copy in a new helper vanished from
+    the census while its text matched the row-29 constant. Deduping on the line
+    alone collides two brackets inside ONE clause (`_connected_pairs`' operator
+    pair), which is the same walk and should stay one entry. The pair is exact:
+    same line and same clause is one walk; anything else is its own site.
+    """
+    sites = found.setdefault(module, [])
+    if any((lineno, segment) == (line, clause) for line, clause, _ in sites):
+        return
+    sites.append((lineno, segment, earlier))
+
+
 def _untyped_read_sites() -> dict[str, list[tuple[int, str, tuple[str, ...]]]]:
     """Census: module → `(line, walk segment, earlier segments)` of untyped reads.
 
@@ -1042,7 +1117,10 @@ def _untyped_read_sites() -> dict[str, list[tuple[int, str, tuple[str, ...]]]]:
     found: dict[str, list[tuple[int, str, tuple[str, ...]]]] = {}
     for path in sorted(PKG.rglob("*.py")):
         text = path.read_text(encoding="utf-8")
-        if "MATCH" not in text:
+        # Case-INSENSITIVE: `_CLAUSE` matches `match` in any case, so a
+        # capital-only pre-filter skipped a module whose only read clause was
+        # lower-cased — a fail-open in a guard whose purpose is not to fail open.
+        if "match" not in text.lower():
             continue
         tree = _parsed(str(path))
         docstrings = _docstring_ids(tree)
@@ -1054,9 +1132,73 @@ def _untyped_read_sites() -> dict[str, list[tuple[int, str, tuple[str, ...]]]]:
                 continue
             value, lineno = rebuilt
             for _offset, segment, earlier in _untyped_read_segments(value):
-                sites = found.setdefault(str(path.relative_to(PKG)), [])
-                if all(segment != existing[1] for existing in sites):
-                    sites.append((lineno, segment, earlier))
+                _record_untyped_site(
+                    found, str(path.relative_to(PKG)), lineno, segment, earlier
+                )
+    return found
+
+
+def _fragment_brackets(value: str) -> list[int]:
+    """Offsets of the UNTYPED, clause-free relationship brackets in `value`.
+
+    The fragment rule, split out so the census and its fixture decide it the same
+    way: untyped (no type once the property map is removed) and with NO Cypher
+    clause before it, which is what makes it a PART rather than a query.
+    """
+    return [
+        match.start()
+        for match in _UNTYPED_BRACKET.finditer(value)
+        if ":" not in _PROPERTY_MAP.sub("", match.group(1))
+        and not _CLAUSE.findall(value[: match.start()])
+    ]
+
+
+def _untyped_fragment_sites() -> dict[str, list[tuple[int, str]]]:
+    """Census: module → `(line, text)` of a FRAGMENT that supplies an untyped walk.
+
+    ⚠️ **This is the bypass a query-shaped census cannot see, and it was
+    measured.** A walk assembled from parts — `_WALK = "-[r]->"`, then
+    `"MATCH (n)" + _WALK + "(m)"` — keeps the bracket in a DIFFERENT string
+    constant from its `MATCH`, so `_untyped_read_sites` finds no bracket at the
+    query, and the fragment carries no clause of its own, so no clause rule
+    applies to it either: the walk entered neither census and every test stayed
+    green. So any string expression holding a dash-delimited relationship
+    bracket with **no rel type and no clause at all** is itself a site, and its
+    enclosing symbol must account for it (a row, an exclusion, or a
+    `_NON_LITERAL` pin).
+
+    Read-vs-write cannot be decided for a fragment, and that is the point: the
+    requirement is unconditional ownership, so a part-assembled walk cannot be
+    introduced silently.
+
+    **Limit, stated rather than implied.** This arm sees a DASH-DELIMITED
+    fragment (`"-[r]->"`, `"(n)-[r]->(o)"`) — Cypher's own relationship
+    delimiter, which is what makes the bracket a relationship at all. A fragment
+    carrying only `"[r]"` is not distinguishable from a list index or a JSON
+    array without knowing the caller, so it is not counted here; a reader built
+    that way is held by the PINS (`_NON_LITERAL`), not by this census. That is
+    why §13 states the derived class as *relationship brackets, in a query or in
+    a dash-delimited fragment* — not as *every possible assembly*.
+    """
+    found: dict[str, list[tuple[int, str]]] = {}
+    for path in sorted(PKG.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        if "match" not in text.lower() and "[" not in text:
+            continue
+        tree = _parsed(str(path))
+        docstrings = _docstring_ids(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Constant, ast.JoinedStr, ast.BinOp)):
+                continue
+            rebuilt = _query_text(node, docstrings)
+            if rebuilt is None:
+                continue
+            value, lineno = rebuilt
+            if not _fragment_brackets(value):
+                continue
+            sites = found.setdefault(str(path.relative_to(PKG)), [])
+            if all(lineno != line for line, _ in sites):
+                sites.append((lineno, value))
     return found
 
 
@@ -1326,6 +1468,15 @@ def test_no_untyped_walk_lacks_a_row_or_a_stated_exclusion():
         "MERGE (n)-[r]->(m)",
     )
 
+    # ⚠️ A pattern comprehension ENUMERATES the edges it walks, so it is a READ
+    # whatever clause introduces it. Before this arm, `SET n.deg = size([…])`
+    # was discarded on the preceding `SET` — a walk over every relationship type
+    # invisible to the census that exists to find it.
+    must_match_comprehension = (
+        "SET n.deg = size([(n)-[r]->(m) | r])",
+        "RETURN size([(n)-[r]-(m) | r]) AS deg",
+    )
+
     def _brackets(query: str) -> list[int]:
         return _untyped_read_brackets(query)
 
@@ -1340,6 +1491,65 @@ def test_no_untyped_walk_lacks_a_row_or_a_stated_exclusion():
             "type (`[r:aboutObject]`, `[r:{rel}]`) is the computed-name half, and "
             "a MERGE is a write."
         )
+    for query in must_match_comprehension:
+        assert _brackets(query), (
+            f"this census reads {query!r} as a non-read — a PATTERN "
+            "COMPREHENSION enumerates the edges it walks, so the clause that "
+            "introduces it (`SET`, `RETURN`) cannot make it a write."
+        )
+
+    # The FRAGMENT rule, asserted directly: a clause-free relationship part is a
+    # site, and a typed one is not. This is the shape that entered NO census.
+    assert _fragment_brackets("-[r]->"), (
+        "a clause-free relationship FRAGMENT (`-[r]->`) is not counted as a "
+        'site — that is the part-assembled walk (`"MATCH (n)" + _WALK + "(m)"`) '
+        "which stayed invisible to the query-shaped census."
+    )
+    assert not _fragment_brackets("-[r:aboutObject]->"), (
+        "a TYPED relationship fragment is the computed-name half, not an untyped "
+        "walk — the fragment rule must not swallow it."
+    )
+
+    # The census IDENTITY: one walk per (line, clause) — not per query string.
+    # Two symbols carrying the SAME untyped query are two sites (a text-keyed
+    # census dropped the second, which is how a sixth copy of
+    # `MATCH ()-[r]->() RETURN count(r)` would vanish beside row 29's constant),
+    # and two brackets inside ONE clause are one walk (`_connected_pairs`).
+    synthetic: dict[str, list[tuple[int, str, tuple[str, ...]]]] = {}
+    _record_untyped_site(synthetic, "m.py", 10, "MATCH (a)-[r]->(b) ", ())
+    _record_untyped_site(synthetic, "m.py", 20, "MATCH (a)-[r]->(b) ", ())
+    assert len(synthetic["m.py"]) == 2, (
+        "two symbols carrying the same untyped query collapsed into one census "
+        "entry — the identity must be the SITE, or a second walk is shielded by "
+        "the first one's row/exclusion."
+    )
+    _record_untyped_site(synthetic, "m.py", 30, "MATCH (op)-[r1]->(a), (op)-[r2]->(b) ", ())
+    _record_untyped_site(synthetic, "m.py", 30, "MATCH (op)-[r1]->(a), (op)-[r2]->(b) ", ())
+    assert len(synthetic["m.py"]) == 3, (
+        "two brackets inside ONE clause were recorded as two walks — that is one "
+        "walk with two relationship positions, and splitting it inflates the "
+        "census with a duplicate."
+    )
+
+    # The cross-clause arm of the exclusion rule, asserted directly (no live site
+    # relies on it today, so this is what makes it falsifiable): a fact in an
+    # EARLIER clause counts when it binds a variable this walk uses, and not
+    # otherwise.
+    assert _exclusion_bounds_the_walk(
+        "MATCH (old:Source {url:$u}) WITH old, size([(old)-[x]-(y) | x]) AS deg ",
+        (),
+        ("MATCH (old:Source {url:$u}) ",),
+    ), "the walk's own clause carries the binding but the exclusion was refused"
+    assert _exclusion_bounds_the_walk(
+        "WITH old, size([(old)-[x]-(y) | x]) AS deg RETURN deg ",
+        ("MATCH (old:Source {url:$u}) ",),
+        ("MATCH (old:Source {url:$u}) ",),
+    ), "an earlier clause binds `old`, which this walk uses, but was refused"
+    assert not _exclusion_bounds_the_walk(
+        "MATCH (q)-[r2]->(w) RETURN type(r2), old.url",
+        ("MATCH (old:Source {url:$u}) ",),
+        ("MATCH (old:Source {url:$u}) ",),
+    ), "an earlier clause binding an UNRELATED variable excused this walk"
 
     named = {f"{row['module']}::{row['symbol']}" for row in _rows()}
     census = _untyped_read_sites()

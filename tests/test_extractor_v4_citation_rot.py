@@ -819,6 +819,13 @@ _CHANGE_NARRATION = re.compile(
     # and which pass found which reader — the class, not just one spelling of it.
     r"|\b(?:the|an|that) earlier (?:enumeration|count|figure|number|measurement|list|table)\b"
     r"|\bcorrected it to\b"
+    # … and the history that names no ordinal and no issue at all: what the
+    # passage's own previous state WAS. All three shapes were in §13 while the
+    # guard reported the design documents clean. Measured across the three design
+    # documents after moving them to the changelog: 0 hits.
+    r"|\b(?:this|that|the) (?:table|section|list|enumeration|register) (?:was|had been) missing\b"
+    r"|\bwas written down as\b"
+    r"|\bhad all rotted\b"
     # A version the passage says it has been true since — change history, not the
     # rule it settled on. Measured across the three design documents before
     # adding: 0 hits at HEAD.
@@ -976,6 +983,14 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         "copy of it has been wrong: `#7956` corrected it to four *doors*.",
         "**⚠️ The backup readers are the ones the ruling turns on:** that question "
         "was answerable only from sites the earlier enumeration did not carry.",
+        # The same class with no ordinal at all — verbatim from §13 at
+        # `7e216697a`: what the passage's own previous state was.
+        "the present-day Point signal behind state recall — ⚠️ **the door this "
+        "table was missing** |",
+        "the head-relative variant of this one was written down as 60 and measured "
+        "62 one merge later.",
+        "Line numbers are deliberately **not** carried any more: the symbol is "
+        "authoritative, and the lines had all rotted.",
         "**\u26a0\ufe0f Draft 1** claimed the index is RAM-mandatory.",
         "\u00a716.2's rule is now also a billing rule (see `#5024` CLOSED).",
         # The change-history date form, on the §8 direction note #8738 moved (the
@@ -1007,6 +1022,11 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         # A near-miss for the numbered-pass arm: an ordinal that counts WALKS,
         # not re-derivations of the passage.
         "A second walk added beside an excluded one cannot inherit its exclusion.",
+        # Near-misses for the three history arms: a design statement that a row is
+        # restored by the next census (no claim about the passage's past), and an
+        # ordinary past tense with no self-reference.
+        "The missing row is restored at the next census, not by hand.",
+        "The figure was recorded with its sha, so it cannot drift.",
         # A near-miss for the parenthesised-date arm: `AMENDED` closed by a
         # paren and followed by a dash. The state word is design prose here
         # (`STORAGE-ARCHITECTURE.md` §14.1 O2), not a dated correction stamp.
