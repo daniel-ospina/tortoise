@@ -174,7 +174,7 @@ idempotent, total, and stores no EP scalar`.
 
 | thing that looks live | its actual state | evidence |
 |---|---|---|
-| **the record, in the hosted deployment** | ⛔ **NOT ARMED.** `TORTOISE_RECORD_DSN` appears **nowhere** in `fly.toml`, `entrypoint.sh`, `.github/workflows/deploy-hosted.yml`, or the runbook's Secrets Matrix. Unset ⇒ `NOT_ARMED` ⇒ *"zero statements, no connection attempt"* — the deployment is byte-identical to pre-record. | `grep -c TORTOISE_RECORD_DSN fly.toml` → **0** |
+| **the record, in the hosted deployment** | ⛔ **NOT ARMED.** `TORTOISE_RECORD_DSN` appears **nowhere** in `fly.toml`, `entrypoint.sh`, `.github/workflows/deploy-hosted.yml`, or the runbook's Secrets Matrix. Unset ⇒ `NOT_ARMED` ⇒ *"zero statements, no connection attempt"* — the record path is inert on the deployment, so its behaviour is unchanged. | `grep -c TORTOISE_RECORD_DSN fly.toml` → **0** |
 | **the end-to-end proof, in CI** | ⛔ **NEVER RUNS.** No CI job sets `TEST_RECORD_DB_URI` (the test file says so itself, and `grep` over `.github/` agrees), **and** `psycopg2` is the optional `[postgres]` extra — absent from the default dev/CI env, so the two Postgres legs `importorskip` and **skip even when a Postgres is given**. | measured: run 1 → `57 passed, 2 skipped`; run 2 with `--extra postgres` → **`2 passed`** |
 | **the edge / operator half of the record** | ⚠️ **`relation` = 0 rows** on the live capture measurement, and the number is a consequence of **R4**: the capture *does* write journaled `EntityLinked` records (each one a `RelationUpsert`, `record_projection.py:732`), but their endpoints are the claim `PointAdded` rows, which that capture's `search_keys` disagreement gets refused — so the relations have nowhere to land. `04-projection.md` §3 *additionally* declares the point-property-derived edge family *"not materialized by this increment"*. | §G run 2; R4 |
 | **the `session` record** | ⚠️ **`capture_redactions` is NULL because the record that would write it is REFUSED** — the column is `jsonb` and the producer emits an integer, so the `SessionRecorded` carrying `capture_redactions` is refused with `DatatypeMismatch` and is counted on `record_write_failures`; the module refuses to coerce (`record_projection.py:1014`). Pinned as a tolerated disagreement, not fixed (**#9264**, OPEN). | `tests/test_9078_record_written_by_production_path.py:139` `_SCHEMA_DISAGREEMENTS = {"search_keys": …, "capture_redactions": …}` |
@@ -374,7 +374,7 @@ calibrates after beta from measured consumption.
 
 **Every figure carries its base, and its date wherever the measurement has one** — rows measured in
 this lane carry both; figures quoted from a prior measurement carry the method and the section that
-measured them, and only those sections pin a date. **`MEASURED` means a number in this repo with a method;
+measured them, plus that section's date where it pins one. **`MEASURED` means a number in this repo with a method;
 `ESTIMATED` means a number this lane could not produce.**
 
 | input | value | basis | status |
@@ -389,9 +389,9 @@ measured them, and only those sections pin a date. **`MEASURED` means a number i
 | Points carrying any content | **49.0%**; **1,121.4 B** mean over those, **549.1 B** over all (5,696,946 B over 10,374) | `graph-content-census.json`, 2026-10-17 | **MEASURED** |
 | Points carrying a vector | **39.96%** (4,145 / 10,374) | same census | **MEASURED** |
 | record footprint per tenant (Postgres) | **0.1916 GB** = **2,136 B/node on disk** (heap + indexes + TOAST) | bench on the committed schema, 2026-10-17 | **MEASURED — a LOWER BOUND** (no TOAST regime; vector written at 6 dp vs the journal's real 21.9 chars/float) |
-| record row width | **1,263–1,266 B** median, **1,421–1,423 B** mean | n = 2,000 × 2 runs | **MEASURED** |
-| keyed miss cost | **5.2 blocks** mean (4 median, 7 max), **2,312 B** on the wire, **0.048–0.053 ms** server | DETOASTED, 200 samples | **MEASURED** |
-| full-scope rebuild (one table) | **115,605 blocks / 947.0 MB / 2,629–2,694 ms** at 89,701 rows | DETOASTED; a per-table **floor**, not the rebuild total | **MEASURED** |
+| record row width | **1,263–1,266 B** median, **1,421–1,423 B** mean | `§17.4.6`; `docs/evidence/7983-cost-magnitudes/README.md`, measured 2026-10-17 | **MEASURED** |
+| keyed miss cost | **5.2 blocks** mean (4 median, 7 max), **2,312 B** on the wire, **0.048–0.053 ms** server | DETOASTED, 200 samples; `§17.4.6` / `docs/evidence/7983-cost-magnitudes/README.md`, 2026-10-17 | **MEASURED** |
+| full-scope rebuild (one table) | **115,605 blocks / 947.0 MB / 2,629–2,694 ms** at 89,701 rows | DETOASTED; a per-table **floor**, not the rebuild total; `§17.4.6` / `docs/evidence/7983-cost-magnitudes/README.md`, 2026-10-17 | **MEASURED** |
 | **edge count** | — | per-type populations ARE recorded — **27,310** `aboutObject`, **4,748** operator-joining, **14,567** `extractedFrom`, measured on the live graph — per-type: `EXTRACTOR-V4-ARCHITECTURE.md` §2.4.3 gives the **27,310** `aboutObject` and the **14,567** `extractedFrom`, `STORAGE-ARCHITECTURE.md` §11.3 the **4,748** joining edges, all measured 2026-09-23 (the `extractedFrom` figure also in `#4333`'s brief, 2026-09-24). ⚠️ **27,310 is the `aboutObject` population, not the edge total** — it is the same figure §11.1's `edges` column shows for "today", so a reader who takes that column as the total will sum the three and get 46,625. What is missing is the **total**: `tools/edge_census.py:224` runs the per-type `MATCH ()-[r]->()` census, but no in-tree record keeps its output, and the drill's **10,000** edges (`#3895`) is ONE graph's manifest count inside a real archive artifact (`node_count` 9,997 / `edge_count` 10,000), not a census and not the fleet total | ⛔ **ESTIMATED / UNMEASURED** (the total) |
 | journal bytes per record | **9,176 B** per create (92% the vector's decimal text), **196 B** per revision. ⚠️ The source's headline **≈8.8 MB per 1,000 creates** does not follow from these inputs — 9,176 B × 1,000 = **9.2 MB**, and its own after-placeholder growth (8,606 B) gives **8.6 MB** — so only the order of magnitude (≈9 MB per 1,000; **8.6–9.2 GB** at 1,000,000) | `tools/journal_growth.py`; `STORAGE-ARCHITECTURE.md` §5.2, 2026-10-17 | **MEASURED** (per-record size; **the rate is not**) |
 | **writes/day** | — | **hosted capture is off by owner ruling 2026-10-14**, so the hosted write rate is **zero today and no historical rate exists**. The per-record size above is the only measured input. | ⛔ **UNMEASURED** |
@@ -525,5 +525,6 @@ grep -riE 'pgvector|vector\(' supabase/migrations/*.sql | wc -l              →
 grep -riE 'narrative|raw_turn|raw_text|transcript' supabase/migrations/*.sql → 0
 grep -rn 'app.current_org_id' --include=*.py tortoise/ tools/                → 0 setters
 grep -rn 'rebuild_from_record' tortoise/__main__.py                          → 0
-grep -rniE '\bpostgres\b|psycopg' tortoise/backup.py tortoise/hosted_backup.py → 0
+grep -rniE '\bpostgres\b|psycopg|pg_dump' tortoise/backup.py tortoise/hosted_backup.py \
+  tortoise/backup_sweep.py tortoise/selfhost_backup.py                            → 0
 ```
