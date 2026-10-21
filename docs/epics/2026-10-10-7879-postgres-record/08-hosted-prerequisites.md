@@ -298,7 +298,7 @@ at 03:00.
 
 ### R9 — Back up the record, and test the restore · **M** · ops + decision · **BLOCKER**
 
-**What:** nothing backs up Postgres. `tortoise/backup.py` (module docstring: *"JSONL archiver +
+**What:** no module of ours backs up the record. `tortoise/backup.py` (module docstring: *"JSONL archiver +
 FalkorDB BGSAVE"*), `hosted_backup.py` (R2), `backup_sweep.py` (the cron driver) are all graph-only.
 §3 and §14.1's **O1** record the decision: **durability = the store's backup; rebuildability = the journal** —
 so promoting Postgres to the record **moves the durability obligation onto Postgres**, and it is
@@ -307,8 +307,8 @@ cost) **plus** an off-box logical dump to R2 on the existing sweep, **plus** a d
 **What it blocks:** durability of the new system of record. This is the item most likely to be
 mistaken for "already done" because the backup machinery *looks* present — it is present, for the
 wrong store.
-**Decision needed:** whether PITR alone is the posture, or an independent dump is required. §17.1's
-sentence does not distinguish.
+**Decision needed:** whether PITR alone is the posture, or an independent dump is required. §3 and §14.1's
+**O1** do not distinguish them.
 
 ### R10 — Connection pooling on the record write path · **S/M** · ops + code · **FOLLOW**
 
@@ -364,7 +364,7 @@ calibrates after beta from measured consumption.
 | record row width | **1,263–1,266 B** median, **1,421–1,423 B** mean | n = 2,000 × 2 runs | **MEASURED** |
 | keyed miss cost | **5.2 blocks** mean (4 median, 7 max), **2,312 B** on the wire, **0.048–0.053 ms** server | DETOASTED, 200 samples | **MEASURED** |
 | full-scope rebuild (one table) | **115,605 blocks / 947.0 MB / 2,629–2,694 ms** at 89,701 rows | DETOASTED; a per-table **floor**, not the rebuild total | **MEASURED** |
-| **edge count** | — | per-type populations ARE recorded — **27,310** `aboutObject`, **4,748** operator-joining, **14,567** `extractedFrom`, measured on the live graph 2026-09-23 (§5.1). What is missing is the **total**: `tools/edge_census.py:224` runs the per-type `MATCH ()-[r]->()` census, but no in-tree record keeps its output, and the drill's **10,000** edges (`#3895`) is a fixture, not a population | ⛔ **ESTIMATED / UNMEASURED** (the total) |
+| **edge count** | — | per-type populations ARE recorded — **27,310** `aboutObject`, **4,748** operator-joining, **14,567** `extractedFrom`, measured on the live graph (`STORAGE-ARCHITECTURE.md` §11.1/§11.3, 2026-09-23; the 14,567 `extractedFrom` from `#4333`'s brief, 2026-09-24). What is missing is the **total**: `tools/edge_census.py:224` runs the per-type `MATCH ()-[r]->()` census, but no in-tree record keeps its output, and the drill's **10,000** edges (`#3895`) is a fixture, not a population | ⛔ **ESTIMATED / UNMEASURED** (the total) |
 | journal bytes per record | **9,176 B** per create (92% the vector's decimal text), **196 B** per revision. ⚠️ The source's headline **≈8.8 MB per 1,000 creates** does not follow from these inputs — 9,176 B × 1,000 = **9.2 MB**, and its own after-placeholder growth (8,606 B) gives **8.6 MB** — so only the order of magnitude (≈9 MB per 1,000; **8.6–9.2 GB** at 1,000,000) | `tools/journal_growth.py`; `STORAGE-ARCHITECTURE.md` §5.2, 2026-10-17 | **MEASURED** (per-record size; **the rate is not**) |
 | **writes/day** | — | **hosted capture is off by owner ruling 2026-10-14**, so the hosted write rate is **zero today and no historical rate exists**. The per-record size above is the only measured input. | ⛔ **UNMEASURED** |
 | **reads/day** | — | no tenant serves a workload. `tortoise/read_ledger.py` is the instrument; its one exercise (**f = 8.64%**, 200 proxy queries over 10,457 keys, one graph, one date) is explicitly *"NOT `f` FOR THE COST MODEL"* (§17.4.6) | ⛔ **UNMEASURED** |
