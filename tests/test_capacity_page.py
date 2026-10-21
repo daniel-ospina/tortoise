@@ -40,11 +40,19 @@ CAPACITY = ROOT / "docs" / "capacity.md"
 README = ROOT / "README.md"
 QUICKSTART = ROOT / "docs" / "quickstart-selfhosted.md"
 SELF_HOSTED_HTML = ROOT / "website" / "self-hosted.html"
+FAQ_HTML = ROOT / "website" / "faq.html"
 ENV_EXAMPLE = ROOT / ".env.example"
 CONCURRENCY_TEST = ROOT / "tests" / "test_embedded_concurrency.py"
 
 #: The one integration test that measures concurrent writers on a live graph.
 LIVE_WRITER_TEST = "test_concurrent_writers_live_falkor_no_lost_writes"
+
+#: Every surface that publishes the verified write-concurrency figure. One
+#: tuple, shared by BOTH writer scans below: the figure was published from a
+#: surface this list had never heard of (`website/faq.html`), so the binding was
+#: asleep for it — adding a surface to one list and forgetting the other is the
+#: same defect again (#9517 review 5).
+_WRITER_SURFACES = (CAPACITY, QUICKSTART, ENV_EXAMPLE, SELF_HOSTED_HTML, FAQ_HTML)
 
 #: The page's GitHub-rendered URL, which is what the website links to.
 CAPACITY_URL = (
@@ -63,7 +71,7 @@ _UNMEASURED_CELL = re.compile(r"unmeasured", re.IGNORECASE)
 #: not know ("concurrent writers verified at 2 processes"), so this is the union
 #: of the wordings in the tree rather than one literal:
 #:   "integration-tested to 5 concurrent writers"  (docs)
-#:   "integration-tested to 5 writers"             (`.env.example`)
+#:   "integration-tested to 5 writers"             (`.env.example`, FAQ)
 #:   "concurrent writers verified at 5 processes"  (quickstart env table)
 #:   "verified to 5 concurrent writer processes"   (website)
 #:   "5 writer processes on one graph"             (capacity §2)
@@ -455,7 +463,7 @@ def test_published_write_concurrency_matches_the_integration_test():
     this replaces could not see it (#8492 ISSUE 1).
     """
     n = _integration_writer_coverage()
-    for path in (CAPACITY, QUICKSTART, ENV_EXAMPLE, SELF_HOSTED_HTML):
+    for path in _WRITER_SURFACES:
         found = _published_writer_counts(_strip_markdown(_read(path)))
         assert found, (
             f"{path.relative_to(ROOT)} no longer publishes a verified "
@@ -498,7 +506,7 @@ def test_no_writer_number_escapes_the_binding_on_a_public_surface():
     be the derived coverage.
     """
     n = _integration_writer_coverage()
-    for path in (CAPACITY, QUICKSTART, ENV_EXAMPLE, SELF_HOSTED_HTML):
+    for path in _WRITER_SURFACES:
         text = _writer_scan_text(path, _read(path))
         for line in text.splitlines():
             embedded_line = bool(re.search(r"\bembedded\b", line, re.IGNORECASE))

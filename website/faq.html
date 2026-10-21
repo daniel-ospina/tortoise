@@ -227,7 +227,8 @@
       <p>What we can tell you concretely today:</p>
       <ul>
         <li>Adding a claim costs work proportional to how many things it connects to. Unrelated claims don't interact, and belief work stays inside each claim's neighbourhood rather than the whole store.</li>
-                <li>Concurrent writers run on the Docker path — integration-tested to five — and on the hosted service. That is the deployment built for teams.</li>
+        <li>Belief is computed over a bounded neighbourhood around each claim, which is what keeps reads local.</li>
+        <li>Concurrent writers run on the Docker path — integration-tested to 5 writers — and on the hosted service. That is the deployment built for teams.</li>
       </ul>
       <div class="callout open">
         <p><strong>Published:</strong> <a href="https://github.com/daniel-ospina/tortoise/blob/main/docs/capacity.md">docs/capacity.md</a> — write concurrency per deployment mode, request rate limits, graph-size caps, retrieval latency, storage footprint per element, and belief-propagation cost. Every number there names its source — a committed artifact, a code symbol, or the tracker issue holding the measurement.</p>

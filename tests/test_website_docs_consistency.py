@@ -314,9 +314,13 @@ _RULING_REWRITES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     ),
     # A10 — "the graph itself is not the differentiator" is correct but empty;
     # the rewrite is "a graph *stores* relationships; Tortoise *computes* over
-    # them".
+    # them". A11's problem span was three clauses, and the first ("an alpha,
+    # single-maintainer reimplementation that is not a competitor product")
+    # survived three review rounds because nothing bound it: it is the premise
+    # the removed "bolt-on-able rather than out of reach" conclusion was drawn
+    # from, so keeping it keeps the self-undercut (#9517 review 5).
     "different": (
-        ("not the differentiator",),
+        ("not the differentiator", "single-maintainer reimplementation"),
         ("<em>computes</em> over them",),
     ),
 }
