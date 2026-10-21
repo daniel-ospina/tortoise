@@ -137,6 +137,11 @@ WHAT THIS PINS
    sentence that declares the class, and nothing read that numeral: the register
    was only floor-checked, so adding or removing a member falsified the sentence
    silently — the same rot class the arms above close for the headline counts.
+14. **`test_the_empty_pattern_class_derivation_holds`** — the MECHANISM for arm 3,
+   on seven synthetic sources (`_EMPTY_PATTERN_CASES`): a bracketed traversal with
+   no type must derive, and the near-misses must NOT (a named type, a `MERGE`
+   writer, a docstring quoting Cypher). Without it the shape walk could regress to
+   "finds nothing" and arm 3 would report a class of size zero as complete.
 
 WHAT THE CENSUS CANNOT SEE (stated, not silently excluded)
 ---------------------------------------------------------
@@ -308,7 +313,9 @@ EMPTY_PATTERN: tuple[tuple[str, str, str], ...] = (
     (
         "tortoise/sdk.py",
         "_promote_incident_operators",
-        "the operator-promotion pass repoints every edge of an incident node",
+        "an endpoint-liveness gate for operator promotion: it reads every "
+        "outgoing edge of the incident operator to decide whether all its "
+        "endpoints are live, and asks nothing about a referent",
     ),
     (
         "tortoise/sdk.py",
