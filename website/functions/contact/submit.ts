@@ -5,7 +5,7 @@
  *   "for outside product should be hello@ for inside product should be support@"
  * The website is the outside-product surface, so the message must reach
  * `hello@premiselabs.co` — the same address the legal pages already name as the
- * designated channel (privacy §1, DPA §15, ToS §15.5, aviso-privacidad). It is a
+ * designated channel (privacy §1, DPA §15, ToS §15.5). It is a
  * CODE CONSTANT, never a request field: that is what keeps this form from being
  * an open relay. Routing the queued item to it is the intake endpoint's job;
  * this surface only guarantees the visitor is told the decided address.

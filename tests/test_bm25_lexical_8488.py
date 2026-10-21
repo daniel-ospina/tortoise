@@ -51,6 +51,7 @@ from tortoise.bm25 import (
 from tortoise.embeddings import EmbeddingModel
 from tortoise.sdk import TortoiseSDK
 from tortoise.search_engine import (
+    LEXICAL_DECLINED_KEY,
     LEXICAL_MECHANISM_BM25,
     clamp_lexical_fusion_weight,
     rrf_fusion,
@@ -766,8 +767,10 @@ class TestReadPath:
         so the newest documents are invisible to it. Replacing the shipped
         rows with that window makes the read lexically weaker than the leg it
         replaced, silently, and #8486 would baseline it as the arm's answer.
-        So the leg returns ``[]`` and records ``degraded`` (the same fail-safe
-        an empty arm gets).
+        So the leg returns ``[]`` and records ``declined`` — NOT ``degraded``,
+        which would relabel this complete read as an impaired memory (see
+        ``TestDeclineIsNotAReadDegradation``) — the same fail-safe an empty
+        arm gets.
 
         The cap is driven through the REAL sdk wiring by wrapping
         ``run_bm25_query`` (the sdk imports it at call time), so the assertion
@@ -825,12 +828,13 @@ class TestReadPath:
                  for h in sdk.tortoise_fts_query(
                      QUERY, limit=10, leg_trace=tight_trace)]
         declined = [e for e in tight_trace
-                    if e.get("mechanism") == LEXICAL_MECHANISM_BM25]
+                    if e.get(LEXICAL_DECLINED_KEY)]
         assert declined, (
             "the arm must have RUN (and declined) for this read to say "
             f"anything; trace={tight_trace}")
-        assert declined and all(e.get("degraded") for e in declined), (
-            f"a windowed corpus read records itself degraded; trace={tight_trace}")
+        assert all(e.get("degraded") is False for e in declined), (
+            "a declined arm does not IMPAIR the read — the shipped leg answered "
+            f"over the whole label; trace={tight_trace}")
         assert not [e for e in declined if e.get("count")], (
             f"a declined read contributes NO rows; trace={tight_trace}")
         assert tight == off, (
@@ -870,14 +874,215 @@ class TestReadPath:
                                        leg_trace=opted_trace)
         assert opted, "guard: the opt-in read must return rows"
         # ``count`` is the load-bearing half: ``_record`` writes the mechanism
-        # key whenever the leg RAN, so ``mechanism == "bm25"`` alone is
-        # satisfied by an arm that ran and matched NOTHING (count=0) — i.e. by
-        # the very regression this test exists to catch (the arm call ignoring
-        # the caller's policy). Only a MATCH proves the policy reached it.
+        # key whenever the leg ran and did NOT decline, so ``mechanism ==
+        # "bm25"`` alone is satisfied by an arm that ran and matched NOTHING
+        # (count=0) — i.e. by the very regression this test exists to catch (the
+        # arm call ignoring the caller's policy). Only a MATCH proves the policy
+        # reached it.
         assert any(e.get("mechanism") == LEXICAL_MECHANISM_BM25
                    and e.get("count") for e in opted_trace), (
             "the caller's keep_numeric=True must reach the BM25 arm (it must "
             f"MATCH, not merely run); trace={opted_trace}")
+
+
+class TestDeclineIsNotAReadDegradation:
+    """#8488 follow-up: a DECLINED arm is not an IMPAIRED read.
+
+    The cap's decline used to record ``degraded=True``. That flag is not
+    leg-local: ``read_status.classify_leg_trace`` reports the whole READ as
+    ``degraded`` when any entry carries it, and ``ask_lane`` folds it into
+    ``retrieval_degraded`` the same way. So on a store at the cap, enabling the
+    arm relabelled every successful read "the memory layer is IMPAIRED".
+
+    Why that relabel was WRONG — stated on the term's own ground, not on the
+    row count. ``degraded`` is the recorded term for a store that did not
+    answer or a leg that did not run, and it deliberately OUTRANKS a
+    successful read: a rows-returning read with a genuinely missing leg IS
+    correctly ``degraded``, because a partial result is not a clean one
+    (``classify_read_status`` folds it on top of the content mapping;
+    ``tests/test_read_status.py``'s
+    ``test_a_leg_that_did_not_run_is_the_boundary_degraded_term`` pins
+    exactly that, ``hit_count=3`` and all). Nothing was
+    impaired HERE: every leg ran, and the shipped lexical leg answered over
+    the WHOLE label; only the arm's alternative SCORER declined. So the
+    decline is not an impairment to record — not "a degraded read with rows
+    is forbidden" (no such property exists, and a lane that believed in one
+    could "fix" the classifier into calling a genuinely absent vector leg on
+    a rows-returning read a clean hybrid read).
+
+    ``mechanism="bm25"`` had the mirror-image problem: the key answers "which
+    path produced these rows", and a declined arm produced none, so #8486's
+    baseline (which counts ``mechanism == "bm25"``) counted reads where BM25
+    contributed nothing.
+
+    Mutations, each APPLIED to this tree and the decline/cap selection
+    re-run (not reasoned about), naming exactly what goes red:
+
+    * restore ``degraded=True`` on the decline branch →
+      ``test_a_declined_arm_does_not_report_the_read_degraded``,
+      ``test_a_declined_arm_entry_is_not_itself_degraded`` and
+      ``test_the_shared_trace_fold_does_not_read_the_decline_as_a_degradation``
+      red, along with the two older decline assertions
+      (``TestCorpusCap.test_over_the_cap_the_leg_declines_instead_of_window_ranking``
+      and ``TestReadPath.test_a_windowed_corpus_read_never_replaces_the_shipped_rows``);
+    * restore ``mechanism=LEXICAL_MECHANISM_BM25`` for a declined entry →
+      ``test_a_declined_arm_claims_no_bm25_mechanism`` reds (as does
+      ``TestCorpusCap``'s mechanism assertion);
+    * delete the ``declined=declined`` passthrough in ``_record`` → the
+      decline becomes invisible and ALL FOUR decline tests above red on their
+      guards (the control test below does not trigger a decline, so it is
+      deliberately unaffected by all three mutations — that is what makes it a
+      control).
+
+    Non-vacuity is claimed PER MUTATION, never as "all of these tests are red
+    on the pre-fix tree": this module imports ``LEXICAL_DECLINED_KEY`` at
+    module scope, so reverting ``tortoise/search_engine.py`` alone reds the
+    file at COLLECTION and proves nothing about any assertion here.
+    """
+
+    @staticmethod
+    def _sdk(monkeypatch):
+        sdk = TortoiseSDK(
+            os.path.join(tempfile.mkdtemp(prefix="bm25_8488_decline_"), "t.db"),
+            namespace=f"bm25_decline_{os.urandom(6).hex()}")
+        _SDKS.append(sdk)
+        for content in TOPIC_DOCS_END_TO_END:
+            sdk.create_point("statement", content)
+        sdk.create_point("statement", TARGET_DOC)
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "1")
+        return sdk
+
+    @staticmethod
+    def _declining(monkeypatch):
+        """Drive the cap through the REAL sdk wiring (the sdk imports at call
+        time), so the composition is what is measured."""
+        import tortoise.search_engine as search_engine
+
+        real = search_engine.run_bm25_query
+
+        def _capped(*args, **kwargs):
+            kwargs["corpus_cap"] = 1  # the fixture corpus is 5 rows
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(search_engine, "run_bm25_query", _capped)
+
+    def test_a_declined_arm_does_not_report_the_read_degraded(
+            self, monkeypatch, lexicon_embedder):
+        """The read returns rows, every leg ran, and the status says so.
+
+        The assertion is on the READ's recorded status (the user-facing term),
+        not on the trace: that is the surface the flag actually reached. The
+        trace assertion alongside it is what proves the arm DID run and
+        decline — otherwise an `available` result could be explained by the arm
+        never running at all.
+        """
+        sdk = self._sdk(monkeypatch)
+        self._declining(monkeypatch)
+        sink: dict = {}
+        trace: list[dict] = []
+        rows = sdk.tortoise_fts_query(QUERY, limit=10, read_status_out=sink,
+                                      leg_trace=trace)
+        assert rows, "guard: the shipped legs must still answer this read"
+        assert [e for e in trace if e.get(LEXICAL_DECLINED_KEY)], (
+            "guard: the arm must have declined for this test to say anything; "
+            f"trace={trace}")
+        assert sink.get("status") == "available", (
+            "a complete read (rows returned, every leg ran) must not be "
+            f"reported as an impaired memory; status={sink.get('status')!r} "
+            f"trace={trace}")
+
+    def test_a_declined_arm_entry_is_not_itself_degraded(
+            self, force_sparse_tfidf):
+        """The leg-local half: the decline carries ``declined``, not `degraded`.
+
+        Pinned separately from the read status because the aggregation is one
+        consumer of the flag and ``ask_lane``'s ``retrieval_degraded`` is
+        another; a leg entry that says ``degraded`` lies to both.
+        """
+        graph, _ids = _graph_with_corpus()
+        trace: list[dict] = []
+        rows = run_bm25_query(graph, QUERY, entity_type="point", limit=20,
+                              corpus_cap=1, leg_trace=trace)
+        assert rows == [], f"a window is never ranked; got {rows}"
+        entry = trace[-1]
+        assert entry[LEXICAL_DECLINED_KEY] is True, trace
+        assert entry["degraded"] is False, (
+            "the decline must not claim the memory layer is impaired: "
+            f"{entry}")
+        assert entry["ran"] is True, (
+            f"the leg DID read the corpus; it declined to RANK it: {entry}")
+        assert entry["count"] == 0, trace
+
+    def test_a_declined_arm_claims_no_bm25_mechanism(
+            self, force_sparse_tfidf):
+        """``mechanism`` answers "which path produced these rows" and BM25
+        produced none — so a #8486 baseline counting ``mechanism == "bm25"``
+        cannot count a decline as a BM25-scored read.
+
+        The distinguishing signal is ``declined``, which is the truthful
+        carrier: the arm ran, read a window, and returned nothing.
+        """
+        graph, _ids = _graph_with_corpus()
+        trace: list[dict] = []
+        run_bm25_query(graph, QUERY, entity_type="point", limit=20,
+                       corpus_cap=1, leg_trace=trace)
+        entry = trace[-1]
+        assert entry.get("mechanism") is None, (
+            "a declined arm produced no BM25 rows and must not claim the "
+            f"mechanism that produced rows; {entry}")
+        assert entry.get(LEXICAL_DECLINED_KEY) is True, (
+            "the decline must stay VISIBLE once it stops claiming degraded: "
+            f"{entry}")
+
+    def test_the_shared_trace_fold_does_not_read_the_decline_as_a_degradation(
+            self, force_sparse_tfidf):
+        """The RECORDING half: the folds both battery lanes share see a run.
+
+        ``retrieval_preflight.merge_leg_trace`` is the single interpreter of
+        this trace shape — ``arms/a4_tortoise`` and ``parity/mabench_tortoise``
+        both record their ``retrieval_degraded`` through it — and it reads ONLY
+        ``degraded``. So the decline must keep that flag false, or the two
+        battery lanes relabel a complete measurement as impaired: the same
+        false positive this class removes from the read's status, one layer
+        out. What a measurement needs instead is the ``declined`` key on the
+        entry; counting it is the baseline's job (see
+        :data:`LEXICAL_DECLINED_KEY`), and it must never be routed back through
+        ``degraded`` to get there.
+        """
+        from battery.runner.retrieval_preflight import merge_leg_trace
+
+        graph, _ids = _graph_with_corpus()
+        trace: list[dict] = []
+        run_bm25_query(graph, QUERY, entity_type="point", limit=20,
+                       corpus_cap=1, leg_trace=trace)
+        assert trace[-1].get(LEXICAL_DECLINED_KEY) is True, (
+            f"guard: the arm must have declined; {trace}")
+        legs: list[str] = []
+        assert merge_leg_trace(legs, trace) is False, (
+            "the shared fold the battery lanes record through must not report "
+            f"an impaired measurement for a decline; trace={trace}")
+        assert "fts" in legs, (
+            f"the declined arm still RAN that leg slot; legs={legs}")
+
+    def test_a_clean_arm_loss_is_not_a_decline(
+            self, force_sparse_tfidf):
+        """Control: the non-declining empty arm is untouched by this change.
+
+        An arm that ran and matched nothing records ``degraded=False`` WITHOUT
+        ``declined`` — so the new key cannot be satisfied by every empty arm,
+        and the two states stay distinguishable.
+        """
+        graph, _ids = _graph_with_corpus()
+        trace: list[dict] = []
+        rows = run_bm25_query(graph, "the", entity_type="point", limit=20,
+                              leg_trace=trace)
+        assert rows == [], f"a stopword-only query matches nothing; got {rows}"
+        entry = trace[-1]
+        assert entry["degraded"] is False, entry
+        assert entry.get(LEXICAL_DECLINED_KEY) is None, (
+            f"a clean empty arm did not DECLINE anything; {entry}")
+        assert entry.get("mechanism") == LEXICAL_MECHANISM_BM25, (
+            f"the arm ran its scorer (and found nothing): {entry}")
 
 
 class TestCorpusCap:
@@ -885,7 +1090,8 @@ class TestCorpusCap:
 
     The leg asks for one row past the cap, so "exactly cap" (the whole corpus
     fits) is distinguishable from "more than cap" (a window). On a WINDOW it
-    returns nothing and records ``degraded=True``, leaving the shipped
+    returns nothing and records ``declined`` (NOT ``degraded`` — see
+    ``TestDeclineIsNotAReadDegradation``), leaving the shipped
     graph-side leg's rows in place — the shipped leg answered over the WHOLE
     label, so swapping in a ranking over the oldest N ids would make the read
     lexically weaker than the leg it replaced, silently.
@@ -922,13 +1128,14 @@ class TestCorpusCap:
 
     def test_over_the_cap_the_leg_declines_instead_of_window_ranking(
             self, force_sparse_tfidf):
-        """Over the cap: NO rows, ``degraded=True`` — never a windowed ranking.
+        """Over the cap: NO rows, ``declined=True`` — never a windowed ranking.
 
         ``count=0`` and an empty return are the contract the sdk relies on to
         keep the shipped leg's whole-label rows (``if _bm25_hits``). The
-        ``degraded`` flag is what separates this from a clean empty result, so
-        a measurement cannot read a declined window as "the arm ran and found
-        nothing".
+        ``declined`` key is what separates this from a clean empty result, so a
+        measurement cannot read a declined window as "the arm ran and found
+        nothing" — and it is NOT ``degraded``, which is aggregated into the
+        READ's recorded status (see ``TestDeclineIsNotAReadDegradation``).
         """
         graph, _ids = _graph_with_corpus()
         trace: list[dict] = []
@@ -937,12 +1144,13 @@ class TestCorpusCap:
         assert rows == [], (
             "a corpus wider than the cap must not be ranked over a window; "
             f"got {rows}")
-        assert trace and trace[-1]["degraded"] is True, trace
+        assert trace and trace[-1][LEXICAL_DECLINED_KEY] is True, trace
+        assert trace[-1]["degraded"] is False, trace
         assert trace[-1]["count"] == 0, trace
         assert trace[-1]["reason"] == "empty_results", trace
-        assert trace[-1]["mechanism"] == LEXICAL_MECHANISM_BM25, (
-            f"the leg DID run (it read the corpus), so mechanism is set; "
-            f"trace={trace}")
+        assert trace[-1].get("mechanism") is None, (
+            "the leg ran but produced NO BM25 rows, so it may not claim the "
+            f"mechanism that produced them; trace={trace}")
 
 
 class TestServableFamilies:
@@ -1119,3 +1327,63 @@ class TestOperatorContract:
         assert declared, (
             f"{BM25_ENV} must be shown as a commented assignment (the example "
             "form an operator copies), not just named in prose")
+
+    def test_env_example_declares_the_DECLINE_contract_truthfully(self):
+        """The operator contract for the cap must not teach the OLD decline.
+
+        `.env.example` described the corpus-cap decline as the leg "reporting
+        itself ``degraded`` in the leg trace". That is false and it is exactly
+        the misreading #8488's follow-up removed: `degraded` is aggregated into
+        the READ's recorded status (`read_status.classify_leg_trace`) and into
+        `ask_lane`'s `retrieval_degraded`, so an operator on a store over the
+        cap was told to expect a complete read to be flagged as impaired memory.
+        Post-fix the entry is `declined=True` with `degraded=False` and no
+        `mechanism`, so the contract has to say so.
+
+        The sibling test above only asserts the switch is PRESENT, which is why
+        the drift went uncaught; this one pins the semantics of the decline.
+
+        It pins the two positive facts by their CANONICAL trace spellings —
+        ``declined=True`` and ``degraded=False`` are code identifiers in the leg
+        trace, so the contract names them literally: an operator reading
+        `.env.example` meets the same spellings the trace emits, and a reword
+        ("``degraded`` remains ``False``") is a deliberate edit of the contract
+        that this test asks for rather than an innocent change it forbids. The
+        two NEGATIVE assertions are the other direction — they refuse either
+        spelling of the OLD contract (a `degraded=True` decline, or the
+        "reports itself degraded" sentence), so a text that keeps the old
+        meaning while avoiding one literal still reds on the other.
+        """
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        block = _bm25_env_block((root / ".env.example").read_text())
+        assert block, "guard: the #8488 block must be findable in .env.example"
+        assert "declined=True" in block, (
+            ".env.example must name the decline's own trace key (`declined=True`); "
+            "without it the only operator-visible account of the cap is the "
+            "misleading one: " + block)
+        assert "degraded=False" in block, (
+            ".env.example must say the decline leaves `degraded` FALSE — the "
+            "flag an operator reads as an impaired read: " + block)
+        # The two ways the OLD contract can reappear. `degraded=True` covers a
+        # restated decline flag; the sentence covers prose that keeps the old
+        # meaning while avoiding the literal.
+        assert "degraded=True" not in block, (
+            ".env.example reintroduces the old decline contract (`degraded=True` "
+            "on an arm that produced no rows): " + block)
+        assert "reports itself" not in block, (
+            ".env.example still says the leg 'reports itself degraded', the "
+            "sentence this change exists to remove: " + block)
+
+
+def _bm25_env_block(env: str) -> str:
+    """The `#8488` section of `.env.example` (its `# ── …` header to the next)."""
+    lines = env.splitlines()
+    start = next((i for i, line in enumerate(lines)
+                  if "#8488 BM25 lexical arm" in line), None)
+    if start is None:
+        return ""
+    end = next((j for j in range(start + 1, len(lines))
+                if lines[j].startswith("# ──")), len(lines))
+    return "\n".join(lines[start:end])

@@ -4234,12 +4234,29 @@ def test_main_health_nightly_calls_ci_yml_and_never_gates_main():
     assert job.get("secrets") == "inherit"
 
 
-def test_inbound_relay_keeps_both_mergify_exemption_belts():
-    text = (WORKFLOWS_DIR / "inbound-relay.yml").read_text()
-    # Two INDEPENDENT belts (#3558): either alone exempts Mergify's batch PR;
-    # only removing BOTH re-breaks the relay and dequeues every queued PR.
-    assert "github.actor != 'mergify[bot]'" in text
-    assert (
-        "startsWith(github.event.pull_request.head.ref, 'mergify/merge-queue/')"
-        in text
+def test_inbound_relay_keeps_both_queue_batch_exemption_belts():
+    doc = _load_workflow("inbound-relay.yml")
+    # ALL whitespace stripped on both sides, so a reformat of the expression
+    # (`startsWith(...)` wrapped across lines) is not a failure — the same
+    # normalisation tests/test_inbound_relay_guard.py uses, so one edit cannot
+    # green one file and red another (review B, cycle 2).
+    guard = "".join(str(doc["jobs"]["relay"].get("if", "")).split())
+    # Two INDEPENDENT belts (#3558, #5185), and their coverage is per-case —
+    # neither is disposable. Belt 1 (the queue-owned head branch) is the ONLY
+    # belt for a rule that sets `draft_bot_account`, whose batch is authored by
+    # a user account; belt 2 (author identity + same-repo head + the queue base)
+    # is what still exempts a batch when the branch prefix is reconfigured. So
+    # removing EITHER re-breaks the relay for that class and dequeues its queued
+    # PR. Both are EVIDENCE, not names — the behaviour of each is pinned in
+    # tests/test_inbound_relay_guard.py, which evaluates this guard for real.
+    #
+    # 1. The queue-owned head branch (author-agnostic, per Mergify's docs: the
+    #    only marker true of every queue PR). The prefix is config-bound.
+    assert "startsWith(github.event.pull_request.head.ref," in guard
+    # 2. Author identity from GitHub's `type` field — an installed GitHub App
+    #    cannot be impersonated — never a hardcoded bot login, which rots.
+    assert "github.event.pull_request.user.type=='Bot'" in guard
+    assert "mergify[bot]" not in guard, (
+        "keying on the bot LOGIN is what #5185 rotted: a renamed app or a "
+        "different queue engine re-breaks the relay silently"
     )

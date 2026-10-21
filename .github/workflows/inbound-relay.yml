@@ -22,10 +22,11 @@ on:
     types: [opened]
 
 # Bookkeeping, not a merge gate — and the one per-event workflow here whose
-# job-level `if:` already excludes the owner and `mergify[bot]` (all internal
-# traffic) at ZERO runner cost, so it cannot flood (#9115). The group still
-# belongs here so a re-run of the SAME unit supersedes rather than racing
-# itself: it is keyed PER UNIT and never cancelled in flight, because this relay
+# job-level `if:` already excludes the owner and the merge queue's own batch
+# PRs (all internal traffic) at ZERO runner cost, so it cannot flood (#9115).
+# The group still belongs here so a re-run of the SAME unit supersedes rather
+# than racing itself: it is keyed PER UNIT and never cancelled in flight,
+# because this relay
 # CLOSES fork PRs and a cancel between the close and the intake POST would leave
 # a closed PR with no intake record — a half-applied action no re-run repairs.
 #
@@ -43,31 +44,82 @@ jobs:
     permissions:
       issues: write
       pull-requests: write
-    # Safety: never process events from the repo owner/org members — those flow
-    # through normal development, not the intake relay. Owner-installed
-    # automation belongs to that same class, and one of them must be exempt
-    # EXPLICITLY: the Mergify merge queue (#3558).
+    # Safety: events whose actor is the repository OWNER are never processed —
+    # that traffic flows through normal development, not the intake relay.
+    # Owner-installed automation belongs to that same class, and the merge
+    # queue's own batch pull requests must be exempt (#3558, #5185).
     #
-    # Mergify validates a queued pull request on a DRAFT "batch" PR it opens from
-    # `mergify/merge-queue/<hash>`, authored by `mergify[bot]`. That actor is not
-    # `daniel-ospina`, so this relay treated the batch PR as an external
-    # contribution and closed it ~11 s after it opened; Mergify then dequeued the
-    # pull request it was validating, reporting "The batch pull request has been
-    # closed". Every queued PR left that way, so no queue merge happened between
-    # 2026-09-24T17:10Z and this change. A bot PR is never an external
-    # contribution — the relay exists for external humans.
+    # WHAT THIS GUARD IS FOR. `pull_request_target` + REST-only (label, comment,
+    # close, relay — see the header): the relay never checks out or executes a
+    # PR's code, so this is an INTAKE rule, not the CI trust boundary. Its
+    # decision rule, stated once and with no "outside the repository" qualifier,
+    # is: every `opened` issue/PR whose actor is not the owner AND which is not
+    # the queue's own batch is labelled, commented, closed and relayed to
+    # intake — same-repo collaborators INCLUDED (pinned by a test). Do not
+    # re-read this as "fork PRs only": that misreading is how #5185 stayed
+    # invisible while it was closing every queue batch.
     #
-    # `mergify[bot]` is the authoritative signal (an installed GitHub App cannot
-    # be spoofed by a contributor); the same-repo head-ref clause is a belt for
-    # the case where that actor login is renamed. The event allow-list is kept:
-    # this stays a strict NARROWING of the previous gate, never a widening.
+    # WHY IT BROKE (#3558, #5185). The gate used to be `github.actor !=
+    # 'daniel-ospina'` — "the owner is the only legitimate author". Mergify
+    # validates a queued PR on a DRAFT batch PR it opens from a queue branch,
+    # authored by an app, so the relay closed the batch ~9 s after it opened and
+    # Mergify dequeued the PR it was validating ("The batch pull request has
+    # been closed"). Every queued merge was lost, fleet-wide. The first fix
+    # (#5221) exempted the LITERAL `mergify[bot]`: it fixed that day's outage
+    # and rotted — a renamed app, a different queue engine, or a reconfigured
+    # branch prefix re-breaks it silently, and nothing goes red until the queue
+    # stops merging again.
+    #
+    # WHAT IT KEYS ON NOW — evidence, never a list of names. Mergify's docs
+    # ("Recognize a Queue Pull Request") name four markers and state that only
+    # ONE holds for every queue pull request, "whoever opens it and whatever
+    # state it is in": the head branch, `queue_branch_prefix` + 10 hex. The
+    # other three have documented exceptions — `draft_bot_account` opens the
+    # batch under a USER account, `merge-batch` marks the draft ready for review
+    # before merging, and developers open drafts too. So:
+    #
+    #   belt 1 (primary, AUTHOR-AGNOSTIC): the head branch is a QUEUE-OWNED
+    #     branch — this repository's own branch, under the queue's configured
+    #     prefix. `.mergify.yml` sets no `queue_branch_prefix`, so the
+    #     documented default applies; `tests/test_inbound_relay_guard.py` reads
+    #     the prefix from that file and fails if this literal drifts from it.
+    #
+    #   belt 2 (redundancy, survives the prefix being reconfigured): author
+    #     identity from GitHub's own `user.type` field — an installed GitHub App
+    #     cannot be impersonated by a contributor — combined with a same-repo
+    #     head and the queue's base branch (the repository's default branch).
+    #     Deliberately NOT narrowed by `draft`: a ready-for-review batch is still
+    #     a batch. Two assumptions are pinned by tests, so neither rots quietly:
+    #     every queue rule's branch prefix is covered by belt 1, and every queue
+    #     rule's `base=` is the SAME single base (belt 2 covers one base — a rule
+    #     on a second base needs its own belt, and the test says so).
+    #     Its cost is that a bot-authored same-repo PR to the default
+    #     branch is not closed by intake; that is a recoverable triage miss,
+    #     while closing a batch dequeues the whole queue — the asymmetry decides.
+    #
+    # FAIL CLOSED. Every EXEMPTION clause lives inside the `!( … )`, so an event
+    # whose payload is missing or unreadable (no `pull_request`, a null
+    # `head.repo`, an absent `user.type`, no `base.ref`, no `default_branch`)
+    # makes the exemption false and the relay CLOSES the PR — the pre-existing
+    # behaviour for anything it cannot classify as the queue's own batch. Note
+    # the belt-2 base arm's `!= ''`: without it, TWO unreadable fields compare
+    # equal (`null == null` is true in Actions' loose equality) and an all-absent
+    # payload would read as a match (review B, cycle 2). The two clauses OUTSIDE
+    # the negation (the event allow-list and the owner exclusion) have the
+    # opposite polarity on purpose: false there suppresses the relay entirely,
+    # and moving an exemption clause out there would invert it. Each fail-closed
+    # case is pinned by a test.
     if: |
       (github.event_name == 'issues' || github.event_name == 'pull_request_target') &&
       github.actor != 'daniel-ospina' &&
-      github.actor != 'mergify[bot]' &&
-      !(github.event_name == 'pull_request_target' &&
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        startsWith(github.event.pull_request.head.ref, 'mergify/merge-queue/'))
+      !(github.event_name == 'pull_request_target' && (
+        (github.event.pull_request.head.repo.full_name == github.repository &&
+         startsWith(github.event.pull_request.head.ref, 'mergify/merge-queue/')) ||
+        (github.event.pull_request.user.type == 'Bot' &&
+         github.event.pull_request.head.repo.full_name == github.repository &&
+         github.event.pull_request.base.ref != '' &&
+         github.event.pull_request.base.ref == github.event.repository.default_branch)
+      ))
     steps:
       - name: "Comment and close — issue"
         if: github.event_name == 'issues'

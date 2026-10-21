@@ -145,8 +145,10 @@ UNFILTERED_PUSH_OK = {
 # (pinned below); drop the `if:` and the workflow becomes a slot consumer.
 ZERO_COST_PR_EVENT = {
     "inbound-relay.yml": (
-        "job-level `if:` excludes the owner and `mergify[bot]` — all internal "
-        "traffic — so the job is skipped before a runner exists"
+        "job-level `if:` excludes the owner and the merge queue's own batch "
+        "PRs (queue-owned head branch, or a bot-authored same-repo PR on the "
+        "default branch) — all internal traffic — so the job is skipped "
+        "before a runner exists"
     ),
 }
 
@@ -179,8 +181,8 @@ PER_UNIT_GROUP_OK = {
     ),
     "inbound-relay.yml": (
         "the JOB is skipped before a runner is allocated for ALL internal "
-        "traffic (its `if:` excludes the owner and `mergify[bot]`), so the "
-        "only fan-out is external `opened` events — one per unit."
+        "traffic (its `if:` excludes the owner and the queue's own batch PRs), "
+        "so the only fan-out is external `opened` events — one per unit."
     ),
 }
 
@@ -491,12 +493,30 @@ def test_the_zero_cost_pr_event_exemption_is_still_true() -> None:
     REQUIRED gate for slots while this module still excused it.
     """
     doc = _load(WORKFLOW_DIR / "inbound-relay.yml")
-    job_if = str(doc["jobs"]["relay"].get("if", ""))
-    assert "github.actor != 'daniel-ospina'" in job_if, (
+    # ALL whitespace stripped: a reformatted (line-wrapped) expression changes no
+    # decision, so it must not red this gate — and this is the SAME normalisation
+    # the other two assertions' files use, so one edit has one answer.
+    job_if = "".join(str(doc["jobs"]["relay"].get("if", "")).split())
+    assert "github.actor!='daniel-ospina'" in job_if, (
         "the internal-traffic exclusion (the owner) is what makes this workflow "
         "zero-cost on the PR path — keep it in the job-level `if:`"
     )
-    assert "mergify[bot]" in job_if, "the Mergify exemption must stay explicit (#3558)"
+    # The queue's batch PRs must stay exempt at JOB level (a skipped job costs
+    # no runner; a step-level decision would), and the exemption must be
+    # EVIDENCE rather than a bot login that rots (#5185).
+    assert "startsWith(github.event.pull_request.head.ref" in job_if, (
+        "the queue-owned head branch must stay exempt (#3558/#5185) — without "
+        "it every queued merge is dequeued and this workflow stops being "
+        "zero-cost for the queue's traffic"
+    )
+    assert "github.event.pull_request.user.type=='Bot'" in job_if, (
+        "the author-identity belt must stay explicit, keyed on GitHub's `type` "
+        "field rather than a bot login (#5185)"
+    )
+    assert "mergify[bot]" not in job_if, (
+        "a hardcoded bot login is the rot #5185 removed: a renamed app "
+        "re-breaks the relay silently"
+    )
 
 
 # ── A run-level group and a job-level group must never share a name ──────────

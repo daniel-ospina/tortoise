@@ -47,7 +47,6 @@
 /license/  /license  301
 /dpa/      /dpa      301
 /security/ /security 301
-/aviso-privacidad/  /aviso-privacidad  301
 /docs/     /docs     301
 /faq/      /faq      301
 /self-hosted/  /self-hosted  301
@@ -55,6 +54,22 @@
 # The investor one-pager (#8568) — same document class as the design-partner
 # page above, so it carries the same trailing-slash 301.
 /investors/  /investors  301
+
+# The Spanish LFPDPPP notice (`aviso-privacidad.html`) is RETIRED (#9486): the
+# controller's jurisdiction of residence is the United Kingdom, so the Mexican
+# notice has no basis and `/privacy` is the privacy notice. A 301 (not a 302)
+# because the route is retired-for-good, exactly like the /signin → /auth
+# consolidation above. The SCOPE.md §12 "302, never a NEW 301" rule governs the
+# moved AUTH surface (#3501/#3521/#4409) — a retired document route is not that
+# surface, so 301 is the right status here and is not an exception to it. All three URL shapes are pinned — the bare path, the
+# trailing-slash variant and the raw `.html` asset were three separately
+# reachable URLs before the retirement, and a retired legal route must not 404.
+# The middleware KEEPS its canonical-host entry for this path, so on the company
+# host the retired URL consolidates like its live siblings; the terminal hop is
+# this rule either way.
+/aviso-privacidad   /privacy  301
+/aviso-privacidad/  /privacy  301
+/aviso-privacidad.html  /privacy  301
 
 # Raw index asset → host root (middleware rewrites / per host)
 /index.html  /  301

@@ -3,7 +3,9 @@
 Owner-approved 2026-09-25 (option A): an **optional** ``sourceVersion`` on the
 **derivation** ``references`` link only — present iff the target was built from
 that source's content. Identity/mention links (``Object``) and referential
-containment (``Source → Source``) stay **property-free**. The anchor is set at
+containment (``Source → Source``) carry **no ``sourceVersion``** — the word is
+scoped to the anchor, never to a general "property-free" claim (``#9450``). The
+anchor is set at
 LINK TIME from the source's current ``contentHash``, so the public SDK signature
 does not change.
 
@@ -106,7 +108,7 @@ def test_identity_link_stays_property_free():
     """Input: a source with contentHash 'h1'; Object linked.
 
     FAILS IF the identity/mention link carries ``sourceVersion`` — the approved
-    scope keeps it property-free (the Source's url IS the artifact).
+    scope keeps it free of ``sourceVersion`` (the Source's url IS the artifact).
     """
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
@@ -117,7 +119,9 @@ def test_identity_link_stays_property_free():
             "MATCH (:Source {url:'src.txt'})-[r:references]->(:Object {id:'obj-1'}) "
             "RETURN r.sourceVersion"
         ).result_set
-        assert rows == [[None]], f"Object link must stay property-free, got {rows!r}"
+        assert rows == [[None]], (
+            f"Object link must carry no sourceVersion, got {rows!r}"
+        )
     finally:
         sdk.close()
 
@@ -376,8 +380,8 @@ def test_document_link_records_the_version_read():
     ``:Source`` target by ``url``. The GUARD is unchanged and still load-bearing:
     drop ``Document`` from ``_DERIVATION_REFERENCES_LABELS`` and this reddens
     again, because the caller's original label is what selects the anchor
-    (``_is_derivation``) — a bare ``Source`` caller stays property-free, which is
-    what keeps referential-containment links unanchored.
+    (``_is_derivation``) — a bare ``Source`` caller carries no ``sourceVersion``,
+    which is what keeps referential-containment links unanchored.
     """
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
@@ -410,8 +414,9 @@ def test_document_derivation_through_the_production_path_anchors():
     the *node* a document resolves to is now a ``:Source``. The writer remaps identity
     either way, so the edge is still created and every other test here stayed green —
     while the anchor silently disappeared from every document link in the product,
-    because ``"Source"`` means referential containment and containment links are
-    deliberately property-free. Test the CALL SITE, not just the mechanism.
+    because ``"Source"`` means referential containment and containment links
+    deliberately carry no ``sourceVersion``. Test the CALL SITE, not just the
+    mechanism.
     """
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
@@ -557,7 +562,7 @@ def test_pre_model_edge_is_not_retro_stamped():
             "title:'src4.txt', contentHash:'h2', ingestedAt:'2024-01-01'})"
         )
         proj.g.query("CREATE (e:Event {eventId:'ev-8', name:'Legacy'})")
-        # The pre-model edge: property-free.
+        # The pre-model edge: no sourceVersion.
         proj.g.query(
             "MATCH (s:Source {url:'src4.txt'}), (e:Event {eventId:'ev-8'}) "
             "MERGE (s)-[:references]->(e)"

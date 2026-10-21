@@ -320,18 +320,43 @@ class TestGuard99:
             except Exception:
                 pass
 
-    def test_delete_is_blocked(self):
+    def test_delete_is_blocked(self, monkeypatch):
         """Bulk DETACH DELETE still triggers the guard (sanity check).
 
         Uses embedded mode (no live DB needed) with _is_embedded flipped to
         False to exercise the server-mode guard path.
+
+        #9470: the docker lane's epic-#1647 redirect hash-renames an explicit
+        NON-test graph name to ``test_<stem>_<hash>`` (``graph_name='tortoise'``
+        + a ``g.db`` path became ``test_g_14a862664fff``), and since #9409 the
+        guard judges the HANDLE's own graph name
+        (``_GuardedGraph._statement_graph_name``), NOT ``proj._graph_name``.
+        Without the carve-out below the wipe therefore lands on a genuinely
+        test-named graph — which the guard is RIGHT to allow — and the pin goes
+        vacuous ("DID NOT RAISE") on every lane that sets TORTOISE_DB_URI, while
+        passing on the URI-less carve-out lane. That lane difference, not test
+        order, is what #9470 observed. ``TORTOISE_TEST_NO_REDIRECT`` is the
+        documented seam (tests/test_redirect_seam.py, tests/
+        test_org_graph_open_tripwire.py) for a test that needs the name it
+        declares; the assertion below pins the precondition the guard reads, so
+        a future redirect change reds this test instead of silently voiding it.
         """
         import tempfile as _tf  # noqa: I001
         import pytest
         from tortoise.projection import FalkorProjection
+        _stems = {s.strip() for s in
+                  os.environ.get("TORTOISE_TEST_NO_REDIRECT", "").split(",")
+                  if s.strip()}
+        _stems.add("test_remove_context_migration")
+        monkeypatch.setenv("TORTOISE_TEST_NO_REDIRECT", ",".join(sorted(_stems)))
         db_path = os.path.join(_tf.mkdtemp(prefix="tortoise_guard_"), "g.db")
         proj = FalkorProjection(db_path, graph_name="tortoise")
         try:
+            # The guard refuses on the name the HANDLE writes (#9409), so the
+            # pin must establish THAT name — not just the projection's field.
+            assert proj.g._statement_graph_name() == "tortoise", (
+                "the #1647 redirect renamed this test's graph, so the wipe "
+                "below is a test-graph wipe and this pin proves nothing (#9470)")
             # Force server-mode guard behavior (embedded normally skips)
             proj._is_embedded = False
             proj._graph_name = "tortoise"

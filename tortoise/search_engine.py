@@ -601,10 +601,10 @@ def read_reference_currency_links(
     source through ``(Source)-[:references]->(entity)`` (§3.4), which is the
     link that carries the ``sourceVersion`` note for the DERIVATION classes
     (owner ruling 2026-09-25, option A — ``Event``/``Document`` annotate, an
-    identity/mention ``Object`` link stays property-free). Without this read the
-    question *"are the entities we reason about still about the content we
-    hold?"* is unanswerable for every class except ``:Point``, which is the gap
-    #5199 names.
+    identity/mention ``Object`` link carries no ``sourceVersion``). Without this
+    read the question *"are the entities we reason about still about the content
+    we hold?"* is unanswerable for every class except ``:Point``, which is the
+    gap #5199 names.
 
     Returns ``{entity_id: [link, ...]}`` — the same row shape as
     :func:`read_currency_links` (``source``, ``recorded``, ``current``,
@@ -621,10 +621,10 @@ def read_reference_currency_links(
       declined to pick a node", so the refusal keeps its key.
 
     ⛔ AN ``Object`` READS ``unknown``, AND THAT IS THE ANSWER, NOT A BUG. Its
-    link is property-free by the same ruling, so the pair is unfillable and
-    :func:`currency_status` returns ``unknown`` — deliberately never
-    ``current``. Do not "fix" this by stamping an anchor onto an identity link:
-    that reverses the ruling and is pinned against in
+    link carries no ``sourceVersion`` by the same ruling, so the pair is
+    unfillable and :func:`currency_status` returns ``unknown`` — deliberately
+    never ``current``. Do not "fix" this by stamping an anchor onto an identity
+    link: that reverses the ruling and is pinned against in
     ``tests/test_source_version_references_5199.py``.
 
     Identity: a row is attributed to the COORDINATES THE CALLER USED, never to
@@ -948,14 +948,20 @@ def classify_query(
 #: took. #4199 adds a second OPTIONAL key — ``scope``
 #: (:data:`VECTOR_SCOPE_KEY`, value :data:`VECTOR_SCOPE_EMPTY`) — present
 #: only on a vector entry whose ``scope_kinds`` predicate selected NO nodes.
-#: Legs that do not pass either key are byte-identical to the shared shape.
+#: Legs that do not pass any optional key are byte-identical to the shared
+#: shape. #8488 adds a third OPTIONAL key — ``declined``
+#: (:data:`LEXICAL_DECLINED_KEY`) — present only on a lexical-arm entry that
+#: RAN and then declined to rank (see :data:`DEFAULT_BM25_CORPUS_CAP`).
 def _trace_entry(leg: str, *, ran: bool, degraded: bool,
                  reason: str | None, count: int,
-                 mechanism: str | None = None) -> dict:
+                 mechanism: str | None = None,
+                 declined: bool = False) -> dict:
     entry = {"leg": leg, "ran": ran, "degraded": degraded,
              "reason": reason, "count": count}
     if mechanism is not None:
         entry[VECTOR_MECHANISM_KEY] = mechanism
+    if declined:
+        entry[LEXICAL_DECLINED_KEY] = True
     return entry
 
 
@@ -1465,7 +1471,8 @@ def run_fts_query(
 #: The cap is a memory/latency bound, not a ranking parameter, and it is
 #: LOUD **and DECLINED**: the leg asks for one row more than the cap, so it can
 #: tell "exactly cap" (a complete ranking) from "more than cap" (a window) —
-#: and on a WINDOW it returns NO rows at all, recording ``degraded=True``. The
+#: and on a WINDOW it returns NO rows at all, recording ``declined=True``
+#: (NOT ``degraded`` — see below). The
 #: shipped graph-side leg answers over the whole label (it is index-backed), so
 #: replacing its rows with a ranking over the first ``cap`` ids in id order —
 #: oldest-first on this tree's ULID ids, i.e. blind to the newest documents,
@@ -1475,14 +1482,47 @@ def run_fts_query(
 #: arm gets) and leaves the signal in the trace. Raise the cap (or add an
 #: id-descending window) before enabling the arm on a store that large.
 #:
-#: ⚠️ What ``degraded=True`` then COSTS the read, stated because it is wider
-#: than "this leg ran": ``read_status.classify_leg_trace`` reports the read as
-#: ``degraded`` when any leg entry is degraded, and ``ask_lane`` sets
-#: ``retrieval_degraded`` the same way. On a store at the cap that is the
-#: intended signal (the corpus the arm could see was a window), but it also
-#: means #2952's narrower reading ("the leg contributed no results") does not
-#: apply. That is the deliberate trade: a truncated corpus must not read as a
-#: clean measurement.
+#: ⛔ What the decline must NOT cost the read (#8488 follow-up). The decline
+#: used to record ``degraded=True`` so that a measurement could not read a
+#: truncated corpus as a clean BM25 result. That carrier was wrong, because
+#: ``degraded`` is NOT a leg-local flag: ``read_status.classify_leg_trace``
+#: reports the whole READ as ``degraded`` when any entry carries it, and
+#: ``ask_lane`` sets ``retrieval_degraded`` the same way. So on a store at the
+#: cap, enabling the arm relabelled EVERY successful read "the memory layer is
+#: IMPAIRED" — the recorded term for a store that could not be reached or a
+#: retrieval leg that did not run, NOT a leg-local "this scorer returned
+#: nothing" — while nothing here was impaired: the shipped lexical leg had in
+#: fact answered over the WHOLE label and every row was returned. The
+#: arm is an alternative SCORER for a SAME leg slot, not a leg, so its
+#: declining cannot mean "a retrieval leg did not run". (The decline's own entry
+#: adds no impairment; it says nothing about the OTHER legs, which report
+#: themselves — a vector leg that failed is degraded on its own entry.)
+#:
+#: The measurement's need — "a truncated corpus must not read as a clean BM25
+#: measurement" — is what :data:`LEXICAL_DECLINED_KEY` makes ANSWERABLE, and
+#: it is not yet answered by any consumer in this tree: the entry records
+#: ``ran=True, declined=True, degraded=False, count=0`` with NO ``mechanism``
+#: key (BM25 produced no rows, so it may not claim to have), so a baseline can
+#: count declines exactly instead of inferring them from a blanket
+#: degradation — but no in-tree fold counts it yet, and the TWO folds that
+#: read the old carrier now record a declining arm as a RUN, not an impairment,
+#: deliberately:
+#:
+#: * ``retrieval_preflight.merge_leg_trace`` — the shared interpreter both
+#:   ``arms/a4_tortoise`` and ``parity/mabench_tortoise`` record through — folds
+#:   only ``degraded``, so the run record's (and the parity cell's)
+#:   ``retrieval_degraded`` no longer fires on a decline, and a decline is
+#:   therefore NOT distinguishable there from the arm being OFF.
+#: * ``retrieval_metering`` tallies the decline as a leg run, not a degraded one.
+#:
+#: That is the correct polarity for both (neither claims an impairment, which is
+#: what this whole note is about), but it does mean the decline's measurement
+#: signal is carried ONLY by the trace entry: a measurement that wants it must
+#: read :data:`LEXICAL_DECLINED_KEY` off the trace — which is exactly what
+#: #8486's baseline has to do, and why the key exists. Whoever wires it must not
+#: route it back through ``degraded``; the parity lane already persists the raw
+#: entries (``capability_gate.leg_trace``), so the signal survives in that
+#: artifact even while the boolean does not carry it.
 #:
 #: ⛔ Cost, stated and NOT measured. Unlike ``run_vector_query``'s embedded
 #: brute force — which scores inside the engine and returns ``limit`` rows —
@@ -1493,6 +1533,20 @@ def run_fts_query(
 #: embedded-lane-only, and why its latency must be measured (#8486) before it
 #: is enabled anywhere.
 DEFAULT_BM25_CORPUS_CAP = 20000
+
+#: #8488 — trace-entry key marking a lexical ARM that ran and then DECLINED to
+#: rank (``ran=True, count=0``): the corpus it could read was a window
+#: (:data:`DEFAULT_BM25_CORPUS_CAP`), so it returned nothing and left the
+#: shipped leg's whole-label rows in place. PER-LEG: written only on an
+#: ``fts`` entry produced by the in-process BM25 arm; no other leg passes it.
+#:
+#: Why it exists instead of ``degraded``: ``degraded`` is aggregated into the
+#: READ's recorded status (``read_status.classify_leg_trace``) and into
+#: ``ask_lane``'s ``retrieval_degraded``, so carrying a leg-local decline there
+#: reported a complete read as an impaired one. ``mechanism`` cannot carry it
+#: either — that key answers "which path produced these rows", and here there
+#: are no rows, which is why a declined entry writes no ``mechanism`` at all.
+LEXICAL_DECLINED_KEY = "declined"
 
 #: #8488 — the value of the leg trace's ``mechanism`` key when the lexical leg
 #: was scored IN-PROCESS by Okapi BM25 (``run_bm25_query``) rather than by the
@@ -1608,16 +1662,22 @@ def run_bm25_query(
       ``mechanism`` key is written: nothing was read, and the leg cannot
       search that family at all. A consumer counting ``mechanism == "bm25"``
       must not count it (that is ``_record``'s own contract).
-    * corpus WIDER than ``corpus_cap`` — ``ran=True``, ``degraded=True``,
-      ``count=0``: the leg DID read, and it declined to return a windowed
-      ranking (see ``DEFAULT_BM25_CORPUS_CAP``), so the shipped whole-label
-      rows survive. ``degraded`` is what separates this from a clean empty.
+    * corpus WIDER than ``corpus_cap`` — ``ran=True``, ``declined=True``,
+      ``degraded=False``, ``count=0``: the leg DID read, and it declined to
+      return a windowed ranking (see ``DEFAULT_BM25_CORPUS_CAP``), so the
+      shipped whole-label rows survive. It writes NO ``mechanism`` key for the
+      same reason the refusal does not: BM25 produced no rows for this read,
+      so a baseline counting ``mechanism == "bm25"`` must not count it — it
+      counts :data:`LEXICAL_DECLINED_KEY` instead. It is NOT ``degraded``:
+      that flag is aggregated into the READ's recorded status, and this decline
+      impairs nothing (the shipped lexical leg answered over the whole label).
+      Marking it degraded relabelled healthy reads as impaired memory.
     * a query that matched nothing — ``ran=True``, ``degraded=False``,
       ``empty_results``, ``count=0``.
 
-    ``degraded`` is recorded only where the leg's OWN result is incomplete or
-    declined (a failed read, an open breaker, a corpus over the cap), never on
-    a clean empty result.
+    ``degraded`` is recorded only where the leg's OWN result is incomplete
+    AND the read is impaired by it (a failed read, an open breaker), never on
+    a clean empty result and never on a decline.
 
     ``keep_numeric`` is threaded, never decided: the search lane's
     byte-identical control is a RECORDED decision and its reopen belongs to the
@@ -1634,7 +1694,7 @@ def run_bm25_query(
     validate_entity_type(entity_type)
 
     def _record(*, ran: bool, degraded: bool, reason: str | None,
-                count: int) -> None:
+                count: int, declined: bool = False) -> None:
         # The leg NAME stays "fts": the leg trace's vocabulary has three slots
         # and the lexical one is that name (``read_status``, the metering fold
         # and the eval lane all key on it). WHICH scorer produced the rows is
@@ -1642,15 +1702,19 @@ def run_bm25_query(
         # additive seam #4999 introduced for index-vs-scan, so a measurement
         # can tell a BM25-scored lexical leg from a server-scored one without
         # a fourth leg name anywhere in the tree. The key is written ONLY when
-        # the leg ran: ``_trace_entry``'s contract leaves it absent on a
-        # ``breaker_open`` skip, and a consumer counting ``mechanism ==
-        # "bm25"`` must not count a skip as a run.
+        # the leg ran AND did not decline (a declined arm produced no rows, so it
+        # may not claim the path that produced them): ``_trace_entry``'s contract
+        # leaves it absent on a ``breaker_open`` skip, on the refusal branch, and
+        # on the corpus-cap decline, and a consumer counting ``mechanism ==
+        # "bm25"`` must count neither a skip nor a decline as a BM25-scored read.
         if meter:
             _retrieval_metering.note_leg("fts", ran=ran, degraded=degraded)
         if leg_trace is not None:
             leg_trace.append(_trace_entry(
                 "fts", ran=ran, degraded=degraded, reason=reason, count=count,
-                mechanism=(LEXICAL_MECHANISM_BM25 if ran else None)))
+                mechanism=(LEXICAL_MECHANISM_BM25
+                           if (ran and not declined) else None),
+                declined=declined))
 
     if not _breaker_allow("bm25"):
         logger.warning("BM25 circuit breaker OPEN — skipping BM25 strategy")
@@ -1725,15 +1789,23 @@ def run_bm25_query(
             # answered over the whole label; a ranking over the first ``cap``
             # ids (oldest-first on ULID ids) is not the same answer and is
             # often a weaker one — so the caller keeps the shipped rows, the
-            # same fail-safe an empty arm gets. ``degraded`` records WHY the
+            # same fail-safe an empty arm gets. ``declined`` records WHY the
             # slot was left alone; ``count=0`` because nothing was returned.
+            #
+            # NOT ``degraded``: that flag propagates to the READ's recorded
+            # status (``read_status.classify_leg_trace``) and to
+            # ``ask_lane``'s ``retrieval_degraded``, and this decline impairs
+            # nothing — the shipped lexical leg answered over the whole label and
+            # the rows are returned. The decline is a property of THIS ARM, not
+            # an impairment of the memory layer (see ``DEFAULT_BM25_CORPUS_CAP``).
             logger.warning(
                 "BM25 corpus exceeds the %d-row cap — declining to replace "
                 "the shipped lexical rows with a ranking over the first %d "
                 "ids; raise %s or measure on a smaller corpus (#8486)",
                 corpus_cap, corpus_cap, "DEFAULT_BM25_CORPUS_CAP")
             _breaker_record("bm25", True)
-            _record(ran=True, degraded=True, reason="empty_results", count=0)
+            _record(ran=True, degraded=False, reason="empty_results",
+                    count=0, declined=True)
             return []
         docs = [
             (row[0], index_text(row[1], row[2])) for row in rows if row[0]

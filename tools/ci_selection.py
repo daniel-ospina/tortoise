@@ -572,8 +572,10 @@ SOURCE_PATTERNS = {
                    "tortoise/hosted_api.py",
                    # #3950: the blog-discoverability guard
                    # (test_website_docs_consistency.py
-                   # ::test_every_in_scope_page_links_to_the_blog) covers all 12
-                   # public+indexable+served pages, not just docs/faq. An unlisted
+                   # ::test_every_in_scope_page_links_to_the_blog) covers EVERY
+                   # public+indexable+served page, not just docs/faq — the count
+                   # is deliberately not stated, because each add or retirement
+                   # would re-stale the number. An unlisted
                    # page means a PR touching ONLY that page selects no surface
                    # (surfaces=[], full=False) and the guard never runs — verified
                    # before listing: `--changed-files website/tos.html` yielded
@@ -590,7 +592,6 @@ SOURCE_PATTERNS = {
                    # surface through this tuple.
                    "website/security.html", "website/tos.html",
                    "website/license.html", "website/dpa.html",
-                   "website/aviso-privacidad.html",
                    # #3436: the remaining top-level page, listed for the
                    # same reason as every other page entry in this tuple — they
                    # are covered by the site-wide element-id uniqueness guard

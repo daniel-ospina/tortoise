@@ -893,8 +893,52 @@ def test_retrofit_verdicts_cite_documentation_homes_that_exist() -> None:
         assert "§ '#3554 amendment'" in where, name
 
 
+def _model_version(text: str) -> tuple[int, ...]:
+    """``"3.30"`` → ``(3, 30)`` — compare model versions numerically, not as text."""
+    return tuple(int(part) for part in text.split("."))
+
+
+_BLOCK_VERSION_RE = re.compile(r">\s*\*\*Changelog v(\d+\.\d+)")
+
+
+def _newest_changelog_version(changelog: str) -> str:
+    """The version of the NEWEST block — the changelog is newest-first."""
+    at = changelog.index("> **Changelog v3.")
+    line = changelog[at:changelog.index("\n", at)]
+    match = _BLOCK_VERSION_RE.match(line)
+    assert match, f"unparseable newest changelog header: {line!r}"
+    return match.group(1)
+
+
+def _assert_declared_version_is_recorded(ontology: str, changelog: str) -> None:
+    """The version the model document declares must BE a recorded release.
+
+    ``docs/ONTOLOGY-CHANGELOG.md`` states its own rule — *"one entry per model
+    change, newest first"* — and ``docs/ONTOLOGY.md``'s header relies on it for
+    "the history of **what changed and why**". So the newest block and the
+    declared version are the same fact seen twice, and a bump with no entry is
+    an unrecorded model change.
+
+    This is the relation the two removed arms ("§4.8's block == declared" and
+    "§4.8's block is the newest") were reaching for. They pinned it to §4.8's
+    bullet, which over-constrained it: any later release reddened a test about a
+    section that had not moved. Keyed on the newest block instead, it holds
+    whatever §4.8's bullet does, and the direction that matters — a version
+    declared with no block recording it — is still excluded (see
+    ``test_a_model_version_bump_with_no_changelog_block_fails``).
+    """
+    declared = re.search(r'^title: "Tortoise — Canonical Ontology v(\d+\.\d+)"',
+                         ontology, re.M)
+    assert declared, "docs/ONTOLOGY.md must declare its model version in frontmatter"
+    newest = _newest_changelog_version(changelog)
+    assert _model_version(newest) == _model_version(declared.group(1)), (
+        f"docs/ONTOLOGY.md declares v{declared.group(1)} but the newest "
+        f"ONTOLOGY-CHANGELOG.md block is v{newest} — a model version bump landed "
+        "with no record of what changed")
+
+
 def test_section_4_8_changelog_entry_sits_under_its_own_version_block() -> None:
-    """The §4.8 changelog bullet belongs to its own version/date/issue header.
+    """The §4.8 changelog bullet belongs to the release that carries it.
 
     Pre-fix the bullet was the FIRST item of the ``v3.23 (2026-10-10 —
     issues #7813 + #7853)`` block, making that header's date and issue
@@ -909,34 +953,103 @@ def test_section_4_8_changelog_entry_sits_under_its_own_version_block() -> None:
     header enumerated an issue that could not have landed in it — the same
     misattribution one block up, now pinned as correct by a hardcoded ``v3.24``.
 
-    So this asserts the RELATION, not the literal: the bullet sits under the
-    NEWEST block, and that block's version is the version the model document
-    itself declares. Pre-fix (both the original ``v3.23`` shape and the
-    ``v3.24`` one) this fails.
+    The second fix asserted "the bullet sits under the NEWEST block, and that
+    block's version is what the model document declares" — an OVER-CONSTRAINT:
+    it made ANY later model release red, though the model is meant to keep
+    evolving and the §4.8 bullet had not moved. A later release (v3.30, #8745,
+    a §4.6-only change) failed it, which is not the misattribution it was
+    reaching for. The relation it wanted is "the block carries the section's own
+    release", so that is what is pinned — from facts already in the text, with
+    no version literal: the bullet records its own landing date
+    (``§4.8 (added by #3554, 2026-10-17)``) and the header records the block's
+    date, so a bullet under ANY other block — older *or* newer — disagrees; and
+    the block's version may not be NEWER than the model document declares
+    itself. Pre-fix (the ``v3.23`` shape, the ``v3.24`` one, and a later block
+    that copies the bullet) each fails; a later block that leaves the bullet
+    alone (v3.30) does not.
+
+    The third fix removed the two arms that pinned the DECLARED version to a
+    block without putting the relation back: ``§4.8's block <= declared`` is
+    satisfied by any later declared version, so a bump with **no changelog
+    entry** — a state those arms made impossible and nothing else in the tree
+    checks — went green. That relation is re-pinned here keyed on the NEWEST
+    block (``_assert_declared_version_is_recorded``), which is where the
+    changelog's own "one entry per model change, newest first" rule puts it.
     """
     changelog = ONTOLOGY_CHANGELOG.read_text(encoding="utf-8")
     ontology = ONTOLOGY.read_text(encoding="utf-8")
-    bullet = changelog.index("§4.8 (added by #3554")
-    header = changelog.rindex("> **Changelog v3.", 0, bullet)
+    bullet_at = changelog.index("§4.8 (added by #3554")
+    header = changelog.rindex("> **Changelog v3.", 0, bullet_at)
     header_line = changelog[header:changelog.index("\n", header)]
+    block_version = _BLOCK_VERSION_RE.match(header_line)
+    assert block_version, f"unparseable changelog header: {header_line!r}"
     # The version the model document declares about itself (frontmatter title).
     declared = re.search(r'^title: "Tortoise — Canonical Ontology v(\d+\.\d+)"',
                          ontology, re.M)
     assert declared, "docs/ONTOLOGY.md must declare its model version in frontmatter"
-    assert f"v{declared.group(1)}" in header_line, (
-        f"§4.8 is recorded under {header_line!r} but the model document declares "
-        f"v{declared.group(1)} — a new model section must be recorded in the "
-        "release that carries it, not an older one")
-    newest = changelog.index("> **Changelog v3.")
-    newest_line = changelog[newest:changelog.index("\n", newest)]
-    assert newest == header, (
-        "§4.8 must be recorded in the NEWEST changelog block (this file is "
-        f"newest-first); it sits under {header_line!r} while the newest block "
-        f"is {newest_line!r}")
+    assert _model_version(block_version.group(1)) <= _model_version(declared.group(1)), (
+        f"§4.8 is recorded under {header_line!r} — a block NEWER than the "
+        f"v{declared.group(1)} this model document declares; a section cannot be "
+        "recorded in a release that has not been published")
     assert "#3554" in header_line, (
         "the §4.8 block's header must name the issue whose section it records")
-    # …and the header must not enumerate an issue that landed in another block.
-    assert header_line.count("#") >= 1
+    # The RELATION: the block carrying the bullet is the release §4.8 landed in.
+    bullet_line = changelog[bullet_at:changelog.index("\n", bullet_at)]
+    landing = re.search(r"§4\.8 \(added by #3554, (\d{4}-\d{2}-\d{2})\)", bullet_line)
+    block_date = re.search(r"\*\*Changelog v3\.\d+ \((\d{4}-\d{2}-\d{2})", header_line)
+    assert landing and block_date, (
+        f"both dates must be readable: bullet={bullet_line!r} header={header_line!r}")
+    assert landing.group(1) == block_date.group(1), (
+        f"§4.8 landed on {landing.group(1)} but sits under {header_line!r}, dated "
+        f"{block_date.group(1)} — a model section belongs to the block that "
+        "released it, not to whichever block happened to be newest when the "
+        "bullet was written")
+    # …and the version↔release relation, decoupled from where §4.8's bullet sits.
+    _assert_declared_version_is_recorded(ontology, changelog)
+
+
+def test_a_model_version_bump_with_no_changelog_block_fails() -> None:
+    """Non-vacuity for the version↔release pairing, in both directions.
+
+    The real tree is GREEN, so an arm that only runs against it proves nothing
+    about the state it exists to exclude. This reproduces that state — the model
+    document bumped to a version the changelog has no block for — and shows the
+    pairing rejects it, while the arm the third rewrite used
+    (``§4.8's block <= declared``) cannot see it at all. Then it records the
+    bumped version and shows the same document goes green, so the arm reads the
+    relation and not a version literal.
+    """
+    ontology = ONTOLOGY.read_text(encoding="utf-8")
+    changelog = ONTOLOGY_CHANGELOG.read_text(encoding="utf-8")
+    _assert_declared_version_is_recorded(ontology, changelog)
+
+    declared = re.search(r'^title: "Tortoise — Canonical Ontology v(\d+\.\d+)"',
+                         ontology, re.M)
+    assert declared, "docs/ONTOLOGY.md must declare its model version in frontmatter"
+    current = declared.group(1)
+    major, minor = current.split(".")
+    bumped_version = f"{major}.{int(minor) + 1}"
+    bumped = ontology.replace(f"Canonical Ontology v{current}",
+                              f"Canonical Ontology v{bumped_version}", 1)
+    assert bumped != ontology, "the declared version must be replaceable in the title"
+
+    # The arm the third rewrite left in place cannot see the regression: §4.8's
+    # block is v3.29 and stays there, so `block <= declared` holds for any bump.
+    bullet_at = changelog.index("§4.8 (added by #3554")
+    header = changelog.rindex("> **Changelog v3.", 0, bullet_at)
+    block_version = _BLOCK_VERSION_RE.match(changelog[header:changelog.index("\n", header)])
+    assert block_version, "§4.8's block header must be readable"
+    assert _model_version(block_version.group(1)) <= _model_version(bumped_version), (
+        "this test's premise is that the §4.8-only bound accepts a bump with no record")
+
+    with pytest.raises(AssertionError, match="no record of what changed"):
+        _assert_declared_version_is_recorded(bumped, changelog)
+
+    newest_at = changelog.index("> **Changelog v3.")
+    recorded = (changelog[:newest_at]
+                + f"> **Changelog v{bumped_version} (2199-01-01 — issue #0 — synthetic):**\n>\n"
+                + changelog[newest_at:])
+    _assert_declared_version_is_recorded(bumped, recorded)
 
 
 def test_ontology_section_4_8_owner_lists_match_the_declaration() -> None:

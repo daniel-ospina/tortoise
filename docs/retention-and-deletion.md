@@ -383,10 +383,15 @@ not a whitelist — a file outside the set above may still link here.
 **Named implementation constants** (exempt by design): `tortoise/retention.py` and
 `tortoise/backup_config.py` are exempt whole-file (every line is the authority);
 `tortoise/{backup_sweep,hosted_api,sdk,supabase_control,raw_state}.py` are exempt
-only on lines that name a canonical constant. `docs/ONTOLOGY.md` is exempt only on
-lines that name a canonical constant too (its §4.6 row does carry a bare window
-number, but it names `RAW_DELETION_MARKER_TTL` on that same line — the constant,
-not the absence of a number, is what makes the line traceable). `website/apps/dashboard/src/graphs.test.js`
+only on lines that name a canonical constant. `docs/ONTOLOGY.md` is line-scoped
+for the same reason — its window prose stays gated, one line at a time — but its
+§4.6 row carries a bare window number and names **no** constant: it passes because
+that row **links this document** (and names the **`R1`** ruling, *never a retention
+period on user content*), so a reader following the row lands on the authority rather
+than on a restated number. The model document cites the authority; the constant name
+is build detail and deliberately does not appear there. `RAW_DELETION_MARKER_TTL`
+remains the **sole numeric authority** for the deletion-marker window — the row in
+the table above. `website/apps/dashboard/src/graphs.test.js`
 is derived: it imports `TRASH_GRACE_DAYS` from `graphs.js` rather than restating
 the number.
 
@@ -419,9 +424,11 @@ this document supersedes them): `docs/plans/2026-09-06-2304-delete-trash-can.md`
 > the draft body to appear in the served `/privacy` page, so §6/§16 (and every
 > other retained-number sentence) **must be edited in BOTH files together** —
 > updating one without the other reddens the gate. Only the G-gate
-> preface/metadata (the `## Draft metadata` block, the delete-account capability
-> check, and the LFPDPPP / outline / canonical-sentence notes above the anchor)
-> is the historical snapshot, kept for the record and not rendered.
+> preface/metadata (the `## Draft metadata` block — whose residence row carries
+> the CURRENT fact, so read it rather than assuming this block is all history —
+> the delete-account capability check, and the LFPDPPP / outline /
+> canonical-sentence / drafting-rule notes above the anchor) is the drafting
+> preface — not rendered, and not the policy — kept for the record.
 >
 > **Division of labour.** The policy copy states the **restore window** as one
 > number (7 days), the **backup horizon** as one number (four weeks), and the
