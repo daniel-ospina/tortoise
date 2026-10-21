@@ -91,7 +91,7 @@ the runs and their output are in **§G**.
 | `object` | `supabase/migrations/20261012000002_record_semantic.sql:21` | 2 — semantic |
 | `subject` | `…02_record_semantic.sql:68` | 2 — semantic |
 | `point` | `supabase/migrations/20261012000003_record_epistemic.sql:50` | 3 — epistemic |
-| `relation` | `…03_record_epistemic.sql:166` | 3 — epistemic (**reified edges**, materialised *where a journaled edge record carries them*: `DirectEdgeCreated`/`EntityLinked` → `IMPL`/`NAND`/`INPUT`, `about*`). What does **not** reach `relation`: (i) the families **derived from point properties** — `extractedFrom`, `references`, `about*`, `mitigated_by` (`04-projection.md` §3, R5); (ii) **an operator's own edges** — `OperatorAdded` is a `point`-row upsert whose inputs sit in `point.props`, so its `IMPL`/`NAND`/`INPUT` topology is R5's work; (iii) **`CONTAINS`** — the capture's `contains_session` rides the *journal envelope* and is dropped by the record projection (`record_projection.py:978`), so the journal rebuilds the edge and the record cannot |
+| `relation` | `…03_record_epistemic.sql:166` | 3 — epistemic (**reified edges**, materialised *only where a journaled edge record carries them*: `DirectEdgeCreated` → `IMPL`/`NAND` (nothing else is even accepted, `sdk.py:19689`), `EntityLinked` → `about*`. No journaled edge record carries `INPUT` at all). What does **not** reach `relation`: (i) the families **derived from point properties** — `extractedFrom`, `references`, `about*`, `mitigated_by` (`04-projection.md` §3, R5); (ii) **an operator's own edges** — `OperatorAdded` is a `point`-row upsert whose inputs sit in `point.props`, so its `IMPL`/`NAND`/`INPUT` topology is R5's work; (iii) **`CONTAINS`** — the capture's `contains_session` rides the *journal envelope* and is dropped by the record projection (`record_projection.py:978`), so the journal rebuilds the edge and the record cannot |
 | `record_event_stream`, `object_current_status`, `subject_current_status` | `supabase/migrations/20261012000004_record_procedural.sql` | 4 — procedural (**views, no table** — `Object.status` is a cache and is computed, never stored) |
 
 **Supersede chains are in.** `point.status` is a PRIMARY column with the lifecycle journaled;
@@ -100,7 +100,7 @@ layer is the fold over them (`…04_record_procedural.sql` `object_current_statu
 
 **EP weights are correctly ABSENT.** `public.point`'s `chk_point_props_no_derived` refuses
 `ep_alpha`, `ep_beta`, `confidence`, `posterior_*`, `baseline_set`, `content_hash`, `ep_dirty*` **by
-name** **as props keys** (`…03_record_epistemic.sql:128`); the columns themselves do not exist, so a
+name as props keys** (`…03_record_epistemic.sql:128`); the columns themselves do not exist, so a
 writer adding one meets a SQL error rather than this CHECK. **Where belief lives:** EP
 confidence is computed in Python over the structure (§2.0 clause (a));
 `tortoise/ep.py` is its home, and `baseline_source`/`baseline_alpha`/`baseline_beta` are the one
@@ -174,7 +174,7 @@ idempotent, total, and stores no EP scalar`.
 |---|---|---|
 | **the record, in the hosted deployment** | ⛔ **NOT ARMED.** `TORTOISE_RECORD_DSN` appears **nowhere** in `fly.toml`, `entrypoint.sh`, `.github/workflows/deploy-hosted.yml`, or the runbook's Secrets Matrix. Unset ⇒ `NOT_ARMED` ⇒ *"zero statements, no connection attempt"* — the deployment is byte-identical to pre-record. | `grep -c TORTOISE_RECORD_DSN fly.toml` → **0** |
 | **the end-to-end proof, in CI** | ⛔ **NEVER RUNS.** No CI job sets `TEST_RECORD_DB_URI` (the test file says so itself, and `grep` over `.github/` agrees), **and** `psycopg2` is the optional `[postgres]` extra — absent from the default dev/CI env, so the two Postgres legs `importorskip` and **skip even when a Postgres is given**. | measured: run 1 → `57 passed, 2 skipped`; run 2 with `--extra postgres` → **`2 passed`** |
-| **the edge / operator half of the record** | ⚠️ **`relation` = 0 rows** on the live capture measurement — that capture carried four `contains_session` keys the projection drops (A1/R5) and wrote no journaled edge record, which is the whole of what this number shows; `04-projection.md` §3 *additionally* declares the point-property-derived edge family *"not materialized by this increment"*, so a capture that did emit edges would still miss that one family. | §G run 2 |
+| **the edge / operator half of the record** | ⚠️ **`relation` = 0 rows** on the live capture measurement, and the number is a consequence of **R4**: the capture *does* write journaled `EntityLinked` records (each one a `RelationUpsert`, `record_projection.py:732`), but their endpoints are the claim `PointAdded` rows, which that capture's `search_keys` disagreement gets refused — so the relations have nowhere to land. `04-projection.md` §3 *additionally* declares the point-property-derived edge family *"not materialized by this increment"*. | §G run 2; R4 |
 | **the `session` record** | ⚠️ **`capture_redactions` is NULL because the record that would write it is REFUSED** — the column is `jsonb` and the producer emits an integer, so the `SessionRecorded` carrying `capture_redactions` is refused with `DatatypeMismatch` and is counted on `record_write_failures`; the module refuses to coerce (`record_projection.py:1014`). Pinned as a tolerated disagreement, not fixed (**#9264**, OPEN). | `tests/test_9078_record_written_by_production_path.py:139` `_SCHEMA_DISAGREEMENTS = {"search_keys": …, "capture_redactions": …}` |
 | **rebuild the graph from the record** | ⚠️ A **method with no CLI verb and no production caller**. | `FalkorProjection.rebuild_from_record` — `grep` finds no `__main__` verb |
 | **RLS as the tenancy boundary** | ⚠️ **Policies exist; nothing sets the GUC.** `app.current_org_id` is set only in `supabase/tests/*.sql` — the migrations that define the policies only *read* it, via `current_setting(…, true)` — and **no Python path sets it**, so the record connects as the DB owner and §4's own bypass rule applies. | `grep -rn app.current_org_id tortoise/ tools/` → 0 setters |
@@ -246,12 +246,17 @@ they are invisible without R3.
 **What:** `relation` exists with real composite FKs into `node_identity`, and the registry already
 handles `EntityLinked` / `DirectEdgeCreated` / `DirectEdgeRepoint`. What is **declared missing**
 (`04-projection.md` §3) is the edge set **derived from point properties** — `extractedFrom`,
-`references`, `about*`, `mitigated_by`. Those edges live on the point row's props today, so a rebuild
-from the record alone reproduces the claims and **not the topology**. ⚠️ **Two more families are missing for their own reasons.** `CONTAINS`: the capture's `contains_session`
+`about*`, `mitigated_by` — which live on the point row's props today, so a rebuild from the record
+alone reproduces the claims and **not the topology**. ⚠️ **`references` is in neither place**: it is not
+a point property and it is not journaled either (`link_source_to_entity`/`create_edge` write it bare), and
+`projection/edges.py:736-745` records the same for the whole structural-predicate class (`ownedBy`, `hasPart`,
+`dependsOn`, `wasDerivedFrom`, `aboutSource`, …) — measured there as `edges: 0` after a rebuild. For those the
+fix is a **producer** (the record type, the fold and the resolver exist as `DirectEdgeCreated`; nothing emits
+them from those doors — tracked on `#9079`), and that half belongs to this item too. ⚠️ **Two more families are missing for their own reasons.** `CONTAINS`: the capture's `contains_session`
 rides the **journal envelope**, so a *journal* rebuild restores the edge — a *record*-sourced rebuild cannot,
 because the projection drops that key (`record_projection.py:978`) and emits no `relation` row for it. And an
 **operator's** `IMPL`/`NAND`/`INPUT` edges: `OperatorAdded` is a `point`-row upsert whose inputs sit in
-`point.props`, so those edges reach the record only when a `DirectEdgeCreated`/`EntityLinked` carries them.
+`point.props` and no journaled edge record carries them, so they never reach `relation` at all.
 **What it blocks:** the epic's own acceptance — *"the graph engine can be destroyed and rebuilt
 without data loss"*. NAND / IMPL / mitigation topology is the thing that would be lost, and §8 makes
 operator topology non-negotiable (a fused claim cannot be `NAND`ed).
