@@ -179,9 +179,11 @@ WHAT THIS PINS
    reached a different count, the last one finding 27 sites where the tree had
    33 (the backup's all-edge dump and the `backfill_v25` count among the six).
 17. `test_every_stated_exclusion_is_still_true` — an exclusion is not a
-   promise: its code facts are asserted inside the excluded symbol's span, so
-   removing the constraint that put the edge out of the walk's result set reds
-   as an unowned read rather than silently re-entering the class.
+   promise: its code facts are asserted inside the excluded symbol's span, and
+   (16) requires the fact that bounds THIS walk to sit in the walk's own clause —
+   so removing the constraint reds as an unowned read rather than silently
+   re-entering the class, and a second walk cannot inherit the first one's
+   exclusion.
 
 ⚠️ **What this deliberately does NOT claim.** The LITERAL census is a LOWER
 BOUND: it sees a relationship pattern naming the edge, so a reader that
@@ -927,29 +929,85 @@ def _query_text(node: ast.AST, docstrings: set[int]) -> tuple[str, int] | None:
     return None
 
 
-def _untyped_read_brackets(query: str) -> list[int]:
-    """Start offsets of every UNTYPED relationship bracket in a READ clause.
+def _untyped_read_segments(query: str) -> list[tuple[int, str, tuple[str, ...]]]:
+    """Every UNTYPED relationship bracket in a READ clause, with its CLAUSE segment.
+
+    Returns `(bracket offset, this walk's segment, the segments before it)`.
 
     One rule, used by the census AND by the fixture that pins it: a bracket is
     untyped when it carries no type after its property map is removed, and it is
     a READ when the last Cypher clause before it is `MATCH`/`OPTIONAL MATCH`
     (`MERGE … MATCH` is a write, `MATCH … MERGE` is a write).
+
+    ⚠️ **The unit is the CLAUSE, not the string literal.** A query can carry two
+    walks, and a constraint written for one of them does not bound the other —
+    Cypher matches each `MATCH` pattern independently. Attributing an exclusion
+    to the whole literal let a second, unconstrained walk appended to the same
+    query string inherit the first one's exclusion, which is the opposite of what
+    the register exists to say.
     """
-    positions: list[int] = []
+    clauses = list(_CLAUSE.finditer(query))
+    found: list[tuple[int, str, tuple[str, ...]]] = []
     for match in _UNTYPED_BRACKET.finditer(query):
         if ":" in _PROPERTY_MAP.sub("", match.group(1)):
             continue  # a typed read, or a run-time type name
-        clauses = _CLAUSE.findall(query[: match.start()])
-        if not clauses:
+        prior = [clause for clause in clauses if clause.start() < match.start()]
+        if not prior:
             continue
-        if " ".join(clauses[-1].upper().split()) not in _READ_CLAUSES:
+        start = prior[-1]
+        if " ".join(start.group(1).upper().split()) not in _READ_CLAUSES:
             continue
-        positions.append(match.start())
-    return positions
+        following = [clause for clause in clauses if clause.start() > match.end()]
+        end = following[0].start() if following else len(query)
+        before = [clause for clause in clauses if clause.start() < start.start()]
+        earlier = tuple(
+            query[clause.start() : (
+                before[index + 1].start() if index + 1 < len(before) else start.start()
+            )]
+            for index, clause in enumerate(before)
+        )
+        found.append((match.start(), query[start.start() : end], earlier))
+    return found
 
 
-def _untyped_read_sites() -> dict[str, list[tuple[int, str]]]:
-    """Census: module → `(line, query text)` of every untyped READ-clause walk.
+def _pattern_variables(text: str) -> set[str]:
+    """Variable names bound in a Cypher pattern — `(old:Source …)`, `(a)`, `(op)`."""
+    return {
+        name
+        for name in re.findall(r"\(\s*([A-Za-z_]\w*)\s*[:)\s]", text)
+        if name.upper()
+        not in {"MATCH", "OPTIONAL", "WHERE", "WITH", "RETURN", "SET", "DELETE"}
+    }
+
+
+def _exclusion_bounds_the_walk(
+    segment: str, earlier: tuple[str, ...], facts: tuple[str, ...]
+) -> bool:
+    """Does one of `facts` bound THIS walk?
+
+    In the walk's own clause first — that is the clause whose pattern the walk
+    is. A fact in an EARLIER clause of the same query also counts, but only when
+    that clause binds a variable this walk's pattern uses: `MATCH (old:Source …)`
+    bounds a later degree over `(old)-[x]-(y)`, and a constraint written for a
+    different walk does not, because Cypher matches each `MATCH` pattern
+    independently. That distinction is what a whole-literal check could not make.
+    """
+    if any(fact in segment for fact in facts):
+        return True
+    own = _pattern_variables(segment)
+    return any(
+        any(fact in prior for fact in facts) and bool(own & _pattern_variables(prior))
+        for prior in earlier
+    )
+
+
+def _untyped_read_brackets(query: str) -> list[int]:
+    """Start offsets of every UNTYPED relationship bracket in a READ clause."""
+    return [offset for offset, _segment, _earlier in _untyped_read_segments(query)]
+
+
+def _untyped_read_sites() -> dict[str, list[tuple[int, str, tuple[str, ...]]]]:
+    """Census: module → `(line, walk segment, earlier segments)` of untyped reads.
 
     `_literal_read_sites` finds the reader that SPELLS the edge. This one finds
     the reader that CANNOT: a relationship bracket carrying no type at all
@@ -974,14 +1032,14 @@ def _untyped_read_sites() -> dict[str, list[tuple[int, str]]]:
     observe the edge are carried by `_EXCLUDED_UNTYPED` with the code fact that
     earns the exclusion.
 
-    ⚠️ **The query TEXT travels with each site, not just its line**, because an
-    exclusion is a claim about a WALK, not about a symbol: without the text, a
-    second unconstrained walk added inside an excluded symbol is absorbed by the
-    symbol's exclusion — the one direction where symbol granularity is backwards
-    (a row says "this symbol reads the edge"; an exclusion says "this walk cannot
-    reach it").
+    ⚠️ **The WALK travels with each site, not just its line**, because an
+    exclusion is a claim about a walk, not about a symbol or a string: without it,
+    a second unconstrained walk added inside an excluded symbol — or appended to
+    the same query string — is absorbed by the first walk's exclusion, the one
+    direction where coarser granularity is backwards (a row says "this symbol
+    reads the edge"; an exclusion says "this walk cannot reach it").
     """
-    found: dict[str, list[tuple[int, str]]] = {}
+    found: dict[str, list[tuple[int, str, tuple[str, ...]]]] = {}
     for path in sorted(PKG.rglob("*.py")):
         text = path.read_text(encoding="utf-8")
         if "MATCH" not in text:
@@ -995,11 +1053,10 @@ def _untyped_read_sites() -> dict[str, list[tuple[int, str]]]:
             if rebuilt is None:
                 continue
             value, lineno = rebuilt
-            if not _untyped_read_brackets(value):
-                continue
-            sites = found.setdefault(str(path.relative_to(PKG)), [])
-            if all(lineno != line for line, _ in sites):
-                sites.append((lineno, value))
+            for _offset, segment, earlier in _untyped_read_segments(value):
+                sites = found.setdefault(str(path.relative_to(PKG)), [])
+                if all(segment != existing[1] for existing in sites):
+                    sites.append((lineno, segment, earlier))
     return found
 
 
@@ -1252,9 +1309,9 @@ def test_no_untyped_walk_lacks_a_row_or_a_stated_exclusion():
     census is: every relationship bracket with no type at all, in a READ clause,
     keyed on its enclosing `module.py::symbol`. Each site must then either own a
     §13 row or appear in `_EXCLUDED_UNTYPED` **with the code fact that earns the
-    exclusion present in that site's OWN query text** — so an exclusion cannot be
-    a claim, it cannot silently stop being true, and it cannot swallow a SECOND,
-    unconstrained walk added beside the one it excuses.
+    exclusion present in that walk's own clause** — so an exclusion cannot be a
+    claim, it cannot silently stop being true, and it cannot swallow a SECOND,
+    unconstrained walk added either beside it or in the same query string.
     """
     # The bracket rule itself, before the census uses it: an UNTYPED walk is one
     # whose bracket carries no type, and a property map is not a type.
@@ -1297,16 +1354,15 @@ def test_no_untyped_walk_lacks_a_row_or_a_stated_exclusion():
     for module, sites in sorted(census.items()):
         tree = _module_tree(_module_path(module))
         symbols = _row_symbols(tree)
-        for line, query in sites:
+        for line, segment, earlier in sites:
             candidates = [name for name, lo, hi in symbols if lo <= line <= hi]
             keys = [f"{module}::{name}" for name in candidates]
             if any(key in named for key in keys):
                 continue
             excluded = [key for key in keys if key in _EXCLUDED_UNTYPED]
-            if excluded and any(
-                fact in query
+            if any(
+                _exclusion_bounds_the_walk(segment, earlier, _EXCLUDED_UNTYPED[key][0])
                 for key in excluded
-                for fact in _EXCLUDED_UNTYPED[key][0]
             ):
                 continue
             unowned.append(

@@ -794,8 +794,9 @@ censuses every Cypher relationship bracket that carries **no type at all** (`[r]
 read clause, reconstructing f-strings and `+`-concatenations so `[r:{rel}]` still reads as typed and the
 `_hop_query` shape is not lost. Ownership is by enclosing `module.py::symbol`, exactly as the literal census
 is, so a new unfiltered walk added beside an existing row reds. A site that genuinely **cannot** observe the
-edge must appear in `_EXCLUDED_UNTYPED` with the code fact that earns the exclusion **asserted inside that
-symbol's span** — today that is only two shapes: the walked type restricted downstream
+edge must appear in `_EXCLUDED_UNTYPED` with the code fact that earns it **present in that walk's own
+clause** (a fact in an earlier clause of the same query counts only when it binds a variable the walk uses) —
+and, from the other side, still present in the symbol's span — today that is only two shapes: the walked type restricted downstream
 (`type(r) IN ['IMPL','NAND']` in `hosted_api._load_commit_graph_state`) and endpoints pinned away from the
 edge's `Point → Object` shape (`STRUCTURAL_REL_LABELS`). Measured: the register's nine entries cover exactly
 the remaining untyped walks, and deleting a constraint reds

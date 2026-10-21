@@ -812,7 +812,13 @@ _CHANGE_NARRATION = re.compile(
     # no arm described the shape — the same false PASS the dated-stamp arm above
     # closed for `CORRECTED (20xx-…)`. The dated history belongs in the
     # `*-CHANGELOG.md`; the design document states the rule it settled on.
-    r"|\b(?:a|the) (?:second|third|fourth|fifth|sixth|seventh) (?:re-?derivation|pass|recount)\b"
+    r"|\b(?:a|an|the|each|every|later|earlier) (?:second|third|fourth|fifth|sixth|seventh) (?:re-?derivation|pass|recount)\b"
+    # … and the same history without a numeral: `the earlier enumeration`, `the
+    # previous count`, `corrected it to`. The numbered arm alone reported both
+    # design documents clean while §13 still narrated which issue body said what
+    # and which pass found which reader — the class, not just one spelling of it.
+    r"|\b(?:the|an|that) earlier (?:enumeration|count|figure|number|measurement|list|table)\b"
+    r"|\bcorrected it to\b"
     # A version the passage says it has been true since — change history, not the
     # rule it settled on. Measured across the three design documents before
     # adding: 0 hits at HEAD.
@@ -964,6 +970,12 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         "⚠️ **A second re-derivation then found three more readers INSIDE "
         "modules the table already named.**",
         "⚠️ **And a FIFTH pass found SIX more, five of one shape.**",
+        # The same history in the wording the numbered arm could not see — the two
+        # sentences §13 and §13.8 carried at `920e0677c` after the first fix.
+        "…because this list is the ruling's evidence, and every hand-maintained "
+        "copy of it has been wrong: `#7956` corrected it to four *doors*.",
+        "**⚠️ The backup readers are the ones the ruling turns on:** that question "
+        "was answerable only from sites the earlier enumeration did not carry.",
         "**\u26a0\ufe0f Draft 1** claimed the index is RAM-mandatory.",
         "\u00a716.2's rule is now also a billing rule (see `#5024` CLOSED).",
         # The change-history date form, on the §8 direction note #8738 moved (the
