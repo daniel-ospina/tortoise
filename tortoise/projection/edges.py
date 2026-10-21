@@ -2013,8 +2013,9 @@ class _EdgeHandlers:
         it was read from as ``sourceVersion`` — the source's current
         ``contentHash``, read HERE so that no caller passes it and the public SDK
         signature is unchanged. Identity/mention links (``Object``) carry no
-        ``sourceVersion`` — the edge is not otherwise empty: ``idx`` and the
-        allowlisted predicates are still written. Written ``ON CREATE`` only:
+        ``sourceVersion`` — this writer sets no property on them at all (the
+        non-derivation branch is a bare ``MERGE``), which is why nothing here
+        needs a version anchor. Written ``ON CREATE`` only:
         a re-link must NOT advance the recorded version, or staleness would
         silently read as current.
 
