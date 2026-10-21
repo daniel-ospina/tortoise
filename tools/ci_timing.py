@@ -407,6 +407,16 @@ COUNT_RE = re.compile(r"(\d+)\s+(passed|failed|error|skipped|xfailed|xpassed)")
 # Such an id is malformed (a `[` with no `]` before the verdict), so it is skipped rather
 # than guessed at.
 V_PROGRESS_RE = re.compile(r"^(tests/\S+?\.py::[^\s]+?)\s+(PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)\b")
+# ⛔ ONE PROGRESS LINE REPORTS ONE TEST (#9134 review, P1). A parametrized id can EMBED
+# another nodeid, and then the line carries a SECOND verdict word that is the inner test's:
+# `...t[tests/x.py::...::test_y FAILED [ 86%] ...] PASSED [ 75%]`. Reading the first verdict
+# published a failure for a test that had passed. The bracket-balance rule that replaced it is
+# WRONG in the other direction: pytest appends the closing `]` to the parameter verbatim, so a
+# legitimate id whose parameter contains `[` (`test_x[False-[server lane-False]`) has MORE
+# opens than closes, and the aggregate-side filters SILENTLY DROPPED those real failures from
+# both the count and the list. Counting verdict words is the shape the defect actually has: a
+# well-formed progress line carries exactly one, however unbalanced its id is.
+_VERDICT_TOKEN_RE = re.compile(r"\b(PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)\b")
 # The session-summary line reports how long the session took, and it must also NAME
 # what happened — see `_is_summary_line`. Matching any line that merely mentions a
 # duration certified truncated legs as complete: pytest echoes a failing test's
@@ -589,12 +599,12 @@ def parse_log(path: Path) -> dict:
                         seen.add(nodeid)
                         target["total_ms"] += ms
                         target["max_ms"] = max(target["max_ms"], ms)
+        if len(_VERDICT_TOKEN_RE.findall(line)) > 1:
+            continue          # a second verdict word means an EMBEDDED nodeid
         m = V_PROGRESS_RE.match(line)
         if m:
             outcomes[m.group(1)] = m.group(2)
             continue
-        if "[" in line and "]" not in line.split(" ", 1)[0]:
-            continue          # malformed/embedded id — do not guess its verdict
         m = R_SUMMARY_RE.match(line)
         if m:
             outcomes[m.group(2)] = m.group(1)
@@ -2738,7 +2748,6 @@ def aggregate_logs(logs_dir: Path | str) -> dict:
     total_counts = {k: 0 for k in COUNT_KEYS}
     killed_any = False
     failed_tests: set[str] = set()
-    _states: dict[str, str] = {}
     log_sources: list[dict] = []
     for log_path in sorted(glob.glob(str(Path(logs_dir) / "**" / "*.log"), recursive=True)):
         parsed = parse_log(Path(log_path))
@@ -2758,21 +2767,16 @@ def aggregate_logs(logs_dir: Path | str) -> dict:
         # change fixes. Failures only, never passed/skipped: a summary-less log
         # cannot establish either.
         if not parsed["summary_seen"]:
-            # Same bracket-balance rule as the list below: an id that embeds another
-            # nodeid is not a name pytest reports, and counting it here published a
-            # failure the leg's own list excluded (#9134 review, P2).
-            _counted = {n: st for n, st in parsed["outcomes"].items()
-                        if n.count("[") == n.count("]")}
+            # `parse_log` already refused every line carrying two verdicts (an embedded
+            # nodeid), so each outcome here is one test's own verdict — including the
+            # legitimate ids whose parameter contains `[` and is therefore bracket-unbalanced
+            # (#9134 review, P1: the balance filter dropped those genuine failures).
             for state, key in (("FAILED", "failed"), ("ERROR", "error")):
-                total_counts[key] += sum(1 for st in _counted.values() if st == state)
+                total_counts[key] += sum(
+                    1 for st in parsed["outcomes"].values() if st == state)
         killed_any = killed_any or parsed["killed"]
-        # An id with unbalanced brackets embeds another nodeid and is not a name pytest
-        # ever reports; publishing it made the failure list disagree with the banners
-        # (#9134 review, P1).
         failed_tests.update(n for n, st in parsed["outcomes"].items()
-                            if st in ("FAILED", "ERROR")
-                            and n.count("[") == n.count("]"))
-        _states.update(parsed["outcomes"])
+                            if st in ("FAILED", "ERROR"))
         # The LEG is the artifact directory (`pytest-log-test-d`), not the file: 15 of
         # the shipped sample's 17 sources are all named `pytest.log`, so a basename
         # cannot identify which leg a disclosure is about (#9134 review, P2).

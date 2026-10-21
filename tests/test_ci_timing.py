@@ -1611,6 +1611,60 @@ def test_a_quoted_summary_is_not_the_session_summary(tmp_path: Path) -> None:
     assert parsed["counts"]["failed"] == 0, parsed["counts"]
 
 
+def test_an_embedded_nodeid_is_not_a_verdict(tmp_path: Path) -> None:
+    """A parametrized id that EMBEDS another nodeid carries two verdicts, not two tests.
+
+    `…test_p[tests/x.py::…::test_y FAILED [ 86%] …] PASSED [ 75%]` is ONE progress line for
+    ONE test; taking its first verdict published a failure for a test that had passed, and the
+    up-reconcile then inflated `outcome.failed` to the length of that list. One progress line
+    reports one test, so a SECOND verdict word means the id is an embedded nodeid — skip the
+    LINE rather than guess (#9134 review, P1).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "tests/test_a.py::test_p[tests/test_x.py::test_y FAILED [ 86%] tail PASSED [ 75%]\n"
+        "tests/test_a.py::test_ok PASSED\n"
+        "= 1 passed in 1.00s =\n")
+    parsed = ci_timing.parse_log(leg / "pytest.log")
+    assert parsed["outcomes"] == {"tests/test_a.py::test_ok": "PASSED"}
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == set()
+    assert agg["total_counts"]["failed"] == 0
+
+
+def test_a_parseable_id_with_unbalanced_brackets_is_still_a_failure(tmp_path: Path) -> None:
+    """An id whose PARAMETER contains `[` is unbalanced, and is still a real failure.
+
+    pytest appends its closing `]` to the parameter verbatim, so a value containing `[` yields
+    an id with more opens than closes. Rejecting every unbalanced id — instead of the line that
+    carries two verdicts — silently DROPPED such failures from both the count and the list on a
+    summary-less leg (#9134 review, P1).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text("tests/test_x.py::test_p[a[b] FAILED [100%]\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {"tests/test_x.py::test_p[a[b]"}
+    assert agg["total_counts"]["failed"] == 1
+
+
+def test_the_banner_is_the_measurement_and_is_not_inflated(tmp_path: Path) -> None:
+    """A banner that says five failures is the measurement; the list must not inflate it.
+
+    The up-reconcile (`failed = max(failed, FAILED ids)`) existed to mask the phantom verdict
+    read out of an embedded nodeid, and it published a failure count the run never had. It is
+    gone: when a banner disagrees with the progress lines, the BANNER wins (#9134 review, P1).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "".join(f"tests/test_i.py::test_{i} FAILED [ 10%]\n" for i in range(6))
+        + "= 5 failed, 1 passed in 9.00s =\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["total_counts"]["failed"] == 5
+
+
 def test_an_unreadable_log_degrades_instead_of_killing_the_run(tmp_path: Path) -> None:
     """One unreadable log must not become a KeyError for the whole artifact.
 
