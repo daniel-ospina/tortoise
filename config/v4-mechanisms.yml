@@ -13,9 +13,13 @@
 # gate is `tests/test_v4_declared_mechanisms.py`:
 #
 #   state: implemented      -> `code:`, `tests:` and `symbols:` are non-empty,
-#                              EVERY declared path exists on disk, and every
-#                              declared symbol is DEFINED at module level in the
-#                              `code:` file(s) this same row names
+#                              EVERY declared path exists on disk, every declared
+#                              `code:` source is READABLE and parsable (an
+#                              unreadable source is a violation, never a silent
+#                              skip), and every declared symbol is DEFINED at
+#                              module level in the `code:` file(s) this same row
+#                              names — where `__all__`/dunders do not count,
+#                              because re-exporting a name is not defining it
 #   state: not-implemented  -> `tracking_issue:` is present
 #
 # ⭐ `symbols:` is the CODE ANCHOR (#5064 indicator (1), the "a code path with a

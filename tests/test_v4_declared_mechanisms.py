@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import ast
 import sys
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -95,16 +96,28 @@ def _defined_names(path: Path) -> set[str] | None:
 
     Only the shapes a declared mechanism can be carried by: a function, a class,
     a module-level assignment (an ``Assign``/``AnnAssign`` target —
-    ``PER_ENTITY_FANOUT_CAP = 200`` is the fan-out cap), and ``__all__`` is not
-    consulted because it re-exports rather than defines.
+    ``PER_ENTITY_FANOUT_CAP = 200`` is the fan-out cap). DUNDER names are not
+    definitions: ``__all__`` re-exports other modules' names and is present in
+    almost every module, so admitting it would let a row anchor itself to a name
+    that proves nothing — the one name that must never count for a gate whose
+    premise is "a symbol importable from elsewhere does not count".
 
-    ``None`` — not an empty set — for an unreadable/unparsable file: the caller
-    must be able to tell "this file defines nothing named that" (a violation)
-    from "there was no file to read" (already reported by the path rule, and
-    reporting it twice would make one defect look like two).
+    The source is read with :func:`tokenize.open`, i.e. with the SAME encoding
+    rules the interpreter applies (PEP 263 coding cookies and a UTF-8 BOM). A
+    plain ``read_text(encoding="utf-8")`` refused a legal
+    ``# -*- coding: latin-1 -*-`` module with ``UnicodeDecodeError`` and HANDED
+    a BOM-prefixed source to ``ast.parse``, which then raised ``SyntaxError``:
+    a file Python imports happily was reported as unreadable, i.e. a present
+    mechanism claimed absent — the wrong verdict direction.
+
+    ``None`` — not an empty set — for a source that cannot be read or parsed at
+    all: the caller must keep "this file defines nothing named that" (a
+    violation) distinct from "this file could not be turned into names" (a
+    DIFFERENT violation, and never a silent pass — see `gate_errors`).
     """
     try:
-        source = path.read_text(encoding="utf-8")
+        with tokenize.open(path) as fh:
+            source = fh.read()
         tree = ast.parse(source, filename=str(path))
     except (OSError, SyntaxError, ValueError, UnicodeError):
         return None
@@ -121,7 +134,7 @@ def _defined_names(path: Path) -> set[str] | None:
                     names.update(
                         elt.id for elt in target.elts if isinstance(elt, ast.Name)
                     )
-    return names
+    return {n for n in names if not (n.startswith("__") and n.endswith("__"))}
 
 
 def _resolve_in_repo(rel: str, root: Path) -> Path | None:
@@ -132,6 +145,14 @@ def _resolve_in_repo(rel: str, root: Path) -> Path | None:
     artifact — reduced to the one question the symbol check asks: WHICH FILE TO
     READ. Kept separate rather than shared so a change to the reporting rule
     cannot silently change what the anchor reads.
+
+    ⚠️ BELT-AND-BRACES when called from ``gate_errors``: the path rule runs
+    first and reports every entry these guards reject, so the anchor can only
+    skip a file the path rule ALREADY reported — one defect, one report, and no
+    symbol verdict for a path the row never validly declared. This is the same
+    documented exception to "a guard must be seen to fail" as ``not p.parts``
+    in ``_path_violations``: the shared discipline is the thing worth keeping
+    aligned, and it must still hold if the reporting rule ever narrows.
     """
     p = Path(rel)
     if p.is_absolute() or ".." in p.parts or not p.parts:
@@ -331,19 +352,43 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
             else:
                 code_entries = row.get("code")
                 defined: set[str] = set()
-                readable = False
+                resolved_entries: list[str] = []
+                unreadable: list[str] = []
                 for rel in (code_entries if isinstance(code_entries, list) else []):
                     if not isinstance(rel, str) or not rel:
                         continue
                     resolved = _resolve_in_repo(rel, root)
                     if resolved is None:
+                        # The PATH rule already reported this entry (missing,
+                        # wrong kind, outside the repo): one defect, one report,
+                        # and there is no file to read for the anchor.
                         continue
+                    resolved_entries.append(rel)
                     names = _defined_names(resolved)
                     if names is None:
+                        unreadable.append(rel)
                         continue
-                    readable = True
                     defined |= names
-                if readable:
+                # ⭐ A declared source that RESOLVES — right kind, on disk,
+                # inside the repo — but cannot be read or parsed is a violation
+                # of its OWN. Nothing else reports it: `_path_violations` never
+                # opens the file, so treating "unparsable" as "the path rule
+                # already said so" left the row certifying a mechanism whose
+                # code was never read at all (the fail-open this rule exists to
+                # close, one level down). Silent only when NO declared entry
+                # resolved — that case the path rule did report.
+                for rel in unreadable:
+                    errors.append(
+                        f"{mid}: declared `code:` source {rel!r} could not be "
+                        f"read or parsed, so the declared symbol(s) {symbols} "
+                        f"cannot be verified in it — an unreadable source is "
+                        f"not the mechanism"
+                    )
+                # The absence check runs only over a COMPLETE read: with any
+                # declared source unparsed, "not found in the files I could "
+                # read" is not evidence of absence, and claiming it would add a
+                # second, wrong verdict on top of the real defect.
+                if resolved_entries and not unreadable:
                     missing = sorted(s for s in symbols if s not in defined)
                     if missing:
                         errors.append(
@@ -496,11 +541,113 @@ def test_gate_fails_closed_on_a_symbol_its_declared_code_does_not_define() -> No
 
 def test_gate_fails_closed_on_a_symbol_defined_only_in_an_undeclared_file() -> None:
     """The symbol must be in a file the ROW declares for the mechanism —
-    otherwise `symbols:` would be satisfied by anything importable anywhere."""
-    errors = gate_errors(
-        [_implemented_row(symbols=["EMBED_GATE"])]  # lives in embed_gate.py
+    otherwise `symbols:` would be satisfied by anything importable anywhere.
+
+    ⚠️ `embedding_verdict` is DEFINED — at `tortoise/embed_gate.py:122` — and
+    the fanout row declares only `tortoise/fanout.py`, so the case fails for
+    CONTAINMENT. The first version of this case named `EMBED_GATE`, which is
+    defined NOWHERE in the repo: it was a duplicate of the case above and a
+    gate that resolved symbols REPO-WIDE (the regression this case claims to
+    pin) still rejected it, so the containment claim was unverified. With a
+    symbol that really exists elsewhere, a repo-wide scan finds it and this
+    case goes red — which is the proof it is named for.
+    """
+    row = _implemented_row(symbols=["embedding_verdict"])
+    errors = gate_errors([row])
+    assert any(
+        "embedding_verdict" in e and str(row["code"]) in e for e in errors
+    ), errors
+    # The control for the SAME symbol: in a file the row DOES declare it is
+    # accepted, so the failure above is containment and not the name.
+    assert gate_errors(
+        [
+            _implemented_row(
+                code=["tortoise/embed_gate.py"], symbols=["embedding_verdict"]
+            )
+        ]
+    ) == []
+
+
+def test_code_anchor_does_not_admit_a_dunder_reexport() -> None:
+    """`__all__` is a re-export list, not the mechanism (see `_defined_names`).
+
+    `tortoise/fanout.py` declares `__all__` at module level, so a naive
+    "any module-level assignment is a definition" admitted it — letting a row
+    anchor itself to a name present in almost every module, for a gate whose
+    premise is that a symbol importable from elsewhere does not count.
+    """
+    errors = gate_errors([_implemented_row(symbols=["__all__"])])
+    assert any(
+        "__all__" in e and "not defined at module level" in e for e in errors
+    ), errors
+
+
+def test_gate_fails_closed_when_a_declared_code_file_cannot_be_parsed(
+    tmp_path,
+) -> None:
+    """A resolved `code:` file that cannot be READ/PARSED is a violation.
+
+    The fail-open this closes: `_path_violations` checks existence, kind and
+    containment and never OPENS the file, so treating an unparsable source as
+    "already reported by the path rule" produced `[]` — a PASS for a row whose
+    declared mechanism was never read. Nothing else reports it, so the silence
+    was total (settled by this case before the fix: it expected a pass).
+    """
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "broken.py").write_text("def broken(:\n")
+    (repo / "docs").mkdir()
+    (repo / "docs" / "design.md").write_text("x\n")
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_x.py").write_text("x\n")
+    row = {
+        "id": "x",
+        "name": "x",
+        "state": "implemented",
+        "declared_in": ["docs/design.md"],
+        "code": ["src/broken.py"],
+        "tests": ["tests/test_x.py"],
+        "symbols": ["ANYTHING"],
+    }
+    errors = gate_errors([row], root=repo)
+    assert any(
+        "could not be read or parsed" in e and "broken.py" in e for e in errors
+    ), errors
+    # One defect, one verdict: the symbol rule must NOT also claim the symbol is
+    # absent from the file it could not read (that would be a second, wrong one).
+    assert not any("not defined at module level" in e for e in errors), errors
+
+
+def test_code_anchor_reads_source_with_pythons_own_encoding_rules(tmp_path) -> None:
+    """A legal non-UTF-8 source (PEP 263) and a BOM-prefixed source are READABLE.
+
+    Python imports both, so a gate that refuses them reports a present
+    mechanism as absent — the wrong direction for a fail-closed check.
+    `read_text(encoding="utf-8")` did exactly that (`UnicodeDecodeError` on a
+    latin-1 coding cookie; a BOM left in the string, which `ast.parse` then
+    rejects); `tokenize.open` applies the interpreter's own rules.
+    """
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "pep263.py").write_bytes(
+        b"# -*- coding: latin-1 -*-\nX_PEP263 = 1\n# \xe9\n"
     )
-    assert any("EMBED_GATE" in e for e in errors), errors
+    (repo / "src" / "bom.py").write_bytes(b"\xef\xbb\xbfX_BOM = 1\n")
+    (repo / "docs").mkdir()
+    (repo / "docs" / "design.md").write_text("x\n")
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_x.py").write_text("x\n")
+    for name, symbol in (("pep263.py", "X_PEP263"), ("bom.py", "X_BOM")):
+        row = {
+            "id": "x",
+            "name": "x",
+            "state": "implemented",
+            "declared_in": ["docs/design.md"],
+            "code": [f"src/{name}"],
+            "tests": ["tests/test_x.py"],
+            "symbols": [symbol],
+        }
+        assert gate_errors([row], root=repo) == [], (name, gate_errors([row], root=repo))
 
 
 def test_every_implemented_mechanism_names_a_symbol_its_code_defines() -> None:
@@ -552,6 +699,11 @@ def test_gate_fails_closed_on_a_fake_declared_path() -> None:
         "declared_in": ["config/v4-mechanisms.yml"],
         "code": ["tortoise/fanout.py"],
         "tests": ["tests/test_fanout_cap.py"],
+        # The CODE ANCHOR is resolvable here on purpose: without it the
+        # unconditional "declares no symbol" verdict satisfies every bare
+        # `assert errors` below whatever the rule under test does (the new
+        # rule turned five cycle-tested cases into tautologies).
+        "symbols": ["PER_ENTITY_FANOUT_CAP"],
     }
     for field in ("declared_in", "code", "tests"):
         # `"."` is included because `Path(".").parts == ()` and `root / "."` is
@@ -623,6 +775,7 @@ def test_gate_fails_closed_on_an_unprobeable_path_without_raising() -> None:
         "declared_in": ["config/v4-mechanisms.yml"],
         "code": ["tortoise/fanout.py"],
         "tests": ["tests/test_fanout_cap.py"],
+        "symbols": ["PER_ENTITY_FANOUT_CAP"],  # keeps `assert errors` deciding
     }
     hostile = {
         "declared_in": ["x" * 4996 + ".md", "a\x00b.md", "\ud800.md"],
@@ -652,6 +805,7 @@ def test_gate_fails_closed_on_a_symlink_loop(tmp_path) -> None:
         "declared_in": ["docs/design.md"],
         "code": ["loop/a.py"],
         "tests": ["tests/test_x.py"],
+        "symbols": ["PER_ENTITY_FANOUT_CAP"],  # no entry resolves; the loop does
     }
     errors = gate_errors([row], root=repo)  # must NOT raise
     assert errors, errors
@@ -680,10 +834,19 @@ def test_gate_fails_closed_on_a_mapping_code_or_declared_in() -> None:
             "state": "implemented",
             "code": ["tortoise/fanout.py"],
             "tests": ["tests/test_fanout_cap.py"],
+            "symbols": ["PER_ENTITY_FANOUT_CAP"],
         }
         row[field] = {key: 1}
         errors = gate_errors([row])
-        assert errors, (field, "the gate PASSED a mapping as a path list")
+        # The container guard's OWN message: a bare `assert errors` was
+        # satisfied by the unconditional "declares no symbol" verdict, so
+        # dropping `isinstance(..., list)` survived the suite.
+        expected = {
+            "declared_in": "no declaring document",
+            "code": "no code path",
+            "tests": "declares no test",
+        }[field]
+        assert any(expected in e for e in errors), (field, expected, errors)
 
 
 def test_gate_fails_closed_on_a_non_py_test_prefixed_name(tmp_path) -> None:
@@ -871,6 +1034,7 @@ def test_gate_fails_closed_on_a_symlink_that_launders_the_kind(tmp_path) -> None
         "declared_in": ["docs/design.md"],
         "code": ["src/impl.py"],
         "tests": ["tests/test_x.py"],
+        "symbols": ["x"],  # `src/impl.py` defines it — `assert errors` decides
     }
     for field, bad in (
         ("code", ["fake_code.py"]),
@@ -960,6 +1124,16 @@ def test_gate_pins_the_branches_the_ad_hoc_cases_do_not_reach() -> None:
         "code missing": ([{**good, "code": []}], "no code path"),
         "tests missing": ([{**good, "tests": []}], "declares no test"),
         "code not a list": ([{**good, "code": {}}], "no code path"),
+        # The `symbols:` field's own shape guards (the code anchor). A
+        # non-string or blank entry must be a VERDICT, not a `TypeError` from
+        # `sorted()` on a mixed list — the crash-vs-verdict class this file
+        # pins elsewhere. None of these was reached by any case, so mutating
+        # the guard away survived the suite.
+        "symbols not a list": ([{**good, "symbols": "PER_ENTITY_FANOUT_CAP"}], "declares no symbol"),
+        "symbols is empty": ([{**good, "symbols": []}], "declares no symbol"),
+        "symbols entry is not a string": ([{**good, "symbols": [123]}], "non-empty strings"),
+        "symbols entry is blank": ([{**good, "symbols": ["   "]}], "non-empty strings"),
+        "symbols entry is None": ([{**good, "symbols": [None, "PER_ENTITY_FANOUT_CAP"]}], "non-empty strings"),
         "empty registry": ([], None),
     }
     for label, (mechs, expected) in cases.items():
