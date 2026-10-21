@@ -1288,6 +1288,11 @@ class TestOperatorContract:
 
         The sibling test above only asserts the switch is PRESENT, which is why
         the drift went uncaught; this one pins the semantics of the decline.
+        It pins the TRUTH, not a phrase whitelist: the two positive facts, and
+        the absence of both ways of stating the old contract (a `degraded=True`
+        decline, and the "reports itself degraded" sentence). A truthful
+        rewording that keeps those facts therefore stays green — the assertions
+        below are one-directional on purpose.
         """
         from pathlib import Path
 
@@ -1298,16 +1303,18 @@ class TestOperatorContract:
             ".env.example must name the decline's own trace key (`declined=True`); "
             "without it the only operator-visible account of the cap is the "
             "misleading one: " + block)
-        # A `degraded` mention is only truthful here as an explicit NEGATIVE
-        # (the flag stays False). Anything else reintroduces the old contract.
-        negative = ("degraded=False", "NOT ``degraded``", "``degraded`` stays")
-        for line in block.splitlines():
-            if "degraded" not in line:
-                continue
-            assert any(m in line for m in negative), (
-                ".env.example describes `degraded` without saying it stays "
-                "FALSE for the decline — the reader is told a complete read "
-                f"is impaired: {line!r}")
+        assert "degraded=False" in block, (
+            ".env.example must say the decline leaves `degraded` FALSE — the "
+            "flag an operator reads as an impaired read: " + block)
+        # The two ways the OLD contract can reappear. `degraded=True` covers a
+        # restated decline flag; the sentence covers prose that keeps the old
+        # meaning while avoiding the literal.
+        assert "degraded=True" not in block, (
+            ".env.example reintroduces the old decline contract (`degraded=True` "
+            "on an arm that produced no rows): " + block)
+        assert "reports itself" not in block, (
+            ".env.example still says the leg 'reports itself degraded', the "
+            "sentence this change exists to remove: " + block)
 
 
 def _bm25_env_block(env: str) -> str:

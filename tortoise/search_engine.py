@@ -1491,10 +1491,12 @@ def run_fts_query(
 #: cap, enabling the arm relabelled EVERY successful read "the memory layer is
 #: IMPAIRED" — the recorded term for a store that could not be reached or a
 #: retrieval leg that did not run, NOT a leg-local "this scorer returned
-#: nothing" — while every leg here had in fact run (the shipped lexical leg
-#: over the WHOLE label), every row was returned, and nothing was impaired. The
+#: nothing" — while nothing here was impaired: the shipped lexical leg had in
+#: fact answered over the WHOLE label and every row was returned. The
 #: arm is an alternative SCORER for a SAME leg slot, not a leg, so its
-#: declining cannot mean "a retrieval leg did not run".
+#: declining cannot mean "a retrieval leg did not run". (The decline's own entry
+#: adds no impairment; it says nothing about the OTHER legs, which report
+#: themselves — a vector leg that failed is degraded on its own entry.)
 #:
 #: The measurement's need — "a truncated corpus must not read as a clean BM25
 #: measurement" — is served more precisely by :data:`LEXICAL_DECLINED_KEY`:
@@ -1648,9 +1650,9 @@ def run_bm25_query(
       same reason the refusal does not: BM25 produced no rows for this read,
       so a baseline counting ``mechanism == "bm25"`` must not count it — it
       counts :data:`LEXICAL_DECLINED_KEY` instead. It is NOT ``degraded``:
-      that flag is aggregated into the READ's recorded status, and this read is
-      complete (every leg ran; the shipped lexical leg answered over the whole
-      label). Marking it degraded relabelled healthy reads as impaired memory.
+      that flag is aggregated into the READ's recorded status, and this decline
+      impairs nothing (the shipped lexical leg answered over the whole label).
+      Marking it degraded relabelled healthy reads as impaired memory.
     * a query that matched nothing — ``ran=True``, ``degraded=False``,
       ``empty_results``, ``count=0``.
 
@@ -1773,10 +1775,10 @@ def run_bm25_query(
             #
             # NOT ``degraded``: that flag propagates to the READ's recorded
             # status (``read_status.classify_leg_trace``) and to
-            # ``ask_lane``'s ``retrieval_degraded``, and this read is complete
-            # — every leg ran and returned rows. The decline is a property of
-            # THIS ARM, not an impairment of the memory layer (see
-            # ``DEFAULT_BM25_CORPUS_CAP``).
+            # ``ask_lane``'s ``retrieval_degraded``, and this decline impairs
+            # nothing — the shipped lexical leg answered over the whole label and
+            # the rows are returned. The decline is a property of THIS ARM, not
+            # an impairment of the memory layer (see ``DEFAULT_BM25_CORPUS_CAP``).
             logger.warning(
                 "BM25 corpus exceeds the %d-row cap — declining to replace "
                 "the shipped lexical rows with a ranking over the first %d "
