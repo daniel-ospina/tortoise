@@ -514,6 +514,252 @@ def snapshot_session(sdk, session_id: str) -> dict:
     }
 
 
+# ── #8444 report-only graph census (E1 Object composition, E3 edge anchors) ──
+#
+# `#7949` E1 and E3 are the two criteria whose numbers had NO home in a run's
+# own artifact (`#8444`): the gated `METRIC_VALUES` vocabulary has no
+# object-composition member, `provenance_accuracy` is a Point-level PRESENCE
+# test (`bool(eventId) or bool(extractedFrom)`, `_row_to_point`) that never
+# reads `sourceVersion`, and `snapshot_session` reads `:Point` only — so no
+# receipt could say whether the `^the <X>` Object class shrank or whether a
+# derivation edge carried its #5199/#5256 version anchor.
+#
+# This census is REPORT-ONLY, on the `operator_audit`/`semantic_judge`
+# precedent: it is NOT a `METRIC_VALUES` member (that would force a baseline
+# re-bless on every existing receipt), it never enters `metrics`, and it moves
+# no verdict. It answers two questions off the graph the run itself wrote:
+#
+#   E1 — how many `:Object`s were written for this session, and what share
+#        carry a definite description (`^the <X>`, the pre-registered
+#        instrument).
+#   E3 — how many derivation edges the capture wrote, and how many carry a
+#        non-empty `sourceVersion`. The anchored predicate is the writer's own
+#        (`projection/edges.py::_anchor_on_create`: NULL and `''` are both
+#        "not anchored" — `''` is the auto-created-Source placeholder and
+#        compares equal to a missing hash).
+#
+# BOUNDS, stated because a census that reports a zero from an instrument that
+# cannot see the writer is the `#8501` defect class:
+#
+#   * Objects are scoped to this session by the `(Point)-[:aboutObject]->
+#     (Object)` edge from the session's own memory Points. `:Object` carries
+#     no session property, so an Object no surviving Point references is
+#     INVISIBLE here — this is a session-scoped census, not a graph-wide one.
+#   * An empty denominator reports `None`, never `0.0`: a `0.0` share would
+#     read as "the class is gone" when the truth is that the session emitted
+#     no Objects to divide by.
+#   * A graph error is REPORTED (`{"error": ...}` + a run note), never
+#     flattened into zeros.
+#
+# `objects.with_derivation_link` exists because E3's criterion is "every
+# derived node carries its version anchor — `:Object`/`:Event` included, not
+# just `Point`s". Whether an Object HAS a derivation link at all is a fact this
+# census measures and the Point-level anchor count cannot: an Object reached
+# only by `aboutObject` has no link to mark stale when its transcript is
+# revised (#7949 E3).
+
+#: `#7949` E1's instrument, verbatim from the pre-registration: `^the\s+\S`,
+#: case-insensitive. The `^` is carried by `.match` below (not by the pattern)
+#: so the anchoring has ONE home: an unanchored read — "policy on the rollout"
+#: counted as a definite description — needs a visible `.search` change.
+_THE_DEFINITE_DESCRIPTION = re.compile(r"the\s+\S", re.IGNORECASE)
+
+SESSION_OBJECT_QUERY = (
+    "MATCH (p:Point)-[:aboutObject]->(o:Object) WHERE p.id IN $pids "
+    "RETURN DISTINCT o.id, o.name"
+)
+#: Does the Object carry a link to the artifact it was derived from at all?
+#: `extractedFrom` is the #5256 derivation predicate; `references` is the
+#: #5199 identity/mention surface (property-free for Objects by the owner's
+#: option-A ruling — this query counts the LINK, never its properties).
+OBJECT_DERIVATION_LINK_QUERY = (
+    "MATCH (o:Object) WHERE o.id IN $oids "
+    "MATCH (o)-[:extractedFrom|references]->() "
+    "RETURN count(DISTINCT o.id)"
+)
+#: Anchored/total for one derivation predicate out of this session's nodes.
+#: The anchored predicate is the writer's own (`_anchor_on_create`).
+DERIVATION_ANCHOR_QUERY = (
+    "MATCH (a)-[r:%s]->() WHERE a.id IN $ids "
+    "RETURN count(r), sum(CASE WHEN r.sourceVersion IS NULL "
+    "OR r.sourceVersion = '' THEN 0 ELSE 1 END)"
+)
+#: The `references` leg, scoped by the session's `:Source` rather than by an
+#: `id`. A session Source is addressed by `url`/`sessionId` and its `id`
+#: property is NULL — the shape `(s:Source {sessionId:$sid})-[r:references]->`
+#: is the one that finds the edge, and an `a.id IN $ids` filter over the
+#: session's Source silently yields 0/0 (a "nothing to anchor" reading of a
+#: graph that HAS an anchor — measured on the session-capture path).
+SESSION_REFERENCES_ANCHOR_QUERY = (
+    "MATCH (s:Source {sessionId: $sid})-[r:references]->() "
+    "RETURN count(r), sum(CASE WHEN r.sourceVersion IS NULL "
+    "OR r.sourceVersion = '' THEN 0 ELSE 1 END)"
+)
+
+
+def graph_census(sdk, session_id: str, point_ids: list[str]) -> dict:
+    """The report-only graph census for ONE session (#8444, for `#7949`).
+
+    ``point_ids`` is the session's memory layer (claims AND reified operator
+    Points — the operator surface is `:Point` too, so an Object it binds is
+    the session's Object). The census reads the graph the run wrote; it
+    returns
+
+        {"session_id",
+         "objects": {"total", "the_prefixed", "the_share",
+                     "with_derivation_link"},
+         "derivation_edges": {"extractedFrom": {"total", "anchored"},
+                              "references": {"total", "anchored"}}}
+
+    and raises nothing of its own: a caller that wants fail-closed reporting
+    wraps it (``census_or_error``), so a graph failure is never silently read
+    as a measured zero.
+    """
+    g = sdk._get_proj().g
+    pids = sorted({pid for pid in point_ids if pid})
+    object_rows: list[tuple] = []
+    if pids:
+        object_rows = list(g.query(
+            SESSION_OBJECT_QUERY, params={"pids": pids}).result_set)
+    names = [name or "" for _oid, name in object_rows]
+    the_prefixed = sum(
+        1 for name in names if _THE_DEFINITE_DESCRIPTION.match(name))
+    oids = [oid for oid, _name in object_rows if oid]
+    with_derivation_link = 0
+    if oids:
+        rows = g.query(
+            OBJECT_DERIVATION_LINK_QUERY, params={"oids": oids}).result_set
+        with_derivation_link = int(rows[0][0] or 0) if rows else 0
+    derivation_edges: dict[str, dict[str, int]] = {}
+    extracted_rows = g.query(
+        DERIVATION_ANCHOR_QUERY % "extractedFrom", params={"ids": pids}
+    ).result_set if pids else []
+    references_rows = g.query(
+        SESSION_REFERENCES_ANCHOR_QUERY, params={"sid": session_id}
+    ).result_set
+    for rel, rows in (("extractedFrom", extracted_rows),
+                      ("references", references_rows)):
+        total = anchored = 0
+        if rows:
+            total, anchored = int(rows[0][0] or 0), int(rows[0][1] or 0)
+        derivation_edges[rel] = {"total": total, "anchored": anchored}
+    return {
+        "session_id": session_id,
+        "objects": {
+            "total": len(object_rows),
+            "the_prefixed": the_prefixed,
+            # A zero denominator is None, never 0.0 (see the block comment).
+            "the_share": (the_prefixed / len(object_rows))
+            if object_rows else None,
+            "with_derivation_link": with_derivation_link,
+        },
+        "derivation_edges": derivation_edges,
+    }
+
+
+def census_or_error(sdk, session_id: str, point_ids: list[str]) -> dict:
+    """``graph_census`` with the graph error REPORTED instead of raised.
+
+    Fail-closed in the direction that matters: an unreadable graph yields
+    ``{"session_id", "error": "<type>: <message>"}`` — never a census of
+    zeros, which would be indistinguishable from a measured empty session.
+    """
+    try:
+        return graph_census(sdk, session_id, point_ids)
+    except Exception as exc:  # reported, never swallowed
+        return {"session_id": session_id,
+                "error": f"{type(exc).__name__}: {exc}"}
+
+
+def aggregate_graph_census(per_session: dict[str, dict]) -> dict:
+    """Sum the per-session censuses; recompute the share from the sums.
+
+    A ratio of sums, never a mean of shares: sessions emit different Object
+    counts, so averaging their shares would weight a one-Object session the
+    same as a twenty-Object one. Sessions that reported an error contribute
+    nothing and are NAMED, so a partial aggregate can never be read as whole.
+    """
+    objects_total = objects_the = objects_linked = 0
+    edges = {rel: {"total": 0, "anchored": 0}
+             for rel in ("extractedFrom", "references")}
+    errored = sorted(
+        sid for sid, census in per_session.items() if "error" in census)
+    sessions_with_objects = 0
+    for census in per_session.values():
+        obj = census.get("objects") or {}
+        objects_total += int(obj.get("total") or 0)
+        objects_the += int(obj.get("the_prefixed") or 0)
+        objects_linked += int(obj.get("with_derivation_link") or 0)
+        if obj.get("total"):
+            sessions_with_objects += 1
+        for rel, counts in (census.get("derivation_edges") or {}).items():
+            if rel not in edges:
+                continue
+            edges[rel]["total"] += int(counts.get("total") or 0)
+            edges[rel]["anchored"] += int(counts.get("anchored") or 0)
+    return {
+        "sessions": len(per_session),
+        "sessions_with_objects": sessions_with_objects,
+        "sessions_errored": errored,
+        "objects": {
+            "total": objects_total,
+            "the_prefixed": objects_the,
+            "the_share": (objects_the / objects_total)
+            if objects_total else None,
+            "with_derivation_link": objects_linked,
+        },
+        "derivation_edges": edges,
+    }
+
+
+def build_graph_census(sdk, surfaces_by_session: dict[str, dict]) -> dict:
+    """The report-level census: per session plus one aggregate (#8444).
+
+    ``surfaces_by_session`` is the runner's ``snapshot_session`` output per
+    session (post-dream), so the census reads exactly the graph the graded
+    numbers were taken from. An unreadable session is carried as an ``error``
+    entry, never dropped and never zeroed.
+    """
+    per_session = {
+        sid: census_or_error(
+            sdk, sid,
+            [p["point_id"]
+             for p in snap.get("points", []) + snap.get("operator_nodes", [])],
+        )
+        for sid, snap in surfaces_by_session.items()
+    }
+    return {
+        "sessions": per_session,
+        "aggregate": aggregate_graph_census(per_session),
+    }
+
+
+def graph_census_notes(census: dict | None) -> list[str]:
+    """The census note(s) a run report carries; ``[]`` when every session read.
+
+    The m2/llm asymmetry the operator audit has does NOT apply here: the census
+    counts what the write path wrote on either lane, so it needs no posture
+    caveat. What it does need is the FAILURE note — a receipt whose E1/E3 rows
+    are silently absent because a graph read failed must say so, or a reader
+    takes an unmeasured session for a measured empty one.
+    """
+    if not census:
+        return []
+    aggregate = census.get("aggregate") or {}
+    errored = list(aggregate.get("sessions_errored") or [])
+    if not errored:
+        return []
+    details = "; ".join(
+        f"{sid}: {(census.get('sessions') or {}).get(sid, {}).get('error')}"
+        for sid in errored)
+    return [
+        "graph census unavailable for "
+        f"{len(errored)} of {aggregate.get('sessions')} session(s) — E1/E3 are "
+        "NOT answerable from this receipt for them (reported, never zeroed): "
+        f"{details}"
+    ]
+
+
 # ── Per-session grading ─────────────────────────────────────────────────────
 
 
@@ -893,6 +1139,11 @@ def run_benchmark(
     metric in this change). ``operators_*`` is the #2552 structural probe:
     reified operator Points that entered the retrievable memory layer
     (eventId-stamped by the capture path).
+    Also on a completed run, the additive ``graph_census`` (``#8444``, for
+    `#7949` E1/E3): per session and aggregated, the `:Object` count and its
+    `^the <X>` share, plus the anchored/total counts of the capture's
+    ``extractedFrom``/``references`` derivation edges — REPORT-ONLY, not a
+    gated metric, so no baseline is re-blessed and no verdict moves.
     On a pre-flight failure or a control-lane violation the report comes back
     with run_status "failed" + the named origin — it NEVER raises mid-run
     (the umbrella aggregates receipts).
@@ -1097,6 +1348,7 @@ def run_benchmark(
         # relation stage, so the score is structurally low and not comparable
         # with the llm lane's — expected and noted, never a quality bar.
         operator_audit = None
+        graph_census_report = None
         if not runner_errors:
             golds = {sid: corpus.load_gold(sid, root) for sid in selected}
             points_by_session: dict[str, list] = {}
@@ -1112,6 +1364,15 @@ def run_benchmark(
                             "operator_edges": [], "mitigations": []}
                 points_by_session[sid] = snap.get("points", [])
                 surfaces_by_session[sid] = snap
+            # #8444 (for `#7949` E1/E3): the report-only census, taken off the
+            # SAME post-dream snapshot the operator audit reads, so the two
+            # dimensions cannot describe different graphs. Additive and NOT a
+            # `METRIC_VALUES` member — see the block comment on `graph_census`.
+            graph_census_report = build_graph_census(sdk, surfaces_by_session)
+            notes.extend(graph_census_notes(graph_census_report))
+            for result in session_results:
+                result["graph_census"] = graph_census_report["sessions"].get(
+                    result["session_id"])
             if not runner_errors:
                 operator_audit = grading.grade_planted_operators(
                     golds, points_by_session, surfaces_by_session
@@ -1274,6 +1535,7 @@ def run_benchmark(
         "metrics": metrics,
         "quote_spans_total": quote_spans_total,
         "operator_audit": operator_audit,
+        "graph_census": graph_census_report,
         "semantic_judge": semantic_block,
         "session_results": session_results,
         "notes": notes,
@@ -1594,6 +1856,12 @@ def build_receipt(report: dict, *, justification: str | None = None) -> dict:
             "operators_total": audit.get("operators_total"),
             "operators_provenanced": audit.get("operators_provenanced"),
         }
+    # #8444 additive graph census (a completed-run dimension only): the E1
+    # object-composition and E3 edge-anchor numbers a `#7949` row reads. NOT a
+    # gated metric — no baseline re-bless, no verdict movement.
+    census = report.get("graph_census")
+    if census is not None:
+        receipt["graph_census"] = census
     # #5085 additive banded semantic judge block.  Added ONLY when the arm ran
     # (``--judge semantic``), so a mechanical-lane receipt is byte-identical to
     # the pre-#5085 runner's — the gated ``metrics``/``judge_pin`` surface is
@@ -1865,6 +2133,22 @@ def _main(argv: list[str] | None = None) -> int:
         if report.get("metrics"):
             for key, value in report["metrics"].items():
                 print(f"  {key}: {value}")
+        census = (report.get("graph_census") or {}).get("aggregate")
+        if census:
+            obj = census["objects"]
+            share = obj["the_share"]
+            edges = census["derivation_edges"]
+            print(
+                "  graph_census (report-only, NOT a gated metric): "
+                f"objects={obj['total']} "
+                f"the_prefixed={obj['the_prefixed']} "
+                f"the_share={'n/a (no Objects)' if share is None else f'{share:.1%}'} "
+                f"objects_with_derivation_link={obj['with_derivation_link']} "
+                f"extractedFrom={edges['extractedFrom']['anchored']}/"
+                f"{edges['extractedFrom']['total']} anchored "
+                f"references={edges['references']['anchored']}/"
+                f"{edges['references']['total']} anchored"
+            )
         semantic = report.get("semantic_judge")
         if semantic and semantic.get("status") == "completed":
             print("  semantic_judge (additive, NOT a gated metric):")
