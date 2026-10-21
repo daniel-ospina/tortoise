@@ -13,8 +13,8 @@
     "d3-force": "^3.0.0",
     "graphology-layout-noverlap": "^0.4.2",
     "playwright": "^1.62.0",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7",
+    "react": "~19.2.9",
+    "react-dom": "~19.2.9",
     "react-force-graph-2d": "^1.29.1",
     "remove-overlaps": "^2.1.0"
   },

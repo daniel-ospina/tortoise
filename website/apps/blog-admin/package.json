@@ -39,8 +39,8 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^0.462.0",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7",
+    "react": "~19.2.9",
+    "react-dom": "~19.2.9",
     "sonner": "^1.7.4",
     "tailwind-merge": "^2.6.0",
     "tiptap-markdown": "0.9.0"
@@ -55,7 +55,18 @@
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.8.3",
-    "vite": "^6.0.0",
-    "vitest": "^4.0.18"
+    "vite": "^6.4.5",
+    "vitest": "^4.1.12"
+  },
+  "overrides": {
+    "nanoid": "^3.3.18",
+    "source-map-js": "^1.2.2",
+    "braces": "^3.0.3",
+    "micromatch": "^4.0.8",
+    "fast-glob": "^3.3.3",
+    "chokidar": "^3.6.0",
+    "markdown-it": "^14.3.3",
+    "postcss-selector-parser": "^7.1.6",
+    "postcss-nested": "^6.2.0"
   }
 }
