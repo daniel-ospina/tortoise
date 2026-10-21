@@ -206,7 +206,13 @@ WHAT IS PINNED (one entry per test, in file order)
    `NOT_AN_ABOUT_WRITER` row is an EXEMPTION, and an exemption nobody compares
    against is a fail-open cell: each premise is asserted at the STATEMENT the
    census attributed the property to (the about transfer carries no `SET`, and
-   the `SET` it does see names no `about*` predicate).
+   the `SET` it does see names no `about*` predicate). EVERY matching statement
+   is checked, not the first (`#9403` review cycle 2: `_rebuild_all_replay`
+   carries TWO `SET r += $attrs` statements and the first-match version left the
+   second — the structural-repoint fold, exactly the shape `#9417` touches — as
+   a fail-open cell). The premise is also pinned to its mechanism: the statement
+   is gated on a FIXED attribute vocabulary, so a descriptor carrying none of
+   those keys writes nothing on the edge its interpolated `etype` names.
 10. `test_no_unrecorded_property_bearing_about_edge_writer` — the census half:
    every property write on an `about*` relationship pattern (named variable or
    anonymous) — named (`SET r.<prop>`), map-assigned (`SET r += $props` /
@@ -291,6 +297,14 @@ WHAT IS PINNED (one entry per test, in file order)
    applied to the paragraph that MAKES the citations: three of them survived
    bare, and one (`security.py:85`) is false at the declared pin `c79ba1cf2`
    (`#9403` review, P2).
+
+24. `test_the_cost_argument_states_the_open_set_not_a_closed_pair` — §11.3 is
+   where a reader decides what the migration does to this layer, and both its
+   table row and its prose summarised the entity link as a CLOSED pair ("two
+   ids, plus the binder's `confidence` … and the projection's `idx` ordinal")
+   while the same section's §11.1 footnote and §13 say the set those names sit in
+   is open. Pinned PER PASSAGE, because a section-wide marker test stayed green
+   when only the table row was reverted (measured) — `#9403` review cycle 2.
 
 NOT promised: this does not re-open stored-vs-derived (the ruling stands, and
 the edge stays), and it does not decide §11.4 rule 1's tension with `#1370`
@@ -741,14 +755,23 @@ def _function_body(module: str, symbol: str) -> str:
     raise AssertionError(f"{module}::{symbol} no longer exists")
 
 
-def _query_call_containing(body: str, needle: str) -> str:
-    """The text of the one `.query(...)` CALL that carries `needle`.
+def _query_calls_containing(body: str, needle: str) -> list[str]:
+    """EVERY `.query(...)` CALL in `body` that carries `needle`, in source order.
 
     SCOPED to the call, not the function or the module: a premise about WHICH
     statement a property lands in cannot be checked against a function-wide text
     union — that union is precisely the false positive `NOT_AN_ABOUT_WRITER`
     declares — and a module-wide membership test is weaker still.
+
+    ⚠️ PLURAL, and that is the point (`#9403` review cycle 2, P1). The FIRST
+    version returned the first match only, and
+    `projection._rebuild_all_replay` carries TWO `SET r += $attrs` statements
+    (the `DirectEdgeCreated` fold and the structural-repoint fold). The
+    exemption leg inspected only the first, so a property reaching an about edge
+    through the second stayed GREEN — a fail-open cell inside the leg whose whole
+    job is to close one. A needle that matches N statements has N premises.
     """
+    out: list[str] = []
     for match in re.finditer(r"\.query\(", body):
         start = match.end() - 1  # at the '('
         depth = 0
@@ -761,9 +784,18 @@ def _query_call_containing(body: str, needle: str) -> str:
                 if depth == 0:
                     call = body[start : i + 1]
                     if needle in call:
-                        return call
+                        out.append(call)
                     break
-    return ""
+    return out
+
+
+def _query_call_containing(body: str, needle: str) -> str:
+    """The FIRST `.query(...)` call carrying `needle`, for premises that are
+    about a statement the census attributed a property to by construction
+    (the single bare transfer). Prefer `_query_calls_containing` wherever the
+    needle can match more than one statement."""
+    calls = _query_calls_containing(body, needle)
+    return calls[0] if calls else ""
 
 
 #: Bounded history depths tried, in order, to make `PRE_FIX_REV` reachable in a
@@ -1391,6 +1423,21 @@ def test_the_cheapness_rule_states_the_measured_set_and_records_the_tension():
             "the rule may not state the exception as a bare qualifier, and a "
             "record-projected about edge carries the projection's ordinal"
         )
+    # The OPEN SET, in the same breath as the two names (`#9403` review cycle 2,
+    # P1). The rule said "two ids — plus the binder's `confidence` … and the
+    # projection's `idx` ordinal", a CLOSED pair, while §11.1's own footnote
+    # says the record-map writers' further attributes are an open set and §13
+    # says the same. A record-projected about edge carries the row's placement
+    # columns (`RelationUpsert.attrs`: direction, confidence, weight, label,
+    # batch_id, source_version) and the open `props` tail beside `idx`, so a
+    # closed pair misstates the population this rule is about.
+    for marker in ("placement columns", "props", "open set"):
+        assert marker in rule, (
+            f"§11.4 rule 1 no longer states the OPEN SET ({marker!r}) — the "
+            "two named properties sit in a set the map-form writers fill at "
+            "runtime, so a closed pair is a population claim the code "
+            "contradicts (§11.1's footnote, §13)"
+        )
     assert "does carry a `weight`" not in rule, (
         "§11.4 rule 1 calls the `#1370` binding attribute a `weight` — the "
         "code sets `confidence`, and `weight` is a different property that no "
@@ -1424,6 +1471,65 @@ def test_the_cheapness_rule_states_the_measured_set_and_records_the_tension():
         "unqualified 'bare rows' claims the whole population is bare, which "
         "§11.1/§11.3 contradict for every record-projected edge; scope it to "
         "the rows that carry nothing but the id pair"
+    )
+
+
+def test_the_cost_argument_states_the_open_set_not_a_closed_pair():
+    """§11.3 is where a reader decides what the migration does to this layer, and
+    its table row plus its prose summarised the entity link as *"two ids, plus
+    the binder's `confidence` on a *bound* link and the projection's `idx`
+    ordinal"* — a CLOSED pair, while §11.1's footnote in the same section says
+    the record-map writers' further attributes are an open set and §13 says the
+    same (`#9403` review cycle 2, P1).
+
+    Measured: reverting §11.3's row to the closed pair left every leg green —
+    the population-absolute list is §11.4-scoped and the corrected-passage pins
+    reach §11.1/§13/§13.8 q2, so §11.3 was pinned by nothing. The claim is the
+    same one §11.4 rule 1 makes, so it is pinned in the place it is made.
+    """
+    section = _flat(
+        _section(
+            _doc(STORAGE),
+            "### 11.3 Two different things, both called",
+            "### 11.4 The four rules that keep it cheap",
+        )
+    )
+    # Asserted PER PASSAGE, not section-wide: the section states the same fact
+    # twice (the table row, then the prose below it), so a section-wide marker
+    # test stayed GREEN when only the table row was reverted to the closed pair
+    # — measured. Each passage is its own claim.
+    passages = {
+        "§11.3 table row": [
+            line for line in _doc(STORAGE).splitlines()
+            if "| **Entity links** (`aboutObject`, `aboutSubject`) |" in line
+        ],
+        "§11.3 prose": [
+            line for line in _doc(STORAGE).splitlines()
+            if "while the entity links stay near-bare" in line
+        ],
+    }
+    for label, lines in passages.items():
+        assert lines, (
+            f"{label} is gone — this leg measures nothing (the passage could "
+            "have moved, or been rewritten past the anchor)"
+        )
+        text = _flat(" ".join(lines))
+        for marker in ("placement columns", "props", "open set"):
+            assert _flat(marker) in text, (
+                f"{label} no longer states the OPEN SET ({marker!r}) — the two "
+                "named properties sit in a set the map-form writers fill at "
+                "runtime (the record row's placement columns and the `props` "
+                "tail), so a closed pair understates what a record-projected "
+                "about edge carries"
+            )
+        assert _flat("two recorded properties") not in text, (
+            f"{label} states a CLOSED count of the recorded properties — the "
+            "set is open, and the count is the retracted absolute in a smaller "
+            "font"
+        )
+    assert "placement columns" in _flat(section), (
+        "§11.3 no longer states the open set anywhere — the closed-pair "
+        "summary is back in every passage this leg anchors on"
     )
 
 
@@ -1494,6 +1600,13 @@ def test_the_ledger_keep_row_names_both_recorded_properties():
         "one semantic property",
         "only one property",
         "essentially property free",
+        # A CLOSED COUNT in a different spelling: the row said "two recorded
+        # properties" and then conceded, in the same sentence, that a
+        # record-projected edge also carries the row's placement columns and an
+        # open-set `props` tail (`#9403` review cycle 2, P2). Two names plus an
+        # open set is not "two properties".
+        "two recorded properties",
+        "exactly two properties",
     )
     survivors = [
         literal for literal in one_name_absolutes
@@ -1578,6 +1691,12 @@ def _unqualified_line_citations(text: str) -> list[str]:
         # citation beside it, so removing `(at HEAD)` from `security.py:85`
         # while the next clause carried one stayed GREEN (vacuous pin).
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        # ... AND at the newline. Measured: a LATER bullet's "— at HEAD"
+        # qualified a bare citation in an earlier line, because the window ran
+        # past the paragraph break (`#9403` review cycle 2, P2).
+        newline = text.find("\n", m.end())
+        if 0 <= newline < end:
+            end = newline
         if qualifier.search(text[m.end() : end]):
             continue
         out.append(m.group(0))
@@ -1643,6 +1762,12 @@ def test_the_writer_classification_separates_the_causal_axis_from_the_write_form
     )
     # And the write-FORM split is the axis the census actually reads, so it must
     # survive alongside it — a single number cannot carry both.
+    assert _flat("originated, three sites") not in section_13, (
+        "§13's one-line summary says `confidence` is *originated, three sites* "
+        "— only TWO sites originate it; the third writes it in the named form "
+        "but RE-MATERIALIZES it, which is what the same paragraph's split says "
+        "(`#9403` review cycle 2, P2)"
+    )
     assert "NAMED form" in section_13 and "property MAP" in section_13, (
         "§13 conflates the causal split with the write-form split — the census "
         "reads the FORM (named `SET r.<prop>` vs property MAP), and that is the "
@@ -1800,18 +1925,40 @@ def test_the_declared_false_positive_premises_hold_at_the_statement():
         )
         # The `SET` the census DOES see must land on a statement whose
         # relationship patterns are all non-about — that asymmetry is the whole
-        # exemption.
-        setter = _query_call_containing(body, set_needle)
-        assert setter, (
+        # exemption. EVERY matching statement is checked, not the first
+        # (`#9403` review cycle 2, P1): `_rebuild_all_replay` carries TWO
+        # `SET r += $attrs` statements and the first-match version inspected
+        # only one, leaving the second — the structural-repoint fold — as a
+        # fail-open cell in the leg that exists to close one.
+        setters = _query_calls_containing(body, set_needle)
+        assert setters, (
             f"`{module}::{symbol}` no longer carries the `{set_needle}` the "
             "census row was derived from — the exemption now describes code "
             "that moved"
         )
-        assert _ABOUT_REL.search(setter) is None, (
-            f"the `{set_needle}` statement in `{module}::{symbol}` now names an "
-            f"`about*` predicate ({setter.strip()!r}) — the property lands on "
-            "an about edge, so the exemption is stale"
-        )
+        for setter in setters:
+            assert _ABOUT_REL.search(setter) is None, (
+                f"a `{set_needle}` statement in `{module}::{symbol}` now names "
+                f"an `about*` predicate ({setter.strip()!r}) — the property "
+                "lands on an about edge, so the exemption is stale"
+            )
+            # The exemption's SECOND premise, and the one that carries it where
+            # the predicate is INTERPOLATED: the statement is gated on a
+            # non-empty `attrs` map built from a fixed key set, so a structural
+            # descriptor that carries none of those keys writes NOTHING. Both
+            # statements are `if attrs:`-guarded today; asserted here because a
+            # `SET r += $attrs` with an unconditional call would write whatever
+            # the descriptor's attribute set holds onto whatever `etype`
+            # resolves to — and `etype` is interpolated, so no about predicate
+            # can appear in the statement text.
+            assert re.search(
+                r"if k in \(|if attrs:", body
+            ), (
+                f"`{module}::{symbol}` no longer guards its `{set_needle}` "
+                "statement with a non-empty `attrs` map — the exemption's "
+                "premise is that a structural descriptor carrying no attribute "
+                "writes nothing on the edge its interpolated `etype` names"
+            )
 
 
 # ── 4. no unrecorded property-bearing writer ───────────────────────────────
