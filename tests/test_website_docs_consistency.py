@@ -293,6 +293,69 @@ def test_the_faq_source_retention_answers_disclose_the_capture_window() -> None:
         )
 
 
+#: #9510's ruling names each of these FAQ passages by anchor, quotes the
+#: self-undercutting clause it forbids, and states the positive statement that
+#: replaces it. The pair is the ruling's, not a taste judgement — which is why it
+#: is a bounded per-anchor table rather than a phrasing blacklist that would rot.
+_RULING_REWRITES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    # A2 — "a different retrieval signal" framed Tortoise as a better index;
+    # the ruling's rewrite is typed, weighted constraints **computed over**,
+    # and the cognitive-layer-for-agents positioning.
+    "not-just-rag": (
+        ("a different retrieval signal",),
+        ("computed over", "reasoning, memory and learning"),
+    ),
+    # A4 — "not as evidence that this graph works" undercuts the very graph the
+    # answer is describing; the rewrite names what the study measured and what
+    # Tortoise computes over.
+    "source-text": (
+        ("not as evidence that this graph works",),
+        ("computes over typed relations",),
+    ),
+    # A10 — "the graph itself is not the differentiator" is correct but empty;
+    # the rewrite is "a graph *stores* relationships; Tortoise *computes* over
+    # them".
+    "different": (
+        ("not the differentiator",),
+        ("<em>computes</em> over them",),
+    ),
+}
+
+
+def test_the_rulings_named_faq_rewrites_are_the_ones_that_shipped() -> None:
+    """#9517 review 3: the ruling's A2/A4/A10 passages must not survive verbatim.
+
+    #9510 forbids negative self-review on customer-facing copy, and its
+    "Inventory and disposition" table names each of these three passages by
+    anchor with the clause to remove and the positive statement to put in its
+    place. The PR that implements the ruling rewrote seven of the twelve FAQ
+    items, left these three standing, and its body then asserted the FAQ was
+    the whole exposure — so the surviving passages are what a reader sees while
+    the PR says otherwise.
+
+    A4 is the sharp one: "do not read this study as evidence that this graph
+    works" sits in the same paragraph the PR edits, and it hands the reader the
+    argument against the product on the page that argues for it.
+    """
+    for anchor, (forbidden, required) in _RULING_REWRITES.items():
+        answer = _faq_answer(anchor)
+        for phrase in forbidden:
+            assert phrase not in answer, (
+                f"website/faq.html#{anchor} still carries {phrase!r}. #9510's "
+                "inventory disposes of that clause — a surface that volunteers "
+                "its own weak points hands the reader the argument against us "
+                "— and #9517's own body claimed the FAQ was clean against the "
+                "ruling, so the passage cannot stay here unrewritten."
+            )
+        for phrase in required:
+            assert phrase in answer, (
+                f"website/faq.html#{anchor} does not carry the positive "
+                f"statement {phrase!r} that replaces the ruled-out clause. "
+                "Deleting the self-undercut without stating what Tortoise "
+                "actually does leaves the answer shorter, not stronger."
+            )
+
+
 @PAGES
 def test_no_dead_issue_references_in_public_copy(page: Path) -> None:
     """Public copy must not cite issue numbers, and must never cite nonexistent ones.
