@@ -1021,8 +1021,10 @@ worth naming: both were **prose asserting a fact about prose**, which no arm was
   that was wrong when written), so a blanket arm would red on the passage that *documents* the
   defect. What the arm enforces — *the symbols are authoritative, the line number is a
   convenience* — therefore applies here in the smaller form this block can actually keep: **no hint
-  is written as a re-verification aid**, and the three that remain (`ranking.py:1066`,
-  `sdk.py:13559`, `mcp_server.py:6804`) are dated record rather than pointers into the live table.
+  is written as a re-verification aid**, and the four that remain across these two entries
+  (`ranking.py:1066`, `sdk.py:13559`, `mcp_server.py:6804` in the fifth-correction bullet, plus
+  `topic_summarization.py:211` a paragraph below it) are dated record rather than pointers into the
+  live table.
 - **`_numeral` advertised digits it could not receive.** Its docstring promised *"digits are
   accepted as well, so a rewrite that writes `6` instead of `SIX` stays checkable"*, while all five
   `_PROSE_*` captures were `([A-Za-z][A-Za-z-]*)` — so `token.isdigit()` was unreachable and a
