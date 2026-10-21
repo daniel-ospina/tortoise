@@ -649,8 +649,14 @@ def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
     except (TypeError, ValueError) as e:
         # REFUSED, never "no floor": a floor the probe cannot read is a floor it
         # cannot honour, and honouring nothing is how a below-floor run gets a
-        # verdict (#9513 review P2).
-        floor, floor_raw, floor_error = None, None, f"{type(e).__name__}: {e}"
+        # verdict (#9513 review P2). The DECLARED value is captured for the log —
+        # a refusal that does not say what it could not read is not auditable
+        # (#9513 review P3).
+        floor, floor_error = None, f"{type(e).__name__}: {e}"
+        declared_floors = (prereg.get("denominator_floors")
+                           if isinstance(prereg, Mapping) else None)
+        floor_raw = (declared_floors.get("e1_objects")
+                     if isinstance(declared_floors, Mapping) else declared_floors)
 
     reasons: list[str] = []
     if declared_sha:
@@ -930,7 +936,12 @@ def _run(argv: list[str] | None = None) -> int:
                 # ``prereg=`` stays UNPREREGISTERED so no criterion can carry a
                 # verdict from it (the structural gate refuses that pairing).
                 threshold = None
-            else:
+            if threshold is not None:
+                # Keyed on SCORING, not on the binding: a matched corpus with an
+                # UNREADABLE bar is still UNPREREGISTERED, and naming the sha on
+                # ``prereg=`` there would print a log V9 calls unsound (a sha with
+                # no frozen threshold) — the probe must not emit a log its own
+                # gate rejects (#9513 review P2).
                 prereg_note = args.prereg
     lines.insert(4, f"prereg={prereg_note} artifact={PREREG_ARTIFACT}")
     if bind_line is not None:

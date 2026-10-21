@@ -867,6 +867,16 @@ def check(text: str) -> tuple[list[str], dict]:
                 f"[V15] the binding names corpus_sha256={bind.get('corpus_sha256')} "
                 f"but the run measured {measured_sha} — the binding is about a "
                 f"corpus this log did not run")
+        # The binding's denominator is the scored arm's own `objects` line, so
+        # the two must agree: a hand-edited log could otherwise inflate
+        # `objects=` to dodge the floor while the arm still prints the real
+        # denominator (#9513 review P2).
+        if bind.get("objects", "").isdigit() and scored in totals \
+                and int(bind["objects"]) != totals[scored]:
+            findings.append(
+                f"[V15] the binding checks objects={bind['objects']} but the "
+                f"scored arm {scored} measured {totals[scored]} — the floor was "
+                f"checked against a denominator this run did not produce")
         if bind.get("status") == "MATCHED":
             # A MATCHED binding is the only shape a scored log may carry, so it
             # must carry NO refusal reason — otherwise a log could print a

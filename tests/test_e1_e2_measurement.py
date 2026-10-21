@@ -1328,6 +1328,55 @@ def test_checker_refuses_an_unreadable_binding_with_no_attribution(monkeypatch):
     assert any("[V15]" in f and "could not be read" in f for f in findings), findings
 
 
+def test_a_matched_corpus_with_an_unreadable_bar_is_not_named_as_preregistered(
+        monkeypatch):
+    """A bound corpus does not make a malformed BAR a scored bar (#9513 review P2).
+
+    `prereg=` used to key off the binding, so this artifact produced
+    `prereg=<sha>` beside `prereg_e1_threshold=n/a` and `prereg-error=` — a log
+    the checker's V9 calls unsound. The probe must not emit a log its own gate
+    rejects, and `prereg=` must never claim a run scored against a bar it could
+    not read.
+    """
+    code, text = _run_with_prereg(
+        monkeypatch, {"e1": {"min_share_reduction": "5%"},
+                      "corpus": {"path": _CORPUS_REL},
+                      "denominator_floors": {"e1_objects": 20}})
+    assert code == 3, text
+    assert "prereg=UNPREREGISTERED" in text, text
+    assert "prereg-binding status=MATCHED" in text, text
+    assert "prereg-error=" in text, text
+    assert "prereg_e1_threshold=n/a" in text, text
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
+def test_the_unreadable_floor_refusal_names_the_value_it_could_not_read(
+        monkeypatch):
+    """`floor-unreadable` without the declared value is not auditable (P3)."""
+    code, text = _run_with_prereg(
+        monkeypatch, {**_bound_artifact(0.05),
+                      "denominator_floors": {"e1_objects": "30"}})
+    assert code == 3, text
+    binding = next(ln for ln in text.splitlines()
+                   if ln.startswith("prereg-binding "))
+    assert 'declared_floor="30"' in binding, binding
+    assert "reason=floor-unreadable" in binding, binding
+
+
+def test_checker_refuses_a_binding_denominator_the_run_did_not_produce(monkeypatch):
+    """`objects=` must be the scored arm's own denominator (P2, tamper-facing)."""
+    code, text = _run_with_prereg(monkeypatch, _bound_artifact(0.0))
+    assert code == 0, text
+    # dodge the floor by inflating the binding's denominator only: the arm still
+    # prints denominator=25, so the two no longer agree.
+    tampered = text.replace("declared_floor=20 objects=25",
+                            "declared_floor=30 objects=30", 1)
+    assert "declared_floor=30 objects=30" in tampered, tampered
+    findings, _ = check.check(tampered)
+    assert any("[V15]" in f and "did not produce" in f for f in findings), findings
+
+
 def test_a_corpus_sha_pin_that_is_not_this_corpus_never_scores(monkeypatch):
     """An exact-bytes pin is the stronger identity, and a wrong one is refused."""
     code, text = _run_with_prereg(
