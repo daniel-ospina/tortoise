@@ -1273,3 +1273,50 @@ class TestOperatorContract:
         assert declared, (
             f"{BM25_ENV} must be shown as a commented assignment (the example "
             "form an operator copies), not just named in prose")
+
+    def test_env_example_declares_the_DECLINE_contract_truthfully(self):
+        """The operator contract for the cap must not teach the OLD decline.
+
+        `.env.example` described the corpus-cap decline as the leg "reporting
+        itself ``degraded`` in the leg trace". That is false and it is exactly
+        the misreading #8488's follow-up removed: `degraded` is aggregated into
+        the READ's recorded status (`read_status.classify_leg_trace`) and into
+        `ask_lane`'s `retrieval_degraded`, so an operator on a store over the
+        cap was told to expect a complete read to be flagged as impaired memory.
+        Post-fix the entry is `declined=True` with `degraded=False` and no
+        `mechanism`, so the contract has to say so.
+
+        The sibling test above only asserts the switch is PRESENT, which is why
+        the drift went uncaught; this one pins the semantics of the decline.
+        """
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        block = _bm25_env_block((root / ".env.example").read_text())
+        assert block, "guard: the #8488 block must be findable in .env.example"
+        assert "declined=True" in block, (
+            ".env.example must name the decline's own trace key (`declined=True`); "
+            "without it the only operator-visible account of the cap is the "
+            "misleading one: " + block)
+        # A `degraded` mention is only truthful here as an explicit NEGATIVE
+        # (the flag stays False). Anything else reintroduces the old contract.
+        negative = ("degraded=False", "NOT ``degraded``", "``degraded`` stays")
+        for line in block.splitlines():
+            if "degraded" not in line:
+                continue
+            assert any(m in line for m in negative), (
+                ".env.example describes `degraded` without saying it stays "
+                "FALSE for the decline — the reader is told a complete read "
+                f"is impaired: {line!r}")
+
+
+def _bm25_env_block(env: str) -> str:
+    """The `#8488` section of `.env.example` (its `# ── …` header to the next)."""
+    lines = env.splitlines()
+    start = next((i for i, line in enumerate(lines)
+                  if "#8488 BM25 lexical arm" in line), None)
+    if start is None:
+        return ""
+    end = next((j for j in range(start + 1, len(lines))
+                if lines[j].startswith("# ──")), len(lines))
+    return "\n".join(lines[start:end])
