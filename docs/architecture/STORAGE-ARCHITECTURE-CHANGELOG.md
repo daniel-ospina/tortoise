@@ -939,10 +939,11 @@ still false. The review is the reason the count below moved in the direction tha
 - **The census could only see a string LITERAL.** It parsed `ast.Constant` and nothing else, so a
   reader that builds the relationship name at runtime was invisible — and five of them exist:
   `StateRanker._fetch_object_signals` (`ranking.py:1066`, `"|".join(ABOUT_EDGE_TYPES)`),
-  `TortoiseSDK._state_related_objects` / `_state_related_points` (`sdk.py`, no line hint — see
-  the ninth entry below: the numbers this entry shipped with were already wrong when written),
-  `"MATCH (n)-[a:" + self._ABOUT_TYPES + "]…"`), `supersede_point` (`sdk.py:13559`) and
-  `_preview_supersede` (`mcp_server.py:6804`), both looping over `SUPERSEDE_STRUCTURAL_RELS`.
+  `TortoiseSDK._state_related_objects` / `_state_related_points` (`sdk.py`, no line hint — it
+  builds `"MATCH (n)-[a:" + self._ABOUT_TYPES + "]…"`, and the numbers this entry originally
+  shipped with were already wrong by a few lines when written), `supersede_point`
+  (`sdk.py:13559`) and `_preview_supersede` (`mcp_server.py:6804`), both looping over
+  `SUPERSEDE_STRUCTURAL_RELS`.
   Worse, the table and the census **agreed perfectly** on the 13 sites the literal scan could see,
   and that agreement was circular: both were blind in the same place. Adding rows alone would have
   left a sixth hand pass guaranteed, so the fix is the derivation, not the list.
@@ -1167,18 +1168,20 @@ worth naming: both were **prose asserting a fact about prose**, which no arm was
 - **Two `file.py:NNNN` citations in the fifth-correction entry were already rotten when written.**
   `_state_related_objects` / `_state_related_points` were cited at lines 28773 and 28790 of
   `sdk.py`; at the head those lines are a validity-window helper and a sort-key comparison, while
-  the readers themselves sit roughly 590 lines further down. The entry now uses **`sdk.py`,
-  symbol-only** — the same form the same block adopts for `_connect_issue_objects` — because
-  re-measuring is what produced the wrong number in the first place, and the rotten numbers are
-  named here as numbers in prose rather than as a `file.py:NNNN` hint, so the passage that says
+  the readers themselves sit **over 600 lines** further down (measured for this entry: 619 at the
+  head, and 5 lines off already at the commit that wrote the citation). The entry now uses
+  **`sdk.py`, symbol-only** — the same form the same block adopts for `_connect_issue_objects` —
+  because re-measuring is what produced the wrong number in the first place, and the rotten numbers
+  are named here as numbers in prose rather than as a `file.py:NNNN` hint, so the passage that says
   they rot does not hand a re-verifier a fresh one to copy. ⚠️ **This block is deliberately not
-  guarded by a no-hints arm**, and the reason is
-  structural rather than an omission: two of its hints exist **as examples of rot**
-  (`assembly.py:573`/`:789`/`:809`, the `EXTRACTOR-V4` §16 pointer the fourth correction replaced,
-  and `sdk.py:20154`, the `_connect_issue_objects` citation that was wrong when written), so a
-  blanket arm would red on the passage that *documents* the defect. The rule this entry follows
-  instead is the document's own:
-  a hint is written only where the point is that it was wrong, never as an aid.
+  guarded by a no-hints arm**, and the reason is structural rather than an omission: two of its
+  hints exist **as examples of rot** (`assembly.py:573`/`:789`/`:809`, the `EXTRACTOR-V4` §16
+  pointer the fourth correction replaced, and `sdk.py:20154`, the `_connect_issue_objects` citation
+  that was wrong when written), so a blanket arm would red on the passage that *documents* the
+  defect. What the arm enforces — *the symbols are authoritative, the line number is a
+  convenience* — therefore applies here in the smaller form this block can actually keep: **no hint
+  is written as a re-verification aid**, and the three that remain (`ranking.py:1066`,
+  `sdk.py:13559`, `mcp_server.py:6804`) are dated record rather than pointers into the live table.
 - **`_numeral` advertised digits it could not receive.** Its docstring promised *"digits are
   accepted as well, so a rewrite that writes `6` instead of `SIX` stays checkable"*, while all five
   `_PROSE_*` captures were `([A-Za-z][A-Za-z-]*)` — so `token.isdigit()` was unreachable and a
