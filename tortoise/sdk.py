@@ -110,6 +110,13 @@ from . import file_indexer  # noqa: F401 — binds the classifier/identity modul
 from .projection import FalkorProjection
 # #7951 §17.1: the single-writer scope the live doors open around their fold.
 from .projection import _declares_live_write_lane, _live_write_scope
+# #9206 §17.1: the APPLY-FIRST declaration — the cache write is the commit point
+# and the record that describes it follows, BY DECISION. A declaration, not a
+# bypass: it is honest only where a record IS still appended (the census pin
+# refuses a door that appends none — the #9068 defect).
+from .projection import (
+    _declares_apply_first_write_lane,
+)
 # #9123 §17.1: the GRAPH-METADATA lane — a write with no journal record that
 # describes it, and whose loss a rebuild absorbs.
 from .projection import _graph_metadata_write_scope
@@ -2148,6 +2155,7 @@ def _capture_turn_ids(proj, session_id: str) -> list[str]:
             if isinstance(r[0], str) and r[0][len(prefix):].isdecimal()]
 
 
+@_declares_apply_first_write_lane("_write_capture_turns")
 def _write_capture_turns(
     proj,
     sdk,
@@ -2459,6 +2467,7 @@ def _write_capture_turns(
     return redacted_total
 
 
+@_declares_live_write_lane("_write_session_and_turns")
 def _write_session_and_turns(
     proj,
     sdk,
@@ -2520,10 +2529,20 @@ def _write_session_and_turns(
       * ``session_existed`` is the caller's own pre-MERGE probe (it also drives
         the caller's replay/retry gate); it is forwarded to the turn writer so
         the fresh-capture hot path keeps its exact query count.
-      * ``on_session_merged`` lets a journaling caller emit its
-        ``SessionRecorded`` record BETWEEN the MERGE and the turn write — the
-        order the SDK lane's live/replay parity depends on. ``None`` is a no-op
-        (hosted journals nothing here).
+      * ``on_session_merged`` is an OBSERVER hook fired after the MERGE. It is
+        NOT the journal carrier any more (#9206: this writer appends
+        ``SessionRecorded`` itself, before the MERGE), so ``None`` — or any
+        observer — costs nothing in durability. ⚠️ No caller passes one today (the
+        SDK lane's was removed with the same change; hosted never had one), so
+        the hook exists for observers only.
+
+    ⛔ §17.1 (#9206): this writer carries `@_declares_live_write_lane` — it
+    appends its OWN `SessionRecorded` before the `:Session` MERGE, so the MERGE
+    is journal-first. ⚠️ It also delegates the turn store to
+    `_write_capture_turns`, which carries its own APPLY-FIRST declaration
+    (`@_declares_apply_first_write_lane`): the turn Points' `PointAdded` records
+    follow their batched write. That nested claim is stated where it lives, not
+    inherited from this door's stronger one.
 
     ⛔ ``machine_id`` and ``model`` MUST keep the set-if-absent ``coalesce``
     semantics. A plain ``SET s.machine_id=$mid`` would let a re-capture from a
@@ -2534,8 +2553,10 @@ def _write_session_and_turns(
     reuses them for its entity-link pass instead of re-scrubbing) and the total
     redaction count — plus the rest of the post-write state (the offset-aware
     turn ids, the per-kind redaction counts, the ``Session`` record and the
-    MERGE params), which nothing reads today. The journal emit rides the
-    ``on_session_merged`` callback, not the returned ``session_record``.
+    MERGE params), which nothing reads today. The journal emit is THIS BODY'S
+    OWN (``_emit_event("SessionRecorded", **session_record)``, before the MERGE
+    — #9206); ``session_record`` is the same dict it passes, and
+    ``on_session_merged`` is an observer hook that journals nothing.
     """
     turn_count = len(turns)
     # The canonical :Session field list. Order is load-bearing only in that it
@@ -2621,9 +2642,68 @@ def _write_session_and_turns(
     if machine_id:
         merge_sets.append("s.machine_id=coalesce(s.machine_id, $mid)")
         merge_params["mid"] = machine_id
+        # Same set-if-absent rule in the RECORD (#9206 review P1): this MERGE is
+        # declared journal-first, so every property it writes must be described
+        # by the record that precedes it or a journal-only rebuild restores the
+        # node WITHOUT it — measured: a hosted capture came back with neither
+        # `machine_id` nor `model`, i.e. the API served null attribution for the
+        # machine that captured the session. The fold's matching arm is
+        # `_fold_session_recorded`'s (also a coalesce, so live first-writer-wins
+        # and replay agree).
+        session_record["machine_id"] = machine_id
     if model:
         merge_sets.append("s.model=coalesce(s.model, $model)")
         merge_params["model"] = model
+        session_record["model"] = model
+    # #9206 §17.1: THE RECORD IS APPENDED HERE, BEFORE THE MERGE, by the writer
+    # itself. Two defects are closed in one line and they share a cause (a
+    # record whose emission belonged to the CALLER):
+    #
+    #   * the HOSTED capture lane passed no `on_session_merged` at all, so its
+    #     `MERGE (s:Session …)` was UNJOURNALLED — a raw graph write with no
+    #     record, which a journal-only `rebuild()`/`recover_from_log` simply
+    #     drops (#9206 measured it through §17.1's third door);
+    #   * and with no record of its own this writer could not DECLARE a lane
+    #     honestly: the census (`tests/test_9124_declared_live_doors.py`) refuses
+    #     an apply-first declaration on a door that appends nothing — the #9068
+    #     defect — so "every caller must remember to journal" was a precondition
+    #     the type system could not keep.
+    #
+    # The ORDER is #3664's, moved one step earlier: the record must precede the
+    # TURN WRITE (whose `PointAdded` records carry `contains_session`, so a
+    # replay needs the `:Session` node to exist when it folds them), and
+    # appending it before the MERGE satisfies that while ALSO making the MERGE
+    # journal-first — the direction §17.1 requires (a record the cache lacks is
+    # projection lag; a cache node no record describes is the second writer).
+    # The fold is an idempotent `MERGE` by `id` with coalesce-preserved fields,
+    # so a replayed record whose live MERGE later failed converges rather than
+    # duplicating. ⚠️ The append's outcome is not checked (same residual as
+    # `supersede_point`, #9124 part 2): `_emit_event` is best-effort, so a failed
+    # append leaves the cache ahead of the journal — counted in
+    # `_journal_write_failures`, not reported per call.
+    #
+    # ⛔ THE OTHER DIRECTION IS A STATED, ACCEPTED WINDOW, NOT "LAG" (#9206
+    # review P2, tracked as #9390). The record is appended BEFORE the MERGE, so a
+    # MERGE that ABORTS after its bounded retries (the `#7405` retry re-raises)
+    # leaves an ORPHAN record: a `SessionRecorded` for a `:Session` that was
+    # never written. It converges STRUCTURALLY (the fold MERGEs by `id`, so no
+    # duplicate node) but NOT in its VALUES, because every coalesce-preserved
+    # field here is FIRST-WRITER-WINS ON BOTH SIDES — this statement's
+    # `s.<f>=coalesce(s.<f>, $v)` and `_fold_session_recorded`'s matching arm —
+    # so on a journal-only rebuild the orphan's `capture_lane` / `machine_id` /
+    # `model` / `source` / `client_captured_at` / `actor_user_id` WIN over the
+    # values of the attempt that actually landed: lag converges on replay, this
+    # does not, replay keeps the value the live graph REJECTED. Concretely
+    # (#3516 piece 7): a failed hook capture followed by a landed `store_sync`
+    # backstop restores as `capture_lane="hook"` — which is what the `#3516 §B`
+    # hook-liveness check reads. Bounded to an ABORTED MERGE (an append that
+    # fails instead only loses durability, never attribution), and #9390 owns the
+    # decision: either the fold learns to tell a LANDED record from an orphan
+    # (an attempt/instant it can order on) or the two become one commit point.
+    # Pinned, so this cannot change silently, by
+    # `tests/test_9206_apply_first_lane.py::
+    # test_an_orphan_record_wins_the_replay_fold_attribution_measured`.
+    sdk._emit_event("SessionRecorded", **session_record)
     # #7405 (audit G8): the `:Session` MERGE rides the bounded write retry.
     # Before this a rebuild's per-query abort raised out of this writer BEFORE
     # the turn store below, so the capture lost the whole session — row and
@@ -2649,6 +2729,9 @@ def _write_session_and_turns(
         what="capture :Session MERGE",
     )
     if on_session_merged is not None:
+        # An OBSERVER hook, not the journal carrier (#9206: this writer appends
+        # its own `SessionRecorded` above). Both capture lanes pass it or not for
+        # their own reasons; nothing depends on it for durability.
         on_session_merged(session_record)
 
     # The stored text is the WRITER'S OWN definition (#4911's scrubber runs
@@ -3045,6 +3128,14 @@ def _deleted_point_payload(id: str) -> dict:
 # rather than writes, so a count from it would be a guess). Plan §7 increment 4
 # tracks the conversion; naming the four is not fixing them.
 #
+# ⚠️ #9206 changed what "still apply-first" COSTS, not the order: each of these
+# doors now DECLARES the apply-first lane (`_declares_apply_first_write_lane`)
+# instead of leaving its writes undeclared, so an armed handle no longer refuses
+# the product's own write path while the per-door conversion (#9124 part 2)
+# remains open. The declaration states the order; it does not close the window
+# described above, and the lane's census pin refuses a door that appends no
+# record.
+#
 # `delete_point` is apply-first BY SHAPE since #9207 (the `DETACH DELETE` is
 # issued first and the `EntityMutated` op=delete record follows it, once it has
 # returned) — but it is NOT one of the doors this inventory is about, and the
@@ -3073,11 +3164,14 @@ def _deleted_point_payload(id: str) -> dict:
 # owed here": this door USED to carry `@_declares_live_write_lane(
 # "delete_point")` (#9124 part 1). That declaration was journal-first-only —
 # `_declares_live_write_lane`'s docstring says so — and #9207's reversal makes it
-# false, so it is REMOVED rather than qualified and `delete_point` is inventoried
-# in `tests/test_9124_declared_live_doors.py` (`_APPLY_FIRST_DOORS`, by decision).
-# Until an "apply-first, by decision" lane exists (#9124/#9206), this door's
-# handle writes are MEASURED as undeclared, and an ARMED handle (part 2) refuses
-# them. Neither is silent: the measure is on the census, the refusal raises.
+# false, so it was REMOVED rather than qualified. #9206 then DECLARED the order
+# the door actually uses: `@_declares_apply_first_write_lane("delete_point")`,
+# the lane that states "the cache write is the commit point, the record follows,
+# by decision". A declaration is not an amnesty — the lane's census pin fails
+# for a door that appends no record (the #9068 defect) and for a journal-first
+# door that took the weaker lane — and the runtime behaviour is pinned by
+# `tests/test_9079_handle_write_authority.py`
+# (`test_a_declared_apply_first_door_writes_under_the_armed_guard`).
 # ═══════════════════════════════════════════════════════════════════════════
 
 # #7951: the envelope keys ``_emit_event`` OWNS. A record that is journalled
@@ -4622,6 +4716,169 @@ def _capture_minted_ids(extracted: list[dict]) -> list[str]:
     from tortoise.write_verb import DEDUP_NEW
     return [p["id"] for p in extracted
             if p.get("dedup", DEDUP_NEW) == DEDUP_NEW and p.get("id")]
+
+
+#: The §17.1 lane the capture provenance stamp writes under (#9350).
+#:
+#: Before this, the stamp was a raw write at the projection's handle with NO
+#: record, which #9206's rule forbids declaring ("a declaration that blesses an
+#: unjournalled cache write is the #9068 defect") and which a journal-only
+#: rebuild silently reverted for any minted Point that is never promoted. The
+#: stamp is now journalled FIRST and the write declares this lane.
+#:
+#: A stable literal ON PURPOSE: `tests/test_9350_capture_provenance_journalled.py`
+#: reads it back AT the write handle (`_CACHE_WRITE_AUTHORIZED`), the same way
+#: `test_9079_ep_epoch_declared.py` pins the graph-metadata lane, so a rename is
+#: a red test rather than a silent relabelling.
+_CAPTURE_PROVENANCE_LANE = "capture.provenance-stamp"
+
+
+def _stamp_capture_provenance(sdk, proj, ids, *, event_id, session_id,
+                              harness, ingested_at, statement, what,
+                              params=None) -> bool:
+    """Journal the capture provenance, then write it under its own lane.
+
+    THE STAMP DOOR (#9350): one ``PointRevised`` per id is appended FIRST,
+    then the cache write runs inside
+    ``_live_write_scope(_CAPTURE_PROVENANCE_LANE)`` — the ordering every live
+    door in this module takes (§17.1,
+    `docs/architecture/STORAGE-ARCHITECTURE.md`). The append is IN THIS BODY
+    rather than in a helper on purpose: the §17.1 census
+    (`tests/test_9124_declared_live_doors.py`) reads one function at a time and
+    refuses a lane declaration whose own body appends no record — a door whose
+    record lives behind a call edge is a door the gate cannot check.
+
+    ONE RECORD PER ID, not one batched record: ``PointRevised`` is id-keyed
+    (``_revise_point`` and the pure fold both address a single Point), so a
+    batched payload would be a record NO fold could apply — a carrier with no
+    fold is the #3299 class. This is also why a minted Point's provenance
+    survives a journal-only rebuild even when the Point is never promoted: the
+    four fields are not in its ``PointAdded`` snapshot (that was taken at
+    extraction time, before the stamp).
+
+    ``statement`` is the caller's own SET (the three call sites differ in the
+    node variable and in their no-clobber WHERE guards, and those guards are
+    the reason the statement is passed rather than built here); ``params`` adds
+    any guard-specific parameters beside the standard five.
+
+    Returns ``False`` when a CONFIGURED journal refused an append, so the
+    caller can skip the cache write: the derived store must never lead the
+    truth (§17.1). ``True`` otherwise, including the journal-less lane — there
+    is nothing to commit to there, and nothing a replay could restore. The
+    caller does not inspect the value: the refusal is already disclosed to the
+    customer, because ``_emit_event`` counts it on
+    ``_journal_write_failures`` and the capture receipt carries the #4240
+    delta warning (both lanes).
+    """
+    if not ids:
+        return True
+    if "IS NULL" in statement and "$stamp_ids" not in statement:
+        # #9350 review (P2-1): a GUARDED stamp's ``$ids`` is the caller's CLAIM
+        # predicate, not the set that WOULD be journalled. Without the narrow
+        # clause the WRITTEN set is not a subset of the JOURNALLED set, so an id
+        # that became eligible between the pre-read and the write is stamped
+        # with no record — the §17.1 window this change exists to close.
+        #
+        # ⛔ The check runs BEFORE the appends (review round 3): raising after
+        # them left the journal holding records for a write that was then
+        # skipped — `rebuild()` would apply provenance the capture never wrote,
+        # the mirror of the defect this issue removes. `_recorded` is computed
+        # first because nothing here depends on the append.
+        raise ValueError(
+            f"a guarded stamp must narrow its write to $stamp_ids ({what})")
+    # ONE record per id, for the ids a record CAN name. The SAME filtered list
+    # binds the write (#9350 review): the record loop already skipped a non-str
+    # / empty id, so binding the raw list would let the write touch an id the
+    # loop had no record for — the unjournalled shape, one malformed id away.
+    _recorded = [pid for pid in ids if isinstance(pid, str) and pid]
+    # ONE RECORD PER ID, appended UNCONDITIONALLY for every id before the single
+    # cache write below. A comprehension rather than a `for` loop ON PURPOSE:
+    # the §17.1 census derives "the record precedes the write" from the AST, and
+    # an append nested one control-flow level deeper than the write it covers
+    # cannot be proven to cover it (the write would be reachable on a branch
+    # with no record) — `tests/test_9124_declared_live_doors.py::
+    # test_every_live_declared_door_is_journal_first` refuses that shape. The
+    # comprehension also states the property directly: every id is emitted,
+    # then the write runs once.
+    appended = [
+        sdk._emit_event(
+            "PointRevised", id=pid,
+            eventId=event_id, source_session=session_id,
+            source_harness=harness, ingested_at=ingested_at)
+        for pid in _recorded
+    ]
+    if any(ok is False for ok in appended):
+        # A configured journal REFUSED the record: do NOT write the cache. The
+        # write is the thing the record describes, so proceeding would leave
+        # the derived store ahead of the truth with no repair path (§17.1
+        # window (a)). `_emit_event` has already logged and counted it (#4240).
+        return False
+    bound = {"ids": list(_recorded), "eid": event_id, "sid": session_id,
+             "harness": harness, "ing": ingested_at, **(params or {})}
+    if "$stamp_ids" in statement:
+        # #9350: a GUARDED stamp's ``$ids`` is the caller's CLAIM predicate (it
+        # arrives through ``params``), so it is NOT the set this call just
+        # journalled — binding the write to it alone would let an id that became
+        # eligible between the pre-read and the write be stamped with NO record
+        # (the #9068 shape this change exists to remove). ``$stamp_ids`` is bound
+        # AFTER ``params``, so no caller can widen it: the statement's
+        # ``AND <node>.id IN $stamp_ids`` makes the WRITTEN set a subset of the
+        # JOURNALLED set by construction. An id that appeared in between is left
+        # for the next pass rather than written unrecorded.
+        bound["stamp_ids"] = list(_recorded)
+    with _live_write_scope(_CAPTURE_PROVENANCE_LANE):
+        sdk._graph_write_with_retry(
+            lambda: proj.g.query(statement, params=bound), what=what)
+    return True
+
+
+def _capture_stamp_targets(sdk, proj, statement: str, params: dict,
+                           what: str) -> list[str]:
+    """The ids a guarded provenance stamp statement WOULD match, read first.
+
+    The operator and retry-heal stamps carry ``eventId IS NULL`` no-clobber
+    guards, so the set they write is not known before the write. #9350 needs
+    one ``PointRevised`` per written id BEFORE the cache write, so the ids are
+    read with the SAME predicate the write uses (``statement`` is the shared
+    prefix of both, in the caller) — one extra index-served read per guarded
+    statement, on the operator / retry paths only.
+
+    A stale read is harmless to the WRITE: the write keeps its own guard, so an
+    id stamped in between simply does not match and nothing is clobbered.
+
+    ⚠ It is NOT invisible to the RECORD, and the difference is stated rather
+    than papered over: the ``PointRevised`` for such an id was already appended
+    from THIS read and carries THIS capture's four values, while the node now
+    holds the other writer's. So a journal-only rebuild takes this capture's
+    ``eventId``/``ingested_at`` for that id until the next record for it — a
+    window bounded to attribution fields on an id this capture was already
+    stamping, and unclosable by re-ordering (the record precedes the write by
+    design). The inverse direction is benign: an id that becomes eligible
+    between read and write is not healed on this pass (``if not ids`` skips the
+    statement), which is what the pre-#9350 code did for the whole set.
+
+    The read rides ``_graph_write_with_retry`` (#7405): it is part of the same
+    stamp path, and a transient graph-replaced abort on the READ would otherwise
+    lose the whole stamp — the #2552 ``operator_counts == {}`` signature the
+    retry funnel exists to prevent, one query earlier than before.
+
+    ⛔ ``statement`` must be READ-ONLY, and that is enforced here rather than
+    trusted to the callers: the §17.1 census declares this function as an
+    unresolved *read*, and a statement that writes would let an unjournalled,
+    lane-less write ride a declaration that says "reads" — the #9350 review's
+    P2-2 (measured: a ``SET`` smuggled into a caller's prefix left the arming
+    gate reporting a fully-declared surface).
+    """
+    from .projection import _statement_writes
+
+    if _statement_writes(statement):
+        raise ValueError(
+            "_capture_stamp_targets reads the ids a stamp WOULD write, so its "
+            f"statement must be read-only; refusing a writing one ({what})")
+    result = sdk._graph_write_with_retry(
+        lambda: proj.g.query(statement, params=params), what=what)
+    rows = getattr(result, "result_set", None) or []
+    return [r[0] for r in rows if r and isinstance(r[0], str)]
 
 
 def _capture_ep_target_ids(extracted: list[dict], proj) -> list[str]:
@@ -6416,6 +6673,15 @@ class TortoiseSDK:
         measures retry behaviour — the eval's ``ingest_retries`` Layer-1 outcome
         — can observe a retry that happened INSIDE the SDK, not only the outer
         phase retry.
+
+        #9350: the funnel is also used for the capture stamp's id PRE-READ
+        (``_capture_stamp_targets``), so a re-issued read increments the same
+        counter. That is deliberate — the counter measures *re-issues through
+        this funnel*, not statements that mutate — but a caller reading it as
+        "write retries" will over-count by at most the guarded-stamp reads of
+        one capture, and only when a re-issue actually happened. Suppressing it
+        here would hide real instability (a read that had to be re-issued after
+        a GRAPH-REPLACED abort is the same defect the retry exists for).
         """
         from .retry import (
             WriteStageRetriesExhausted,
@@ -9061,6 +9327,84 @@ class TortoiseSDK:
             return {"session_id": session_id, "ok": False, "error": str(e),
                     "payload": payload, "guards": guards, "delta": delta}
 
+    @_declares_apply_first_write_lane("_stamp_entity_link_counters")
+    def _stamp_entity_link_counters(self, proj, session_id: str,
+                                    link_result: dict) -> None:
+        """Record the #7405 entity-link counters on the `:Session`, then journal them.
+
+        ⛔ WHY THIS IS ITS OWN DOOR (#9206 review). The write and its record
+        used to sit inline in `capture_session`, which declares NO lane and
+        appends no record of its own (it is inventoried `_NO_JOURNAL`; what it
+        still writes is stamps, #9350) — so with §17.1's handle ARMED this SET
+        raised `DirectCacheWriteRefused`, and the caller's deliberate
+        `except Exception` ("a provenance failure must not fail a capture")
+        swallowed the refusal into `extraction_warnings` while it asserted
+        nothing about it: a silently-unwritten write is the one shape an armed
+        battery cannot see. Declaring the lane HERE is honest because the pair
+        is genuinely apply-first by necessity — the counters ARE the landed
+        pass's result, so the record cannot precede the write it describes.
+
+        The SET is idempotent (absolute values for this link pass, #7405 audit
+        G8), so a re-issue after an abort cannot double-count, and it rides the
+        retry. The trailing `SessionRecorded` is what makes the counter survive
+        a journal-only `rebuild()` / `recover_from_log`: the FIRST
+        `SessionRecorded` is emitted BEFORE the link pass, so its payload cannot
+        carry these values (a live != rebuild divergence).
+        """
+        self._graph_write_with_retry(
+            lambda: proj.g.query(
+                "MATCH (s:Session {id:$sid}) SET "
+                "s.entity_links_attempted=$a, s.entity_links_created=$c",
+                params={"sid": session_id,
+                        "a": link_result["attempted"],
+                        "c": link_result["created"]}),
+            what="capture entity-link counters",
+        )
+        # #3664 review P2: the raw SET above is a LIVE write with no journal
+        # carrier unless this record follows — emit the counters as a THIRD
+        # SessionRecorded AFTER the result is known, so the durable fold
+        # (``_fold_session_recorded``) replays them.
+        self._emit_event(
+            "SessionRecorded", id=session_id,
+            entity_links_attempted=link_result["attempted"],
+            entity_links_created=link_result["created"])
+
+    @_declares_apply_first_write_lane("_stamp_capture_attempt_state")
+    def _stamp_capture_attempt_state(self, proj, session_id: str, *,
+                                     capture_ok: bool,
+                                     capture_extractor: str) -> None:
+        """Record the #2335 WI-2b attempt outcome on the `:Session`, then journal it.
+
+        ⛔ WHY THIS IS ITS OWN DOOR (#9206 review). Same shape as
+        `_stamp_entity_link_counters`: inline in `capture_session` this SET was
+        undeclared, so an ARMED handle refused it and the caller's `except`
+        turned the refusal into an additive warning — leaving `capture_ok`
+        NULL, which the #2335 WI-2b gate reads as "legacy presumed captured" and
+        therefore NEVER retries. A FAILED capture silently stopped retrying,
+        invisibly.
+
+        Apply-first by necessity: the recorded outcome IS this attempt's result,
+        so the record cannot precede the write it describes. The SET is
+        idempotent (absolute ``capture_ok``/``capture_extractor`` values, #7405
+        audit G8) and rides the retry; the trailing `SessionRecorded` is emitted
+        ONLY after the live SET succeeded, so live and replay stay in lockstep
+        (that null was consumed by the TRUE-retry gate above — a session whose
+        capture FAILED silently stopped retrying).
+        """
+        self._graph_write_with_retry(
+            lambda: proj.g.query(
+                "MATCH (s:Session {id:$sid}) "
+                "SET s.capture_ok=$ok, "
+                "    s.capture_extractor=$extractor",
+                params={"sid": session_id, "ok": capture_ok,
+                        "extractor": capture_extractor}),
+            what="capture attempt-outcome stamp",
+        )
+        self._emit_event(
+            "SessionRecorded", id=session_id,
+            capture_ok=capture_ok,
+            capture_extractor=capture_extractor)
+
     @counts_capture_ops
     def capture_session(
         self,
@@ -9325,14 +9669,15 @@ class TortoiseSDK:
         # (the #1532/#2813 duplicated-store class).
         #
         # #3664: the journal's ``SessionRecorded`` for the raw :Session MERGE
-        # must land BETWEEN the MERGE and the turn write (a rebuild otherwise
-        # loses the node, making any EntityLinked edge FROM it unreplayable), so
-        # it rides the ``on_session_merged`` hook rather than following the
-        # whole write. The idempotent fold MERGEs by id and coalesce-preserves
+        # must land BEFORE the turn write (a rebuild otherwise loses the node,
+        # making any EntityLinked edge FROM it unreplayable). #9206 moved it one
+        # step earlier — the shared writer appends it ITSELF, before the MERGE —
+        # so this lane no longer supplies the record and cannot forget it; the
+        # hosted lane, which supplied none, now journals its :Session too. The
+        # idempotent fold MERGEs by id and coalesce-preserves
         # created_at/actor_user_id/capture_lane, mirroring the live SET clauses;
-        # it is
-        # emitted on every capture (the MERGE is itself unconditional) so the
-        # journaled ``turn_count`` tracks the live value on the #1727
+        # it is emitted on every capture (the MERGE is itself unconditional) so
+        # the journaled ``turn_count`` tracks the live value on the #1727
         # longer-replay-payload path.
         #
         # #4194: ``embed_fn`` is the ONE local-encoder batch, computed over the
@@ -9350,8 +9695,6 @@ class TortoiseSDK:
             session_existed=session_existed,
             embed_fn=lambda texts: _capture_turn_embeddings(
                 texts, proj.required_embedding_dim),
-            on_session_merged=lambda record: self._emit_event(
-                "SessionRecorded", **record),
         )
         _capture_redactions = _capture_write["redacted_total"]
 
@@ -9525,15 +9868,22 @@ class TortoiseSDK:
                     # bounded write retry too. Idempotent: the statement SETs
                     # absolute values on an explicit id list, so a re-issue
                     # writes the same four fields again.
-                    self._graph_write_with_retry(
-                        lambda: proj.g.query(
+                    # #9350: JOURNAL-FIRST (§17.1). One `PointRevised` per
+                    # minted id is appended BEFORE this statement reaches the
+                    # write handle, and the statement then runs inside its own
+                    # `_live_write_scope` lane — so the minted Point's
+                    # provenance survives a journal-only rebuild even when the
+                    # Point is never promoted, and the write is a declared
+                    # lane rather than a raw cache write (the #9068 shape
+                    # #9206 forbids blessing).
+                    _stamp_capture_provenance(
+                        self, proj, minted_ids, event_id=event_id,
+                        session_id=session_id, harness=source_harness,
+                        ingested_at=now,
+                        statement=(
                             "MATCH (n:Point) WHERE n.id IN $ids "
                             "SET n.eventId=$eid, n.source_session=$sid, "
-                            "    n.source_harness=$harness, n.ingested_at=$ing",
-                            params={"ids": minted_ids,
-                                    "eid": event_id, "sid": session_id,
-                                    "harness": source_harness, "ing": now},
-                        ),
+                            "    n.source_harness=$harness, n.ingested_at=$ing"),
                         what="capture minted-point provenance stamp",
                     )
                     # #2552 (layer-2 WIRE — the structural leg): reified
@@ -9560,29 +9910,44 @@ class TortoiseSDK:
                         # #7853: c is id-anchored — sweep the epistemic labels.
                         # The SET is idempotent, so a multi-labelled endpoint is
                         # stamped under each matching label harmlessly.
-                        for _q in epistemic_label_queries(
+                        for _prefix in epistemic_label_queries(
                             "MATCH (o:Point {is_operator:true})-"
                             "[:IMPL|NAND]->(c:{label}) "
                             "WHERE c.id IN $ids "
                             "AND (o.status IS NULL OR o.status = 'draft') "
                             "AND o.eventId IS NULL "
-                            "SET o.eventId=$eid, o.source_session=$sid, "
-                            "    o.source_harness=$harness, "
-                            "    o.ingested_at=$ing"
                         ):
                             # #7405 (audit G8): each label statement is its own
                             # write and rides the retry. Idempotent: the
                             # statement carries an ``o.eventId IS NULL`` guard,
                             # so a re-issue stamps only what a partial attempt
-                            # did not already stamp. ``_q`` is bound as a default
-                            # so the lambda can never close over a LATER loop
-                            # value.
-                            self._graph_write_with_retry(
-                                lambda _q=_q: proj.g.query(_q, params={
-                                    "ids": minted_ids,
-                                    "eid": event_id, "sid": session_id,
-                                    "harness": source_harness, "ing": now}),
+                            # did not already stamp.
+                            # #9350: the guard means the written set is not
+                            # known before the write, so the ids are read with
+                            # the SAME predicate first and journalled per id;
+                            # the write then carries ``AND o.id IN $stamp_ids``
+                            # so it touches only ids that DID get a record. A
+                            # stale read still leaves the record ahead of the
+                            # node for that id (stated in
+                            # `_capture_stamp_targets`) — it never lets a WRITE
+                            # go unrecorded.
+                            _op_ids = _capture_stamp_targets(
+                                self, proj, _prefix + "RETURN DISTINCT o.id",
+                                {"ids": minted_ids},
+                                what="capture operator-label stamp targets")
+                            _stamp_capture_provenance(
+                                self, proj, _op_ids, event_id=event_id,
+                                session_id=session_id,
+                                harness=source_harness, ingested_at=now,
+                                statement=(
+                                    _prefix
+                                    + "AND o.id IN $stamp_ids "
+                                      "SET o.eventId=$eid, "
+                                      "o.source_session=$sid, "
+                                      "    o.source_harness=$harness, "
+                                      "    o.ingested_at=$ing"),
                                 what="capture operator-label provenance stamp",
+                                params={"ids": minted_ids},
                             )
                     # #4936: the minted-point join above CANNOT reach an
                     # operator whose endpoint RE-KEYED to a pre-existing
@@ -9611,19 +9976,32 @@ class TortoiseSDK:
                     if operator_ids:
                         # #7405 (audit G8): same funnel; idempotent by the
                         # statement's own ``o.eventId IS NULL`` guard.
-                        self._graph_write_with_retry(
-                            lambda: proj.g.query(
-                                "MATCH (o:Point {is_operator:true}) "
-                                "WHERE o.id IN $ids "
-                                "AND o.eventId IS NULL "
-                                "SET o.eventId=$eid, o.source_session=$sid, "
-                                "    o.source_harness=$harness, "
-                                "    o.ingested_at=$ing",
-                                params={"ids": operator_ids,
-                                        "eid": event_id, "sid": session_id,
-                                        "harness": source_harness, "ing": now},
-                            ),
+                        # #9350: journalled per WRITTEN id first (read with the
+                        # same guard), then the guarded write under the stamp
+                        # lane — a raw write here would be refused under an
+                        # armed handle.
+                        _op_prefix = (
+                            "MATCH (o:Point {is_operator:true}) "
+                            "WHERE o.id IN $ids "
+                            "AND o.eventId IS NULL ")
+                        _requested = set(operator_ids)
+                        _written = [pid for pid in _capture_stamp_targets(
+                            self, proj, _op_prefix + "RETURN DISTINCT o.id",
+                            {"ids": operator_ids},
+                            what="capture operator-id stamp targets")
+                            if pid in _requested]
+                        _stamp_capture_provenance(
+                            self, proj, _written, event_id=event_id,
+                            session_id=session_id, harness=source_harness,
+                            ingested_at=now,
+                            statement=(
+                                _op_prefix
+                                + "AND o.id IN $stamp_ids "
+                                  "SET o.eventId=$eid, o.source_session=$sid, "
+                                  "    o.source_harness=$harness, "
+                                  "    o.ingested_at=$ing"),
                             what="capture operator-id provenance stamp",
+                            params={"ids": operator_ids},
                         )
                     if retry_failed_capture:
                         # #2335 WI-2b / review (PR #2473): a RETRY heals the
@@ -9650,18 +10028,28 @@ class TortoiseSDK:
                         # ``n.eventId IS NULL`` guard, so a re-issue after an
                         # abort cannot re-stamp a node a partial attempt
                         # already touched.
-                        self._graph_write_with_retry(
-                            lambda: proj.g.query(
-                                "MATCH (s:Session {id:$sid})-[c:CONTAINS]->"
-                                "(n:Point) WHERE n.eventId IS NULL "
-                                "AND coalesce(n.is_episodic, false) <> true "
-                                "SET n.eventId=$eid, n.source_session=$sid, "
-                                "    n.source_harness=$harness, "
-                                "    n.ingested_at=$ing",
-                                params={"sid": session_id, "eid": event_id,
-                                        "harness": source_harness, "ing": now},
-                            ),
+                        # #9350: journalled per written id first, then the
+                        # guarded write under the stamp lane.
+                        _heal_prefix = (
+                            "MATCH (s:Session {id:$sid})-[c:CONTAINS]->"
+                            "(n:Point) WHERE n.eventId IS NULL "
+                            "AND coalesce(n.is_episodic, false) <> true ")
+                        _heal_ids = _capture_stamp_targets(
+                            self, proj, _heal_prefix + "RETURN DISTINCT n.id",
+                            {"sid": session_id},
+                            what="capture retry-heal stamp targets")
+                        _stamp_capture_provenance(
+                            self, proj, _heal_ids, event_id=event_id,
+                            session_id=session_id, harness=source_harness,
+                            ingested_at=now,
+                            statement=(
+                                _heal_prefix
+                                + "AND n.id IN $stamp_ids "
+                                  "SET n.eventId=$eid, n.source_session=$sid, "
+                                  "    n.source_harness=$harness, "
+                                  "    n.ingested_at=$ing"),
                             what="capture retry-heal provenance stamp",
+                            params={"sid": session_id},
                         )
                 else:
                     # P1 #1529 (D4): create_event returning no id/eventId
@@ -9746,32 +10134,12 @@ class TortoiseSDK:
                           for i in range(len(link_texts))],
                 sdk=self)
             if link_result["attempted"]:
-                # #7405 (audit G8): the counter SET is idempotent (absolute
-                # values for this link pass), so a re-issue after an abort
-                # cannot double-count.
-                self._graph_write_with_retry(
-                    lambda: proj.g.query(
-                        "MATCH (s:Session {id:$sid}) SET "
-                        "s.entity_links_attempted=$a, s.entity_links_created=$c",
-                        params={"sid": session_id,
-                                "a": link_result["attempted"],
-                                "c": link_result["created"]}),
-                    what="capture entity-link counters",
-                )
-                # #3664 review P2: the raw SET above is a LIVE write with no
-                # journal carrier — the first SessionRecorded is emitted
-                # BEFORE the link pass, so its payload cannot carry the
-                # counters, and the apply()-based engines
-                # (``recover_from_log`` / a journal-only ``rebuild()``)
-                # restored the :Session node with both fields null (a
-                # live != rebuild divergence). Emit the counters as a
-                # THIRD SessionRecorded AFTER the result is known, under
-                # the SAME ``if attempted`` guard as the live write, so the
-                # durable fold (``_fold_session_recorded``) replays them.
-                self._emit_event(
-                    "SessionRecorded", id=session_id,
-                    entity_links_attempted=link_result["attempted"],
-                    entity_links_created=link_result["created"])
+                # #9206 review: the counter SET and its trailing record live in
+                # a DECLARED apply-first door. Inline here they carried no lane,
+                # so an armed handle refused the write and this block's own
+                # `except` swallowed the refusal into `extraction_warnings` —
+                # measured as a green test over a write that never landed.
+                self._stamp_entity_link_counters(proj, session_id, link_result)
         except Exception as e:  # noqa: BLE001, RUF100 — non-fatal, mirror hosted
             _logger.warning(
                 "capture_session: session entity-linking failed (non-fatal) "
@@ -9841,42 +10209,24 @@ class TortoiseSDK:
             # re-attempting (the TRUE retry silently no-ops). The warning
             # names the residue: capture_ok unset means an unknown prior.
             try:
-                # #7405 (audit G8): the attempt-outcome SET is idempotent
-                # (absolute ``capture_ok``/``capture_extractor`` values) and
-                # rides the retry. The outer try/except stays: an exhausted
-                # retry surfaces the original error and is downgraded to the
-                # additive warning below, exactly as before.
-                self._graph_write_with_retry(
-                    lambda: proj.g.query(
-                        "MATCH (s:Session {id:$sid}) "
-                        "SET s.capture_ok=$ok, "
-                        "    s.capture_extractor=$extractor",
-                        params={"sid": session_id, "ok": _capture_ok_record,
-                                "extractor": _capture_extractor_record}),
-                    what="capture attempt-outcome stamp",
-                )
+                # #9206 review: the attempt-outcome SET and the trailing record
+                # it needs live in a DECLARED apply-first door. Inline here they
+                # carried no lane, so an armed handle refused the SET and this
+                # `except` downgraded the refusal to a warning — leaving
+                # ``capture_ok`` NULL, which the #2335 WI-2b gate reads as
+                # "legacy presumed captured", so a FAILED capture never
+                # retried. The outer try/except stays: an exhausted retry
+                # surfaces the original error and is downgraded to the additive
+                # warning below, exactly as before (and the record is emitted
+                # ONLY when the live SET succeeded, so live and replay stay in
+                # lockstep).
+                self._stamp_capture_attempt_state(
+                    proj, session_id,
+                    capture_ok=_capture_ok_record,
+                    capture_extractor=_capture_extractor_record)
             except Exception as exc:  # pragma: no cover - graph hiccup
                 extraction_warnings.append(
                     f"capture_ok state write failed: {type(exc).__name__}")
-            else:
-                # #3664 review P2: the raw SET above has no journal carrier —
-                # the FIRST SessionRecorded is emitted BEFORE extraction, and
-                # the counter emission carries only the link counters — so a
-                # journal-only ``rebuild()`` / ``recover_from_log`` restored
-                # ``capture_ok = capture_extractor = null``. That null is
-                # CONSUMED by the #2335 WI-2b TRUE-retry gate above ("null"
-                # reads as the legacy presumed-captured case), so a session
-                # whose capture FAILED silently stopped retrying. Emit a
-                # TRAILING SessionRecorded with the values just written so
-                # ``_fold_session_recorded`` replays them. Under the SAME
-                # ``_record_session_state`` gate (and only after the live SET
-                # succeeded) so live and replay stay in lockstep; a
-                # journal-less SDK no-ops in ``_emit_event``, exactly as it
-                # does for the first record.
-                self._emit_event(
-                    "SessionRecorded", id=session_id,
-                    capture_ok=_capture_ok_record,
-                    capture_extractor=_capture_extractor_record)
         if not ok and meta.get("mode") == "empty":
             effective_mode = "empty"
         elif not ok:
@@ -11138,6 +11488,7 @@ class TortoiseSDK:
         }
         return extracted, meta
 
+    @_declares_apply_first_write_lane("_materialize_session_source")
     def _materialize_session_source(
         self,
         session_id: str,
@@ -11266,14 +11617,59 @@ class TortoiseSDK:
         ).result_set
         prior_valid_from = _rows[0][0] if _rows else None
         prior_is_episodic = _rows[0][1] if _rows else None
+        # ⛔ §17.1 ORDER (#9206 review P1): THE RECORD IS APPENDED HERE, BEFORE
+        # the `link_source_to_event` write below — not after it (where it used to
+        # sit), and BEFORE the record's own explanatory block explains why it is
+        # `SourceCreated`. Reasons, in the order that matters:
+        #   * this door's lane authorizes BOTH writes, so a raise between them
+        #     must not be able to leave the MERGE standing with no record. It
+        #     CAN: both callers of this helper swallow the exception
+        #     (`capture_session` logs a warning and continues; the hosted lane
+        #     turns it into an additive warning and still returns 200), which is
+        #     deliberate — a provenance failure must not fail a capture — so a
+        #     post-link emit would be SKIPPED on exactly the path that needs it
+        #     most.
+        #   * nothing in the payload comes from the link: `prior_valid_from` /
+        #     `prior_is_episodic` are read back from the MERGE above, in the same
+        #     statement, and `eventId` is the caller's own argument.
+        # Why this door is APPLY-FIRST, not journal-first: the `MERGE
+        # (s:Source …)` it also describes was issued ABOVE this emit, with
+        # `prior_valid_from` / `prior_is_episodic` read back from that same
+        # statement. So the record precedes the write whose failure would skip
+        # it (`link_source_to_event`, below) but not the MERGE — a record stated
+        # over the write's own result, which is exactly what §17.1's apply-first
+        # lane declares. ⛔ Precisely: it precedes ONE of the two writes it
+        # describes (the link), not the MERGE — a reader who took the old
+        # "precedes both writes" wording literally would file this door under
+        # the journal-first lane, which its order does not earn.
+        self._emit_event(
+            "SourceCreated", id=url,
+            url=url,
+            sourceKind="agentSession",
+            contentHash=content_hash,
+            title=None,
+            ingestedAt=now,
+            updatedAt=now,
+            validFrom=prior_valid_from,
+            is_episodic=prior_is_episodic,
+            _stub_completion=True,
+            **{SOURCE_SEARCH_TEXT_FIELD: search_text},
+            sessionId=session_id,
+            capturedAt=now,
+            summary=summary,
+            topics=topics,
+            **(({"eventId": event_id}) if event_id else {}),
+        )
         if event_id:
             # Anchored ON CREATE by the shared derivation writer (#5199).
+            # AFTER the record on purpose — see the order note above.
             proj.link_source_to_event(url, event_id)
-        # ⛔ THE RAW MERGE ABOVE NEEDS A JOURNAL CARRIER (lane L5 #5097, gate
-        # item 2). It is a raw graph SET on the capture path, and the rule for
-        # those is ALREADY recorded on this lane (`_write_capture_turns`'s
-        # `capture_redactions` note a few hundred lines up): a raw SET with no
-        # trailing record makes live and replay diverge, so a rebuild silently
+        # ⛔ WHY THAT RECORD EXISTS AT ALL — THE RAW MERGE ABOVE NEEDS A JOURNAL
+        # CARRIER (lane L5 #5097, gate item 2). It is a raw graph SET on the
+        # capture path, and the rule for those is ALREADY recorded on this lane
+        # (`_write_capture_turns`'s `capture_redactions` note a few hundred lines
+        # up): a raw SET with no trailing record makes live and replay diverge,
+        # so a rebuild silently
         # reverts what the write stored. Measured before this record existed
         # (`capture_session` -> `rebuild()`): the session `:Source` came back
         # with `summary`, `topics`, `sessionId`, `capturedAt`, `eventId`,
@@ -11328,24 +11724,6 @@ class TortoiseSDK:
         # is the same unjournaled-writer class one writer upstream, not
         # something this record can fix; the recorded value is emitted anyway so
         # the ON CREATE path (no stub) is faithful.
-        self._emit_event(
-            "SourceCreated", id=url,
-            url=url,
-            sourceKind="agentSession",
-            contentHash=content_hash,
-            title=None,
-            ingestedAt=now,
-            updatedAt=now,
-            validFrom=prior_valid_from,
-            is_episodic=prior_is_episodic,
-            _stub_completion=True,
-            **{SOURCE_SEARCH_TEXT_FIELD: search_text},
-            sessionId=session_id,
-            capturedAt=now,
-            summary=summary,
-            topics=topics,
-            **(({"eventId": event_id}) if event_id else {}),
-        )
 
     # ── Update / Delete consolidation (epic #888 W2, PR #912) ─────────
     # One update()/delete() for Points AND entities. The legacy methods
@@ -11431,6 +11809,7 @@ class TortoiseSDK:
             return self.delete_point(id)
         return self.delete_entity(id)
 
+    @_declares_apply_first_write_lane("update_point")
     def update_point(self, id: str, *, is_episodic: bool | None = None, **props) -> dict:
         """Update properties on an existing Point. Returns updated point dict.
 
@@ -11738,17 +12117,23 @@ class TortoiseSDK:
         # `test_the_promote_arm_stays_apply_first_a_recorded_deviation` and
         # `test_a_refused_promote_journals_no_revision`.
         #
-        # ⛔ NOT ROUTED THROUGH THE FOLD YET, AND STILL UNDECLARED (#9124).
-        # The non-promote writes below go through the raw guarded handle, whose
-        # §17.1 door now DETECTS an undeclared write (#9124 part 1), so this
-        # door is one of the measured remainder in
-        # `tests/test_9124_declared_live_doors.py`'s MIXED-ARM inventory. It
-        # cannot declare `_live_write_scope` yet, for the reason the promote arm
-        # below states: the SAME write region serves an arm whose record is
-        # stated only AFTER its guarded write, so a scope placed here would
-        # authorize that arm too. Moving these writes onto the fold — and
-        # deciding the promote arm with them — is part 2 (#9124), and that is
-        # when this door declares itself.
+        # ⛔ DECLARED APPLY-FIRST (#9206), and the non-promote arm is the
+        # reason the claim is the weaker one. The writes below go through the
+        # raw guarded handle, whose §17.1 door DETECTS an undeclared write
+        # (#9124 part 1) and REFUSES it once armed (part 2). This door could not
+        # declare `_live_write_scope`: the SAME write region serves the PROMOTE
+        # arm, whose record may only be stated AFTER its guarded write, so a
+        # journal-first declaration here would authorize it falsely. The door
+        # therefore carries `@_declares_apply_first_write_lane("update_point")`
+        # — "a write precedes its record, by decision" — which is TRUE of the
+        # promote arm and merely WEAKER than the non-promote arm's own
+        # behaviour (that arm appends first and aborts with
+        # `WriteNotLandedError` when its append fails; the lane says nothing
+        # against it, and this comment is where the asymmetry is recorded).
+        # Pinned by `tests/test_9124_declared_live_doors.py::
+        # test_every_apply_first_declared_door_states_an_order_and_a_record`
+        # (the door is genuinely apply-first) and by
+        # `tests/test_7951_update_point_outbox.py`'s promote-arm pins.
         # #1904: content_hash is derived from content — keep it out of the
         # event record (mirrors create_point's snapshot strip at emit).
         # #4208: the vector this path just DERIVED from the content is stripped
@@ -12190,42 +12575,42 @@ class TortoiseSDK:
         # payload is the same dict either way — one record shape per call.
         return result
 
-    # §17.1 LANE (#9124): NONE, and that is the honest state — #9207 reversed
-    # this door to the APPLY-FIRST shape, so the live-lane declaration it used
-    # to carry here would now be FALSE.
+    # §17.1 LANE (#9206): the APPLY-FIRST lane — DECLARED, with the order it
+    # actually uses. #9207 reversed this door to the apply-first shape, so the
+    # journal-first declaration it used to carry (`@_declares_live_write_lane`,
+    # #9124 part 1) would now be FALSE: it asserted "the record is appended,
+    # THEN the cache is written".
     #
-    # `@_declares_live_write_lane("delete_point")` (landed by #9124 part 1 /
-    # #9224) asserts "the record is appended, THEN the cache is written". That
-    # was true of #7951 increment 4a — and #9207 reverses the order on measured
-    # evidence (see the block below), which makes the same decorator authorize
-    # a `DETACH DELETE` issued BEFORE any record exists: the #9068 defect
-    # `_declares_live_write_lane`'s own docstring says a declaration must never
-    # bless. It is not a matter of opinion — `tests/test_9124_declared_live_
-    # doors.py::test_every_live_declared_door_is_journal_first` re-derives the
-    # order from this source, and it names `delete_point` as an offender when
-    # the decorator is present. That is why it is gone rather than kept with a
-    # caveat.
+    # ⛔ THE REMEDY IS NOT "NO DECLARATION". Undeclared left the door's writes
+    # MEASURED (#9124 part 1) and, once `_HANDLE_GUARD_ENFORCES` is armed (part
+    # 2), REFUSED — the product's own delete path refused by the guard that
+    # exists to protect it. So #9206 adds the lane this door can honestly claim:
+    # `_declares_apply_first_write_lane`, which states "the cache write IS the
+    # commit point and the record that describes it follows, BY DECISION" — the
+    # exact claim #9207 makes (see the block below). It is a DECLARATION, not a
+    # bypass: a record IS appended for every destroy that lands, and the lane's
+    # census pin refuses a door that appends none (the #9068 defect), so this
+    # cannot become an amnesty for an unjournalled cache write.
     #
-    # So this door is INVENTORIED, not declared: `_APPLY_FIRST_DOORS` in
-    # `tests/test_9124_declared_live_doors.py` carries it with this reason.
-    # ⚠️ Consequences, stated rather than implied: (a) its handle writes are
-    # MEASURED as undeclared (one WARNING per distinct statement, #9124 part 1
-    # measure mode) instead of being covered by the door's own lane, and (b)
-    # with `_HANDLE_GUARD_ENFORCES` armed (part 2) this door is REFUSED at the
-    # `DETACH DELETE`. Honouring an apply-first door under an armed handle needs
-    # a lane that says "apply-first, by decision" — a §17.1 decision that lives
-    # with #9124/#9206, not a decorator this file may quietly re-purpose. Pinned
-    # executably by `tests/test_9079_handle_write_authority.py::test_an_apply_
-    # first_door_is_refused_by_the_armed_guard`.
+    # `tests/test_9124_declared_live_doors.py::test_every_apply_first_declared_
+    # door_states_an_order_and_a_record` pins that this door is GENUINELY
+    # apply-first and appends a record, and
+    # `tests/test_9079_handle_write_authority.py::
+    # test_a_declared_apply_first_door_writes_under_the_armed_guard` pins the
+    # behaviour: under an armed handle `delete_point` completes and appends its
+    # record, while a raw `DETACH DELETE` with no lane is still REFUSED.
+    @_declares_apply_first_write_lane("delete_point")
     def delete_point(self, id: str) -> bool:
         """Delete a Point and its relationships. Returns True if found.
 
         Implementation behind delete(id) — the consolidated Point/entity
         delete (epic #888 W2).
 
-        §17.1 LANE (#9124): NOT DECLARED — this door is APPLY-FIRST BY DECISION
-        (#9207), so a `@_declares_live_write_lane` here would be a false claim
-        (see the comment above the signature).
+        §17.1 LANE (#9206): DECLARED — `@_declares_apply_first_write_lane`,
+        the lane that states this door's order (APPLY-FIRST BY DECISION, #9207).
+        It is deliberately NOT `@_declares_live_write_lane`: that lane claims
+        "the record is appended, THEN the cache is written", which is false
+        here (see the comment above the signature).
 
         THE CACHE WRITE IS THE COMMIT POINT (#9207). The `DETACH DELETE` is
         issued FIRST, and the `EntityMutated` op=delete record is appended only
@@ -12325,12 +12710,14 @@ class TortoiseSDK:
         # (docs/evidence/7951-delete-point-outbox/probes/delete_order_probe.py,
         # delete-order-probe.log). So the reachable trigger TODAY is a generic
         # engine/transport failure with the node still present: RARE. ⚠️ Once
-        # part 2 arms the handle, the shape changes and this door is REFUSED —
-        # it is apply-first, so it cannot honestly declare a journal-first lane
-        # (see the comment above the signature and `_APPLY_FIRST_DOORS`). The
-        # ordering below is justified by the DIRECTION of the divergence it
-        # leaves, not by its frequency — and the refusal test injects the
-        # failure rather than claiming the door produces it.
+        # part 2 arms the handle this door COMPLETES: it holds the DECLARED
+        # apply-first lane (#9206 — `@_declares_apply_first_write_lane` above the
+        # signature), which states "the cache write IS the commit point and the
+        # record that describes it follows". What an armed handle still REFUSES
+        # here is a raw UNDECLARED statement — the lane is on the door, not on
+        # the statement. The ordering below is justified by the DIRECTION of the
+        # divergence it leaves, not by its frequency — and the refusal test
+        # injects the failure rather than claiming the door produces it.
         #
         # So the destroy is issued FIRST and the record is written only once it
         # has RETURNED. A cache write that raises appends NOTHING, so #9207's
@@ -14719,6 +15106,7 @@ class TortoiseSDK:
 
     # ── Operators ─────────────────────────────────────────────────
 
+    @_declares_apply_first_write_lane("create_operator")
     def create_operator(self, op_type: str, source_id: str, target_ids: list[str],
                         label: str | None = None,
                         direction: str = "bidirectional",
@@ -15035,12 +15423,16 @@ class TortoiseSDK:
                 ),
                 what="create_operator source promote SET",
             )
-        # Dreaming (#85): new edges change propagation — mark all inputs dirty.
-        self._mark_dirty(inputs)
-        # Epic 903-C4 (#1242): a new operator changes the factor graph —
-        # existing direct-edge messages around its endpoints may be stale
-        # (a formerly operator-less claim now has an operator). Drop seeds.
-        self._get_ep().invalidate_messages(inputs)
+        # §17.1 ORDER (#9206 review P2): the two CONSISTENCY writes below
+        # (`_mark_dirty`, the EP message drop) are moved AFTER the record, not
+        # before it. They authorize under this door's lane, and either can raise
+        # on a transport abort — with the record last, that raise left the
+        # operator node and its IMPL/NAND/INPUT edges live with NO
+        # `OperatorAdded`, so a rebuild dropped an operator the graph still
+        # holds (the #7951 2b "applied with no record" shape `update_point`'s
+        # promote arm documents). Neither write is needed to state the record:
+        # both are derived-cache housekeeping over a write that has already
+        # landed, so a failure there is recoverable while a lost record is not.
         result = self.get_point(pid)
         # #1934: merge the structured warnings into the result (warn-not-block
         # contract — consumers may surface or ignore; the shape is stable).
@@ -15054,6 +15446,12 @@ class TortoiseSDK:
             "id": pid, "op_type": op_type, "source_id": source_id,
             "target_ids": list(target_ids),
         }, point=event_point)
+        # Dreaming (#85): new edges change propagation — mark all inputs dirty.
+        self._mark_dirty(inputs)
+        # Epic 903-C4 (#1242): a new operator changes the factor graph —
+        # existing direct-edge messages around its endpoints may be stale
+        # (a formerly operator-less claim now has an operator). Drop seeds.
+        self._get_ep().invalidate_messages(inputs)
         return result
 
     # ── Operator action consolidation (epic #888 W2) ──────────────────
@@ -19007,6 +19405,7 @@ class TortoiseSDK:
                    reverse=True)
         return items[:limit]
 
+    @_declares_apply_first_write_lane("create_direct_edge")
     def create_direct_edge(self, op_type: str, source_id: str, target_id: str, *,
                            direction: str | None = None,
                            confidence: float | None = None,
@@ -20646,7 +21045,8 @@ class TortoiseSDK:
 
     # ── Epic 903-C5 (#1243): non-convergence retention ──────────────
 
-    def _register_failed_attempt(self, roots: set[str]) -> None:
+    def _register_failed_attempt(self, roots: set[str],
+                                 run_ep: int | None = None) -> None:
         """Record a failed (non-converged) attempt for the given dirty roots.
 
         W4 retention: the roots STAY dirty (retry) until the attempt cap;
@@ -20654,6 +21054,34 @@ class TortoiseSDK:
         ``stale_unresolved`` with its attempt count + backoff state. Backoff
         is exponential in attempts (2**n seconds, capped) — recorded as
         state, never slept (tests inject a fake clock).
+
+        ⛔ ``run_ep`` (#9362 review) — the CAP must not erase another
+        process's marking, and the GRAPH is what decides, exactly as it does for
+        :meth:`_sweep_dirty_roots`. FOUR outcomes, from one statement:
+
+        * ``retired`` — a dirty flag at or before this run's snapshot: cleared in
+          the graph, so the caller drops the root from the mirror and records it
+          capped;
+        * ``retained`` — a flag a PEER stamped after this run's snapshot: the
+          graph keeps it, and the caller keeps the root, its attempts (so the
+          next cap attempt is one pass away) and its backoff, writing no `capped`
+          record for a root that is not capped;
+        * ``absent`` — no dirty ``:Point`` with that id (deleted, or a flag no
+          reader will see): the phantom case, and the caller drops the root;
+        * ``unknown`` — the statement raised: the caller keeps the root retryable
+          (fail SAFE) and logs, because a silently inert cap would restore the
+          immortal-retry class #1243 bounds.
+
+        ⛔ A snapshot of ``0`` is NOT an ordering claim: ``_ep_epoch()`` returns 0
+        for "no ``:EpMeta``" (a rebuilt graph, whose replayed stamps sit ahead of
+        the reset counter — #5166), so the caller passes ``None`` instead and the
+        cap retires, audibly. ``<= 0`` can never hold, so a literal 0 would make
+        the cap retain every stamped root for the whole re-climb: bounded retry
+        is the cap's entire job, and an unbounded, silent one is inert.
+
+        An UNSTAMPED flag is retired (``n.ep_dirty_at IS NULL``): the cap's job
+        is to stop this process retrying a root it has failed on repeatedly, and
+        a peer that does not stamp has no marking to preserve.
         """
         now = self._retry_clock()
         for root in roots:
@@ -20661,6 +21089,63 @@ class TortoiseSDK:
                 continue  # already resolved/dropped by another path
             attempts = self._retry_attempts.get(root, 0) + 1
             if attempts > self.retry_attempt_cap:
+                # #9362: the GRAPH decides whether the cap may retire this root
+                # — the same rule the sweep follows one function down. The cap
+                # is this process's local policy; a root a PEER stamped after
+                # this run's snapshot is not this process's to drop, and a root
+                # that is already gone from the graph (deleted, or cleared by a
+                # peer) leaves the mirror with its retry state.
+                # ⛔ A snapshot of ``0`` is NO ORDERING CLAIM, not "older than
+                # everything" (#9362 review, P2). ``_ep_epoch()`` returns 0 for
+                # "there is no ``:EpMeta``" — exactly the state a journal
+                # ``rebuild`` leaves, with the replayed ``ep_dirty_at`` stamps
+                # still ahead of the reset counter (#5166, documented on
+                # :meth:`_advance_ep_version`). ``n.ep_dirty_at <= 0`` can never
+                # hold, so passing 0 through as a claim would make the cap
+                # retain EVERY stamped root in that window: no ``capped``
+                # record, no log, no drain of ``stale_backlog``, and the retry
+                # loop unbounded for the whole climb — an inert cap is #1243's
+                # immortal-retry class returning silently. 0 therefore carries
+                # the same meaning as ``None`` (the cap retires), and the retire
+                # is ANNOUNCED, because the run is giving up on a stamp it could
+                # not order. The SWEEP keeps its ``<=`` guard untouched: this is
+                # the cap's bound, not the sweep's delayed clear.
+                snapshot_unusable = run_ep == 0
+                verdict, verdict_error = self._retry_cap_verdict(
+                    root, None if snapshot_unusable else run_ep)
+                if verdict == "retained":
+                    # Another process's newer marking. Keep the root AND its
+                    # attempts (so the next cap attempt is one pass away), and
+                    # do not write a `capped` record for a root that is not
+                    # capped — a later epoch-guarded pass retires it.
+                    self._retry_attempts[root] = attempts
+                    self._retry_backoff_until[root] = now + min(
+                        2 ** attempts, 3600)
+                    self._stale_unresolved.pop(root, None)
+                    continue
+                if verdict == "unknown":
+                    # The write failed. Fail SAFE: keep the root retryable rather
+                    # than dropping a root whose graph flag may stand — and LOG,
+                    # because an inert cap is #1243's immortal-retry class
+                    # coming back silently. The stale record is dropped so the
+                    # root is never reported capped and retrying at once.
+                    self._retry_attempts[root] = attempts
+                    self._stale_unresolved.pop(root, None)
+                    # ⛔ `exc_info=verdict_error`, never `exc_info=True`: the
+                    # exception was swallowed inside `_retry_cap_verdict`, so
+                    # this frame has no live handler and `exc_info=True` would
+                    # render `NoneType: None` — discarding exactly the cause
+                    # this diagnostic exists for.
+                    _logger.warning(
+                        "#9362: could not read the graph's verdict for capped "
+                        "dirty root %s — keeping it retryable (attempt %d); a "
+                        "persistent failure here makes the retry cap inert",
+                        root, attempts, exc_info=verdict_error)
+                    continue
+                # `retired` (this run's snapshot outranks the stamp and the
+                # flag is now gone) or `absent` (no such dirty :Point — the
+                # phantom case): the mirror loses the root, as the landed code
+                # did.
                 self._dirty_roots.discard(root)
                 self._retry_attempts.pop(root, None)
                 self._retry_backoff_until.pop(root, None)
@@ -20670,17 +21155,18 @@ class TortoiseSDK:
                     "backoff_state": "capped",
                     "reason": "non_converged",
                 }
-                # #1163: a capped root is dropped from the dirty set — its
-                # GRAPH flag must go too, or a fresh SDK would rehydrate it
-                # and retry forever (the cap is meaningless cross-process).
-                try:  # noqa: SIM105
-                    self._get_proj().g.query(
-                        "MATCH (n:Point {id:$id}) "
-                        "SET n.ep_dirty = null, n.ep_dirty_at = null",
-                        params={"id": root},
-                    )
-                except Exception:  # noqa: BLE001, RUF100
-                    pass
+                if snapshot_unusable:
+                    # Audible, because on a rebuilt graph (#5166) this retire is
+                    # decided without an ordering the run could read: the cap
+                    # stops retrying a root it cannot prove is stale, and the
+                    # `capped` record above is what C7 reports it by.
+                    _logger.warning(
+                        "#9362: retiring capped dirty root %s with no usable "
+                        "epoch snapshot (run_ep=0 — no :EpMeta, e.g. a rebuilt "
+                        "graph): a stamp this run cannot order is not a marking "
+                        "it can prove is newer, so the cap retires it rather "
+                        "than retry it forever (attempt %d)",
+                        root, attempts)
             else:
                 self._retry_attempts[root] = attempts
                 self._retry_backoff_until[root] = now + min(
@@ -20690,6 +21176,43 @@ class TortoiseSDK:
                 # never see a root in both retry_attempts and
                 # stale_unresolved at once.
                 self._stale_unresolved.pop(root, None)
+
+    def _retry_cap_verdict(self, root: str,
+                           run_ep: int | None) -> tuple[str, BaseException | None]:
+        """The GRAPH's verdict on retiring a capped root: ``retired``,
+        ``retained``, ``absent`` or ``unknown`` (#9362 review), plus the
+        swallowed exception for ``unknown`` (``None`` otherwise).
+
+        The exception is RETURNED rather than logged here so the caller can
+        put it on its own contextual warning with a real traceback — this frame
+        is the only one holding it, and a caller logging `exc_info=True` after
+        this handler exits would report `NoneType: None`.
+
+        One statement, so the clear and the verdict cannot disagree: a flag a
+        peer stamped AFTER this run's snapshot is left exactly as it is
+        (`SET x = x`), and the row says so. No row means there is no dirty
+        ``:Point`` with that id — deleted, or a flag no reader will see — which
+        the caller treats as the phantom case (`absent`, NOT `unknown`: folding
+        the two together would keep a phantom in the mirror forever and block
+        hydration). A raise is ``unknown``: the caller keeps the root retryable
+        rather than dropping it on a write it did not see succeed, and logs, so
+        a broken statement cannot make the cap silently inert.
+        """
+        try:
+            rows = self._get_proj().g.query(
+                "MATCH (n:Point) WHERE n.id = $id AND n.ep_dirty = true "
+                "WITH n, (n.ep_dirty_at IS NULL OR $run_ep IS NULL "
+                "          OR n.ep_dirty_at <= $run_ep) AS retired_now "
+                "SET n.ep_dirty = CASE WHEN retired_now THEN null ELSE n.ep_dirty END, "
+                "    n.ep_dirty_at = CASE WHEN retired_now THEN null ELSE n.ep_dirty_at END "
+                "RETURN retired_now AS retired_now",
+                params={"id": root, "run_ep": run_ep},
+            ).result_set
+        except Exception as exc:  # noqa: BLE001, RUF100 - fail safe, see docstring
+            return "unknown", exc
+        if not rows:
+            return "absent", None
+        return ("retired", None) if rows[0][0] is True else ("retained", None)
 
     def _reset_retry_state(self, roots: set[str]) -> None:
         """Clear attempt/backoff state for roots that CONVERGED."""
@@ -20964,26 +21487,96 @@ class TortoiseSDK:
         a concurrent process re-marked it dirty mid-run and its marking
         must survive. ``run_ep=None`` (single-process callers without a
         snapshot) clears unconditionally.
+
+        ⛔ ORDER (#9362). The mirror is the GRAPH's mirror, so it may only be
+        changed by what the graph actually did — never in advance of the
+        write and never by the set the caller ASKED for. Two measured
+        failures came from the old order (mirror subtracted first):
+
+        * the epoch guard keeps a newer marking in the graph while the mirror
+          dropped the root (#1163's hazard, mirror side), so
+          ``dream_health_check``'s ``stale_backlog`` under-reports it;
+        * a sweep whose ``SET`` aborts loses the root for the life of the
+          process — the graph keeps the flag, the mirror forgets it, and
+          ``_hydrate_dirty_roots`` only reads the graph while the mirror is
+          EMPTY, so that process retries only if its mirror later drains
+          (and the roots the aborted sweep dropped are exactly the ones that
+          would have drained it).
+
+        So the write runs FIRST and RETURNS its own verdict, and the mirror is
+        then reconciled exactly: cleared roots leave it, roots the graph KEEPS
+        (newer epoch, or no stamp) stay in it, and roots the graph no longer
+        holds at all (cleared by a peer, or deleted) leave it too — keeping
+        those would pin a phantom that blocks hydration forever. Retry state
+        follows the mirror: reset for every root the mirror lost, kept for a
+        retained one (still dirty, still retryable).
+
+        ⛔ A retained root is KEPT, never ACQUIRED. `|= retained` would also
+        ADD a graph-dirty root this process's mirror never held (a peer's
+        marking, learned for the first time here) — and because
+        ``_hydrate_dirty_roots`` keys on an EMPTY mirror, that partial mirror
+        would then block the hydration that is supposed to load the rest of
+        the graph's backlog. So the update is subtractive only
+        (``-= swept - retained``): a retained root the mirror held stays, one
+        it never held stays unknown to it, and hydration still owns the
+        graph→mirror direction.
+
+        ⚠️ Residual, stated so "the mirror never outruns the graph" is not
+        read as absolute: a ``_mark_dirty`` landing between the statement's
+        commit and these two mirror lines is dropped by the subtraction. The
+        graph keeps the flag, so it is the conservative direction and the next
+        pass picks the root up again; no supported caller runs a marking
+        concurrently with a sweep on the SAME SDK (`Dreamer`'s lock is per
+        instance, and the hosted paths build a per-request SDK).
         """
         swept = set(affected) | self._unsweepable_dirty_roots(affected)
-        self._dirty_roots -= swept
-        self._reset_retry_state(swept)
         if not swept:
             return
         ids = list(swept)
-        if run_ep is None:
-            self._get_proj().g.query(
-                "MATCH (n:Point) WHERE n.id IN $ids AND n.ep_dirty = true "
-                "SET n.ep_dirty = null, n.ep_dirty_at = null",
-                params={"ids": ids},
-            )
-        else:
-            self._get_proj().g.query(
-                "MATCH (n:Point) WHERE n.id IN $ids AND n.ep_dirty = true "
-                "AND n.ep_dirty_at <= $run_ep "
-                "SET n.ep_dirty = null, n.ep_dirty_at = null",
-                params={"ids": ids, "run_ep": run_ep},
-            )
+        # ONE statement, so the verdict and the clear cannot race each other.
+        # `swept_now` is the epoch decision for this root, and the retained ids
+        # come back COLLECTED into the single returned row: the swept set can be
+        # thousands of ids on a large graph, and materialising one Python row
+        # per match costs ~40% of the statement's wall time for a verdict the
+        # caller only needs as a set. Only the RETAINED ids are needed (the
+        # cleared set is `swept - retained`); `collect()` drops the nulls the
+        # CASE emits for a cleared root.
+        #
+        # A root stamped at a NEWER epoch — or carrying no stamp at all, which
+        # the old `ep_dirty_at <= $run_ep` predicate also excluded — is left
+        # EXACTLY as it is (`SET x = x` is the no-op branch of the CASE). The
+        # predicate is the landed one, unchanged: #9362 moves WHEN the mirror
+        # learns the verdict, never WHICH flags the guard clears.
+        #
+        # ⚠️ Disclosed, not claimed away: the retained branch still issues a SET
+        # on that row (`x = x`), where the old statement wrote nothing for it.
+        # Only reachable for an epoch-retained or unstamped flag — a concurrent
+        # re-stamp, or legacy raw-written state — and #2952 records that any
+        # write to an existing node costs a fulltext index entry. The sweep
+        # already writes on every CLEARED node, so this adds a write only on the
+        # rare retained row, and buys the exact verdict the mirror now needs.
+        # (The `retained` set is graph-dirty by construction; it is not
+        # re-filtered for terminal/outdated points the way `_hydrate_dirty_roots`
+        # filters — unreachable today because `_mark_dirty` never persists those
+        # two classes, and named here so a future change to that rule is not
+        # read as already handled.)
+        rows = self._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids AND n.ep_dirty = true "
+            "WITH n, ($run_ep IS NULL OR n.ep_dirty_at <= $run_ep) AS swept_now "
+            "SET n.ep_dirty = CASE WHEN swept_now THEN null ELSE n.ep_dirty END, "
+            "    n.ep_dirty_at = CASE WHEN swept_now THEN null ELSE n.ep_dirty_at END "
+            "RETURN collect(CASE WHEN swept_now THEN null ELSE n.id END) AS retained",
+            params={"ids": ids, "run_ep": run_ep},
+        ).result_set
+        retained = set((rows[0][0] if rows else None) or ())
+        # Subtract ONLY what the graph did not keep: the cleared roots AND the
+        # phantoms (cleared by a peer, deleted, never a :Point). Additive
+        # reconciliation is deliberately avoided — see the docstring.
+        self._dirty_roots -= (swept - retained)
+        # Retry state is per-MIRROR-ROOT: a root that left the mirror cannot be
+        # retried through it, so its attempts/backoff entries are dead. Roots
+        # the graph KEPT keep their state.
+        self._reset_retry_state(swept - retained)
 
     def _unsweepable_dirty_roots(self, affected: set[str]) -> set[str]:
         """Dirty roots that NO pass can ever clear: the NEUTRAL-LINK ones — a
@@ -21835,7 +22428,9 @@ class TortoiseSDK:
             # auto-select to local and inflating the W5 backlog alarm.
             self._prune_nonexistent_dirty_roots()
         elif not result.get("converged", False):
-            self._register_failed_attempt(affected)
+            self._register_failed_attempt(
+                affected,
+                run_ep=getattr(dreamer, "_last_run_ep_version", None))
         reachable = self._window_closure(anchors, max_hops)
         coverage = (len(affected) / len(reachable)) if reachable else 0.0
         result["coverage"] = coverage
@@ -21891,7 +22486,8 @@ class TortoiseSDK:
             # the retained dirty roots (retention already keeps them via the
             # W2 union — the attempt cap bounds the retry loop).
             self._register_failed_attempt(
-                set(self._dirty_roots) & affected)
+                set(self._dirty_roots) & affected,
+                run_ep=getattr(dreamer, "_last_run_ep_version", None))
         reachable = self._window_closure(window, max_hops)
         coverage = (len(affected) / len(reachable)) if reachable else 0.0
         result["coverage"] = coverage
@@ -22279,8 +22875,8 @@ class TortoiseSDK:
         claim's belief is stale" marker; before #6211 the only path that
         retired a CONVERGED PASS's recomputed set was the dreaming adapters'
         `_sweep_dirty_roots` (the two other writers of the flag — `_mark_dirty`'s
-        terminal-point clear and `_register_failed_attempt`'s retry-cap clear —
-        are lifecycle events, not "this pass recomputed it"). A writer following
+        terminal-point clear and `_retry_cap_verdict`'s retry-cap clear — are
+        lifecycle events, not "this pass recomputed it"). A writer following
         the documented "compute confidence for my claims" call (`anchors=` /
         `factors=`) therefore got posteriors and `converged: true` while its own
         claims stayed `ep_dirty` forever. The two TARGETED branches (`factors=` /
@@ -22613,8 +23209,8 @@ class TortoiseSDK:
         set is `_sweep_dirty_roots`, called from the three dreaming adapters
         (`_dream_local` / `_dream_stale_first` / `_dream_full`). Two other
         writers touch the same flag and are NOT this rule: `_mark_dirty` clears
-        it for TERMINAL points as it re-marks them, and
-        `_register_failed_attempt` clears it when a root hits the retry cap —
+        it for TERMINAL points as it re-marks them, and `_retry_cap_verdict`
+        clears it when a root hits the retry cap —
         both are lifecycle events, not "a pass recomputed this belief". The
         targeted fast path — `compute_confidence(
         factors=…)` / `compute_confidence(anchors=…)`, the call the graph
@@ -22712,17 +23308,14 @@ class TortoiseSDK:
         affected = set(getattr(ep, "_last_affected", ()) or ())
         if not affected:
             return
-        # Snapshot the mirror for an EXACT undo. `_sweep_dirty_roots` subtracts
-        # `set(affected) | _unsweepable_dirty_roots(affected)` BEFORE it issues
-        # the graph write, so a failure leaves the roots in the graph but gone
-        # from this process's backlog — and `_hydrate_dirty_roots` returns early
-        # while the mirror is non-empty, so a later no-arg pass would never
-        # retry them. Restoring `affected` alone is not enough: the #7505
-        # NEUTRAL-LINK residue is subtracted too and would be lost; and when the
-        # failure happens BEFORE the subtraction (a raise from
-        # `_unsweepable_dirty_roots` itself) re-adding `affected` would
-        # manufacture mirror roots whose graph flag is clean. A snapshot is the
-        # identity in both positions.
+        # #6211/#9362: the sweep is now write-FIRST — it mutates the mirror only
+        # from the graph's own verdict, so a raise can no longer leave roots in
+        # the graph but gone from this process's backlog, and the restore below
+        # is the IDENTITY on every reachable failure (a raise from
+        # `_unsweepable_dirty_roots` or the statement happens BEFORE the mirror
+        # update). It is kept as a cheap defensive identity rather than deleted:
+        # if a future change moves a mirror mutation above a raise point, this is
+        # the line that keeps `compute_confidence`'s targeted clear honest.
         mirror_before = set(self._dirty_roots)
         try:
             self._sweep_dirty_roots(affected, run_ep=run_ep)
@@ -31368,6 +31961,7 @@ class TortoiseSDK:
         # handling are unchanged.
         return self._emit_event(_ENTITY_MUTATION_RECORD_TYPE, **record)
 
+    @_declares_apply_first_write_lane("_update_entity")
     def _update_entity(self, id_val: str, *, _reserved_supplied: tuple = (), **props) -> dict:
         # #2296 review: `_reserved_supplied` is the set of reserved names the
         # CALLER supplied, captured by `update_entity` before it strips them for
@@ -31956,6 +32550,7 @@ class TortoiseSDK:
                 )
         return self._get_entity(post_write_id)
 
+    @_declares_apply_first_write_lane("_delete_entity")
     def _delete_entity(self, id_val: str) -> bool:
         proj = self._get_proj()
         # NOTE (issue #327): deletion covers only canonical entity labels —

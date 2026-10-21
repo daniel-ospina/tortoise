@@ -14,6 +14,7 @@ import random
 import re
 import time
 
+from .projection import _declares_apply_first_write_lane
 from .quadrature import tilted_moments, moments_to_beta, phi_nand, phi_impl
 from .live import (
     EPISTEMIC_LABELS,
@@ -2085,6 +2086,15 @@ class TortoiseEP:
         return [{"id": r[0], "content": r[5], "alpha": r[2],
                  "beta": r[3], "variance": r[4]} for r in ordered]
 
+    # §17.1 LANE (#9206): APPLY-FIRST, DECLARED. The `REMOVE` of the edge
+    # message slots runs FIRST and its record follows, because the record is
+    # stated over the DELETE's own OUTCOME (`RETURN count(r)` / the committed
+    # edge set) — #5380's design, one direction only: a record written before
+    # the drop could name slots that were never dropped. `_emit_edge_message_
+    # clear` describes the drop completely (its fold clears exactly the scope
+    # this statement cleared), so this is not the #9068 shape: the write IS
+    # journaled, after it lands.
+    @_declares_apply_first_write_lane("ep.invalidate_messages")
     def invalidate_messages(self, point_ids: list[str] | None = None) -> int:
         """Drop graph-persisted EP message state (epic 903-C4, #1242).
 
@@ -2128,6 +2138,9 @@ class TortoiseEP:
             self._emit_edge_message_clear("touching", point_ids)
         return count
 
+    # §17.1 LANE (#9206): APPLY-FIRST, DECLARED — same shape and same reason as
+    # `invalidate_messages` above (record stated over the committed set).
+    @_declares_apply_first_write_lane("ep.invalidate_factor_messages")
     def invalidate_factor_messages(self, point_ids: list[str]) -> int:
         """Drop messages on ALL edges of every operator connected to a point.
 

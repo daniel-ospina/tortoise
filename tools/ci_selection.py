@@ -1145,6 +1145,23 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # queue_resweep / write_op_reachability entries above.
              "tools/why_layer_rate.py",
              "tools/write_op_reachability.py",
+             # #9206 review P1 (the DERIVED-RECOMPUTE lane): the lane's own
+             # disclosure points operators at
+             # `tools/source_dedup_report.py --backfill` as the repair path for a
+             # corpus whose `urlAliases` matter, and that tool is a DECLARED
+             # WRITER of the lane (`_derived_recompute_write_scope`) — so it is
+             # held by the SOURCE CENSUS in
+             # tests/test_9206_derived_recompute_lane.py, which is `core`-
+             # registered. `tools/` is a flat NON_PYTHON_PREFIXES entry and no
+             # SOURCE_PATTERNS row matches the tool, so a tool-only change came
+             # back with `changed == []` and took the docs-only early return:
+             # the census that pins the tool's lane would never run on the PR
+             # that changes it, and an undeclared write added there would go
+             # unnoticed (the #1349/#3332/#3616 silent-drop class). CORE_ALSO
+             # (not TOOL_CARVEOUTS) because the census is hermetic and `core` is
+             # where the suite is registered. Pinned by
+             # tests/test_ci_selection.py::test_9206_lane_suites_run_on_the_diffs_that_can_break_them.
+             "tools/source_dedup_report.py",
              # #2786 review P2: `tools/probe_extractor.py` (the classification
              # prompt put in front of the model) and `tools/calibration_harness.py`
              # (the harness whose `VOCAB` the `minted` metric reads) are the two

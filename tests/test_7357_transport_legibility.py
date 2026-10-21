@@ -36,6 +36,7 @@ redis_exc = pytest.importorskip("redis.exceptions")
 from tortoise import cypher_guard  # noqa: E402
 from tortoise.retry import (  # noqa: E402
     explain_instance_unavailable,
+    is_dead_reader,
     is_instance_unavailable,
     retryable_transient,
 )
@@ -465,9 +466,154 @@ def test_a_non_transport_error_is_not_explained_by_the_helper():
         ValueError("not a db error"), mutating=True) is None
 
 
+def test_a_read_racing_a_parser_teardown_is_a_transport_outcome():
+    """#6977: a torn-down parser socket IS the transport going away.
+
+    ``SocketBuffer.close()`` closes the buffer and then clears the reference, so
+    a read landing in either window raises a plain ``ValueError`` /
+    ``AttributeError``. Neither carries a transport class, so before #6977 the
+    classifier answered False and the sweep folded the teardown into a per-graph
+    DATA error — the ~20% false red on the #2823 P0 guard.
+
+    The shapes are raised through the REAL guarded handle here, because that is
+    where the difference bites: the guard appends its diagnosis IN PLACE, and a
+    classifier that compares the whole message answers False on the production
+    path while passing every synthetic test. Measured, and the reason the arm
+    matches the message HEAD.
+    """
+    teardown = (
+        ValueError("I/O operation on closed file."),
+        AttributeError("'NoneType' object has no attribute 'readline'"),
+        AttributeError("'NoneType' object has no attribute 'read'"),
+    )
+    for error in teardown:
+        exc = _raise_from_handle(error, READ_STATEMENT)
+        # The guard annotated it (the note is what the caller sees)…
+        assert "CONNECTION-LIFETIME" in str(exc), str(exc)
+        assert "graph was deleted or replaced' abort" in str(exc)
+        # …and the classification SURVIVES the annotation.
+        assert is_dead_reader(exc) is True, repr(error)
+        assert is_instance_unavailable(exc) is True, repr(error)
+
+
+#: Message text is the ONLY discriminator this arm has, so its narrowness is the
+#: contract: a different ``ValueError``/``AttributeError`` — including one about
+#: a closed file that is not the vendor's string — must stay outside the family.
+def test_only_the_vendor_teardown_strings_are_admitted():
+    for exc in (
+        ValueError("I/O operation on closed file"),  # no trailing period
+        ValueError("I/O operation on a closed file."),
+        AttributeError("'NoneType' object has no attribute 'encode'"),
+        ValueError("not a db error"),
+    ):
+        assert is_dead_reader(exc) is False, repr(exc)
+        assert is_instance_unavailable(exc) is False, repr(exc)
+
+
 def test_a_bare_local_timeout_is_not_claimed_to_be_an_instance_outage():
     """``retryable_transient`` refuses a cause-less builtin timeout — so do we."""
     assert is_instance_unavailable(TimeoutError("deadline exceeded")) is False
+
+
+def test_a_masked_teardown_is_admitted_through_its_cause_chain():
+    """#6977: the chain walk admits the shape #3813 recorded.
+
+    ``hosted_backup._is_client_read_timeout`` records a ``ValueError: I/O
+    operation on closed file`` chained behind the originating
+    ``redis.exceptions.TimeoutError``. Walking the chain through
+    ``retryable_transient`` (the module's ONE transport classifier) admits it
+    without a second predicate; the message text alone would not.
+    """
+    timeout = redis_exc.TimeoutError(SOCKET_TIMEOUT)
+    try:
+        raise ValueError("a masked shape the text arm does not know") from timeout
+    except ValueError as exc:
+        assert is_dead_reader(exc) is False          # not a vendor string
+        assert is_instance_unavailable(exc) is True  # …but its CAUSE is transport
+
+
+def test_an_answered_refusal_in_the_chain_does_not_join_the_family():
+    """#6977 review: the answered-refusal exclusion is per-EXCEPTION, not per-family.
+
+    The vendor parser maps ``-ERR max number of clients reached`` to the plain
+    ``ConnectionError`` and ``WRONGPASS`` to ``AuthenticationError``. Those must
+    not be smuggled in by a chain either: a data failure whose ``__context__``
+    happens to be a pool-exhaustion refusal is still a data failure, and calling
+    it ``transport`` sends an operator to the wrong surface (#8827's trap).
+    """
+    for refusal in (
+        redis_exc.ConnectionError("max number of clients reached"),
+        redis_exc.AuthenticationError("WRONGPASS invalid username-password pair"),
+        redis_exc.ResponseError("MISCONF Redis is configured to save RDB snapshots"),
+    ):
+        # Each is excluded on its own…
+        assert is_instance_unavailable(refusal) is False, repr(refusal)
+        # …and stays excluded when it is merely the CAUSE of another error.
+        try:
+            raise ValueError("bad row shape") from refusal
+        except ValueError as exc:
+            assert is_instance_unavailable(exc) is False, repr(refusal)
+
+
+def test_a_self_referential_chain_terminates():
+    """The walk is identity-deduplicated, so a cycle cannot hang a red run."""
+    exc = ValueError("bad row shape")
+    exc.__cause__ = exc
+    assert is_instance_unavailable(exc) is False
+
+
+def test_an_implicit_context_chain_is_admitted_too():
+    """#6977: the shape the chain walk exists for is the IMPLICIT one.
+
+    ``hosted_backup._is_client_read_timeout`` records the masked teardown as an
+    implicit ``__context__`` (redis-py raises during the ``except`` body, with no
+    ``from``), so the ``__context__`` half of the walk is the half production
+    travels — it must be pinned, not just the explicit ``from`` half.
+    """
+    try:
+        try:
+            raise redis_exc.TimeoutError(SOCKET_TIMEOUT)
+        except redis_exc.TimeoutError:
+            # Implicit context ON PURPOSE: this is the shape production produces
+            # (redis-py raises during the ``except`` body, with no ``from``).
+            raise ValueError(  # noqa: B904
+                "a masked shape the text arm does not know")
+    except ValueError as exc:
+        assert exc.__cause__ is None and exc.__context__ is not None
+        assert is_instance_unavailable(exc) is True
+
+
+def test_a_suppressed_context_is_not_followed():
+    """``raise ... from None`` DETACHES the chain on purpose — honour it.
+
+    Python sets ``__suppress_context__`` and the author's intent is that the
+    detached error is not the explanation. Following it anyway relabels a data
+    failure as an instance outage — the very misdirection this module exists to
+    prevent.
+    """
+    try:
+        try:
+            raise redis_exc.TimeoutError(SOCKET_TIMEOUT)
+        except redis_exc.TimeoutError:
+            raise ValueError("bad row shape") from None
+    except ValueError as exc:
+        assert exc.__suppress_context__ is True
+        assert is_instance_unavailable(exc) is False
+
+
+def test_a_loading_link_stays_an_instance_event_when_chained():
+    """LOADING is the one ANSWER this module treats as an instance event.
+
+    ``BusyLoadingError`` subclasses ``ConnectionError`` on the pin, so the walk
+    would admit it via ``retryable_transient`` anyway — this pins that the
+    answered-refusal exclusion deliberately does not take it away, chained or
+    not (the command was rejected BEFORE it ran, so nothing was applied).
+    """
+    try:
+        raise ValueError("a masked shape") from redis_exc.BusyLoadingError(
+            "LOADING Redis is loading the dataset in memory")
+    except ValueError as exc:
+        assert is_instance_unavailable(exc) is True
 
 
 # ── contract the callers depend on ─────────────────────────────────────────
