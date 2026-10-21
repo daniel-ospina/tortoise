@@ -25,7 +25,7 @@ inputs: extraction-criteria-v1.md, extraction-harness-design-space.md, calibrati
 | D3 | **statement-only point kind** — the logic layer is one kind; hypothesis folded into confidence (owner, option B) | #1022 |
 | D4 | **Decision class → Event node** (eventKind `decision`, aboutObject → options) — never a decision Point; decision-as-event on the timeline | #1013, state-centric model |
 | D5 | **EventKind semantics** — occurrence (default), deployment (shipped to production ONLY), review, extraction, decision, turn (capture only) | iteration-4 fix (deployment mislabeling eliminated) |
-| D6 | **core:concept kind** for meta-domain concepts (points, decisions, options, criteria, lifecycle, models) | iteration-2 fix (design sessions: 63/99 entities → concept; `other` dump eliminated) |
+| D6 | ~~**core:concept kind** for meta-domain concepts (points, decisions, options, criteria, lifecycle, models)~~ — **SUPERSEDED 2026-10-21 (#2786, PR #9395):** `concept` is not an `objectKind` in ONTOLOGY §5 — #2727 retired it, and the canonical 16 (`pack_registry.CANONICAL_OBJECT_KINDS`) declares no `core:concept`, so the kind this decision routes to resolves nowhere. An abstract model with no fitting kind now routes to the vocabulary's **explicit `other` bucket** (`core:other`). See the note below the table: the routing is the shipped prompt's, and the effect D6 was protecting against is now a calibration measurement, not a prompt-rubric decision. | iteration-2 fix (design sessions: 63/99 entities → concept; `other` dump eliminated) · D6's own evidence argues *against* `other`, so this is **superseded by §5/#2727, not refuted** — the question it raised is now measured, see below |
 | D7 | **S0 reference masking** — regex pre-filter (`PR #N`, `issue N`, `epic N`, `vX.Y`, `#N`) before the LLM sees the transcript | iteration-3 fix (PR refs as dev:issue eliminated) |
 | D8 | **Glue gate** — conversation-about-conversation (acknowledgments, recaps, meta) → nothing/process; facts about the WORK stay claims | iteration-6 correction (the gate must not eat operational content) |
 | D9 | **Chunked extraction** — 6-EDU chunks with id prefixes + per-chunk retry/skip | measured truncation at ~18.6K chars on full-window outputs; chunk=6 fixed all methods |
@@ -33,6 +33,30 @@ inputs: extraction-criteria-v1.md, extraction-harness-design-space.md, calibrati
 | D11 | **Deterministic enforcer rules** (from `validate_stream`): minted kinds, bad eventKinds, claim kind = statement, source_ref present (R4), quote ≤200, MITIGATES targets an IMPL edge + strength band, referential integrity | real-stream audit: 29 missing source_ref, 36 quote violations, 17 kind drifts — the deterministic layer catches what the LLM drifts on |
 | D12 | **Distribution guards**: eventKind collapse (>80% one kind), 0-relations-with->5-claims, keep-ratio fail-closed (>40%), block-rate fail-closed (>15%) | guard fires on flash's all-occurrence streams; keep-ratio/block-rate from the plan |
 | D13 | **Experiments ledger** — every extraction run logged (window, method, model, config, metrics, duration, status) | the calibration loop's memory; `tools/experiments.jsonl` + `--report` |
+
+### D6 is superseded, and that is recorded here on purpose
+
+D6 is struck through rather than deleted because it was a **real measured finding**
+(iteration 2: routing meta-domain concepts to `other` produced a 63/99-entity dump), and the
+only thing that ended it is a **later vocabulary decision**, not a counter-measurement:
+ONTOLOGY §5 (via #2727) declares no `concept` object kind. Two consequences this record must
+carry, so a lane reading a decision table does not re-decide the routing the other way:
+
+- **The routing is settled by §5, not by D6.** The extraction prompt's confusable-kind
+  paragraph and `tools/probe_extractor.py`'s `CORE_SEMANTICS` route an abstract model with no
+  fitting kind to `core:other`, and `tests/test_kind_vocabulary_consistency.py`
+  (`::test_extraction_prompt_advertises_only_canonical_core_kinds`) reds if a retired
+  `core:<kind>` re-enters the built prompt. D6's *intent* — semantics-first extraction with an
+  explicit no-fit bucket, never a minted kind — survives; only its chosen kind does not.
+- **D6's fear of `other` is a measurement now, not a rubric argument.** Whether `core:other`
+  behaves as a dump bucket again is settled by the calibration lanes (#9075–#9077) on
+  `tools/experiments.jsonl`, which is where a change to the routing belongs if the measurement
+  says so. A vocabulary-maintenance change is not the place to re-decide it, and neither is
+  this record: reopening D6 means bringing that measurement here.
+
+> **OVERRIDES:** D6's `core:concept` routing — superseded by ONTOLOGY §5 / #2727 (the canonical
+> object-kind set declares no `concept`), so an abstract model with no fitting kind is emitted as
+> the explicit `core:other` rather than as a retired kind no read path can resolve.
 
 ## The pipeline (target state — what #954/#955/#956 build)
 
