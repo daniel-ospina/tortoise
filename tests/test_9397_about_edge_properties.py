@@ -517,11 +517,14 @@ RETRACTED_INTRODUCED_HERE: frozenset[str] = frozenset({
 })
 
 #: The writers the corrected passages must NAME, and the code shape that makes
-#: each one a property-bearing `about*` writer. The axis here is the WRITE FORM (a
-#: literal `SET r.<name>` in the source), NOT causality: two of these ORIGINATE the
-#: property and one RE-MATERIALIZES it on replay — a split this comment does not
-#: assert, because `test_the_writer_classification_separates_the_causal_axis_from_
-#: the_write_form` is what pins it, in the documents.
+#: each one a property-bearing `about*` writer. The axis here is the WRITE FORM — a
+#: literal `SET r.<name>` in the source — and nothing else. This comment used to
+#: classify them causally ("the ORIGINATORS") and carried the retracted 3+2
+#: split; it must not restate a split at all, because no leg compares THIS
+#: comment to the causal classes, so any count written here is unpinned prose.
+#: Causality is pinned where it belongs: by
+#: `test_the_writer_classification_separates_the_causal_axis_from_the_write_form`,
+#: against the documents.
 RECORDED_WRITERS: dict[tuple[str, str], tuple[str, ...]] = {
     ("tortoise/session_link.py", "link_entity"): (
         'MERGE (s)-[r:{edge_type}]->(t) SET r.confidence=$conf',
@@ -1170,7 +1173,25 @@ def test_the_pin_index_names_every_leg():
         for node in ast.parse(source).body
         if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
     }
-    indexed = set(_PIN_INDEX_ENTRY.findall(source))
+    # ⛔ The match must be confined to the INDEX BLOCK, not file-wide: measured
+    # at `#9403` review, deleting an index entry while adding one
+    # `^\d+\. \`test_…\`` line anywhere else (this module's docstring already
+    # carries such a numbered list) left the leg GREEN — the drift it exists to
+    # catch had a green path. And the count must be compared, not only the set:
+    # `findall` collapses duplicates into a set, so two entries for one name and
+    # none for another also passed.
+    start = source.index("WHAT IS PINNED")
+    block = source[start : source.index("NOT promised:", start)]
+    matches = _PIN_INDEX_ENTRY.findall(block)
+    indexed = set(matches)
+    assert len(matches) == len(indexed), (
+        "the pin index lists a leg more than once: "
+        f"{sorted({n for n in matches if matches.count(n) > 1})}"
+    )
+    assert len(matches) == len(defined), (
+        f"the pin index has {len(matches)} entries for {len(defined)} tests — "
+        "one test per entry"
+    )
     assert indexed <= defined, (
         "the pin index names legs that do not exist: "
         f"{sorted(indexed - defined)}"
