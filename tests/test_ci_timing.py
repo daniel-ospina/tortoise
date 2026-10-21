@@ -4707,6 +4707,10 @@ def test_refresh_warns_when_no_declared_count_resolves(tmp_path: Path) -> None:
         "a refresh that resolves NO declared count must warn: it is about to write "
         f"(UNKNOWN) into every note. stderr={proc.stderr[-400:]!r}")
     assert "declared testcase count" in proc.stderr, proc.stderr[-400:]
+    # The message names the DERIVED fact (the inferred root), never a guessed cause: a
+    # manifest at the repo root or in a subdirectory is inside the tree, and telling the
+    # operator to "re-run inside the tree" would be advice that is already satisfied.
+    assert "grandparent" in proc.stderr and "tests/" in proc.stderr, proc.stderr[-400:]
 
 
 @pytest.mark.parametrize("body,label", [

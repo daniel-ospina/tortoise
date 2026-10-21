@@ -2849,22 +2849,23 @@ def main() -> int:
         # guard cannot be forgotten by the weekly workflow — and so a caller with
         # no witness is never reported as having one.
         declared = declared_test_counts(weights, manifest_path.resolve().parent.parent)
-        if weights and not declared:
-            # THE ROOT IS INFERRED FROM THE MANIFEST'S LOCATION, so a manifest copied
-            # outside the tree (a scratch copy — exactly what a reviewer or a
-            # regenerator makes) resolves no `tests/` directory: every row then takes
-            # the UNKNOWN branch and the refresh rewrites dozens of provenance notes
-            # with a claim that is FALSE of the tree, while still exiting 0 (measured:
-            # 47 rows, 44 of which had carried a concrete denominator). A ZERO-ratio is
-            # never a legitimate result for this repo, so say it out loud rather than
-            # letting the artifact record a witness it never read (#9134 review, P2).
+        if weights and not declared and manifest_path.is_file():
+            # A ZERO-ratio is never a legitimate result for this repo, so say it rather
+            # than letting the artifact record a witness it never read. State the DERIVED
+            # FACT, not a guessed cause: the root comes from the manifest's GRANDPARENT
+            # (`<repo>/config/ci-surfaces.yml`), so name that root and whether `<root>/tests`
+            # exists — a message that assumes "outside the repo" is false for a manifest at
+            # the repo root or in a subdirectory, and its advice ("re-run inside the tree")
+            # is then already satisfied (#9134 review, P2). Skipped when the manifest does
+            # not exist, because that path fails closed on its own and writes nothing.
+            root = manifest_path.resolve().parent.parent
             print(
-                "::warning::ci_timing: none of the "
-                f"{len(weights)} measured files resolved a declared testcase count — "
-                "the manifest is probably outside the repo (the root is derived from "
-                f"the manifest's location: {manifest_path.resolve().parent.parent}). "
-                "Every note will be written as (UNKNOWN); re-run with the manifest "
-                "inside the tree.",
+                "::warning::ci_timing: no declared testcase count resolved for any of the "
+                f"{len(weights)} measured files — every note will be written as (UNKNOWN). "
+                f"The root is the manifest's grandparent, which resolves to {root}; that "
+                f"directory {'has' if (root / 'tests').is_dir() else 'has NO'} tests/ in it. "
+                "The expected layout is <repo-root>/config/ci-surfaces.yml "
+                "(`--manifest config/ci-surfaces.yml` from the repo root).",
                 file=sys.stderr,
             )
         coverage = {path: (m["tests"], declared[path])
