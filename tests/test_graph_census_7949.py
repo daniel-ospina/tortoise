@@ -82,7 +82,7 @@ def test_the_census_counts_the_objects_the_capture_wrote(captured):
 def test_a_definite_description_is_counted_and_a_bare_name_is_not(captured):
     """FAILS IF the `^the <X>` predicate stops being case-insensitive or starts
     matching a name that merely CONTAINS "the" (`#7949` E1's instrument is
-    `^the\\s+\\S`, anchored at the start)."""
+    `^the\\s`, anchored at the start — the probe's own pattern)."""
     sdk, session_id, snap = captured
     g = sdk._get_proj().g
     oid_rows = g.query(
@@ -182,6 +182,36 @@ def test_an_object_reached_only_by_aboutObject_has_no_derivation_link(captured):
         "has moved; record the new number on the epic and update this pin")
 
 
+def test_the_census_uses_the_same_instrument_as_the_e1_probe():
+    """FAILS IF the census grows a SECOND, subtly different E1 predicate.
+
+    The measured E1 figure this bundle reports comes from
+    `docs/evidence/7949-capstone/probes/e1_e2_probe.py::THE_PREFIX`. A census
+    copy of `the\\s+\\S` (the pre-fix spelling) is a strict SUBSET of it — the
+    probe matches a name of exactly `"the "` and the census did not — so the
+    two numbers would be produced by two instruments under one name, which is
+    exactly what E1's claim to authority rules out. Pinned on BOTH surfaces:
+    the pattern/flags, and the classification over the boundary names.
+    """
+    import importlib.util as ilu
+
+    probe_path = (Path(__file__).resolve().parent.parent / "docs" / "evidence"
+                  / "7949-capstone" / "probes" / "e1_e2_probe.py")
+    spec = ilu.spec_from_file_location("e1_e2_probe_census_pin", str(probe_path))
+    assert spec and spec.loader, probe_path
+    probe = ilu.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+
+    assert runner._THE_DEFINITE_DESCRIPTION.pattern == probe.THE_PREFIX.pattern
+    assert runner._THE_DEFINITE_DESCRIPTION.flags == probe.THE_PREFIX.flags
+
+    boundary = ["the rollout policy", "The rollout policy", "THE rollout",
+                "the", "the ", "the\npolicy", "policy on the rollout",
+                "theme", "", " the rollout"]
+    assert [bool(runner._THE_DEFINITE_DESCRIPTION.match(n)) for n in boundary] == \
+        [bool(probe.THE_PREFIX.match(n)) for n in boundary], boundary
+
+
 def test_the_session_source_to_event_reference_anchor_is_counted(captured):
     """FAILS IF the `references` leg scopes by Point ids instead of the
     session's `:Source` — the `#5199` anchor lives on Source→Event, so a
@@ -197,8 +227,8 @@ def test_the_session_source_to_event_reference_anchor_is_counted(captured):
 def test_a_containment_link_is_excluded_from_the_reference_anchor_count(captured):
     """FAILS IF the `references` leg counts referential CONTAINMENT.
 
-    A `(Source)-[:references]->(:Source)` link carries no `sourceVersion` **by
-    design**, so counting one would turn a deliberately unanchored,
+    A `(Source)-[:references]->(:Source)` link with NO `sourceVersion` carries
+    none **by design**, so counting one would turn a deliberately unanchored,
     non-derivation edge into an E3 failure — a false red. The excluded
     population is still reported, so it cannot vanish silently either.
     """
@@ -207,6 +237,7 @@ def test_a_containment_link_is_excluded_from_the_reference_anchor_count(captured
     before = runner.graph_census(
         sdk, session_id, _point_ids(snap))["derivation_edges"]["references"]
     assert before["containment_excluded"] == 0, before
+    assert before["identity_excluded"] == 0, before
 
     g.query(
         "MATCH (s:Source {sessionId:$sid}) "
@@ -221,10 +252,112 @@ def test_a_containment_link_is_excluded_from_the_reference_anchor_count(captured
     assert after["containment_excluded"] == 1, after
 
 
-def test_a_graph_error_is_reported_never_zeroed(captured):
+def test_an_anchored_document_derivation_link_is_counted_not_excluded(captured):
+    """FAILS IF the `references` partition is the target's LABEL instead of the
+    WRITER's rule — the pre-fix defect that hid an anchored derivation link.
+
+    A `Document` link is a DERIVATION link (`edges.py`
+    `_DERIVATION_REFERENCES_LABELS = {Event, Document}`, decided on the CALLER's
+    label) and D10 remaps the node onto `:Source`, so the stored edge is
+    `(Source)-[:references]->(Source)` AND carries `sourceVersion`. A census
+    that excluded every `:Source` target would count that edge as containment —
+    invisible in `total`, invisible in `anchored` — so a later regression that
+    dropped its anchor would move no number at all: `#8501`'s failure mode one
+    label over.
+    """
+    sdk, session_id, snap = captured
+    g = sdk._get_proj().g
+    before = runner.graph_census(
+        sdk, session_id, _point_ids(snap))["derivation_edges"]["references"]
+
+    g.query(
+        "MATCH (s:Source {sessionId:$sid}) "
+        "MERGE (d:Source {url:$url, sourceKind:'document'}) "
+        "MERGE (s)-[r:references]->(d) SET r.sourceVersion = 'doc-sha-1'",
+        params={"sid": session_id, "url": f"doc:{session_id}:1"})
+    after = runner.graph_census(
+        sdk, session_id, _point_ids(snap))["derivation_edges"]["references"]
+    assert after["total"] == before["total"] + 1, (
+        "an anchored Document derivation link vanished from the derivation "
+        f"population: {after!r}")
+    assert after["anchored"] == before["anchored"] + 1, after
+    assert after["containment_excluded"] == before["containment_excluded"], (
+        "an ANCHORED Source target is a derivation link, not containment")
+
+
+def test_an_unanchored_source_target_is_reported_as_containment_a_named_residual(
+        captured):
+    """The NAMED RESIDUAL of the `references` partition, pinned as a limit.
+
+    The stored edge does not record whether `link_source_to_entity` was called
+    with `"Document"` (a derivation, anchored) or whether the writer was the
+    `hosted_api` containment MERGE (unanchored by design), so an UNANCHORED
+    `(Source)-[:references]->(:Source)` edge cannot be classified. The census
+    reports it under `containment_excluded` rather than guessing.
+
+    FAILS IF someone makes the census claim more than that (e.g. counts an
+    unanchored Source target as a derivation failure without a discriminator —
+    a false red on every containment edge), or if the population stops being
+    counted at all. When a real graph-side discriminator lands, this leg is the
+    one to update WITH its evidence — not to delete.
+    """
+    sdk, session_id, snap = captured
+    g = sdk._get_proj().g
+    before = runner.graph_census(
+        sdk, session_id, _point_ids(snap))["derivation_edges"]["references"]
+
+    g.query(
+        "MATCH (s:Source {sessionId:$sid}) "
+        "MERGE (x:Source {url:$url, sourceKind:'external'}) "
+        "MERGE (s)-[:references]->(x)",
+        params={"sid": session_id, "url": f"session:{session_id}:ext2"})
+    after = runner.graph_census(
+        sdk, session_id, _point_ids(snap))["derivation_edges"]["references"]
+    assert after["containment_excluded"] == before["containment_excluded"] + 1
+    assert after["total"] == before["total"], (
+        "an unanchored Source target entered the derivation population — that "
+        "is a false red on a deliberately unanchored containment link")
+    assert after["anchored"] == before["anchored"]
+
+
+def test_an_object_identity_link_is_not_a_failed_anchor(captured):
+    """FAILS IF an `Object` identity/mention link counts as a failed anchor.
+
+    The writer sets NO property on an `(Source)-[:references]->(:Object)` link
+    (`edges.py:2015`: "Identity/mention links (`Object`) carry no
+    `sourceVersion` — this writer sets no property on them at all";
+    `entities.py` writes exactly that edge on the connector path). Counting one
+    in the derivation population would report a deliberate non-derivation as
+    E3 red — a false red. It is reported separately instead of being dropped.
+    """
+    sdk, session_id, snap = captured
+    g = sdk._get_proj().g
+    before = runner.graph_census(
+        sdk, session_id, _point_ids(snap))["derivation_edges"]["references"]
+
+    g.query(
+        "MATCH (s:Source {sessionId:$sid}) "
+        "CREATE (o:Object {id:$oid, name:'the auth dead-end'}) "
+        "CREATE (s)-[:references]->(o)",
+        params={"sid": session_id, "oid": f"mention:{session_id}"})
+    after = runner.graph_census(
+        sdk, session_id, _point_ids(snap))["derivation_edges"]["references"]
+    assert after["total"] == before["total"], (
+        "an identity/mention link entered the derivation population — the "
+        f"writer leaves it anchor-free by design: {after!r}")
+    assert after["anchored"] == before["anchored"], after
+    assert after["identity_excluded"] == before["identity_excluded"] + 1, after
+    assert after["containment_excluded"] == before["containment_excluded"]
+
+
+def test_a_graph_error_is_reported_never_zeroed():
     """FAILS IF `census_or_error` swallows a graph failure into zeros — a
     measured empty session and an unreadable graph must not be the same
-    artifact (`#8501`'s defect class one level up)."""
+    artifact (`#8501`'s defect class one level up).
+
+    Deliberately requests NO `captured` fixture: this is a pure-unit leg, and a
+    real capture would pay for a measurement it never reads.
+    """
 
     class _Boom:
         def query(self, *_a, **_k):
@@ -306,18 +439,26 @@ def test_the_aggregate_is_a_ratio_of_sums_not_a_mean_of_shares():
         "a": {"objects": {"total": 1, "the_prefixed": 1, "the_share": 1.0,
                           "with_derivation_link": 0},
               "derivation_edges": {"extractedFrom": {"total": 1, "anchored": 1},
-                                   "references": {"total": 1, "anchored": 1}}},
+                                   "references": {"total": 1, "anchored": 1,
+                                                  "containment_excluded": 2,
+                                                  "identity_excluded": 0}}},
         "b": {"objects": {"total": 3, "the_prefixed": 0, "the_share": 0.0,
                           "with_derivation_link": 0},
               "derivation_edges": {"extractedFrom": {"total": 0, "anchored": 0},
-                                   "references": {"total": 1, "anchored": 0}}},
+                                   "references": {"total": 1, "anchored": 0,
+                                                  "containment_excluded": 1,
+                                                  "identity_excluded": 4}}},
     }
     aggregate = runner.aggregate_graph_census(per_session)
     assert aggregate["objects"]["the_share"] == pytest.approx(0.25)  # not 0.5
     assert aggregate["derivation_edges"]["extractedFrom"] == {
         "total": 1, "anchored": 1}
+    # The EXCLUDED populations are summed too, not silently dropped: the
+    # receipt carries this aggregate as the corpus-level figure, so a reader of
+    # it must be able to see every edge the census declined to judge.
     assert aggregate["derivation_edges"]["references"] == {
-        "total": 2, "anchored": 1}
+        "total": 2, "anchored": 1,
+        "containment_excluded": 3, "identity_excluded": 4}
     assert aggregate["sessions_with_objects"] == 2
     assert aggregate["sessions_errored"] == []
 
@@ -333,6 +474,35 @@ def test_the_report_level_block_is_per_session_plus_one_aggregate(captured):
     assert block["aggregate"]["objects"]["total"] == \
         block["sessions"][session_id]["objects"]["total"]
     assert runner.graph_census_notes(block) == []  # a clean read says nothing
+
+
+def test_a_snapshot_failure_is_reported_never_zeroed(captured):
+    """FAILS IF a session whose SNAPSHOT raised is published as a measured zero.
+
+    The runner substitutes an empty stand-in snapshot when `snapshot_session`
+    raises, so `census_or_error` never fires (the GRAPH was readable — the
+    snapshot was not) and the census would carry `objects.total = 0`,
+    `the_share = None` and `0/0` edges with no `error` key and no note: a
+    "measured empty" entry for a session nobody measured. The failure is one
+    level above the graph seam, so it must be handed to the census, not
+    re-derived from a zeroed stand-in.
+    """
+    sdk, session_id, _snap = captured
+    stand_in = {"points": [], "direct_edges": [], "operator_edges": [],
+                "mitigations": []}
+    block = runner.build_graph_census(
+        sdk, {session_id: stand_in},
+        snapshot_errors={session_id: "RuntimeError: snapshot exploded"})
+
+    entry = block["sessions"][session_id]
+    assert "error" in entry, entry
+    assert "snapshot raised" in entry["error"]
+    assert "snapshot exploded" in entry["error"]
+    assert "objects" not in entry, "a failed snapshot was published as zeros"
+    assert block["aggregate"]["sessions_errored"] == [session_id]
+    notes = runner.graph_census_notes(block)
+    assert len(notes) == 1 and session_id in notes[0], notes
+    assert "never zeroed" in notes[0], notes
 
 
 def test_an_unreadable_session_names_itself_in_the_report_note(captured):

@@ -558,11 +558,29 @@ def snapshot_session(sdk, session_id: str) -> dict:
 # only by `aboutObject` has no link to mark stale when its transcript is
 # revised (#7949 E3).
 
-#: `#7949` E1's instrument, verbatim from the pre-registration: `^the\s+\S`,
-#: case-insensitive. The `^` is carried by `.match` below (not by the pattern)
-#: so the anchoring has ONE home: an unanchored read — "policy on the rollout"
-#: counted as a definite description — needs a visible `.search` change.
-_THE_DEFINITE_DESCRIPTION = re.compile(r"the\s+\S", re.IGNORECASE)
+#: `#7949` E1's instrument — the SAME predicate, character for character, that
+#: produced the measured figure the epic reports:
+#: `docs/evidence/7949-capstone/probes/e1_e2_probe.py::THE_PREFIX`
+#: (`re.compile(r"^the\s", re.IGNORECASE)`), which restates the architecture
+#: document's rule (§1:85 — a definite description is an Object whose name
+#: begins with `the `). There is deliberately ONE definition per side and NO
+#: second, subtly stricter copy: an earlier `the\s+\S` here made the census a
+#: strict SUBSET of the probe (a name of exactly `"the "` matched the probe and
+#: not the census) — two instruments under one name, with E1's whole claim to
+#: authority being that there is one. They are pinned identical by
+#: `tests/test_graph_census_7949.py`,
+#: `test_the_census_uses_the_same_instrument_as_the_e1_probe`.
+#:
+#: The `^` is carried by `.match` below as well as by the pattern, so an
+#: unanchored read — "policy on the rollout" counted as a definite description
+#: — needs a visible `.search` change.
+#:
+#: NOT checkable against a pre-registration artifact: the `PREREG_ARTIFACT` the
+#: probe names (`docs/evidence/7949-capstone/preregistration.json`) is ABSENT
+#: from the tree, so the probe reports the run as `UNPREREGISTERED` pending
+#: `#9075`. "Pre-registered instrument" means the frozen rule the probe
+#: implements, not a frozen-thresholds file.
+_THE_DEFINITE_DESCRIPTION = re.compile(r"^the\s", re.IGNORECASE)
 
 #: Objects are deduped and re-addressed by their BACKEND id, not by `o.id`:
 #: `:Object` always carries an `id` on the write path, but a legacy or
@@ -595,21 +613,63 @@ DERIVATION_ANCHOR_QUERY = (
 #: session's Source silently yields 0/0 (a "nothing to anchor" reading of a
 #: graph that HAS an anchor — measured on the session-capture path).
 #:
-#: ⚠️ CONTAINMENT IS EXCLUDED, and that exclusion is load-bearing: a
-#: `(Source)-[:references]->(:Source)` link is referential containment and
-#: carries NO `sourceVersion` **by design** (`projection/edges.py`, the
-#: `_DERIVATION_REFERENCES_LABELS` note — the `hosted_api` session→external
-#: MERGE writes those outside the anchored path). Counting them would make a
-#: deliberately unanchored, non-derivation edge read as an E3 failure — a
-#: FALSE RED, the mirror of the false green the anchored predicate guards
-#: against. They are counted separately (`containment_excluded`) so the
-#: population stays visible instead of vanishing.
+#: ⚠️ THE PARTITION IS THE WRITER'S RULE, NOT THE TARGET'S LABEL. The label
+#: alone cannot answer "is this edge a derivation":
+#:
+#:   * a DERIVATION link is written for `_DERIVATION_REFERENCES_LABELS` =
+#:     `{Event, Document}`, and D10 remaps `Document` onto `:Source` — so a
+#:     DOCUMENT derivation link is stored as `(Source)-[:references]->(Source)`
+#:     and it CARRIES `sourceVersion` (`projection/edges.py::link_source_to_entity`
+#:     decides `_is_derivation` on the CALLER's label, before the remap).
+#:     Excluding every `:Source` target would hide that anchored derivation
+#:     edge — the one the hosted lane writes (`hosted_api` →
+#:     `link_source_to_entity(…, "Document")`) — from BOTH sides, which is the
+#:     `#8501` failure mode one label over: an anchor a later regression could
+#:     drop without moving any number.
+#:   * an IDENTITY/MENTION link is written for `Object` with NO property at all
+#:     (`edges.py:2015` — "this writer sets no property on them at all"), so
+#:     counting one as a failed anchor is a FALSE RED on an edge the model
+#:     deliberately leaves bare (`entities.py` writes
+#:     `(Source)-[:references]->(:Object)` on the connector path).
+#:   * REFERENTIAL CONTAINMENT — `(Source)-[:references]->(:Source)` with NO
+#:     `sourceVersion`, written by the `hosted_api` session→external MERGE
+#:     outside the anchored path — is likewise non-derivation by design.
+#:
+#: So the derivation population is "every `references` edge EXCEPT those two
+#: named, anchor-free classes", each excluded class reported separately and by
+#: COUNT (`containment_excluded`, `identity_excluded`) so neither can vanish
+#: silently, and any UNKNOWN target label stays IN the population (reported as
+#: a failure) instead of dropping out of it. A `:Source` target that carries an
+#: anchor is by definition a `Document` derivation and lands in
+#: `total`/`anchored`.
+#:
+#: ⚠️ NAMED RESIDUAL — this partition is correct where the graph can decide, and
+#: it CANNOT decide everywhere. The stored edge does not record the relation
+#: spelling that made it derivation or containment, so an UNANCHORED
+#: `(Source)-[:references]->(:Source)` edge is reported under
+#: `containment_excluded` whichever of the two it is. The consequence is
+#: one-directional and stated rather than hidden: a regression that DROPS the
+#: anchor from a `Document` derivation link moves `anchored` and `total` down
+#: by one and `containment_excluded` up by one — visible to a reader, but not
+#: counted as an E3 failure. Closing it needs a graph-side discriminator; a
+#: target `documentKind` is a CANDIDATE and not an answer (the `Document` stub
+#: mint does not guarantee one), so it is not asserted here. Pinned by
+#: `test_an_unanchored_source_target_is_reported_as_containment_a_named_residual`.
 SESSION_REFERENCES_ANCHOR_QUERY = (
     "MATCH (s:Source {sessionId: $sid})-[r:references]->(t) "
-    "RETURN sum(CASE WHEN t:Source THEN 0 ELSE 1 END), "
-    "sum(CASE WHEN t:Source THEN 0 "
+    "RETURN "
+    # total: not identity/mention, and not an UNANCHORED Source target.
+    "sum(CASE WHEN t:Object THEN 0 WHEN t:Source AND "
+    "(r.sourceVersion IS NULL OR r.sourceVersion = '') THEN 0 ELSE 1 END), "
+    # anchored: of that same population, the ones carrying the writer's anchor.
+    "sum(CASE WHEN t:Object THEN 0 WHEN t:Source AND "
+    "(r.sourceVersion IS NULL OR r.sourceVersion = '') THEN 0 "
     "WHEN r.sourceVersion IS NULL OR r.sourceVersion = '' THEN 0 ELSE 1 END), "
-    "sum(CASE WHEN t:Source THEN 1 ELSE 0 END)"
+    # containment_excluded: Source targets with NO anchor (by design).
+    "sum(CASE WHEN t:Source AND "
+    "(r.sourceVersion IS NULL OR r.sourceVersion = '') THEN 1 ELSE 0 END), "
+    # identity_excluded: Object targets — anchor-free by design.
+    "sum(CASE WHEN t:Object THEN 1 ELSE 0 END)"
 )
 
 
@@ -624,8 +684,14 @@ def graph_census(sdk, session_id: str, point_ids: list[str]) -> dict:
         {"session_id",
          "objects": {"total", "the_prefixed", "the_share",
                      "with_derivation_link"},
-         "derivation_edges": {"extractedFrom": {"total", "anchored"},
-                              "references": {"total", "anchored"}}}
+         "derivation_edges": {
+             "extractedFrom": {"total", "anchored"},
+             "references": {"total", "anchored",
+                            "containment_excluded", "identity_excluded"}}}
+
+    ``references.total`` is the DERIVATION population only: the two anchor-free,
+    non-derivation classes are excluded by the WRITER's rule and reported by
+    count (see ``SESSION_REFERENCES_ANCHOR_QUERY``).
 
     and does not swallow a graph failure: the runner ALWAYS reaches it through
     ``census_or_error`` precisely so that a failure is reported and can never
@@ -656,14 +722,17 @@ def graph_census(sdk, session_id: str, point_ids: list[str]) -> dict:
     ).result_set
     for rel, rows in (("extractedFrom", extracted_rows),
                       ("references", references_rows)):
-        total = anchored = containment = 0
+        total = anchored = containment = identity = 0
         if rows:
             total, anchored = int(rows[0][0] or 0), int(rows[0][1] or 0)
-            containment = int(rows[0][2] or 0) if len(rows[0]) > 2 else 0
+            if len(rows[0]) > 3:
+                containment = int(rows[0][2] or 0)
+                identity = int(rows[0][3] or 0)
         derivation_edges[rel] = {
             "total": total, "anchored": anchored,
-            **({"containment_excluded": containment} if rel == "references"
-               else {}),
+            **({"containment_excluded": containment,
+                "identity_excluded": identity}
+               if rel == "references" else {}),
         }
     return {
         "session_id": session_id,
@@ -717,8 +786,14 @@ def aggregate_graph_census(per_session: dict[str, dict]) -> dict:
         for rel, counts in (census.get("derivation_edges") or {}).items():
             if rel not in edges:
                 continue
-            edges[rel]["total"] += int(counts.get("total") or 0)
-            edges[rel]["anchored"] += int(counts.get("anchored") or 0)
+            for key, value in counts.items():
+                # EVERY per-session counter is summed, not just total/anchored:
+                # the excluded populations (`containment_excluded`,
+                # `identity_excluded`) are part of the measurement, and an
+                # aggregate that dropped them would leave the corpus-level
+                # figure — the one the receipt carries — silent about exactly
+                # the edges the census chose not to judge.
+                edges[rel][key] = edges[rel].get(key, 0) + int(value or 0)
     return {
         "sessions": len(per_session),
         "sessions_with_objects": sessions_with_objects,
@@ -734,22 +809,39 @@ def aggregate_graph_census(per_session: dict[str, dict]) -> dict:
     }
 
 
-def build_graph_census(sdk, surfaces_by_session: dict[str, dict]) -> dict:
+def build_graph_census(sdk, surfaces_by_session: dict[str, dict],
+                       snapshot_errors: dict[str, str] | None = None) -> dict:
     """The report-level census: per session plus one aggregate (#8444).
 
     ``surfaces_by_session`` is the runner's ``snapshot_session`` output per
     session (post-dream), so the census reads exactly the graph the graded
     numbers were taken from. An unreadable session is carried as an ``error``
     entry, never dropped and never zeroed.
+
+    ``snapshot_errors`` maps a session id to the failure that stopped the
+    runner reading its snapshot at all. Such a session has NO surface to
+    census: the runner substitutes an empty stand-in so the rest of the run can
+    continue, and a census over that stand-in would report `objects.total = 0`,
+    `the_share = None` and `0/0` edges — a MEASURED-EMPTY entry with no
+    ``error`` key, because ``census_or_error`` guards the GRAPH read and this
+    failure is one level up. So the fact is carried into the census instead of
+    being re-derived from a zeroed snapshot, and the run note names the session
+    like any other unreadable one.
     """
-    per_session = {
-        sid: census_or_error(
+    snapshot_errors = dict(snapshot_errors or {})
+    per_session: dict[str, dict] = {}
+    for sid, snap in surfaces_by_session.items():
+        if sid in snapshot_errors:
+            per_session[sid] = {
+                "session_id": sid,
+                "error": f"snapshot raised: {snapshot_errors[sid]}",
+            }
+            continue
+        per_session[sid] = census_or_error(
             sdk, sid,
             [p["point_id"]
              for p in snap.get("points", []) + snap.get("operator_nodes", [])],
         )
-        for sid, snap in surfaces_by_session.items()
-    }
     return {
         "sessions": per_session,
         "aggregate": aggregate_graph_census(per_session),
@@ -1375,6 +1467,7 @@ def run_benchmark(
             golds = {sid: corpus.load_gold(sid, root) for sid in selected}
             points_by_session: dict[str, list] = {}
             surfaces_by_session: dict[str, dict] = {}
+            snapshot_errors: dict[str, str] = {}
             for sid in selected:
                 try:
                     snap = snapshot_session(sdk, sid)
@@ -1382,6 +1475,10 @@ def run_benchmark(
                     runner_errors.append(
                         f"{sid}: operator snapshot raised {type(exc).__name__}: {exc}"
                     )
+                    # Remembered for the census below: the stand-in snapshot is
+                    # NOT a measurement, and a census over it would publish a
+                    # zero for a session whose graph was never read.
+                    snapshot_errors[sid] = f"{type(exc).__name__}: {exc}"
                     snap = {"points": [], "direct_edges": [],
                             "operator_edges": [], "mitigations": []}
                 points_by_session[sid] = snap.get("points", [])
@@ -1390,7 +1487,8 @@ def run_benchmark(
             # SAME post-dream snapshot the operator audit reads, so the two
             # dimensions cannot describe different graphs. Additive and NOT a
             # `METRIC_VALUES` member — see the block comment on `graph_census`.
-            graph_census_report = build_graph_census(sdk, surfaces_by_session)
+            graph_census_report = build_graph_census(
+                sdk, surfaces_by_session, snapshot_errors=snapshot_errors)
             notes.extend(graph_census_notes(graph_census_report))
             for result in session_results:
                 result["graph_census"] = graph_census_report["sessions"].get(
@@ -2169,7 +2267,10 @@ def _main(argv: list[str] | None = None) -> int:
                 f"extractedFrom={edges['extractedFrom']['anchored']}/"
                 f"{edges['extractedFrom']['total']} anchored "
                 f"references={edges['references']['anchored']}/"
-                f"{edges['references']['total']} anchored"
+                f"{edges['references']['total']} anchored "
+                f"(excluded: containment="
+                f"{edges['references'].get('containment_excluded', 0)}, "
+                f"identity={edges['references'].get('identity_excluded', 0)})"
             )
         semantic = report.get("semantic_judge")
         if semantic and semantic.get("status") == "completed":
