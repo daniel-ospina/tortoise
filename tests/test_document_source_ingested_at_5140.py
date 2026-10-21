@@ -241,3 +241,100 @@ def test_the_single_clock_stamp_never_becomes_an_event_property():
             f"envelope `ts` must never be a node property; got {rows!r}")
     finally:
         sdk.close()
+
+
+# ── #9434 — the SDK door that APPENDS first, then folds the caller's dict ────
+#
+# #9419 took one of the two doors `_event_plain_merge`'s docstring names. This is
+# the other, and its shape is why it was split out: `_apply_and_journal` appends
+# through `_journal_entity_event` → `_emit_event`, which mints the envelope `ts`
+# on a COPY of the record, and only THEN folds the CALLER's dict — which carries
+# no `ts`, because `ts` is a reserved ENVELOPE prop. So the fold read
+# `record_ts=None` and stamped `_now_iso()`, while a replay read the record's own
+# `ts`: the #5024 `derived = replay(journal)` break, on `ingestedAt`.
+#
+# Same two tests as #9419 above, driven through the OTHER door.
+
+
+def _applied_record(object_id: str) -> dict:
+    """The FLAT `EventRecorded` record a caller of `_apply_and_journal` builds.
+
+    Flat, not nested: `_upsert_event` unwraps `event.get("event", event)`, so the
+    caller's own dict IS the payload — which is exactly why the append-first door
+    could journal an instant the fold never saw.
+    """
+    return {
+        "type": "EventRecorded",
+        "id": f"evt-{object_id}",
+        "eventKind": "sessionCaptured",
+        "subject": "agent-pi",
+        "object": object_id,
+        "objectType": "Document",
+    }
+
+
+def test_apply_and_journal_document_does_not_diverge_live_vs_rebuild():
+    """Input: a document `EventRecorded` through `_apply_and_journal`.
+
+    FAILS IF live and rebuilt disagree on the minted document `:Source`'s
+    `ingestedAt` — #9434. Pre-fix the fold read no record `ts` (the caller's dict
+    had none) and stamped `_now_iso()` at fold time while the append stamped the
+    record's own instant, so a rebuild replayed a DIFFERENT value than the live
+    write stored. Mutation: drop the `event["ts"]` stamp in
+    `_apply_and_journal` (or the `recorded_ts=` argument that hands it to
+    `_journal_entity_event`) and the two values differ again.
+    """
+    from tortoise.log import EventLog
+
+    sdk, log = _journaled_sdk()
+    try:
+        proj = sdk._get_proj()
+        sdk._apply_and_journal(proj, _applied_record("doc-9434.md"))
+        live = _ingested_at(proj, "doc-9434.md")
+        assert live, "the document :Source must be stamped at all (§4.6 REQUIRED)"
+        proj.rebuild_all(os.path.dirname(log), confirm_destructive=True)
+        rebuilt = _ingested_at(proj, "doc-9434.md")
+        assert live == rebuilt, (
+            "`derived = replay(journal)` must hold for this field: the live "
+            f"write stamped {live!r} and the rebuild {rebuilt!r}")
+        # ...and the equality must come from the RECORD, not from two clocks
+        # that happened to agree: the one instant is the envelope `ts`.
+        rec = [e for e in EventLog(log).read_all()
+               if e.get("type") == "EventRecorded"]
+        assert len(rec) == 1, f"expected one EventRecorded line, got {len(rec)}"
+        assert rec[0]["ts"] == live, (
+            "the fold instant and the record's `ts` must be ONE clock read — "
+            f"record ts {rec[0]['ts']!r} vs live ingestedAt {live!r}")
+    finally:
+        sdk.close()
+
+
+def test_the_apply_and_journal_stamp_never_becomes_a_node_property():
+    """Input: the same `_apply_and_journal` write, read back off BOTH nodes.
+
+    FAILS IF the envelope `ts` stamped for #9434 leaks onto the folded nodes.
+    This door is the one where a leak is most plausible, because the dict the
+    fold receives is the CALLER's dict and the stamp mutates it in place. `ts` is
+    a `_META_KEYS` member, so `_persist_extra_props` must skip it — and
+    `_journal_record_payload` drops it from the payload, so a live-only `ts`
+    property would be a NEW live/rebuild divergence, i.e. this fix rebuilding
+    the defect it closes.
+    """
+    sdk, _log = _journaled_sdk()
+    try:
+        proj = sdk._get_proj()
+        sdk._apply_and_journal(proj, _applied_record("doc-9434-ts.md"))
+        for query, params, label in (
+            ("MATCH (e:Event {eventId:$k}) RETURN properties(e)",
+             {"k": "evt-doc-9434-ts.md"}, "Event"),
+            ("MATCH (s:Source {url:$k}) RETURN properties(s)",
+             {"k": "doc-9434-ts.md"}, "Source"),
+        ):
+            rows = proj.g.query(query, params=params).result_set
+            assert len(rows) == 1, f"expected one {label} node, got {rows!r}"
+            props = rows[0][0] or {}
+            assert "ts" not in props, (
+                f"envelope `ts` must never be a {label} node property; "
+                f"got {sorted(props)!r}")
+    finally:
+        sdk.close()
