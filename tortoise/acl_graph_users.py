@@ -85,25 +85,28 @@ def _admin_client():
     parsers; docker-compose maps 6379 for containers WITH the port).
 
     #7357 — built through ``guarded_client`` (the #6882 seam), so a transport
-    failure on this channel arrives with the instance-outage note appended by
-    ``cypher_guard``: the instance went away, and whether the command took
-    effect is UNKNOWN — anything that mutates must be read back before it is
-    re-issued. The HEDGE arm is the one this channel gets, deliberately: every
-    verb this module sends is non-Cypher (``MODULE LIST``, ``ACL GETUSER``/
+    failure on a role/ACL mutation carries the instance-outage note: the
+    instance went away (a restart, an RDB reload, an OOM-kill), and for a
+    mutating verb whether the command took effect is UNKNOWN — read the ACL
+    state back before re-issuing it.
+
+    THE SURFACE THAT GAINS THE NOTE IS THIS MODULE'S LOG LINE, NOT a
+    caller-facing message: every ACL fn here is fail-soft and catches what the
+    guarded channel raises (``except Exception`` → ``logger.warning(...)``, then
+    ``False``/``None`` — see :func:`_setuser`, :func:`drop_acl_user`), so the
+    noted exception is LOGGED and swallowed rather than returned to a caller,
+    and an ``AclLayerError`` from a real ``ResponseError`` refusal is untouched
+    and correctly carries no note (``is_instance_unavailable`` excludes it).
+    What was missing before this seam is the mechanism class and the read-back
+    instruction; the prefix this module already logged said "connection
+    failure". A first-command failure inside :func:`_falkordb_present` is still
+    swallowed there with no log at all — pre-existing, and outside this wiring
+    change's scope. The HEDGE arm is the one this channel gets, deliberately:
+    every verb this module sends is non-Cypher (``MODULE LIST``, ``ACL GETUSER``/
     ``SETUSER``/``DELUSER``/``SAVE``), so ``_command_mutating`` has no statement
     to classify and answers ``None``. The ACL bearer commands are also not
     operator-guarded (no Cypher reaches the ``=~`` guard); the outage note is
     the whole gain.
-
-    ⛔ Where that note LANDS, stated because these fns are fail-soft: no caller
-    receives a transport sentence at all. ``_setuser``/``drop_acl_user``/
-    ``_acl_save`` log the noted exception at ``logger.warning`` and return
-    False/None, and ``create_acl_user`` then reports ``None``. So the surface
-    this change improves on this channel is the LOG LINE — it names the
-    mechanism class and the read-back rule to whoever reads the log, instead of
-    the bare driver sentence. (A first-command failure inside
-    ``_falkordb_present`` is swallowed there with no log at all; that
-    pre-existing swallow is out of this wiring change's scope.)
     """
     uri = os.environ.get("TORTOISE_DB_URI")
     if not uri:
