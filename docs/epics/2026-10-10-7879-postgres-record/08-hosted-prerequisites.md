@@ -100,7 +100,7 @@ layer is the fold over them (`…04_record_procedural.sql` `object_current_statu
 
 **EP weights are correctly ABSENT.** `public.point`'s `chk_point_props_no_derived` refuses
 `ep_alpha`, `ep_beta`, `c_cal`, `confidence`, `posterior_*`, `baseline_set`, `content_hash`,
-`inherited_at`, `ep_dirty*` (16 keys in all) **by name as props keys** (`…03_record_epistemic.sql:128`); the columns themselves do not exist, so a
+`inherited_at`, `ep_dirty*` (16 keys in all — the other five are `_graph_id`, `_nid`, `lastDreamedAt`, `reason`, `version`) **by name as props keys** (`…03_record_epistemic.sql:128`); the columns themselves do not exist, so a
 writer adding one meets a SQL error rather than this CHECK. **Where belief lives:** EP
 confidence is computed in Python over the structure (§2.0 clause (a));
 `tortoise/ep.py` is its home, and `baseline_source`/`baseline_alpha`/`baseline_beta` are the one
@@ -174,7 +174,7 @@ idempotent, total, and stores no EP scalar`.
 
 | thing that looks live | its actual state | evidence |
 |---|---|---|
-| **the record, in the hosted deployment** | ⛔ **NOT ARMED.** `TORTOISE_RECORD_DSN` appears **nowhere** in `fly.toml`, `entrypoint.sh`, `.github/workflows/deploy-hosted.yml`, or the runbook's Secrets Matrix. Unset ⇒ `NOT_ARMED` ⇒ *"zero statements, no connection attempt"* — the record path is inert on the deployment, so its behaviour is unchanged. | `grep -c TORTOISE_RECORD_DSN fly.toml` → **0** |
+| **the record, in the hosted deployment** | ⛔ **NOT ARMED.** `TORTOISE_RECORD_DSN` appears **nowhere** in `fly.toml`, `entrypoint.sh`, `.github/workflows/deploy-hosted.yml`, or the runbook's Secrets Matrix. Unset ⇒ `NOT_ARMED` ⇒ *"zero statements, no connection attempt"* — the record path is inert on the deployment, so its behaviour is unchanged. | `grep -rn TORTOISE_RECORD_DSN fly.toml entrypoint.sh .github/workflows/ docs/infra-runbook.md` → empty |
 | **the end-to-end proof, in CI** | ⛔ **NEVER RUNS.** No CI job sets `TEST_RECORD_DB_URI` (the test file says so itself, and `grep` over `.github/` agrees), **and** `psycopg2` is the optional `[postgres]` extra — absent from the default dev/CI env, so the two Postgres legs `importorskip` and **skip even when a Postgres is given**. | measured: run 1 → `57 passed, 2 skipped`; run 2 with `--extra postgres` → **`2 passed`** |
 | **the edge / operator half of the record** | ⚠️ **`relation` = 0 rows** on the live capture measurement, and the number is a consequence of **R4**: the capture *does* write journaled `EntityLinked` records (each one a `RelationUpsert`, `record_projection.py:732`), but their endpoints are the claim `PointAdded` rows, which that capture's `search_keys` disagreement gets refused — so the relations have nowhere to land. `04-projection.md` §3 *additionally* declares the point-property-derived edge family *"not materialized by this increment"*. | §G run 2; R4 |
 | **the `session` record** | ⚠️ **`capture_redactions` is NULL because the record that would write it is REFUSED** — the column is `jsonb` and the producer emits an integer, so the `SessionRecorded` carrying `capture_redactions` is refused with `DatatypeMismatch` and is counted on `record_write_failures`; the module refuses to coerce (`record_projection.py:1014`). Pinned as a tolerated disagreement, not fixed (**#9264**, OPEN). | `tests/test_9078_record_written_by_production_path.py:139` `_SCHEMA_DISAGREEMENTS = {"search_keys": …, "capture_redactions": …}` |
@@ -318,7 +318,7 @@ at 03:00.
 ### R9 — Back up the record, and test the restore · **M** · ops + decision · **BLOCKER**
 
 **What:** no module of ours backs up the record. `tortoise/backup.py` (module docstring: *"JSONL archiver +
-FalkorDB BGSAVE"*), `hosted_backup.py` (Cloudflare R2) and `backup_sweep.py` (the cron driver) archive the **graph** — `backup.py` additionally copies the local journal's `events.jsonl` — and none of them backs up the record.
+FalkorDB BGSAVE"*), `hosted_backup.py` (Cloudflare R2), `backup_sweep.py` (the cron driver) and the self-hosted sweep `selfhost_backup.py` archive the **graph** — `backup.py` additionally copies the local journal's `events.jsonl` — and none of them backs up the record.
 §3 and §14.1's **O1** record the decision: **durability = the store's backup; rebuildability = the journal** —
 so promoting Postgres to the record **moves the durability obligation onto Postgres**, and no
 module of ours holds it (whether the paid plan does is unverified — every statement in the tree
@@ -381,14 +381,14 @@ measured them, plus that section's date where it pins one. **`MEASURED` means a 
 |---|---|---|---|
 | resident nodes (dogfood/prod graph) | **89,701** | `MATCH (n)`, 2026-09-25 (§17.4.2) | **MEASURED** |
 | quota-counted nodes | **24,978** | the quota predicate, same date | **MEASURED** |
-| `GRAPH.MEMORY USAGE` | **143 MiB** (indices 46 MiB) | sampling estimate, `SAMPLES`=100; **blind to the HNSW index** (§2.1) | **MEASURED (estimate by construction)** |
+| `GRAPH.MEMORY USAGE` | **143 MiB** (indices 46 MiB) | sampling estimate, `SAMPLES`=100; **blind to the HNSW index** (§2.1 — which pins 2026-09-24; the same reading is dated 2026-09-25 in §17.4.2) | **MEASURED (estimate by construction)** |
 | bytes per resident node | **1,672 B** | 143 MiB ÷ 89,701 | **MEASURED** |
 | in-graph text | **16 MB** | §2.2 breakdown | **MEASURED** |
 | in-graph embeddings | **51.6 MB** stored vectors; **45 MB** of indices | §2.2 / §12.1b | **MEASURED** |
 | stored vectors, by label | **12,657** (`:Object` 7,859 + `:Event` 4,798, ≈19 MB) — and only `Point.embedding` is indexed | `CALL db.indexes()`, §13 | **MEASURED** |
-| Points carrying any content | **49.0%**; **1,121.4 B** mean over those, **549.1 B** over all (5,696,946 B over 10,374) | `graph-content-census.json`, 2026-10-17 | **MEASURED** |
-| Points carrying a vector | **39.96%** (4,145 / 10,374) | same census | **MEASURED** |
-| record footprint per tenant (Postgres) | **0.1916 GB** = **2,136 B/node on disk** (heap + indexes + TOAST) | bench on the committed schema, 2026-10-17 | **MEASURED — a LOWER BOUND** (no TOAST regime; vector written at 6 dp vs the journal's real 21.9 chars/float) |
+| Points carrying any content | **49.0%**; **1,121.4 B** mean over those, **549.1 B** over all (5,696,946 B over 10,374) | `§17.4.6` / `graph-content-census.json`, 2026-10-17 | **MEASURED** |
+| Points carrying a vector | **39.96%** (4,145 / 10,374) | same census; `§17.4.6`, 2026-10-17 | **MEASURED** |
+| record footprint per tenant (Postgres) | **0.1916 GB** = **2,136 B/node on disk** (heap + indexes + TOAST) | bench on the committed schema; `§17.4.6`, 2026-10-17 | **MEASURED — a LOWER BOUND** (no TOAST regime; vector written at 6 dp vs the journal's real 21.9 chars/float) |
 | record row width | **1,263–1,266 B** median, **1,421–1,423 B** mean | `§17.4.6`; `docs/evidence/7983-cost-magnitudes/README.md`, measured 2026-10-17 | **MEASURED** |
 | keyed miss cost | **5.2 blocks** mean (4 median, 7 max), **2,312 B** on the wire, **0.048–0.053 ms** server | DETOASTED, 200 samples; `§17.4.6` / `docs/evidence/7983-cost-magnitudes/README.md`, 2026-10-17 | **MEASURED** |
 | full-scope rebuild (one table) | **115,605 blocks / 947.0 MB / 2,629–2,694 ms** at 89,701 rows | DETOASTED; a per-table **floor**, not the rebuild total; `§17.4.6` / `docs/evidence/7983-cost-magnitudes/README.md`, 2026-10-17 | **MEASURED** |
@@ -520,7 +520,8 @@ cd supabase/tests/pglite && npm install && npm run validate
 **Census commands (the "not in place" claims):**
 
 ```text
-grep -c TORTOISE_RECORD_DSN fly.toml entrypoint.sh .github/workflows/*.yml   → 0
+grep -rn TORTOISE_RECORD_DSN fly.toml entrypoint.sh .github/workflows/ \
+  docs/infra-runbook.md                                                       → (no output)
 grep -riE 'pgvector|vector\(' supabase/migrations/*.sql | wc -l              → 0
 grep -riE 'narrative|raw_turn|raw_text|transcript' supabase/migrations/*.sql → 0
 grep -rn 'app.current_org_id' --include=*.py tortoise/ tools/                → 0 setters
