@@ -1288,11 +1288,17 @@ class TestOperatorContract:
 
         The sibling test above only asserts the switch is PRESENT, which is why
         the drift went uncaught; this one pins the semantics of the decline.
-        It pins the TRUTH, not a phrase whitelist: the two positive facts, and
-        the absence of both ways of stating the old contract (a `degraded=True`
-        decline, and the "reports itself degraded" sentence). A truthful
-        rewording that keeps those facts therefore stays green — the assertions
-        below are one-directional on purpose.
+
+        It pins the two positive facts by their CANONICAL trace spellings —
+        ``declined=True`` and ``degraded=False`` are code identifiers in the leg
+        trace, so the contract names them literally: an operator reading
+        `.env.example` meets the same spellings the trace emits, and a reword
+        ("``degraded`` remains ``False``") is a deliberate edit of the contract
+        that this test asks for rather than an innocent change it forbids. The
+        two NEGATIVE assertions are the other direction — they refuse either
+        spelling of the OLD contract (a `degraded=True` decline, or the
+        "reports itself degraded" sentence), so a text that keeps the old
+        meaning while avoiding one literal still reds on the other.
         """
         from pathlib import Path
 
