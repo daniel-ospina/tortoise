@@ -558,9 +558,13 @@ def _short_summary_id(tail: str, known_by_len: dict[int, set[str]]) -> str:
                 break
         cands.append((at, depth, clean))
         at = tail.find(" - ", at + 3)
-    for at, _depth, _clean in cands:
-        # `at` is the separator's leading SPACE; the pattern starts at its dash.
-        if _LONGREPR_RE.match(tail[at + 1:]):
+    for at, _depth, clean in cands:
+        # `at` is the separator's leading SPACE; the pattern starts at its dash. DEPTH 0 only:
+        # an id-internal separator whose remainder merely OPENS with a longrepr-shaped word
+        # (`test_p[a - Failed to connect]`) is not the short-summary split point, and taking it
+        # published an id pytest never reports (#9134 review, P2). Bracket-internal separators
+        # belong to the delta ladder below, which is what d6e166e41 established.
+        if clean and _depth == 0 and _LONGREPR_RE.match(tail[at + 1:]):
             return tail[:at]
     whole = tail.count("[") - tail.count("]")
     for at, _depth, clean in cands:

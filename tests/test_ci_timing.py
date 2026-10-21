@@ -2005,6 +2005,29 @@ def test_a_longrepr_that_does_not_look_like_one_still_splits(tmp_path: Path) -> 
     }
 
 
+def test_a_longrepr_inside_a_parameter_does_not_split_the_id(tmp_path: Path) -> None:
+    """A ` - ` INSIDE a parameter is not the short-summary split, even when it opens like a repr.
+
+    The longrepr pass ran before the bracket-delta ladder, so an id-internal separator whose
+    remainder merely OPENS with a longrepr-shaped word (`test_p[a - Failed to connect]`,
+    `[a - assert b]`) won and cut the id inside its own parameter — publishing a nodeid pytest
+    never reports, on the summary-less leg this artifact exists to publish honestly (#9134
+    review, P2). The pass is depth-0 only; bracket-internal separators belong to the ladder.
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "FAILED tests/test_x.py::test_p[a - Failed to connect] - boom\n"
+        "FAILED tests/test_y.py::test_q[a - assert b] - boom\n"
+        "FAILED tests/test_z.py::test_r[a - AssertionError x] - boom\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {
+        "tests/test_x.py::test_p[a - Failed to connect]",
+        "tests/test_y.py::test_q[a - assert b]",
+        "tests/test_z.py::test_r[a - AssertionError x]",
+    }
+
+
 def test_an_unreadable_log_degrades_instead_of_killing_the_run(tmp_path: Path) -> None:
     """One unreadable log must not become a KeyError for the whole artifact.
 
