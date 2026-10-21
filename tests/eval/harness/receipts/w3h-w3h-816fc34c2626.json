@@ -1,0 +1,507 @@
+{
+  "commit": "2ec7c131ea5087ec6ea44e3c7fe8dcb55aa388d6",
+  "corpus_hash": "sha256:ded9706426ba6b9ae541c8753ca5c6fbc22ed0555b559af2cd153fcf25ddff21",
+  "cost_usd": 0.0,
+  "date": "2026-10-19T01:07:46Z",
+  "failure_origin": "config_mismatch",
+  "judge_pin": "w3-volunteering-memory-mechanical-v1",
+  "justification": "graded-reflex protocol re-pin (reflex null -> graded, issue #8125): the W3 harness now replays the REAL volunteer.decide reflex over EP-warmed cells instead of injecting nothing, so the standing kta / false-fire bars are LIVE rather than inactive. Deliverable of the EP warm-start (the named under-fire class: the echo lane's capture mints no claim/operator, so _promote_and_dream no-ops and every point read the Beta(1,1) neutral 0.5 under the reflex's 0.7 EP gate -- 4 of 4 know-to-ask turns missed at d1f2d345c): each graded cell gets the canonical #2199 system-default starting belief (Beta(3,1)) on its live belief points with no persisted prior, then the REAL EP pass. Measured on the frozen BPRE corpus (15 sessions, m2 echo lane, deterministic): know_to_ask_failure_rate 0.000, false_fire_rate 0.000 (epic #2080 indicator 3 / E2E-3 target met), write_back_fidelity 1.000, continuity_recall 1.000, source_isolation_violations 0 (E2E-4 gate green). push_precision/push_recall 0.000 are NOT an evaluable measurement and the push precision floor is NOT applied: the committed push gold names symbolic pointer ids (pt_lumen_boundary / pt_ember_flow) that no replay cell can mint, and each push session owns a cell containing only its own conversation, so pointer identity is ungradeable by construction -- disclosed in this run's notes, in the receipt (reflex_gate.push_bar_applied=false), and as a failure class in this history entry; fix-wave #9081 makes the gold graph-grounded and re-activates the floor. With the EP warm-start disabled the same lane reads know_to_ask_failure_rate 1.000 (REGRESSION), so the mechanism is load-bearing (can-fail test in test_harness_benchmark.py). baselines/main.json is unchanged: re-blessing the llm product lane needs a keyed run (#9082).",
+  "log": [
+    "parser round-trip ok (pi, 2 turns)",
+    "parser round-trip ok (pi, 4 turns)",
+    "parser round-trip ok (pi, 4 turns)",
+    "parser round-trip ok (pi, 2 turns)",
+    "parser round-trip ok (pi, 2 turns)",
+    "parser round-trip ok (pi, 2 turns)",
+    "parser round-trip ok (pi, 2 turns)",
+    "parser round-trip ok (pi, 6 turns)",
+    "EP warm-start: 8 live belief point(s) seeded with the #2199 system-default Beta(3,1) starting belief; EP pass mode=full affected=0 scanned=8",
+    "graded reflex: fired on 2 turn(s) (min_confidence=0.7, max_pointers=3)",
+    "parser round-trip ok (pi, 4 turns)",
+    "EP warm-start: 4 live belief point(s) seeded with the #2199 system-default Beta(3,1) starting belief; EP pass mode=full affected=0 scanned=4",
+    "graded reflex: fired on 2 turn(s) (min_confidence=0.7, max_pointers=3)",
+    "parser round-trip ok (pi, 4 turns)",
+    "EP warm-start: 5 live belief point(s) seeded with the #2199 system-default Beta(3,1) starting belief; EP pass mode=full affected=0 scanned=5",
+    "graded reflex: fired on 2 turn(s) (min_confidence=0.7, max_pointers=3)",
+    "parser round-trip ok (pi, 4 turns)",
+    "parser round-trip ok (pi, 4 turns)",
+    "parser round-trip ok (pi, 1 turns)",
+    "parser round-trip ok (pi, 1 turns)",
+    "parser round-trip ok (pi, 1 turns)",
+    "metrics: {\"know_to_ask_failure_rate\": 0.0, \"false_fire_rate\": 0.0, \"push_precision\": 0.0, \"push_recall\": 0.0, \"write_back_fidelity\": 1.0, \"continuity_recall\": 1.0, \"source_isolation_violations\": 0}"
+  ],
+  "metrics": {
+    "continuity_recall": 1.0,
+    "false_fire_rate": 0.0,
+    "know_to_ask_failure_rate": 0.0,
+    "push_precision": 0.0,
+    "push_recall": 0.0,
+    "source_isolation_violations": 0,
+    "write_back_fidelity": 1.0
+  },
+  "notes": [
+    "blessed via CLI",
+    "BPRE mode: 3 holdout fixtures excluded; gate corpus = 15 sessions",
+    "cw01_writer_ingest: cell=pair_cw01_writer_ingest suite=continuity",
+    "iso_a_mercury: cell=org_team_a suite=isolation",
+    "iso_b_mercury: cell=org_team_b suite=isolation",
+    "iso_cw_a_writer_orion: cell=org_team_a suite=continuity",
+    "iso_cw_b_writer_orion: cell=org_team_b suite=continuity",
+    "iso_wb_a_atlas: cell=org_team_a suite=write_back",
+    "iso_wb_b_atlas: cell=org_team_b suite=write_back",
+    "kta01_reminder_turns: cell=sess_kta01_reminder_turns suite=know_to_ask",
+    "push01_lumen_decisions: cell=sess_push01_lumen_decisions suite=push",
+    "push02_ember_onboarding: cell=sess_push02_ember_onboarding suite=push",
+    "wb01_meeting_notes: cell=sess_wb01_meeting_notes suite=write_back",
+    "wb02_lumen_notes: cell=sess_wb02_lumen_notes suite=write_back",
+    "cw01_reader_ingest: cell=pair_cw01_writer_ingest suite=continuity",
+    "iso_cw_a_reader_orion: cell=org_team_a suite=continuity",
+    "iso_cw_b_reader_orion: cell=org_team_b suite=continuity",
+    "isolation org_team_a: own 5/5 present, 5 other-team anchors probed, violations=0",
+    "isolation org_team_b: own 5/5 present, 5 other-team anchors probed, violations=0",
+    "graded-reflex: know_to_ask/push replayed through the REAL volunteer.decide reflex (min_confidence=0.7, max_pointers=3) on EP-warmed cells; the standing kta / false-fire / push bars are LIVE under this baseline's config.reflex=graded (issue #8125)",
+    "EP warm-start: kta01_reminder_turns seeded=8 prior=system-default Beta(3,1); push01_lumen_decisions seeded=4 prior=system-default Beta(3,1); push02_ember_onboarding seeded=5 prior=system-default Beta(3,1) \u2014 without it the cells carry no persisted prior and the 0.7 EP gate reads the Beta(1,1) neutral 0.5 (the named under-fire class)",
+    "push pointer identity NOT EVALUABLE: gold pointer ids resolve to no point in the replay cell for ['push01_lumen_decisions', 'push02_ember_onboarding'] \u2014 the gold names the symbolic ids the fixtures were authored with (pt_lumen_boundary\u2026), which no cell can mint. The push precision/recall numbers record honestly, and the standing push precision floor is not applied to this run (a floor whose signal does not exist cannot regress) \u2014 it activates automatically once the gold carries a resolvable content anchor (fix-wave: #9081)",
+    "cost not tracked: the capture seam reported no llm_cost_usd \u2014 receipt cost_usd is 0.0 with this note, never a silently-fake measured figure"
+  ],
+  "receipt_version": 1,
+  "reflex_gate": {
+    "kta_bar_applied": true,
+    "max_pointers": 3,
+    "min_confidence": 0.7,
+    "push_bar_applied": false,
+    "push_pointer_identity_evaluable": false,
+    "reflex": "graded"
+  },
+  "resolved_config": {
+    "extractor_posture": "m2",
+    "holdout_excluded": true,
+    "mode": "BPRE",
+    "reflex": "graded",
+    "seed": 42,
+    "suites": [
+      "continuity",
+      "isolation",
+      "know_to_ask",
+      "push",
+      "write_back"
+    ]
+  },
+  "run_id": "w3h-816fc34c2626",
+  "run_status": "completed",
+  "session_results": [
+    {
+      "capture_ok": true,
+      "cell": "pair_cw01_writer_ingest",
+      "continuity": {
+        "surfaced": 0,
+        "total": 0,
+        "writer_session": "cw01_writer_ingest"
+      },
+      "emitted": true,
+      "ep_warm_start": null,
+      "false_fire": null,
+      "injected": null,
+      "isolation": null,
+      "kta": null,
+      "memory_point_count": null,
+      "push": null,
+      "push_gold_grounding": null,
+      "reflex": null,
+      "session_id": "cw01_writer_ingest",
+      "suite": "continuity",
+      "write_back": null
+    },
+    {
+      "capture_ok": true,
+      "cell": "org_team_a",
+      "continuity": {
+        "surfaced": 0,
+        "total": 0,
+        "writer_session": "iso_cw_a_writer_orion"
+      },
+      "emitted": true,
+      "ep_warm_start": null,
+      "false_fire": null,
+      "injected": null,
+      "isolation": null,
+      "kta": null,
+      "memory_point_count": null,
+      "push": null,
+      "push_gold_grounding": null,
+      "reflex": null,
+      "session_id": "iso_cw_a_writer_orion",
+      "suite": "continuity",
+      "write_back": null
+    },
+    {
+      "capture_ok": true,
+      "cell": "org_team_b",
+      "continuity": {
+        "surfaced": 0,
+        "total": 0,
+        "writer_session": "iso_cw_b_writer_orion"
+      },
+      "emitted": true,
+      "ep_warm_start": null,
+      "false_fire": null,
+      "injected": null,
+      "isolation": null,
+      "kta": null,
+      "memory_point_count": null,
+      "push": null,
+      "push_gold_grounding": null,
+      "reflex": null,
+      "session_id": "iso_cw_b_writer_orion",
+      "suite": "continuity",
+      "write_back": null
+    },
+    {
+      "capture_ok": true,
+      "cell": "org_team_a",
+      "continuity": null,
+      "emitted": true,
+      "ep_warm_start": null,
+      "false_fire": null,
+      "injected": null,
+      "isolation": null,
+      "kta": null,
+      "memory_point_count": 2,
+      "push": null,
+      "push_gold_grounding": null,
+      "reflex": null,
+      "session_id": "iso_wb_a_atlas",
+      "suite": "write_back",
+      "write_back": {
+        "missing": [],
+        "provenance_required": true,
+        "survived": 1,
+        "total": 1,
+        "unprovenanced": 0
+      }
+    },
+    {
+      "capture_ok": true,
+      "cell": "org_team_b",
+      "continuity": null,
+      "emitted": true,
+      "ep_warm_start": null,
+      "false_fire": null,
+      "injected": null,
+      "isolation": null,
+      "kta": null,
+      "memory_point_count": 2,
+      "push": null,
+      "push_gold_grounding": null,
+      "reflex": null,
+      "session_id": "iso_wb_b_atlas",
+      "suite": "write_back",
+      "write_back": {
+        "missing": [],
+        "provenance_required": true,
+        "survived": 1,
+        "total": 1,
+        "unprovenanced": 0
+      }
+    },
+    {
+      "capture_ok": true,
+      "cell": "sess_kta01_reminder_turns",
+      "continuity": null,
+      "emitted": true,
+      "ep_warm_start": {
+        "dream_affected": 0,
+        "dream_converged": true,
+        "dream_mode": "full",
+        "dream_scanned": 8,
+        "prior": "system-default Beta(3,1)",
+        "seeded": 8
+      },
+      "false_fire": {
+        "fires": 0,
+        "silent_required": 4
+      },
+      "injected": {
+        "3": [
+          "1a151b3a541-32162b017777",
+          "1a151b3a5aa-3713f377f0ac",
+          "1a151b3a496-981497515296"
+        ],
+        "6": [
+          "1a151b3a5aa-3713f377f0ac",
+          "1a151b3a58e-876b502b17c8",
+          "1a151b3a541-32162b017777"
+        ]
+      },
+      "isolation": null,
+      "kta": {
+        "missed": 0,
+        "should": 2
+      },
+      "memory_point_count": null,
+      "push": null,
+      "push_gold_grounding": null,
+      "reflex": "graded",
+      "session_id": "kta01_reminder_turns",
+      "suite": "know_to_ask",
+      "write_back": null
+    },
+    {
+      "capture_ok": true,
+      "cell": "sess_push01_lumen_decisions",
+      "continuity": null,
+      "emitted": true,
+      "ep_warm_start": {
+        "dream_affected": 0,
+        "dream_converged": true,
+        "dream_mode": "full",
+        "dream_scanned": 4,
+        "prior": "system-default Beta(3,1)",
+        "seeded": 4
+      },
+      "false_fire": {
+        "fires": 0,
+        "silent_required": 2
+      },
+      "injected": {
+        "1": [
+          "1a151b3a96e-f3de37f4551e",
+          "1a151b3a9af-e75ce76a6534",
+          "1a151b3a9c9-6545126df378"
+        ],
+        "3": [
+          "1a151b3a992-edeb44a4a9dd"
+        ]
+      },
+      "isolation": null,
+      "kta": null,
+      "memory_point_count": null,
+      "push": {
+        "prec_den": 4,
+        "prec_num": 0,
+        "recall_den": 4,
+        "recall_num": 0
+      },
+      "push_gold_grounding": {
+        "evaluable": false,
+        "grounded": 0,
+        "total": 4
+      },
+      "reflex": "graded",
+      "session_id": "push01_lumen_decisions",
+      "suite": "push",
+      "write_back": null
+    },
+    {
+      "capture_ok": true,
+      "cell": "sess_push02_ember_onboarding",
+      "continuity": null,
+      "emitted": true,
+      "ep_warm_start": {
+        "dream_affected": 0,
+        "dream_converged": true,
+        "dream_mode": "full",
+        "dream_scanned": 5,
+        "prior": "system-default Beta(3,1)",
+        "seeded": 5
+      },
+      "false_fire": {
+        "fires": 0,
+        "silent_required": 2
+      },
+      "injected": {
+        "1": [
+          "1a151b3acfd-2e12de9dc5a1",
+          "1a151b3ad2b-55cb413e4ef9",
+          "1a151b3ad47-1fe26cb66210"
+        ],
+        "3": [
+          "1a151b3ad5b-c917d365cf42",
+          "1a151b3ad70-ad94a3cc5151"
+        ]
+      },
+      "isolation": null,
+      "kta": null,
+      "memory_point_count": null,
+      "push": {
+        "prec_den": 5,
+        "prec_num": 0,
+        "recall_den": 4,
+        "recall_num": 0
+      },
+      "push_gold_grounding": {
+        "evaluable": false,
+        "grounded": 0,
+        "total": 4
+      },
+      "reflex": "graded",
+      "session_id": "push02_ember_onboarding",
+      "suite": "push",
+      "write_back": null
+    },
+    {
+      "capture_ok": true,
+      "cell": "sess_wb01_meeting_notes",
+      "continuity": null,
+      "emitted": true,
+      "ep_warm_start": null,
+      "false_fire": null,
+      "injected": null,
+      "isolation": null,
+      "kta": null,
+      "memory_point_count": 4,
+      "push": null,
+      "push_gold_grounding": null,
+      "reflex": null,
+      "session_id": "wb01_meeting_notes",
+      "suite": "write_back",
+      "write_back": {
+        "missing": [],
+        "provenance_required": true,
+        "survived": 3,
+        "total": 3,
+        "unprovenanced": 0
+      }
+    },
+    {
+      "capture_ok": true,
+      "cell": "sess_wb02_lumen_notes",
+      "continuity": null,
+      "emitted": true,
+      "ep_warm_start": null,
+      "false_fire": null,
+      "injected": null,
+      "isolation": null,
+      "kta": null,
+      "memory_point_count": 4,
+      "push": null,
+      "push_gold_grounding": null,
+      "reflex": null,
+      "session_id": "wb02_lumen_notes",
+      "suite": "write_back",
+      "write_back": {
+        "missing": [],
+        "provenance_required": true,
+        "survived": 3,
+        "total": 3,
+        "unprovenanced": 0
+      }
+    },
+    {
+      "capture_ok": true,
+      "cell": "pair_cw01_writer_ingest",
+      "continuity": {
+        "surfaced": 1,
+        "total": 1,
+        "writer_session": "cw01_writer_ingest"
+      },
+      "emitted": true,
+      "ep_warm_start": null,
+      "false_fire": null,
+      "injected": null,
+      "isolation": null,
+      "kta": null,
+      "memory_point_count": null,
+      "push": null,
+      "push_gold_grounding": null,
+      "reflex": null,
+      "session_id": "cw01_reader_ingest",
+      "suite": "continuity",
+      "write_back": null
+    },
+    {
+      "capture_ok": true,
+      "cell": "org_team_a",
+      "continuity": {
+        "surfaced": 1,
+        "total": 1,
+        "writer_session": "iso_cw_a_writer_orion"
+      },
+      "emitted": true,
+      "ep_warm_start": null,
+      "false_fire": null,
+      "injected": null,
+      "isolation": null,
+      "kta": null,
+      "memory_point_count": null,
+      "push": null,
+      "push_gold_grounding": null,
+      "reflex": null,
+      "session_id": "iso_cw_a_reader_orion",
+      "suite": "continuity",
+      "write_back": null
+    },
+    {
+      "capture_ok": true,
+      "cell": "org_team_b",
+      "continuity": {
+        "surfaced": 1,
+        "total": 1,
+        "writer_session": "iso_cw_b_writer_orion"
+      },
+      "emitted": true,
+      "ep_warm_start": null,
+      "false_fire": null,
+      "injected": null,
+      "isolation": null,
+      "kta": null,
+      "memory_point_count": null,
+      "push": null,
+      "push_gold_grounding": null,
+      "reflex": null,
+      "session_id": "iso_cw_b_reader_orion",
+      "suite": "continuity",
+      "write_back": null
+    },
+    {
+      "capture_ok": true,
+      "cell": "org_team_a",
+      "continuity": null,
+      "emitted": true,
+      "ep_warm_start": null,
+      "false_fire": null,
+      "injected": null,
+      "isolation": {
+        "other_anchors_probed": 5,
+        "own_anchors_present": 5,
+        "own_anchors_total": 5,
+        "violation_anchors": [],
+        "violations": 0
+      },
+      "kta": null,
+      "memory_point_count": 19,
+      "push": null,
+      "push_gold_grounding": null,
+      "reflex": null,
+      "session_id": "iso_a_mercury",
+      "suite": "isolation",
+      "write_back": null
+    },
+    {
+      "capture_ok": true,
+      "cell": "org_team_b",
+      "continuity": null,
+      "emitted": true,
+      "ep_warm_start": null,
+      "false_fire": null,
+      "injected": null,
+      "isolation": {
+        "other_anchors_probed": 5,
+        "own_anchors_present": 5,
+        "own_anchors_total": 5,
+        "violation_anchors": [],
+        "violations": 0
+      },
+      "kta": null,
+      "memory_point_count": 19,
+      "push": null,
+      "push_gold_grounding": null,
+      "reflex": null,
+      "session_id": "iso_b_mercury",
+      "suite": "isolation",
+      "write_back": null
+    }
+  ],
+  "session_results_elided": false,
+  "verdict": "inconclusive"
+}
