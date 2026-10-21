@@ -272,9 +272,11 @@ operator topology non-negotiable (a fused claim cannot be `NAND`ed).
 **What:** every record table has `ENABLE ROW LEVEL SECURITY` + a `*_read_org` policy on
 `current_setting('app.current_org_id', true)` and a `service_role` `ALL` policy
 (`…01_record_event_stream.sql:115` ff. — every table, and each one `REVOKE ALL … FROM anon,
-authenticated, public` + `GRANT SELECT … TO authenticated`). **No code sets that GUC** — so today RLS is
-`service_role`/owner-bypassed and the tenancy boundary is the writer's `org_id` value plus the
-`node_identity` FK, not RLS. The `#669` research brief documents the mechanism — *"a shared non-bypass app role +
+authenticated, public` + `GRANT SELECT … TO authenticated`). **No code sets that GUC** — so RLS cannot be the record's tenancy boundary today, and the boundary
+is the writer's `org_id` value plus the `node_identity` FK. Which role the record connects as is **this
+item's** decision (A8 states the same): R1's DSN would make it the table owner and the migrations'
+comment expects `service_role`, both of which bypass, while a non-bypass app role would put RLS in
+force. The `#669` research brief documents the mechanism — *"a shared non-bypass app role +
 `current_setting('app.current_org_id')` GUC … gives RLS-enforced isolation for backend queries
 without per-user connections"* (`docs/plans/2026-08-08-669-research.md` §2, item 1) — but its own
 §4 leaves the **access path** open and recommends `service_role` plus defence-in-depth at cutover,
@@ -320,8 +322,9 @@ FalkorDB BGSAVE"*), `hosted_backup.py` (Cloudflare R2) and `backup_sweep.py` (th
 §3 and §14.1's **O1** record the decision: **durability = the store's backup; rebuildability = the journal** —
 so promoting Postgres to the record **moves the durability obligation onto Postgres**, and no
 module of ours holds it (whether the paid plan does is unverified — every statement in the tree
-about it is plan-level, and A8 names two of them). Two halves: Supabase's PITR (a plan-tier fact, and therefore an owner decision on
-cost) **plus** an off-box logical dump to Cloudflare R2 on the existing sweep, **plus** a drill that proves it.
+about it is plan-level, and A8 names two of them). Two halves — Supabase's PITR (a plan-tier fact, and therefore an owner decision on cost) versus an
+independent off-box logical dump to Cloudflare R2 on the existing sweep — **plus** a drill that proves
+whichever is chosen.
 **What it blocks:** durability of the new system of record. This is the item most likely to be
 mistaken for "already done" because the backup machinery *looks* present — it is present, for the
 wrong store.
