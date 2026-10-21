@@ -392,13 +392,25 @@ def test_an_ambiguous_multi_label_identity_is_refused():
     assert any("ambiguous" in p for p in exc.value.problems)
 
 
-def test_a_shared_key_property_is_not_ambiguous():
-    """:Point and :Session both key on `id` — one key, twice, not two keys."""
+@pytest.mark.parametrize("labels", [["Point", "Session"], ["Session", "Point"]])
+def test_a_shared_key_property_is_out_of_scope_in_both_label_orders(labels):
+    """:Point and :Session share ONE key (`id`) — and that id is the SESSION's.
+
+    Scope is decided over the label set, never by array order: `dump_graph`
+    preserves FalkorDB's order, so a `claiming[0]` fallback would rename a
+    caller-supplied `session_*` key in one order and skip it in the other.
+    """
     dump = _dump()
-    dump["nodes"].append(_node(10_006, ["Point", "Session"], id="p-9999999"))
+    dump["nodes"].append(_node(10_006, labels, id="session_9f8a7b6c5d4e"))
     dump["node_count"] = len(dump["nodes"])
     plan = build_plan(dump)  # must not raise
-    assert [r.old for r in plan.renames if r.dump_id == 10_006] == ["p-9999999"]
+    assert [r for r in plan.renames if r.dump_id == 10_006] == [], (
+        "a node carrying an out-of-scope label's key is never a rename candidate"
+    )
+    assert census(dump).out_of_scope["Session"] == 2
+    out, _ = apply_plan(dump, plan)
+    node = next(n for n in out["nodes"] if n["dump_id"] == 10_006)
+    assert node["props"]["id"] == "session_9f8a7b6c5d4e", "the session key is untouched"
 
 
 def test_a_padded_key_is_refused_rather_than_silently_trimmed():
@@ -571,3 +583,140 @@ def test_cli_refuses_an_in_place_run(tmp_path):
             ]
         )
     assert exc.value.code == 2
+
+
+# ─────────────────────────── the ledger identity ───────────────────────────
+def test_every_node_lands_in_exactly_one_bucket():
+    """`nodes` must equal the sum of the parts — a remainder is not a count.
+
+    #8607's indicator (1) is "the same node count resolves before/after"; that
+    is only evidence if the census accounts for EVERY node. A malformed row, an
+    ambiguous identity or an undeclared label that fell through the buckets would
+    make the split look complete while a population went uncounted.
+    """
+    found = census(_dump())
+    ledger = found.ledger()
+    assert ledger["nodes"] == ledger["accounted"], ledger
+    assert ledger["balanced"] is True
+    assert found.in_scope == found.canonical + found.legacy
+
+
+def test_the_ledger_holds_for_a_malformed_snapshot_too():
+    dump = _dump()
+    dump["nodes"].append("not a node")  # a row that is not an object at all
+    dump["nodes"].append(_node(10_020, ["Point", "Event"], id="p-0000777", eventId="EV-2026-7777"))
+    dump["nodes"].append(_node(10_021, ["Point"]))  # in scope, no key
+    dump["node_count"] = len(dump["nodes"])
+    found = census(dump)
+    assert found.ledger()["balanced"] is True, found.ledger()
+    assert sum(found.unresolved.values()) == 3
+    with pytest.raises(LegacyIdError):
+        build_plan(dump)
+
+
+# ─────────────────── the scope maps are total over the contract ─────────────
+def test_the_two_scope_maps_partition_the_contract_exactly():
+    """Every keyed label has a recorded decision — none is "undeclared".
+
+    Without this, a label could join `KEY_PROPERTY` and be silently absorbed
+    into "out of scope" — attributed to a decision nobody made.
+    """
+    from tortoise.cache_projection import KEY_PROPERTY
+
+    assert set(REKEY_SCOPE) | set(DECLARED_OUT_OF_SCOPE) == set(KEY_PROPERTY)
+    assert not set(REKEY_SCOPE) & set(DECLARED_OUT_OF_SCOPE)
+
+
+def test_a_keyed_label_with_no_decision_is_refused_not_absorbed(monkeypatch):
+    import tortoise.legacy_ids as mod
+
+    monkeypatch.setitem(mod.KEY_PROPERTY, "Widget", "widgetId")
+    monkeypatch.setattr(mod, "REKEY_SCOPE", {"Point": next(iter(REKEY_SCOPE.values()))})
+    dump = _dump()
+    dump["nodes"].append(_node(10_030, ["Widget"], widgetId="w-1"))
+    dump["node_count"] = len(dump["nodes"])
+    with pytest.raises(LegacyIdError) as exc:
+        build_plan(dump)
+    assert any("neither REKEY_SCOPE nor DECLARED_OUT_OF_SCOPE" in p for p in exc.value.problems)
+    assert census(dump).undeclared == {"Widget": 1}
+
+
+# ──────────────────────────── CLI path collisions ──────────────────────────
+@pytest.mark.parametrize(
+    "target,other",
+    [("--report", "--dump"), ("--report", "--out"), ("--out", "--dump")],
+)
+def test_cli_refuses_two_artifacts_on_one_path(tmp_path, target, other):
+    """Three artifacts, three jobs — a collision destroys one of them silently."""
+    from tools.legacy_id_normalise import main
+
+    same = tmp_path / "same.json"
+    same.write_text(json.dumps(_dump()), encoding="utf-8")
+    rest = tmp_path / "rest.json"
+    paths = {"--dump": rest, "--out": rest, "--report": rest}
+    paths[other] = same
+    paths[target] = same
+    argv = ["--dump", str(paths["--dump"])]
+    if "--out" in (target, other):
+        argv += ["--apply", "--out", str(paths["--out"])]
+    if "--report" in (target, other):
+        argv += ["--report", str(paths["--report"])]
+    with pytest.raises(SystemExit) as exc:
+        main(argv)
+    assert exc.value.code == 2
+    assert json.loads(same.read_text(encoding="utf-8"))["nodes"], "the dump survived"
+
+
+def test_cli_reports_a_usage_error_not_a_traceback_on_an_unreadable_dump(tmp_path):
+    from tools.legacy_id_normalise import main
+
+    (tmp_path / "adir").mkdir()
+    with pytest.raises(SystemExit) as exc:
+        main(["--dump", str(tmp_path / "adir")])
+    # `SystemExit(<message>)` — Python prints it and exits 1: a usage/IO error,
+    # not the traceback an unguarded `read_text` raises.
+    assert "could not read dump" in str(exc.value.code)
+
+
+def test_cli_refuses_a_report_row_that_is_not_a_rename(tmp_path):
+    from tools.legacy_id_normalise import main
+
+    dump_path = tmp_path / "dump.json"
+    dump_path.write_text(json.dumps(_dump()), encoding="utf-8")
+    (tmp_path / "r.json").write_text(
+        json.dumps({"renames": [{"dump_id": "not-an-int"}], "dump_sha256": "x"}),
+        encoding="utf-8",
+    )
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "--dump",
+                str(dump_path),
+                "--revert",
+                "--report",
+                str(tmp_path / "r.json"),
+                "--out",
+                str(tmp_path / "o.json"),
+            ]
+        )
+    assert "not a report this tool wrote" in str(exc.value.code)
+    assert not (tmp_path / "o.json").exists()
+
+
+def test_an_unserialisable_edge_value_is_not_a_traceback():
+    """A Python-constructed dump can hold what JSON cannot; the refusal must be
+    the module's own, never a `TypeError` from `sorted()`/`json.dumps()`."""
+    dump = _dump()
+    dump["edges"] = [{"src": 1, "dst": 2, "props": {"blob": {1, 2, 3}}}]
+    dump["edge_count"] = 1
+    plan = build_plan(dump)  # must not raise TypeError
+    assert plan.dump_sha256
+
+
+def test_the_fingerprint_is_order_insensitive_over_edges():
+    dump = _dump()
+    dump["edges"] = [{"src": 1, "dst": 2}, {"src": 2, "dst": 3}]
+    dump["edge_count"] = 2
+    first = build_plan(dump).dump_sha256
+    dump["edges"] = [{"dst": 3, "src": 2}, {"dst": 2, "src": 1}]
+    assert build_plan(dump).dump_sha256 == first

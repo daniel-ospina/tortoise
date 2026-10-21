@@ -67,9 +67,15 @@ from tortoise.legacy_ids import (
 
 def _load_json(path: Path, what: str) -> object:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
     except FileNotFoundError as exc:
         raise SystemExit(f"{what} not found: {path}") from exc
+    except OSError as exc:
+        # IsADirectoryError, PermissionError, ENOSPC on a network mount …: the
+        # same class of failure as "not found", and it must not traceback.
+        raise SystemExit(f"could not read {what} at {path}: {exc}") from exc
+    try:
+        return json.loads(text)
     except json.JSONDecodeError as exc:
         raise SystemExit(f"{what} is not valid JSON ({path}): {exc}") from exc
 
@@ -98,16 +104,26 @@ def _load_revert_plan(path: Path, dump: dict) -> LegacyIdPlan:
     payload = _load_json(path, "plan")
     if not isinstance(payload, dict) or not isinstance(payload.get("renames"), list):
         raise SystemExit(f"plan is not a report this tool wrote: {path}")
-    renames = tuple(
-        Rename(
-            dump_id=int(row["dump_id"]),
-            label=str(row["label"]),
-            key_property=str(row["key_property"]),
-            old=str(row["old"]),
-            new=str(row["new"]),
-        )
-        for row in payload["renames"]
-    )
+    renames = []
+    for index, row in enumerate(payload["renames"]):
+        try:
+            if not isinstance(row, dict):
+                raise TypeError("not an object")
+            renames.append(
+                Rename(
+                    dump_id=int(row["dump_id"]),
+                    label=str(row["label"]),
+                    key_property=str(row["key_property"]),
+                    old=str(row["old"]),
+                    new=str(row["new"]),
+                )
+            )
+        except (TypeError, KeyError, ValueError) as exc:
+            raise SystemExit(
+                f"plan is not a report this tool wrote: {path} — renames[{index}] "
+                f"is not a rename row ({exc!r})"
+            ) from exc
+    renames = tuple(renames)
     return LegacyIdPlan(
         renames=renames,
         census=census(dump),
@@ -128,12 +144,20 @@ def _summary(report: dict) -> str:
 def _census_line(found: dict) -> str:
     out_of_scope = found["out_of_scope"]
     uncontracted = found["uncontracted"]
-    return (
+    ledger = found["ledger"]
+    line = (
         f"nodes {found['nodes']} · in scope {found['in_scope']} · "
         f"canonical {found['canonical']} · legacy {found['legacy']} · "
         f"declared out of scope {sum(out_of_scope.values())} ({out_of_scope}) · "
-        f"out of contract {sum(uncontracted.values())} ({uncontracted})"
+        f"out of contract {sum(uncontracted.values())} ({uncontracted}) · "
+        f"undeclared {sum(found['undeclared'].values())} ({found['undeclared']}) · "
+        f"unresolved {sum(found['unresolved'].values())} ({found['unresolved']})"
     )
+    if not ledger["balanced"]:
+        # The census does not sum to the snapshot: the plan below is over a
+        # SAMPLE, and saying so on the line a lane quotes is the whole point.
+        line += f" · ⚠️ LEDGER UNBALANCED {ledger['accounted']}/{ledger['nodes']}"
+    return line
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -173,11 +197,28 @@ def main(argv: list[str] | None = None) -> int:
         # The plan is the only way back: `--revert` reads this file, and a
         # sha256 cannot undo a rewritten key.
         parser.error("--apply/--revert requires --report (the plan is the revert artifact)")
-    if args.out is not None and args.out.resolve() == args.dump.resolve():
-        parser.error(
-            "--out must not be --dump: an in-place run whose plan is lost is "
-            "unrecoverable, because the old ids survive only in the plan"
-        )
+    # Every one of these three paths is an ARTIFACT with its own job, so no two
+    # may collide. Checked pairwise because each collision loses a different
+    # thing and only one of them was caught before:
+    #   --out == --dump    → the run overwrites what it was asked to read
+    #   --report == --dump → the report REPLACES the snapshot: a dry run that
+    #                        destroys its own input, writing nothing that says so
+    #   --report == --out  → the report is written first, then the snapshot
+    #                        overwrites it, so the plan that undoes the pass is
+    #                        gone and --revert can never run
+    targets = [("--dump", args.dump), ("--out", args.out), ("--report", args.report)]
+    seen: dict[Path, str] = {}
+    for flag, path in targets:
+        if path is None:
+            continue
+        resolved = path.resolve()
+        if resolved in seen:
+            parser.error(
+                f"{flag} and {seen[resolved]} are the same file ({resolved}): each "
+                "is a distinct artifact and overwriting one destroys it — use "
+                "separate paths"
+            )
+        seen[resolved] = flag
 
     dump = _load_json(args.dump, "dump")
     if not isinstance(dump, dict):

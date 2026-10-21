@@ -133,6 +133,15 @@ OUT_OF_SCOPE = "out-of-scope"
 #: key at all. A real ``dump_graph`` artifact carries these (``:GraphEvent``,
 #: ``Meta``), so they are COUNTED, never refused.
 UNCONTRACTED = "<out-of-contract>"
+#: :func:`scope_of` values. ``UNDECLARED`` is a label the record keys with no
+#: recorded decision — never silently treated as out of scope.
+REKEYED = "rekey"
+DECLARED_OUT = "declared-out"
+UNDECLARED = "undeclared"
+#: The bucket for a node :func:`_node_label` cannot resolve at all (no key,
+#: ambiguous identity, a structural defect). Its own field, because a node that
+#: is counted in NO bucket breaks the ledger identity :data:`LEDGER` states.
+UNRESOLVED = "<unresolved>"
 
 #: The labels this pass may re-key, each with the reason it is in scope.
 #:
@@ -238,6 +247,22 @@ def canonical_id(label: str, legacy: str) -> str:
 # ── dump access (the same accessors ``retype`` uses, so both read one shape) ─
 
 
+def scope_of(label: str) -> str:
+    """``"rekey"`` · ``"declared-out"`` · ``"undeclared"`` — the label's decision.
+
+    A label the record keys but that neither :data:`REKEY_SCOPE` nor
+    :data:`DECLARED_OUT_OF_SCOPE` names has **no recorded decision**, so it is
+    its own bucket (and a refusal, in :func:`build_plan`) rather than being
+    absorbed into "out of scope" — silently absorbing it would attribute a
+    future label to a decision nobody made.
+    """
+    if label in REKEY_SCOPE:
+        return REKEYED
+    if label in DECLARED_OUT_OF_SCOPE:
+        return DECLARED_OUT
+    return UNDECLARED
+
+
 def _props(node: Mapping[str, Any]) -> dict:
     props = node.get("props")
     return props if isinstance(props, dict) else {}
@@ -297,12 +322,24 @@ def _node_label(node: Mapping[str, Any]) -> tuple[str | None, str | None]:
             "the layer's identity property; it cannot be normalised or "
             f"addressed (labels {sorted(labels)})"
         )
-    if not claiming and len(known) > 1:
+    # ⛔ SCOPE IS DECIDED OVER THE LABEL SET, NEVER BY ARRAY ORDER. A node that
+    # carries ANY out-of-scope label's key is out of scope: `:Point` + `:Session`
+    # share ONE key (`id`), and that id is the caller-supplied session key, so
+    # renaming it is a client migration (§1.4 rule 3) whichever way the dump
+    # happens to order its labels. `dump_graph` preserves FalkorDB's order, so a
+    # `claiming[0]` fallback here made the verdict — and the census bucket —
+    # depend on that order.
+    out_claiming = [label for label in claiming if label not in REKEY_SCOPE]
+    if out_claiming:
+        return out_claiming[0], None
+    if claiming:
+        return claiming[0], None
+    if len(known) > 1:
         return None, (
             f"dump_id {dump_id!r} carries {sorted(labels)} and none of their "
             "contract keys — its identity is undecidable"
         )
-    return (claiming or known)[0], None
+    return known[0], None
 
 
 def _edge_digest(edges: object) -> str:
@@ -316,13 +353,19 @@ def _edge_digest(edges: object) -> str:
     rows = []
     if isinstance(edges, list):
         for edge in edges:
-            if isinstance(edge, dict):
-                rows.append(
-                    [str(k) for k in sorted(edge)]
-                    + [json.dumps(edge[k], sort_keys=True) for k in sorted(edge)]
-                )
-            else:
+            if not isinstance(edge, dict):
                 rows.append(["<malformed>", repr(edge)])
+                continue
+            try:
+                # Mixed-type keys and non-JSON values are not reachable from a
+                # PARSED dump, but a Python-constructed one can carry them — and
+                # a traceback is not the refusal this module promises.
+                keys = sorted(edge, key=repr)
+                rows.append(
+                    [str(k) for k in keys] + [json.dumps(edge[k], sort_keys=True) for k in keys]
+                )
+            except (TypeError, ValueError):
+                rows.append(["<unserialisable>", repr(edge)])
     rows.sort()
     return hashlib.sha256(json.dumps(rows, separators=(",", ":")).encode("utf-8")).hexdigest()
 
@@ -379,8 +422,33 @@ class Census:
     out_of_scope: dict[str, int] = field(default_factory=dict)
     #: ``label set -> count`` for nodes the record's key contract does not key.
     uncontracted: dict[str, int] = field(default_factory=dict)
-    #: ``label -> {canonical|legacy|out-of-scope|unkeyed: count}``
+    #: ``label -> count`` for a label the record keys that NEITHER
+    #: :data:`REKEY_SCOPE` nor :data:`DECLARED_OUT_OF_SCOPE` names — a missing
+    #: decision, never silently "out of scope".
+    undeclared: dict[str, int] = field(default_factory=dict)
+    #: Nodes :func:`_node_label` cannot resolve (no key, ambiguous identity).
+    #: Counted here so the ledger identity holds for a malformed snapshot too:
+    #: ``nodes == in_scope + Σout_of_scope + Σuncontracted + Σundeclared
+    #: + Σunresolved``.
+    unresolved: dict[str, int] = field(default_factory=dict)
+    #: ``label -> {canonical|legacy|out-of-scope|undeclared: count}``
     by_label: dict[str, dict[str, int]] = field(default_factory=dict)
+
+    def ledger(self) -> dict[str, int]:
+        """Every node in exactly one bucket — ``nodes`` must equal ``accounted``.
+
+        A census whose parts do not sum to the whole is not a count, it is a
+        sample with an unnamed remainder. ``in_scope`` equals
+        ``canonical + legacy`` (a node enters it once and is then sorted).
+        """
+        accounted = (
+            self.in_scope
+            + sum(self.out_of_scope.values())
+            + sum(self.uncontracted.values())
+            + sum(self.undeclared.values())
+            + sum(self.unresolved.values())
+        )
+        return {"nodes": self.nodes, "accounted": accounted, "balanced": self.nodes == accounted}
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -390,6 +458,9 @@ class Census:
             "legacy": self.legacy,
             "out_of_scope": dict(sorted(self.out_of_scope.items())),
             "uncontracted": dict(sorted(self.uncontracted.items())),
+            "undeclared": dict(sorted(self.undeclared.items())),
+            "unresolved": dict(sorted(self.unresolved.items())),
+            "ledger": self.ledger(),
             "canonical_shapes": dict(sorted(self.canonical_shapes.items())),
             "legacy_shapes": dict(sorted(self.legacy_shapes.items())),
             "by_label": {
@@ -416,18 +487,30 @@ def census(dump: Mapping[str, Any]) -> Census:
     legacy_shapes: dict[str, int] = {}
     out_of_scope: dict[str, int] = {}
     uncontracted: dict[str, int] = {}
+    undeclared: dict[str, int] = {}
+    unresolved: dict[str, int] = {}
     by_label: dict[str, dict[str, int]] = {}
     in_scope = canonical = legacy = 0
     for node in nodes:
-        label = None if not isinstance(node, dict) else _node_label(node)[0]
+        if not isinstance(node, dict):
+            _bump(unresolved, "<malformed-row>")
+            _bump(by_label.setdefault(UNRESOLVED, {}), OUT_OF_SCOPE)
+            continue
+        label, problem = _node_label(node)
         if label is None:
-            _bump(by_label.setdefault("<unresolved>", {}), OUT_OF_SCOPE)
+            _bump(unresolved, problem or "unresolved")
+            _bump(by_label.setdefault(UNRESOLVED, {}), OUT_OF_SCOPE)
             continue
         if label == UNCONTRACTED:
             _bump(uncontracted, ",".join(sorted(_labels(node))) or "<no-labels>")
             _bump(by_label.setdefault(UNCONTRACTED, {}), OUT_OF_SCOPE)
             continue
-        if label not in REKEY_SCOPE:
+        scope = scope_of(label)
+        if scope == UNDECLARED:
+            _bump(undeclared, label)
+            _bump(by_label.setdefault(label, {}), UNDECLARED)
+            continue
+        if scope != REKEYED:
             _bump(out_of_scope, label)
             _bump(by_label.setdefault(label, {}), OUT_OF_SCOPE)
             continue
@@ -435,7 +518,12 @@ def census(dump: Mapping[str, Any]) -> Census:
         raw = _props(node).get(KEY_PROPERTY[label])
         value = raw.strip() if isinstance(raw, str) else ""
         if not value:
-            _bump(by_label.setdefault(label, {}), "unkeyed")
+            # `_node_label` already refuses an in-scope label with no key, so
+            # this is unreachable; it is kept as a counted hole rather than a
+            # silent `continue` in case that rule ever narrows.
+            _bump(unresolved, f"{label}.{KEY_PROPERTY[label]} missing")
+            _bump(by_label.setdefault(UNRESOLVED, {}), OUT_OF_SCOPE)
+            in_scope -= 1
             continue
         name = shape(value)
         if name == LEGACY:
@@ -455,6 +543,8 @@ def census(dump: Mapping[str, Any]) -> Census:
         legacy_shapes=legacy_shapes,
         out_of_scope=out_of_scope,
         uncontracted=uncontracted,
+        undeclared=undeclared,
+        unresolved=unresolved,
         by_label=by_label,
     )
 
@@ -543,10 +633,20 @@ def build_plan(dump: Mapping[str, Any]) -> LegacyIdPlan:
         if problem is not None:
             problems.append(problem)
             continue
-        if label is None or label == UNCONTRACTED or label not in REKEY_SCOPE:
-            # Declared out of scope (a reason per label in
-            # DECLARED_OUT_OF_SCOPE / the record does not key it) — counted by
-            # `census`, never rewritten.
+        if label is None or label == UNCONTRACTED:
+            # The record does not key it — counted by `census`, never rewritten.
+            continue
+        scope = scope_of(label)
+        if scope == UNDECLARED:
+            problems.append(
+                f"label {label!r} is keyed by the record's contract "
+                f"(`{KEY_PROPERTY[label]}`) but is in neither REKEY_SCOPE nor "
+                "DECLARED_OUT_OF_SCOPE — record the decision before normalising"
+            )
+            continue
+        if scope != REKEYED:
+            # Declared out of scope, with a reason in DECLARED_OUT_OF_SCOPE —
+            # counted by `census`, never rewritten.
             continue
         key_prop = KEY_PROPERTY[label]
         raw = _props(node).get(key_prop)
