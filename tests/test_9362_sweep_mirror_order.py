@@ -123,11 +123,17 @@ def test_stale_epoch_sweep_keeps_the_root_in_the_mirror():
             sdk._mark_dirty([ids[1]])          # newer marking at epoch e
             e = sdk._ep_epoch()
             assert ids[1] in sdk._dirty_roots
+            sdk._retry_attempts[ids[1]] = 2    # a root that has already failed twice
 
             sdk._sweep_dirty_roots({ids[1]}, run_ep=e - 1)
 
             assert _ep_dirty_at(sdk, ids[1]) == e, (
                 "the epoch guard must keep the newer marking in the graph"
+            )
+            assert sdk._retry_attempts.get(ids[1]) == 2, (
+                "a RETAINED root keeps its attempt count and backoff — resetting "
+                "it on a sweep that cleared nothing makes the retry cap never "
+                "converge (#9362: `_reset_retry_state(swept - retained)`)"
             )
             assert ids[1] in sdk._dirty_roots, (
                 "the sweep removed a root from the in-memory mirror that its "
