@@ -1598,6 +1598,10 @@ def test_ci_runs_the_ordering_half_on_full_history():
 _EXPECTED_MESSAGE = {
     "a sibling `$GITHUB_PATH` writer": "$GITHUB_PATH",
     "a sibling `$GITHUB_ENV` writer": "$GITHUB_ENV",
+    "a job-level `continue-on-error: true`": "continue-on-error",
+    "a job-level `container:`": "container:",
+    "a workflow-level PATH shim": "on python-ci.yml",
+    "a job-level `defaults.run.working-directory`": "defaults.run.working-directory",
 }
 
 
@@ -1627,6 +1631,14 @@ def _mutations():
             "env", {"PATH": "/tmp/shim:/usr/bin"}),
         "a job-level `defaults.run.shell`": lambda w: w["jobs"]["changes"].__setitem__(
             "defaults", {"run": {"shell": "bash -c 'true'"}}),
+        "a job-level `defaults.run.working-directory`": lambda w: w["jobs"][
+            "changes"].__setitem__("defaults", {"run": {"working-directory": "tools"}}),
+        "a workflow-level PATH shim": lambda w: w.setdefault("env", {}).__setitem__(
+            "PATH", "/tmp/shim:/usr/bin"),
+        "a job-level `continue-on-error: true`": lambda w: w["jobs"]["changes"].__setitem__(
+            "continue-on-error", True),
+        "a job-level `container:`": lambda w: w["jobs"]["changes"].__setitem__(
+            "container", "stub:latest"),
         "a job-level `if:`": lambda w: w["jobs"]["changes"].__setitem__("if", "false"),
         "a second decoy gate step": lambda w: w["jobs"]["changes"]["steps"].append(
             {"name": "decoy", "run": ORDERING_HALF_INVOCATION}),
@@ -1645,6 +1657,13 @@ def test_the_ci_pin_rejects_every_silencing_idiom(label):
 
     Every case keeps the gate's command string present, so the old membership assertion stayed
     green while the check could never fail a PR; the strict pin must name the violation.
+
+    Every branch of the pin that can leave the gate GREEN has a case here. The one branch without
+    one — "the job must check out the repo" — is the opposite shape: deleting the `changes`
+    checkout reds the job instead of greening the gate, and the PRE-FIX pin already refused it,
+    the same way it already refused a shallow checkout
+    (`test_the_ci_pin_still_catches_a_shallow_checkout`), so claiming it here as a pre-fix hole
+    would overstate the gap.
     """
     import copy
 
