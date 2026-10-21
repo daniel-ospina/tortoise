@@ -297,27 +297,25 @@ _MIXED_ARM_DOORS: set[str] = set()
 #: (#9315 review MINOR), which is the same hand-copied-number rot the
 #: `durations:` row was carrying.
 _NO_JOURNAL = {
-    # ⛔ `capture_session` LEFT THIS SET (#9206 → #9349). It was here because it
-    # "reaches the handle with a write-like statement and appends no record" —
-    # and #9349 moved its last write-like reach OUT of the door into doors of
-    # their own (`_stamp_capture_attempt_state`, `_stamp_entity_link_counters`,
+    # ⛔ #9206/#9349 — `capture_session` LEFT this set, and the reason is the
+    # history this list keeps: #9206 put it here after excluding
+    # `_journal_write_failure_warning` (a receipt-warning STRING BUILDER) as a
+    # commit point, because what remained at the handle was four provenance
+    # stamps. #9349 then moved those stamps to their OWN declared doors
+    # (`_stamp_capture_attempt_state` / `_stamp_entity_link_counters`, both
+    # `apply-first-declared`) and the door now reaches no mutating handle call
+    # at all — so a row here would be a STALE census entry, which
+    # `test_the_inventories_hold_no_stale_entry` reds on. A door that issues no
+    # handle write has no lane to name. ⚠️ The five names are the writes that
+    # MOVED, not "every write it still makes": its stamps also still reach
+    # `_capture_stamp_targets`, and its extraction `_extract_session_llm` /
+    # `_extract_session_v2` — no-journal doors that hold rows of their own:
     # `_write_session_and_turns`, `_materialize_session_source`,
-    # `_stamp_capture_provenance` — the five whose WRITES MOVED, not "every
-    # write it still makes": its stamps also still reach `_capture_stamp_targets`
-    # and its extraction `_extract_session_llm` / `_extract_session_v2`, and those
-    # are no-journal doors with rows of their own). The two provenance successors
-    # are `apply-first-declared`, so the stamps' declaration did not vanish with
-    # the row. With no write-like call of its own the census no longer KEYS it,
-    # so an entry here would name a function the census does not emit — a stale
-    # row, which this file's own `test_the_inventories_hold_no_stale_entry`
-    # refuses. The door's remaining claim ("appends nothing of its own") is
-    # pinned in `test_the_capture_door_delegates_its_writes_to_declared_doors`,
-    # now as an ABSENCE from both the surface and every inventory rather than a
-    # row. The warning-string builder (`_journal_write_failure_warning`) that
-    # once bought this door a false `apply-first` lane stays in
-    # `_APPEND_NOT_A_RECORD`, and that test still asserts every append-pattern
-    # call in the door's body is a proven non-record — so a FUTURE real append
-    # (the fix #9350 owes) FAILS instead of hiding under the exclusion.
+    # `_stamp_capture_provenance`, `_stamp_capture_attempt_state`,
+    # `_stamp_entity_link_counters`.
+    # `test_the_capture_door_delegates_its_writes_to_declared_doors` pins the
+    # split, so a successor that drops off the census surface reds there instead
+    # of being absorbed here.
     "_clear_reliability_cache",
     "_connect_issue_objects",
     "_extract_session_llm",
@@ -1030,18 +1028,20 @@ def _duplicate_writer_offenders(surface: dict, where: str = "") -> list[str]:
 
 # ── the live gate: every SDK entry point is declared or accounted for ─────
 
-#: The kinds that ARE a declaration — a door holding a lane, so an inventory row
-#: beside it is stale and must be named. `derived-recompute` belongs here even
-#: though its lane appends nothing by construction (`_kind`'s docstring): it is
-#: still a LANE, and leaving it out did not just mislabel the door — it filed it
-#: under "NO declared lane", whose natural remedy a reader takes to be an
-#: inventory ROW, i.e. it would weaken a declared door into an inventoried one.
-#: That is the producer-without-consumer mirror of the `duplicate_writer_defs`
-#: defect this file already closed (#9315 review MINOR). It is a named constant
-#: so `test_the_derived_recompute_lane_has_its_own_kind` can bind the two halves
-#: — the kind `_kind` EMITS and the kinds this gate ACCEPTS — instead of a tuple
-#: literal only one of them can see.
-_DECLARED_KINDS = ("declared", "apply-first-declared", "derived-recompute")
+#: The kinds this gate accepts as DECLARED — the tuple the `derived-recompute`
+#: row was missing (review MINOR, latent): `_kind` has THREE declared kinds, and
+#: accepting only two of them reported a `_derived_recompute_write_scope` door as
+#: "NO declared lane and no inventory entry", whose natural remedy is an
+#: INVENTORY row — i.e. it would have converted a declared door into an
+#: inventoried one and weakened it. No live instance (`_derived_recompute_write_scope`
+#: is opened in `tortoise/source_identity.py`, not in `sdk.py`), but a door added
+#: to `sdk.py` would have got the wrong instruction.
+#: ⛔ The producer-without-consumer mirror of the round-5 `duplicate_writer_defs`
+#: defect (four consumers, no producer). Named so that the kind `_kind` EMITS and
+#: the kinds this gate ACCEPTS are bound by one pin.
+_DECLARED_KINDS = frozenset(
+    {"declared", "apply-first-declared", "derived-recompute"})
+
 
 def test_every_mutating_sdk_entry_point_is_declared_or_inventoried():
     """THE gate. A new mutating `sdk.py` function must declare a lane.
@@ -1191,8 +1191,16 @@ def test_no_two_census_entries_share_a_bare_function_name():
 #: throughout; `@` (a "file@rev" habit) and `#?`/`line #23508` are admitted too.
 #: Same rot, same reasoning:
 #: the separator is noise, the `sdk.py` + digits pair is the citation.
+#: ⛔ WIDENED AGAIN (review, measured): `~` was not in the separator class, so
+#: the TILDE spelling — the one this branch's own narrative uses ("a `line ~511`
+#: anchor had already rotted", "`(line ~700)` in `_handle_query_calls`") — went
+#: green: `sdk.py:~23508`, `sdk.py (line ~23508)` and `` `sdk.py` ~23508 `` all
+#: missed. Same rot: the number still points at whatever function holds that
+#: line. The tilde is a separator like any other, so it is admitted; a note that
+#: merely mentions a MAGNITUDE (`sdk.py is ~37k lines`) still cannot match,
+#: because that text carries letters between the path and the digits.
 _SDK_LINE_ANCHOR = re.compile(
-    r"sdk\.py[\s,:`@#()]*(?:(?:at\s+)?line[\s:,#]*)?(?:at\s+)?[Ll]?#?\d+",
+    r"sdk\.py[\s,:`@#()~]*(?:(?:at\s+)?line[\s:,#~]*)?(?:at\s+)?[Ll]?#?\d+",
     re.IGNORECASE)
 
 #: ⛔ NO LOCAL WRITE-CLAUSE REGEX HERE. What counts as a write is
@@ -1371,7 +1379,8 @@ def _params_of(func) -> set[str]:
     return {name for name in names if name not in ("self", "cls")}
 
 
-def _mutated_parameters(func) -> set[str]:
+def _mutated_parameters(func, module=None, path=None, *, _visited=None,
+                        _depth=0) -> set[str]:
     """Parameters of `func` that it MUTATES in place — an accumulator channel.
 
     Narrow on purpose. Only the mutating shapes that hand a value back to the
@@ -1379,6 +1388,16 @@ def _mutated_parameters(func) -> set[str]:
     `<param>[…] = …`); a bare call to a void helper is not enough, because that
     is ordinary code and reporting it would trade this silence for a wall of
     false FAILs. The set this feeds is REPORTED, never exempted.
+
+    ⛔ TRANSITIVE, and that is the point of `module`/`path` (review P2, measured
+    GREEN): the first version read the callee's OWN syntax only, so a callee that
+    FORWARDS the parameter to a second callee which mutates it
+    (`_add_clause(out)` → `_forward(out)` → `out.append(" SET …")`) reported
+    nothing — the shape simply moved one hop and every arm of the row pin stayed
+    green. A nested callee's mutated parameter is now folded back onto THIS
+    function's parameter through the nested call site's own argument binding
+    (positional + keyword, `self`/`cls` dropped), bounded by `visited` for the
+    cycles and `_FRAGMENT_DEPTH_CAP` for the depth.
     """
     params = _params_of(func)
     # A callee may hand the parameter to a LOCAL first (`acc = out;
@@ -1426,7 +1445,68 @@ def _mutated_parameters(func) -> set[str]:
                 owning(target.value.id) for target in node.targets
                 if isinstance(target, ast.Subscript)
                 and isinstance(target.value, ast.Name)) if owner}
+
+    # …and one hop of INDIRECTION: a nested callee's mutated parameter is this
+    # function's parameter, when this function passes its own parameter in.
+    if module is None or _depth >= _FRAGMENT_DEPTH_CAP:
+        return mutated
+    visited = set() if _visited is None else _visited
+    if id(func) in visited:
+        return mutated
+    visited.add(id(func))
+    owned_names = set(params) | set(alias)
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Call):
+            continue
+        nested_name = _callee_name(node)
+        if nested_name is None:
+            continue
+        nested, nested_module, nested_path = _resolve_callee(
+            nested_name, module, path)
+        if nested is None:
+            continue
+        nested_mutated = _mutated_parameters(
+            nested, nested_module, nested_path,
+            _visited=visited, _depth=_depth + 1)
+        if not nested_mutated:
+            continue
+        nested_params = [arg.arg for arg in (
+            list(nested.args.posonlyargs) + list(nested.args.args))
+            if arg.arg not in ("self", "cls")]
+        passed = dict(zip(nested_params, node.args, strict=False))
+        passed.update({kw.arg: kw.value for kw in node.keywords
+                       if kw.arg is not None})
+        for param in sorted(nested_mutated):
+            value = passed.get(param)
+            if isinstance(value, ast.Name) and value.id in owned_names:
+                owner = owning(value.id)
+                if owner:
+                    mutated.add(owner)
     return mutated
+
+
+def _mutated_module_bindings(func, module) -> set[str]:
+    """MODULE-LEVEL names `func` accumulates into — the global accumulator.
+
+    The same mutation channel one scope out: `_mutated_parameters` names only
+    the callee's PARAMETERS, so `PARTS = []` at module scope with a callee doing
+    `PARTS.append(" SET …")` was neither reported nor followed (review P2), and
+    the statement `"… " + "".join(PARTS)` reads the module literal as empty. The
+    intersection with `_module_bindings` is what makes the name a MODULE name
+    rather than a local, so a callee's own locals cannot red this.
+    """
+    if module is None:
+        return set()
+    names: set[str] = set()
+    for node in ast.walk(func):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and isinstance(node.func.value, ast.Name) \
+                and node.func.attr in _ACCUMULATOR_METHODS:
+            names.add(node.func.value.id)
+        elif isinstance(node, ast.AugAssign) \
+                and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+    return names & set(_module_bindings(module))
 
 
 def _names_feeding(expression, func) -> set[str]:
@@ -1511,7 +1591,16 @@ def _accumulator_offenders(func, statement_expr, module, path) -> list[str]:
             callee_name, module, path)
         if callee is None:
             continue
-        mutated = _mutated_parameters(callee)
+        mutated = _mutated_parameters(callee, _callee_module, _callee_path)
+        # …and the module-scope flavour: a callee that accumulates into a MODULE
+        # container the statement reads (`PARTS = []` / `_fill()` /
+        # `"".join(PARTS)`) has no parameter to bind, so it is matched by NAME.
+        for name in sorted(_mutated_module_bindings(callee, _callee_module)
+                           & feeding):
+            offenders.append(
+                f"{callee_name}(): writes into module-level `{name}`, which "
+                "feeds this row's statement — what the callee contributes could "
+                "not be read out, so the row cannot be called a read on this walk")
         if not mutated:
             continue
         # `self`/`cls` are not arguments the CALL SITE passes (review P2): without
@@ -1667,16 +1756,16 @@ _FRAGMENT_DEPTH_CAP = 16
 #: walked, which is exactly the arm whose cost grows with the statement.
 _BUILTIN_NAMES = frozenset(dir(builtins))
 
-#: Builtins whose RESULT cannot carry statement text, so a parameter handed to
-#: one genuinely IS a scalar. `str` is deliberately NOT here: it returns its
-#: argument verbatim, so `f"…{str(extra)}"` would smuggle a caller's Cypher past
-#: the pin (measured GREEN while the bare `{extra}` form was RED). Anything not
-#: on this list — `str`, `list`, an SDK helper — leaves the argument reported.
 #: The accumulation verbs a callee can use to hand text back through a parameter
 #: instead of returning it (see `_mutated_parameters`). `append`/`extend`/`insert`
 #: on a list, `update` on a dict, plus `+=`/`<param>[k] = …` handled separately.
 _ACCUMULATOR_METHODS = frozenset({"append", "extend", "insert", "update"})
 
+#: Builtins whose RESULT cannot carry statement text, so a parameter handed to
+#: one genuinely IS a scalar. `str` is deliberately NOT here: it returns its
+#: argument verbatim, so `f"…{str(extra)}"` would smuggle a caller's Cypher past
+#: the pin (measured GREEN while the bare `{extra}` form was RED). Anything not
+#: on this list — `str`, `list`, an SDK helper — leaves the argument reported.
 _SCALAR_COERCIONS = frozenset(
     {"int", "float", "bool", "len", "abs", "round", "hash"})
 
@@ -2058,6 +2147,13 @@ def test_the_line_anchor_matches_every_spelling():
         "sdk.py at 23508",
         "tortoise/sdk.py (23508)",
         "SDK.PY:23508",
+        # Sixth spelling family (review, measured): the TILDE. This branch's own
+        # narrative writes `line ~511` / `(line ~700)`, so the idiom is not
+        # hypothetical — and it was the one shape the separator class missed.
+        "sdk.py:~23508",
+        "sdk.py (line ~23508)",
+        "`sdk.py` ~23508",
+        "sdk.py~23508",
     ]
     for variant in must_match:
         assert _SDK_LINE_ANCHOR.search(variant), (
@@ -2787,17 +2883,28 @@ def test_a_shadowed_builtin_CALLEE_is_reported_not_blessed():
         "the call was blessed as the builtin, so its return text — a write, "
         f"here — was never read nor reported (offenders={offenders})")
 
+    # ⛔ THE LOCAL HALF USED TO BE VACUOUS (review P2, measured): the source
+    # below bound `parts = _parts` and called `format(parts())`, so `format` was
+    # genuinely UNBOUND (the builtin exemption was CORRECT there) and the
+    # offender the assertion saw (`parts()`) came from the unresolvable-callee
+    # arm, fixed one commit earlier — reverting `or sub.func.id in bindings` left
+    # the whole file green. The local now shadows the builtin itself, so this
+    # half observes the LOCAL table and nothing else: `format` IS bound in
+    # `reading`, `_resolve_callee` still does not follow it, and without the
+    # local-binding disjunct the call is blessed as the builtin and `_parts`'
+    # return text is never read.
     local = (
         'def _parts():\n'
         '    return " SET n.poked = 1"\n'
         'class Door:\n'
         '    def reading(self, proj):\n'
-        '        parts = _parts\n'
+        '        format = _parts\n'
         '        query = "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id "\n'
-        '        query += f"{format(parts())}"\n'
+        '        query += f"{format()}"\n'
         '        return proj.g.query(query).result_set\n')
     offenders = _offenders_for(local, with_module=True)
-    assert any("could not be read out" in offender for offender in offenders), (
+    assert any("could not be read out" in offender and "format()" in offender
+               for offender in offenders), (
         "a LOCAL binding of a builtin-shaped name was blessed as the builtin, "
         f"so its call was neither followed nor reported (offenders={offenders})")
 
@@ -3212,6 +3319,16 @@ _ACCUMULATOR_SHAPES: dict[str, tuple[str, str, str]] = {
         'def _fill(out):\n    acc = out\n    acc.append(" SET n.poked = 1")\n',
         "        _fill(parts)\n",
         '        query = "MATCH (n:Point) RETURN n.id " + "".join(parts)\n'),
+    # ⛔ …and the FORWARDED parameter (review P2, measured GREEN): the callee the
+    # row calls mutates nothing itself — it hands the parameter to a second
+    # callee that does. Reading only the callee's own syntax left the shape silent
+    # one hop out; `_mutated_parameters` is transitive over the callee's calls.
+    "forwarded_argument": (
+        'def _forward(out):\n    out.append(" SET n.poked = 1")\n'
+        '\n'
+        'def _fill(out):\n    _forward(out)\n',
+        "        _fill(parts)\n",
+        '        query = "MATCH (n:Point) RETURN n.id " + "".join(parts)\n'),
     # …and the closure: `parts` reaches the statement only through an AUGMENTED
     # local, which is what `_names_feeding`'s aug-assign arm adds.
     "augassign_binding": (
@@ -3220,6 +3337,52 @@ _ACCUMULATOR_SHAPES: dict[str, tuple[str, str, str]] = {
         '        query = "MATCH (n:Point) RETURN n.id "\n'
         '        query += "".join(parts)\n'),
 }
+
+
+def test_a_module_level_accumulator_is_reported_too():
+    """The mutation channel one SCOPE out: a module container, not a parameter.
+
+    `_mutated_parameters` binds a named parameter at the call site, so a callee
+    that accumulates into a MODULE-level list and is called with NO argument had
+    nothing to bind: `PARTS = []` / `_fill()` / `query = "… " +
+    `"".join(PARTS)` came back clean while `_fill` appended `" SET …"`
+    (review P2, measured GREEN before this arm). The name is matched through
+    `_module_bindings`, so a callee's own LOCAL list cannot red a correct row.
+    """
+    source = (
+        'PARTS = []\n'
+        '\n'
+        'def _fill():\n'
+        '    PARTS.append(" SET n.poked = 1")\n'
+        '\n'
+        'class Row:\n'
+        '    def reading(self, proj):\n'
+        '        _fill()\n'
+        '        query = "MATCH (n:Point) RETURN n.id " + "".join(PARTS)\n'
+        '        return proj.g.query(query).result_set\n')
+    offenders = _offenders_for(source, with_module=True)
+    assert any("writes into module-level `PARTS`" in offender
+               for offender in offenders), (
+        "a callee accumulating into a MODULE-level container was neither read "
+        f"nor reported (offenders={offenders})")
+
+    # CONTROL: the same call over a module container that does NOT feed the
+    # statement (the row reads its own local) is ordinary code, and must stay
+    # green — the name match is scoped to the statement's feeding set.
+    benign = (
+        'OTHER = []\n'
+        '\n'
+        'def _fill():\n'
+        '    OTHER.append(" SET n.poked = 1")\n'
+        '\n'
+        'class Row:\n'
+        '    def reading(self, proj):\n'
+        '        parts = []\n'
+        '        _fill()\n'
+        '        query = "MATCH (n:Point) RETURN n.id " + "".join(parts)\n'
+        '        return proj.g.query(query).result_set\n')
+    assert not _offenders_for(benign, with_module=True), (
+        "a module accumulator that never reaches the statement was reported")
 
 
 @pytest.mark.parametrize("shape", sorted(_ACCUMULATOR_SHAPES))
@@ -3560,23 +3723,17 @@ def test_the_derived_recompute_lane_has_its_own_kind():
     and is why the kind must say so explicitly instead of borrowing the
     journal-first label.
     """
-    fact = {"scopes": [(1, "_derived_recompute_write_scope")],
-            "writes": [(2, "query", "SET n.x = 1")],
-            "appends": [], "end_lineno": 3,
-            "scope_spans": [(1, 3)]}
-    kind = _kind(fact)
+    kind = _kind({"scopes": [(1, "_derived_recompute_write_scope")],
+                  "writes": [(2, "query", "SET n.x = 1")],
+                  "appends": [], "end_lineno": 3,
+                  "scope_spans": [(1, 3)]})
     assert kind == "derived-recompute"
-    # …and the gate that classifies declared-ness must ACCEPT it. Every other
-    # kind `_kind` emits here is either a lane this gate already takes
-    # (`declared`, `apply-first-declared`) or an un-accounted state; a kind that
-    # is a lane but falls through to `reason is None` gets "NO declared lane",
-    # whose remedy is an inventory row — the opposite of what a declared door
-    # needs (#9315 review MINOR).
+    # …and the FLIP gate must accept that kind as declared: dropping it
+    # from `_DECLARED_KINDS` reds here (review MINOR) instead of sending
+    # the author of a declared door to add an inventory row.
     assert kind in _DECLARED_KINDS, (
-        f"`_kind` emits {kind!r} for a door that HOLDS a lane, but the "
-        f"declared-ness gate only accepts {_DECLARED_KINDS} — so this door is "
-        "reported as having NO declared lane and the remedy a reader takes from "
-        "that message is an inventory row, which would DOWNGRADE it")
+        "`_kind` returns a declared kind the flip gate does not accept — "
+        "its remedy would be an inventory row, which weakens the door")
 
 
 #: Doors whose apply-first ORDER the census cannot prove: an append attributed
