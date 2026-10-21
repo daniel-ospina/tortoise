@@ -409,8 +409,10 @@ uv run python tools/capstone_preregistration_check.py --dir docs/evidence/7949-c
 **Exit codes.** `0` only when every rule below holds; `1` when any rule fails; `2` when the check
 cannot read its subject at all (no document, an unparseable or wrong-typed pins/record block) — a
 check that cannot read what it audits never reports success. `--no-git` and `--no-corpus` exist for
-authoring only: they SKIP a half, and the report says so (`OK (halves NOT checked) — … ordering NOT
-checked (…)`), so neither can be mistaken for a verified run. The acceptance command above runs both
+authoring, **or for a half that runs elsewhere** (CI is the standing case: `--no-corpus` above):
+they SKIP a half, and the report says so (`OK (halves NOT checked) — … ordering NOT checked (…)`),
+so neither can be mistaken for a verified run. Do not drop `--no-corpus` from the `changes` job to
+"tighten" it — that job does not install the package, and the corpus half already runs in `test`. The acceptance command above runs both
 halves; **CI runs the ordering half in the `changes` job** (the one job that checks out at
 `fetch-depth: 0`) with `--no-corpus`, and the corpus half in the `test` job via
 `tests/test_capstone_preregistration_9075.py`, which owns the package dependencies that leg needs.
@@ -562,6 +564,25 @@ pre_existing_unscored_logs:
 ---
 
 ## 8. Change control
+
+**Every edit carries a re-cut.** `preregistration.json` pins this file's `document_sha256`, and the
+gate checks it in BOTH halves (§7 item 3) — so a commit that touches this file **anywhere**, including
+a typo or a disclosure clarification in §0, must re-cut the digest or the check reds. That is the
+point (a pre-registration is the artefact that must not be silently editable), but it is easy to trip
+over, so the command is here:
+
+```bash
+# re-cut after ANY edit to this file, then commit both together
+uv run python - <<'EOF'
+import hashlib, json, pathlib
+doc = pathlib.Path("docs/evidence/7949-capstone/PRE-REGISTRATION.md").read_bytes()
+rec_p = pathlib.Path("docs/evidence/7949-capstone/preregistration.json")
+rec = json.loads(rec_p.read_text())
+rec["document_sha256"] = "sha256:" + hashlib.sha256(doc).hexdigest()
+rec_p.write_text(json.dumps(rec, indent=2, ensure_ascii=False) + "\n")
+print(rec["document_sha256"])
+EOF
+```
 
 **Before the first scored evidence log,** this file may be revised by commit, and a revision that
 changes a pin or a threshold must state the reason in its message.
