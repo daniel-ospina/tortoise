@@ -45,7 +45,9 @@ EDGE = "aboutObject"
 #: summary items" and whose JSON schema then carries `[{"edge":
 #: "aboutObject|…"}]`, so the English verb governed a bracket. A guard that reads
 #: prose as Cypher is the same defect pointing the other way, and both
-#: directions are pinned in `_MECHANISM_CASES`.
+#: directions are pinned — the clause regex by `test_the_edge_pattern_sees_the_
+#: whole_about_family`, the empty-pattern walk by `test_the_empty_pattern_type_
+#: slot_rules` and `test_a_comprehension_only_walk_derives` in the guard.
 _CLAUSE = re.compile(r"\b(OPTIONAL\s+MATCH|MATCH|MERGE|CREATE)\b\s*\(", re.IGNORECASE)
 #: A traversal: an opening `[` or `-` shortly before the relationship name, so
 #: prose ("an ``aboutObject`` edge") is not mistaken for Cypher.
@@ -66,6 +68,31 @@ _EMPTY_TRAVERSAL = re.compile(r"[-<]\s*\[([^\]]*)\]\s*[-<>]")
 #: on purpose: a bare `--` in prose, a CLI flag or a `->` in a log message is not
 #: a traversal, and a Cypher relationship always sits between two nodes.
 _BARE_TRAVERSAL = re.compile(r"(?<=\))\s*(?:<-->|<--|-->|--)\s*(?=\()")
+#: The THIRD spelling of the same shape: a traversal whose DASH is outside the
+#: bracket's literal, because the pattern is assembled from parts —
+#: `"MATCH (n)-" + "[r]->(m)"` (bracket, then dash) or `"MATCH (n)-[r]" +
+#: "->(m)"` (bracket, concatenation, then dash). Neither regex above sees those:
+#: the first needs a `-`/`<` immediately before the `[`, the second needs a node
+#: pattern on BOTH sides of a dash pair, and in the assembled source text the
+#: operator sits between two string literals. Measured on the pre-fix filter in
+#: this module: both spellings returned `False` while `"MATCH (n)-[x]->(m)"`
+#: returned `True` — so the file was dropped by the gate and the walk inside it
+#: never ran, even though `_resolve()` folds `ast.BinOp/Add` and WOULD have
+#: derived the site. Latent on today's corpus, which is exactly why
+#: `test_the_file_filter_un_sees_nothing` cannot see it.
+#: ⚠️ This is a FILTER, so a false positive costs one unused parse and is free
+#: — but the SOURCE of a false positive is not free: the shape is anchored on a
+#: bracket that OPENS WITH A NAME and carries no comma or quote (a relationship
+#: variable, with or without a property map or a `*` range), followed by the `-`
+#: that every Cypher traversal puts immediately after its `]` (or by a literal
+#: boundary and then that `-`). Without the anchor, Python subscripts and
+#: comparisons matched — `sim[i, j] >= t`, `if df[t] > 0`, `r["created_at"] >`
+#: — and the gate admitted 61 extra modules (102 walked, 79 gate-true) instead
+#: of 17 (76 walked, 35 gate-true) for a byte-identical derivation. The type
+#: slot is deliberately NOT inspected here.
+_SPLIT_TRAVERSAL = re.compile(
+    r"\[[A-Za-z_][^\]\n,\"']*\]\s*-|[\[][A-Za-z_][^\]\n,\"']*\]\s*[\"']\s*\+\s*[\"']\s*-"
+)
 #: Is the offset inside a Cypher PATTERN COMPREHENSION? The delimiter test is
 #: exact rather than a heuristic: no other construct puts a relationship
 #: bracket inside an unclosed `[` of the same query string — `[(n)-[r]->(m) |
@@ -109,7 +136,8 @@ _UNKNOWN = ""
 #: declared by name with the reason, so a NEW member of the class cannot appear
 #: silently: `test_the_empty_pattern_class_is_derived_and_declared` derives the class from
 #: the pattern's shape and requires every member to be either a §13 row or an
-#: entry here. Each entry is `(filename, symbol, why it is not an about read)`.
+#: entry here. Each entry is
+#: `(filename, symbol, why it is not an about read, the code facts that earn it)`.
 #:
 #: ⚠️ **A site that owns a §13 ROW is not carried here (#9493).** A row says the
 #: reader IS enumerated; an entry says the walk cannot observe the edge — both on
@@ -119,62 +147,135 @@ _UNKNOWN = ""
 #: the operator promotion and the hub-degree count — all rows since the third and
 #: fifth passes); they are removed, and
 #: `test_no_empty_pattern_entry_is_also_a_row` reds any regrowth.
-EMPTY_PATTERN: tuple[tuple[str, str, str], ...] = (
+#:
+#: ⚠️ **The PROSE is the register's only record of WHY, so it is checked too.**
+#: Each entry carries a fourth element: the literal source fragments that express
+#: the ground, asserted by `test_every_empty_pattern_entry_states_a_true_fact`
+#: inside the symbol's own span (plus the body of any module-level constant that
+#: span NAMES, because a query constant is where the walk lives for its consumer).
+#: Without it the reason was unverifiable prose: retype one anchor —
+#: `session_source_migration._OUT_TYPES` from `(old:Source {url:$u})` to `(old)`,
+#: or `sdk.provenance` off `:Subject` — and the walk starts observing an
+#: `aboutObject` edge while every arm stays green, because all of them read only
+#: `(file, symbol)`. That is the exact fail-open direction this class exists to
+#: close, one level up from the read itself.
+#:
+#: Three grounds are legal, and each entry names the one it rests on:
+#:
+#: * the walked relationship TYPE is restricted (`WHERE type(r) IN [...]`);
+#: * an ENDPOINT label excludes the edge — every `aboutObject` triple is
+#:   `Point`/`Event`/`Session` → `Object` (`session_link.ENTITY_LINKED_TRIPLES`),
+#:   so a `:Subject` source, a `:Point` target or a `:Source` at either end
+#:   excludes it;
+#: * the pattern is a STRUCTURAL test — a degree or existence count that returns
+#:   no edge, so nothing about a referent is asked.
+#:
+#: ⚠️ The grounds are stated against the SCHEMA, not against a memory of it. An
+#: earlier cut of this register said `aboutObject` "starts at a Point" and that
+#: `STRUCTURAL_REL_LABELS` carried both halves; the target half is true, the
+#: source half is not (a `Session` and an `Event` are sources too —
+#: `session_link.ENTITY_LINKED_TRIPLES`), and the conclusions happened to hold
+#: either way. A ground a future exclusion copies has to be the fact the schema
+#: actually carries.
+EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
     (
         "tortoise/domain_validators.py",
         "validate_chain_integrity",
-        "the `orphaned_draft` rule's zero-edge check (`AND NOT (n)--()`) — a "
-        "degree count over every edge type, used to decide whether a Point is "
-        "orphaned; the same read `session_source_migration._degree` is registered "
-        "for one file over. It asks nothing about a referent, and its bracket-less "
-        "spelling is why the class walk had to cover both spellings: it was live "
-        "and invisible while only the bracketed form derived",
+        "the `orphaned_draft` rule's zero-edge check: `AND NOT (n)--()` is a "
+        "BOOLEAN existence test — whether the draft Point has any edge at all — "
+        "so no edge is returned and nothing about a referent is asked. Its "
+        "source IS a `:Point`, which an `aboutObject` triple can start at, so "
+        "the ground is the pattern's USE, not its endpoints. Its bracket-less "
+        "spelling is also why the class walk had to cover both spellings: it was "
+        "live and invisible while only the bracketed form derived",
+        ("AND NOT (n)--()",),
     ),
     (
         "tortoise/hosted_api.py",
         "_load_commit_graph_state",
-        "restore/rollback bookkeeping — it rewires every edge type it finds, "
-        "`aboutObject` included, but asks nothing about a referent",
+        "restore/rollback reconciliation, and the walk is TYPE-RESTRICTED: the "
+        "one untyped bracket is followed by `WHERE type(r) IN ['IMPL','NAND']`, "
+        "so an `aboutObject` edge is filtered out before a row is returned. It "
+        "writes nothing either — the docstring states the state is `computed IN "
+        "MEMORY (nothing written here)`, so it does not rewire the edge it "
+        "cannot see",
+        ("WHERE type(r) IN ['IMPL','NAND']",),
     ),
     (
         "tortoise/mining.py",
         "verify_no_auto_wire",
-        "the no-auto-wire verifier walks every edge type to assert a shape is "
-        "absent",
+        "the no-auto-wire verifier's two walks pin BOTH endpoints to `:Point` "
+        "(`(o:Point …)-[r]->(n:Point)`, `(o:Point …)-[r]->(s:Point)`), and every "
+        "`aboutObject` triple's target is `:Object`, so neither walk can return "
+        "the edge; it asserts a shape, not a referent",
+        ("-[r]->(n:Point)", "-[r]->(s:Point)"),
     ),
     (
         "tortoise/projection/entities.py",
         "_materialize_connector_source",
-        "connector-source materialisation rewires the node's edges by type",
+        "the supersede sweep's DEGREE COUNT (`size([(old)-[x]-(y) | x]) AS deg`) "
+        "— a count, not an edge rewrite — and its anchor is a `:Source` "
+        "(`MATCH (old:Source)-[r:references]->…`); no `aboutObject` triple has a "
+        "`Source` at either end (the sources are `Point`/`Event`/`Session`, the "
+        "target is `Object`)",
+        (
+            "size([(old)-[x]-(y) | x]) AS deg",
+            "MATCH (old:Source)-[r:references]->(e:Event",
+        ),
     ),
     (
         "tortoise/sdk.py",
         "_connected_pairs",
-        "a connectivity inventory (which node pairs are joined at all) — the "
-        "edge TYPE is deliberately ignored",
+        "a connectivity inventory — which Points are joined at all — and BOTH "
+        "walks pin every endpoint to `:Point` (`(op:Point …)-[r1]->(a:Point)`, "
+        "`(a:Point)-[r]-(b:Point)`). An `aboutObject` target is `:Object`, so the "
+        "edge cannot be returned; the TYPE is deliberately left unbound, which "
+        "is what makes the shape derive at all",
+        ("-[r1]->(a:Point)", "MATCH (a:Point)-[r]-(b:Point)"),
     ),
     (
         "tortoise/sdk.py",
         "provenance",
-        "the provenance walk reports which edge types reach a Subject; an "
-        "`aboutObject` edge is not a provenance link and is not classified as "
-        "one",
+        "the provenance walk reports which edge types reach a `:Subject`, and its "
+        "single untyped bracket is OUTGOING from one (`MATCH (s:Subject "
+        "{id:$sid})-[r]->(n)`); no `aboutObject` triple has a `:Subject` source "
+        "(`ENTITY_LINKED_TRIPLES`: `Point`/`Event`/`Session` → `Object`)",
+        ("MATCH (s:Subject {id:$sid})-[r]->(n)",),
     ),
     (
         "tortoise/session_source_migration.py",
         "_degree",
-        "a degree count over every edge type, used to decide whether a Source "
-        "is orphaned",
+        "a degree count over every edge type on a legacy `:Source` (`_DEGREE`), "
+        "used to decide whether the node is orphaned; no `aboutObject` triple "
+        "has a `Source` at either end",
+        (
+            "MATCH (old:Source {url:$u}) ",
+            "size([(old)-[x]-(y) | x]) AS deg",
+        ),
     ),
     (
         "tortoise/session_source_migration.py",
         "_delete_if_orphan",
-        "the orphan sweep deletes every edge of a degree-0 Source",
+        "the orphan sweep — a degree-0 `:Source` is `DETACH DELETE`d, so the "
+        "degree count is a delete PRECONDITION, not a referent read; no "
+        "`aboutObject` triple has a `Source` at either end",
+        (
+            "MATCH (old:Source {url:$u}) ",
+            "size([(old)-[x]-(y) | x]) AS deg",
+            "DETACH DELETE old",
+        ),
     ),
     (
         "tortoise/session_source_migration.py",
         "_rel_types",
-        "an inventory of the edge TYPES on a node, reported as labels",
+        "an inventory of the edge TYPES on a legacy `:Source` (`_OUT_TYPES` / "
+        "`_IN_TYPES`), returned as relationship type names rather than edges; "
+        "each walk has the `:Source` at one end, which no `aboutObject` triple "
+        "does",
+        (
+            "MATCH (old:Source {url:$u})-[r]->(t) ",
+            "MATCH (n)-[r]->(old:Source {url:$u}) ",
+        ),
     ),
 )
 
@@ -607,10 +708,18 @@ def _may_traverse_every_type(source: str) -> bool:
     decides. It must stay a SUPERSET of the class, or a filtered-out file is a
     reader that ships green — which is exactly how the bracket-less member was
     missed while `EMPTY_PATTERN` was floor-checked.
+
+    ⚠️ **A SUPERSET needs every spelling the resolver can reassemble, not every
+    spelling the regex can see.** The pattern may be built from parts
+    (`"MATCH (n)-" + "[r]->(m)"`, `"MATCH (n)-[r]" + "->(m)"`), and the two
+    detectors above require the dash and the bracket to be adjacent in the SAME
+    literal. `_resolve()` folds `ast.BinOp/Add`, so the derivation would find the
+    site — but the file never reaches it. Those spellings are admitted by
+    `_SPLIT_TRAVERSAL`.
     """
     if any(_type_slot(m.group(1)) is None for m in _EMPTY_TRAVERSAL.finditer(source)):
         return True
-    return bool(_BARE_TRAVERSAL.search(source))
+    return bool(_BARE_TRAVERSAL.search(source) or _SPLIT_TRAVERSAL.search(source))
 
 
 def _may_have_gap_type(source: str) -> bool:

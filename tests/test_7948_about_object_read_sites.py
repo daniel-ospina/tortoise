@@ -633,6 +633,61 @@ def _span(tree: ast.Module, dotted: str) -> tuple[int, int] | None:
     return None
 
 
+def _owning_span(tree: ast.Module, symbol: str) -> tuple[int, int] | None:
+    """`_span`, plus one CLASS level down for a bare method name.
+
+    The census attributes a read to the innermost `def`, so a register entry may
+    name `_materialize_connector_source` without its class — `_span` only
+    resolves that spelling when the entry writes `Class.attr`. The register does
+    not, and a fact check that silently found NO span would be checking nothing.
+    """
+    found = _span(tree, symbol)
+    if found is not None:
+        return found
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for inner in node.body:
+            if _bound_name(inner) == symbol:
+                return (inner.lineno, inner.end_lineno or inner.lineno)
+    return None
+
+
+def _symbol_fact_text(rel: str, symbol: str) -> str:
+    """The source a stated exclusion FACT must appear in, or raise.
+
+    The symbol's own span, plus — ONE level, no recursion — the body of every
+    module-level constant that span NAMES. The second half is load-bearing and
+    was measured, not assumed: three of the nine entries have no Cypher in their
+    own span at all, because the walk lives in a query CONSTANT their body
+    executes (`session_source_migration._DEGREE` behind `_degree`,
+    `_OUT_TYPES`/`_IN_TYPES` behind `_rel_types`). Without it the arm would have
+    had to weaken those facts to the constant's NAME — a check that the entry
+    still mentions a symbol, which is the unread claim it exists to replace.
+
+    `rel` is spelled from the REPO root (`tortoise/projection/entities.py`,
+    as the register writes it), while a §13 row spells it from the package
+    (`projection/entities.py`); both forms resolve here.
+    """
+    path = PKG / rel.removeprefix("tortoise/")
+    lines = path.read_text(encoding="utf-8").splitlines()
+    tree = _module_tree(path)
+    span = _owning_span(tree, symbol)
+    assert span is not None, (
+        f"`{rel}::{symbol}` — the register names a symbol this module does not "
+        "bind, so its stated exclusion cannot be checked against any code"
+    )
+    text = "\n".join(lines[span[0] - 1 : span[1]])
+    for node in tree.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        name = _bound_name(node)
+        if name is None or not re.search(rf"\b{re.escape(name)}\b", text):
+            continue
+        text += "\n" + "\n".join(lines[node.lineno - 1 : node.end_lineno or node.lineno])
+    return text
+
+
 def _reads_literally(value: str) -> bool:
     """True when ANY `aboutObject` bracket in this literal belongs to a READ.
 
@@ -2660,7 +2715,9 @@ def _derived(keys: dict[tuple[str, str], tuple[int, ...]]) -> dict[str, tuple[in
 
 
 def _register_keys(entries) -> set[str]:
-    return {_site_key(rel, symbol) for rel, symbol, _why in entries}
+    # `EMPTY_PATTERN` entries carry a fourth element (the code facts their reason
+    # rests on), `CALL_TIME_REL` entries do not — both key the same way.
+    return {_site_key(rel, symbol) for rel, symbol, *_rest in entries}
 
 
 def _declared_keys() -> set[str]:
@@ -2823,6 +2880,236 @@ def test_no_empty_pattern_entry_is_also_a_row():
         "these sites are BOTH a §13 row and an `EMPTY_PATTERN` entry — one of "
         f"the two is dead: {both}"
     )
+
+
+def test_every_empty_pattern_entry_states_a_true_fact():
+    """Each entry's REASON is checked against the code it claims to describe.
+
+    ⚠️ **This arm restores the half the `#9493` fold deleted, and its absence was
+    a fail-open in the direction this class exists to close.** An entry is
+    `(file, symbol, why, facts)`; the other three arms read only `(file, symbol)`,
+    so the prose — the register's ONLY record of *why* a walk is out — was never
+    checked against anything. Measured on the pre-arm tree: retyping
+    `session_source_migration._OUT_TYPES` from `(old:Source {url:$u})` to
+    `(old)`, or dropping `:Subject` from `sdk.provenance`, makes the walk start
+    observing an `aboutObject` edge while EVERY arm stays green — the entry goes
+    on excusing it, and §13's two legal grounds no longer hold for that site.
+
+    The facts are asserted as plain substrings of the symbol's own span plus the
+    module-level constants that span names (`_symbol_fact_text`), so a fact
+    cannot be satisfied by an unrelated reader elsewhere in the file — which is
+    what the old guard's cross-clause formatter existed for, and what a
+    package-wide `grep` would have broken.
+    """
+    census = _call_time_census()
+    assert census.EMPTY_PATTERN, (
+        "the `EMPTY_PATTERN` register is empty — this arm would then assert "
+        "nothing, which is how an unread prose reason ships green"
+    )
+    checked = 0
+    failures: list[str] = []
+    for rel, symbol, _why, facts in census.EMPTY_PATTERN:
+        assert facts, (
+            f"`{_site_key(rel, symbol)}` carries no code fact — its reason is "
+            "prose nothing can falsify, so weakening the walk would leave it "
+            "excusing a site that now reads the edge"
+        )
+        text = _symbol_fact_text(rel, symbol)
+        for fact in facts:
+            checked += 1
+            if fact not in text:
+                failures.append(f"  - {_site_key(rel, symbol)} no longer states `{fact}`")
+    assert not failures, (
+        "these `EMPTY_PATTERN` entries excuse a walk on a fact their code no "
+        "longer carries, so the walk may now be observing an `aboutObject` edge "
+        "while the register keeps it out of §13:\n"
+        + "\n".join(failures)
+        + "\nRe-derive the reason from the site: either restore the bound (a "
+        "`type(r) IN [...]` restriction, an endpoint label outside every "
+        "`aboutObject` triple, or a degree/existence count that returns no "
+        "edge), or move the site to a §13 row."
+    )
+    assert checked >= len(census.EMPTY_PATTERN), (
+        f"{len(census.EMPTY_PATTERN)} entries produced only {checked} fact "
+        "assertions — every entry must carry at least one, or the register's "
+        "reasons are unverified again"
+    )
+
+
+def test_a_part_assembled_walk_is_derived():
+    """The assembled spelling is DERIVED, not merely admitted by the gate.
+
+    ⚠️ **Two properties, one fixture, because they are two halves of one bypass.**
+    `_WALK = "-[r]->"` plus `"MATCH (n)" + _WALK + "(m)"` is a walk over every
+    relationship type whose dash, bracket and node patterns sit in three
+    different literals. §13 claims such a walk *"enters the census through the
+    consumer the resolver follows"*; that is true ONLY because `_resolve()` folds
+    `ast.BinOp/Add` (`tests/_about_call_time_census.py`), and until this arm
+    existed nothing asserted it — a change to `_resolve` would have reopened the
+    bypass silently while the document kept claiming the property. The GATE half
+    is `_may_traverse_every_type`, which must admit the module before any of this
+    runs (`test_the_module_filter_admits_a_split_traversal`).
+    """
+    census = _call_time_census()
+    source = (
+        '_WALK = "-[r]->"\n'
+        "\n"
+        "\n"
+        "def _assembled(query):\n"
+        '    return query("MATCH (n)" + _WALK + "(m)")\n'
+        "\n"
+        "\n"
+        "def _typed(query):\n"
+        '    return query("MATCH (n)-[r:aboutObject]->(m)")\n'
+    )
+    file = census._File(Path("synthetic_split.py"), "synthetic_split.py", source)
+    derived = {symbol for symbol, _line in census._empty_pattern_sites_in(file)}
+    assert "_assembled" in derived, (
+        "a walk assembled from a fragment constant (`\"MATCH (n)\" + _WALK + "
+        "\"(m)\"`) is not derived — `_resolve()` no longer folds `ast.BinOp/Add`, "
+        "so every walk built from parts ships green, and §13's claim that it "
+        "enters the census through the resolver is false"
+    )
+    assert "_typed" not in derived, (
+        "a typed walk derived as an empty-pattern site — the fold must not "
+        "swallow the half that belongs to the named class"
+    )
+
+
+def test_the_module_filter_admits_a_split_traversal():
+    """The file gate must admit a walk whose dash is outside the bracket literal.
+
+    ⚠️ Measured on the pre-fix filter: both assembled spellings returned `False`
+    while the one-literal spelling returned `True`, so a module holding only the
+    assembled form was dropped before the derivation — which can see it — ran.
+    `test_the_file_filter_un_sees_nothing` cannot catch this: the corpus holds no
+    such file today, so the difference it compares stays empty either way. The
+    assertion is therefore synthetic, on the two shapes a `+` concatenation
+    produces.
+    """
+    census = _call_time_census()
+    cases = {
+        'q("MATCH (n)-" + "[r]->(m)")': "the bracket is its own literal",
+        'q("MATCH (n)-[r]" + "->(m)")': "the dash is its own literal",
+    }
+    for source, shape in cases.items():
+        assert census._may_traverse_every_type(source), (
+            f"the module filter refuses the assembled spelling ({shape}): "
+            f"{source} — the file is never walked, so the walk inside it is "
+            "invisible however good the resolver is"
+        )
+    assert not census._may_traverse_every_type("no cypher here at all"), (
+        "the filter admits a module with no traversal in it — as a filter that "
+        "is free, but it also means the assertions above measure nothing"
+    )
+
+
+def test_the_empty_pattern_type_slot_rules():
+    """Variable-length and property-map brackets name NO type — `MERGE` is a write.
+
+    Three rules this class rests on, each correct and each unpinned once the
+    retired guard's `_EMPTY_PATTERN_CASES` table went with the fold:
+
+    * `[r*1..2]` — a variable-length traversal has no type slot, so it walks every
+      type (the `*` is a length, not a type);
+    * `[r {idx:0}]` — a property map is not a type, and the colon inside `{}` is a
+      map key;
+    * `MERGE (n)-[r]-(m)` / `CREATE` — the pattern MINTS the edge, so it is a
+      writer, not a reader of it. Deleting the clause test would inflate the
+      class with every write site and force an entry for each.
+    """
+    census = _call_time_census()
+    source = (
+        "def _ranged(query):\n"
+        '    return query("MATCH (n)-[r*1..2]->(m)")\n'
+        "\n"
+        "\n"
+        "def _mapped(query):\n"
+        '    return query("MATCH (n)-[r {idx:0}]->(m)")\n'
+        "\n"
+        "\n"
+        "def _minted(query):\n"
+        '    return query("MERGE (n)-[r]-(m)")\n'
+        "\n"
+        "\n"
+        "def _created(query):\n"
+        '    return query("CREATE (n)-[r]-(m)")\n'
+    )
+    file = census._File(Path("synthetic_slots.py"), "synthetic_slots.py", source)
+    derived = {symbol for symbol, _line in census._empty_pattern_sites_in(file)}
+    for symbol in ("_ranged", "_mapped"):
+        assert symbol in derived, (
+            f"`{symbol}` names no relationship TYPE (a length, or a property "
+            "map, is not a type) so it walks every type — a bracket this walk "
+            "cannot see is a reader that ships green"
+        )
+    for symbol in ("_minted", "_created"):
+        assert symbol not in derived, (
+            f"`{symbol}` derives as an empty-pattern READ — `MERGE`/`CREATE` "
+            "mint the edge, so the pattern is a writer, and admitting writers "
+            "inflates the class with sites that never read a referent"
+        )
+
+
+def test_the_two_halves_of_the_register_are_measured():
+    """One symbol can own TWO sites — the derivation is per-site, the key per-symbol.
+
+    ⚠️ A census that collapsed its sites to a set of SYMBOLS would lose the
+    difference: `mining.verify_no_auto_wire` walks the edge twice (1409 and
+    1435 at this head), `session_source_migration._rel_types` twice (its two
+    query constants). Every register key is therefore a symbol that may hide
+    more than one read, and both counts are asserted so that neither side can
+    quietly become the other: the KEYS are what the register matches, the ROWS
+    are what the class is.
+    """
+    census = _call_time_census()
+    sites = census._empty_pattern_sites()
+    keys = len(sites)
+    rows = sum(len(lines) for lines in sites.values())
+    assert keys > 2, f"the empty-pattern derivation found {keys} symbols — nothing to measure"
+    assert rows > keys, (
+        f"{keys} symbols own {rows} sites — the multiplicity is gone, so either "
+        "the derivation now stops at the first site of each symbol (and a second "
+        "walk beside a registered one ships green) or the class shrank"
+    )
+    assert rows - keys >= 2, (
+        f"{keys} symbols over {rows} sites leaves only {rows - keys} extra "
+        "site(s); at least TWO symbols are known to own two sites each, so a "
+        "collapse to one is a derivation regression"
+    )
+
+
+def test_the_site_aliases_are_grounded():
+    """BOTH halves of every `_SITE_ALIASES` row must resolve (#9493).
+
+    ⚠️ **This table turns a deleted entry into a row-owned site, so a mis-pairing
+    is a hole with a footnote.** Each row key is a constant that owns a §13 row
+    (`hosted_backup._DUMP_EDGE_PAGE_QUERY`); each target is the consumer the
+    derivation actually attributes the site to (`dump_graph`). The three pairs
+    this change adds are correct — but a row key that names no row, or a target
+    that names no derived site, would let an unrowed site be excused by an
+    UNRELATED row, which is the stale-shield shape `test_no_empty_pattern_entry_
+    is_also_a_row` closes on the register side. The grounding arm above covers
+    the other table (`_DERIVED_ALIASES`); this one is its twin and was missing.
+    """
+    census = _call_time_census()
+    assert _SITE_ALIASES, "`_SITE_ALIASES` is empty — this arm would assert nothing"
+    declared = {
+        _site_key("x/" + str(row["module"]), str(row["symbol"])) for row in _rows()
+    }
+    derived = set(_derived(census._empty_pattern_sites()))
+    for row_key, target in sorted(_SITE_ALIASES.items()):
+        assert row_key in declared, (
+            f"`_SITE_ALIASES` maps `{row_key}` to `{target}`, and §13 has no row "
+            "under that key — the alias stands for a row that does not exist, so "
+            "it excuses nothing and hides that fact"
+        )
+        assert target in derived, (
+            f"`_SITE_ALIASES` maps `{row_key}` to `{target}`, and the empty-pattern "
+            "derivation attributes no site to that name — the alias points at a "
+            "symbol that reads nothing, so an UNROWED site elsewhere can be "
+            "matched by the row key while the alias supplies the missing key"
+        )
 
 
 def test_a_comprehension_only_walk_derives():
