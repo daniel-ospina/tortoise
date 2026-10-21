@@ -48,6 +48,10 @@ _PROBE_PATH = (_REPO_ROOT / "docs" / "evidence" / "7949-capstone" / "probes"
                / "e1_e2_probe.py")
 _CORPUS_DIR = _REPO_ROOT / "docs" / "evidence" / "7949-capstone" / "corpus"
 _CORPUS = _CORPUS_DIR / "e1e2_corpus.json"
+#: #9507's committed record — the artifact a REAL `--prereg` is handed. Read from
+#: disk so a pin about its floors cannot drift away from the record it describes.
+_PREREG_ARTIFACT = (_REPO_ROOT / "docs" / "evidence" / "7949-capstone"
+                    / "preregistration.json")
 
 #: The run's corpus, repo-relative — what a REAL pre-registration must pin before
 #: its bar can be scored over this population (#9076). The artifact shape is
@@ -1513,25 +1517,23 @@ def test_a_matching_corpus_sha_pin_binds_without_a_path(monkeypatch):
 
 def test_the_real_pre_registration_schema_names_why_it_cannot_score_this_run(
         monkeypatch):
-    """#9507's artifact, VERBATIM: every refusal AND the four floors it drops.
+    """#9507's artifact, read from DISK: every refusal AND the four floors it drops.
 
     Pre-fix this run printed only `prereg-error=TypeError: e1 is absent`, which
     blames a malformed artifact and says nothing about the reasons it cannot be
     this run's bar (a different corpus, a 30-Object floor against 25, and the four
-    `denominator_floors` keys this binding cannot evaluate). The floors are the
-    record's OWN five keys, not a hand-reduced copy: a copy that kept only
-    `e1_objects` could not see the drop this test exists to catch (#9513 review P2).
+    `denominator_floors` keys this binding cannot evaluate). The artifact is the
+    COMMITTED `preregistration.json`, not a hand-reduced copy: a copy that kept only
+    `e1_objects` could not see the drop this test exists to catch, and a copy cannot
+    notice the record changing (#9513 review P2).
     """
-    artifact = {
-        "schema": "capstone-preregistration/v1",
-        "corpus": {"path": "tests/eval/write_path", "sessions": 7},
-        "criteria": [{"id": "E1",
-                      "threshold": "`after_share <= 0.50 x before_share`"}],
-        "denominator_floors": {"e1_objects": 30, "e1_min_before_share": 0.2,
-                               "e2b_surviving_units": 30, "e3_derived_nodes": 30,
-                               "e5_rate_min_sentences": 10},
-        "below_floor": "REFUSED, which is neither a pass nor a fail",
-    }
+    artifact = json.loads(_PREREG_ARTIFACT.read_text(encoding="utf-8"))
+    # The floors are what this pin is about; if the record grows a key the probe
+    # CAN read, or drops one, this is the line that says so.
+    assert sorted(artifact["denominator_floors"]) == [
+        "e1_min_before_share", "e1_objects", "e2b_surviving_units",
+        "e3_derived_nodes", "e5_rate_min_sentences"], artifact["denominator_floors"]
+    assert artifact["corpus"]["path"] == "tests/eval/write_path"
     code, text = _run_with_prereg(monkeypatch, artifact)
     assert code == 3, text
     assert "declared_path=tests/eval/write_path" in text, text
