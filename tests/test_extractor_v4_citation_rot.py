@@ -654,7 +654,15 @@ _STATUS_ADJACENT = (
 _CHANGE_NARRATION = re.compile(
     r"(?:an|the) earlier (?:draft|version|note|row|line|passage|recommendation)"
     r"|Corrections? to (?:an )?earlier"
-    r"|(?:CORRECTED|AMENDED) 20[0-9]{2}-"
+    # The stamp's DATE may be parenthesised and may follow a qualifier: this
+    # arm originally required `CORRECTED 20xx-` with a single space, so a
+    # "CORRECTED (2026-10-20, `#NNNN`)" stamp — the shape #7948 itself added to
+    # `EXTRACTOR-V4-ARCHITECTURE.md` §13.8 — passed the guard while violating
+    # the rule the guard exists to enforce. The `AMENDED` in
+    # `STORAGE-ARCHITECTURE.md` §14.1 O2 is followed by `)` and a dash, not a
+    # date, so allowing the parens does not make it fire (pinned in
+    # `must_not_flag`).
+    r"|(?:CORRECTED|AMENDED)(?:\s+AGAIN)?\s*\(?\s*20[0-9]{2}-"
     r"|\bDraft [0-9]\b"
     r"|rewritten twice"
     # A version the passage says it has been true since — change history, not the
@@ -791,6 +799,12 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         "this reopen is CLOSED",
         "*An earlier draft said* the opposite of this paragraph.",
         "**CORRECTED 2026-09-24** \u2014 this passage was repaired.",
+        # The parenthesised-date form, verbatim from what #7948 added to
+        # `EXTRACTOR-V4-ARCHITECTURE.md` §13.8 and then moved to the changelog.
+        # The arm above required `CORRECTED 20xx-`, so this line passed the guard.
+        "**\u26a0\ufe0f CORRECTED (2026-10-20, `#7948`): TEN sites are "
+        "customer-callable, behind EIGHT doors.**",
+        "**CORRECTED AGAIN 2026-10-20, second pass (`#7948`): 23 sites.**",
         "**Implementation status.** Both halves are now implemented.",
         "**\u26a0\ufe0f Draft 1** claimed the index is RAM-mandatory.",
         "\u00a716.2's rule is now also a billing rule (see `#5024` CLOSED).",
@@ -817,6 +831,11 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         # A near-miss for the version-date arm: a version NAMED, not asserted as
         # a period the passage has held true since.
         "Model version v3.15 retires the `:Document` label.",
+        # A near-miss for the parenthesised-date arm: `AMENDED` closed by a
+        # paren and followed by a dash. The state word is design prose here
+        # (`STORAGE-ARCHITECTURE.md` §14.1 O2), not a dated correction stamp.
+        "The owner re-affirmed **2026-09-30** that this measurement is wanted "
+        "(§14.1 **O2**, AMENDED) \u2014 **only the goal is deferred.**",
     ]
     # The SCOPE is pinned too, and pinned ABSOLUTELY. Two narrowings are possible
     # and both must red a test:
