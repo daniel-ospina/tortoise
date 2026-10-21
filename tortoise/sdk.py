@@ -12493,12 +12493,14 @@ class TortoiseSDK:
         # (docs/evidence/7951-delete-point-outbox/probes/delete_order_probe.py,
         # delete-order-probe.log). So the reachable trigger TODAY is a generic
         # engine/transport failure with the node still present: RARE. ⚠️ Once
-        # part 2 arms the handle, the shape changes and this door is REFUSED —
-        # it is apply-first, so it cannot honestly declare a journal-first lane
-        # (see the comment above the signature and `_APPLY_FIRST_DOORS`). The
-        # ordering below is justified by the DIRECTION of the divergence it
-        # leaves, not by its frequency — and the refusal test injects the
-        # failure rather than claiming the door produces it.
+        # part 2 arms the handle this door COMPLETES: it holds the DECLARED
+        # apply-first lane (#9206 — `@_declares_apply_first_write_lane` above the
+        # signature), which states "the cache write IS the commit point and the
+        # record that describes it follows". What an armed handle still REFUSES
+        # here is a raw UNDECLARED statement — the lane is on the door, not on
+        # the statement. The ordering below is justified by the DIRECTION of the
+        # divergence it leaves, not by its frequency — and the refusal test
+        # injects the failure rather than claiming the door produces it.
         #
         # So the destroy is issued FIRST and the record is written only once it
         # has RETURNED. A cache write that raises appends NOTHING, so #9207's
