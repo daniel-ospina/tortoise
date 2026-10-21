@@ -636,3 +636,35 @@ re-derived (run 2 still regenerates byte-identically — now pinned by a test, n
   missing delta makes the verdict `no branch matched — scoring input incomplete`. No committed figure changes:
   run 2 still regenerates byte-identically (the artifact pin is what proves it), and the fix is pinned by
   four tests that fail on the pre-fix code (two of them on the `TypeError`, verified by reverting the module).
+
+## §13.8 question 2 — the read-site correction's narration moved here (2026-10-20, `#7948`)
+
+The design document states the fact; the story of how the figure moved belongs here, per the rule the
+design-language pass (#8542) established and `tests/test_extractor_v4_citation_rot.py` pins.
+
+**The removed stamp, verbatim:**
+
+> ⚠️ **CORRECTED (2026-10-20, `#7948`): TEN sites are customer-callable, behind EIGHT doors — the four
+> counted here missed the whole state-recall path, and a later pass added three more readers that no
+> module-level census could see.**
+
+**What it recorded.** §13.8 question 2 previously counted four customer-callable sites (`belief_timeline`,
+`topic_summarize`, `recall_subgraph`, graph-ordered `search`). That count missed the whole state-recall
+path — `recall_state` alone reads the edge on four code paths, three of them through an `about*`
+alternation CONSTANT — and a later pass added three readers that no module-level census could see: an
+all-edge walk in `navigation.py` behind two further MCP tools, the supersede dry run in `mcp_server.py`,
+and the replay delete-leg in `projection/__init__.py`. The document now states only the resulting fact
+(**TEN customer-callable read sites, behind EIGHT distinct doors**); the authoritative enumeration is
+`STORAGE-ARCHITECTURE.md` §13's table, resolved against the code by
+`tests/test_7948_about_object_read_sites.py`.
+
+**Two citations in §13.8 were also re-pointed, and this is the rot class the citation guard cannot see:**
+`create_about_edge` (`projection/edges.py:344` → `:1447`) and, in `STORAGE-ARCHITECTURE.md` §13,
+`_connect_issue_objects` (`sdk.py:20154`) — both numbers named something else entirely at HEAD. §13's
+citations are now symbol-keyed (`projection/edges.py::_EdgeHandlers.create_about_edge`,
+`sdk.py::TortoiseSDK._connect_issue_objects`), matching §13's own statement that it carries no line numbers.
+
+**And the guard that forbids this shape had a false PASS, now closed.** Its date arm was pinned to the
+space-separated form (`CORRECTED 20xx-`), so the parenthesized stamp above — the form this document's own
+corrections actually take — read as clean. The separator now accepts a short non-digit run, and the
+instrument's own both-directions test carries the parenthesized form as a `must_flag` fixture.

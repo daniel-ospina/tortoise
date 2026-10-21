@@ -651,10 +651,21 @@ _STATUS_ADJACENT = (
 #: A change narrated as a change, rather than the rule it settled on. The record
 #: of what changed belongs in `ONTOLOGY-CHANGELOG.md`, which is what a changelog
 #: is for.
+#:
+#: ⚠️ The date arm must not be pinned to the space-separated form. The stamp this
+#: guard exists to keep out of the design documents routinely arrives with the
+#: date in parentheses — *"⚠️ **CORRECTED (2026-10-20, `#7948`): …**"*, which #7948
+#: itself landed in §13.8 — and a space-only arm reported all three documents
+#: clean while it sat there. That is a false PASS on the exact class the guard
+#: claims: the word and the field's most natural date form, neither flagged.
+#: The separator is therefore one short run of non-digits, covering ` `, ` (`,
+#: ` on `, ` — ` and `: ` without matching ordinary prose (*"the corrected
+#: figure is TEN sites"* carries no `20xx-`); measured against the three design
+#: documents at HEAD: 0 hits.
 _CHANGE_NARRATION = re.compile(
     r"(?:an|the) earlier (?:draft|version|note|row|line|passage|recommendation)"
     r"|Corrections? to (?:an )?earlier"
-    r"|(?:CORRECTED|AMENDED) 20[0-9]{2}-"
+    r"|(?:CORRECTED|AMENDED)\b[^0-9\n]{0,12}20[0-9]{2}[-/]"
     r"|\bDraft [0-9]\b"
     r"|rewritten twice"
     # A version the passage says it has been true since — change history, not the
@@ -791,6 +802,13 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         "this reopen is CLOSED",
         "*An earlier draft said* the opposite of this paragraph.",
         "**CORRECTED 2026-09-24** \u2014 this passage was repaired.",
+        # The PARENTHESIZED date form. Measured: this is how #7948's own §13.8
+        # stamp landed, and the space-only arm reported all three design
+        # documents clean while it sat there — a false PASS on the class this
+        # test exists to keep out, which is why the arm is no longer pinned to
+        # one separator.
+        "\u26a0\ufe0f **CORRECTED (2026-10-20, `#7948`): TEN sites are customer-callable.**",
+        "The row was amended on 2026-10-19, after the recount.",
         "**Implementation status.** Both halves are now implemented.",
         "**\u26a0\ufe0f Draft 1** claimed the index is RAM-mandatory.",
         "\u00a716.2's rule is now also a billing rule (see `#5024` CLOSED).",
@@ -805,6 +823,9 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         "`aboutObject` source only.",
     ]
     must_not_flag = [
+        # A near-miss for the date arm: the word is used, but nothing is stamped
+        # — no `20xx-` date-form, so this is a design statement, not narration.
+        "The corrected figure is TEN sites behind eight doors.",
         "The gate is FAIL-CLOSED at the boundary.",
         "`goalState` is a CLOSED vocabulary.",
         "A 384-dim float32 embedding is a fixed-width row.",
