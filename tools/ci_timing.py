@@ -429,7 +429,14 @@ COUNT_RE = re.compile(r"(\d+)\s+(passed|failed|error|skipped|xfailed|xpassed)")
 _V = r"(?:PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)"
 V_PROGRESS_RE = re.compile(
     rf"^(?P<nodeid>tests/\S+?\.py::.+?)\s+(?P<verdict>{_V})"
-    rf"(?:\s+\(.*\))?\s*\[\s*\d+%\]\s*$")
+    rf"(?:\s+\(.*\))?\s*\[\s*\d+%\]"
+    # The line's LAST marker decides; text after it is allowed. A child process can
+    # concatenate its own stderr onto the verdict line with no newline — real, in the
+    # shipped sample: `...test_import_deleted_team_410 PASSED [ 58%]11265:C 20 Oct 2026
+    # 17:50:42.598 # Fatal error, can't open config file` — and an end-anchor `\s*$`
+    # silently dropped that line, so on a leg truncated before the summary block a real
+    # FAILED vanished from `failed_tests` AND from the count (#9134 review, P1).
+    rf"(?!.*\[\s*\d+%\]).*$")
 # Some logs carry a bare `id VERDICT` line with no percentage marker (a hand-trimmed capture, an
 # extract, the suite's own fixture). Accepting only the marked form dropped every outcome in such a
 # leg, so this alternative reads them. It is deliberately narrow: the id may not contain a space,
@@ -588,6 +595,15 @@ def parse_log(path: Path) -> dict:
     # Any line that NAMES the outcome counts as the summary: a leg's summary is not
     # always the last line (two legs in the sample end with trailing output after
     # it), and anchoring to the end published complete legs as truncated.
+    # ⛔ Shape, not vocabulary: a summary line is `=== <n> <state>` and does not have
+    # to mention `passed`. Requiring that word made a COLLECTION-ERROR leg
+    # (`=== 1 error in 0.40s ===`) parse as all-zero, so a leg that failed to collect
+    # reported no errors at all (#9134 review, P3).
+    # A summary is also the line that says how long the session took — `= 10 passed
+    # in 3.00s =`, `==== no tests ran in 0.01s ====`, `2 deselected in 0.10s`.
+    # Requiring a COUNT token missed the last two (neither names a count), and
+    # matching only `-q`'s banner-less form missed the banner form that every
+    # `-v` CI leg actually prints (#9134 review, P1).
     summary_seen = any(_is_summary_line(ln) for ln in lines)
 
     for line in lines:
@@ -664,59 +680,35 @@ def parse_log(path: Path) -> dict:
         if m:
             outcomes[_short_summary_id(m.group(2), known_ids)] = m.group(1)
             continue
-        # ⛔ Shape, not vocabulary: a summary line is `=== <n> <state>` and does not have
-        # to mention `passed`. Requiring that word made a COLLECTION-ERROR leg
-        # (`=== 1 error in 0.40s ===`) parse as all-zero, so a leg that failed to collect
-        # reported no errors at all (#9134 review, P3).
-        # A summary is the line that says how long the session took — `= 10 passed
-        # in 3.00s =`, `==== no tests ran in 0.01s ====`, `2 deselected in 0.10s`.
-        # Requiring a COUNT token missed the last two (neither names a count), and
-        # matching only `-q`'s banner-less form missed the banner form that every
-        # `-v` CI leg actually prints (#9134 review, P1).
-        # ⛔ A COUNT line is parsed in EITHER shape: bannered (`=== 10 passed … ===`,
-        # which is also how a captured banner-shaped line carrying counts is read) or
-        # pytest -q's banner-less `1 failed, 2 passed in 3.00s`. Requiring a leading
-        # `=` alone made a `-q` leg report `summary_seen: True` with every count ZERO,
-        # and a seen summary SUPPRESSES the summary-less disclosure — so the leg's real
-        # counts vanished silently, which is exactly the fail-open the disclosure
-        # exists to prevent (#9134 review, P2). This is DELIBERATELY more permissive
-        # than `_is_summary_line`: that predicate decides whether the leg is DISCLOSED,
-        # this one only decides which numbers to credit.
-        if COUNT_RE.search(line) and (line.startswith("=") or _SUMMARY_IN_RE.search(line)):
-            for n, key in COUNT_RE.findall(line):
-                if key in counts:
-                    counts[key] = int(n)
+        # ⛔ The counts are NOT credited here. Exactly ONE site decides them — `_cand`
+        # below, after this loop — and it resets every key before it sets one. A
+        # per-line credit block used to sit at this point; it was DEAD (the reset
+        # discarded every value it wrote) and its comment documented a "more
+        # permissive in either shape" policy that never executed, so a maintainer
+        # reading it believed a fallback existed that did not (#9134 review, P3).
     for fname, entry in files.items():
         entry["tests"] = len(nodeids[fname])
     for rel_path, entry in file_paths.items():
         entry["tests"] = len(path_nodeids[rel_path])
-    # Counts come from the LAST line that reports them. pytest echoes parametrized
-    # ids and captured output at column 0, so a quoted id such as
-    # `...[= 1 error in 0.44s =]` was credited as a real summary and fabricated an
-    # error the run never had (#9134 review, P2).
-    # The counts line must be a SUMMARY BANNER, not merely a line with a count in it:
-    # pytest echoes parametrized ids and captured output at column 0, so a quoted id
-    # such as `...[= 1 error in 0.44s =]` or a trailing teardown echo was credited as
-    # the real summary (#9134 review, P2). Only the keys that line names are set —
-    # zeroing the rest erased passes the run really had.
-    # Exactly ONE line decides the counts: the last line pytest printed as a SESSION
-    # SUMMARY — a banner (`= 10 passed in 3s =`) or the banner-less `-q` form — and never
-    # one containing `[`, which is a parametrized id echoed into the log. Every key is
-    # reset first, so a column the genuine summary omits is genuinely zero (#9134 review,
-    # P1: crediting a quoted id fabricated an error the run never had).
-    # ⛔ A non-banner candidate must BE the banner-less summary, not merely contain
-    # `in Ns`: `_SUMMARY_IN_RE` alone credited `E   AssertionError: assert '= 10
-    # passed in 3.00s =' in …` — a FAILING assertion quoting a summary — as the session
-    # summary on a log truncated before the real one, so a killed leg shipped fabricated
-    # passes with `summary_seen: True` and no truncation disclosure (#9134 review, P2).
-    # The WATCHDOG banner keeps working: it OPENS with `=`, so it takes the banner
-    # branch, and its counts stay a lower bound (kill detection is a separate question,
-    # #6145).
-    # The counts rule is deliberately a touch wider than `_is_summary_line`: a WATCHDOG
-    # banner opens with `=` and carries counts but no duration, and its counts stay
-    # credited (as a lower bound — #6145 pins that). What it may NOT do is credit an
-    # echoed ASSERTION, which is why a non-banner line must OPEN with the count clause
-    # rather than merely contain `in Ns` (#9134 review, P2).
+    # ---- the counts rule: exactly ONE line, decided here and NOWHERE else -------
+    # The counts come from the LAST line that pytest printed as a SESSION SUMMARY.
+    # A candidate line must carry a count, must NOT contain `[` (pytest echoes
+    # parametrized ids and captured output at column 0, so `...[= 1 error in 0.44s =]`
+    # or a trailing teardown echo would otherwise be credited as the real summary and
+    # fabricate an error the run never had — #9134 review, P2), and must be either a
+    # BANNER (opens with `=`) or the banner-less `-q` form that OPENS with the count
+    # clause. `_SUMMARY_IN_RE` alone is not enough for the non-banner case: it credited
+    # `E   AssertionError: assert '= 10 passed in 3.00s =' in …` — a FAILING assertion
+    # quoting a summary — on a log truncated before the real one, so a killed leg
+    # shipped fabricated passes with `summary_seen: True` and no truncation disclosure
+    # (#9134 review, P2).
+    # Every key is RESET first, so a column the genuine summary omits is genuinely
+    # zero; only the keys that line NAMES are then set (zeroing without setting erased
+    # passes the run really had). The WATCHDOG banner keeps working — it OPENS with
+    # `=`, so it takes the banner branch and its counts stay a lower bound (kill
+    # detection is a separate question, #6145). The rule is therefore deliberately a
+    # touch wider than `_is_summary_line`: that predicate decides whether a leg is
+    # DISCLOSED, this one only decides which numbers to credit.
     _cand = [ln for ln in lines if "[" not in ln and COUNT_RE.search(ln)
              and (ln.strip().startswith("=")
                   or _BANNERLESS_SUMMARY_RE.match(ln.strip()))]
@@ -1085,14 +1077,15 @@ def _has_parametrisation(tree: ast.Module) -> bool:
 def _splits_tests_across_exclusive_sides(tree: ast.Module) -> bool:
     """True when two MUTUALLY EXCLUSIVE branches each define tests.
 
-    Only one side of a live `if`/`else` runs, and only one of `try`'s body and a
-    handler can — but `_collectable_statements` descends into both, so their tests are
-    SUMMED. The count then EXCEEDS what pytest collects, which makes the row's
-    `observed >= declared` permanently unsatisfiable: the weight holds forever with a
-    witness naming a testcase that never exists (measured on a platform-guarded module:
-    5 declared against 2 collected on this host). The count is therefore OMITTED —
-    UNKNOWN is raisable and never lowerable, the direction this module requires
-    (#9134 review, P2).
+    Only one side of a live `if`/`else` runs, only one of `try`'s body and a handler
+    can, and only ONE ARM of a `match` runs — but `_collectable_statements` descends
+    into all of them, so their tests are SUMMED. The count then EXCEEDS what pytest
+    collects, which makes the row's `observed >= declared` permanently unsatisfiable:
+    the weight holds forever with a witness naming a testcase that never exists
+    (measured on a platform-guarded module: 5 declared against 2 collected on this
+    host; a two-arm `match` measured 2 declared against 1 collected). The count is
+    therefore OMITTED — UNKNOWN is raisable and never lowerable, the direction this
+    module requires (#9134 review, P2; `match` arms, P3).
     """
     tc = _type_checking_names(tree)
     for node in ast.walk(tree):
@@ -1110,6 +1103,17 @@ def _splits_tests_across_exclusive_sides(tree: ast.Module) -> bool:
             # so a test in either of those is additive and not a split.
             body_tests = _count_collected(node.body, tc)
             if body_tests and any(_count_collected(h.body, tc) for h in node.handlers):
+                return True
+        elif isinstance(node, ast.Match):
+            # `_collectable_statements` descends into EVERY `case` body
+            # (`getattr(node, "cases", [])`), but a `match` runs exactly one arm, so two
+            # arms that each define tests are mutually exclusive in precisely the same
+            # way `if`/`else` is — and summing them makes `observed >= declared`
+            # unsatisfiable (measured on a `match sys.platform:` module: 2 declared, 1
+            # collected). A `case` guard does not change this: a guarded arm and the
+            # arm after it still cannot both run for one testcase (#9134 review, P3).
+            if sum(1 for case in node.cases
+                   if _count_collected(case.body, tc)) > 1:
                 return True
     return False
 
