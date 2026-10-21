@@ -2462,12 +2462,16 @@ def candidate_flakes(history: list[dict]) -> list[dict]:
 
 def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
               run_id: str, history: list[dict], flakes: list[dict],
-              summary_less_legs: list[dict] | None = None) -> str:
+              summary_less_legs: list[dict] | None = None,
+              now: str | None = None) -> str:
     # #1477 review P2: CI_TIMING_NOW lets tests freeze the clock (the
     # back-to-back subprocess invocations in the determinism test otherwise
     # straddle a second boundary and flake).
-    now = (os.environ.get("CI_TIMING_NOW")
-           or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))  # noqa: UP017
+    # The caller resolves the sample time (it may have been bumped to the newest history
+    # row); re-deriving it here made the markdown contradict the JSON and its own history
+    # (#9134 review, P1).
+    now = now or (os.environ.get("CI_TIMING_NOW")
+                  or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))  # noqa: UP017
     lines = [FRONT_MATTER,
              "# CI Timing Measurement Artifact",
              "",
@@ -2884,8 +2888,8 @@ def main() -> int:
     }
 
     md = render_md(run, steps, files, total_counts, killed_any, run_id, history, flakes,
-                   summary_less_legs=[s for s in log_sources
-                                      if not s["summary_seen"]])
+                   summary_less_legs=[s for s in log_sources if not s["summary_seen"]],
+                   now=now)
     try:
         (out_dir / "ci-timing.md").write_text(md)
         (out_dir / "ci-timing.json").write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")

@@ -1,5 +1,34 @@
 {
-  "candidate_flakes": [],
+  "candidate_flakes": [
+    {
+      "failed_at": "2026-10-20T18:40:00Z",
+      "passed_at": "2026-10-21T09:30:00Z",
+      "passed_run_id": "39467226356",
+      "run_id": "39191149586",
+      "test": "tests/test_7925_route_parity.py::test_both_routes_produce_the_same_confidence[IMPL]"
+    },
+    {
+      "failed_at": "2026-10-20T18:40:00Z",
+      "passed_at": "2026-10-21T09:30:00Z",
+      "passed_run_id": "39467226356",
+      "run_id": "39191149586",
+      "test": "tests/test_7925_route_parity.py::test_both_routes_produce_the_same_confidence[NAND]"
+    },
+    {
+      "failed_at": "2026-10-20T18:40:00Z",
+      "passed_at": "2026-10-21T09:30:00Z",
+      "passed_run_id": "39467226356",
+      "run_id": "39191149586",
+      "test": "tests/test_ci_timing.py::test_refresh_durations_on_the_real_manifest_of_record"
+    },
+    {
+      "failed_at": "2026-10-20T18:40:00Z",
+      "passed_at": "2026-10-21T09:30:00Z",
+      "passed_run_id": "39467226356",
+      "run_id": "39191149586",
+      "test": "tests/test_oauth_consent_bridge.py::test_the_spec_cites_live_hosted_api_sites"
+    }
+  ],
   "failed_tests": [
     "tests/test_entry_point_python_guard.py::test_no_doc_or_usage_advertises_the_form_the_guard_refuses",
     "tests/test_markers.py::test_namespace_literals_guard_passing_or_routed",
@@ -588,16 +617,44 @@
         "tests/test_entry_point_python_guard.py::test_no_doc_or_usage_advertises_the_form_the_guard_refuses",
         "tests/test_markers.py::test_namespace_literals_guard_passing_or_routed",
         "tests/test_onboarding_endpoints.py::TestOnboardingTeam::test_create_team_then_session_key_mint_registry",
-        "tests/test_pytest_attribution.py::test_killed_leg_names_the_test_it_was_running[tests/test_session_key_http.py::TestSessionKeyMintConcurrency::test_registry_mint_blocks_while_team_lock_held",
+        "tests/test_pytest_attribution.py::test_killed_leg_names_the_test_it_was_running",
         "tests/test_session_key_http.py::TestSessionKeyMintConcurrency::test_registry_mint_blocks_while_team_lock_held",
         "tests/test_uri_env_mutations_declared.py::test_uri_env_mutations_declared"
       ],
       "killed": false,
       "run_id": "39467226356",
-      "sample_time": "2026-10-20T18:30:00Z",
+      "sample_time": "2026-10-21T09:30:00Z",
       "sha": "65023e7d9d8d2c08d98718d8267f94dcd50f6eee",
       "steps_max_job_ms": 1346000,
       "steps_total_ms": 9844000
+    },
+    {
+      "branch": "main",
+      "conclusion": "failure",
+      "counts": {
+        "error": 1,
+        "failed": 6,
+        "passed": 30697,
+        "skipped": 129,
+        "xfailed": 7,
+        "xpassed": 0
+      },
+      "created_at": "2026-10-19T02:41:31Z",
+      "event": "push",
+      "failed_tests": [
+        "tests/test_7925_route_parity.py::test_both_routes_produce_the_same_confidence[IMPL]",
+        "tests/test_7925_route_parity.py::test_both_routes_produce_the_same_confidence[NAND]",
+        "tests/test_ci_timing.py::test_refresh_durations_on_the_real_manifest_of_record",
+        "tests/test_oauth_consent_bridge.py::test_the_spec_cites_live_hosted_api_sites",
+        "tests/test_onboarding_endpoints.py::TestOnboardingTeam::test_create_team_then_session_key_mint_registry",
+        "tests/test_session_key_http.py::TestSessionKeyMintConcurrency::test_registry_mint_blocks_while_team_lock_held"
+      ],
+      "killed": false,
+      "run_id": "39191149586",
+      "sample_time": "2026-10-20T18:40:00Z",
+      "sha": "8464f850f938ff048666a24ade2081e4518987b6",
+      "steps_max_job_ms": 1300000,
+      "steps_total_ms": 9951000
     },
     {
       "branch": "main",
@@ -934,7 +991,7 @@
     "created_at": "2026-10-20T17:34:10Z",
     "head_sha": "65023e7d9d8d2c08d98718d8267f94dcd50f6eee",
     "run_id": "39467226356",
-    "sample_time": "2026-10-20T18:30:00Z",
+    "sample_time": "2026-10-21T09:30:00Z",
     "selection": "event=push&branch=main, exclude_pull_requests=true, cancelled skipped; this sample IS run 39467226356 (created 2026-10-20T17:34:10Z), and it is not re-labelled as a newer run"
   },
   "schema_version": 1,
