@@ -63,6 +63,10 @@ WHAT THIS PINS
    3: the named exclusions must actually read the edge, at HEAD, so the scoping is
    load-bearing rather than decoration. If `ranking.py` stops reading it, the
    qualifier reds here rather than surviving as a stale claim of its own.
+5. `test_the_widening_guard_fires_on_a_widened_file_list` — non-vacuity for arm
+   2's own widening guard, which compares path COMPONENTS: a measurement widened
+   to `tortoise/ranking.py` must be caught. The pre-fix spelling compared raw
+   tokens, so that guard could never fire (fail-open; #9426 review P2).
 
 NOT promised:
 - No count is asserted here. The #7948 census table is #7948's to pin
@@ -88,7 +92,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Pattern
 
 ROOT = Path(__file__).resolve().parent.parent
 DOCS_DIR = ROOT / "docs" / "architecture"
@@ -117,7 +120,7 @@ class Claim:
     label: str
     doc: Path
     anchor: str
-    files_re: Pattern[str]
+    files_re: re.Pattern[str]
 
 
 CLAIMS: tuple[Claim, ...] = (
@@ -176,6 +179,19 @@ def _quoted_files(claim: Claim, line: str) -> list[str]:
     return match.group(1).split()
 
 
+def _measured_files_include_excluded(files: list[str]) -> bool:
+    """True when the quoted measurement's file list names the excluded module.
+
+    Compared on path COMPONENTS, not raw tokens. The first spelling of this check
+    was `EXCLUDED_MODULE not in files`, which is fail-open: a widened measurement
+    writes `tortoise/ranking.py`, and that token is not equal to `"ranking.py"`,
+    so the very event the arm exists to catch — "the claim's measured file list
+    now contains `ranking.py`" — sailed through it. Only arm 1 masked that, and
+    only for as long as `aboutObject` stays a literal in `ranking.py`.
+    """
+    return any(Path(f).name == EXCLUDED_MODULE for f in files)
+
+
 def test_the_quoted_command_is_true_over_the_files_it_names() -> None:
     """Re-run each document's quoted measurement, over exactly the files it names."""
     for claim in CLAIMS:
@@ -214,7 +230,7 @@ def test_the_claim_names_the_module_it_excludes() -> None:
         claim_text = _claim_line(claim)
         files = _quoted_files(claim, claim_text)
 
-        assert EXCLUDED_MODULE not in files, (
+        assert not _measured_files_include_excluded(files), (
             f"{claim.label}: the claim's measured file list now contains "
             f"{EXCLUDED_MODULE} — if the measurement was widened, the sentence's "
             "own scoping must be re-derived rather than left describing the old "
@@ -240,6 +256,31 @@ def test_the_claim_names_the_module_it_excludes() -> None:
             "measurement bounds (the default FTS/vector/RRF retrieval lane) — the "
             "scope is the claim (#9399)"
         )
+
+
+def test_the_widening_guard_fires_on_a_widened_file_list() -> None:
+    """Non-vacuity for arm 2's widening guard, over the spelling a widening uses.
+
+    RED on the pre-fix spelling (`EXCLUDED_MODULE not in files`): a measurement
+    widened to `tortoise/ranking.py` is a raw-token MISmatch, so the guard was
+    dead — it could never fire, and the arm advertised as the widened-measurement
+    guard was fail-open (#9426 review, P2).
+    """
+    measured = [
+        "tortoise/retrieval.py",
+        "tortoise/search_engine.py",
+        "tortoise/session_reinjection.py",
+    ]
+    assert not _measured_files_include_excluded(measured), (
+        "the widening guard fires on the three-file measurement the documents "
+        "actually quote — a guard that reds on the correct claim is not usable"
+    )
+    assert _measured_files_include_excluded([*measured, "tortoise/ranking.py"]), (
+        "the widening guard does not see `tortoise/ranking.py` in the quoted file "
+        "list — it is comparing raw tokens instead of path components, so a "
+        "widened measurement passes it and §13/§13.8 keep describing a scope they "
+        "no longer measured (#9399)"
+    )
 
 
 def test_no_document_asserts_the_unscoped_claim() -> None:
