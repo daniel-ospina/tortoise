@@ -90,10 +90,31 @@ worktree, so a threshold edited after the numbers are in cannot be served. With 
 a verdict, exiting 3. Measured numbers are evidence; a verdict without a frozen
 threshold is not.
 
+⚠️ **A threshold is HALF a bar: the other half is the population it was argued
+over** (#9076). A pre-registration binds a number to a corpus, so reading
+``e1.min_share_reduction`` and ignoring ``corpus.path`` lets this probe score a
+run over ``e1e2_corpus.json`` against a bar argued on ``tests/eval/write_path`` —
+the numerator/denominator mismatch the issue's own Research Needed §1.2 refuses
+one level up. A *declared* denominator floor the probe cannot read as an integer is REFUSED
+too (``UNREADABLE``), never read as "no floor stated" — the same fail-closed rule
+the threshold gets, because a bar whose floor is silently dropped is a bar the
+author did not write. That rule covers the floor's KEY as well as its value: the
+real ``capstone-preregistration/v1`` record declares five ``denominator_floors``
+and this probe can evaluate exactly one (``e1_objects``), so any other key is
+REFUSED (``floor-unconsumed``, naming the keys) instead of being dropped while the
+bar is stamped ``MATCHED`` — otherwise a run that violates the record's own
+``e1_min_before_share`` floor would score as if the floor did not exist (#9513
+review P2). ``prereg_binding`` therefore compares the artifact's corpus pin
+(path and/or sha256) and its ``denominator_floors.e1_objects`` against THIS run,
+prints the comparison on ``prereg-binding``, and refuses to score when they do
+not agree or the denominator is under the frozen floor (the artifact's own rule:
+*``below_floor: REFUSED, which is neither a pass nor a fail``*). Exit code 3, not
+RED: an unsound bar is not a missed bar.
+
 Exit codes: ``0`` scored and every criterion green · ``1`` scored and something
-red · ``3`` measured but UNPREREGISTERED (no frozen thresholds, or an artifact
-the probe cannot consume — the malformed case is reported on ``prereg-error=``
-and never scored) · ``2`` usage.
+red · ``3`` measured but UNPREREGISTERED (no frozen thresholds, an artifact the
+probe cannot consume — reported on ``prereg-error=`` — or a bar that is not this
+run's, reported on ``prereg-binding``) · ``2`` usage.
 """
 from __future__ import annotations
 
@@ -555,6 +576,178 @@ def prereg_threshold(prereg: object) -> float:
     return value
 
 
+def _normalise_sha(value: object) -> str:
+    return str(value).strip().lower().removeprefix("sha256:")
+
+
+def _declared_corpus_path(prereg: Mapping) -> str:
+    corpus = prereg.get("corpus")
+    if not isinstance(corpus, Mapping):
+        return ""
+    path = corpus.get("path")
+    return path if isinstance(path, str) else ""
+
+
+#: The ``denominator_floors`` keys this probe can actually evaluate. A floor it
+#: cannot evaluate is refused, not dropped (#9513 review P2).
+CONSUMED_FLOORS = frozenset({"e1_objects"})
+
+
+def _declared_floor(
+        prereg: Mapping) -> tuple[bool, int | None, object, tuple[str, ...]]:
+    """``(declared, value, raw, unconsumed)`` — DECLARED, not merely readable.
+
+    "Absent" and "present but unreadable" are different states, and collapsing
+    them into ``None`` is a fail-open (#9513 review P2): an artifact that writes
+    the floor as ``"30"`` (a JSON typo) or ``30.0`` would lose the floor gate
+    silently, and a below-floor run would then be scored against a bar whose
+    author explicitly refused it — the very mismatch this module exists to
+    refuse. So a *declared* floor that is not a plain ``int`` raises, exactly as a
+    malformed threshold does in ``prereg_threshold``; ``(False, None, None, ())``
+    means the artifact states no floor at all, which is what makes the run
+    ``MATCHED`` on the corpus half alone.
+
+    The fourth element is the flip side of the same rule on the floor's KEY: the
+    real record declares five ``denominator_floors`` and only ``e1_objects`` is
+    consumed here, so every other key is returned as UNCONSUMED for the caller to
+    refuse. Reading "no ``e1_objects`` in a NON-EMPTY mapping" as "this artifact
+    states no floor" is the silent drop this docstring exists to prevent — the
+    artifact's ``e1_min_before_share: 0.2`` floor on a quantity this probe prints
+    would simply vanish (#9513 review P2).
+    """
+    floors = prereg.get("denominator_floors")
+    if floors is None:
+        return (False, None, None, ())
+    if not isinstance(floors, Mapping):
+        raise TypeError(
+            f"`denominator_floors` is a {type(floors).__name__}, not an object")
+    unconsumed = tuple(sorted(str(k) for k in floors
+                              if k not in CONSUMED_FLOORS))
+    if not floors:
+        return (False, None, None, ())
+    if "e1_objects" not in floors:
+        return (False, None, None, unconsumed)
+    floor = floors["e1_objects"]
+    # `bool` is an `int` in Python; `true` is not a floor.
+    if isinstance(floor, bool) or not isinstance(floor, int):
+        raise TypeError(
+            f"`denominator_floors.e1_objects` is {floor!r}, not an integer")
+    return (True, floor, floor, unconsumed)
+
+
+def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
+                   objects: int) -> dict:
+    """Does the frozen bar actually cover THIS run? (#9076, §4.4 fail-closed)
+
+    A pre-registration binds a THRESHOLD to a POPULATION. A probe that reads the
+    threshold and ignores the population can pick its own bar by picking its
+    corpus, which is the same failure as choosing the bar after the numbers — the
+    epic's rule is about a number that was fixed *before*, over *this* population.
+
+    Four ways the binding fails, each REFUSED rather than scored (#9513 review P2
+    added ``UNREADABLE``/``floor-unreadable``; a floor declared on a key this probe
+    cannot evaluate is refused as ``floor-unconsumed`` and surfaces as
+    ``MISMATCH``):
+
+    * ``UNPINNED`` — the artifact names no corpus at all, so it cannot say which
+      population its bar covers;
+    * ``MISMATCH`` — it pins one (``corpus.sha256`` when present, else
+      ``corpus.path``) and it is not this run's;
+    * ``BELOW_FLOOR`` — the corpus agrees but the run's denominator is under the
+      artifact's own ``denominator_floors.e1_objects``. The artifact's rule is
+      ``below_floor: REFUSED, which is neither a pass nor a fail``, so a 25-Object
+      run under a 30-Object floor may not be reported RED either.
+
+    ``status`` is ``MATCHED`` only when a pin exists, it agrees, and no floor is
+    violated. Everything else means the artifact and the run are about different
+    numbers, and the caller must not score.
+    """
+    declared_path = _declared_corpus_path(prereg if isinstance(prereg, Mapping)
+                                          else {})
+    corpus = prereg.get("corpus") if isinstance(prereg, Mapping) else None
+    declared_sha = ""
+    if isinstance(corpus, Mapping) and corpus.get("sha256"):
+        declared_sha = _normalise_sha(corpus["sha256"])
+    floor = None
+    floor_error = ""
+    floor_unconsumed: tuple[str, ...] = ()
+    try:
+        _declared, floor, floor_raw, floor_unconsumed = _declared_floor(
+            prereg if isinstance(prereg, Mapping) else {})
+    except (TypeError, ValueError) as e:
+        # REFUSED, never "no floor": a floor the probe cannot read is a floor it
+        # cannot honour, and honouring nothing is how a below-floor run gets a
+        # verdict (#9513 review P2). The DECLARED value is captured for the log —
+        # a refusal that does not say what it could not read is not auditable
+        # (#9513 review P3).
+        floor, floor_error = None, f"{type(e).__name__}: {e}"
+        declared_floors = (prereg.get("denominator_floors")
+                           if isinstance(prereg, Mapping) else None)
+        floor_raw = (declared_floors.get("e1_objects")
+                     if isinstance(declared_floors, Mapping) else declared_floors)
+
+    reasons: list[str] = []
+    if declared_sha:
+        # A sha256 pin is the STRONGER identity: it names the exact bytes, so it
+        # is compared alone (a co-declared path that has since moved is not a
+        # contradiction — the file it names is the file that was frozen).
+        if declared_sha != _normalise_sha(corpus_sha256):
+            reasons.append("corpus-sha256")
+    elif declared_path:
+        declared = Path(declared_path)
+        resolved = (declared if declared.is_absolute() else ROOT / declared)
+        try:
+            same = resolved.resolve() == corpus_path.resolve()
+        except (OSError, ValueError):
+            # ValueError is what `Path.resolve()` raises for an embedded NUL —
+            # valid JSON can carry one (`"path": "...\u0000x"`), and a malformed
+            # pin must be REFUSED (a mismatch) rather than crash the run with a
+            # traceback and an exit code a runner reads as RED (#9513 review P3).
+            same = False
+        if not same:
+            reasons.append("corpus-path")
+    else:
+        reasons.append("corpus-unpinned")
+    if floor_error:
+        reasons.append("floor-unreadable")
+    if floor_unconsumed:
+        # A floor this binding cannot check is not a floor it may skip: leaving it
+        # out would stamp the run MATCHED while the artifact's own anti-gaming
+        # floor (e.g. `e1_min_before_share`) went unread (#9513 review P2).
+        reasons.append("floor-unconsumed")
+    if floor is not None and objects < floor:
+        reasons.append("below-floor")
+
+    if not reasons:
+        status = "MATCHED"
+    elif "corpus-unpinned" in reasons:
+        status = "UNPINNED"
+    elif "floor-unreadable" in reasons:
+        status = "UNREADABLE"
+    elif "below-floor" in reasons and len(reasons) == 1:
+        status = "BELOW_FLOOR"
+    else:
+        status = "MISMATCH"
+    return {"status": status, "reasons": reasons, "declared_path": declared_path,
+            "declared_sha256": declared_sha, "floor": floor,
+            "floor_error": floor_error, "floor_raw": floor_raw,
+            "floor_unconsumed": floor_unconsumed,
+            "corpus": corpus_path.name, "corpus_sha256": corpus_sha256,
+            "objects": objects}
+
+
+def binding_line(bind: dict) -> str:
+    """The log line the structural gate reads — every side of the comparison."""
+    return (f"prereg-binding status={bind['status']} corpus={bind['corpus']} "
+            f"corpus_sha256={bind['corpus_sha256']} "
+            f"declared_path={bind['declared_path'] or 'n/a'} "
+            f"declared_sha256={bind['declared_sha256'] or 'n/a'} "
+            f"declared_floor={bind['floor'] if bind['floor'] is not None else ('n/a' if bind['floor_raw'] is None else json.dumps(bind['floor_raw']))} "
+            f"objects={bind['objects']} "
+            f"floor_unconsumed={','.join(bind['floor_unconsumed']) or 'n/a'} "
+            f"reason={','.join(bind['reasons']) or 'n/a'}")
+
+
 def measurement_sha() -> str:
     """The sha the run is measured at, plus a marker when the TRACKED tree differs.
 
@@ -751,20 +944,60 @@ def _run(argv: list[str] | None = None) -> int:
     prereg = None
     threshold = None
     prereg_note = "UNPREREGISTERED"
+    declared_line = None
+    bind_line = None
     if args.prereg:
+        loaded = False
         try:
             prereg = load_prereg(args.prereg)
-            # Validated ONCE, here: a malformed artifact is a MEASUREMENT with no
-            # bar (exit 3), never a scored run that happens to have no threshold.
-            threshold = prereg_threshold(prereg)
-            prereg_note = args.prereg
+            loaded = True
         except (subprocess.CalledProcessError, json.JSONDecodeError,
                 TypeError, KeyError, ValueError) as e:
             lines.append(f"prereg-error={type(e).__name__}: {e} "
                          f"artifact={PREREG_ARTIFACT} sha={args.prereg}")
             prereg = None
-            threshold = None
+        if loaded and not isinstance(prereg, Mapping):
+            # A COMMITTED `null` (or any non-object) artifact loads without
+            # raising, so it has to be refused as malformed HERE: skipping it
+            # silently would print a bare UNPREREGISTERED that reads exactly like
+            # "no --prereg was given", and the module docstring promises the
+            # unconsumable case on `prereg-error=` (#9513 review P3).
+            lines.append(f"prereg-error=TypeError: the artifact is "
+                         f"{type(prereg).__name__}, not an object "
+                         f"artifact={PREREG_ARTIFACT} sha={args.prereg}")
+            prereg = None
+        if prereg is not None:
+            # The bar's POPULATION is checked before its number, and the number
+            # is only consumed when the population agrees: a threshold whose
+            # corpus is not this run's is not this run's threshold (#9076).
+            bind = prereg_binding(prereg, corpus_path, corpus_sha,
+                                  len(results[SCORED_ARM]["census"]["objects"]))
+            declared_line = f"prereg_declared={args.prereg}"
+            bind_line = binding_line(bind)
+            try:
+                # Validated ONCE, here: a malformed artifact is a MEASUREMENT
+                # with no bar (exit 3), never a scored run that has no threshold.
+                threshold = prereg_threshold(prereg)
+            except (TypeError, KeyError, ValueError) as e:
+                lines.append(f"prereg-error={type(e).__name__}: {e} "
+                             f"artifact={PREREG_ARTIFACT} sha={args.prereg}")
+                threshold = None
+            if bind["status"] != "MATCHED":
+                # REFUSED, not RED: an unbound bar is not a missed bar, and
+                # ``prereg=`` stays UNPREREGISTERED so no criterion can carry a
+                # verdict from it (the structural gate refuses that pairing).
+                threshold = None
+            if threshold is not None:
+                # Keyed on SCORING, not on the binding: a matched corpus with an
+                # UNREADABLE bar is still UNPREREGISTERED, and naming the sha on
+                # ``prereg=`` there would print a log V9 calls unsound (a sha with
+                # no frozen threshold) — the probe must not emit a log its own
+                # gate rejects (#9513 review P2).
+                prereg_note = args.prereg
     lines.insert(4, f"prereg={prereg_note} artifact={PREREG_ARTIFACT}")
+    if bind_line is not None:
+        lines.insert(5, bind_line)
+        lines.insert(5, declared_line)
 
     # The threshold USED is printed twice on purpose: once as what the artifact
     # froze, once as what this run scored against. The checker fails if the two
