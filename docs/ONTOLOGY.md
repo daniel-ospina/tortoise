@@ -660,7 +660,9 @@ window, independent of when Tortoise learned it. Canonical pair:
 >   `validTo == validFrom` (#5374), so a zero-length `[t, t]` window is already
 >   persistable and this closed `_covers` covers exactly one instant: at `t` the
 >   read answers `status="found"` with the point as `valid_point` (measured
->   against `get_historical_knowledge`'s `_covers`, which rejects only `vT < t`).
+>   against `get_historical_knowledge`'s `_covers`, which rejects only `vT < t`,
+>   and only once `vT` names an instant (#9202 — a bound that names none is not
+>   a bound, so it can reject nothing).
 >   Under `[vF, vT)` that window covers **no** instant and the
 >   same read answers `status="absent"` — the shape of honest absence — while
 >   #5361's `malformed` flag stays **silent**, because that detection is strictly
