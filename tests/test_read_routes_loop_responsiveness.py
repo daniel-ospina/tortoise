@@ -242,7 +242,14 @@ class _RequestScopedProbe:
     which makes it the one seam that discriminates off-loop from on-loop for
     the attach without patching each handler's query shape. But it is also used
     by background daemon-thread sweeps, so the probe scopes itself to the SDK
-    instances the REQUEST created on the main thread.
+    instances the REQUEST created: those built while its WINDOW was open
+    (``state["active"]``, on whichever thread does the work — since #3718 the
+    request's own SDK is built on a ``graph``-pool worker), plus main-thread
+    builds (the pre-#3718 shape). Owning by the main thread ALONE would stop
+    observing exactly the worker-built SDK the #3718 conversion introduces, and
+    every attach assertion below would then pass vacuously. A daemon-thread
+    sweep that runs with no window open owns nothing and is delegated
+    untouched — which is why the window, not the thread, is the owner.
 
     LIMIT, stated rather than implied: this observes the ATTACH, not the query
     round trip. A read reverted to inline on an ALREADY-ATTACHED projection
@@ -460,6 +467,156 @@ def test_read_route_construction_is_offloaded(client, monkeypatch, label,
     assert response.status_code == 200, (
         f"[{label}] the off-loaded construction changed the response "
         f"({response.status_code}: {response.text[:200]})")
+
+
+class _BrokenSDK:
+    """An SDK whose every graph attach fails — the ``#1591`` broken-STORE shape.
+
+    Stands in for ``TortoiseSDK`` in the capacity test below: the construction
+    is what that test controls, and its only requirement of the returned object
+    is that a later read refuses (so a route that IS allowed to reach its read
+    degrades down the fail-soft path).
+    """
+
+    def _get_proj(self):
+        raise RuntimeError("graph unavailable")
+
+    def _get_registry(self):
+        raise RuntimeError("graph unavailable")
+
+    def close(self):
+        return None
+
+
+#: The three READ routes whose docstring/comment carries a ``#1591`` FAIL-SOFT
+#: contract, and which therefore have to record the ONE new fail-CLOSED mode
+#: the #3718 construction off-load adds to them. ``list_points`` / ``get_point``
+#: / ``dream_health`` were already fail-closed on their read, so the 503 is not
+#: a contract change there (and their response has no soft shape to confuse).
+_FAIL_SOFT_CONTRACT_CASES = [
+    ("team", "/v1/team"),
+    ("sessions-list", "/v1/sessions"),
+    ("session-get", f"/v1/sessions/{_SEEDED_SESSION}"),
+]
+
+
+@pytest.mark.parametrize("label,url", _FAIL_SOFT_CONTRACT_CASES,
+                         ids=[c[0] for c in _FAIL_SOFT_CONTRACT_CASES])
+def test_graph_pool_capacity_is_fail_closed_not_a_silent_empty(
+        client, monkeypatch, label, url):
+    """#3718: a graph-pool CAPACITY refusal must never become the soft shape.
+
+    Moving the per-request SDK construction onto the ``graph`` pool gives these
+    three routes a failure mode they did not have: the offload can REFUSE a
+    submission (saturated backlog) or miss its wait bound. Their ``#1591``
+    FAIL-SOFT contract is for a MISSING/BROKEN graph — a STORE condition — and
+    the empty shape is the honest answer there (``point_count: 0`` /
+    ``sessions: []`` / ``session: None``). It is NOT the honest answer for our
+    own capacity: serving it would report real data as absent, which is exactly
+    the clean-empty-for-a-store-we-could-not-reach shape ``#3892`` forbids. So
+    the refusal is fail-CLOSED — a retryable 503 ``graph_unavailable`` — and
+    the fail-soft arm below the construction still covers the broken store
+    (``test_hosted_api.py::test_sessions_fail_soft_when_graph_unavailable`` &c,
+    unchanged). The contract is recorded at each route's construction site; this
+    is its behavioural pin.
+
+    RED on the pre-#3718 shape, and for the right reason: with the construction
+    INLINE the lane's bound is never armed (the slow construction merely delays
+    the request) and each route returns 200 with its soft body. So this pins a
+    real consequence of the conversion, not a tautology.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    # The graph lane's own bound, lowered to a bound miss — the lever
+    # ``tests/test_control_plane_offload_3498.py`` uses for this pool.
+    monkeypatch.setattr(ha_mod, "graph_offload_timeout_s", lambda: 0.05)
+
+    def _slow_data_plane(real):
+        def _wrapped(*args, **kwargs):
+            # The REGISTRY plane (auth, membership, invite lookups) is not what
+            # this test is about — it runs inline today and must keep working,
+            # or the request would 500 before reaching the route's own
+            # construction.
+            if kwargs.get("namespace") == "registry":
+                return real(*args, **kwargs)
+            time.sleep(0.4)
+            return _BrokenSDK()
+        return _wrapped
+
+    monkeypatch.setattr(ha_mod, "_data_sdk",
+                        _slow_data_plane(ha_mod._data_sdk))
+    monkeypatch.setattr(ha_mod, "_make_sdk",
+                        _slow_data_plane(ha_mod._make_sdk))
+
+    response = client.get(url)
+
+    assert response.status_code == 503, (
+        f"[{label}] a graph-pool bound miss returned {response.status_code} "
+        f"({response.text[:200]}) — #3718's capacity contract is a retryable "
+        f"503, never the #1591 soft shape, which is reserved for a BROKEN "
+        f"STORE (#3892: no clean empty for a store we could not reach)")
+    body = response.json()
+    assert body.get("detail", {}).get("error_code") == "graph_unavailable", body
+    assert "sessions" not in body and "session" not in body, (
+        f"[{label}] the capacity refusal came back as the route's soft body "
+        f"({body}) — a warm pool would then be indistinguishable from an "
+        f"empty org")
+
+
+@pytest.mark.parametrize("label,handler,request_kwargs", _CONSTRUCTION_CASES,
+                         ids=[c[0] for c in _CONSTRUCTION_CASES])
+def test_read_routes_submit_one_graph_pool_submission(
+        client, monkeypatch, label, handler, request_kwargs):
+    """#3718 makes the ``graph`` pool a READ lane — pin its per-request occupancy.
+
+    The pool's occupancy disclosure (``tortoise/monitoring.py``,
+    ``CONTROL_PLANE_GRAPH_*`` — the #3669 "not hidden" rule) now states that
+    each of these six read requests submits here exactly ONCE, for its SDK
+    construction, and that its graph READS do not come here at all (they ride
+    the house ``asyncio.to_thread`` default executor, ``dream_health``'s pass on
+    ``_DREAM_EXECUTOR``). That number is the rule's content, so it is pinned
+    here rather than left to prose: a second submission per read changes the
+    pool's read pressure, and a ZERO means the construction went back inline.
+
+    RED on the pre-#3718 shape — the inline construction submitted nothing to
+    this pool, which is why the disclosure block had no read-plane line at all.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+
+    _seed_read_surface()
+    _arm_session_endpoints(monkeypatch)
+
+    real_call = ha_mod.run_control_plane_call
+    pools: list[str] = []
+
+    async def _recorder(fn, *, op, timeout=None, pool="auth",
+                        cancel_on_timeout=True):
+        pools.append(pool)
+        return await real_call(fn, op=op, pool=pool, timeout=timeout,
+                               cancel_on_timeout=cancel_on_timeout)
+
+    monkeypatch.setattr(ha_mod, "run_control_plane_call", _recorder)
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            return await ac.request(**request_kwargs())
+
+    response = asyncio.run(_run())
+
+    assert response.status_code == 200, (
+        f"[{label}] the request did not complete "
+        f"({response.status_code}: {response.text[:200]})")
+    graph_submissions = [p for p in pools if p == "graph"]
+    assert len(graph_submissions) == 1, (
+        f"[{label}] {handler} made {len(graph_submissions)} `graph`-pool "
+        f"submission(s) (all pools: {pools!r}) — the occupancy disclosure in "
+        f"tortoise/monitoring.py declares exactly ONE per read request (the SDK "
+        f"construction). ZERO means the construction went back on the loop; "
+        f"more than one means the pool's read pressure changed and the "
+        f"disclosure block has to move with it (#3718, #3669)")
 
 
 def test_construction_offloaded_reads_are_the_declared_ones():
@@ -1078,11 +1235,18 @@ _OFFLOAD_BOUNDARY_CALLEES = frozenset({
 #: ⚠️ ``list_points``, ``get_point``, ``org_info``, ``list_sessions``,
 #: ``get_session_detail``, ``dream_health``, ``list_api_keys``, ``list_members``,
 #: ``list_pending_invites_for_me``, ``patch_onboarding_state`` and
-#: ``invite_info`` were members until #4660 widened the scan: their graph READS
-#: are off-loaded, but their ``_data_sdk`` / ``_make_sdk(namespace="registry")``
-#: CONSTRUCTION still runs on the loop. They now live in
-#: ``_OFFLOADED_ASYNC_BODIES_WITH_ON_LOOP_SDK_CONSTRUCTION`` below — a decided,
-#: visible residual rather than a vacuous declaration.
+#: ``invite_info`` were members of the residual until #4660 widened the scan:
+#: their graph READS are off-loaded, but their ``_data_sdk`` /
+#: ``_make_sdk(namespace="registry")`` CONSTRUCTION ran on the loop. #3718
+#: burned down the six DATA-plane bodies of that group — ``list_points``,
+#: ``get_point``, ``org_info``, ``list_sessions``, ``get_session_detail`` and
+#: ``dream_health`` — and they are members of THIS set because their
+#: construction is now off the loop too (``_data_sdk_offloaded`` / the raw
+#: ``_graph_offload`` seam). The five that remain construction residuals —
+#: ``list_api_keys``, ``list_members``, ``list_pending_invites_for_me``,
+#: ``patch_onboarding_state``, ``invite_info`` — live in
+#: ``_OFFLOADED_ASYNC_BODIES_WITH_ON_LOOP_SDK_CONSTRUCTION`` below, each with a
+#: recorded reason (registry-plane #2446 / worker-owned close), NOT in this set.
 _OFFLOADED_ASYNC_BODIES = frozenset({
     # #3718 residual 3 — the DATA-plane seam outside the REST-converted
     # bodies. These were ``_KNOWN_INLINE_*_RESIDUAL`` until this change

@@ -8367,8 +8367,19 @@ def _graph_unavailable() -> HTTPException:
     failure on the activation scorecard, activation_scorecard.py): this one
     means only that the offload did not complete inside the lane's budget, so
     the request may be retried. The code is body-only today — no client maps it yet (the REST
-    write lane is consumed by agents/SDKs, which treat any 5xx as retryable);
-    the dashboard renders a 503 on the auth lane, not this one.
+    write lane is consumed by agents/SDKs, which treat any 5xx as retryable).
+
+    #3718 (read half): the SIX read handlers now submit their per-request SDK
+    construction here too (``list_points``, ``get_point``, ``dream_health``,
+    ``list_sessions``, ``get_session_detail``, ``org_info``), so this body is
+    reachable on the READ routes as well — including the dashboard's Overview
+    reads (``GET /v1/team``, ``/v1/sessions``, ``/v1/points``). That is NOT the
+    "dashboard renders a 503 on the auth lane" case above: those routes now
+    carry this body, and they carry it fail-CLOSED rather than degrading to
+    their ``#1591`` empty shape (see ``org_info`` / ``list_sessions`` /
+    ``get_session_detail``). Retrying is safe for every one of them: the
+    off-loaded unit is a CONSTRUCTION, and a submission that never ran did no
+    work.
     """
     return HTTPException(
         status_code=503,
@@ -9798,6 +9809,21 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
     # twin. The CALL is unchanged — only which thread runs it — so the
     # namespace, the embedded anchor probe and every reader below are
     # byte-identical.
+    #
+    # CONTRACT, scoped (recorded here because the `#1591` note below promises
+    # fail-soft for this route): `#1591` covers a MISSING/BROKEN org graph — a
+    # STORE condition, where `point_count=0 / graph_ready=false` is the honest
+    # answer. This `await` adds a second, DIFFERENT failure mode that is
+    # fail-CLOSED: a saturated `graph`-pool backlog or a bound miss raises 503
+    # `graph_unavailable` HERE, before the fail-soft `try`. Deliberate —
+    # rendering `point_count=0` because OUR pool refused the call would report
+    # a healthy org as empty, i.e. the clean-empty-for-a-store-we-could-not-
+    # reach shape `#3892` forbids; and a read retry is safe (see
+    # `_graph_unavailable`). `#1591` is not repealed: the reads below degrade
+    # exactly as before. Pinned by
+    # `test_graph_pool_capacity_is_fail_closed_not_a_silent_empty` (#3718).
+    # OVERRIDES: the "every failure on this route is `#1591` fail-soft" reading
+    # — pool capacity is not a store condition, so it stays a hard 503.
     sdk = await _graph_offload(
         lambda: _make_sdk(namespace=org["org_id"]), op="org_sdk")
     # Count REAL Points in default graph. #2360: demo/sample Points
@@ -9808,7 +9834,10 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
     # it can never drift. #1591: FAIL SOFT — a missing/broken org graph
     # (half-failed provisioning, restores) must not dead-end the dashboard
     # with a hard 500; the client renders the empty state and a write
-    # recreates the graph.
+    # recreates the graph. SCOPE (#3718): the SDK construction above is a
+    # `graph`-POOL submission, and its capacity refusal is a retryable 503
+    # `graph_unavailable` — deliberately NOT this soft shape (a `0` for a
+    # healthy org would report real data as absent).
     point_count = 0
     graph_ready = True
     try:
@@ -16865,7 +16894,11 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
 
     #1591: FAIL SOFT — a missing org graph (half-failed provisioning)
     returns an empty list, never a 500 (a 500 also strips the CORS headers
-    and surfaces as a misleading 'CORS blocked' to the browser).
+    and surfaces as a misleading 'CORS blocked' to the browser). SCOPE (#3718):
+    that is the BROKEN-STORE condition. A graph-pool CAPACITY refusal at the
+    SDK construction below is a RETRYABLE 503 `graph_unavailable`, never this
+    empty list — a `[]` for an org that has sessions would report real data as
+    absent (see the note at the construction).
 
     #3520: each row carries the server-resolved per-session EXTRACTION status
     (`extraction`: `{status, extractor, outcome_known}`), so the dashboard can
@@ -16901,6 +16934,21 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
         import uuid as _canon_uuid
         actor_filter = str(_canon_uuid.UUID(actor_filter))
     # #3718: the construction is off the loop (see list_points).
+    #
+    # CONTRACT, scoped (recorded here because the docstring above promises
+    # `#1591` fail-soft for this route): `#1591` covers a MISSING/BROKEN org
+    # graph — a STORE condition, where `sessions: []` is the honest answer.
+    # This `await` adds a second, DIFFERENT failure mode that is fail-CLOSED: a
+    # saturated `graph`-pool backlog or a bound miss raises 503
+    # `graph_unavailable` HERE, before the fail-soft `try` below. Deliberate —
+    # serving `sessions: []` because OUR pool refused the call would report an
+    # org that HAS sessions as empty, the clean-empty-for-a-store-we-could-not-
+    # reach shape `#3892` forbids; and a read retry is safe (see
+    # `_graph_unavailable`). `#1591` is not repealed: the reads below degrade
+    # exactly as before. Pinned by
+    # `test_graph_pool_capacity_is_fail_closed_not_a_silent_empty` (#3718).
+    # OVERRIDES: the "every failure on this route is `#1591` fail-soft" reading
+    # — pool capacity is not a store condition, so it stays a hard 503.
     sdk = await _data_sdk_offloaded(org)
     try:
         # #2600: actor filter rides a MATCH-level WHERE (before the OPTIONAL
@@ -17063,6 +17111,20 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     """
     _require_scope(org, "graphs:read", "get_session_detail")
     # #3718: the construction is off the loop (see list_points).
+    #
+    # CONTRACT, scoped: `#1591` covers a MISSING/BROKEN org graph — a STORE
+    # condition, where `{"session": None}` below is the honest answer. This
+    # `await` adds a second, DIFFERENT failure mode that is fail-CLOSED: a
+    # saturated `graph`-pool backlog or a bound miss raises 503
+    # `graph_unavailable` HERE, before the `try` below. Deliberate — serving
+    # `session: None` (which reads as "no such session", 200) because OUR pool
+    # refused the call would report an existing session as missing, the
+    # clean-empty-for-a-store-we-could-not-reach shape `#3892` forbids; and a
+    # read retry is safe (see `_graph_unavailable`). `#1591` is not repealed:
+    # the attach/read below still degrades to the soft shape. Pinned by
+    # `test_graph_pool_capacity_is_fail_closed_not_a_silent_empty` (#3718).
+    # OVERRIDES: the "every failure on this route is `#1591` fail-soft" reading
+    # — pool capacity is not a store condition, so it stays a hard 503.
     sdk = await _data_sdk_offloaded(org)
     try:
         # #3718 residual 2: `_get_proj()` opens/attaches the SYNC FalkorDB
