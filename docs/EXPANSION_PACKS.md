@@ -20,7 +20,7 @@ One further pack ships in the catalog **without** being a starter: `venture` (fu
 ## Anatomy of a manifest
 
 ```yaml
-namespace: mydomain          # REQUIRED — camelCase, no colons, not a reserved starter name
+namespace: mydomain          # REQUIRED — camelCase, no colons, no whitespace, not a reserved starter name
 name: My Domain Pack
 version: "0.1.0"
 tier: free                   # free | premium
@@ -78,6 +78,39 @@ extraction:
 
 1. **`memory_granularity` at the top level** — the value-brief compiler reads `ontology.memory_granularity`. Top-level is silently ignored. (The `_template` teaches the correct placement — copy it.)
 2. **A `kindDefs` key not declared in `objectKinds`/`pointKinds`/etc.** — the validator rejects it. Every kindDefs key must be a declared kind.
+
+### One bare kind name, one category (#2786)
+
+A bare kind name belongs to **exactly one** of `objectKinds`, `eventKinds`,
+`pointKinds`, `documentKinds`, `actionKinds` — and a name core already owns cannot be
+declared at all, on any of those five axes. Both are load errors that drop the pack:
+
+- the same name in two categories of one manifest claims two meanings, and
+  `store_as()` resolves the collision by silent precedence for the point-vs-rest
+  pairs (a `:Point` for a kind the manifest also declared an `:Object`), so the store
+  target would be chosen for the author instead of by the author. The rule is
+  per-manifest: the same name in the *same* category across two packs is legal, and a
+  repeated entry inside one list is redundant, not a deformation;
+- a core name declared under a different category is the deformation #7848 fixed by
+  hand (the `dev` pack shipped `deployment` — an ONTOLOGY §5 **eventKind** — in
+  `objectKinds`). It is not inert: `pack.object_kinds` feeds the extractor's writable
+  kind forms and the classification index, so the deformed name was writable under
+  the wrong axis. The action axis counts too (#122 retired its *canonical* status, but
+  `implement`/`deploy`/`meet`… still resolve and expand as core).
+
+A declared kind is a **bare identifier** — no whitespace, no `:` (the registry prefixes
+it with the manifest's namespace), so `" deployment"` and `"dev:deployment"` are
+refused rather than silently defeating the collision check.
+
+Reference core kinds by name instead of re-declaring them — `nearMisses` and chain
+steps resolve any core kind directly. A `subclassOf` **parent** is narrower by design:
+ONTOLOGY §6 subclasses Objects, so the parent must be a core entity type (`Document`,
+`Event`, `Point`… the `CORE_ENTITY_TYPES`) or a core `objectKind` (`WorkItem`,
+`Project`, `goal`…) — a lowercase core event or point *kind* (`meeting`, `occurrence`)
+is not a subclass parent.
+`equivalentTo` is what links two packs that declare the same name in the *same*
+category. `decision` is core-owned on two axes (point **and** event), so a collision
+error names every owner.
 
 ## Declaring a per-kind stage pipeline (#2792)
 

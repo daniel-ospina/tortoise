@@ -64,8 +64,11 @@ from .pack_registry import (
 )
 from .quota import (
     MAX_ENTITIES,
+    MAX_EVENTS,
     MAX_OPERATORS,
     MAX_PAYLOAD_POINTS,
+    MAX_PROVENANCE_REFS,
+    MAX_SOURCES,
     MAX_VALUE_POINTS_PER_SESSION,
 )
 
@@ -1078,6 +1081,27 @@ def validate_layer1(
         add("supersessions", f"supersession count "
             f"{len(payload.supersessions)} exceeds MAX_OPERATORS "
             f"({MAX_OPERATORS})")
+    # #4051 (§3.3): the collections the per-type caps above missed — they grow
+    # stored data ONE ENTRY at a time (a node per ``events[]``/``sources[]``
+    # entry; for ``provenance_refs[]`` a longer stored ``provenance_spans``
+    # property, plus one more entry in the TRANSIENT ``session_ref_urls``
+    # lookup map, which is never persisted), so with NO count cap the only
+    # bound on ONE request was the 8 MiB body cap — the per-request multiplier
+    # on the commit lane's unbounded-growth defect. Same class and same 422 as
+    # the caps above: a request-SHAPE bound, not a retention one (#4010/#3853
+    # untouched — these bound a REQUEST, never what a tenant may keep). What
+    # each entry grows, and the ``spans``-size residual the ref COUNT does not
+    # bound, are named in ``quota.MAX_EVENTS``.
+    if len(payload.events) > MAX_EVENTS:
+        add("events", f"event count {len(payload.events)} exceeds "
+            f"MAX_EVENTS ({MAX_EVENTS})")
+    if len(payload.sources) > MAX_SOURCES:
+        add("sources", f"source count {len(payload.sources)} exceeds "
+            f"MAX_SOURCES ({MAX_SOURCES})")
+    if len(payload.provenance_refs) > MAX_PROVENANCE_REFS:
+        add("provenance_refs", f"provenance ref count "
+            f"{len(payload.provenance_refs)} exceeds MAX_PROVENANCE_REFS "
+            f"({MAX_PROVENANCE_REFS})")
 
     # Atomicity shape (per point).
     for i, pt in enumerate(payload.points):

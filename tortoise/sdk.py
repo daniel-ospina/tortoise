@@ -8018,6 +8018,37 @@ class TortoiseSDK:
         # widened a `dev`-only graph. Gate the whole mined key set, exactly as
         # the entity funnel does.
         self._refuse_unapproved_kinds_in_props(props)
+        # #9167: `content` is a REQUIRED str and nothing said so. A ``None`` or
+        # any non-str reached ``_content_hash(content)`` below — i.e.
+        # ``text.encode("utf-8")`` one frame inside a private helper — so the
+        # caller got ``AttributeError: 'NoneType' object has no attribute
+        # 'encode'``, a message naming neither this door nor ``content``: a
+        # caller error that reads as an internal bug. The MCP
+        # ``tortoise_create_point`` tool passes the caller's ``content``
+        # straight through, so a client sending ``{"content": null}`` saw that
+        # same internal-looking trace on the wire.
+        #
+        # Fail closed HERE, at the door, naming the argument — the same posture
+        # as ``update_point`` (#5240) and ``checkpoint``'s item schema (#8554),
+        # each at its OWN door. Placement is deliberate: after the kind gates
+        # (so which error a doubly-invalid call sees is unchanged) and before
+        # any prop processing, graph read or write, so a refused call leaves
+        # nothing behind.
+        #
+        # ⛔ Deliberately NOT hardening ``_content_hash`` itself: that would
+        # close every remaining surface at once but CANNOT name the caller's
+        # parameter, and it would hide which doors still lack validation —
+        # #8554's own reason for choosing the door over the helper.
+        #
+        # An EMPTY string stays valid: ``""`` hashes to a real digest, and
+        # ``update_point`` already pins it as a real content edit (#5240).
+        # Only a wrong TYPE is refused, never a wrong length.
+        if not isinstance(content, str):
+            raise TypeError(
+                "create_point: content must be a str, got "
+                f"{type(content).__name__} — `content` is required and "
+                "cannot be None (every write path hashes it)"
+            )
         # #329: server-managed fields rejected on the props passthrough
         # (the explicit-id path via props.pop("id") below is preserved for operators)
         props = _sanitize_props(props)
@@ -31662,6 +31693,31 @@ class TortoiseSDK:
         # Object/Subject/Event blocks already do — see KNOWN DEVIATIONS).
         if event_type == "DocumentCreated":
             self._journal_entity_event(event)
+        # (#9419) ONE clock read for the whole Event write. This funnel folds
+        # the record FIRST and journals it AFTER, so `_emit_event` used to mint
+        # the envelope `ts` a SECOND time — and any fold-level field stamped
+        # from the record's own instant (`_event_plain_merge`'s document
+        # `:Source` `ingestedAt`, #5140) then took the fold clock live and the
+        # append clock on replay: measured, live `…54.719525` vs rebuilt
+        # `…54.784866`. That is the #5024 `derived = replay(journal)` class on
+        # this field. Stamping `ts` HERE, before `proj.apply`, makes the value
+        # the fold reads and the value the envelope carries ONE instant — the
+        # shape `_apply_and_journal` already uses for `createdAt`.
+        #
+        # `ts` is a reserved ENVELOPE name and neither side stores it: it is in
+        # `_META_KEYS`, so `_persist_extra_props` cannot put it on a node
+        # (`skip = _META_KEYS | handled_keys`), and `_journal_record_payload`
+        # drops it from the payload for the same reason. So live and replay both
+        # see a record-carried instant, and neither grows a `ts` property.
+        # Scoped to `label == "Event"` because `_upsert_event` is the ONLY fold
+        # that reads `record_ts` (`record_ts=event.get("ts")`); the Object /
+        # Subject / Document / Source folds keep their pre-#9419 input dicts
+        # byte-identical.
+        _record_ts = None
+        if label == "Event":
+            from .ids import now_iso
+            _record_ts = now_iso()
+            event["ts"] = _record_ts
         # Apply through projection (writes to FalkorDB)
         # #7951 §17.1: the live-write scope. `_create_entity` is the recorded
         # apply-first deviation (its Object/Subject/Event registration blocks
@@ -31692,6 +31748,9 @@ class TortoiseSDK:
             self._emit_event(
                 "EventRecorded",
                 id=event["id"],
+                # (#9419) the SAME instant the fold above read as `record_ts`
+                # — see the stamp's comment, just before `proj.apply`.
+                recorded_ts=_record_ts,
                 # #8398 P1-1: ONE dict, never two `**`-splats. Two splats that
                 # share a key raise `TypeError: _emit_event() got multiple
                 # values for keyword argument 'aboutLinks'` — AFTER the live
