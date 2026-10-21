@@ -1478,27 +1478,29 @@ class TestMilestoneCanonicalEventKind:
     without the others.
     """
 
-    def test_cross_pack_reference_with_a_declaring_pack_resolves(self, tmp_path):
-        """#2767 indicator (2): a `nearMisses` reference to `milestone` resolves
-        to core even when other packs declare kinds of their own — the half the
-        reported failure needed.
+    def test_two_packs_declaring_one_name_in_one_category_still_load(
+            self, tmp_path):
+        """Cross-pack POSITIVE control for the per-manifest scope of #2786.
+
+        The new one-name-one-category rule is per MANIFEST, not global: two packs
+        declaring the same bare name in the SAME category is the §7 `equivalentTo`
+        bridge and must stay legal, and a bare reference to a CORE name still
+        resolves to core while they do. A future widening that keys on "the name
+        is declared elsewhere" (rather than "this manifest declares it twice")
+        reds this.
 
         ⚠️ UPDATED by #2786's cross-axis guard. This fixture used to have alpha and
         delta DECLARE `milestone` as an `objectKind`, which is the deformation the
         same class's `test_milestone_is_canonical_event_not_object` and
         `test_repo_pack_catalog_declares_no_milestone` forbid: core owns the bare
         name on the EVENT axis, so a pack cannot declare it on any axis at all now
-        (the declaration is refused, naming `eventKinds`). The ambiguity this test
-        was written against — *"declared by multiple packs"* — can therefore no
-        longer be re-created; what still needs pinning is that the REFERENCE
-        resolves, which is what the assertion below covers.
-
-        The refusing half is pinned by
-        `tests/test_pack_kinds.py::TestCoreKindCategoryDeformation2786`, and the
-        no-declaration shape by `test_cross_pack_bare_reference_resolves_to_core`.
+        (the declaration is refused, naming `eventKinds`). The *declaring-pack*
+        half of the #2767 shape is pinned end-to-end by
+        `test_a_declaring_pack_is_refused_while_a_bare_reference_still_resolves`
+        below; the no-declaration shape by
+        `test_cross_pack_bare_reference_resolves_to_core`.
         """
-        # A declaring pack, on a pack-owned axis (the `milestone` declaration this
-        # fixture used to carry is now refused — see the docstring).
+        # Two packs declaring the same pack-owned bare name in one category.
         _write_pack(str(tmp_path), "alpha", {
             "namespace": "alpha", "name": "Alpha", "version": "0.1.0",
             "tier": "free",
@@ -1507,10 +1509,6 @@ class TestMilestoneCanonicalEventKind:
                 "kindDefs": {"milestoneNote": {"description": "m"}},
             },
         })
-        # Two packs declaring the same bare name in the SAME category is legal (§7
-        # `equivalentTo`); a `nearMisses` reference to a CORE name still resolves.
-        # (These two packs used to DECLARE `milestone` — a core-owned eventKind —
-        # as an objectKind, the deformation #2786 now refuses; see the docstring.)
         _write_pack(str(tmp_path), "delta", {
             "namespace": "delta", "name": "Delta", "version": "0.1.0",
             "tier": "free",
@@ -1529,8 +1527,50 @@ class TestMilestoneCanonicalEventKind:
             },
         })
         registry = PackRegistry(tmp_path)
-        registry.load_all()
+        loaded = registry.load_all()
+        assert loaded == 3, registry.errors
         assert not registry.errors, registry.errors
+
+    def test_a_declaring_pack_is_refused_while_a_bare_reference_still_resolves(
+            self, tmp_path):
+        """#2767 indicator (2), both halves, one fixture.
+
+        The reported failure needed BOTH sides at once: a pack DECLARING the bare
+        name (the shape that made the reference ambiguous) and another pack
+        REFERENCING it in `nearMisses`. #2786 refuses the declaration — core owns
+        `milestone` on the EVENT axis, so it cannot be declared on any axis — but
+        refusing it must not break the reference: a bare `milestone` still
+        resolves, to core, for the pack that merely references it.
+
+        One assertion alone cannot pin this shape: the refusing half is a
+        declaration and the resolving half is a reference in a DIFFERENT pack, so
+        the fixture has to carry both, and the two asserts have to land on
+        different packs.
+        """
+        _write_pack(str(tmp_path), "alpha_declares", {
+            "namespace": "alpha_declares", "name": "Alpha Declares",
+            "version": "0.1.0", "tier": "free",
+            "ontology": {"extends": "core", "objectKinds": ["milestone"]},
+        })
+        _write_pack(str(tmp_path), "beta_references", {
+            "namespace": "beta_references", "name": "Beta References",
+            "version": "0.1.0", "tier": "free",
+            "ontology": {
+                "extends": "core", "objectKinds": ["widget"],
+                "kindDefs": {"widget": {"description": "w",
+                                        "nearMisses": ["milestone"]}},
+            },
+        })
+        registry = PackRegistry(tmp_path)
+        loaded = registry.load_all()
+        # The declaring pack is DROPPED, and the reason names the owner axis.
+        assert "alpha_declares" in registry.errors, registry.errors
+        assert loaded == 1, (loaded, registry.errors)
+        declaration_msg = " ".join(registry.errors["alpha_declares"])
+        assert "core owns it as eventKinds" in declaration_msg, declaration_msg
+        # …and the REFERENCING pack still resolves the bare name against core.
+        assert "beta_references" in registry.packs, registry.errors
+        assert "beta_references" not in registry.errors, registry.errors
 
     def test_both_kind_paths_agree_on_the_removed_set(self):
         """`known_kinds('pointKind')` (the hosted write validator) and

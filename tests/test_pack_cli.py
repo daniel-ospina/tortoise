@@ -24,6 +24,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
 
@@ -98,14 +100,16 @@ class TestPackNew:
             assert r.returncode == 1, f"{ns} should be rejected"
             assert msg in r.stderr, r.stderr
 
-    def test_reserved_words_cover_every_owned_axis(self):
-        """One definition (#2786): the CLI reads `canonical_kind_words()`.
+    def test_reserved_words_are_derived_from_the_owner_map(self):
+        """One definition (#2786): the reserved word set IS `canonical_kind_words()`.
 
-        The reservation used to be hand-rolled here, and it had drifted — the
-        action axis (`CANONICAL_ACTION_KINDS`, which `CANONICAL_KINDS` deliberately
-        omits) was missing, so `pack new implement` scaffolded a namespace that
-        collides with a core word. This pins the set against the owner map, so a
-        future hand-rolled copy cannot silently drop an axis again.
+        This pins the DERIVATION — the word set is computed from the owner map, so
+        `KIND_OWNER_AXES` cannot gain an axis that the reservation ignores. It is
+        deliberately a self-comparison: it never runs the CLI, so it says nothing
+        about what the scaffolder does with the set. Whether `pack new <word>`
+        actually REFUSES a word from every axis (the drift this file used to have —
+        the action axis was missing from a hand-rolled union here) is pinned
+        end-to-end by `test_every_owned_axis_word_is_rejected_by_the_cli`.
         """
         from tortoise.pack_registry import KIND_OWNER_AXES, canonical_kind_words
 
@@ -113,6 +117,29 @@ class TestPackNew:
         for axis, kinds in KIND_OWNER_AXES.items():
             missing = {k for k in kinds if k.lower() not in words}
             assert not missing, f"{axis} missing from the reserved words: {missing}"
+
+    @pytest.mark.parametrize("word,axis", [
+        # ONE word per owned axis, each driving the real CLI. `implement`
+        # (actionKinds) is the decisive case: the pre-#2786 hand-rolled union in
+        # `_cmd_pack_new` omitted the action axis, so it scaffolded a namespace
+        # colliding with a core word. A unit check over `canonical_kind_words()`
+        # cannot see that — reverting the CLI to the hand-rolled union leaves it
+        # green — so the pin has to go through `_run_cli`.
+        ("tag", "objectKinds"),
+        ("deployment", "eventKinds"),
+        ("hypothesis", "pointKinds"),
+        ("transcript", "documentKinds"),
+        ("implement", "actionKinds"),
+    ])
+    def test_every_owned_axis_word_is_rejected_by_the_cli(self, tmp_path, word, axis):
+        """A namespace must not collide with ANY word core owns, on any axis."""
+        out_dir = tmp_path / "packs"
+        r = _run_cli("pack", "new", word, "--dir", str(out_dir))
+        assert r.returncode == 1, f"{word} ({axis}) should be rejected: {r.stdout}"
+        assert "canonical kind" in r.stderr, r.stderr
+        # …and nothing was written: the scaffold is refused BEFORE the manifest
+        # exists, so there is no pack a validator would then refuse.
+        assert not (out_dir / word / "manifest.yaml").exists()
 
     def test_existing_dir_rejected(self, tmp_path):
         _scaffold("mydomain", tmp_path)
