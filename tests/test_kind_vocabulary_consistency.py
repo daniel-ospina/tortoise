@@ -351,7 +351,8 @@ def test_extraction_probe_object_kinds_are_the_canonical_set():
 
     Measured before this leg existed: the probe advertised ``document`` (retired as an
     ``objectKind`` by D10 — a document is a ``:Source``, ONTOLOGY §4.4) and ``concept``
-    (retired by #2727), while OMITTING five kinds §5 declares — ``Problem``, ``strategy``,
+    (never a §5 ``objectKind``; removed from the extractor brief by T12/#1272), while OMITTING
+    five kinds §5 declares — ``Problem``, ``strategy``,
     ``plan``, ``goal``, ``target``. Both directions are wrong in the same way: the probe could
     not name a canonical core kind and could name two that resolve nowhere.
     """
