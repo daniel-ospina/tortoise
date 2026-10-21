@@ -258,6 +258,16 @@ WHAT THIS PINS
    denial at all, and the second arm is its non-vacuity: the merge-base string and
    the intermediate string RED, a duration carrying its framing stays GREEN, and a
    duration with only "one box" for company (hardware is not framing) REDs.
+   ⚠️ **Three later corrections, each found by putting the removed string somewhere
+   else and watching the arm stay green.** (1) The capture kept only `#`-leading
+   lines, so the same figure in the function DOCSTRING, in a TRAILING comment, or in
+   the `#` block above the `def` went unnoticed — it now reads the function's whole
+   source plus that block. (2) Framing was matched over the whole text, so a comment
+   that merely NAMED `--durations` while denying it passed; the window is now the
+   number's own line, and a negated marker (`not measured with …`) is not framing.
+   (3) The duration unit was `ms|s`, so `30 seconds` and `2.6 sec` — the same claim
+   re-spelled — was GREEN; every duration word is in, with a lookbehind so `1,000 s`
+   and `sha256s` cannot half-match.
 
 ⚠️ **What this deliberately does NOT claim.** The LITERAL census is a LOWER
 BOUND: it sees a relationship pattern naming the edge, so a reader that
@@ -3687,16 +3697,57 @@ def test_a_module_constant_is_attributed_to_its_consumer():
 
 
 def _gate_walk_comment() -> str:
-    """The `#` lines of `_narrow_gate_walk_sites` — the comment `#9506` is about."""
+    """Every PROSE line `_narrow_gate_walk_sites` carries — the text `#9506` is about.
+
+    ⚠️ **This used to keep only lines that start with `#`, and that made the arm blind
+    to the exact string the PR removes** — measured by the round-6 review, which put
+    `measured 10.36 s of the control's 10.85 s` in three other positions inside the
+    same function and got GREEN on both arms each time: the function DOCSTRING (which
+    `inspect.getsource` returns and the `#` filter dropped), a TRAILING comment on a
+    code line (`for file in _literal_files():  # measured 10.36 s …`), and a `#`
+    comment above the `def` (which `getsource` does not return at all). A guard that
+    reads one of the four places a duration can be written is a guard with three
+    documented ways past it.
+
+    So the capture is: the function's WHOLE source (docstring, inline code and
+    trailing comments) plus the contiguous `#` block immediately above the `def`.
+    Nothing is projected away, so a duration is dropped only by being absent.
+
+    What it still does not read: prose elsewhere in the file (a module docstring, a
+    sibling's comment). That is recorded in the arm's docstring rather than implied —
+    the `#9506` claim lives in this function, and a wider net would red on unrelated
+    history rather than on this comment.
+    """
     census = _call_time_census()
     source = inspect.getsource(census._narrow_gate_walk_sites)
-    return "\n".join(
-        line.strip() for line in source.splitlines() if line.lstrip().startswith("#")
-    )
+    path = inspect.getsourcefile(census._narrow_gate_walk_sites)
+    first = inspect.getsourcelines(census._narrow_gate_walk_sites)[1]
+    above: list[str] = []
+    if path:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+        index = first - 2  # the line before the `def`
+        while index >= 0 and lines[index].lstrip().startswith("#"):
+            above.append(lines[index].strip())
+            index -= 1
+    return "\n".join([*reversed(above), source])
 
 
-#: A duration, as a comment pins one (`10.36 s`, `~2.6 s`, `850 ms`).
-_DURATION = re.compile(r"\d+(?:\.\d+)?\s?(?:ms|s)\b")
+#: A duration, as a comment pins one (`10.36 s`, `~2.6 s`, `850 ms`, `30 seconds`).
+#:
+#: ⚠️ **Two reviews changed this regex, and both changes are about the same thing: a
+#: guard whose only unit is `ms|s` is retired by a UNIT EDIT.** The round-6 review
+#: measured `30 seconds of the control's 60 seconds` and `2.6 sec of a 17 sec arm`
+#: going GREEN — the identical claim, re-spelled — so every duration word is here.
+#:
+#: And the match must be WHOLE: without the leading guard, `1,000 s` matched `000 s`,
+#: `1e3 s` matched `3 s` and `sha256s` matched `256s`, so a failure message could
+#: quote a token that is not a duration at all. The lookbehind refuses a number that
+#: starts mid-digit-run, mid-exponent or mid-identifier.
+_DURATION = re.compile(
+    r"(?<![\w.,])\d+(?:\.\d+)?\s?"
+    r"(?:ms|s|secs?|seconds?|mins?|minutes?)\b",
+    re.IGNORECASE,
+)
 
 #: What makes a pinned duration SETTLEABLE — the framing that produced it.
 #: Each entry names the measurement a re-verifier must reproduce to check the
@@ -3707,6 +3758,17 @@ _DURATION_FRAMING = (
     "whole arm",
     "control step",
     "in-suite",
+)
+
+
+#: A framing marker that is present only to be DENIED (`no --durations run`,
+#: `not measured with --durations`, `never a whole arm`) is not framing. Without this,
+#: a comment that says *"not measured with `--durations=0`, so no framing was taken:
+#: measured 10.36 s"* passed the arm — measured by the round-6 review.
+_NEGATED_FRAMING = re.compile(
+    r"\b(?:no|not|never|without|none)\b[^.;]{0,40}?"
+    r"(?:--durations|whole arm|control step|in-suite)",
+    re.IGNORECASE,
 )
 
 
@@ -3725,19 +3787,29 @@ def _unframed_durations(comment: str) -> list[str]:
     timing figure is named" silently retired it.
 
     So the rule now reads the CLAIM rather than a phrase about it: a duration is a
-    fact asserted about a measurement, and it is acceptable only when the comment
-    also states the framing that produced it. This reds on the merge-base text and
-    on the intermediate `~2.6 s of ~17 s` sentence alike, and no rewording can
-    retire it because it never reads the denial.
+    fact asserted about a measurement, and it is acceptable only when the text also
+    states the framing that produced it. This reds on the merge-base text and on the
+    intermediate `~2.6 s of ~17 s` sentence alike, and no rewording can retire it
+    because it never reads a denial PHRASE — the one denial it does read is a negation
+    of the framing marker itself.
 
-    Coarse in one documented direction: the framing marker is matched over the whole
-    comment, not per number, so a comment that carries its framing may also mention
-    a second figure. That is the harmless direction — it can only stay GREEN where
-    the framing IS stated, which is the state the reviewer asked to keep allowed.
+    ⚠️ **The framing is matched on the NUMBER'S OWN LINE, and that is the second fix.**
+    Matching it over the whole text (the first version) passed a comment that merely
+    NAMED `--durations` somewhere — `… 10.36 s of the control's 10.85 s — not measured
+    with --durations=0, so no framing was ever taken` was GREEN, and the docstring's
+    claim that it "can only stay GREEN where the framing IS stated" was false. A
+    framed number and a framed comment are different things, so the window is the line.
+    Cost, stated: a duration whose framing wraps onto the NEXT line reds, and the fix
+    is to put them on one line — the direction that keeps a claim settleable.
     """
-    found = _DURATION.findall(comment)
-    if any(marker in comment for marker in _DURATION_FRAMING):
-        return []
+    found: list[str] = []
+    for line in comment.splitlines():
+        for match in _DURATION.finditer(line):
+            framed = any(marker in line.lower() for marker in _DURATION_FRAMING)
+            if framed and _NEGATED_FRAMING.search(line):
+                framed = False
+            if not framed:
+                found.append(match.group(0).strip())
     return found
 
 
@@ -3793,11 +3865,16 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         "and\n# rebuilding the same 29 `_File`s measured 10.36 s of the control's "
         "10.85 s for\n# byte-identical output."
     )
+    # Verbatim from `git show aded3145d:tests/_about_call_time_census.py` (lines
+    # 990-995) — the round-6 review caught this as an ABRIDGED PARAPHRASE labelled
+    # "the intermediate string", which is the defect this file keeps re-learning: a
+    # quotation that is not the thing it quotes. Re-wrap it only from the real blob.
     intermediate = (
-        "# ... only object identity changes. No magnitude is stated on purpose: the\n"
-        "# redundant rebuild is a fraction of this arm (a re-verifier measured "
-        "~2.6 s of\n# ~17 s on one box), and a wall-clock number pinned into a "
-        "comment is the\n# claim that rots."
+        "# `_literal_files()` is already parsed and cached, so rebuilding the same 29\n"
+        "# `_File`s bought nothing: measured on the parent commit, the re-parse was\n"
+        "# 8.14 s of this function's 25.34 s (32 %) for byte-identical output — 20/20\n"
+        "# named, 15/15 empty-pattern, 9/9 call-time either way. `_sources()` itself is\n"
+        "# `lru_cache`d, so it was never the cost; the re-parse was."
     )
     assert _unframed_durations(merge_base) == ["10.36 s", "10.85 s"], (
         "the predicate must red on the MERGE BASE text (`measured 10.36 s of the "
