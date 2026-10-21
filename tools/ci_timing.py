@@ -417,6 +417,16 @@ V_PROGRESS_RE = re.compile(r"^(tests/\S+?\.py::[^\s]+?)\s+(PASSED|FAILED|ERROR|S
 # published complete legs as truncated.)
 _SUMMARY_IN_RE = re.compile(r"\bin \d+(?:\.\d+)?s\b")
 
+# pytest -q's BANNER-LESS summary: the line BEGINS with the count clause
+# (`6 failed, 35152 passed, 146 skipped in 1234.56s (0:20:34)`) and runs on to the
+# duration. The leading count is the point: an echoed assertion that merely QUOTES a
+# summary (`E   AssertionError: assert '= 10 passed, 1 failed in 3.00s =' in ...`)
+# carries the same phrase, and on a log truncated before the real summary (the SIGKILL
+# path) it was credited as the session summary — fabricating passes a killed leg never
+# had AND suppressing the truncation disclosure, because `summary_seen` became True
+# (#9134 review, P2).
+_BANNERLESS_SUMMARY_RE = re.compile(r"^\d+\s+\w+.*\bin \d+(?:\.\d+)?s\b")
+
 
 def _is_summary_line(line: str) -> bool:
     """True for pytest's session-summary line, in banner and banner-less forms.
@@ -433,6 +443,21 @@ def _is_summary_line(line: str) -> bool:
     # a truncated leg as complete and drop its real failures (#9134 review, P1).
     # The count form is also the only thing that recognises pytest -q's banner-less
     # `10 passed in 3.02s` (#9134 review, P3).
+    #
+    # ⛔ POSITION MATTERS AS MUCH AS CONTENT (#9134 review, P2): a summary OPENS with
+    # its own content — a banner (`= … =`) or, banner-less, a count clause, `no tests
+    # ran`, or a deselection. An echoed assertion that merely QUOTES a summary
+    # (`E   AssertionError: assert '= 10 passed, 1 failed in 3.00s =' in …`) carries
+    # every token of one INSIDE a sentence; read as a summary it certified a leg killed
+    # mid-run as complete and disclosed nothing, and it also fabricated the passes it
+    # quoted. Same shape rule as the counts selector below, so the two cannot disagree.
+    _opens_with_its_content = (
+        stripped.startswith("=")
+        or _BANNERLESS_SUMMARY_RE.match(stripped) is not None
+        or stripped.startswith("no tests ran")
+    )
+    if not _opens_with_its_content:
+        return False
     return bool(COUNT_RE.search(stripped) or "no tests ran" in stripped
                 or " deselected" in stripped)
 
@@ -614,8 +639,22 @@ def parse_log(path: Path) -> dict:
     # one containing `[`, which is a parametrized id echoed into the log. Every key is
     # reset first, so a column the genuine summary omits is genuinely zero (#9134 review,
     # P1: crediting a quoted id fabricated an error the run never had).
+    # ⛔ A non-banner candidate must BE the banner-less summary, not merely contain
+    # `in Ns`: `_SUMMARY_IN_RE` alone credited `E   AssertionError: assert '= 10
+    # passed in 3.00s =' in …` — a FAILING assertion quoting a summary — as the session
+    # summary on a log truncated before the real one, so a killed leg shipped fabricated
+    # passes with `summary_seen: True` and no truncation disclosure (#9134 review, P2).
+    # The WATCHDOG banner keeps working: it OPENS with `=`, so it takes the banner
+    # branch, and its counts stay a lower bound (kill detection is a separate question,
+    # #6145).
+    # The counts rule is deliberately a touch wider than `_is_summary_line`: a WATCHDOG
+    # banner opens with `=` and carries counts but no duration, and its counts stay
+    # credited (as a lower bound — #6145 pins that). What it may NOT do is credit an
+    # echoed ASSERTION, which is why a non-banner line must OPEN with the count clause
+    # rather than merely contain `in Ns` (#9134 review, P2).
     _cand = [ln for ln in lines if "[" not in ln and COUNT_RE.search(ln)
-             and (ln.strip().startswith("=") or _SUMMARY_IN_RE.search(ln))]
+             and (ln.strip().startswith("=")
+                  or _BANNERLESS_SUMMARY_RE.match(ln.strip()))]
     counts = {k: 0 for k in counts}
     if _cand:
         for _n, _key in COUNT_RE.findall(_cand[-1]):
@@ -2873,6 +2912,27 @@ def main() -> int:
         now = _newest
         row["sample_time"] = now
     history = history[: args.max_history]
+
+    # ⛔ ONE RUN, ONE LIST (#9134 review, P1): the header is published from the row that
+    # WON the history seat, never from the fresh aggregation beside it. `_dedupe_history`
+    # keeps the NEWEST sample of a run, so a committed row for THIS run stamped later than
+    # `now` displaces the fresh row — and then the header's `failed_tests`/`outcome` came
+    # from the fresh parse while `history[0]` carried the committed one, so one artifact
+    # published TWO different failure lists for one run. The shipped `docs/ci-timing.json`
+    # had exactly that at run 39467226356: the header named one truncated parametrized id
+    # where the row named two separate tests. Selecting the winner by run identity AND the
+    # resolved instant means a re-sample can never disagree with its own history row, and
+    # "one run cannot have two error totals" stops depending on which side was newer.
+    _run_key = row.get("run_id") or row.get("sha")
+    winner = next(
+        (h for h in history
+         if (h.get("run_id") or h.get("sha")) == _run_key
+         and _history_sample_time(h) == now),
+        row,
+    )
+    total_counts = {k: int((winner.get("counts") or {}).get(k, 0)) for k in COUNT_KEYS}
+    killed_any = bool(winner.get("killed", killed_any))
+    failed_tests = list(winner.get("failed_tests") or [])
 
     flakes = candidate_flakes(history)
 

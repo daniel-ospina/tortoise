@@ -1517,6 +1517,100 @@ def test_generating_twice_under_one_frozen_clock_does_not_duplicate_the_sample(
     assert len(history) == 1, history
 
 
+def _seed_one_history_row(out: Path, run_id: str, sample_time: str,
+                          passed: int, failed_tests: list[str]) -> None:
+    """Plant a committed artifact whose history already holds a LATER sample of `run_id`."""
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "ci-timing.json").write_text(json.dumps({
+        "schema_version": ci_timing.SCHEMA_VERSION,
+        "history": [{
+            "sample_time": sample_time, "run_id": run_id, "sha": None,
+            "created_at": "2026-08-19T00:00:00Z", "conclusion": "failure",
+            "event": "push", "branch": "main",
+            "counts": {"passed": passed, "failed": len(failed_tests), "error": 0,
+                       "skipped": 0, "xfailed": 0, "xpassed": 0},
+            "killed": False, "steps_total_ms": 0, "steps_max_job_ms": 0,
+            "failed_tests": failed_tests,
+        }],
+    }))
+
+
+def _run_main_against(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                      out: Path, run_id: str = "4242") -> None:
+    monkeypatch.setattr("sys.argv", ["ci_timing.py", "--repo", "o/r",
+                                     "--run-id", run_id,
+                                     "--logs-dir", str(tmp_path / "logs"),
+                                     "--out-dir", str(out)])
+    assert ci_timing.main() == 0
+
+
+def test_a_resampled_run_publishes_one_failure_list(tmp_path: Path,
+                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    """The header and its own history row can never name different failures.
+
+    `_dedupe_history` keeps the NEWEST sample of a run, so a committed row stamped
+    later than `CI_TIMING_NOW` displaces the fresh row — and the header was still
+    built from the fresh aggregation beside it, so ONE artifact published TWO failure
+    lists and two different pass counts for one run. The shipped `docs/ci-timing.json`
+    had exactly that at run 39467226356 (#9134 review, P1).
+    """
+    write_log(tmp_path, "pytest-log-test-a/pytest.log",
+              "FAILED tests/test_new.py::test_NEW\n= 1 failed, 2 passed in 1.00s =\n")
+    out = tmp_path / "out"
+    _seed_one_history_row(out, "4242", "2026-08-20T00:00:00Z", 99,
+                          ["tests/test_old.py::test_OLD"])
+    monkeypatch.setenv("CI_TIMING_NOW", "2026-08-19T00:00:00Z")
+    _run_main_against(tmp_path, monkeypatch, out)
+
+    artifact = json.loads((out / "ci-timing.json").read_text())
+    row = artifact["history"][0]
+    assert artifact["failed_tests"] == row["failed_tests"], artifact["failed_tests"]
+    assert artifact["outcome"]["passed"] == row["counts"]["passed"]
+    assert artifact["outcome"]["failed"] == row["counts"]["failed"]
+    # the fresh parse lost the seat, so the artifact is the COMMITTED reading, whole
+    assert row["failed_tests"] == ["tests/test_old.py::test_OLD"]
+
+
+def test_the_markdown_takes_the_resolved_sample_time(tmp_path: Path,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """The md must date itself from the RESOLVED instant, not from the env again.
+
+    When a committed row is newer than `CI_TIMING_NOW`, `now` is re-published from
+    that row; `render_md` re-reads `CI_TIMING_NOW` when it is given no `now`, so the
+    markdown dated the artifact a day before its own json (#9134 review, P2 — the
+    fix that added `now=now` was pinned by nothing).
+    """
+    write_log(tmp_path, "pytest-log-test-a/pytest.log", "= 3 passed in 1.00s =\n")
+    out = tmp_path / "out"
+    _seed_one_history_row(out, "4242", "2026-08-20T00:00:00Z", 99, [])
+    monkeypatch.setenv("CI_TIMING_NOW", "2026-08-19T00:00:00Z")
+    _run_main_against(tmp_path, monkeypatch, out)
+
+    artifact = json.loads((out / "ci-timing.json").read_text())
+    resolved = artifact["sampled_run"]["sample_time"]
+    assert resolved == "2026-08-20T00:00:00Z"
+    assert f"- sample_time: `{resolved}`" in (out / "ci-timing.md").read_text()
+
+
+def test_a_quoted_summary_is_not_the_session_summary(tmp_path: Path) -> None:
+    """A FAILING assertion that quotes a summary must not be read as one.
+
+    A watchdog SIGKILL truncates the log before pytest prints its real summary. If the
+    last column-0 line quotes a summary inside an assertion message, the old rule
+    credited its counts (fabricating passes the leg never had) AND set
+    `summary_seen: True`, suppressing the truncation disclosure — a killed leg shipped
+    as a complete one (#9134 review, P2).
+    """
+    log = write_log(
+        tmp_path, "truncated.log",
+        "FAILED tests/test_x.py::test_x\n"
+        "E   AssertionError: assert '= 10 passed, 1 failed in 3.00s =' in '## Outcome'\n")
+    parsed = ci_timing.parse_log(log)
+    assert parsed["summary_seen"] is False
+    assert parsed["counts"]["passed"] == 0, parsed["counts"]
+    assert parsed["counts"]["failed"] == 0, parsed["counts"]
+
+
 def test_an_unreadable_log_degrades_instead_of_killing_the_run(tmp_path: Path) -> None:
     """One unreadable log must not become a KeyError for the whole artifact.
 
