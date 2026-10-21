@@ -453,13 +453,24 @@ _NON_LITERAL: dict[str, tuple[str, ...]] = {
 #: that fact goes away.
 #:
 #: The two shapes that exclude are the two ways a walk can bound the RESULT SET
-#: away from the edge (its target is `:Object`, `STRUCTURAL_REL_LABELS` in
-#: `projection/edges.py`):
+#: away from the edge:
 #:
 #: * the relationship TYPE is restricted downstream (`type(r) IN [...]`), or
-#: * an ENDPOINT label excludes both of the edge's ends.
+#: * an ENDPOINT label excludes BOTH ends of every `aboutObject` triple.
 #:
-#: A pattern-comprehension degree (`size([(old)-[x]-(y) | x])`) is the second
+#: ⚠️ **The endpoint shape is stated against the SCHEMA, not against a memory of
+#: it (#9400 review).** The first cut said "`aboutObject` starts at a Point" and
+#: "its target is `:Object` (`STRUCTURAL_REL_LABELS`)" — the second half is true
+#: of the TARGET only (`STRUCTURAL_REL_LABELS` maps rel -> the TARGET's label,
+#: `projection/edges.py`), and the first half is FALSE: `session_link
+#: .ENTITY_LINKED_TRIPLES` permits `aboutObject` from a `Point`, an `Event` AND a
+#: `Session`, and `projection.create_about_edge` resolves its source across every
+#: label. The conclusions below hold either way — but the register's rationale is
+#: what a future exclusion copies, so it has to name the fact the schema actually
+#: carries: **a `aboutObject` source is `Point`/`Event`/`Session` (never `Subject`,
+#: never `Source`) and its target is `Object`.**
+#:
+#: A pattern-comprehension degree (`size([(old)-[x]-(y) | x])`) is the endpoint
 #: shape: it is anchored on a `:Source`, and no `aboutObject` starts or ends at a
 #: Source.
 _EXCLUDED_UNTYPED: dict[str, tuple[tuple[str, ...], str]] = {
@@ -489,8 +500,9 @@ _EXCLUDED_UNTYPED: dict[str, tuple[tuple[str, ...], str]] = {
     ),
     "sdk.py::TortoiseSDK.provenance": (
         ("MATCH (s:Subject {id:$sid})-[r]->(n) ",),
-        "the walk is OUTGOING from a `:Subject`, and `aboutObject` starts at a "
-        "Point",
+        "the walk is OUTGOING from a `:Subject`, and no `aboutObject` triple has a "
+        "`:Subject` source (`session_link.ENTITY_LINKED_TRIPLES`: the sources are "
+        "`Point`, `Event` and `Session`, the target is `Object`)",
     ),
     "sdk.py::TortoiseSDK._connected_pairs": (
         (
@@ -2270,8 +2282,15 @@ def test_the_stated_door_count_matches_the_table():
 
     So the rule is now STATED in both documents — *a door is one independently
     callable entry point: an MCP tool, a public SDK method, or a served REST
-    route; counted once per site that reaches it* — and both documents' stated
-    total, and the per-kind breakdown, are asserted against the table.
+    route; counted ONCE however many of the seventeen sites reach it* — and both
+    documents' stated total, and the per-kind breakdown, are asserted against the
+    table. ⚠️ **The first cut of that rule said "counted once per site that
+    reaches it", which does not produce the figure it certifies**: applied
+    literally it yields the CELL-OCCURRENCE total (29), not the distinct door
+    total (20), and a reader following it cannot reproduce either number. The
+    cell-occurrence total is therefore STATED as well (§13's blast-radius
+    sentence) and asserted here, so the folding rule is checkable in both
+    directions instead of being prose that happens to agree with a constant.
     """
     doors = _customer_callable_doors()
     kinds: dict[str, int] = {}
@@ -2323,6 +2342,22 @@ def test_the_stated_door_count_matches_the_table():
         "what STATES the folding rule (MCP tool and SDK twin counted separately, "
         "the three `dry_run` delete tools counted as three); without it the total "
         "is not reproducible from the table."
+    )
+    # The OTHER half of the same rule: "counted ONCE however many sites reach it"
+    # is only checkable if the cell-occurrence total is stated too — `tortoise_recall`
+    # / `recall_state` alone land in five rows, so 20 distinct doors is 29 cells.
+    occurrences = sum(len(rows) for rows in doors.values())
+    stated_occurrences = {
+        int(match.group(1))
+        for match in re.finditer(r"\b(\d+) cell occurrences?\b", section)
+    }
+    assert stated_occurrences == {occurrences}, (
+        f"§13 states {sorted(stated_occurrences) or 'no'} cell-occurrence "
+        f"total(s); the table's customer-callable reach cells hold {occurrences} "
+        f"door instance(s) over {total} distinct door(s). The sentence states the "
+        "folding rule — a door is counted ONCE however many sites reach it — so "
+        "both halves must be derivable from the table: restore the cell-occurrence "
+        "figure beside the distinct total."
     )
     for name, document in (
         ("STORAGE-ARCHITECTURE.md §13", _doc()),
@@ -2619,10 +2654,16 @@ def test_the_prior_art_points_at_the_table_instead_of_restating_the_count():
 
 # ── 9. §13 carries the line numbers its own sentence says it does not ───────
 
-#: A `file.py:NNNN` — or `file.py:NNNN-MMM` — line citation, the form §13's own
+#: A `file.EXT:NNNN` — or `file.EXT:NNNN-MMM` — line citation, the form §13's own
 #: sentence retires. A symbol citation (`module.py::symbol`) does NOT match: its
-#: colon is doubled, so it is never followed by a digit.
-_LINE_CITATION = re.compile(r"[A-Za-z0-9_./-]+\.py:[0-9]+")
+#: colon is doubled, so it is never followed by a digit. ⚠️ EXTENSION-AGNOSTIC on
+#: purpose (#9400 review): the first cut matched `.py:` only, so the ONE citation
+#: that survived the rewrite — a `.sql:175` on a migration column — was invisible
+#: to the very guard that exists to catch it, and the section both stated "no line
+#: numbers" and carried one.
+_LINE_CITATION = re.compile(
+    r"[A-Za-z0-9_./-]+\.(?:py|sql|ts|tsx|js|mjs|cjs|md|ya?ml|json|toml|sh):[0-9]+"
+)
 
 
 def test_section_13_carries_no_line_citations():
