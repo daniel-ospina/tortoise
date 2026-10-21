@@ -407,6 +407,19 @@ def _load_manifest_tool():
     return mod
 
 
+#: Every row whose `dependency` column states a caller set. The COUNT is the pin: a row
+#: that stops carrying a comparable pair silently leaves the comparison, so the population
+#: is asserted rather than floor-ed (#9150 review, P2 — measured: the old `>= 40` against
+#: 41 rows let exactly one row drop out unnoticed, and a one-sided edit on that row passed).
+_COMPARABLE_CALLER_ROWS = 71
+
+#: The wording a row uses when the derivation found no caller outside the tests. It is the
+#: one shape where `dependency` carries a set and `reason` carries no `callers:` list, so it
+#: is compared as a PAIR of statements instead of being skipped.
+_NO_CALLERS_DEPENDENCY = "none outside tests"
+_NO_CALLERS_REASON = "no caller outside tests was found"
+
+
 def _caller_lists(doc: dict) -> tuple[int, list[tuple[str, str, str]]]:
     """(rows compared, mismatched (name, dependency list, reason list)).
 
@@ -414,6 +427,13 @@ def _caller_lists(doc: dict) -> tuple[int, list[tuple[str, str, str]]]:
     so `check` never compares it — but the caller LIST inside it is plain text and must
     equal the one in the `dependency` column beside it, because the rendered table prints
     both as the same fact (`Does / depends on` vs `Rationale`).
+
+    ⛔ A ROW WHERE ONLY ONE SIDE CARRIES A LIST IS A MISMATCH, NOT A ROW TO SKIP (#9150
+    review, P2). The first revision did `if not (dep_match and reason_match): continue`,
+    so stripping the list from either side removed the row from the comparison and the
+    contradiction it had become went GREEN. The only legitimate one-sided shape is the
+    no-callers wording, and it is compared as a pair (`none outside tests` vs
+    "no caller outside tests was found") rather than skipped.
     """
     compared = 0
     mismatched: list[tuple[str, str, str]] = []
@@ -424,11 +444,30 @@ def _caller_lists(doc: dict) -> tuple[int, list[tuple[str, str, str]]]:
         reason = " ".join(str(row.get("reason") or "").split())
         dep_match = re.search(r"caller categories: (.*)$", dependency)
         reason_match = re.search(r"callers: (.*)$", reason)
-        if not (dep_match and reason_match):
-            continue  # the "no caller outside tests was found" wording carries no list
+        name = str(row.get("name"))
+        if not dep_match:
+            # ⛔ THE OTHER DIRECTION (#9150 review, P2): a `reason` that lists callers while
+            # the `dependency` column states none is a one-sided edit too — and there is no
+            # legitimate shape for it (measured: 0 rows are reason-only on this tree).
+            # Skipping it was the same hole in reverse: the row left the population and
+            # went green.
+            if reason_match:
+                compared += 1
+                mismatched.append(
+                    (name, "<no caller list in `dependency`>", reason_match.group(1).strip())
+                )
+            continue  # this row's dependency states no caller set at all
         compared += 1
-        if dep_match.group(1).strip() != reason_match.group(1).strip():
-            mismatched.append((str(row.get("name")), dep_match.group(1), reason_match.group(1)))
+        dep_list = dep_match.group(1).strip()
+        if dep_list == _NO_CALLERS_DEPENDENCY:
+            if _NO_CALLERS_REASON not in reason:
+                mismatched.append((name, dep_list, "<`reason` no longer says no callers were found>"))
+            continue
+        if not reason_match:
+            mismatched.append((name, dep_list, "<no caller list in `reason`>"))
+            continue
+        if dep_list != reason_match.group(1).strip():
+            mismatched.append((name, dep_list, reason_match.group(1).strip()))
     return compared, mismatched
 
 
@@ -446,9 +485,11 @@ def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
     and `test_the_reason_dependency_cross_check_can_fail` proves it fires.
     """
     compared, mismatched = _caller_lists(_manifest())
-    assert compared >= 40, (
-        f"only {compared} rows carry a comparable caller list (41 today) — this check "
-        "has stopped reading the manifest's rows and would pass vacuously"
+    assert compared == _COMPARABLE_CALLER_ROWS, (
+        f"{compared} rows now carry a caller set in `dependency` ({_COMPARABLE_CALLER_ROWS} "
+        "recorded). An INCREASE is a new row — update the constant in the same change. A "
+        "DECREASE means a row stopped carrying one, so it silently left this comparison: "
+        "re-cut the row, do not lower the number"
     )
     assert not mismatched, (
         "these rows state one caller set in `dependency` and another in `reason`: "
@@ -458,20 +499,49 @@ def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
 
 
 def test_the_reason_dependency_cross_check_can_fail():
-    """Instrument check: a one-sided edit must red the pin above.
+    """Instrument check: EVERY one-sided edit must red the pin above.
 
     Without this, the comparison could stop matching anything (a reworded column) and the
     pin would pass on a manifest full of contradictions — the vacuity class this file has
     been burned by before.
+
+    ⛔ THREE CASES, because the first revision only covered one and the other two were
+    measured GREEN (#9150 review, P2): a row where the `reason` list was REPLACED, but
+    also a row where one side LOST its list entirely — which the old
+    `if not (dep_match and reason_match): continue` made vanish from the comparison
+    instead of contradicting it. `compared` is asserted on every doctored copy: a case
+    that reds by DROPPING the row is not the same check.
     """
-    doc = copy.deepcopy(_manifest())
-    row = next(r for r in doc["rows"] if r.get("name") == "sdk:supersede_point")
-    row["reason"] = "no MCP tool binds it; callers: engine, other-tooling, tenant-rest"
-    compared, mismatched = _caller_lists(doc)
-    assert compared >= 40, f"the cross-check reads only {compared} rows on a doctored copy"
-    assert [name for name, _dep, _reason in mismatched] == ["sdk:supersede_point"], (
-        f"a one-sided edit to `reason` did not red the cross-check: {mismatched}"
-    )
+    def doctored(mutate) -> tuple[int, list[tuple[str, str, str]]]:
+        doc = copy.deepcopy(_manifest())
+        row = next(r for r in doc["rows"] if r.get("name") == "sdk:supersede_point")
+        mutate(row)
+        return _caller_lists(doc)
+
+    def no_callers_row(row: dict) -> None:
+        """The legitimate one-sided shape, broken on the `reason` side."""
+        row["dependency"] = "reached by no registered MCP tool; caller categories: none outside tests"
+
+    cases = {
+        "reason list replaced": lambda row: row.update(
+            {"reason": "no MCP tool binds it; callers: engine, other-tooling, tenant-rest"}
+        ),
+        "reason list deleted": lambda row: row.update({"reason": "no MCP tool binds it"}),
+        "dependency list deleted": lambda row: row.update(
+            {"dependency": "reached by no registered MCP tool"}
+        ),
+        "no-callers row contradicts its reason": no_callers_row,
+    }
+    for label, mutate in cases.items():
+        compared, mismatched = doctored(mutate)
+        assert compared == _COMPARABLE_CALLER_ROWS, (
+            f"the {label!r} case reads {compared} rows, expected "
+            f"{_COMPARABLE_CALLER_ROWS} — a doctored row LEFT the population instead of "
+            "contradicting inside it"
+        )
+        assert [name for name, _dep, _reason in mismatched] == ["sdk:supersede_point"], (
+            f"the {label!r} case did not red the cross-check on that row: {mismatched}"
+        )
 
 
 def test_the_retired_block_matches_the_declaration():

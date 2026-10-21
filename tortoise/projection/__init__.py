@@ -3287,8 +3287,13 @@ def _journal_safe_params(params, cypher=None):
 #     its own is how its state is RECOVERED: it is neither a fold of a record
 #     (the live doors) nor rebuild-from-zero bookkeeping (the metadata lanes) —
 #     it is org-level FLOW metadata that a rebuild cannot re-derive, which is why
-#     the replay engines CAPTURE-AND-RESTORE the class instead (#4641 below)
-#     rather than replay it. So no journal event exists whose fold would produce
+#     the replay engines **that can rebuild this graph** capture-and-restore the
+#     class instead (#4641 below) rather than replay it — the same qualifier the
+#     bullet above uses, and it is load-bearing: `tortoise/backup.py::restore`'s
+#     JSONL fallback is a fourth replay engine with NO onboarding capture, so
+#     "the replay engines capture-and-restore it" is not a universal and a reader
+#     must not take it as one (the gap is stated with the writers, in
+#     `onboarding/state.py`). So no journal event exists whose fold would produce
 #     it, and the declaration IS the whole of this lane's authorization. It
 #     declares through the same primitive (`_cache_write_authorized`) and
 #     deliberately does not delegate to `_graph_metadata_write_scope` (whose
