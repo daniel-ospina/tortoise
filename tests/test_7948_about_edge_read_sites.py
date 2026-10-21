@@ -57,35 +57,49 @@ WHAT THIS PINS
    §13's table. A new reader added anywhere under `tortoise/` reds this until it
    is declared.
 2. **`test_every_declared_symbol_still_performs_the_read`** — ROT. Every symbol
-   the table names must be a census site, or the one documented un-derivable
-   site (which must still exist in its file). A row whose symbol resolves but
-   does not read misleads every re-verifier — `EXTRACTOR-V4-ARCHITECTURE`'s own
-   rule is *"the symbol name is authoritative, the line number is a
-   convenience"*.
-3. **`test_the_declaration_covers_every_known_un_derivable_site`** — the reader
-   no census can derive is declared **with its reason** and still exists.
-   `recall_subgraph` reads the edge through `MATCH (n)-[r]->(m)` (its default
-   `completeness="full"` sets an empty relationship pattern), so no relationship
-   name appears anywhere in the statement.
-4. **`test_the_table_is_not_vacuous`** — the census, the table and the
-   customer-callable count are all non-trivially populated, so none of the arms
-   above can pass by finding nothing.
+   the table names must be a site of one of the two derivations below. A row
+   whose symbol resolves but does not read misleads every re-verifier —
+   `EXTRACTOR-V4-ARCHITECTURE`'s own rule is *"the symbol name is authoritative,
+   the line number is a convenience"*.
+3. **`test_the_empty_pattern_class_is_declared`** — the SECOND derivation.
+   An empty relationship pattern (`MATCH (n)-[r]->(m)`) names no type, so it
+   reads the edge without naming it and no scan for the name can find it —
+   `recall_subgraph`'s `completeness="full"`, `entityProfile`/`tortoise_traverse`'s
+   per-hop query, and the backfill census's unlabelled inbound count are all
+   this shape. It is derived as a **class** from the pattern's own shape: every
+   such reader under `tortoise/` must be either a §13 row or a named member of
+   `EMPTY_PATTERN` (with the reason it is not an `aboutObject` read for a
+   referent), and every member must still derive. One example declared by name
+   was the shape's defect: it let three further members — two of them
+   customer-callable — go absent while every arm stayed green.
+4. **`test_the_table_is_not_vacuous`** — the census, the empty-pattern class,
+   the table and the customer-callable count are all non-trivially populated, so
+   none of the arms above can pass by finding nothing.
 5. **`test_the_census_derives_a_relationship_name_built_at_runtime`** — the
    MECHANISM, on synthetic sources: a literal, a `+`-concatenation, an f-string,
    `"|".join(TUPLE)` and a `for rel in TUPLE` loop must each derive; a `MERGE`
    writer must not. Without this arm the resolver could regress to
    literal-only and the table would silently go back to being un-checked in the
    class that produced the fourth correction.
-6. **`test_the_prose_counts_match_the_table`** — the NUMBERS. §13 states the
-   census size and the customer-callable count in prose and the other arms check
-   only the rows, so the numerals are read out of the sentences that state them
-   and compared to the table. A demoted `reach` cell with a stale headline is
-   the `#7956` erratum's direction — the one the ruling rests on.
+6. **`test_the_prose_counts_match_the_table`** — the NUMBERS. §13 states its
+   counts in prose and the other arms check only the rows, so the numerals are
+   read out of the sentences that state them and compared to the table. A
+   demoted `reach` cell with a stale headline is the `#7956` erratum's direction
+   — the one the ruling rests on. ⚠️ **The counts are checked WITH their units**:
+   the headline used to read *"TWENTY read sites, and SIX of them are
+   CUSTOMER-CALLABLE"*, mixing a **symbol** count with a **row** count, so "of
+   them" could not hold — the six customer-callable rows carried nine symbols.
+   It now states sites, rows, customer-callable rows and the sites inside them
+   separately, and each numeral is checked against its own unit.
 
 WHAT THE CENSUS CANNOT SEE (stated, not silently excluded)
 ---------------------------------------------------------
-* **An empty relationship pattern** (`MATCH (n)-[r]->(m)`) names no type, so
-  nothing literal or constant carries `aboutObject` — hence arm 3.
+* **An empty relationship pattern** names no type, so nothing literal or
+  constant carries `aboutObject` — no scan for the NAME can find it. It is not
+  left undeclared: the class is derived by arm 3's shape walk, and every member
+  must be a row or an `EMPTY_PATTERN` entry. A pattern assembled **entirely from
+  a variable** (no bracket text anywhere in the source) is still out of reach of
+  that walk, so it must be declared by name.
 * **Resolution is one level deep per binding.** A rel name assembled from a
   value that is itself computed at call time (a function argument, a dict
   lookup, a value stored on an instance at construction) is not resolved; the
@@ -111,9 +125,10 @@ whole argument"*: the arm reads the numeral out of the sentence that states it
 and compares it to the `reach` column, so demoting two rows without moving the
 number — the `#7956` erratum's exact direction, and the error the KEEP ruling
 rests on — reds instead of shipping. The same arm checks the census-size
-numeral (`TWENTY read sites`) against `census ∪ UN_DERIVABLE`. Only the numeral
-is read, never the prose around it, so the sentence can be rewritten freely as
-long as it stays true.
+numerals (`TWENTY-TWO read sites across EIGHTEEN rows, and SEVEN of those rows
+(ten sites) are CUSTOMER-CALLABLE`) against their own units. Only the numeral is
+read, never the prose around it, so the sentence can be rewritten freely as long
+as it stays true.
 
 Static, stdlib-only, no network / DB / graph — it reads source text and a
 document.
@@ -139,6 +154,10 @@ _CLAUSE = re.compile(r"\b(OPTIONAL\s+MATCH|MATCH|MERGE|CREATE)\b")
 #: A traversal: an opening `[` or `-` shortly before the relationship name, so
 #: prose ("an ``aboutObject`` edge") is not mistaken for Cypher.
 _TRAVERSAL = re.compile(rf"[-\[][^\n]{{0,140}}?{EDGE}", re.IGNORECASE)
+#: An EMPTY relationship pattern: a bracketed traversal that names NO type
+#: (`-[r]->`, `<-[r]-`, `-[r*1..2]->`). It walks EVERY relationship type, so it
+#: reads the edge without naming it — the class no scan for the NAME can find.
+_EMPTY_TRAVERSAL = re.compile(r"[-<]\s*\[([^\]]*)\]\s*[-<>]")
 #: The most candidate strings one expression may expand to. A rel list is at most
 #: a handful of members, so this only bounds pathological input.
 _MAX_CANDIDATES = 64
@@ -149,26 +168,129 @@ _UNKNOWN = ""
 #: A backticked token in §13's `site` column that can be a symbol.
 _SYMBOL = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*(?:\(\))?\Z")
 
-#: The floor arms below: deliberately BELOW today's census (19 sites / 16 rows),
-#: because a row deleted together with its reader is not a reason to red — that
-#: is a legitimate contraction, and a floor pinned at today's exact count turns
-#: it into a failure whose message says "the parser broke". The floor exists only
-#: so no arm can pass by finding nothing.
+#: Floor for the empty-pattern class walk, so the class arm cannot pass by
+#: deriving nothing (today's census: 23 members).
+_MIN_EMPTY_PATTERN = 5
+
+#: Floor arms: deliberately BELOW today's census (19 named sites / 16 rows at the
+#: time of writing), because a row deleted together with its reader is not a
+#: reason to red — that is a legitimate contraction, and a floor pinned at
+#: today's exact count turns it into a failure whose message says "the parser
+#: broke". The floor exists only so no arm can pass by finding nothing.
 _MIN_SITES = 10
 _MIN_ROWS = 10
-#: `FOUR` was the old floor; the table now declares six customer-callable
-#: surfaces. Kept at the historical count so a *contraction* of the prose is
-#: visible even before the exact-count arm below reads the numeral itself.
+#: `FOUR` was the floor when this arm was written, i.e. the count BEFORE the
+#: fifth correction (four → six customer-callable rows). Kept at that historical
+#: value so a *contraction* of the prose is visible even before the exact-count
+#: arm below reads the numeral itself; the table declares seven today.
 _MIN_CUSTOMER_CALLABLE = 4
 
-#: The sites NO census can derive, each with the reason it cannot be derived.
-UN_DERIVABLE: tuple[tuple[str, str, str], ...] = (
+#: The empty-pattern readers that are NOT an `aboutObject` read for a referent,
+#: declared by name with the reason, so a NEW member of the class cannot appear
+#: silently: `test_the_empty_pattern_class_is_declared` derives the class from
+#: the pattern's shape and requires every member to be either a §13 row or an
+#: entry here. Each entry is `(filename, symbol, why it is not an about read)`.
+EMPTY_PATTERN: tuple[tuple[str, str, str], ...] = (
     (
-        "ranking.py",
-        "_neighbors",
-        "`completeness=\"full\"` sets an empty relationship pattern, so the "
-        "query walks EVERY relationship type via `MATCH (n)-[r]->(m)` and "
-        "reads the edge without ever naming it",
+        "tortoise/hosted_api.py",
+        "_export_graph_snapshot",
+        "a whole-graph export — it copies every node and edge, so it carries the "
+        "edge as data, not as a read for a referent",
+    ),
+    (
+        "tortoise/hosted_api.py",
+        "_load_commit_graph_state",
+        "restore/rollback bookkeeping — it rewires every edge type it finds, "
+        "`aboutObject` included, but asks nothing about a referent",
+    ),
+    (
+        "tortoise/hosted_backup.py",
+        "_independent_counts",
+        "an edge-count cross-check (`MATCH ()-[r]->() RETURN count(r)`) — it "
+        "counts the edge, it does not read it for a referent",
+    ),
+    (
+        "tortoise/hosted_backup.py",
+        "_restore_copy_settled",
+        "the post-restore settle check, again a total-edge count",
+    ),
+    (
+        "tortoise/hosted_backup.py",
+        "dump_graph",
+        "the dump cursor walks every edge type to serialise them",
+    ),
+    (
+        "tortoise/hosted_backup.py",
+        "restore_graph",
+        "the restore replay that writes those edges back",
+    ),
+    (
+        "tortoise/mcp_server.py",
+        "_preview_delete_edges",
+        "the delete preview enumerates every edge touching the node — a "
+        "deletion inventory, not an about* read",
+    ),
+    (
+        "tortoise/mining.py",
+        "verify_no_auto_wire",
+        "the no-auto-wire verifier walks every edge type to assert a shape is "
+        "absent",
+    ),
+    (
+        "tortoise/projection/__init__.py",
+        "_rebuild_all_replay",
+        "the rebuild/rollback replay — every edge is deleted and rewritten by "
+        "type, so it carries the edge rather than reading it",
+    ),
+    (
+        "tortoise/projection/entities.py",
+        "_materialize_connector_source",
+        "connector-source materialisation rewires the node's edges by type",
+    ),
+    (
+        "tortoise/sdk.py",
+        "_connected_pairs",
+        "a connectivity inventory (which node pairs are joined at all) — the "
+        "edge TYPE is deliberately ignored",
+    ),
+    (
+        "tortoise/sdk.py",
+        "_promote_incident_operators",
+        "the operator-promotion pass repoints every edge of an incident node",
+    ),
+    (
+        "tortoise/sdk.py",
+        "backfill_v25",
+        "a migration — it counts all edges as a baseline",
+    ),
+    (
+        "tortoise/sdk.py",
+        "provenance",
+        "the provenance walk reports which edge types reach a Subject; an "
+        "`aboutObject` edge is not a provenance link and is not classified as "
+        "one",
+    ),
+    (
+        "tortoise/session_source_migration.py",
+        "_degree",
+        "a degree count over every edge type, used to decide whether a Source "
+        "is orphaned",
+    ),
+    (
+        "tortoise/session_source_migration.py",
+        "_delete_if_orphan",
+        "the orphan sweep deletes every edge of a degree-0 Source",
+    ),
+    (
+        "tortoise/session_source_migration.py",
+        "_rel_types",
+        "an inventory of the edge TYPES on a node, reported as labels",
+    ),
+    (
+        "tortoise/subgraph.py",
+        "_hub_degrees",
+        "hub-degree counting for the fan-out cap — it counts every edge of a "
+        "node, whatever its type",
     ),
 )
 
@@ -180,16 +302,26 @@ _TABLE_HEADER = "| # | site |"
 #: also carries numerals about other rulings (a `123`-hub cap), so the count arm
 #: must not read past the bullet.
 _BULLET_START = "- **`aboutObject` as a stored edge vs a derived join**"
-#: `<N> read sites` — the census size, asserted.
-_PROSE_SITES = re.compile(r"\b([A-Za-z]+)\s+read sites\b", re.IGNORECASE)
-#: `<N> of them are CUSTOMER-CALLABLE` — the headline count, asserted.
+#: `<N> read sites` — the SITE count, asserted.
+_PROSE_SITES = re.compile(r"\b([A-Za-z][A-Za-z-]*)\s+read sites\b", re.IGNORECASE)
+#: `<N> rows` — the ROW count, asserted. The two units are different (a row may
+#: name several sites), which is why each numeral is read with its own noun.
+_PROSE_ROWS = re.compile(r"\bacross\s+([A-Za-z][A-Za-z-]*)\s+rows\b", re.IGNORECASE)
+#: `<N> of those rows (<M> sites) are CUSTOMER-CALLABLE` — rows and the sites
+#: inside them, asserted separately.
+_PROSE_CALLABLE_ROWS = re.compile(
+    r"\b([A-Za-z][A-Za-z-]*)\s+of those rows\s*\(\s*([A-Za-z][A-Za-z-]*)\s+sites\s*\)"
+    r"\s+are\s+CUSTOMER-CALLABLE",
+    re.IGNORECASE,
+)
+#: `<N> of them are CUSTOMER-CALLABLE` — the older phrasing; still a claim.
 _PROSE_CALLABLE = re.compile(
-    r"\b([A-Za-z]+)\s+of them are customer-callable\b", re.IGNORECASE
+    r"\b([A-Za-z][A-Za-z-]*)\s+of them are customer-callable\b", re.IGNORECASE
 )
 #: `... are <N> of them` — a later sentence re-asserting the same count. Any
 #: sentence that restates the number is a claim, so it is checked too: the
 #: `#7956` erratum was exactly a second sentence contradicting the first.
-_PROSE_CALLABLE_AGAIN = re.compile(r"\bare\s+([A-Za-z]+)\s+of them\b", re.IGNORECASE)
+_PROSE_CALLABLE_AGAIN = re.compile(r"\bare\s+([A-Za-z][A-Za-z-]*)\s+of them\b", re.IGNORECASE)
 
 #: The number words §13 states its counts in. Digits are accepted as well, so
 #: a rewrite that writes `6` instead of `SIX` stays checkable.
@@ -220,6 +352,10 @@ _NUMBER_WORDS = {
     "twenty-three": 23,
     "twenty-four": 24,
     "twenty-five": 25,
+    "twenty-six": 26,
+    "twenty-seven": 27,
+    "twenty-eight": 28,
+    "twenty-nine": 29,
     "thirty": 30,
 }
 
@@ -331,14 +467,18 @@ def _files() -> tuple[_File, ...]:
 
     A module can build its rel pattern out of `SUPERSEDE_STRUCTURAL_RELS` without
     ever writing the literal, so the second half of this set is what keeps the
-    census from reproducing its old blindness one level up.
+    census from reproducing its old blindness one level up. The third half is
+    the empty-pattern class: a module that walks EVERY relationship type names
+    neither the edge nor a constant, so it is found by the shape of its pattern
+    (`_may_traverse_every_type`) — which is how `navigation.py` and the backfill
+    census were missing from a census that had already declared the class.
     """
     parsed = {file.path: file for file in _literal_files()}
     names = _rel_constant_names()
     for path, source in _sources().items():
         if path in parsed:
             continue
-        if any(name in source for name in names):
+        if any(name in source for name in names) or _may_traverse_every_type(source):
             parsed[path] = _File(path, str(path.relative_to(ROOT)), source)
     return tuple(sorted(parsed.values(), key=lambda file: file.path))
 
@@ -351,8 +491,8 @@ def _module_consts() -> dict[str, tuple[ast.AST, _File]]:
     module — an `import`ed constant (`mcp_server` imports
     `SUPERSEDE_STRUCTURAL_RELS` from `sdk`). The uniqueness rule is what keeps
     the fallback from guessing between two different constants that happen to
-    share a name: an ambiguous name resolves to nothing and is reported as a gap
-    by the arm that covers un-derivable sites.
+    share a name: an ambiguous name resolves to nothing and is reported by the
+    completeness arm as an undeclared empty-pattern site until it is declared.
     """
     seen: dict[str, list[tuple[ast.AST, _File]]] = {}
     for file in _literal_files():
@@ -510,6 +650,33 @@ def _resolve(
     return [_UNKNOWN]
 
 
+def _may_traverse_every_type(source: str) -> bool:
+    """Text pre-filter for the empty-pattern class: is there a bracket with no
+    type in it? Cheap, and only a filter — `_is_empty_pattern_read` decides.
+    """
+    return any(":" not in match.group(1) for match in _EMPTY_TRAVERSAL.finditer(source))
+
+
+def _docstrings(file: _File) -> set[int]:
+    """The `id()`s of every module/class/function docstring Constant.
+
+    A docstring is prose that may QUOTE Cypher (this package's docs do, e.g. a
+    "tried `MATCH (n)<-[r]-(m)` and it scans" note), so it is not a site: only an
+    executed string literal is. Without this, the class walk would derive a
+    function whose docstring merely mentions the pattern.
+    """
+    found: set[int] = set()
+    for node in ast.walk(file.tree):
+        if not isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            continue
+        body = getattr(node, "body", [])
+        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+            found.add(id(body[0].value))
+    return found
+
+
 def _is_read(text: str) -> bool:
     """Does this Cypher string traverse the edge under a reading clause?
 
@@ -517,6 +684,26 @@ def _is_read(text: str) -> bool:
     `OPTIONAL MATCH` read, `MERGE`/`CREATE` mint.
     """
     for match in _TRAVERSAL.finditer(text):
+        clauses = _CLAUSE.findall(text[: match.start()])
+        if not clauses:
+            continue
+        governing = " ".join(clauses[-1].split()).upper()
+        if governing in ("MATCH", "OPTIONAL MATCH"):
+            return True
+    return False
+
+
+def _is_empty_pattern_read(text: str) -> bool:
+    """Does this Cypher traverse a relationship it does NOT name?
+
+    Same governing-clause rule as `_is_read` — only a `MATCH`/`OPTIONAL MATCH`
+    makes it a read — but the subject is the pattern's SHAPE: a bracketed
+    traversal whose contents carry no `:` has no type, so it walks every
+    relationship type and `aboutObject` is one of them.
+    """
+    for match in _EMPTY_TRAVERSAL.finditer(text):
+        if ":" in match.group(1):
+            continue
         clauses = _CLAUSE.findall(text[: match.start()])
         if not clauses:
             continue
@@ -634,6 +821,33 @@ def _census() -> dict[tuple[str, str], tuple[int, ...]]:
 
 
 @lru_cache(maxsize=1)
+def _empty_pattern_sites() -> dict[tuple[str, str], tuple[int, ...]]:
+    """Every site that reads the edge through a pattern naming NO type.
+
+    A separate walk from `_census()` because the site is not identified by a
+    name at all — the class is derived from the SHAPE of the pattern. Kept apart
+    so the completeness arm can say which class a missing site belongs to, and
+    so the class's own declaration (`EMPTY_PATTERN`) is checked against what the
+    code actually does rather than against itself.
+    """
+    sites: dict[tuple[str, str], list[int]] = {}
+    for file in _files():
+        if not _may_traverse_every_type(file.source):
+            continue
+        docstrings = _docstrings(file)
+        for node in _roots(file):
+            if id(node) in docstrings:
+                continue
+            candidates = _resolve(node, _scope(file, node), file)
+            if not any(_is_empty_pattern_read(text) for text in candidates):
+                continue
+            line = getattr(node, "lineno", 0)
+            for symbol in _site_symbol(node, file):
+                sites.setdefault((file.rel, symbol), []).append(line)
+    return {key: tuple(sorted(value)) for key, value in sites.items()}
+
+
+@lru_cache(maxsize=1)
 def _declared_rows() -> tuple[tuple[int, str, str, tuple[tuple[str, str], ...]], ...]:
     """§13's table, parsed: `(row_number, site_cell, reach_cell, site_pairs)`.
 
@@ -708,9 +922,11 @@ def _numeral(token: str) -> int | None:
 
 
 @lru_cache(maxsize=1)
-def _prose_counts() -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """§13's asserted counts, verbatim: `(read sites, customer-callable)`.
+def _prose_counts() -> dict[str, tuple[str, ...]]:
+    """§13's asserted counts, verbatim, keyed by the UNIT each one counts.
 
+    `sites` / `rows` / `callable_rows` / `callable_sites` are different numbers,
+    and the headline used to mix the first and the third under one "of them".
     The tokens are returned as written, not as numbers, so the arm can name the
     sentence's own word when it disagrees with the table.
     """
@@ -725,9 +941,15 @@ def _prose_counts() -> tuple[tuple[str, ...], tuple[str, ...]]:
             break
         bullet.append(line)
     text = "\n".join(bullet)
-    callable_tokens = [m.group(1) for m in _PROSE_CALLABLE.finditer(text)]
-    callable_tokens += [m.group(1) for m in _PROSE_CALLABLE_AGAIN.finditer(text)]
-    return tuple(m.group(1) for m in _PROSE_SITES.finditer(text)), tuple(callable_tokens)
+    callable_rows = [m.group(1) for m in _PROSE_CALLABLE_ROWS.finditer(text)]
+    callable_rows += [m.group(1) for m in _PROSE_CALLABLE.finditer(text)]
+    callable_rows += [m.group(1) for m in _PROSE_CALLABLE_AGAIN.finditer(text)]
+    return {
+        "sites": tuple(m.group(1) for m in _PROSE_SITES.finditer(text)),
+        "rows": tuple(m.group(1) for m in _PROSE_ROWS.finditer(text)),
+        "callable_rows": tuple(callable_rows),
+        "callable_sites": tuple(m.group(2) for m in _PROSE_CALLABLE_ROWS.finditer(text)),
+    }
 
 
 def test_the_table_is_not_vacuous():
@@ -735,6 +957,7 @@ def test_the_table_is_not_vacuous():
     finding nothing — the failure mode that let four hand audits conclude the
     list was complete."""
     sites = _census()
+    empty_pattern = _empty_pattern_sites()
     rows = _declared_rows()
     customer_callable = [row for row in rows if "customer-callable" in row[2].lower()]
 
@@ -743,6 +966,13 @@ def test_the_table_is_not_vacuous():
         "traversal shape changed (or the parser broke) and the completeness arm "
         "would pass vacuously. Sites: "
         + ", ".join(sorted(f"{f}::{s}" for f, s in sites))
+    )
+    assert len(empty_pattern) >= _MIN_EMPTY_PATTERN, (
+        "the empty-pattern walk derived only "
+        f"{len(empty_pattern)} sites from tortoise/ — the shape detector broke, "
+        "and with it the only arm that can see a reader which names no "
+        "relationship type. The defect that produced this arm was exactly this "
+        "class going unenumerated."
     )
     assert len(rows) >= _MIN_ROWS, (
         f"§13's table parsed to {len(rows)} rows — the table moved out of the "
@@ -753,117 +983,140 @@ def test_the_table_is_not_vacuous():
         "rests on; the table declares "
         f"{len(customer_callable)}."
     )
-    # The un-derivable declaration is the census's only hand-maintained surface,
-    # so it must not quietly empty out.
-    assert UN_DERIVABLE, (
-        "the un-derivable declaration is empty — either every site is derivable "
-        "(delete this arm and the test below) or the hand-declared blind spot "
-        "was dropped without a replacement."
+    # The class register is the only hand-maintained list in the file now, so it
+    # must not quietly empty out (its members are checked against the code).
+    assert EMPTY_PATTERN, (
+        "the empty-pattern register is empty — either every member is a §13 row "
+        "(delete the register and this arm) or the class's out-of-scope members "
+        "were dropped without a replacement, which is how three of them went "
+        "missing while every arm stayed green."
     )
 
 
 def test_the_prose_counts_match_the_table():
     """The NUMBERS are the argument, so they are asserted, not narrated.
 
-    §13 states its own totals in prose — *"TWENTY read sites, and SIX of them
-    are CUSTOMER-CALLABLE"* — and the KEEP ruling rests on the customer-callable
-    one. The arms above guard the **rows**; nothing guarded the **numerals**, so
-    a row demoted in the `reach` column left every test green while the headline
-    still said SIX. That is the `#7956` erratum's direction (the count was
-    under-stated), and it is the error this table exists to prevent.
+    §13 states its own totals in prose, and the KEEP ruling rests on the
+    customer-callable one. The arms above guard the **rows**; nothing guarded
+    the **numerals**, so a row demoted in the `reach` column left every test
+    green while the headline still said SIX. That is the `#7956` erratum's
+    direction (the count was under-stated), and it is the error this table
+    exists to prevent.
 
-    Only the numeral is read — never the prose around it — so the sentence stays
-    free to be rewritten as long as it stays true.
+    ⚠️ **Each numeral is checked against its own unit.** The headline used to
+    read *"TWENTY read sites, and SIX of them are CUSTOMER-CALLABLE"*: TWENTY
+    counted backticked SYMBOLS, SIX counted ROWS, and the six customer-callable
+    rows carried nine symbols — so "of them" was false by three, and the arm
+    baked the mismatch in by comparing each numeral to a different set. Sites,
+    rows, customer-callable rows and the sites inside them are now four
+    separate claims, each compared to the set it names.
+
+    Only the numerals are read — never the prose around them — so the sentences
+    stay free to be rewritten as long as they stay true.
     """
-    site_tokens, callable_tokens = _prose_counts()
-    customer_callable = [
-        row for row in _declared_rows() if "customer-callable" in row[2].lower()
-    ]
-    # The census, plus the site no census can derive: `_neighbors` reads the
-    # edge through an empty pattern, so it is a read site the table must name
-    # even though no derivation finds it.
-    derived = _census()
-    # Same `(basename, symbol)` shape the table is compared in — the census
-    # keys are repo-relative paths, a row names a file.
-    read_sites = {(path.rsplit("/", 1)[-1], symbol) for path, symbol in derived} | {
-        (filename, _last(symbol)) for filename, symbol, _reason in UN_DERIVABLE
+    counts = _prose_counts()
+    rows = _declared_rows()
+    declared_sites = {pair for _n, _cell, _reach, pairs in rows for pair in pairs}
+    customer_callable = [row for row in rows if "customer-callable" in row[2].lower()]
+    callable_sites = {
+        pair for _n, _cell, _reach, pairs in customer_callable for pair in pairs
     }
 
-    problems: list[str] = []
-    if not site_tokens:
-        problems.append(
-            "§13 no longer states `<N> read sites`, so the number this arm "
-            "polices is unguarded again (restore the sentence, or delete this "
-            "arm and say why in the docstring)"
-        )
-    for token in site_tokens:
-        stated = _numeral(token)
-        if stated is None:
-            problems.append(
-                f"§13 states `{token}` read sites and this guard cannot read "
-                "that numeral — spell it out in words or digits"
-            )
-        elif stated != len(read_sites):
-            problems.append(
-                f"§13 states `{token}` read sites; the census derives "
-                f"{len(derived)} and {len(read_sites) - len(derived)} more can "
-                f"only be declared by name, so there are {len(read_sites)} read "
-                "sites to declare"
-            )
+    #: `(key, what it counts, the set it must equal, the sentence form)` — the
+    #: four units, so a rewrite cannot state one where the other belongs.
+    claims: tuple[tuple[str, str, int, str], ...] = (
+        ("sites", "read sites", len(declared_sites), "`<N> read sites`"),
+        ("rows", "rows", len(rows), "`<N> rows`"),
+        (
+            "callable_rows",
+            "customer-callable rows",
+            len(customer_callable),
+            "`<N> of those rows (<M> sites) are CUSTOMER-CALLABLE`",
+        ),
+        (
+            "callable_sites",
+            "sites inside the customer-callable rows",
+            len(callable_sites),
+            "`<N> of those rows (<M> sites) are CUSTOMER-CALLABLE`",
+        ),
+    )
 
-    if not callable_tokens:
-        problems.append(
-            "§13 no longer states how many of the sites are customer-callable — "
-            "that is the number the KEEP ruling rests on, so it cannot go "
-            "unstated"
-        )
-    for token in callable_tokens:
-        stated = _numeral(token)
-        if stated is None:
+    problems: list[str] = []
+    for key, unit, actual, form in claims:
+        tokens = counts[key]
+        if not tokens:
             problems.append(
-                f"§13 states `{token}` customer-callable sites and this guard "
-                "cannot read that numeral — spell it out in words or digits"
+                f"§13 no longer states its {unit} count ({form}), so the number "
+                "this arm polices is unguarded again (restore the sentence, or "
+                "delete this arm and say why in the docstring)"
             )
-        elif stated != len(customer_callable):
-            problems.append(
-                f"§13 states `{token}` customer-callable sites; the `reach` "
-                f"column declares {len(customer_callable)}: "
-                + ", ".join(f"row {row[0]}" for row in customer_callable)
-            )
+            continue
+        for token in tokens:
+            stated = _numeral(token)
+            if stated is None:
+                problems.append(
+                    f"§13 states `{token}` {unit} and this guard cannot read "
+                    "that numeral — spell it out in words or digits"
+                )
+            elif stated != actual:
+                problems.append(
+                    f"§13 states `{token}` {unit}; the table has {actual} "
+                    f"({form})"
+                )
 
     assert not problems, (
         "the counts §13 asserts do not match the table it asserts them about. "
         "⚠️ The customer-callable number IS the argument for keeping the edge — "
-        "a stale numeral here is the ruling resting on an unmeasured claim:\n  - "
+        "a stale numeral here is the ruling resting on an unmeasured claim, and "
+        "a numeral checked against the WRONG unit is the same claim with a "
+        "cleaner alibi:\n  - "
         + "\n  - ".join(problems)
     )
 
 
 def test_every_code_site_that_traverses_the_edge_is_declared():
-    """COMPLETENESS: the table must name every reader the code actually has.
+    """COMPLETENESS: both derivations must be declared somewhere.
 
     This is the arm that no symbol-resolution check can replace — a *missing*
-    row has no symbol to fail to resolve.
+    row has no symbol to fail to resolve. It covers both classes:
+
+    * a reader that NAMES the edge — literally, or through a constant the
+      resolver can follow — must be a §13 row;
+    * a reader that names NO type at all (`MATCH (n)-[r]->(m)`) must be either a
+      §13 row or an `EMPTY_PATTERN` entry saying why it is not an `aboutObject`
+      read for a referent. ⚠️ This class used to be ONE declared example, so the
+      three further members that exist today — `entityProfile` / `tortoise_traverse`
+      (customer-callable) and the backfill census — were absent from the table
+      while every arm stayed green.
     """
-    sites = _census()
     declared = {
         pair for _n, _cell, _reach, pairs in _declared_rows() for pair in pairs
     }
+    registered = {(filename, _last(symbol)) for filename, symbol, _reason in EMPTY_PATTERN}
 
     undeclared = []
-    for (path, symbol), lines in sorted(sites.items()):
-        if (path.rsplit("/", 1)[-1], symbol) in declared:
-            continue
-        undeclared.append((path, symbol, lines))
+    for label, sites in (
+        ("names the edge", _census()),
+        ("names no type (empty pattern)", _empty_pattern_sites()),
+    ):
+        for (path, symbol), lines in sorted(sites.items()):
+            if (path.rsplit("/", 1)[-1], symbol) in declared:
+                continue
+            if (path, symbol) in registered:
+                continue
+            undeclared.append((label, path, symbol, lines))
 
     assert not undeclared, (
-        "these sites traverse the `aboutObject` edge and §13's table does not "
-        "name them. That table is the evidence base for the KEEP ruling, and "
-        "the document's own rule is that the count IS the argument — so an "
-        "omitted reader is an unmeasured one (add the row, with the symbol, to "
-        "`## 13` of STORAGE-ARCHITECTURE.md):\n  - "
+        "these sites traverse the `aboutObject` edge and §13's table neither "
+        "names them nor declares them out of scope. That table is the evidence "
+        "base for the KEEP ruling, and the document's own rule is that the "
+        "count IS the argument — so an omitted reader is an unmeasured one "
+        "(add the row, with the symbol, to `## 13` of STORAGE-ARCHITECTURE.md, "
+        "or — only if it is not an about* read for a referent — add it to "
+        "`EMPTY_PATTERN` with the reason):\n  - "
         + "\n  - ".join(
-            f"{path}::{symbol} (lines {lines})" for path, symbol, lines in undeclared
+            f"{path}::{symbol} — {label} (lines {lines})"
+            for label, path, symbol, lines in undeclared
         )
     )
 
@@ -871,39 +1124,25 @@ def test_every_code_site_that_traverses_the_edge_is_declared():
 def test_every_declared_symbol_still_performs_the_read():
     """ROT: a row whose symbol resolves but does not read is a false row.
 
-    All four prior audits failed in this direction too — a symbol that exists,
-    is quoted, and is not where the traversal happens — so the check is that the
-    symbol is a **census site**, not merely present in the file.
+    Four prior audits failed in this direction too — a symbol that exists, is
+    quoted, and is not where the traversal happens — so the check is that the
+    symbol is a **site of one of the two derivations**, not merely present in
+    the file. A name-only check would pass `_hop_query` (which builds the query)
+    for the wrong reason, so both classes count and nothing else does.
     """
-    sites = _census()
     site_symbols: set[tuple[str, str]] = {
-        (path.rsplit("/", 1)[-1], symbol) for path, symbol in sites
-    }
-    un_derivable = {(filename, _last(symbol)) for filename, symbol, _reason in UN_DERIVABLE}
+        (path.rsplit("/", 1)[-1], symbol) for path, symbol in _census()
+    } | {(path.rsplit("/", 1)[-1], symbol) for path, symbol in _empty_pattern_sites()}
 
     problems: list[str] = []
     for number, _site_cell, _reach, pairs in _declared_rows():
         for key in pairs:
             if key in site_symbols:
                 continue
-            if key in un_derivable:
-                # Declared-by-design, but the symbol must still exist —
-                # otherwise the row rotted silently and `UN_DERIVABLE` is
-                # masking it.
-                filename, symbol = key
-                candidates = [p for p in TORTISE.rglob(filename)]
-                if not candidates:
-                    problems.append(f"row {number}: uncovered site {filename} does not exist")
-                elif not any(
-                    symbol in p.read_text(encoding="utf-8") for p in candidates
-                ):
-                    problems.append(
-                        f"row {number}: un-derivable symbol `{symbol}` is not in {filename}"
-                    )
-                continue
             problems.append(
                 f"row {number}: `{key[1]}` ({key[0]}) is declared as a reader but no "
-                "Cypher in it traverses `aboutObject`"
+                "Cypher in it traverses `aboutObject` (by name or through an "
+                "empty pattern)"
             )
 
     assert not problems, (
@@ -915,24 +1154,48 @@ def test_every_declared_symbol_still_performs_the_read():
     )
 
 
-def test_the_declaration_covers_every_known_un_derivable_site():
-    """The reader no census can find must be declared BY NAME, with the reason,
-    and must still exist — a scan for a relationship name is structurally blind
-    to an empty pattern, so a dropped row has no other way to be noticed."""
-    declared = {pair for _n, _cell, _reach, pairs in _declared_rows() for pair in pairs}
+def test_the_empty_pattern_class_is_declared():
+    """The class that names NO type is DERIVED, and every member is declared.
 
-    missing = []
-    for filename, symbol, reason in UN_DERIVABLE:
-        assert _last(symbol) in "".join(
-            path.read_text(encoding="utf-8") for path in TORTISE.rglob(filename)
-        ), f"`{symbol}` no longer exists in {filename} — re-verify the row"
-        if (filename, _last(symbol)) not in declared:
-            missing.append(f"{filename}::{symbol} — {reason}")
+    Two directions, because each one was a real defect:
 
+    * **every derived member is declared** — a NEW empty-pattern reader cannot
+      appear silently. Declaring one example by name (`_neighbors`) is what let
+      `entityProfile`/`tortoise_traverse` and the backfill census stay absent.
+    * **every registered member still derives** — a register entry whose reader
+      stopped traversing the pattern (renamed, rewritten to name types) is rot,
+      and a stale entry is what makes the next reader's absence invisible.
+    """
+    derived = _empty_pattern_sites()
+    row_symbols = {
+        pair for _n, _cell, _reach, pairs in _declared_rows() for pair in pairs
+    }
+    derived_keys = set(derived)
+
+    missing = [
+        f"{filename}::{symbol} — {reason}"
+        for filename, symbol, reason in EMPTY_PATTERN
+        if (filename, _last(symbol)) not in derived_keys
+    ]
     assert not missing, (
-        "these sites read the `aboutObject` edge but cannot be derived by any "
-        "scan for the relationship name, so §13 must name them explicitly (it "
-        "is the only place they are recorded):\n  - " + "\n  - ".join(missing)
+        "these `EMPTY_PATTERN` entries are no longer empty-pattern readers of "
+        "the edge, so the register has rotted (re-verify each: a renamed symbol "
+        "or a query that now names its types):\n  - " + "\n  - ".join(missing)
+    )
+
+    registered = {(filename, _last(symbol)) for filename, symbol, _reason in EMPTY_PATTERN}
+    about_reads = sorted(
+        key
+        for key in derived_keys
+        if (key[0].rsplit("/", 1)[-1], key[1]) in row_symbols and key not in registered
+    )
+    assert len(about_reads) >= 3, (
+        "the empty-pattern class has fewer than three members declared as §13 "
+        "rows — the class's about*-relevant readers are `_neighbors`,\n"
+        "  `_hop_query` (entityProfile / tortoise_traverse) and the backfill "
+        "census; if one of them stopped deriving, the shape detector broke and "
+        "this arm would pass over a missing row. Derived as rows: "
+        + ", ".join(f"{f}::{s}" for f, s in about_reads)
     )
 
 
@@ -998,4 +1261,89 @@ def test_the_census_derives_a_relationship_name_built_at_runtime():
     assert not missing, (
         "the census lost a derivation shape, so a reader written that way would "
         "pass this guard undeclared:\n  - " + "\n  - ".join(missing)
+    )
+
+
+#: Synthetic sources for the empty-pattern arm: shapes that DO name no type, and
+#: shapes that look similar but must not count (a named type is the named
+#: census's business; a `MERGE` writes; a docstring only quotes Cypher).
+_EMPTY_PATTERN_CASES: tuple[tuple[str, str, bool], ...] = (
+    (
+        "outbound empty pattern",
+        'def read(g):\n    g.query("MATCH (n)-[r]->(m) RETURN type(r)")\n',
+        True,
+    ),
+    (
+        "inbound empty pattern",
+        'def read(g):\n    g.query("MATCH (n)<-[r]-(m) RETURN type(r)")\n',
+        True,
+    ),
+    (
+        "variable-length empty pattern",
+        'def read(g):\n    g.query("MATCH (n)-[r*1..2]->(m) RETURN type(r)")\n',
+        True,
+    ),
+    (
+        "f-string with an empty pattern",
+        'def read(g, label):\n'
+        '    g.query(f"MATCH (n:{label})-[r]->(m) RETURN type(r)")\n',
+        True,
+    ),
+    (
+        "named type (the named census's job, not this class)",
+        'def read(g):\n    g.query("MATCH (n)-[r:aboutObject]->(m) RETURN n")\n',
+        False,
+    ),
+    (
+        "MERGE writer",
+        'def write(g):\n    g.query("MERGE (n)-[r]->(m)")\n',
+        False,
+    ),
+    (
+        "a docstring quoting the pattern is not a site",
+        'def read(g):\n    """Tried `MATCH (n)<-[r]-(m)`; it scanned."""\n'
+        "    return None\n",
+        False,
+    ),
+)
+
+
+def _empty_pattern_sites_in(file: _File) -> set[tuple[str, int]]:
+    """`_empty_pattern_sites()` restricted to one (usually synthetic) module."""
+    docstrings = _docstrings(file)
+    sites: set[tuple[str, int]] = set()
+    for node in _roots(file):
+        if id(node) in docstrings:
+            continue
+        candidates = _resolve(node, _scope(file, node), file)
+        if not any(_is_empty_pattern_read(text) for text in candidates):
+            continue
+        line = getattr(node, "lineno", 0)
+        for symbol in _site_symbol(node, file):
+            sites.add((symbol, line))
+    return sites
+
+
+def test_the_empty_pattern_class_derivation_holds():
+    """The MECHANISM of the second class, on synthetic sources.
+
+    The class is only as good as its shape detector: if the pattern match
+    regressed, `_empty_pattern_sites()` would return nothing, the three §13 rows
+    for its members would become "declared but not derived", and — worse — a new
+    member would be silently acceptable. These cases pin both directions on
+    sources that do not depend on today's tree, including the two near-misses
+    that must NOT count (a named type, and a docstring that only quotes Cypher).
+    """
+    missing = []
+    for label, source, should_derive in _EMPTY_PATTERN_CASES:
+        derived = _empty_pattern_sites_in(_File(TORTISE / "<synthetic>", "<synthetic>", source))
+        if bool(derived) is not should_derive:
+            missing.append(
+                f"{label}: expected {'a site' if should_derive else 'no site'}, "
+                f"derived {sorted(derived)}"
+            )
+    assert not missing, (
+        "the empty-pattern derivation lost a shape (or started counting one it "
+        "must not), so a reader that names no type would pass undeclared:\n  - "
+        + "\n  - ".join(missing)
     )

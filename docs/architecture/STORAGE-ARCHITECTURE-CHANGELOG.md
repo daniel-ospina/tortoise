@@ -842,7 +842,8 @@ entry"* — and that line was the one thing in §13 nothing checked.
   `test_the_prose_counts_match_the_table` reads the numerals **out of the sentences that state them**
   (`TWENTY read sites`, `SIX of them are CUSTOMER-CALLABLE`, and any later *"are N of them"* restatement)
   and compares each to the table — the `reach`-column count for the customer-callable numerals, and
-  `census ∪ UN_DERIVABLE` for the site count. Only the numeral is read, never the prose around it, so the
+  `census ∪ UN_DERIVABLE` for the site count (as the mechanism stood then — the seventh entry below
+  splits the units, because those two numerals counted different things). Only the numeral is read, never the prose around it, so the
   sentences stay free to be rewritten as long as they stay true. Non-vacuity is measured, not assumed:
   the arm reds on the previous revision of §13 (it reads `four` against six declared rows) and reds again
   when a `reach` cell is demoted with the prose left alone.
@@ -851,4 +852,53 @@ entry"* — and that line was the one thing in §13 nothing checked.
   the `tortoise_supersede` dry-run preview) and says *six*, and the customer-callable count is no longer
   described in the guard's docstring as "not asserted beyond a floor" — that paragraph is what permitted
   the stale headline in the first place.
+
+### Follow-up, same day — the SEVENTH correction: the class was ONE example, and the headline mixed two units (`PR #9398`, third review)
+
+The sixth entry closed the blind classes it knew about and asserted the counts they produced. The
+review of *that* state found both halves still wrong in the same direction — a reader the table did
+not name, and a number that read as a count of something it did not count.
+
+- **⚠️ The empty-pattern shape was declared as ONE example, and the class had three further
+  members.** §13 said *"an empty relationship pattern (`MATCH (n)-[r]->(m)`, row 3)"*, and
+  `UN_DERIVABLE` held a single entry (`SubgraphExpander._neighbors`). But the shape is not a
+  symbol — it is a **class**: any query whose relationship pattern names no type walks every type,
+  `aboutObject` included. Three live members were absent, one of them **customer-callable**:
+  `navigation._hop_query` — the per-hop query behind `entityProfile` and `tortoise_traverse` (MCP
+  `tortoise_entity_profile`, and `tortoise_traverse`), which emits `-[r]->` and `<-[r]-` and returns
+  `type(r)` verbatim — and the backfill census `CENSUS_QUERY`
+  (`definite_description_backfill.census_rows`, diagnostic), while `_preview_supersede` was a row
+  for a different reason entirely. **The guard could not see any of them**: `navigation.py` carries
+  no `aboutObject` literal and no rel constant, so no derivation parsed it, and the single
+  hand-declared entry covered only `_neighbors`. Six arms stayed green over a customer-callable
+  reader — a PASS about a false artifact, which is the failure mode this whole instrument exists to
+  end.
+- **The class is now derived by its own shape walk** (`_is_empty_pattern_read`: a bracketed
+  traversal with no `:` under a reading clause, docstrings excluded because they only quote Cypher),
+  and every derived member must be either a §13 row or a named `EMPTY_PATTERN` entry saying why it
+  is not an `aboutObject` read for a referent (eighteen such members today, from graph export and
+  edge counts to delete/repoint sweeps). A **new** member of the class now reds instead of shipping:
+  declaring one example by name was how this survived four passes. New rows **17** (`_hop_query`,
+  customer-callable) and **18** (`census_rows`, diagnostic).
+- **⚠️ The headline's numerals were compared against the wrong units.** *"TWENTY read sites, and SIX
+  of them are CUSTOMER-CALLABLE"*: TWENTY counted backticked **symbols**, SIX counted **rows**, and
+  the six customer-callable rows carried **nine** symbols — so "of them" was false by three, and the
+  arm baked the mismatch in by comparing each numeral to a different set. §13 now states
+  **TWENTY-TWO read sites across EIGHTEEN rows, and SEVEN of those rows (ten sites) are
+  CUSTOMER-CALLABLE**, and `test_the_prose_counts_match_the_table` checks four numerals, each
+  against the set its own noun names.
+- **The sibling copy in `EXTRACTOR-V4-ARCHITECTURE.md` §16 stopped restating the counts.** It
+  asserted an unguarded *"SIX sites are customer-callable"* and *"four customer-callable sites DO"*,
+  plus a "TWENTY-site table" pointer, and nothing executed any of them (the citation guard resolves
+  symbols, not counts) — so the two documents agreed on numbers neither checked, which is the
+  circular agreement this changelog diagnoses one level down. Both numerals and the table-size
+  pointer are now a reference to §13, and the name-invisible enumeration gained
+  `navigation._hop_query`.
+- **A rotted `file.py:NNNN` citation was fixed in the passage this PR already rewrote.**
+  `_connect_issue_objects` was cited as `sdk.py:20154` — a line inside `_cross_lens_pool`'s Cypher —
+  and is defined at `sdk.py:34896`. It sat three paragraphs below the sentence explaining that line
+  numbers were dropped *because* they had rotted.
+- **`_MIN_CUSTOMER_CALLABLE`'s comment stated a wrong delta** (*"the table now declares three
+  more"*: four → six is two). A comment making a numeric claim inside a file whose whole subject is
+  numeric claims is not cosmetic.
 
