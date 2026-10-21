@@ -433,11 +433,13 @@ Exit 0 only when **all** of these hold:
    assert `written_before_any_scored_run` **with its basis stated** (no SCORED run exists; the
    `UNPREREGISTERED` log that predates it is named). The unqualified `written_before_any_run` is
    **refused**: it is false whenever any log exists, and a machine consumer keys on the field name
-   rather than on prose. It must also agree with the pins block on
+   rather than on prose, and it is **trusted, not derived** — it is only cross-checked against the
+   `*.log` scan when the git ordering runs, so `--no-git` leaves it an assertion (the report says so).
+   It must also agree with the pins block on
    `fixtures_hash`, on every criterion threshold, and on the exempt-log list.
-3. **E4's denominator is 15.** The E4 row's denominator is `15`, and **no four-edge denominator rate
+4. **E4's denominator is 15.** The E4 row's denominator is `15`, and **no four-edge denominator rate
    appears** (§6).
-4. **The pins still describe the corpus.** `fixtures_hash`, sessions, 90 planted units, 15 operator
+5. **The pins still describe the corpus.** `fixtures_hash`, sessions, 90 planted units, 15 operator
    edges, 14 value-bearing units, 29 marker sentences, and the 25/15/9/6 salience measurement are
    **re-derived** from the tree and compared with the pins block; and the split is a true partition
    of the 7 sessions. A corpus change therefore fails this check instead of silently re-basing the

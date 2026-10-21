@@ -100,8 +100,15 @@ UNSCORED = "UNPREREGISTERED"
 #: Every ``verdict=``/``result=`` value in an exempt log must be this. A WHITELIST, not a blacklist
 #: of four known-bad strings: a closed bad-list silently admits the next scored vocabulary, which is
 #: the inverse of the gap the exemption exists to close (#9075 review P2).
-SCORED_KEYS = re.compile(r"(?:^|\s)(verdict|result)=(\S+)", re.MULTILINE)
-EXIT_KEY = re.compile(r"(?:^|\s)exit=(\S+)", re.MULTILINE)
+#:
+#: ``\s*=\s*`` and the trailing-punctuation strip are both needed: a spaced assignment
+#: (``verdict = PASS``) was a false NEGATIVE, and a punctuated one (``result=UNPREREGISTERED,``) was a
+#: false POSITIVE that refused a harmless formatting variation with a misleading diagnosis.
+SCORED_KEYS = re.compile(r"(?:^|\s)(verdict|result)\s*=\s*(\S+)", re.MULTILINE)
+EXIT_KEY = re.compile(r"(?:^|\s)exit\s*=\s*(\S+)", re.MULTILINE)
+
+#: Punctuation a value may be glued to at end-of-token (``result=UNPREREGISTERED,``).
+VALUE_TRAILING = ",;."
 
 #: The rows the epic requires. ``E2`` may be carried by sub-rows (``E2a``/``E2b``); a required id is
 #: satisfied when at least one row's id equals it or starts with it.
@@ -407,7 +414,7 @@ def _log_declares_unscored(log: Path) -> tuple[bool, str]:
             "an exemption covers a log that is unscored, not a log that was scored and renamed"
         )
     for key, value in SCORED_KEYS.findall(text):
-        if value != UNSCORED:
+        if value.rstrip(VALUE_TRAILING) != UNSCORED:
             return False, (
                 f"carries {key}={value} — a grandfathered log may only ever carry "
                 f"{key}={UNSCORED}; anything else was measured against a bar that did not exist"
@@ -418,7 +425,7 @@ def _log_declares_unscored(log: Path) -> tuple[bool, str]:
             "does not record an exit= line — an UNPREREGISTERED log must exit 3, so a missing "
             "exit line means the status and the outcome disagree"
         )
-    if any(value != "3" for value in exits):
+    if any(value.rstrip(VALUE_TRAILING) != "3" for value in exits):
         return False, (
             f"records exit={','.join(exits)} — an UNPREREGISTERED log must exit 3 and only 3"
         )
@@ -749,10 +756,14 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
             derived = derive_corpus_facts(pins)
         except CheckError:
             raise
-        except (OSError, ImportError, ValueError, KeyError) as exc:
+        except (OSError, ImportError, ValueError, KeyError, TypeError, AttributeError,
+                IndexError) as exc:
             # A corpus change that deletes a fixture, the salience JSONL or the module itself is
             # exactly the event this check exists to catch — it must read as an attributed exit 2,
-            # not an unhandled traceback that hides the cause (#9075 review P2).
+            # not an unhandled traceback that hides the cause (#9075 review P2). The tuple is wide
+            # on purpose: a fixture that parses to a list raises AttributeError/TypeError, and a
+            # malformed JSONL row raises TypeError/IndexError — all of them are "cannot read my
+            # subject", not an internal defect.
             raise CheckError(
                 f"cannot re-derive the corpus pins from the tree: {type(exc).__name__}: {exc}"
             ) from exc
@@ -769,6 +780,11 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
 
     report["failures"] = failures
     report["ok"] = not failures
+    # The machine record's run-order claim is TRUSTED, not derived: the only independent evidence
+    # that no scored run exists is the `*.log` scan below, which `--no-git` skips. Say so in the
+    # report rather than letting a skip flag silently turn an assertion into a green (#9075 review
+    # P2-4). CI and the §7 acceptance command run the full check.
+    report["run_order_claim"] = "verified" if use_git else "UNVERIFIED (--no-git)"
     return report
 
 
@@ -819,6 +835,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"FAIL — {len(report['failures'])} problem(s):")
             for f in report["failures"]:
                 print(f"  - {f}")
+        print(f"machine record run-order claim: {report['run_order_claim']}")
     return 0 if report["ok"] else 1
 
 

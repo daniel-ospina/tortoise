@@ -645,3 +645,80 @@ def test_every_placeholder_spelling_is_rejected(cell):
 @pytest.mark.parametrize("cell", ["`>= 13 of 14`", "0.05", "`= 1.000`"])
 def test_real_values_are_not_mistaken_for_placeholders(cell):
     assert not check.is_placeholder(cell)
+
+
+# ── round-2 review regressions ───────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("old,new,bad", [
+    ("verdict=UNPREREGISTERED", "verdict = PASS", "verdict=PASS"),
+    ("result=UNPREREGISTERED", "result = GREEN", "result=GREEN"),
+])
+def test_a_spaced_scored_assignment_also_voids_the_exemption(
+        tmp_path, monkeypatch, old, new, bad):
+    """REGRESSION (#9075 review P2-2): the regex required a literal `=` with NO spaces.
+
+    `verdict = PASS` was a false negative — invisible to the whitelist — which is the same
+    "next scored vocabulary slips through with no code change" gap the whitelist closed.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    log = _write_log(repo, "e1-e2.log", epoch=1_700_000_000, body=UNSCORED_LOG.replace(old, new))
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+    failures = check.check_ordering(prereg, [log], _exempt())
+    assert failures and bad in failures[0], (bad, failures)
+
+
+@pytest.mark.parametrize("punctuated", [
+    "result=UNPREREGISTERED,",
+    "result=UNPREREGISTERED;",
+    "result=UNPREREGISTERED.",
+])
+def test_a_punctuated_unpreregistered_value_is_not_refused(
+        tmp_path, monkeypatch, punctuated):
+    """REGRESSION (#9075 review P2-3): `(\\S+)` glued punctuation to the value.
+
+    A harmless formatting variation was refused with the misleading message that it "was measured
+    against a bar that did not exist". Failing closed is safe in direction, but the diagnosis lied.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    body = UNSCORED_LOG.replace("result=UNPREREGISTERED", punctuated)
+    log = _write_log(repo, "e1-e2.log", epoch=1_700_000_000, body=body)
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+    assert check.check_ordering(prereg, [log], _exempt()) == []
+
+
+@pytest.mark.parametrize("exc", [
+    FileNotFoundError("fixture"),
+    TypeError("a JSONL row that is not a mapping"),
+    AttributeError("a fixture that parsed to a list"),
+    IndexError("a short row"),
+])
+def test_every_unreadable_subject_becomes_a_check_error(monkeypatch, exc):
+    """REGRESSION (#9075 review P2-1): the tuple only covered four exception types.
+
+    A malformed corpus most plausibly raises TypeError/AttributeError/IndexError, and those
+    escaped as an unhandled traceback — the exact "traceback that hides the cause" the exit-2
+    contract exists to prevent.
+    """
+    def boom(_pins):
+        raise exc
+
+    monkeypatch.setattr(check, "derive_corpus_facts", boom)
+    with pytest.raises(check.CheckError) as excinfo:
+        check.run(PREREG_DIR, use_git=False, use_corpus=True)
+    assert "cannot re-derive the corpus pins" in str(excinfo.value)
+    assert type(exc).__name__ in str(excinfo.value)
+
+
+def test_the_run_order_claim_is_reported_as_unverified_without_git():
+    """REGRESSION (#9075 review P2-4): --no-git must not silently turn an assertion into green."""
+    report = check.run(PREREG_DIR, use_git=False, use_corpus=False)
+    assert report["run_order_claim"].startswith("UNVERIFIED")
+    verified = check.run(PREREG_DIR, use_git=True, use_corpus=False)
+    assert verified["run_order_claim"] == "verified"
+
+
+def test_the_acceptance_report_states_the_claim_provenance(capsys):
+    assert check.main(["--dir", str(PREREG_DIR)]) == 0
+    out = capsys.readouterr().out
+    assert "run-order claim: verified" in out
