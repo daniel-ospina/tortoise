@@ -593,6 +593,17 @@ def parse_log(path: Path) -> dict:
         entry["tests"] = len(nodeids[fname])
     for rel_path, entry in file_paths.items():
         entry["tests"] = len(path_nodeids[rel_path])
+    # Counts come from the LAST line that reports them. pytest echoes parametrized
+    # ids and captured output at column 0, so a quoted id such as
+    # `...[= 1 error in 0.44s =]` was credited as a real summary and fabricated an
+    # error the run never had (#9134 review, P2).
+    _last = next((ln for ln in reversed(lines) if COUNT_RE.search(ln)), None)
+    counts = {k: 0 for k in counts}
+    if _last is not None:
+        for _n, _key in COUNT_RE.findall(_last):
+            if _key in counts:
+                counts[_key] = int(_n)
+
     return {"files": files, "file_paths": file_paths, "counts": counts,
             "outcomes": outcomes, "killed": killed, "error": error,
             "summary_seen": summary_seen}
@@ -2689,7 +2700,15 @@ def aggregate_logs(logs_dir: Path | str) -> dict:
                 total_counts[key] += sum(
                     1 for st in parsed["outcomes"].values() if st == state)
         killed_any = killed_any or parsed["killed"]
-        failed_tests.update(n for n, st in parsed["outcomes"].items() if st in ("FAILED", "ERROR"))
+        def _own_id(node: str) -> str:
+            # A parametrized id can EMBED a foreign nodeid (the killed-leg attribution
+            # test is named `...t[tests/test_x.py::...::test_y`), so one failure was
+            # listed as two. Trim to our own base; keep ordinary params like [3].
+            base, sep, param = node.partition("[")
+            return base if (sep and ("tests/" in param or "::" in param)) else node
+
+        failed_tests.update(_own_id(n) for n, st in parsed["outcomes"].items()
+                            if st in ("FAILED", "ERROR"))
         # The LEG is the artifact directory (`pytest-log-test-d`), not the file: 15 of
         # the shipped sample's 17 sources are all named `pytest.log`, so a basename
         # cannot identify which leg a disclosure is about (#9134 review, P2).
@@ -2698,6 +2717,10 @@ def aggregate_logs(logs_dir: Path | str) -> dict:
                             "counts": parsed["counts"],
                             "killed": parsed["killed"],
                             "summary_seen": parsed["summary_seen"]})
+    # A watchdog-killed leg reports failures only through progress lines, so the
+    # summed total can sit below the list beside it. Never claim fewer than we list.
+    total_counts["failed"] = max(total_counts["failed"], len(failed_tests))
+
     return {"files": files, "total_counts": total_counts, "killed_any": killed_any,
             "failed_tests": failed_tests, "log_sources": log_sources}
 
@@ -2817,7 +2840,18 @@ def main() -> int:
     # committed bytes stopped being any single invocation's output (#9134 review, P2).
     history = _dedupe_history([row, *load_history(json_path)])[: args.max_history]
 
-    flakes = candidate_flakes(history)
+    # One row per run: sampling the same run twice is not a second sample, and
+    # comparing it with itself fabricates flake candidates (#9134 review, P2).
+    _seen_runs: set[object] = set()
+    _one_per_run = []
+    for _r in history:
+        _rid = _r.get("run_id") or _r.get("sha")
+        if _rid in _seen_runs:
+            continue
+        _seen_runs.add(_rid)
+        _one_per_run.append(_r)
+
+    flakes = candidate_flakes(_one_per_run)
 
     snapshot = {
         "schema_version": SCHEMA_VERSION,
