@@ -222,17 +222,48 @@ def _statement_sinks(
     return sinks
 
 
-def _not_on_the_escape_handle(
+#: The §17.1 sinks an eager-init statement may legitimately be issued through
+#: AFTER #9157. The escape-(3) handle (`<handle>.query(...)` where `<handle>` is
+#: this function's own `select_graph(...)` binding) is no longer one of them, and
+#: neither is `proj.g` — that handle is bound to the projection's graph, not the
+#: org graph the statement names.
+_DECLARED_EAGER_INIT_SINKS = ("run_eager_init", "_run")
+
+
+def _not_through_the_declared_funnel(
     enclosing: ast.AST, issued: set[str], handles: set[str]
 ) -> list[str]:
-    """Sinks where the statement leaves the `select_graph` handle, rendered."""
+    """Sinks where the statement leaves the declared route, rendered.
+
+    Two failure modes, named separately because they fail differently:
+    re-issuing on the escape-(3) handle restores the #9157 defect (an
+    unjournalled, undeclared write no door can see), while issuing on `proj.g`
+    writes the onboarding row into the projection's OWN graph — measured, not
+    hypothetical: the org mint binds `proj` to the SDK's graph and opens
+    `org_<id>` separately, so `proj.g` is the wrong target.
+    """
     offenders: list[str] = []
     for lineno, callee, receiver, passed in _statement_sinks(enclosing, issued):
-        if callee.rsplit(".", 1)[-1] == "query" and receiver in handles:
+        leaf = callee.rsplit(".", 1)[-1]
+        if leaf in _DECLARED_EAGER_INIT_SINKS:
+            continue
+        if leaf == "query" and receiver in handles:
+            offenders.append(
+                f"line {lineno}: {callee}({', '.join(passed)}) — issued on this "
+                f"function's escape-(3) handle(s) {sorted(handles)}: the #9157 "
+                "escape is back"
+            )
+            continue
+        if leaf == "query" and (receiver in {"g", "proj"}
+                                or callee.endswith(".g.query")):
+            offenders.append(
+                f"line {lineno}: {callee}({', '.join(passed)}) — `proj.g` is bound "
+                "to the projection's graph, not the org graph this statement names"
+            )
             continue
         offenders.append(
-            f"line {lineno}: {callee}({', '.join(passed)}) — "
-            f"escape-(3) handle(s): {sorted(handles)}"
+            f"line {lineno}: {callee}({', '.join(passed)}) — not one of the "
+            f"declared sinks {_DECLARED_EAGER_INIT_SINKS}"
         )
     return offenders
 
@@ -413,24 +444,30 @@ def test_the_eager_init_statement_is_a_mutating_one():
 
 
 # ── the note in the declaration says what it does NOT cover ───────────────
-def test_the_declaration_note_names_the_seam_it_does_not_cover():
-    """`state.py`'s declaration must state the escape, where a reader looks.
+def test_the_declaration_note_states_the_route_that_closed_the_seam():
+    """`state.py`'s declaration must say HOW the class is covered, where a reader looks.
 
-    The universal that five call sites disprove ("every onboarding write is
-    declared") is the thing this pins against: the note has to (a) narrow the
-    claim to the `_run` seam, (b) name the mechanism (`eager_init_query` on
-    `select_graph`), and (c) name the residual issue (`#9157`) so the gap is
-    filed rather than implied closed. Deleting any of the three turns this RED.
+    Flipped with `#9157`. While the residual was open this asserted the note
+    carried its NEGATIVE ("do not close escape (3) believing onboarding is
+    covered"). Now the note has to carry the POSITIVE, and each part is a way to
+    regress into the old over-claim or a new one:
+
+    * (a) the mechanism — `eager_init_query` statements now ride
+      `run_eager_init` (`_run` + the class check), not `select_graph`;
+    * (b) BOTH halves named, because either alone is a broken fix: the guarded
+      handle without the declaration is refused once the guard arms, and the
+      declaration without the guarded handle is a ContextVar nothing reads;
+    * (c) the residual that is STILL open stated as still open, so a reader does
+      not conclude that escape (3) itself was closed by this change.
     """
     source = (_REPO / "tortoise/onboarding/state.py").read_text(encoding="utf-8")
     flat = " ".join(source.split())
-    for phrase in ("eager_init_query", "select_graph", "#9157",
-                   "do not close escape (3) believing"):
+    for phrase in ("eager_init_query", "run_eager_init", "guarded_write_handle",
+                   "#9157", "Escape (3) itself is NOT closed"):
         assert phrase in flat, (
             f"`tortoise/onboarding/state.py` no longer contains {phrase!r} — the "
-            "declaration's note about the seam it does NOT cover has been "
-            "removed or reworded, which restores the over-claim that five "
-            "`eager_init_query()` call sites disprove"
+            "note that tells a door inventory HOW this class is declared has "
+            "been removed or reworded (#9157)"
         )
 
 
@@ -463,19 +500,24 @@ def test_the_note_and_the_ast_inventory_agree():
 
 
 # ── what the sites DO, and the coupling to the honest fix (#9157) ─────────
-def test_every_eager_init_site_issues_its_statement_on_the_escape_three_handle():
-    """Each site issues the statement ON a `select_graph(...)`-bound handle.
+def test_every_eager_init_site_issues_its_statement_through_the_declared_funnel():
+    """Each site issues the statement through the DECLARED funnel when available.
 
-    This is the assertion that gives the note its meaning: `eager_init_query`
-    only PRODUCES text, so the seam is "issued below the guarded handle" only
-    while every caller does that — and only while the statement is issued on
-    the handle it resolves in the SAME function. The linkage is asserted, not
-    its neighbourhood: an earlier revision checked only that the enclosing
-    function mentioned `select_graph(...)` somewhere, which stayed green when
-    the statement moved to `proj.g.query(...)` (the §17.1 violation this file
-    exists to see) or to `state._run(...)` (the honest #9157 fix) while an
-    unrelated handle binding remained. Both of those now RED here, so the
-    residual cannot be closed in code while the docstrings still describe it.
+    This pin has now flipped with the fix it was built to see (#9157). Written
+    against the residual, it asserted "issued ON the `select_graph(...)` handle"
+    — so the honest fix (routing the statement through `onboarding/state.py`)
+    turned it RED and forced this change, which is the coupling working:
+
+    * the statement must be issued through `run_eager_init`/`_run` — the route
+      that opens `_onboarding_write_scope` in another module — on a handle that
+      is NOT one of this function's own `select_graph(...)` bindings;
+    * it must NOT be issued on the escape-(3) handle (the residual, restored),
+      and not on `proj.g` either (the wrong-graph violation: the org graph is
+      not the projection's own).
+
+    The escape-(3) handle BINDING may remain in these functions — it is the read
+    handle for the idempotency/`_seen` probe in three of them — so the pin reads
+    the statement's SINKS, not the function's bindings.
     """
     # Driven by the SAME finder and population as the inventory (#9150 review,
     # P2): a site this pin cannot see is a site it silently certifies.
@@ -487,13 +529,12 @@ def test_every_eager_init_site_issues_its_statement_on_the_escape_three_handle()
             enclosing = _enclosing_function(node, parents)
             assert enclosing is not None
             handles = _escape_handle_names(enclosing)
-            assert handles, (
-                f"{rel}:{node.lineno} ({enclosing.name}) builds an eager-init "
-                "statement but nothing in the function binds a `select_graph(...)` "
-                "handle by name — the escape-(3) description in "
-                "`onboarding/state.py` and in the guard's inventory is now wrong "
-                "(#9157)"
-            )
+            # #9157: an empty binding set is now the CLEAN shape for a site
+            # whose only graph access is the guarded handle — `sdk.org_create`
+            # opened `select_graph(...)` solely to issue this statement, and the
+            # fix removed it. Three other sites keep the binding as their READ
+            # handle (the `_seen`/idempotency probe), so both shapes are legal;
+            # what the offenders list below decides is where the STATEMENT goes.
             issued = _bound_names(targets[0]) if len(targets) == 1 else set()
             assert issued, (
                 f"{rel}:{node.lineno} binds the statement to something this walk "
@@ -505,51 +546,71 @@ def test_every_eager_init_site_issues_its_statement_on_the_escape_three_handle()
                 f"statement to {sorted(issued)} but nothing in the function "
                 "consumes it — re-derive the residual rather than assuming it"
             )
-            offenders = _not_on_the_escape_handle(enclosing, issued, handles)
+            offenders = _not_through_the_declared_funnel(enclosing, issued, handles)
             assert not offenders, (
-                f"{rel}:{node.lineno} ({enclosing.name}) no longer issues the "
-                f"eager-init statement on the escape-(3) handle: {offenders}. "
-                "The residual is moving (#9157): update, in the same change, the "
-                "note in `tortoise/onboarding/state.py`, the opener inventory in "
-                "`tortoise/projection/__init__.py`, and this pin"
+                f"{rel}:{node.lineno} ({enclosing.name}) issues the eager-init "
+                f"statement outside the declared funnel: {offenders}. The "
+                "statement must go through `_os.run_eager_init(...)` (which opens "
+                "`_onboarding_write_scope`) on a `guarded_write_handle` bound to "
+                "the ORG graph — issuing it on `select_graph(...)` restores the "
+                "#9157 escape, and issuing it on `proj.g.query(...)` writes the "
+                "onboarding row into the WRONG graph"
             )
 
 
-def test_the_issuance_detector_reds_on_the_guarded_handle_and_on_run():
-    """The instrument check for the pin above — it must RED on the two closures.
+def test_the_issuance_detector_reds_on_every_route_but_the_declared_one():
+    """The instrument check for the pin above — it must fire on every wrong route.
 
-    Written because the pin it guards is worthless if it cannot fire: the
-    previous revision passed on both of these mutations (proved in the review),
-    because it never linked the statement to the handle. Both snippets below are
-    the STATEMENT used correctly, changed only in where it is issued.
+    Flipped with `#9157`, and the flip is the point: the old instrument certified
+    "issued on the escape handle" as CORRECT, so once the fix landed it would have
+    certified the restored defect. The three wrong routes are now distinct
+    offenders (the escape handle, `proj.g`, and a sink that is neither) and the
+    two right ones are clean — so the pin cannot pass by being blind, and cannot
+    pass by crying wolf either.
     """
     cases = {
-        # The escape-(3) shape, as production issues it today: NOT an offender.
+        # The #9157 defect, restored: issued on this function's escape-(3) handle.
         "on_the_escape_handle": (
             """
             def site(proj, _init_q, _init_p):
                 handle = proj.db.select_graph("g")
                 handle.query(_init_q, params=_init_p)
             """,
-            [],
+            ["the #9157 escape is back"],
         ),
-        # Closed the WRONG way: the guarded handle, i.e. the §17.1 violation.
-        "on_the_guarded_handle": (
+        # The WRONG-graph route: the projection is bound to another graph.
+        "on_the_projection_handle": (
+            """
+            def site(proj, _init_q, _init_p):
+                proj.g.query(_init_q, params=_init_p)
+            """,
+            ["not the org graph"],
+        ),
+        # Any other sink: not declared, and invisible to this pin's rule.
+        "on_an_unknown_sink": (
+            """
+            def site(proj, _init_q, _init_p):
+                proj.db.some_new_door(_init_q, _init_p)
+            """,
+            ["not one of the declared sinks"],
+        ),
+        # The landed route: `run_eager_init` on a guarded handle.
+        "through_run_eager_init": (
             """
             def site(proj, _init_q, _init_p):
                 handle = proj.db.select_graph("g")
-                proj.g.query(_init_q, params=_init_p)
+                _os.run_eager_init(handle, _init_q, _init_p)
             """,
-            ["proj.g.query(_init_p, _init_q)"],
+            [],
         ),
-        # Closed the honest way (#9157) — but then the note is stale.
+        # The same route spelled through the funnel directly.
         "through_the_run_funnel": (
             """
             def site(proj, _init_q, _init_p):
                 handle = proj.db.select_graph("g")
                 _os._run(handle, _init_q, _init_p)
             """,
-            ["_os._run(_init_p, _init_q)"],
+            [],
         ),
     }
     for name, (source, expected) in cases.items():
@@ -560,7 +621,7 @@ def test_the_issuance_detector_reds_on_the_guarded_handle_and_on_run():
         )
         issued = {"_init_q", "_init_p"}
         handles = _escape_handle_names(func)
-        offenders = _not_on_the_escape_handle(func, issued, handles)
+        offenders = _not_through_the_declared_funnel(func, issued, handles)
         assert len(offenders) == len(expected), (
             f"the issuance detector is {'blind' if expected else 'crying wolf'} on "
             f"the {name!r} shape: expected {expected}, got {offenders}"

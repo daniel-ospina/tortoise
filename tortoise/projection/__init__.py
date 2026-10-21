@@ -3366,13 +3366,18 @@ def _journal_safe_params(params, cypher=None):
 #     deliberately does not delegate to `_graph_metadata_write_scope` (whose
 #     docstring carries the epoch's two obligations, the first of them false of
 #     this lane).
-#     ⚠️ And it does not cover the whole onboarding class: the five
-#     `eager_init_query()` call sites that CREATE `:OnboardingState` execute on
-#     `proj.db.select_graph(...)` — escape (3) below — so those writes remain
-#     unjournalled AND undeclared and are filed as `#9157`. Journalling the class
-#     is the larger, §2.0-correct increment and is filed separately
-#     (`#9129`), not assumed by this lane. A door inventory done against THIS block must not
-#     close escape (3) believing onboarding is covered.
+#     ✅ It NOW covers the whole onboarding class it claims, including the five
+#     `eager_init_query()` call sites that CREATE `:OnboardingState` (`#9157`).
+#     Those sites used to issue their statement on `proj.db.select_graph(...)` —
+#     escape (3) below — so the class's CREATION writes were unjournalled AND
+#     undeclared while this block read as complete. They now go through
+#     `onboarding/state.py::run_eager_init` on a `guarded_write_handle` bound to
+#     the ORG graph, i.e. the door above. Journalling the class instead is the
+#     larger, §2.0-correct increment and is filed separately
+#     (`#9129`), not assumed by this lane.
+#     ⚠️ Escape (3) itself is still open — it is structural, and any writer that
+#     holds a driver handle can take it. What this lane can now say is the
+#     narrower true thing: its OWN class does not ride it.
 #   * `structural-edge.derived` (`tortoise/projection/edges.py`, #9195) — the
 #     SDK's structural-edge mints (`create_edge` and `create_about_edge`, each
 #     with ONE `MERGE`, plus `create_edge`'s three typed wrappers — two mints
@@ -3643,6 +3648,33 @@ def _reset_undeclared_handle_writes() -> None:
     """Clear the measure-mode census (tests only — no operator surface exposes it)."""
     with _UNDECLARED_HANDLE_WRITES_LOCK:
         _UNDECLARED_HANDLE_WRITES.clear()
+
+
+def guarded_write_handle(proj: FalkorProjection, graph_name: str) -> _GuardedGraph:
+    """A §17.1 write handle on ``graph_name``, judged by ``proj``'s journal.
+
+    For a writer that must address a graph OTHER than the projection's own —
+    the org mint is the case that needed it (#9157): `sdk.org_create` and the
+    hosted-api lanes write `:TeamMeta` + `:OnboardingState` into
+    ``org_<id>`` while the SDK's projection is bound to another graph, so
+    `proj.g` is the wrong target and `proj.db.select_graph(name)` is
+    §17.1's escape (3) — one hop below every door §17.1 has.
+
+    This returns the handle WITHOUT opening a declaration: the caller still has
+    to be authorized for the statement it issues. That separation is the point
+    — a handle that declared its own writes would make the guard's default
+    (refuse) unreachable for exactly the writers it exists to judge. Pass it to
+    a sink that opens a lane (`onboarding/state.py::run_eager_init` does that
+    for the eager-init class; the backup dump path builds the same handle for a
+    read-only dump).
+
+    ``proj`` is used for its JOURNAL-BACKED state and its connection only — the
+    handle's writes are classified against ``proj``'s binding, which is what
+    "this cache is the derived cache of THAT journal" means. An unbound
+    projection therefore yields an unguarded-but-harmless handle (the guard's
+    arming rule is the same one the fold uses).
+    """
+    return _GuardedGraph(proj.db.select_graph(graph_name), proj)
 
 
 #: The single-writer authorization for the current context. ``None`` = no

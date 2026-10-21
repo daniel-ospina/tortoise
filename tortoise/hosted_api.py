@@ -4906,7 +4906,13 @@ async def provision_tenant(request: Request):
         # call, so the write-ahead ordering (journal ⇒ CREATE) is preserved.
         if _minted_here:
             journal_mint_write_ahead(graph_name)
-        org_graph.query(_init_q, params=_init_p)
+        # #9157: the eager-init CREATE rides a §17.1 GUARDED handle bound to this
+        # org graph (the projection is bound to another one) through the declared
+        # route — it used to be issued on `org_graph` (escape 3), unjournalled and
+        # undeclared.
+        from tortoise.projection import guarded_write_handle as _guarded_write_handle
+        _os.run_eager_init(
+            _guarded_write_handle(sdk._get_proj(), graph_name), _init_q, _init_p)
 
         # Create Membership (creator is Owner)
         sdk._get_registry().query(
@@ -10598,7 +10604,11 @@ async def register_user(request: Request, response: Response):
         # line is the ownership tombstone for that drop.
         journal_mint_write_ahead(graph_name)
         try:
-            org_graph = _make_sdk(namespace=org_id)._get_proj().db.select_graph(graph_name)
+            # #9157: a §17.1 GUARDED handle on the org graph, issued through the
+            # declared route (was `select_graph(...).query(...)` — escape 3).
+            from tortoise.projection import guarded_write_handle as _guarded_write_handle
+            _init_graph = _guarded_write_handle(
+                _make_sdk(namespace=org_id)._get_proj(), graph_name)
             # #2001 (W5): eager OnboardingState init in the same statement as
             # TeamMeta — first-org semantics (a fresh register has no prior
             # memberships → fork None → the fork card is asked exactly once).
@@ -10607,7 +10617,7 @@ async def register_user(request: Request, response: Response):
                 "CREATE (:TeamMeta {name: $name, created: $now})",
                 {"name": org_name, "now": now},
                 org_id=org_id)
-            org_graph.query(_init_q, params=_init_p)
+            _os.run_eager_init(_init_graph, _init_q, _init_p)
         except Exception:
             raise HTTPException(status_code=500, detail="Registration failed")  # noqa: B904
         try:
@@ -10690,7 +10700,10 @@ async def register_user(request: Request, response: Response):
             )
 
             # Provision FalkorDB namespace for the org
-            org_graph = sdk._get_proj().db.select_graph(graph_name)
+            # #9157: a §17.1 GUARDED handle on the org graph, issued through the
+            # declared route (was `select_graph(...).query(...)` — escape 3).
+            from tortoise.projection import guarded_write_handle as _guarded_write_handle
+            _init_graph = _guarded_write_handle(sdk._get_proj(), graph_name)
             # #2001 (W5): eager OnboardingState init in the same statement as
             # TeamMeta — first-org semantics (fresh register, no memberships).
             from tortoise.onboarding import state as _os
@@ -10701,7 +10714,7 @@ async def register_user(request: Request, response: Response):
             # #3390 WRITE-AHEAD: journal BEFORE the CREATE (was
             # record-after-effect — an unowned org_* graph on a mid-gap kill).
             journal_mint_write_ahead(graph_name)
-            org_graph.query(_init_q, params=_init_p)
+            _os.run_eager_init(_init_graph, _init_q, _init_p)
 
             # #318 (multi-tenant pack isolation): activate the starter pack
             # set — registry-mode self-service path (the Supabase-mode path
@@ -19050,7 +19063,13 @@ def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str,
         "CREATE (:TeamMeta {name: $name, created: $now})",
         {"name": name, "now": datetime.now(UTC).isoformat()},
         org_id=org_id, fork=init_fork, compact=init_compact)
-    graph.query(_init_q, params=_init_p)
+    # #9157: the eager-init CREATE is issued on a §17.1 GUARDED handle through
+    # the declared route. `graph` (== `proj.db.select_graph(graph_name)`, escape
+    # 3) stays the READ handle for the idempotency probe above; a guard that
+    # never sees the write cannot authorize, refuse or count it.
+    from tortoise.projection import guarded_write_handle as _guarded_write_handle
+    _os.run_eager_init(
+        _guarded_write_handle(proj, graph_name), _init_q, _init_p)
     return graph_name
 
 

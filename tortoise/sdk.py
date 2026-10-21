@@ -29143,7 +29143,15 @@ class TortoiseSDK:
                 params={"id": tid, "ik": idempotency_key},
             )
         try:
-            org_graph = proj.db.select_graph(graph_name)
+            # #9157: the eager-init CREATE is issued on a §17.1 GUARDED handle
+            # bound to org_{name} (the projection itself is bound to another
+            # graph), through `_os.run_eager_init` — the declared route. Before
+            # this, `proj.db.select_graph(graph_name).query(...)` was §17.1's
+            # escape (3): one hop below every door, so the write was
+            # unjournalled AND undeclared and the onboarding lane read as if it
+            # covered its own class.
+            from tortoise.projection import guarded_write_handle
+            _init_graph = guarded_write_handle(proj, graph_name)
             # #2001 (W5): eager OnboardingState init in the same statement as
             # TeamMeta (graph-side atomicity). compact = creator's prior
             # memberships > 0 (registry Membership nodes); fork inherited from
@@ -29197,7 +29205,7 @@ class TortoiseSDK:
             # No-op outside test sessions (journal env absent).
             from tortoise.projection import journal_mint_write_ahead
             journal_mint_write_ahead(graph_name)
-            org_graph.query(_init_q, params=_init_p)
+            _os.run_eager_init(_init_graph, _init_q, _init_p)
             # Graph node (org→graph 1:N, product ontology): the default graph
             self._graph_create(tid, "default", kind="default", namespace=graph_name)
             # #1748: the owner Membership for the session user — INSIDE the
