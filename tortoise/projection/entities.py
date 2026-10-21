@@ -4546,8 +4546,8 @@ class _EntityHandlers:
             # ── PLAIN path — legacy/replay calls, byte-identical (SC4) ──
             # #5140: the record's OWN instant, for the document `:Source` this
             # fold can mint (§4.6 marks `ingestedAt` REQUIRED). It rides the
-            # RECORD, not the nested payload — ``EventAPI._emit`` stamps every
-            # journal line with ``ts`` — so a replay reads the value the live
+            # RECORD, not the nested payload — ``EventAPI._emit`` stamps ``ts``
+            # on every line IT writes — so a replay reads the value the live
             # write recorded instead of re-stamping a replay clock (#5024's
             # rule for `updatedAt`, applied to the same slot).
             self._event_plain_merge(eid, props, embedding, inner,
@@ -4690,19 +4690,40 @@ class _EntityHandlers:
         replay agree on when Tortoise first saw that source — §4.6's
         `ingestedAt`, which the record — not the fold — is the authority for.
 
-        That agreement holds for the door that STAMPS ``ts`` on the record it
-        folds (`EventAPI._emit`), not for every door: `TortoiseSDK.
-        _apply_and_journal` appends through `_emit_event`, which mints ``ts`` on
-        a COPY of the record, then folds the caller's own dict — so a caller
-        setting ``objectType='Document'`` through THAT door stamps the write
-        clock live and the envelope ``ts`` on replay. Latent rather than live
-        today (no producer sets ``objectType`` there), and the same residue the
-        ``createdAt`` VALUE-SYNTHESIS in ``_apply_and_journal`` closes for that
-        field (``sdk.py``: it stamps ``event["createdAt"]`` before the append so
-        the record and the fold carry one instant; `_journal_record_payload`
-        shares only the payload-KEY rule and would not close it); stamping
-        ``ts`` in that door the same way is the fix, not a change to this
-        contract.
+        That agreement holds for the doors that STAMP ``ts`` on the record they
+        fold (`EventAPI._emit`), not for every door. TWO doors have the opposite
+        shape, and each mints the envelope ``ts`` a SECOND time — so both are
+        named here rather than the one this contract used to exempt:
+
+        * `TortoiseSDK._apply_and_journal` appends through `_emit_event`, which
+          mints ``ts`` on a COPY of the record, then folds the caller's own
+          dict;
+        * `TortoiseSDK._create_entity` (the public ``create_entity`` /
+          ``create_event`` — the ``tortoise_create_entity`` /
+          ``tortoise_create_event`` tools) folds the caller's event at
+          ``proj.apply`` and journals it AFTER the fold, so the record it folds
+          has no ``ts`` to read (``ts`` is a reserved ENVELOPE prop, stripped at
+          prop intake) and `_emit_event` mints one at append time.
+
+        A caller setting ``objectType='Document'`` through either door stamps
+        the write clock live and the envelope ``ts`` on replay; measured through
+        ``create_event(objectType='Document')`` — live ``ingestedAt``
+        ``…56.356835`` vs rebuilt ``…56.421082`` — the #5024 divergence class, on
+        this field. Latent rather than live today in BOTH cases: no producer in
+        this repo sets ``objectType`` on either door (`EventAPI.add_event` is the
+        shipped one and it goes through ``_emit``).
+
+        The fix is the same for each and belongs to those doors, not to this
+        contract: stamp ``ts`` on the record BEFORE the fold and hand the SAME
+        instant to the append — the ``createdAt`` VALUE-SYNTHESIS in
+        ``_apply_and_journal`` already does exactly that for that field (it
+        stamps ``event["createdAt"]`` before the append so the record and the
+        fold carry one instant), and ``_emit_event(recorded_ts=…)`` is the
+        parameter `retract_point` uses for this purpose; `_journal_record_payload`
+        shares only the payload-KEY rule and would not close it. Filed as #9419
+        rather than taken here: it moves the journal bytes of every
+        ``EventRecorded`` that funnel emits, a different blast radius from this
+        clause.
         """
         # #4524: the ON MATCH embedding write below can be a SILENT no-op on
         # the embedded engine — a ``vecf32`` overwrite of an existing vector is
@@ -4781,16 +4802,25 @@ class _EntityHandlers:
             # recorded is never overwritten (#398's never-overwrite contract;
             # the field means when Tortoise FIRST saw this source). The value is
             # the record's own `ts` when it carries a USABLE one — deterministic
-            # on replay — falling back to the write clock only for a synthetic
-            # event applied without one (legacy lines, test fixtures). "Usable"
-            # is `_usable_instant` — the policy `_journal_instant` wraps, and the
-            # form to copy. It is a choice made HERE, not a guarantee inherited
-            # from the file: `valid_to` (the supersede/invalidate folds) and
-            # `_upsert_source`'s `ingestedAt`/`updatedAt`/`rawStateAt` still ride
-            # ungated (#7369), so nothing else gates this slot for you. Cited by
-            # NAME, never by line — a number here is stale the next time
-            # anything above it moves (this branch has already paid for that
-            # twice).
+            # on replay — falling back to the write clock only for a record that
+            # states none. Not every live door states one, and ALL THREE are
+            # latent rather than live today (no in-repo producer sets
+            # `objectType` on any of them): the miner's own envelope carries no
+            # `ts`; `_apply_and_journal` folds the caller's dict rather than the
+            # envelope its append minted; and `_create_entity` (behind
+            # `create_entity`/`create_event`) folds BEFORE it journals, so the
+            # append's `ts` never reaches the fold (sdk.py counts the journal's
+            # three live append doors; #9419 carries the live-vs-rebuild delta).
+            # For any of them the fallback is what keeps `ingestedAt` REQUIRED
+            # rather than NULL, and the value is not replay-deterministic.
+            # "Usable" is `_usable_instant` — the policy `_journal_instant`
+            # wraps, and the form to copy. It is a choice made HERE, not a
+            # guarantee inherited from the file: `valid_to` (the
+            # supersede/invalidate folds) and `_upsert_source`'s
+            # `ingestedAt`/`updatedAt`/`rawStateAt` still ride ungated (#7369), so
+            # nothing else gates this slot for you. Cited by NAME, never by line
+            # — a number here is stale the next time anything above it moves
+            # (this branch has already paid for that twice).
             #
             # The reason is NOT a raise: `self.g`'s parameter boundary
             # (`_journal_safe_params`) DEGRADES an unwritable value to `None`
