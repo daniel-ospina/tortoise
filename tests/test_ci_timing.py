@@ -1611,6 +1611,51 @@ def test_a_quoted_summary_is_not_the_session_summary(tmp_path: Path) -> None:
     assert parsed["counts"]["failed"] == 0, parsed["counts"]
 
 
+def test_the_counts_rule_runs_at_exactly_one_site(tmp_path: Path) -> None:
+    """The counts are decided ONCE, after the line loop — and the comment describes that.
+
+    `parse_log` carried a SECOND, in-loop credit block (`if COUNT_RE.search(line) and
+    (line.startswith("=") or _SUMMARY_IN_RE.search(line))`) under a comment documenting a
+    "deliberately more permissive, either shape" policy. It was DEAD — the site after the
+    loop resets every key with `counts = {k: 0 …}` before it sets one, so nothing it wrote
+    survived — and a maintainer reading that comment would believe a fallback existed and
+    "fix" the wrong copy (measured pre-fix: `= 3 passed … ` then `= 4 passed … [killed]`
+    credits 3, the live rule, while the dead block claimed the second line was parsed in
+    "either shape"). Structure is what has to be pinned here, because deleting dead code
+    cannot change behaviour: the structural assertion is RED on the pre-fix source and
+    green on the single-rule source, and the behavioural assertions keep the one surviving
+    rule from being quietly widened as a "restore the fallback" (#9134 review, P3).
+    """
+    import ast as _ast
+    import inspect
+
+    func = _ast.parse(inspect.getsource(ci_timing.parse_log)).body[0]
+
+    def _counts_assignments(node: _ast.AST) -> list[int]:
+        return [sub.lineno for sub in _ast.walk(node)
+                if isinstance(sub, _ast.Assign)
+                and any(isinstance(t, _ast.Subscript) and isinstance(t.value, _ast.Name)
+                        and t.value.id == "counts" for t in sub.targets)]
+
+    line_loops = [n for n in _ast.walk(func)
+                  if isinstance(n, _ast.For) and isinstance(n.iter, _ast.Name)
+                  and n.iter.id == "lines"]
+    assert len(line_loops) == 1, "the log's line loop moved — update this pin"
+    assert _counts_assignments(line_loops[0]) == [], (
+        "a counts assignment inside the LINE loop is dead code: the site after the loop "
+        "resets every key before it sets one")
+    assert len(_counts_assignments(func)) == 1, (
+        "the counts must be credited at exactly ONE site")
+
+    # The one surviving rule, pinning the two rows the review measured: only the LAST
+    # candidate line credits, and a line carrying `[` is a parametrized id echoed into the
+    # log rather than a session summary.
+    log = write_log(tmp_path, "two-summaries.log",
+                    "= 3 passed in 1.00s =\n"
+                    "= 4 passed in 2.00s = [killed]\n")
+    assert ci_timing.parse_log(log)["counts"]["passed"] == 3
+
+
 def test_an_embedded_nodeid_is_not_a_verdict(tmp_path: Path) -> None:
     """A parametrized id that EMBEDS another nodeid names the OUTER test, not the inner one.
 
@@ -2295,6 +2340,64 @@ def test_tests_split_across_exclusive_branches_have_no_denominator(tmp_path: Pat
     assert ci_timing._splits_tests_across_exclusive_sides(
         _ast.parse((tmp_path / "tests" / "s.py").read_text())) is True
     assert "s.py" not in ci_timing.declared_test_counts(["s.py"], tmp_path)
+
+
+def test_tests_split_across_exclusive_match_arms_have_no_denominator(tmp_path: Path) -> None:
+    """A `match` runs ONE arm, so two arms that define tests are a split, not a sum.
+
+    `_collectable_statements` descends into every `case` body (that is right for
+    counting a single-arm match), but only one arm runs — so summing two arms makes the
+    count EXCEED what pytest collects, exactly the `if`/`else` and `try`/`except` case
+    the sibling test pins. Measured pre-fix on the module below: 2 declared against 1
+    collected on any host, i.e. `observed >= declared` is UNSATISFIABLE, the row's
+    weight can only ever be raised or held, and its note publishes a witness naming a
+    testcase that cannot exist. `ast.Match` was simply missing from the exclusion scan
+    (`ast.If`, `ast.Try`, `ast.TryStar` only) — #9134 review, P3.
+    """
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "m.py").write_text(
+        "import sys\n"
+        "match sys.platform:\n"
+        "    case 'linux':\n"
+        "        def test_linux(): pass\n"
+        "    case 'win32' if sys.maxsize < 0:\n"
+        "        def test_win(): pass\n"
+        "    case _:\n"
+        "        def test_other(): pass\n"
+    )
+
+    import ast as _ast
+
+    tree = _ast.parse((tmp_path / "tests" / "m.py").read_text())
+    assert ci_timing._collected_test_count(tree) == 3, "the walk still SUMS the arms"
+    assert ci_timing._splits_tests_across_exclusive_sides(tree) is True
+    assert "m.py" not in ci_timing.declared_test_counts(["m.py"], tmp_path)
+
+
+def test_a_single_collecting_match_arm_keeps_its_denominator(tmp_path: Path) -> None:
+    """The `match` exclusion is about TWO collecting arms, never about `match` itself.
+
+    Only one arm defining tests is not a split: the other arms collect nothing, so the
+    summed count IS what pytest collects. Omitting the denominator there would drop a
+    perfectly countable row (UNKNOWN is fail-closed, but freezing rows for nothing is
+    the regression the `Test*`-base rule had to walk back).
+    """
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "one.py").write_text(
+        "import sys\n"
+        "match sys.platform:\n"
+        "    case 'linux':\n"
+        "        def test_a(): pass\n"
+        "        def test_b(): pass\n"
+        "    case _:\n"
+        "        x = 1\n"
+    )
+
+    import ast as _ast
+
+    tree = _ast.parse((tmp_path / "tests" / "one.py").read_text())
+    assert ci_timing._splits_tests_across_exclusive_sides(tree) is False
+    assert ci_timing.declared_test_counts(["one.py"], tmp_path) == {"one.py": 2}
 
 
 def test_the_remaining_floor_shapes_have_no_denominator(tmp_path: Path) -> None:
