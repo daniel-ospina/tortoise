@@ -361,6 +361,60 @@ def _reads_via_carrier(rel: str, source: str) -> list[str]:
     )
 
 
+@functools.cache
+def _carrier_shaped_constants(rel: str) -> dict[str, tuple[str, ...]]:
+    """module/class-level constants that can be SPLICED INTO a rel pattern.
+
+    Two shapes qualify: a rel-type list whose elements are all string literals
+    (`ABOUT_EDGE_TYPES`, `SUPERSEDE_STRUCTURAL_RELS`) and an `a|b|c`
+    alternation string (`TortoiseSDK._ABOUT_TYPES`). Both are what a reader
+    interpolates into `-[a:<value>]->`, which is exactly why the edge name can
+    live in the constant and nowhere in the query.
+
+    ⛔ Deliberately NOT filtered by `aboutObject`. `_carrier_constants()`
+    selects only constants whose source ALREADY contains the edge name, so
+    asserting that a selected constant contains it can never fail — removing
+    `aboutObject` from `ranking.ABOUT_EDGE_TYPES` left all eight tests green,
+    while the mutation the PR body claims reds the carrier test. Candidate
+    shape here is decided by the VALUE's form plus the `about*` family prefix,
+    both of which survive `aboutObject` itself leaving the constant; membership
+    is then asserted by the caller, where it can actually fail.
+    """
+
+    def splices(node: ast.AST | None) -> tuple[str, ...] | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return tuple(node.value.split("|")) if "|" in node.value else None
+        if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+            elements: list[str] = []
+            for element in node.elts:
+                if not (isinstance(element, ast.Constant) and isinstance(element.value, str)):
+                    return None
+                elements.append(element.value)
+            return tuple(elements)
+        return None
+
+    path = _module_path(rel)
+    tree = _parsed(str(path))
+    carriers: dict[str, tuple[str, ...]] = {}
+
+    def scan(body, prefix: str = "") -> None:
+        for node in body:
+            if isinstance(node, ast.ClassDef):
+                scan(node.body, prefix=f"{node.name}.")
+                continue
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                name = _bound_name(node)
+                if name is None:
+                    continue
+                elements = splices(node.value)
+                if not elements or not any(e.startswith("about") for e in elements):
+                    continue
+                carriers[prefix + name] = elements
+
+    scan(tree.body)
+    return carriers
+
+
 def _modules_reading_the_edge() -> dict[str, list[int]]:
     """Census: module → line numbers of each literal Cypher READ of the edge."""
     found: dict[str, list[int]] = {}
@@ -596,6 +650,13 @@ def test_every_carrier_constant_a_row_reads_through_still_names_the_edge():
     reviews. If the edge leaves one of these constants, the §13 row keeps
     resolving while the site stops reading the edge — an under-count in the
     direction that matters.
+
+    The candidates come from `_carrier_shaped_constants()` (shape + `about*`
+    family), NOT from `_carrier_constants()` (which filters on the very name
+    this test asserts). Deleting the edge from `ABOUT_EDGE_TYPES` therefore
+    reds here — measured: `TORTOISE_TEST_CARVE_OUT=1 uv run pytest
+    tests/test_7948_about_object_read_sites.py -q` goes 8 passed → 1 failed
+    with `row 17: … ABOUT_EDGE_TYPES`.
     """
     broken: list[str] = []
     for row in _rows():
@@ -607,7 +668,12 @@ def test_every_carrier_constant_a_row_reads_through_still_names_the_edge():
         source = "\n".join(
             _module_path(module).read_text(encoding="utf-8").splitlines()[span[0] - 1 : span[1]]
         )
-        for carrier in _reads_via_carrier(module, source):
+        carriers = sorted(
+            qualified
+            for qualified in _carrier_shaped_constants(module)
+            if re.search(rf"\b{re.escape(qualified.split('.')[-1])}\b", source)
+        )
+        for carrier in carriers:
             declaration = _span(tree, carrier)
             assert declaration is not None, f"{module}::{carrier} does not resolve"
             declared = "\n".join(
