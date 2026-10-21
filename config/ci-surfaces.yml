@@ -2285,6 +2285,17 @@ surfaces:
   # subject is the extraction write path; ALSO `tier1`, because a docs-only diff
   # takes select()'s early return and the artifact this guards lives under `docs/`.
   - test_e1_e2_measurement.py
+  # #9075: the capstone PRE-REGISTRATION gate — the artefact the row above refuses to score
+  # against. `docs/evidence/7949-capstone/PRE-REGISTRATION.md` must name a metric, a denominator
+  # and a numeric threshold for E1-E5; every SCORED evidence log must postdate its add-commit (the
+  # one log that predates it is exempt only while the log itself declares UNPREREGISTERED and
+  # carries no verdict); the E4 denominator must be 15 (never 4); the machine record
+  # `preregistration.json` must agree with the pins; and every corpus pin must still re-derive from
+  # `tests/eval/write_path/`. `core` because the subject is the extraction write path and a corpus
+  # edit under `tests/eval/write_path/` is exactly the change that silently re-bases every
+  # threshold; ALSO `tier1`, because the artefact itself lives under `docs/` and a docs-only diff
+  # takes select()'s early return.
+  - test_capstone_preregistration_9075.py
   # #4282 Phase 0.3b: dual-registered with `api` for the same reason — `api` is
   # keyed on SOURCE PATTERNS and `tools/sdk_rename_table.py` is named there.
   # NOTE: docs paths are in NON_PYTHON_PREFIXES, not SOURCE_PATTERNS, so editing
@@ -5481,6 +5492,11 @@ tier1:
 # matters for this artifact: the evidence log, the corpus JSON and the probe all
 # live under `docs/`.
 - test_e1_e2_measurement.py
+# #9075: the capstone pre-registration gate (`core` above) — a markdown table scan, a YAML pins
+# parse, a JSON record cross-check and a `tests/eval/write_path` re-derivation. No DB, no network,
+# no graph fixture, so a docs-only PR runs it here — and a docs-only PR is exactly the change class
+# that can edit a threshold after the numbers landed.
+- test_capstone_preregistration_9075.py
 # #5092: the extractor-v4 design's step-list guard is a fast, no-DB file scan, so a
 # docs-only PR runs it here — the same placement as `test_retention_promise.py` above.
 - test_extractor_v4_step_list_consistency.py
@@ -7722,6 +7738,7 @@ durations:
   # the file; a marker on the comment lines above would outlive its own truth
   # (#9110 review P2, the #8254/#2876 stale-basis class).
   test_e1_e2_measurement.py: 2.0  # unmeasured — #9076: flat default until a CI sweep measures this file
+  test_capstone_preregistration_9075.py: 2.0  # unmeasured — new in #9075: a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so it carries the header's flat `DEFAULT_FAST_WEIGHT` (the #2818/#3419 convention), and the LEADING marker is what lets `tools/ci_timing.py::render_refreshed_manifest` clear this note once a sweep measures it. Do NOT substitute a local timing: what the weight covers is a markdown table scan, a YAML pins parse, a JSON record cross-check and a `tests/eval/write_path` fixtures_hash re-derivation (7 sessions of fixtures + gold, no DB, no network, no graph fixture) — a local wall reading is dominated by interpreter and session cost rather than this file's weight, and the map is a SHARD-LAYOUT input. Refresh from the first post-merge sweep.
   # The #9109 pin is a file ADDED BY A PR, so it has no CI junit measurement (the
   # refresher samples push-to-main runs only): it carries the flat default until a
   # sweep collects it (the #3419/#2788 rule), and the tail LEADS with
