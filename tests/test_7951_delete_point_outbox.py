@@ -29,9 +29,15 @@ are not equally harmful:
   probe in this directory prints `RAW HANDLE LANE (proj.g.query): SUCCEEDED`
   with the guard measuring. So the window is a generic engine/transport failure
   with the node still present: RARE. The ordering is justified by the DIRECTION
-  of the divergence it leaves, not by its frequency. (⚠️ Once part 2 arms the
-  handle this door is REFUSED — it is apply-first by #9207's decision, so it
-  holds no journal-first lane and is inventoried in `_APPLY_FIRST_DOORS`.)
+  of the divergence it leaves, not by its frequency. (⚠️ This door COMPLETES
+  under an armed handle: #9206 declares its apply-first lane
+  (`@_declares_apply_first_write_lane("delete_point")`) — #9207's decision put
+  the `DETACH DELETE` first, so it holds no journal-first lane and is no longer
+  inventoried in `_APPLY_FIRST_DOORS`. Pinned by
+  `test_9079_handle_write_authority.py::
+  test_a_declared_apply_first_door_writes_under_the_armed_guard` and by this
+  directory's own probe, which still prints `RAW HANDLE LANE` for the raw-query
+  residuals, NOT for the door.)
 * the cache first (#9207) — a `DETACH DELETE` that fails or matches nothing
   appends NOTHING, so the record can never over-claim. The remaining window is
   the append failing after a landed destroy: the cache is ahead of the truth

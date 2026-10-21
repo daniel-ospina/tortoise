@@ -26,8 +26,12 @@ aboutObjects: "#7951, #7950, STORAGE-ARCHITECTURE.md §17.1, tortoise/sdk.py del
 > measuring). ⚠️ **Consequence for §17.1's declaration inventory:** `delete_point` therefore holds NO
 > live lane — its #9124 part-1 `@_declares_live_write_lane("delete_point")` was journal-first-only and
 > is WITHDRAWN, and the door is inventoried in `_APPLY_FIRST_DOORS`
-> (`tests/test_9124_declared_live_doors.py`). Arming the handle (part 2) REFUSES this apply-first
-> door until an "apply-first, by decision" lane exists (#9124 / #9206). The ordering is justified by
+> (`tests/test_9124_declared_live_doors.py`). ⚠️ #9206 has since landed exactly the lane this
+> paragraph says is missing — the "apply-first, by decision" lane (`@_declares_apply_first_write_lane`),
+> which `delete_point` now carries, so an armed handle COMPLETES this door and it is no longer
+> inventoried in `_APPLY_FIRST_DOORS`. What follows records this increment's reasoning at the time it
+> was written; read `_APPLY_FIRST_PROVED_ELSEWHERE` / `_APPLY_FIRST_DECLARED_DOORS` for the state now.
+> The ordering is justified by
 > the DIRECTION of the divergence it leaves, not its
 > frequency. The door now issues the destroy FIRST and appends the record
 > only once it has RETURNED (any row count — a zero-row write still leaves the node absent, so the
@@ -265,7 +269,9 @@ fixed one.
    `_APPLY_FIRST_DOORS`. ⚠️ The handle's measure/enforce state is not an argument here: the handle
    DETECTS this write today (`_HANDLE_GUARD_ENFORCES` is `False`, #9124 part 2 arms it), so a lane
    would change nothing it can see and would still be a false claim about the order. An
-   "apply-first, by decision" lane is §17.1 work (#9124 / #9206), not this increment's.
+   "apply-first, by decision" lane is §17.1 work (#9124 / #9206), not this increment's — and since
+   #9206 it EXISTS (`_apply_first_write_scope`), which is the lane `delete_point` carries now
+   (`@_declares_apply_first_write_lane("delete_point")`), replacing its inventory row.
 3. **A blanket refusal on the guarded handle.** REJECTED — `#8389` verbatim; carried as the recorded
    `OVERRIDES:` departure.
 4. **Widening the record to a new event type for a Point hard delete.** REJECTED — `EntityMutated`

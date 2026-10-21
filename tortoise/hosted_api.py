@@ -143,8 +143,14 @@ from tortoise.monitoring import (
     health_probe_interval as _health_probe_interval,  # #2988: shared with selfhost
 )
 from tortoise.onboarding import state as _os  # #2001 (W5) canonical FLOW-state module
+
+# #9206: `_declares_apply_first_write_lane` is the APPLY-FIRST declaration —
+# used by this module's cache-first writer (`_delete_session_sync`): its removal
+# records follow the removes they describe, so a journal-first lane would be a
+# false claim about it.
 from tortoise.projection import (
     DirectCacheWriteRefused,  # #9233: §17.1 refusal is not a crypto failure
+    _declares_apply_first_write_lane,
     is_missing_graph_error,  # #2163: absent-graph GRAPH.DELETE family == success
     journal_mint_write_ahead,  # #3390: journal the intended name BEFORE the CREATE
 )
@@ -14039,6 +14045,15 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # exact result rather than paying a second scrub of the same window. All of
     # it stays off the event loop: a legal-maximum 500x5,000 capture is 2.5 MB
     # of client-controlled text.
+    #
+    # #9206: THE SHARED WRITER JOURNALS ITS `:Session` NODE. Hosted used to pass
+    # no `on_session_merged`, so this lane's session-container MERGE was
+    # UNJOURNALLED — a raw graph write with no record, which a journal-only
+    # `rebuild()`/`recover_from_log` drops. Since #9206 the shared writer emits
+    # `SessionRecorded` itself, BEFORE the MERGE, so no caller can forget it.
+    # (This comment deliberately does NOT spell that statement out: a guard in
+    # `tests/test_write_session_and_turns_3551.py` asserts the shared primitive
+    # is the only carrier of the session-merge text, prose included.)
     _capture_write = await _run_off_loop(
         _CAPTURE_EXECUTOR, _write_session_and_turns, proj, sdk, session_id,
         windowed, now=now, harness=capture_harness,
@@ -18337,6 +18352,17 @@ async def delete_session(session_id: str, org: dict = Depends(get_current_org_se
     url = f"session:{session_id}"
     org_id = org["org_id"]
 
+    # §17.1 LANE (#9206): APPLY-FIRST, DECLARED. This writer removes the
+    # session's Points, Events, Source stub and container FIRST and appends the
+    # record that describes each removal AFTER it — `EntityMutated` op=delete
+    # per removed node (keyed off the DELETE's OWN result, so a concurrent
+    # capture cannot leave an unrecorded removal) and `SessionDeleted` for the
+    # container (whose fold also removes the agentSession Source). The order is
+    # the same trade `delete_point` makes (#9207): a record for a destroy the
+    # cache never performed is worse than a reported window, and the records can
+    # only be stated once the destroy's result is known. Without a declaration
+    # an armed handle refused the product's own session-delete path.
+    @_declares_apply_first_write_lane("hosted.delete_session")
     def _delete_session_sync() -> dict:
         proj = sdk._get_proj()
 
