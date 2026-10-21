@@ -1963,6 +1963,47 @@ def test_a_named_progress_id_beats_a_shorter_named_prefix(tmp_path: Path) -> Non
     assert agg["failed_tests"] == {"tests/test_x.py::test_a[1]"}
 
 
+def test_a_message_carrying_its_own_brackets_does_not_move_the_split(tmp_path: Path) -> None:
+    """The message is pytest's longrepr, and it can carry brackets of its own.
+
+    `assert '[' in ''` and `assert ']' == 'a - b'` make the tail's bracket delta differ from the
+    id's in BOTH directions, so a delta-only rule cut an id that contains ` - ` (`test_p[a - b]` →
+    `test_p[a`) and folded a message prefix into another (`test_neg - AssertionError: assert ']' == 'a`).
+    The longrepr SHAPE settles it: the remainder after the true separator opens with pytest's own
+    rendering, which is the one signal that is not bracket arithmetic (#9134 review, P1).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "FAILED tests/test_x.py::test_p[a - b] - AssertionError: assert '[' in ''\n"
+        "FAILED tests/test_x.py::test_p[a - c] - AssertionError: assert ']' in ''\n"
+        "FAILED tests/test_x.py::test_neg - AssertionError: assert ']' == 'a - b'\n"
+        "= 3 failed in 0.49s =\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {
+        "tests/test_x.py::test_p[a - b]",
+        "tests/test_x.py::test_p[a - c]",
+        "tests/test_x.py::test_neg",
+    }
+    assert agg["total_counts"]["failed"] == 3
+
+
+def test_a_longrepr_that_does_not_look_like_one_still_splits(tmp_path: Path) -> None:
+    """Not every message opens with `SomethingError:`; the ladder must still find the id."""
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "FAILED tests/test_x.py::test_a - boom\n"
+        "FAILED tests/test_x.py::test_b - \n"
+        "FAILED tests/test_x.py::test_p[a - b] - boom\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {
+        "tests/test_x.py::test_a",
+        "tests/test_x.py::test_b",
+        "tests/test_x.py::test_p[a - b]",
+    }
+
+
 def test_an_unreadable_log_degrades_instead_of_killing_the_run(tmp_path: Path) -> None:
     """One unreadable log must not become a KeyError for the whole artifact.
 

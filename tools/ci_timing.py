@@ -508,25 +508,43 @@ def _is_summary_line(line: str) -> bool:
 R_SUMMARY_RE = re.compile(r"^(FAILED|ERROR)\s+(tests/\S+?\.py::.+)$")
 
 
-def _short_summary_id(tail: str, known_by_len: dict[int, set[str]]) -> str:
-    """Split `<id> - <message>` when neither side can be told from punctuation alone.
+# ⛔ THE ID CANNOT BE FOUND BY BRACKET ARITHMETIC ALONE. The message is pytest's longrepr, and it
+# can carry brackets of its own (`assert '[' in ''`, `assert ']' == 'a - b'`), so the tail's total
+# bracket delta is the id's PLUS the message's. Two forms of the same defect were measured on real
+# pytest lines: assuming the message's delta is zero SPLIT AN ID THAT CONTAINS ` - `
+# (`test_p[a - b]` → `test_p[a`), and folding a message prefix into the id invented
+# `test_neg - AssertionError: assert ']' == 'a`. The longrepr SHAPE is the signal that is not
+# arithmetic: the text after the true separator always opens with pytest's own rendering
+# (`AssertionError: …`, `Failed: …`, `E   …`, a bare `assert …`).
+_LONGREPR_RE = re.compile(
+    r"^- (?:E\s{2,}|Failed\b|assert\b"
+    r"|[A-Za-z_][\w.]*(?:Error|Exception|Warning|Failure|Interrupt|Exit)\b)")
 
-    The id may contain a space (`test_spaced[server lane]`), the separator itself (`test_p[a - b]`)
-    and BRACKETS THAT DO NOT BALANCE (`test_open[a[b]`, because pytest appends the closing `]` to
-    the parameter verbatim); the message is free text that may also contain ` - ` and brackets. So
-    the ladder is: a nodeid a PROGRESS line already named (authoritative — those lines are
-    unambiguous, and pytest writes them before the summary); then a separator whose head has the
-    SAME bracket delta as the whole tail (the message's brackets are what makes the tail's delta
-    differ from the id's, so a matching head is the id); then a separator at depth 0; then the last
-    one. Never the whole tail — that publishes `<id> - <message>` as a nodeid pytest never reports.
+
+def _short_summary_id(tail: str, known_by_len: dict[int, set[str]]) -> str:
+    """Split `<id> - <message>` where the id may contain spaces, ` - ` and UNBALANCED brackets.
+
+    pytest appends its closing `]` to a parameter verbatim, so a REAL id can have more opens than
+    closes (`test_open[a[b]`); the message is free text that may contain ` - ` and brackets of its
+    own. The ladder, in order:
+
+    1. a nodeid a PROGRESS line already named — authoritative, unambiguous, and pytest writes the
+       progress lines before the summary (bucketed by length so a failure-dense leg is not
+       quadratic);
+    2. a separator whose remainder OPENS with pytest's longrepr shape (see `_LONGREPR_RE`) — the
+       only signal that is not bracket arithmetic, and the one that survives a message carrying
+       its own brackets;
+    3. a separator whose head has never gone bracket-negative AND whose bracket delta equals the
+       whole tail's (sound when the message carries no brackets: then the id's delta IS the tail's);
+    4. the same delta test without the non-negative requirement;
+    5. the first separator at depth 0;
+    6. the last separator — never the whole tail, which would publish `<id> - <message>` as a nodeid
+       pytest never reports.
     """
-    # Longest-first over the ids a progress line named, without re-sorting a growing set on every
-    # summary line: lengths are bucketed by the caller, and membership is a set lookup.
     for width in sorted(known_by_len, reverse=True):
         if (tail[:width] in known_by_len[width]
                 and tail[width:].startswith(" - ")):
             return tail[:width]
-    whole = tail.count("[") - tail.count("]")
     cands: list[tuple[int, int, bool]] = []
     at = tail.find(" - ")
     while at != -1:
@@ -538,6 +556,11 @@ def _short_summary_id(tail: str, known_by_len: dict[int, set[str]]) -> str:
                 break
         cands.append((at, depth, clean))
         at = tail.find(" - ", at + 3)
+    for at, _depth, _clean in cands:
+        # `at` is the separator's leading SPACE; the pattern starts at its dash.
+        if _LONGREPR_RE.match(tail[at + 1:]):
+            return tail[:at]
+    whole = tail.count("[") - tail.count("]")
     for at, _depth, clean in cands:
         if clean and tail[:at].count("[") - tail[:at].count("]") == whole:
             return tail[:at]
