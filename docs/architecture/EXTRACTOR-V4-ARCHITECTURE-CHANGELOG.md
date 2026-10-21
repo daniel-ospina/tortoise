@@ -656,3 +656,23 @@ unflagged and the instrument's own test reds.
 §13, `_connect_issue_objects` (`sdk.py:20154` → the symbol, `sdk.py::TortoiseSDK._connect_issue_objects`).
 §13's prose now states no line numbers at all, matching its own sentence that it carries none; the
 sibling `tests/test_extractor_v4_citation_rot.py` asserts every remaining quoted-symbol citation resolves.
+
+## §13's remaining line citations symbol-keyed, and the LINE asserted where the document keeps one (2026-10-21, `#7948`)
+
+The entry above records that *"§13's prose now states no line numbers at all"*. It still carried two, and
+both had rotted: `projection/entities.py:785+` (line 785 sits inside `_connector_content_hash`'s docstring,
+not the replay — the fold is `projection/entities.py::_EntityHandlers._fold_entity_linked`) and
+`test_index_restore.py:373-403` (the unjournalled-`Document` drop, not the `aboutObject` count, which is
+`tests/test_index_restore.py::test_t12_instantiates_edges_rebuild_drop_and_restore`). Both are now
+symbol-keyed, so the sentence is true and a line that MOVES cannot falsify it.
+
+Two guards, so neither class survives a later edit.
+`tests/test_7948_about_object_read_sites.py::test_section_13_carries_no_line_citations` holds §13 to its own
+sentence — the document states it carries no line numbers, so carrying one reds. And because §13.8 question 2
+is the one place that DOES keep a line (it was re-derived at `26aff163c`),
+`tests/test_extractor_v4_citation_rot.py::test_the_rederived_read_site_citations_land_inside_their_own_symbol`
+asserts each of its citations resolves INSIDE the symbol it is attached to — symbol-exists-in-file cannot see
+that, which is why two had drifted there too: `_state_related_objects` cited `sdk.py:29361` and
+`_state_related_points` `sdk.py:29378`, both landing inside `_state_mitigations` (a `mitigated_by` reader)
+while their `def`s sit at `29392`/`29409`. Non-vacuity measured: under the pre-fix text both new tests red,
+naming the offending line and the span the cited symbol actually occupies.

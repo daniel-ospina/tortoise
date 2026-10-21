@@ -115,6 +115,13 @@ WHAT THIS PINS
 8. `test_the_extractor_document_agrees_on_the_count` — the sibling document
    states the SAME count and names the state-recall readers; the two copies
    cannot diverge again.
+9. `test_section_13_carries_no_line_citations` — §13 says *"Line numbers are
+   deliberately **not** carried any more … the lines had all rotted"*, so it
+   must carry none. Two survived underneath that sentence
+   (`projection/entities.py:785+`, `test_index_restore.py:373-403`) and BOTH
+   had rotted: 785 is inside `_connector_content_hash`'s docstring, and
+   373-403 is the unjournalled-`Document` drop, not the `aboutObject` count.
+   A claim a document makes about itself is one a guard can hold it to.
 
 ⚠️ **What this deliberately does NOT claim.** The census is a LOWER BOUND: it
 sees a literal relationship pattern naming the edge, so a reader that
@@ -929,3 +936,41 @@ def test_the_extractor_document_agrees_on_the_count():
             f"EXTRACTOR-V4-ARCHITECTURE.md does not name `{reader}` — a "
             "`recall_state` read the four-site census missed"
         )
+
+
+# ── 9. §13 carries the line numbers its own sentence says it does not ───────
+
+#: A `file.py:NNNN` — or `file.py:NNNN-MMM` — line citation, the form §13's own
+#: sentence retires. A symbol citation (`module.py::symbol`) does NOT match: its
+#: colon is doubled, so it is never followed by a digit.
+_LINE_CITATION = re.compile(r"[A-Za-z0-9_./-]+\.py:[0-9]+")
+
+
+def test_section_13_carries_no_line_citations():
+    """§13 states it carries no line numbers, so it must carry none.
+
+    The sentence is load-bearing — it is what tells a reader the SYMBOL is
+    authoritative and the line is no longer kept — and two citations survived
+    underneath it, both already rotted. A guard cannot check that a symbol sits
+    at the right line in a document that says it stopped recording lines; it
+    can check the document does what it says.
+    """
+    section = _section_13()
+    assert "Line numbers are deliberately **not** carried" in section, (
+        "§13 no longer carries the sentence this guard exists to enforce — "
+        "re-read the paragraph: restore it, or delete this test with a reason."
+    )
+    assert _rows(), "§13's symbol-keyed rows are missing (see `_rows`)."
+    text = _doc()
+    offset = text.index("## 13. Filed from this document")
+    surplus = [
+        (text.count("\n", 0, offset + match.start()) + 1, match.group(0))
+        for match in _LINE_CITATION.finditer(section)
+    ]
+    assert not surplus, (
+        "§13 states it carries no line numbers, and it still carries these — "
+        "symbol-key them (`module.py::symbol`), which is what the sentence "
+        "promises, because a line in a design document rots and nothing "
+        "re-derives it:\n  - "
+        + "\n  - ".join(f"line {line}: `{cite}`" for line, cite in surplus)
+    )

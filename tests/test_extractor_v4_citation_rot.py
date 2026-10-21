@@ -35,11 +35,20 @@ WHAT THIS PINS
    `` `sym` (`file.py:NNNN`) `` (and the reverse parenthetical form) the symbol
    must exist in the cited file at HEAD. Catches a rename or removal that would
    leave the citation naming a symbol that is not there.
+5. **`test_the_rederived_read_site_citations_land_inside_their_own_symbol`** —
+   the LINE, in the one place the document keeps one. §13.8 question 2 was
+   re-derived at a pin and carries a `file.py:NNNN` per reader, so there the
+   line is not a convenience: two of the ten had drifted onto a DIFFERENT
+   reader (`_state_related_objects` cited `sdk.py:29361`, inside
+   `_state_mitigations`; its `def` is at `29392`), which is exactly the failure
+   §13's table condemns for the old row 4. Symbol-exists-in-file cannot see it.
 
 NOT promised:
-- The line NUMBER is only a convenience and is not asserted — the symbol is,
-  per the document's own rule. A citation whose symbol has merely MOVED inside
-  its file passes, and that is deliberate.
+- The line NUMBER is only a convenience and is not asserted **outside §13.8** —
+  the symbol is, per the document's own rule. A citation whose symbol has
+  merely MOVED inside its file passes, and that is deliberate. §13.8's
+  re-derived paragraph is the exception because the document carries a line
+  there on purpose, so the line is checked against the symbol's own span.
 - Citations whose passage quotes no symbol are out of scope (the document
   carries ~40 of those); this pins the class the issue described.
 - Issue-state claims (`#NNNN` open/closed) are NOT resolved over the network —
@@ -50,6 +59,7 @@ Static, stdlib-only, no network / DB / graph.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -484,15 +494,27 @@ _SYM_THEN_CITATION = re.compile(rf"`({_SYMBOL})`\s*\(`?({_CITED_FILE}):(\d+)")
 _CITATION_THEN_SYM = re.compile(rf"`?({_CITED_FILE}):(\d+)`?\s*\(`({_SYMBOL})`")
 
 
+def _citations_in(text: str) -> list[tuple[int, str, str, int]]:
+    """Every `(offset, symbol, cited_file, cited_line)` the tight forms bind."""
+    found: list[tuple[int, str, str, int]] = []
+    for match in _SYM_THEN_CITATION.finditer(text):
+        found.append(
+            (match.start(), match.group(1), match.group(2), int(match.group(3)))
+        )
+    for match in _CITATION_THEN_SYM.finditer(text):
+        found.append(
+            (match.start(), match.group(3), match.group(1), int(match.group(2)))
+        )
+    return found
+
+
 def _quoted_symbol_citations() -> list[tuple[int, str, str, str]]:
     """Every `(doc_line, symbol, cited_file, cited_line)` the tight forms bind."""
-    found: list[tuple[int, str, str, str]] = []
-    for lineno, line in enumerate(_doc_text().splitlines(), start=1):
-        for match in _SYM_THEN_CITATION.finditer(line):
-            found.append((lineno, match.group(1), match.group(2), match.group(3)))
-        for match in _CITATION_THEN_SYM.finditer(line):
-            found.append((lineno, match.group(3), match.group(1), match.group(2)))
-    return found
+    text = _doc_text()
+    return [
+        (text.count("\n", 0, offset) + 1, symbol, cited_file, str(cited_line))
+        for offset, symbol, cited_file, cited_line in _citations_in(text)
+    ]
 
 
 def test_every_quoted_symbol_citation_resolves_at_head():
@@ -532,6 +554,79 @@ def test_every_quoted_symbol_citation_resolves_at_head():
         + "\n  - ".join(
             f"doc line {line}: `{sym}` -> {where} ({why})"
             for line, sym, where, why in unresolved
+        )
+    )
+
+
+#: §13.8 of `DOC` is the ONE section whose citations were RE-DERIVED at a pin
+#: (`26aff163c`) and therefore carries a `file.py:NNNN` for each reader it names.
+#: Everywhere else the line is a convenience; here it is the citation, so here it
+#: is asserted against the symbol's own span.
+_SECTION_13_8 = ("### 13.8 What this does to our design", "## 14. Not established")
+
+
+def _symbol_span(path: Path, base: str) -> tuple[int, int] | None:
+    """The line span of `base`'s definition in `path`, or None if it is absent."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if getattr(node, "name", None) == base:
+            return node.lineno, node.end_lineno or node.lineno
+    return None
+
+
+def test_the_rederived_read_site_citations_land_inside_their_own_symbol():
+    """In §13.8 a citation's LINE must fall inside the symbol it is attached to.
+
+    `test_every_quoted_symbol_citation_resolves_at_head` proves the symbol exists
+    in the cited FILE, which is the right bound for a document that treats the
+    line as a convenience — and the wrong one for §13.8 question 2, which was
+    re-derived at `26aff163c` and carries a line for each of its readers. Two had
+    drifted onto a DIFFERENT reader: `_state_related_objects` cited
+    `sdk.py:29361` and `_state_related_points` `sdk.py:29378`, while both `def`s
+    sit at `29392`/`29409` — `29361` is inside `_state_mitigations`, a reader of
+    `mitigated_by`, not of `aboutObject`. That is the shape §13's table condemns
+    for the old row 4 (*"`ranking.py:714` is `eid = row[0]`"*), read as a
+    citation, and neither citation guard could see it.
+    """
+    text = _doc_text()
+    start_marker, end_marker = _SECTION_13_8
+    start = text.index(start_marker)
+    section = text[start : text.index(end_marker, start)]
+    citations = _citations_in(section)
+    assert len(citations) >= 8, (
+        f"only {len(citations)} line citations parsed in §13.8 — the section's "
+        "citation shape changed (or the extractor broke) and this guard would "
+        "otherwise pass vacuously."
+    )
+
+    drifted = []
+    for offset, symbol, cited_file, cited_line in citations:
+        path = ROOT / "tortoise" / cited_file
+        if not path.exists():
+            path = ROOT / cited_file
+        doc_line = text.count("\n", 0, start + offset) + 1
+        base = re.sub(r"\(\)$", "", symbol).rsplit(".", 1)[-1]
+        span = _symbol_span(path, base)
+        if span is None:
+            drifted.append(
+                (doc_line, symbol, f"{cited_file}:{cited_line}", "symbol not in file")
+            )
+        elif not span[0] <= cited_line <= span[1]:
+            drifted.append(
+                (
+                    doc_line,
+                    symbol,
+                    f"{cited_file}:{cited_line}",
+                    f"its definition spans {span[0]}-{span[1]}",
+                )
+            )
+
+    assert not drifted, (
+        "these §13.8 citations name a line that holds a DIFFERENT symbol — the "
+        "citation has rotted (re-derive the line at HEAD, or symbol-key it):\n  - "
+        + "\n  - ".join(
+            f"doc line {line}: `{sym}` -> {where} ({why})"
+            for line, sym, where, why in drifted
         )
     )
 
