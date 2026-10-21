@@ -451,6 +451,16 @@ Exit 0 only when **all** of these hold:
    of the 7 sessions. A corpus change therefore fails this check instead of silently re-basing the
    thresholds.
 
+**The ordering half has a third outcome, and it is neither a pass nor a failure.** In a **shallow
+clone** (CI test jobs check out at `fetch-depth: 1`) git grafts the boundary commit, so *every* path
+reports as added by HEAD and the epochs on both sides of the comparison collapse onto the same
+number. The check then cannot tell *"the ordering was violated"* from *"the ordering cannot be
+proved here"*, so it reports **`UNPROVABLE — shallow clone`** in the report's `ordering` and
+`run-order claim` fields, and never a violation: a false red on a correctly ordered tree is the one
+verdict this check must not give. Run it in a full clone (`git fetch --unshallow`) for the ordering
+verdict; the tests that assert a real-artefact PASS skip in a shallow checkout rather than assume
+one.
+
 The pins block below is the machine-readable copy; the prose in §1–§3 is the argument. Both are
 checked, so neither can rot alone.
 

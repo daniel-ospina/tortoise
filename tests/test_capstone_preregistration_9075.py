@@ -32,6 +32,21 @@ from tools import capstone_preregistration_check as check  # noqa: E402
 PREREG_DIR = REPO_ROOT / "docs" / "evidence" / "7949-capstone"
 PREREG = PREREG_DIR / "PRE-REGISTRATION.md"
 
+#: The ordering half reads COMMIT HISTORY, and CI test jobs check out at `fetch-depth: 1` — a
+#: settled, documented property of this repo (`tests/test_lint_tripwire.py`: *"CI test jobs use
+#: shallow fetch-depth:1"*). In a depth-1 clone git grafts the tip, so every path reports as added by
+#: HEAD and the gate can no longer tell "ordering violated" from "ordering unprovable": it reports
+#: the third outcome and these real-artefact PASS assertions SKIP (#9075 review r4 P1). Skipping is
+#: the shape the repo's other history-dependent tests use (`tests/test_finding_provenance.py`,
+#: `tests/test_9397_about_edge_properties.py`); assuming a full clone red-ed `python-ci-gate`.
+requires_history = pytest.mark.skipif(
+    check.history_unavailable(),
+    reason=(
+        "shallow clone (CI test jobs check out at fetch-depth 1): the add-commit epochs the "
+        "ordering half reads are unavailable, so the gate reports the ordering as UNPROVABLE"
+    ),
+)
+
 HEADER = "| id | metric (numerator) | denominator | threshold |\n|---|---|---|---|\n"
 
 
@@ -63,6 +78,7 @@ FULL_ROWS = _rows(
 # ── the real artefact ───────────────────────────────────────────────────────
 
 
+@requires_history
 def test_the_real_registration_is_complete_and_orders_against_its_logs():
     """The acceptance command, on the committed artefact.
 
@@ -274,6 +290,57 @@ def _write_and_commit(repo: Path, name: str, epoch: int) -> Path:
     _git(repo, "add", str(target.relative_to(repo)))
     _git(repo, "commit", "-q", "-m", f"add {name}", epoch=epoch)
     return target
+
+
+def test_a_shallow_checkout_reports_unprovable_instead_of_violated(tmp_path, monkeypatch):
+    """REGRESSION (#9075 review r4 P1): a depth-1 clone must never produce an ordering VIOLATION.
+
+    CI test jobs check out at `fetch-depth: 1`, where git grafts the boundary commit: `git log
+    --diff-filter=A` then reports EVERY path as added by HEAD, so the exempt log's last-touch epoch
+    and the registration's add-commit collapse to the SAME number. The pre-fix gate read that as
+    "exempted, but it was MODIFIED at <epoch>, which is not strictly before ..." — a false RED on a
+    correctly ordered tree, diagnosed as the exact defect the content bound exists to catch.
+    """
+    origin = _repo(tmp_path, monkeypatch)
+    log = _write_log(origin, "e1-e2.log", epoch=1_700_000_000)
+    prereg = _write_and_commit(origin, check.PREREG_NAME, epoch=1_700_000_100)
+    assert check.check_ordering(prereg, [log], _exempt()) == []  # full history: ordered
+
+    shallow = tmp_path / "shallow"
+    _git(tmp_path, "clone", "-q", "--depth", "1", f"file://{origin.resolve()}", str(shallow))
+    probe = subprocess.run(
+        ["git", "rev-parse", "--is-shallow-repository"],
+        cwd=str(shallow), capture_output=True, text=True, check=True,
+    )
+    assert probe.stdout.strip() == "true"
+    rel = log.relative_to(origin)
+    monkeypatch.setattr(check, "REPO_ROOT", shallow.resolve())
+    assert check.history_unavailable() is True
+    with pytest.raises(check.HistoryUnavailable) as excinfo:
+        check.check_ordering(shallow / rel, [shallow / rel], _exempt())
+    assert "shallow" in str(excinfo.value)
+    # And it must be a CheckError, i.e. the exit-2 "cannot read my subject" contract, not a crash.
+    assert isinstance(excinfo.value, check.CheckError)
+
+
+def test_the_run_report_carries_the_third_ordering_outcome(monkeypatch):
+    """The unprovable outcome reaches the report as a claim — never as a failure, never as green."""
+    monkeypatch.setattr(check, "history_unavailable", lambda: True)
+    report = check.run(PREREG_DIR, use_git=True, use_corpus=False)
+    assert report["ordering"] == check.HISTORY_UNAVAILABLE
+    assert report["run_order_claim"] == check.HISTORY_UNAVAILABLE
+    assert not any("MODIFIED at" in f for f in report["failures"]), report["failures"]
+    assert report["ok"] is True
+
+
+def test_the_cli_never_reports_an_unchecked_ordering_as_a_pass(monkeypatch, capsys):
+    """Exit 0 is only honest while the output says the ordering was NOT checked (#9075 r4 P1)."""
+    monkeypatch.setattr(check, "history_unavailable", lambda: True)
+    assert check.main(["--dir", str(PREREG_DIR)]) == 0
+    out = capsys.readouterr().out
+    assert "ordering NOT checked" in out
+    assert "the ordering holds" not in out
+    assert check.HISTORY_UNAVAILABLE[:20] in out
 
 
 def test_ordering_passes_when_the_log_comes_after(tmp_path, monkeypatch):
@@ -607,6 +674,7 @@ def test_run_wraps_a_corpus_failure_as_a_check_error(tmp_path, monkeypatch):
 # ── the CLI contract ────────────────────────────────────────────────────────
 
 
+@requires_history
 def test_cli_exits_zero_on_the_real_registration(capsys):
     assert check.main(["--dir", str(PREREG_DIR)]) == 0
     out = capsys.readouterr().out
@@ -633,6 +701,7 @@ def test_cli_exits_one_on_a_broken_document(tmp_path, capsys):
     assert "FAIL —" in capsys.readouterr().out
 
 
+@requires_history
 def test_the_json_report_is_machine_readable(capsys):
     assert check.main(["--dir", str(PREREG_DIR), "--json"]) == 0
     import json
@@ -719,13 +788,27 @@ def test_the_run_order_claim_is_reported_as_unverified_without_git():
     report = check.run(PREREG_DIR, use_git=False, use_corpus=False)
     assert report["run_order_claim"].startswith("UNVERIFIED")
     verified = check.run(PREREG_DIR, use_git=True, use_corpus=False)
-    assert verified["run_order_claim"] == "verified"
+    if check.history_unavailable():
+        # A shallow checkout has the third outcome, not a verdict: "verified" would be a lie.
+        assert verified["ordering"] == check.HISTORY_UNAVAILABLE
+        assert verified["run_order_claim"] == check.HISTORY_UNAVAILABLE
+    else:
+        assert verified["run_order_claim"] == "verified"
 
 
+@requires_history
 def test_the_acceptance_report_states_the_claim_provenance(capsys):
     assert check.main(["--dir", str(PREREG_DIR)]) == 0
     out = capsys.readouterr().out
     assert "run-order claim: verified" in out
+
+
+@requires_history
+def test_the_acceptance_report_claims_a_verified_ordering_only_when_it_checked_one(capsys):
+    """The provenance line is the same string the report carries — one source, no paraphrase."""
+    assert check.main(["--dir", str(PREREG_DIR)]) == 0
+    out = capsys.readouterr().out
+    assert "the ordering holds" in out
 
 
 # ── round-3 review regressions ───────────────────────────────────────────────
@@ -748,6 +831,55 @@ def test_an_uppercase_scored_marker_also_voids_the_exemption(
     prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
     failures = check.check_ordering(prereg, [log], _exempt())
     assert failures and bad in failures[0], (bad, failures)
+
+
+@pytest.mark.parametrize("glued,bad", [
+    ("(verdict=PASS)", "verdict=PASS"),
+    ("[result=GREEN]", "result=GREEN"),
+    (",verdict=FAIL", "verdict=FAIL"),
+    (";result=RED", "result=RED"),
+])
+def test_a_marker_glued_to_punctuation_also_voids_the_exemption(
+        tmp_path, monkeypatch, glued, bad):
+    """REGRESSION (#9075 review r4 P2): the prefix anchor demanded WHITESPACE before the key.
+
+    `(verdict=PASS)` matched NOTHING at all — the earlier rounds widened the `=` spacing, the
+    trailing punctuation and the case, but never the prefix — so a grandfathered log could carry a
+    scored verdict and keep its exemption. That is the exact laundering bound (d) refuses, defeated
+    by one character of punctuation (`[result=GREEN]`, `,verdict=FAIL`, `verdict\t=PASS` alike).
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    body = UNSCORED_LOG.replace("verdict=UNPREREGISTERED", glued)
+    log = _write_log(repo, "e1-e2.log", epoch=1_700_000_000, body=body)
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+    failures = check.check_ordering(prereg, [log], _exempt())
+    assert failures and bad in failures[0], (bad, failures)
+
+
+@pytest.mark.parametrize("bare", ["verdict=", "result = "])
+def test_an_unparseable_status_marker_fails_closed(tmp_path, monkeypatch, bare):
+    """REGRESSION (#9075 review r4 P2): a marker with no readable value was skipped entirely.
+
+    "Cannot parse" must fail CLOSED. Skipping it lets a log carry a status token the whitelist never
+    inspects — the same class of gap, one step further along.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    log = _write_log(repo, "e1-e2.log", epoch=1_700_000_000, body=UNSCORED_LOG + bare + "\n")
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+    failures = check.check_ordering(prereg, [log], _exempt())
+    assert failures and "cannot be parsed" in failures[0], failures
+
+
+def test_an_exit_marker_glued_to_punctuation_is_seen(tmp_path, monkeypatch):
+    """The SAME token anchor on the exit leg: `ran(exit=0)` is an exit marker, not prose."""
+    repo = _repo(tmp_path, monkeypatch)
+    body = UNSCORED_LOG.replace("exit=3", "ran(exit=0)")
+    log = _write_log(repo, "e1-e2.log", epoch=1_700_000_000, body=body)
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+    failures = check.check_ordering(prereg, [log], _exempt())
+    # `records exit=` (not `must exit 3`): the token must be READ and refused — "absent" and "wrong
+    # value" are different defects, and the pre-fix gate reported the first for this input.
+    assert failures and "records exit=" in failures[0], failures
 
 
 def test_an_uppercase_exit_is_not_accepted_as_three(tmp_path, monkeypatch):
@@ -920,3 +1052,110 @@ def test_the_touch_history_sees_a_merge_commit(tmp_path, monkeypatch):
     prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
     failures = check.check_ordering(prereg, [log], _exempt())
     assert failures and "MODIFIED at" in failures[0], failures
+
+
+# ── round-5: shallow CI, glued markers, unreadable status, wrong-typed inputs ──
+
+
+def test_a_marker_glued_to_punctuation_voids_the_exemption(tmp_path, monkeypatch):
+    """`(?:^|\\s)` required whitespace before the key, so a glued marker matched nothing.
+
+    `(verdict=PASS)`, `[result=GREEN]` and `,verdict=FAIL` all survived the exemption. The
+    `(?<!\\w)` token anchor catches them while still ignoring `subverdict=`.
+    """
+    for glue, bad in (
+        ("prereg=UNPREREGISTERED\n(verdict=PASS)\nexit=3\n", "verdict=PASS"),
+        ("prereg=UNPREREGISTERED\n[result=GREEN]\nexit=3\n", "result=GREEN"),
+        ("prereg=UNPREREGISTERED\n,verdict=FAIL\nexit=3\n", "verdict=FAIL"),
+    ):
+        case = tmp_path / bad.replace("=", "-")
+        case.mkdir()
+        repo = _repo(case, monkeypatch)
+        log = _write_log(repo, "e1-e2.log", epoch=1_700_000_000, body=glue)
+        prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+        failures = check.check_ordering(prereg, [log], _exempt())
+        assert failures and bad in failures[0], (bad, failures)
+
+
+def test_a_similar_but_different_key_is_not_a_marker(tmp_path, monkeypatch):
+    """`subverdict=PASS` / `myresult=GREEN` are not the probe's vocabulary, so they must not fire."""
+    repo = _repo(tmp_path, monkeypatch)
+    body = "prereg=UNPREREGISTERED\nsubverdict=PASS myresult=GREEN\nexit=3\n"
+    log = _write_log(repo, "e1-e2.log", epoch=1_700_000_000, body=body)
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+    assert check.check_ordering(prereg, [log], _exempt()) == []
+
+
+def test_an_unreadable_status_fails_closed(tmp_path, monkeypatch):
+    """A `verdict=` with no parseable value must fail, not be skipped as absent."""
+    repo = _repo(tmp_path, monkeypatch)
+    body = "prereg=UNPREREGISTERED\nverdict=\nexit=3\n"
+    log = _write_log(repo, "e1-e2.log", epoch=1_700_000_000, body=body)
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+    failures = check.check_ordering(prereg, [log], _exempt())
+    assert failures and (
+        "cannot be parsed" in failures[0] or "carries verdict=" in failures[0]), failures
+
+
+def test_a_shallow_checkout_reports_unprovable_not_a_violation(tmp_path, monkeypatch):
+    """REGRESSION (#9075 review r5): CI test jobs check out at fetch-depth:1.
+
+    Git GRAFTS a depth-1 clone at its tip, so every path resolves to HEAD's epoch and "violated"
+    becomes indistinguishable from "unprovable". Reporting the first reds a correctly ordered tree in
+    every CI test job — a false RED blamed on the wrong thing.
+    """
+    monkeypatch.setattr(check, "history_unavailable", lambda: True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    prereg = repo / check.PREREG_NAME
+    prereg.write_text("x\n")
+    with pytest.raises(check.HistoryUnavailable) as excinfo:
+        check.check_ordering(prereg, [])
+    assert "UNPROVABLE" in str(excinfo.value)
+
+
+def test_the_real_artefact_skips_rather_than_reds_when_history_is_unavailable(monkeypatch):
+    """The CI-visible half: a shallow checkout must SKIP, not fail the required check."""
+    monkeypatch.setattr(check, "history_unavailable", lambda: True)
+    report = check.run(PREREG_DIR, use_git=True, use_corpus=True)
+    assert report["ok"], report["failures"]
+    assert report["ordering"].startswith("UNPROVABLE")
+    assert report["run_order_claim"] == report["ordering"]
+
+
+@pytest.mark.parametrize("key,value", [
+    ("corpus", "not-a-dict"),
+    ("denominator_floors", "n/a"),
+    ("split", 7),
+])
+def test_a_wrong_typed_record_block_is_a_usage_error_not_a_traceback(tmp_path, key, value):
+    """REGRESSION (#9075 review r5 P2): the record side was unguarded.
+
+    `record["corpus"] = "not-a-dict"` raised ``AttributeError: 'str' object has no attribute 'get'``
+    — the same class the pins-side guard closed, applied incompletely.
+    """
+    rec = _record()
+    rec[key] = value
+    d = _materialise(tmp_path, rec)
+    with pytest.raises(check.CheckError) as excinfo:
+        check.check_machine_record(d, check.parse_pins(PREREG.read_text()))
+    assert key in str(excinfo.value)
+
+
+def test_a_wrong_typed_salience_labels_pin_is_a_usage_error():
+    """The pins block's `salience_labels` sub-block was the last unguarded `.get()`."""
+    pins = check.parse_pins(PREREG.read_text())
+    pins["salience_labels"] = "notamap"
+    with pytest.raises(check.CheckError) as excinfo:
+        check.check_pins(pins, check.derive_corpus_facts(
+            check.parse_pins(PREREG.read_text())))
+    assert "salience_labels" in str(excinfo.value)
+
+
+def test_a_non_mapping_criteria_entry_is_reported_not_fatal(tmp_path):
+    """`criteria: ["E1"]` must be an attributed finding, not an AttributeError."""
+    rec = _record()
+    rec["criteria"] = ["E1"]
+    d = _materialise(tmp_path, rec)
+    failures = check.check_machine_record(d, check.parse_pins(PREREG.read_text()))
+    assert any("expected a mapping" in f for f in failures), failures

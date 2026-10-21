@@ -6,7 +6,7 @@ the discipline that made `#3011` usable."* A registration that is a document onl
 can be edited after the numbers land, and a threshold chosen after the run is the exact failure the
 constraint exists to prevent. This tool is what makes the artefact executable.
 
-It verifies four things, and it fails on each of them for a specific reason:
+It verifies five things, and it fails on each of them for a specific reason:
 
 1. **Every criteria row carries a metric, a denominator AND a numeric threshold.** A row with a
    placeholder (*"to be decided"*, *"TBD"*, an em dash) is a row that will be decided later — which is
@@ -41,6 +41,13 @@ It verifies four things, and it fails on each of them for a specific reason:
    The effect is the property the epic actually wants: **no number is scored against a threshold
    whose author could already see it**. An exempt log stays unscored forever; the moment E1/E2 are
    re-run, the new log must postdate this file or the check fails.
+
+   **The third outcome.** In a SHALLOW clone (CI test jobs check out at ``fetch-depth: 1``) git grafts
+   the boundary commit, so every path reports as added by HEAD and both epochs collapse onto one
+   number: "ordering violated" and "ordering unprovable" become indistinguishable. The check then
+   reports ``UNPROVABLE — shallow clone`` in the report's ``ordering`` field and raises
+   ``HistoryUnavailable`` from ``check_ordering`` — a verdict it cannot support is never given, and
+   the tests that assert a real-artefact PASS skip instead of red-ing the required check (#9075 r4 P1).
 3. **E4's denominator is 15, never 4.** The planted-operator gold is 15 edges across all seven
    sessions; the 4-edge denominator it replaced swung 0–2 of 4 on *identical* code, so a four-edge
    rate is not evidence of anything. The phrase is rejected wherever it appears in the document,
@@ -101,15 +108,26 @@ UNSCORED = "UNPREREGISTERED"
 #: of four known-bad strings: a closed bad-list silently admits the next scored vocabulary, which is
 #: the inverse of the gap the exemption exists to close (#9075 review P2).
 #:
-#: Three widenings, each found by a review and each the same CLASS of gap — a marker the whitelist
+#: Four widenings, each found by a review and each the same CLASS of gap — a marker the whitelist
 #: could not see:
 #:   * ``\s*=\s*`` — a spaced ``verdict = PASS`` was a false NEGATIVE (r2);
 #:   * ``VALUE_TRAILING`` — a punctuated ``result=UNPREREGISTERED,`` was a false POSITIVE that
 #:     refused a harmless formatting variation with a misleading diagnosis (r2);
-#:   * ``re.IGNORECASE`` — an uppercase ``RESULT=PASS`` escaped entirely (r3).
+#:   * ``re.IGNORECASE`` — an uppercase ``RESULT=PASS`` escaped entirely (r3);
+#:   * ``(?<!\w)`` in place of ``(?:^|\s)`` — the PREFIX anchor required whitespace, so a marker
+#:     glued to punctuation (``(verdict=PASS)``, ``[result=GREEN]``, ``,verdict=FAIL``) produced no
+#:     match at all and the exemption survived it (r4). A ``\b``-style lookbehind anchors on the
+#:     TOKEN, so ``subverdict=`` is still not a marker while ``(verdict=`` is.
 #: The ``prereg=`` line check stays case-SENSITIVE on purpose: it fails closed on ``PREREG=``.
-SCORED_KEYS = re.compile(r"(?:^|\s)(verdict|result)\s*=\s*(\S+)", re.MULTILINE | re.IGNORECASE)
-EXIT_KEY = re.compile(r"(?:^|\s)exit\s*=\s*(\S+)", re.MULTILINE | re.IGNORECASE)
+SCORED_KEYS = re.compile(r"(?<!\w)(verdict|result)\s*=\s*(\S+)", re.MULTILINE | re.IGNORECASE)
+
+#: Every occurrence of a status KEY, whether or not a value can be parsed after it. Compared against
+#: ``SCORED_KEYS``' match count: a marker whose value cannot be read must fail CLOSED, never be
+#: silently skipped as though the log did not carry one (r4).
+SCORED_KEY_TOKENS = re.compile(r"(?<!\w)(verdict|result)\s*=", re.MULTILINE | re.IGNORECASE)
+
+#: The same token anchor as ``SCORED_KEYS``, for the same reason: ``[exit=0]`` is an exit marker.
+EXIT_KEY = re.compile(r"(?<!\w)exit\s*=\s*(\S+)", re.MULTILINE | re.IGNORECASE)
 
 #: Punctuation a value may be glued to at end-of-token (``result=UNPREREGISTERED,``).
 VALUE_TRAILING = ",;."
@@ -373,6 +391,41 @@ def _half_counts(derived: dict, ids: list[str]) -> dict[str, int]:
 
 # ── git ordering ────────────────────────────────────────────────────────────
 
+#: The ordering half's THIRD outcome: the history it reads is not in this checkout.
+#: CI test jobs check out at ``fetch-depth: 1`` — a settled property of this repo
+#: (``tests/test_lint_tripwire.py`` records it: *"CI test jobs use shallow fetch-depth:1"*) — and git
+#: GRAFTS a depth-1 clone at its tip, so ``git log --diff-filter=A`` reports every path as added by
+#: HEAD. Both sides of the comparison then resolve to the same epoch, and the gate can no longer tell
+#: "the ordering was violated" from "the ordering cannot be proved". Reporting the first while the
+#: second is true is a false RED on a correctly ordered tree, blamed on the wrong thing (#9075 r4 P1).
+HISTORY_UNAVAILABLE = (
+    "UNPROVABLE — shallow clone: the add-commit epochs the ordering half reads are not in this "
+    "checkout, so the ordering of this registration against its evidence logs cannot be "
+    "established here (run against a full clone: git fetch --unshallow)"
+)
+
+
+class HistoryUnavailable(CheckError):
+    """The checkout does not carry the history the ordering half needs to reach a verdict."""
+
+
+def history_unavailable() -> bool:
+    """True when this checkout is shallow, i.e. when add-commit epochs are unusable.
+
+    ``git rev-parse --is-shallow-repository`` is the exact signal: in a depth-1 clone the boundary
+    commit is a grafted root, so every tracked path resolves to HEAD's own epoch.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, check=False,
+        )
+    except OSError:  # pragma: no cover - git absent
+        return False
+    if out.returncode != 0:
+        return False
+    return out.stdout.strip().lower() == "true"
+
 
 def _added_epochs(path: Path) -> list[int]:
     """Commit epochs at which ``path`` was ADDED, oldest-first. Empty when never added."""
@@ -425,7 +478,14 @@ def _log_declares_unscored(log: Path) -> tuple[bool, str]:
             f"does not declare prereg={UNSCORED} on its own line (found {declared!r}) — "
             "an exemption covers a log that is unscored, not a log that was scored and renamed"
         )
-    for key, value in SCORED_KEYS.findall(text):
+    markers = SCORED_KEYS.findall(text)
+    tokens = SCORED_KEY_TOKENS.findall(text)
+    if len(markers) < len(tokens):
+        return False, (
+            "carries a verdict=/result= marker whose value cannot be parsed — an unreadable "
+            "status must fail closed, not be skipped as though the log did not carry one"
+        )
+    for key, value in markers:
         if value.rstrip(VALUE_TRAILING) != UNSCORED:
             return False, (
                 f"carries {key}={value} — a grandfathered log may only ever carry "
@@ -470,24 +530,52 @@ def _touch_epochs(path: Path) -> list[int]:
     return sorted(int(x) for x in out.stdout.split() if x.strip().isdigit())
 
 
-def _pins_mapping(pins: dict, key: str) -> dict:
-    """A pins sub-block as a mapping, or a CheckError — never a bare ``dict()`` crash.
+def _mapping(container: dict, key: str, where: str) -> dict:
+    """A sub-block as a mapping, or a CheckError — never a bare ``dict()``/``.get()`` crash.
 
-    A valid-YAML-wrong-TYPE pins value (``pre_existing_unscored_logs: notamap``) is a PARSE error,
-    which the contract says is exit 2; ``dict("notamap")`` raised ``ValueError`` and escaped as an
-    unhandled traceback (#9075 review r4 P3).
+    A valid-YAML-wrong-TYPE value (``pre_existing_unscored_logs: notamap``) is a PARSE error, which
+    the contract says is exit 2; ``dict("notamap")`` raised ``ValueError`` and a wrong-typed
+    ``"corpus"`` in the record raised ``AttributeError``, both escaping as unhandled tracebacks
+    (#9075 review r4 P3, r5 P2). Falsy wrong-types (``[]``, ``""``, ``null``) are treated as an
+    absent block rather than a crash — that fail-closes into the "empty" failure, which is exit 1
+    and correctly attributed.
     """
-    value = (pins or {}).get(key) or {}
+    value = (container or {}).get(key)
+    if not value:
+        return {}
     if not isinstance(value, dict):
         raise CheckError(
-            f"pins.{key} is {type(value).__name__}, expected a mapping — the pins block is "
-            "unparseable for this check"
+            f"{where}.{key} is {type(value).__name__}, expected a mapping — it is unparseable "
+            "for this check"
         )
     return dict(value)
 
 
+def _list(container: dict, key: str, where: str) -> list:
+    """A sub-block as a list, or a CheckError (same contract as :func:`_mapping`)."""
+    value = (container or {}).get(key)
+    if not value:
+        return []
+    if not isinstance(value, list):
+        raise CheckError(
+            f"{where}.{key} is {type(value).__name__}, expected a list — it is unparseable "
+            "for this check"
+        )
+    return value
+
+
+def _pins_mapping(pins: dict, key: str) -> dict:
+    return _mapping(pins, key, "pins")
+
+
 def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None) -> list[str]:
-    """``[]`` when every log is either after the registration or provably unscored."""
+    """``[]`` when every log is either after the registration or provably unscored.
+
+    Raises ``HistoryUnavailable`` (a ``CheckError``) when this checkout is shallow: with a grafted
+    tip the comparison cannot be evaluated at all, and a wrong verdict is worse than no verdict.
+    """
+    if history_unavailable():
+        raise HistoryUnavailable(HISTORY_UNAVAILABLE)
     failures: list[str] = []
     exempt = _pins_mapping(pins or {}, "pre_existing_unscored_logs")
     present = {p.name for p in logs}
@@ -591,8 +679,8 @@ def check_machine_record(directory: Path, pins: dict) -> list[str]:
             f"that no SCORED run exists and name the {UNSCORED} log that predates it"
         )
 
-    corpus = record.get("corpus") or {}
-    pins_corpus = pins.get("corpus") or {}
+    corpus = _mapping(record, "corpus", MACHINE_RECORD)
+    pins_corpus = _mapping(pins, "corpus", "pins")
 
     def cmp(label: str, want, got) -> None:
         """The record may not disagree with the pins on a number it RESTATES.
@@ -623,7 +711,7 @@ def check_machine_record(directory: Path, pins: dict) -> list[str]:
         cmp(f"corpus.{key}", pins_corpus[key], corpus.get(key))
 
     pins_floors = _pins_mapping(pins, "denominator_floors")
-    rec_floors = record.get("denominator_floors") or {}
+    rec_floors = _mapping(record, "denominator_floors", MACHINE_RECORD)
     if not pins_floors:
         failures.append(
             "pins.denominator_floors is empty — every REFUSED boundary the run probe enforces "
@@ -638,7 +726,7 @@ def check_machine_record(directory: Path, pins: dict) -> list[str]:
         )
 
     pins_split = _pins_mapping(pins, "split")
-    rec_split = record.get("split") or {}
+    rec_split = _mapping(record, "split", MACHINE_RECORD)
     for half in ("tune", "held_out"):
         cmp(f"split.{half}", sorted(pins_split.get(half) or []), sorted(rec_split.get(half) or []))
 
@@ -648,7 +736,13 @@ def check_machine_record(directory: Path, pins: dict) -> list[str]:
     # Each criterion row's threshold in the record must match the table's, character for character.
     rows = parse_criteria_rows((directory / PREREG_NAME).read_text())
     table = {r["id"]: _plain(r["threshold"]) for r in rows}
-    for crit in record.get("criteria") or []:
+    for crit in _list(record, "criteria", MACHINE_RECORD):
+        if not isinstance(crit, dict):
+            failures.append(
+                f"{MACHINE_RECORD} has a criteria entry that is "
+                f"{type(crit).__name__}, expected a mapping"
+            )
+            continue
         cid = str(crit.get("id") or "")
         if cid not in table:
             failures.append(f"{MACHINE_RECORD} carries criterion {cid!r} with no row in the table")
@@ -658,12 +752,16 @@ def check_machine_record(directory: Path, pins: dict) -> list[str]:
                 f"{MACHINE_RECORD} threshold for {cid} is {crit.get('threshold')!r} but the "
                 f"table says {table[cid]!r}"
             )
-    missing = sorted(set(table) - {str(c.get("id")) for c in record.get("criteria") or []})
+    missing = sorted(
+        set(table)
+        - {str(c.get("id")) for c in _list(record, "criteria", MACHINE_RECORD)
+           if isinstance(c, dict)}
+    )
     if missing:
         failures.append(f"{MACHINE_RECORD} omits criteria rows {missing}")
 
     exempt = sorted(_pins_mapping(pins, "pre_existing_unscored_logs"))
-    if sorted(record.get("unscored_runs_before_this_registration") or []) != exempt:
+    if sorted(_list(record, "unscored_runs_before_this_registration", MACHINE_RECORD)) != exempt:
         failures.append(
             f"{MACHINE_RECORD} unscored_runs_before_this_registration is "
             f"{record.get('unscored_runs_before_this_registration')!r} but the pins exempt {exempt!r}"
@@ -744,7 +842,7 @@ def check_e4_denominator(rows: list[dict[str, str]], text: str, pins: dict) -> l
 def check_pins(pins: dict, derived: dict) -> list[str]:
     failures: list[str] = []
     corpus = pins.get("corpus") or {}
-    salience_pins = pins.get("salience_labels") or {}
+    salience_pins = _pins_mapping(pins, "salience_labels")
     split = pins.get("split") or {}
 
     def cmp(label: str, want, got) -> None:
@@ -827,7 +925,16 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
     logs = sorted(directory.glob(EVIDENCE_LOG_GLOB))
     report["evidence_logs"] = [p.name for p in logs]
     if use_git:
-        failures += check_ordering(prereg, logs, pins)
+        try:
+            failures += check_ordering(prereg, logs, pins)
+            ordering = "verified"
+        except HistoryUnavailable:
+            # The THIRD outcome: neither a pass nor an ordering failure. Folding it into either is
+            # what reds a correctly ordered tree in every CI test job (#9075 r4 P1).
+            ordering = HISTORY_UNAVAILABLE
+    else:
+        ordering = "UNVERIFIED (--no-git)"
+    report["ordering"] = ordering
     failures += check_machine_record(directory, pins)
 
     if use_corpus:
@@ -863,7 +970,7 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
     # that no scored run exists is the `*.log` scan below, which `--no-git` skips. Say so in the
     # report rather than letting a skip flag silently turn an assertion into a green (#9075 review
     # P2-4). CI and the §7 acceptance command run the full check.
-    report["run_order_claim"] = "verified" if use_git else "UNVERIFIED (--no-git)"
+    report["run_order_claim"] = report["ordering"]
     return report
 
 
@@ -907,9 +1014,14 @@ def main(argv: list[str] | None = None) -> int:
                 "/{sentences_total} salience={salience[in_scope]}-in-scope"
                 "/{salience[positively_classified]}-classified".format(**d)
             )
-        if report["ok"]:
+        if report["ok"] and report["ordering"] == "verified":
             print("OK — every criteria row is complete, the ordering holds, "
                   "the E4 denominator is 15, and the pins match the tree")
+        elif report["ok"]:
+            # Never let an unchecked ordering read as a checked one: the verdict line carries the
+            # reason it is missing, and it is the same string the report's claim field carries.
+            print("OK (ordering NOT checked) — every criteria row is complete, the E4 denominator "
+                  f"is 15, and the pins match the tree; the ordering half is {report['ordering']}")
         else:
             print(f"FAIL — {len(report['failures'])} problem(s):")
             for f in report["failures"]:
