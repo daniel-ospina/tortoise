@@ -248,7 +248,13 @@ WHAT THIS PINS
    copies so they cannot come back: a count is asserted, or it is rot. The same
    ban covers the `#7948` envelope's site count, which lives in that issue's
    owner-decision comment and in the changelog — the docstring restated it in two
-   spellings the original ban could not see, and both are matched now.
+   spellings the original ban could not see. The tenth review then found two more
+   copies in two more spellings (the anti-vacuity floors' census pair, and the
+   customer-callable row count one increment behind the table), which is why the
+   ban now states the PROPERTY instead of listing shapes: a COUNT with a census
+   UNIT, scoped as current or as a dated reading, in either order, over the
+   UNWRAPPED text — a comment wraps, and a copy whose scope word lands on the next
+   line is still a claim.
 
 WHAT THE CENSUS CANNOT SEE (stated, not silently excluded)
 ---------------------------------------------------------
@@ -387,19 +393,22 @@ _SYMBOL = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*(?:\
 #: (`test_the_file_states_no_count_it_does_not_measure`).
 _MIN_EMPTY_PATTERN = 5
 
-#: Floor arms: deliberately BELOW today's census (20 named sites / 22 rows at the
-#: time of writing — the numerals are historical, which is the point: a floor is
-#: not a count, and pinning it at today's exact figure would turn a legitimate
-#: contraction into a failure whose message says "the parser broke"). They are
-#: below deliberately, because a row deleted together with its reader is not a
-#: reason to red. The floor exists only so no arm can pass by finding nothing.
-#: ⚠️ The exact counts are asserted against the TABLE, one arm down — never here.
+#: Floor arms: deliberately BELOW the census the TABLE declares, so a legitimate
+#: contraction — a row deleted together with its reader — is not a reason to red,
+#: and so a broken parser cannot pass by finding nothing. A floor is not a count,
+#: and pinning it at the table's own figure would turn that contraction into a
+#: failure whose message says "the parser broke". This comment states the
+#: PROPERTY and restates no numeral: the exact counts are asserted against the
+#: table by `test_the_prose_counts_match_the_table`, one arm down, and a copy of
+#: them here is what `test_the_file_states_no_count_it_does_not_measure` bans.
 _MIN_SITES = 10
 _MIN_ROWS = 10
 #: `FOUR` was the floor when this arm was written, i.e. the count BEFORE the
-#: fifth correction (four → six customer-callable rows). Kept at that historical
-#: value so a *contraction* of the prose is visible even before the exact-count
-#: arm below reads the numeral itself; the table declares seven today.
+#: fifth correction. Kept at that historical value so a *contraction* of the
+#: prose is visible even before the exact-count arm below reads the numeral
+#: itself; that arm — `test_the_prose_counts_match_the_table` — is the only place
+#: the current customer-callable count may appear, so this comment stops at the
+#: property rather than quoting the table's figure.
 _MIN_CUSTOMER_CALLABLE = 4
 
 #: Floor for the call-time class walk, for the same reason as
@@ -1797,7 +1806,7 @@ def test_every_code_site_that_traverses_the_edge_is_declared():
     * a reader that names NO type at all (`MATCH (n)-[r]->(m)`) must be either a
       §13 row or an `EMPTY_PATTERN` entry saying why it is not an `aboutObject`
       read for a referent. ⚠️ This class used to be ONE declared example, so the
-      three further members that exist today — `entityProfile` / `tortoise_traverse`
+      further members that exist today — `entityProfile` / `tortoise_traverse`
       (customer-callable) and the backfill census — were absent from the table
       while every arm stayed green.
     * a reader whose type slot is an EXPRESSION the resolver cannot fill
@@ -3302,22 +3311,68 @@ def test_the_extractor_section_keeps_its_three_questions():
     )
 
 
+#: A NUMBER — digits, or one of the words `_NUMBER_WORDS` knows. Deliberately
+#: NOT `_NUMERAL`, which also accepts any identifier so a DOCUMENT's prose can
+#: read `TWENTY-FOUR`: beside a unit, `_NUMERAL` makes English inflate the ban
+#: (`a new member, not on today's tree` in the completeness arm's docstring is a
+#: "restated count" under it, and the ban would red on a sentence that states no
+#: count). Longest-first so `twenty-two` is read as one number, not `twenty` plus
+#: a suffix.
+_COUNT = r"\d+|" + "|".join(sorted(_NUMBER_WORDS, key=len, reverse=True))
+
+
+def _unwrapped_for_scanning(source: str) -> str:
+    """The source with each comment line's `#`/`#:` marker blanked to spaces.
+
+    The ban below is a claim about PROSE, and prose wraps. A copy whose scope word
+    lands on the next comment line is otherwise invisible to a per-line scan — the
+    tenth review's `<N> named sites / <N> rows at the` + `#: time of writing` pair
+    was wrapped exactly there, and a per-line scan could not have seen it even
+    after the spelling was added. Only a START-of-line marker is blanked, and only
+    with spaces, so every offset — and therefore every line number the arm reports
+    — still points at the line the author sees.
+    """
+    return re.sub(
+        r"\n[^\S\n]*#:?[^\S\n]*",
+        lambda match: "\n" + " " * (len(match.group(0)) - 1),
+        source,
+    )
+
 #: A count stated in THIS file's prose about a set this file does not measure
 #: there: the `EMPTY_PATTERN` register's size (which belongs to §13 and to
 #: `test_the_empty_pattern_register_count_matches_the_prose`, the one reader of it),
-#: a walk's member count (which the class arm asserts against the derived set), and
+#: a walk's member count (which the class arm asserts against the derived set), the
+#: anti-vacuity floors (which the exact-count arm asserts against the table), and
 #: the `#7948` envelope's site count (which lives in that issue's owner-decision
 #: comment and in `STORAGE-ARCHITECTURE-CHANGELOG.md` — neither of which this arm
 #: can compare a restated numeral to, so a copy here is rot with a decoder ring).
 #: All of them were restated here and all of them went stale — the register one in
-#: three places while the arm went on asserting the document's numeral, and the
-#: envelope one stated a figure that nothing claimed at all, which the ninth review
-#: of PR #9398 found while this arm stayed green.
+#: three places while the arm went on asserting the document's numeral, the
+#: envelope one in a figure that nothing claimed (ninth review of PR #9398), and
+#: the census and the floors in present-tense copies the exact-count arm falsified
+#: (tenth review, which found two more while this arm reported clean). That history
+#: is why the ban stopped listing spellings: the final two alternatives state the
+#: PROPERTY a copy has — a COUNT with a census UNIT, scoped as CURRENT (`today`,
+#: `currently`) or as a DATED reading (`at the time of writing`) — so a fifth
+#: spelling of the same claim is covered without another widening.
+#: The scan runs over `_unwrapped_for_scanning()`, not raw lines: a comment wraps,
+#: and a claim whose scope word lands on the next line is still a claim (the
+#: tenth review's `<N> named sites / <N> rows at the` + `time of writing` copy was
+#: wrapped exactly there).
 _SELF_COUNT_CLAIM = re.compile(
-    rf"(?:{_NUMERAL})\s+members today"
-    rf"|today's census:\s*(?:{_NUMERAL})\s+members"
-    rf"|(?:{_NUMERAL})[- ]site envelope"
-    rf"|(?:{_NUMERAL})\s+sites? claimed",
+    # the register's size, in §13's two spellings
+    rf"(?:{_COUNT})\s+members? today"
+    rf"|today's census:\s*(?:{_COUNT})\s+members?"
+    # the `#7948` envelope: the issue's hyphenated form and the docstring's
+    rf"|(?:{_COUNT})[- ]site envelope"
+    rf"|(?:{_COUNT})\s+sites? claimed"
+    # the property, NUMERAL-FIRST: `<N> [qualifier] sites|rows|members`, scoped
+    # `today` / `currently` / `at the time of writing` before the sentence ends
+    rf"|(?:{_COUNT})\s+(?:[^\W\d_]+\s+){{0,3}}(?:sites?|rows?|members?)\b"
+    rf"[^.]{{0,60}}?(?:today|currently|at\s+the\s+time\s+of\s+writing)"
+    # and NUMERAL-LAST (`the table declares <N> today`), which has no unit word
+    # for the alternative above to key on
+    rf"|declares\s+(?:{_COUNT})\b[^.]{{0,20}}?\btoday",
     re.IGNORECASE,
 )
 
@@ -3343,14 +3398,28 @@ def test_the_file_states_no_count_it_does_not_measure():
     file measures: it is stated in that issue's owner-decision comment and recorded
     in `STORAGE-ARCHITECTURE-CHANGELOG.md`, and the docstring above restated it as a
     number neither of them claimed — in two spellings the original ban could not see
-    (`<N>-site envelope`, `<N> sites claimed`). Both are matched now, so the copy
-    cannot come back in a third shape.
+    (`<N>-site envelope`, `<N> sites claimed`).
+
+    The fifth and sixth are the two the TENTH review found, and they are why this
+    arm no longer enumerates spellings. `_MIN_SITES`/`_MIN_ROWS`'s comment stated a
+    numeral pair the table never carried and that never coexisted, and
+    `_MIN_CUSTOMER_CALLABLE`'s stated the customer-callable row count one increment
+    behind the table — both present-tense, both falsified by
+    `test_the_prose_counts_match_the_table`, and both green here because
+    `declares <N> today` and a `<N> named sites / <N> rows at the time of writing`
+    pair matched none of the four listed shapes. A fixed list of shapes is a claim
+    about the shapes that will be written; the property is not: the last two
+    alternatives match a COUNT with a census UNIT scoped as CURRENT or as a DATED
+    reading (numeral-first, with the unit; and numeral-last for the `declares <N>
+    today` form, which carries no unit), over the unwrapped text so a comment that
+    wraps its scope word onto the next line is still seen.
     """
     source = Path(__file__).read_text(encoding="utf-8")
+    scanned = _unwrapped_for_scanning(source)
     offenders = [
-        f"line {number}: `{match.group(0)}`"
-        for number, line in enumerate(source.splitlines(), start=1)
-        for match in _SELF_COUNT_CLAIM.finditer(line)
+        f"line {scanned.count(chr(10), 0, match.start()) + 1}: "
+        f"`{' '.join(match.group(0).split())}`"
+        for match in _SELF_COUNT_CLAIM.finditer(scanned)
     ]
 
     # CONTROL: the pattern must still match a restated count, or this arm is a
@@ -3379,6 +3448,29 @@ def test_the_file_states_no_count_it_does_not_measure():
     assert _SELF_COUNT_CLAIM.search("the first " + "eleven" + "-site envelope"), (
         "the banned-count pattern no longer matches `<N>-site envelope`, so the "
         "changelog's spelling of the same claim is not covered by this ban"
+    )
+    # And the two the tenth review found, verbatim from the pre-fix comments and
+    # built from parts for the same reason: the first is the WRAPPED pair (the
+    # copied text spans two `#:` lines, which is part of why it survived), the
+    # second is the numeral-last spelling with no unit word at all.
+    assert _SELF_COUNT_CLAIM.search(
+        _unwrapped_for_scanning(
+            "#: Floor arms: deliberately BELOW today's census ("
+            + "20"
+            + " named sites / "
+            + "22"
+            + " rows at the\n#: time of writing — the numerals are historical)"
+        )
+    ), (
+        "the banned-count pattern no longer matches a `<N> named sites / <N> rows "
+        "at the time of writing` pair, so the tenth review's first stale copy can "
+        "come back green — and a comment WRAPS, so it must be seen across the wrap"
+    )
+    assert _SELF_COUNT_CLAIM.search(
+        "the table " + "declares " + "seven" + " today"
+    ), (
+        "the banned-count pattern no longer matches `declares <N> today`, so the "
+        "numeral-last spelling the tenth review found is uncovered"
     )
     assert not offenders, (
         "this file restates a census count it does not assert, so the copy will "

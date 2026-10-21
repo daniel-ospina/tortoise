@@ -1348,6 +1348,62 @@ the stale count back in a comment reds the count-copy arm. Counts are unchanged 
 twenty-two rows, nine customer-callable rows (twelve sites)** — the gate was hiding no member at
 this head, which is the point: it would have hidden the next one.
 
+### The ninth review — the clause detector was case-sensitive, and a numeral nothing claimed
+
+The ninth review found no defect in the table, the three derivations, the CI registration or the four
+asserted numerals. Both of its findings were in the instrument's own handling.
+
+- **The governing-clause detector was case-SENSITIVE.** `_CLAUSE` carried no `re.IGNORECASE` while
+  both of its consumers `.upper()`ed the capture — the normalization a regex that can only yield
+  upper case makes dead code. A reader written `match (n)-[:aboutObject]->(m)` therefore derived into
+  NO class: not the named census, not the empty-pattern walk, not the call-time walk. The
+  completeness arm stayed green while §13 shipped a row short. No reader in the tree is written that
+  way today, so nothing was missed at that head — the failure was latent, not shipped.
+- **The flag alone was not the fix, and that was measured rather than reasoned.** With
+  `re.IGNORECASE` and no anchor, the completeness arm derived a FALSE site in
+  `value_extractor.GROUNDING_SYSTEM`: an LLM prompt whose prose says *"match summary items"* and
+  whose JSON schema then carries an example naming the edge, so the English verb governed a bracket.
+  The clause is now anchored on the `(` a real Cypher clause always carries, and both directions are
+  pinned in `_MECHANISM_CASES` / `_EMPTY_PATTERN_CASES`: a lowercase clause that must derive, a
+  lowercase `merge` and a prose sentence that must not.
+- **The docstring stated an envelope site count that nothing claimed.** The issue body names no
+  count; the issue's owner-decision comment and this changelog state the real one, and the docstring
+  disagreed with both. The numeral is removed rather than corrected — a count restated in a file that
+  does not measure it is the rot this guard polices — and the restated-count ban was widened to the
+  two spellings it could not see (the hyphenated `-site envelope` form and the `sites claimed` form).
+
+**Measured.** Restoring the case-sensitive detector reds two arms (both lowercase cases); taking the
+flag but dropping the anchor reds two (the prose near-miss and the false `value_extractor` site).
+Counts are unchanged.
+
+### The tenth review — two more restated counts, and the ban stops listing spellings
+
+The tenth review found the four asserted numerals, the three derived sets and the CI registration
+sound, and one defect left: two present-tense copies of census counts inside the guard itself, in
+spellings the restated-count ban could not see.
+
+- **The anti-vacuity floors' comment stated a pair the table never carried.** It read *"deliberately
+  BELOW today's census (20 named sites / 22 rows at the time of writing)"*, and those two numerals
+  never coexisted — the row count and the site count arrived in different corrections — so the
+  comment paired a symbol count with a row count, the units error the guard exists to stop. It also
+  contradicted this changelog's own record of the floors.
+- **The customer-callable floor's comment stated the row count one increment behind the table**, in a
+  present-tense `the table declares <N> today`.
+
+Neither was seen because the ban was a fixed list of four spellings, and this was the third round of
+widening it after the fact. It now states the PROPERTY: a COUNT with a census UNIT, scoped as current
+(`today`, `currently`) or as a dated reading (`at the time of writing`), in either order — plus a
+numeral-last alternative for the spelling that carries no unit word. It also scans the UNWRAPPED text
+(start-of-line comment markers are blanked to spaces, so every reported line number still points at
+the line the author sees), because the wrapped pair is precisely how one of the copies survived a
+per-line scan.
+
+Both comments are now property-only and point at `test_the_prose_counts_match_the_table`, the arm
+that measures the table. **Measured.** Restoring the two pre-fix comments reds
+`test_the_file_states_no_count_it_does_not_measure` on both, and each pre-fix line is a control
+sample inside that arm, so the shapes cannot silently fall out of coverage. Counts are unchanged —
+**twenty-six sites, twenty-two rows, nine customer-callable rows (twelve sites)**.
+
 ## §13 — the `aboutObject` headline claim is SCOPED to the files it measured (`#9399`)
 
 The removed sentence and why it went. §13's evidence for the KEEP ruling opened
