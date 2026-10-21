@@ -12595,14 +12595,22 @@ class TortoiseSDK:
         the append's RETURN is not checked here, so a FAILED append still
         proceeds to the cache: the lane is honest about ORDER and says nothing
         about CONFIRMATION. The doors that gate on a per-call append outcome do
-        so ARM BY ARM, not door by door: `create_point` and `update_point`'s
-        NON-promote arm raise `WriteNotLandedError` on `_record_committed is
-        False`, and `delete_point` gates on `_delete_committed =
-        _journal_entity_mutation(...)`. `update_point`'s PROMOTE arm (its record
-        is emitted after the write, return discarded), `invalidate_point` and
-        `retract_point` discard the append's return exactly as this door does,
-        so the same residual is carried by FOUR doors, not one. Closing it is
-        part 2 of #9124 (it changes the failure contract, not the order).
+        so ARM BY ARM, not door by door, and they gate their CACHE WRITE on it:
+        `create_point` and `update_point`'s NON-promote arm raise
+        `WriteNotLandedError` on `_record_committed is False`. `update_point`'s
+        PROMOTE arm (its record is emitted after the write, return discarded),
+        `invalidate_point` and `retract_point` discard the append's return
+        exactly as this door does, so the same residual is carried by FOUR
+        doors in this family, not one. Closing it is part 2 of #9124 (it changes
+        the failure contract, not the order).
+
+        `delete_point` is NOT in that class either, but for the opposite reason:
+        since #9207 it issues the `DETACH DELETE` FIRST and reads the append's
+        outcome only AFTERWARDS, to decide WHETHER to raise — never whether to
+        destroy — so the destruction is gated on no append (the OVERRIDES line is
+        on #9207). A failed append there costs the bookkeeping that follows the
+        destroy (`PointRetracted`, the tag GC and `_mark_dirty` are skipped, and
+        the door declares that residual in place), not the destruction itself.
 
         E6 (#1538) D2 — bi-temporal validity windows: the supersession ALSO
         stamps the old point's window END (``validTo`` = the successor's
@@ -13331,10 +13339,13 @@ class TortoiseSDK:
         append's return is discarded here, so a FAILED append still retracts the
         cache node and reports success — measured on this branch by forcing
         `_emit_event` to return False: the point came back `status='retracted'`.
-        Only `create_point`, `update_point`'s non-promote arm and `delete_point`
-        gate on their append's return; `invalidate_point`, this door and
-        `supersede_point` do not. That residual is part 2 of #9124 (it changes
-        the failure contract).
+        Only `create_point` and `update_point`'s non-promote arm gate their
+        CACHE WRITE on their append's return; `invalidate_point`, this door and
+        `supersede_point` do not. (`delete_point` branches on the append's
+        return too, but not to gate a cache write: since #9207 its `DETACH
+        DELETE` is issued FIRST and that outcome decides only WHETHER to raise
+        afterwards, never whether to destroy.) That residual is part 2 of #9124
+        (it changes the failure contract).
 
         #432: retraction is a TERMINAL state transition, not a deletion — the
         projection keeps the point with status='retracted' and default query
