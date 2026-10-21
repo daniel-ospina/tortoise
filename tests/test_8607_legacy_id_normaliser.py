@@ -23,8 +23,10 @@ contract-only fixture would miss: ``:Session`` (caller-supplied id),
 all), and a shape-mix group that is *built to no regex* so the frame-correction
 assertion binds to the contract predicate rather than to its own generator.
 
-Pure functions over a plain dict: no graph, no database, no clock. Runs in the
-embedded carve-out lane.
+Pure functions over a plain dict: no graph, no database, no clock. Registered
+in `core` (docker fast legs) — **not** the embedded carve-out: every input is a
+`tortoise-logical-dump-v1` dict built in-process, so there is no URI, no graph
+and no fixture to place.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -235,6 +238,48 @@ def test_the_target_is_the_existing_canonical_minter():
     # second identity space. `entity_name_id` is `_entity_name_id`'s (§1.2).
     assert canonical_id("Point", "p-0000438") == entity_name_id("Point", "p-0000438")
     assert canonical_id("Point", "p-0000438") != canonical_id("Object", "p-0000438")
+
+
+def test_a_normalised_point_key_is_an_entity_handle_not_a_minted_ulid():
+    """⚠️ The DECISION this pass makes, pinned where it can be seen.
+
+    The target is ``entity_name_id``'s handle — ``poi-<sha256[:26]>`` — which is
+    NOT the ``<ts-hex>-<uuid12>`` shape ``create_point`` mints (and warns about
+    when it is handed anything else). A normalised ``:Point`` key space is
+    therefore the entity-handle spelling, and the label carries BOTH canonical
+    shapes after a pass. Deliberate, and stated in the module docstring and
+    §1.4: a recomputable target is what makes the plan reviewable, verifiable
+    and reversible, and ``ulid()`` is random — so there is no deterministic
+    minted-shape target to aim at instead.
+    """
+    from tortoise.sdk import _is_ulid
+
+    new = canonical_id("Point", "p-0000438")
+    assert new.startswith("poi-"), new
+    assert not _is_ulid(new), "the entity handle is NOT the created-point mint format"
+    # …and it is canonical anyway, via the label-agnostic union `is_canonical`
+    # uses — which is exactly what makes a second run a no-op.
+    assert shape(new) == "entity-handle"
+    assert is_canonical(new)
+
+
+def test_a_pass_leaves_two_canonical_shapes_on_point_and_says_so():
+    """The module's own instrument must REPORT the split, not hide it.
+
+    ``census(canonical_shapes)`` is the reading a lane quotes; before this
+    assertion the only shape assertion was over the INPUT. A pass that silently
+    changed the :Point key space from one canonical shape to two would leave the
+    instrument reading ``{"minted-ulid": 8700}`` and never say so.
+    """
+    dump = _dump()
+    out, _ = apply_plan(dump, build_plan(dump))
+    after = census(out)
+    assert after.canonical_shapes == {
+        "minted-ulid": MINTED,
+        "entity-handle": _renamed_population(),
+    }, after.canonical_shapes
+    assert after.legacy == 0
+    assert after.legacy_shapes == {}
 
 
 # ── applying it: the counts reconcile, and nothing else moves ──────────────
@@ -582,7 +627,73 @@ def test_cli_refuses_an_in_place_run(tmp_path):
                 str(tmp_path / "r.json"),
             ]
         )
-    assert exc.value.code == 2
+    # The usage error propagates as SystemExit(<message>) — Python exits 1 — and
+    # NOT as argparse's own 2, which this tool reserves for a refusal.
+    assert "--out and --dump" in str(exc.value.code)
+
+
+def test_cli_usage_errors_exit_1_so_2_means_only_refused(tmp_path):
+    """`2` is the REFUSAL; a bad invocation must not be indistinguishable from it.
+
+    `parser.error` — argparse's own path — exits 2, and both cases write
+    nothing, so a caller keying on `2 == refused` treated a typo'd command line
+    as a refused snapshot. The tool's own `_Parser` makes every usage error a
+    usage/IO failure (exit 1).
+    """
+    from tools.legacy_id_normalise import main
+
+    dump_path = tmp_path / "dump.json"
+    dump_path.write_text(json.dumps(_dump()), encoding="utf-8")
+    usage_errors = [
+        ["--dump", str(dump_path), "--apply"],  # --out and --report missing
+        ["--dump", str(dump_path), "--apply", "--revert"],  # both modes at once
+        ["--dump", str(dump_path), "--revert", "--out", str(tmp_path / "o.json")],  # no --report
+        ["--nonsense"],  # unknown flag
+    ]
+    for argv in usage_errors:
+        with pytest.raises(SystemExit) as exc:
+            main(argv)
+        assert isinstance(exc.value.code, str) and "error:" in exc.value.code, (
+            argv,
+            exc.value.code,
+            "a usage error is SystemExit(<message>) -> exit 1, never the refusal's 2",
+        )
+
+
+def test_cli_exit_codes_are_distinguishable_at_the_process_level(tmp_path):
+    """The documented contract, settled the way a caller sees it: `$?`.
+
+    ``uv run python tools/legacy_id_normalise.py --dump x.json --apply; echo $?``
+    answers 1 (usage), and a refused snapshot answers 2 — the two are told apart
+    without reading stderr.
+    """
+    import subprocess
+
+    tool = Path(__file__).resolve().parents[1] / "tools" / "legacy_id_normalise.py"
+    good = tmp_path / "dump.json"
+    good.write_text(json.dumps(_dump()), encoding="utf-8")
+    truncated = tmp_path / "truncated.json"
+    bad = _dump()
+    bad["node_count"] = len(bad["nodes"]) + 5
+    truncated.write_text(json.dumps(bad), encoding="utf-8")
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, str(tool), *argv], capture_output=True, text=True)
+
+    usage = run(["--dump", str(good), "--apply"])
+    assert usage.returncode == 1, (usage.returncode, usage.stderr[-400:])
+    assert "error:" in usage.stderr
+
+    dry = run(["--dump", str(good)])
+    assert dry.returncode == 0, (dry.returncode, dry.stderr[-400:])
+
+    refusal = run(["--dump", str(truncated)])
+    assert refusal.returncode == 2, (refusal.returncode, refusal.stderr[-400:])
+    assert "REFUSED" in refusal.stderr
+
+    missing = run(["--dump", str(tmp_path / "nope.json")])
+    assert missing.returncode == 1, (missing.returncode, missing.stderr[-400:])
+    assert "Traceback" not in missing.stderr
 
 
 # ─────────────────────────── the ledger identity ───────────────────────────
@@ -663,7 +774,7 @@ def test_cli_refuses_two_artifacts_on_one_path(tmp_path, target, other):
         argv += ["--report", str(paths["--report"])]
     with pytest.raises(SystemExit) as exc:
         main(argv)
-    assert exc.value.code == 2
+    assert "error:" in str(exc.value.code), exc.value.code
     assert json.loads(same.read_text(encoding="utf-8"))["nodes"], "the dump survived"
 
 

@@ -2011,6 +2011,32 @@ def test_graph_census_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_legacy_id_normalise_tool_change_selects_core_not_tier1():
+    # #9523 review P1: tools/legacy_id_normalise.py is the CLI for the legacy-id
+    # normaliser and owns tests/test_8607_legacy_id_normaliser.py, registered
+    # `core`.
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row
+    # matches the tool, so a CLI-only diff came back with `changed == []` and
+    # took the docs-only early return: `select()` returned NO surface, and the
+    # file whose entire content is the dry-run default, the
+    # `--apply`/`--revert`-requires-`--out` rule and the 0/1/2 exit contract ran
+    # none of its own cases. Registering the test under `core` does not help — a
+    # name in a surface's test_files only runs when that surface is already
+    # selected.
+    #
+    # Measured before the CORE_ALSO entry: `_sel(["tools/legacy_id_normalise.py"])`
+    # -> surfaces=[], full=False, test_8607_legacy_id_normaliser.py absent.
+    # CORE_ALSO (not TOOL_CARVEOUTS) is the deliberate choice: the suite is
+    # hermetic (pure functions over a dict — no graph, no Postgres), so selecting
+    # `core` runs it at the lowest CI cost.
+    # Mutation check: removing the CORE_ALSO entry fails assert 2 below.
+    r = _sel(["tools/legacy_id_normalise.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_8607_legacy_id_normaliser.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_write_op_reachability_tool_change_selects_core_not_tier1():
     # #4495 review P2: tools/write_op_reachability.py is the CLI that reports the
     # write-op allowance's stock/flow conversion, and its guard

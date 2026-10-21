@@ -59,8 +59,43 @@ original keys back.
 (``tortoise/ids.py``), applied to the node's already-unique key. §1.4 rule 1:
 *"the legacy id is already the node's unique key; the rewrite is a rename of
 the key value, not a merge"*. So the target is one a reader can recompute, and
-there is no second minter to drift. The resulting handle is canonical by
+there is no second MINTER to drift. The resulting handle is canonical by
 :func:`is_canonical`, which is what makes a second run a no-op.
+
+### ⚠️ What that target IS, stated plainly: a ``:Point`` key is then `poi-<hash>`
+
+The handle ``entity_name_id`` emits is ``label[:3]-<sha256[:26]>``, so a
+re-keyed ``:Point`` key is **``poi-<hash>``** — and that is **not** the
+``<timestamp-hex>-<uuid12>`` shape ``create_point`` mints, nor the one
+``STORAGE-ARCHITECTURE`` §17.5 records `:Point` ids are minted in. Three
+consequences a reader must not have to infer from :func:`is_canonical`'s union:
+
+* **After a pass the label carries TWO canonical spellings at once.** New
+  points are ``minted-ulid``; the re-keyed population is ``entity-handle``.
+  :func:`census` REPORTS that split (``canonical_shapes == {"minted-ulid":
+  <untouched>, "entity-handle": <renamed>}``) rather than reporting one
+  "canonical" number, and
+  ``tests/test_8607_legacy_id_normaliser.py::test_a_pass_leaves_two_canonical_shapes_on_point_and_says_so``
+  pins it. This is a deliberate key-space exception, not a claim that the pass
+  reproduced ``create_point``'s spelling.
+* **``create_point``'s non-ULID warning does not describe a normalised key.**
+  ``sdk.create_point`` logs *"create_point received non-ULID id=… — canonical
+  format is <timestamp-hex>-<uuid12>"* for an **explicit id overriding the
+  auto-mint at creation**. A normalised key is not minted there: it is a §1.4
+  rule-1 rename of an existing key value, applied to a dump, and nothing in this
+  module calls ``create_point``. The warning is still the reason the sentence
+  *"`:Point` ids are ULIDs"* is false after a pass — say the exception instead
+  of relying on the predicate's union to blur it.
+* **The alternative is not available.** Aiming at the minted spelling needs a
+  deterministic ``<ts-hex>-<uuid12>`` function; ``ulid()`` takes the clock and a
+  random UUID, so a plan built from it could not be recomputed from the input,
+  reviewed by a second lane, or verified on a revert. A deterministic,
+  recomputable target is what makes this pass an auditable transform, and
+  ``entity_name_id`` is the only minter the repo already has that provides one.
+
+What is NOT true, and must not be claimed: that this restores *the* canonical
+``:Point`` spelling. It gives one deterministic, contract-recognised spelling to
+the legacy population.
 
 ## Fail-closed invariants (each raises :class:`LegacyIdError` with EVERY one)
 
@@ -231,6 +266,12 @@ def is_canonical(value: object) -> bool:
     census of every minting surface: ``:Event``'s ``ev_<sha256[:62]>``
     (``_session_capture_event_id``) does not match it, which is one more reason
     ``:Event`` is out of scope by declaration rather than by predicate.
+
+    ⚠️ It is the label-agnostic UNION (``_is_ulid or _CANONICAL_ENTITY_ID_RE``),
+    so after a pass a ``:Point`` population reads canonical under TWO spellings
+    — the minted ULID and the ``poi-`` entity handle (§ "What that target IS").
+    That union is what makes a second run a no-op; it is not evidence that the
+    pass produced the minted spelling.
     """
     return isinstance(value, str) and shape(value) != LEGACY
 
@@ -240,6 +281,10 @@ def canonical_id(label: str, legacy: str) -> str:
 
     Deterministic and total (one value per ``(label, legacy)``), which is what
     makes the pass idempotent and the plan reviewable: a reader recomputes it.
+
+    ⚠️ The shape is ``label[:3]-<sha256[:26]>`` (``poi-…`` for ``:Point``), i.e.
+    the **entity-handle** spelling — NOT the ``<ts-hex>-<uuid12>`` a created
+    point is minted with. See the module docstring, "What that target IS".
     """
     return entity_name_id(label, legacy)
 

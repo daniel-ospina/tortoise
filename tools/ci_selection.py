@@ -1124,6 +1124,30 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # already falls through to `core`). Pinned by
              # tests/test_ci_selection.py::test_graph_census_tool_change_selects_core_not_tier1.
              "tools/graph_census.py",
+             # #9523 review P1: tools/legacy_id_normalise.py is the CLI for the
+             # legacy-id normaliser, and its guard
+             # (tests/test_8607_legacy_id_normaliser.py) is `core`-registered —
+             # but `tools/` is a flat NON_PYTHON_PREFIXES entry and no
+             # SOURCE_PATTERNS row matches the tool, so a CLI-only change was
+             # DROPPED by `_keep_changed` and took the docs-only early return:
+             # `select(["tools/legacy_id_normalise.py"])` returned
+             # surfaces=[], full=False, with the guard absent from test_files.
+             # Registering the test under `core` does not help — a name in a
+             # surface's test_files only runs when that surface is already
+             # selected — so the file whose ENTIRE content is the dry-run
+             # default, the `--apply`/`--revert`-requires-`--out` rule and the
+             # 0/1/2 exit contract (`test_cli_dry_run_writes_the_report_and_no_
+             # snapshot`, `test_cli_apply_then_revert_round_trips`,
+             # `test_cli_refusal_exits_2_and_writes_nothing`,
+             # `test_cli_usage_errors_exit_1_so_2_means_only_refused`) would run
+             # none of its own cases on the PR editing it. Same
+             # #1349/#3332/#3910 silent-drop class as
+             # tools/retype_snapshot.py and tools/graph_census.py above (both
+             # dump-transform CLIs in this family). `tortoise/legacy_ids.py`
+             # needs no entry (it matches no SOURCE_PATTERN, so a module-only
+             # change already falls through to `core`). Pinned by
+             # tests/test_ci_selection.py::test_legacy_id_normalise_tool_change_selects_core_not_tier1.
+             "tools/legacy_id_normalise.py",
              # #4495 review P2: tools/write_op_reachability.py is the CLI that
              # reports the write-op allowance's stock/flow conversion, and its
              # guard (tests/test_write_op_reachability.py) is `core`+`api`

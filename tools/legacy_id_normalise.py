@@ -30,8 +30,18 @@ FRESH graph; the journaled live pass is ``#7951``'s, not this tool's.
 ⚠️ ``--out`` may NOT be the ``--dump`` path: an in-place run with no report is
 one a ``sha256`` cannot undo.
 
-Exit codes: ``0`` planned/applied · ``2`` refused (problems on stderr, nothing
-written) · ``1`` usage/IO.
+Exit codes — ``2`` is the REFUSAL and nothing else, so a wrapper can key on it:
+
+* ``0`` — planned (dry run), applied, or reverted;
+* ``2`` — **refused**: the plan, the revert or an artifact path was not provably
+  safe. Every problem is on stderr and **nothing was written**;
+* ``1`` — usage or IO: a bad invocation, a missing/unreadable dump or report,
+  or a report that is not one this tool wrote.
+
+⚠️ ``argparse``'s own status for a usage error is ``2`` — the code this contract
+reserves for a REFUSAL — so :class:`_Parser` overrides it to ``1``. Without
+that, a caller keying on ``2 == refused`` cannot tell a bad snapshot from a bad
+invocation, and both write nothing, so no other signal distinguishes them.
 """
 
 from __future__ import annotations
@@ -50,6 +60,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 import argparse
 import json
 from pathlib import Path
+from typing import NoReturn
 
 # The tool ships in the repo it operates on: put the checkout ahead of any
 # installed copy, so the mechanics that run are the mechanics under test.
@@ -63,6 +74,21 @@ from tortoise.legacy_ids import (
     build_plan,
     census,
 )
+
+
+class _Parser(argparse.ArgumentParser):
+    """``argparse`` exits **2** on a usage error — the status this tool reserves
+    for a REFUSAL (``tortoise/legacy_ids.LegacyIdError``, nothing written).
+
+    Both write nothing, so nothing else tells them apart, and a wrapper keying on
+    ``2 == refused`` would treat a typo'd invocation as a refused snapshot. A
+    usage error is a **usage/IO** failure, which this tool documents as ``1``:
+    ``SystemExit(<message>)`` prints the message and exits ``1``.
+    """
+
+    def error(self, message: str) -> NoReturn:  # type: ignore[override]
+        self.print_usage(sys.stderr)
+        raise SystemExit(f"{self.prog}: error: {message}")
 
 
 def _load_json(path: Path, what: str) -> object:
@@ -161,7 +187,7 @@ def _census_line(found: dict) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         description="Census and normalise legacy node ids in a graph dump (#8607 W1b)."
     )
     parser.add_argument(
