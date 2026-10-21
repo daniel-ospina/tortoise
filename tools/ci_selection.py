@@ -4227,22 +4227,29 @@ def _is_outside_repo_file(c: str) -> bool:
     deliberately NOT eligible — that discrimination is what keeps the hint off
     the legitimate fail-closed case.
 
-    BOTH operands are absolute before they are compared, and each is anchored to
-    where the argument actually means: `c` is a shell argument, so a relative one
-    is relative to the process CWD, while `REPO` is derived from `__file__` and
-    is therefore checkout-anchored whatever the CWD is. A caller that runs this
-    tool from a subdirectory therefore gets `False` (never `True`) for a
-    repo-relative name — it fails QUIET, it cannot invent a list-file hint.
+    BOTH operands are made absolute before they are compared, and each is
+    anchored to where the argument actually means: `c` is a shell argument, so a
+    relative one is relative to the process CWD, while `REPO` is derived from
+    `__file__` and is therefore checkout-anchored whatever the CWD is. A caller
+    that runs this tool from a subdirectory therefore gets `False` (never
+    `True`) for a repo-relative name — it fails QUIET, it cannot invent a
+    list-file hint.
     """
     p = Path(c)
     if not p.is_file():
         return False
-    # abspath, NOT resolve(): a repo-relative symlink that points outside the
-    # checkout is still a repo path, and `resolve()` would relabel it as an
-    # outside file and hint at it. The question here is where the PATH is, not
-    # where its target is.
+    # Resolve the DIRECTORY spelling on both operands and leave the final
+    # component alone. Resolving the whole path (`Path.resolve()`) would follow a
+    # repo-relative symlink to an outside target and relabel a repo path — the
+    # question here is where the PATH is, not where its target is. But resolving
+    # NOTHING is the mirror-image error: a checkout reached through a symlinked
+    # spelling (a `/tmp` -> `/private/tmp` mount, a symlinked worktree root)
+    # then reads as outside, and the hint fires on a real repo path. Resolving
+    # only the parent directory settles both: the spelling is canonical while the
+    # path's own identity as a path (not its target) is preserved.
+    abs_p = Path(os.path.realpath(p.parent)) / p.name
     try:
-        Path(os.path.abspath(p)).relative_to(Path(os.path.abspath(REPO)))
+        abs_p.relative_to(Path(os.path.realpath(REPO)))
     except ValueError:
         return True
     return False

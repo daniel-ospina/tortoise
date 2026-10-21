@@ -180,6 +180,42 @@ def test_an_in_repo_symlink_to_an_outside_file_is_a_repo_path(tmp_path, monkeypa
         link.unlink(missing_ok=True)
 
 
+def test_a_symlinked_spelling_of_the_checkout_is_still_a_repo_path(tmp_path):
+    """A checkout reached through a symlinked path is the SAME checkout.
+
+    `REPO` is `Path(__file__).resolve()`-anchored, so its spelling is already
+    canonical; the argument was compared with `os.path.abspath`, which does not
+    canonicalise anything. So a repo path spelled through a symlinked directory
+    (a `/tmp` -> `/private/tmp` mount, a symlinked worktree root) read as an
+    outside list file and carried the malformed-invocation hint — the
+    plausible-but-false reading this diagnostic exists to prevent.
+
+    Resolving the argument's PARENT directory fixes that while leaving the final
+    component unresolved, so the sibling pin above (a repo-relative symlink to an
+    outside target) keeps reading as a repo path.
+    """
+    from tools import ci_selection as cs
+
+    repo = Path(__file__).resolve().parents[1]
+    alias = tmp_path / "repo-through-a-link"
+    os.symlink(repo, alias)
+    spelled = alias / "tools" / "ci_selection.py"
+    assert spelled.is_file(), "the aliased spelling must resolve to a real file"
+
+    assert cs._is_outside_repo_file(str(spelled)) is False, (
+        "a symlinked spelling of the checkout is still the checkout — "
+        "abspath() alone treats it as outside")
+
+    # The control: an outside file reached through a symlinked PARENT is still
+    # outside. Canonicalising the spelling must not swallow the real answer.
+    outside_dir = tmp_path / "outside-dir"
+    outside_dir.mkdir()
+    (outside_dir / "changed.txt").write_text("tortoise/audit.py\n", encoding="utf-8")
+    alias_outside = tmp_path / "outside-through-a-link"
+    os.symlink(outside_dir, alias_outside)
+    assert cs._is_outside_repo_file(str(alias_outside / "changed.txt")) is True
+
+
 def test_explain_is_cleared_for_a_selection_that_does_not_fail_closed():
     """`explain`'s contract is "empty unless THIS call recorded a reason". A
     caller reusing one dict across two calls would otherwise get the previous
