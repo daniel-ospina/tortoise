@@ -692,3 +692,67 @@ def test_the_report_does_not_claim_the_eval_graphs_have_no_operators():
         "for the v2 configuration it records")
     assert "dataset_audit.py` divergence record rides" not in text, (
         "the report still attributes the operators claim to dataset_audit.py")
+
+
+# ── the INGEST-CACHE contract must describe the belief arm too ───────────
+#
+# `tools/longmem_eval/README.md` is the operator reference for the #2080 cache
+# and for the runner's flags, and `run.py::cache_hit_decision` documents the
+# gate's own invariant. Both are load-bearing prose: a maintainer reasons from
+# them about whether a cache HIT can change the graph, which is exactly the
+# question #8486 answered "yes, under --activate-beliefs".
+
+_README = (Path(__file__).resolve().parents[2] / "tools" / "longmem_eval"
+           / "README.md")
+
+
+def _flat(text: str) -> str:
+    """Whitespace-insensitive form — markdown re-wraps, claims do not."""
+    return " ".join(text.split())
+
+
+def test_the_ingest_cache_contract_documents_the_belief_arm():
+    """RED (fresh-context review, P2 — downstream impact): the Contract
+    section still described the pre-#8486 seam — the marker as written ONLY by
+    an ingest, the seam as "INGEST-level only", and reuse as "only ever reused
+    read-only" — while the code at this head refreshes the marker on the cache
+    HIT path and (with ``--activate-beliefs``) mutates the persisted graph in
+    place. ``--activate-beliefs`` was documented nowhere, although
+    ``run_protocol`` injects it into every run step."""
+    text = _flat(_README.read_text(encoding="utf-8"))
+    assert "--activate-beliefs" in text, (
+        "the operator reference never documents --activate-beliefs, which "
+        "run_protocol injects into every run step")
+    assert "belief_activated" in text, (
+        "the cache marker's belief_activated flag must be documented where "
+        "the marker lifecycle is")
+    assert "only ever reused read-only" not in text, (
+        "README still claims cached reuse is always read-only — a cache HIT "
+        "under --activate-beliefs promotes points and persists posteriors "
+        "in place")
+    assert "this seam is INGEST-level only" not in text, (
+        "README still claims the seam is ingest-level only — it now gates on "
+        "the belief layer too (#8486)")
+    assert "mutates the persisted graph in place" in text, (
+        "README must state the HIT-path mutation, which is why the reuse gate "
+        "and the marker refresh exist")
+
+
+def test_the_cache_gate_docstring_names_the_hit_path_exception():
+    """RED (fresh-context review, P2 — comment compliance):
+    ``cache_hit_decision``'s docstring said "The marker is written ONLY after
+    an ingest completes, so mid-write vs complete is distinguishable by
+    construction" — an absolute this PR's ``_cache_marker_activate`` breaks on
+    the cache HIT path. The sentence a maintainer would use to prove "marker
+    present ⇒ ingest complete" must name both paths."""
+    from tools.longmem_eval import run as lme_run
+
+    doc = _flat(lme_run.cache_hit_decision.__doc__ or "")
+    assert "The marker is written ONLY after an ingest completes" not in doc, (
+        "the docstring still states the absolute _cache_marker_activate "
+        "falsifies on the cache HIT path")
+    assert "_cache_marker_write" in doc, (
+        "the docstring must name the fresh-ingest write path")
+    assert "_cache_marker_activate" in doc, (
+        "the docstring must name the HIT-path flag refresh that is the "
+        "exception to the marker invariant")

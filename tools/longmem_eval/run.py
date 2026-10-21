@@ -3002,9 +3002,21 @@ def cache_hit_decision(*, marker_fp: str | None, graph_present: bool,
     a stored marker carries the matching ingest fingerprint AND the graph
     exists (contains its Session/points). A partial graph WITHOUT the
     marker (a crash mid-ingest, or a peer mid-write) is treated as absent
-    → miss → re-ingest. The marker is written ONLY after an ingest
-    completes, so mid-write vs complete is distinguishable by
-    construction.
+    → miss → re-ingest. ``_cache_marker_write`` writes the marker ONLY after
+    an ingest completes (and only when the ingest owns a clean namespace and
+    the pre-retrieval gate is green), so mid-write vs complete is
+    distinguishable by construction.
+
+    ONE EXCEPTION (#8486): ``_cache_marker_activate`` refreshes the
+    ``belief_activated`` flag on the cache-HIT path, without any ingest — a
+    HIT under ``--activate-beliefs`` promotes the persisted graph's draft
+    points/operators and persists EP posteriors IN PLACE, so the flag must
+    follow the graph. It never rewrites the fingerprint or the ingest
+    snapshot (those still describe the ingest that BUILT the graph), and when
+    the refresh fails it DROPS the marker rather than leave a stale flag — a
+    missing marker is a miss, which is the safe direction. So "marker
+    present" still means "a complete ingest built this graph", but the
+    belief flag on it is the latest arm state, not the ingest's.
 
     #8486 BELIEF-LAYER STATE: the ingest fingerprint says nothing about
     whether an earlier run PROMOTED the cached graph's draft points/

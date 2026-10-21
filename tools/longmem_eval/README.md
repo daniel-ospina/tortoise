@@ -134,6 +134,27 @@ mode — `valid=true` unreachable at scale because any recoverable-class
 blip pushes `invalid_rate > 0` — would otherwise silently recur on the
 follow-up's ~24k session extractions; the step-5 pattern applies).
 
+**Belief layer (`--activate-beliefs`, #8486) — OFF by default, REQUIRED for
+the official v2 configuration:**
+`--activate-beliefs` (no env tri-state, no `--no-` form — the default IS
+off). After each question's ingest, `tools/longmem_eval/ep_activation.py`
+promotes the extraction's draft points/operators to `live` and runs a real
+EP pass (`sdk.dream(mode="full")`), so claims carry **measured**
+posteriors instead of the unmeasured `Beta(1,1)` 0.50 of #2598. It
+**requires `--ingest-mode v2`** and is refused loudly otherwise
+(`parser.error` on the CLI, `ValueError` in `run_evaluation`) — a
+deterministic graph writes no operators to activate. `run_protocol`
+injects it into every `run`-kind step (3, 5, 7, 8, 9 — never the step-4
+full-context cell). The run records the posture
+(`methodology.measurement_posture`: `ingest_mode`, `beliefs_activated`,
+`belief_layer` ∈ `inert`/`partial`/`activated`/`unknown`, plus the
+`points_with_ep` / `points_unmeasured` cells the state is derived from),
+and `w7_publish.validate_receipt` refuses a completed run whose receipt
+does not disclose it. `activated` requires **positive measurement** for
+every question (`questions_with_ep == questions`) — an EP pass that
+returned without writing posteriors (no EP factors in the window, a
+stale-run stand-down) reads `partial`, never `activated`.
+
 **R6 rerank (issue #1545, epic #1509) — cross-encoder + MMR, OFF by default:**
 `--rerank` / `--no-rerank` (tri-state; `--no-rerank` beats a leaked env),
 `--rerank-pool N`, `--rerank-cap N`, `--rerank-lambda F`, `--rerank-model
@@ -631,20 +652,35 @@ python -m tools.longmem_eval.run --split s --limit 50 --cache-ingest --db docker
   changing → fingerprint changes → automatic re-ingest.
 - **Marker lifecycle.** After a clean ingest whose pre-retrieval integrity
   gate is green, a marker node (`:lme_ingest_cache`, carrying the
-  fingerprint + the ingest's stats snapshot) is written on the question's
-  graph — ONLY after the ingest completes, so a partial/mid-write graph
-  never carries a marker. Cache validity = matching marker AND graph
-  content present.
+  fingerprint + the ingest's stats snapshot + a `belief_activated` flag)
+  is written on the question's graph — ONLY after the ingest completes, so
+  a partial/mid-write graph never carries a marker.
+  `_cache_marker_activate` is the one path that touches a marker WITHOUT an
+  ingest: on a cache HIT under `--activate-beliefs` it refreshes
+  `belief_activated` (and only that flag — the fingerprint and snapshot
+  keep describing the ingest that built the graph); a failed refresh
+  DROPS the marker (a missing marker is a miss, the safe direction).
+  Cache validity = matching marker AND graph content present AND
+  `not (marker.belief_activated and this run is arm-OFF)` (#8486).
 - **Semantics.** Cache hit → ingest (extractor calls) skipped; outcome
   records `ingest_cached: true`. Miss/stale → namespace wipe → ingest →
   marker (graph persists as the cache). The outcome checkpoint stays
-  strict (arms/fingerprint refused on mismatch) — this seam is INGEST-level
-  only.
+  strict (arms/fingerprint refused on mismatch). The seam is no longer
+  INGEST-level only (#8486): with `--activate-beliefs` it also gates on —
+  and records — the belief layer, because an arm-OFF run must never reuse
+  a graph a previous arm-ON run promoted and measured (its posture would
+  then claim `inert` over a live/EP graph). The mirror direction stays a
+  hit: an arm-ON run may reuse an inert graph and activate it
+  (promotion + EP are idempotent).
 - **Concurrency.** The existing marker-file peer guard still holds: a
   cache-mode miss under a LIVE foreign run marker never wipes the peer's
   in-flight graph AND never writes a cache marker (a graph another process
-  is actively writing is never reused or cached). The cached graph is only
-  ever reused read-only.
+  is actively writing is never reused or cached). Reuse is read-only for
+  retrieval, but NOT for the belief layer: a cache HIT under
+  `--activate-beliefs` mutates the persisted graph in place (draft points/
+  operators promoted to `live`, EP posteriors persisted, marker flag
+  refreshed). That mutation is why the reuse gate and the HIT-path marker
+  refresh exist (#8486).
 - **Hygiene escape hatch.** `--sweep-cache` wipes the question's graph
   (content + marker) right after the question finishes so the eval DB never
   accumulates namespaces.
