@@ -8018,6 +8018,37 @@ class TortoiseSDK:
         # widened a `dev`-only graph. Gate the whole mined key set, exactly as
         # the entity funnel does.
         self._refuse_unapproved_kinds_in_props(props)
+        # #9167: `content` is a REQUIRED str and nothing said so. A ``None`` or
+        # any non-str reached ``_content_hash(content)`` below — i.e.
+        # ``text.encode("utf-8")`` one frame inside a private helper — so the
+        # caller got ``AttributeError: 'NoneType' object has no attribute
+        # 'encode'``, a message naming neither this door nor ``content``: a
+        # caller error that reads as an internal bug. The MCP
+        # ``tortoise_create_point`` tool passes the caller's ``content``
+        # straight through, so a client sending ``{"content": null}`` saw that
+        # same internal-looking trace on the wire.
+        #
+        # Fail closed HERE, at the door, naming the argument — the same posture
+        # as ``update_point`` (#5240) and ``checkpoint``'s item schema (#8554),
+        # each at its OWN door. Placement is deliberate: after the kind gates
+        # (so which error a doubly-invalid call sees is unchanged) and before
+        # any prop processing, graph read or write, so a refused call leaves
+        # nothing behind.
+        #
+        # ⛔ Deliberately NOT hardening ``_content_hash`` itself: that would
+        # close every remaining surface at once but CANNOT name the caller's
+        # parameter, and it would hide which doors still lack validation —
+        # #8554's own reason for choosing the door over the helper.
+        #
+        # An EMPTY string stays valid: ``""`` hashes to a real digest, and
+        # ``update_point`` already pins it as a real content edit (#5240).
+        # Only a wrong TYPE is refused, never a wrong length.
+        if not isinstance(content, str):
+            raise TypeError(
+                "create_point: content must be a str, got "
+                f"{type(content).__name__} — `content` is required and "
+                "cannot be None (every write path hashes it)"
+            )
         # #329: server-managed fields rejected on the props passthrough
         # (the explicit-id path via props.pop("id") below is preserved for operators)
         props = _sanitize_props(props)

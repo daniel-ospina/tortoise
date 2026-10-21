@@ -567,7 +567,14 @@ def test_probe_does_not_own_a_background_sweep_built_inside_the_window(
 
         def _run():
             try:
-                ha_mod._make_sdk(namespace="org-3718")
+                # Guard-passing namespace, and provably inert here: the SDK is
+                # stubbed, and the probe's ownership rule keys on the request
+                # WINDOW plus a thread-name exclusion for the sweep lane — never
+                # on the namespace (see this test's docstring). `test_markers`'
+                # census refuses an un-routed `org-*` literal in a test file, and
+                # the hyphenated `test-*` family is SDK-normalized by
+                # `_derive_graph_name` (tortoise/sdk.py).
+                ha_mod._make_sdk(namespace="test-org-3718")
             finally:
                 done.set()
 

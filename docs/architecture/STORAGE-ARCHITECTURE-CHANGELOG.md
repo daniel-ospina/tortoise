@@ -1118,3 +1118,25 @@ longer resolves into the walk keyspace). Removing entries 20/21 from `WHAT THIS 
 duplicate. Counts are unchanged: **twenty-six sites, twenty-two rows, nine customer-callable rows
 (twelve sites)** — this round added no reader to the table, which is the point: the member it found
 is not one.
+## §13 — the `aboutObject` headline claim is SCOPED to the files it measured (`#9399`)
+
+The removed sentence and why it went. §13's evidence for the KEEP ruling opened
+with an unqualified claim about *"the primary search path"*, but the command it
+quotes as proof measures exactly three modules — and `tortoise/ranking.py`, which
+holds both product ranking read paths and therefore the reads behind the default
+recall door (`tortoise_recall` → `sdk_method="recall_state"`), is not one of them.
+
+**Removed (verbatim):**
+
+> **The primary search path does NOT read it.** `rg -n 'aboutObject'
+> tortoise/retrieval.py tortoise/search_engine.py tortoise/session_reinjection.py`
+> → **exit 1, zero matches**, case-insensitive. **Hindsight's premise holds for
+> this path.**
+
+The measurement was never wrong; the **scope** was unstated, so the sentence read
+as a whole-product claim and a reader checking only the quoted command concluded
+the opposite of what the section rules on. The design document now states the
+lane the three files bound and names the module and the door outside it;
+`tests/test_9399_search_path_claim_scope.py` holds it there by parsing the file
+list OUT of the sentence and re-running the scan over it, so widening the list or
+reverting the qualification reds.
