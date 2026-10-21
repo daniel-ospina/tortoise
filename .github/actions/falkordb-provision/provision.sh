@@ -143,11 +143,12 @@ fi
 # it, so this job can remove exactly its own containers.
 #
 # ⚠️ Residual risk, stated rather than papered over: a job that is HARD-KILLED
-# (runner death) runs neither the teardown step nor the EXIT trap, and `--rm`
-# only removes a container when the container itself exits — so such a job can
-# leave a RUNNING container behind. Its label names the run/job/attempt, which
-# is how a human or a future reaper can attribute it; NO automatic reaper
-# exists today.
+# (runner death) runs neither the teardown step nor the EXIT trap, so it can
+# leave a container behind — RUNNING, or (since this action no longer passes
+# `--rm`, #7357) STOPPED. Its label names the run/job/attempt, which is how a
+# human or a future reaper can attribute it; NO automatic reaper exists today.
+# NB: the stopped case is the one that carries the failure evidence the health
+# gate reads (`OOMKilled`/`ExitCode`), which is why `--rm` was dropped.
 ## ⛔ GITHUB_JOB is the job_id — IDENTICAL for every matrix shard (a 9-shard
 # fast matrix is ONE GITHUB_JOB), so the run/job/attempt triple alone is NOT
 # unique among concurrent shards: keying on it made each shard's
@@ -184,6 +185,92 @@ trap cleanup_own EXIT
 # quietly turn the failure annotation into plain text.
 PORT_FILE="$(mktemp)"
 
+# The container is created with the SAME kernel memory cap every other
+# FalkorDB container this repo starts gets (#7357): `--maxmemory` in REDIS_ARGS
+# is a Redis-side limit, so without `HostConfig.Memory` the container's real
+# ceiling is the HOST's — and the host's ceiling is swap. Measured on the fleet
+# box (#7357): `HostConfig.Memory=0`, `OOMKilled=false`, `ExitCode=0`,
+# `RestartCount` climbing, every lane degraded with it. A cgroup cap converts
+# that fleet-wide outage into ONE container dying alone, in seconds.
+# `--memory-swap` EQUALS `--memory` on purpose: docker's default is 2x memory,
+# i.e. the container may swap, which turns a fast isolated death into a
+# minutes-long RDB reload. Raise FALKORDB_CONTAINER_MEMORY for a job that
+# genuinely needs more; a malformed value is refused, never silently dropped.
+#
+# ⚠️ THE 2g DEFAULT IS PROVISIONAL, AND IT IS NOT THE LANE'S CEILING. These
+# containers carry `REDIS_ARGS` of `--requirepass falkordb --save ''` — NO
+# `--maxmemory` at all — so before this cap their only ceiling was the HOST's.
+# The shared docker lane's `maxmemory 2GiB` (which makes 2g a no-op for
+# `tools/test_lane.py`) therefore says NOTHING about this seam: a CI leg whose
+# graph RSS reached >2g used to succeed and is now SIGKILLed mid-suite. No
+# measurement settles it yet (#7357 review, UNVERIFIED); to settle it, read
+# `memory.peak` from the heaviest provisioning job's container (cgroup v2:
+# `/sys/fs/cgroup/.../memory.peak`) or `docker stats --no-stream` during the
+# longest `python-ci` leg. Comfortably below 2g -> this default stands; at or
+# above -> raise it per job. A kill is not silent either way: the health gate's
+# `termination_note` names it and prints the remedy.
+#
+# TRIMMED AT THE ENDS ONLY (`.strip()`), then lowercased — the SAME normalisation
+# as the three Python seams, so `2G` and `" 2g "` mean `2g` at ALL FOUR seams
+# (docker itself rejects `--memory " 2g "`; the seam strips first, which is why
+# it never reaches docker that way). The earlier `tr -d '[:space:]'` deleted
+# INNER whitespace too, so `"2 g"` was silently rewritten to `2g` in CI and
+# refused in every lane — one env var, two contracts (#7357 review F7). The
+# narrower grammar below then refuses `"2 g"` at all four seams DELIBERATELY,
+# even though docker and compose accept it; the paragraph there says why.
+FALKORDB_MEMORY="${FALKORDB_CONTAINER_MEMORY:-2g}"
+FALKORDB_MEMORY="${FALKORDB_MEMORY#"${FALKORDB_MEMORY%%[![:space:]]*}"}"
+FALKORDB_MEMORY="${FALKORDB_MEMORY%"${FALKORDB_MEMORY##*[![:space:]]}"}"
+FALKORDB_MEMORY="$(printf '%s' "$FALKORDB_MEMORY" | tr '[:upper:]' '[:lower:]')"
+# Grammar first, then the ZERO case: a memory spec of 0 is not a tiny cap, it is
+# docker's spelling for NO LIMIT — the uncapped container #7357 is about, via the
+# one value a reader would type to "disable" the cap. (No backticks in this
+# string: inside double quotes bash would run the token as a command.)
+#
+# The grammar accepts docker's LONG unit forms too (`kb`/`mb`/`gb`): refusing
+# `2gb` would refuse the natural spelling of the remedy this action's kill
+# message prints (raise FALKORDB_CONTAINER_MEMORY), while docker accepts it
+# without complaint (#7357 review).
+#
+# The SUFFIX set is docker's — `b`, `k`/`kb`/`kib`, `m`/`mb`/`mib`,
+# `g`/`gb`/`gib`, `t`/`tb`/`tib`, with an optional leading `+` (all measured
+# against docker 29.1.3): `2g`, `2gb`, `2gib`, `+2g`, `1.5gb`, `1t` are valid;
+# `2bb` is "invalid suffix: 'bb'". ONE deliberate narrowing, stated rather than
+# implied: EMBEDDED whitespace (`"2 g"`) is refused here, although docker AND
+# compose both accept it (both measured) — nobody spells a cap that way, and the
+# refusal names the accepted forms, so the cost of the narrowing is one clear
+# message instead of a silent rewrite. Line anchoring is docker's too: the subject must be ONE line (the Python
+# seams' `\Z`), which `grep -E '$'` is NOT — it matches per line, so `"2g\nabc"`
+# used to be accepted here and refused everywhere else (#7357 review).
+#
+# Positivity is decided on BYTES, not on the number: docker truncates the parsed
+# spec to an int64, so `0.0000000001g` (0.107 B) and `0.1b` install as
+# `HostConfig.Memory=0` — the UNCAPPED container this action exists to prevent,
+# reached through a value that reads as positive (#7357 review).
+# A HERE-STRING, not a pipe: `printf … | grep -Eq` is the #841 SIGPIPE
+# false-negative idiom — under `set -o pipefail` grep exits at the first match
+# while the writer is still pushing bytes, the writer takes SIGPIPE (141), and
+# the pipeline status becomes non-zero, so this fail-closed gate would reject a
+# VALID cap and print a grammar error. `<<<` backs the grep with a temp file, so
+# there is no earlier writer left to kill. Line anchoring is unchanged.
+if ! grep -Eq '^\+?[0-9]+(\.[0-9]+)?([bkmgt]|[kmgt]b|[kmgt]ib)?$' <<<"$FALKORDB_MEMORY" \
+   || [ "$(printf '%s' "$FALKORDB_MEMORY" | wc -l)" -ne 0 ] \
+   || ! awk -v v="$FALKORDB_MEMORY" 'BEGIN {
+        sub(/^\+/, "", v)
+        match(v, /[0-9]+(\.[0-9]+)?/)
+        num = substr(v, 1, RLENGTH)
+        unit = substr(v, RLENGTH + 1)
+        mult = 1
+        if (unit ~ /^(k|kb|kib)$/) mult = 1024
+        else if (unit ~ /^(m|mb|mib)$/) mult = 1048576
+        else if (unit ~ /^(g|gb|gib)$/) mult = 1073741824
+        else if (unit ~ /^(t|tb|tib)$/) mult = 1099511627776
+        exit (int(num * mult) >= 1) ? 0 : 1
+      }'; then
+  annotate_error "FALKORDB_CONTAINER_MEMORY=$FALKORDB_MEMORY is not a POSITIVE docker memory spec (e.g. 512m, 2g; 0 means UNLIMITED) — refusing to start an UNCAPPED container"
+  exit 1
+fi
+
 # start <name> <REDIS_ARGS> <health-cli-auth-args>
 # On success writes the ASSIGNED host port to $PORT_FILE and returns 0. All
 # diagnostics go to stderr; on failure it emits an ::error:: annotation on
@@ -205,10 +292,16 @@ start() {
   # Every consumer of this action dials localhost (the exported
   # TORTOISE_TEST_DOCKER_PORT/_LEGACY_PORT are read by `tests/_live_utils.py`
   # with host `localhost`), so restricting the bind costs the CI path nothing.
-  # --rm  removes the container when it STOPS (a normal exit, a crash, or a
-  #       `docker stop`) — it is not a job-death reaper: a hard-killed runner
-  #       can leave a RUNNING container, attributable by $LABEL.
-  if ! docker run -d --rm --name "$name" --label "$LABEL" \
+  # NO --rm (#7357 review): `--rm` removes a container the moment it STOPS, so a
+  #       container that was killed leaves NOTHING to inspect — the OOMKilled /
+  #       ExitCode facts the failure report is made of. Removal stays explicit
+  #       and unconditional: `cleanup_own` on the failure path, the paired
+  #       teardown step (label sweep) on success, and `docker rm -f` on the next
+  #       provision. A hard-killed runner can leave a container either way; the
+  #       label is what makes it attributable.
+  # --memory / --memory-swap: the kernel cap (#7357, see FALKORDB_MEMORY above).
+  if ! docker run -d --name "$name" --label "$LABEL" \
+      --memory "$FALKORDB_MEMORY" --memory-swap "$FALKORDB_MEMORY" \
       -e REDIS_ARGS="$redis_args" \
       -p 127.0.0.1:0:6379 \
       "$RUN_IMAGE" >/dev/null; then
@@ -248,9 +341,48 @@ start() {
     fi
     sleep 1
   done
-  annotate_error "$name did not answer PING within ${HEALTH_TIMEOUT}s (host port $port)"
+  annotate_error "$name did not answer PING within ${HEALTH_TIMEOUT}s (host port $port)$(termination_note "$name")"
   docker logs "$name" 2>&1 | tail -n 40 >&2 || true
   return 1
+}
+
+# termination_note <name> — a suffix explaining why the health gate failed
+# (#7357), or "" when there is nothing measured to say. Three cases, all from
+# docker itself and never inferred from the connection error:
+#   * OOMKilled=true          -> KILLED FOR MEMORY (host pressure, or this cap);
+#   * ExitCode 137 alone      -> SIGKILLED from OUTSIDE (no OOM event inside);
+#   * docker's own "No such object" -> the container no longer EXISTS, so it
+#     crashed or was killed rather than starting slowly;
+#   * any other inspect failure -> its termination could not be READ, so the
+#     state is UNKNOWN (a wedged daemon also fails this way, and a failure is
+#     not evidence of absence).
+termination_note() {
+  local name="$1" facts oom code
+  if ! facts="$(docker inspect -f '{{.State.OOMKilled}} {{.State.ExitCode}}' "$name" 2>&1)"; then
+    # A failed read is NOT evidence of absence: `docker inspect` also fails when
+    # the daemon is unreachable or wedged, which is the condition this issue is
+    # about. Only docker's OWN absence wording is reported as a disappearance
+    # (the same rule `tools/test_lane.py::container_state` applies).
+    case "$facts" in
+      *"No such object"*|*"no such container"*|*"no such object"*)
+        printf '%s' " — the container no longer EXISTS: it exited and was removed, so it CRASHED or was KILLED rather than starting slowly; see the engine's own lines above (a memory kill on this host is the #7357 shape)"
+        ;;
+      *)
+        printf '%s' " — and its termination could not be READ (docker inspect failed; a wedged daemon is one reason), so whether it was killed, crashed or never started is UNKNOWN: $facts"
+        ;;
+    esac
+    return 0
+  fi
+  oom="${facts%% *}"
+  code="${facts##* }"
+  if [ "$oom" = "true" ]; then
+    printf '%s' " — it was KILLED FOR MEMORY (OOMKilled=$oom, ExitCode=$code), not unhealthy: this container's own cgroup cap (now $FALKORDB_MEMORY) or host-level pressure ended it, so raise FALKORDB_CONTAINER_MEMORY or reduce the job's graph load"
+  elif [ "$code" = "137" ]; then
+    # 137 WITHOUT OOMKilled=true is a plain SIGKILL: the cgroup cap sets
+    # OOMKilled=true, so naming the cap here would contradict this sentence's
+    # own evidence (#7357 review).
+    printf '%s' " — it was SIGKILLED (OOMKilled=$oom, ExitCode=$code), not unhealthy: this container's own cgroup cap did NOT fire (that sets OOMKilled=true), so the signal came from outside it — most likely host-level memory pressure. Check the runner's free memory before raising FALKORDB_CONTAINER_MEMORY (now $FALKORDB_MEMORY)"
+  fi
 }
 
 log "starting passworded service from $RUN_IMAGE (label $LABEL)"

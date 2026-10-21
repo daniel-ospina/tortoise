@@ -48,8 +48,11 @@ worth stating exactly:
   otherwise be created by the act of measuring it; ``--create-if-missing`` is
   the deliberate opt-in.
 - The only writes the tool itself performs are inside a **disposable isolated
-  container it starts and removes itself** (``--network none``, ``--rm``), for
-  the RAM probe.
+  container it starts and removes itself** (``--network none``, an explicit
+  ``docker rm -f`` in a ``finally:``), for the RAM probe. It is deliberately NOT
+  started with ``--rm``: that removes a stopped container before its
+  ``OOMKilled``/``ExitCode`` can be read, which is the evidence a failed probe's
+  report is made of (#7357).
 
 Relationship-type names are read from the graph and are therefore never
 interpolated into Cypher. The census returns the name as a **value**
@@ -109,6 +112,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 import argparse
 import json
 import os
+import re
 import subprocess
 import time
 from collections.abc import Callable, Sequence
@@ -462,6 +466,42 @@ def docker_available() -> bool:
         return False
 
 
+def _probe_stages(container: str, graph: str, n: int,
+                  edges: int) -> list[Stage]:
+    """Run the measurement stages in order and return the per-stage receipts.
+
+    Factored out so the probe's failure reporting can wrap the WHOLE sequence
+    (#7357): a container killed mid-run by its own cap must be explained, not
+    reported as docker's raw "is not running".
+    """
+    stages: list[Stage] = [
+        Stage("baseline (fresh instance)", _container_used_memory(container))]
+    _container_query(
+        container, graph,
+        f"UNWIND range(1,{n}) AS i CREATE (:Point {{id: 'p' + toString(i)}})")
+    stages.append(Stage("bare :Point node (label + id only)",
+                        _container_used_memory(container), n))
+    _container_query(container, graph, f"MATCH (n:Point) {_POINT_PROPS}")
+    stages.append(Stage("+ keyword-only Point props",
+                        _container_used_memory(container), n))
+    _container_query(
+        container, graph,
+        f"UNWIND range(1,{edges}) AS i "
+        f"MATCH (a:Point {{id: 'p' + toString(i)}}), "
+        f"      (b:Point {{id: 'p' + toString(i + 1)}})"
+        f"CREATE (a)-[:IMPL]->(b)")
+    stages.append(Stage("bare :IMPL edge (no properties)",
+                        _container_used_memory(container), edges))
+    _container_query(container, graph, f"MATCH ()-[r:IMPL]->() {_EDGE_ATTRS}")
+    stages.append(Stage("+ real IMPL attrs "
+                        "(direction,confidence,weight,label,batch_id)",
+                        _container_used_memory(container), edges))
+    _container_query(container, graph, f"MATCH ()-[r:IMPL]->() {_EDGE_SLOTS}")
+    stages.append(Stage("+ the four EP message slots",
+                        _container_used_memory(container), edges))
+    return stages
+
+
 def _container_used_memory(container: str) -> int:
     try:
         proc = _docker("exec", container, "redis-cli", "INFO", "memory")
@@ -515,6 +555,147 @@ _REDIS_ERROR_TOKENS = (
 #: Label every probe container, so an orphan from a SIGKILLed run is
 #: identifiable and reapable instead of accumulating invisibly.
 _PROBE_LABEL = "edge-census-probe=1"
+
+#: #7357 — the KERNEL (cgroup) memory cap for the disposable probe container,
+#: as a docker memory spec. Same env seam and default as every other FalkorDB
+#: container this repo starts (`tools/test_lane.py`,
+#: `.github/actions/falkordb-provision/provision.sh`,
+#: `graph-scripts/setup.py`); the rationale is in `test_lane.CONTAINER_MEMORY_ENV`
+#: — short version: `--maxmemory` is a Redis-side limit and the probe runs with
+#: NO `maxmemory` at all, so without a cgroup cap a runaway probe can starve the
+#: HOST and take the canonical graph instance down with it.
+CONTAINER_MEMORY_ENV = "FALKORDB_CONTAINER_MEMORY"
+DEFAULT_CONTAINER_MEMORY = "2g"
+#: Group 1 is the NUMBER: docker accepts the LONG unit forms too (`2gb`,
+#: `2048mb`), so refusing them would refuse the natural spelling of the remedy
+#: these messages print (#7357 review).
+_MEMORY_SPEC_RE = re.compile(r"\+?([0-9]+(?:\.[0-9]+)?)(?:[bkmgt]|[kmgt]b|[kmgt]ib)?\Z")
+
+
+#: Byte multipliers for the units docker honours: `b`, `k`/`kb`/`kib`,
+#: `m`/`mb`/`mib`, `g`/`gb`/`gib`, `t`/`tb`/`tib`. Positivity is decided on the
+#: BYTE COUNT, not the number: docker truncates the spec to an int64, so
+#: `0.0000000001g` and `0.1b` install as `HostConfig.Memory=0` — the UNCAPPED
+#: container this seam exists to prevent, reached through a value that reads as
+#: positive (#7357 review, measured).
+_MEMORY_UNIT_BYTES = {
+    "": 1, "b": 1,
+    "k": 1 << 10, "kb": 1 << 10, "kib": 1 << 10,
+    "m": 1 << 20, "mb": 1 << 20, "mib": 1 << 20,
+    "g": 1 << 30, "gb": 1 << 30, "gib": 1 << 30,
+    "t": 1 << 40, "tb": 1 << 40, "tib": 1 << 40,
+}
+
+def _spec_is_positive(spec: str) -> bool:
+    """Whether *spec* is a POSITIVE byte count.
+
+    `0` (and `0g`, `0.0g`, …) means NO limit to docker — the uncapped container
+    #7357 is about — so the grammar alone is not enough. The test is on BYTES:
+    docker truncates to an int64, so `0.0000000001g` and `0.1b` install as
+    Memory=0 — an uncapped probe reached through a positive-looking number
+    (#7357 review).
+    """
+    m = _MEMORY_SPEC_RE.match(spec)
+    if not m:
+        return False
+    unit = spec[m.end(1):].lower()
+    return int(float(m.group(1)) * _MEMORY_UNIT_BYTES[unit]) >= 1
+
+
+def container_memory_cap() -> str:
+    """The kernel memory cap for the probe container (#7357).
+
+    Read at CALL time and validated: a malformed or ZERO spec is refused rather
+    than dropped, because a dropped cap is the uncapped probe this exists to
+    prevent.
+    """
+    raw = (os.environ.get(CONTAINER_MEMORY_ENV)
+           or DEFAULT_CONTAINER_MEMORY).strip().lower()
+    if not _MEMORY_SPEC_RE.match(raw) or not _spec_is_positive(raw):
+        raise CensusError(
+            f"{CONTAINER_MEMORY_ENV}={raw!r} is not a POSITIVE docker memory "
+            f"spec (e.g. 512m, 2g, 1.5g; `0` means UNLIMITED to docker) — "
+            f"refusing to start the probe with an unusable cap "
+            f"(default {DEFAULT_CONTAINER_MEMORY})"
+        )
+    return raw
+
+
+def _probe_run_args(container: str, image: str) -> list[str]:
+    """The `docker run` argv for the probe container — the cap included.
+
+    Factored out so the argv is assertable: a guard that only greps this file
+    for `--memory` is satisfied by a comment, and the defect it prevents
+    (an uncapped container) is invisible at run time.
+    """
+    cap = container_memory_cap()
+    # NOT `--rm` (#7357 review): `--rm` removes a container the moment it STOPS,
+    # which deletes the only evidence of WHY it stopped — the `OOMKilled` /
+    # `ExitCode` facts this module now reports. Removal is explicit and already
+    # unconditional (`finally:` below removes it on every path), and the label
+    # makes an escaped container reapable, so `--rm` bought nothing but an
+    # unreadable failure.
+    return ["run", "-d", "--network", "none",
+            "--memory", cap, "--memory-swap", cap,
+            "--label", _PROBE_LABEL, "--name", container, image]
+
+
+def _memory_kill_report(container: str) -> str:
+    """Name a MEMORY kill of the probe container, or `""` when it was not one.
+
+    Docker's own facts (`OOMKilled`, `ExitCode`), never inferred from the
+    connection error. The probe is started WITHOUT `--rm` precisely so a dead
+    container is still there to be read; if the read still fails (a wedged
+    daemon, a timeout) the FAILED READ is what gets reported — a failure is not
+    evidence of absence, and this module states that rule everywhere else.
+
+    A container that is still RUNNING reports NOTHING: docker keeps
+    `OOMKilled`/`ExitCode` from the container's previous termination, so for a
+    live probe those facts are HISTORY and naming them as the cause of a query
+    error would be a false diagnosis (the same rule
+    `tools/test_lane.py::_termination_report`'s `live` arm applies). The state
+    is therefore READ IN THE SAME CALL, and only a dead container is explained.
+    """
+    try:
+        r = _docker("inspect", "--format",
+                    "{{.State.OOMKilled}} {{.State.ExitCode}} {{.State.Running}}",
+                    container, check=False)
+    except (OSError, subprocess.SubprocessError):
+        r = None
+    if r is None or r.returncode != 0:
+        return (
+            " — and its termination could not be READ (the `docker inspect` "
+            "failed or timed out; a wedged daemon is one reason), so whether it "
+            "was killed, crashed or never started is UNKNOWN. Check the daemon "
+            "and the engine's own error, then re-run with a smaller `--n` — a "
+            "memory kill on this host is the #7357 shape"
+        )
+    parts = (r.stdout or "").strip().split()
+    if len(parts) != 3:
+        return ""
+    oom, exit_code, still_running = parts
+    if still_running.lower() == "true":
+        return ""
+    if oom.lower() != "true" and exit_code != "137":
+        return ""
+    if oom.lower() == "true":
+        # A cgroup-cap kill sets OOMKilled=true, so naming the cap here is
+        # exactly what the evidence shows.
+        return (
+            f" — it was KILLED FOR MEMORY (OOMKilled={oom}, "
+            f"ExitCode={exit_code}), not wedged: the host was out of memory or "
+            f"the cgroup cap ({CONTAINER_MEMORY_ENV}="
+            f"{os.environ.get(CONTAINER_MEMORY_ENV) or DEFAULT_CONTAINER_MEMORY}) "
+            f"was reached. Raise the cap for a larger n rather than re-running"
+        )
+    return (
+        f" — it was SIGKILLED (OOMKilled={oom}, ExitCode={exit_code}), not "
+        f"wedged: its own cgroup cap ({CONTAINER_MEMORY_ENV}="
+        f"{os.environ.get(CONTAINER_MEMORY_ENV) or DEFAULT_CONTAINER_MEMORY}) "
+        f"did NOT fire — that sets OOMKilled=true — so the signal came from "
+        f"outside the container, most likely host-level pressure. Check free "
+        f"memory before re-running with a smaller n"
+    )
 
 #: The engine the probe container runs. It used to be a floating
 #: ``falkordb/falkordb:latest``, which resolves to engine 6.0.x — and that build
@@ -626,9 +807,11 @@ def run_probe(
     edges = n - 1
     container = f"edge-census-probe-{os.getpid()}-{int(time.time())}"
     log(f"starting disposable container {container!r} ({image})")
-    # `--rm` so a failure that escapes the teardown below still removes the
-    # container; `--network none` so the probe cannot reach any sibling
-    # container — the caller's own FalkorDB is routinely a bridge container on
+    # NO `--rm` (#7357 review): it removes a stopped container before its
+    # `OOMKilled`/`ExitCode` can be read, which is the evidence the failure
+    # report is made of. `finally:` below removes the container on every path,
+    # and `--label` makes an escaped one reapable. `--network none` so the probe
+    # cannot reach any sibling container — the caller's own FalkorDB is routinely a bridge container on
     # the documented local URI, and the probe only ever talks to its own
     # loopback. `--label` marks an orphan (SIGKILL / host crash) reapable.
     # The `run` is INSIDE the try: starting the container is the step most
@@ -636,8 +819,17 @@ def run_probe(
     # try a failure there left a container behind with no `rm`.
     try:
         try:
-            _docker("run", "-d", "--rm", "--network", "none",
-                    "--label", _PROBE_LABEL, "--name", container, image)
+            _docker(*_probe_run_args(container, image))
+        except subprocess.CalledProcessError as exc:
+            # docker's OWN line, not just the argv and the exit status: a missing
+            # image, a permission problem and a wedged daemon are otherwise
+            # indistinguishable, and this module's stated rule is that it reports
+            # docker's reason rather than an opaque refusal (#7357 review).
+            detail = ((exc.stderr or "") or (exc.stdout or "")).strip()[:400]
+            raise CensusError(
+                f"could not start the probe container from {image!r}: "
+                f"{detail or exc}"
+            ) from exc
         except (subprocess.SubprocessError, OSError) as exc:
             raise CensusError(
                 f"could not start the probe container from {image!r}: {exc}"
@@ -649,34 +841,21 @@ def run_probe(
                 break
             time.sleep(1)
         else:
-            raise CensusError(f"{container!r} never became ready (60s)")
+            raise CensusError(
+                f"{container!r} never became ready (60s)"
+                + _memory_kill_report(container)
+            )
 
-        stages: list[Stage] = [
-            Stage("baseline (fresh instance)",
-                  _container_used_memory(container))]
-        _container_query(
-            container, graph,
-            f"UNWIND range(1,{n}) AS i CREATE (:Point {{id: 'p' + toString(i)}})")
-        stages.append(Stage("bare :Point node (label + id only)",
-                            _container_used_memory(container), n))
-        _container_query(container, graph, f"MATCH (n:Point) {_POINT_PROPS}")
-        stages.append(Stage("+ keyword-only Point props",
-                            _container_used_memory(container), n))
-        _container_query(
-            container, graph,
-            f"UNWIND range(1,{edges}) AS i "
-            f"MATCH (a:Point {{id: 'p' + toString(i)}}), "
-            f"      (b:Point {{id: 'p' + toString(i + 1)}}) "
-            f"CREATE (a)-[:IMPL]->(b)")
-        stages.append(Stage("bare :IMPL edge (no properties)",
-                            _container_used_memory(container), edges))
-        _container_query(container, graph, f"MATCH ()-[r:IMPL]->() {_EDGE_ATTRS}")
-        stages.append(Stage("+ real IMPL attrs "
-                            "(direction,confidence,weight,label,batch_id)",
-                            _container_used_memory(container), edges))
-        _container_query(container, graph, f"MATCH ()-[r:IMPL]->() {_EDGE_SLOTS}")
-        stages.append(Stage("+ the four EP message slots",
-                            _container_used_memory(container), edges))
+        try:
+            stages = _probe_stages(container, graph, n, edges)
+        except CensusError as exc:
+            # #7357 review: the report used to be attached ONLY to the readiness
+            # branch, so a probe killed MID-RUN — which the cap this module now
+            # sets makes the likely failure of a large `--n` — raised docker's
+            # raw "Container … is not running" with no cause. That is the
+            # legibility gap the issue is about, on the very path the cap
+            # creates.
+            raise CensusError(str(exc) + _memory_kill_report(container)) from exc
     finally:
         log(f"removing container {container!r}")
         _docker("rm", "-f", container, check=False)

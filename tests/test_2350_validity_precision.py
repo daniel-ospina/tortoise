@@ -87,6 +87,58 @@ def test_effective_precision_legacy_default_is_day():
     assert effective_precision(None, "unknown") == "unknown"
 
 
+def test_effective_precision_denies_a_bound_that_names_no_instant():
+    """#9201: presence is NOT precision.
+
+    ``effective_precision`` gated the legacy default on ``is not None`` alone,
+    so a PRESENT but UNORDERABLE bound (``validFrom=""`` / ``"TBD"``) reported
+    ``"day"`` — a day-granularity claim about a start that names no instant.
+    The PRESENCE gate is right and stays: a falsey-but-present bound is a real
+    bound for ``_covers`` / ``_assert_window_start_not_inverted``. What it
+    cannot support is a granularity, so the precision gate additionally
+    requires the bound to ORDER — the same ``_created_sort_key`` the read path
+    orders with (``key[0] == 0`` ⇒ parseable instant).
+
+    Discriminating values: ``""`` and ``"TBD"`` (present, unorderable ⇒ None)
+    against ``0`` and ``False`` (present, ORDERABLE ⇒ still ``day``: epoch 0 is
+    1970-01-01T00:00:00Z, a real instant — the #6140 ruling makes an unparseable
+    start unrecorded, not a numeric epoch).
+    """
+    from tortoise.validity import effective_precision
+
+    assert effective_precision("", None) is None
+    assert effective_precision("TBD", None) is None
+    assert effective_precision("not-a-date", None) is None
+    # orderable — the pre-#2350 legacy reading is untouched
+    assert effective_precision("2024-01-01", None) == "day"
+    assert effective_precision("2024-01-01T00:00:00+00:00", None) == "day"
+    # epoch 0 is an INSTANT, not an absent start
+    assert effective_precision(0, None) == "day"
+    assert effective_precision(False, None) == "day"
+    # a caller-DECLARED token is an assertion, not a derivation: it wins
+    assert effective_precision("TBD", "year") == "year"
+    # a numeric bound is an instant even when ``_created_sort_key`` cannot
+    # float() it — the read path must not acquire a raise it never had
+    assert effective_precision(10 ** 400, None) == "day"
+
+
+def test_window_read_fields_denies_precision_to_an_unorderable_bound():
+    """#9201: the ONE read-projection home reports no precision for a bound
+    that names no instant, on either end, and leaves the orderable end alone."""
+    from tortoise.validity import window_read_fields
+
+    assert window_read_fields("", "2024-01-01", None, None) == {
+        "valid_from_precision": None,
+        "valid_to_precision": "day",
+        "end_state": "known",
+    }
+    assert window_read_fields("2024-01-01", "TBD", None, None) == {
+        "valid_from_precision": "day",
+        "valid_to_precision": None,
+        "end_state": "known",
+    }
+
+
 def test_end_state_is_three_valued():
     from tortoise.validity import END_KNOWN, END_OPEN, END_UNKNOWN, end_state
 
@@ -457,14 +509,15 @@ def test_get_historical_knowledge_nearest_does_not_gain_an_unrecorded_content_ke
 
 
 def test_embedded_fallback_decorates_a_falsey_but_present_start(lane):
-    """#2350 review P2: the degraded TF-IDF fallback decoration owed the same
-    precision block as the primary ``SearchResult.to_dict`` gate, but its gate
-    omitted ``valid_from_precision``. For a falsey-but-PRESENT start
+    """#2350 review P2 + #9201: the degraded TF-IDF fallback decoration owed the
+    same precision block as the primary ``SearchResult.to_dict`` gate, but its
+    gate omitted ``valid_from_precision``. For a falsey-but-PRESENT start
     (``validFrom=''``) the fetched state is
-    ``valid_from=None, valid_from_precision='day', end_state='open'``, so the
-    primary path emitted the block and the fallback emitted NEITHER key — the
-    cross-surface drift this feature exists to remove, on the fourth surface.
-    Pre-fix ``valid_from_precision``/``end_state`` were absent here."""
+    ``valid_from=None, valid_from_precision=None, end_state='open'`` — the
+    bound is present but names no instant, so it carries no granularity
+    (#9201) — and the block is still EMITTED here rather than dropped: the
+    key is present with ``None``. Pre-#2350 P2 both keys were absent on this
+    surface while the primary path emitted them."""
     from tortoise.sdk import _decorate_fallback_hits
 
     sdk, _events = lane
@@ -472,7 +525,10 @@ def test_embedded_fallback_decorates_a_falsey_but_present_start(lane):
     assert _props(sdk, p["id"])["validFrom"] == ""
 
     hits = _decorate_fallback_hits([{"id": p["id"]}], sdk._get_proj().g)
-    assert hits[0]["valid_from_precision"] == "day"
+    # #9201: an unorderable start has no precision — but the block is still
+    # EMITTED (the bound is present), with ``None``, so no surface drops it.
+    assert "valid_from_precision" in hits[0]
+    assert hits[0]["valid_from_precision"] is None
     assert hits[0]["end_state"] == "open"
 
     # control — an undated hit still gains NO window keys (the gate is not a
@@ -504,7 +560,10 @@ def test_falsey_but_present_bound_resolves_identically_on_all_three_read_paths(l
     way. Pre-fix, ``fetch_point_epistemic_state`` pre-normalized with
     ``or None`` (precision ``None``) and ``SearchResult.to_dict`` dropped the
     block entirely, while the other two surfaces said ``day``/``open`` — the
-    exact cross-surface drift the module exists to prevent."""
+    exact cross-surface drift the module exists to prevent. #9201 then changed
+    WHAT the agreed value is (an unorderable start has no precision, so the
+    triple is ``None``/``None``/``open`` on all three); agreement is still the
+    invariant under test."""
     sdk, _events = lane
     from tortoise.assembly import docker_walker_port
 
@@ -515,20 +574,75 @@ def test_falsey_but_present_bound_resolves_identically_on_all_three_read_paths(l
 
     # 1. get_historical_knowledge (raw bound)
     gk = sdk.get_historical_knowledge(p["id"], A_DATE)
-    assert gk["chain"][0]["valid_from_precision"] == "day"
+    assert gk["chain"][0]["valid_from_precision"] is None
     assert gk["chain"][0]["end_state"] == "open"
 
     # 2. assembly window rows (raw bound)
     port = docker_walker_port(sdk)
     today = datetime.date.today()
     row = next(r for r in port.window_rows(today, today) if r["id"] == p["id"])
-    assert row["valid_from_precision"] == "day"
+    assert row["valid_from_precision"] is None
     assert row["end_state"] == "open"
 
-    # 3. search/recall wire — the outlier pre-fix
+    # 3. search/recall wire — PRESENT, with the same ``None`` (a dropped key
+    #    would be the cross-surface drift of #2350 review P2 all over again)
     hit = next(r for r in _scan(sdk) if r["id"] == p["id"])
-    assert hit["valid_from_precision"] == "day"
+    assert "valid_from_precision" in hit
+    assert hit["valid_from_precision"] is None
     assert hit["end_state"] == "open"
+
+
+def test_unorderable_end_is_emitted_as_null_on_every_read_surface(lane):
+    """#9201 (review P2): the presence datum is per-END, not start-only.
+
+    ``effective_precision`` is end-agnostic, so a PRESENT but UNORDERABLE
+    ``validTo`` (``"TBD"``) resolves to no precision. Without an END presence
+    datum the two truthiness-gated wire surfaces would DROP
+    ``valid_to_precision`` while ``assembly``/``get_historical_knowledge``
+    emit ``null`` — a brand-new cross-surface divergence introduced by the
+    start-side fix. All four surfaces must agree on ``None``.
+
+    ``end_state`` stays ``known``: whether a stored-but-un-datable END should
+    report ``END_UNKNOWN`` is #9202's owner decision, and this read fix does
+    not pre-empt it. That assertion is the pin — #9202 changes it on purpose.
+    """
+    sdk, _events = lane
+    from tortoise.assembly import docker_walker_port
+
+    p = sdk.create_point("statement", "unorderable end",
+                         validFrom="2024-01-01", validTo="TBD")
+    assert _props(sdk, p["id"])["validTo"] == "TBD"
+
+    # 1. get_historical_knowledge (raw bound)
+    gk = sdk.get_historical_knowledge(p["id"], A_DATE)
+    assert gk["chain"][0]["valid_to_precision"] is None
+    assert gk["chain"][0]["end_state"] == "known"
+
+    # 2. assembly window rows
+    port = docker_walker_port(sdk)
+    today = datetime.date.today()
+    row = next(r for r in port.window_rows(today, today) if r["id"] == p["id"])
+    assert row["valid_to_precision"] is None
+
+    # 3. search/recall wire
+    hit = next(r for r in _scan(sdk) if r["id"] == p["id"])
+    assert "valid_to_precision" in hit, hit
+    assert hit["valid_to_precision"] is None
+    assert hit["end_state"] == "known"
+
+    # 4. the embedded fallback decoration
+    from tortoise.sdk import _decorate_fallback_hits
+    fb = _decorate_fallback_hits([{"id": p["id"]}], sdk._get_proj().g)
+    assert "valid_to_precision" in fb[0], fb[0]
+    assert fb[0]["valid_to_precision"] is None
+
+    # CONTROL — an OPEN end (no validTo at all) keeps its absent key on the
+    # wire; emitting ``null`` there would erase the open/un-datable distinction.
+    open_ended = sdk.create_point("statement", "open end",
+                                  validFrom="2024-01-01")
+    open_hit = next(r for r in _scan(sdk) if r["id"] == open_ended["id"])
+    assert "valid_to_precision" not in open_hit
+    assert open_hit["end_state"] == "open"
 
 
 def test_check_consistency_reference_fold_states_the_terminalizer_precision(lane):

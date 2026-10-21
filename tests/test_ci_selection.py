@@ -1976,28 +1976,46 @@ def test_write_op_reachability_guard_runs_on_every_surface_it_pins():
     assert "test_write_op_reachability.py" in r["test_files"], r
 
 
-def test_orchestrator_harness_change_selects_core_not_tier1():
-    # operations/orchestrator-harness/*.sh own tests/test_orchestrator_harness.py
-    # (`core`): the shipped-block pins for lane.sh's heredoc, merged-not-closed.sh's
-    # paged enumeration, refresh-candidates.sh's pool/checked contract and
-    # orch-loop.sh's P0 merge-priority override.
+def test_retired_orchestrator_harness_selects_its_retained_guards():
+    # RETIRED 2026-10-19. The harness moved to agent-infra/scripts/orchestrator-harness/
+    # (single source of truth) and tests/test_orchestrator_harness.py was retired WITH the
+    # copy it drove.
     #
-    # #8469 review P1: `operations/` is a flat NON_PYTHON_PREFIXES entry and no
-    # SOURCE_PATTERNS row matches the harness scripts, so an operations-only diff
-    # came back with `changed == []` and took the docs-only early return — the
-    # guard never ran on the file it guards. Registering the test under `core` is
-    # NOT sufficient: a name in a surface's test_files only runs when that surface
-    # is already selected, and an operations-only diff selects none.
+    # The directory is NOT a dead path, though: two scripts are retained because their fixes are
+    # UNPORTED (`merge-one.sh` — #8484/#8602/#8612; `merged-not-closed.sh` — no landed copy
+    # anywhere, agent-infra#2160 is still open), and they carry hermetic guards of their own
+    # (tests/test_orchestrator_harness_retained.py), as does the guard that keeps the rest
+    # retired (tests/test_harness_pointer_guard.py for tools/check-harness-fork.sh).
     #
-    # Measured before the CORE_ALSO entry: `_sel(["operations/orchestrator-harness/
-    # lane.sh"])` -> surfaces=[], full=False, test_files 33, harness test absent.
-    # CORE_ALSO (not TOOL_CARVEOUTS) is the deliberate choice: the suite is
-    # hermetic and sub-second, so selecting `core` runs it at the lowest CI cost.
-    # Mutation check: removing the CORE_ALSO entry fails assert 1 below.
-    r = _sel(["operations/orchestrator-harness/merged-not-closed.sh"])
+    # Both must run on a change to their subject. `operations/` and `tools/` are flat
+    # NON_PYTHON_PREFIXES entries and no SOURCE_PATTERNS row matches either path, so without the
+    # CORE_ALSO entries an operations-only or tools-only diff came back with `changed == []`, took
+    # the docs-only early return and ran NO surface — the #1349/#3332/#3616 silent-drop class (the
+    # guard would not run on the PR that weakens the guard). A name in a surface's test_files is
+    # NOT sufficient: it only runs when the surface is already selected.
+    #
+    # Mutation check: removing either CORE_ALSO entry restores `surfaces=[]` and reds these asserts.
+    r = _sel(["operations/orchestrator-harness/lane.sh"])
     assert "core" in r["surfaces"], r
-    assert "test_orchestrator_harness.py" in r["test_files"], r
+    assert "test_orchestrator_harness_retained.py" in r["test_files"], r
+    # ⛔ The RETIRED suite must not come back with it: a stale registration schedules a file that
+    # no longer exists and hides the retirement from anyone reading the map.
+    assert "test_orchestrator_harness.py" not in r["test_files"], r
+    # ⛔ `full` MUST STAY FALSE (review finding): a change under this path must not start forcing
+    # a full run — that would be a heavy, silent regression from a retirement. Pinning it makes
+    # this "deliberately retired" rather than "path dropped".
     assert r["full"] is False, r
+
+    # The guard's own path: same class, same requirement.
+    g = _sel(["tools/check-harness-fork.sh"])
+    assert "core" in g["surfaces"], g
+    assert "test_harness_pointer_guard.py" in g["test_files"], g
+    assert g["full"] is False, g
+
+    # The pointer README is a docs change: still no harness suite, still not a full run.
+    r2 = _sel(["operations/orchestrator-harness/README.md"])
+    assert "test_orchestrator_harness.py" not in r2["test_files"], r2
+    assert r2["full"] is False, r2
 
 
 def test_queue_dispatch_and_fleet_state_change_select_core_not_tier1():
@@ -5658,9 +5676,18 @@ def test_drift_gate_cannot_skip_the_test_matrix():
     # every declared leg, but the plain sweep is what catches a leg that reaches
     # `needs:` WITHOUT a row (a shape the row-set assertion below forbids, so
     # this is redundancy — deliberately kept and pinned rather than dropped).
-    assert re.search(r"grep -qE 'failure\|cancelled'", script), (
+    #
+    # Pin CODE, not prose (#9240). `script` is the raw `run:` scalar INCLUDING
+    # comment lines, and the aggregate's own rationale comment quotes
+    # `grep -qE 'failure|cancelled'` verbatim — so a raw-string pin stays green
+    # after the functional command is deleted. That is the same
+    # comment-satisfiable class the dead-code ordering hid behind for months.
+    code = "\n".join(line for line in script.splitlines()
+                     if not line.strip().startswith("#"))
+    assert re.search(r"grep -qE 'failure\|cancelled'", code), (
         "the aggregate must keep the `failure|cancelled` sweep over "
-        "`needs.*.result` as defence in depth (#5219)")
+        "`needs.*.result` as defence in depth (#5219) — as a LINE OF CODE, not "
+        "as a mention inside a comment")
 
     # Render the GitHub expressions into literal results and actually RUN the
     # aggregate's script: this is what turns "the words are present" into "a
@@ -5712,10 +5739,19 @@ def test_drift_gate_cannot_skip_the_test_matrix():
                     f"`{leg}`'s row must gate on `{selector}` — the output its "
                     f"own `if:` reads; got {rows[leg]!r}")
 
-        def _render(results: dict, selected: dict) -> str:
-            rendered = script.replace(
+        def _render(results: dict, selected: dict, extra=(), src=None) -> str:
+            """Render the aggregate's GitHub expressions into literal values.
+
+            `extra` appends result words to the `needs.*.result` join WITHOUT
+            adding rows — the only way to reproduce the shape that reaches
+            `needs:` with no row in the table (a need the aggregate cannot
+            name). `src` renders a modified copy of the script (e.g. with a
+            duplicated row) instead of the real one.
+            """
+            rendered = (src if src is not None else script).replace(
                 "${{ join(needs.*.result, ' ') }}",
-                " ".join(results.get(name, "skipped") for name in job_names))
+                " ".join([results.get(name, "skipped") for name in job_names]
+                         + list(extra)))
             # `needs.<job>.result` renders as EMPTY when <job> is absent from
             # `needs:` — GitHub's own semantics, and the reason a leg dropped
             # from the required check's list must fail closed here rather than
@@ -5731,25 +5767,84 @@ def test_drift_gate_cannot_skip_the_test_matrix():
                 f"uses, or it proves nothing; unrendered: {unrendered}")
             return rendered
 
-        def _verdict(results: dict, selected: dict | None = None) -> int:
+        # GitHub runs a `run:` step that declares no `shell:` under
+        # `bash --noprofile --norc -eo pipefail {0}`, and `python-ci-gate`
+        # declares none — so THIS is the shell the aggregate really executes
+        # under. Named once, used by every probe below, and pinned: the pre-fix
+        # harness ran `bash -e` (no `pipefail`), which is the half of the runner
+        # shell that `pipefail`-sensitive lines depend on (#9240 review P2-1).
+        RUNNER_SHELL = ("bash", "-eo", "pipefail")
+        RUNS: list[list[str]] = []
+
+        def _verdict(results: dict, selected: dict | None = None,
+                     extra=(), src=None) -> tuple[int, str]:
+            """Render and RUN the aggregate. Returns `(exit code, output)`.
+
+            The OUTPUT is half the contract: a red that does not NAME the leg
+            sends the operator to the job logs, which is exactly the defect
+            #9240 fixes. Asserting only the exit code cannot tell that fix from
+            the code it replaced — the old bare `grep -qE 'failure|cancelled'`
+            bail exits 1 on every red vector below, so exit-code-only coverage
+            is satisfied by the pre-fix script (proved in #9240 review).
+            The shell is `bash -eo pipefail`, NOT `bash -e` (#9240 review). The
+            aggregate step declares no `shell:`, so the runner gives it GitHub's
+            default `bash --noprofile --norc -eo pipefail {0}` — the same shell
+            this repo records twice in load-bearing comments
+            (`.github/workflows/ai-review-gate.yml`, "`shell: bash` (which is
+            `-eo pipefail`)"; `.github/workflows/post-merge-validation.yml`,
+            "GitHub runs steps under bash -eo pipefail"). Omitting `pipefail`
+            here would exercise the aggregate's `if echo "$RESULTS" | grep
+            -qE ...` backstop under a shell that cannot reproduce the flag
+            behind its best-documented failure — a `grep -q` mid-pipeline whose
+            SIGPIPE silently inverts the branch (`docs/ci/docs-lint-baseline.md`,
+            `tests/test_migration_drift_gate.py`, `tests/test_docs_lint_baseline.py`).
+            A green path that only survives without errexit/pipefail is caught
+            here too.
+            """
             sel = dict(SELECTED)
             sel.update(selected or {})
-            return subprocess.run(["bash", "-c", _render(results, sel)],
-                                  capture_output=True).returncode
+            argv = [*RUNNER_SHELL, "-c", _render(results, sel, extra, src)]
+            RUNS.append(argv)
+            proc = subprocess.run(argv, capture_output=True, text=True)
+            return proc.returncode, proc.stdout + proc.stderr
+
+        # The bare sentence the pre-fix aggregate printed for every red. Nothing
+        # may emit it again: it names no leg, which is the whole defect #9240
+        # fixes (agent-infra#2148 sibling).
+        LEGACY = "matrix leg failed or was cancelled"
 
         green = {name: "success" for name in job_names}
-        assert _verdict(green) == 0, (
-            "an all-green matrix must pass the required check")
+        rc, out = _verdict(green)
+        assert rc == 0, "an all-green matrix must pass the required check"
+        assert "::error::" not in out, (
+            f"a green matrix must not emit an error annotation; got {out!r}")
+
         # EVERY leg, not just the last one: a required check that cannot red on
-        # a given leg is a check that does not observe it (#5219).
+        # a given leg is a check that does not observe it (#5219). And every red
+        # must NAME its leg — that is #9240's deliverable, and the reason these
+        # assertions inspect `out` rather than only the exit code.
         for red in ("failure", "cancelled"):
             for leg in job_names:
                 bad = dict(green)
                 bad[leg] = red
-                assert _verdict(bad) == 1, (
+                rc, out = _verdict(bad)
+                assert rc == 1, (
                     f"a `{red}` for `{leg}` must FAIL python-ci-gate — a leg "
                     "the required check does not observe is a leg it cannot "
                     "block (#5219)")
+                assert f"::error::leg '{leg}'" in out, (
+                    f"a `{red}` for `{leg}` must be NAMED — an aggregate that "
+                    "only says 'merge blocked' sends the operator to the job "
+                    f"logs (#9240, agent-infra#2148); got {out!r}")
+                assert LEGACY not in out, (
+                    "the pre-fix bare sentence names no leg — it must never be "
+                    f"the report for a red again (#9240); got {out!r}")
+                # The summary line counts LEGS and must not pad its number with
+                # `wc`'s spaces (the one operator-facing line in this change).
+                assert "❌ 1 leg(s) did not pass" in out, (
+                    f"the summary must count exactly one red leg, unpadded; got "
+                    f"{out!r}")
+
         # An always-run leg has NO selector that can decline it, so a `skipped`
         # one is a lost shard. This is the half of "`skipped` is not a pass"
         # that covers the legs the gate cannot see skip: a silently skipped
@@ -5758,38 +5853,128 @@ def test_drift_gate_cannot_skip_the_test_matrix():
         for leg in ALWAYS:
             lost = dict(green)
             lost[leg] = "skipped"
-            assert _verdict(lost) == 1, (
+            rc, out = _verdict(lost)
+            assert rc == 1, (
                 f"`{leg}` has no diff gate, so a `skipped` {leg} is a lost "
                 "shard and must red the required check")
+            assert f"::error::leg '{leg}'" in out and "SKIPPED" in out, (
+                f"a `skipped` {leg} must be named as SKIPPED; got {out!r}")
         # A leg the selector DID select reporting `skipped` is a lost shard...
         for leg, selector in DECLINABLE.items():
             lost = dict(green)
             lost[leg] = "skipped"
-            assert _verdict(lost) == 1, (
+            rc, out = _verdict(lost)
+            assert rc == 1, (
                 f"`{leg}` skipped although the selector SELECTED it is a lost "
                 "shard — the required check must not certify it (#5219)")
+            assert f"::error::leg '{leg}'" in out, (
+                f"a lost shard must be named, not just counted; got {out!r}")
             # ... while one the selector DECLINED may skip: a diff that does not
             # touch the leg must not be blocked by the gate's own shape.
             declined = dict(green)
             declined[leg] = "skipped"
-            assert _verdict(declined, {selector: "false"}) == 0, (
+            rc, out = _verdict(declined, {selector: "false"})
+            assert rc == 0, (
                 f"`{leg}` skipped because `{selector}` declined it must not "
-                "red the required check")
+                f"red the required check; got {out!r}")
         # A docs-only diff selects nothing at all.
         declined_all = dict(green)
         for leg in DECLINABLE:
             declined_all[leg] = "skipped"
-        assert _verdict(declined_all,
-                        {sel: "false" for sel in DECLINABLE.values()}) == 0, (
-            "an all-declined (docs-only) diff must stay green")
+        rc, out = _verdict(declined_all,
+                           {sel: "false" for sel in DECLINABLE.values()})
+        assert rc == 0, (
+            f"an all-declined (docs-only) diff must stay green; got {out!r}")
         # And the shape #5219 was actually about: a leg dropped from `needs:`
         # must fail closed instead of vanishing — for EVERY leg, not just one.
+        # Its row renders EMPTY, so it is reported as the missing-leg shape BY
+        # NAME, which is why this class was already named pre-fix.
         for leg in job_names:
             dropped = dict(green)
             dropped.pop(leg)
-            assert _verdict(dropped) == 1, (
+            rc, out = _verdict(dropped)
+            assert rc == 1, (
                 f"`{leg}` REMOVED from `needs:` must fail closed, not "
                 "disappear — that is the exact #5219 shape")
+            assert f"::error::leg '{leg}'" in out, (
+                f"a missing `{leg}` must be named — a bare count mismatch "
+                f"sends the operator hunting; got {out!r}")
+
+        # Two red legs must yield TWO named lines, not the first one only (an
+        # `exit` inside the loop would silently report just the first).
+        two = dict(green)
+        two["test"] = "failure"
+        two["test-slow"] = "cancelled"
+        rc, out = _verdict(two)
+        assert rc == 1
+        assert "::error::leg 'test' reported 'failure'" in out, out
+        assert "::error::leg 'test-slow' was CANCELLED" in out, out
+        assert out.count("::error::leg ") == 2, (
+            f"each red leg gets its own line; got {out!r}")
+        assert "❌ 2 leg(s) did not pass" in out, out
+
+        # A duplicate row inspected twice is ONE red leg and must be counted
+        # once — a copy-paste must not inflate the operator's summary.
+        order = ("test|${{ needs.test.result }}|"
+                 "${{ needs.changes.outputs.python }}")
+        row_line = next((ln for ln in script.splitlines()
+                         if ln.strip() == order), None)
+        assert row_line is not None, (
+            "could not find the `test` row to duplicate — the fixture is stale")
+        dup_src = script.replace(row_line, f"{row_line}\n{row_line}", 1)
+        one_red = dict(green)
+        one_red["test"] = "failure"
+        rc, out = _verdict(one_red, src=dup_src)
+        assert rc == 1, (
+            "a duplicated row must not hide its own red; got "
+            f"rc={rc} {out!r}")
+        assert "❌ 1 leg(s) did not pass" in out, (
+            f"the summary must count LEGS, not rows; got {out!r}")
+
+        # The `failure|cancelled` sweep must stay REACHABLE (#9240 review: it
+        # was dead code behind the deleted distinct-count guard). A red result
+        # with no row at all is only visible to that sweep — assert it fires and
+        # says so, instead of being pre-empted by an earlier, blinder bail.
+        rc, out = _verdict(green, extra=("failure",))
+        assert rc == 1, (
+            "a failing need with no row must red the required check — a "
+            f"`skipped`-shaped escape here is a fail-OPEN; got {out!r}")
+        assert "no leg row named it" in out, (
+            "the unrowed-need red must come from the identity-blind sweep, i.e. "
+            f"the sweep must be reachable; got {out!r}")
+
+        # --- #9240 review P2-1: run it under the RUNNER's shell --------------
+        # Adopting `-eo pipefail` is not cosmetic and must not be reverted
+        # silently: the pin is on the argv that was EXECUTED, so an edit that
+        # drops the flag (back to the pre-review `bash -e`) reds here.
+        assert RUNS, "the aggregate harness must actually execute the script"
+        for argv in RUNS:
+            # Literal expectation, NOT `RUNNER_SHELL` — comparing the executed
+            # argv to the constant it was built from would pin nothing.
+            assert tuple(argv[:3]) == ("bash", "-eo", "pipefail"), (
+                "the aggregate must be exercised under the runner's shell, "
+                "`bash --noprofile --norc -eo pipefail {0}` — `python-ci-gate` "
+                "declares no `shell:`, and its last-resort sweep is a `grep -q` "
+                f"on the writing side of a pipe; got {argv!r}")
+        # ... and adopting it must not CHANGE any verdict (a shell-parity red
+        # would mean the fix itself reds the gate on the runner while staying
+        # green here). Re-run the discriminating vectors under `bash -e` alone.
+        parity = [green, {**green, "test": "failure"},
+                  {**green, "test-slow": "cancelled"}]
+        for vec in parity:
+            rendered = _render(vec, SELECTED)
+            errexit_only = subprocess.run(["bash", "-e", "-c", rendered],
+                                          capture_output=True, text=True)
+            runner_shell = subprocess.run([*RUNNER_SHELL, "-c", rendered],
+                                          capture_output=True, text=True)
+            assert errexit_only.returncode == runner_shell.returncode, (
+                "the aggregate's verdict must not depend on `pipefail`: "
+                f"`bash -e` says {errexit_only.returncode}, `bash -eo pipefail` "
+                f"says {runner_shell.returncode} for {vec!r}")
+            assert errexit_only.stdout == runner_shell.stdout, (
+                "both shells must produce the same REPORT, not just the same "
+                f"exit code; got {errexit_only.stdout!r} vs "
+                f"{runner_shell.stdout!r}")
 
 
 def test_required_gate_covers_the_long_legs():

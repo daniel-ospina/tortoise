@@ -95,6 +95,16 @@ data/kind_index/*
 # the wipe, removed after a completed replay).
 .tortoise-prewipe-snapshot.json
 .tortoise-prewipe-*.tmp
+
+# #9190: the journal POSITION cache, written beside whatever journal it
+# describes (`<journal>.position` — the suffix is appended to the journal's own
+# name, so it is not tied to `*.jsonl`; `tortoise ingest --log graph.events`
+# writes `graph.events.position`). Same exposure as the snapshot above:
+# `ingest` / `rebuild` default the event log to `events.jsonl` in the CWD, so a
+# routine run in a checkout root leaves one here. Derived state — a stale or
+# deleted sidecar costs a recount, never a wrong cached number — and nothing
+# else in the tree produces this suffix, so it must never be committed.
+*.position
 .venv
 .pytest_cache/
 
