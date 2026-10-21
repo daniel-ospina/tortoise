@@ -410,14 +410,19 @@ Exit 0 only when **all** of these hold:
    commit that adds each `*.log` in this directory (`git log --diff-filter=A --format=%ct`). An
    evidence log at the same or an earlier second fails — *"same second" is not "before"*.
 
-   The single documented exception is `e1-e2.log` (§0), and it is bounded on four sides so it cannot
-   launder a scored number:
+   The single documented exception is `e1-e2.log` (§0), and it is bounded on five sides so it
+   cannot launder a scored number:
 
    - it must **predate** this file (a postdating log needs no exemption);
+   - its **content** must not have been modified at or after this file's add-commit — the check
+     reads the last commit that *touched* the log, not just the one that added it, so an in-place
+     edit cannot put a measurement number into a grandfathered log after the thresholds were
+     written;
    - it must declare `prereg=UNPREREGISTERED` **on its own line** — the check reads the log, never
      this paragraph;
-   - it must carry **no scored verdict** — no `verdict=PASS`/`FAIL`, no `result=GREEN`/`RED`, and
-     `exit=3`;
+   - **every** `verdict=`/`result=` line in it must read `UNPREREGISTERED`, and every `exit=` must
+     be `3` — a whitelist, not a list of known-bad values, so the next scored vocabulary cannot
+     slip through;
    - an exemption naming a log that does not exist **fails**, so the exempt set cannot grow.
 
    The property enforced is the one the epic wants: **no number is scored against a threshold whose
@@ -425,8 +430,10 @@ Exit 0 only when **all** of these hold:
    postdate this file.
 3. **The machine record agrees with the argument.** `preregistration.json` — the path the evidence
    probe already names on its `prereg=` line — must parse, declare `capstone-preregistration/v1`,
-   assert `written_before_any_run` **with its basis stated** (no SCORED run exists; the
-   `UNPREREGISTERED` log that predates it is named), and agree with the pins block on
+   assert `written_before_any_scored_run` **with its basis stated** (no SCORED run exists; the
+   `UNPREREGISTERED` log that predates it is named). The unqualified `written_before_any_run` is
+   **refused**: it is false whenever any log exists, and a machine consumer keys on the field name
+   rather than on prose. It must also agree with the pins block on
    `fixtures_hash`, on every criterion threshold, and on the exempt-log list.
 3. **E4's denominator is 15.** The E4 row's denominator is `15`, and **no four-edge denominator rate
    appears** (§6).

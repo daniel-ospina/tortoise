@@ -20,17 +20,22 @@ It verifies four things, and it fails on each of them for a specific reason:
    *before* this registration existed, from a lane that correctly refused to score it. A bare date
    comparison can therefore only report a permanent failure, which is not a check but a stuck
    light. The exemption is granted per-log in the pins (``pre_existing_unscored_logs``) and is
-   bounded on all four sides, so it cannot be used to launder a scored number:
+   bounded on all five sides, so it cannot be used to launder a scored number:
 
    a. the exempt log must genuinely **predate** this file (a postdating log needs no exemption, and
       one granted to it would hide a real ordering failure);
-   b. the exempt log must **declare itself unscored on its own line** — ``prereg=UNPREREGISTERED``
+   b. the exempt log's **content** must not have been touched at or after this file's add-commit.
+      The add-commit is immutable, so on its own it cannot see an in-place edit: a log could be
+      re-committed with a fabricated measurement after the thresholds were written and still look
+      exempt. This bound reads the LAST commit touching the log, not just the one that added it;
+   c. the exempt log must **declare itself unscored on its own line** — ``prereg=UNPREREGISTERED``
       read out of the log, never out of this document, so the exemption cannot claim a status the
       log does not carry;
-   c. the exempt log must carry **no scored verdict at all** — no ``verdict=PASS``/``FAIL``, no
-      ``result=GREEN``/``RED``, and ``exit=3`` (the ``UNPREREGISTERED`` exit). A single scored row
-      voids the exemption, because that is a number measured against a bar that did not exist;
-   d. an exemption naming a log that **does not exist** fails, so an exempt set cannot grow by
+   d. **every** ``verdict=``/``result=`` value in it must be ``UNPREREGISTERED`` and every
+      ``exit=`` must be ``3``. A whitelist, not a list of four known-bad strings: a closed bad-list
+      admits the next scored vocabulary with no code change, which is the inverse of the gap the
+      exemption exists to close;
+   e. an exemption naming a log that **does not exist** fails, so an exempt set cannot grow by
       keeping stale rows around to be reused later.
 
    The effect is the property the epic actually wants: **no number is scored against a threshold
@@ -49,9 +54,11 @@ It verifies four things, and it fails on each of them for a specific reason:
 
 5. **The machine record agrees with the argument.** ``preregistration.json`` is the record the
    evidence probe reads (``e1-e2.log`` names it on its ``prereg=`` line). It must parse, declare the
-   ``capstone-preregistration/v1`` schema, carry the honest run-order claim, and **agree with the
-   pins block** on every number it restates. Two copies of a threshold that can disagree is how a
-   gate reads one while a reviewer reads the other.
+   ``capstone-preregistration/v1`` schema, carry the honest run-order claim —
+   ``written_before_any_scored_run``, NOT the unqualified ``written_before_any_run``, which is false
+   whenever any log exists and which a machine consumer keys on by name — and **agree with the pins
+   block** on every number it restates. Two copies of a threshold that can disagree is how a gate
+   reads one while a reviewer reads the other.
 
 What it deliberately does NOT do: it does not judge whether the thresholds are *right*. That is the
 argument in the document, and an argument is reviewed, not grepped.
@@ -90,8 +97,11 @@ PREREG_SCHEMA = "capstone-preregistration/v1"
 #: The status a log carries when no threshold existed to score it against.
 UNSCORED = "UNPREREGISTERED"
 
-#: A verdict that IS a score. Any of these inside an exempt log voids the exemption.
-SCORED_MARKS = ("verdict=PASS", "verdict=FAIL", "result=GREEN", "result=RED")
+#: Every ``verdict=``/``result=`` value in an exempt log must be this. A WHITELIST, not a blacklist
+#: of four known-bad strings: a closed bad-list silently admits the next scored vocabulary, which is
+#: the inverse of the gap the exemption exists to close (#9075 review P2).
+SCORED_KEYS = re.compile(r"(?:^|\s)(verdict|result)=(\S+)", re.MULTILINE)
+EXIT_KEY = re.compile(r"(?:^|\s)exit=(\S+)", re.MULTILINE)
 
 #: The rows the epic requires. ``E2`` may be carried by sub-rows (``E2a``/``E2b``); a required id is
 #: satisfied when at least one row's id equals it or starts with it.
@@ -396,18 +406,46 @@ def _log_declares_unscored(log: Path) -> tuple[bool, str]:
             f"does not declare prereg={UNSCORED} on its own line (found {declared!r}) — "
             "an exemption covers a log that is unscored, not a log that was scored and renamed"
         )
-    for mark in SCORED_MARKS:
-        if mark in text:
+    for key, value in SCORED_KEYS.findall(text):
+        if value != UNSCORED:
             return False, (
-                f"carries {mark!r} — a grandfathered log that scores anything was measured "
-                "against a bar that did not exist"
+                f"carries {key}={value} — a grandfathered log may only ever carry "
+                f"{key}={UNSCORED}; anything else was measured against a bar that did not exist"
             )
-    if "exit=3" not in text:
+    exits = EXIT_KEY.findall(text)
+    if not exits:
         return False, (
-            "does not record exit=3 — an UNPREREGISTERED log must exit 3, so a missing exit "
-            "line means the status and the outcome disagree"
+            "does not record an exit= line — an UNPREREGISTERED log must exit 3, so a missing "
+            "exit line means the status and the outcome disagree"
+        )
+    if any(value != "3" for value in exits):
+        return False, (
+            f"records exit={','.join(exits)} — an UNPREREGISTERED log must exit 3 and only 3"
         )
     return True, ""
+
+
+def _touch_epochs(path: Path) -> list[int]:
+    """Every commit epoch that TOUCHED ``path`` — not just the one that added it.
+
+    ``--diff-filter=A`` is immutable by construction, so on its own it cannot see an in-place
+    edit: a grandfathered log could be re-committed with a fabricated measurement number and its
+    add-commit would still predate the registration (#9075 review P1).
+    """
+    try:
+        rel = path.resolve().relative_to(REPO_ROOT)
+    except ValueError:
+        return []
+    try:
+        out = subprocess.run(
+            ["git", "log", "--format=%ct", "--", str(rel)],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, check=False,
+        )
+    except OSError:  # pragma: no cover - git absent
+        return []
+    if out.returncode != 0:
+        return []
+    return sorted(int(x) for x in out.stdout.split() if x.strip().isdigit())
 
 
 def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None) -> list[str]:
@@ -456,6 +494,22 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None) -> 
             ok, why = _log_declares_unscored(log)
             if not ok:
                 failures.append(f"{log.name}: exempted, but the log {why}")
+                continue
+            touches = _touch_epochs(log)
+            if not touches:
+                failures.append(
+                    f"{log.name}: exempted but no commit touching it could be read — the "
+                    "exemption needs its CONTENT to predate the registration, not just its add"
+                )
+                continue
+            latest = max(touches)
+            if latest >= prereg_epoch:
+                failures.append(
+                    f"{log.name}: exempted, but it was MODIFIED at {latest}, which is not "
+                    f"strictly before the pre-registration's add-commit {prereg_epoch} — an "
+                    "in-place edit can put a measurement number into a grandfathered log after "
+                    "the thresholds were written, and the add-commit cannot see that"
+                )
             continue
         if log_epoch <= prereg_epoch:
             failures.append(
@@ -481,16 +535,22 @@ def check_machine_record(directory: Path, pins: dict) -> list[str]:
         failures.append(
             f"{MACHINE_RECORD} declares schema {record.get('schema')!r}, expected {PREREG_SCHEMA!r}"
         )
-    if not record.get("written_before_any_run"):
+    if not record.get("written_before_any_scored_run"):
         failures.append(
-            f"{MACHINE_RECORD} does not assert written_before_any_run — a threshold without that "
-            "claim may have been chosen to fit the number"
+            "does not assert written_before_any_scored_run — a threshold without that claim "
+            "may have been chosen to fit the number"
         )
-    basis = str(record.get("written_before_any_run_basis") or "")
+    if "written_before_any_run" in record:
+        failures.append(
+            "carries the unqualified written_before_any_run — that field is FALSE whenever any "
+            "run exists, including an UNPREREGISTERED one, and a machine consumer keys on the "
+            "name rather than the prose. Use written_before_any_scored_run (#9075 review P1)"
+        )
+    basis = str(record.get("written_before_any_scored_run_basis") or "")
     if UNSCORED not in basis:
         failures.append(
-            "written_before_any_run is asserted without naming the basis — it must state that it "
-            f"means no SCORED run exists and name the {UNSCORED} log that predates it"
+            "written_before_any_scored_run is asserted without naming the basis — it must state "
+            f"that no SCORED run exists and name the {UNSCORED} log that predates it"
         )
 
     corpus = record.get("corpus") or {}
@@ -685,7 +745,17 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
     failures += check_machine_record(directory, pins)
 
     if use_corpus:
-        derived = derive_corpus_facts(pins)
+        try:
+            derived = derive_corpus_facts(pins)
+        except CheckError:
+            raise
+        except (OSError, ImportError, ValueError, KeyError) as exc:
+            # A corpus change that deletes a fixture, the salience JSONL or the module itself is
+            # exactly the event this check exists to catch — it must read as an attributed exit 2,
+            # not an unhandled traceback that hides the cause (#9075 review P2).
+            raise CheckError(
+                f"cannot re-derive the corpus pins from the tree: {type(exc).__name__}: {exc}"
+            ) from exc
         report["derived"] = {
             "fixtures_hash": derived["fixtures_hash"],
             "planted_units": derived["planted_units"],

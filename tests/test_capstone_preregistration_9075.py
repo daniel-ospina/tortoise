@@ -389,7 +389,7 @@ def test_an_exempted_log_without_exit_3_fails(tmp_path, monkeypatch):
     log = _write_log(repo, "e1-e2.log", epoch=1_700_000_000, body=body)
     prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
     failures = check.check_ordering(prereg, [log], _exempt())
-    assert failures and "exit=3" in failures[0], failures
+    assert failures and "must exit 3" in failures[0], failures
 
 
 def test_an_exemption_for_a_log_that_postdates_the_registration_fails(tmp_path, monkeypatch):
@@ -420,8 +420,8 @@ def _record(**over) -> dict:
     rows = check.parse_criteria_rows(PREREG.read_text())
     base = {
         "schema": check.PREREG_SCHEMA,
-        "written_before_any_run": True,
-        "written_before_any_run_basis": f"no scored run exists; the {check.UNSCORED} log predates it",
+        "written_before_any_scored_run": True,
+        "written_before_any_scored_run_basis": f"no scored run exists; the {check.UNSCORED} log predates it",
         "unscored_runs_before_this_registration": sorted(
             pins["pre_existing_unscored_logs"]),
         "corpus": {"fixtures_hash": pins["corpus"]["fixtures_hash"]},
@@ -483,19 +483,121 @@ def test_a_machine_record_whose_unscored_list_disagrees_with_the_pins_fails(tmp_
     assert any("unscored_runs_before_this_registration" in f for f in failures), failures
 
 
-def test_a_machine_record_without_the_run_order_assumption_fails(tmp_path):
-    rec = _record(written_before_any_run=False)
+def test_a_machine_record_without_the_scored_run_assumption_fails(tmp_path):
+    rec = _record(written_before_any_scored_run=False)
     d = _materialise(tmp_path, rec)
     failures = check.check_machine_record(d, check.parse_pins(PREREG.read_text()))
-    assert any("written_before_any_run" in f for f in failures), failures
+    assert any("written_before_any_scored_run" in f for f in failures), failures
 
 
 def test_the_run_order_claim_must_state_its_basis(tmp_path):
     """An unqualified `true` is the claim #9075 exists to refuse; the basis names the unscored log."""
-    rec = _record(written_before_any_run_basis="because we say so")
+    rec = _record(written_before_any_scored_run_basis="because we say so")
     d = _materialise(tmp_path, rec)
     failures = check.check_machine_record(d, check.parse_pins(PREREG.read_text()))
     assert any("without naming the basis" in f for f in failures), failures
+
+
+def test_the_unqualified_written_before_any_run_field_is_refused(tmp_path):
+    """REGRESSION (#9075 review P1): the name lies even when the prose is honest.
+
+    `written_before_any_run: true` is false whenever ANY log exists — including an UNPREREGISTERED
+    one — and a machine consumer keys on the NAME. The precise claim is
+    `written_before_any_scored_run`, so carrying the ambiguous one is a failure even alongside it.
+    """
+    rec = _record(written_before_any_run=True)
+    d = _materialise(tmp_path, rec)
+    failures = check.check_machine_record(d, check.parse_pins(PREREG.read_text()))
+    assert any("unqualified written_before_any_run" in f for f in failures), failures
+
+
+def test_the_real_machine_record_carries_only_the_precise_field():
+    import json as _json
+    record = _json.loads((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    assert record["written_before_any_scored_run"] is True
+    assert "written_before_any_run" not in record
+
+# ── the exemption cannot be laundered by rewriting the log in place ──────────
+
+
+def test_an_exempted_log_edited_after_the_registration_fails(tmp_path, monkeypatch):
+    """REGRESSION (#9075 review P1): `--diff-filter=A` cannot see an in-place edit.
+
+    The add-commit is immutable, so a log can be re-committed with a fabricated measurement AFTER
+    the thresholds were written and still look exempt. The exemption therefore bounds the log's
+    CONTENT, not just its add-commit: the last commit touching it must predate the registration.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    log = _write_log(repo, "e1-e2.log", epoch=1_700_000_000)
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+    assert check.check_ordering(prereg, [log], _exempt()) == []
+
+    # The forgery: keep every marker intact, only move the number — the exact edit that would be
+    # read as a measurement against the frozen threshold.
+    log.write_text(UNSCORED_LOG.replace("after_share=0.6", "after_share=0.25"))
+    _git(repo, "add", str(log.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "rewrite the log", epoch=1_700_000_200)
+
+    failures = check.check_ordering(prereg, [log], _exempt())
+    assert failures and "MODIFIED at" in failures[0], failures
+
+
+@pytest.mark.parametrize("old,new,bad", [
+    ("result=UNPREREGISTERED", "result=PASS", "result=PASS"),
+    ("verdict=UNPREREGISTERED", "verdict=GREEN", "verdict=GREEN"),
+])
+def test_an_exempted_log_with_a_marker_other_than_unpreregistered_fails(
+        tmp_path, monkeypatch, old, new, bad):
+    """REGRESSION (#9075 review P2): the whitelist, not a four-string blacklist.
+
+    `result=PASS` and `verdict=GREEN` were both admitted by the old blacklist, which only knew
+    `verdict=PASS|FAIL` and `result=GREEN|RED` — the inverse of the gap the exemption closes.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    log = _write_log(repo, "e1-e2.log", epoch=1_700_000_000, body=UNSCORED_LOG.replace(old, new))
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+    failures = check.check_ordering(prereg, [log], _exempt())
+    assert failures and bad in failures[0], (bad, failures)
+
+
+def test_an_unreadable_corpus_is_a_usage_error_not_a_traceback(tmp_path):
+    """REGRESSION (#9075 review P2): a check that cannot read its subject must exit 2.
+
+    A corpus change that deletes a fixture or the salience JSONL is exactly the event this gate
+    exists to catch, so it must be attributed, never an unhandled traceback.
+    """
+    doc = _doc(tmp_path, _rows(
+        "| E1 | shape Objects written | all Objects written (floor >= 30) | `<= 0.50 x before` |",
+        "| E2a | value units surviving | the **14** value units | `>= 13 of 14` |",
+        "| E3 | anchored derived nodes | all derived nodes (floor >= 30) | `= 1.000` |",
+        "| E4 | wired+persisted operator edges | the **15** planted operator edges | `= 15 of 15` |",
+        "| E5 | narrative-arm marker claims | raw-arm marker claims over **29** sentences | `>= 0.90` ratio |",
+    ))
+    pins = check.parse_pins(doc.read_text())
+    pins["corpus"]["root"] = "tests/eval/write_path_DOES_NOT_EXIST"
+    with pytest.raises(check.CheckError):
+        check.derive_corpus_facts(pins)
+
+
+def test_run_wraps_a_corpus_failure_as_a_check_error(tmp_path, monkeypatch):
+    """`run()` must surface a mid-derivation IO failure as exit-2 material, not a traceback."""
+    doc = _doc(tmp_path, _rows(
+        "| E1 | shape Objects written | all Objects written (floor >= 30) | `<= 0.50 x before` |",
+        "| E2a | value units surviving | the **14** value units | `>= 13 of 14` |",
+        "| E3 | anchored derived nodes | all derived nodes (floor >= 30) | `= 1.000` |",
+        "| E4 | wired+persisted operator edges | the **15** planted operator edges | `= 15 of 15` |",
+        "| E5 | narrative-arm marker claims | raw-arm marker claims over **29** sentences | `>= 0.90` ratio |",
+    ))
+    assert doc.exists()
+
+    def boom(_pins):
+        raise FileNotFoundError("tests/eval/write_path/fixtures/wp01_quarry_debug.json")
+
+    monkeypatch.setattr(check, "derive_corpus_facts", boom)
+    with pytest.raises(check.CheckError) as excinfo:
+        check.run(tmp_path, use_git=False, use_corpus=True)
+    assert "cannot re-derive the corpus pins" in str(excinfo.value)
+    assert "FileNotFoundError" in str(excinfo.value)
 
 
 # ── the CLI contract ────────────────────────────────────────────────────────
