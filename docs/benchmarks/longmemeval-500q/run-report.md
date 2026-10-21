@@ -40,8 +40,8 @@ extends: docs/planning/2026-09-01-2080-gbrain-plan.md (DM-11, §6.6, §7 E2E-8),
 |---|---|
 | Benchmark | LongMemEval-S cleaned (`xiaowu0162/longmemeval-cleaned`, official 500-Q set) |
 | Run | `run_protocol` step 5 (full 500-Q), resumable state machine |
-| Ingest mode | **`v2`** — the production extractor (statement points + IMPL/NAND operators), i.e. `run_protocol` step 5's documented mode. **SUPERSEDES the `deterministic` record this row carried before #8486**: the belief layer is armable ONLY on a `v2` graph (the runner **refuses** `--activate-beliefs` with `--ingest-mode deterministic` — `parser.error` at the CLI, `ValueError` for programmatic callers), and the #8486 protocol injects `--ingest-mode v2 --activate-beliefs` on every run step, so a `deterministic` step-5 command is now unrunnable. The deterministic raw-content mode (turn points + raw chunks, no operators) remains the historical variant in §3/§4; it cannot carry a belief layer. |
-| Belief layer | **`inert` — not activated.** The belief-activation arm (`tools/longmem_eval/run.py --activate-beliefs` → `ep_activation.activate_beliefs`, `#3011`) is now wired into the runner and armed by the `#8486` run protocol; the step-5 run MUST arm it. Reasons it is not optional: `ingest_v2` writes every extraction point `status="draft"` and mints its operators with `promote_source=False`, and `tortoise/ep.py` filters the factor graph with `_live_only(..., include_draft=False)` — so an un-activated graph is **EP-inert** and every claim reads the neutral `0.50` of a Beta(1,1) prior that was never measured (`#2598`). A `v2` number without this row saying `activated` must not be described as measuring Tortoise's reasoning (`#8486`). Both halves are carried mechanically: the report's `methodology.measurement_posture` records them, and `w7_publish.validate_receipt` **refuses** a `completed` receipt whose posture is absent or `unknown`. |
+| Ingest mode | **`v2`** — the production extractor (statement points + IMPL/NAND operators), i.e. `run_protocol` step 5's documented mode. **SUPERSEDES the `deterministic` record this row carried before #8486**: the belief layer is armable ONLY on a `v2` graph (the runner **refuses** `--activate-beliefs` with `--ingest-mode deterministic` — `parser.error` at the CLI, `ValueError` for programmatic callers), and the #8486 protocol injects `--ingest-mode v2 --activate-beliefs` on every run step, so a `deterministic` step-5 command is now unrunnable. The deterministic raw-content mode (turn points + raw chunks, no operators) remains the historical variant documented in §3; it cannot carry a belief layer. |
+| Belief layer | **`inert` — not activated.** The belief-activation arm (`tools/longmem_eval/run.py --activate-beliefs` → `ep_activation.activate_beliefs`, `#3011`) is now wired into the runner and armed by the `#8486` run protocol; the step-5 run MUST arm it. Reasons it is not optional: `ingest_v2` writes every extraction point `status="draft"` and mints its operators with `promote_source=False`, and `tortoise/ep.py` filters the factor graph with `_live_only(..., include_draft=False)` — so an un-activated graph is **EP-inert** and every claim reads the neutral `0.50` of a Beta(1,1) prior that was never measured (`#2598`). **The four resolved states — and the bar in terms of them** (`tools/longmem_eval/measurement_posture.py::belief_layer_state`, the ONE place they are derived): `activated` = the arm ran **and every question carries a measured posterior** (its post-pass census found at least one non-operator point with `points_with_ep > 0`); `partial` = the arm ran but not every question does — a resumed outcome with no manifest, an activation that failed, or, in the common case on this benchmark, a question whose extraction minted no IMPL/NAND operators, so `sdk.dream` returned with zero belief writes (`no_op_reason = "no_ep_factors"`, and the #1163 stale-run stand-down — single-session questions are frequently this shape); `inert` = the arm was not requested; `unknown` = no posture was ever recorded. **`partial` is the state a correctly-armed step-5 run is expected to report**, so the disclosure bar is PER QUESTION, never all-or-nothing: a `partial` number may be described as measuring Tortoise's reasoning **for the N of M questions whose claims carry a measured posterior** (`posture.activation.questions_with_ep` of `posture.activation.questions`, with `beliefs_activated: false`), and must NOT be described as belief-activated as a whole. Only `activated` licenses the unqualified description (`#8486`). Both halves are carried mechanically: the report's `methodology.measurement_posture` records them, and `w7_publish.validate_receipt` **refuses** a `completed` receipt whose posture is absent or `unknown` (it accepts `partial` — which is why the state has to be defined here, on the surface that states the number). |
 | Reader | `openrouter:deepseek/deepseek-v4-flash` (M5 pinned default, `reader_pinned: true`) |
 | Judge | `openai/gpt-4o-2024-08-06` (the OFFICIAL LongMemEval judge model; verbatim `evaluate_qa.py` anscheck prompts, `judge_call_shape` = official, rubric hash `82d07b0de05daa48`) via the OpenRouter transport — OPENAI_API_KEY absent, identical model id |
 | Backend | real FalkorDB (docker `:falkordb@localhost:6379/tortoise_lme_w7`) — FTS + vector + hybrid RRF |
@@ -120,11 +120,25 @@ Full per-`k` table + per-question digests: `w7a-500q.variants.json`
   question's history (isolated per-question corpus — the report's
   `retrieval_scope`), scored with the official LongMemEval retrieval
   semantics; and end-to-end QA accuracy via the official anscheck judge.
-- **Does NOT measure:** EP belief propagation or why-context assembly —
-  LongMemEval histories are ingested as sessions; no operators/NANDs exist
-  in the eval graphs (`dataset_audit.py` divergence record rides the
-  report). The reader model is the pinned default (deepseek-v4-flash);
-  QA accuracy is reader-bound and is reported separately from retrieval.
+- **Does NOT measure:** why-context assembly (the `#3011` B/C/D arms), and
+  it does not measure the belief layer's effect on **retrieval** — the
+  ranking is hybrid RRF over FTS/vector plus the structural leg, and no
+  posterior/confidence term enters the score (`tools/longmem_eval/
+  retrieve.py`), so arming the belief layer changes what a claim's
+  confidence READS (each claim's posterior, `ep_activation.
+  read_confidence`, `#2598`), never which sessions are recalled. The reader
+  model is the pinned default (deepseek-v4-flash); QA accuracy is
+  reader-bound and is reported separately from retrieval.
+  **Erratum (#8486):** this bullet used to assert that the eval graphs
+  contain no IMPL/NAND operators, citing a `dataset_audit.py` divergence
+  record. That was true only of the `deterministic` raw-content variant and is
+  FALSE for the `v2` step-5 configuration in §1: `ingest_v2` writes entities,
+  points, events and **operators** (IMPL/NAND via `sdk.create_operator`,
+  `#1369`), and `ep_activation` has a target to promote and EP precisely
+  because they exist. `dataset_audit.py` never mentioned operators, so the
+  attribution is dropped — the `v2` operators ARE measured, and the
+  disclosure question is the one §1's **Belief layer** row now answers per
+  question.
 - **Ingest-mode note (mechanism honesty):** the pre-#8486 configuration of
   this run used the runner's `deterministic` ingest (raw-content graph: turn
   points + raw chunks) — **superseded for step 5 by #8486**, which requires
@@ -230,6 +244,7 @@ never a silent in-place edit (publication discipline, #2106 §7):
 |---|---|
 | (machinery commit) | Report committed in PENDING state: protocol gates 1-4 passed (evidence below); steps 5+ (full 500-Q execution) not run. |
 | 2026-10-21 | #8486 follow-up (doc reconciliation, raised by the PR's fresh-context review): §1's **Ingest mode** row now states `v2` (it still said `deterministic`, which is mutually exclusive with the adjacent **Belief layer** row — the runner refuses `--activate-beliefs` on a deterministic graph, and the #8486 protocol injects `--ingest-mode v2 --activate-beliefs`). §3's ingest-mode note and §4's exact command follow. No metric, gate or receipt value changed — the run is still PENDING. |
+| 2026-10-21 | #8486 follow-up, second pass (same review): §3's **Does NOT measure** bullet dropped its claim that the eval graphs contain no IMPL/NAND operators, and its `dataset_audit.py` attribution — both are false for the `v2` configuration §1 records (the extractor writes IMPL/NAND operators, which is what `--activate-beliefs` promotes and EPs), so the bullet now names what is genuinely unmeasured (why-context assembly, and the belief layer's effect on the RRF retrieval score). §1's **Belief layer** row now defines all four resolved states and reconciles the disclosure bar with them: `partial` is the expected state of a correctly-armed run, and the bar is per question (`questions_with_ep` of `questions`), not all-or-nothing. Pinned by `tests/longmem_eval/test_measurement_posture.py` (the report must define every state the module can return and must not restate the operators claim). No metric, gate or receipt value changed — the run is still PENDING. |
 
 ## 10. Handoff to W7-b (#2106)
 

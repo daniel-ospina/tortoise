@@ -629,3 +629,66 @@ def test_a_failed_marker_refresh_drops_the_marker_instead_of_lying():
         "MERGE (m:lme_ingest_cache {namespace:$ns}) "
         "SET m.belief_activated=$activated"]
     assert proj2.g.queries[0][1] == {"ns": "ns-2", "activated": True}
+
+
+# ── the DISCLOSURE document must agree with this module ──────────────────
+#
+# `docs/benchmarks/longmemeval-500q/run-report.md` is the surface that STATES
+# the number, so it is part of the gate: a posture the report does not define,
+# or a mechanism claim it gets backwards, is a disclosure defect even when the
+# code is right (fresh-context review, P1/P2).
+
+_REPORT = (Path(__file__).resolve().parents[2] / "docs" / "benchmarks"
+           / "longmemeval-500q" / "run-report.md")
+
+
+def _report() -> str:
+    return _REPORT.read_text(encoding="utf-8")
+
+
+def test_the_report_defines_every_state_this_module_can_return():
+    """RED (fresh-context review, P2): the report defined ``inert`` and
+    ``activated`` but ``partial`` — the state a correctly-armed run actually
+    reports (``test_one_unmeasured_question_makes_the_whole_run_partial``,
+    because single-session questions often carry no operators) — appeared
+    NOWHERE in it, and the acceptance gate publishes ``partial``. So the row a
+    reader would use to interpret the number had no defined meaning.
+
+    Keyed on the module's own vocabulary: a state added here without a
+    definition on the disclosure surface fails this test.
+    """
+    text = _report()
+    missing = [s for s in sorted(mp.BELIEF_LAYER_VALUES)
+               if f"`{s}`" not in text]
+    assert missing == [], (
+        f"the run report never names these belief-layer states: {missing}")
+
+
+def test_the_report_states_the_bar_against_the_positive_measurement_cell():
+    """The bar must be per QUESTION, not all-or-nothing: ``activated`` requires
+    every question to carry a measured posterior (``questions_with_ep``), so an
+    unqualified "must say activated" bar is unreachable on this benchmark and
+    a ``partial`` run would have no defined description. Pinning the cell name
+    keeps the doc's bar tied to the value the code computes."""
+    text = _report()
+    assert "questions_with_ep" in text, (
+        "the bar must name the positive-measurement cell the code decides on")
+    assert "beliefs_activated" in text, (
+        "the receipt's portable boolean must be named where the bar is stated")
+
+
+def test_the_report_does_not_claim_the_eval_graphs_have_no_operators():
+    """RED (fresh-context review, P1): §3 said "no operators/NANDs exist in the
+    eval graphs" and attributed it to a ``dataset_audit.py`` divergence record.
+    Both are false for the ``v2`` step-5 configuration §1 records —
+    ``ingest_v2`` writes IMPL/NAND operators (``sdk.create_operator``) and
+    ``--activate-beliefs`` promotes and EPs exactly those, and
+    ``dataset_audit.py`` never mentioned operators at all. A reader taking the
+    bullet at face value concludes "the belief layer cannot matter here",
+    which is the premise #8486 exists to correct."""
+    text = _report()
+    assert "no operators/NANDs exist" not in text, (
+        "the report still claims the eval graphs have no operators — false "
+        "for the v2 configuration it records")
+    assert "dataset_audit.py` divergence record rides" not in text, (
+        "the report still attributes the operators claim to dataset_audit.py")
