@@ -1983,6 +1983,18 @@ surfaces:
   # that stops reporting the coordinate still runs this guard. No hosted route
   # emits it yet (`#7970` is the consumer), so `core` alone is correct.
   - test_residency_router.py
+  # #5199 (read half): the ENTITY-addressed currency read — the
+  # `(Source)-[:references]->(:Object|:Event|:Source)` hop, whose targets never
+  # carry an `extractedFrom` link. Registered under `core` because both changed
+  # source files fall through to it (`tortoise/search_engine.py` owns the pair +
+  # the §4.6 aggregate) and the tool it wraps (`tools/source_currency.py`) is a
+  # CORE_ALSO path. Lane: the sibling `test_source_version_references_5199.py`
+  # file (registered in `api` above) — URI-less-runnable (`TortoiseSDK(<tmp path>)`, embedded
+  # FalkorDBLite per test), so `TORTOISE_TEST_CARVE_OUT=1` runs it locally, and
+  # on a URI lane the #1647 test-mode redirect sends it to a per-path derived
+  # graph. Deliberately NOT carve_out-registered, for the same reason the two
+  # rows above are not: it is not embedded-ONLY.
+  - test_source_version_entity_currency_5199.py
   # #5009 (§12.4 / §12.5): the SUFFICIENCY ROUTER and the ESCALATION WRITE-BACK.
   # It pins tortoise/sufficiency_router.py, which matches no SOURCE_PATTERN rule
   # and therefore falls back to `core` — the decision layer is hermetic (no DB,
@@ -7447,6 +7459,7 @@ durations:
   test_source_identity.py: 0.2
   test_source_kind_runtime_registration.py: 0.3
   test_source_version_read_wiring_5199.py: 0.6
+  test_source_version_entity_currency_5199.py: 7.5  # unmeasured — #5199: 13 tests, embedded lane (`TORTOISE_TEST_CARVE_OUT=1`); locally measured 5.9-7.0s per run (SDK/engine startup dominates, fleet-contention sensitive)
   test_source_version_references_5199.py: 1.1
   test_subject_binding_1370.py: 7.1
   test_subject_layer_read_surfaces_4889.py: 0.9

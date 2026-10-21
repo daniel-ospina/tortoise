@@ -592,6 +592,135 @@ def read_currency_links(graph, point_ids: Iterable[str]) -> dict[str, list[dict]
     return out
 
 
+def read_reference_currency_links(
+        graph, entity_ids: Iterable[str]) -> dict[str, list[dict] | None]:
+    """#5199 — the same pair, read for an **ENTITY** (`:Object` / `:Event`).
+
+    ``read_currency_links`` answers for a **Point**, over its ``extractedFrom``
+    links. A derived ``:Object`` / ``:Event`` has no such link: it reaches its
+    source through ``(Source)-[:references]->(entity)`` (§3.4), which is the
+    link that carries the ``sourceVersion`` note for the DERIVATION classes
+    (owner ruling 2026-09-25, option A — ``Event``/``Document`` annotate, an
+    identity/mention ``Object`` link stays property-free). Without this read the
+    question *"are the entities we reason about still about the content we
+    hold?"* is unanswerable for every class except ``:Point``, which is the gap
+    #5199 names.
+
+    Returns ``{entity_id: [link, ...]}`` — the same row shape as
+    :func:`read_currency_links` (``source``, ``recorded``, ``current``,
+    ``currency``) — keyed by the id the CALLER used. THREE states, and they are
+    deliberately distinguishable:
+
+    * ``[link, ...]`` — the covered node's links, in ``(source, recorded)``
+      order;
+    * ABSENT — no inbound ``references`` link, or not in the batch. The caller's
+      verdict is :func:`aggregate_currency`'s anti-vacuity ``unknown``;
+    * ``None`` — the address named MORE THAN ONE node, so it is REFUSED rather
+      than answered (see the identity paragraph below). Absence must never be
+      read as "nothing references this entity" when the truth is "this read
+      declined to pick a node", so the refusal keeps its key.
+
+    ⛔ AN ``Object`` READS ``unknown``, AND THAT IS THE ANSWER, NOT A BUG. Its
+    link is property-free by the same ruling, so the pair is unfillable and
+    :func:`currency_status` returns ``unknown`` — deliberately never
+    ``current``. Do not "fix" this by stamping an anchor onto an identity link:
+    that reverses the ruling and is pinned against in
+    ``tests/test_source_version_references_5199.py``.
+
+    Identity: a row is attributed to the COORDINATES THE CALLER USED, never to
+    a derived value. Three coordinates are legal because the provenance writers
+    mint three node shapes, and each is addressed differently:
+
+    * a ``:Source`` (D10: a document IS a source) is addressed by ``url``
+      (``projection/edges.py``'s ``key_clause = "{url:$eid}" if entity_label ==
+      "Source"``). ``_upsert_document`` happens to also write
+      ``s.id=coalesce(s.id, $id)``, but ``_mint_source_stub`` writes NO ``id``
+      and a Source's ``id`` is not guaranteed to equal its ``url`` — so a read
+      that matched ``id`` alone would report ``unknown``, with no links, for
+      every stub-minted document provenance while the note sits on the edge;
+    * a legacy raw-Cypher ``:Event`` carries only ``eventId``;
+    * ``id`` is the ordinary coordinate for an ``:Event`` / ``:Object``.
+
+    ⛔ ONE ADDRESS, ONE REFERENCED NODE — OR NO ANSWER. A single address can
+    name more than one node (``entity_identity.py`` names this fold as the
+    historic wrong answer: *MATCH returning several rows … folds two identities
+    into one value*). Rather than union several nodes' links under one verdict —
+    which can accuse the wrong entity and can downgrade a current node on a
+    stranger's link — an address that resolves to more than one node keeps its
+    key with a ``None`` value: the read REFUSED it (see the three states above),
+    and :func:`aggregate_currency` is never asked.
+
+    ⚠️ THE REFUSAL COUNTS *REFERENCED* NODES — the honest limit of an
+    edge-anchored read, stated rather than implied. The query walks
+    ``references`` edges, so a node with no inbound link is invisible to the
+    check: an address naming one LINKED and one UNLINKED node is answered for
+    the linked one. Making the refusal TOTAL needs a node-anchored pre-read
+    (``MATCH (n) WHERE n.id IN $ids OR …``), which is a label-less scan of the
+    graph and therefore a cost decision, not a free addition. Until then:
+    uniqueness is ``entity_identity._require_unique_id``'s job, and an address
+    that names a linked node plus an unlinked twin reads as the linked node's
+    verdict.
+
+    This function owns the graph read itself (one query, as
+    :func:`read_currency_links` does), the pair extraction and the ordering. The
+    §4.6 **aggregate** is what it leaves to its caller — that is
+    :func:`aggregate_currency`'s job, and passing it the pairs is the call site's.
+    """
+    ids = list(entity_ids)
+    if not ids:
+        return {}
+    wanted = set(ids)
+    rows = graph.query(
+        "MATCH (s:Source)-[ref:references]->(n) "
+        "WHERE n.id IN $ids OR n.eventId IN $ids OR n.url IN $ids "
+        "RETURN id(n), n.id, n.eventId, n.url, s.url, "
+        "ref.sourceVersion, s.contentHash",
+        params={"ids": ids},
+    ).result_set
+    out: dict[str, list[dict] | None] = {}
+    idents: dict[str, set] = {}
+    for node_uid, nid, neid, nurl, url, remembered, current in rows:
+        recorded = remembered or ""
+        now = current or ""
+        row = {
+            "source": url or "",
+            "recorded": recorded,
+            "current": now,
+            "currency": currency_status(recorded, now),
+        }
+        # The NODE's identity — used only to detect an address that names more
+        # than one node, never to key a row. It is the engine's own node id
+        # (`id(n)`, stable within this query snapshot, which is all that is
+        # needed), NOT a fingerprint of the node's VALUES: two distinct nodes
+        # can carry the same coordinates (`id:'x'` twice is exactly the raw
+        # duplicate corruption `entity_identity._require_unique_id` refuses
+        # first), and a value fingerprint would call them one node — the very
+        # fold this check exists to catch. A derived property key would do the
+        # same, which is why the row returns no derived identity at all.
+        ident = node_uid
+        # Attribute to EVERY coordinate the caller actually asked for. An empty
+        # string is not a coordinate, so a `id: ''` node is reached through its
+        # `eventId`/`url` rather than skipped. The coordinates are DEDUPED: the
+        # ordinary production shape carries ``id`` and ``eventId`` with the SAME
+        # value, and appending once per coordinate would double that row.
+        for key in dict.fromkeys((nid, neid, nurl)):
+            if key and key in wanted:
+                out.setdefault(key, []).append(dict(row))
+                idents.setdefault(key, set()).add(ident or "")
+    # ONE ADDRESS, ONE NODE — OR NO ANSWER (see the docstring). An address that
+    # named more than one node keeps its KEY with a ``None`` value: a verdict
+    # assembled from a node the caller may not have addressed is not an answer,
+    # but silently dropping the key would make a REFUSAL indistinguishable from
+    # "no inbound reference" — and a caller that cannot tell those apart could
+    # read absence as "nothing references this entity".
+    for key in [k for k, seen in idents.items() if len(seen) > 1]:
+        out[key] = None
+    for links in out.values():
+        if links is not None:  # a refused address keeps its `None` (see above)
+            links.sort(key=lambda lk: (lk["source"], lk["recorded"]))
+    return out
+
+
 @dataclass
 class SearchResult:
     id: str
