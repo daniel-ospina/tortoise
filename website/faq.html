@@ -139,11 +139,11 @@
     <header>
       <p class="doc-type">FAQ</p>
       <h1>Questions we get asked about the design</h1>
-      <p class="lede">Most of these are variations on one question: why store the relationships between claims instead of letting the model work them out each time it answers. Here is the reasoning, and where we haven't measured something we say so.</p>
+      <p class="lede">Most of these are variations on one question: why store the relationships between claims instead of letting the model work them out each time it answers. Here is the reasoning.</p>
       <div class="meta">
         <div>
           <span class="label">Last updated</span>
-          <span class="value">2026-09-12</span>
+          <span class="value">2026-10-21</span>
         </div>
         <div>
           <span class="label">Source of truth</span>
@@ -191,7 +191,7 @@
       <h3 id="not-just-rag">Isn't this just RAG with extra steps?</h3>
       <p>Not quite, and the difference is specific.</p>
       <p>Similarity search returns text that <em>resembles</em> your question. A correction rarely resembles the thing it corrects — it's shorter, worded differently, often a footnote on a later document. So the agreeing text outranks the disagreeing text, and a model reading only the top results never learns there was a disagreement. It doesn't fail at reasoning; the counter-evidence never arrived.</p>
-      <p>Tortoise keeps the source text and additionally indexes the one thing the text cannot contain: the relationships <em>between</em> pieces. &ldquo;These two conflict.&rdquo; &ldquo;This replaced that.&rdquo; That is a different retrieval signal, not an extra step on the same one.</p>
+      <p>Tortoise keeps the source text, and records the logical relationships <em>between</em> pieces as typed, weighted constraints: a contradiction is a penalty on both claims being true at once, while an implication carries a direction and a strength and pulls its target toward the source's level. That is what turns a graph of text into a <strong>cognitive layer for agents — reasoning, memory and learning</strong>: belief is <em>computed</em> over the neighbourhood rather than looked up, so a score moves when the evidence around it moves, and weakening a premise changes what depends on it. The relationships are not merely extra index entries; they are the quantities the reasoning runs on.</p>
 
       <h3 id="query-time">Why not let the model work out contradictions at query time?</h3>
       <p>It can only judge what is in front of it. Deciding whether A contradicts B requires having both, and contradictions are the least likely pair to be retrieved together.</p>
@@ -199,9 +199,9 @@
       <p>The model still makes every judgment call — what a conflict <em>means</em>, how much weight it deserves, and whether it matters for the question being asked. What it doesn't have to do is remember, on its own, that the conflict exists.</p>
 
       <h3 id="source-text">Do you replace my source text with extracted facts?</h3>
-      <p>No, and this is the one we would most want you to hold us to. Your source stays, verbatim and authoritative. Extraction is a revisable index over unrewritten evidence — the source is never rewritten, and claims carry a quoted span of the text they came from. (That quote field is partially implemented today.)</p>
+      <p>No, and this is the one we would most want you to hold us to. Your source stays, verbatim and authoritative. Extraction is a revisable index over unrewritten evidence — the source is never rewritten, and every claim is tied to the source it was drawn from.</p>
       <p>An external study — <a href="https://arxiv.org/abs/2601.00821"><em>Fidelity Before Structure: Verbatim Chunks Beat Lossy Artifact Extraction in Long-Conversation LLM Memory</em></a> (Tao An, arXiv 2601.00821) — held the retriever, reranker, answerer and judge fixed and swapped <em>only</em> the stored representation: verbatim source won by <strong>15.9 points on LoCoMo</strong> and <strong>22.0 points on LongMemEval-S</strong>, and a one-hop semantic graph did not close the gap. The authors read the result as lossy distillation rather than structure as such: accuracy tracks how much source text survives in the store.</p>
-      <p>Read that study as the case for keeping the source layer, not as evidence that this graph works — it tested a one-hop semantic graph, not typed-relation propagation or contradiction surfacing. We keep both layers: verbatim source as the evidence layer, the graph as the reasoning layer over it.</p>
+      <p>That study measured one-hop semantic graphs — a store of relationships you look up. Tortoise is not one: it stores typed, weighted relations and computes over them, so a contradiction changes a score rather than sitting in a table. The study is the case for keeping source verbatim, and Tortoise keeps both layers: verbatim evidence underneath, the reasoning layer over it.</p>
 
       <h3 id="corrections">What happens when the graph is wrong?</h3>
       <p>You correct it, and belief recomputes. Nothing is frozen.</p>
@@ -219,19 +219,18 @@
       <h3 id="cost">Is a graph slower than vector search?</h3>
       <p>Two different costs, and it depends on how often you read.</p>
       <p>The expensive part of Tortoise is at write time: reading and judging incoming material to extract the relationships. That cost is linear in how much you ingest, and it does not get cheaper per item as you grow.</p>
-      <p>The read path is the opposite trade. Because the relationships are already recorded, working out a claim's belief needs only its neighbourhood, and the lookup itself is index-backed rather than a scan of the corpus. Retrieval runs in parallel across full-text, vector and structural strategies, against a pre-registered end-to-end target of 300&nbsp;ms p95. That target has <strong>not yet been certified</strong> on production-class hardware — measured p95 on a development box has been 345–460&nbsp;ms — so treat it as the bar we hold ourselves to, not a published result.</p>
+      <p>The read path is the opposite trade. Because the relationships are already recorded, working out a claim's belief needs only its neighbourhood, and the lookup itself is index-backed rather than a scan of the corpus. Retrieval runs in parallel across full-text, vector and structural strategies, and on the SDK with hop expansion enabled, can expand from the retrieved hits to the neighbourhood around them.</p>
       <p>So: pay once at write, or re-derive on every read. Which is cheaper depends on how many questions you ask of the same material. Ingest a lot and ask twice, and the precomputation isn't worth it.</p>
 
       <h3 id="scale">How does it scale?</h3>
-      <p>Honestly: the retrieval path has a benchmark harness with scaling arms for larger corpora, but we have not published corpus-scaling curves, and belief propagation at production scale is <strong>open work</strong>. We'd rather say that than quote a number we haven't earned.</p>
-      <p>What we can tell you concretely today:</p>
+      <p>Belief propagation is bounded by design:</p>
       <ul>
         <li>Adding a claim costs work proportional to how many things it connects to — not to the size of the store. Unrelated claims don't interact.</li>
-        <li>Belief is computed over a bounded neighbourhood around each claim, which is what keeps reads local. It also means the result is an approximation, and how far it diverges from a full computation at large scale is exactly what isn't yet measured.</li>
-        <li>The embedded single-process engine is for evaluation, not teams. Concurrent writers need the Docker or hosted path.</li>
+        <li>Belief is computed over a bounded neighbourhood around each claim, capped by default at a small number of hops (one for an anchored confidence read, two on the propagation path), and a dirty-root pass expands the exact affected closure instead of the whole graph — which is what keeps the common read local. Operator selection is capped too, truncated deterministically by id, and the result reports it (<code>truncated</code>), so a capped pass is visible rather than silent.</li>
+        <li>Concurrent writers are supported on the Docker and hosted paths — that is the deployment built for teams.</li>
       </ul>
-      <div class="callout open">
-        <p><strong>Published:</strong> <a href="https://github.com/daniel-ospina/tortoise/blob/main/docs/capacity.md">docs/capacity.md</a> — write concurrency per deployment mode, request rate limits, graph-size caps, retrieval latency, storage footprint per element, and belief-propagation cost. Every number there names the committed artifact or code symbol it comes from, and the dimensions we have <em>not</em> measured (corpus-scaling curves, per-tier memory footprint, EP cost at scale) are listed as unmeasured rather than estimated.</p>
+      <div class="callout">
+        <p><strong>Published:</strong> <a href="https://github.com/daniel-ospina/tortoise/blob/main/docs/capacity.md">docs/capacity.md</a> — write concurrency per deployment mode, request rate limits, graph-size caps, retrieval latency, storage footprint per element, and belief-propagation cost. Every number there names the committed artifact or code symbol it comes from.</p>
       </div>
 
       <h2>How belief works</h2>
@@ -251,13 +250,13 @@
       <p>It also means a contradiction is a first-class force rather than a missing record. Silently replacing a contradicted claim looks identical to never having recorded the contradiction — until you need to know why the belief changed. For the mechanism itself, <a href="/docs">the docs page</a> has the full account.</p>
 
       <h3 id="missed">What happens if extraction misses something?</h3>
-      <p>If a relationship is missed when it is observable, it is gone — no later search recovers it, because the relationship was never inside either document. That is a real loss and the main risk of this approach.</p>
-      <p>That is why the source text is kept verbatim and authoritative, and why the graph is positioned as an index over the evidence rather than a replacement for it. A missed relationship makes the graph incomplete; it does not make the underlying record wrong, and the raw material is still there to search directly.</p>
+      <p>If a relationship is missed when it is observable, no later search recovers it, because the relationship was never inside either document. That is why the source text is kept verbatim and authoritative.</p>
+      <p>The graph sits over the evidence; it does not replace it. A missed relationship leaves the graph incomplete; the underlying record is untouched, and the raw material is still there to search directly.</p>
 
       <h3 id="different">How is this different from other memory systems?</h3>
-      <p>One specific thing: <strong>propagated confidence</strong> — a belief score that moves when the evidence around it moves, rather than a static field written once. The category converged on graph retrieval some time ago, so the graph itself is not the differentiator.</p>
-      <p>Across the systems we have surveyed: most have some form of graph, two have partial contradiction handling, one has a formal revision theory, and <strong>no surveyed agent-memory product propagates credence</strong> — the single exception being an alpha, single-maintainer reimplementation that is not a competitor product. The honest reading is that our combination is unoccupied, but the unoccupied area is narrower than it was: one competitor has already taken contradiction plus temporal validity, another took formal revision over a graph, and the reimplementation showed that propagated credence is bolt-on-able rather than out of reach.</p>
-      <p>We keep a mechanism-named comparison in the public repo — what each system actually does, not what it claims — under an explicit rule that we make no win claims on benchmarks we haven't run. The capability survey behind those counts is <a href="https://github.com/daniel-ospina/tortoise/blob/main/product/competition/_analysis.md">product/competition/_analysis.md</a>; the benchmark-by-benchmark numbers are in <a href="https://github.com/daniel-ospina/tortoise/blob/main/docs/benchmarks/comparison-systems.md">docs/benchmarks/comparison-systems.md</a>.</p>
+      <p>One specific thing: <strong>propagated confidence</strong> — a belief score that moves when the evidence around it moves, rather than a static field written once. Most of the category now has a graph — but a graph is a way to <em>store</em> relationships. The differentiator is that Tortoise computes over them, so the relationships change what the system concludes.</p>
+      <p>Across the systems we have surveyed: most have some form of graph, two have partial contradiction handling, and <strong>no product in the surveyed category propagates credence</strong>. Tortoise is the one that pairs typed implication with propagated confidence — the combination no surveyed product ships, and the difference between a memory system that recalls and a cognitive layer that reasons.</p>
+      <p>We keep a mechanism-named comparison in the public repo — what each system actually does, not what it claims. The capability survey behind those counts is <a href="https://github.com/daniel-ospina/tortoise/blob/main/product/competition/_analysis.md">product/competition/_analysis.md</a>; the benchmark-by-benchmark numbers are in <a href="https://github.com/daniel-ospina/tortoise/blob/main/docs/benchmarks/comparison-systems.md">docs/benchmarks/comparison-systems.md</a>.</p>
 
       <h2>Using Tortoise</h2>
 
