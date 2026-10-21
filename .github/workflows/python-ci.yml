@@ -367,6 +367,21 @@ jobs:
       # longer withholds the tests. python-ci-gate lists `manifest-integrity`
       # in its needs, so a drift still reds the required aggregate check, by
       # name, while the suite runs and reports real signal.
+      - name: "Capstone pre-registration gate — the ordering half (#9075)"
+        # #9075 review r6 P1: the gate's git half was UNREACHABLE from every automated path. The
+        # ordering/exemption bounds need add-commit epochs, the `test` job checks out at
+        # `fetch-depth: 1` (so the gate reports them UNPROVABLE), and no workflow invoked the gate
+        # at all — so a grandfathered log could be edited in place with a measurement number and
+        # every gate stayed green. This step gives it the history it reads: `changes` is the one job
+        # that checks out at `fetch-depth: 0`, it already owns pyyaml, and the run is ~2s.
+        #
+        # `--no-corpus` on purpose: the corpus half imports `tortoise` (and therefore the package
+        # dependencies this job does not install). It runs in the `test` job, through
+        # `tests/test_capstone_preregistration_9075.py`, which is `core`+`tier1` — and the report
+        # SAYS the half was skipped (`corpus pins NOT checked`), so a partial run can never read as
+        # a verified one. The step fails closed: exit 1 on an ordering violation, 2 on an
+        # unreadable document/record.
+        run: python3 tools/capstone_preregistration_check.py --dir docs/evidence/7949-capstone --no-corpus
       - name: Secrets scan (evidence artifacts, #1349)
         # Evidence commits (T8/T15/T16) must never carry live keys. The
         # provenance writer redacts (primary defense); this grep is the
