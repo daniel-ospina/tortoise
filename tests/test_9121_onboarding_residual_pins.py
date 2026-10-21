@@ -816,6 +816,16 @@ def test_the_opener_inventory_is_pinned_so_a_new_lane_moves_this_file():
         # statement, which is why it is a distinct opener and a distinct row in
         # the same bullet list — the pin firing again on the same rule.
         "_prewipe_synthetic_write_scope",
+        # #9206 landed its three SDK write lanes with their openers (#9349): the
+        # apply-first lane (the write is issued BEFORE the record, so the door
+        # may not authorize it after the fact), the derived-recompute lane, and
+        # the test-fixture lane that shadows rather than defers. They are new
+        # openers in this same inventory, so the list moves with them — which is
+        # what this pin exists to force, and it fired on main before this file
+        # was carried forward here.
+        "_apply_first_write_scope",
+        "_derived_recompute_write_scope",
+        "_test_fixture_write_scope",
     }
     derived = _projection_openers()
     assert derived == expected, (
@@ -849,6 +859,11 @@ def test_the_detector_population_is_pinned_by_content():
         # #9347 landed the second pre-wipe lane (the synthetic fold), so it joins
         # the content anchor for the same reason its restore sibling is here.
         "_prewipe_synthetic_write_scope",
+        # the three #9206 write lanes (#9349) are openers in the same projection
+        # inventory, so they belong to the population the detector iterates.
+        "_apply_first_write_scope",
+        "_derived_recompute_write_scope",
+        "_test_fixture_write_scope",
         # those defined OUTSIDE `projection/__init__.py`:
         # `_run` is `tortoise/webhook_delivery.py`'s opener (a name, not the
         # onboarding funnel — `onboarding/state.py::_run` delegates through
