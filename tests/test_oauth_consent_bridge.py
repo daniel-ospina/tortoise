@@ -353,6 +353,14 @@ _BARE_ANCHOR_RE = re.compile(r":\s*(\d+)")
 #: file-name scan rather than "the line mentions hosted_api.py somewhere": §10's
 #: `Redemption` row names `hosted_api.py` AND carries `session_auth.py:588`, so the loose rule
 #: reported the row's legitimate anchor to a DIFFERENT file (measured).
+#:
+#: The scan is SAME-LINE by design: a continuation whose governing `hosted_api.py` mention sits
+#: on an EARLIER line is not attributed (measured — `["the base is `_oauth_base` in",
+#: "`hosted_api.py`, as served on", "`:39205`."]` reads clean). Every table in this document
+#: writes the file and its continuation on one row, and the EXPLICIT forms — including one
+#: wrapped across a line break — are caught document-wide by `_fold`, so this boundary is
+#: recorded rather than closed; closing it would need a cross-line attribution rule the doc's
+#: own style does not need.
 _NEAREST_PY_RE = re.compile(r"[\w./-]+\.py")
 
 
@@ -386,6 +394,34 @@ def _fold(raw: str) -> tuple[str, list[int]]:
         out.append(":" if char == "\uff1a" else char)
         origin.append(line)
     return "".join(out), origin
+
+
+def _bare_continuations(raw: str) -> list[str]:
+    """Every bare `:<n>` continuation in `raw` that belongs to `hosted_api.py`.
+
+    The note half of the guard. `_stray_anchors` scans the body OUTSIDE the provenance note by
+    design (the note is allowed to quote the stale pair), which left the ONE region that already
+    holds anchors exempt from the CONTINUATION rule too: `_HOSTED_ANCHOR_RE` sees only the
+    explicit forms, so `` > Verified against `hosted_api.py`, `:39286`. `` inside the note left
+    `quoted == {'23284','23409'}` and `stray == []` — green, anchor added (measured). Applying
+    the continuation rule to the note's own text closes it: the note's legitimate quotation is
+    the EXPLICIT `hosted_api.py:23409` / `:23284-23292` pair, so no honest note line carries a
+    continuation.
+
+    An `:<n>` sitting INSIDE an explicit anchor (`hosted_api.py:23409`) is that anchor, not a
+    continuation — the explicit scan already owns it, and flagging it would make the note's own
+    quotation illegal.
+    """
+    folded = _collapse(raw)
+    explicit = [match.span() for match in _HOSTED_ANCHOR_RE.finditer(folded)]
+    found: list[str] = []
+    for match in _BARE_ANCHOR_RE.finditer(folded):
+        if any(start <= match.start() < end for start, end in explicit):
+            continue
+        owners = _NEAREST_PY_RE.findall(folded[:match.start()])
+        if owners and owners[-1].rsplit("/", 1)[-1] == "hosted_api.py":
+            found.append(match.group(0))
+    return found
 
 
 def _provenance_note_bounds(lines: list[str]) -> tuple[int, int]:
@@ -508,7 +544,10 @@ def test_the_spec_cites_no_hosted_api_line_numbers() -> None:
       ANY spelling of `hosted_api.py` (basename comparison, so `tortoise/hosted_api.py` counts).
       Each of those was green under an earlier version of this guard (measured), because the
       scan read one line at a time and knew one separator — and the token comparison let the
-      repository-relative spelling through after the bare continuation was added (measured);
+      repository-relative spelling through after the bare continuation was added (measured).
+      The same continuation rule is applied INSIDE the provenance note, which the body scan skips
+      by design: without it the note was the one place a `hosted_api.py` continuation could be
+      added green (measured);
     * and the replacement citations are pinned PER SECTION, as exactly one row: a document-wide
       `in body` check passes after a row is deleted or gutted (the route string also occurs in a
       §9 plan step), and a document-wide `startswith` passes when a decoy row with the same prefix
@@ -528,6 +567,17 @@ def test_the_spec_cites_no_hosted_api_line_numbers() -> None:
         "this doc owns, and belongs in the rows below instead. Pruning a stale quotation is "
         "fine (a subset passes), because retiring a record that no longer needs quoting must not "
         "be blocked by the guard that pins it."
+    )
+    # …and the exemption must not become a hole for the OTHER form: the note is the one region
+    # `_stray_anchors` skips, so a bare `:<n>` continuation added inside it was covered by neither
+    # half of the guard (measured: `quoted` stayed `{'23284','23409'}` and `stray` stayed `[]`).
+    note_bare = _bare_continuations(note_raw)
+    assert not note_bare, (
+        f"the #3524 provenance note carries a bare continuation {sorted(note_bare)}; this note may "
+        "quote ONLY the explicit `hosted_api.py:23409` / `hosted_api.py:23284-23292` pair it owns "
+        "(#3524's stale body). A continuation (`hosted_api.py`, then `:39286`) is a NEW citation "
+        "in the one region the body scan exempts — cite the symbol or the route in the rows below "
+        "instead."
     )
 
     # Every OTHER line: no explicit anchor in any spelling — the whole body is FOLDED before it is
@@ -605,6 +655,44 @@ def test_the_anchor_scan_catches_every_form_at_the_line_it_is_on() -> None:
         "wrapped one reported where it STARTS, the other file's on line 7 and the note's own "
         "quotation on lines 3-4 excluded; got "
         f"{reported} from {stray}"
+    )
+
+
+def test_the_provenance_note_cannot_smuggle_a_bare_continuation() -> None:
+    """The note's exemption covers the QUOTED pair only — the continuation form must still fail.
+
+    The note is the one region `_stray_anchors` skips, so applying the continuation rule only to
+    the body left the guard's own contract ("the anchors inside it may only be the quoted
+    issue-body pair … ADDING one does not") false for the spelling §1 already uses for
+    `session_auth.py:588` → `` (`:600`) `` — the most likely form a future editor copies in.
+    Measured before the fix: `` > Verified against `hosted_api.py`, `:39286`. `` inside the note
+    left `quoted == {'23409','23284'}` and `stray == []`, i.e. green with an anchor added.
+
+    Non-vacuous in both directions: the escaping line is shown to be INVISIBLE to the explicit
+    scan (so the note half is what catches it), and the note's own legitimate quotation is shown
+    to stay legal (so the rule is not simply "no colons in the note").
+    """
+    # The measured escape: no explicit anchor, but a continuation that belongs to hosted_api.py.
+    escaping = "> Verified against `hosted_api.py`, `:39286`."
+    assert not _HOSTED_ANCHOR_RE.findall(_collapse(escaping)), (
+        "this case is only interesting while the EXPLICIT scan cannot see it — the note's own "
+        "quoted set would otherwise catch it and the continuation scan would be vacuous here"
+    )
+    assert _bare_continuations(escaping) == [":39286"], (
+        "the note's continuation form must be caught: `hosted_api.py` followed by a bare `:39286` "
+        f"is a new citation, got {_bare_continuations(escaping)}"
+    )
+
+    # The live spec's note quotes only the explicit pair, so this rule does not red it — and the
+    # explicit pair must NOT be re-reported as a continuation of itself.
+    lines = SPEC.read_text().splitlines()
+    note_start, note_end = _provenance_note_bounds(lines)
+    note_raw = "\n".join(lines[note_start:note_end])
+    assert set(_HOSTED_ANCHOR_RE.findall(_collapse(note_raw))) == {"23409", "23284"}
+    assert _bare_continuations(note_raw) == [], (
+        "the note's own quoted pair `hosted_api.py:23409` / `hosted_api.py:23284-23292` is an "
+        "EXPLICIT anchor, so the continuation rule must leave it alone; it flagged "
+        f"{_bare_continuations(note_raw)}"
     )
 
 
