@@ -426,38 +426,6 @@ def _build_f4_graph(sdk: TortoiseSDK) -> tuple[dict[str, str], list[str]]:
     return ids, operator_ids
 
 
-def _converge_f4_ep(sdk: TortoiseSDK, operator_ids: list[str], seed: int) -> None:
-    """Run F4's frozen-truth EP procedure — the ONE definition both the oracle
-    and its reproducibility check use.
-
-    Two steps, in this order, under a pinned seed:
-
-    1. the targeted pass (``compute_confidence(factors=…)``), which computes and
-       persists the posteriors; and
-    2. an explicit ``dream(dirty_only=True, warm_start=False)``.
-
-    Step 2 is EXPLICIT on purpose (#9394). #9381 made a targeted pass retire the
-    ``ep_dirty`` flags it recomputed (#6211 mode 2), so a later
-    ``get_confidence`` no longer fires the lazy re-dream that step 2 used to fall
-    out of — the read then returns step 1's INTERMEDIATE posterior, which is a
-    different fixed point (measured |Δ| up to 2.7e-5, e.g. r1 2.756e-06). The
-    reproducibility check had been reading that intermediate value and
-    comparing it against this post-dream oracle.
-
-    ``warm_start=False`` is Epic 903-C4 (#1242): no gamma-skip censoring, so the
-    capture is bit-reproducible across builders; warm-start's bounded
-    perturbation (≈1e-5) would break the 1e-6 oracle lock.
-
-    Sharing this helper is what stops the oracle and the check from drifting
-    apart again: neither path depends on what an unrelated read happens to
-    trigger.
-    """
-    random.seed(seed)
-    sdk.compute_confidence(factors=operator_ids, require_calibration=False)
-    random.seed(seed)
-    sdk.dream(dirty_only=True, warm_start=False)
-
-
 def f4_frozen_truth(seed: int | None = None) -> F4FrozenTruth:
     """F4 — frozen-ground-truth fixture builder.
 
@@ -477,9 +445,19 @@ def f4_frozen_truth(seed: int | None = None) -> F4FrozenTruth:
         # clone graph is identical to the live fixture's (deterministic
         # builder) but has different ulid ids — the oracle is keyed by the
         # stable corpus keys so it addresses the live fixture via ``ids``.
-        # The procedure itself lives in `_converge_f4_ep` so the reproducibility
-        # check runs literally the same steps (#9394).
-        _converge_f4_ep(clone_sdk, clone_ops, seed)
+        random.seed(seed)
+        clone_sdk.compute_confidence(factors=clone_ops,
+                                     require_calibration=False)
+        # compute_confidence leaves the clone's claims dirty, so the first
+        # get_confidence would otherwise fire an UNSEEDED lazy-consistency
+        # re-dream mid-capture. Dream explicitly under the same pinned seed
+        # so the whole capture trajectory is deterministic, then read.
+        random.seed(seed)
+        # Epic 903-C4 (#1242): the oracle is the FROZEN from-scratch ground
+        # truth — dream with warm_start=False (no gamma-skip censoring) so
+        # the capture is bit-reproducible across builders; warm-start's
+        # bounded perturbation (≈1e-5) would break the 1e-6 oracle lock.
+        clone_sdk.dream(dirty_only=True, warm_start=False)
         oracle = {key: clone_sdk.get_confidence(pid)["mean"]
                   for key, pid in clone_ids.items()}
     finally:
