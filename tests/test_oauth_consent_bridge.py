@@ -327,22 +327,30 @@ def test_the_deletion_set_rows_cite_live_sites() -> None:
 
 # ── The spec's `hosted_api.py` citations: SYMBOLS, never line numbers ───────
 
-#: Every form this tree writes a `hosted_api.py` LINE citation in: `:39152`, `#L39152`, a space or
-#: a newline after the colon (CommonMark renders a wrapped code span as one space), the fullwidth
-#: colon, and the bare `:<n>` CONTINUATION the §1 table uses for `session_auth.py:588` →
-#: `` (`:600`) ``. Each was let through by an earlier version of this guard (measured), because
-#: the check read one line at a time and knew one separator. So:
+#: Every form this tree writes a `hosted_api.py` LINE citation in, and the one the guard must
+#: catch for each: `:39152`, `#L39152`, a space-separated `L39152`, a space or a newline after the
+#: separator (CommonMark renders a wrapped code span as one space), the fullwidth colon, and the
+#: bare `:<n>` CONTINUATION the §1 table uses for `session_auth.py:588` → `` (`:600`) ``. Each was
+#: let through by an earlier version of this guard (measured), because the check read one line at
+#: a time and knew one separator. So:
 #:
-#:  * `_HOSTED_ANCHOR_RE` matches the explicit forms; `_stray_anchors` FOLDS the body first
-#:    (whitespace runs to one space, the fullwidth colon to ASCII), so a wrapped or padded anchor
-#:    is one shape again and the offset still points at a real line;
+#:  * `_HOSTED_ANCHOR_RE` matches the explicit forms — the number adjacent to the filename, which
+#:    it may reach through `:`, `#L` or `L` and any whitespace; `_stray_anchors` FOLDS the body
+#:    first (whitespace runs to one space, the fullwidth colon to ASCII), so a wrapped or padded
+#:    anchor is one shape again and the offset still points at a real line;
 #:  * `_BARE_ANCHOR_RE` + `_NEAREST_PY_RE` catch the continuation idiom line by line, attributing
-#:    the number to the nearest `something.py` to its LEFT rather than to "any file named on the
-#:    line" (see `_NEAREST_PY_RE` for why the looser rule over-reported).
-_HOSTED_ANCHOR_RE = re.compile(r"hosted_api\.py(?:\s*#L|\s*:)\s*(\d+)")
+#:    the number to the BASENAME of the nearest `something.py` to its LEFT rather than to "any
+#:    file named on the line" (see `_NEAREST_PY_RE` for why the looser rule over-reported) — the
+#:    basename, not the whole token, because the repository-relative spelling
+#:    `tortoise/hosted_api.py` is a spelling THIS document already uses (§1's `Canonical code:`
+#:    line), and comparing the token let `` `tortoise/hosted_api.py`, see `:39286` `` through
+#:    green (measured).
+_HOSTED_ANCHOR_RE = re.compile(r"hosted_api\.py\s*(?:#?L|:)\s*(\d+)")
 _BARE_ANCHOR_RE = re.compile(r":\s*(\d+)")
 #: The nearest `something.py` to the LEFT of a bare `:<n>`, which is what the continuation
-#: belongs to. A file-name scan rather than "the line mentions hosted_api.py somewhere": §10's
+#: belongs to. It is matched WHOLE (it may carry a directory) and compared by BASENAME, so
+#: `tortoise/hosted_api.py` attributes its continuation exactly like `hosted_api.py` does. A
+#: file-name scan rather than "the line mentions hosted_api.py somewhere": §10's
 #: `Redemption` row names `hosted_api.py` AND carries `session_auth.py:588`, so the loose rule
 #: reported the row's legitimate anchor to a DIFFERENT file (measured).
 _NEAREST_PY_RE = re.compile(r"[\w./-]+\.py")
@@ -428,7 +436,10 @@ def _stray_anchors(lines: list[str], note_start: int, note_end: int) -> list[str
         folded_line = _collapse(line)
         for match in _BARE_ANCHOR_RE.finditer(folded_line):
             owners = _NEAREST_PY_RE.findall(folded_line[:match.start()])
-            if owners and owners[-1] == "hosted_api.py":
+            # BASENAME, not the matched token: `tortoise/hosted_api.py` is the repository-relative
+            # spelling this very document uses for the same file, so a continuation after it
+            # belongs to `hosted_api.py` too (exact equality let it through — measured).
+            if owners and owners[-1].rsplit("/", 1)[-1] == "hosted_api.py":
                 stray.append(
                     f"line {index + 1}: bare continuation {match.group(0)!r} belongs to "
                     "`hosted_api.py`")
@@ -492,10 +503,12 @@ def test_the_spec_cites_no_hosted_api_line_numbers() -> None:
       stale anchor ride in any NEW blockquote (measured: `> Verified against \
       `hosted_api.py:39286`.` passed);
     * every other line — including other blockquotes — may carry no anchor at all, in ANY of the
-      forms this tree writes: `:n`, `#Ln`, a space or a WRAPPED line after the colon, the
-      fullwidth colon, and the bare `:n` continuation. Each of those was green under an earlier
-      version of this guard (measured), because the scan read one line at a time and knew one
-      separator;
+      forms this tree writes: `:n`, `#Ln`, a space-separated `Ln`, a space or a WRAPPED line after
+      the separator, the fullwidth colon, and the bare `:n` continuation after a file named in
+      ANY spelling of `hosted_api.py` (basename comparison, so `tortoise/hosted_api.py` counts).
+      Each of those was green under an earlier version of this guard (measured), because the
+      scan read one line at a time and knew one separator — and the token comparison let the
+      repository-relative spelling through after the bare continuation was added (measured);
     * and the replacement citations are pinned PER SECTION, as exactly one row: a document-wide
       `in body` check passes after a row is deleted or gutted (the route string also occurs in a
       §9 plan step), and a document-wide `startswith` passes when a decoy row with the same prefix
@@ -560,7 +573,9 @@ def test_the_anchor_scan_catches_every_form_at_the_line_it_is_on() -> None:
     Proven on a synthetic body rather than only on the live spec, because the live spec returns
     `[]` — a scan that caught nothing at all would pass there too. Line 5-6 is one anchor
     WRAPPED across a line break; 8 is the bare `:<n>` continuation; 9-10 are the fullwidth colon
-    and a space-padded anchor. Line 7 cites a DIFFERENT file in the same idiom and must stay
+    and a space-padded anchor; 11 is that same continuation after the REPOSITORY-RELATIVE
+    spelling `tortoise/hosted_api.py` (the token comparison missed it — measured); 12 is the
+    space-separated `L<n>` form. Line 7 cites a DIFFERENT file in the same idiom and must stay
     legal, and the note's own quotation (lines 3-4) must not be reported at all — nor may one
     line be reported twice (an explicit anchor also carries a bare `:<n>`; the message names the
     line once, as one citation).
@@ -580,13 +595,16 @@ def test_the_anchor_scan_catches_every_form_at_the_line_it_is_on() -> None:
         "a row naming `hosted_api.py`, then `:39205`",
         "fullwidth `hosted_api.py\uff1a39432`",
         "padded `hosted_api.py : 39278`",
+        "repo-relative `tortoise/hosted_api.py`, then `:39286`",
+        "space-led `hosted_api.py L39205`",
     ]
     stray = _stray_anchors(lines, note_start=2, note_end=4)
     reported = sorted(int(m.group(1)) for m in re.finditer(r"line (\d+):", " | ".join(stray)))
-    assert reported == [1, 5, 8, 9, 10], (
-        "expected the five hosted_api.py anchors on source lines 1, 5, 8, 9 and 10 — the wrapped "
-        "one reported where it STARTS, the other file's on line 7 and the note's own quotation "
-        f"on lines 3-4 excluded; got {reported} from {stray}"
+    assert reported == [1, 5, 8, 9, 10, 11, 12], (
+        "expected the seven hosted_api.py anchors on source lines 1, 5, 8, 9, 10, 11 and 12 — the "
+        "wrapped one reported where it STARTS, the other file's on line 7 and the note's own "
+        "quotation on lines 3-4 excluded; got "
+        f"{reported} from {stray}"
     )
 
 
