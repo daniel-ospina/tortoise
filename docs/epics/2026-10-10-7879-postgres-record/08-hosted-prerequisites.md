@@ -91,7 +91,7 @@ the runs and their output are in **§G**.
 | `object` | `supabase/migrations/20261012000002_record_semantic.sql:21` | 2 — semantic |
 | `subject` | `…02_record_semantic.sql:68` | 2 — semantic |
 | `point` | `supabase/migrations/20261012000003_record_epistemic.sql:50` | 3 — epistemic |
-| `relation` | `…03_record_epistemic.sql:166` | 3 — epistemic (**reified edges**: `IMPL`/`NAND`/`INPUT`, `CONTAINS`) — plus `extractedFrom`, `references`, `about*` and `mitigated_by`, which are **declared, not materialised** (R5; `04-projection.md` §3) |
+| `relation` | `…03_record_epistemic.sql:166` | 3 — epistemic (**reified edges**: `IMPL`/`NAND`/`INPUT`; a journaled `EntityLinked` `about*` row materialises too). Four families do **not**: `extractedFrom`, `references`, `about*` and `mitigated_by` **as derived from point properties** (`04-projection.md` §3, R5) — and `CONTAINS`, which has no journaled producer at all: the capture's `contains_session` is dropped as record-only (`record_projection.py:978`) |
 | `record_event_stream`, `object_current_status`, `subject_current_status` | `supabase/migrations/20261012000004_record_procedural.sql` | 4 — procedural (**views, no table** — `Object.status` is a cache and is computed, never stored) |
 
 **Supersede chains are in.** `point.status` is a PRIMARY column with the lifecycle journaled;
@@ -174,7 +174,7 @@ idempotent, total, and stores no EP scalar`.
 | **the record, in the hosted deployment** | ⛔ **NOT ARMED.** `TORTOISE_RECORD_DSN` appears **nowhere** in `fly.toml`, `entrypoint.sh`, `.github/workflows/deploy-hosted.yml`, or the runbook's Secrets Matrix. Unset ⇒ `NOT_ARMED` ⇒ *"zero statements, no connection attempt"* — the deployment is byte-identical to pre-record. | `grep -c TORTOISE_RECORD_DSN fly.toml` → **0** |
 | **the end-to-end proof, in CI** | ⛔ **NEVER RUNS.** No CI job sets `TEST_RECORD_DB_URI` (the test file says so itself, and `grep` over `.github/` agrees), **and** `psycopg2` is the optional `[postgres]` extra — absent from the default dev/CI env, so the two Postgres legs `importorskip` and **skip even when a Postgres is given**. | measured: run 1 → `57 passed, 2 skipped`; run 2 with `--extra postgres` → **`2 passed`** |
 | **the edge / operator half of the record** | ⚠️ **`relation` = 0 rows** on the live capture measurement — that capture wrote **no edge records at all**, which is the whole of what this number shows; `04-projection.md` §3 *additionally* declares the point-property-derived edge family *"not materialized by this increment"*, so a capture that did emit edges would still miss that one family. | §G run 2 |
-| **the `session` record** | ⚠️ **`capture_redactions` is NULL because the record that would write it is REFUSED** — the column is `jsonb` and the producer emits an integer, so the terminal `SessionRecorded` write raises `DatatypeMismatch` and is counted on `record_write_failures`; the module refuses to coerce (`record_projection.py:1014`). Pinned as a tolerated disagreement, not fixed (**#9264**, OPEN). | `tests/test_9078_record_written_by_production_path.py:139` `_SCHEMA_DISAGREEMENTS = {"search_keys": …, "capture_redactions": …}` |
+| **the `session` record** | ⚠️ **`capture_redactions` is NULL because the record that would write it is REFUSED** — the column is `jsonb` and the producer emits an integer, so the `SessionRecorded` carrying `capture_redactions` is refused with `DatatypeMismatch` and is counted on `record_write_failures`; the module refuses to coerce (`record_projection.py:1014`). Pinned as a tolerated disagreement, not fixed (**#9264**, OPEN). | `tests/test_9078_record_written_by_production_path.py:139` `_SCHEMA_DISAGREEMENTS = {"search_keys": …, "capture_redactions": …}` |
 | **rebuild the graph from the record** | ⚠️ A **method with no CLI verb and no production caller**. | `FalkorProjection.rebuild_from_record` — `grep` finds no `__main__` verb |
 | **RLS as the tenancy boundary** | ⚠️ **Policies exist; nothing sets the GUC.** `app.current_org_id` is set only in `supabase/tests/*.sql` — the migrations that define the policies only *read* it, via `current_setting(…, true)` — and **no Python path sets it**, so the record connects as the DB owner and §4's own bypass rule applies. | `grep -rn app.current_org_id tortoise/ tools/` → 0 setters |
 | **the record's durability** | ⛔ **NO MODULE OF OURS BACKS UP THE RECORD.** The modules that archive today copy **the graph** — RDB/BGSAVE plus a local copy of the journal's `events.jsonl` (`tortoise/backup.py`), and the R2 logical dump (`hosted_backup.py`, `backup_sweep.py`, the self-hosted sweep `selfhost_backup.py`). `docs/durability-posture.md`, the page that records durability for every deployment, has **no row for the record** (four deployments, none of them Postgres; it never mentions Supabase). Whether the Supabase project backs it up is **unverified** — the tree's statements about that are plan-level and about the **control plane**, not the record (`docs/plans/2026-08-08-669-align.md:21`, `docs/ops/registry-backup-dr.md:1051`) — so this is R9's owner decision, not a verified backup. | §3; §14.1 **O1**: *"DURABILITY = the store's backup"*; R9 |
@@ -228,11 +228,12 @@ catch it **skips**, twice over (§G run 1 vs run 2). ⚠️ #9264 *itself* is a 
 
 ### R4 — Fix the two schema↔producer disagreements (#9264) · **M** · schema or code + decision · **BLOCKER**
 
-**What:** `session.capture_redactions` is `jsonb`, the producer emits an **integer** — so the terminal
-`SessionRecorded` record is **refused** (`DatatypeMismatch`, counted on `record_write_failures`) and the
+**What:** `session.capture_redactions` is `jsonb`, the producer emits an **integer** — so the `SessionRecorded` carrying
+`capture_redactions` is **refused** (`DatatypeMismatch`, counted on `record_write_failures`) and the
 row keeps the column **NULL**; `point.search_keys` is `jsonb`, the producer emits a flattened
 **string**. #9200's sibling class. Decide per field which side is authoritative and fix it;
-the tolerance entries in `tests/test_9078…:139` **self-delete** when it lands, so the fix and the pin
+the tolerance entries in `tests/test_9078…:139` are held by a **self-reddening assertion** — the first clean projection fails that test until the entry is deleted
+(`:1942-1946`) — so the fix and the pin
 move together.
 **What it blocks:** a **complete** session record (the redaction count is lost today) and any Point
 that carries extracted `search_keys` (refused ⇒ lost). Both are silent losses the journal heals, so
@@ -244,7 +245,9 @@ they are invisible without R3.
 handles `EntityLinked` / `DirectEdgeCreated` / `DirectEdgeRepoint`. What is **declared missing**
 (`04-projection.md` §3) is the edge set **derived from point properties** — `extractedFrom`,
 `references`, `about*`, `mitigated_by`. Those edges live on the point row's props today, so a rebuild
-from the record alone reproduces the claims and **not the topology**.
+from the record alone reproduces the claims and **not the topology**. ⚠️ **`CONTAINS` is missing for a different reason**: no journal record carries it — the capture's
+`contains_session` is a record-only key (`record_projection.py:978`) — so `relation` never receives it, and
+the `Session→Point` topology is unrecorded even though the cache has it (`sdk.py`'s `MERGE (s)-[:CONTAINS]->(t)`).
 **What it blocks:** the epic's own acceptance — *"the graph engine can be destroyed and rebuilt
 without data loss"*. NAND / IMPL / mitigation topology is the thing that would be lost, and §8 makes
 operator topology non-negotiable (a fused claim cannot be `NAND`ed).
