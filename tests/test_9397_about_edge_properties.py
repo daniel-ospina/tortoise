@@ -2145,6 +2145,24 @@ def test_the_document_population_counts_match_the_census():
         f"§13's causal split {originating} + {rematerializing} does not add up "
         f"to the census population of {total}"
     )
+    # §11.1 states the same two numbers in a DIFFERENT spelling — "ORIGINATED by two
+    # sites and written by three in the named form" — and that spelling was pinned by
+    # nothing: measured at `#9403` review, editing it to "three sites" left the suite
+    # green while the paragraph above contradicted it. Words, not digits, so both
+    # spellings are checked against the tables.
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
+    assert f"ORIGINATED by {words[originating]} sites" in storage, (
+        f"§11.1 no longer states 'ORIGINATED by {words[originating]} sites', which is the "
+        f"ORIGINATING count {originating} the census split implies"
+    )
+    assert f"written by {words[named]} in the named form" in storage, (
+        f"§11.1 no longer states 'written by {words[named]} in the named form', which is "
+        f"what `RECORDED_WRITERS` holds ({named})"
+    )
+    assert f"{words[len(NOT_AN_ABOUT_WRITER)]} declared false positives" in storage, (
+        "§13's declared-false-positive count no longer matches `NOT_AN_ABOUT_WRITER` "
+        f"({len(NOT_AN_ABOUT_WRITER)})"
+    )
     assert (originating == 2 and "the two that ORIGINATE it" in storage) or (
         f"the {originating} that ORIGINATE it" in storage
     ), (
@@ -3082,6 +3100,33 @@ def test_the_guard_states_its_own_execution_and_probe_coverage_honestly():
         "SIX entries and the probes cover five (gap 6 is the file-scope gap, "
         "which no `_writers_in_module` probe can express)"
     )
+    # The header claims probes "for gaps 1-5", and until this pin existed nothing
+    # compared that claim to the probes: measured at `#9403` review, deleting the
+    # gap-4 `spellings` table AND the gap-5 `aboutClaim` probe left every leg green
+    # while the header still promised them. Pinned by ANCHOR, not by count — the
+    # anchors are the comment that introduces each probe block plus the wildcard
+    # that decides what counts as about-bearing, so a deletion takes its anchor too.
+    # ⛔ Slice out THIS leg first: the anchor strings below appear verbatim in this very
+    # assertion list, so a file-wide search matches its own text and the pin is vacuous
+    # (the self-match this file records twice already). Measured: with the whole file
+    # searched, deleting the gap-5 probe left this leg green.
+    own_leg = src.find("def test_the_guard_states_its_own_execution_and_probe_coverage_honestly")
+    assert own_leg > 0, "this pin cannot locate its own definition, so it cannot slice it out"
+    outside = src[:own_leg]
+    for gap_anchor in (
+        "# Gap 1: the predicate is a PARAMETER",
+        "# Gap 2: an UNTYPED binding",
+        "# Gap 3: the predicate IS spelled in a typed pattern",
+        "# Gap 4: spellings `_PATTERN` does not recognise",
+        "# Gap 5: an about-NAMED predicate outside `_ABOUT_REL`",
+        "MATCH (s)-[r:aboutClaim]->(t)",
+        "a recorded control",
+    ):
+        assert gap_anchor in outside, (
+            f"the header promises probes for gaps 1-5 with a recorded control, but this "
+            f"probe anchor is gone: {gap_anchor!r}. Delete the claim or keep the probe."
+        )
+
     assert "Gap 6" in header and "STATED and not pinned" in header, (
         "the header no longer states that gap 6 is STATED rather than pinned — "
         "the asymmetry is the claim, so it is pinned as one"
