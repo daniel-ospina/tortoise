@@ -561,6 +561,116 @@ class TestDocumentsQuota:
         finally:
             tenant.close()
 
+    # ── #5140 P1: the meter key is not caller-demotable ────────────────────
+
+    def test_document_kind_cannot_be_demoted_out_of_the_meter(
+            self, reg_sdk, tmp_path):
+        """#5140 P1 (the B3 *effect*, reached off the declared B3 route).
+
+        B3 declares the route `DocumentCreated`; the DECLARED EFFECT is
+        "documents stop being metered". The effect was reachable without that
+        route at all, because the meter key is caller-writable on the two
+        public `:Source` surfaces: `_SOURCE_EXTRA_PROPS` (the `create_source`
+        passthrough) and `_SOURCE_NODE_PROPS` (the generic `update_entity`
+        surface). One call demoted an existing document to `transcript` — or
+        nulled the genre — and the node left the metered set, freeing a slot
+        per document, repeatably. The cap did not hold.
+
+        MEASURED on the pre-fix code, 3 seeded document Sources: the meter read
+        3 -> 2 via `create_source(did, 'document', documentKind='transcript')`
+        and 2 -> 1 via `update_entity(did, documentKind='transcript')` — both
+        after `enforce_org_limit` had already refused at the derived cap, i.e.
+        the refusal the previous test pins was bypassable one call later.
+        """
+        tid, tenant = self._tenant(tmp_path, reg_sdk)
+        try:
+            reg_sdk._get_registry().query(
+                "MATCH (t:Team {id:$id}) SET t.max_points = 1",
+                params={"id": tid})
+            for i in range(10):
+                self._seed_doc(tenant, i, kind="report")
+            limits = resolve_org_limits(tid)
+            assert count_org_usage(tid, "documents", sdk=tenant) == 10
+            # precondition: the derived cap is genuinely reached
+            with pytest.raises(QuotaExceededError, match="documents limit"):
+                enforce_org_limit(limits, "documents", sdk=tenant)
+
+            # ⛔ BOTH spellings on BOTH caller surfaces. The document writer
+            # reads `$dk` from the snake spelling and OVERWRITES the camelCase
+            # genre, so admitting the snake form would hide the same demotion
+            # one document-path write later.
+            attempts = {
+                "create_source/documentKind": lambda: tenant.create_source(
+                    "doc_0", "document", documentKind="transcript"),
+                "create_source/document_kind": lambda: tenant.create_source(
+                    "doc_1", "document", document_kind="transcript"),
+                "update_entity/documentKind": lambda: tenant.update_entity(
+                    "doc_2", documentKind="transcript"),
+                "update_entity/document_kind": lambda: tenant.update_entity(
+                    "doc_3", document_kind="transcript"),
+                # `None` through `SET n += $p` REMOVES the property, so the
+                # generic surface's null is a demotion too (the passthrough
+                # skips null values — see `_persist_extra_props`).
+                "update_entity/documentKind=None": lambda: tenant.update_entity(
+                    "doc_4", documentKind=None),
+            }
+            for label, attempt in attempts.items():
+                with pytest.raises(ValueError, match="metered `documents` set"):
+                    attempt()
+                assert count_org_usage(tid, "documents", sdk=tenant) == 10, (
+                    f"{label} escaped the documents meter")
+            kinds = tenant._get_proj().g.query(
+                "MATCH (s:Source) WHERE s.documentKind = 'transcript' "
+                "RETURN count(s)").result_set[0][0]
+            assert kinds == 0, f"{kinds} document(s) demoted to transcript"
+
+            # ⛔ NON-OVER-REACH: the guard must not turn the surfaces into a
+            # no-op for the genre axis. (a) one metered genre -> another still
+            # lands, and (b) SETTING a genre where none is stored is how a
+            # document `:Source` is minted through these surfaces at all.
+            tenant.create_source("doc_0", "document", documentKind="brief")
+            assert tenant._get_proj().g.query(
+                "MATCH (s:Source {url:'doc_0'}) RETURN s.documentKind"
+            ).result_set[0][0] == "brief"
+            self._seed_doc(tenant, 20, kind=None)   # provenance Source
+            tenant.create_source("doc_20", "document", documentKind="report")
+            assert tenant._get_proj().g.query(
+                "MATCH (s:Source {url:'doc_20'}) RETURN s.documentKind"
+            ).result_set[0][0] == "report"
+            assert count_org_usage(tid, "documents", sdk=tenant) == 11
+        finally:
+            tenant.close()
+
+    def test_meter_predicate_halves_agree(self, reg_sdk, tmp_path):
+        """#5140: the `documents` predicate has ONE definition, in two halves.
+
+        `count_org_usage` counts with `DOCUMENT_METER_PREDICATE` (Cypher) and
+        the write guard tests with `is_metered_document_kind` (Python). The
+        escape above existed because the rule had a counter and no defender;
+        two halves that can drift would put it back, so pin them to each other
+        across the values the write paths actually produce (`''` is the
+        projection's CREATE default, #5026/D10; `'transcript'` is the capture
+        genre; `None` is a kind-less provenance Source).
+        """
+        from tortoise.quota import (DOCUMENT_METER_PREDICATE,
+                                    is_metered_document_kind)
+        tid, tenant = self._tenant(tmp_path, reg_sdk)
+        try:
+            g = tenant._get_proj().g
+            for kind in (None, "", "report", "brief", "transcript", "other"):
+                g.query("MATCH (s:Probe5140) DETACH DELETE s")
+                g.query("CREATE (s:Probe5140 {documentKind:$k})",
+                        params={"k": kind})
+                cypher = int(g.query(
+                    "MATCH (s:Probe5140) WHERE " + DOCUMENT_METER_PREDICATE +
+                    " RETURN count(s)").result_set[0][0])
+                assert bool(cypher) == is_metered_document_kind(kind), (
+                    f"predicate halves disagree on {kind!r}: cypher={cypher} "
+                    f"python={is_metered_document_kind(kind)}")
+                g.query("MATCH (s:Probe5140) DETACH DELETE s")
+        finally:
+            tenant.close()
+
 
 # ── #1911: object/subject writes count against the quota cap ──────────────
 
