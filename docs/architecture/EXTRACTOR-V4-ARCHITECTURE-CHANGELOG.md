@@ -201,6 +201,7 @@ revision, which is what this file is for.
 
 - `EXTRACTOR-V4-ARCHITECTURE.md:1304` — | connection fan-out | bounded everywhere, with a timeout that drops an arm | ✅ Cap adopted AND implemented — `PER_ENTITY_FANOUT_CAP = 200` (`tortoise/fanout.py`), consumed by `assembly.p…
 - `EXTRACTOR-V4-ARCHITECTURE.md:1306` — ⇒ One of the three questions below is still the owner's (question 1). Question 2 is measured, ruled and deferred; question 3 was adopted and is CLOSED — `#5010` (`PER_ENTITY_FANOUT_CAP = …
+- `EXTRACTOR-V4-ARCHITECTURE.md` §13.8, question 2 — **CORRECTED 2026-10-20 (`#7948`): TEN sites are customer-callable, behind EIGHT doors — the four counted here missed the whole state-recall path, and a later pass added three more readers that no module-level census could see.** Moved here verbatim on 2026-10-21: at that pass the design document stated only the count (*"TEN sites are customer-callable, behind EIGHT doors"*) — a figure **since superseded, twice** (SEVENTEEN sites / TWENTY doors at the 2026-10-21 fifth pass; §13's table is the authority, and neither number should be re-read as current here) — because a dated `CORRECTED` stamp and the narrative of what an earlier pass missed are change history, not design — and `tests/test_extractor_v4_citation_rot.py` pins that class in the design documents. What the count moves from and why: the paragraph counted FOUR customer-callable sites; re-deriving it at `26aff163c` found eight behind five doors (the whole `recall_state` path was missing, on four code paths), and a second pass found three more readers that sat INSIDE modules the table already named — `navigation._hop_query`, `mcp_server._preview_supersede` and `projection.FalkorProjection._rebuild_all_replay` — which is the drift a module-level census cannot see, and why `STORAGE-ARCHITECTURE.md` §13's census is now keyed on `module.py::symbol`. The ruling itself is unchanged: KEEP the stored edges, deferred to post-launch.
 
 ### 16. Decision protocol run (AGENTS.md, 2026-09-23)
 
@@ -665,3 +666,164 @@ it; `tests/test_9399_search_path_claim_scope.py` guards this document *and*
 quoted scan over the files that sentence names — so the qualifier cannot be
 dropped from either copy, and a second unscoped copy inside the same document
 reds as an absence.
+
+## §13.8 question 2 — the read-site correction's narration moved here (2026-10-20, `#7948`)
+
+The design document states the fact; the story of how the figure moved belongs here, per the rule the
+design-language pass (#8542) established and `tests/test_extractor_v4_citation_rot.py` pins.
+
+**The removed stamp, verbatim:**
+
+> ⚠️ **CORRECTED (2026-10-20, `#7948`): TEN sites are customer-callable, behind EIGHT doors — the four
+> counted here missed the whole state-recall path, and a later pass added three more readers that no
+> module-level census could see.**
+
+**What it recorded.** §13.8 question 2 previously counted four customer-callable sites (`belief_timeline`,
+`topic_summarize`, `recall_subgraph`, graph-ordered `search`). That count missed the whole state-recall
+path — `recall_state` alone reads the edge on four code paths, three of them through an `about*`
+alternation CONSTANT — and a later pass added three readers that no module-level census could see: an
+all-edge walk in `navigation.py` behind two further MCP tools, the supersede dry run in `mcp_server.py`,
+and the replay delete-leg in `projection/__init__.py`. The document stated only the resulting fact at that pass
+(**TEN customer-callable read sites, behind EIGHT distinct doors**); the authoritative enumeration is
+`STORAGE-ARCHITECTURE.md` §13's table, resolved against the code by
+`tests/test_7948_about_object_read_sites.py`.
+
+**And the guard that forbids this shape had a false PASS, now closed.** Its date arm was pinned to the
+space-separated form (`CORRECTED 20xx-`), so the parenthesized stamp above — the form this document's own
+corrections actually take — read as clean. The separator now accepts a short non-digit run, and the
+instrument's own both-directions test carries the parenthesized form as a `must_flag` fixture.
+
+**Two citations in §13.8/§13 named something else at HEAD, and were re-pointed:**
+`create_about_edge` (`projection/edges.py:344` → its `def`, at `:1458`) and, in `STORAGE-ARCHITECTURE.md`
+§13, `_connect_issue_objects` (`sdk.py:20154` → the symbol, `sdk.py::TortoiseSDK._connect_issue_objects`).
+§13's prose now states no line numbers at all, matching its own sentence that it carries none; the
+sibling `tests/test_extractor_v4_citation_rot.py` asserts every remaining quoted-symbol citation resolves.
+
+## §13's remaining line citations symbol-keyed, and the LINE asserted where the document keeps one (2026-10-21, `#7948`)
+
+The entry above records that *"§13's prose now states no line numbers at all"*. It still carried two, and
+both had rotted: `projection/entities.py:785+` (line 785 sits inside `_connector_content_hash`'s docstring,
+not the replay — the fold is `projection/entities.py::_EntityHandlers._fold_entity_linked`) and
+`test_index_restore.py:373-403` (the unjournalled-`Document` drop, not the `aboutObject` count, which is
+`tests/test_index_restore.py::test_t12_instantiates_edges_rebuild_drop_and_restore`). Both are now
+symbol-keyed, so the sentence is true and a line that MOVES cannot falsify it.
+
+Two guards, so neither class survives a later edit.
+`tests/test_7948_about_object_read_sites.py::test_section_13_carries_no_line_citations` holds §13 to its own
+sentence — the document states it carries no line numbers, so carrying one reds. §13.8 was symbol-keyed as
+well, in the entry below, which is the guard that SHIPS: no line is pinned anywhere in either section, and
+`tests/test_extractor_v4_citation_rot.py::test_section_13_8_carries_no_line_citations_and_its_symbols_resolve`
+asserts both halves (none present, each name resolves). The intermediate span assertion
+(`test_the_rederived_read_site_citations_land_inside_their_own_symbol`, which required each §13.8 citation to
+resolve *inside* the symbol it was attached to) was replaced in that same pass because it was over-blocking
+and under-detecting at once: one inserted line above a reader's `def` moved the span and reddened a `core`
+test on a PR that touched no reader, while a mid-body citation only had to sit somewhere inside the symbol.
+That is why the two citations that had drifted — `_state_related_objects` and `_state_related_points`, both
+landing in a `mitigated_by` reader instead of their own bodies — are now symbol-keyed rather than re-pointed.
+
+## §13.8 symbol-keyed (no line pinned), its count made to hold its own enumeration, and the door figure derived (2026-10-21, `#7948`)
+
+**The §13.8 line guard was over-blocking and under-detecting at the same time.** Ten of its eleven
+`file.py:NNNN` citations named a reader's `def` line, so inserting ONE line above
+`def _preview_supersede` in `mcp_server.py` moved the symbol's span and reddened a `core`-registered
+test on a PR that touched nothing in this document — and the one mid-body citation
+(`_preview_delete_edges`) was only bounded by "somewhere inside the symbol", so it could point at a
+different statement and stay green. That is the rot `STORAGE-ARCHITECTURE.md` §13 retired in this same
+PR, so §13.8 now takes the same resolution: **every reader is cited as `module.py::symbol`, and no line
+is pinned anywhere in the document.** `tests/test_extractor_v4_citation_rot.py::test_section_13_8_carries_no_line_citations_and_its_symbols_resolve`
+replaces the line-span test and asserts both halves (none present, each name resolves), and the
+whole-document quoted-symbol floor drops 10 → 6 because §13.8's eleven citations no longer match that
+form. Non-vacuity measured: restoring one citation as ``(`mcp_server.py:6529`)`` reds the new test.
+
+**The count and the enumeration under it had also come apart.** §13.8 read *"TWELVE sites are
+customer-callable"* and then listed thirteen, the thirteenth being `sdk.TortoiseSDK.supersede_point` —
+which `STORAGE-ARCHITECTURE.md` §13 classes `write path` (row 20), its read half being
+`mcp_server._preview_supersede` (row 21). The numeral therefore agreed with §13 while the list under it
+did not, and nothing could see it: the agreement guard compared only the number. Two fixes:
+
+- §13.8 now enumerates exactly the twelve customer-callable readers, and states the write half
+  separately — `supersede_point` IS reachable from `tortoise_supersede(dry_run=False)` and is a public
+  SDK method, so it is a door into the edge, but it MOVES the edges rather than reading them to answer
+  a customer, which is why the count stays twelve;
+- `tests/test_7948_about_object_read_sites.py::test_the_extractor_document_agrees_on_the_count` now
+  asserts **membership in both directions** (every customer-callable row named, no reader of another
+  reach named) and reads BOTH word orders the document states the count in — `N sites are
+  customer-callable` (§13.8) and `N *customer-callable* sites` (§13.6), the second of which the old
+  pattern never matched, so one copy could be edited while the other stayed stale and green.
+
+Measured non-vacuity: putting `supersede_point` back in the enumeration reds the membership arm naming
+it and §13 row 20; editing §13.6's `TWELVE` to `THIRTEEN` reds the word-order arm (under the pre-fix
+pattern it stayed green).
+
+**And the blast-radius DOOR figure in the same sentence was a third hand-count that nothing read.** It said
+*"TWELVE distinct doors"* while the 12 customer-callable reach cells in `STORAGE-ARCHITECTURE.md` §13 name
+**sixteen** distinct door identifiers; the folding rule was applied inconsistently (graph-ordered `search` and
+`tortoise_fts_query` folded into one door, the three `dry_run` delete tools left as three); and the sentence
+justifying it — *"TWELVE sites behind those twelve doors, because `recall_state` alone reads the edge on FOUR
+code paths"* — requires doors to be FEWER than sites while asserting they are equal. At that pass both documents stated
+SIXTEEN, the rule was stated (*a door is one independently callable entry point — an MCP tool, a public SDK
+method, or a served REST route — counted once per site that reaches it* — ⚠️ a rule since RETRACTED: it yields
+cell occurrences, not distinct doors), and `test_the_stated_door_count_matches_the_table` derived the total and
+the per-kind breakdown (then nine MCP tools, five SDK methods, two REST routes) from the reach cells and
+asserted it in BOTH documents. ⚠️ These figures are SUPERSEDED — the census now carries THIRTY-SEVEN rows /
+NINETEEN customer-callable sites / TWENTY-TWO doors, and the present counts live in §13.8 and §13 of the two
+design documents. Measured before the
+fix: rewriting the figure to `four` here, or `TEN` in the sibling, left all ten tests green.
+
+## §13.8 question 2 — the count moves to SEVENTEEN sites / TWENTY doors, because the ALL-EDGE class was still a hand pass (2026-10-21, `#7948`)
+
+The guard over this passage now DERIVES the untyped-walk class from the tree, so this entry records what the
+derivation moved and why the predecessor kept missing it.
+
+**What was wrong.** Rows 24–27 of `STORAGE-ARCHITECTURE.md` §13 were added by applying the section's own
+declared rule — *an unfiltered walk reads the edge without naming it; the class is enumerated, not excluded*.
+Every subsequent pass applied that rule and reached a different number, because a rule that admits every
+unfiltered walk admits more than any hand pass will find, and nothing recorded where it stopped. Measured at
+the head this entry was written for: the table carried 27 sites and the tree had 33, and the six it missed
+included the two whose absence mattered most to the ruling.
+
+**The six, and why the backup ones are load-bearing.**
+
+- `hosted_backup.py::_DUMP_EDGE_PAGE_QUERY` — every edge of the graph keyset-paged out **as data**
+  (`MATCH (a)-[r]->(b) … RETURN …, type(r), properties(r), …`, no rel-type filter, no label constraint), into
+  the per-org encrypted backup, behind `POST /v1/backups`.
+- `hosted_backup.py::_COUNT_ALL_EDGES_QUERY`, `::restore_graph`, `::_restore_copy_settled` — the unlabelled
+  whole-graph edge counts (`MATCH ()-[r]->() RETURN count(r)`) that make a dump's completeness checkable, take
+  a restore's baseline/delta and gate whether the copy has settled. Behind `POST /v1/backups` and
+  `POST /v1/backups/restore`.
+- `sdk.py::TortoiseSDK.backfill_v25` — the same unlabelled all-edge count, returned to the caller as
+  `report["edge_count"]`, on a public `TortoiseSDK` method with a registered MCP tool
+  (`tortoise_backfill_v25`) in front of it.
+- `sdk.py::TortoiseSDK._promote_incident_operators` — every incident operator edge of a freshly-live Point,
+  target swept across all four epistemic labels (`epistemic_disjunction`, which **includes `Object`**) with no
+  rel-type filter, so an `aboutObject` edge is walked and its endpoint status gates the promotion.
+
+⚠️ **The backup readers are not a marginal addition to the count — they are the site the §13 ruling's own
+durability bullet is about.** That bullet asks whether this edge class is consistent about durability, and the
+backup **is** the durability mechanism, so *would a `SET`-free derive change what the customer can restore?*
+was answerable only from a reader the table did not carry. `sdk.py::TortoiseSDK.backfill_v25` is the direct
+analogue of row 27 (`definite_description_backfill.CENSUS_QUERY`), which the table already carried — on a
+public SDK method rather than an ops audit.
+
+**The structural fix — the part that stops a sixth pass.** `tests/test_7948_about_object_read_sites.py` now
+censuses every Cypher relationship bracket that carries **no type at all** (`[r]`, `[r*1..2]`, `[x]`) inside a
+read clause, reconstructing f-strings and `+`-concatenations so `[r:{rel}]` still reads as typed and the
+`_hop_query` shape is not lost. Ownership is by enclosing `module.py::symbol`, exactly as the literal census
+is, so a new unfiltered walk added beside an existing row reds. A site that genuinely **cannot** observe the
+edge must appear in `_EXCLUDED_UNTYPED` with the code fact that earns it **present in that walk's own
+clause** (a fact in an earlier clause of the same query counts only when it binds a variable the walk uses) —
+and, from the other side, still present in the symbol's span — today that is only two shapes: the walked type restricted downstream
+(`type(r) IN ['IMPL','NAND']` in `hosted_api._load_commit_graph_state`) and endpoints sitting outside every
+`aboutObject` triple — a `Point`/`Event`/`Session` source, an `Object` target (`session_link.ENTITY_LINKED_TRIPLES`;
+`STRUCTURAL_REL_LABELS` carries the target half). Measured: the register's nine entries cover exactly
+the remaining untyped walks, and deleting a constraint reds
+`test_every_stated_exclusion_is_still_true` while leaving the site unowned in
+`test_no_untyped_walk_lacks_a_row_or_a_stated_exclusion`. **Nothing in this class is out by silence any more.**
+
+**Counts.** §13, §13's blast-radius sentence, §13.6 and §13.8 stated, AT THAT PASS, THIRTY-THREE read sites, SEVENTEEN
+customer-callable, TWENTY doors — ten MCP tools, six SDK methods and four REST routes. ⚠️ **SUPERSEDED** — the table carries THIRTY-SEVEN / NINETEEN / TWENTY-TWO today; §13 is the authority, so do not re-read these as current. (`POST /v1/backups` and
+`POST /v1/backups/restore` are new; `backfill_v25` / `tortoise_backfill_v25` are new) — every figure derived
+from the reach cells by the guard, never hand-counted. §13.8's enumeration names all seventeen, and
+`test_the_extractor_document_agrees_on_the_count` holds it there in both directions. The ruling is unchanged:
+**KEEP the stored edges, deferred to post-launch** — the corrected count moves in the direction the ruling
+already bet on, since more read sites make keeping the edge more strongly indicated.
