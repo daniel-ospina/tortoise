@@ -1054,9 +1054,14 @@ not name, and a number that read as a count of something it did not count.
   pointer are now a reference to §13, and the name-invisible enumeration gained
   `navigation._hop_query`.
 - **A rotted `file.py:NNNN` citation was fixed in the passage this PR already rewrote.**
-  `_connect_issue_objects` was cited as `sdk.py:20154` — a line inside `_cross_lens_pool`'s Cypher —
-  and is defined at `sdk.py:34896`. It sat three paragraphs below the sentence explaining that line
-  numbers were dropped *because* they had rotted.
+  `_connect_issue_objects` was cited as `sdk.py:20154` — a line inside `_cross_lens_pool`'s Cypher.
+  It sat three paragraphs below the sentence explaining that line numbers were dropped *because*
+  they had rotted. ⚠️ **The first fix of that citation shipped a new number, and the number was
+  wrong too** (`34896`, which is a different function at every head it was checked against) — the
+  fix for a rotten line number was a rotten line number, which is the argument for the rule rather
+  than an exception to it. The citation is now **symbol-only** (`sdk.py`, no `:NNNN`), the same form
+  §13's headline states, and the third review's remaining line hints in `EXTRACTOR-V4-ARCHITECTURE.md`
+  were dropped the same way — see the ninth entry below.
 - **`_MIN_CUSTOMER_CALLABLE`'s comment stated a wrong delta** (*"the table now declares three
   more"*: four → six is two). A comment making a numeric claim inside a file whose whole subject is
   numeric claims is not cosmetic.
@@ -1102,3 +1107,38 @@ scoped to *no semantic payload, except the binding confidence*, in §13 and in �
 wording is flagged as predating `#1370` rather than silently rewritten — reopening a ruling is a
 decision, not a copy-edit. (Surfaced by the earlier reviews of this PR; the third review's scope did
 not include it.)
+
+### Follow-up, same day — the NINTH correction: the line-number hints are gone, and three prose claims are now checked (`PR #9398`, fourth review)
+
+The fourth review found nothing wrong with the census or the KEEP ruling. All three of its findings
+were **prose that a machine could have caught and no machine was catching**, which is this PR's own
+subject one level up:
+
+- **The line hints were still there, in the one paragraph that says they are not the authority.** The
+  §16 passage in `EXTRACTOR-V4-ARCHITECTURE.md` opened with *"These line numbers are the convenience,
+  not the authority"* while carrying fifteen `file.py:NNNN` hints — and six of them pointed at
+  unrelated code **at the PR head and at `origin/main`** (the reviewer measured each as a symbol
+  grep vs a `sed -n 'Np'`, the two-command comparison the paragraph itself invites). §13 had already
+  dropped its line numbers for exactly this reason, and the passage is inside the same argument, so
+  the numbers are now **gone, not re-measured**: the paragraph resolves **symbols** only, and the
+  sentence says why. The re-measure route was rejected because the last time this set was "fixed"
+  by re-measuring, the new number was wrong too (the `_connect_issue_objects` entry above).
+- **§13's empty-pattern class named two rows and has three.** *"an empty relationship pattern
+  (`MATCH (n)-[r]->(m)`, rows 3 and 17)"* — row 18 (`definite_description_backfill.census_rows`,
+  `OPTIONAL MATCH (o)<-[r]-()`) is the same class, and the guard's own docstring says so. Now
+  *rows 3, 17 and 18*, and **the sentence is asserted against the derived class**: a new member, or
+  a row dropped from the sentence, reds.
+- **Row 7's `reach` cell cited a symbol that does not exist.** `QueryOptions` appears nowhere in the
+  package (`grep -rn --include=*.py QueryOptions tortoise/` → 0 hits); the flag is a keyword
+  parameter of `tortoise_fts_query`. Corrected, and the `reach` column gained an arm: every
+  CamelCase symbol it backtick-quotes must exist in the package, so a reach cell can no longer cite
+  a name that was never there.
+
+**The three new arms, and why each is non-vacuous.** `tests/test_7948_about_edge_read_sites.py`
+gained `test_the_census_prose_carries_no_line_citations` (reds on the pre-fix document, which
+carried nineteen hints across the two passages), `test_the_prose_names_every_row_in_the_empty_pattern_class`
+(reds on *rows 3 and 17*, naming the missing row 18 by deriving it), and
+`test_the_reach_column_names_only_symbols_that_exist` (reds on `QueryOptions`). The lesson the three
+share: the guard resolved the `site` column and nothing else, so the prose around the table could
+carry a stale number, an under-counted class and a non-existent symbol while every arm stayed green
+— a **PASS about a false artifact**, which is the failure mode this whole instrument exists to end.
