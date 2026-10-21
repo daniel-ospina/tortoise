@@ -294,6 +294,7 @@ import ast
 import functools
 import inspect
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -3719,9 +3720,23 @@ def _gate_walk_comment() -> str:
     history rather than on this comment.
     """
     census = _call_time_census()
-    source = inspect.getsource(census._narrow_gate_walk_sites)
-    path = inspect.getsourcefile(census._narrow_gate_walk_sites)
-    first = inspect.getsourcelines(census._narrow_gate_walk_sites)[1]
+    return _prose_of(census._narrow_gate_walk_sites)
+
+
+def _prose_of(fn: Callable[..., object]) -> str:
+    """Every prose line `fn` carries, plus the contiguous `#` block above its `def`.
+
+    ⚠️ **Factored out of `_gate_walk_comment` so the four POSITIONS a duration can be
+    written in are executable, not prose** (`#9522`). A guard over a comment is only
+    as good as its capture, and the capture was green on three of the four positions —
+    measured by splicing the removed figure into each one and watching both arms pass.
+    Taking a CALLABLE makes the capture testable on synthetic functions that write the
+    figure in each position, which is what
+    `test_the_gate_walk_capture_reads_every_position_a_duration_is_written` does.
+    """
+    source = inspect.getsource(fn)
+    path = inspect.getsourcefile(fn)
+    first = inspect.getsourcelines(fn)[1]
     above: list[str] = []
     if path:
         lines = Path(path).read_text(encoding="utf-8").splitlines()
@@ -3897,6 +3912,63 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         "the live comment must be green under the same predicate the two arms above "
         "use — this is the arm the guard asserts, restated so a divergence between "
         "the predicate and its non-vacuity arm cannot go unnoticed"
+    )
+
+
+def _figure_in_the_docstring() -> None:
+    """A duration in the position `getsource` RETURNS and the `#` filter DROPPED:
+
+    measured 10.36 s of the control's 10.85 s.
+    """
+
+
+def _figure_as_a_trailing_comment() -> None:  # measured 10.36 s of the control's 10.85 s
+    """A duration on a code line's TRAILING comment — also dropped by the filter."""
+
+
+# measured 10.36 s of the control's 10.85 s
+# (contiguous, so the backward scan has to reach past the `def`)
+def _figure_in_the_block_above_the_def() -> None:
+    """A duration in the `#` block ABOVE the `def` — `getsource` never returns it."""
+
+
+def test_the_gate_walk_capture_reads_every_position_a_duration_is_written():
+    """The capture is not a `#`-only projection (`#9522`).
+
+    ⚠️ **A guard over a comment is only as good as its capture, and the capture was
+    blind to three of the four places a duration can be written.** `#9516` merged the
+    comment change and left the arm reading `line.lstrip().startswith("#")`, which
+    drops the function DOCSTRING and TRAILING comments (`inspect.getsource` returns
+    both) and never sees the `#` block above the `def` (`getsource` does not return
+    it at all). Measured by splicing `measured 10.36 s of the control's 10.85 s` —
+    the exact string the `#9506` change deletes — into each position on `69390341f`:
+    all three stayed GREEN, so the guard had three documented ways past it.
+
+    The three synthetic functions below put the figure in each position THROUGH the
+    same `_prose_of` the guard uses, so "the capture reads every position" is executed
+    rather than asserted in a docstring. This arm reds on `69390341f` and greens here;
+    it is the missing half of the `#9522` fix, which changed the capture without an
+    arm that could tell the two captures apart.
+    """
+    for fn in (
+        _figure_in_the_docstring,
+        _figure_as_a_trailing_comment,
+        _figure_in_the_block_above_the_def,
+    ):
+        assert _unframed_durations(_prose_of(fn)) == ["10.36 s", "10.85 s"], (
+            f"`{fn.__name__}` writes the `#9506` figure in a position the capture "
+            "projects away, so the guard stays GREEN on the very text it exists to "
+            "delete — the capture must be the function's whole source plus the `#` "
+            "block above the `def`"
+        )
+
+    census = _call_time_census()
+    capture = _prose_of(census._narrow_gate_walk_sites)
+    assert capture != "\n".join(
+        line for line in capture.splitlines() if line.lstrip().startswith("#")
+    ), (
+        "the live capture is exactly its own `#` lines, so it is a `#`-only "
+        "projection again and the docstring/trailing-comment positions are invisible"
     )
 
 
