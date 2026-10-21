@@ -299,7 +299,7 @@ at 03:00.
 ### R9 — Back up the record, and test the restore · **M** · ops + decision · **BLOCKER**
 
 **What:** no module of ours backs up the record. `tortoise/backup.py` (module docstring: *"JSONL archiver +
-FalkorDB BGSAVE"*), `hosted_backup.py` (R2), `backup_sweep.py` (the cron driver) are all graph-only.
+FalkorDB BGSAVE"*), `hosted_backup.py` (R2) and `backup_sweep.py` (the cron driver) archive the **graph** — `backup.py` additionally copies the local journal's `events.jsonl` — and none of them backs up the record.
 §3 and §14.1's **O1** record the decision: **durability = the store's backup; rebuildability = the journal** —
 so promoting Postgres to the record **moves the durability obligation onto Postgres**, and no
 module of ours holds it (whether the paid plan does is unverified — every statement in the tree
@@ -318,8 +318,8 @@ journal record**, and the module states the cost in place: *"~one connection + c
 plan materialization"* — `table_columns()` is **deliberately uncached**, so every record re-reads the
 migrations. No pool exists.
 **What it blocks:** capture latency at volume. **Not a first-customer gate** — hosted capture is off
-by owner ruling (2026-10-14) and the beta volume is unmeasured. **But it must land before the write
-rate can be measured at all.** Cheapest fix is the pooler DSN plus caching the column map; batching is the larger
+by owner ruling (2026-10-14) and the beta volume is unmeasured. **But it must land before the per-record cost of a real
+write volume can be measured.** Cheapest fix is the pooler DSN plus caching the column map; batching is the larger
 change and needs the ordering-across-three-doors question answered.
 **Decision needed:** none to start; the batching shape needs a measurement first.
 
@@ -399,7 +399,7 @@ Postgres, and §17.4 already prices both stores.
 8. **R8** a restore verb + a drill → *a restore that has never been run is not a restore*
 9. **R9** back up the record → *the durability obligation moved, and no module of ours holds it*
 
-**What can wait:** **R10** (pooling — gated on a measured write rate, not a date), **R11** (the byte gate and the
+**What can wait:** **R10** (pooling — gated on a captured tenant write volume, not a date), **R11** (the byte gate and the
 meter → allowance wiring — gates the first *allowance*, not the first customer), **N1** (the read path, by
 §2.0), **N2** (`pgvector`, by open decision V1), **N5** (the failure alert, while the cache is full).
 
