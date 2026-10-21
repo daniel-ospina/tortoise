@@ -665,7 +665,7 @@ Second-granularity timestamps: sub-10s steps read 0s — do not alarm on those.
 
 ## Outcome (suite totals across jobs)
 
-- passed: **35291** · failed: **6** · error: **0** · skipped: **146** · xfailed: 10 · xpassed: 0
+- passed: **35291** · failed: **6** · error: **1** · skipped: **146** · xfailed: 12 · xpassed: 0
 - watchdog-killed mid-suite: no
 
 ## Flake signal
@@ -674,19 +674,13 @@ Second-granularity timestamps: sub-10s steps read 0s — do not alarm on those.
 > sample and is absent from the next sample's failed list is a *candidate flake*.
 > Per-test rerun-based flake rate becomes exact once the retry protocol lands (#1477).
 
-| Test | Failed (run) | Passed again (run) |
-|---|---|---|
-| `tests/test_7925_route_parity.py::test_both_routes_produce_the_same_confidence[IMPL]` | `39191149586` | 2026-10-21T09:30:00Z (`39467226356`) |
-| `tests/test_7925_route_parity.py::test_both_routes_produce_the_same_confidence[NAND]` | `39191149586` | 2026-10-21T09:30:00Z (`39467226356`) |
-| `tests/test_ci_timing.py::test_refresh_durations_on_the_real_manifest_of_record` | `39191149586` | 2026-10-21T09:30:00Z (`39467226356`) |
-| `tests/test_oauth_consent_bridge.py::test_the_spec_cites_live_hosted_api_sites` | `39191149586` | 2026-10-21T09:30:00Z (`39467226356`) |
+*No candidate flakes in the sampled window — no pair of samples both orders a transition and survives a sample at the same instant still recording the failure.*
 
 ## History (bounded to last 52 samples)
 
 | Sample | Run | Conclusion | Passed | Failed | Error | Skipped | Steps max job (s) |
 |---|---|---|---|---|---|---|---|
-| 2026-10-21T09:30:00Z | 39467226356 | failure | 35291 | 6 | 0 | 146 | 1346 |
-| 2026-10-20T18:40:00Z | 39191149586 | failure | 30697 | 6 | 1 | 129 | 1300 |
+| 2026-10-20T18:30:00Z | 39467226356 | failure | 35291 | 6 | 1 | 146 | 1346 |
 | 2026-10-17T15:56:38Z | 39040632415 | success | 31284 | 0 | 0 | 139 | 1414 |
 | 2026-10-13T03:18:43Z | 38337541559 | success | 28478 | 0 | 0 | 137 | 1232 |
 | 2026-10-12T04:54:57Z | 38203397437 | success | 27677 | 0 | 0 | 137 | 1052 |
