@@ -307,7 +307,7 @@ def test_faq_ties_only_extracted_claims_to_their_source() -> None:
 _MECHANISM_MARKERS = (
     "joint-truth penalty",
     "difference coupling",
-    "per-edge weight",
+    "own weight and direction",
     "exp(-w",
 )
 
@@ -350,7 +350,7 @@ def test_the_belief_mechanism_is_documented_on_docs_first() -> None:
     for mechanism in (
         "joint-truth penalty",
         "toward the source's level",
-        "per-edge weight",
+        "own weight and direction",
     ):
         assert mechanism in docs, (
             f"website/docs.html no longer states {mechanism!r}. The mechanism account "
@@ -379,12 +379,12 @@ def test_the_belief_mechanism_is_documented_on_docs_first() -> None:
         f"file's own maintainer note."
     )
     sample = _normalise(
-        "<p>A <strong>NAND</strong> is a joint-truth penalty and carries a per-edge "
-        "weight: <code>exp(-w&middot;c<sub>a</sub>&middot;c<sub>b</sub>)</code>.</p>"
+        "<p>A <strong>NAND</strong> is a joint-truth penalty and carries its own "
+        "weight and direction: <code>exp(-w&middot;c<sub>a</sub>&middot;c<sub>b</sub>)</code>.</p>"
     )
     assert _mechanism_hits(sample) == [
         "joint-truth penalty",
-        "per-edge weight",
+        "own weight and direction",
         "exp(-w",
     ], (
         "the formula-level detector no longer fires on mechanism vocabulary, so the "
@@ -1877,3 +1877,41 @@ def test_privacy_establishes_the_basis_that_6_cites() -> None:
         "§4 must state the purpose for session recordings, which §6 cites"
     )
     assert "legitimate interests (Art. 6(1)(f)):" in section
+
+
+def test_faq_source_answer_states_the_capture_shaping() -> None:
+    """The FAQ may not call the stored source "verbatim" or "never rewritten".
+
+    The stored turn is shaped once, on the way in: `_CAPTURE_TURN_CAP` (5000,
+    `tortoise/sdk.py:1134`) routes every writer through
+    `_clip_capture_turn_content`, which cuts to the cap AND appends a marker
+    carrying the true original length ("no cut is silent"), and
+    `_redact_turn_contents` replaces credential-shaped spans in place (#4911) —
+    both before the write. So the absolute "the source is never rewritten" is
+    false of the shipped capture path, and this page is the one that has to say
+    what actually happens instead (#9510 review, #9517 carries the same fix).
+
+    Extraction's own honesty claim is separate and stays pinned: extraction is
+    additive, and every EXTRACTED claim carries its source. The scoping to
+    "extracted" is deliberate — `sdk.create_point` takes an unsourced claim and
+    only advises (`PROVENANCE ADVISORY`, #8171).
+    """
+    text = _normalise(_read(FAQ))
+    for refuted in ("verbatim and authoritative", "the source is never rewritten"):
+        assert refuted not in text, (
+            f"website/faq.html restates {refuted!r}, which is false of the shipped "
+            f"capture path (5000-character clip with a truncation marker, plus "
+            f"credential redaction, both applied before the write)."
+        )
+    for stated, home in (
+        ("5,000 characters", "_CAPTURE_TURN_CAP"),
+        ("truncation marker", "_clip_capture_turn_content"),
+        ("credential-shaped spans are redacted", "_redact_turn_contents"),
+    ):
+        assert stated in text, (
+            f"website/faq.html no longer states {stated!r} ({home}) — the page must "
+            f"describe the shaping it actually applies, not omit it."
+        )
+    assert "every extracted claim carries the source it was drawn from" in text, (
+        "the scoped traceability claim was dropped along with the false universal"
+    )
