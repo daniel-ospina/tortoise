@@ -135,28 +135,61 @@ panic for every peer lane, so the ``TORTOISE_TEST_LANE_IMAGE`` seam is
 validated (``assert_pinned_image``) and a floating tag is REFUSED rather than
 copy-pasted back in.
 
-MEMORY — A KERNEL CAP, NOT ONLY `maxmemory` (#7357)
----------------------------------------------------
-The container is created with ``--memory`` AND ``--memory-swap`` set to the
-same value (``CONTAINER_MEMORY_ENV``, default ``2g``). ``--maxmemory`` is a
-REDIS-side limit; with ``HostConfig.Memory=0`` the container's real ceiling is
-the HOST's, and the host's ceiling is swap. So one runaway instance pages the
-whole box for minutes and starves every neighbour — including the canonical
-graph instance, whose process then goes away and is restarted by its own
-``restart: always`` policy, forever (#7357 measured exactly that). The cap
-converts a fleet-wide outage into ONE container dying alone, in its own cgroup,
-in seconds. It also makes the death LEGIBLE: a container the kernel (or this
-cap) killed used to read as "it may be wedged: run down and retry", so the
-operator retried into the same death and never learned the cause —
-``_termination_report`` now names ``OOMKilled``/``ExitCode``/``RestartCount``
-when docker reports them. Two limits, stated: an EXISTING container keeps the
-limits it was created with — docker cannot change them on ``start``, so the
-reuse path WARNS when that container has no cap and ``down`` + ``start``
-recreates it (as with the image pin) — and a value above the host's real
-headroom still dies (it just dies alone). A container that has already STOPPED
-has those facts read and reported on stderr BEFORE it is removed: this tool sets
-no ``--restart`` policy, so a kill leaves the container ``exited`` and the
-stale-container branch is the one path a memory kill actually takes.
+MEMORY — TWO BOUNDS, IN ORDER (#7357)
+------------------------------------
+The container is created with BOTH a cgroup cap (``--memory`` and ``--memory-swap``
+set to the same value, ``CONTAINER_MEMORY_ENV``, default ``2g``) and a REDIS-side
+dataset ceiling BELOW it (``--maxmemory``, ``DATASET_CEILING_RATIO`` of the cap,
+pinned ``--maxmemory-policy noeviction``). They are not alternatives; the ORDER
+between them is the point.
+
+``--maxmemory`` alone is the WRONG bound and the cgroup cap alone is the wrong
+DEATH. ``--maxmemory`` is a REDIS-side limit: with ``HostConfig.Memory=0`` the
+container's real ceiling is the HOST's, and the host's ceiling is swap — so one
+runaway instance pages the whole box for minutes and starves every neighbour,
+including the canonical graph instance, whose process then goes away and is
+restarted by its own ``restart: always`` policy, forever (#7357 measured exactly
+that). That is what the cgroup cap fixes: it converts a fleet-wide outage into
+ONE container dying alone, in its own cgroup, in seconds. But a cgroup kill is a
+``SIGKILL``: the container VANISHES mid-run, taking every in-flight read with it,
+and the caller is left holding a bare transport error that says nothing about
+memory — #7357's own defect ("the failure surfaces as … which misdescribes it")
+reproduced by this tool's own defaults. MEASURED on this box 2026-10-21: TEN
+lane containers had been killed at exactly their cap (``OOMKilled=true
+ExitCode=137``), while ordinary lanes peak at 156 MiB / 390 MiB / 37 MiB
+(``/sys/fs/cgroup/memory.peak``) — so the 2g default is NOT too small for a
+normal suite run, and the defect is the failure MODE at the cap, not the value.
+
+The dataset ceiling fires first, and it is an ANSWERED refusal: ``OOM command
+not allowed when used memory > 'maxmemory'``, an ordinary ``ResponseError``
+(``redis.exceptions.OutOfMemoryError`` on the pinned client) that
+``retry.is_instance_unavailable`` correctly refuses to call an instance outage.
+The instance SURVIVES with its DATA INTACT and the reason is IN the message.
+⛔ MEASURED, and it corrects the obvious reading: a lane's READ path is
+``GRAPH.QUERY``, which FalkorDB registers as a deny-OOM command, so a read at
+the ceiling is refused TOO (a read-only ``MATCH (n) RETURN count(n)`` returned
+``OutOfMemoryError`` against the pinned engine). Reads are NOT a safe haven at
+the ceiling — the win is against the ``SIGKILL``, not for reads: the container
+and its dataset are still there, and the message says why.
+The cgroup cap stays as the hard backstop for what ``maxmemory`` does
+not bound — ``used_memory`` is the dataset, while RSS adds allocator overhead,
+fragmentation, client/replication buffers and fork copy-on-write, so RSS is
+strictly larger. ``noeviction`` is pinned, not inherited: under an eviction
+policy Redis would silently DROP graph keys to stay under the ceiling, which on
+a graph instance is silent data loss — worse than any refusal.
+
+It also makes a cgroup death LEGIBLE: a container the kernel (or this cap)
+killed used to read as "it may be wedged: run down and retry", so the operator
+retried into the same death and never learned the cause — ``_termination_report``
+now names ``OOMKilled``/``ExitCode``/``RestartCount`` when docker reports them.
+Two limits, stated: an EXISTING container keeps the limits it was created with —
+docker cannot change them on ``start``, so the reuse path WARNS when that
+container has no cap and ``down`` + ``start`` recreates it (as with the image
+pin) — and a value above the host's real headroom still dies (it just dies
+alone). A container that has already STOPPED has those facts read and reported
+on stderr BEFORE it is removed: this tool sets no ``--restart`` policy, so a
+kill leaves the container ``exited`` and the stale-container branch is the one
+path a memory kill actually takes.
 
 CONTRACT — THE TARGET IS NOT A PARAMETER
 ----------------------------------------
@@ -230,6 +263,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import socket
@@ -339,20 +373,22 @@ READY_TIMEOUT = 60
 #: CI seam's: it is taken from the SHARED instance's own ceiling (`used_memory
 #: 2.0 GiB of maxmemory 2.0 GiB`), but that ceiling does not justify it.
 #: `maxmemory` bounds the Redis DATASET, and the shared instance REFUSES WRITES
-#: at it — this lane container sets no `--maxmemory` at all (see
-#: LANE_FALKORDB_ARGS), so the cgroup cap here is the ONLY ceiling, and
-#: `HostConfig.Memory` bounds RSS: dataset plus allocator overhead,
-#: fragmentation, client/replication buffers and fork copy-on-write. RSS is
-#: strictly larger than `used_memory`, and `--memory-swap` is EQUAL, so there is
-#: no swap headroom to absorb the margin — a lane that fitted inside the shared
-#: instance's data budget can be SIGKILLed here, where the shared instance would
-#: have failed SOFT with a legible refused write (#7357 review).
-#: Settle it by MEASURING: read the cgroup v2 peak (`/sys/fs/cgroup/.../`
-#: `memory.peak`) or `docker stats --no-stream fdb-lane-<slug>` during a full
-#: suite run on the heaviest lane. Comfortably below 2 GiB -> this default
-#: stands, and the measured peak belongs in this comment; at or near 2 GiB ->
-#: raise it, or give the lane a `--maxmemory` BELOW the cap so Redis refuses
-#: first the way the shared instance does.
+#: at it — the lane now does the same, at `DATASET_CEILING_RATIO` of this cap
+#: (`container_dataset_ceiling`), so the cgroup cap is the BACKSTOP and not the
+#: only ceiling: `HostConfig.Memory` bounds RSS, which is dataset plus allocator
+#: overhead, fragmentation, client/replication buffers and fork copy-on-write.
+#: RSS is strictly larger than `used_memory`, and `--memory-swap` is EQUAL, so
+#: there is no swap headroom to absorb the margin — which is why the two bounds
+#: are ORDERED (dataset ceiling first, cgroup cap second) and why a lane that
+#: overshoots is REFUSED rather than killed.
+#: SETTLED BY MEASUREMENT (done, 2026-10-21): cgroup v2 `memory.peak` on three
+#: live lane containers read **156 MiB / 390 MiB / 37 MiB** against this 2g cap,
+#: so this default is comfortably clear of a normal suite run and stands. What
+#: the same measurement DID find is ten lane containers killed at exactly the
+#: cap (`OOMKilled=true ExitCode=137`): the value is right, the failure MODE was
+#: not — hence the dataset ceiling below it. Re-measure the peak (and re-derive
+#: this number) if the suite's working set grows; do not raise the cap to fix a
+#: runaway, because a higher cap only makes a bigger SIGKILL.
 #:
 #: WHY A KERNEL CAP AND NOT ONLY `maxmemory`: `--maxmemory` is a REDIS-side
 #: limit. Without `HostConfig.Memory` the container's real ceiling is the
@@ -368,6 +404,24 @@ READY_TIMEOUT = 60
 #: 96-146 s RDB reload the issue records rather than a fast failure.
 CONTAINER_MEMORY_ENV = "FALKORDB_CONTAINER_MEMORY"
 DEFAULT_CONTAINER_MEMORY = "2g"
+#: #7357 — the REDIS-side dataset ceiling as a FRACTION of the cgroup cap.
+#:
+#: Three quarters, so the ceiling leaves a quarter of the cap for exactly what
+#: ``maxmemory`` does NOT bound: allocator overhead and fragmentation (MEASURED:
+#: ``used_memory`` stayed ~64 MiB above baseline after probe graphs were
+#: deleted), plus client/replication buffers.
+#: ⛔ NOT ``GRAPH.COPY``/``BGSAVE`` — a first draft of this note named them and
+#: the measurement refutes it: ``GRAPH.COPY`` of a 200k-node graph added **+78 MB
+#: to ``used_memory``** (vs +16.8 MB for the graph itself), i.e. it is an
+#: in-process copy counted INSIDE the ceiling, and ``BGSAVE`` cannot fork at all
+#: here because the container runs `--save ''`. They are still a reason to keep a
+#: margin, but as headroom used *by this container*, not as RSS the ceiling
+#: ignores. It must stay STRICTLY BELOW the cap: a ``--maxmemory`` at or above
+#: it is no ceiling at all — RSS would reach the cgroup limit first and the kernel would
+#: ``SIGKILL`` the container, which is the death this ordering exists to replace.
+#: MEASURED ordinary peaks are 37-390 MiB against a 2g cap, so 1536 MiB is ~4x
+#: headroom over a normal suite run and can only fire on a genuine runaway.
+DATASET_CEILING_RATIO = 3 / 4
 #: The docker memory-spec grammar (`512m`, `2g`, `1.5g`, `2gb`, `2048mb`,
 #: `1t`, bytes) — the LONG form (`kb`/`mb`/`gb`) is valid to docker, so refusing it
 #: would refuse the natural spelling of the very remedy these messages print
@@ -392,6 +446,34 @@ _MEMORY_UNIT_BYTES = {
     "t": 1 << 40, "tb": 1 << 40, "tib": 1 << 40,
 }
 
+#: Redis's spec grammar — a DIFFERENT grammar from docker's, and not only in
+#: case. Group 1 is the number, group 2 the optional unit; there is NO fraction
+#: and no leading `+`, because `memtoull` reads digits and then treats the rest as
+#: a unit, so Redis itself refuses `1.5g` and `+2g`. Matching runs on the
+#: normalised (stripped, unquoted, lowercased) token, so the unit can be sliced
+#: from that same string.
+_REDIS_SPEC_RE = re.compile(r"([0-9]+)(b|k|kb|m|mb|g|gb)?\Z")
+
+#: Byte multipliers for the units Redis's `memtoull` honours (redis.conf
+#: §Memory units): `1k` = **1000**, `1kb` = 1024, `1m` = 1000000, `1mb` =
+#: 1024*1024, `1g` = 1000000000, `1gb` = 1024*1024*1024. The BARE letters are
+#: DECIMAL; only the `b`-suffixed forms are binary. There is no `t` and no
+#: `kib`/`mib`/`gib` — Redis refuses those, so they stay unreadable here.
+#:
+#: ⛔ THIS TABLE EXISTS because `_spec_bytes` (docker's grammar, 1024-based for
+#: BOTH spellings) was reading a value out of a container's `REDIS_ARGS`
+#: (#7357 review, round 5). `--memory 2g --maxmemory 2g` is CORRECTLY bounded —
+#: Redis's 2,000,000,000 ceiling fires ~147 MiB before the 2,147,483,648 cgroup
+#: cap — but docker's multipliers made that token 2,147,483,648, so the note
+#: declared it "at or ABOVE its own cgroup cap" and prescribed `down`, which
+#: DELETES that healthy container's graphs.
+_REDIS_UNIT_BYTES = {
+    "": 1, "b": 1,
+    "k": 1000, "kb": 1 << 10,
+    "m": 1000 ** 2, "mb": 1 << 20,
+    "g": 1000 ** 3, "gb": 1 << 30,
+}
+
 def _spec_is_positive(spec: str) -> bool:
     """Whether *spec* is a POSITIVE byte count.
 
@@ -403,23 +485,69 @@ def _spec_is_positive(spec: str) -> bool:
     The test is on BYTES, not on the number: docker truncates the parsed spec to
     an int64, so `0.0000000001g` (0.107 B) and `0.1b` install as Memory=0 —
     a positive NUMBER that becomes an UNCAPPED container (#7357 review).
+
+    The unit is sliced from the SAME normalised string the regex matched, as in
+    `_spec_bytes`: slicing the RAW spec made a padded spelling (`" 2g "`) match
+    the grammar and then miss the unit table (#7357 review, nit).
     """
-    m = _MEMORY_SPEC_RE.match(spec)
+    normalised = spec.strip().lower()
+    m = _MEMORY_SPEC_RE.match(normalised)
     if not m:
         return False
-    unit = spec[m.end(1):].lower()
-    return int(float(m.group(1)) * _MEMORY_UNIT_BYTES[unit]) >= 1
+    return int(float(m.group(1)) * _MEMORY_UNIT_BYTES[normalised[m.end(1):]]) >= 1
 
 
 def _spec_bytes(spec: str) -> int | None:
-    """The BYTE count a docker memory spec denotes, or None if it is not one."""
-    m = _MEMORY_SPEC_RE.match(spec)
+    """The BYTE count a DOCKER memory spec denotes, or None if it is not one.
+
+    ⛔ DOCKER'S GRAMMAR ONLY. Every spelling is 1024-based to docker, but to
+    Redis the bare `k`/`m`/`g` are DECIMAL — so a value read out of a
+    container's `REDIS_ARGS` belongs in `_redis_spec_bytes`, not here (#7357
+    review, round 5). BOTH call sites here pass docker specs:
+    `container_dataset_ceiling` and `_termination_report`'s normalised
+    `wanted`. `container_memory_cap`/`_memory_cap_args` validate the grammar
+    with `_MEMORY_SPEC_RE`/`_spec_is_positive` and never count bytes, so they
+    are not call sites (#7357 review, nit).
+
+    CASE-INSENSITIVE on purpose: docker's grammar is lowercase, and the cap is
+    normalised before it gets here (`container_memory_cap`), so a permissive
+    read costs nothing and keeps a caller from re-deriving the rule.
+
+    The unit is sliced from the SAME normalised string the regex matched —
+    slicing the raw spec made every padded spelling (`" 2g"`) match the grammar
+    and then miss the unit table, reporting a readable spec as "unreadable"
+    (#7357 review).
+    """
+    normalised = spec.strip().lower()
+    m = _MEMORY_SPEC_RE.match(normalised)
     if not m:
         return None
-    try:
-        return int(float(m.group(1)) * _MEMORY_UNIT_BYTES[spec[m.end(1):].lower()])
-    except KeyError:  # pragma: no cover - the regex constrains the unit
+    return int(float(m.group(1)) * _MEMORY_UNIT_BYTES[normalised[m.end(1):]])
+
+
+def _redis_spec_bytes(spec: str) -> int | None:
+    """The BYTE count REDIS reads *spec* as, or None if it is not a Redis spec.
+
+    This is what a `--maxmemory` token in a container's `REDIS_ARGS` must be
+    judged with, and it is deliberately NOT `_spec_bytes`: docker's multipliers
+    are 1024-based for both spellings, Redis's bare letters are decimal, so the
+    two disagree by ~4.9% (`m`) / 7.4% (`g`) on the very spelling a human writes
+    when making the numbers match (`--memory 2g --maxmemory 2g`). Read with
+    docker's table, that healthy container computes a "ceiling" equal to its own
+    cgroup cap and is reported as "the ceiling never fires … run `down`" — a
+    false statement whose remedy DELETES its graphs (#7357 review, round 5).
+
+    Case-INSENSITIVE (MEASURED on the pinned engine: `CONFIG SET maxmemory 1GB`
+    → 1073741824) and QUOTE-TOLERANT: `REDIS_ARGS` reaches Redis through a word
+    split, so `--maxmemory '1536mb'` is a plausible spelling whose quotes Redis's
+    own `sdssplitargs` strips. Reporting either as "unreadable" is what sends an
+    operator after `down` on a correctly bounded container.
+    """
+    normalised = spec.strip().strip("'\"").strip().lower()
+    m = _REDIS_SPEC_RE.match(normalised)
+    if not m:
         return None
+    return int(m.group(1)) * _REDIS_UNIT_BYTES[m.group(2) or ""]
 
 
 def container_memory_cap() -> str:
@@ -454,6 +582,75 @@ def _memory_cap_args(cap: str | None = None) -> list[str]:
     return ["--memory", cap, "--memory-swap", cap]
 
 
+def container_dataset_ceiling(cap: str | None = None) -> str:
+    """The REDIS-side `--maxmemory` for the lane container (#7357).
+
+    ``DATASET_CEILING_RATIO`` of the cgroup cap, floored to whole MiB so the
+    value Redis receives is exactly the value this module computed. Fail-closed
+    on the two values that would silently restore the defect this exists to
+    remove:
+
+    * a ceiling that is not POSITIVE — ``0`` is docker's/Redis's spelling for
+      NO LIMIT, i.e. the unbounded dataset that reaches the cgroup cap and is
+      ``SIGKILL``ed, which is the failure mode being replaced;
+    * a ceiling at or ABOVE the cap — ``maxmemory`` would then never fire and
+      the death would be the kernel's again. Refused rather than clamped: a
+      caller that raised ``FALKORDB_CONTAINER_MEMORY`` to a value the derived
+      ceiling cannot be ordered against is telling this seam something it must
+      not paper over.
+
+    The environment seam is the CAP, not a second variable: one knob cannot get
+    the two bounds out of order, which is the whole contract.
+    """
+    cap = cap if cap is not None else container_memory_cap()
+    cap_bytes = _spec_bytes(cap)
+    if cap_bytes is None or cap_bytes < 1:
+        # ``container_memory_cap`` already refuses these; a direct caller that
+        # passed ``cap=`` bypassed it, so the belt is here on the value this
+        # function actually computes from.
+        raise SystemExit(
+            f"test-lane: cannot derive a dataset ceiling from "
+            f"{CONTAINER_MEMORY_ENV}={cap!r} — it is not a positive docker "
+            f"memory spec (default {DEFAULT_CONTAINER_MEMORY})"
+        )
+    ceiling_bytes = int(cap_bytes * DATASET_CEILING_RATIO)
+    ceiling_mib = ceiling_bytes // (1 << 20)
+    if ceiling_mib < 1 or ceiling_mib * (1 << 20) >= cap_bytes:
+        raise SystemExit(
+            f"test-lane: {CONTAINER_MEMORY_ENV}={cap!r} is too small to hold a "
+            f"dataset ceiling BELOW it (``--maxmemory`` must fire before the "
+            f"cgroup cap, or the kernel SIGKILLs the container and the caller "
+            f"is told nothing) — raise it or set it in whole MiB "
+            f"(default {DEFAULT_CONTAINER_MEMORY})"
+        )
+    return f"{ceiling_mib}mb"
+
+
+def _redis_args(cap: str | None = None, *, ceiling: str | None = None) -> str:
+    """The `REDIS_ARGS` the lane container is created with (#7357).
+
+    ONE builder, because ``REDIS_ARGS`` is a single ``-e`` value: a second
+    ``-e REDIS_ARGS=…`` is not merged by docker, the LAST one wins, so a
+    persistence pin added next to a ceiling pin would silently drop the other —
+    a green argv assertion per flag would not notice.
+
+    ``ceiling`` lets `start()` pass the value it ALREADY derived and validated at
+    the top of the call (#7357 review: a derived-seam refusal must land before
+    the stale-container `docker rm -f`, or it destroys the lane's graphs and then
+    refuses to replace the container — the F8 defect this file already paid for).
+    Omitting it derives the ceiling here, which is what a direct caller wants.
+
+    ``--appendonly no --save ''`` (persistence OFF) is this tool's existing
+    contract: a throwaway lane must not carry an RDB/AOF, which is also what
+    makes a container restart cheap. ``noeviction`` is pinned beside the ceiling
+    (see the module docstring: eviction on a graph instance is silent data
+    loss).
+    """
+    ceiling = ceiling if ceiling is not None else container_dataset_ceiling(cap)
+    return (f"--appendonly no --save '' --maxmemory {ceiling} "
+            f"--maxmemory-policy noeviction")
+
+
 #: `docker inspect --format` for the facts that separate "the server is wedged"
 #: from "the kernel killed it" from "it is looping", in one call.
 _TERMINATION_FORMAT = (
@@ -478,6 +675,244 @@ def _container_memory_limit(name: str) -> int | None:
         return int((r.stdout or "").strip())
     except ValueError:
         return None
+
+
+_CONTAINER_ENV_FORMAT = "{{json .Config.Env}}"
+
+
+def _container_redis_args(name: str) -> str | None:
+    """The `REDIS_ARGS` a container was CREATED with, or None when unreadable.
+
+    This is the **FALLBACK**, not the primary source: `_note_missing_dataset_ceiling`
+    asks the LIVE instance first (`CONFIG GET maxmemory`) because a `CONFIG SET`
+    after creation moves the ceiling without touching `Config.Env`. The creation
+    env is used only when that live read fails, and it answers a DIFFERENT
+    question — what the container was launched with, which is NOT what is in
+    effect. Do not delete the live read as redundant (#7357 review, round 3).
+
+    None is "could not read", never "it has none" (#7357: an unread fact must
+    never be reported as a pass).
+    """
+    r = _docker("inspect", "--format", _CONTAINER_ENV_FORMAT, name)
+    if r.returncode != 0:
+        return None
+    try:
+        entries = json.loads((r.stdout or "").strip() or "[]")
+    except ValueError:
+        return None
+    if not isinstance(entries, list):  # pragma: no cover - docker emits a list
+        return None
+    for entry in entries:
+        if isinstance(entry, str) and entry.startswith("REDIS_ARGS="):
+            return entry[len("REDIS_ARGS="):]
+    return ""
+
+
+def _container_live_maxmemory(name: str) -> int | None:
+    """The LIVE `maxmemory` of a RUNNING container, in bytes, or None.
+
+    The reuse path only ever asks about a container that is UP (the caller sits
+    inside `if state == "running":`, and the very next call PINGs it), so the
+    live value IS readable — and it is the only truthful one: a `CONFIG SET
+    maxmemory …` after creation moves the ceiling without touching
+    `Config.Env`, so the creation env would report a ceiling the instance no
+    longer has (and, in the other direction, would stay silent about a runtime
+    `CONFIG SET maxmemory 0` — the unbounded container this exists to catch).
+
+    `docker exec` is bounded by `DOCKER_TIMEOUT` like every other docker call
+    here, and any failure answers None — "could not read", never "it is fine".
+    """
+    r = _docker("exec", name, "redis-cli", "--raw", "CONFIG", "GET", "maxmemory")
+    if r.returncode != 0:
+        return None
+    lines = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return None
+    try:
+        return int(lines[1])
+    except ValueError:
+        return None
+
+
+def _note_missing_dataset_ceiling(name: str) -> None:
+    """Say it out loud when a REUSED container has no dataset ceiling (#7357).
+
+    `docker start` cannot change a limit, so a lane container created by an
+    earlier version of this tool carries `HostConfig.Memory=2g` **and
+    `REDIS_ARGS` with no `--maxmemory`** — the exact defect this change removes,
+    kept for life by the only path that can hand such a container back. The
+    kernel-cap note next to this one reads `HostConfig.Memory` and is therefore
+    SILENT about it (measured on this box 2026-10-21: `fdb-lane-1555b57be7`
+    reports `Memory=2147483648`, `maxmemory 0`, and the cap note printed
+    nothing). Silence here is #7357's own defect — "the failure is not reported"
+    — so the reuse path names it and gives the one remedy that applies.
+
+    A ceiling that is unparseable or NOT strictly below the container's own
+    `HostConfig.Memory` is reported too: `--maxmemory` at or above the cgroup cap
+    never fires, so the death is the kernel's again.
+
+    ⛔ THE CAP BASIS IS THE CONTAINER'S OWN `HostConfig.Memory`, never the value
+    `FALKORDB_CONTAINER_MEMORY` holds now (#7357 review). A container keeps the
+    limits it was BORN with, so comparing a 4g-born container against a lane
+    running the default 2g reported "at or ABOVE its own cgroup cap" — and its
+    remedy is `down`, which deletes that container's graphs — while the reverse
+    (2g-born, ceiling 4gb, lane now at 8g) went silent on a ceiling that can
+    never fire. The configured value therefore takes NO part in this function.
+
+    THREE read outcomes of that limit, never collapsed: an int is the cap,
+    `0` is "NO cgroup cap at all", and `None` is "could not be read". Every
+    branch that names what happens on an overshoot derives that claim from this
+    read (`fate`) — "SIGKILLed by the cgroup cap" is only true when a cap WAS
+    read, and the env fallback used to assert it unconditionally (or, for
+    `--maxmemory 0`, to name the cap and then call the overshoot uncaught)
+    (#7357 review, round 6).
+
+    ⛔ THE CEILING COMES FROM THE LIVE INSTANCE when it answers
+    (`CONFIG GET maxmemory`), with the creation env as the fallback: a
+    `CONFIG SET` after creation moves the ceiling without touching `Config.Env`,
+    which in one direction invents a ceiling the instance no longer has and in
+    the other stays silent about a runtime `CONFIG SET maxmemory 0`.
+
+    ⛔ THE CEILING TOKEN IS READ WITH REDIS'S GRAMMAR (`_redis_spec_bytes`),
+    never docker's: the bare `k`/`m`/`g` are DECIMAL to Redis and 1024-based to
+    docker, so `--memory 2g --maxmemory 2g` is a HEALTHY pair (the 2,000,000,000
+    ceiling fires ~147 MiB before the 2,147,483,648 cap) that docker's table
+    computed as "at or ABOVE its own cgroup cap" — with `down`, which deletes
+    the graphs, as the remedy (#7357 review, round 5).
+
+    Prints to STDERR and never raises: this is a warning on a reuse path that
+    must still hand back a working container.
+    """
+    try:
+        # THREE distinct read outcomes, never collapsed (#7357 review, round 3):
+        # `None` is "could not read", `0` is "NO cgroup cap at all", and a
+        # positive int is the cap. Treating `0` or `None` as "use the configured
+        # value" asserted a cap that was never read (or that does not exist) and
+        # then prescribed `down` — which deletes the very graphs — for a container
+        # whose ceiling was fine. `_termination_report` branches on these same
+        # three outcomes for the same reason.
+        limit = _container_memory_limit(name)
+        if limit is None:
+            cap_bytes = None
+            cap_note = "its own cgroup cap could not be read"
+        elif limit == 0:
+            cap_bytes = None
+            cap_note = "it has NO cgroup cap of its own"
+        else:
+            cap_bytes = limit
+            cap_note = f"its own cgroup cap ({limit})"
+        # ⛔ The SIGKILL claim needs a cap to make it true: when the cgroup cap
+        # is unreadable or ABSENT (`_note_uncapped_existing` prints that beside
+        # this note), saying "SIGKILLed by the cgroup cap" asserts a limit no
+        # branch read. ONE spelling, used by EVERY branch that names the
+        # overshoot's fate — the live branch had it first, and the two
+        # env-fallback branches asserted the SIGKILL unconditionally (or denied
+        # a cap they had just named), which is the same collapse (#7357 review,
+        # round 6: round 5 fixed it for the live branch only).
+        fate = ("an overshoot is SIGKILLed by the cgroup cap"
+                if cap_bytes is not None else
+                "an overshoot goes uncaught")
+        live = _container_live_maxmemory(name)
+        if live is not None:
+            if live >= 1 and cap_bytes is not None and 0 < live < cap_bytes:
+                return
+            if live < 1:
+                reason = (
+                    "has NO dataset ceiling in effect (`CONFIG GET maxmemory` "
+                    f"answers `{live}`, i.e. unbounded, so {fate} and the caller "
+                    "is told nothing)"
+                )
+            elif cap_bytes is None:
+                # A ceiling EXISTS — that is this note's whole question, and it
+                # is answered. Whether the container has a cgroup cap at all is
+                # `_note_uncapped_existing`'s finding, printed beside this one;
+                # repeating it here would claim a problem we did not measure
+                # (#7357 review, round 3).
+                return
+            else:
+                reason = (
+                    f"has `maxmemory {live}` at or ABOVE {cap_note}, so the "
+                    f"ceiling never fires and an overshoot is SIGKILLed by the "
+                    f"kernel"
+                )
+        else:
+            raw = _container_redis_args(name)
+            if raw is None:
+                print(
+                    f"test-lane: could not READ the dataset ceiling of {name} (the "
+                    f"`docker exec … CONFIG GET maxmemory` and `docker inspect "
+                    f"--format '{_CONTAINER_ENV_FORMAT}'` queries both failed), "
+                    f"so whether `--maxmemory` is set cannot be confirmed; it is "
+                    f"left alone. Check with `docker container inspect -f "
+                    f"'{_CONTAINER_ENV_FORMAT}' {name}` (#7357)",
+                    file=sys.stderr,
+                )
+                return
+            m = re.search(r"--maxmemory(?:=|\s+)(\S+)", raw)
+            if m is None:
+                # ⛔ `fate`, never the bare SIGKILL claim: this fallback is
+                # reached with `cap_bytes is None` too (the cap read failed, or
+                # there is NO cgroup cap), and then there is no kernel limit for
+                # a SIGKILL to come from — the overshoot pages the host, which
+                # is #7357's own outage (#7357 review, round 6).
+                reason = (
+                    "was created with NO dataset ceiling (`REDIS_ARGS` carries no "
+                    f"`--maxmemory`, so {fate} and the caller is told nothing)"
+                )
+            else:
+                # ⛔ REDIS's grammar, not docker's: this token is Redis's to
+                # interpret, and the two grammars disagree on the bare units
+                # (#7357 review, round 5).
+                ceiling_bytes = _redis_spec_bytes(m.group(1))
+                known_zero = ceiling_bytes == 0
+                if known_zero:
+                    # ``--maxmemory 0`` is NOT unreadable: it is Redis's spelling
+                    # for NO LIMIT, the one value this note exists to catch, and
+                    # reporting it as "unreadable" understates it (#7357 review).
+                    # ⛔ `fate`, not a hard-coded "uncaught": with a positive
+                    # `HostConfig.Memory` the overshoot IS caught (by the
+                    # kernel, just illegibly), and the old wording named the cap
+                    # in `cap_note` and then denied it in the same sentence
+                    # (#7357 review, round 6). "Uncaught" is true only when no
+                    # cap was read.
+                    reason = (
+                        "was created with `--maxmemory 0`, which means NO LIMIT "
+                        f"— {cap_note}, so {fate} and the caller is told nothing"
+                    )
+                elif ceiling_bytes is None or ceiling_bytes < 1:
+                    reason = (
+                        f"has an unreadable `--maxmemory {m.group(1)}`, so whether "
+                        f"it bounds anything cannot be confirmed"
+                    )
+                elif cap_bytes is None:
+                    # The ceiling was READ and is a real bound. Whether the
+                    # container has a cgroup cap at all is
+                    # `_note_uncapped_existing`'s finding, printed beside this one
+                    # — claiming it here would assert a fact this branch did not
+                    # read, and the remedy it prescribes (`down`) DELETES the
+                    # container's graphs (#7357 review, round 4).
+                    return
+                elif ceiling_bytes >= cap_bytes:
+                    reason = (
+                        f"has `--maxmemory {m.group(1)}` at or ABOVE {cap_note}, "
+                        f"so the ceiling never fires and an overshoot is "
+                        f"SIGKILLed by the kernel"
+                    )
+                else:
+                    return
+        print(
+            f"test-lane: WARNING — {name} {reason} (#7357; `docker start` cannot "
+            f"change it). Run `uv run python tools/test_lane.py down` and retry "
+            f"to recreate it with the derived ceiling "
+            f"({DATASET_CEILING_RATIO:.0%} of the cgroup cap)",
+            file=sys.stderr,
+        )
+    except Exception:  # noqa: BLE001, RUF100 — a warning must never break the reuse path
+        print(
+            f"test-lane: could not evaluate the dataset ceiling of {name} "
+            f"(#7357) — leaving it alone",
+            file=sys.stderr,
+        )
 
 
 def _note_uncapped_existing(name: str) -> None:
@@ -1113,6 +1548,14 @@ def start(port: int | None = None) -> tuple[str, int]:
     # below. An unusable cap must refuse while the container (and the graphs in
     # it) still exist, not after the removal it would never replace.
     cap = container_memory_cap()
+    # #7357 review: the DERIVED ceiling is validated here too, beside the cap it
+    # is derived from — not at the `docker run` argument tuple, which is where it
+    # was first written. `container_dataset_ceiling` refuses a SUPERSET of what
+    # `container_memory_cap` accepts (any cap under ~1.33 MiB passes the cap
+    # grammar and cannot hold a strictly-smaller ceiling), so validating it at the
+    # call site put the refusal AFTER the stale-container `docker rm -f` —
+    # verbatim the F8 defect stated in the docstring above.
+    ceiling = container_dataset_ceiling(cap)
     # #8180: the call site that makes ownership reaping actually BITE. Every lane
     # that starts sweeps containers whose owning worktree is gone, so a lane
     # closed without `down` (measured: `cmux workspace close` never runs it)
@@ -1179,6 +1622,12 @@ def start(port: int | None = None) -> tuple[str, int]:
                 f"tools/test_lane.py down` first to move it"
             )
         _note_uncapped_existing(name)
+        # #7357: the SIBLING defect this change removes. A container created by
+        # an earlier version of this tool has a cgroup cap AND no dataset ceiling,
+        # so the kernel-cap note above is silent about it (measured: "2g" +
+        # `maxmemory 0`, note printed nothing). Reusing it silently keeps the
+        # SIGKILL death for life — the "failure is not reported" shape.
+        _note_missing_dataset_ceiling(name)
         if not _wait_ready(name, published):
             # #7357: `live` is decided by a state read taken HERE, after the
             # wait — not by the one that opened this branch. `_wait_ready` waits
@@ -1307,7 +1756,14 @@ def start(port: int | None = None) -> tuple[str, int]:
         # `cap` was validated at the TOP of this function (ordering note there).
         *_memory_cap_args(cap),
         "-p", f"127.0.0.1:{chosen}:6379",
-        "-e", "REDIS_ARGS=--appendonly no --save ''",
+        # #7357: the REDIS-side dataset ceiling, BELOW the cgroup cap above, so a
+        # runaway instance is REFUSED legibly instead of being SIGKILLed by the
+        # kernel and taking the container (and its dataset) with it. NOT a "reads
+        # keep working" claim: a lane reads through `GRAPH.QUERY`, which FalkorDB
+        # registers as deny-OOM, so reads are refused at the ceiling too (measured).
+        # Built by `_redis_args` (one `-e`, never two: docker takes the last), and
+        # `ceiling` was validated at the TOP of this function.
+        "-e", f"REDIS_ARGS={_redis_args(cap, ceiling=ceiling)}",
         # #8071: engine parity with the SHARED instance (see the module
         # docstring's ENGINE PARITY section).
         "-e", f"FALKORDB_ARGS={LANE_FALKORDB_ARGS}",
