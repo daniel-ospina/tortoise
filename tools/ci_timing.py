@@ -501,20 +501,33 @@ def _is_summary_line(line: str) -> bool:
 R_SUMMARY_RE = re.compile(r"^(FAILED|ERROR)\s+(tests/\S+?\.py::.+)$")
 
 
-def _short_summary_id(tail: str) -> str:
-    """Split `<id> - <message>` at the FIRST ` - ` outside brackets.
+def _short_summary_id(tail: str, known: set[str]) -> str:
+    """Split `<id> - <message>` when neither the id nor the message can be told from punctuation.
 
-    The id can be `test_p[a - b]` and the message is free text that may itself contain ` - `, so
-    neither the first dash nor the last is right. The id's brackets balance; the message's do not
-    belong to it. A tail with no separator (pytest omits a message sometimes) is the id.
+    The id may contain a space (`test_spaced[server lane]`), the separator itself (`test_p[a - b]`)
+    and BRACKETS THAT DO NOT BALANCE (`test_open[a[b]`, because pytest appends the closing `]` to
+    the parameter verbatim), and the message is free text that may also contain ` - `. No pattern
+    resolves that, so the order is: a nodeid the PROGRESS lines already named and that the tail
+    starts with (authoritative — the progress line is unambiguous, and pytest writes the progress
+    lines before the summary); else the first ` - ` at bracket DEPTH 0; else the LAST ` - `, since a
+    message is likelier to contain one than an id pytest itself reports. Never the whole tail: that
+    would publish `<id> - <message>` as a nodeid pytest never reports.
     """
+    for nodeid in sorted(known, key=len, reverse=True):
+        if tail.startswith(nodeid) and tail[len(nodeid):].startswith(" - "):
+            return nodeid
     at = tail.find(" - ")
     while at != -1:
-        head = tail[:at]
-        if head.count("[") == head.count("]"):
-            return head
+        depth = 0
+        for ch in tail[:at]:
+            depth += (ch == "[") - (ch == "]")
+            if depth < 0:
+                break
+        if depth == 0:
+            return tail[:at]
         at = tail.find(" - ", at + 3)
-    return tail
+    last = tail.rfind(" - ")
+    return tail[:last] if last != -1 else tail
 
 COUNT_KEYS = ("passed", "failed", "error", "skipped", "xfailed", "xpassed")
 
@@ -554,6 +567,7 @@ def parse_log(path: Path) -> dict:
     path_nodeids: dict[str, set[str]] = {}
     counts = {k: 0 for k in COUNT_KEYS}
     outcomes: dict[str, str] = {}
+    known_ids: set[str] = set()
     killed = False
     # A summary line is `=== <n> <state>`; `no tests ran in 0.30s` is one of those
     # with every count zero. Absence of a summary is a DIFFERENT event from a
@@ -644,10 +658,11 @@ def parse_log(path: Path) -> dict:
         m = V_PROGRESS_RE.match(line) or V_PROGRESS_BARE_RE.match(line)
         if m:
             outcomes[m.group("nodeid")] = m.group("verdict")
+            known_ids.add(m.group("nodeid"))
             continue
         m = R_SUMMARY_RE.match(line)
         if m:
-            outcomes[_short_summary_id(m.group(2))] = m.group(1)
+            outcomes[_short_summary_id(m.group(2), known_ids)] = m.group(1)
             continue
         # ⛔ Shape, not vocabulary: a summary line is `=== <n> <state>` and does not have
         # to mention `passed`. Requiring that word made a COLLECTION-ERROR leg

@@ -1811,6 +1811,50 @@ def test_a_param_containing_the_separator_is_not_truncated(tmp_path: Path) -> No
     assert agg["total_counts"]["failed"] == 1
 
 
+def test_an_unbalanced_param_does_not_glue_its_message_onto_the_id(tmp_path: Path) -> None:
+    """pytest appends `]` to the parameter verbatim, so a real id can be UNBALANCED.
+
+    `test_open[a[b]` has one more `[` than `]`, so a balance test never finds a split and the id
+    was published as `<id> - <message>` — a nodeid pytest never reports, invented by the splitter
+    (#9134 review, P2). The depth scan falls through to the last separator instead, and a nodeid
+    the PROGRESS line already named wins outright: that line is unambiguous, and pytest writes the
+    progress lines before the summary.
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "tests/test_x.py::test_open[a[b] FAILED [ 50%]\n"
+        "FAILED tests/test_x.py::test_open[a[b] - AssertionError: boom\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {"tests/test_x.py::test_open[a[b]"}
+    assert agg["total_counts"]["failed"] == 1
+
+    bare = tmp_path / "logs2" / "pytest-log-test-a"
+    bare.mkdir(parents=True)
+    (bare / "pytest.log").write_text(
+        "FAILED tests/test_x.py::test_open[a[b] - AssertionError: boom\n")
+    alone = ci_timing.aggregate_logs(tmp_path / "logs2")
+    assert alone["failed_tests"] == {"tests/test_x.py::test_open[a[b]"}
+
+
+def test_a_progress_line_resolves_an_id_that_contains_the_separator_and_a_bracket(
+        tmp_path: Path) -> None:
+    """`test_pb[a] - b]` cannot be split by punctuation alone — the progress line settles it.
+
+    Its first ` - ` sits at bracket depth 0 (`[a]` closes early), so a depth scan truncates it,
+    and the message may legitimately contain ` - ` too. The progress line that precedes the
+    summary carries the id verbatim, so it is the authority (#9134 review, P2).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "tests/test_x.py::test_pb[a] - b] FAILED [ 50%]\n"
+        "FAILED tests/test_x.py::test_pb[a] - b] - AssertionError: 1 - 1 != 0\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {"tests/test_x.py::test_pb[a] - b]"}
+    assert agg["total_counts"]["failed"] == 1
+
+
 def test_an_unreadable_log_degrades_instead_of_killing_the_run(tmp_path: Path) -> None:
     """One unreadable log must not become a KeyError for the whole artifact.
 
