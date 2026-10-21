@@ -2135,7 +2135,6 @@ def _customer_callable_doors() -> dict[str, list[int]]:
     return doors
 
 
-
 def _public_sdk_methods() -> set[str]:
     tree = _module_tree(PKG / "sdk.py")
     for node in tree.body:
@@ -3333,7 +3332,6 @@ def _declared_keys() -> set[str]:
     return {k for k in keys if k}
 
 
-
 def test_every_named_census_site_owns_a_row():
     """The named census's FORWARD direction — the half that was missing.
 
@@ -3403,7 +3401,7 @@ def test_the_call_time_shape_is_derived_and_declared():
         + "\nAdd a row with the symbol, or a `CALL_TIME_REL` entry in "
         "`tests/_about_call_time_census.py` stating the code fact that keeps "
         f"`aboutObject` off that slot ({len(derived)} derived, "
-        f"{len(registered)} registered, {len(declared)} rows)"
+        f"{len(registered)} registered, {len(_rows())} rows)"
     )
 
 
@@ -3495,48 +3493,50 @@ def test_the_derived_aliases_are_grounded():
 def test_the_file_filter_un_sees_nothing():
     r"""The file gate must admit every module a walk derives a site in.
 
-    ⚠️ **A narrowed gate is the quietest failure this instrument can have:** the
-    walks still work, every arm still passes, and the reader they no longer reach
-    simply stops being covered.
+    ⚠️ **A narrowed gate is the quietest failure this instrument can have:** the walks
+    still work, every arm still passes, and the reader they no longer reach simply
+    stops being covered. Measured before this arm walked UNGATED: deleting
+    `navigation.py` from `_files()` left the entire guard green while §13's row for
+    `_hop_query` stopped being derived by anything.
 
-    ⚠️ **The CONTROL is the load-bearing half, and an earlier version of this arm did
-    not have it.** Its per-class loop is fed modules the gate EXCLUDES, and the gate
-    excludes only modules that fail every walk predicate — so those sets are empty by
-    construction and the loop proves nothing on its own. What gives it teeth is running
-    the SAME measurement through the NARROW gate (`_literal_files()`, the one predicate
-    the gate started from): that must find sites, or the measurement cannot see a
-    narrowing at all and this arm is a PASS about nothing.
+    The comparison is therefore against a walk that IGNORES the gate — the gate cannot
+    be interrogated from its own output, because a module it skips is by definition
+    absent from it. The CONTROL runs the same comparison through the NARROW gate
+    (`_literal_files()`, the one predicate the gate started from): it must miss sites,
+    or the measurement cannot see a narrowing and its silence proves nothing.
     """
     census = _call_time_census()
     labels = ("named census", "empty-pattern class", "call-time class")
 
-    skipped = census._excluded_walk_sites()
+    ungated = census._ungated_walk_sites()
+    gated = (census._census(), census._empty_pattern_sites(), census._call_time_sites())
+    gated_keys = [set(keys) for keys in gated]
+
     assert len(census._sources()) > len(census._files()), (
         "the gate admits every module, so there is no excluded module to measure and "
         "this arm passes vacuously — either the gate was widened to `True` or the "
         "package shrank to the gated set"
     )
-    problems = [
-        f"{label}: {len(found)} site(s) exist under `tortoise/` in a module the gate "
-        f"SKIPPED: {sorted({f'{Path(rel).name}::{sym}' for rel, sym in found})[:5]}"
-        for label, found in zip(labels, skipped, strict=True)
-        if found
-    ]
+
+    problems = []
+    for label, every, kept in zip(labels, ungated, gated_keys, strict=True):
+        missed = every - kept
+        if missed:
+            shown = sorted({f"{Path(rel).name}::{sym}" for rel, sym in missed})[:5]
+            problems.append(
+                f"{label}: {len(missed)} site(s) are derived by the UNGATED walk but "
+                f"not by the gated one, so the gate skips a module that reads the "
+                f"edge: {shown}"
+            )
     assert not problems, (
         "the module gate is narrower than the walks it feeds, so readers outside it "
         "are silently uncovered:\n  " + "\n  ".join(problems)
     )
 
-    # CONTROL — the same measurement, through the NARROW gate, must DISAGREE.
-    narrow = census._excluded_walk_sites(use_narrow_gate=True)
-    assert any(narrow), (
+    # CONTROL — the same comparison through the NARROW gate must DISAGREE.
+    narrow = census._narrow_gate_walk_sites()
+    assert any(every - kept for every, kept in zip(ungated, narrow, strict=True)), (
         "the narrow gate hides no site from any walk, so this measurement cannot "
         "detect a narrowing — the control has gone blind and the arm above is a "
         "PASS about nothing"
-    )
-    assert {file.path for file in census._literal_files()} < {
-        file.path for file in census._files()
-    }, (
-        "`_literal_files()` is no longer a strict subset of `_files()`, so the control "
-        "is not measuring the widening it claims"
     )
