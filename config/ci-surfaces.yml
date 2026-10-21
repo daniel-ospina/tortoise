@@ -4979,6 +4979,19 @@ surfaces:
   # select `eval` and run neither).
   - test_measure_ask_distilled.py
   - eval/ask/test_ask_corpus.py
+  # #8066 ⟂ #9097: the served-skill relay ratchet's SUBJECT is every
+  # `tests/**/*.py`, so every surface such a file can SELECT needs an arm.
+  # `tests/eval/ask/` is a SOURCE_PATTERNS entry of THIS surface (the #9097
+  # block above), so an `eval`-only diff to `corpus.py` /
+  # `generate_corpus.py` / `test_ask_corpus.py` / `__init__.py` selects `eval`
+  # and REPLACES the `core` fallback where the ratchet's `core` arm lives —
+  # without this arm the ratchet is asleep exactly on those files (the
+  # #1349/#2938 silent-drop class). Measured: `tests/eval/ask/` landed on main
+  # with #9380 and
+  # `test_8066_relay_ratchet_is_registered_on_every_surface_it_covers` went red
+  # naming those four files — that test's own enumeration is what demands this
+  # row, on whichever surface a `tests/**` file newly selects.
+  - test_8066_served_skill_relay_ratchet.py
   - longmem_eval/test_freq_count_disposition.py  # #2886: guards tools/longmem_eval/freq_count_disposition.py (the census frequency/count disposition tool) — `tools/longmem_eval/` is a SOURCE_PATTERNS entry of this surface, so an eval-tool change alone selects it
   - test_temporal_aggregate_arm.py  # #2886: guards tools/longmem_eval/retrieve.py's `temporal_aggregate_verdict` adapter — `tools/longmem_eval/` is a SOURCE_PATTERNS entry of this surface, so a retrieve.py-only change selects it (dual-registered with `core` for the core's verdict semantics)
   - longmem_eval/test_temporal_admission_trace.py  # #2976: temporal admission trace — pool-membership vs reader-window-cut receipts + TR-machinery-inert mechanism pin (hermetic, no DB)

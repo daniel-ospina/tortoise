@@ -781,8 +781,13 @@ def test_the_restore_copy_client_carries_the_note(monkeypatch):
     swap's ``GRAPH.COPY`` must not inherit the request's read bound), and this
     pins that routing it through the guard seam did not touch that: the pool
     still receives the swap's own ``socket_timeout`` and NO retry. What it
-    gains is the #7357 note, so a restore that dies mid-copy says the INSTANCE
-    went away instead of leaving a timeout that reads as a bad write.
+    gains is the #7357 note on the leg that used to surface BARE: a NON-timeout
+    transport failure (``ConnectionError: Connection closed by server``, which
+    ``_is_client_read_timeout`` does not convert). The read-TIMEOUT leg is
+    #4233's and unchanged — ``_graph_copy_with_restore_bound`` still proves the
+    copy settled or raises ``RestoreCopyTimeoutError`` ("the server-side
+    GRAPH.COPY may still be running") — and the note now rides on that error's
+    ``__cause__`` instead of replacing the honest sentence.
     """
     import redis
 
@@ -832,13 +837,26 @@ def test_the_restore_copy_client_carries_the_note(monkeypatch):
 def test_the_acl_admin_client_carries_the_note(monkeypatch):
     """``acl_graph_users._admin_client`` reaches the seam too.
 
-    A role/ACL mutation issued while the instance is restarting is exactly the
-    "a write that may have landed with only the reply lost" shape, so the
-    UNKNOWN arm — not the read arm — is what this caller must be told.
+    Every command this module issues is in the NON-Cypher family — ``MODULE
+    LIST``, ``ACL GETUSER``/``SETUSER``/``DELUSER``/``SAVE`` — so there is no
+    statement for the classifier to read and ``_command_mutating`` returns
+    ``None``: the arm this channel really gets is the HEDGE ("Whether the
+    command took effect is UNKNOWN … anything that mutates must be read back"),
+    NOT the write-statement arm. The test therefore drives the command the
+    module actually sends; a ``GRAPH.QUERY`` statement here would pin an arm
+    this client can never produce.
     """
     import redis
 
     from tortoise import acl_graph_users as acl
+
+    # The command the module really puts on the wire (``ACL SETUSER``,
+    # acl_graph_users.py:367) and the classification that decides its arm. Both
+    # are asserted because the arm assertion below DEPENDS on the classifier
+    # answering ``None``: if ACL verbs were ever taught to it as mutating, this
+    # must red rather than keep asserting a message the channel no longer emits.
+    acl_setuser = ("ACL", "SETUSER", "tenant_g", "reset", "on", ">pw")
+    assert cypher_guard._command_mutating(acl_setuser) is None
 
     monkeypatch.setenv(
         "TORTOISE_DB_URI", "docker://:pw@127.0.0.1:16379/tortoise")
@@ -848,9 +866,13 @@ def test_the_acl_admin_client_carries_the_note(monkeypatch):
     assert client is not None
 
     with pytest.raises(redis_exc.TimeoutError) as caught:
-        client.execute_command("GRAPH.QUERY", "tortoise", WRITE_STATEMENT)
+        client.execute_command(*acl_setuser)
 
     message = str(caught.value)
     assert message.startswith(SOCKET_TIMEOUT)
-    assert "OUTCOME IS UNKNOWN" in message
+    # The hedge, and its instruction for a mutating shape.
+    assert "Whether the command took effect is UNKNOWN" in message
+    assert "anything that mutates must be read back" in message
+    # NOT the write-statement arm, and NOT the read arm.
+    assert "OUTCOME IS UNKNOWN" not in message
     assert "re-issuing this statement is safe" not in message

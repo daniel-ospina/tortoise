@@ -85,11 +85,15 @@ def _admin_client():
     parsers; docker-compose maps 6379 for containers WITH the port).
 
     #7357 — built through ``guarded_client`` (the #6882 seam), so a role/ACL
-    mutation that meets a restarting instance is told the instance went away
-    and that its OUTCOME IS UNKNOWN, instead of surfacing the bare transport
-    sentence as if the statement had been refused. The ACL bearer commands
-    (``ACL SETUSER`` …) carry no Cypher, so the seam's operator guard is a
-    no-op for them; the outage note is not.
+    mutation that meets a restarting instance is told the instance went away,
+    and that whether the command took effect is UNKNOWN — anything that mutates
+    must be read back before it is re-issued — instead of surfacing the bare
+    transport sentence as if the statement had been refused. The HEDGE arm is
+    the one this channel gets, deliberately: every verb this module sends is
+    non-Cypher (``MODULE LIST``, ``ACL GETUSER``/``SETUSER``/``DELUSER``/
+    ``SAVE``), so ``_command_mutating`` has no statement to classify and
+    answers ``None``. The ACL bearer commands are also not operator-guarded
+    (no Cypher reaches the ``=~`` guard); the outage note is the whole gain.
     """
     uri = os.environ.get("TORTOISE_DB_URI")
     if not uri:

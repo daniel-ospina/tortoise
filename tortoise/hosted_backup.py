@@ -2456,9 +2456,14 @@ def _restore_copy_client(db):
     ``GRAPH.COPY`` reaches the same command channel every other in-package
     client does: the ``=~`` operator guard, and the instance-outage note that
     ``cypher_guard`` appends when the container restarts/reloads or is
-    OOM-killed mid-request. Without it a restore that dies mid-copy surfaced as
-    a bare ``Timeout reading from socket`` — which reads as a bad write rather
-    than "the instance went away, the server-side copy may still be running".
+    OOM-killed mid-request. The leg that used to surface BARE is a NON-timeout
+    transport failure — ``ConnectionError: Connection closed by server``, which
+    ``_is_client_read_timeout`` does not convert — and it now says the instance
+    went away rather than reading as a bad write. The read-TIMEOUT leg is
+    #4233's and unchanged: ``_graph_copy_with_restore_bound`` either proves the
+    copy settled or raises ``RestoreCopyTimeoutError`` ("the server-side
+    GRAPH.COPY may still be running; <src> intact, <dst> NOT restored"), and the
+    note now rides on that error's ``__cause__`` instead of replacing it.
     ⛔ The #3813 read bound is NOT touched by this: the pool below is still the
     restore's own (generous ``socket_timeout``, no retry), which is the whole
     reason this client exists rather than reusing an ordinary one.
@@ -2481,9 +2486,12 @@ def _restore_copy_client(db):
     kwargs["socket_timeout"] = _restore_swap_timeout_s()
     kwargs["retry"] = _Retry(NoBackoff(), 0)
     # #6882's ONE construction seam, not a raw ``redis.Redis``: the client's
-    # own ``execute_command`` (and its connection's command entries) then carry
-    # the operator guard and the #7357 outage note. The pool, its
-    # ``connection_class`` and the #3813 bound are passed through untouched.
+    # own ``execute_command`` then carries the operator guard and the #7357
+    # outage note. (Not its connection entries: a plain ``redis.Redis`` leaves
+    # ``self.connection`` as ``None`` at init, so ``_guard_connection`` has
+    # nothing to bind — harmless, because execute_command is the only command
+    # channel this client exposes.) The pool, its ``connection_class`` and the
+    # #3813 bound are passed through untouched.
     from tortoise.cypher_guard import guarded_client
 
     return guarded_client(_redis.Redis, connection_pool=_redis.ConnectionPool(
