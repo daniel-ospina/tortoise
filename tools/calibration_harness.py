@@ -26,6 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import probe_extractor as pe  # noqa: E402, RUF100
 
+from tortoise.pack_registry import CANONICAL_OBJECT_KINDS
+
 TANDEM_APPEND = """
 REMINDER - EXTRACTION AND RELATIONS IN TANDEM (the most important rule):
 every claim argues for/against something, so emit its IMPL/NAND relation with
@@ -192,10 +194,16 @@ EVK = {"decision", "occurrence", "deployment", "review", "extraction",
        "meeting", "experiment", "friction", "turn", "sessionCaptured",
        "AgentSession", "documentCreated", "roleCreated", "pointAdded",
        "humanApproval", "milestone"}
-VOCAB = {"core:concept", "core:standard", "core:other", "core:WorkItem",
-         "core:document", "core:tool", "core:workflow", "core:Project",
-         "core:tag", "core:user", "core:skill", "core:agent", "core:agreement",
-         "core:strategy", "core:plan", "core:goal", "core:target",
+# ⛔ The `core:` half is DERIVED from the one canonical object-kind set (#2786), never a
+# hand-typed copy. A stale member here does not merely fail to catch drift, it ABSORBS it:
+# `metrics()` counts an entity whose kind is NOT in VOCAB as `minted`, so while the retired
+# `core:document` (D10) and `core:concept` (never a §5 objectKind; removed by T12/#1272) sat in
+# this set an extractor emitting them
+# was scored as in-vocabulary. Guarded by
+# `tests/test_kind_vocabulary_consistency.py`
+# ::test_calibration_harness_core_vocabulary_is_the_canonical_set.
+CORE_VOCAB = {f"core:{k}" for k in CANONICAL_OBJECT_KINDS}
+VOCAB = CORE_VOCAB | {
          "product-strategy:product", "product-strategy:feature",
          "product-strategy:customer", "product-strategy:competitor",
          "product-strategy:customerSegment", "product-strategy:market",
@@ -220,6 +228,12 @@ def metrics(d: dict) -> dict:
                       if e.get("kind") not in VOCAB),
         "badEvk": sum(1 for e in d.get("events", [])
                       if e.get("eventKind") not in EVK),
+        # HISTORICAL key, expected 0 once a stream stops carrying the retired kind: `core:concept`
+        # is not in the vocabulary any more, so `minted` flags it and the probe no longer offers
+        # it (#2786) — but a model can still emit the spelling, which leaves this key non-zero.
+        # Kept (rather than deleted) because `tools/experiments.jsonl` records the field —
+        # removing it changes the measurement schema those records are compared across, which
+        # belongs with the measurement lanes (#9075–#9077), not with a vocabulary guard.
         "concepts": sum(1 for e in d.get("entities", [])
                         if e.get("kind") == "core:concept"),
         "mitigates": sum(1 for r in d.get("relations", [])

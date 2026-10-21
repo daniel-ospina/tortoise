@@ -2049,6 +2049,40 @@ CONTROL_PLANE_OAUTH_BACKLOG = 64
 #: graph slot here and a bound miss on that read reports ``graph_unavailable``.
 #: Routing the ownership probe through the control-plane pool is a follow-up;
 #: the shared-capacity shape is accepted.
+#:
+#: #3718 (READ half — the lane's second consumer class, added with the six read
+#: conversions): the REST READ handlers submit ONE entry per request here, for
+#: their per-request SDK CONSTRUCTION only — ``GET /v1/points``
+#: (``list_points``), ``GET /v1/points/{id}`` (``get_point``),
+#: ``GET /v1/dream/health`` (``dream_health``), ``GET /v1/team``
+#: (``org_info``), ``GET /v1/sessions`` (``list_sessions``) and
+#: ``GET /v1/sessions/{id}`` (``get_session_detail``). Their graph READS do NOT
+#: come here: they ride the house ``asyncio.to_thread`` default executor
+#: (``dream_health``'s pass on ``_DREAM_EXECUTOR``), so a read request's
+#: occupancy of this pool is exactly one submission, not one per read. Before
+#: #3718 no dashboard OVERVIEW read touched this pool: what was already here is
+#: named in the paragraphs above — the ``/v1/events`` and ``/v1/dream`` SDK
+#: opens, the org switcher's chunked graph LISTING, and the graph-bound
+#: ``_data_sdk`` control-plane ownership read. The consequences are stated
+#: rather than hidden: (1) a WRITE burst that fills the backlog (128) can now
+#: refuse a dashboard read, and (2) the THREE of the six whose routes carry a
+#: ``#1591`` fail-soft arm — ``GET /v1/team``, ``GET /v1/sessions``,
+#: ``GET /v1/sessions/{id}`` — now fail CLOSED with the 503
+#: ``graph_unavailable`` body instead of that empty shape; ``GET /v1/points``,
+#: ``GET /v1/points/{id}`` and ``GET /v1/dream/health`` were already
+#: fail-closed on their read, so nothing changes for them. A capacity refusal
+#: is not a store condition (#3892: never a clean empty for a store we could
+#: not reach). That scoping of ``#1591`` is a departure from the "every
+#: failure here is fail-soft" reading, so it carries an ``OVERRIDES:`` line at
+#: each of the three construction sites and is relayed to #3718 (the burn-down
+#: tracker the next slice reads), not left implicit in a 40k-line module.
+#: Both costs are accepted for a construction that
+#: otherwise blocks the loop on every dashboard load; if read pressure ever
+#: saturates this lane, size it or give reads their own pool rather than
+#: re-inlining. Pinned by
+#: ``test_read_routes_submit_one_graph_pool_submission`` and
+#: ``test_graph_pool_capacity_is_fail_closed_not_a_silent_empty`` in
+#: ``tests/test_read_routes_loop_responsiveness.py``.
 CONTROL_PLANE_GRAPH_WORKER_NAME = "tortoise-graph"
 CONTROL_PLANE_GRAPH_WORKERS = 8
 CONTROL_PLANE_GRAPH_BACKLOG = 128
