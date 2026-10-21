@@ -774,6 +774,17 @@ class _DeadRedis:
         raise type(self.error)(*self.error.args)
 
 
+class _ClosedRedis(_DeadRedis):
+    """The same vendor shape, failing the way a container restart looks.
+
+    ``Connection closed by server`` is a NON-timeout transport failure, so
+    ``_is_client_read_timeout`` does NOT convert it — which makes it the one
+    leg whose annotated sentence actually reaches a restore CALLER.
+    """
+
+    error = redis_exc.ConnectionError("Connection closed by server.")
+
+
 def test_the_restore_copy_client_carries_the_note(monkeypatch):
     """``hosted_backup._restore_copy_client`` reaches the seam, bound intact.
 
@@ -781,13 +792,18 @@ def test_the_restore_copy_client_carries_the_note(monkeypatch):
     swap's ``GRAPH.COPY`` must not inherit the request's read bound), and this
     pins that routing it through the guard seam did not touch that: the pool
     still receives the swap's own ``socket_timeout`` and NO retry. What it
-    gains is the #7357 note on the leg that used to surface BARE: a NON-timeout
-    transport failure (``ConnectionError: Connection closed by server``, which
-    ``_is_client_read_timeout`` does not convert). The read-TIMEOUT leg is
-    #4233's and unchanged — ``_graph_copy_with_restore_bound`` still proves the
-    copy settled or raises ``RestoreCopyTimeoutError`` ("the server-side
-    GRAPH.COPY may still be running") — and the note now rides on that error's
-    ``__cause__`` instead of replacing the honest sentence.
+    gains is the #7357 note on its command channel — here over the driver's
+    ``TimeoutError``, the shape this stub raises.
+
+    ⛔ What this case does NOT pin: the note reaching a CALLER. A read timeout
+    on this path is #4233's and unchanged — ``_graph_copy_with_restore_bound``
+    proves the copy settled or raises ``RestoreCopyTimeoutError`` ("the
+    server-side GRAPH.COPY may still be running"), with the note on its
+    ``__cause__``. The leg that used to surface BARE is a NON-timeout transport
+    failure (``ConnectionError: Connection closed by server``, which
+    ``_is_client_read_timeout`` does not convert), and it is pinned end-to-end
+    through the real caller by
+    ``test_the_restore_swap_caller_keeps_the_note_on_a_closed_connection``.
     """
     import redis
 
@@ -832,6 +848,55 @@ def test_the_restore_copy_client_carries_the_note(monkeypatch):
     with pytest.raises(redis_exc.TimeoutError) as caught:
         client.execute_command("GRAPH.QUERY", "tortoise", WRITE_STATEMENT)
     assert "OUTCOME IS UNKNOWN" in str(caught.value)
+
+
+def test_the_restore_swap_caller_keeps_the_note_on_a_closed_connection(monkeypatch):
+    """The leg #7357 actually repairs on the restore path: the CALLER's sentence.
+
+    ``_graph_copy_with_restore_bound`` converts a client READ timeout into
+    ``RestoreCopyTimeoutError`` (#4233) and re-raises anything else unchanged,
+    so only a NON-timeout transport failure carries the annotated sentence to a
+    caller. This drives the real call — not the raw channel — so a bare
+    ``redis.Redis`` (the pre-fix construction) raises the un-annotated
+    ``Connection closed by server.`` and the note assertions below fail.
+    """
+    import redis
+
+    from tortoise import hosted_backup as hb
+
+    class _Pool:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _PoolInfo:
+        def __init__(self):
+            self.connection_kwargs = {"host": "127.0.0.1", "port": 16379}
+            self.connection_class = object
+
+    class _Db:
+        connection = type("_Conn", (), {"connection_pool": _PoolInfo()})()
+
+        def list_graphs(self):
+            # A destination this copy can have produced (not pre-existing).
+            return []
+
+    monkeypatch.setattr(redis, "Redis", _ClosedRedis, raising=True)
+    monkeypatch.setattr(redis, "ConnectionPool", _Pool, raising=True)
+
+    with pytest.raises(redis_exc.ConnectionError) as caught:
+        hb._graph_copy_with_restore_bound(
+            _Db(), "tortoise_intact", "tortoise",
+            role="restore swap", intact_name="tortoise_intact")
+
+    message = str(caught.value)
+    # NOT the #4233 timeout verdict: this leg is not a read timeout, so the
+    # annotated transport sentence is what the caller gets.
+    assert not isinstance(caught.value, hb.RestoreCopyTimeoutError)
+    assert message.startswith("Connection closed by server.")
+    # ``GRAPH.COPY`` carries no Cypher, so the honest arm is the HEDGE.
+    assert "Whether the command took effect is UNKNOWN" in message
+    assert "anything that mutates must be read back" in message
+    assert "OUTCOME IS UNKNOWN" not in message
 
 
 def test_the_acl_admin_client_carries_the_note(monkeypatch):

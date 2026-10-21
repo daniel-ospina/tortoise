@@ -2060,7 +2060,8 @@ def guarded_client(base_client, *args, **kwargs):
     ``docs/runbook/``, ``tests/``) is not covered. The two IN-package modules
     that build a bare ``redis.Redis`` (``hosted_backup._restore_copy_client``,
     ``acl_graph_users``' admin client) now come through HERE as well — for their
-    command channels' operator guard and #7357 outage note, not for a FalkorDB
-    handle they never yield; see the module docstring's SCOPE paragraph.
+    command channels' #7357 outage note (their verbs carry no Cypher, so the
+    operator arm is inert there), not for a FalkorDB handle they never yield;
+    see the module docstring's SCOPE paragraph.
     """
     return guarded_client_class(base_client)(*args, **kwargs)

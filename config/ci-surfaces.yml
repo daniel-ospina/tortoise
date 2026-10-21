@@ -377,6 +377,21 @@ surfaces:
   # entry below covers them.) Pinned by
   # tests/test_ci_selection.py::test_socket_bound_2969_guard_runs_on_every_spread_site.
   - test_socket_bound_not_multiplied_2969.py
+  # #7357: the instance-outage note on the two in-package clients
+  # (`guarded_client` wiring). DUAL-REGISTERED with `core` for the same reason
+  # as the two rows above: `tortoise/acl_graph_users.py` is an exact `api`
+  # SOURCE_PATTERNS match, so an `acl_graph_users.py`-only diff selects `api`
+  # and REPLACES the `core` fallback — without THIS entry the ACL case never
+  # runs on a change to the site it pins (the #2938/#1349 silent-drop class).
+  # MEASURED: `ci_selection.py --changed-files tortoise/acl_graph_users.py` →
+  # surfaces `["api"]` with this file ABSENT from `test_files` before this
+  # row, present after. (The restore half needs no row of its own:
+  # `tortoise/hosted_backup.py` is in `CORE_ALSO`, so that diff selects
+  # `api` + `core` and the file runs anyway — which is exactly why the ACL
+  # half's absence went unnoticed.) `test_bounded_raw_clients_3065.py` above
+  # pins only THAT the clients go through the seam; this file pins WHAT the
+  # seam says on each channel.
+  - test_7357_transport_legibility.py
   # #2922/#2923: DB-free static guards for boot-path regressions (credential
   # redaction in entrypoint.sh, function-scope import shadowing in _lifespan).
   # Registered under `api` as well as `core` deliberately: the file it guards most
@@ -3496,11 +3511,16 @@ surfaces:
   - test_7405_update_point_writes.py
   # #7357: the instance-outage NOTE — `retry.explain_instance_unavailable` /
   # `is_instance_unavailable`, and their application on every channel
-  # `cypher_guard` wraps. `core` is load-bearing for BOTH subjects and neither
-  # is named: `tortoise/retry.py` matches no SOURCE_PATTERNS (the reason the two
-  # #7405 rows above carry the same arm) and `tortoise/cypher_guard.py` matches
-  # none either, so a file-only diff to either falls through to this `core`
-  # fallback. Verified by `ci_selection.py --changed-files` on both files →
+  # `cypher_guard` wraps. `core` is load-bearing for BOTH subjects and NEITHER
+  # source is a named pattern reachable without it: `tortoise/retry.py` matches
+  # no SOURCE_PATTERNS (the reason the two #7405 rows above carry the same arm)
+  # and `tortoise/cypher_guard.py` matches none either, so a file-only diff to
+  # either falls through to this `core` fallback. ⚠️ The #7357 suite is also
+  # DUAL-REGISTERED on `api` (see the row there): its ACL subject
+  # (`tortoise/acl_graph_users.py`) IS an exact `api` match, so an
+  # `acl_graph_users.py`-only diff REPLACES this fallback and only the `api`
+  # arm keeps the ACL case awake.
+  # Verified by `ci_selection.py --changed-files` on both files →
   # `{"surfaces": ["core"], "full": false}`. Without this row the file
   # classifies NOWHERE: `--integrity` reds the required `manifest-integrity` job
   # and no leg runs the suite at all (not even a push, whose fast pool is built

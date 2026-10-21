@@ -84,16 +84,26 @@ def _admin_client():
     URIs default to 16379 (the repo-wide convention — projection/session
     parsers; docker-compose maps 6379 for containers WITH the port).
 
-    #7357 — built through ``guarded_client`` (the #6882 seam), so a role/ACL
-    mutation that meets a restarting instance is told the instance went away,
-    and that whether the command took effect is UNKNOWN — anything that mutates
-    must be read back before it is re-issued — instead of surfacing the bare
-    transport sentence as if the statement had been refused. The HEDGE arm is
-    the one this channel gets, deliberately: every verb this module sends is
-    non-Cypher (``MODULE LIST``, ``ACL GETUSER``/``SETUSER``/``DELUSER``/
-    ``SAVE``), so ``_command_mutating`` has no statement to classify and
-    answers ``None``. The ACL bearer commands are also not operator-guarded
-    (no Cypher reaches the ``=~`` guard); the outage note is the whole gain.
+    #7357 — built through ``guarded_client`` (the #6882 seam), so a transport
+    failure on this channel arrives with the instance-outage note appended by
+    ``cypher_guard``: the instance went away, and whether the command took
+    effect is UNKNOWN — anything that mutates must be read back before it is
+    re-issued. The HEDGE arm is the one this channel gets, deliberately: every
+    verb this module sends is non-Cypher (``MODULE LIST``, ``ACL GETUSER``/
+    ``SETUSER``/``DELUSER``/``SAVE``), so ``_command_mutating`` has no statement
+    to classify and answers ``None``. The ACL bearer commands are also not
+    operator-guarded (no Cypher reaches the ``=~`` guard); the outage note is
+    the whole gain.
+
+    ⛔ Where that note LANDS, stated because these fns are fail-soft: no caller
+    receives a transport sentence at all. ``_setuser``/``drop_acl_user``/
+    ``_acl_save`` log the noted exception at ``logger.warning`` and return
+    False/None, and ``create_acl_user`` then reports ``None``. So the surface
+    this change improves on this channel is the LOG LINE — it names the
+    mechanism class and the read-back rule to whoever reads the log, instead of
+    the bare driver sentence. (A first-command failure inside
+    ``_falkordb_present`` is swallowed there with no log at all; that
+    pre-existing swallow is out of this wiring change's scope.)
     """
     uri = os.environ.get("TORTOISE_DB_URI")
     if not uri:

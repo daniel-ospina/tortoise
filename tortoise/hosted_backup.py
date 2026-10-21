@@ -2454,9 +2454,12 @@ def _restore_copy_client(db):
 
     #7357 — the client is built through ``guarded_client`` (the #6882 seam) so
     ``GRAPH.COPY`` reaches the same command channel every other in-package
-    client does: the ``=~`` operator guard, and the instance-outage note that
-    ``cypher_guard`` appends when the container restarts/reloads or is
-    OOM-killed mid-request. The leg that used to surface BARE is a NON-timeout
+    client does, and picks up the instance-outage note ``cypher_guard`` appends
+    when the container restarts/reloads or is OOM-killed mid-request. ⚠️ The
+    note is the WHOLE gain here: ``_guard_execute_command`` inspects only
+    ``_GRAPH_QUERY_COMMANDS``, and ``GRAPH.COPY`` is not one of them — these
+    arguments reach no ``=~`` operator guard. The leg that used to surface BARE
+    is a NON-timeout
     transport failure — ``ConnectionError: Connection closed by server``, which
     ``_is_client_read_timeout`` does not convert — and it now says the instance
     went away rather than reading as a bad write. The read-TIMEOUT leg is
@@ -2486,8 +2489,9 @@ def _restore_copy_client(db):
     kwargs["socket_timeout"] = _restore_swap_timeout_s()
     kwargs["retry"] = _Retry(NoBackoff(), 0)
     # #6882's ONE construction seam, not a raw ``redis.Redis``: the client's
-    # own ``execute_command`` then carries the operator guard and the #7357
-    # outage note. (Not its connection entries: a plain ``redis.Redis`` leaves
+    # own ``execute_command`` then carries the #7357 outage note (the ONLY gain
+    # on this channel — ``GRAPH.COPY`` is not a query verb, so no operator arm
+    # can fire). (Not its connection entries: a plain ``redis.Redis`` leaves
     # ``self.connection`` as ``None`` at init, so ``_guard_connection`` has
     # nothing to bind — harmless, because execute_command is the only command
     # channel this client exposes.) The pool, its ``connection_class`` and the

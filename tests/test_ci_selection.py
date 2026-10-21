@@ -1770,6 +1770,33 @@ def test_socket_bound_2969_guard_runs_on_every_spread_site():
             core_source, r)
 
 
+def test_7357_note_guard_runs_on_every_surface_its_subjects_select():
+    # #7357: `tests/test_7357_transport_legibility.py` pins WHAT the two
+    # in-package clients' command channel says when the instance goes away. Its
+    # subjects span TWO surfaces and one of them was asleep: the suite's ACL
+    # subject, `tortoise/acl_graph_users.py`, is an exact
+    # SOURCE_PATTERNS["api"] entry and is deliberately NOT in `CORE_ALSO`, so an
+    # `acl_graph_users.py`-only diff selected `api`, REPLACED the `core`
+    # fallback, and never collected the suite — the only test that pins the ACL
+    # channel's arm (the hedge, and the classifier answer it depends on) did not
+    # run on the diff it guards (the #2938/#1349 silent-drop class).
+    # `tortoise/hosted_backup.py` IS in `CORE_ALSO`, so the restore half already
+    # ran under both surfaces — which is exactly why the ACL half's absence went
+    # unnoticed. Registration is DUAL for that reason.
+    # Mutation check: deleting the `api` arm fails the first assert; deleting the
+    # `core` row fails the loop over the two core-only subjects.
+    r = _sel(["tortoise/acl_graph_users.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["api"], r
+    assert "test_7357_transport_legibility.py" in r["test_files"], r
+    for core_source in ("tortoise/retry.py", "tortoise/cypher_guard.py"):
+        r = _sel([core_source])
+        assert r["full"] is False, (core_source, r)
+        assert r["surfaces"] == ["core"], (core_source, r)
+        assert "test_7357_transport_legibility.py" in r["test_files"], (
+            core_source, r)
+
+
 def test_record_schema_pin_runs_on_migration_or_doc_change():
     # #7968 / PR #8179 review P2: `tests/test_record_schema_placement.py` pins
     # the record migrations against the placement table in
