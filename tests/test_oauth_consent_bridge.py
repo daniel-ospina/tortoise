@@ -424,6 +424,31 @@ def _bare_continuations(raw: str) -> list[str]:
     return found
 
 
+#: The ONLY anchors the `#3524` provenance note may quote — the stale issue body it quotes.
+#: Compared as a SUBSET, never by equality: pruning a quotation that no longer needs quoting has
+#: to stay legal (the same contract `test_auto_advance_status_matches_the_route_artifact` states —
+#: a guard must not make the honest edit the expensive one), while ADDING one is a new citation.
+_NOTE_QUOTED_ANCHORS = frozenset({"23409", "23284"})
+
+
+def _note_anchor_violations(note_raw: str) -> tuple[list[str], list[str]]:
+    """What the provenance note does NOT have licence for: `(new_anchors, continuations)`.
+
+    ONE rule in ONE place, because both halves of the guard call it: the primary guard accepted a
+    pruned quotation (subset) while `test_the_provenance_note_cannot_smuggle_a_bare_continuation`
+    pinned set EQUALITY, so the honest cleanup the guard's own message invites redded its
+    neighbour with a bare two-set diff and no instruction (measured). Sharing the helper makes
+    that disagreement unrepresentable.
+
+    `new_anchors` is a subset violation, not an equality: the note may quote `23409` and `23284`,
+    may prune either, and may not gain anything else. `continuations` is the note half of
+    `_bare_continuations`: the note is exempt from the body scan, so the `:<n>` continuation form
+    has to be checked inside it too (an anchor added there in that spelling was green before).
+    """
+    quoted = set(_HOSTED_ANCHOR_RE.findall(_collapse(note_raw)))
+    return sorted(quoted - _NOTE_QUOTED_ANCHORS), _bare_continuations(note_raw)
+
+
 def _provenance_note_bounds(lines: list[str]) -> tuple[int, int]:
     """The `[start, end)` span of the ONE blockquote this doc may quote an anchor in.
 
@@ -559,19 +584,18 @@ def test_the_spec_cites_no_hosted_api_line_numbers() -> None:
     note_raw = "\n".join(lines[note_start:note_end])
     rest_raw = "\n".join(lines[:note_start] + lines[note_end:])
 
-    quoted = set(_HOSTED_ANCHOR_RE.findall(_collapse(note_raw)))
-    assert quoted <= {"23409", "23284"}, (
-        f"the provenance note quotes the issue-body anchors {sorted(quoted)}; the only anchors it "
-        "may quote are `hosted_api.py:23409` and `hosted_api.py:23284-23292` (#3524's stale "
-        "body). A NEW anchor here — including one wrapped across two `>` lines — is a citation "
-        "this doc owns, and belongs in the rows below instead. Pruning a stale quotation is "
-        "fine (a subset passes), because retiring a record that no longer needs quoting must not "
-        "be blocked by the guard that pins it."
+    note_new_anchors, note_bare = _note_anchor_violations(note_raw)
+    assert not note_new_anchors, (
+        f"the provenance note quotes the issue-body anchors {note_new_anchors} that it has no "
+        "licence for; the only anchors it may quote are `hosted_api.py:23409` and "
+        "`hosted_api.py:23284-23292` (#3524's stale body). A NEW anchor here — including one "
+        "wrapped across two `>` lines — is a citation this doc owns, and belongs in the rows "
+        "below instead. Pruning a stale quotation is fine (a subset passes), because retiring a "
+        "record that no longer needs quoting must not be blocked by the guard that pins it."
     )
     # …and the exemption must not become a hole for the OTHER form: the note is the one region
     # `_stray_anchors` skips, so a bare `:<n>` continuation added inside it was covered by neither
     # half of the guard (measured: `quoted` stayed `{'23284','23409'}` and `stray` stayed `[]`).
-    note_bare = _bare_continuations(note_raw)
     assert not note_bare, (
         f"the #3524 provenance note carries a bare continuation {sorted(note_bare)}; this note may "
         "quote ONLY the explicit `hosted_api.py:23409` / `hosted_api.py:23284-23292` pair it owns "
@@ -671,6 +695,12 @@ def test_the_provenance_note_cannot_smuggle_a_bare_continuation() -> None:
     Non-vacuous in both directions: the escaping line is shown to be INVISIBLE to the explicit
     scan (so the note half is what catches it), and the note's own legitimate quotation is shown
     to stay legal (so the rule is not simply "no colons in the note").
+
+    ⛔ And the rule is a SUBSET, not an equality — this test used to assert the note's quoted set
+    `== {"23409", "23284"}` while the guard beside it asserted `<=`, so an editor who followed
+    the guard's own instruction ("pruning a stale quotation is fine") was redded here by a bare
+    two-set diff with nothing to act on. Both halves now call `_note_anchor_violations`, and the
+    pruning case is pinned below: restoring an equality rule reds it again (measured).
     """
     # The measured escape: no explicit anchor, but a continuation that belongs to hosted_api.py.
     escaping = "> Verified against `hosted_api.py`, `:39286`."
@@ -683,12 +713,30 @@ def test_the_provenance_note_cannot_smuggle_a_bare_continuation() -> None:
         f"is a new citation, got {_bare_continuations(escaping)}"
     )
 
+    # PRUNING the quotation is legal (the subset rule), and ADDING an explicit anchor is not —
+    # the two directions the equality used to conflate into one false red.
+    pruned = ("> **Provenance (#3524)** — the stale issue body quoted: "
+              "(its line anchors are unrelated code today), and")
+    assert _note_anchor_violations(pruned) == ([], []), (
+        "retiring a quotation that no longer needs quoting must stay legal — the guard's own "
+        "message says so, so a rule that reds it is the false red this helper replaced; got "
+        f"{_note_anchor_violations(pruned)}"
+    )
+    assert _note_anchor_violations(pruned + " `hosted_api.py:39286`") == (["39286"], []), (
+        "the subset rule must still catch a NEW anchor in the note, or 'pruning is legal' would "
+        "have bought an exemption for everything; got "
+        f"{_note_anchor_violations(pruned + ' `hosted_api.py:39286`')}"
+    )
+
     # The live spec's note quotes only the explicit pair, so this rule does not red it — and the
     # explicit pair must NOT be re-reported as a continuation of itself.
     lines = SPEC.read_text().splitlines()
     note_start, note_end = _provenance_note_bounds(lines)
     note_raw = "\n".join(lines[note_start:note_end])
-    assert set(_HOSTED_ANCHOR_RE.findall(_collapse(note_raw))) == {"23409", "23284"}
+    assert _note_anchor_violations(note_raw) == ([], []), (
+        "the live note may quote at most `hosted_api.py:23409` / `:23284-23292` and carry no "
+        f"continuation; got {_note_anchor_violations(note_raw)}"
+    )
     assert _bare_continuations(note_raw) == [], (
         "the note's own quoted pair `hosted_api.py:23409` / `hosted_api.py:23284-23292` is an "
         "EXPLICIT anchor, so the continuation rule must leave it alone; it flagged "
