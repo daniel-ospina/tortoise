@@ -1401,7 +1401,7 @@ def extract_subject_terms(question: str,
 
 from dataclasses import dataclass, field  # noqa: E402
 from datetime import UTC as _UTC, date as _date, datetime as _datetime  # noqa: E402
-from typing import Protocol  # noqa: E402
+from typing import NamedTuple, Protocol  # noqa: E402
 # #3302: the canonical OBJECT terminal vocabulary. Safe as a module-level
 # import: commit_ops' import closure does not reach assembly (verified), so
 # this edge cannot cycle — unlike projection/entities.py, which imports the
@@ -2016,6 +2016,146 @@ def _norm_date(value) -> _date | None:
     return d
 
 
+class _WindowBounds(NamedTuple):
+    """One field's pre-filter ends (``None`` = that end is open) plus the
+    DATE-ONLY literals the inclusive upper end would otherwise over-admit."""
+
+    lo: str | None
+    hi: str | None
+    excluded: tuple[str, ...]
+
+
+def _window_bounds(lo: _date | None, hi: _date | None, *,
+                   utc_stamped: bool = False,
+                   ) -> _WindowBounds:
+    """#9406: one date FIELD's ``window_rows`` pre-filter, as DATE-ONLY strings.
+
+    The predicate is a STRING comparison in Cypher against values that are
+    free text (``when``, ``startedAt``) or the graph's own UTC stamp
+    (``createdAt``), so the ends must be a SUPERSET of every value the
+    authoritative R2 ladder (``_norm_date``, which truncates an aware instant
+    in **UTC**) would place inside ``[lo, hi]`` — and nothing more than that,
+    because the fetch is ``ORDER BY … DESC LIMIT cap``: a row admitted ABOVE
+    the window takes a cap slot at the HEAD of a newest-first fetch, and the
+    ladder then drops it. Over-admission is therefore not free either.
+
+    The ordering fact that drives all of it: a date-only string is a PREFIX of
+    every full timestamp of that same day, so
+    ``"2026-10-21" < "2026-10-21T00:12Z"``. Two consequences ``hi + 1`` misses:
+
+    * ``value <= "<hi+1>"`` admits only raw days **≤ hi** for a full
+      timestamp — the ``+1`` is consumed by the prefix ordering, so the day
+      the widening was meant to buy is exactly the day it excludes.
+    * a FREE-TEXT date carrying a POSITIVE offset sits on a LATER raw date
+      than the UTC date the ladder reads (``2026-10-21T02:00+09:00`` → ladder
+      day ``2026-10-20``), so at the upper edge its raw date is ``hi + 1``.
+      Admitting every time-of-day on that day needs an end greater than
+      ``"<hi+1>T23:59:59…"``, i.e. a date-only ``hi + 2``.
+
+    ``utc_stamped=True`` is for ``createdAt``, the graph's OWN clock stamp:
+    every in-repo writer (``pipeline``/``mining``/``ingest``) passes
+    ``datetime.now(UTC)``, so its raw date is its UTC date and the skew above
+    cannot arise from those writers. It is also the DENSE field, so a day of
+    out-of-window rows there costs the most: measured (3 in-window rows + 50
+    rows raw-dated ``hi+1``, cap 10) ``hi + 2`` returns 0 of the 3 in-window
+    rows and ``hi + 1`` returns 3 of 3. So the end is chosen per FIELD.
+
+    ``excluded`` closes the remaining leak, and it is not cosmetic: a DATE-ONLY
+    value one or two days past the window is inside a dashed range comparison
+    but is NEVER in-window (``_norm_date`` anchors it to UTC midnight), and a
+    backfilled ``when='<hi+1>'`` population starves the walk at the production
+    cap as well — measured 250 such rows + 3 in-window rows at ``cap=200``:
+    0/3 in-window rows kept. (The population must EXCEED the cap for the LIMIT
+    to bind: a 50-row dose at cap 200 keeps all 3 and proves nothing — measured
+    with the exclusions dropped, 53 fetched, 3/3 kept.) Excluding the LITERAL
+    costs nothing real: no timestamp can equal a date-only string, so the
+    offset-bearing value the wider end exists for is untouched (verified: with
+    ``<> "<hi+1>"`` the offset row is kept AND the in-window rows survive).
+
+    Admitted sets, stated exactly — free text: date-only ``≥ lo`` and ``≤ hi``,
+    timestamps with raw date in ``[lo-1, hi+1]``; UTC stamp: the same date-only
+    band, timestamps with raw date in ``[lo-1, hi]``. The lower end is
+    ``> "<lo-1>"`` (STRICTLY greater), because a NEGATIVE offset can move a raw
+    date one day BACK — ``"<lo-1>T…" > "<lo-1>"`` keeps that skew — while the
+    date-only value ``"<lo-1>"`` itself is a day below ``lo`` on its own ladder
+    date, so admitting it is pure loss. That is the mirror of the upper-end
+    exclusion and it is NOT cosmetic either: measured (3 in-window rows + 250
+    backfilled date-only ``when='<lo-1>'`` rows, production cap 200) the fetch
+    spends every slot on ``lo-1`` rows the ladder then drops and **0 of 3**
+    in-window rows are kept — and the negative-offset row that the ``lo-1``
+    widening exists for is starved with them. With the strict end: 3/3 kept.
+
+    ⚠ THREE RESIDUALS. Two are pre-existing FALSE NEGATIVES (in-window by the
+    ladder, unfetchable by the predicate); the third is a FALSE POSITIVE this
+    wider end introduces. All three are recorded with their measurements in the
+    #9406 discussion:
+
+    1. FALSE NEGATIVE (pre-existing) — ``createdAt`` is a documented CALLER prop
+       (``sdk.create_point(**props)`` — ``api.py``/``ingest.py``/the
+       source-inheritance path all pass one), so a caller can store an
+       OFFSET-bearing value whose ladder day is ``hi`` while its raw date is
+       ``hi+1``; the narrow end drops it. Widening that end instead re-opens
+       the starvation measured above — the honest cure is a fetch that cannot
+       starve (bounded paging / in-band-first order), which is a change to the
+       walk's fetch contract, not to one end.
+    2. FALSE POSITIVE (**NEW**, introduced by the wider free-text end) — a
+       free-text TIMESTAMP raw-dated ``hi+1`` whose ladder day is ``hi+1`` is
+       admitted: a string bound cannot tell it apart from the offset-bearing
+       value the wider end exists to admit. This is the documented price of
+       admitting the offset case at all, and it is the one residual that SPENDS
+       CAPACITY: those rows sort at the head of the newest-first fetch, so a
+       population of them larger than ``cap`` displaces in-window rows (the
+       upper-end exclusions above remove the DATE-ONLY half of that population;
+       this timestamp half cannot be removed by a string bound).
+    3. FALSE NEGATIVE (pre-existing) — ``_norm_date``'s date-only branch also
+       accepts the COMPACT (``20261020``) and ISO-WEEK (``2026-W43-2``)
+       spellings and LEADING-space values, none of which is lexicographically
+       inside a dashed range, so such a row is fetched by neither bound. (A
+       TRAILING-space value happens to sort INSIDE the range and is fetched —
+       the spelling class is not uniform.) No in-repo writer emits any of them
+       (the projection writes dashed ISO, the v2 lane writes ``YYYY-MM-DD``),
+       and the predicate cannot normalize a free-text value inside Cypher.
+    """
+    lo_s = (lo - _timedelta(days=1)).isoformat() if lo else None
+    if not hi:
+        return _WindowBounds(lo_s, None, ())
+    # the inclusive end, then the DATE-ONLY literals it would over-admit: every
+    # date-only day above ``hi`` up to that end (``hi+1`` always, ``hi+2`` when
+    # the free-text end is used).
+    hi_s = (hi + _timedelta(days=1 if utc_stamped else 2)).isoformat()
+    excluded = tuple(
+        (hi + _timedelta(days=d)).isoformat()
+        for d in range(1, (1 if utc_stamped else 2) + 1))
+    return _WindowBounds(lo_s, hi_s, excluded)
+
+
+def _window_clause(field: str, pref: str, bounds: _WindowBounds,
+                   params: dict) -> str | None:
+    """Render ONE field's pre-filter clause and fill ``params`` in place.
+
+    ``field`` is a fixed literal from the caller's own tuple (never input), so
+    interpolation here cannot carry caller data; every VALUE is bound. Returns
+    ``None`` when the bounds are fully open (no clause, no params).
+    """
+    parts = []
+    if bounds.lo is not None:
+        # STRICTLY greater: ``lo - 1`` is a day below the window on its own
+        # ladder date, and no timestamp equals a date-only literal — so ``>``
+        # drops exactly the useless date-only value and keeps every offset-
+        # bearing one (#9406, the mirror of the ``<>`` exclusions below).
+        parts.append(f"{field} > ${pref}_lo")
+        params[f"{pref}_lo"] = bounds.lo
+    if bounds.hi is not None:
+        parts.append(f"{field} <= ${pref}_hi")
+        params[f"{pref}_hi"] = bounds.hi
+        for i, lit in enumerate(bounds.excluded):
+            # ``<>`` on a NULL property is NULL (falsy) — right here: an absent
+            # value cannot be in-window through this field.
+            parts.append(f"{field} <> ${pref}_x{i}")
+            params[f"{pref}_x{i}"] = lit
+    return "(" + " AND ".join(parts) + ")" if parts else None
+
+
 def _tier_and_date(row: dict) -> tuple[str, _date | None]:
     """R2 ladder for ONE spine row: when → createdAt → startedAt, each
     parse-gated; a malformed value FALLS THROUGH to the next tier (never
@@ -2287,6 +2427,17 @@ def docker_walker_port(sdk) -> WalkerPort:
         # ORDER BY id mirrors `spine_rows` (deterministic, per-kind) — the
         # collector re-sorts on (date, kind, id), so the returned order is an
         # implementation detail, not the contract.
+        #
+        # ⚠ ``STARTS WITH`` is the UN-FIXED twin of ``_window_bounds`` (#9406):
+        # a raw prefix test is not a superset of the ladder's UTC truncation for
+        # a value whose raw date differs from its UTC date — an aware
+        # ``when="2026-10-21T02:00+09:00"`` is ladder day 2026-10-20 but does
+        # not start with it, so this probe drops a row ``window_rows`` now
+        # admits. Same class as ``_window_bounds`` residual 3 (compact /
+        # ISO-week spellings are invisible to a prefix test too). Recorded with
+        # its measurement in the #9406 discussion; closing it means choosing one
+        # notion of "the day" for both probes, i.e. a change to this probe's
+        # contract, not to a bound.
         if not days:
             return []
         cap = bounded_fanout(per_day_cap)
@@ -2336,38 +2487,47 @@ def docker_walker_port(sdk) -> WalkerPort:
         entity).
 
         TWO batched statements (points, events) — never N+1. The Cypher
-        predicate is a COARSE pre-filter widened by a day: the three date
-        fields are free text (a malformed ``when`` is possible, and the
-        v2 lane leaves ``when`` sparse), so the AUTHORITATIVE window test
-        is the R2 ladder + ``_norm_date`` in ``collect_window_slices``.
+        predicate is a COARSE pre-filter whose ends come from
+        ``_window_bounds`` — per FIELD, because a free-text date can carry a
+        zone offset and the graph's own clock stamp cannot (see that note for
+        the arithmetic, the three recorded residuals, and why one end is a day
+        wider). ``when`` and ``startedAt`` are free text (a malformed ``when``
+        is possible, and the v2 lane leaves ``when`` sparse) while
+        ``createdAt`` is the writer's UTC stamp, so the AUTHORITATIVE window
+        test is the R2 ladder + ``_norm_date`` in ``collect_window_slices``.
         Because the predicate ORs over ``when`` and ``createdAt``, a row
         with a junk ``when`` but a real ``createdAt`` is still fetched.
         ORDER BY the DENSE date field (``createdAt``) DESC is only the FETCH
         priority — it keeps the newest rows when the cap binds, which is what
-        ANY window whose answer locus is the most recent end needs (recency,
-        and the count form: both render newest-first). It is deliberately a single-property sort with
+        a window whose answer locus is the most recent end needs (recency,
+        and the count form: both render newest-first). It is NOT a universal
+        guarantee: ``createdAt`` is tier 2 of the ladder, so a row the ladder
+        dates by its ``when`` can rank by ``createdAt`` instead — that is the
+        recorded cap cost of a coarse pre-filter, not a claim this sort makes
+        good on. It is deliberately a single-property sort with
         NO ``coalesce`` (cheaper, and one less function in an unindexed
         full-scan query); the authoritative window filter AND the rendered
         order both come from Python (the R2 ladder).
         """
         cap = bounded_fanout(cap)
-        lo_s = (lo - _timedelta(days=1)).isoformat() if lo else None
-        hi_s = (hi + _timedelta(days=1)).isoformat() if hi else None
         out: list[dict] = []
         pclauses = []
         pparams: dict = {"cap": cap}
-        for fld in ("when", "createdAt"):
-            parts = []
-            if lo_s is not None:
-                parts.append(f"p.{fld} >= $lo")
-            if hi_s is not None:
-                parts.append(f"p.{fld} <= $hi")
-            if parts:
-                pclauses.append("(" + " AND ".join(parts) + ")")
-        if lo_s is not None:
-            pparams["lo"] = lo_s
-        if hi_s is not None:
-            pparams["hi"] = hi_s
+        # #9406: the bounds are chosen PER FIELD — a free-text date can carry a
+        # zone offset (so its raw date may run a day ahead of the UTC date the
+        # ladder reads) and needs the wider end; ``createdAt`` is the graph's
+        # own UTC stamp and a wider end for it would spend cap slots, at the
+        # HEAD of a newest-first fetch, on rows the ladder then drops. Each
+        # field's clause also EXCLUDES the DATE-ONLY literals its inclusive end
+        # would over-admit — days past the window on their own ladder date,
+        # which would otherwise displace in-window rows under the cap.
+        for fld, stamp, pref in (("when", False, "w"),
+                                 ("createdAt", True, "c")):
+            clause = _window_clause(
+                f"p.{fld}", pref,
+                _window_bounds(lo, hi, utc_stamped=stamp), pparams)
+            if clause is not None:
+                pclauses.append(clause)
         if pclauses:
             prow = proj.g.query(
                 "MATCH (p:Point) WHERE " + " OR ".join(pclauses)
@@ -2391,12 +2551,13 @@ def docker_walker_port(sdk) -> WalkerPort:
                             **_window_precision(r[6], r[7], r[15], r[16])})
         eclauses = []
         eparams: dict = {"cap": cap}
-        if lo_s is not None:
-            eclauses.append("e.startedAt >= $lo")
-            eparams["lo"] = lo_s
-        if hi_s is not None:
-            eclauses.append("e.startedAt <= $hi")
-            eparams["hi"] = hi_s
+        # ``startedAt`` is caller/connector-supplied free text, so it takes the
+        # free-text bounds — the same per-field builder as the points leg, so
+        # the two legs cannot drift apart again.
+        eclause = _window_clause("e.startedAt", "e",
+                                 _window_bounds(lo, hi), eparams)
+        if eclause is not None:
+            eclauses.append(eclause)
         if eclauses:
             erow = proj.g.query(
                 "MATCH (e:Event) WHERE " + " AND ".join(eclauses)

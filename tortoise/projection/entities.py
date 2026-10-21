@@ -4696,7 +4696,7 @@ class _EntityHandlers:
         named here rather than the one this contract used to exempt:
 
         * `TortoiseSDK._apply_and_journal` appends through `_emit_event`, which
-          mints ``ts`` on a COPY of the record, then folds the caller's own
+          minted ``ts`` on a COPY of the record, and then folded the caller's own
           dict;
         * `TortoiseSDK._create_entity` (the public ``create_entity`` /
           ``create_event`` — the ``tortoise_create_entity`` /
@@ -4726,11 +4726,13 @@ class _EntityHandlers:
         before ``proj.apply`` and passes that same instant as
         ``_emit_event(recorded_ts=…)``, so this fold reads one clock and live ≡
         rebuilt (``test_document_source_ingested_at_5140.py`` pins it).
-        ``_apply_and_journal`` remains the OPEN half — **`#9434`** carries it, and
-        the divergence above is still that door's, not this contract's.
-        (Split out of `#9419` on its own scope: that door is APPEND-FIRST, so
-        stamping its record's `ts` moves the funnel's ordering contract rather
-        than a single dict field.)
+        ✅ ``_apply_and_journal`` IS FIXED TOO (#9434): it stamps ``event["ts"]``
+        before its append and hands the same instant to ``_emit_event`` through
+        ``_journal_entity_event(recorded_ts=…)``, so the dict it folds after the
+        append carries the record's own instant instead of none. Both halves are
+        pinned in ``test_document_source_ingested_at_5140.py``; neither door has
+        an in-repo producer that sets ``objectType`` today, so this is a residual
+        closed, not a live defect fixed.
         """
         # #4524: the ON MATCH embedding write below can be a SILENT no-op on
         # the embedded engine — a ``vecf32`` overwrite of an existing vector is
@@ -4810,17 +4812,18 @@ class _EntityHandlers:
             # the field means when Tortoise FIRST saw this source). The value is
             # the record's own `ts` when it carries a USABLE one — deterministic
             # on replay — falling back to the write clock only for a record that
-            # states none. Not every live door states one, and all of the
-            # remaining ones are latent rather than live today (no in-repo
-            # producer sets `objectType` on any of them): the miner's own
-            # envelope carries no `ts`, and `_apply_and_journal` folds the
-            # caller's dict rather than the envelope its append minted
-            # (#9434 carries that one). The
-            # third door, `_create_entity` (behind `create_entity` /
-            # `create_event`), folded BEFORE it journals, so the append's `ts`
-            # never reached the fold — FIXED in #9419: it now stamps `ts`
-            # before the fold and hands the same instant to `_emit_event`.
-            # For the remaining two the fallback is what keeps `ingestedAt`
+            # states none. Not every live door states one, and the one still
+            # remaining is latent rather than live today (no in-repo producer
+            # sets `objectType` on it): the miner's own envelope carries no
+            # `ts`. The TWO doors that used to head this list are FIXED and
+            # named so a census does not read them as still-broken —
+            # `_apply_and_journal` (#9434) now stamps `ts` before its append and
+            # folds a dict that carries the record's own instant, and
+            # `_create_entity` (behind `create_entity` / `create_event`) folded
+            # BEFORE it journals, so the append's `ts` never reached the fold —
+            # FIXED in #9419: it now stamps `ts` before the fold and hands the
+            # same instant to `_emit_event`.
+            # For the remaining door the fallback is what keeps `ingestedAt`
             # REQUIRED rather than NULL, and the value is not
             # replay-deterministic.
             # "Usable" is `_usable_instant` — the policy `_journal_instant`

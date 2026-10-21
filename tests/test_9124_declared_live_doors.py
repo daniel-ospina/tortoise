@@ -85,8 +85,11 @@ surface this suite never looked at.
 from __future__ import annotations
 
 import ast
+import builtins
+import io
 import re
 import sys
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -94,6 +97,13 @@ import pytest
 from tortoise.projection import (
     _HANDLE_GUARD_ENFORCES,
     _HANDLE_MUTATING_VERBS,
+    # The repo's ONE definition of a write clause, and the literal/comment
+    # stripper it reads (see `_assembled_write_evidence`): a local copy of this
+    # regex drifted from it twice over — fail-open on the clauses it omitted and
+    # false-red on the property names it stopped excluding (#7174) — which is the
+    # #3595 shared-decision rule this file's docstring already invokes.
+    _LITERAL_OR_COMMENT_RE,
+    _WRITE_CLAUSE_RE,
     _statement_writes,
 )
 
@@ -125,8 +135,10 @@ _APPEND_NOT_A_RECORD = {
     # census credited that door with a commit point it does not have and filed
     # it as apply-first on the strength of a warning builder. A `_journal_*`
     # NAME is not a journal write; that is exactly what this set exists to
-    # refuse, and `capture_session` is inventoried under `_NO_JOURNAL` for the
-    # reason the source actually shows.
+    # refuse. `capture_session` was its only other pattern-matching call and is
+    # no longer on the census at all (#9349 moved its writes into declared
+    # doors), so this exclusion now guards the census against a warning builder
+    # wherever one appears, not that door's lane.
     "_journal_write_failure_warning",  # sdk.py: builds a receipt warning string
 }
 
@@ -214,8 +226,9 @@ _DECLARATION_DECORATORS = (*_LIVE_LANE_NAMES, *_APPLY_FIRST_LANE_NAMES)
 #: this set's pointer will not find the other five. The remaining TWO
 #: (`_stamp_capture_attempt_state`, `_stamp_entity_link_counters`) were never
 #: inventory entries at all: they were inline statements inside
-#: `capture_session`, which appends NO record of its own and is therefore
-#: inventoried under `_NO_JOURNAL` for its four provenance stamps (`#9350`) — a
+#: `capture_session`, which appends NO record of its own: its four provenance
+#: stamps (`#9350`) and its extraction reaches are doors of their own now, and
+#: the parent door left the census in #9349 — a
 #: function holding BOTH scoped and unscoped writes is refused by this census
 #: ("presence is not containment"), so the stamps became doors of their own.
 #: A declaration does not convert the order: the entries that remain are still
@@ -262,6 +275,9 @@ _APPLY_FIRST_HELPERS = {
 #:   first attempt at a home, `_APPLY_FIRST_DOORS`, was only reachable by
 #:   counting `_journal_write_failure_warning` (a warning-string builder) as an
 #:   append. See that entry's comment.
+#:   ⛔ AND #9349 THEN MOVED THE STAMPS OUT TOO: the door has no write-like reach
+#:   of its own any more, so it is in NEITHER set — `_NO_JOURNAL`'s note records
+#:   why, and its pin asserts the absence rather than a row.
 _MIXED_ARM_DOORS: set[str] = set()
 
 #: Reach the handle with a write-like statement and append NO record at all, so
@@ -283,6 +299,11 @@ _NO_JOURNAL = {
     # declaration, and
     # `test_the_capture_door_delegates_its_writes_to_declared_doors` pins that
     # split so the stamps cannot slip back into an undeclared body.
+    #   The five doors those writes MOVED to are named by that pin —
+    #   `_write_session_and_turns`, `_materialize_session_source` and
+    #   `_stamp_capture_provenance` included — so a successor that drops off
+    #   the census surface reds there instead of being absorbed here.
+
     "_clear_reliability_cache",
     "_connect_issue_objects",
     "_extract_session_llm",
@@ -324,15 +345,56 @@ _UNRESOLVED = {
     # `{_capture_passthrough_read_fields()}`, …) — the #9124 review's P1 shape,
     # which a placeholder substitution used to flatten into a false READ.
     "_count_ep_factors",
-    # #9063: both calibration readers build their Cypher the same way — the
-    # `WHERE` fragment is bound to a LOCAL (`where = f"WHERE {not_operator} …"`)
-    # and interpolated as `proj.g.query(f"MATCH (n:Point) {where} … RETURN …")`,
-    # which the resolver cannot unfold. Checked by hand: the resolvable part of
+    # #9063: both calibration readers hide their statement from the resolver, in
+    # two DIFFERENT shapes — so "they build their Cypher the same way" is false
+    # for one of them, which is why the shapes are spelled out separately here
+    # rather than as one shared sentence. Both were re-read in `tortoise/sdk.py`
+    # for this note:
+    #   `calibrate_summary` binds a `where` LOCAL (`f"WHERE {not_operator} …"`)
+    #   and interpolates it straight into the call — `proj.g.query(f"MATCH
+    #   (n:Point) {where} … RETURN …")` — so the fragment it cannot unfold is
+    #   that `where` TEXT.
+    #   `_uncalibrated_ep_participants` composes a per-label `query` VARIABLE
+    #   (`f"MATCH (n:{label}) WHERE {where} RETURN n.id"`, an `IN $ids` form, and
+    #   a trailing `LIMIT` appended with `+=`) and passes the VARIABLE —
+    #   `proj.g.query(query, params=params)` — so here the unresolvable fragment
+    #   is the whole ASSEMBLED statement, not one bound piece of it.
+    # What the two share is only WHY they are unresolvable, not what they look
+    # like. Checked by hand: the resolvable part of
     # both statements is a `MATCH … RETURN` read with no write keyword (they
     # list uncalibrated points; neither writes the cache and neither appends a
     # record). Listed here rather than silently called a read, per this set's
     # own rule. (These two rows are why the census reddened on `origin/main`
     # at e08a669b2 — the entries, not the statements, were missing.)
+    # ⚠️ The human step covers the WHOLE statement, not just its resolvable
+    # part — for these rows the unresolvable fragment IS the statement text the
+    # resolver cannot unfold (the `where` local for `calibrate_summary`, the
+    # whole assembled `query` for `_uncalibrated_ep_participants`), so
+    # "the readable half has no write keyword" would not settle it. Measured,
+    # each function's only handle reach is ONE read:
+    #   `calibrate_summary` — `MATCH … OPTIONAL MATCH … RETURN` (a read)
+    #   `_uncalibrated_ep_participants` — `MATCH … RETURN n.id` (a read)
+    # with no SET/CREATE/MERGE/DELETE/REMOVE in the assembled query and no CALL
+    # to any `sdk.py` function the census proves reaches the write handle
+    # (`calibrate_summary` names `set_point_baseline` only inside advice strings
+    # — it never calls it, and neither function calls any other writer).
+    # That second claim is pinned against the CENSUS's own handle surface —
+    # "write OR not-proven-read", because that surface also keys a function whose
+    # mutating call it could not RESOLVE (45 of its 83 entries are that shape),
+    # so calling it "the list of writing functions" overstates it; the names this
+    # file has already proven READ are subtracted — and not against a
+    # hand-written list of method names: a check that
+    # knew only `set_point_baseline` stayed green while the sentence it was cited
+    # for went false (`self.invalidate_point(…)` is not a `set_point_baseline`
+    # call and not a `<handle>.<verb>` call either).
+    # ⛔ CITED BY SYMBOL, NEVER BY `sdk.py:<line>`. The numbers this note first
+    # carried were 268 lines off within hours of being measured (they landed in
+    # `_apply_source_inheritance`, whose `MATCH … REMOVE` is the opposite of the
+    # claim) — the §7/a citation-rot class: a reader who follows a stale line
+    # number cannot tell a rotten citation from a false claim. The symbol is
+    # authoritative; `test_the_unresolved_hand_check_cites_symbols_not_line_numbers`
+    # and `test_the_calibration_readers_assemble_no_write_clause` keep this note
+    # honest instead of trusting it.
     "calibrate_summary",
     "_uncalibrated_ep_participants",
     "_cross_lens_pool",
@@ -367,6 +429,17 @@ _UNRESOLVED = {
     "suggest_entry_points",
     "tortoise_fts_query",
     "traverse",
+    # ⛔ NO SECOND ROW FOR `calibrate_summary` / `_uncalibrated_ep_participants`.
+    # They are declared ONCE, above (the #9063 entry). Both PRs that landed on
+    # 2026-10-20 declared them at different offsets, so the merge kept both
+    # copies: a duplicate element in a SET is silently collapsed by Python — the
+    # intent still holds — but `ruff` B033 flags it, and the lint shard reds for
+    # every PR that inherits it. The duplicates have since been removed twice
+    # over (#9249 on `main`, and the same deletion here), so what this note
+    # guards is the RULE rather than that repair: adding a row for a name that
+    # is already in the set is the same defect as #9259's duplicate DICT key,
+    # one container over — the declaration reads as two decisions where there
+    # is one.
 }
 
 _INVENTORY = {
@@ -943,6 +1016,20 @@ def _duplicate_writer_offenders(surface: dict, where: str = "") -> list[str]:
 
 # ── the live gate: every SDK entry point is declared or accounted for ─────
 
+#: The kinds this gate accepts as DECLARED — the tuple the `derived-recompute`
+#: row was missing (review MINOR, latent): `_kind` has THREE declared kinds, and
+#: accepting only two of them reported a `_derived_recompute_write_scope` door as
+#: "NO declared lane and no inventory entry", whose natural remedy is an
+#: INVENTORY row — i.e. it would have converted a declared door into an
+#: inventoried one and weakened it. No live instance (`_derived_recompute_write_scope`
+#: is opened in `tortoise/source_identity.py`, not in `sdk.py`), but a door added
+#: to `sdk.py` would have got the wrong instruction.
+#: ⛔ The producer-without-consumer mirror of the round-5 `duplicate_writer_defs`
+#: defect (four consumers, no producer).
+_DECLARED_KINDS = frozenset(
+    {"declared", "apply-first-declared", "derived-recompute"})
+
+
 def test_every_mutating_sdk_entry_point_is_declared_or_inventoried():
     """THE gate. A new mutating `sdk.py` function must declare a lane.
 
@@ -979,7 +1066,7 @@ def test_every_mutating_sdk_entry_point_is_declared_or_inventoried():
                 "not containment; move the write inside the lane or declare one "
                 "that covers it")
             continue
-        if kind in ("declared", "apply-first-declared"):
+        if kind in _DECLARED_KINDS:
             if reason is not None:
                 offenders.append(
                     f"{name}:{fact['lineno']} is DECLARED ({fact['scopes']}) but "
@@ -1055,6 +1142,2528 @@ def test_no_two_census_entries_share_a_bare_function_name():
         "covered by the other's row. Qualify the inventory entry (or split it) "
         "and resolve it the same way in `_inventory_of`:\n  "
         + "\n  ".join(offenders))
+
+
+# ── the hand-check note behind the two #9063 rows is CHECKABLE ────────────
+#
+# That note is the only evidence a reader has for WHY `calibrate_summary` and
+# `_uncalibrated_ep_participants` sit in `_UNRESOLVED`. It first carried
+# `sdk.py:<line>` anchors and they were 268 lines off: following the first one
+# landed in `_apply_source_inheritance`, a function that WRITES
+# (`MATCH … REMOVE`) — the opposite of what the citation was offered as evidence
+# for. A reader who cannot tell a rotten citation from a false claim deletes the
+# rows, and deleting them reds the census (both classify `no-journal`). So the
+# note is pinned twice: no line-number anchor may come back (the #8093/#8506
+# citation-rot class — the SYMBOL is authoritative, the number is a
+# convenience), and the claim it makes is re-derived from `sdk.py` rather than
+# believed.
+
+#: A `sdk.py:<line>` anchor, in ANY of the shapes a human actually writes.
+#: `tortoise/sdk.py` is ~37k lines and moves under the note on almost every
+#: merge, so a number rots here without anything reddening.
+#:
+#: ⛔ WIDENED (review, measured): the first version was `r"sdk\.py:\d+"`, which
+#: matched ONLY the no-whitespace form. Every ordinary spelling of the same
+#: anchor went green — `sdk.py: 23508`, `sdk.py line 23508`, `sdk.py:L23508`,
+#: `sdk.py, 23508`, `sdk.py 23508` — so the pin forbade a citation style it
+#: let through in five of six shapes. The rot does not care about whitespace:
+#: `sdk.py: 23508` decays into a pointer at whatever function holds that line
+#: exactly as `sdk.py:23508` does. `test_the_line_anchor_matches_every_spelling`
+#: holds the variants red-eyed.
+#: ⛔ WIDENED AGAIN (review, measured): `[\s,:]*` cannot consume a CLOSING
+#: BACKTICK, so the spelling this very note uses — a backticked module path — went
+#: green: `` `sdk.py`:23508 ``, `` `sdk.py` line 23508 ``, `` `sdk.py` 23508 ``,
+#: `` `tortoise/sdk.py`:23508 ``. The backticked form is the MOST likely next
+#: spelling, since the note writes `` `tortoise/sdk.py` `` in backticks
+#: throughout; `@` (a "file@rev" habit) and `#?`/`line #23508` are admitted too.
+#: Same rot, same reasoning:
+#: the separator is noise, the `sdk.py` + digits pair is the citation.
+#: ⛔ WIDENED AGAIN (review, measured): `~` was not in the separator class, so
+#: the TILDE spelling — the one this branch's own narrative uses ("a `line ~511`
+#: anchor had already rotted", "`(line ~700)` in `_handle_query_calls`") — went
+#: green: `sdk.py:~23508`, `sdk.py (line ~23508)` and `` `sdk.py` ~23508 `` all
+#: missed. Same rot: the number still points at whatever function holds that
+#: line. The tilde is a separator like any other, so it is admitted.
+#: ⛔ AND THE MAGNITUDE GUARD (review, measured): admitting `~` made
+#: `sdk.py ~37k lines` — a LENGTH statement, not a citation — match, because the
+#: tilde consumed the separator and `37` is a digit run. The sentence above named
+#: letters between the path and the digits as what kept a magnitude out;
+#: `sdk.py is ~37k lines` alone does not hold that line (it passes on the word
+#: "is"), and `sdk.py ~37k lines` went red with no letters at all. `(?![\dkK])`
+#: is what actually does the work: `\d+` cannot backtrack into the run (`3`
+#: leaves `7k`, which fails the same lookahead), so neither `sdk.py ~37k lines`
+#: nor `sdk.py ~ 37k lines` matches, while every digit-final spelling above still
+#: does. Both spellings are in `must_not_match`.
+#: ⛔ THE SEPARATOR CLASS IS ENUMERATED, NOT "NOISE" (round 6, measured): an
+#: earlier comment here reasoned as if any separator were admitted — a class only
+#: admits what it lists. The em/en dash is this file's own dominant prose
+#: separator (`sdk.py — 23508`) and `near line` / `near <n>` are ordinary
+#: citation prose; both missed. Any FURTHER separator is a one-character change
+#: in the class below, and this line is the reminder that it is not a rule.
+
+_SDK_LINE_ANCHOR = re.compile(
+    r"sdk\.py[\s,:`@#()~\u2014\u2013-]*"
+    r"(?:(?:near\s+)?(?:at\s+)?line[\s:,#~]*)?(?:near\s+)?(?:at\s+)?[Ll]?#?\d+"
+    r"(?![\dkK])",
+    re.IGNORECASE)
+
+#: ⛔ NO LOCAL WRITE-CLAUSE REGEX HERE. What counts as a write is
+#: `_statement_writes` + `_WRITE_CLAUSE_RE` from `tortoise.projection` — the
+#: SAME pair the runtime door consults (this file's docstring, #3595). The first
+#: version of this pin declared its own `\b(?:SET|CREATE|MERGE|DELETE|DETACH|
+#: REMOVE)\b` and every difference from the canonical def ran the wrong way:
+#: it was case-sensitive and had no `FOREACH`/`DROP` (a lower-case `set`, a
+#: `FOREACH (…) | SET …` or a `DROP INDEX` appended to these statements is a
+#: write to the door and was invisible here — the note could rot false with
+#: nothing red), and it dropped the `(?<![\w.$:])` lookbehind that keeps a
+#: PROPERTY named like a keyword from reading as a clause (`RETURN n.SET` is a
+#: well-formed READ; #7174 is the recorded false refusal that lookbehind fixed).
+
+
+def _assembled_write_evidence(assembled: str) -> str | None:
+    """The write evidence in an assembled statement, or ``None`` for a read.
+
+    Delegates the VERDICT to `_statement_writes` and only uses the canonical
+    `_WRITE_CLAUSE_RE` (over the same literal-stripped text `_statement_writes`
+    reads) to name the clause for the failure message — so the message and the
+    door cannot disagree either. A statement that writes only through a write
+    PROCEDURE (`CALL db.idx.fulltext.createNodeIndex(…)`) has no clause to
+    name, so it is reported by the classifier alone rather than as a read.
+    """
+    if not _statement_writes(assembled):
+        return None
+    clause = _WRITE_CLAUSE_RE.search(_LITERAL_OR_COMMENT_RE.sub(" ", assembled))
+    if clause is not None:
+        return repr(clause.group(0))
+    return "a write PROCEDURE call (no write clause, per `_statement_writes`)"
+
+#: The two rows the #9063 note covers, each with the read shape the note states.
+_CALIBRATION_READERS: tuple[tuple[str, str], ...] = (
+    ("calibrate_summary", "OPTIONAL MATCH"),
+    ("_uncalibrated_ep_participants", "RETURN n.id"),
+)
+
+
+def _unresolved_block_span(source: str) -> str:
+    """The source of the ONE module-level `_UNRESOLVED` set literal.
+
+    Sliced by the AST's own line numbers, so the span cannot silently shrink to
+    a fragment that happens to pass.
+
+    ⛔ EXACTLY ONE assignment, asserted rather than assumed (review P3): the
+    first version looped and `return`ed on the first match, so a SECOND
+    `_UNRESOLVED = {…}` later in the module — the one that is live at runtime,
+    because it rebinds the name — left both pins validating the DEAD first
+    literal while the governing block went unverified, silently. Counting the
+    matches makes a rebinding red instead of skipped.
+    """
+    lines = source.splitlines()
+    matches = [
+        node for node in ast.parse(source).body
+        if isinstance(node, ast.Assign)
+        and any(getattr(t, "id", None) == "_UNRESOLVED" for t in node.targets)]
+    assert len(matches) == 1, (
+        f"`_UNRESOLVED` is assigned {len(matches)} times at module level — a "
+        "second assignment REBINDS the name, so these pins would check the "
+        "dead first literal while the live block went unverified. Keep one "
+        "assignment (or move the pins with the rebinding)")
+    node = matches[0]
+    return "\n".join(lines[node.lineno - 1:node.end_lineno])
+
+
+def _unresolved_block_source() -> str:
+    """The `_UNRESOLVED` block of THIS file, comments included."""
+    return _unresolved_block_span(Path(__file__).read_text())
+
+
+def _comments_in(block_source: str) -> str:
+    """The COMMENT text inside a source block, and nothing else.
+
+    The `#9063` note lives in comments; the two function names it must cite live
+    in the SET ROWS (`"calibrate_summary",` is itself a string element of the
+    literal). Searching the block as plain text therefore cannot tell the note
+    from the rows: deleting the whole note while keeping the rows left the
+    positive half of the symbol pin green, i.e. the exact failure it exists to
+    prevent (a reader who cannot re-verify the note deletes the rows) was
+    unguarded on the symbol side. Resolving the anchor against COMMENT tokens
+    only makes that deletion red.
+
+    Tokenizes with `tokenize`, so a `#` inside a string literal is not a
+    comment and a `#9063`-shaped string element cannot be mistaken for one.
+    """
+    comments: list[str] = []
+    for token in tokenize.generate_tokens(io.StringIO(block_source).readline):
+        if token.type == tokenize.COMMENT:
+            comments.append(token.string.lstrip("#"))
+    return "\n".join(comments)
+
+
+def _missing_citations(block_source: str) -> list[str]:
+    """The `_CALIBRATION_READERS` rows this block's COMMENT text does not cite.
+
+    ⛔ THE PIN'S OWN PREDICATE, and it lives HERE — module level, one definition
+    (review P2). It used to be spelled out inside the pin, while the non-vacuity
+    test defined its own byte-identical copy: the test therefore observed
+    nothing the pin computed and stayed green when the pin's positive half was
+    reverted to the pre-fix `name in block`, i.e. it could not fail on the
+    regression it claims to hold. Both now drive this function, so reverting
+    `_comments_in` to the raw block reds the pin AND the test.
+
+    Returns one entry per row whose name AND read shape are not on a single
+    comment line — the citation must be one line, because a name mentioned
+    somewhere and a shape mentioned elsewhere does not let a reader re-verify
+    the note.
+    """
+    note_lines = _comments_in(block_source).splitlines()
+    return [name for name, shape in _CALIBRATION_READERS
+            if not any(name in line and shape in line for line in note_lines)]
+
+
+def _string_constants(node) -> list[str]:
+    """Every string literal inside `node` (f-string fragments included)."""
+    return [sub.value for sub in ast.walk(node)
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str)]
+
+
+def _local_bindings(func) -> dict[str, list[ast.expr]]:
+    """`name -> every value assigned to it` in `func` (one entry per BRANCH).
+
+    Every binding, not the last one: `_uncalibrated_ep_participants` builds its
+    `query` in an `if`/`else` pair, and checking only the surviving branch would
+    leave the other one unverified.
+    """
+    nodes = ast.walk(func) if isinstance(func, ast.AST) else func
+    bound: dict[str, list[ast.expr]] = {}
+    for node in nodes:
+        if isinstance(node, ast.Assign) and node.value is not None:
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    bound.setdefault(target.id, []).append(node.value)
+        elif (isinstance(node, ast.AnnAssign) and node.value is not None
+              and isinstance(node.target, ast.Name)):
+            bound.setdefault(node.target.id, []).append(node.value)
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            # A loop/comprehension target is not a hole: its VALUE is its
+            # iterable, so `{label}` resolves to `_CALIBRATION_GATED_LABELS`'s
+            # strings instead of being reported as unreadable.
+            if isinstance(node.target, ast.Name):
+                bound.setdefault(node.target.id, []).append(node.iter)
+        elif (isinstance(node, ast.AugAssign)
+              and isinstance(node.target, ast.Name)):
+            # `query += f" LIMIT {int(limit)}"` — an APPEND to the statement, and
+            # `_uncalibrated_ep_participants` (one of the two rows this helper
+            # exists to check) builds its statement exactly that way. Without
+            # this arm the augmented fragment was never inspected, so
+            # `query += " SET n.poked = 1"` produced NO offender: the read shape
+            # was still satisfied by the plain assignments above it and the pin
+            # stayed green while the statement wrote. Same arm, same reason, as
+            # `_bound_names`'s `ast.AugAssign` branch — the census's walker had
+            # it, so this helper was the narrower of the two.
+            bound.setdefault(node.target.id, []).append(node.value)
+        # A comprehension can also be the VALUE of a binding
+        # (`_ID_WHITESPACE_SET = ", ".join(_cypher_ws_literal(c) for c in …)`);
+        # without this its target `c` is an unreadable name in the statement.
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.comprehension) and isinstance(sub.target, ast.Name):
+                bound.setdefault(sub.target.id, []).append(sub.iter)
+    return bound
+
+
+def _params_of(func) -> set[str]:
+    """Every parameter name of `func` — values the assembly cannot read.
+
+    `self`/`cls` are excluded, exactly as `enumerate_handle_surface` does it:
+    they are not values that can carry statement text, and counting them would
+    make every `self.<verb>(…)` call read as a reach on a handle PARAMETER.
+    """
+    args = func.args
+    names = {arg.arg for arg in (
+        list(args.posonlyargs) + list(args.args) + list(args.kwonlyargs))}
+    names |= {arg.arg for arg in (args.vararg, args.kwarg) if arg is not None}
+    return {name for name in names if name not in ("self", "cls")}
+
+
+def _mutated_parameters(func, module=None, path=None, *, _visited=None,
+                        _depth=0) -> set[str]:
+    """Parameters of `func` that it MUTATES in place — an accumulator channel.
+
+    Narrow on purpose. Only the mutating shapes that hand a value back to the
+    caller are named (`<param>.append/extend/insert/update`, `<param> += …`,
+    `<param>[…] = …`); a bare call to a void helper is not enough, because that
+    is ordinary code and reporting it would trade this silence for a wall of
+    false FAILs. The set this feeds is REPORTED, never exempted.
+
+    ⛔ TRANSITIVE, and that is the point of `module`/`path` (review P2, measured
+    GREEN): the first version read the callee's OWN syntax only, so a callee that
+    FORWARDS the parameter to a second callee which mutates it
+    (`_add_clause(out)` → `_forward(out)` → `out.append(" SET …")`) reported
+    nothing — the shape simply moved one hop and every arm of the row pin stayed
+    green. A nested callee's mutated parameter is now folded back onto THIS
+    function's parameter through the nested call site's own argument binding
+    (positional + keyword, `self`/`cls` dropped), bounded by `visited` for the
+    cycles and `_FRAGMENT_DEPTH_CAP` for the depth.
+    """
+    params = _params_of(func)
+    # A callee may hand the parameter to a LOCAL first (`acc = out;
+    # acc.append(...)`) — the alias arm (review round 5, measured GREEN). The
+    # alias map is closed the same way `_names_feeding` closes its name set, so
+    # `a = b = out` and a two-hop local are both covered.
+    alias: dict[str, str] = {}
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Assign):
+                continue
+            source = node.value
+            if not isinstance(source, ast.Name):
+                continue
+            owner = source.id if source.id in params else alias.get(source.id)
+            if owner is None:
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Name) \
+                        and target.id not in params \
+                        and alias.get(target.id) != owner:
+                    alias[target.id] = owner
+                    changed = True
+
+    def owning(name: str) -> str | None:
+        return name if name in params else alias.get(name)
+
+    mutated: set[str] = set()
+    for node in ast.walk(func):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and isinstance(node.func.value, ast.Name) \
+                and node.func.attr in _ACCUMULATOR_METHODS:
+            owner = owning(node.func.value.id)
+            if owner:
+                mutated.add(owner)
+        elif isinstance(node, ast.AugAssign) \
+                and isinstance(node.target, ast.Name):
+            owner = owning(node.target.id)
+            if owner:
+                mutated.add(owner)
+        elif isinstance(node, ast.Assign):
+            mutated |= {owner for owner in (
+                owning(target.value.id) for target in node.targets
+                if isinstance(target, ast.Subscript)
+                and isinstance(target.value, ast.Name)) if owner}
+
+    # …and one hop of INDIRECTION: a nested callee's mutated parameter is this
+    # function's parameter, when this function passes its own parameter in.
+    if module is None or _depth >= _FRAGMENT_DEPTH_CAP:
+        return mutated
+    visited = set() if _visited is None else _visited
+    if id(func) in visited:
+        return mutated
+    visited.add(id(func))
+    owned_names = set(params) | set(alias)
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Call):
+            continue
+        nested_name = _callee_name(node)
+        if nested_name is None:
+            continue
+        nested, nested_module, nested_path = _resolve_callee(
+            nested_name, module, path)
+        if nested is None:
+            continue
+        nested_mutated = _mutated_parameters(
+            nested, nested_module, nested_path,
+            _visited=visited, _depth=_depth + 1)
+        if not nested_mutated:
+            continue
+        nested_params = [arg.arg for arg in (
+            list(nested.args.posonlyargs) + list(nested.args.args))
+            if arg.arg not in ("self", "cls")]
+        passed = dict(zip(nested_params, node.args, strict=False))
+        passed.update({kw.arg: kw.value for kw in node.keywords
+                       if kw.arg is not None})
+        for param in sorted(nested_mutated):
+            value = passed.get(param)
+            if isinstance(value, ast.Name) and value.id in owned_names:
+                owner = owning(value.id)
+                if owner:
+                    mutated.add(owner)
+    return mutated
+
+
+def _mutated_module_bindings(func, module) -> set[str]:
+    """MODULE-LEVEL names `func` accumulates into — the global accumulator.
+
+    The same mutation channel one scope out: `_mutated_parameters` names only
+    the callee's PARAMETERS, so `PARTS = []` at module scope with a callee doing
+    `PARTS.append(" SET …")` was neither reported nor followed (review P2), and
+    the statement `"… " + "".join(PARTS)` reads the module literal as empty. The
+    intersection with `_module_bindings` is what makes the name a MODULE name
+    rather than a local, so a callee's own locals cannot red this.
+    """
+    if module is None:
+        return set()
+    names: set[str] = set()
+    for node in ast.walk(func):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and isinstance(node.func.value, ast.Name) \
+                and node.func.attr in _ACCUMULATOR_METHODS:
+            names.add(node.func.value.id)
+        elif isinstance(node, ast.AugAssign) \
+                and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+    return names & set(_module_bindings(module))
+
+
+def _names_feeding(expression, func) -> set[str]:
+    """Every name whose VALUE can reach `expression`, closed over assignments.
+
+    The statement expression is usually a bare local (`proj.g.query(query)`), so
+    the fragment is assembled one statement away: `query = "…" + "".join(parts)`.
+    A one-level reading saw only `{query}` and missed `parts` — and `parts` is
+    precisely the accumulator argument (measured, review round 4). So the set is
+    CLOSED: a name is added when it appears in any expression assigned to (or
+    augmented into, or conditionally bound to) a name already in the set.
+    """
+    names = {node.id for node in ast.walk(expression)
+             if isinstance(node, ast.Name)}
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(func):
+            target: ast.expr | None = None
+            value: ast.expr | None = None
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target, value = node.targets[0], node.value
+            elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+                target, value = node.target, node.value
+            if target is None or value is None \
+                    or not isinstance(target, ast.Name) \
+                    or target.id not in names:
+                continue
+            for inner in ast.walk(value):
+                if isinstance(inner, ast.Name) and inner.id not in names:
+                    names.add(inner.id)
+                    changed = True
+    return names
+
+
+def _callee_name(call: ast.Call) -> str | None:
+    """The NAME to resolve for `call` — a bare function, or `self.<method>`.
+
+    Attribute callees were SKIPPED (review P2, measured): `self._fill(parts)`
+    resolved nowhere as far as this arm was concerned, so the dominant helper
+    shape in `sdk.py` — every `self._stamp_*` / `self._materialize_*` — was
+    invisible even though `_fragments_of` follows attribute callees. Only
+    `self`/`cls` receivers are named: `<handle>.append(…)` is a COLLECTION
+    mutation of the row's own local, not a callee whose parameter is mutated, and
+    resolving `append` as a module function would be a category error.
+    """
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) \
+            and func.value.id in ("self", "cls"):
+        return func.attr
+    return None
+
+
+def _accumulator_offenders(func, statement_expr, module, path) -> list[str]:
+    """Calls whose callee hands text back through a MUTATED ARGUMENT.
+
+    The expression walk cannot see this shape, and that is the point: the write
+    is not inside the statement, it lands in a caller LOCAL that the statement
+    then reads — `parts = []; _fill(parts); query = "… " + "".join(parts)`, with
+    `_fill` doing `out.append(" SET …")`. `_fragments_of` resolves `parts` to the
+    EMPTY list it was bound to, so the one handle reach reads as clean, the call
+    resolves (so the unresolvable-name arm stays silent), and nothing is
+    reported — measured GREEN (review round 4).
+
+    Reported, not followed: binding what a callee appends into a caller's list is
+    a dataflow problem this walk does not solve, and reported-not-skipped is this
+    file's own polarity (`unread`). SCOPED to a mutated argument name that can
+    reach the row's statement expression — without that, every call passing a
+    dict to a helper that updates it would red a correct row.
+    """
+    feeding = _names_feeding(statement_expr, func)
+    offenders: list[str] = []
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Call):
+            continue
+        callee_name = _callee_name(node)
+        if callee_name is None:
+            continue
+        callee, _callee_module, _callee_path = _resolve_callee(
+            callee_name, module, path)
+        if callee is None:
+            continue
+        mutated = _mutated_parameters(callee, _callee_module, _callee_path)
+        # …and the module-scope flavour: a callee that accumulates into a MODULE
+        # container the statement reads (`PARTS = []` / `_fill()` /
+        # `"".join(PARTS)`) has no parameter to bind, so it is matched by NAME.
+        for name in sorted(_mutated_module_bindings(callee, _callee_module)
+                           & feeding):
+            offenders.append(
+                f"{callee_name}(): writes into module-level `{name}`, which "
+                "feeds this row's statement — what the callee contributes could "
+                "not be read out, so the row cannot be called a read on this walk")
+        if not mutated:
+            continue
+        # `self`/`cls` are not arguments the CALL SITE passes (review P2): without
+        # dropping them every positional bound one slot to the left, so a METHOD
+        # callee's mutated parameter was never matched.
+        params = [arg.arg for arg in
+                  list(callee.args.posonlyargs) + list(callee.args.args)
+                  if arg.arg not in ("self", "cls")]
+        supplied = {param: value
+                    for param, value in zip(params, node.args, strict=False)}
+        # A KEYWORD argument binds by name whatever the position (review P2):
+        # `_fill(out=parts)` was invisible while `_fill(parts)` reported.
+        supplied.update({kw.arg: kw.value for kw in node.keywords
+                         if kw.arg is not None})
+        for param in sorted(mutated):
+            value = supplied.get(param)
+            if isinstance(value, ast.Name) and value.id in feeding:
+                offenders.append(
+                    f"{callee_name}(): writes into `{value.id}` (its "
+                    f"`{param}` parameter), and `{value.id}` feeds this row's "
+                    "statement — what the callee contributes could not be read "
+                    "out, so the row cannot be called a read on this walk")
+    return offenders
+
+
+def _statement_argument(call: ast.Call) -> ast.expr | None:
+    """The statement text of a handle call — the census's own argument index.
+
+    `args[0]` for every verb except `execute_command`, whose statement sits at
+    index 2 (`"GRAPH.QUERY", <graph>, <cypher>`) — the same rule
+    `enumerate_handle_surface` applies; see the arm below.
+
+    Keywords are excluded on purpose — `<handle>.query(stmt, params=params)`
+    passes BIND DATA, not Cypher, so a statement's parameter dict is not part of
+    the statement. Following it let an unrelated `{"reason": "MERGE"}` in that
+    dict red a provably read-only row (measured: a false FAIL, which is how a
+    check like this gets weakened by the next reader).
+    """
+    # ⛔ MIRRORS THE CENSUS (`enumerate_handle_surface`: "the statement sits at
+    # index 2 … every other verb takes it positionally"). Returning `args[0]`
+    # unconditionally handed back the literal `"GRAPH.QUERY"` for
+    # `execute_command("GRAPH.QUERY", <graph>, <cypher>)` — the Cypher was
+    # never inspected, and the row red only because its read shape was absent,
+    # which blames the note for a bug in this helper.
+    index = 2 if getattr(call.func, "attr", None) == "execute_command" else 0
+    return call.args[index] if len(call.args) > index else None
+
+
+def _module_bindings(module) -> dict[str, list[ast.expr]]:
+    """Module-level bindings, so a fragment pulled from a CONSTANT is followed.
+
+    `where` interpolates module strings (`_ID_WHITESPACE_SET`) and module tuples
+    (`_CALIBRATION_GATED_LABELS`); a walk that stopped at function-local names
+    left the assembled text visibly incomplete (`MATCH (n: )`) and a write
+    hidden in a module constant passed the pin (measured). Cached, because the
+    resolver asks per NAME.
+    """
+    entry = _MODULE_BINDINGS_CACHE.get(id(module))
+    if entry is None or entry[0] is not module:
+        entry = (module, _local_bindings(
+            node for node in module.body
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign,
+                                 ast.NamedExpr, ast.For))))
+        _MODULE_BINDINGS_CACHE[id(module)] = entry
+    return entry[1]
+
+
+#: `id(module AST) -> (the AST itself, its module-level bindings)`.
+#: ⛔ THE AST IS RETAINED IN THE ENTRY — that is what makes an identity key
+#: safe here. The sdk module is held by the caller, but the IMPORTED-CALLEE hop
+#: is not: `_resolve_callee` does `ast.parse(candidate.read_text())`, `_fragments_of`
+#: uses it for the duration of the recursion, and then it is unreachable while
+#: its `id` stays a live key — a later `ast.parse` can be allocated at the same
+#: address and this cache would hand back ANOTHER module's constants. Wrong
+#: fragments can resolve a write AWAY (the fail-open direction this pin exists
+#: to prevent). It does not bite today (only `tortoise/live.py` is reached that
+#: way and every re-parse yields identical bindings), so this is a trap defused
+#: rather than a live failure — but the retention, not the comment, is what
+#: holds it. `test_the_module_bindings_cache_retains_its_module` pins that.
+_MODULE_BINDINGS_CACHE: dict[int, tuple[object, dict[str, list[ast.expr]]]] = {}
+
+
+def _function_returns(func) -> list[ast.expr]:
+    """Every expression a function RETURNS — the values its callers receive.
+
+    YIELDS count too (review, measured): a generator has no `Return`, so a
+    resolved callee that yields its text contributed NO fragments and nothing to
+    `unread` — `query = "MATCH … " + "".join(_parts())` where `_parts()` yields
+    `" SET n.poked = 1"` passed GREEN in both the same-module and the
+    package-`__init__` hop, which is the P1 class this branch closed one branch
+    over. `yield`/`yield from` are exactly as reachable as `return` here: both
+    hand the caller a string it may splice into a statement.
+    """
+    return [node.value for node in ast.walk(func)
+            if isinstance(node, (ast.Return, ast.Yield, ast.YieldFrom))
+            and node.value is not None]
+
+
+def _resolve_callee(name: str, module, path: Path):
+    """`(FunctionDef, its module, its path)` for a NAME, here or by import.
+
+    Two hops, both needed: `_cypher_ws_literal` / `_strip_whitespace` are defined
+    in `sdk.py` itself, while `_live_only` arrives through
+    `from .live import _live_only`. Following only same-module definitions left
+    the imported predicate unread, so a `SET` spliced into
+    `_strip_whitespace`'s returned f-string passed the pin (measured).
+    """
+    if module is None:
+        return None, module, path
+    defs = [node for node in ast.walk(module)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == name]
+    if defs:
+        return defs[0], module, path
+    for node in ast.walk(module):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if not any(alias.name == name for alias in node.names):
+            continue
+        module_name = node.module or ""
+        if node.level:
+            package = path.parent.relative_to(ROOT).as_posix().replace("/", ".")
+            module_name = ".".join(filter(None, [package, module_name]))
+        # ⛔ PACKAGE FIRST — Python's own resolution order, and it is
+        # load-bearing here: `tortoise/projection.py` exists as a 37-line shim,
+        # so a module-first resolver parsed the SHIM, found no def, and never
+        # reached the package `__init__.py` where `_stored_prop_value` actually
+        # lives. (Verified: `import tortoise.projection` resolves to the
+        # package, not the shim.)
+        package = ROOT / (module_name.replace(".", "/")) / "__init__.py"
+        candidate = package if package.exists() else ROOT / (
+            module_name.replace(".", "/") + ".py")
+        if not candidate.exists():
+            continue
+        other = ast.parse(candidate.read_text(), str(candidate))
+        found = [node for node in ast.walk(other)
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                 and node.name == name]
+        if found:
+            return found[0], other, candidate
+    return None, module, path
+
+
+#: How many indirection hops the fragment walk follows before it declares the
+#: statement unreadable. A BACKSTOP, not the mechanism that keeps the walk
+#: finite — `visited` does that — so it sits ABOVE the deepest chain on the
+#: real tree (measured 11 for `_uncalibrated_ep_participants`, i.e. ~5 hops of
+#: headroom) and, when it is reached, it REPORTS the blind spot instead of
+#: returning in silence.
+_FRAGMENT_DEPTH_CAP = 16
+
+#: `dir(builtins)`, hoisted: it was rebuilt every time an UNBOUND name was
+#: walked, which is exactly the arm whose cost grows with the statement.
+_BUILTIN_NAMES = frozenset(dir(builtins))
+
+#: The accumulation verbs a callee can use to hand text back through a parameter
+#: instead of returning it (see `_mutated_parameters`). `append`/`extend`/`insert`
+#: on a list, `update` on a dict, plus `+=`/`<param>[k] = …` handled separately.
+_ACCUMULATOR_METHODS = frozenset({"append", "extend", "insert", "update"})
+
+#: Builtins whose RESULT cannot carry statement text, so a parameter handed to
+#: one genuinely IS a scalar. `str` is deliberately NOT here: it returns its
+#: argument verbatim, so `f"…{str(extra)}"` would smuggle a caller's Cypher past
+#: the pin (measured GREEN while the bare `{extra}` form was RED). Anything not
+#: on this list — `str`, `list`, an SDK helper — leaves the argument reported.
+_SCALAR_COERCIONS = frozenset(
+    {"int", "float", "bool", "len", "abs", "round", "hash"})
+
+
+#: Literal containers: a value whose ENTIRE content is a constant expression.
+_LITERAL_CONTAINERS = (ast.Dict, ast.List, ast.Tuple, ast.Set)
+
+
+def _is_literal_value(node) -> bool:
+    """True when everything `node` can evaluate to is a CONSTANT.
+
+    Read by the non-NAME callee arm to decide the one benign case: a method
+    called ON a literal (`", ".join(...)`) or on a name whose every binding is
+    a literal container (`_CYPHER_CHAR_LITERAL.get(ch)` — a dict literal) can
+    only return text this walk has ALREADY collected, so it carries no blind
+    spot. A call on anything else — `b = _make(); b.suffix()` — returns text
+    from a body this walk never read, and is REPORTED.
+    """
+    if isinstance(node, ast.Constant):
+        return True
+    if isinstance(node, _LITERAL_CONTAINERS):
+        children = list(node.values if isinstance(node, ast.Dict) else node.elts)
+        if isinstance(node, ast.Dict):
+            children += [key for key in node.keys if key is not None]
+        return all(_is_literal_value(child) for child in children)
+    return False
+
+
+def _non_name_callee_is_benign(callee, bindings, params, module) -> bool:
+    """Benign cases for a call whose `func` is not a NAME.
+
+    Three, all measured — a blanket report reds the real pin:
+
+    * the receiver is a LITERAL, or a name whose every binding is a literal
+      container: `", ".join(_CALIBRATION_EVIDENCE_KINDS)` and
+      `_CYPHER_CHAR_LITERAL.get(ch)` are the two shapes the two pinned rows
+      assemble their statements with, and each value they return is drawn from
+      text this walk already read;
+    * the receiver is a PARAMETER: the `params` arm owns that decision (a
+      followed callee's parameter was walked at the call site; otherwise the
+      parameter is already reported) — `_live_only` does exactly
+      `clause.split(" AND ")` on the real tree;
+    * the callee is itself an ATTRIBUTE of a parameter (`self._suffix()`), where
+      the receiver NAME is already reported by the bare-name arm.
+    """
+    if not isinstance(callee, ast.Attribute):
+        return False  # Subscript / Lambda / … — nothing benign is known
+    receiver = callee.value
+    if isinstance(receiver, ast.Name) and receiver.id in params:
+        return True
+    if _is_literal_value(receiver):
+        return True
+    if not isinstance(receiver, ast.Name):
+        return False
+    values = list(bindings.get(receiver.id, ()))
+    if module is not None:
+        values += list(_module_bindings(module).get(receiver.id, ()))
+    return bool(values) and all(_is_literal_value(value) for value in values)
+
+
+def _fragments_of(expr, bindings, params, module, path, followed, unread,
+                  depth: int = 0, visited=None,
+                  params_are_inspected: bool = False) -> list[str]:
+    """String fragments that can flow out of `expr`, following indirection.
+
+    `bindings`/`params` belong to the ENCLOSING scope; a callee is followed with
+    ITS OWN, so `_strip_whitespace`'s local `out` and its `ch` parameter are not
+    mistaken for holes in the statement.
+
+    Anything that cannot be resolved is added to `unread` rather than skipped —
+    the census's own polarity (a fragment that cannot be shown read-only is not
+    called read-only), so a blind spot cannot be inherited silently. A callee
+    need not be a NAME: an `Attribute`/`Subscript`/`Lambda` callee cannot be
+    resolved at all, so it is reported too (`_non_name_callee_is_benign` names
+    the three benign shapes). Parameters are the exception: they carry bind data
+    and integers — but only when their
+    VALUE was already walked, which is true for a FOLLOWED CALLEE (its argument
+    was inspected in the caller's expression) and NOT true for the top-level
+    function: there the parameter is a value this walk never sees, so a directly
+    interpolated one (`f"…{extra}"`) is reported, while a parameter genuinely
+    used as a scalar argument (`int(limit)`, `len(ids)`) stays benign. A BUILTIN
+    name is benign only when this walk holds the module it came from and the module does
+    not bind that name (`format`, `set`, `next` are ordinary variable names) —
+    with no module AST there is nothing to check it against, so it is reported.
+
+    Two guards, and their POLARITY is the point:
+
+    * `visited` — `(expression, the scope it was resolved in)` pairs already
+      inspected. Without it the walk re-expanded the same subgraph on every
+      path: the real `_uncalibrated_ep_participants` walk collected 275 fragments
+      of which 230 were repeats of a literal it had already seen, where the
+      guard collects 77 — and, because it is no longer the thing keeping the
+      walk finite, 10 fragments that the old ceiling cut are now inspected.
+      ⛔ BOTH id-keyed containers RETAIN the node they key on (`visited` the
+      expression, `followed` the callee). `_resolve_callee` re-parses its target
+      on every resolution, so a bare `set[int]` keyed on a node from a throwaway
+      module could have its `id` recycled: the guard then skipped a node it had
+      never walked — neither followed nor reported, the silent blind spot this
+      docstring forbids. `test_the_fragment_walk_retains_the_nodes_it_keys_on`
+      pins that.
+    * `_FRAGMENT_DEPTH_CAP` — a backstop for a binding CYCLE, and it REPORTS.
+      It used to `return fragments` in silence: past six hops a write held in a
+      variable was neither inspected nor added to `unread`, so the pin stayed
+      green over a writing row (`_uncalibrated_ep_participants` already assembles
+      its statement at depth 7-11 — one hop from live code, not a distant
+      ceiling). A cap may stop the walk; it may never call the fragment read.
+    """
+    if visited is None:
+        visited = {}
+    fragments = _string_constants(expr)
+    if depth > _FRAGMENT_DEPTH_CAP:
+        unread.add(
+            f"<depth cap {_FRAGMENT_DEPTH_CAP} reached at "
+            f"{ast.dump(expr)[:60]}>")
+        return fragments
+    seen = visited.setdefault(id(expr), [])
+    if any(scope is bindings for _retained, scope in seen):
+        return []  # already inspected in this exact scope; nothing new to add
+    # ⛔ THE EXPRESSION IS RETAINED WITH THE SCOPE (review P2). Appending only
+    # `bindings` pinned the SCOPE dict, never the key: `expr` (a parse-tree node
+    # from `_resolve_callee`'s throwaway module) could be freed and its `id`
+    # recycled, which made the guard above fire for a DIFFERENT expression — and
+    # the walk then returned `[]`, neither inspected nor reported.
+    seen.append((expr, bindings))
+    call_names = {id(node.func) for node in ast.walk(expr)
+                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+    # A parameter passed to an UNshadowed scalar coercion cannot carry statement
+    # text; one interpolated straight into the text, or passed to `str(...)`
+    # (which returns it verbatim), can. The shadowing checks MIRROR the bare-name
+    # arm below — `int = str` makes `int(extra)` a verbatim pass-through, and
+    # exempting it re-opened the `str(extra)` hole one binding away (measured
+    # GREEN). Computed over the whole expression, so the two states cannot be
+    # confused by walk order.
+    scalar_arg_ids = {
+        id(arg) for node in ast.walk(expr)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in _SCALAR_COERCIONS
+        and node.func.id not in bindings
+        and (module is None
+             or node.func.id not in _module_bindings(module))
+        for arg in node.args}
+    for sub in ast.walk(expr):
+        if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name):
+            callee, callee_module, callee_path = _resolve_callee(
+                sub.func.id, module, path)
+            if callee is not None and id(callee) not in followed:
+                # ⛔ KEYED BY id, RETAINING THE CALLEE — the same shape as
+                # `_MODULE_BINDINGS_CACHE`. A bare `set[int]` kept no reference
+                # to `callee`, and `_resolve_callee` re-parses its target on
+                # every resolution, so a later `ast.parse` could land on the
+                # freed address: the guard then skipped a callee it had never
+                # followed — neither followed nor reported, the silent blind
+                # spot this walk's docstring forbids.
+                followed[id(callee)] = callee
+                callee_bindings = _local_bindings(ast.walk(callee))
+                for returned in _function_returns(callee):
+                    fragments.extend(_fragments_of(
+                        returned, callee_bindings, _params_of(callee),
+                        callee_module, callee_path, followed, unread, depth + 1,
+                        visited,
+                        params_are_inspected=bool(sub.args or sub.keywords)))
+                # A DEFAULT is a value the call site need not supply, so it is
+                # walked here rather than blessed with the arguments: a write
+                # sitting in `def _suffix(extra=" SET …")` is otherwise never
+                # read (measured GREEN before this loop existed).
+                for default in list(callee.args.defaults) \
+                        + list(callee.args.kw_defaults):
+                    if default is None:
+                        continue
+                    fragments.extend(_fragments_of(
+                        default, callee_bindings, _params_of(callee),
+                        callee_module, callee_path, followed, unread, depth + 1,
+                        visited, params_are_inspected=True))
+            elif callee is None and (
+                    sub.func.id not in _BUILTIN_NAMES
+                    or sub.func.id in bindings
+                    or (module is not None
+                        and sub.func.id in _module_bindings(module))):
+                # ⛔ REPORTED, never skipped — this is the polarity the
+                # docstring above states, and the asymmetry that made it a
+                # hole: an unknown NAME reds the pin below
+                # (`else: unread.add(sub.id)`), an unknown CALL did not, so a
+                # write introduced in a helper's return was invisible AND
+                # unannounced. A builtin is the one benign case (`int`, `len`)
+                # — and only when NOTHING HERE BINDS IT, the same two-table
+                # test the bare-name and scalar-coercion arms make:
+                # `next = _parts` / `format = _suffix_builder` makes the name
+                # a user callable, `_resolve_callee` does not follow an alias,
+                # and the builtin exemption then blessed a call whose body this
+                # walk never read (measured GREEN over a write in `_parts`).
+                unread.add(f"{sub.func.id}()")
+            continue
+        if isinstance(sub, ast.Call):
+            # A callee that is NOT a NAME: `Attribute` (`b.suffix()`),
+            # `Subscript` (`handlers[i]()`), `Lambda`. The NAME arm above cannot
+            # resolve it and the bare-name branch below skips it, so before this
+            # arm it contributed NEITHER a fragment NOR an `unread` entry — the
+            # defect closed for NAME callees at `aec5d1e0e`, left one branch
+            # over (measured GREEN: `b = _make(); query += f"{b.suffix()}"`).
+            # Not rescued by the receiver: when the receiver RESOLVES nothing
+            # else reports it.
+            if not _non_name_callee_is_benign(
+                    sub.func, bindings, params, module):
+                unread.add(f"{ast.unparse(sub.func)}()")
+            continue
+        if not isinstance(sub, ast.Name) or id(sub) in call_names:
+            # A callee NAME is handled above; naming it again here would report
+            # the function itself as an unread fragment.
+            continue
+        if sub.id in bindings:
+            for value in bindings[sub.id]:
+                fragments.extend(_fragments_of(
+                    value, bindings, params, module, path, followed, unread,
+                    depth + 1, visited,
+                    params_are_inspected=params_are_inspected))
+            if sub.id in params and not params_are_inspected \
+                    and id(sub) not in scalar_arg_ids:
+                # A LOCAL binding of a PARAMETER name must not HIDE it: this
+                # branch is tested before the `params` arm, so a rebind (a `for`
+                # target, a comprehension variable, a nested helper's
+                # assignment — `_local_bindings` is a flat union) resolved the
+                # name to its binding and the `params` arm was never reached,
+                # so a caller-supplied fragment was neither followed nor
+                # reported (measured GREEN: `f"…{extra}"` with
+                # `for extra in []:`). Reported as well, which is the same
+                # over-report direction `_local_bindings` already documents.
+                unread.add(sub.id)
+        elif module is not None and sub.id in _module_bindings(module):
+            for value in _module_bindings(module)[sub.id]:
+                fragments.extend(_fragments_of(
+                    value, bindings, params, module, path, followed, unread,
+                    depth + 1, visited,
+                    params_are_inspected=params_are_inspected))
+        elif sub.id in params:
+            # Benign when the value was already walked (a followed callee) or the
+            # name is an ARGUMENT to a call (`int(limit)`); otherwise the text is
+            # assembled from a value this walk never saw, and `unread` says so
+            # rather than blessing it — the census's own polarity.
+            if params_are_inspected or id(sub) in scalar_arg_ids:
+                continue
+            unread.add(sub.id)
+        elif (sub.id in _BUILTIN_NAMES and module is not None
+                and sub.id not in _module_bindings(module)):
+            # The builtin ITSELF, and that is a claim this walk can only make
+            # when it holds the module: a name that SHADOWS a builtin is a
+            # binding, and the two branches above already followed it (local
+            # first, then module) — so the ORDER is what resolves a shadow, and
+            # `format = " SET …"` at module level is inspected rather than
+            # skipped as a scalar. With no module AST there is nothing to check
+            # the name against, so it falls through to `unread`.
+            continue
+        else:
+            unread.add(sub.id)
+    return fragments
+
+
+def _assembled_statement_fragments(func, call: ast.Call,
+                                   module=None, path: Path = SDK_PY
+                                   ) -> tuple[list[str], set[str]]:
+    """String fragments reaching `call`'s statement, and the names NOT read.
+
+    Follows the indirection transitively — `query` -> f-string -> `where` ->
+    f-string -> module constant -> same-module or imported helper's returns —
+    because that indirection is exactly why the census could not resolve these
+    statements; a check that stopped at the literals in the call would pass on
+    the readable half and prove nothing about the whole.
+
+    `module` is the AST the function came from (the real pin passes `sdk.py`); a
+    synthetic non-vacuity case may pass `None`, which disables only the
+    module-constant hop.
+    """
+    statement = _statement_argument(call)
+    if statement is None:
+        return [], set()
+    unread: set[str] = set()
+    fragments = _fragments_of(statement, _local_bindings(ast.walk(func)),
+                              _params_of(func), module, path, {}, unread)
+    return fragments, unread
+
+
+def _handle_aliases(func) -> set[str]:
+    """Every local name in `func` bound to the write handle.
+
+    ALIAS-AWARE, like `enumerate_handle_surface`: the census resolves
+    `h = proj.g; h.query(...)`, so a receiver-name-only check would let a SECOND
+    reach hide behind the "found 1 call" assertion in
+    `test_the_calibration_readers_assemble_no_write_clause` — the assertion that
+    is the whole point of the pin would be the thing that misses it.
+
+    ONE cumulative pass over the function, so an alias counts for calls on
+    EITHER side of its binding. That is the over-report direction, deliberately:
+    a call is counted as a handle reach even when it precedes the binding, which
+    can only make the "found 1 call" assertion stricter, never looser. (An
+    earlier version of this docstring claimed positional scoping and sorted the
+    walk by `lineno` to implement it; the sort was inert, because the alias set
+    was complete before any call was tested. Stated as it behaves.)
+    """
+    aliases: set[str] = set()
+    params = _params_of(func)
+    for node in ast.walk(func):
+        _bind_handle_aliases(node, aliases, params)
+    return aliases
+
+
+def _handle_query_calls(func) -> list[ast.Call]:
+    """Every `<handle>.<verb>(...)`-shaped call in `func` — its handle reach.
+
+    Alias-aware AND handle-parameter aware. `_is_handle_ref` counts a function
+    PARAMETER as the handle — the census's documented over-report, because a
+    handle RECEIVED AS AN ARGUMENT has no binding to follow and that is how a
+    real writer hides (`clear_config_reset(proj.g)` → `clear_config_reset(g)`)
+    — so `params` is threaded through here exactly as `enumerate_handle_surface`
+    threads it (its `ast.Call` branch passes `fact["params"]` into
+    `_is_handle_ref`). ⛔ cited by SYMBOL, not by line number: the first version
+    of this sentence said `(line ~700)`, which is the citation-rot class this
+    PR exists to remove and was already ~19 lines stale at the head (review
+    MINOR). Without the `params` arm, a second reach through a handle
+    parameter left the "found 1 call" assertion green over two statements.
+    """
+    aliases = _handle_aliases(func)
+    params = _params_of(func)
+    return [node for node in ast.walk(func)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in _HANDLE_MUTATING_VERBS
+            and _is_handle_ref(node.func.value, aliases, params)]
+
+
+def test_the_line_anchor_matches_every_spelling():
+    """Non-vacuity for the widened anchor (review, measured).
+
+    The pin in `test_the_unresolved_hand_check_cites_symbols_not_line_numbers`
+    is only as wide as `_SDK_LINE_ANCHOR`. The first version matched
+    `sdk.py:<digits>` and NOTHING else, so five ordinary spellings of the same
+    citation passed — the pin forbade a style it admitted. Each variant below is
+    a way a human writes the anchor; every one must red.
+
+    The negative cases matter just as much: `tortoise/sdk.py` (a path, no line),
+    `sdk.py` alone, and the note's own self-description `sdk.py:<line>` (not a
+    digit) must NOT match, or the pin would red on a correct note.
+    """
+    must_match = [
+        "sdk.py:23508",
+        "sdk.py: 23508",
+        "sdk.py:L23508",
+        "sdk.py line 23508",
+        "sdk.py, 23508",
+        "sdk.py 23508",
+        # Second spelling family (review round 2, measured): `\sline\s`
+        # required the word `line` to be WHITESPACE-preceded, so a separator or
+        # a word in front of it reopened the same hole one family over.
+        "sdk.py, line 23508",
+        "sdk.py (line 23508)",
+        "sdk.py at line 23508",
+        "sdk.py::23508",
+        # Third spelling family (review round 3, measured): the note writes
+        # `tortoise/sdk.py` in BACKTICKS throughout, and `[\s,:]*` cannot
+        # consume a closing backtick — so the spelling this file is most likely
+        # to grow next was the one that passed. `#?` also admits `line #23508`.
+        "`sdk.py`:23508",
+        "`sdk.py` line 23508",
+        "`sdk.py` 23508",
+        "`tortoise/sdk.py`:23508",
+        "sdk.py line #23508",
+        "sdk.py@23508",
+        # Fourth spelling family (review round 4, measured): `#` was admitted
+        # only INSIDE the `line` alternative, so the GitHub-anchor shape — which
+        # the `[Ll]?` in this pattern exists for — missed entirely.
+        "sdk.py#L23508",
+        "sdk.py #L23508",
+        "[sdk.py](../tortoise/sdk.py#L23508)",
+        "sdk.py#23508",
+        # Fifth spelling family (review round 5, measured): `\(?` only fired when
+        # `line` followed, so the parenthesised bare line and the bare `at <n>`
+        # form passed — the two a human writes next to a path.
+        "sdk.py (23508)",
+        "sdk.py (L23508)",
+        "sdk.py at 23508",
+        "tortoise/sdk.py (23508)",
+        "SDK.PY:23508",
+        # Sixth spelling family (review, measured): the TILDE. This branch's own
+        # narrative writes `line ~511` / `(line ~700)`, so the idiom is not
+        # hypothetical — and it was the one shape the separator class missed.
+        "sdk.py:~23508",
+        "sdk.py (line ~23508)",
+        "`sdk.py` ~23508",
+        "sdk.py~23508",
+        # Seventh family (round 6, measured): the dash (this file's own prose
+        # separator) and `near` — the class is an enumeration, so both were out.
+        "sdk.py — 23508",
+        "sdk.py – 23508",
+        "sdk.py - 23508",
+        "sdk.py near line 23508",
+        "sdk.py near 23508",
+    ]
+    for variant in must_match:
+        assert _SDK_LINE_ANCHOR.search(variant), (
+            f"the line anchor misses {variant!r} — that spelling of a sdk.py "
+            "citation passes the pin while rotting exactly the same way")
+
+    must_not_match = [
+        "`tortoise/sdk.py` function `calibrate_summary`",
+        "the sdk.py module",
+        "CITED BY SYMBOL, NEVER BY `sdk.py:<line>`",
+        "sdk.py is ~37k lines",
+        # ⛔ …and the MAGNITUDE statement WITHOUT the word "is" (review,
+        # measured): admitting `~` made the tilde spelling match, so the control
+        # above passed only because of the letters in "is". Both are length
+        # statements, not citations, and both must stay green.
+        "sdk.py ~37k lines",
+        "sdk.py ~ 37k lines",
+    ]
+    for variant in must_not_match:
+        assert not _SDK_LINE_ANCHOR.search(variant), (
+            f"the line anchor FALSE-POSITIVES on {variant!r} — a correct note "
+            "must not red")
+
+
+def test_the_unresolved_hand_check_cites_symbols_not_line_numbers():
+    """The #9063 note must cite the two SYMBOLS, never a line number.
+
+    NON-VACUITY: the note as first committed carried `(sdk.py:23143)` and
+    `(sdk.py:23531)`, so a `sdk.py:<n>` anchor in the `_UNRESOLVED` block reds
+    this test. The positive half is what makes the note verifiable at all: both
+    function names must appear IN THE COMMENT TEXT, because the symbol is the
+    only anchor that survives `sdk.py` moving under it.
+
+    ⛔ The positive half reads COMMENTS, not the block's raw text: the two rows
+    are themselves string elements (`"calibrate_summary",`), so a plain
+    `name in block` was satisfied by the inventory the note is ABOUT — deleting
+    the whole note kept it green. `_comments_in` is what makes deleting the note
+    red; `test_the_symbol_pin_reads_the_comment_not_the_rows` holds that line.
+    """
+    block = _unresolved_block_source()
+    anchors = _SDK_LINE_ANCHOR.findall(block)
+    assert not anchors, (
+        "the `_UNRESOLVED` hand-check note cites sdk.py by LINE NUMBER "
+        f"({sorted(set(anchors))}) — sdk.py moves under it, so the anchor rots "
+        "into a pointer at whatever function happens to hold that line now "
+        "(measured on this note: 268 lines off, landing in a writer). Cite the "
+        "function by NAME — the symbol is authoritative, the number is not:"
+        f"\n  {block}")
+    note = _comments_in(block)
+    missing = _missing_citations(block)
+    assert not missing, (
+        "the note no longer cites the function(s) it is the hand-check FOR, "
+        f"with the read shape it claims ({missing}) — the citation must be ONE "
+        "comment line naming the function and its shape. Both halves matter: "
+        "the names are also set rows and are mentioned again in the dedupe "
+        "note, so a check that accepted any mention anywhere stayed green with "
+        "the citation replaced by prose (measured: \"the calibration reader — "
+        "`MATCH … OPTIONAL MATCH … RETURN`\"). Without the citation the note "
+        "anchors at nothing and a reader cannot re-verify it, which is exactly "
+        f"how it rotted before. Comments seen:\n  {note}")
+
+
+def test_the_symbol_pin_reads_the_comment_not_the_rows():
+    """NON-VACUITY for the symbol pin: the ROWS alone must not satisfy it.
+
+    The exact defect the P2 review found: `_unresolved_block_source()` returns
+    the whole set literal, whose elements ARE the two names, so the pin was
+    green with the entire `#9063` note deleted. This is that state, built by
+    hand: two declared rows, no comment. Under the fix `_comments_in` sees no
+    names and the pin would red; under the old `name in block` both names are
+    "present" and it would stay green.
+
+    ⛔ It drives `_missing_citations` — the PIN'S OWN PREDICATE, the function
+    the pin calls — not a copy of it (review P2). The earlier version carried a
+    private `_missing()` (twice, the first definition dead), so the test could
+    not observe the pin at all and stayed green with the pin's positive half
+    reverted to `name in block`. Now reverting `_missing_citations`'s
+    `_comments_in(...)` call to the raw block reds this test.
+    """
+    rows_only = (
+        '_UNRESOLVED = {\n'
+        '    "calibrate_summary",\n'
+        '    "_uncalibrated_ep_participants",\n'
+        '}\n')
+    note = _comments_in(rows_only)
+    assert note == "", f"the block has no comments, yet {note!r} was read"
+    # The names ARE in the raw block, on the set rows — so the assertions below
+    # discriminate on WHERE the pin reads, not on whether the text exists at
+    # all. A predicate that skimmed the raw block (`name in block`, the pre-fix
+    # shape) would find both and stay green over a note-less block.
+    assert all(name in rows_only for name, _shape in _CALIBRATION_READERS), (
+        "this case is only meaningful while the block's rows carry both names")
+    # ⛔ THE PIN'S OWN PREDICATE (`_missing_citations`, the function the pin
+    # calls), not `name not in note`: after the line above established
+    # `note == ""` that test is `True` unconditionally, so it could not fail —
+    # and it held identically with the positive half reverted. Spending the
+    # predicate on a comment-free block leaves both names MISSING, which is what
+    # makes deleting the note red.
+    assert _missing_citations(rows_only) == [
+        name for name, _shape in _CALIBRATION_READERS], (
+        "the symbol pin would stay green with the #9063 note deleted — its "
+        "positive half is reading the block's SET ROWS, not the comments")
+    # …and a name+shape pair sitting in a ROW (a string element, not a comment)
+    # must NOT satisfy it: that is the difference between reading COMMENTS and
+    # reading the block's raw text, which `_comments_in` exists to make.
+    shapes_in_rows = (
+        '_UNRESOLVED = {\n'
+        '    "calibrate_summary OPTIONAL MATCH",\n'
+        '    "_uncalibrated_ep_participants RETURN n.id",\n'
+        '}\n')
+    assert _missing_citations(shapes_in_rows) == [
+        name for name, _shape in _CALIBRATION_READERS], (
+        "a name+shape pair in a SET ROW satisfied the pin — its positive half "
+        "is reading the block's raw text, not its comments")
+    # …and the note, once present in the shape the pin requires (ONE comment
+    # line carrying the name AND its read shape), satisfies it.
+    with_note = rows_only.replace(
+        "_UNRESOLVED = {",
+        "#   `calibrate_summary` — `MATCH … OPTIONAL MATCH … RETURN` (a read)\n"
+        "#   `_uncalibrated_ep_participants` — `MATCH … RETURN n.id` (a read)\n"
+        "_UNRESOLVED = {")
+    assert _missing_citations(with_note) == [], (
+        "the pin does not even accept a note written in its own required "
+        f"shape, so the assertion above proves nothing (comments: "
+        f"{_comments_in(with_note)!r})")
+
+
+def test_a_second_unresolved_assignment_reds_the_pin():
+    """NON-VACUITY for the ONE-assignment guard in `_unresolved_block_span`.
+
+    The span used to `return` on the first module-level `_UNRESOLVED = {…}`, so
+    a SECOND assignment — which REBINDS the name, and is therefore the block
+    that governs at runtime — left both pins validating the DEAD first literal,
+    silently. Pre-fix this case returns the first span and the assertion below
+    never fires; with the fix it reds.
+    """
+    one = (
+        '_UNRESOLVED = {\n'
+        '    "a",\n'
+        '}\n')
+    assert "a" in _unresolved_block_span(one), (
+        "the span helper does not even find a single assignment")
+    with pytest.raises(AssertionError, match="assigned 2 times"):
+        _unresolved_block_span(one + "\n_UNRESOLVED = {\n    'b',\n}\n")
+    # A rebinding that the OLD loop would have skipped rather than reded.
+    with pytest.raises(AssertionError, match="assigned 0 times"):
+        _unresolved_block_span("_UNRESOLVED: set[str] = {'a'}\n")
+
+
+#: The module `_census_writer_names` censuses, as the census spells it (the same
+#: `relative_to(ROOT).as_posix()` form `_modules_reaching_the_handle()` emits).
+SDK_REL = "tortoise/sdk.py"
+
+
+def _proven_read_names(rel: str = SDK_REL, register=None) -> frozenset[str]:
+    """Bare names `register` proves read-only **for `rel`**, and only that module.
+
+    ⛔ THE MODULE KEY IS THE WHOLE POINT (review P2, latent fail-open).
+    `_PROVEN_READS` is keyed `(rel_path, scope-qualified name)` across the whole
+    package, while the writer set it is subtracted from is `sdk.py`'s and the
+    consumer matches BARE callee names. Subtracting without the `rel` check
+    resolves the identity of the *removed* function by bare name across every
+    module the register names, so a proven read added for, say,
+    `tortoise/event_store.py` would silently un-guard an `sdk.py` writer that
+    merely shares the bare name — and the arm would then report nothing, with
+    its note reading true for the wrong reason. That is the SAME bare-name
+    collision class `test_no_two_census_entries_share_a_bare_function_name`
+    already gates for inventories. `test_a_proven_read_is_subtracted_only_for_
+    its_own_module` reds if this filter is dropped.
+    """
+    register = _PROVEN_READS if register is None else register
+    return frozenset(_bare_name(key) for mod, key in register if mod == rel)
+
+
+def _sdk_surface() -> dict:
+    """`enumerate_handle_surface` over `sdk.py`, parsed once per process.
+
+    Cached separately from the writer set: the writer set is a DERIVED view
+    (`surface − proven reads`), so the non-vacuity tests need the raw surface to
+    show the subtraction is load-bearing rather than tautological.
+    """
+    cached = _SDK_SURFACE_CACHE.get("surface")
+    if cached is None:
+        cached = enumerate_handle_surface(SDK_PY.read_text(), str(SDK_PY))
+        _SDK_SURFACE_CACHE["surface"] = cached
+    return cached
+
+
+def _census_writer_names(surface: dict | None = None,
+                         register=None) -> frozenset[str]:
+    """Bare names the census either PROVES reaches a write or CANNOT prove a read.
+
+    `enumerate_handle_surface` keeps a fact for every function holding at least
+    one mutating `<handle>.<verb>` call, so that surface IS the census's own
+    answer to "does this name write" — using it here keeps this pin from
+    introducing a second, narrower notion of "write" (#3595's shared-decision
+    precedent, which this file's module docstring states). Keys are
+    scope-qualified (`TortoiseSDK.set_point_baseline`) and are resolved with
+    `_bare_name`, the SAME resolver `_inventory_of` uses — it strips the
+    `@<lineno>` suffix too, so a same-scope redefinition cannot make a writer
+    name unmatchable by accident.
+
+    ⛔ THE POLARITY IS "WRITE **OR** NOT-PROVEN-READ", NOT "WRITE" (review,
+    measured). A surface entry whose every mutating call is `<unresolved>` is a
+    function the census could not settle — it is on the surface for the same
+    reason `_UNRESOLVED` exists, and 45 of 83 entries here are that shape. The
+    message this set drives therefore may not say "the census PROVES reaches the
+    write handle": for that majority the census proves nothing at all.
+
+    What IS subtracted is the file's own positive verdict: a name registered in
+    `_PROVEN_READS` has been hand-checked AND mechanically pinned as an
+    unresolved-but-read row (`test_every_proven_read_names_a_real_census_entry`
+    checks both its census verdict and the exact statement kinds), so calling it
+    from another row may not red on the census's silence.
+
+    The remaining `_UNRESOLVED`-declared names still red — deliberately. Their
+    hand-check covers THEIR OWN statement, not a call from someone else's row,
+    and the over-report direction is the one this file prefers. What was wrong
+    was the reason, not the direction.
+
+    ⛔ the subtraction is `_proven_read_names(SDK_REL)` — `sdk.py`'s proven reads
+    ONLY, because this set is matched against bare callees in `sdk.py`.
+
+    `surface` / `register` are the non-vacuity seam: supplying either bypasses
+    the cache so a test can hand in a synthetic surface and a synthetic register
+    and observe the module filter. The real pin passes neither.
+    """
+    if surface is not None or register is not None:
+        surface = _sdk_surface() if surface is None else surface
+        return frozenset(_bare_name(key) for key in surface) \
+            - _proven_read_names(SDK_REL, register)
+    cached = _CENSUS_WRITER_NAMES.get("names")
+    if cached is None:
+        cached = _census_writer_names(surface=_sdk_surface())
+        _CENSUS_WRITER_NAMES["names"] = cached
+    return cached
+
+
+#: Filled on first use: parsing `sdk.py` is ~0.25 s and every
+#: `_calibration_read_offenders` call would otherwise pay it again. Kept apart
+#: from the derived writer set so the raw surface stays observable.
+_SDK_SURFACE_CACHE: dict[str, dict] = {}
+
+#: The derived view (`surface − sdk.py's proven reads`), filled on first use.
+_CENSUS_WRITER_NAMES: dict[str, frozenset[str]] = {}
+
+
+def _calibration_read_offenders(functions, readers=_CALIBRATION_READERS,
+                                module=None, path: Path = SDK_PY,
+                                writers: frozenset[str] | None = None
+                                ) -> list[str]:
+    """The per-row checks of the note, over `functions` (name -> def node).
+
+    Extracted so the synthetic non-vacuity tests can run the SAME code on a
+    hand-built function instead of asserting against a copy of it.
+
+    `writers` is `_census_writer_names()` — "write **OR** not-proven-read", NOT
+    "the names the census proves a write": 45 of its 83 entries are functions
+    the census could not settle, so the offender message this set drives may not
+    claim the census PROVES a write (see that function's docstring for the full
+    polarity, and `test_the_census_writer_set_states_its_own_polarity` for the
+    pin). `None` means "ask the census", which is what the real pin does.
+    """
+    writers = _census_writer_names() if writers is None else writers
+    offenders: list[str] = []
+    for name, read_shape in readers:
+        func = functions.get(name)
+        if func is None:
+            offenders.append(f"{name}: no such function in tortoise/sdk.py")
+            continue
+        calls = _handle_query_calls(func)
+        if len(calls) != 1:
+            offenders.append(
+                f"{name}: the note says ONE handle reach, found {len(calls)} "
+                "`<handle>.query(...)` call(s) — re-check the row before "
+                "trusting either")
+            continue
+        fragments, unread = _assembled_statement_fragments(
+            func, calls[0], module, path)
+        if unread:
+            offenders.append(
+                f"{name}: {sorted(unread)} could not be read out of the "
+                "statement at all, so this pin cannot say the row is a read — "
+                "resolve them, or extend the resolver and say why (a "
+                "`<depth cap …>` entry means the walk gave up on a binding "
+                "cycle or a chain longer than `_FRAGMENT_DEPTH_CAP`: raise it "
+                "and re-check, never delete the row on this message alone)")
+        assembled = " ".join(fragments)
+        write = _assembled_write_evidence(assembled)
+        if write:
+            offenders.append(
+                f"{name}: the assembled statement carries {write} — "
+                "this row is not a read any more")
+        statement_expr = _statement_argument(calls[0])
+        if statement_expr is not None:
+            offenders.extend(_accumulator_offenders(
+                func, statement_expr, module, path))
+        if read_shape not in assembled:
+            offenders.append(
+                f"{name}: the assembled statement no longer contains "
+                f"{read_shape!r}, so the note's stated read shape is stale")
+        # The note's second claim: no write through ANOTHER SDK method. Pinned
+        # against the census's writer list rather than one method name — a
+        # `set_point_baseline`-only check left `self.invalidate_point(…)` (or
+        # `record_calibration`, or `_touch_inherited_at`) invisible while the
+        # note went false. The name may appear in advice STRINGS (it does), so
+        # this pins CALLS. The handle reach itself is excluded here: it is the
+        # call the statement above was assembled from, and `query` is on the
+        # surface too (`TortoiseSDK.query`), so counting it would red every row.
+        aliases = _handle_aliases(func)
+        params = _params_of(func)
+        for node in ast.walk(func):
+            if not isinstance(node, ast.Call):
+                continue
+            callee = getattr(node.func, "attr", None) or getattr(
+                node.func, "id", None)
+            if callee not in writers:
+                continue
+            receiver = getattr(node.func, "value", None)
+            if receiver is not None and _is_handle_ref(
+                    receiver, aliases, params):
+                continue
+            offenders.append(
+                f"{name}: CALLS `{callee}`, which the census either proves "
+                "reaches the write handle or cannot prove read-only (both are "
+                "on `enumerate_handle_surface`, and this message may not claim "
+                "more than that) — the note says this row is a read, so either "
+                "the call goes, the row moves out of `_UNRESOLVED`, or the "
+                "callee is registered in `_PROVEN_READS` with its statements")
+    return offenders
+
+
+def test_the_calibration_readers_assemble_no_write_clause():
+    """Re-derive the note's claim from `sdk.py`: one handle READ each, no write.
+
+    The claim is not decorative — it is the entire reason these two functions
+    are in `_UNRESOLVED` (``statement not provably read-only``) instead of being
+    declared writers. Checked mechanically so a later edit that adds a `SET` to
+    one of them reds HERE (and forces the row to be re-examined) instead of
+    rotting the note into a false claim.
+
+    Every fragment that can reach the assembled statement is inspected, because
+    the reason the census could not settle these is that the `WHERE` text is
+    built in a LOCAL and interpolated — the same indirection is followed here,
+    INCLUDING an append (`query += …`), which is how
+    `_uncalibrated_ep_participants` finishes its statement.
+    """
+    module = ast.parse(SDK_PY.read_text(), str(SDK_PY))
+    functions = {node.name: node for node in ast.walk(module)
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    offenders = _calibration_read_offenders(functions, module=module)
+    assert not offenders, (
+        "the hand-check note above `_UNRESOLVED` no longer matches the code it "
+        "describes — fix the note, or move the row out of that inventory:\n  "
+        + "\n  ".join(offenders))
+
+
+def test_the_write_pin_sees_a_write_appended_with_augassign():
+    """NON-VACUITY for the `ast.AugAssign` arm of `_local_bindings` (P1).
+
+    `_uncalibrated_ep_participants` builds its statement with `query = …` in an
+    `if`/`else` and finishes it with `query += …`. Without an `ast.AugAssign`
+    arm the appended fragment was never inspected, so a write added THAT way
+    produced no offender while the stated read shape stayed satisfied by the
+    plain assignments — the join in `_assembled_statement_fragments` simply
+    never saw it, so the pin stayed green over a writing row. This is that
+    shape, declared read-only on the first two fragments and writing on the
+    third, which is precisely how the real function is laid out.
+    """
+    source = '''
+class Door:
+    def reading(self, proj, ids, *, limit=None):
+        where = f"WHERE n.id IN $ids"
+        query = f"MATCH (n:Point) WHERE {where} RETURN n.id"
+        if limit is not None:
+            query += " SET n.poked = 1"
+        return proj.g.query(query, params={"ids": ids}).result_set
+'''
+    functions = {node.name: node for node in ast.walk(ast.parse(source))
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    offenders = _calibration_read_offenders(
+        functions, (("reading", "RETURN n.id"),))
+    assert any("not a read any more" in offender for offender in offenders), (
+        "a write appended with `query += …` produced no offender, so the note "
+        f"can rot false with nothing red (offenders={offenders})")
+
+    # …and the polarity holds: the same function with a READ-only append is clean.
+    clean = source.replace('" SET n.poked = 1"', 'f" LIMIT {int(limit)}"')
+    clean_functions = {
+        node.name: node for node in ast.walk(ast.parse(clean))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    assert not _calibration_read_offenders(
+        clean_functions, (("reading", "RETURN n.id"),)), (
+        "a read-only `query += …` must not red the pin")
+
+
+def test_the_write_pin_uses_the_shared_write_classifier():
+    r"""NON-VACUITY for the #3595 rule: no local notion of "write" (review P1).
+
+    The pin first declared its own clause regex, which disagreed with the
+    runtime door in BOTH directions: it was case-sensitive and had no
+    `FOREACH`/`DROP`, so three real writes were invisible to it; and it lacked
+    the `(?<![\w.$:])` lookbehind, so a property named like a keyword reddened
+    it on a well-formed READ (#7174's false refusal, one layer out).
+    """
+    invisible_to_a_local_regex = {
+        "lower-case clause":
+            "MATCH (n:Point) WHERE n.id IN $ids set n.ep = 1 RETURN n.id",
+        "FOREACH body":
+            "MATCH (n:Point) FOREACH (x IN [1] | SET n.ep = 1) RETURN n.id",
+        "DROP": "MATCH (n:Point) RETURN n.id DROP INDEX ON :Point(id)",
+        "write PROCEDURE":
+            "MATCH (n:Point) RETURN n.id CALL "
+            "db.idx.fulltext.createNodeIndex('Point','content')",
+    }
+    for label, statement in invisible_to_a_local_regex.items():
+        assert _assembled_write_evidence(statement) is not None, (
+            f"{label}: `_statement_writes` calls this a write but the pin did "
+            f"not flag it — {statement!r}")
+    read_with_a_keyword_property = (
+        "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.SET, n.DROP")
+    assert _assembled_write_evidence(read_with_a_keyword_property) is None, (
+        "a READ whose property names look like clauses was flagged as a write "
+        "— the canonical classifier excludes `n.SET`/`n.DROP` (#7174), so a "
+        "local regex without that lookbehind would false-red this pin")
+
+
+def _chain_source(poke_links: int) -> str:
+    """A reader whose ONLY write clause sits behind `poke_links` NAME hops.
+
+    The read shape stays in the statement itself, so a walk that stops following
+    names still sees `RETURN n.id` and still sees no write: the fragment below is
+    exactly the shape where following indirection is the whole check.
+    """
+    lines = [
+        "class Door:",
+        "    def reading(self, proj):",
+        '        query = (f"MATCH (n:Point) WHERE n.id IN $ids"',
+        '                 " RETURN n.id ")',
+        '        p0 = " SET n.poked = 1"',
+    ]
+    for link in range(1, poke_links):
+        lines.append(f'        p{link} = f"{{p{link - 1}}}"')
+    lines.append(f'        query += f"{{p{poke_links - 1}}}"')
+    lines.append("        return proj.g.query(query).result_set")
+    return "\n".join(lines) + "\n"
+
+
+def _offenders_for(source: str, read_shape: str = "RETURN n.id",
+                   with_module: bool = False) -> list[str]:
+    """`_calibration_read_offenders` over a synthetic source, no census walk.
+
+    `with_module` threads the parsed source as the module AST, which is what the
+    real pin does (`sdk.py`); without it the module-constant hop is disabled and
+    a name that only the MODULE binds is unreadable — the documented polarity of
+    `_fragments_of`.
+    """
+    tree = ast.parse(source)
+    functions = {node.name: node for node in ast.walk(tree)
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    return _calibration_read_offenders(
+        functions, (("reading", read_shape),),
+        module=tree if with_module else None, writers=frozenset())
+
+
+def test_the_fragment_walk_follows_a_name_past_six_hops():
+    """NON-VACUITY for the depth cap in `_fragments_of` (review P2).
+
+    The walk returned its string constants and STOPPED at `depth > 6`, without
+    recording anything in `unread` — so past six hops a write held in a
+    VARIABLE was neither inspected nor reported, and
+    `_calibration_read_offenders` (`if unread:`) had nothing to say. Measured on
+    the real tree, `_uncalibrated_ep_participants` assembles its statement at
+    depth 7-11, i.e. the ceiling was already a single hop from live code: here
+    the write is 12 name hops down, the read shape is satisfied at the top, and
+    the pre-fix walk came back clean over a statement that writes.
+    """
+    offenders = _offenders_for(_chain_source(12))
+    assert any("not a read any more" in offender for offender in offenders), (
+        "a write reached through 12 name hops produced no offender, so the "
+        "depth ceiling silently dropped it — the pin stays green over a "
+        f"writing row (offenders={offenders})")
+
+
+def test_the_fragment_walk_retains_the_nodes_it_keys_on():
+    """NON-VACUITY for the identity guards in `_fragments_of` (review P2).
+
+    Both guards are keyed on `id(node)`, and keying on an id is only safe when
+    the entry RETAINS the node (`_MODULE_BINDINGS_CACHE` was fixed that way; its
+    `test_the_module_bindings_cache_retains_its_module` holds it). Here
+    `followed` was a bare `set[int]` and `visited` appended only the SCOPE dict,
+    so a freed node's `id` could be recycled and the guard then fired for a
+    DIFFERENT node: the walk returned `[]` for an expression it never inspected,
+    neither followed nor reported. `_resolve_callee` re-parses on every
+    resolution, which is exactly how such a node becomes unreachable while its
+    id stays a live key.
+
+    Pre-fix this reds deterministically: a `set` of ints has no `.items()`, and
+    a `visited` entry is a bare dict, not a `(expr, scope)` pair.
+    """
+    source = (
+        "def _parts():\n"
+        '    return " SET n.poked = 1"\n'
+        "\n"
+        "def reading(proj):\n"
+        '    query = f"MATCH (n:Point) RETURN n.id {_parts()}"\n'
+        "    return proj.g.query(query).result_set\n")
+    tree = ast.parse(source)
+    reading = next(node for node in tree.body
+                   if isinstance(node, ast.FunctionDef)
+                   and node.name == "reading")
+    bindings = _local_bindings(reading)
+    assert "query" in bindings, "the synthetic reader binds no statement"
+    followed: dict = {}
+    visited: dict = {}
+    _fragments_of(bindings["query"][0], bindings, _params_of(reading),
+                  tree, Path("synthetic_sdk.py"), followed, set(),
+                  visited=visited)
+    assert followed, (
+        "the walk followed no NAME callee, so this case proves nothing about "
+        "the `followed` guard")
+    for key, callee in followed.items():
+        assert id(callee) == key, (
+            "a `followed` entry is keyed by an id but does not retain the "
+            "callee, so a recycled id makes the guard skip a callee it never "
+            "followed — neither followed nor reported")
+        assert isinstance(callee, (ast.FunctionDef, ast.AsyncFunctionDef)), (
+            f"the retained value is not the callee ({callee!r})")
+    assert visited, (
+        "the walk recorded no `visited` entry, so this case proves nothing "
+        "about that guard")
+    for key, seen in visited.items():
+        for expr, _scope in seen:
+            assert id(expr) == key, (
+                "a `visited` entry does NOT retain the expression it is "
+                "keyed by (it kept the scope dict instead), so a recycled id "
+                "can fire the guard for a different expression and the walk "
+                "returns [] without inspecting or reporting it")
+
+
+def test_the_fragment_walk_fails_closed_at_the_depth_cap():
+    """NON-VACUITY for the CAP ITSELF: it must report, never return in silence.
+
+    A cap is unavoidable (the walk follows names, and a binding cycle would
+    otherwise recurse forever), but its polarity has to be the census's: a
+    fragment that cannot be shown read-only is NOT called read-only. The chain
+    below is deliberately deeper than any sane cap, so the pin must red with the
+    blind spot named — the pre-fix `return fragments` said nothing at all and
+    this same function came back clean.
+    """
+    offenders = _offenders_for(_chain_source(40))
+    assert any("depth cap" in offender for offender in offenders), (
+        "the walk hit its depth ceiling and reported nothing, so a write "
+        "deeper than the ceiling is invisible AND unannounced — a silent "
+        f"blind spot is the fail-open this pin exists to prevent "
+        f"(offenders={offenders})")
+
+
+def test_a_builtin_shadowing_name_is_resolved_not_assumed_scalar():
+    """The builtin arm is BENIGN only for a name the walk can PROVE is a builtin.
+
+    `sub.id in dir(builtins)` skipped every builtin-shaped name as though it
+    carried a scalar, rebuilding `dir(builtins)` once per name. Three states are
+    pinned here:
+
+    * a MODULE-level binding that shadows a builtin (`format`, `set`, `next` are
+      ordinary variable names) resolves through the module hop, so its fragment
+      — a write, here — is inspected;
+    * the same shadow with NO module AST is reported in `unread` rather than
+      skipped: with nothing to check the name against, "this is the builtin" is
+      a claim the walk cannot make. This half is NON-VACUOUS — the pre-fix arm
+      skipped it in silence and the function came back clean over a write;
+    * a name that really IS the builtin stays benign (no offender, no `unread`).
+
+    The first half is a regression guard rather than a non-vacuity case: the
+    local-then-module branches already preceded the builtin arm, so the ORDER
+    was already resolving a shadow — what is new is that the arm states that
+    dependency instead of relying on it invisibly.
+    """
+    shadowing = (
+        'format = " SET n.poked = 1"\n'
+        '\n'
+        'class Door:\n'
+        '    def reading(self, proj):\n'
+        '        query = "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id "\n'
+        '        query += f"{format}"\n'
+        '        return proj.g.query(query).result_set\n')
+    offenders = _offenders_for(shadowing, with_module=True)
+    assert any("not a read any more" in offender for offender in offenders), (
+        "a module-level binding that SHADOWS a builtin was skipped as a "
+        f"scalar, so its statement fragment was never inspected "
+        f"(offenders={offenders})")
+    blind = _offenders_for(shadowing)
+    assert any("could not be read out" in offender for offender in blind), (
+        "with no module AST the walk cannot tell a shadowing name from the "
+        "builtin, and it skipped it anyway — a silent blind spot is the "
+        f"fail-open this pin exists to prevent (offenders={blind})")
+
+    # …and a name that IS the builtin stays benign: no offender, no `unread`.
+    benign = (
+        'class Door:\n'
+        '    def reading(self, proj, ids):\n'
+        '        query = (f"MATCH (n:Point) WHERE n.id IN $ids "\n'
+        '                 f"LIMIT {int(len(ids) > 0)}")\n'
+        '        query += " RETURN n.id"\n'
+        '        return proj.g.query(query).result_set\n')
+    assert not _offenders_for(benign, with_module=True), (
+        "a genuine builtin call in the statement was reported as unread, so "
+        "every `int(...)`/`len(...)` fragment would red the pin")
+
+
+def test_the_handle_reach_count_follows_an_alias():
+    """NON-VACUITY for the alias arm of `_handle_query_calls` (review P1).
+
+    The census resolves `h = proj.g; h.query(…)`; a receiver-name-only check
+    here would see only ONE reach in the function below and the "found 1 call"
+    assertion would pass while the second statement — the one a write would be
+    added to — stayed uninspected.
+    """
+    source = '''
+class Door:
+    def reading(self, proj):
+        proj.g.query("MATCH (n:Point) RETURN n.id")
+        h = proj.g
+        h.query("MATCH (n:Point) RETURN n.id")
+'''
+    func = next(node for node in ast.walk(ast.parse(source))
+                if isinstance(node, ast.FunctionDef))
+    assert len(_handle_query_calls(func)) == 2, (
+        "the handle reach through the alias `h` was not counted, so a second "
+        "statement (and any write added to it) is invisible to the pin")
+
+
+def test_the_handle_reach_follows_a_handle_parameter():
+    """NON-VACUITY for the `params` arm of `_handle_query_calls` (review MINOR).
+
+    The census counts a handle RECEIVED AS AN ARGUMENT — its documented
+    over-report, and the shape a real writer hides in
+    (`clear_config_reset(proj.g)` → `clear_config_reset(g)`).
+    `_handle_query_calls` called `_is_handle_ref` WITHOUT the parameter set, so
+    a reach whose receiver is a handle parameter was not a reach at all: the
+    "found 1 call" assertion accounted for the statements it could see and
+    stayed green over the one it could not.
+
+    `self` is excluded from that set on purpose (`_params_of`, matching
+    `enumerate_handle_surface`), so `self.<verb>(…)` is never mistaken for a
+    handle reach — the second assertion holds that.
+    """
+    source = '''
+class Door:
+    def reading(self, g, ids):
+        return g.query("MATCH (n:Point) WHERE n.id IN $ids RETURN n.id")
+'''
+    func = next(node for node in ast.walk(ast.parse(source))
+                if isinstance(node, ast.FunctionDef))
+    assert len(_handle_query_calls(func)) == 1, (
+        "the handle reach through the handle PARAMETER `g` was not counted — "
+        "a second such reach would leave the pin's one-call assertion green "
+        "over an uninspected statement")
+    assert "self" not in _params_of(func), (
+        "`self` was counted as a handle parameter, so every `self.<verb>(…)` "
+        "call would read as a handle reach and the one-call assertion would "
+        "fire on a method call that touches no handle at all")
+
+
+def test_an_unresolvable_callee_is_reported_not_dropped():
+    """NON-VACUITY for the REPORT arm of `_fragments_of` (review P1).
+
+    The callee arm recursed only `if callee is not None` and then `continue`d
+    unconditionally, so a call the walk could not resolve contributed neither a
+    fragment nor an `unread` entry — while an unknown NAME redded the pin a few
+    lines below. The pin therefore stayed GREEN over a statement whose suffix
+    it never read, which is the polarity `_fragments_of`'s own docstring
+    forbids ("anything that cannot be resolved is added to `unread` rather
+    than skipped").
+
+    Reachable shape: `_resolve_callee` matches `ImportFrom` by `alias.name`,
+    never by the alias, so `from .cypher import build_suffix as _suffix` +
+    `query += _suffix()` is invisible; and a package import
+    (`from .projection import _stored_prop_value`) resolved through no
+    `__init__.py` hop at all.
+    """
+    source = (
+        'class Door:\n'
+        '    def reading(self, proj):\n'
+        '        query = "MATCH (n:Point) RETURN n.id "\n'
+        '        query += f"{_suffix()}"\n'
+        '        return proj.g.query(query).result_set\n')
+    offenders = _offenders_for(source)
+    assert any("could not be read out" in offender for offender in offenders), (
+        "a call the walk could not resolve was dropped in silence, so the pin "
+        "stayed green over a statement whose suffix was never read — exactly "
+        f"the fail-open this arm exists to close (offenders={offenders})")
+
+    # …and a genuine BUILTIN call stays benign, or every `int(...)`/`len(...)`
+    # fragment would red the rows this pin exists to keep green.
+    benign = (
+        'class Door:\n'
+        '    def reading(self, proj, ids):\n'
+        '        query = (f"MATCH (n:Point) WHERE n.id IN $ids "\n'
+        '                 f"LIMIT {int(len(ids) > 0)}")\n'
+        '        query += " RETURN n.id"\n'
+        '        return proj.g.query(query).result_set\n')
+    assert not _offenders_for(benign), (
+        "a genuine builtin call was reported as unread, so `int(...)` would "
+        "red every pinned row")
+
+
+def test_a_shadowed_builtin_CALLEE_is_reported_not_blessed():
+    """NON-VACUITY for the builtin half of the callee arm (review P2).
+
+    The arm exempted every builtin-SHAPED name from `unread` without consulting
+    the binding tables — while the bare-name arm and the scalar-coercion arm a
+    few lines up both refuse to bless such a name unless it is UNBOUND. So
+    `next = _parts` / `format = _suffix_builder` (or an alias import) made the
+    name a user callable, `_resolve_callee` did not follow it, the name matched
+    `_BUILTIN_NAMES`, nothing was reported, and the callee's `return` text was
+    never walked: `query += f"{next()}"` came back CLEAN over a write in
+    `_parts`. Measured: `[]` before this fix, both halves.
+    """
+    module_level = (
+        'def _parts():\n'
+        '    return " SET n.poked = 1"\n'
+        'next = _parts\n'
+        'class Door:\n'
+        '    def reading(self, proj):\n'
+        '        query = "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id "\n'
+        '        query += f"{next()}"\n'
+        '        return proj.g.query(query).result_set\n')
+    offenders = _offenders_for(module_level, with_module=True)
+    assert any("could not be read out" in offender for offender in offenders), (
+        "a MODULE binding that shadows a builtin was called as a function and "
+        "the call was blessed as the builtin, so its return text — a write, "
+        f"here — was never read nor reported (offenders={offenders})")
+
+    # ⛔ THE LOCAL HALF USED TO BE VACUOUS (review P2, measured): the source
+    # below bound `parts = _parts` and called `format(parts())`, so `format` was
+    # genuinely UNBOUND (the builtin exemption was CORRECT there) and the
+    # offender the assertion saw (`parts()`) came from the unresolvable-callee
+    # arm, fixed one commit earlier — reverting `or sub.func.id in bindings` left
+    # the whole file green. The local now shadows the builtin itself, so this
+    # half observes the LOCAL table and nothing else: `format` IS bound in
+    # `reading`, `_resolve_callee` still does not follow it, and without the
+    # local-binding disjunct the call is blessed as the builtin and `_parts`'
+    # return text is never read.
+    local = (
+        'def _parts():\n'
+        '    return " SET n.poked = 1"\n'
+        'class Door:\n'
+        '    def reading(self, proj):\n'
+        '        format = _parts\n'
+        '        query = "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id "\n'
+        '        query += f"{format()}"\n'
+        '        return proj.g.query(query).result_set\n')
+    offenders = _offenders_for(local, with_module=True)
+    assert any("could not be read out" in offender and "format()" in offender
+               for offender in offenders), (
+        "a LOCAL binding of a builtin-shaped name was blessed as the builtin, "
+        f"so its call was neither followed nor reported (offenders={offenders})")
+
+
+def test_an_attribute_callee_on_a_resolved_value_is_reported():
+    """NON-VACUITY for the NON-NAME callee arm of `_fragments_of` (review P2).
+
+    An `ast.Call` whose `func` is an `Attribute` matched neither the NAME arm
+    nor the bare-name arm, so it contributed neither a fragment nor an `unread`
+    entry — the defect closed for NAME callees at `aec5d1e0e`, one branch over.
+    It is not rescued by the receiver: when the receiver RESOLVES (a local bound
+    to a call, a module binding) nothing else reports it. Measured: `[]` over
+    `b = _make(); query += f"{b.suffix()}"`.
+
+    The benign half is load-bearing, not decoration: a blanket report reds the
+    two real rows, which assemble their statements with `", ".join(...)` and
+    `_CYPHER_CHAR_LITERAL.get(ch)`, and `_live_only` does `clause.split(…)` on a
+    followed callee's parameter.
+    """
+    via_local = (
+        'def _make():\n'
+        '    return object()\n'
+        'class Door:\n'
+        '    def reading(self, proj):\n'
+        '        query = "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id "\n'
+        '        b = _make()\n'
+        '        query += f"{b.suffix()}"\n'
+        '        return proj.g.query(query).result_set\n')
+    offenders = _offenders_for(via_local, with_module=True)
+    assert any("could not be read out" in offender for offender in offenders), (
+        "a method call on a resolved local was dropped in silence, so a write "
+        f"returned by it is invisible AND unannounced (offenders={offenders})")
+
+    via_module = (
+        'def _make():\n'
+        '    return object()\n'
+        'BUILDER = _make()\n'
+        'class Door:\n'
+        '    def reading(self, proj):\n'
+        '        query = "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id "\n'
+        '        query += f"{BUILDER.suffix()}"\n'
+        '        return proj.g.query(query).result_set\n')
+    offenders = _offenders_for(via_module, with_module=True)
+    assert any("could not be read out" in offender for offender in offenders), (
+        "a method call on a MODULE binding was dropped in silence — the same "
+        f"fail-open one hop out (offenders={offenders})")
+
+    # The three measured benign shapes, each kept benign on purpose.
+    benign = (
+        "KINDS = ('statement', 'observation')\n"
+        "CHARS = {'q': 'x'}\n"
+        "def _live_only(clause):\n"
+        "    return ' AND '.join(clause.split(' AND '))\n"
+        "class Door:\n"
+        "    def reading(self, proj):\n"
+        '        query = "MATCH (n:Point) WHERE n.id IN $ids "\n'
+        "        query += f\"RETURN n.id {' - '.join(KINDS)} {CHARS.get('q')} \"\n"
+        '        query += f"{_live_only(\'a AND b\')}"\n'
+        '        return proj.g.query(query).result_set\n')
+    offenders = _offenders_for(benign, with_module=True)
+    assert not offenders, (
+        "a method call on a LITERAL, on a name bound only to a literal "
+        "container, or on a followed callee's parameter was reported — those "
+        "are the shapes the two pinned rows assemble their statements with "
+        f"(`, `.join / dict `.get` / `_live_only`'s `clause.split`): "
+        f"{offenders}")
+
+
+def test_the_params_set_matches_the_census_for_a_positional_only_parameter():
+    """NON-VACUITY for `_params_of`'s census parity (review P2).
+
+    `_params_of` claimed to build its set "exactly as `enumerate_handle_surface`
+    does it" but omitted `args.posonlyargs`, while the census includes it and
+    `_is_handle_ref` treats a `params` member as the handle. A handle received
+    as a positional-only parameter was therefore not a reach: as a SECOND reach
+    it left the "found 1 call" assertion green over an uninspected statement —
+    the same hole the `params` arm closed in `db73165cc`.
+    """
+    source = '''
+class Door:
+    def reading(self, g, /, proj):
+        proj.g.query("MATCH (n:Point) RETURN n.id")
+        g.query("MATCH (n:Point) RETURN n.id")
+'''
+    func = next(node for node in ast.walk(ast.parse(source))
+                if isinstance(node, ast.FunctionDef))
+    assert "g" in _params_of(func), (
+        "a positional-only parameter was missing from `_params_of`, so a "
+        "reach through it was not counted and a second statement stayed "
+        "uninspected")
+    assert len(_handle_query_calls(func)) == 2, (
+        "the handle reach through the POSITIONAL-ONLY parameter `g` was not "
+        "counted, so the one-call assertion stays green over two reaches")
+
+
+def test_the_statement_argument_mirrors_the_census_for_execute_command():
+    """NON-VACUITY for `_statement_argument`'s per-verb index (review P2).
+
+    `enumerate_handle_surface` takes `execute_command`'s statement at index 2
+    (`"GRAPH.QUERY", <graph>, <cypher>`); this helper returned `args[0]` for
+    every verb, so the Cypher was never inspected and the row red only because
+    its read shape was absent — a false FAIL whose message blames the note.
+    """
+    call = next(
+        node for node in ast.walk(ast.parse(
+            'proj.g.execute_command("GRAPH.QUERY", "g", '
+            '"MATCH (n:Point) RETURN n.id")'))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "execute_command")
+    statement = _statement_argument(call)
+    assert isinstance(statement, ast.Constant) \
+        and statement.value == "MATCH (n:Point) RETURN n.id", (
+        "`execute_command`'s statement was read from index 0, so the Cypher "
+        f"at index 2 was never inspected (got {ast.dump(statement) if statement else None})")
+
+
+def test_a_directly_interpolated_parameter_is_reported_not_blessed():
+    """NON-VACUITY for the parameter arm of `_fragments_of` (review P2).
+
+    `elif sub.id in params: continue` blessed EVERY parameter of the enclosing
+    scope, on the docstring's justification that parameters "carry bind data and
+    integers". That is sound for a FOLLOWED CALLEE (its argument was walked in
+    the caller's expression) but NOT for the top-level function, where there is
+    no caller expression in view: a caller passing `" SET n.poked = 1"` into a
+    parameter interpolated as `f"…{extra}"` produced a writing statement the pin
+    called a read. A parameter used as a scalar ARGUMENT (`int(limit)`) stays
+    benign, or the real rows would red.
+    """
+    source = (
+        'class Door:\n'
+        '    def reading(self, proj, extra):\n'
+        '        query = f"MATCH (n:Point) RETURN n.id {extra}"\n'
+        '        return proj.g.query(query).result_set\n')
+    offenders = _offenders_for(source)
+    assert any("could not be read out" in offender for offender in offenders), (
+        "a parameter interpolated straight into the statement was blessed as "
+        "read-only, so a caller-supplied write passed the pin — the top-level "
+        f"scope has no argument to have inspected (offenders={offenders})")
+
+    # ⛔ `str(extra)` is the same hole one call away: `str` is a builtin (so the
+    # callee REPORT arm is silent) and returns its argument VERBATIM, so an
+    # exemption that blessed "any call argument" let a caller's Cypher through.
+    # Only scalar coercions (`int`, `len`, …) may bless an argument.
+    via_str = (
+        'class Door:\n'
+        '    def reading(self, proj, extra):\n'
+        '        query = f"MATCH (n:Point) RETURN n.id {str(extra)}"\n'
+        '        return proj.g.query(query).result_set\n')
+    assert any("could not be read out" in offender
+               for offender in _offenders_for(via_str)), (
+        "`str(extra)` is a builtin call, so it was treated as a benign scalar "
+        "and a caller-supplied write passed through verbatim — only coercions "
+        "whose result cannot carry statement text may exempt an argument")
+
+    benign = (
+        'class Door:\n'
+        '    def reading(self, proj, ids):\n'
+        '        query = (f"MATCH (n:Point) WHERE n.id IN $ids "\n'
+        '                 f"LIMIT {int(len(ids) > 0)}")\n'
+        '        query += " RETURN n.id"\n'
+        '        return proj.g.query(query).result_set\n')
+    assert not _offenders_for(benign), (
+        "a parameter used as a scalar ARGUMENT (`int(...)`, `len(...)`) was "
+        "reported as unread, so every such fragment would red a real row")
+
+
+def test_the_callee_resolver_prefers_the_package_over_a_sibling_shim():
+    """NON-VACUITY for `_resolve_callee`'s package preference (review P2).
+
+    `tortoise/projection.py` exists as a 37-line shim, so a MODULE-first
+    resolver parsed the shim, found no def, and never reached the package
+    `__init__.py` where `_stored_prop_value` actually lives — the package hop
+    added for exactly that import never fired, and nothing tested it. Python
+    resolves `import tortoise.projection` to the PACKAGE, so the resolver must
+    too (verified: the package wins at runtime).
+    """
+    tree = ast.parse(SDK_PY.read_text(), str(SDK_PY))
+    func, _module, _path = _resolve_callee("_stored_prop_value", tree, SDK_PY)
+    assert func is not None, (
+        "`from .projection import _stored_prop_value` did not resolve: the "
+        "sibling `tortoise/projection.py` shim was parsed INSTEAD of the "
+        "package `__init__.py` that Python actually imports, so that callee's "
+        "return was unreadable")
+
+
+def test_a_write_in_a_callee_default_is_read():
+    """NON-VACUITY for the DEFAULT walk in `_fragments_of` (review P2).
+
+    `params_are_inspected` blesses a callee's parameters because "its argument
+    was inspected in the caller's expression" — but a DEFAULT is a value the
+    call site need not supply at all, so it was neither inspected nor reported:
+    a callee called WITH an argument (so its parameters are blessed) whose other
+    default carries the write came back GREEN with an empty `unread`, because
+    `_function_returns` never walks defaults.
+    """
+    source = (
+        'def _suffix(seen, extra=" SET n.poked = 1"):\n'
+        '    return f"{seen}{extra}"\n'
+        '\n'
+        'class Door:\n'
+        '    def reading(self, proj):\n'
+        '        query = "MATCH (n:Point) RETURN n.id "\n'
+        '        query += f"{_suffix(\"\")}"\n'
+        '        return proj.g.query(query).result_set\n')
+    offenders = _offenders_for(source, with_module=True)
+    assert any("not a read any more" in offender for offender in offenders), (
+        "a write sitting in a callee's DEFAULT was never walked, and the "
+        "call's argument presence blessed the parameters — so the pin stayed "
+        f"green over a writing statement (offenders={offenders})")
+
+
+def test_a_local_rebind_does_not_hide_a_parameter():
+    """NON-VACUITY for the `bindings`-shadows-parameter arm (review P2).
+
+    The `bindings` branch is tested BEFORE the `params` arm, and `_local_bindings`
+    is a flat union that also collects a `for` target, a comprehension variable
+    and a nested helper's assignment. So rebinding a parameter name resolved it
+    to the binding and the `params` arm was never reached: a caller-supplied
+    fragment was neither followed nor reported (`f"…{extra}"` came back GREEN
+    once `for extra in []:` was added).
+    """
+    source = (
+        'class Door:\n'
+        '    def reading(self, proj, extra):\n'
+        '        query = f"MATCH (n:Point) RETURN n.id {extra}"\n'
+        '        for extra in []:\n'
+        '            pass\n'
+        '        return proj.g.query(query).result_set\n')
+    assert any("could not be read out" in offender
+               for offender in _offenders_for(source)), (
+        "a local rebind of a parameter name HID the parameter, so a "
+        "caller-supplied fragment was neither followed nor reported — the "
+        "exact hole the bare `{extra}` case is reported for")
+
+
+def test_a_shadowed_scalar_coercion_does_not_exempt_its_argument():
+    """NON-VACUITY for the shadowing checks on the scalar allow-list (P2).
+
+    The exemption keyed on the call's NAME, without checking that the name still
+    IS the builtin — the asymmetry the bare-name arm already handles. So
+    `int = str; int(extra)` blessed its argument while `str(extra)` is reported,
+    i.e. the `str` hole re-opened one binding away. Same for a module-level
+    rebind (`round = str`).
+    """
+    local = (
+        'class Door:\n'
+        '    def reading(self, proj, extra):\n'
+        '        int = str\n'
+        '        query = f"MATCH (n:Point) RETURN n.id {int(extra)}"\n'
+        '        return proj.g.query(query).result_set\n')
+    assert any("could not be read out" in offender
+               for offender in _offenders_for(local, with_module=True)), (
+        "a locally SHADOWED scalar coercion (`int = str`) exempted its "
+        "argument, re-opening the `str(extra)` pass-through one binding away")
+
+    module_level = (
+        'round = str\n'
+        'class Door:\n'
+        '    def reading(self, proj, extra):\n'
+        '        query = f"MATCH (n:Point) RETURN n.id {round(extra)}"\n'
+        '        return proj.g.query(query).result_set\n')
+    assert any("could not be read out" in offender
+               for offender in _offenders_for(module_level, with_module=True)), (
+        "a MODULE-level rebind of a scalar coercion exempted its argument, so "
+        "a caller-supplied fragment passed through the pin")
+
+
+def test_a_yielding_callee_is_read_not_skipped():
+    """NON-VACUITY for the generator arm of `_fragments_of` (review P2).
+
+    The callee arm followed `_function_returns` only, so a RESOLVED callee with
+    no `Return` — a generator — contributed NO fragments and nothing to
+    `unread`: the resolver succeeded, so the "cannot be resolved" arm never ran
+    either. Measured: a write yielded by a helper passed GREEN, same-module and
+    through the package hop, which is the silent-drop class this branch closed
+    for an unresolvable NAME, one branch over. `yield`/`yield from` hand the
+    caller a string exactly as `return` does.
+
+    The control is the same source with `yield` swapped for `return`: it reds,
+    so this test distinguishes the arm and not merely "some offender".
+    """
+    yielding = (
+        'def _parts():\n'
+        '    yield " SET n.poked = 1"\n'
+        '\n'
+        'class Door:\n'
+        '    def reading(self, proj):\n'
+        '        query = "MATCH (n:Point) RETURN n.id " + "".join(_parts())\n'
+        '        return proj.g.query(query).result_set\n')
+    offenders = _offenders_for(yielding, with_module=True)
+    assert any("not a read any more" in offender for offender in offenders), (
+        "a write YIELDED by a resolved callee was neither read nor reported — "
+        f"the generator shape is invisible (offenders={offenders})")
+
+    # `yield from` is the second half of the fix and had NO test of its own:
+    # dropping `ast.YieldFrom` left the whole file green (review round 4,
+    # measured), i.e. the arm was correct and unguarded.
+    delegating = (
+        'def _inner():\n'
+        '    yield " SET n.poked = 1"\n'
+        '\n'
+        'def _parts():\n'
+        '    yield from _inner()\n'
+        '\n'
+        'class Door:\n'
+        '    def reading(self, proj):\n'
+        '        query = "MATCH (n:Point) RETURN n.id " + "".join(_parts())\n'
+        '        return proj.g.query(query).result_set\n')
+    assert any("not a read any more"
+               for offender in _offenders_for(delegating, with_module=True)), (
+        "a write delegated with `yield from` was neither read nor reported — "
+        "`ast.YieldFrom` is the arm no test named")
+
+    returning = yielding.replace('yield " SET n.poked = 1"',
+                                 'return [" SET n.poked = 1"]')
+    assert any("not a read any more"
+               for offender in _offenders_for(returning, with_module=True)), (
+        "the control does not red, so this test proves nothing about the "
+        "yield arm")
+
+
+def test_a_write_fed_through_an_accumulator_parameter_is_reported():
+    """NON-VACUITY for the accumulator arm of a row (review round 4).
+
+    The expression walk's only fragment sources are a RETURNED or YIELDED value.
+    A callee that writes into a collection the caller passed in returns nothing
+    and yields nothing, and because the resolver SUCCEEDED the "cannot be
+    resolved" arm never ran either: `parts = []; _fill(parts)` then
+    `"".join(parts)` came back GREEN with a `SET` in `_fill`. Reported rather
+    than followed — what the callee appends is not a value this walk can bind.
+
+    The control keeps it NARROW: a callee that mutates nothing must stay clean,
+    or the arm reds every row that hands a dict to a helper.
+    """
+    accumulating = (
+        'def _fill(out):\n'
+        '    out.append(" SET n.poked = 1")\n'
+        '\n'
+        'class Door:\n'
+        '    def reading(self, proj):\n'
+        '        parts = []\n'
+        '        _fill(parts)\n'
+        '        query = "MATCH (n:Point) RETURN n.id " + "".join(parts)\n'
+        '        return proj.g.query(query).result_set\n')
+    offenders = _offenders_for(accumulating, with_module=True)
+    assert any("writes into `parts`" in offender for offender in offenders), (
+        "a write fed back through a MUTATED PARAMETER was neither read nor "
+        f"reported (offenders={offenders})")
+
+    benign = (
+        'def _noop(out):\n'
+        '    print(out)\n'
+        '\n'
+        'class Door:\n'
+        '    def reading(self, proj):\n'
+        '        parts = []\n'
+        '        _noop(parts)\n'
+        '        query = "MATCH (n:Point) RETURN n.id " + "".join(parts)\n'
+        '        return proj.g.query(query).result_set\n')
+    assert not _offenders_for(benign, with_module=True), (
+        "a call that mutates NOTHING was reported as an accumulator — this arm "
+        "must name the mutating shapes, not any call that takes a parameter")
+
+
+#: Every mutating shape `_mutated_parameters` / `_names_feeding` CLAIM to see,
+#: as a (callee body, call site, how the fragment reaches the statement) triple.
+#: Enumeration matters: the first version of the accumulator test exercised
+#: `.append` only, and four of the five declared arms could then be deleted with
+#: the whole file green (review round 5, measured — `_ACCUMULATOR_METHODS`
+#: narrowed to `{"append"}`, the `+=` arm dead, the subscript arm dead, and
+#: `_names_feeding`'s aug-assign arm dead all passed).
+_ACCUMULATOR_SHAPES: dict[str, tuple[str, str, str]] = {
+    "append": (
+        'def _fill(out):\n    out.append(" SET n.poked = 1")\n',
+        "        _fill(parts)\n",
+        '        query = "MATCH (n:Point) RETURN n.id " + "".join(parts)\n'),
+    "extend": (
+        'def _fill(out):\n    out.extend([" SET n.poked = 1"])\n',
+        "        _fill(parts)\n",
+        '        query = "MATCH (n:Point) RETURN n.id " + "".join(parts)\n'),
+    "insert": (
+        'def _fill(out):\n    out.insert(0, " SET n.poked = 1")\n',
+        "        _fill(parts)\n",
+        '        query = "MATCH (n:Point) RETURN n.id " + "".join(parts)\n'),
+    "update": (
+        'def _fill(out):\n    out.update({"k": " SET n.poked = 1"})\n',
+        "        _fill(parts)\n",
+        '        query = "MATCH (n:Point) RETURN n.id " + "".join(parts.values())\n'),
+    "augassign": (
+        'def _fill(out):\n    out += [" SET n.poked = 1"]\n',
+        "        _fill(parts)\n",
+        '        query = "MATCH (n:Point) RETURN n.id " + "".join(parts)\n'),
+    "subscript": (
+        'def _fill(out):\n    out[0] = " SET n.poked = 1"\n',
+        "        _fill(parts)\n",
+        '        query = "MATCH (n:Point) RETURN n.id " + "".join(parts)\n'),
+    # …and the two CALL-SIDE shapes, which are about reaching the callee at all
+    # rather than about how it mutates (review round 5):
+    "keyword_argument": (
+        'def _fill(out):\n    out.append(" SET n.poked = 1")\n',
+        "        _fill(out=parts)\n",
+        '        query = "MATCH (n:Point) RETURN n.id " + "".join(parts)\n'),
+    "method_callee": (
+        'class Door:\n    def _fill(self, out):\n'
+        '        out.append(" SET n.poked = 1")\n',
+        "        self._fill(parts)\n",
+        '        query = "MATCH (n:Point) RETURN n.id " + "".join(parts)\n'),
+    # ⛔ …and the callee-side ALIAS: the parameter is handed to a local before it
+    # is mutated (review round 5, measured GREEN before this arm existed).
+    "callee_alias": (
+        'def _fill(out):\n    acc = out\n    acc.append(" SET n.poked = 1")\n',
+        "        _fill(parts)\n",
+        '        query = "MATCH (n:Point) RETURN n.id " + "".join(parts)\n'),
+    # ⛔ …and the FORWARDED parameter (review P2, measured GREEN): the callee the
+    # row calls mutates nothing itself — it hands the parameter to a second
+    # callee that does. Reading only the callee's own syntax left the shape silent
+    # one hop out; `_mutated_parameters` is transitive over the callee's calls.
+    "forwarded_argument": (
+        'def _forward(out):\n    out.append(" SET n.poked = 1")\n'
+        '\n'
+        'def _fill(out):\n    _forward(out)\n',
+        "        _fill(parts)\n",
+        '        query = "MATCH (n:Point) RETURN n.id " + "".join(parts)\n'),
+    # ⛔ …and the closure's OWN declared sub-shapes (round 6, measured): with only
+    # the single-hop row, `a = b = out` fell to `node.targets[:1]`, the
+    # REVERSE-ordered two-hop fell to a one-pass loop, and `cls` could drop out of
+    # the receiver tuple — all three with the whole file green.
+    "chained_alias": (
+        'def _fill(out):\n    a = b = out\n    b.append(" SET n.poked = 1")\n',
+        "        _fill(parts)\n",
+        '        query = "MATCH (n:Point) RETURN n.id " + "".join(parts)\n'),
+    "reverse_two_hop_alias": (
+        'def _fill(out):\n    b = a\n    a = out\n'
+        '    b.append(" SET n.poked = 1")\n',
+        "        _fill(parts)\n",
+        '        query = "MATCH (n:Point) RETURN n.id " + "".join(parts)\n'),
+    "classmethod_callee": (
+        'class Door:\n    @classmethod\n    def _fill(cls, out):\n'
+        '        out.append(" SET n.poked = 1")\n',
+        "        cls._fill(parts)\n",
+        '        query = "MATCH (n:Point) RETURN n.id " + "".join(parts)\n'),
+    # …and the closure: `parts` reaches the statement only through an AUGMENTED
+    # local, which is what `_names_feeding`'s aug-assign arm adds.
+    "augassign_binding": (
+        'def _fill(out):\n    out.append(" SET n.poked = 1")\n',
+        "        _fill(parts)\n",
+        '        query = "MATCH (n:Point) RETURN n.id "\n'
+        '        query += "".join(parts)\n'),
+}
+
+
+def test_a_module_level_accumulator_is_reported_too():
+    """The mutation channel one SCOPE out: a module container, not a parameter.
+
+    `_mutated_parameters` binds a named parameter at the call site, so a callee
+    that accumulates into a MODULE-level list and is called with NO argument had
+    nothing to bind: `PARTS = []` / `_fill()` / `query = "… " +
+    `"".join(PARTS)` came back clean while `_fill` appended `" SET …"`
+    (review P2, measured GREEN before this arm). The name is matched through
+    `_module_bindings`, so a callee's own LOCAL list cannot red a correct row.
+    """
+    source = (
+        'PARTS = []\n'
+        '\n'
+        'def _fill():\n'
+        '    PARTS.append(" SET n.poked = 1")\n'
+        '\n'
+        'class Row:\n'
+        '    def reading(self, proj):\n'
+        '        _fill()\n'
+        '        query = "MATCH (n:Point) RETURN n.id " + "".join(PARTS)\n'
+        '        return proj.g.query(query).result_set\n')
+    offenders = _offenders_for(source, with_module=True)
+    assert any("writes into module-level `PARTS`" in offender
+               for offender in offenders), (
+        "a callee accumulating into a MODULE-level container was neither read "
+        f"nor reported (offenders={offenders})")
+
+    # CONTROL: the same call over a module container that does NOT feed the
+    # statement (the row reads its own local) is ordinary code, and must stay
+    # green — the name match is scoped to the statement's feeding set.
+    benign = (
+        'OTHER = []\n'
+        '\n'
+        'def _fill():\n'
+        '    OTHER.append(" SET n.poked = 1")\n'
+        '\n'
+        'class Row:\n'
+        '    def reading(self, proj):\n'
+        '        parts = []\n'
+        '        _fill()\n'
+        '        query = "MATCH (n:Point) RETURN n.id " + "".join(parts)\n'
+        '        return proj.g.query(query).result_set\n')
+    assert not _offenders_for(benign, with_module=True), (
+        "a module accumulator that never reaches the statement was reported")
+
+
+@pytest.mark.parametrize("shape", sorted(_ACCUMULATOR_SHAPES))
+def test_every_declared_accumulator_shape_is_reported(shape):
+    """Each mutating / call-side shape the arm CLAIMS to see must report.
+
+    Table-driven on purpose: a hand-written case per arm is how `.append` became
+    the only covered shape while the docstring named six (review round 5). Each
+    row fails if its arm is deleted or narrowed, so the enumeration is the
+    non-vacuity proof for the whole declared surface rather than one sample.
+    """
+    body, call, statement = _ACCUMULATOR_SHAPES[shape]
+    source = f"{body}\nclass Row:\n    def reading(self, proj):\n        parts = []\n{call}{statement}        return proj.g.query(query).result_set\n"
+    offenders = _offenders_for(source, with_module=True)
+    assert any("writes into `parts`" in offender for offender in offenders), (
+        f"the `{shape}` shape is declared by the arm but was neither read nor "
+        f"reported (offenders={offenders})")
+
+
+def test_the_census_writer_set_states_its_own_polarity():
+    """The writers arm is "write OR NOT-PROVEN-READ", and its message says so.
+
+    `enumerate_handle_surface` keys a function for ANY mutating call, including
+    one it could not resolve — so 45 of 83 entries are functions the census
+    proves nothing about (33 of them this file's own hand-checked `_UNRESOLVED`
+    READ rows). The arm's message claimed "the census PROVES reaches the write
+    handle", which is false for that majority, and a call to a name already
+    proven read here (`_PROVEN_READS`) redded a correct row for it.
+
+    So: the proven-read register is subtracted, a provable writer is not, and
+    the message may not assert more than "write or not-proven-read".
+
+    ⛔ THE OLD `assert not (names & proven)` IS GONE (review P2, inert
+    assertion). `names` is `_census_writer_names()`, which IS
+    `surface − proven`, so `names & proven` was empty by construction: it could
+    not fail for any input, including the cross-module subtraction defect it
+    named, so it never observed the property. The subtraction is now pinned by
+    two assertions that CAN fail: the live register must actually be on the
+    censused surface (or the subtraction is decorative), and a proven read from
+    ANOTHER module must not be subtracted
+    (`test_a_proven_read_is_subtracted_only_for_its_own_module`).
+    """
+    names = _census_writer_names()
+    proven = _proven_read_names()
+    assert proven, "`_PROVEN_READS` is empty, so this test proves nothing"
+    raw = frozenset(_bare_name(key) for key in _sdk_surface())
+    assert proven & raw, (
+        "no `_PROVEN_READS` name is on the censused surface at all, so the "
+        "subtraction changes nothing and the register is decorative — the "
+        f"`rel` key no longer matches the census's spelling ({SDK_REL!r})")
+    # WHAT GUARANTEES THE SUBTRACTION IS THE DEFINITION (`surface − proven`), not
+    # an `assert not (names & proven)` here: that assertion held by construction
+    # and therefore for every input. What is checkable is that the definition is
+    # CONFINED to one module and LOAD-BEARING on the real tree — both above/below.
+    assert "invalidate_point" in names, (
+        "a name the census genuinely proves writes is missing from the set — "
+        "the subtraction above cannot be the whole surface")
+
+    source = '''
+class Door:
+    def reading(self, proj):
+        query = "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id"
+        self._find_point_by_content("x")
+        return proj.g.query(query).result_set
+'''
+    func = next(node for node in ast.walk(ast.parse(source))
+                if isinstance(node, ast.FunctionDef))
+    offenders = _calibration_read_offenders(
+        {"reading": func}, (("reading", "RETURN n.id"),),
+        writers=frozenset({"_find_point_by_content"}))
+    assert offenders, "the unproven-callee arm produced nothing to inspect"
+    assert all("which the census proves reaches the write handle" not in offender
+               for offender in offenders), (
+        "the message asserts the census PROVES a write for an entry that may "
+        f"only be unproven (offenders={offenders})")
+    assert all("either proves reaches the write handle or cannot prove "
+               "read-only" in offender for offender in offenders), (
+        "the message does not state the set's real polarity, so the next "
+        f"reader will trust a claim the census does not make "
+        f"(offenders={offenders})")
+
+
+def test_a_proven_read_is_subtracted_only_for_its_own_module():
+    """NON-VACUITY for the module half of the proven-read subtraction (P2).
+
+    `_PROVEN_READS` is keyed `(rel_path, scope-qualified name)` across the whole
+    package, but the set it is subtracted from is `sdk.py`'s surface and the
+    consumer (`_calibration_read_offenders`) matches BARE callee names. Dropping
+    the `rel` check — the pre-fix `{_bare_name(key) for _rel, key in
+    _PROVEN_READS}` — therefore lets a proven read registered for ANY module
+    un-guard an `sdk.py` writer that merely shares the bare name, in the
+    fail-open direction: one module's proof silences another module's write.
+
+    The subject is a SYNTHETIC surface and a SYNTHETIC register, so the test is
+    fast and independent of what `sdk.py` currently contains; it reds on exactly
+    that one-clause revert (`if mod == rel` dropped, or made unconditional).
+    """
+    surface = {"TortoiseSDK.invalidate_point": {}}
+    foreign = {("tortoise/event_store.py", "TortoiseStore.invalidate_point")}
+    still_a_writer = _census_writer_names(surface=surface, register=foreign)
+    assert "invalidate_point" in still_a_writer, (
+        "a proven read registered for ANOTHER module removed an `sdk.py` writer "
+        "of the same bare name — one module's proof un-guarded another "
+        f"module's write (writers={sorted(still_a_writer)})")
+    own = {("tortoise/sdk.py", "TortoiseSDK.invalidate_point")}
+    assert not _census_writer_names(surface=surface, register=own), (
+        "a proven read registered for `sdk.py` ITSELF was not subtracted, so "
+        "the register's whole purpose is gone — a correct row reds on the "
+        "census's silence again")
+
+
+def test_the_offenders_helper_docstring_states_the_real_polarity():
+    """NON-VACUITY for the `writers` parameter's own docstring (review P2).
+
+    `_census_writer_names`'s polarity was corrected to "write **OR**
+    not-proven-read" (45 of 83 entries are functions the census could not
+    settle), and the offender message was corrected with it — but the parameter
+    DOCSTRING eleven lines below still said "the set of names the census proves
+    write", i.e. the narrower, false thing. No pin covered prose, so the
+    overtuned sentence could sit beside the corrected one indefinitely and tell
+    every reader of the helper the wrong contract.
+
+    Red on the pre-fix text: it contained the literal "proves write".
+    """
+    doc = " ".join((_calibration_read_offenders.__doc__ or "").split())
+    assert doc, "`_calibration_read_offenders` lost its docstring"
+    assert "proves write" not in doc, (
+        "the `writers` docstring claims the census PROVES a write again — the "
+        "real polarity is 'write OR not-proven-read' (45 of 83 entries are "
+        f"unproven), so the parameter's stated contract is false (doc={doc!r})")
+    assert "not-proven-read" in doc, (
+        "the `writers` docstring no longer states the 'write OR "
+        "not-proven-read' polarity it receives from `_census_writer_names` "
+        f"(doc={doc!r})")
+    assert "`None`" in doc, (
+        "the `writers` docstring no longer documents the `None` default, which "
+        f"is what the real pin passes (doc={doc!r})")
+
+
+def test_the_calibration_reader_list_is_bound_to_the_rows_it_guards():
+    """NON-VACUITY for `_CALIBRATION_READERS` itself (review P2).
+
+    Both pins iterate this hand-maintained tuple, so deleting an entry silently
+    UN-GUARDED that row: with `_uncalibrated_ep_participants` removed, its
+    citation check and its claim re-derivation both vanished and every pin
+    stayed green. Binding the tuple to the `#9063` rows in `_UNRESOLVED` makes a
+    dropped (or extra) entry red instead of quiet — the same `assert scanned >
+    50` idiom the symbol pin already uses.
+    """
+    names = {name for name, _ in _CALIBRATION_READERS}
+    assert names == {"calibrate_summary", "_uncalibrated_ep_participants"}, (
+        "`_CALIBRATION_READERS` no longer names exactly the two #9063 rows, "
+        f"so a row is un-guarded without a red (got {sorted(names)})")
+    assert names <= set(_UNRESOLVED), (
+        "a `_CALIBRATION_READERS` entry is not an `_UNRESOLVED` row, so the "
+        "pin would check a function the note does not cover")
+
+
+def test_the_write_pin_sees_a_write_through_another_sdk_method():
+    """NON-VACUITY for the cross-method arm of `_calibration_read_offenders`.
+
+    The note claimed "no write through another SDK method" while the pin knew
+    exactly one name (`set_point_baseline`). These rows are hand-checked READS
+    whether or not the statement carries a clause, so a `self.invalidate_point(
+    …)` (or `record_calibration`, or `_touch_inherited_at`) added to either
+    function left the pin green and the note false. The arm is driven by the
+    census's own writer list, and the polarity is held both ways: a call the
+    census does not prove writes is clean, and the handle reach itself is never
+    mistaken for a method write (`query` is on the surface too).
+    """
+    source = '''
+class Door:
+    def reading(self, proj):
+        query = "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id"
+        self.invalidate_point("p1")
+        return proj.g.query(query).result_set
+'''
+    func = next(node for node in ast.walk(ast.parse(source))
+                if isinstance(node, ast.FunctionDef))
+    offenders = _calibration_read_offenders(
+        {"reading": func}, (("reading", "RETURN n.id"),),
+        writers=frozenset({"invalidate_point"}))
+    assert any("invalidate_point" in offender for offender in offenders), (
+        "a write through ANOTHER SDK method produced no offender, so the "
+        f"note's second claim can rot false with nothing red (offenders={offenders})")
+
+    # …and the arm is not a blanket "any call": a name the census does not
+    # prove writes is clean.
+    clean = source.replace('self.invalidate_point("p1")', 'self._get_proj()')
+    clean_func = next(node for node in ast.walk(ast.parse(clean))
+                      if isinstance(node, ast.FunctionDef))
+    assert not _calibration_read_offenders(
+        {"reading": clean_func}, (("reading", "RETURN n.id"),),
+        writers=frozenset({"invalidate_point"})), (
+        "a call to a function the census does not prove writes was reported as "
+        "a write — this arm must follow the census, not sound like a keyword"
+        )
+
+    # …and the handle reach is not double-counted as a method write, even though
+    # `query` is itself on the census's surface (`TortoiseSDK.query`).
+    handle_only = source.replace('        self.invalidate_point("p1")\n', '')
+    handle_func = next(node for node in ast.walk(ast.parse(handle_only))
+                       if isinstance(node, ast.FunctionDef))
+    assert not _calibration_read_offenders(
+        {"reading": handle_func}, (("reading", "RETURN n.id"),),
+        writers=frozenset({"query"})), (
+        "the handle reach `proj.g.query(...)` was reported as a write through "
+        "another SDK method")
+
+
+def test_the_module_bindings_cache_retains_its_module():
+    """NON-VACUITY for the identity cache in `_module_bindings` (review MINOR).
+
+    The cache is keyed on `id(module)`, and the comment used to claim the id
+    "cannot be recycled underneath it". That is true only for the sdk AST the
+    caller holds — NOT for the imported-callee hop, where `_resolve_callee`
+    parses `tortoise/live.py`, uses it, and drops it while its id stays a live
+    key: a later `ast.parse` can land on that address and the cache would hand
+    back ANOTHER module's constants (wrong fragments can resolve a write away).
+    The entry now RETAINS the AST, which makes the recycled id unrepresentable
+    rather than merely unlikely — and the identity guard is held below too.
+    """
+    module = ast.parse('_WHERE = "WHERE n.id IN $ids"')
+    key = id(module)
+    bindings = _module_bindings(module)
+    assert "_WHERE" in bindings
+    entry = _MODULE_BINDINGS_CACHE[key]
+    assert entry[0] is module, (
+        "the cache entry does not retain the AST it was built from, so nothing "
+        "keeps this `id` from being recycled by a later `ast.parse` while the "
+        "key is still live")
+    assert entry[1] is bindings, (
+        "the cache entry does not carry the bindings it answers with")
+    assert _module_bindings(module) is bindings, (
+        "a repeated lookup for the SAME module must not rebuild")
+
+    # An id that collides with an entry built from a DIFFERENT AST must be
+    # rejected — that is the exact state a recycled id produces, simulated
+    # deterministically.
+    impostor = ast.parse('_LIVE = "AND n.status = 1"')
+    _MODULE_BINDINGS_CACHE[id(impostor)] = (object(), {"_STALE": []})
+    assert "_STALE" not in _module_bindings(impostor), (
+        "a cache entry whose key matched but whose AST was a different object "
+        "was returned, so a recycled id serves another module's constants")
+    assert "_LIVE" in _module_bindings(impostor), (
+        "the impostor entry was not replaced with the real module's bindings")
 
 
 #: THE APPLY-FIRST LANE'S MEMBERSHIP, PINNED (#9206). One line per door, so a
@@ -1149,10 +3758,17 @@ def test_the_derived_recompute_lane_has_its_own_kind():
     and is why the kind must say so explicitly instead of borrowing the
     journal-first label.
     """
-    assert _kind({"scopes": [(1, "_derived_recompute_write_scope")],
-                  "writes": [(2, "query", "SET n.x = 1")],
+    kind = _kind({"scopes": [(1, "_derived_recompute_write_scope")],
+                 "writes": [(2, "query", "SET n.x = 1")],
                   "appends": [], "end_lineno": 3,
-                  "scope_spans": [(1, 3)]}) == "derived-recompute"
+                  "scope_spans": [(1, 3)]})
+    assert kind == "derived-recompute"
+    # …and the FLIP gate must accept that kind as declared: dropping it
+    # from `_DECLARED_KINDS` reds here (review MINOR) instead of sending
+    # the author of a declared door to add an inventory row.
+    assert kind in _DECLARED_KINDS, (
+        "`_kind` returns a declared kind the flip gate does not accept — "
+        "its remedy would be an inventory row, which weakens the door")
 
 
 #: Doors whose apply-first ORDER the census cannot prove: an append attributed
@@ -2394,7 +5010,21 @@ def test_the_capture_door_delegates_its_writes_to_declared_doors():
         "write of its own — a `no-journal` row for a door with nothing to "
         "journal is a stale census entry (see `_NO_JOURNAL`'s comment)"
     )
+
     assert "capture_session" not in _APPLY_FIRST_DOORS
+    assert "capture_session" not in _all_inventoried(), (
+        "a stale inventory row names a function the census no longer emits — "
+        "`test_the_inventories_hold_no_stale_entry` is the gate that refuses it")
+
+    # …and the writes did not vanish: they moved to doors the census DOES key.
+    delegated = {"_stamp_capture_attempt_state", "_stamp_entity_link_counters",
+                 "_write_session_and_turns", "_materialize_session_source",
+                 "_stamp_capture_provenance"}
+    missing = sorted(name for name in delegated
+                     if not any(key.split(".")[-1] == name for key in surface))
+    assert not missing, (
+        f"{missing} are no longer on the census surface, so the capture door "
+        "has no write-like reach AND no proven home for the ones it lost")
 
     # The stamps did not become orphans: both successors ARE in the census and
     # both DECLARE, which is the whole point of the split.

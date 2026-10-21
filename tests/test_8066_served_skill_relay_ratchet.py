@@ -41,7 +41,9 @@ class it exists to catch (the #1349/#2938 silent-drop class). A change to a
 non-core SOURCE_PATTERNS entries (`tests/_html_links.py`,
 `tests/test_embedded_concurrency.py`), where a named-surface match REPLACES the
 `core` fallback in `select()` (#2938) and selects `onboarding`. This file is
-registered on BOTH surfaces, and
+registered on ALL THREE surfaces a `tests/**/*.py` file can select — `core`,
+`onboarding`, and `eval` (#8066 ⟂ #9380: `tests/eval/ask/` is an exact `eval`
+SOURCE_PATTERNS entry, so the ratchet's subject reaches that surface too) — and
 `test_8066_relay_ratchet_is_registered_on_every_surface_it_covers` enumerates
 every in-scope file and pins the property rather than the declaration.
 

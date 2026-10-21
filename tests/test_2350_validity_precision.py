@@ -28,6 +28,25 @@ from tortoise.sdk import TortoiseSDK
 A_DATE = "2024-06-01"
 
 
+def _utc_today() -> datetime.date:
+    """#9406: the window walk's day boundary is a UTC calendar day.
+
+    ``assembly._norm_date`` truncates an aware instant in **UTC** — its note
+    is explicit: *"aware instants truncate in UTC — NEVER the machine-local
+    zone (a host-dependent day-boundary would scramble the as-of equality
+    boundary)"* — and every product caller names the day from the UTC clock
+    (``ask_lane``: ``datetime.now(UTC).strftime("%Y-%m-%d")``,
+    ``time_aware.resolve_question_date``: ``datetime.now(UTC).date()``).
+
+    A local ``date.today()`` asserts a day boundary the product denies, so on
+    a box whose local date LAGS UTC (any US zone) these three tests went red
+    for the hours between UTC midnight and local midnight — a clock reading,
+    not a state reading: 3 failed / 35 passed with ``TZ=America/New_York``,
+    38 passed with ``TZ=UTC``, same tree.
+    """
+    return datetime.datetime.now(datetime.UTC).date()
+
+
 @pytest.fixture
 def lane(tmp_path):
     """(sdk, events_dir) with the journal wired so rebuild parity is testable."""
@@ -545,7 +564,7 @@ def test_assembly_window_rows_carry_the_precision_block(lane):
     ended = sdk.create_point("statement", "ended", validFrom="2024-01-01",
                              validToPrecision="unknown")
     port = docker_walker_port(sdk)
-    today = datetime.date.today()
+    today = _utc_today()
     rows = port.window_rows(today, today)
     row = next(r for r in rows if r["id"] == ended["id"])
     assert row["end_state"] == "unknown"
@@ -579,7 +598,7 @@ def test_falsey_but_present_bound_resolves_identically_on_all_three_read_paths(l
 
     # 2. assembly window rows (raw bound)
     port = docker_walker_port(sdk)
-    today = datetime.date.today()
+    today = _utc_today()
     row = next(r for r in port.window_rows(today, today) if r["id"] == p["id"])
     assert row["valid_from_precision"] is None
     assert row["end_state"] == "open"
@@ -620,7 +639,7 @@ def test_unorderable_end_is_emitted_as_null_on_every_read_surface(lane):
 
     # 2. assembly window rows
     port = docker_walker_port(sdk)
-    today = datetime.date.today()
+    today = _utc_today()
     row = next(r for r in port.window_rows(today, today) if r["id"] == p["id"])
     assert row["valid_to_precision"] is None
 
@@ -643,6 +662,277 @@ def test_unorderable_end_is_emitted_as_null_on_every_read_surface(lane):
     open_hit = next(r for r in _scan(sdk) if r["id"] == open_ended["id"])
     assert "valid_to_precision" not in open_hit
     assert open_hit["end_state"] == "open"
+
+
+def test_window_pre_filter_spends_no_cap_slots_on_out_of_window_createdAt_rows(
+        lane):
+    """#9406 (review): the pre-filter's ends are per FIELD, and the ``createdAt``
+    end must NOT take the free-text one.
+
+    ``window_rows`` is a capped, newest-first fetch
+    (``ORDER BY p.createdAt DESC … LIMIT cap``), so a day of rows admitted
+    ABOVE the window occupies the first cap slots and is then dropped by the
+    ladder — the window answers empty for facts the graph holds. The rows
+    below are dosed so the failure is unambiguous: 3 rows inside the window
+    and 50 rows one raw day PAST it, cap 10.
+
+    FAILS IF the ``createdAt`` end is widened to ``hi + 2`` (the free-text
+    end): the 50 out-of-window rows sort first and all 3 in-window rows are
+    starved (measured 0/3). Passing requires ``hi + 1`` on the clock-stamped
+    field, which admits every timestamp whose raw date is its UTC date.
+
+    SCOPE, stated because the name is narrow on purpose: this pins the
+    ``createdAt`` leg only. The free-text legs pay a DOCUMENTED cost for
+    admitting offset-bearing values (see ``_window_bounds``) — that cost is
+    not asserted here, because asserting it would pin a limitation as if it
+    were the contract.
+
+    Every row is written at the projection handle with an EXPLICIT
+    ``createdAt``: ``create_point`` stamps the wall clock, and this test's
+    ordering has to be fixed, not read from the machine's date.
+    """
+    sdk, _events = lane
+    from tortoise.assembly import docker_walker_port
+
+    g = sdk._get_proj().g
+    inside = [f"p-in-9406-{i}" for i in range(3)]
+    for i, pid in enumerate(inside):
+        g.query("CREATE (:Point {id:$id, content:$c, pointKind:'statement', "
+                "status:'live', when:'2026-10-20T12:00:00+00:00', "
+                "createdAt:'2026-10-20T12:00:00+00:00'})",
+                params={"id": pid, "c": f"inside {i}"})
+    for i in range(50):
+        # OUT of the window on every field; raw createdAt date is hi+1
+        g.query("CREATE (:Point {id:$id, content:$c, pointKind:'statement', "
+                "status:'live', createdAt:'2026-10-21T00:05:00+00:00'})",
+                params={"id": f"p-out-9406-{i}", "c": f"outside {i}"})
+
+    rows = docker_walker_port(sdk).window_rows(
+        datetime.date(2026, 10, 20), datetime.date(2026, 10, 20), 10)
+    got = {r["id"] for r in rows}
+    assert len(rows) <= 10
+    assert set(inside) <= got, (
+        "the widened band starved the window: fetched "
+        f"{sorted(got)} with cap 10")
+
+
+def test_window_pre_filter_does_not_fetch_date_only_rows_past_the_window(lane):
+    """#9406 (review): the free-text end is ``"<hi+2>"`` and the literal value
+    itself is EXCLUDED, so a date-only ``when`` on ``hi+2`` is not fetched.
+
+    That value's ladder day is ``hi+2`` — a day outside the window — so
+    admitting it buys nothing and spends cap slots at the head of the
+    newest-first fetch. Dosed the same way as the ``createdAt`` leg: 3 rows
+    inside the window, 50 date-only rows one day past it, cap 10.
+
+    FAILS IF the ``<> $hi`` exclusion is dropped: the 50 past-window rows are
+    admitted and the window starves (measured 0/3).
+
+    The residual this leaves standing is a ``when`` TIMESTAMP whose raw date is
+    ``hi+1`` but whose ladder day is ``hi+1`` — a string bound cannot tell it
+    from the offset-bearing value the wider end exists to admit. Recorded in
+    ``_window_bounds`` and on #9406, not asserted here.
+    """
+    sdk, _events = lane
+    from tortoise.assembly import docker_walker_port
+
+    g = sdk._get_proj().g
+    inside = [f"w-in-9406-{i}" for i in range(3)]
+    for i, pid in enumerate(inside):
+        g.query("CREATE (:Point {id:$id, content:$c, pointKind:'statement', "
+                "status:'live', when:'2026-10-20T12:00:00+00:00', "
+                "createdAt:'2026-10-20T12:00:00+00:00'})",
+                params={"id": pid, "c": f"w inside {i}"})
+    for i in range(50):
+        # date-only `when` on hi+2 -> ladder day hi+2, i.e. OUT of the window;
+        # backfilled createdAt so they lead the newest-first fetch
+        g.query("CREATE (:Point {id:$id, content:$c, pointKind:'statement', "
+                "status:'live', when:'2026-10-22', "
+                "createdAt:'2027-03-01T00:00:00+00:00'})",
+                params={"id": f"w-out-9406-{i}", "c": f"w outside {i}"})
+
+    rows = docker_walker_port(sdk).window_rows(
+        datetime.date(2026, 10, 20), datetime.date(2026, 10, 20), 10)
+    got = {r["id"] for r in rows}
+    assert len(rows) <= 10
+    assert set(inside) <= got, (
+        "a date-only `when` past the window starved it: fetched "
+        f"{sorted(got)} with cap 10")
+
+
+def test_window_pre_filter_when_leg_takes_the_free_text_bounds(lane):
+    """#9406 (review): the ``when`` leg's WIDER end is the point of this diff, so
+    it needs a LIVE pin — a unit assertion on ``_window_bounds`` cannot see which
+    end the call site handed the field.
+
+    Dosed like the siblings: 50 date-only ``when`` rows one day past the window
+    (ladder day ``hi+1``, i.e. outside) plus the one row the widening exists for
+    — ``when="2026-10-21T02:00:00+09:00"``, whose UTC day IS the window's day —
+    and an in-window control. At cap 10 the past-window population would take
+    every slot.
+
+    FAILS IF the ``when`` leg is narrowed to the ``createdAt`` end (the
+    offset-bearing row disappears — the exact #9406 defect) or loses its
+    exclusions (the 50 rows are fetched and starve the rest).
+    """
+    sdk, _events = lane
+    from tortoise.assembly import docker_walker_port
+
+    g = sdk._get_proj().g
+    inside = [f"w-in-live-9406-{i}" for i in range(3)]
+    for i, pid in enumerate(inside):
+        g.query("CREATE (:Point {id:$id, content:$c, pointKind:'statement', "
+                "status:'live', when:'2026-10-20T12:00:00+00:00', "
+                "createdAt:'2026-10-20T12:00:00+00:00'})",
+                params={"id": pid, "c": f"w inside {i}"})
+    offset = "w-offset-live-9406"
+    # a STALE caller createdAt, so ONLY the `when` leg can admit this row — the
+    # point of the test. With a `createdAt` inside the stamped range the row
+    # would arrive through THAT leg and the `when` end would go unpinned.
+    g.query("CREATE (:Point {id:$id, content:'offset', pointKind:'statement', "
+            "status:'live', when:'2026-10-21T02:00:00+09:00', "
+            "createdAt:'2026-09-01T00:00:00+00:00'})",
+            params={"id": offset})
+    for i in range(50):
+        # date-only `when` on hi+1 -> ladder day hi+1, OUT of the window;
+        # backfilled createdAt so they would lead the newest-first fetch
+        g.query("CREATE (:Point {id:$id, content:$c, pointKind:'statement', "
+                "status:'live', when:'2026-10-21', "
+                "createdAt:'2027-03-01T00:00:00+00:00'})",
+                params={"id": f"w-out-live-9406-{i}", "c": f"w outside {i}"})
+
+    rows = docker_walker_port(sdk).window_rows(
+        datetime.date(2026, 10, 20), datetime.date(2026, 10, 20), 10)
+    got = {r["id"] for r in rows}
+    assert offset in got, (
+        "the `when` leg dropped an offset-bearing value whose ladder day is IN "
+        f"the window: fetched {sorted(got)}")
+    assert set(inside) <= got, sorted(got)
+    assert not [i for i in got if i.startswith("w-out-live-9406")], (
+        f"date-only rows past the window were fetched: {sorted(got)}")
+
+
+def test_window_pre_filter_lower_end_is_strict_about_its_date_only_value(lane):
+    """#9406 (review): the LOWER end's mirror of the same leak.
+
+    ``lo - 1`` is needed (a negative offset moves a raw date one day BACK), but
+    the DATE-ONLY value ``lo-1`` is a day BELOW the window on its own ladder date
+    — and a backfilled population of it starves the walk: measured, 250 date-only
+    ``when='2026-10-19'`` rows + 3 in-window rows at the production cap 200 kept
+    **0/3**, and starved the negative-offset row the widening exists for. The
+    lower end is therefore STRICTLY greater.
+
+    FAILS IF the ``>`` becomes ``>=``: the 250 rows are admitted at the head of
+    the newest-first fetch and the window (and the offset row) starve.
+    """
+    sdk, _events = lane
+    from tortoise.assembly import docker_walker_port
+
+    g = sdk._get_proj().g
+    inside = [f"lo-in-9406-{i}" for i in range(3)]
+    for i, pid in enumerate(inside):
+        g.query("CREATE (:Point {id:$id, content:$c, pointKind:'statement', "
+                "status:'live', when:'2026-10-20T12:00:00+00:00', "
+                "createdAt:'2026-10-20T12:00:00+00:00'})",
+                params={"id": pid, "c": f"lo inside {i}"})
+    neg = "lo-neg-9406"
+    g.query("CREATE (:Point {id:$id, content:'neg', pointKind:'statement', "
+            "status:'live', when:'2026-10-19T22:00:00-05:00', "
+            "createdAt:'2026-10-20T03:00:00+00:00'})",
+            params={"id": neg})
+    for i in range(250):
+        g.query("CREATE (:Point {id:$id, content:$c, pointKind:'statement', "
+                "status:'live', when:'2026-10-19', "
+                "createdAt:'2027-03-01T00:00:00+00:00'})",
+                params={"id": f"lo-out-9406-{i}", "c": f"lo outside {i}"})
+
+    rows = docker_walker_port(sdk).window_rows(
+        datetime.date(2026, 10, 20), datetime.date(2026, 10, 20), 200)
+    got = {r["id"] for r in rows}
+    assert set(inside) <= got, (
+        "a date-only `lo-1` population starved the window: "
+        f"fetched {len(got)} rows with cap 200")
+    assert neg in got, (
+        "the negative-offset row the `lo-1` widening exists for was lost: "
+        f"{sorted(got)[:5]}")
+    assert not [i for i in got if i.startswith("lo-out-9406")], (
+        f"date-only rows below the window were fetched: {len(got)} rows")
+
+
+def test_window_pre_filter_events_leg_mirrors_the_points_leg(lane):
+    """#9406 (review): the EVENTS leg is the points leg's twin and must not
+    drift from it — it takes the free-text ends (``startedAt`` is caller /
+    connector supplied) and the same DATE-ONLY exclusions.
+
+    Dosed so a dropped exclusion is visible: 50 Events whose only date is a
+    date-only ``startedAt`` one day past the window (ladder day ``hi+1``, i.e.
+    outside) and one offset-bearing ``startedAt`` on the boundary day (ladder
+    day ``hi``, i.e. INSIDE — the row the wider end exists for). At cap 10 the
+    past-window population would take every slot.
+
+    FAILS IF the events leg loses its exclusion (the 50 rows are fetched and
+    the offset row is pushed past the cap) or takes the narrow ``createdAt``
+    end (the offset row is not fetched at all).
+    """
+    sdk, _events = lane
+    from tortoise.assembly import docker_walker_port
+
+    for i in range(50):
+        sdk.create_event(f"past-window event {i}", "occurrence",
+                         startedAt="2026-10-21")
+    offset = sdk.create_event("offset event", "occurrence",
+                              startedAt="2026-10-21T02:00:00+09:00")
+    inside = sdk.create_event("inside event", "occurrence",
+                              startedAt="2026-10-20T12:00:00+00:00")
+
+    rows = docker_walker_port(sdk).window_rows(
+        datetime.date(2026, 10, 20), datetime.date(2026, 10, 20), 10)
+    event_ids = {r["id"] for r in rows if r["kind"] == "event"}
+    assert offset["eventId"] in event_ids, (
+        "the events leg dropped an offset-bearing startedAt whose ladder day "
+        f"is IN the window: fetched {sorted(event_ids)}")
+    assert inside["eventId"] in event_ids, sorted(event_ids)
+    # the date-only `hi+1` population is not fetched at all (ladder day hi+1)
+    assert len(event_ids) == 2, (
+        f"date-only rows past the window were fetched: {sorted(event_ids)}")
+
+
+def test_createdAt_writer_claim_and_the_caller_offset_residual(lane):
+    """The ``createdAt`` end is narrow because of a WRITER claim, so measure
+    the writer — and pin the one shape it does not cover as a RECORDED RESIDUAL.
+
+    1. WRITER: a plain ``create_point`` stores a UTC stamp (``+00:00``), which
+       is what makes the narrow end sound for every in-repo writer.
+    2. RESIDUAL (#9406, recorded, NOT desired): ``createdAt`` is also a caller
+       prop (``create_point(**props)`` — ``api.py``/``ingest.py``/the
+       source-inheritance path all pass one), and a caller-supplied OFFSET is
+       stored verbatim. The ladder reads ``2026-10-21T02:00+09:00`` as the
+       window day ``2026-10-20``, while its raw string is past the window's
+       narrow end — so ``window_rows`` does not fetch it. Widening the end
+       would close this and reopen the cap starvation measured above; the
+       honest cure is a fetch that cannot starve (recorded on #9406).
+
+    Both halves can fail: (1) if a writer starts stamping local time, (2) if a
+    later change closes the residual — in which case this test should be
+    flipped to assert the row IS returned.
+    """
+    sdk, _events = lane
+    from tortoise.assembly import _norm_date, docker_walker_port
+
+    plain = sdk.create_point("statement", "plain stamp")
+    stamp = _props(sdk, plain["id"])["createdAt"]
+    assert stamp.endswith(("+00:00", "Z")), stamp
+
+    offset = sdk.create_point("statement", "caller offset stamp",
+                              createdAt="2026-10-21T02:00:00+09:00")
+    assert _props(sdk, offset["id"])["createdAt"] == \
+        "2026-10-21T02:00:00+09:00", "a caller prop must be stored verbatim"
+    assert _norm_date("2026-10-21T02:00:00+09:00") == datetime.date(2026, 10, 20)
+    rows = docker_walker_port(sdk).window_rows(
+        datetime.date(2026, 10, 20), datetime.date(2026, 10, 20))
+    assert offset["id"] not in {r["id"] for r in rows}, (
+        "the caller-offset residual is CLOSED — flip this test to assert the "
+        "row IS returned, and drop the residual note in _window_bounds")
 
 
 def test_check_consistency_reference_fold_states_the_terminalizer_precision(lane):
