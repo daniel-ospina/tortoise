@@ -597,10 +597,21 @@ def parse_log(path: Path) -> dict:
     # ids and captured output at column 0, so a quoted id such as
     # `...[= 1 error in 0.44s =]` was credited as a real summary and fabricated an
     # error the run never had (#9134 review, P2).
-    _last = next((ln for ln in reversed(lines) if COUNT_RE.search(ln)), None)
+    # The counts line must be a SUMMARY BANNER, not merely a line with a count in it:
+    # pytest echoes parametrized ids and captured output at column 0, so a quoted id
+    # such as `...[= 1 error in 0.44s =]` or a trailing teardown echo was credited as
+    # the real summary (#9134 review, P2). Only the keys that line names are set —
+    # zeroing the rest erased passes the run really had.
+    # Exactly ONE line decides the counts: the last line pytest printed as a SESSION
+    # SUMMARY — a banner (`= 10 passed in 3s =`) or the banner-less `-q` form — and never
+    # one containing `[`, which is a parametrized id echoed into the log. Every key is
+    # reset first, so a column the genuine summary omits is genuinely zero (#9134 review,
+    # P1: crediting a quoted id fabricated an error the run never had).
+    _cand = [ln for ln in lines if "[" not in ln and COUNT_RE.search(ln)
+             and (ln.strip().startswith("=") or _SUMMARY_IN_RE.search(ln))]
     counts = {k: 0 for k in counts}
-    if _last is not None:
-        for _n, _key in COUNT_RE.findall(_last):
+    if _cand:
+        for _n, _key in COUNT_RE.findall(_cand[-1]):
             if _key in counts:
                 counts[_key] = int(_n)
 
@@ -2677,6 +2688,7 @@ def aggregate_logs(logs_dir: Path | str) -> dict:
     total_counts = {k: 0 for k in COUNT_KEYS}
     killed_any = False
     failed_tests: set[str] = set()
+    _states: dict[str, str] = {}
     log_sources: list[dict] = []
     for log_path in sorted(glob.glob(str(Path(logs_dir) / "**" / "*.log"), recursive=True)):
         parsed = parse_log(Path(log_path))
@@ -2700,15 +2712,9 @@ def aggregate_logs(logs_dir: Path | str) -> dict:
                 total_counts[key] += sum(
                     1 for st in parsed["outcomes"].values() if st == state)
         killed_any = killed_any or parsed["killed"]
-        def _own_id(node: str) -> str:
-            # A parametrized id can EMBED a foreign nodeid (the killed-leg attribution
-            # test is named `...t[tests/test_x.py::...::test_y`), so one failure was
-            # listed as two. Trim to our own base; keep ordinary params like [3].
-            base, sep, param = node.partition("[")
-            return base if (sep and ("tests/" in param or "::" in param)) else node
-
-        failed_tests.update(_own_id(n) for n, st in parsed["outcomes"].items()
+        failed_tests.update(n for n, st in parsed["outcomes"].items()
                             if st in ("FAILED", "ERROR"))
+        _states.update(parsed["outcomes"])
         # The LEG is the artifact directory (`pytest-log-test-d`), not the file: 15 of
         # the shipped sample's 17 sources are all named `pytest.log`, so a basename
         # cannot identify which leg a disclosure is about (#9134 review, P2).
@@ -2719,7 +2725,10 @@ def aggregate_logs(logs_dir: Path | str) -> dict:
                             "summary_seen": parsed["summary_seen"]})
     # A watchdog-killed leg reports failures only through progress lines, so the
     # summed total can sit below the list beside it. Never claim fewer than we list.
-    total_counts["failed"] = max(total_counts["failed"], len(failed_tests))
+    # Reconcile against FAILED ids only: failed_tests also collects ERROR ids, and
+    # pytest keeps failed and error as separate columns (#9134 review, P2).
+    total_counts["failed"] = max(total_counts["failed"],
+                                 sum(1 for st in _states.values() if st == "FAILED"))
 
     return {"files": files, "total_counts": total_counts, "killed_any": killed_any,
             "failed_tests": failed_tests, "log_sources": log_sources}
@@ -2838,20 +2847,18 @@ def main() -> int:
     # frozen CI_TIMING_NOW appended the SAME sample twice, so the artifact's history
     # (and the flake proxy built from it) counted one measurement as two, and the
     # committed bytes stopped being any single invocation's output (#9134 review, P2).
-    history = _dedupe_history([row, *load_history(json_path)])[: args.max_history]
+    # The header must never claim an instant EARLIER than its own history rows: that
+    # dated results ahead of the artifact's own sample time (#9134 review, P2). Rather
+    # than discard a valid row, the sample time is published from the winning row — so
+    # header, flake table and rows agree.
+    history = _dedupe_history([row, *load_history(json_path)])
+    _newest = max((str(h.get("sample_time") or "") for h in history), default="")
+    if _newest > str(now):
+        now = _newest
+        row["sample_time"] = now
+    history = history[: args.max_history]
 
-    # One row per run: sampling the same run twice is not a second sample, and
-    # comparing it with itself fabricates flake candidates (#9134 review, P2).
-    _seen_runs: set[object] = set()
-    _one_per_run = []
-    for _r in history:
-        _rid = _r.get("run_id") or _r.get("sha")
-        if _rid in _seen_runs:
-            continue
-        _seen_runs.add(_rid)
-        _one_per_run.append(_r)
-
-    flakes = candidate_flakes(_one_per_run)
+    flakes = candidate_flakes(history)
 
     snapshot = {
         "schema_version": SCHEMA_VERSION,
