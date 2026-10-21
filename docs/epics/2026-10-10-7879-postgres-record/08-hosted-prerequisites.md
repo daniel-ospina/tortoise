@@ -177,7 +177,7 @@ idempotent, total, and stores no EP scalar`.
 | **the `session` record** | ⚠️ **`capture_redactions` lands NULL** — the column is `jsonb` and the producer emits an integer. Pinned as a tolerated disagreement, not fixed (**#9264**, OPEN). | `tests/test_9078_record_written_by_production_path.py:139` `_SCHEMA_DISAGREEMENTS = {"search_keys": …, "capture_redactions": …}` |
 | **rebuild the graph from the record** | ⚠️ A **method with no CLI verb and no production caller**. | `FalkorProjection.rebuild_from_record` — `grep` finds no `__main__` verb |
 | **RLS as the tenancy boundary** | ⚠️ **Policies exist; nothing sets the GUC.** `app.current_org_id` is set only in `supabase/tests/*.sql` — the migrations that define the policies only *read* it, via `current_setting(…, true)` — and **no Python path sets it**, so the record connects as the DB owner and §4's own bypass rule applies. | `grep -rn app.current_org_id tortoise/ tools/` → 0 setters |
-| **the record's durability** | ⛔ **NO MODULE OF OURS BACKS UP THE RECORD.** `tortoise/backup.py` (local JSONL + BGSAVE), `tortoise/hosted_backup.py` (logical Cypher dump, AES-256-GCM, to R2), the self-hosted sweep (`tortoise/selfhost_backup.py`) and `backup_sweep.py` (the cron driver) all archive the **graph**; no module archives the record, and `docs/durability-posture.md` carries **no row for the record at all** (its PITR row reads *"Not documented → treat as absent"*, `:544`). The only claims in the tree that the project's backups would carry the record are plan-level — a 2026-08-08 assumption (*"Supabase Pro PITR covers control-plane tables adequately"*, `docs/plans/2026-08-08-669-align.md:63`) and the DR runbook's *"Supabase PITR covers it"* (`docs/ops/registry-backup-dr.md:1051`) — so this is R9's owner decision, not a verified backup. | §3; §14.1 **O1**: *"DURABILITY = the store's backup"*; R9 |
+| **the record's durability** | ⛔ **NO MODULE OF OURS BACKS UP THE RECORD.** The modules that archive today copy **the graph** — RDB/BGSAVE plus a local copy of the journal's `events.jsonl` (`tortoise/backup.py`), and the R2 logical dump (`hosted_backup.py`, `backup_sweep.py`, the self-hosted sweep `selfhost_backup.py`). `docs/durability-posture.md`, the page that records durability for every deployment, has **no row for the record** (four deployments, none of them Postgres; it never mentions Supabase). Whether the Supabase project backs it up is **unverified** — the tree's statements about that are plan-level and about the **control plane**, not the record (`docs/plans/2026-08-08-669-align.md:21`, `docs/ops/registry-backup-dr.md:1051`) — so this is R9's owner decision, not a verified backup. | §3; §14.1 **O1**: *"DURABILITY = the store's backup"*; R9 |
 
 ---
 
@@ -319,7 +319,7 @@ plan materialization"* — `table_columns()` is **deliberately uncached**, so ev
 migrations. No pool exists.
 **What it blocks:** capture latency at volume. **Not a first-customer gate** — hosted capture is off
 by owner ruling (2026-10-14) and the beta volume is unmeasured. **But it must land before the write
-rate is (R12).** Cheapest fix is the pooler DSN plus caching the column map; batching is the larger
+rate can be measured at all.** Cheapest fix is the pooler DSN plus caching the column map; batching is the larger
 change and needs the ordering-across-three-doors question answered.
 **Decision needed:** none to start; the batching shape needs a measurement first.
 
