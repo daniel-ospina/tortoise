@@ -1730,7 +1730,7 @@ def test_the_corrected_passages_carry_no_bare_edges_line_citation():
 def test_the_references_paragraph_scopes_property_freedom_to_source_version():
     """§9.6 said identity/mention and referential-containment `references` links
     "stay **property-free**" — the same unqualified absolute this PR retracts for
-    `aboutObject`, 70 lines above the correction (third review cycle).
+    `aboutObject`, in the §11.1 correction below (third review cycle).
 
     The absolute is retracted because it is an absolute, not because a
     `references` edge carries a property today. No writer that MINTS one of
