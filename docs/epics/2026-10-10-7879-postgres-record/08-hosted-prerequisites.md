@@ -372,7 +372,9 @@ calibrates after beta from measured consumption.
 
 ## D. Cost inputs — measured vs estimated, per figure
 
-**Every figure carries its base and its date. `MEASURED` means a number in this repo with a method;
+**Every figure carries its base, and its date wherever the measurement has one** — rows measured in
+this lane carry both; figures quoted from a prior measurement carry the method and the section that
+measured them, and only those sections pin a date. **`MEASURED` means a number in this repo with a method;
 `ESTIMATED` means a number this lane could not produce.**
 
 | input | value | basis | status |
@@ -465,7 +467,7 @@ meter → allowance wiring — gates the first *allowance*, not the first custom
   fixed. Per the standing rule, a checklist item with no home gets a comment on the root
   (**#7879**) rather than a peer issue.
 - **No measurement of the live dogfood graph.** Every live figure in §D is quoted from a prior
-  measurement, with its date and base, because this lane has no access to the production FalkorDB.
+  measurement, with its base and — for the rows that have one — its date, because this lane has no access to the production FalkorDB.
 
 ---
 
