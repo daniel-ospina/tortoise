@@ -4729,6 +4729,62 @@ def test_cli_returns_2_when_gh_returns_a_non_mapping_body(tmp_path, body: str) -
     assert "::warning::" in proc.stderr, f"{body} --pick-run must warn"
 
 
+def test_refresh_warns_when_no_declared_count_resolves(tmp_path: Path) -> None:
+    """A zero-ratio is never a legitimate result — say it, do not write UNKNOWN silently.
+
+    `declared_test_counts` infers the repo root from the MANIFEST's location
+    (`manifest_path.parent.parent`), so a manifest copied outside the tree — a scratch
+    copy, which is exactly what a reviewer or a regenerator makes — resolves no
+    `tests/` directory. Every sampled row then takes the UNKNOWN branch and the refresh
+    rewrites dozens of provenance notes with a claim FALSE of the tree, while exiting 0
+    (measured: 47 rows, 44 of which had carried a concrete denominator).
+
+    Non-vacuity: with the warning removed, stderr is empty and this reds.
+    """
+    log_dir = tmp_path / "logs" / "pytest-log-test-a"
+    log_dir.mkdir(parents=True)
+    (log_dir / "pytest.log").write_text(FIXTURE_LOG)
+    manifest = tmp_path / "ci-surfaces.yml"
+    manifest.write_text("durations:\n  test_alpha.py: 12.3\n")
+    # A copy OUTSIDE the tree: `declared_test_counts` then derives a root with no
+    # `tests/` directory, which is the case under test.
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    moved = outside / "ci-surfaces.yml"
+    moved.write_text(manifest.read_text())
+
+    proc = subprocess.run(
+        [sys.executable, str(_CLI), "--repo", "o/r", "--run-id", "1",
+         "--refresh-durations", "--logs-dir", str(tmp_path / "logs"),
+         "--manifest", str(moved)],
+        capture_output=True, text=True, timeout=120,
+        env={**os.environ, "CI_TIMING_NOW": "2026-10-21T09:30:00Z"},
+    )
+    assert proc.returncode in (0, 2), proc.stderr[-400:]
+    assert "::warning::" in proc.stderr, (
+        "a refresh that resolves NO declared count must warn: it is about to write "
+        f"(UNKNOWN) into every note. stderr={proc.stderr[-400:]!r}")
+    assert "declared testcase count" in proc.stderr, proc.stderr[-400:]
+    # The message names the DERIVED fact (the inferred root), never a guessed cause: a
+    # manifest at the repo root or in a subdirectory is inside the tree, and telling the
+    # operator to "re-run inside the tree" would be advice that is already satisfied.
+    # Pin the VALUE and the POLARITY, not the vocabulary: a message that named a GUESSED
+    # root passed a two-substring check (measured), which is the defect this commit exists
+    # to remove. The fixture's manifest lives in <tmp>/elsewhere, so the derived root is
+    # <tmp> and it has no `tests/` — both facts are asserted, and the retired guess cannot
+    # come back.
+    root = moved.resolve().parent.parent
+    # Anchor the rendered CLAUSE: an unanchored substring also accepts a WRONG root that is a
+    # descendant of the true one, and `parent`-instead-of-grandparent is the plausible
+    # off-by-one in this very derivation (measured: that mutant stayed green).
+    assert f"resolves to {root}; that directory has NO tests/" in proc.stderr, proc.stderr[-400:]
+    assert "probably outside" not in proc.stderr, proc.stderr[-400:]
+    # The rewritten notes belong to rows the render HOLDS, not rows it re-bases: re-basing is
+    # the value-changed branch and no value moves here, so naming that class bounded the damage
+    # to an EMPTY set while 47 notes changed (measured). Pin the class the code actually takes.
+    assert "HOLDS" in proc.stderr and "RE-BASES" not in proc.stderr, proc.stderr[-400:]
+
+
 @pytest.mark.parametrize("body,label", [
     ("null", "top-level-not-a-mapping"),
     ("[]", "top-level-is-a-list"),

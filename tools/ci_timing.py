@@ -2863,6 +2863,34 @@ def main() -> int:
         # guard cannot be forgotten by the weekly workflow — and so a caller with
         # no witness is never reported as having one.
         declared = declared_test_counts(weights, manifest_path.resolve().parent.parent)
+        if weights and not declared and manifest_path.is_file():
+            # A ZERO-ratio is never a legitimate result for this repo, so say it rather
+            # than letting the artifact record a witness it never read. State the DERIVED
+            # FACT, not a guessed cause: the root comes from the manifest's GRANDPARENT
+            # (`<repo>/config/ci-surfaces.yml`), so name that root and whether `<root>/tests`
+            # exists — a message that assumes "outside the repo" is false for a manifest at
+            # the repo root or in a subdirectory, and its advice ("re-run inside the tree")
+            # is then already satisfied (#9134 review, P2). Skipped when the manifest does
+            # not exist, because that path fails closed on its own and writes nothing.
+            #
+            # Name the rows correctly: the note that gets rewritten here belongs to a row the
+            # render HOLDS (`kept N`, equal value — `_strip_prior_held_basis` strips its prior
+            # counted witness and re-derives it), NOT a row it re-bases. "Re-base" in this
+            # file means the value-changed branch (`new_value != previous`), which re-bases
+            # NOTHING in this scenario — so scoping the damage to "re-based" rows named an
+            # empty set while 47 notes changed (#9134 review, P1).
+            root = manifest_path.resolve().parent.parent
+            print(
+                "::warning::ci_timing: no declared testcase count resolved for any of the "
+                f"{len(weights)} measured files — the notes on the rows this refresh HOLDS "
+                "whose prior counted witness is replaced will be written as (UNKNOWN), losing "
+                "a witness that is true of the tree. "
+                f"The root is the manifest's grandparent, which resolves to {root}; that "
+                f"directory {'has' if (root / 'tests').is_dir() else 'has NO'} tests/ in it. "
+                "The expected layout is <repo-root>/config/ci-surfaces.yml "
+                "(`--manifest config/ci-surfaces.yml` from the repo root).",
+                file=sys.stderr,
+            )
         coverage = {path: (m["tests"], declared[path])
                     for path, m in measurements.items() if path in declared}
         sample_label = (f"ci-timing top-15 {captured_at[:10]} "
