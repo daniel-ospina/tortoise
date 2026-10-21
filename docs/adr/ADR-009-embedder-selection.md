@@ -284,8 +284,12 @@ gate outcome — the swap is conditional, the record is not.
   NEAR_DUPLICATE 0.75→0.89, DEDUP_REVIEW 0.60→0.84, DEDUP_AUTO_MERGE 0.92→0.94;
   checkpoint 0.95 re-validated (near-dup anchor 0.9547 ≥ 0.95); applied across
   embeddings.py, cross_lens.py (single-source import), sdk.py, mining.py, mcp_server.py.
-- Latency: see Status block — bge-small faster than control on the contended box; 300ms
-  band re-validated at T15 on the benchmark box (deployment-class measurement).
+- Latency: see Status block — bge-small faster than control on the contended box.
+  **Correction (2026-10-21): the 300 ms band was NOT re-validated at T15.** `#1656`
+  reframed T15 from a latency re-validation into a throughput test (1,242 req/s at 15
+  concurrent, 0 failures) and the launch latency band was recorded as superseded by an
+  owner decision on 2026-08-24; no deployment-class E2E-8 p95 exists. §5.2 and §8 of
+  `docs/capacity.md` say so.
 - Post-swap E2E-8 re-run (default=bge, 2026-08-21): p95 460ms 'inconclusive' under
   full-suite contention (345-460ms across runs); MiniLM control 418-464ms under identical
   conditions — bge-small remains relatively faster. The 300ms absolute band requires the
