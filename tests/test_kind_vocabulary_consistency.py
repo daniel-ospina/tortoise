@@ -325,7 +325,10 @@ def test_declared_subject_kinds_match_ontology():
 # the measurement then scores as CORRECT. The leg that was supposed to catch this
 # (`test_calibration_tools::test_probe_vocab_is_subset_of_packs_and_core`) compared the harness
 # copy against a second hand copy of the same list, so both sides carried the same stale
-# entries and it could never fire — a guard that agrees with itself.
+# entries and it could not fire ON THAT DRIFT — a guard that agrees with itself on the drift
+# they share. Its other arm (`or kind in pack_kinds`) was already live, built from
+# `packs/*/manifest.yaml`, so it still caught a kind absent from BOTH sets and a pack-side
+# rename; only the shared copy stayed invisible.
 #
 # The fixture is the canonical set itself, never a transcription of it.
 
