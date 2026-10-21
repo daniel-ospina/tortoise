@@ -1586,10 +1586,10 @@ def test_section_13_pins_every_count_to_a_ref():
     Non-vacuous: the pre-fix sentence (`60 at this PR's head`) reds here.
     """
     section = _section_13()
-    assert "test files asserted the edge" in section, (
-        "§13 no longer carries the test-file count this guard exists to keep "
-        "pinned — re-read the paragraph: restore it with its sha, or delete "
-        "this test with a reason."
+    assert "rg -l aboutObject tests/" in section, (
+        "§13 no longer carries the test-file measurement (the command and its "
+        "sha-pinned result) this guard exists to keep pinned — re-read the "
+        "paragraph: restore it with its sha, or delete this test with a reason."
     )
     text = _doc()
     offset = text.index("## 13. Filed from this document")
