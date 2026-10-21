@@ -525,8 +525,371 @@ class TestRenderElementInventory:
         assert f"-{pricing['display']['annual_discount_pct']}%" in html
 
 
-# ── #1566: welcome.html's provisioning pipeline must stay dead ──
+# ═══════════════════════════════════════════════════════════════════════════════
+# 4b. Static pricing fallback — the section must not be EMPTY without JS
+# ═══════════════════════════════════════════════════════════════════════════════
 
+
+def _served(markup: str) -> str:
+    """Markup a READER actually gets: HTML comments, `<script>` and `<style>`
+    bodies removed — including an UNTERMINATED comment opener, which swallows
+    the rest of the document in a browser.
+
+    Without this the gate is satisfied by markup nobody receives — wrapping the
+    static cards in `<!-- … -->` (the natural way to disable the fallback while
+    debugging) would leave every assertion below green while the no-JS reader is
+    back to an empty grid, which is the failure this section exists to catch.
+    Same lesson as `tests/_html_links.py` (#3436).
+    """
+    markup = re.sub(r"<!--.*?-->", " ", markup, flags=re.S)
+    markup = re.sub(r"<script\b.*?</script>", " ", markup, flags=re.S | re.I)
+    markup = re.sub(r"<style\b.*?</style>", " ", markup, flags=re.S | re.I)
+    return re.sub(r"<!--.*", " ", markup, flags=re.S)
+
+
+def _pricing_section() -> str:
+    """The `#pricing-section` region as a reader receives it.
+
+    Sliced on the STRIPPED document (not on a sentinel comment), so a comment
+    that disables part of the section removes it from this gate too. Stops at
+    the first `</section>`, so the nested-section guard below keeps a claim in a
+    nested section from being invisible here.
+    """
+    src = _served(PRODUCT_HTML.read_text(encoding="utf-8"))
+    marker = 'id="pricing-section"'
+    assert marker in src, (
+        "website/product.html lost #pricing-section — this gate's subject moved")
+    start = src.index(marker)
+    section = src[start:src.index("</section>", start)]
+    assert "<section" not in section[section.index(">") + 1:], (
+        "a <section> is nested inside #pricing-section — this slice stops at the "
+        "first </section>, so anything after it would be invisible to every "
+        "assertion here. Re-scope this gate.")
+    return section
+
+
+def _static_pricing_grid() -> str:
+    """The static cards: between `#pricing-grid` and the usage line."""
+    section = _pricing_section()
+    start = section.index('id="pricing-grid"')
+    end = section.index('id="pricing-usage-line"')
+    assert end > start, "#pricing-usage-line no longer follows #pricing-grid"
+    return section[start:end]
+
+
+def _render_facts(fn: str) -> dict:
+    """The render's OWN literals, read out of `renderPricing()`.
+
+    The point is that the static markup is compared against the render — not
+    against a second hand-typed copy of the render in this file. Anything the
+    static cards share with the render (destination, price suffix, CTA class,
+    exclusion marker, badge) is extracted here, so a funnel change on the
+    render side fails here instead of silently desynchronizing the no-JS copy.
+    """
+    cta = re.search(
+        r"""<a href="([^"]+)" class="btn\$\{name === '([a-z]+)' \? '([^']+)' : ''\}">\$\{cta\}</a>""",
+        fn)
+    assert cta, "renderPricing()'s CTA template changed shape — re-point this gate"
+    suffix = re.search(r'<div class="price">\$\{fmtPrice\(t\.price\)\.big\}<span>([^<]*)</span></div>', fn)
+    assert suffix, "renderPricing()'s price template changed shape — re-point this gate"
+    excl = re.search(
+        r'<div class="feature"><span class="([a-z]+)">([^<]*)</span> <span class="muted">\$\{f\}</span></div>',
+        fn)
+    assert excl, "renderPricing()'s exclusion template changed shape — re-point this gate"
+    tag = re.search(r"'<span class=\"popular-tag\">([^<]*)</span>'", fn)
+    assert tag, "renderPricing()'s 'Most popular' badge literal moved"
+    cta_expr = re.search(r"const cta = name === '([a-z]+)' \? '([^']*)' : '([^']*)';", fn)
+    assert cta_expr, "renderPricing()'s CTA copy changed shape"
+    sep = re.search(
+        r"\$\{PRICING\.display\.overage_line\}([^$]*)\$\{overageTiers\.join\(", fn)
+    assert sep, "renderPricing()'s overage sentence changed shape — re-point this gate"
+    return {
+        "cta_href": cta.group(1),
+        "free_key": cta_expr.group(1),
+        "free_cta": cta_expr.group(2),
+        "paid_cta": cta_expr.group(3),
+        "cta_secondary_class": cta.group(3).strip(),   # the `btn <x>` suffix
+        "cta_class_key": cta.group(2),
+        "price_suffix": suffix.group(1),
+        "excluded_class": excl.group(1),
+        "excluded_glyph": excl.group(2),
+        "popular_tag": _beat_text(tag.group(1)),
+        "overage_separator": sep.group(1).strip(),
+    }
+
+
+def _static_cards() -> list[dict]:
+    """One dict per static `.pricing-card`, in DOM order.
+
+    Every field the JS render writes is captured, including the CTA, the
+    "Most popular" badge, the price suffix and the INCLUDED/EXCLUDED marker —
+    a gate that read only the prices would stay green while the revenue button
+    drifted to `href="/signup"`, or while "Overage" was re-rendered with a green
+    check on the one tier that does not include it (both measured).
+    """
+    grid = _static_pricing_grid()
+    cards = []
+    for chunk in grid.split('<div class="pricing-card')[1:]:
+        features_block = re.search(r'<div class="features">(.*?)</div>\s*<a ', chunk, re.S)
+        assert features_block, "a static pricing card has no features block"
+        rows = re.findall(
+            r'<div class="feature"><span class="(ck|x)">([^<]*)</span>\s*'
+            r'<span( class="muted")?>(.*?)</span>',
+            features_block.group(1))
+        assert rows, "a static pricing card has no feature rows"
+        tag = re.search(r'<span class="popular-tag">(.*?)</span>', chunk, re.S)
+        price = re.search(r'<div class="price">(.*?)<span>([^<]*)</span>', chunk, re.S)
+        assert price, "a static pricing card has no price block"
+        cta = re.search(r'<a href="([^"]*)" class="(btn[^"]*)">(.*?)</a>', chunk, re.S)
+        assert cta, "a static pricing card has no CTA anchor"
+        cards.append({
+            "popular": chunk.lstrip().startswith('popular'),
+            "popular_tag": _beat_text(tag.group(1)) if tag else None,
+            "label": _beat_text(re.search(r"<h3>(.*?)</h3>", chunk, re.S).group(1)),
+            "big": _beat_text(price.group(1)),
+            "suffix": price.group(2),
+            "billing": _beat_text(re.search(r'<p class="billing">(.*?)</p>', chunk, re.S).group(1)),
+            "included": [_beat_text(t) for m, _g, _mu, t in rows if m == "ck"],
+            "excluded": [_beat_text(t) for m, _g, _mu, t in rows if m == "x"],
+            # (marker class, glyph, dimmed?) — the render writes an exclusion as
+            # `<span class="x">✕</span> <span class="muted">…</span>`, so a lost
+            # `muted` is an exclusion rendered as body copy.
+            "excluded_markers": [(m, g, mu.strip())
+                                 for m, g, mu, _t in rows if m != "ck"],
+            "cta_href": cta.group(1),
+            "cta_class": cta.group(2),
+            "cta_label": _beat_text(cta.group(3)),
+        })
+    return cards
+
+
+def _static_usage_line() -> str:
+    m = re.search(r'<p class="pricing-usage" id="pricing-usage-line">(.*?)</p>',
+                  _pricing_section(), re.S)
+    assert m, "#pricing-usage-line lost its static content"
+    return _beat_text(m.group(1))
+
+
+def _static_selfhost_block() -> str:
+    """The `#selfhost-section` element, closed by its OWN `</div>`.
+
+    Sliced by depth rather than "to the end of the section": a link added later
+    inside `#pricing-section` (a "Talk to sales" line, say) would otherwise fail
+    this gate although the block it tests did not change.
+    """
+    section = _pricing_section()
+    marker = section.index('id="selfhost-section"')
+    # Start at the `<div` that OPENS the element, not at the id inside its
+    # tag — otherwise the first balanced child (`.actions`) closes the slice.
+    start = section.rindex("<div", 0, marker)
+    depth = 0
+    for m in re.finditer(r"<div\b|</div>", section[start:]):
+        depth += 1 if m.group(0) != "</div>" else -1
+        if depth == 0:
+            return section[start:start + m.end()]
+    raise AssertionError("#selfhost-section has no balanced closing </div>")
+
+
+class TestStaticPricingFallback:
+    """The pricing section is the revenue surface, and it used to be EMPTY
+    without JavaScript.
+
+    `#pricing-grid`, `#pricing-usage-line` and `#selfhost-section` were rendered
+    entirely by the page's inline script, so a reader that does not execute JS —
+    a crawler, or an AI evaluator reading the page — saw the Monthly/Annual
+    toggle above a blank grid — before this change `#pricing-section` rendered
+    `Pricing · <sub> · Monthly · Annual -20% · Use of the service subject to our
+    Terms` with `document.querySelectorAll('.pricing-card').length === 0`.
+
+    The static markup is a THIRD copy of the tier facts (the inline script's
+    `PRICING` mirror is the second, product/pricing.json the first), so it is
+    the copy most likely to rot. This class keeps it honest by deriving every
+    expectation — prices, labels, features, CTA copy/href/class, the price
+    suffix, the exclusion marker, the badge, the overage sentence, the
+    self-host licence and links — from the mirror and from `renderPricing()`/
+    `renderSelfHost()` themselves, never by re-typing the value here. Slices are
+    read through `_served()`, so markup that no reader receives (comment or
+    `<script>`-wrapped) cannot satisfy the gate.
+    """
+
+    def _expected(self) -> tuple[list[str], str, dict]:
+        """(tier order, the mode the static cards must carry, PRICING mirror)."""
+        pricing = _extract_pricing_object()
+        fn = _render_pricing_fn(PRODUCT_HTML.read_text(encoding="utf-8"))
+        names = re.search(r"const names = \[(.*?)\]", fn, re.S)
+        assert names, "renderPricing() must keep its `names` tier order"
+        order = re.findall(r"'([a-z]+)'", names.group(1))
+        assert order, "could not read renderPricing()'s tier order"
+        mode = "annual" if pricing["display"]["annual_default"] else "monthly"
+        return order, mode, pricing
+
+    def _labels(self) -> dict:
+        fn = _render_pricing_fn(PRODUCT_HTML.read_text(encoding="utf-8"))
+        labels_match = re.search(r"const labels = \{([^}]*)\}", fn)
+        assert labels_match, "renderPricing() must define a `labels` display-name map"
+        return dict(re.findall(r"([A-Za-z_$][\w$]*)\s*:\s*'([^']*)'", labels_match.group(1)))
+
+    def test_render_keys_the_free_cta_from_one_tier(self):
+        """The render decides the free CTA's COPY and its CLASS with two separate
+        `name === '<tier>'` conditionals. If they disagree, the JS grid paints one
+        tier's button as secondary and the static cards the other, with nothing
+        red — so pin them to the same key."""
+        fn = _render_pricing_fn(PRODUCT_HTML.read_text(encoding="utf-8"))
+        facts = _render_facts(fn)
+        assert facts["cta_class_key"] == facts["free_key"], (
+            "renderPricing() keys the free CTA's class on "
+            f"{facts['cta_class_key']!r} but its copy on {facts['free_key']!r}")
+
+    def test_a_reader_can_see_the_grid(self):
+        """A hidden grid satisfies every content assertion while the no-JS reader
+        is back to an empty-looking section, so the container must stay
+        renderable: live region present, no inline hiding."""
+        grid = _static_pricing_grid()
+        opening = grid[:grid.index(">") + 1]
+        assert 'aria-live="polite"' in opening, (
+            "#pricing-grid lost its aria-live region (setBilling re-renders it)")
+        assert "style=" not in opening, (
+            "#pricing-grid carries an inline style — a `display:none` there "
+            "hides the static fallback from the reader this gate protects")
+
+    def test_every_public_tier_renders_in_the_source(self):
+        order, _, _ = self._expected()
+        cards = _static_cards()
+        assert len(cards) == len(order), (
+            f"#pricing-grid carries {len(cards)} static cards for {len(order)} "
+            f"tiers ({', '.join(order)}) — a missing card is a blank slot for a "
+            f"no-JS reader")
+
+    def test_static_cards_carry_the_mirror_facts(self):
+        order, mode, pricing = self._expected()
+        fn = _render_pricing_fn(PRODUCT_HTML.read_text(encoding="utf-8"))
+        labels = self._labels()
+        facts = _render_facts(fn)
+        disc = pricing["display"]["annual_discount_pct"]
+
+        for name, card in zip(order, _static_cards(), strict=True):
+            tier = pricing["tiers"][name]
+            expected_label = labels.get(name, name.capitalize())
+            big, total = _fmt_price(tier["price"], mode, disc)
+            assert card["label"] == expected_label, (
+                f"static card {name}: label {card['label']!r} != {expected_label!r}")
+            assert card["big"] == big, (
+                f"static card {name}: price {card['big']!r} != {big!r} ({mode})")
+            assert card["suffix"] == facts["price_suffix"], (
+                f"static card {name}: price suffix {card['suffix']!r} != the "
+                f"render's {facts['price_suffix']!r}")
+            assert card["billing"] == total, (
+                f"static card {name}: billing line {card['billing']!r} != {total!r}")
+            assert card["included"] == tier["features"], (
+                f"static card {name}: features drifted from the PRICING mirror "
+                f"{card['included']!r} != {tier['features']!r}")
+            assert card["excluded"] == tier["excluded"], (
+                f"static card {name}: exclusions drifted "
+                f"{card['excluded']!r} != {tier['excluded']!r}")
+            # An exclusion must LOOK like an exclusion: the render marks it with
+            # its own class+glyph, so a green check on a non-included line is a
+            # silent claim that the tier includes it.
+            assert card["excluded_markers"] == [
+                (facts["excluded_class"], facts["excluded_glyph"], 'class="muted"')
+            ] * len(tier["excluded"]), (
+                f"static card {name}: excluded rows are marked "
+                f"{card['excluded_markers']!r}, but the render marks them "
+                f"({facts['excluded_class']!r}, {facts['excluded_glyph']!r}, "
+                f"muted)")
+            assert card["popular"] is tier["popular"], (
+                f"static card {name}: popular flag drifted")
+            # The CTA is what actually converts.
+            assert card["cta_label"] == (
+                facts["free_cta"] if name == facts["free_key"] else facts["paid_cta"]), (
+                f"static card {name}: CTA label {card['cta_label']!r} != the "
+                f"render's copy")
+            assert card["cta_href"] == facts["cta_href"], (
+                f"static card {name}: CTA points at {card['cta_href']!r}, the "
+                f"render at {facts['cta_href']!r}")
+            expected_class = ("btn " + facts["cta_secondary_class"]
+                              if name == facts["free_key"] else "btn")
+            assert card["cta_class"] == expected_class, (
+                f"static card {name}: CTA class {card['cta_class']!r} != "
+                f"{expected_class!r} — the free CTA loses its secondary styling")
+            # The badge is the most conspicuous element on the section; a card
+            # marked `popular` without its visible tag is a silent demotion.
+            assert card["popular_tag"] == (
+                facts["popular_tag"] if tier["popular"] else None), (
+                f"static card {name}: 'Most popular' badge is "
+                f"{card['popular_tag']!r} but the tier's popular flag is "
+                f"{tier['popular']} (the render writes {facts['popular_tag']!r})")
+
+    def test_static_overage_line_matches_the_render(self):
+        order, _, pricing = self._expected()
+        fn = _render_pricing_fn(PRODUCT_HTML.read_text(encoding="utf-8"))
+        labels = self._labels()
+        facts = _render_facts(fn)
+        metered = [labels.get(n, n.capitalize()) for n in order
+                   if pricing["tiers"][n]["overage"]]
+        expected = (f"{pricing['display']['overage_line']} "
+                    f"{facts['overage_separator']} {', '.join(metered)}") if metered \
+            else pricing["display"]["overage_line"]
+        assert _static_usage_line() == expected, (
+            f"#pricing-usage-line's static text drifted from the render "
+            f"({_static_usage_line()!r} != {expected!r})")
+
+    def test_static_self_hosted_block_is_not_empty(self):
+        """Same failure mode one section down: `#selfhost-section` was JS-only,
+        so a no-JS reader lost the licence summary and the self-host links."""
+        fn = _function_refs(PRODUCT_HTML.read_text(encoding="utf-8"), "renderSelfHost")
+        block = _static_selfhost_block()
+        pricing, _ = _mirror_data()
+        assert _beat_text(pricing["display"]["license_self_hosted"]) in _beat_text(block), (
+            "the static self-host block must carry pricing.json's licence line")
+        heading = re.search(r"<h4>([^<]*)</h4>", fn)
+        assert heading, "renderSelfHost()'s heading moved"
+        static_heading = re.search(r"<h4>([^<]*)</h4>", block)
+        assert static_heading, "the static self-host block lost its <h4> heading"
+        # Compared as the block's OWN heading, not as a substring: the actions
+        # row carries a `/self-hosted` link, so a substring check would pass on
+        # the link text even after the heading itself was rewritten.
+        assert _beat_text(static_heading.group(1)) == _beat_text(heading.group(1)), (
+            f"static self-host heading {_beat_text(static_heading.group(1))!r} != "
+            f"the render's {_beat_text(heading.group(1))!r}")
+        # Every link the render writes, in the same order — a missing or
+        # retargeted one is invisible to a reader that cannot run the script.
+        def links(src: str) -> list[tuple[str, str]]:
+            return [(_beat_text(h), _beat_text(t)) for h, t in
+                    re.findall(r'href="([^"]+)"[^>]*>(.*?)</a>', src, re.S)]
+
+        assert links(block) == links(fn), (
+            "the static self-host links (href + label) no longer match "
+            f"renderSelfHost()'s: {links(block)!r} != {links(fn)!r}")
+        # The render's own wrappers, so the block is not merely present but
+        # styled the same (an unstyled `<p>` in place of `.license` reads as
+        # body copy, and a bare `<div>` in place of `.actions` unstacks the row).
+        for wrapper in ("class=\"license\"", 'class="actions"'):
+            assert wrapper in fn, f"renderSelfHost() lost {wrapper}"
+            assert wrapper in block, f"the static self-host block lost {wrapper}"
+
+    def test_static_toggle_highlights_the_same_period_the_cards_price(self):
+        """The static cards carry `display.annual_default` figures, so the pill
+        highlighted in the SOURCE must be that same period — otherwise a no-JS
+        reader sees Annual prices under a lit "Monthly" pill."""
+        # `_served()`, for the same reason every other slice uses it: a
+        # commented-out pill is markup no reader receives.
+        html = _served(PRODUCT_HTML.read_text(encoding="utf-8"))
+        _, _, pricing = self._expected()
+        want = "annual" if pricing["display"]["annual_default"] else "monthly"
+        for period in ("monthly", "annual"):
+            m = re.search(rf'<button id="btn-{period}"([^>]*)>', html)
+            assert m, f"#btn-{period} markup moved"
+            attrs = m.group(1)
+            is_active = 'class="active"' in attrs
+            assert is_active is (period == want), (
+                f"#btn-{period} is {'active' if is_active else 'inactive'} in the "
+                f"source but display.annual_default makes {want!r} the default "
+                f"— a no-JS reader gets the toggle and the cards disagreeing")
+            assert 'aria-pressed="' + ("true" if is_active else "false") + '"' in attrs, (
+                f"#btn-{period}'s static aria-pressed disagrees with its own class")
+
+
+# ── #1566: welcome.html's provisioning pipeline must stay dead ──
 
 # #8066/#8027: the subject is the SERVED copy, NOT the machine-local relay.
 # This gate used to read `skills/tortoise-decide/SKILL.md` through the tracked
@@ -678,7 +1041,7 @@ class TestAutomateBeatCopy:
       tracker either.
 
     ⚠️ THE COPY IS THE OWNER'S, VERBATIM, AND ONE OF ITS TWO CLAUSES IS ROADMAP.
-    The paragraph reads "Define confidence threshold or lifecycle events to fire
+    The paragraph reads "Define a confidence threshold or lifecycle events to fire
     webhooks." The LIFECYCLE half ships: `webhook_delivery._validated_types`
     filters the durable `:GraphEvent` types → the 12 `CLAIM_EVENT_TYPES` in
     `tortoise/shared_state/events.py`. The CONFIDENCE-THRESHOLD half does NOT:
@@ -700,10 +1063,15 @@ class TestAutomateBeatCopy:
     advertised before #3432, shipped-but-disclaimed after.
     """
 
-    # The paragraph's rendered text (#8466) — the owner's copy, verbatim.
+    # The paragraph's rendered text — the owner's copy, verbatim. Amended by the
+    # owner on 2026-10-18 (#8466 pin): "Define confidence threshold" → "Define a
+    # confidence threshold" (a missing article), and the second sentence dropped
+    # to "Automate decisions and agent actions." (the "investment decisions … and
+    # more" tail overclaimed). Both edits are the owner's, made on the same
+    # sentence the docstring above calls theirs — not a paraphrase.
     EXPECTED_PARAGRAPH_TEXT = (
-        "Define confidence threshold or lifecycle events to fire webhooks. "
-        "Automate investment decisions, agent actions, and more."
+        "Define a confidence threshold or lifecycle events to fire webhooks. "
+        "Automate decisions and agent actions."
     )
 
     def test_automate_beat_paragraph_is_pinned(self):
