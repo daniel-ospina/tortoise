@@ -76,6 +76,11 @@ WHAT THIS PINS
    writer must not. Without this arm the resolver could regress to
    literal-only and the table would silently go back to being un-checked in the
    class that produced the fourth correction.
+6. **`test_the_prose_counts_match_the_table`** — the NUMBERS. §13 states the
+   census size and the customer-callable count in prose and the other arms check
+   only the rows, so the numerals are read out of the sentences that state them
+   and compared to the table. A demoted `reach` cell with a stale headline is
+   the `#7956` erratum's direction — the one the ruling rests on.
 
 WHAT THE CENSUS CANNOT SEE (stated, not silently excluded)
 ---------------------------------------------------------
@@ -98,10 +103,17 @@ NOT promised, and deliberately so:
   authority and the line a convenience, and pinning line numbers would make
   this guard red on every unrelated edit — a different way to be dead.
 * Whether a declared site is *reachable* (default-ON, flag-gated, eval-only) is
-  NOT asserted, and neither is the customer-callable **count** beyond a floor:
-  that column is prose with reasons, and a regex over it would pin wording
-  rather than behaviour (a demoted surface would still have to be demoted in the
-  prose, which is the review the table exists to force).
+  NOT asserted: that column is prose with reasons, and a regex over the whole
+  of it would pin wording rather than behaviour.
+
+The customer-callable **count** IS asserted (arm 6), because §13 calls it *"the
+whole argument"*: the arm reads the numeral out of the sentence that states it
+and compares it to the `reach` column, so demoting two rows without moving the
+number — the `#7956` erratum's exact direction, and the error the KEEP ruling
+rests on — reds instead of shipping. The same arm checks the census-size
+numeral (`TWENTY read sites`) against `census ∪ UN_DERIVABLE`. Only the numeral
+is read, never the prose around it, so the sentence can be rewritten freely as
+long as it stays true.
 
 Static, stdlib-only, no network / DB / graph — it reads source text and a
 document.
@@ -144,9 +156,9 @@ _SYMBOL = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*(?:\
 #: so no arm can pass by finding nothing.
 _MIN_SITES = 10
 _MIN_ROWS = 10
-#: `FOUR` was the old floor; the table now declares three more customer-callable
+#: `FOUR` was the old floor; the table now declares six customer-callable
 #: surfaces. Kept at the historical count so a *contraction* of the prose is
-#: visible without the floor pinning today's wording.
+#: visible even before the exact-count arm below reads the numeral itself.
 _MIN_CUSTOMER_CALLABLE = 4
 
 #: The sites NO census can derive, each with the reason it cannot be derived.
@@ -162,6 +174,54 @@ UN_DERIVABLE: tuple[tuple[str, str, str], ...] = (
 
 #: The table header that identifies §13's declaration.
 _TABLE_HEADER = "| # | site |"
+
+#: The §13 bullet whose numerals the ruling rests on. Everything between this
+#: line and the next top-level bullet is the `aboutObject` argument; the section
+#: also carries numerals about other rulings (a `123`-hub cap), so the count arm
+#: must not read past the bullet.
+_BULLET_START = "- **`aboutObject` as a stored edge vs a derived join**"
+#: `<N> read sites` — the census size, asserted.
+_PROSE_SITES = re.compile(r"\b([A-Za-z]+)\s+read sites\b", re.IGNORECASE)
+#: `<N> of them are CUSTOMER-CALLABLE` — the headline count, asserted.
+_PROSE_CALLABLE = re.compile(
+    r"\b([A-Za-z]+)\s+of them are customer-callable\b", re.IGNORECASE
+)
+#: `... are <N> of them` — a later sentence re-asserting the same count. Any
+#: sentence that restates the number is a claim, so it is checked too: the
+#: `#7956` erratum was exactly a second sentence contradicting the first.
+_PROSE_CALLABLE_AGAIN = re.compile(r"\bare\s+([A-Za-z]+)\s+of them\b", re.IGNORECASE)
+
+#: The number words §13 states its counts in. Digits are accepted as well, so
+#: a rewrite that writes `6` instead of `SIX` stays checkable.
+_NUMBER_WORDS = {
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+    "twenty-one": 21,
+    "twenty-two": 22,
+    "twenty-three": 23,
+    "twenty-four": 24,
+    "twenty-five": 25,
+    "thirty": 30,
+}
 
 
 class _Index:
@@ -633,6 +693,43 @@ def _last(symbol: str) -> str:
     """The base symbol: `ranking.SubgraphExpander._neighbors` -> `_neighbors`."""
     return re.sub(r"\(\)$", "", symbol).rsplit(".", 1)[-1]
 
+
+def _numeral(token: str) -> int | None:
+    """`SIX` -> 6, `20` -> 20, a word this table does not know -> `None`.
+
+    Returning `None` rather than dropping the token is deliberate: a count the
+    arm cannot read must be reported, because silently skipping it is how an
+    unreadable number becomes an unguarded one.
+    """
+    token = token.strip().lower()
+    if token.isdigit():
+        return int(token)
+    return _NUMBER_WORDS.get(token)
+
+
+@lru_cache(maxsize=1)
+def _prose_counts() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """§13's asserted counts, verbatim: `(read sites, customer-callable)`.
+
+    The tokens are returned as written, not as numbers, so the arm can name the
+    sentence's own word when it disagrees with the table.
+    """
+    lines = STORAGE.read_text(encoding="utf-8").splitlines()
+    bullet: list[str] = []
+    inside = False
+    for line in lines:
+        if not inside:
+            inside = line.startswith(_BULLET_START)
+            continue
+        if line.startswith("- **") or line.startswith("---"):
+            break
+        bullet.append(line)
+    text = "\n".join(bullet)
+    callable_tokens = [m.group(1) for m in _PROSE_CALLABLE.finditer(text)]
+    callable_tokens += [m.group(1) for m in _PROSE_CALLABLE_AGAIN.finditer(text)]
+    return tuple(m.group(1) for m in _PROSE_SITES.finditer(text)), tuple(callable_tokens)
+
+
 def test_the_table_is_not_vacuous():
     """Every arm below must be able to find something, or all of them pass by
     finding nothing — the failure mode that let four hand audits conclude the
@@ -662,6 +759,83 @@ def test_the_table_is_not_vacuous():
         "the un-derivable declaration is empty — either every site is derivable "
         "(delete this arm and the test below) or the hand-declared blind spot "
         "was dropped without a replacement."
+    )
+
+
+def test_the_prose_counts_match_the_table():
+    """The NUMBERS are the argument, so they are asserted, not narrated.
+
+    §13 states its own totals in prose — *"TWENTY read sites, and SIX of them
+    are CUSTOMER-CALLABLE"* — and the KEEP ruling rests on the customer-callable
+    one. The arms above guard the **rows**; nothing guarded the **numerals**, so
+    a row demoted in the `reach` column left every test green while the headline
+    still said SIX. That is the `#7956` erratum's direction (the count was
+    under-stated), and it is the error this table exists to prevent.
+
+    Only the numeral is read — never the prose around it — so the sentence stays
+    free to be rewritten as long as it stays true.
+    """
+    site_tokens, callable_tokens = _prose_counts()
+    customer_callable = [
+        row for row in _declared_rows() if "customer-callable" in row[2].lower()
+    ]
+    # The census, plus the site no census can derive: `_neighbors` reads the
+    # edge through an empty pattern, so it is a read site the table must name
+    # even though no derivation finds it.
+    derived = _census()
+    # Same `(basename, symbol)` shape the table is compared in — the census
+    # keys are repo-relative paths, a row names a file.
+    read_sites = {(path.rsplit("/", 1)[-1], symbol) for path, symbol in derived} | {
+        (filename, _last(symbol)) for filename, symbol, _reason in UN_DERIVABLE
+    }
+
+    problems: list[str] = []
+    if not site_tokens:
+        problems.append(
+            "§13 no longer states `<N> read sites`, so the number this arm "
+            "polices is unguarded again (restore the sentence, or delete this "
+            "arm and say why in the docstring)"
+        )
+    for token in site_tokens:
+        stated = _numeral(token)
+        if stated is None:
+            problems.append(
+                f"§13 states `{token}` read sites and this guard cannot read "
+                "that numeral — spell it out in words or digits"
+            )
+        elif stated != len(read_sites):
+            problems.append(
+                f"§13 states `{token}` read sites; the census derives "
+                f"{len(derived)} and {len(read_sites) - len(derived)} more can "
+                f"only be declared by name, so there are {len(read_sites)} read "
+                "sites to declare"
+            )
+
+    if not callable_tokens:
+        problems.append(
+            "§13 no longer states how many of the sites are customer-callable — "
+            "that is the number the KEEP ruling rests on, so it cannot go "
+            "unstated"
+        )
+    for token in callable_tokens:
+        stated = _numeral(token)
+        if stated is None:
+            problems.append(
+                f"§13 states `{token}` customer-callable sites and this guard "
+                "cannot read that numeral — spell it out in words or digits"
+            )
+        elif stated != len(customer_callable):
+            problems.append(
+                f"§13 states `{token}` customer-callable sites; the `reach` "
+                f"column declares {len(customer_callable)}: "
+                + ", ".join(f"row {row[0]}" for row in customer_callable)
+            )
+
+    assert not problems, (
+        "the counts §13 asserts do not match the table it asserts them about. "
+        "⚠️ The customer-callable number IS the argument for keeping the edge — "
+        "a stale numeral here is the ruling resting on an unmeasured claim:\n  - "
+        + "\n  - ".join(problems)
     )
 
 
