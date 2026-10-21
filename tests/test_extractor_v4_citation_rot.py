@@ -35,13 +35,26 @@ WHAT THIS PINS
    `` `sym` (`file.py:NNNN`) `` (and the reverse parenthetical form) the symbol
    must exist in the cited file at HEAD. Catches a rename or removal that would
    leave the citation naming a symbol that is not there.
+5. **`test_section_13_8_carries_no_line_citations_and_its_symbols_resolve`** —
+   §13.8 question 2 was the ONE paragraph that kept a `file.py:NNNN` per reader,
+   and that exemption was itself the rot: ten of its eleven citations pointed at
+   a `def` line, so inserting a single line above `def _preview_supersede` in
+   `mcp_server.py` reddened a `core`-registered test on a PR that touched
+   nothing here — which is exactly the failure `STORAGE-ARCHITECTURE.md` §13
+   retired in `#7948`. The paragraph is now symbol-keyed (`module.py::symbol`)
+   like §13, so a citation cannot rot, and this guard holds it there AND resolves
+   each symbol.
 
 NOT promised:
-- The line NUMBER is only a convenience and is not asserted — the symbol is,
+- The line NUMBER is never asserted anywhere in the document — the symbol is,
   per the document's own rule. A citation whose symbol has merely MOVED inside
-  its file passes, and that is deliberate.
+  its file passes, and that is deliberate. §13.8 was the one exception (it
+  carried a line per reader because it was re-derived at a pin); `#7948`
+  symbol-keyed it, because a pinned line reds every unrelated code move in six
+  large files and its test could not tell a correct line from a wrong one that
+  stayed inside the span.
 - Citations whose passage quotes no symbol are out of scope (the document
-  carries ~40 of those); this pins the class the issue described.
+  carries ~30 of those); this pins the class the issue described.
 - Issue-state claims (`#NNNN` open/closed) are NOT resolved over the network —
   this test is static and offline by design.
 
@@ -50,6 +63,7 @@ Static, stdlib-only, no network / DB / graph.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -478,36 +492,50 @@ _SYMBOL = r"[A-Za-z_][A-Za-z0-9_.]*(?:\(\))?"
 #: A cited Python file, as the document writes them (`quota.py`,
 #: `projection/entities.py`).
 _CITED_FILE = r"[A-Za-z0-9_./-]+\.py"
-#: `sym` (`file.py`) or `sym` (`file.py:NNN`) — the symbol immediately precedes
-#: its citation. ⚠️ **The line number is OPTIONAL, and that is the durable
-#: form.** The census prose drops `:NNNN` hints deliberately (they rotted six of
-#: seven times against the head that rewrote them, and every unrelated edit to
-#: `sdk.py` moves them again), so the binding this guard can actually keep true
-#: is symbol-to-FILE. Requiring the number here would make the honest form
-#: unciteable — and would silently shrink this arm's inventory to whatever still
-#: carries a hint, which is the vacuity the count floor below exists to catch.
-_SYM_THEN_CITATION = re.compile(
-    rf"`({_SYMBOL})`\s*\(`?({_CITED_FILE})(?::(\d+))?"
-)
+#: `sym` (`file.py:NNN`) — the symbol immediately precedes its citation.
+#: ⚠️ The line number is OPTIONAL here (and on `_CITATION_THEN_SYM` below), and
+#: the document PREFERS the symbol-keyed form: `sym` (`file.py`) survives a code
+#: move, while a line number rots on the next insertion. Requiring `:NNN` on the
+#: citation-then-symbol shape (an earlier state of THIS guard, changed in the same
+#: diff as the widened narration) silently stopped checking every symbol-only
+#: citation of that shape. (The worked example belongs to the OTHER shape — it is
+#: stated with that shape, further down this file, where it is true.)
+_SYM_THEN_CITATION = re.compile(rf"`({_SYMBOL})`\s*\(`?({_CITED_FILE})(?::(\d+))?")
 #: `file.py:NNN` (`sym`) — the citation immediately precedes its symbol.
-_CITATION_THEN_SYM = re.compile(rf"`?({_CITED_FILE}):(\d+)`?\s*\(`({_SYMBOL})`")
+_CITATION_THEN_SYM = re.compile(rf"`?({_CITED_FILE})(?::(\d+))?`?\s*\(`({_SYMBOL})`")
+
+
+def _citations_in(text: str) -> list[tuple[int, str, str, int]]:
+    """Every `(offset, symbol, cited_file, cited_line)` the tight forms bind."""
+    found: list[tuple[int, str, str, int]] = []
+    for match in _SYM_THEN_CITATION.finditer(text):
+        found.append(
+            (
+                match.start(),
+                match.group(1),
+                match.group(2),
+                int(match.group(3)) if match.group(3) else 0,
+            )
+        )
+    for match in _CITATION_THEN_SYM.finditer(text):
+        found.append(
+            (
+                match.start(),
+                match.group(3),
+                match.group(1),
+                int(match.group(2)) if match.group(2) else 0,
+            )
+        )
+    return found
 
 
 def _quoted_symbol_citations() -> list[tuple[int, str, str, str]]:
-    """Every `(doc_line, symbol, cited_file, cited_line)` the tight forms bind.
-
-    `cited_line` is empty for the symbol-only form (`sym` (`file.py`)), which is
-    the preferred one: the number is a convenience the document drops on purpose.
-    """
-    found: list[tuple[int, str, str, str]] = []
-    for lineno, line in enumerate(_doc_text().splitlines(), start=1):
-        for match in _SYM_THEN_CITATION.finditer(line):
-            found.append(
-                (lineno, match.group(1), match.group(2), match.group(3) or "")
-            )
-        for match in _CITATION_THEN_SYM.finditer(line):
-            found.append((lineno, match.group(3), match.group(1), match.group(2)))
-    return found
+    """Every `(doc_line, symbol, cited_file, cited_line)` the tight forms bind."""
+    text = _doc_text()
+    return [
+        (text.count("\n", 0, offset) + 1, symbol, cited_file, str(cited_line))
+        for offset, symbol, cited_file, cited_line in _citations_in(text)
+    ]
 
 
 def test_every_quoted_symbol_citation_resolves_at_head():
@@ -518,10 +546,14 @@ def test_every_quoted_symbol_citation_resolves_at_head():
     count assertion reds, so the guard cannot quietly become vacuous.
     """
     citations = _quoted_symbol_citations()
-    assert len(citations) >= 10, (
+    assert len(citations) >= 9, (
         f"only {len(citations)} quoted-symbol citations found — the document's "
         "citation shape changed (or the extractor broke) and this guard would "
-        "otherwise pass vacuously."
+        "otherwise pass vacuously. NINE is the measured count at this head, and "
+        "it counts BOTH the line-numbered and the symbol-only forms: the floor "
+        "was 6 while the symbol-only form was excluded from the patterns, which "
+        "was the regression that let `kind_classifier.classify_items` "
+        "(`kind_classifier.py`) rot unread."
     )
 
     unresolved = []
@@ -547,6 +579,105 @@ def test_every_quoted_symbol_citation_resolves_at_head():
         + "\n  - ".join(
             f"doc line {line}: `{sym}` -> {where} ({why})"
             for line, sym, where, why in unresolved
+        )
+    )
+
+
+#: §13.8 of `DOC` is the section whose citations `#7948` moved from
+#: `file.py:NNNN` to `module.py::symbol`, the form §13 uses. There is no longer
+#: any section whose LINE is asserted — see the test below for why keeping one
+#: there was itself the rot.
+_SECTION_13_8 = ("### 13.8 What this does to our design", "## 14. Not established")
+
+#: A `module.py::symbol` citation — the form §13 and §13.8 both use, and the one
+#: that survives any code move. `_Symbol` allows a dotted `Class.attr`.
+_SECTION_13_8_SYMBOL = re.compile(r"`([A-Za-z0-9_./-]+\.py)::([A-Za-z_][\w.]*)`")
+
+#: A stale `file.py:NNNN` line citation. §13.8 carries none.
+_LINE_CITATION = re.compile(r"[A-Za-z0-9_./-]+\.py:[0-9]+")
+
+
+def _symbol_span(path: Path, base: str) -> tuple[int, int] | None:
+    """The line span of `base`'s definition in `path`, or None if it is absent."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if getattr(node, "name", None) == base:
+            return node.lineno, node.end_lineno or node.lineno
+    return None
+
+
+def test_section_13_8_carries_no_line_citations_and_its_symbols_resolve():
+    """§13.8 pins a SYMBOL per reader, never a line — and every symbol resolves.
+
+    This replaces the guard that asserted each §13.8 line landed inside its
+    symbol's span (`#7948`). The exemption was the rot: ten of the eleven
+    citations named the reader's `def` line, so inserting ONE line above
+    `def _preview_supersede` in `mcp_server.py` moved the span's start and
+    reddened a `core`-registered test on a PR that touched nothing in this
+    document. Its silent half was worse — the one mid-body citation
+    (`mcp_server.py` in `_preview_delete_edges`) was only bounded by "somewhere
+    in the symbol", so it could point at a different statement and stay green.
+
+    That is the failure `STORAGE-ARCHITECTURE.md` §13 retired in this same PR
+    (*"the symbol is authoritative, the line was the convenience, and the lines
+    had all rotted"*), and this document's own `NOT promised` contract already
+    said the line number is not asserted. So §13.8 is symbol-keyed now, and the
+    two directions are pinned here:
+
+    * NO `file.py:NNNN` survives in the section (the pre-fix text carried
+      eleven, so this arm is red on it — measured: reverting one citation to
+      `(`mcp_server.py:6529`)` reds this test, naming it);
+    * every `` `module.py::symbol` `` resolves in that module at HEAD, so the
+      symbol-keyed form cannot rot into a name that no longer exists.
+    """
+    text = _doc_text()
+    start_marker, end_marker = _SECTION_13_8
+    start = text.index(start_marker)
+    section = text[start : text.index(end_marker, start)]
+
+    surplus = [
+        (text.count("\n", 0, start + match.start()) + 1, match.group(0))
+        for match in _LINE_CITATION.finditer(section)
+    ]
+    assert not surplus, (
+        "§13.8 carries line citations again, and a line in a design document "
+        "rots: it reds every unrelated code move in a large file while being "
+        "unable to tell a correct line from a wrong one. Symbol-key them "
+        "(`module.py::symbol`) — that is the form §13 uses:\n  - "
+        + "\n  - ".join(f"line {line}: `{cite}`" for line, cite in surplus)
+    )
+
+    found = [
+        (text.count("\n", 0, start + match.start()) + 1, match.group(1), match.group(2))
+        for match in _SECTION_13_8_SYMBOL.finditer(section)
+    ]
+    assert len(found) >= 10, (
+        f"only {len(found)} `module.py::symbol` citations parsed in §13.8 — the "
+        "section's citation shape changed (or the extractor broke) and this "
+        "guard would otherwise pass vacuously."
+    )
+
+    unresolved = []
+    for doc_line, cited_file, symbol in found:
+        path = ROOT / "tortoise" / cited_file
+        if not path.exists():
+            path = ROOT / cited_file
+        if not path.exists():
+            unresolved.append((doc_line, symbol, cited_file, "file not found"))
+            continue
+        base = re.sub(r"\(\)$", "", symbol).rsplit(".", 1)[-1]
+        if _symbol_span(path, base) is None:
+            unresolved.append(
+                (doc_line, symbol, cited_file, "symbol does not resolve at HEAD")
+            )
+
+    assert not unresolved, (
+        "§13.8 cites these readers as living in these modules, and they do not "
+        "— the citation has rotted (re-verify the passage, or re-point it to "
+        "the symbol that replaced it):\n  - "
+        + "\n  - ".join(
+            f"doc line {line}: `{cited_file}::{sym}` ({why})"
+            for line, sym, cited_file, why in unresolved
         )
     )
 
@@ -669,9 +800,38 @@ _STATUS_ADJACENT = (
 _CHANGE_NARRATION = re.compile(
     r"(?:an|the) earlier (?:draft|version|note|row|line|passage|recommendation)"
     r"|Corrections? to (?:an )?earlier"
-    r"|(?:CORRECTED|AMENDED) 20[0-9]{2}-"
+    # The stamp's DATE may be parenthesised and may follow a qualifier: this
+    # arm originally required `CORRECTED 20xx-` with a single space, so a
+    # "CORRECTED (2026-10-20, `#NNNN`)" stamp — the shape #7948 itself added to
+    # `EXTRACTOR-V4-ARCHITECTURE.md` §13.8 — passed the guard while violating
+    # the rule the guard exists to enforce. The `AMENDED` in
+    # `STORAGE-ARCHITECTURE.md` §14.1 O2 is followed by `)` and a dash, not a
+    # date, so allowing the parens does not make it fire (pinned in
+    # `must_not_flag`).
+    r"|(?:CORRECTED|AMENDED)(?:\s+AGAIN)?\s*\(?\s*20[0-9]{2}-"
     r"|\bDraft [0-9]\b"
     r"|rewritten twice"
+    # A numbered pass / re-derivation: the narration of how many times the
+    # passage was re-derived. `STORAGE-ARCHITECTURE.md` §13 carried a FIVE-pass
+    # log ("a second re-derivation then found three more … a FIFTH pass found
+    # SIX more") while this guard reported the design documents clean, because
+    # no arm described the shape — the same false PASS the dated-stamp arm above
+    # closed for `CORRECTED (20xx-…)`. The dated history belongs in the
+    # `*-CHANGELOG.md`; the design document states the rule it settled on.
+    r"|\b(?:a|an|the|each|every|later|earlier) (?:second|third|fourth|fifth|sixth|seventh) (?:re-?derivation|pass|recount)\b"
+    # … and the same history without a numeral: `the earlier enumeration`, `the
+    # previous count`, `corrected it to`. The numbered arm alone reported both
+    # design documents clean while §13 still narrated which issue body said what
+    # and which pass found which reader — the class, not just one spelling of it.
+    r"|\b(?:the|an|that) earlier (?:enumeration|count|figure|number|measurement|list|table)\b"
+    r"|\bcorrected it to\b"
+    # … and the history that names no ordinal and no issue at all: what the
+    # passage's own previous state WAS. All three shapes were in §13 while the
+    # guard reported the design documents clean. Measured across the three design
+    # documents after moving them to the changelog: 0 hits.
+    r"|\b(?:this|that|the) (?:table|section|list|enumeration|register) (?:was|had been) missing\b"
+    r"|\bwas written down as\b"
+    r"|\bhad all rotted\b"
     # A version the passage says it has been true since — change history, not the
     # rule it settled on. Measured across the three design documents before
     # adding: 0 hits at HEAD.
@@ -806,7 +966,33 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         "this reopen is CLOSED",
         "*An earlier draft said* the opposite of this paragraph.",
         "**CORRECTED 2026-09-24** \u2014 this passage was repaired.",
+        # The parenthesised-date form, verbatim from what #7948 added to
+        # `EXTRACTOR-V4-ARCHITECTURE.md` §13.8 and then moved to the changelog.
+        # The arm above required `CORRECTED 20xx-`, so this line passed the guard.
+        "**\u26a0\ufe0f CORRECTED (2026-10-20, `#7948`): TEN sites are "
+        "customer-callable, behind EIGHT doors.**",
+        "**CORRECTED AGAIN 2026-10-20, second pass (`#7948`): 23 sites.**",
         "**Implementation status.** Both halves are now implemented.",
+        # The numbered-pass arm, verbatim from the five-pass log #7948 carried in
+        # `STORAGE-ARCHITECTURE.md` §13 — the shape no arm described, so the
+        # design documents were reported clean while the history sat in §13.
+        "⚠️ **A second re-derivation then found three more readers INSIDE "
+        "modules the table already named.**",
+        "⚠️ **And a FIFTH pass found SIX more, five of one shape.**",
+        # The same history in the wording the numbered arm could not see — the two
+        # sentences §13 and §13.8 carried at `920e0677c` after the first fix.
+        "…because this list is the ruling's evidence, and every hand-maintained "
+        "copy of it has been wrong: `#7956` corrected it to four *doors*.",
+        "**⚠️ The backup readers are the ones the ruling turns on:** that question "
+        "was answerable only from sites the earlier enumeration did not carry.",
+        # The same class with no ordinal at all — verbatim from §13 at
+        # `7e216697a`: what the passage's own previous state was.
+        "the present-day Point signal behind state recall — ⚠️ **the door this "
+        "table was missing** |",
+        "the head-relative variant of this one was written down as 60 and measured "
+        "62 one merge later.",
+        "Line numbers are deliberately **not** carried any more: the symbol is "
+        "authoritative, and the lines had all rotted.",
         "**\u26a0\ufe0f Draft 1** claimed the index is RAM-mandatory.",
         "\u00a716.2's rule is now also a billing rule (see `#5024` CLOSED).",
         # The change-history date form, on the §8 direction note #8738 moved (the
@@ -832,6 +1018,19 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         # A near-miss for the version-date arm: a version NAMED, not asserted as
         # a period the passage has held true since.
         "Model version v3.15 retires the `:Document` label.",
+        # A near-miss for the numbered-pass arm: an ordinal that counts WALKS,
+        # not re-derivations of the passage.
+        "A second walk added beside an excluded one cannot inherit its exclusion.",
+        # Near-misses for the three history arms: a design statement that a row is
+        # restored by the next census (no claim about the passage's past), and an
+        # ordinary past tense with no self-reference.
+        "The missing row is restored at the next census, not by hand.",
+        "The figure was recorded with its sha, so it cannot drift.",
+        # A near-miss for the parenthesised-date arm: `AMENDED` closed by a
+        # paren and followed by a dash. The state word is design prose here
+        # (`STORAGE-ARCHITECTURE.md` §14.1 O2), not a dated correction stamp.
+        "The owner re-affirmed **2026-09-30** that this measurement is wanted "
+        "(§14.1 **O2**, AMENDED) \u2014 **only the goal is deferred.**",
     ]
     # The SCOPE is pinned too, and pinned ABSOLUTELY. Two narrowings are possible
     # and both must red a test:

@@ -247,10 +247,17 @@ revision, which is what this file is for.
 - `STORAGE-ARCHITECTURE.md:1335` — | §17.3 the residency router | `#7953` ✅ built 2026-10-13 | a residency miss is not an insufficiency: fetch from the truth store, never escalate a tier, never surface an absence. Decidabl…
 - `STORAGE-ARCHITECTURE.md:1336` — | §17.4 the two-store cost model | `#7954` | price both stores (Postgres compute + disk and FalkorDB RAM) plus the blended total §5–§6 omit |
 - `STORAGE-ARCHITECTURE.md:1337` — | §17 the five gaps | `#7951` (17.1) · `#7952` (17.2) · `#7953` (17.3) · `#7954` (17.4) · `#7955` (17.5) · `#7967` (the surface map) | what the record/cache split still needs: a write-pat…
+- `tests/test_7948_about_object_read_sites.py` — **the count arm reads EVERY statement, and every literal bracket is classified (2026-10-21, `#7948`).** Two fail-opens, each now pinned by a fixture that asserts the RULE rather than the document's current wording. (1) §13 states the customer-callable figure **twice** — `TWELVE of them are CUSTOMER-CALLABLE` at the head of the section and `TWELVE customer-callable read sites` in the blast-radius sentence — and the guard `search`ed once, so the second copy was read by nothing: rewriting it to `FIFTEEN customer-callable read sites` left all thirteen arms green, the identical "hand copy with no reader" shape the DOOR figure in that same sentence was fixed for. Both figures are now collected with `finditer` and compared as SETS (`{27}` / `{12}`), the shape the sibling §13.8 arm already used, and a fixture states the figure twice in both shapes so a first-match reader reds. (2) `_reads_literally` classified only the FIRST `aboutObject` bracket in a string literal, so a query shaped write-then-read (`… MERGE (p)-[:aboutObject]->(o) WITH p MATCH (x)-[:aboutObject]->(y) …`) was skipped whole on the `MERGE` and its read entered neither the census nor any row check — while `test_no_read_site_lacks_a_row` promised "every read clause that names the edge". Every bracket is now classified; the fixture pins the four orderings, and under the pre-fix rule the write-then-read case is red.
+- `STORAGE-ARCHITECTURE.md:1353/1348/1388` — **the wording §13 no longer carries (2026-10-21, `#7948`).** Three change-history clauses left the design section and are recorded here: row 2's reach cell no longer says *"the door this table was missing"* (the row states what the Point signal is for); the moving-ref paragraph no longer recounts that the head-relative figure *"was written down as 60 and measured 62 one merge later"* (it states the rule: a figure pinned to a branch tip has no pin, re-measure with the command and quote the sha); and the line-number sentence no longer narrates that *"the lines had all rotted"* (it states the rule: the symbol is authoritative, the line is a convenience). `_CHANGE_NARRATION` in `tests/test_extractor_v4_citation_rot.py` gained the matching arms — `this|that|the <section-word> was missing`, `was written down as`, `had all rotted` — with those three sentences as `must_flag` fixtures, because the guard had reported the design documents clean while all three sat in §13.
+- `STORAGE-ARCHITECTURE.md:1344-1382` — **FIFTH PASS 2026-10-21 (`#7948`): 33 sites, SEVENTEEN customer-callable, TWENTY DERIVED doors — and the untyped-walk class stops being a hand pass.** Rows 24–27 were added by applying §13's declared rule (*an unfiltered walk reads the edge without naming it*), and every later reader applied the same rule and got a different count, because nothing recorded where the rule STOPPED. The fifth pass is what made that visible: **six all-edge reads were missing, and the sharpest two were a customer door the ruling's own argument needs** — `hosted_backup._DUMP_EDGE_PAGE_QUERY` (every edge paged out as data into the per-org encrypted backup, behind `POST /v1/backups`) and the three whole-graph counts that verify a dump and gate its restore (`_COUNT_ALL_EDGES_QUERY` behind `POST /v1/backups`, where its only consumer `dump_graph` runs; `restore_graph` and `_restore_copy_settled` behind `POST /v1/backups/restore`), plus `sdk.TortoiseSDK.backfill_v25` (an all-edge count handed back as `report["edge_count"]`, behind SDK `backfill_v25` and MCP `tortoise_backfill_v25`) and the write-side `sdk.TortoiseSDK._promote_incident_operators` (every incident operator edge, target swept over all four epistemic labels — `Object` included). ⚠️ **The backup rows are not a marginal addition:** §13's `#4240` durability bullet is about THIS edge class, and the backup IS the durability mechanism, so *would a `SET`-free derive change what the customer can restore?* was answerable only from a site the table did not carry. **The class is now derived from the tree instead of restated by hand**: `tests/test_7948_about_object_read_sites.py` censuses every relationship bracket carrying no type at all, in a read clause — keyed on `module.py::symbol`, so a new walk beside a row reds — and requires each site to own a row or appear in `_EXCLUDED_UNTYPED` **with the code fact that earns it present in that walk's own clause** (a fact in an earlier clause of the same query counts only when it binds a variable the walk uses), and, from the other side, still present in the symbol's span — `test_every_stated_exclusion_is_still_true` (a downstream `type(r) IN […]` restriction, or endpoints sitting outside every `aboutObject` triple — `Point`/`Event`/`Session` → `Object`, per `session_link.ENTITY_LINKED_TRIPLES`; `STRUCTURAL_REL_LABELS` carries the target half). An exclusion cannot be a claim and cannot silently stop being true: remove the constraint and the site reds as an unowned read. `_NON_LITERAL` carries the six new rows' pins. Counts moved in §13, §13's blast-radius sentence and §13.8 (both documents), and §13.8's enumeration now names all seventeen.
+- `STORAGE-ARCHITECTURE.md:1344-1380` — **FOURTH PASS 2026-10-21 (`#7948`): 27 sites, TWELVE customer-callable, and the blast-radius figure is now SIXTEEN DERIVED doors — the declared CLASS, applied to the code, found two more readers that are not customer doors at all.** The first three passes each asked *which customer surface reaches this edge?*; this one asked the question §13 actually declares — *which code reads every edge?* — and the answer is two readers no customer path touches and no grep can find: `subgraph._CYPHER_HUB_DEGREE` (`MATCH (o)-[r]-()`, an unfiltered incident-edge COUNT feeding the `#3011` engine's `hub_degree`, reach **eval harness**) and `definite_description_backfill.CENSUS_QUERY` (an unlabelled inbound-edge count whose own docstring says a referent is an Object if *anything* points at it, `aboutObject` included, reach **ops audit**). Both count what they walk, so a `SET`-free derive silently changes the number they report — the identical argument that put rows 3, 22, 24 and 25 in the table — and both are carried by `_NON_LITERAL` pins, because neither names the edge. Row 1's MCP door was also wrong in the reach cell: `tortoise_search` defaults `entity_type="point"` and forwards it unchanged, so `order_by="graph"` alone lands on `_fetch_point_signals`, not on row 1's `_fetch_event_signals` — the same defect the second pass corrected on the SDK side (`suggest_entry_points`), left uncorrected on the MCP side. ⚠️ **And the blast-radius DOOR figure was a hand-count that nothing read**: it said *twelve* while the 12 customer-callable reach cells name **sixteen** distinct door identifiers, the folding rule was applied inconsistently (graph-ordered `search`/`tortoise_fts_query` folded into one door, the three `dry_run` delete tools left as three), and *"TWELVE sites behind those twelve doors, because `recall_state` alone reads the edge on FOUR code paths"* requires doors to be fewer than sites while asserting they are equal. Both documents now state SIXTEEN and state the rule (*a door is one independently callable entry point, counted once per site that reaches it*), and `tests/test_7948_about_object_read_sites.py` derives the total and the per-kind breakdown (nine MCP tools, five SDK methods, two REST routes) from the reach cells. Three fail-opens in the guard were closed with it: the census pattern was bounded by a 60-character window, so the six-member `about*` alternation `ranking.ABOUT_EDGE_TYPES` uses was invisible to BOTH the census and the row check (it is now bounded by the bracketed string and anchored on Cypher's dash-delimited relationship form, which also refuses a JSON payload that merely contains the word); the door test parsed only the strict ``REST `VERB path` `` form, so row 5's `hosted REST (`/v1/…/topic`)` never reached the route check (row 5 now writes the real route, and an unparseable `/v1/…` door reds); and `_rows()` asserted no uniqueness, so a duplicated row raised the stated count without adding a reader (row numbers and `(module, symbol)` pairs are now unique).
+- `STORAGE-ARCHITECTURE.md:1344-1380` — **THIRD PASS 2026-10-21 (`#7948`): 25 sites, TWELVE customer-callable, twelve doors — two more all-edge walks behind customer doors, found by reviewing the guard's own rule against the code.** Row 22 asserts the inclusion rule is universal (*an unfiltered `MATCH (n)-[r]->(m)` reads the edge without naming it*), and applied to the code that rule found two readers the table did not carry: `mcp_server._preview_delete_edges` — the delete BLAST RADIUS, `MATCH (a)-[r]-(b) WHERE ID(a) IN $nids OR ID(b) IN $nids`, matching every incident edge and reporting `type(r)` per edge, behind three registered `dry_run` tools (`tortoise_delete`, `tortoise_delete_point`, `tortoise_delete_entity`) — and `hosted_api._export_graph_snapshot`, the org graph export, `MATCH (a)-[r]->(b) … type(r) …`, behind `GET /v1/organizations/{org_id}/export`. Both are customer-callable and both would silently lose `aboutObject` rows from what they report or ship if the edge were derived, which is exactly the argument row 21 (`_preview_supersede`) already rests on — so neither could be classed as transport and left out. The guard carries both as `_NON_LITERAL` rows pinning the consuming query INSIDE the reader's span, and its door test now resolves a REST door (the row writes `REST` beside the route, e.g. `GET /v1/organizations/{org_id}/export`) against the actual `@app.<verb>(path)` routes in `hosted_api.py`, so a customer-callable row cannot name a door that does not exist while REST-only reach stays expressible. ⚠️ Still a lower bound in one direction, and it is recorded on `#9418`: a NEW carrier-constant reader or a new unfiltered walk is invisible to the census until a row is added by hand, because the census sees only literal `aboutObject` brackets. The count itself is asserted, and so is every row's read.
 - `STORAGE-ARCHITECTURE.md:1339` — Filed from this document — the tracking issue and its current state are named on each bullet:
 - `STORAGE-ARCHITECTURE.md:1341` — - `aboutObject` as a stored edge vs a derived join — `#7948` (OPEN) — the measurement is DONE (research brief, 2026-09-23) and the answer is SPLIT, which decides it.
 - `STORAGE-ARCHITECTURE.md:1363` — ⇒ The comparable's conclusion does NOT transfer. Their justification was "recall never touched them" — false here. Deleting the edge would silently break four customer-callable surfaces. …
 - `STORAGE-ARCHITECTURE.md:1369` — ⚠️ The derived design is what CREATES a fan-out problem. Hindsight's join needed a `LATERAL LIMIT per_entity_limit` (default 200) and a timeout that drops the entire entity arm. A join on…
+- `STORAGE-ARCHITECTURE.md:1344-1380` — **CORRECTED AGAIN 2026-10-20, second pass (`#7948`): 23 sites, TEN customer-callable, EIGHT doors — and the census is now keyed on `module.py::symbol`, not on the module.** Three readers were still missing, and every one of them sat INSIDE a module the table already named, which is exactly the drift a module-level census cannot see: `navigation._hop_query` (the second all-edge walk, behind MCP `tortoise_entity_profile` and `tortoise_traverse` — the same inclusion rule that makes `SubgraphExpander._neighbors` a row), `mcp_server._preview_supersede` (the supersede dry run, matching every `SUPERSEDE_STRUCTURAL_RELS` member), and `projection.FalkorProjection._rebuild_all_replay` (the replay delete-leg, matching a run-time rel name gated on `DERIVABLE_STRUCTURAL_RELS`). Row 1's SDK door was also wrong: `suggest_entry_points` hardcodes `entity_type="point"` and cannot reach `_fetch_event_signals`, so the door is `tortoise_fts_query(entity_type="event", order_by="graph")`. The guard was tightened in four places to make those failures red rather than latent: the census resolves the enclosing SYMBOL of every literal read; every carrier/computed row pins its CONSUMING line inside its own span (row 20 was the last row decided by a bare constant mention); carrier constants are resolved through the reader's IMPORT, so a constant that leaves `aboutObject` cannot pass; and the spelled counts go past `TWENTY`.
+- `STORAGE-ARCHITECTURE.md:1344-1380` — **REPLACED 2026-10-20 (`#7948`): the `aboutObject` read-site enumeration was prose and had rotted, so it is now EXECUTABLE.** Removed: the `| # | site | … |` table whose rows cited `file.py:NNNN` (the lines had all moved; two named symbols — `topic_summarize`, `collect_slices` — did not read the edge at all, and row 4 named no symbol), the prefixed count *"ELEVEN read sites, and FOUR of them are CUSTOMER-CALLABLE"*, and *"And 36 test files assert the edge at the pin"*. What was wrong underneath, measured at `26aff163c`: **the customer-callable count was five doors / eight sites, not four**, because the whole state-recall path was missing — `recall_state` alone reads the edge on four paths (`StateRanker._fetch_point_signals` literal; `StateRanker._fetch_object_signals`, `TortoiseSDK._state_related_objects` and `TortoiseSDK._state_related_points` through `about*` alternation CONSTANTS, which no grep can see) — and `session_schema.audit_session_retrofit`, `projection/edges._count_about_out` were unnamed. Replaced by rows keyed on `module.py::symbol` (20 sites at that pass) + `tests/test_7948_about_object_read_sites.py`, which resolves every row against the code, re-runs the census, and asserts both counts equal the table. **The ruling is unchanged: KEEP the stored edges, deferred to post-launch.**
 - `STORAGE-ARCHITECTURE.md:1374` — - Fan-out caps — `#5010` (CLOSED `COMPLETED`) — nothing in our write path bounds how many edges one entity accumulates (`config/ci-surfaces.yml` at 123, `durations map` at 111, `the admin…
 - `STORAGE-ARCHITECTURE.md:1375` — - ⭐ NEW (2026-09-24) — the unindexed embeddings (V3, §12.1b). MEASURED ON THE LIVE GRAPH AND FILED: `#4997` — the measurement half is CLOSED `COMPLETED`; the unindexed-embeddings defect i…
 
@@ -889,7 +896,7 @@ argument — the table must name every customer-callable surface"*. It has now b
    no symbol at all, and two readers were absent entirely.
 
 What moved, and why it is the last hand pass: the table is now **executable**
-(`tests/test_7948_about_edge_read_sites.py`). It derives the census from the source's AST and reds
+(`tests/test_7948_about_object_read_sites.py`). It derives the census from the source's AST and reds
 when a reader under `tortoise/` is undeclared or a declared symbol does not perform the read, so
 the fifth correction is a red test rather than a fifth audit.
 
@@ -1138,7 +1145,7 @@ subject one level up:
   CamelCase symbol it backtick-quotes must exist in the package, so a reach cell can no longer cite
   a name that was never there.
 
-**The three new arms, and why each is non-vacuous.** `tests/test_7948_about_edge_read_sites.py`
+**The three new arms, and why each is non-vacuous.** `tests/test_7948_about_object_read_sites.py`
 gained `test_the_census_prose_carries_no_line_citations` (reds on the pre-fix document, which
 carried twenty hints across the two passages — four in §13's bullet and sixteen in the sibling
 paragraph, measured with the arm's own `_LINE_HINT`), `test_the_prose_names_every_row_in_the_empty_pattern_class`
@@ -1403,3 +1410,89 @@ that measures the table. **Measured.** Restoring the two pre-fix comments reds
 `test_the_file_states_no_count_it_does_not_measure` on both, and each pre-fix line is a control
 sample inside that arm, so the shapes cannot silently fall out of coverage. Counts are unchanged —
 **twenty-six sites, twenty-two rows, nine customer-callable rows (twelve sites)**.
+
+## §13's derived class now covers the FRAGMENT half, and three claims in the guard became executable (2026-10-21, `#7948`)
+
+Review cycle 5 found four defects, all inside the guard that makes §13 executable rather than anything
+in the table it pins. Each is closed by making the claim run.
+
+**The fragment census existed and was never CALLED.** `_untyped_fragment_sites()` carried a 40-line
+docstring stating that *any string expression holding a dash-delimited relationship bracket with no rel
+type and no clause at all is itself a site, and its enclosing symbol must account for it (a row, an
+exclusion, or a `_NON_LITERAL` pin)* — and no test invoked it. So the bypass it documents was open:
+`_WALK = "-[r]->"` beside `query("MATCH (n)" + _WALK + "(m)")` enters neither census (the bracket and
+its clause live in different constants), and the whole suite stayed green. It is now wired into
+`test_no_untyped_walk_lacks_a_row_or_a_stated_exclusion` with exactly the ownership rule its docstring
+states — row, `_EXCLUDED_UNTYPED`, or `_NON_LITERAL` pin — a floor so it cannot go vacuous, and a
+synthetic part-assembled fixture so the detection itself is falsifiable. **Non-vacuity measured**: the
+probe above, appended to `tortoise/fanout.py`, reds naming `fanout.py (inside _WALK_FRAGMENT)`; it was
+green on the pre-fix tree. §13's sentence now states that half of the class (*in a read clause, or
+assembled from a dash-delimited fragment part that carries no clause of its own*), so the document and
+the instrument say one thing.
+
+**A docstring is prose, not a query — and the two halves of the census disagreed about it.** The untyped
+census filtered prose through `_docstring_ids()`; `_literal_read_sites()` and `_reads_naming_the_edge()`
+accepted every string constant. Measured on the pre-fix predicate: replace row 9's link query with
+`CONTAINS` and paste the old query into `audit_session_retrofit`'s **docstring** → every arm green, so a
+row kept its *"the named symbol really reads the edge"* verdict after the code stopped reading it. One
+rule now, asserted both ways by `test_a_docstring_is_prose_and_not_a_read_site`: prose is dropped, and
+the same query in the function BODY is still counted.
+
+**The carrier arm had no floor, so it could report green having asserted nothing.** It is the only arm
+asserting *"the constant IS the read"* (rows 17–21, 23), and it built its pairs in nested loops ending
+`assert not broken`. A carrier refactored to `ABOUT_EDGE_TYPES = _SHARED_ABOUT + ("aboutObject",)` is no
+longer splice-shaped, so `_carrier_declarations()` yields `{}`, the loops run zero times, and the arm
+passes while the `_NON_LITERAL` pins those rows carry keep the other arms green. It now counts the pairs
+it examined (`assert checked`; 7 at this head) and pins which refactor empties the candidate set, the way
+the sibling arms already guard (`assert census`, `assert pins`, `assert _EXCLUDED_UNTYPED`).
+
+**A third copy of the count was left stale — in the prior art this PR cites.** B2.7 of
+`REVIEW-CONSOLIDATED-2026-09-23.md` closed with *"⇒ the customer-callable count is four, not two"* while
+§13 and §13.8 stated SEVENTEEN at that pass, and nothing read that file. The durable form is a POINTER, not a fourth
+number, so the row now marks its figure superseded and sends the reader to §13's table — and
+`test_the_prior_art_points_at_the_table_instead_of_restating_the_count` keeps the pointer there, because
+a restated count is a copy that rots on the next pass.
+
+## Two censuses of the same table merge — and the first one's DERIVATION survives it (`#9400`, 2026-10-21)
+
+Two branches made §13 executable inside the same hour. `#9398` landed
+`tests/test_7948_about_edge_read_sites.py`, whose table covered **26 sites across 22 rows, 9
+customer-callable, 12 door-reaching**. `#9400` is the wider pass: the merged table now carries
+**37 rows, 19 customer-callable, across 22 distinct doors** — it derives the all-edge class a
+name-based census cannot see (`SubgraphExpander._neighbors`, `navigation._hop_query`, the backup
+dump and the counts that verify and settle it, the org export, the delete blast-radius preview,
+the v2.5 backfill), and the carrier-constant readers (`ABOUT_EDGE_TYPES`, `TortoiseSDK._ABOUT_TYPES`).
+
+⚠️ **The first resolution called it a straight supersession, and that was WRONG — it was a
+measurement artefact, not a finding.** The claim "every symbol the landed table names is named
+here, plus 36 more" came from comparing two different row spellings (`module.py **symbol**` vs
+`module.py::Symbol`): the regex matched only one of them, so the other table looked almost empty.
+Measured properly, the wider pass had **dropped four rows** the narrower one carried —
+`sdk.py::TortoiseSDK.traverse` and `sdk.py::TortoiseSDK.ingest` (both customer-callable
+CALL-TIME doors) and `session_link.py::link_entity` / `subject_binding.py::bind_point_subjects`
+(both write-path readers whose relationship type is an expression). A name-and-literal census
+cannot see any of the four; that is exactly why the narrower guard derived them from the resolved
+SHAPE. They are **rows 34–37** now, so the table is a superset **by measurement** rather than by
+assertion, and the "36" is gone: 37 rows against 26 is ELEVEN more.
+
+**The narrower guard retires as a FILE, not as a capability.** The two cannot coexist — each
+parses §13 in its own row shape, so the landed guard reads a table it can no longer find and
+reddens 10 of its 25 legs. What it *derived*, though, is the part that mattered: the call-time
+class (a type slot holding an expression, which no literal scan sees) and both legal spellings of
+an empty relationship pattern (the bracketed `-[r]->` and the bracket-less `(n)--()`, the second of
+which once left a live member undeclared). Those derivations moved, verbatim, into
+`tests/_about_call_time_census.py`; `tests/test_7948_about_object_read_sites.py` consumes them and
+pins both directions — every derived site must own a row or a stated exclusion, and every
+exclusion must still derive. The prose pins that came with the old file (its own row count, its
+`<from> → <to> sites` change chain) could not survive the restructure; they are the narration this
+document no longer keeps, and the changelog is where it lives.
+
+The old guard's name now appears nowhere in this file: a guard name in prose is a citation, and a
+citation to a deleted file is rot of the same kind the guards exist to prevent — so the mention
+above is the retirement record itself, not a citation of a live guard.
+
+What did NOT move with the retirement is the measured property finding (`#9397`/`#9403`): the
+`aboutObject` edge is **not** property-free — `confidence` is ORIGINATED by two writers
+(`session_link.link_entity`, `subject_binding.bind_point_subjects`) and `idx` is re-materialized
+in an inline pattern map by `cache_projection.relation_statement`. The wider census changed the
+count, not that measurement, and `tests/test_9397_about_edge_properties.py` still pins it.
