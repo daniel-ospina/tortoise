@@ -32,8 +32,23 @@ boot sweeps run it on a daemon worker thread (``run_on_daemon_worker``,
 ``tortoise-boot-sweep``), and patching the CLASS method naively picked up those
 calls, corrupting the measured window (reproduced: ``thread='tortoise-boot-sweep'``
 in the recorded state). The probe below therefore records only SDK instances the
-REQUEST created on the main thread (by wrapping ``_data_sdk`` / ``_make_sdk``),
-and delegates every other call untouched.
+REQUEST created WHILE ITS WINDOW WAS OPEN (``state["active"]``, on whichever
+thread does the work — the shape the dataplane sibling has used since #4660),
+plus main-thread builds, and delegates every other call untouched. Ownership by
+main thread alone would stop observing exactly the bodies the #4660 construction
+burn-down moves to a worker (#3718), and their attach assertions would pass
+vacuously.
+
+A WINDOW ALONE IS NOT ENOUGH, though: the sweeps are armed from ``_lifespan``
+at fixture entry and ``_sweep_events`` / ``_sweep_invite_ghosts`` construct AND
+attach as ADJACENT statements on their daemon thread, so one firing inside an
+open window would be owned — which re-admits exactly the corruption recorded
+above for the one caller the probe was scoped to exclude. The window half is
+therefore CLOSED to the background sweep lanes by thread name
+(``_BACKGROUND_SDK_THREAD_PREFIXES``) and stays open to every thread the
+request itself works on (``asyncio.to_thread``'s executor, the ``graph`` pool).
+``test_probe_does_not_own_a_background_sweep_built_inside_the_window`` pins
+both halves.
 
 SCOPE — the handlers converted in this change (the read-only FalkorDB class):
 ``list_points``, ``get_point``, ``org_info``, ``list_sessions``,
@@ -76,7 +91,9 @@ the construction residual is declared in
 ``_OFFLOADED_ASYNC_BODIES_WITH_ON_LOOP_SDK_CONSTRUCTION``. The behavioural half
 (``sdk_built_on_loop``) lives in the dataplane file, because that probe is
 window-scoped and so can see the construction a sync wrapper hides from any
-source scan.
+source scan — and, since #3718's construction burn-down, in THIS file too
+(``test_read_route_construction_is_offloaded``), so the six converted read
+bodies are pinned behaviourally as well as structurally.
 
 FLAKE NOTE — the embedded-redislite fixture is not hermetic under this harness
 (#3653/#3685, the same note the write-responsiveness file carries): a
@@ -212,6 +229,48 @@ _READ_CASES = [
 ]
 
 
+#: The read cases whose SDK CONSTRUCTION is off the loop (#3718 burn-down of
+#: the #4660 construction residual). Named as a set so the membership assertion
+#: below has something to compare against: this class can only GROW by
+#: off-loading another body, and the AST pin's residual set is the other half.
+_CONSTRUCTION_OFFLOADED_READS = frozenset({
+    "points-list", "point-get", "dream-health", "team",
+    "sessions-list", "session-get",
+})
+
+#: Derived, never re-typed: the request kwargs come from ``_READ_CASES`` so a
+#: renamed route cannot leave a stale duplicate here.
+_CONSTRUCTION_CASES = [c for c in _READ_CASES
+                       if c[0] in _CONSTRUCTION_OFFLOADED_READS]
+
+
+#: Daemon worker THREAD-name prefixes whose SDK builds are NOT the request's
+#: work (#3718 review P2). ``run_on_daemon_worker`` names BOTH sweep lanes
+#: ``tortoise-boot-sweep`` — the one-shot ``_run_boot_sweeps`` and the periodic
+#: ``_event_retention_loop`` — and ``_sweep_events`` (``sdk = _make_sdk(...)``
+#: then ``proj = sdk._get_proj()``) / ``_sweep_invite_ghosts`` construct-and-
+#: attach adjacently on that thread, on a schedule the test does not control.
+#:
+#: Why name, not time: a WINDOW-ONLY ownership rule owns a sweep's SDK whenever
+#: the sweep fires while the window is open, which (a) satisfies the new
+#: construction test's ``sdk_builds > 0`` guard — whose whole job is "the run
+#: actually built a REQUEST SDK, so a short-circuited request cannot pass" —
+#: with work the request never did, and (b) in the ``block=True`` freeze test
+#: lets that SDK's ``_get_proj`` overwrite ``entered`` / ``exited`` (last-write-
+#: wins, ``_make_probe_fn``), rotating the measured stall window. The window is
+#: load-bearing for the request's own WORKER-built SDK (#3718 moves the
+#: construction there), so it cannot simply be dropped — it is closed to these
+#: threads instead. ``workers == 1`` keeps the thread name exact; a multi-worker
+#: lane is suffixed (``<name>-<i>``), hence the prefix match.
+_BACKGROUND_SDK_THREAD_PREFIXES = ("tortoise-boot-sweep",)
+
+
+def _is_background_sdk_thread() -> bool:
+    """Is the current thread a background lane whose SDK build is not ours?"""
+    name = threading.current_thread().name
+    return any(name.startswith(p) for p in _BACKGROUND_SDK_THREAD_PREFIXES)
+
+
 class _RequestScopedProbe:
     """A ``TortoiseSDK._get_proj`` probe that only sees REQUEST-owned SDKs.
 
@@ -221,7 +280,17 @@ class _RequestScopedProbe:
     which makes it the one seam that discriminates off-loop from on-loop for
     the attach without patching each handler's query shape. But it is also used
     by background daemon-thread sweeps, so the probe scopes itself to the SDK
-    instances the REQUEST created on the main thread.
+    instances the REQUEST created: those built while its WINDOW was open
+    (``state["active"]``, on whichever thread does the work — since #3718 the
+    request's own SDK is built on a ``graph``-pool worker), plus main-thread
+    builds (the pre-#3718 shape). Owning by the main thread ALONE would stop
+    observing exactly the worker-built SDK the #3718 conversion introduces, and
+    every attach assertion below would then pass vacuously. A daemon-thread
+    sweep owns nothing — with no window open, and by NAME even when a window is
+    open (``_BACKGROUND_SDK_THREAD_PREFIXES``: the sweeps construct-and-attach
+    adjacently on their own schedule, so a window alone would own them) — and
+    is delegated untouched. The window plus that name exclusion, not the
+    thread, is the owner.
 
     LIMIT, stated rather than implied: this observes the ATTACH, not the query
     round trip. A read reverted to inline on an ALREADY-ATTACHED projection
@@ -243,10 +312,47 @@ class _RequestScopedProbe:
 
         def _capture(real):
             def _wrapped(*args, **kwargs):
+                # #3718: "this build is the REQUEST's work" — a build inside the
+                # window AND not on a background sweep lane. Attribution gates
+                # BOTH the construction record below and ownership: a sweep's
+                # SDK must not satisfy `sdk_builds > 0` (the short-circuit
+                # guard) nor become `_get_proj`-observable.
+                request_work = (
+                    bool(self._state.get("active"))
+                    and not _is_background_sdk_thread())
+                # #3718: record the CONSTRUCTION's own view of the loop. This is
+                # the behavioural half of the AST pin's construction class — the
+                # pin sees `_make_sdk` / `_data_sdk` in an async body, this sees
+                # whether the call actually ran on the loop thread.
+                if request_work:
+                    try:
+                        asyncio.get_running_loop()
+                        built_on_loop = True
+                    except RuntimeError:
+                        built_on_loop = False
+                    # AGGREGATED, not last-call-wins: a body building several
+                    # SDKs must not let a later off-loop construction erase an
+                    # on-loop first one.
+                    self._state["sdk_built_on_loop"] = (
+                        self._state.get("sdk_built_on_loop", False)
+                        or built_on_loop)
+                    self._state["sdk_builds"] = (
+                        self._state.get("sdk_builds", 0) + 1)
+                    if built_on_loop:
+                        self._state.setdefault("sdk_build_threads", []).append(
+                            threading.current_thread().name)
                 sdk = real(*args, **kwargs)
-                # Only the request's own construction (main thread + the
-                # in-flight loop) is owned; a daemon-thread sweep's SDK is not.
-                if threading.current_thread() is threading.main_thread():
+                # Owned = built as the request's own work (`request_work`: inside
+                # the window and not on a background sweep lane), or on the main
+                # thread (the pre-#3718 shape). The window is what keeps the
+                # probe honest once a body builds its SDK on a WORKER thread:
+                # owning by main thread alone would silently stop observing the
+                # SDK the request is about to use, and every attach assertion
+                # would pass vacuously. The sweep exclusion is what stops the
+                # window from owning a sweep's own SDK when the two overlap
+                # (`_BACKGROUND_SDK_THREAD_PREFIXES`).
+                if (request_work
+                        or threading.current_thread() is threading.main_thread()):
                     self._owned.append(sdk)
                 return sdk
             return _wrapped
@@ -333,7 +439,11 @@ def test_read_route_offloads_graph_io(client, monkeypatch, label, handler,
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport,
                                      base_url="http://test") as ac:
-            return await ac.request(**request_kwargs())
+            state["active"] = True
+            try:
+                return await ac.request(**request_kwargs())
+            finally:
+                state["active"] = False
 
     response = asyncio.run(_run())
 
@@ -349,6 +459,323 @@ def test_read_route_offloads_graph_io(client, monkeypatch, label, handler,
     assert response.status_code == 200, (
         f"[{label}] the off-loaded read did not return a real response "
         f"({response.status_code}: {response.text[:200]})")
+
+
+@pytest.mark.parametrize("label,handler,request_kwargs", _CONSTRUCTION_CASES,
+                         ids=[c[0] for c in _CONSTRUCTION_CASES])
+def test_read_route_construction_is_offloaded(client, monkeypatch, label,
+                                              handler, request_kwargs):
+    """#3718 (construction half of #4660): building the per-request SDK must not
+    run on the event loop either.
+
+    The read's ROUND TRIP was already off the loop (#4455) — but the SDK that
+    owns it was still built inline, and in embedded mode ``_make_sdk`` probes
+    the keepalive anchor (``_anchor_usable``) and may eagerly connect with the
+    socket held, so the read route froze the loop on its FIRST statement. This
+    is the same defect class the write lane closed in #3773; the reads were left
+    in ``_OFFLOADED_ASYNC_BODIES_WITH_ON_LOOP_SDK_CONSTRUCTION``.
+
+    Mechanism assertion, not a source grep: ``asyncio.get_running_loop()``
+    succeeds only on the loop thread. Two sides, both required:
+
+    * ``sdk_builds > 0`` — the run actually constructed a request SDK, so a
+      route that short-circuited earlier cannot pass this vacuously;
+    * ``sdk_built_on_loop is not True`` — the construction did NOT run on the
+      loop thread.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+
+    _seed_read_surface()
+    _arm_session_endpoints(monkeypatch)
+
+    state: dict = {}
+    _RequestScopedProbe(monkeypatch, ha_mod, state, block=False)
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            state["active"] = True
+            try:
+                return await ac.request(**request_kwargs())
+            finally:
+                state["active"] = False
+
+    response = asyncio.run(_run())
+
+    assert state.get("sdk_builds", 0) > 0, (
+        f"[{label}] {handler} built no SDK while the request was live "
+        f"({response.status_code}: {response.text[:200]}) — this run proves "
+        f"nothing about the construction off-load (#3718)")
+    assert state.get("sdk_built_on_loop") is not True, (
+        f"[{label}] {handler} CONSTRUCTED its SDK on the event loop "
+        f"(threads={state.get('sdk_build_threads')!r}) — in embedded mode "
+        f"`_make_sdk` probes the anchor and may eagerly connect with the "
+        f"socket held, so the construction freezes every concurrent request "
+        f"exactly as the attach did. Route it through `_data_sdk_offloaded` / "
+        f"`_graph_offload` (#3773, #4660)")
+    assert response.status_code == 200, (
+        f"[{label}] the off-loaded construction changed the response "
+        f"({response.status_code}: {response.text[:200]})")
+
+
+def test_probe_does_not_own_a_background_sweep_built_inside_the_window(
+        monkeypatch):
+    """#3718 review: a sweep's SDK built INSIDE the window is NOT request-owned.
+
+    The ownership rule is "built while the request window was open, on whichever
+    thread does the request's work" — but a WINDOW IS NOT A REQUEST. The boot
+    sweeps are armed from ``_lifespan`` at fixture entry and ``_sweep_events``
+    builds its SDK and attaches it as ADJACENT statements on the
+    ``tortoise-boot-sweep`` daemon thread (``_make_sdk`` then
+    ``sdk._get_proj()``), so whenever a sweep fires inside an open window a
+    window-only rule owns it. That re-admits the very corruption this probe was
+    scoped to exclude (header: ``thread='tortoise-boot-sweep'``), and it breaks
+    two guards rather than one:
+
+    * ``sdk_builds > 0`` — the construction test's "the run built a REQUEST SDK"
+      half — becomes satisfiable by a sweep, so a request that short-circuited
+      before its own construction could pass;
+    * in the ``block=True`` freeze test that SDK's ``_get_proj`` overwrites
+      ``entered`` / ``exited`` (last-write-wins), rotating the measured stall
+      window.
+
+    Pre-fix this is RED on both halves: the sweep build increments
+    ``sdk_builds`` and lands in ``state["sdks"]``. Post-fix the window keeps
+    owning the request's own worker build (``asyncio_0`` here — the shape
+    ``asyncio.to_thread`` / the graph pool produce) and refuses the sweep lane.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    built: list = []
+
+    def _stub_make_sdk(*_args, **_kwargs):
+        sdk = object()          # distinct identity per build, so ownership is
+        built.append(sdk)       # observable without constructing a real SDK
+        return sdk
+
+    monkeypatch.setattr(ha_mod, "_make_sdk", _stub_make_sdk)
+    state: dict = {}
+    _RequestScopedProbe(monkeypatch, ha_mod, state, block=False)
+
+    state["active"] = True      # the request's window is OPEN ...
+
+    def _build_from(thread_name: str):
+        """Construct an SDK from a thread named like the named lane would."""
+        done = threading.Event()
+
+        def _run():
+            try:
+                ha_mod._make_sdk(namespace="org-3718")
+            finally:
+                done.set()
+
+        worker = threading.Thread(target=_run, name=thread_name, daemon=True)
+        worker.start()
+        assert done.wait(10), f"the {thread_name!r} builder never ran"
+        worker.join(10)
+        assert not worker.is_alive(), f"the {thread_name!r} builder hung"
+
+    _build_from("tortoise-boot-sweep")     # a background sweep, mid-window
+    _build_from("asyncio_0")               # the request's own worker build
+
+    sweep_sdk, request_sdk = built
+
+    assert state["sdks"] == [request_sdk], (
+        f"the probe owned {len(state['sdks'])} SDK(s) for a background sweep "
+        f"that built one INSIDE the request window (owned={state['sdks']!r}, "
+        f"sweep={sweep_sdk!r}) — a sweep's SDK is not the request's work, and "
+        f"owning it re-opens the measured `tortoise-boot-sweep` corruption "
+        f"(#3718)")
+    assert state.get("sdk_builds") == 1, (
+        f"the request's construction count is {state.get('sdk_builds')!r}, not "
+        f"1 — a background sweep's build was attributed to the request, so "
+        f"`sdk_builds > 0` no longer proves the REQUEST built an SDK (#3718)")
+    assert state.get("sdk_built_on_loop") is False, (
+        f"neither build ran on a loop thread, yet the probe recorded "
+        f"sdk_built_on_loop={state.get('sdk_built_on_loop')!r} (#3718)")
+
+
+class _BrokenSDK:
+    """An SDK whose every graph attach fails — the ``#1591`` broken-STORE shape.
+
+    Stands in for ``TortoiseSDK`` in the capacity test below: the construction
+    is what that test controls, and its only requirement of the returned object
+    is that a later read refuses (so a route that IS allowed to reach its read
+    degrades down the fail-soft path).
+    """
+
+    def _get_proj(self):
+        raise RuntimeError("graph unavailable")
+
+    def _get_registry(self):
+        raise RuntimeError("graph unavailable")
+
+    def close(self):
+        return None
+
+
+#: The three READ routes whose docstring/comment carries a ``#1591`` FAIL-SOFT
+#: contract, and which therefore have to record the ONE new fail-CLOSED mode
+#: the #3718 construction off-load adds to them. ``list_points`` / ``get_point``
+#: / ``dream_health`` were already fail-closed on their read, so the 503 is not
+#: a contract change there (and their response has no soft shape to confuse).
+_FAIL_SOFT_CONTRACT_CASES = [
+    ("team", "/v1/team"),
+    ("sessions-list", "/v1/sessions"),
+    ("session-get", f"/v1/sessions/{_SEEDED_SESSION}"),
+]
+
+
+@pytest.mark.parametrize("label,url", _FAIL_SOFT_CONTRACT_CASES,
+                         ids=[c[0] for c in _FAIL_SOFT_CONTRACT_CASES])
+def test_graph_pool_capacity_is_fail_closed_not_a_silent_empty(
+        client, monkeypatch, label, url):
+    """#3718: a graph-pool CAPACITY refusal must never become the soft shape.
+
+    Moving the per-request SDK construction onto the ``graph`` pool gives these
+    three routes a failure mode they did not have: the offload can REFUSE a
+    submission (saturated backlog) or miss its wait bound. Their ``#1591``
+    FAIL-SOFT contract is for a MISSING/BROKEN graph — a STORE condition — and
+    the empty shape is the honest answer there (``point_count: 0`` /
+    ``sessions: []`` / ``session: None``). It is NOT the honest answer for our
+    own capacity: serving it would report real data as absent, which is exactly
+    the clean-empty-for-a-store-we-could-not-reach shape ``#3892`` forbids. So
+    the refusal is fail-CLOSED — a retryable 503 ``graph_unavailable`` — and
+    the fail-soft arm below the construction still covers the broken store
+    (``test_hosted_api.py::test_sessions_fail_soft_when_graph_unavailable`` &c,
+    unchanged). The contract is recorded at each route's construction site; this
+    is its behavioural pin.
+
+    RED on the pre-#3718 shape, and for the right reason: with the construction
+    INLINE the lane's bound is never armed (the slow construction merely delays
+    the request) and each route returns 200 with its soft body. So this pins a
+    real consequence of the conversion, not a tautology.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    # The graph lane's own bound, lowered to a bound miss — the lever
+    # ``tests/test_control_plane_offload_3498.py`` uses for this pool.
+    monkeypatch.setattr(ha_mod, "graph_offload_timeout_s", lambda: 0.05)
+
+    def _slow_data_plane(real):
+        def _wrapped(*args, **kwargs):
+            # The REGISTRY plane (auth, membership, invite lookups) is not what
+            # this test is about — it runs inline today and must keep working,
+            # or the request would 500 before reaching the route's own
+            # construction.
+            if kwargs.get("namespace") == "registry":
+                return real(*args, **kwargs)
+            time.sleep(0.4)
+            return _BrokenSDK()
+        return _wrapped
+
+    monkeypatch.setattr(ha_mod, "_data_sdk",
+                        _slow_data_plane(ha_mod._data_sdk))
+    monkeypatch.setattr(ha_mod, "_make_sdk",
+                        _slow_data_plane(ha_mod._make_sdk))
+
+    response = client.get(url)
+
+    assert response.status_code == 503, (
+        f"[{label}] a graph-pool bound miss returned {response.status_code} "
+        f"({response.text[:200]}) — #3718's capacity contract is a retryable "
+        f"503, never the #1591 soft shape, which is reserved for a BROKEN "
+        f"STORE (#3892: no clean empty for a store we could not reach)")
+    body = response.json()
+    assert body.get("detail", {}).get("error_code") == "graph_unavailable", body
+    assert "sessions" not in body and "session" not in body, (
+        f"[{label}] the capacity refusal came back as the route's soft body "
+        f"({body}) — a warm pool would then be indistinguishable from an "
+        f"empty org")
+
+
+@pytest.mark.parametrize("label,handler,request_kwargs", _CONSTRUCTION_CASES,
+                         ids=[c[0] for c in _CONSTRUCTION_CASES])
+def test_read_routes_submit_one_graph_pool_submission(
+        client, monkeypatch, label, handler, request_kwargs):
+    """#3718 makes the ``graph`` pool a READ lane — pin its per-request occupancy.
+
+    The pool's occupancy disclosure (``tortoise/monitoring.py``,
+    ``CONTROL_PLANE_GRAPH_*`` — the #3669 "not hidden" rule) now states that
+    each of these six read requests submits here exactly ONCE, for its SDK
+    construction, and that its graph READS do not come here at all (they ride
+    the house ``asyncio.to_thread`` default executor, ``dream_health``'s pass on
+    ``_DREAM_EXECUTOR``). That number is the rule's content, so it is pinned
+    here rather than left to prose: a second submission per read changes the
+    pool's read pressure, and a ZERO means the construction went back inline.
+
+    RED on the pre-#3718 shape — the inline construction submitted nothing to
+    this pool, which is why the disclosure block had no read-plane line at all.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app
+
+    _seed_read_surface()
+    _arm_session_endpoints(monkeypatch)
+
+    real_call = ha_mod.run_control_plane_call
+    pools: list[str] = []
+
+    async def _recorder(fn, *, op, timeout=None, pool="auth",
+                        cancel_on_timeout=True):
+        pools.append(pool)
+        return await real_call(fn, op=op, pool=pool, timeout=timeout,
+                               cancel_on_timeout=cancel_on_timeout)
+
+    monkeypatch.setattr(ha_mod, "run_control_plane_call", _recorder)
+
+    async def _run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            return await ac.request(**request_kwargs())
+
+    response = asyncio.run(_run())
+
+    assert response.status_code == 200, (
+        f"[{label}] the request did not complete "
+        f"({response.status_code}: {response.text[:200]})")
+    graph_submissions = [p for p in pools if p == "graph"]
+    assert len(graph_submissions) == 1, (
+        f"[{label}] {handler} made {len(graph_submissions)} `graph`-pool "
+        f"submission(s) (all pools: {pools!r}) — the occupancy disclosure in "
+        f"tortoise/monitoring.py declares exactly ONE per read request (the SDK "
+        f"construction). ZERO means the construction went back on the loop; "
+        f"more than one means the pool's read pressure changed and the "
+        f"disclosure block has to move with it (#3718, #3669)")
+
+
+def test_construction_offloaded_reads_are_the_declared_ones():
+    """The behavioural class and the AST residual set must name the SAME bodies.
+
+    Two guards, one class: the AST pin (``_OFFLOADED_ASYNC_BODIES`` /
+    ``_OFFLOADED_ASYNC_BODIES_WITH_ON_LOOP_SDK_CONSTRUCTION``) and this file's
+    behavioural cases. If they can drift, one of them is decoration — a body
+    could be converted and still sit in the residual, or leave the residual with
+    no behavioural proof that it is off the loop.
+    """
+    assert len(_CONSTRUCTION_CASES) == len(_CONSTRUCTION_OFFLOADED_READS), (
+        "a label in `_CONSTRUCTION_OFFLOADED_READS` has no `_READ_CASES` row — "
+        f"the behavioural case was renamed or dropped: "
+        f"{sorted(_CONSTRUCTION_OFFLOADED_READS - {c[0] for c in _READ_CASES})}")
+    assert frozenset({
+        "points-list", "point-get", "dream-health", "team",
+        "sessions-list", "session-get",
+    }) == _CONSTRUCTION_OFFLOADED_READS, (
+        "the construction-off-loaded read set changed shape — re-derive which "
+        "read bodies are actually off the loop before trusting the AST pin "
+        "(#3718)")
+    assert {c[1] for c in _CONSTRUCTION_CASES} <= set(
+        _OFFLOADED_ASYNC_BODIES), (
+        "a behaviourally-proven off-loaded read body is not in the AST pin's "
+        "fully-off-loaded set — the pin would let its construction regress "
+        "silently (#3718)")
+    assert not ({c[1] for c in _CONSTRUCTION_CASES}
+                & _OFFLOADED_ASYNC_BODIES_WITH_ON_LOOP_SDK_CONSTRUCTION), (
+        "a read body is declared BOTH fully off-loaded and a construction "
+        "residual — the two declarations disagree (#3718)")
 
 
 def test_read_route_does_not_freeze_the_event_loop(client, monkeypatch):
@@ -388,6 +815,12 @@ def test_read_route_does_not_freeze_the_event_loop(client, monkeypatch):
                                      base_url="http://test") as ac:
             tick = asyncio.create_task(_ticker())
             await asyncio.sleep(TICK_S * 2)  # ticker mid-sleep before the read
+            # The request WINDOW owns the probe's SDKs (#3718): with the
+            # construction off the loop the SDK is built on a worker thread, so
+            # a main-thread-only ownership rule would silently stop observing
+            # the attach this test exists to watch — and the blocking stand-in
+            # below would never fire.
+            state["active"] = True
             read = asyncio.create_task(ac.request(**request_kwargs))
             for _ in range(2000):  # let the read reach the blocking call
                 if "entered" in state:
@@ -402,6 +835,7 @@ def test_read_route_does_not_freeze_the_event_loop(client, monkeypatch):
             health = await ac.get("/health")
             health_done = time.perf_counter()
             response = await read
+            state["active"] = False
             stop["done"] = True
             await tick
         return ticks, health, health_done, response, read_in_flight
@@ -449,7 +883,8 @@ def test_read_route_does_not_freeze_the_event_loop(client, monkeypatch):
 #
 # BOUNDARY, stated rather than implied (the module header's rule): this pin is
 # MECHANISM-scoped, not request-ownership-scoped. ``_RequestScopedProbe`` above
-# can only own SDKs built on the main thread, and the listing's registry read is
+# owns SDKs built during the request WINDOW or on the main thread;
+# the listing's registry read is
 # off-loaded — it runs on a worker thread through the process-lifetime
 # ``_registry_anchor()`` (no construction of its own; in Supabase mode no graph
 # handle at all) — so the switcher cannot be a ``_READ_CASES`` entry and cannot
@@ -928,11 +1363,18 @@ _OFFLOAD_BOUNDARY_CALLEES = frozenset({
 #: ⚠️ ``list_points``, ``get_point``, ``org_info``, ``list_sessions``,
 #: ``get_session_detail``, ``dream_health``, ``list_api_keys``, ``list_members``,
 #: ``list_pending_invites_for_me``, ``patch_onboarding_state`` and
-#: ``invite_info`` were members until #4660 widened the scan: their graph READS
-#: are off-loaded, but their ``_data_sdk`` / ``_make_sdk(namespace="registry")``
-#: CONSTRUCTION still runs on the loop. They now live in
-#: ``_OFFLOADED_ASYNC_BODIES_WITH_ON_LOOP_SDK_CONSTRUCTION`` below — a decided,
-#: visible residual rather than a vacuous declaration.
+#: ``invite_info`` were members of the residual until #4660 widened the scan:
+#: their graph READS are off-loaded, but their ``_data_sdk`` /
+#: ``_make_sdk(namespace="registry")`` CONSTRUCTION ran on the loop. #3718
+#: burned down the six DATA-plane bodies of that group — ``list_points``,
+#: ``get_point``, ``org_info``, ``list_sessions``, ``get_session_detail`` and
+#: ``dream_health`` — and they are members of THIS set because their
+#: construction is now off the loop too (``_data_sdk_offloaded`` / the raw
+#: ``_graph_offload`` seam). The five that remain construction residuals —
+#: ``list_api_keys``, ``list_members``, ``list_pending_invites_for_me``,
+#: ``patch_onboarding_state``, ``invite_info`` — live in
+#: ``_OFFLOADED_ASYNC_BODIES_WITH_ON_LOOP_SDK_CONSTRUCTION`` below, each with a
+#: recorded reason (registry-plane #2446 / worker-owned close), NOT in this set.
 _OFFLOADED_ASYNC_BODIES = frozenset({
     # #3718 residual 3 — the DATA-plane seam outside the REST-converted
     # bodies. These were ``_KNOWN_INLINE_*_RESIDUAL`` until this change
@@ -965,18 +1407,42 @@ _OFFLOADED_ASYNC_BODIES = frozenset({
     # ``test_org_switcher_listing_is_chunked_and_loses_no_row`` and
     # ``test_org_switcher_listing_never_builds_a_graph_handle_in_supabase_mode``.
     "list_my_orgs",
+    # #3718 (construction half of #4660): the DATA-plane read handlers built
+    # their per-request SDK on the loop while already off-loading the read it
+    # serves. `_data_sdk_offloaded` (the #3773 twin) returns the identical SDK,
+    # so these are one-thread-hand-off conversions with no semantic change;
+    # `org_info` builds directly via `_make_sdk`, so it uses the raw
+    # `_graph_offload` seam. Behavioural pins:
+    # ``test_read_route_construction_is_offloaded`` (6 cases) in
+    # ``tests/test_read_routes_loop_responsiveness.py`` — each one RED on the
+    # inline shape (`sdk_built_on_loop` True, thread MainThread).
+    "list_points", "get_point", "org_info", "list_sessions",
+    "get_session_detail", "dream_health",
 })
 
 #: Async bodies whose GRAPH I/O is off-loaded but whose SDK CONSTRUCTION is
 #: still on the loop (#4660). Declared, visible residual — NOT a claim that
 #: these bodies are clean.
 #:
-#: Why they are not simply off-loaded here: off-loading the construction of a
-#: handled read is a behavioural change on the hottest read path (11 routes plus
-#: the hot onboarding PATCH), mixed into what is otherwise a pure guard/inventory
-#: change — exactly the mixing #4660 was deferred out of #4645 to avoid. The
-#: burn-down runs under #3718 (kept open via #2924); ``_data_sdk_offloaded``
-#: (#3773) is the twin the data-plane ones would move onto.
+#: #3718 burned down the six DATA-plane read bodies that used to be here
+#: (``list_points``, ``get_point``, ``org_info``, ``list_sessions``,
+#: ``get_session_detail``, ``dream_health``) — they now live in
+#: ``_OFFLOADED_ASYNC_BODIES``. The five below are a DIFFERENT class and were
+#: deliberately left, each for a recorded reason rather than for effort:
+#:
+#: * ``list_api_keys`` / ``list_members`` / ``list_pending_invites_for_me`` /
+#:   ``invite_info`` construct on the REGISTRY plane (``_make_sdk(namespace=
+#:   "registry")``), and registry reads carry the #2446 thread-dependence
+#:   measurement: off-loading them made
+#:   ``test_invites_http.py::TestExpiredInviteReMint`` see an EMPTY member list
+#:   (inline passes 4/4), i.e. an auth-path read whose result depends on which
+#:   thread runs it. Reproduce that measurement for THESE queries before
+#:   converting them — the reference case lives in
+#:   ``_KNOWN_INLINE_HELPER_RESIDUAL`` (``_membership_role``).
+#: * ``patch_onboarding_state`` constructs inside a WORKER-OWNED close: its read
+#:   closure closes the SDK in the worker's own ``finally`` (CPython #87185), so
+#:   moving the construction means moving the close's subject too — a separate
+#:   unit with its own proof, not a one-line swap.
 #:
 #: Two assertions hold for the membership, so this set can only shrink by
 #: actually off-loading the construction:
@@ -985,8 +1451,6 @@ _OFFLOADED_ASYNC_BODIES = frozenset({
 #: * every member's GRAPH-seam hits are empty — re-inlining a read/attach in one
 #:   of these bodies is still a failure, not an upgrade to "construction-only".
 _OFFLOADED_ASYNC_BODIES_WITH_ON_LOOP_SDK_CONSTRUCTION = frozenset({
-    "list_points", "get_point", "org_info", "list_sessions",
-    "get_session_detail", "dream_health",
     "list_api_keys", "list_members", "list_pending_invites_for_me",
     "patch_onboarding_state",
     # The public invite-info read: its READS are off-loaded — the registry legs

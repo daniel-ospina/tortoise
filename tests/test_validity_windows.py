@@ -843,9 +843,12 @@ def test_a_start_naming_no_instant_leaves_the_window_open(sdk):
 
     Discriminating: on the unfixed code this point reports ``status="absent"``.
     The open-END side is deliberately NOT touched here, and it is NOT flagged
-    either: a present-but-unparseable ``validTo`` covers every later instant and
-    still reads ``end_state: "known"`` (``END_UNKNOWN`` needs an ABSENT end plus
-    an ``"unknown"`` declaration), tracked on #9202.
+    either: a present-but-unparseable ``validTo`` is not a bound at all
+    (``_covers`` skips its arm, #9202 — it used to EXCLUDE an unparseable probe
+    by comparing the text) and it still reads ``end_state: "known"``
+    (``END_UNKNOWN`` needs an ABSENT end plus an ``"unknown"`` declaration) —
+    the flag half is still #9202's owner decision. See
+    ::``test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_probe``.
     """
     empty = _make_point(sdk, content="start recorded as empty", validFrom="")
     assert _props(sdk, empty["id"])["validFrom"] == ""
@@ -880,6 +883,79 @@ def test_a_start_naming_no_instant_leaves_the_window_open(sdk):
         "the end distance is computable, so the nearest-window annotation must "
         f"survive an unparseable start: {absent}"
     )
+
+
+@pytest.mark.parametrize("stored_end", ["TBD", ""],
+                         ids=["text-that-is-not-an-instant", "empty-value"])
+def test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_probe(
+        sdk, stored_end):
+    """#9202 (coverage half) — a stored end that names no instant is not a bound.
+
+    ``_covers`` gates the START arm on ORDERABILITY since #6140 (an unorderable
+    start is skipped, so the window is open below), but the END arm ordered the
+    key unconditionally. An unorderable END and an UNPARSEABLE PROBE both bucket
+    as ``(1, <text>)``, so that comparison fell through to the TEXT:
+    ``_created_sort_key("TBD") < _created_sort_key("zzz")`` is True and the
+    window was EXCLUDED — while the very same window covered ``"AAA"`` and
+    every dated probe. The answer depended on the alphabet of the probe, not on
+    the data: the stored end bounds nothing, yet it excluded one instant and
+    not another.
+
+    Both shapes of the class are exercised, because they were broken
+    DIFFERENTLY: ``"TBD"`` excluded only the probes its text sorts before
+    (``"zzz"``, not ``"AAA"``), while the empty value keys as ``(1, "")``
+    and therefore sorted before EVERY UNPARSEABLE probe — both junk probes, and
+    neither a dated one: bucket ``(1, "")`` sorts AFTER every ``(0, epoch)``
+    instant, which is why the ``dated`` assertion below is green on the unfixed
+    code too.
+
+    ONTOLOGY §4.7 already states the rule for this value — an *"unorderable
+    bound ... names no instant, so a refusal would rest on a lexicographic
+    accident rather than a comparison"* — and the same section records the
+    reading the END keeps: an unorderable ``validTo`` *"covers every later
+    instant"*. This test pins the COVERAGE half only.
+
+    NOT touched here, on purpose: ``end_state`` still reads ``known`` for a
+    present-but-un-datable end. Whether it should read ``unknown`` / ``open`` is
+    #9202's OWNER decision (``docs/ONTOLOGY.md`` §4.7; the ``#2350`` pin in
+    ``tests/test_2350_validity_precision.py``), and this fix does not pre-empt
+    it — the assertions below never touch ``end_state``.
+
+    Discriminating: on the unfixed code the ``"zzz"`` probe reports
+    ``status="absent"`` for both shapes.
+    """
+    p = _make_point(sdk, content="end recorded as un-datable",
+                    validFrom="2024-01-01", validTo=stored_end)
+    assert _props(sdk, p["id"])["validTo"] == stored_end
+
+    # A DATED probe — covered on both the fixed and the unfixed code.
+    dated = sdk.get_historical_knowledge(p["id"], "2050-01-01")
+    assert dated["status"] == "found"
+
+    # Two probes that name no instant, one sorting AFTER the stored text and one
+    # BEFORE it: the same window, the same un-datable end — ONE answer.
+    after = sdk.get_historical_knowledge(p["id"], "zzz")
+    assert after["status"] == "found", (
+        "a stored end that names no instant cannot exclude the probe — the "
+        f"unfixed END arm compared the text ({stored_end!r} < 'zzz'): {after}"
+    )
+    assert after["valid_point"]["id"] == p["id"]
+
+    before = sdk.get_historical_knowledge(p["id"], "AAA")
+    assert before["status"] == "found", (
+        "coverage must not depend on the probe's spelling — the "
+        f"{stored_end!r} end names no instant, so it cannot exclude this "
+        f"probe either: {before}"
+    )
+    assert before["valid_point"]["id"] == p["id"]
+
+    # CONTROL — a DATED end still bounds the window. The fix SKIPS an
+    # unorderable bound; it does not stop windows from ending.
+    dated_end = _make_point(sdk, content="dated end",
+                            validFrom="2024-01-01", validTo="2024-03-01")
+    out = sdk.get_historical_knowledge(dated_end["id"], "2050-01-01")
+    assert out["status"] == "absent"
+    assert out["found"] is False
 
 
 def test_an_unorderable_valid_from_warns_at_the_write_boundary(sdk, caplog):

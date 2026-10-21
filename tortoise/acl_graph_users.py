@@ -82,7 +82,32 @@ def _admin_client():
     admin creds). None when: no URI (embedded redislite), a hostless URI, or
     an unsupported scheme — every ACL fn then no-ops (fail-soft). Port-less
     URIs default to 16379 (the repo-wide convention — projection/session
-    parsers; docker-compose maps 6379 for containers WITH the port)."""
+    parsers; docker-compose maps 6379 for containers WITH the port).
+
+    #7357 — built through ``guarded_client`` (the #6882 seam), so a transport
+    failure on a role/ACL mutation carries the instance-outage note: the
+    instance went away (a restart, an RDB reload, an OOM-kill), and for a
+    mutating verb whether the command took effect is UNKNOWN — read the ACL
+    state back before re-issuing it.
+
+    THE SURFACE THAT GAINS THE NOTE IS THIS MODULE'S LOG LINE, NOT a
+    caller-facing message: every ACL fn here is fail-soft and catches what the
+    guarded channel raises (``except Exception`` → ``logger.warning(...)``, then
+    ``False``/``None`` — see :func:`_setuser`, :func:`drop_acl_user`), so the
+    noted exception is LOGGED and swallowed rather than returned to a caller,
+    and an ``AclLayerError`` from a real ``ResponseError`` refusal is untouched
+    and correctly carries no note (``is_instance_unavailable`` excludes it).
+    What was missing before this seam is the mechanism class and the read-back
+    instruction; the prefix this module already logged said "connection
+    failure". A first-command failure inside :func:`_falkordb_present` is still
+    swallowed there with no log at all — pre-existing, and outside this wiring
+    change's scope. The HEDGE arm is the one this channel gets, deliberately:
+    every verb this module sends is non-Cypher (``MODULE LIST``, ``ACL GETUSER``/
+    ``SETUSER``/``DELUSER``/``SAVE``), so ``_command_mutating`` has no statement
+    to classify and answers ``None``. The ACL bearer commands are also not
+    operator-guarded (no Cypher reaches the ``=~`` guard); the outage note is
+    the whole gain.
+    """
     uri = os.environ.get("TORTOISE_DB_URI")
     if not uri:
         return None
@@ -99,13 +124,18 @@ def _admin_client():
     # (only redis.from_url does), so a raw read breaks auth silently.
     from tortoise.config import parse_uri_userinfo
 
+    # #6882's ONE construction seam — see this function's docstring for the
+    # #7357 half (the outage note) and why the guard's Cypher arm is inert here.
+    from tortoise.cypher_guard import guarded_client
+
     # #3065: the socket bounds come from the product's ONE resolution point,
     # not from a pair of literals. The literals this replaces (3s connect /
     # 5s read) were bounded but KNOB-BLIND — `TORTOISE_DB_SOCKET_TIMEOUT`
     # never reached this client, which is the same defect one step milder.
     from tortoise.projection import _bounded_server_socket_kwargs
     username, password = parse_uri_userinfo(uri)
-    return redis.Redis(
+    return guarded_client(
+        redis.Redis,
         host=parsed.hostname,
         port=parsed.port or 16379,
         username=username,

@@ -223,6 +223,12 @@ surfaces:
   # `tortoise/projection/__init__.py` needs no arm: it is in SHARED_MODULES
   # (full matrix).
   - test_9121_onboarding_residual_pins.py
+  # #9157 (§17.1): the eager-init CREATE found its declared route. Same
+  # multi-surface argument as #9121 above — the routes it pins live in
+  # `tortoise/onboarding/state.py` (onboarding), the host mint lanes
+  # (`tortoise/hosted_api.py` -> api), the guarded handle it must use
+  # (`tortoise/projection/__init__.py` -> core) and `TortoiseSDK.org_create` (sdk).
+  - test_9157_eager_init_declared.py
   - test_7951_write_doors.py
   # #7951 (steps 1-3, the ENFORCEMENT): DUAL-REGISTERED with the same six
   # surfaces as the door inventory above, for the same reason — the guard's
@@ -377,6 +383,37 @@ surfaces:
   # entry below covers them.) Pinned by
   # tests/test_ci_selection.py::test_socket_bound_2969_guard_runs_on_every_spread_site.
   - test_socket_bound_not_multiplied_2969.py
+  # #7357: the instance-outage note on the two in-package clients
+  # (`guarded_client` wiring). DUAL-REGISTERED with `core` for the same reason
+  # as the two rows above: `tortoise/acl_graph_users.py` is an exact `api`
+  # SOURCE_PATTERNS match, so an `acl_graph_users.py`-only diff selects `api`
+  # and REPLACES the `core` fallback — without THIS entry the ACL case never
+  # runs on a change to the site it pins (the #2938/#1349 silent-drop class).
+  # MEASURED: `ci_selection.py --changed-files tortoise/acl_graph_users.py` →
+  # surfaces `["api"]` with this file ABSENT from `test_files` before this
+  # row, present after. (The restore half needs no row of its own:
+  # `tortoise/hosted_backup.py` is in `CORE_ALSO`, so that diff selects
+  # `api` + `core` and the file runs anyway — which is exactly why the ACL
+  # half's absence went unnoticed.) `test_bounded_raw_clients_3065.py` above
+  # pins only THAT the clients go through the seam; this file pins WHAT the
+  # seam says on each channel.
+  # #7357: the instance-outage NOTE on the two in-package raw clients
+  # (`hosted_backup._restore_copy_client`, `acl_graph_users._admin_client`).
+  # DUAL-REGISTERED with `core` (its fallback surface — see the #7357 block
+  # there, which is load-bearing for `tortoise/retry.py` and
+  # `tortoise/cypher_guard.py`, NEITHER of which matches a named pattern).
+  # The ACL client's module IS an exact `api` SOURCE_PATTERNS match
+  # (`tortoise/acl_graph_users.py`, deliberately not in `CORE_ALSO`), so an
+  # `acl_graph_users.py`-only diff selects `api` and REPLACES the `core`
+  # fallback — without THIS entry the only test that pins what the seam SAYS on
+  # that channel never runs on a change to that channel (the #1349/#2938/#9190
+  # silent-drop class). The anti-REVERT half is already `api`-registered
+  # (`test_bounded_raw_clients_3065.py` above), but it is an AST inventory: it
+  # pins THAT the client goes through the seam, not WHAT the seam emits.
+  # Measured this turn: `ci_selection.py --changed-files
+  # tortoise/acl_graph_users.py` → `surfaces: ["api"]`, and the restore half
+  # (`hosted_backup.py` is in `CORE_ALSO`) already selects this file.
+  - test_7357_transport_legibility.py
   # #2922/#2923: DB-free static guards for boot-path regressions (credential
   # redaction in entrypoint.sh, function-scope import shadowing in _lifespan).
   # Registered under `api` as well as `core` deliberately: the file it guards most
@@ -1749,6 +1786,12 @@ surfaces:
   # otherwise run this suite never — the #1349/#2938/#3154 silent-drop class.
   - test_9079_onboarding_declared_lane.py
   - test_9121_onboarding_residual_pins.py
+  # #9157 (§17.1): the eager-init CREATE found its declared route. Same
+  # multi-surface argument as #9121 above — the routes it pins live in
+  # `tortoise/onboarding/state.py` (onboarding), the host mint lanes
+  # (`tortoise/hosted_api.py` -> api), the guarded handle it must use
+  # (`tortoise/projection/__init__.py` -> core) and `TortoiseSDK.org_create` (sdk).
+  - test_9157_eager_init_declared.py
   # #9195 (§17.1's FOURTH declaration child): the SDK's structural-edge write
   # lane (`create_edge` and `create_about_edge`, each with ONE `MERGE`, plus
   # `create_edge`'s three typed wrappers — the lane mints no node, no property
@@ -3534,16 +3577,35 @@ surfaces:
   - test_7405_update_point_writes.py
   # #7357: the instance-outage NOTE — `retry.explain_instance_unavailable` /
   # `is_instance_unavailable`, and their application on every channel
-  # `cypher_guard` wraps. `core` is load-bearing for BOTH subjects and neither
-  # is named: `tortoise/retry.py` matches no SOURCE_PATTERNS (the reason the two
-  # #7405 rows above carry the same arm) and `tortoise/cypher_guard.py` matches
-  # none either, so a file-only diff to either falls through to this `core`
-  # fallback. Verified by `ci_selection.py --changed-files` on both files →
+  # `cypher_guard` wraps. `core` is load-bearing for BOTH subjects and NEITHER
+  # source is a named pattern reachable without it: `tortoise/retry.py` matches
+  # no SOURCE_PATTERNS (the reason the two #7405 rows above carry the same arm)
+  # and `tortoise/cypher_guard.py` matches none either, so a file-only diff to
+  # either falls through to this `core` fallback. ⚠️ The #7357 suite is also
+  # DUAL-REGISTERED on `api` (see the row there): its ACL subject
+  # (`tortoise/acl_graph_users.py`) IS an exact `api` match, so an
+  # `acl_graph_users.py`-only diff REPLACES this fallback and only the `api`
+  # arm keeps the ACL case awake.
+  # Verified by `ci_selection.py --changed-files` on both files →
   # `{"surfaces": ["core"], "full": false}`. Without this row the file
   # classifies NOWHERE: `--integrity` reds the required `manifest-integrity` job
   # and no leg runs the suite at all (not even a push, whose fast pool is built
   # from the manifest, not from the `tests/` glob) — the #9190 trap written up
   # above, and the same miss the #9209 row records.
+  # `cypher_guard` wraps. `core` is load-bearing for BOTH of its own subjects
+  # and neither is named: `tortoise/retry.py` matches no SOURCE_PATTERNS (the
+  # reason the two #7405 rows above carry the same arm) and
+  # `tortoise/cypher_guard.py` matches none either, so a file-only diff to
+  # either falls through to this `core` fallback. Verified by `ci_selection.py
+  # --changed-files` on both files → `{"surfaces": ["core"], "full": false}`.
+  # The suite's THIRD subject — the ACL admin client in
+  # `tortoise/acl_graph_users.py` — IS a named source (an exact `api`
+  # SOURCE_PATTERNS match, deliberately not in `CORE_ALSO`), so it needs the
+  # `api` arm as well; that row is the dual registration, above. Without this
+  # row the file classifies NOWHERE: `--integrity` reds the required
+  # `manifest-integrity` job and no leg runs the suite at all (not even a push,
+  # whose fast pool is built from the manifest, not from the `tests/` glob) —
+  # the #9190 trap written up above, and the same miss the #9209 row records.
   - test_7357_transport_legibility.py
   - test_retrieval_determinism_2952.py  # #2952: ranking determinism w.r.t. elapsed wall-clock (hermetic, no DB)
   - test_3844_annotation_injection.py  # #3844: reader-evidence annotation prefix cannot be forged by a newline in speaker/session_date OR the validity marker (hermetic, no DB)
@@ -4306,6 +4368,12 @@ surfaces:
   # otherwise run this suite never — the #1349/#2938/#3154 silent-drop class.
   - test_9079_onboarding_declared_lane.py
   - test_9121_onboarding_residual_pins.py
+  # #9157 (§17.1): the eager-init CREATE found its declared route. Same
+  # multi-surface argument as #9121 above — the routes it pins live in
+  # `tortoise/onboarding/state.py` (onboarding), the host mint lanes
+  # (`tortoise/hosted_api.py` -> api), the guarded handle it must use
+  # (`tortoise/projection/__init__.py` -> core) and `TortoiseSDK.org_create` (sdk).
+  - test_9157_eager_init_declared.py
   - test_7951_write_doors.py
   # #9068 review P1: MULTI-REGISTERED with `core` (below), `api` and `onboarding`
   # (above), and `ep` / `eval` / `sdk` — the six surfaces a module the #5475 door
@@ -4916,6 +4984,12 @@ surfaces:
   # otherwise never run it (the #1349/#2938 silent-drop class; full rationale in
   # the `api` entry above).
   - test_9121_onboarding_residual_pins.py
+  # #9157 (§17.1): the eager-init CREATE found its declared route. Same
+  # multi-surface argument as #9121 above — the routes it pins live in
+  # `tortoise/onboarding/state.py` (onboarding), the host mint lanes
+  # (`tortoise/hosted_api.py` -> api), the guarded handle it must use
+  # (`tortoise/projection/__init__.py` -> core) and `TortoiseSDK.org_create` (sdk).
+  - test_9157_eager_init_declared.py
   classify:
   # Issue #1695 (extractor-v3 classify-later): the kind-classification and
   # chain-enforcement surface. Pure-logic files (stub encoders, golden
@@ -5052,6 +5126,22 @@ surfaces:
   # select `eval` and run neither).
   - test_measure_ask_distilled.py
   - eval/ask/test_ask_corpus.py
+  # #8066 ⟂ #9097: the served-skill relay ratchet's SUBJECT is every
+  # `tests/**/*.py`, so every surface such a file can SELECT needs an arm.
+  # `tests/eval/ask/` is a SOURCE_PATTERNS entry of THIS surface (the #9097
+  # block above — `tools/ci_selection.py`, `SOURCE_PATTERNS["eval"]`, the
+  # `"tests/eval/ask/"` tuple member), so an `eval`-only diff to `corpus.py` /
+  # `generate_corpus.py` / `test_ask_corpus.py` / `__init__.py` selects `eval`
+  # and REPLACES the `core` fallback where the ratchet's `core` arm lives —
+  # without this arm the ratchet is asleep exactly on those files (the
+  # #1349/#2938 silent-drop class). Measured this turn: each of those four
+  # paths → `surfaces: ["eval"]`, and with this row absent the ratchet is not in
+  # `test_files`; `tests/eval/ask/` landed on main
+  # with #9380 and
+  # `test_8066_relay_ratchet_is_registered_on_every_surface_it_covers` went red
+  # naming those four files — that test's own enumeration is what demands this
+  # row, on whichever surface a `tests/**` file newly selects.
+  - test_8066_served_skill_relay_ratchet.py
   - longmem_eval/test_freq_count_disposition.py  # #2886: guards tools/longmem_eval/freq_count_disposition.py (the census frequency/count disposition tool) — `tools/longmem_eval/` is a SOURCE_PATTERNS entry of this surface, so an eval-tool change alone selects it
   - test_temporal_aggregate_arm.py  # #2886: guards tools/longmem_eval/retrieve.py's `temporal_aggregate_verdict` adapter — `tools/longmem_eval/` is a SOURCE_PATTERNS entry of this surface, so a retrieve.py-only change selects it (dual-registered with `core` for the core's verdict semantics)
   - longmem_eval/test_temporal_admission_trace.py  # #2976: temporal admission trace — pool-membership vs reader-window-cut receipts + TR-machinery-inert mechanism pin (hermetic, no DB)
@@ -5797,6 +5887,7 @@ durations_captured_at: "2026-10-17T15:43:47Z"
 durations:
   test_9362_sweep_mirror_order.py: 2.0  # unmeasured — new in #9362; no CI sweep has collected it, so it carries the flat default for an unmeasured file (the #9121/#9192/#3400 convention). Do NOT substitute a local timing: the map is a SHARD-LAYOUT input modelling CI, and the local whole-file reading here (135.6s) is ~124s of SESSION cost that lands on whichever test runs first (measured both ways: `-k stale_epoch` alone 125.2s, `-k peer_already_cleared` alone 123.9s, and the same two cost ~1s each when not first — the #3400 attribution the map's header warns about), so a locally derived row would misstate the file by whatever order the shard happens to run. It matters here rather than being cosmetic: at b76de57c the map sat at 96/961 missing = coverage 0.900104 against the 0.90 floor with ZERO headroom, so one more unweighted fast file reds `--integrity`'s `duration_coverage_issues`. `tools/ci_timing.py --refresh-durations` is the sole writer and replaces this from junit.
   test_9121_onboarding_residual_pins.py: 2.0  # unmeasured — new in #9121; no sweep has collected it, so it carries the flat default for an unmeasured file (same convention as test_prod_csp_monitor.py / test_venture_pack.py). Do NOT substitute a local timing: the map is a SHARD-LAYOUT input modelling CI, and a locally measured weight that does not model CI must not decide what runs together. Measured 2026-10-19: 15 cases, source-structural only (no graph fixture). `test_9079_onboarding_declared_lane.py` already carries a measured row in the #3400-trap block below (3.6) — do NOT add a second key here; a duplicate mapping key is refused by `tools/registry_integrity.py` and silently keeps the LAST value (#5373).
+  test_9157_eager_init_declared.py: 2.0  # unmeasured — new in #9157; no CI sweep has collected it yet, so it carries the same flat default as its siblings (test_9121_onboarding_residual_pins.py, test_9079_ep_epoch_declared.py) rather than a local timing, which this map forbids as a SHARD-LAYOUT input: a local reading here is dominated by the #3400 first-fixture session cost (~124 s), not by this file's weight, and substituting it would pack a real graph fixture into an already-heavy shard. `tools/ci_timing.py --refresh-durations` replaces this from junit once a sweep collects it.
 # #3395: per-file CI wall time (seconds), swept from the junit artifacts of four
 # completed 2026-09-22 runs rather than entered by hand — two push-to-main runs
 # (35770984825 at b8ded3646, 35779482728 at 45aa52f70) and two runs of branch

@@ -4914,7 +4914,13 @@ async def provision_tenant(request: Request):
         # call, so the write-ahead ordering (journal ⇒ CREATE) is preserved.
         if _minted_here:
             journal_mint_write_ahead(graph_name)
-        org_graph.query(_init_q, params=_init_p)
+        # #9157: the eager-init CREATE rides a §17.1 GUARDED handle bound to this
+        # org graph (the projection is bound to another one) through the declared
+        # route — it used to be issued on `org_graph` (escape 3), unjournalled and
+        # undeclared.
+        from tortoise.projection import guarded_write_handle as _guarded_write_handle
+        _os.run_eager_init(
+            _guarded_write_handle(sdk._get_proj(), graph_name), _init_q, _init_p)
 
         # Create Membership (creator is Owner)
         sdk._get_registry().query(
@@ -8367,8 +8373,19 @@ def _graph_unavailable() -> HTTPException:
     failure on the activation scorecard, activation_scorecard.py): this one
     means only that the offload did not complete inside the lane's budget, so
     the request may be retried. The code is body-only today — no client maps it yet (the REST
-    write lane is consumed by agents/SDKs, which treat any 5xx as retryable);
-    the dashboard renders a 503 on the auth lane, not this one.
+    write lane is consumed by agents/SDKs, which treat any 5xx as retryable).
+
+    #3718 (read half): the SIX read handlers now submit their per-request SDK
+    construction here too (``list_points``, ``get_point``, ``dream_health``,
+    ``list_sessions``, ``get_session_detail``, ``org_info``), so this body is
+    reachable on the READ routes as well — including the dashboard's Overview
+    reads (``GET /v1/team``, ``/v1/sessions``, ``/v1/points``). That is NOT the
+    "dashboard renders a 503 on the auth lane" case above: those routes now
+    carry this body, and they carry it fail-CLOSED rather than degrading to
+    their ``#1591`` empty shape (see ``org_info`` / ``list_sessions`` /
+    ``get_session_detail``). Retrying is safe for every one of them: the
+    off-loaded unit is a CONSTRUCTION, and a submission that never ran did no
+    work.
     """
     return HTTPException(
         status_code=503,
@@ -9448,7 +9465,14 @@ async def list_points(
         if kind not in allowed:
             raise HTTPException(status_code=400, detail=f"kind must be one of {sorted(allowed)}")
     _require_scope(org, "graphs:read", "list_points")
-    sdk = _data_sdk(org)
+    # #3718 (construction half of #4660): the per-request SDK is BUILT off the
+    # loop, not just used off it. In embedded mode `_make_sdk` probes the
+    # keepalive anchor (`_anchor_usable`) and may eagerly connect with the
+    # socket held, so an inline construction froze the loop on this handler's
+    # first statement even though the query below was already off-loaded. Same
+    # `_data_sdk_offloaded` twin the write lane uses (#3773) — it returns the
+    # identical SDK (`_data_sdk`), so only WHERE the call runs changes.
+    sdk = await _data_sdk_offloaded(org)
     conditions = ["n.is_operator = false"]
     # #432 Task 2: retracted points (status='retracted') are EXCLUDED from the
     # default listing surface — tombstone contract: retrievable by id via
@@ -9493,7 +9517,8 @@ async def list_points(
 async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)):  # noqa: B008
     """Get a single Point by ID."""
     _require_scope(org, "graphs:read", "get_point")
-    sdk = _data_sdk(org)
+    # #3718: the construction is off the loop (see list_points).
+    sdk = await _data_sdk_offloaded(org)
     # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
     rows = await asyncio.to_thread(
         lambda: sdk._get_proj().g.query(
@@ -9631,7 +9656,9 @@ async def dream_health(
     backlog, alarm verdict (zero-output silent-death detection, A8),
     region_attempts (C5) and warm-start savings (C4)."""
     _require_scope(org, "graphs:read", "dream_health")
-    sdk = _data_sdk(org)
+    # #3718: the construction is off the loop (see list_points) — the pass below
+    # already ran on the dream pool, but the SDK it takes was built inline.
+    sdk = await _data_sdk_offloaded(org)
     # #3718 residual 2 (code review): `dream_health_check` first runs
     # `_hydrate_dirty_roots()` — an UNBOUNDED all-`Point` `ep_dirty` scan with
     # no index — so it is the "long/stallable" class the module's #3060
@@ -9783,7 +9810,30 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
     P1: ungated — overview reads stay reachable for tt_ keys on flag-off
     orgs (the #1148 gate stays scoped to the management set)."""
     _reject_graph_bound_org_surface(org, "team overview")
-    sdk = _make_sdk(namespace=org["org_id"])
+    # #3718: this body builds its SDK directly (not through `_data_sdk`), so it
+    # uses the raw `_graph_offload` seam rather than the `_data_sdk_offloaded`
+    # twin. The CALL is unchanged — only which thread runs it — so the
+    # namespace, the embedded anchor probe and every reader below are
+    # byte-identical.
+    #
+    # CONTRACT, scoped (recorded here because the `#1591` note below promises
+    # fail-soft for this route): `#1591` covers a MISSING/BROKEN org graph — a
+    # STORE condition, where `point_count=0 / graph_ready=false` is the honest
+    # answer. This `await` adds a second, DIFFERENT failure mode that is
+    # fail-CLOSED: a saturated `graph`-pool backlog or a bound miss raises 503
+    # `graph_unavailable` HERE, before the fail-soft `try`. Deliberate —
+    # rendering `point_count=0` because OUR pool refused the call would report
+    # a healthy org as empty, i.e. the clean-empty-for-a-store-we-could-not-
+    # reach shape `#3892` forbids; and a read retry is safe (see
+    # `_graph_unavailable`). `#1591` is not repealed: the reads below degrade
+    # exactly as before. Pinned by
+    # `test_graph_pool_capacity_is_fail_closed_not_a_silent_empty` (#3718).
+    # OVERRIDES: the "every failure on this route is `#1591` fail-soft" reading
+    # — pool capacity is not a store condition, so it stays a hard 503. Relayed
+    # to the burn-down tracker rather than left here alone: #3718,
+    # issuecomment-6305730612 (DECISION RELAY).
+    sdk = await _graph_offload(
+        lambda: _make_sdk(namespace=org["org_id"]), op="org_sdk")
     # Count REAL Points in default graph. #2360: demo/sample Points
     # (_seed_demo_graph: the 12 sample Points + _demo_sentinel) are EXCLUDED
     # — the Overview memory digest (this count) presents the user's own
@@ -9792,7 +9842,10 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
     # it can never drift. #1591: FAIL SOFT — a missing/broken org graph
     # (half-failed provisioning, restores) must not dead-end the dashboard
     # with a hard 500; the client renders the empty state and a write
-    # recreates the graph.
+    # recreates the graph. SCOPE (#3718): the SDK construction above is a
+    # `graph`-POOL submission, and its capacity refusal is a retryable 503
+    # `graph_unavailable` — deliberately NOT this soft shape (a `0` for a
+    # healthy org would report real data as absent).
     point_count = 0
     graph_ready = True
     try:
@@ -10606,7 +10659,11 @@ async def register_user(request: Request, response: Response):
         # line is the ownership tombstone for that drop.
         journal_mint_write_ahead(graph_name)
         try:
-            org_graph = _make_sdk(namespace=org_id)._get_proj().db.select_graph(graph_name)
+            # #9157: a §17.1 GUARDED handle on the org graph, issued through the
+            # declared route (was `select_graph(...).query(...)` — escape 3).
+            from tortoise.projection import guarded_write_handle as _guarded_write_handle
+            _init_graph = _guarded_write_handle(
+                _make_sdk(namespace=org_id)._get_proj(), graph_name)
             # #2001 (W5): eager OnboardingState init in the same statement as
             # TeamMeta — first-org semantics (a fresh register has no prior
             # memberships → fork None → the fork card is asked exactly once).
@@ -10615,7 +10672,7 @@ async def register_user(request: Request, response: Response):
                 "CREATE (:TeamMeta {name: $name, created: $now})",
                 {"name": org_name, "now": now},
                 org_id=org_id)
-            org_graph.query(_init_q, params=_init_p)
+            _os.run_eager_init(_init_graph, _init_q, _init_p)
         except Exception:
             raise HTTPException(status_code=500, detail="Registration failed")  # noqa: B904
         try:
@@ -10698,7 +10755,10 @@ async def register_user(request: Request, response: Response):
             )
 
             # Provision FalkorDB namespace for the org
-            org_graph = sdk._get_proj().db.select_graph(graph_name)
+            # #9157: a §17.1 GUARDED handle on the org graph, issued through the
+            # declared route (was `select_graph(...).query(...)` — escape 3).
+            from tortoise.projection import guarded_write_handle as _guarded_write_handle
+            _init_graph = _guarded_write_handle(sdk._get_proj(), graph_name)
             # #2001 (W5): eager OnboardingState init in the same statement as
             # TeamMeta — first-org semantics (fresh register, no memberships).
             from tortoise.onboarding import state as _os
@@ -10709,7 +10769,7 @@ async def register_user(request: Request, response: Response):
             # #3390 WRITE-AHEAD: journal BEFORE the CREATE (was
             # record-after-effect — an unowned org_* graph on a mid-gap kill).
             journal_mint_write_ahead(graph_name)
-            org_graph.query(_init_q, params=_init_p)
+            _os.run_eager_init(_init_graph, _init_q, _init_p)
 
             # #318 (multi-tenant pack isolation): activate the starter pack
             # set — registry-mode self-service path (the Supabase-mode path
@@ -16856,7 +16916,11 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
 
     #1591: FAIL SOFT — a missing org graph (half-failed provisioning)
     returns an empty list, never a 500 (a 500 also strips the CORS headers
-    and surfaces as a misleading 'CORS blocked' to the browser).
+    and surfaces as a misleading 'CORS blocked' to the browser). SCOPE (#3718):
+    that is the BROKEN-STORE condition. A graph-pool CAPACITY refusal at the
+    SDK construction below is a RETRYABLE 503 `graph_unavailable`, never this
+    empty list — a `[]` for an org that has sessions would report real data as
+    absent (see the note at the construction).
 
     #3520: each row carries the server-resolved per-session EXTRACTION status
     (`extraction`: `{status, extractor, outcome_known}`), so the dashboard can
@@ -16891,7 +16955,25 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
         # against stored canonical hyphenated actor_user_id).
         import uuid as _canon_uuid
         actor_filter = str(_canon_uuid.UUID(actor_filter))
-    sdk = _data_sdk(org)
+    # #3718: the construction is off the loop (see list_points).
+    #
+    # CONTRACT, scoped (recorded here because the docstring above promises
+    # `#1591` fail-soft for this route): `#1591` covers a MISSING/BROKEN org
+    # graph — a STORE condition, where `sessions: []` is the honest answer.
+    # This `await` adds a second, DIFFERENT failure mode that is fail-CLOSED: a
+    # saturated `graph`-pool backlog or a bound miss raises 503
+    # `graph_unavailable` HERE, before the fail-soft `try` below. Deliberate —
+    # serving `sessions: []` because OUR pool refused the call would report an
+    # org that HAS sessions as empty, the clean-empty-for-a-store-we-could-not-
+    # reach shape `#3892` forbids; and a read retry is safe (see
+    # `_graph_unavailable`). `#1591` is not repealed: the reads below degrade
+    # exactly as before. Pinned by
+    # `test_graph_pool_capacity_is_fail_closed_not_a_silent_empty` (#3718).
+    # OVERRIDES: the "every failure on this route is `#1591` fail-soft" reading
+    # — pool capacity is not a store condition, so it stays a hard 503. Relayed
+    # to the burn-down tracker rather than left here alone: #3718,
+    # issuecomment-6305730612 (DECISION RELAY).
+    sdk = await _data_sdk_offloaded(org)
     try:
         # #2600: actor filter rides a MATCH-level WHERE (before the OPTIONAL
         # CONTAINS so the count(p) grouping semantics hold); the appended
@@ -17052,7 +17134,24 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     _session_user_org (?org_id= → non-member 403); keys are org-scoped.
     """
     _require_scope(org, "graphs:read", "get_session_detail")
-    sdk = _data_sdk(org)
+    # #3718: the construction is off the loop (see list_points).
+    #
+    # CONTRACT, scoped: `#1591` covers a MISSING/BROKEN org graph — a STORE
+    # condition, where `{"session": None}` below is the honest answer. This
+    # `await` adds a second, DIFFERENT failure mode that is fail-CLOSED: a
+    # saturated `graph`-pool backlog or a bound miss raises 503
+    # `graph_unavailable` HERE, before the `try` below. Deliberate — serving
+    # `session: None` (which reads as "no such session", 200) because OUR pool
+    # refused the call would report an existing session as missing, the
+    # clean-empty-for-a-store-we-could-not-reach shape `#3892` forbids; and a
+    # read retry is safe (see `_graph_unavailable`). `#1591` is not repealed:
+    # the attach/read below still degrades to the soft shape. Pinned by
+    # `test_graph_pool_capacity_is_fail_closed_not_a_silent_empty` (#3718).
+    # OVERRIDES: the "every failure on this route is `#1591` fail-soft" reading
+    # — pool capacity is not a store condition, so it stays a hard 503. Relayed
+    # to the burn-down tracker rather than left here alone: #3718,
+    # issuecomment-6305730612 (DECISION RELAY).
+    sdk = await _data_sdk_offloaded(org)
     try:
         # #3718 residual 2: `_get_proj()` opens/attaches the SYNC FalkorDB
         # client — off-load the attach as well as the reads below, so the
@@ -19127,7 +19226,13 @@ def _eager_provision_org_graph(cp, org_id: str, name: str, user_id: str,
         "CREATE (:TeamMeta {name: $name, created: $now})",
         {"name": name, "now": datetime.now(UTC).isoformat()},
         org_id=org_id, fork=init_fork, compact=init_compact)
-    graph.query(_init_q, params=_init_p)
+    # #9157: the eager-init CREATE is issued on a §17.1 GUARDED handle through
+    # the declared route. `graph` (== `proj.db.select_graph(graph_name)`, escape
+    # 3) stays the READ handle for the idempotency probe above; a guard that
+    # never sees the write cannot authorize, refuse or count it.
+    from tortoise.projection import guarded_write_handle as _guarded_write_handle
+    _os.run_eager_init(
+        _guarded_write_handle(proj, graph_name), _init_q, _init_p)
     return graph_name
 
 

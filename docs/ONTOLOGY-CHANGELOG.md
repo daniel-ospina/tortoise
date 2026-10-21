@@ -1015,3 +1015,34 @@ which requires orderability before the legacy `day` default applies — a caller
 still wins; #2350 carries the field semantics),
 and a present-but-unparseable `validTo` covers every later instant while still reporting
 `end_state: "known"` (#9202, the END side, untouched by this ruling).
+
+---
+
+## §4.7 — the END's coverage gate, and the flag that is still open (#9202, coverage half, 2026-10-20)
+
+The recorded reading for an unorderable `validTo` — *"covers every later instant"* — was true only
+when the QUERY string parsed. `get_historical_knowledge`'s `_covers` gated the START arm on
+orderability (#6140) but ordered the END key unconditionally, and an unorderable end and an
+unparseable probe both bucket as `(1, <text>)`, so the comparison fell through to the TEXT: a stored
+`validTo="TBD"` **excluded** probe `"zzz"` (which sorts after `"TBD"`) while covering `"AAA"` and
+every dated probe, and an empty end sorted before every **unparseable** probe. The two shapes were
+broken differently, and neither excluded a dated query — bucket `(1, "")` sorts after every
+parseable instant. One stored window answered `absent` for one junk probe and `found` for another.
+
+What changed: the END arm now requires the END to name an instant before it bounds anything — the
+same rule §4.7 already states for this value on the write side (*"an unorderable bound … names no
+instant, so a refusal would rest on a lexicographic accident rather than a comparison"*). The gate is
+orderability of the **END alone**: a parseable end still excludes an unparseable probe, which is the
+pre-existing pinned reading and is deliberately left as it is.
+
+What did NOT change, and is still a question: `end_state` for a present-but-un-datable end still
+reads `known`, so the reply keeps asserting the end is dated while the window covers every instant.
+That is the **flag half** of #9202 and it is an OPEN OWNER DECISION — #6140 ruled on the start only,
+and the three documents that record the END side as Daniel's call (`docs/ONTOLOGY.md` §4.7,
+`docs/product/mcp-sdk-surface.md`, the `#2350` pin in `tests/test_2350_validity_precision.py`) are
+unchanged in that respect. The options put to him there (report `END_OPEN` / `END_UNKNOWN` /
+flag the stored bound separately) are untouched by this entry.
+
+Pinned by `tests/test_validity_windows.py`
+(`test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_probe`, parametrized over
+the `"TBD"` and `""` shapes because they were broken differently).
