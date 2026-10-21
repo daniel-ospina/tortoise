@@ -15,22 +15,27 @@ with a ``.query(cypher, **params)`` surface (FalkorProjection) returning a
 result with ``.result_set`` and ``.stats``. Importable without hosted_api
 (no circular import).
 
-§17.1 (#9121): every imperative write THIS MODULE ISSUES goes through `_run`,
-which declares the statement with `_onboarding_write_scope` before dispatch.
-⚠️ Not every write that touches an onboarding node: the eager-init statement
-built by `eager_init_query` is an imperative cache write, but it is issued by
-its CALLERS on `proj.db.select_graph(<g>)` — §17.1's escape (3) — and is
-outside this declaration (last bullet of the block below). The declaration is
-the module's ONLY dependency on `tortoise.projection`, and it is imported
-LAZILY (see the block above `ONBOARDING_WRITE_LANE`) so this module stays a
-light leaf and the dependency direction stays one-way — projection already
-imports this module, at function level.
+§17.1 (#9121/#9157): every imperative write THIS MODULE ISSUES goes through
+`_run`, which declares the statement with `_onboarding_write_scope` before
+dispatch — and that now INCLUDES the eager-init statement (`run_eager_init`,
+#9157). `eager_init_query` only BUILDS text; its five callers used to issue the
+result on `proj.db.select_graph(<g>)` (escape (3)) and so escaped both, which is
+fixed: they now hand it to `run_eager_init` on a
+`projection.guarded_write_handle` bound to the ORG graph. Escape (3) itself is
+not closed — this class simply no longer rides it (last bullet of the block
+below). The declaration is the module's ONLY dependency on
+`tortoise.projection`, and it is imported LAZILY (see the block above
+`ONBOARDING_WRITE_LANE`) so this module stays a light leaf and the dependency
+direction stays one-way — projection already imports this module, at function
+level.
 """
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import logging
+import re
 import threading
 from collections.abc import Iterable
 from datetime import UTC, datetime
@@ -421,10 +426,13 @@ def _org_lock(org_id: str) -> threading.Lock:
 #     same way (the #5353 block: its writers "use a bare `CREATE` that rides no
 #     journal record"). On the eager-init lanes the two are literally one
 #     statement (`eager_init_query` appends the init fragment — scope pin 10).
-#     ⚠️ That combined statement is issued on `proj.db.select_graph(<g>)`, i.e.
-#     §17.1's escape (3) — OUTSIDE this declaration (see the last bullet below).
-#     `:TeamMeta` holds no §17.1 declaration itself; "documented and
-#     capture-restored" is what the precedent is, not a vetted write-path rule.
+#     ℹ️ That combined statement USED to be issued on `proj.db.select_graph(<g>)`,
+#     i.e. §17.1's escape (3) — outside this declaration. It now rides
+#     `run_eager_init` on a guarded handle and is inside the lane (#9157, last
+#     bullet below). `:TeamMeta` holds no §17.1 declaration itself; "documented
+#     and capture-restored" is what the precedent is, not a vetted write-path
+#     rule — which is why the statement is declared by THIS lane rather than
+#     shipped on the strength of that precedent.
 #
 # ⛔ This is a declaration, not a bypass. Its width is stated rather than
 # flattered:
@@ -449,21 +457,32 @@ def _org_lock(org_id: str) -> threading.Lock:
 #     bless that; it is named here so it is not discovered, and the fix (the
 #     seed's journalled door should be the only minter, or the anchor needs its
 #     own declaration) is tracked on `#9079`'s family.
-#   * It does NOT cover the eager-init statement on the org-graph lane, issued
-#     on `proj.db.select_graph(<g>)` — §17.1's stated escape (3), below anything
-#     a handle guard sits on. Five call sites build that statement with
-#     `eager_init_query`, and every one of them issues it OUTSIDE this lane:
+#   * It DOES now cover the eager-init statement on the org-graph lanes
+#     (`#9157`). `eager_init_query()` had only ever BUILT text: its five call
+#     sites issued the result on `proj.db.select_graph(<g>)` — §17.1's escape
+#     (3), one hop below every door — so the `:OnboardingState` CREATION writes
+#     were unjournalled AND undeclared while this block read as if the class
+#     were covered. They now go through `run_eager_init()` below, which is
+#     `_run` plus a class check, on a `projection.guarded_write_handle` bound to
+#     the ORG graph (the projection itself is bound to another one, which is why
+#     the door was skipped in the first place). The five sites are
 #     `tortoise/sdk.py::org_create`, `tortoise/hosted_api.py::provision_tenant`,
 #     `tortoise/hosted_api.py::register_user` (TWO sites: the self-service arm
 #     and the Supabase-mode arm) and
-#     `tortoise/hosted_api.py::_eager_provision_org_graph`. Those
-#     `:OnboardingState` CREATION writes stay unjournalled AND undeclared and
-#     are filed as `#9157` — do not close escape (3) believing the onboarding
-#     class is covered. Journalling the class is the larger, §2.0-correct
-#     increment and is filed separately (`#9129`).
-#     `tests/test_9121_onboarding_residual_pins.py` reads this list and fails if
-#     it drifts from the AST, and fails the day one of those sites enters a
-#     declaration.
+#     `tortoise/hosted_api.py::_eager_provision_org_graph`.
+#     ⚠️ BOTH halves are load-bearing and each is useless alone: a guarded handle
+#     without the declaration is refused once `_HANDLE_GUARD_ENFORCES` arms, and
+#     the declaration without the guarded handle is a ContextVar nothing reads.
+#     `tests/test_9157_eager_init_declared.py` asserts the ROUTE at runtime (an
+#     armed guard, and a spy on the handle that requires this lane's reason to be
+#     in flight AT the write); `tests/test_9121_onboarding_residual_pins.py`
+#     asserts the route in the AST for all five sites and fails if one of them
+#     goes back to issuing on the escape handle.
+#     ⚠️ Escape (3) itself is NOT closed — it is a structural hole for any writer
+#     that reaches the driver directly. What changed is that this class no longer
+#     rides it, so a door inventory done against this lane can now say the
+#     onboarding class is declared. Journalling the class instead is the larger,
+#     §2.0-correct increment and is filed separately (`#9129`).
 #
 # SEAM: `#9123` landed that named wrapper — `_graph_metadata_write_scope(reason)`
 # in `tortoise/projection/__init__.py`, for the `:EpMeta` epoch write. This lane
@@ -500,6 +519,128 @@ def _onboarding_write_scope(cypher: str):
     if _statement_writes(cypher):
         return _cache_write_authorized(ONBOARDING_WRITE_LANE)
     return contextlib.nullcontext()
+
+
+@functools.lru_cache(maxsize=1)
+def _eager_init_fragment_shapes() -> frozenset[str]:
+    """The MASKED text of every `onboarding_node_init_fragment()` variant.
+
+    Derived from the builder rather than spelled here, so a reformat of the
+    fragment (a renamed variable, a spacing change) cannot silently turn every
+    org mint into a `ValueError` — the check moves with its producer.
+    """
+    from tortoise.cypher_guard import _mask_literals
+
+    shapes = {
+        _mask_literals(onboarding_node_init_fragment(
+            fork=fork, compact=compact, org_named_edge=org_named_edge))
+        for fork in (None, *FORK_VALUES)
+        for compact in (False, True)
+        for org_named_edge in (False, True)
+    }
+    return frozenset(shapes)
+
+
+#: The ONLY shape a legal `eager_init_query()` PREFIX may have: zero or more
+#: write clauses, each of them a `:TeamMeta` node pattern with an optional
+#: property map — i.e. exactly the argument `eager_init_query` documents
+#: ("append the OnboardingState init to a TeamMeta statement") and exactly
+#: what all five call sites pass.
+#:
+#: ⛔ A *regex over the pattern*, not a keyword blocklist, on purpose: the lane's
+#: width claim is "this statement writes `:TeamMeta` + the onboarding fragment",
+#: and a blocklist would have to enumerate every other way to write (`SET`,
+#: `FOREACH`, a second `CREATE`, a procedure `CALL`, …) — the enumerate-and-miss
+#: failure that a positive shape does not have. A caller that genuinely needs a
+#: wider prefix must widen THIS lane deliberately, which is the entire point of
+#: a class check.
+_EAGER_INIT_PREFIX_SHAPE = re.compile(
+    r"\A\s*(?:(?:CREATE|MERGE)\s*\(\s*(?:[A-Za-z_][\w]*\s*)?"
+    r":\s*TeamMeta\s*(?:\{[^{}]*\})?\s*\)\s*)*\Z",
+    re.IGNORECASE,
+)
+
+
+def is_eager_init_statement(cypher: str) -> bool:
+    """Is `cypher` an `eager_init_query()` statement — fragment AND prefix?
+
+    ⛔ BOTH HALVES ARE CHECKED, and each closed a real laundering route (#9157
+    review P2):
+
+    * the FRAGMENT must be the statement's SUFFIX, so a write appended after it
+      cannot ride along — and the shapes are taken from
+      `onboarding_node_init_fragment()` itself (every fork/compact/edge variant),
+      so a reformat of the builder moves the check with it instead of turning
+      every org mint into a `ValueError`;
+    * the PREFIX must be the `TeamMeta` node write and nothing else
+      (`_EAGER_INIT_PREFIX_SHAPE`). `eager_init_query()` PREPENDS a
+      caller-supplied statement, so a fragment-contains test would have
+      authorized `eager_init_query("CREATE (:Point {id:$id})", …)` — an
+      unrelated write under the onboarding lane's authorization, which is the
+      one-call way to borrow a lane this module's declaration argument forbids.
+
+    ⛔ Both sides are MASKED (`cypher_guard._mask_literals`) for the same
+    reason: a comment or a string literal that merely QUOTES the fragment —
+    `CREATE (p:Point {n:'MERGE (n:OnboardingState {'})` — is data or prose, and
+    must not be mistaken for a clause either way. Masking preserves length but
+    not text, so the shape matching is done on the masked copy alone.
+    """
+    if not isinstance(cypher, str) or not cypher:
+        return False
+    from tortoise.cypher_guard import _mask_literals
+
+    masked = _mask_literals(cypher).rstrip().rstrip(";").rstrip()
+    for shape in _eager_init_fragment_shapes():
+        fragment = shape.strip()
+        if not masked.endswith(fragment):
+            continue
+        prefix = masked[: len(masked) - len(fragment)]
+        return bool(_EAGER_INIT_PREFIX_SHAPE.match(prefix))
+    return False
+
+
+def run_eager_init(graph: Any, cypher: str,
+                   params: dict[str, Any] | None = None):
+    """Run an `eager_init_query()` statement through THIS module's declared lane.
+
+    `eager_init_query()` only BUILDS text, so before #9157 its five call sites
+    each issued the result on `proj.db.select_graph(<graph>)` — §17.1's escape
+    (3), one hop below the guarded handle — and the `:OnboardingState`
+    CREATION writes were therefore unjournalled AND undeclared, while this
+    module's own declaration read as if it covered the class. This function is
+    the declared route: it delegates to `_run`, which opens
+    `_onboarding_write_scope`, and the caller hands it a `_GuardedGraph`
+    (`projection.guarded_write_handle`) so the write arrives at the door that
+    reads the declaration.
+
+    ⛔ BOTH HALVES ARE REQUIRED, and each is useless alone: the guarded handle
+    without the declaration is refused once `_HANDLE_GUARD_ENFORCES` arms (the
+    §17.1 violation), and the declaration without the guarded handle is a
+    ContextVar nothing reads (the escape is BELOW the door that reads it).
+
+    ⛔ THE CLASS CHECK IS THE LANE'S WIDTH, not decoration. Every leg of this
+    module's declaration argument is about onboarding FLOW metadata, so a
+    statement outside that class gets no authorization here: otherwise the next
+    writer that wants an undeclared cache write has a one-call way to obtain
+    one, spelled as the fix for this issue. The check is `is_eager_init_statement`
+    — the MASKED fragment text taken from `onboarding_node_init_fragment` itself
+    (so a reformat of the builder cannot break every mint, and a comment or a
+    string literal that quotes the fragment cannot launder a write), applied to
+    the statement's SUFFIX, with the PREFIX restricted to the `:TeamMeta`
+    CREATE/MERGE that `eager_init_query()` exists to extend. Raising (rather
+    than silently skipping) is deliberate — a caller that got the arguments
+    wrong must not learn it from a graph that is missing its onboarding row.
+    """
+    if not is_eager_init_statement(cypher):
+        raise ValueError(
+            "run_eager_init only issues an `eager_init_query()` statement: the "
+            "masked text must END with `onboarding_node_init_fragment()`'s "
+            "`:OnboardingState` MERGE, and everything before it must be the "
+            "`TeamMeta` node write (#9157); for anything else open the lane "
+            "your write belongs to. Refusing:\n"
+            f"{cypher[:400]}"
+        )
+    return _run(graph, cypher, params)
 
 
 def _run(graph: Any, cypher: str, params: dict[str, Any] | None = None):

@@ -32,17 +32,20 @@ handles — is guarded. That construction set is no longer a convention: #6882
 pins it with an AST inventory (a revert to a raw ``FalkorDB(...)`` fails a test)
 and a runtime marker assertion on a real embedded projection.
 
-⛔ TWO IN-PACKAGE EXCEPTIONS, and the guard-seam pin above cannot see either:
-the #6882 SCAN matches only ``FalkorDB(...)`` / ``guarded_client(...)``, so a
-module that builds a bare ``redis.Redis(...)`` passes it unguarded —
-``hosted_backup._restore_copy_client`` (raw on purpose, #3813) and
-``acl_graph_users``' admin client. Both ARE counted by the SIBLING read-bound
-inventory in the same test file (``_EXPECTED_SITES`` names both modules, and its
-``found == _EXPECTED_SITES`` assertion reds on any addition), so a THIRD raw
-client reds that scan instead of slipping in — and that is the distinction a
-reader must not blur: it pins that these clients carry a socket bound, NOT that
-they are guarded. Their commands do NOT carry the #7357 note and are NOT
-operator-guarded; see :class:`_GuardedExecuteCommand`.
+⛔ THE TWO BARE ``redis.Redis`` CLIENTS ARE WIRED NOW (#7357) — they used to be
+this paragraph's exceptions, because the #6882 SCAN matches only
+``FalkorDB(...)`` / ``guarded_client(...)`` and a module that builds a bare
+``redis.Redis(...)`` passes it unguarded: ``hosted_backup._restore_copy_client``
+(raw on purpose, #3813) and ``acl_graph_users``' admin client. Both are now
+constructed THROUGH :func:`guarded_client` (``guarded_client(redis.Redis, …)``),
+so their command channels carry this module's guard AND the #7357
+instance-outage note, and the seam inventory pins them. Their #3813 property is
+untouched: the restore client still derives its OWN pool (generous
+``socket_timeout``, no retry), it is only the CONSTRUCTION that moved. The
+remaining distinction a reader must not blur is that these clients yield no
+``FalkorDB`` handles at all — the seam is here for the command CHANNELS, which
+is why they are listed under ``_EXPECTED_GUARD_SEAM_SITES`` and still counted by
+the SIBLING read-bound inventory (``_EXPECTED_SITES``).
 
 Code OUTSIDE the package that builds a raw vendor client is NOT covered. That
 set is ILLUSTRATIVE, not exhaustive — e.g. ``graph-scripts/*.py``,
@@ -135,7 +138,9 @@ import functools
 import logging
 import re
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
+from typing import NamedTuple
 
 from tortoise.exceptions import (
     UnrepresentableNumberError,
@@ -193,6 +198,183 @@ _GUARDED_CHANNEL_MARKER = "_tortoise_cypher_guarded_channel"
 _GRAPH_QUERY_COMMANDS = frozenset(
     {"GRAPH.QUERY", "GRAPH.RO_QUERY", "GRAPH.PROFILE", "GRAPH.EXPLAIN"}
 )
+
+#: §17.1 (#9079) — THE JOURNAL-WRITE AUTHORITY HOOK.
+#:
+#: §17.1's statement door used to sit on ONE object, the projection's write
+#: handle (``_GuardedGraph``, i.e. ``proj.g``). Two documented escapes are one
+#: hop BELOW that object, and both reach the cache through a handle this module
+#: already wraps:
+#:
+#:   2. ``proj.g._g.query("CREATE …")`` — the write handle's own inner handle;
+#:   3. ``proj.db.select_graph(<g>).query("CREATE …")`` — the client directly,
+#:      naming ANY graph (including the SDK's own write handles, which are built
+#:      by :func:`guarded_client`).
+#:
+#: ``tortoise/projection/__init__.py`` used to say each one is *"one hop below
+#: anything a runtime signal is placed on"*. This is that signal, one hop
+#: lower: every guarded Cypher entry point consults the hook, so the decision
+#: no longer depends on WHICH handle a writer reached. The hook is INSTALLED BY
+#: the projection (it owns the classifier, the authorization ContextVar and the
+#: refusal) and this module only carries the call, because
+#: ``tortoise.projection`` imports this module and the dependency cannot run
+#: both ways.
+#:
+#: ``None`` = no authority installed. That is the state of a process with no
+#: journal-bound projection at all, where §17.1 has nothing to enforce — and it
+#: is also the fast path: one global read per query.
+_JOURNAL_WRITE_AUTHORITY: Callable[[str | None, str, str], None] | None = None
+
+
+def set_journal_write_authority(
+        hook: Callable[[str | None, str, str], None] | None) -> None:
+    """Install (or clear) §17.1's journal-write authority hook.
+
+    *hook* is called as ``hook(store_key, graph_name, statement)`` for every
+    statement that reaches a guarded handle, BEFORE any other pre-dispatch
+    guard, and is expected to raise when the write is unauthorised. Idempotent,
+    so a re-import or a second projection cannot stack hooks.
+
+    ``store_key`` is :func:`_client_store_key`'s answer for the client the
+    handle belongs to (``None`` when the channel carries no client at all). The
+    projection keys its registry on the PAIR, because one process routinely
+    holds several stores whose graphs share a name — every embedded SDK calls
+    its graph ``tortoise`` — and a name-only key would judge one store's cache
+    by another's journal.
+    """
+    global _JOURNAL_WRITE_AUTHORITY
+    _JOURNAL_WRITE_AUTHORITY = hook
+
+
+#: Which STORE a client talks to: its file/socket, or its HOST:PORT.
+#:
+#: The same NOTION of store identity `tortoise/event_store.py::_store_identity`
+#: derives from a PROJECTION, derived here from a CLIENT (the only object a
+#: guarded channel holds) — and STRICTER, in two measured ways: it carries the
+#: Redis DB INDEX (``:dbN``), and it does NOT canonicalise a file/socket path, so
+#: two spellings of one path would compare unequal here. Both ends of ONE
+#: decision call THIS function (the projection's registration and the hook), so
+#: they cannot compute different keys; the two DO NOT meet otherwise —
+#: `_JOURNAL_BACKED_KEYS` and event_store's `_graph_key` are separate registries
+#: and are never compared, which is why the divergences above have no live
+#: defect. Stated rather than left as "the same identity", which a future caller
+#: would act on (#9079 review, P3).
+#:
+#: The PORT is part of the identity, not decoration: one host can carry several
+#: FalkorDB servers, and this repo's tests run two on loopback.
+#:
+#: Every step is `getattr`-guarded because callers reach it with duck-typed
+#: handles, a `None` client, and test doubles; ``None`` means "this channel
+#: cannot name its store" and the caller states that as a residual instead of
+#: guessing.
+def _client_store_key(client) -> str | None:
+    """Best-effort store identity for *client* (``None`` when unknowable)."""
+    if client is None:
+        return None
+    # A vendor FalkorDB client keeps the pool under `.connection`; a raw
+    # redis-like client (what a graph handle's `.client` is) keeps it directly.
+    kwargs = None
+    for owner in (getattr(client, "connection", None), client):
+        pool = getattr(owner, "connection_pool", None)
+        candidate = getattr(pool, "connection_kwargs", None)
+        if isinstance(candidate, dict):
+            kwargs = candidate
+            break
+    if kwargs is None:
+        return None
+    # The Redis DB INDEX is part of the identity too: one host:port can carry
+    # several keyspaces, and a same-named graph in another DB is another store.
+    db = kwargs.get("db", 0)
+    path = kwargs.get("path") or kwargs.get("unix_socket_path")
+    if path:
+        return f"file:{path}:db{db}"
+    host = kwargs.get("host")
+    if not host:
+        return None
+    port = kwargs.get("port")
+    base = f"host:{host}:{port}" if port is not None else f"host:{host}"
+    return f"{base}:db{db}"
+
+
+#: How many guarded entries are on the current call chain.
+#:
+#: One statement reaches the guarded seams SEVERAL times: the vendor's ``query``
+#: delegates to ``_query``, both re-enter a guarded override, the vendor's
+#: ``_query`` dispatches through the client's ``execute_command`` (an instance
+#: attribute, guarded) and that call reaches the connection's guarded command
+#: channel. Each of them would take §17.1's decision again, so ONE logical write
+#: would be counted up to four times in the measure-mode census — the evidence
+#: the declaration programme sizes the remainder with. The decision therefore
+#: belongs to the OUTERMOST guarded entry, and this depth is how it knows.
+_JOURNAL_DECISION_DEPTH: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "tortoise_journal_decision_depth", default=0)
+
+
+@contextmanager
+def _journal_decision_scope():
+    """Mark a guarded entry on the call chain (see `_JOURNAL_DECISION_DEPTH`)."""
+    token = _JOURNAL_DECISION_DEPTH.set(_JOURNAL_DECISION_DEPTH.get() + 1)
+    try:
+        yield
+    finally:
+        _JOURNAL_DECISION_DEPTH.reset(token)
+
+
+def _decides_once_per_write(method):
+    """Decide §17.1 once for a whole guarded call, not once per inner seam.
+
+    Applied to every guarded entry point, because the nesting is a property of
+    the VENDOR's delegation, not of one verb: a verb guarded at only its own
+    level still sees its ``_query``/``execute_command`` legs decide again.
+    """
+
+    @functools.wraps(method)
+    def wrapper(*args, **kwargs):
+        with _journal_decision_scope():
+            return method(*args, **kwargs)
+
+    return wrapper
+
+
+def _consult_journal_write_authority(handle, statement) -> None:
+    """Give §17.1's authority the statement a guarded handle is about to send.
+
+    Silent when no authority is installed, when the handle cannot name its
+    graph, or when the statement is not text — the hook's own classifier owns
+    the "is this a write" question (ONE classifier, the #3595 precedent), so
+    this function never second-guesses it.
+
+    ⛔ THE UNINSTALLED CHECK COMES FIRST, because it IS the fast path (#9079
+    review): the census door is installed by `tortoise.projection` when it
+    imports, and nothing is installed before a journal-bound projection exists —
+    but that is "before any projection", NOT "only in long-lived processes":
+    `tortoise/__main__.py` imports the projection module on the paths that build
+    one, so a CLI that opens an SDK pays for the installed hook too. What the
+    early return buys is that the store key (several ``getattr``s plus two
+    f-strings) is not computed for a process that never installs one.
+    """
+    if _JOURNAL_WRITE_AUTHORITY is None:
+        return
+    _consult_journal_authority_for_graph(
+        getattr(handle, "name", None), statement,
+        _client_store_key(getattr(handle, "client", None)))
+
+
+def _consult_journal_authority_for_graph(graph, statement, store_key=None) -> None:
+    """The same consultation for a channel that names its graph as an ARGUMENT.
+
+    ``execute_command`` carries no handle — the graph is ``args[1]`` — but it is
+    the same door and must reach the same decision, so the decision takes a
+    graph NAME (and the caller's *store_key*) rather than an object.
+    """
+    hook = _JOURNAL_WRITE_AUTHORITY
+    if hook is None:
+        return
+    if _JOURNAL_DECISION_DEPTH.get() > 1:
+        return  # an inner seam of a call that already decided
+    if not isinstance(graph, str) or not isinstance(statement, str):
+        return
+    hook(store_key, graph, statement)
 
 
 def _unsupported_cypher_operator(cypher: str) -> str | None:
@@ -1163,7 +1345,12 @@ def _guard_query(cypher: str, params=None, *, handle=None) -> str:
     The refusals are the operator scan (#3595), the param map (#7174) and the
     statement TEXT (#8479). The last two are the two halves of the store's
     numeric domain, so a value is guarded whichever surface carries it.
+
+    §17.1's AUTHORITY check runs FIRST (#9079): a write this graph's journal did
+    not authorize may not reach the cache at all, so its answer is the one a
+    caller gets. It is the same order the projection's own write handle uses.
     """
+    _consult_journal_write_authority(handle, cypher)
     _guard_unsupported_cypher(cypher)
     _guard_numeric_params(params)
     _guard_numeric_literals(cypher)
@@ -1267,6 +1454,134 @@ def _as_text(value):
     return value
 
 
+class _CommandShape(NamedTuple):
+    """What a raw ``execute_command`` payload will actually SEND (see `_command_shape`).
+
+    ``index`` is the POSITIONAL argument that carries the statement, or ``None``
+    when the statement came out of the SPLIT first argument — the only case where
+    rewriting the statement has to rebuild ``args[0]``.
+    """
+
+    verb: str
+    graph: str | None
+    statement: str | None
+    index: int | None
+    prefix: tuple[str, ...] = ()
+
+    def with_statement(self, args, statement):
+        """*args* with the Cypher payload replaced by *statement*.
+
+        The #7162 barrier needs this: the caller must dispatch the RETURN VALUE,
+        and the Cypher is not always ``args[2]`` (see `_command_shape`).
+        """
+        if self.index is None:
+            # ⛔ SPLICE INTO THE ORIGINAL TEXT, do not re-join the words (#9079
+            # review). `" ".join(head.split()[:2] + [statement])` collapses the
+            # whitespace run between the graph and the statement, and the
+            # statement itself used to be re-joined too — which altered
+            # whitespace runs INSIDE string literals on the wire
+            # (`WHERE n.content = 'a  b'` → `'a b'`). A guard that alters the
+            # payload it forwards is the class `_guard_execute_command` says it
+            # refuses; only the Cypher substring is replaced here.
+            head = args[0]
+            if isinstance(head, str):
+                parts = head.split(None, len(self.prefix))
+                if len(parts) > len(self.prefix):
+                    return (head[: len(head) - len(parts[-1])] + statement,
+                            *args[1:])
+            head = " ".join((*self.prefix, statement))
+            return (head, *args[1:])
+        return (*args[: self.index], statement, *args[self.index + 1:])
+
+
+def _command_shape(args) -> _CommandShape | None:
+    """``(verb, graph, statement, index)`` for a raw command payload, or ``None``.
+
+    ⛔ THE FIRST ARGUMENT IS SPLIT, NOT READ AS ONE TOKEN (#9079 review, P1).
+    Both pinned ``redis`` serializers pack ``args[0]`` with
+    ``args[0].encode().split()`` / ``args[0].split()`` before sending — the same
+    measurement `projection._handle_command_words` records for the #9209
+    classifier — so the arguments of a command may ride inside its command WORD:
+
+        execute_command("GRAPH.QUERY", <graph>, "CREATE (n:X)")       # canonical
+        execute_command("GRAPH.QUERY <graph>", "CREATE (n:X)")        # 2 args
+        execute_command("GRAPH.QUERY <graph> CREATE (n:X)")           # 1 arg
+        execute_command("", "GRAPH.QUERY", <graph>, "CREATE (n:X)")  # empty head
+
+    A reader that requires three positional arguments with an exact verb at
+    ``args[0]`` closes ONE spelling and leaves the rest open — measured on an
+    ARMED journal-backed projection: the 2-arg and the empty-head spellings wrote
+    the cache with no refusal and no census entry, which is the exact hole the
+    #9209 review closed at the classifier and this door had not closed for
+    itself.
+
+    ⚠️ THE 1-ARG SPELLING IS NOT THE SAME WRITE, and the difference is the
+    SERVER's, so it is stated instead of assumed (this docstring first claimed
+    all four were byte-identical, which review measured false): the split words
+    become SEPARATE SERVER ARGUMENTS and ``GRAPH.QUERY`` reads its Cypher from the
+    THIRD one only. ``execute_command("GRAPH.QUERY <graph> CREATE (n:X)")``
+    therefore arrives as ``("GRAPH.QUERY", <graph>, "CREATE", "(n:X)")`` and the
+    engine answers ``Invalid input at end of input … errCtx: CREATE`` (measured,
+    v4.20.6) — it cannot carry a multi-word statement at all. It is still READ
+    here, and the whole remainder is returned as the statement ON PURPOSE: the
+    fail-closed direction is to judge the text the caller asked to write, and
+    never to answer "not a write" because the wire would have truncated it.
+
+    THE TWO READERS OF THIS CHANNEL MUST NOT DISAGREE (#9124): the projection's
+    `_command_statement` and this module's `_guard_execute_command` both call this
+    function, so the statement one classifies is the statement the other decides
+    about — the whole reason the door was moved onto the guarded handle.
+
+    ``None`` when the payload has no readable command word at all (an
+    unreadable head, or nothing); every caller treats that as "cannot judge",
+    which is the fail-closed direction and is already refused downstream by the
+    write handle's `_command_payload_is_unreadable` rule.
+    """
+    if not args:
+        return None
+    head = _as_text(args[0])
+    if not isinstance(head, str):
+        return None
+    tail = tuple(_as_text(arg) for arg in args[1:])
+    words = head.split()
+    if not words:
+        # An empty/whitespace head is DROPPED by the serializer, so the command
+        # the server sees STARTS at ``args[1]`` (measured in the #9209 review).
+        # ⛔ A NON-TEXT SUCCESSOR IS "CANNOT JUDGE", NOT A CRASH (#9079 review):
+        # `_as_text` passes an unreadable payload through unchanged, so
+        # `execute_command("", 5, 2)` reached `tail[0].upper()` and raised
+        # `AttributeError` on a hot guard. Pre-fix that payload was forwarded
+        # untouched; `None` keeps it in the same unmeasured direction and leaves
+        # the refusal to the write handle's `_command_payload_is_unreadable`.
+        if len(tail) < 2 or not isinstance(tail[0], str):
+            return None
+        return _CommandShape(
+            tail[0].upper(), tail[1],
+            tail[2] if len(tail) > 2 else None,
+            3 if len(tail) > 2 else None)
+    verb = words[0].upper()
+    if len(words) >= 2:
+        graph = words[1]
+        if len(words) > 2:
+            # The statement (or its head) rides inside the FIRST argument; the
+            # tail is flags, so it is not part of the Cypher.
+            # ⛔ THE STATEMENT IS THE ORIGINAL TEXT, not the re-joined words
+            # (#9079 review): `" ".join(words[2:])` collapsed whitespace runs
+            # inside the Cypher — including inside string literals — and
+            # `with_statement` then put that altered text on the wire whenever
+            # the #7162 barrier rewrote the payload. `split(None, 2)` keeps the
+            # remainder byte-for-byte.
+            return _CommandShape(
+                verb, graph, head.split(None, 2)[2], None,
+                (words[0], graph))
+        if not tail or tail[0] is None:
+            return _CommandShape(verb, graph, None, None)
+        return _CommandShape(verb, graph, tail[0], 1)
+    if len(tail) < 2 or tail[0] is None or tail[1] is None:
+        return _CommandShape(verb, tail[0] if tail else None, None, None)
+    return _CommandShape(verb, tail[0], tail[1], 2)
+
+
 def _guard_execute_command(args, client=None):
     """Refuse a ``=~`` in a raw ``execute_command`` payload; return args to send.
 
@@ -1275,9 +1590,12 @@ def _guard_execute_command(args, client=None):
     guarded seams re-bind it to :func:`_guarded_execute_command` instead.
 
     Only the four ``GRAPH.*`` query verbs are inspected: their Cypher argument
-    is positional (``(cmd, graph_name, cypher, ...)``). Every other command
-    (``GRAPH.DELETE``, ``GRAPH.COPY``, ``GRAPH.CONFIG``, ``INFO``, ...) and
-    every non-``GRAPH`` command is forwarded untouched.
+    is positional (``(cmd, graph_name, cypher, ...)``) — but recovered through
+    :func:`_command_shape`, because the client SPLITS ``args[0]`` before packing,
+    so the same command reaches the server with the graph and the Cypher inside
+    the first argument. Every other command (``GRAPH.DELETE``, ``GRAPH.COPY``,
+    ``GRAPH.CONFIG``, ``INFO``, ...) and every non-``GRAPH`` command is
+    forwarded untouched.
 
     #7162 — the returned tuple is the statement to SEND: the #7162 normaliser can
     insert a ``WITH *`` barrier into ``args[2]``, exactly as it does on the
@@ -1301,20 +1619,31 @@ def _guard_execute_command(args, client=None):
     to be SILENTLY altered (MEASURED; the table is on
     :func:`_numeric_literal_reason`).
     """
-    if len(args) >= 3:
-        verb = _as_text(args[0])
-        statement = _as_text(args[2])
-        if (
-            isinstance(verb, str)
-            and verb.upper() in _GRAPH_QUERY_COMMANDS
-            and isinstance(statement, str)
-        ):
-            _guard_unsupported_cypher(statement)
-            _guard_numeric_literals(statement)
-            if _engine_needs_predicate_barrier(client):
-                barred = _predicate_drop_barrier(statement)
-                if barred != statement:
-                    return tuple([args[0], args[1], barred, *args[3:]])
+    # ⛔ THE SHAPE COMES FROM `_command_shape`, NOT FROM `len(args) >= 3`
+    # (#9079 review, P1). The client SPLITS ``args[0]`` before packing, so a
+    # payload that carries the graph (and even the Cypher) in the first argument
+    # reaches the server as a real ``GRAPH.QUERY`` while a positional reader saw
+    # no statement at all — a write on an ARMED journal-backed cache with no
+    # refusal and no census entry (measured). The projection's
+    # `_command_statement` reads the SAME helper, so the two readers of this
+    # channel cannot disagree about where the Cypher lives.
+    shape = _command_shape(args)
+    if shape is None or shape.statement is None:
+        return args
+    if shape.verb not in _GRAPH_QUERY_COMMANDS:
+        return args
+    statement = shape.statement
+    # §17.1 (#9079): the same authority decision the handle verbs take, on the
+    # statement a raw command actually carries. This channel is how escape (3)
+    # reaches a journal-backed graph without ever touching `proj.g`.
+    _consult_journal_authority_for_graph(
+        shape.graph, statement, _client_store_key(client))
+    _guard_unsupported_cypher(statement)
+    _guard_numeric_literals(statement)
+    if _engine_needs_predicate_barrier(client):
+        barred = _predicate_drop_barrier(statement)
+        if barred != statement:
+            return shape.with_statement(args, barred)
     return args
 
 
@@ -1550,15 +1879,14 @@ class _GuardedExecuteCommand:
     real vendor handle those verbs route through ``execute_command`` and are
     covered.
 
-    ⛔ AND THE TWO IN-PACKAGE CLIENTS THAT BUILD THEIR OWN ``redis.Redis``, named
-    because "in-package" is not the test — going through THIS seam is:
-    ``hosted_backup._restore_copy_client`` (a raw client on purpose, #3813: the
-    restore's ``GRAPH.COPY`` must not inherit an ordinary request's read bound)
-    and ``acl_graph_users``' admin client. A transport failure there still
-    arrives as the bare driver sentence. The claim above is exactly these
-    channels, not "every handle" and not "every client this package builds".
-    Wiring those two is follow-up work on THEIR seam, not a reason to widen this
-    sentence.
+    ⛔ AND THE TWO IN-PACKAGE CLIENTS THAT BUILD THEIR OWN ``redis.Redis`` were
+    the OTHER half of that caveat, now closed (#7357): "in-package" was never
+    the test — going through THIS seam is. ``hosted_backup._restore_copy_client``
+    (a client on purpose, #3813: the restore's ``GRAPH.COPY`` must not inherit an
+    ordinary request's read bound — that bound is unchanged) and
+    ``acl_graph_users``' admin client are both constructed through
+    ``guarded_client(redis.Redis, …)``, so a transport failure there arrives
+    with this note like every other guarded channel.
     """
 
     __slots__ = ("__weakref__", "_client", "_raw")
@@ -1567,6 +1895,7 @@ class _GuardedExecuteCommand:
         self._raw = raw
         self._client = client
 
+    @_decides_once_per_write
     def __call__(self, *args, **kwargs):
         guarded = _guard_execute_command(args, self._client)
         try:
@@ -1684,24 +2013,29 @@ class _UnsupportedOperatorGuardedQueries:
         super().__init__(client, name)
         self.execute_command = _guarded_execute_command(client.execute_command, client)
 
+    @_decides_once_per_write
     def query(self, q, params=None, timeout=None):
         q = _guard_query(q, params, handle=self)
         return super().query(q, params=params, timeout=timeout)
 
+    @_decides_once_per_write
     def ro_query(self, q, params=None, timeout=None):
         q = _guard_query(q, params, handle=self)
         return super().ro_query(q, params=params, timeout=timeout)
 
+    @_decides_once_per_write
     def _query(self, q, params=None, timeout=None, read_only=False):
         q = _guard_query(q, params, handle=self)
         return super()._query(
             q, params=params, timeout=timeout, read_only=read_only
         )
 
+    @_decides_once_per_write
     def profile(self, query, params=None):
         query = _guard_query(query, params, handle=self)
         return super().profile(query, params=params)
 
+    @_decides_once_per_write
     def explain(self, query, params=None):
         query = _guard_query(query, params, handle=self)
         return super().explain(query, params=params)
@@ -1736,12 +2070,14 @@ class _GuardedHandleProxy:
         self._handle = handle
         self._client = getattr(handle, "client", None)
 
+    @_decides_once_per_write
     def query(self, q, params=None, timeout=None):
         q = _guard_query(q, params, handle=self._handle)
         return _forward_query(
             self._handle.query, q, params, timeout,
             mutating=_statement_mutating(q))
 
+    @_decides_once_per_write
     def ro_query(self, q, params=None, timeout=None):
         q = _guard_query(q, params, handle=self._handle)
         # The arm comes from the TEXT, not the verb: the vendor's "read-only"
@@ -1752,6 +2088,7 @@ class _GuardedHandleProxy:
             self._handle.ro_query, q, params, timeout,
             mutating=_statement_mutating(q))
 
+    @_decides_once_per_write
     def _query(self, q, params=None, timeout=None, read_only=False):
         q = _guard_query(q, params, handle=self._handle)
         # ``read_only`` selects the VERB (``GRAPH.RO_QUERY`` vs ``GRAPH.QUERY``),
@@ -1761,6 +2098,7 @@ class _GuardedHandleProxy:
             mutating=_statement_mutating(q),
             read_only=read_only)
 
+    @_decides_once_per_write
     def profile(self, query, params=None):
         query = _guard_query(query, params, handle=self._handle)
         # GRAPH.PROFILE EXECUTES the statement, so the text decides.
@@ -1768,6 +2106,7 @@ class _GuardedHandleProxy:
             self._handle.profile, query, params,
             mutating=_statement_mutating(query))
 
+    @_decides_once_per_write
     def explain(self, query, params=None):
         query = _guard_query(query, params, handle=self._handle)
         # The arm comes from the POLICY SET, through the same classifier the
@@ -1781,6 +2120,7 @@ class _GuardedHandleProxy:
             mutating=_command_mutating(
                 ("GRAPH.EXPLAIN", getattr(self._handle, "name", ""), query)))
 
+    @_decides_once_per_write
     def execute_command(self, *args, **kwargs):
         args = _guard_execute_command(args, self._client)
         try:
@@ -2055,9 +2395,11 @@ def guarded_client(base_client, *args, **kwargs):
     doctor probe — goes through here, so every handle they yield is guarded
     regardless of which call site queries it. A raw vendor client built
     *outside* the package (e.g. ``graph-scripts/``, ``apps/graph-viz/``,
-    ``docs/runbook/``, ``tests/``) is not covered, and neither are the two
-    IN-package modules that build a bare ``redis.Redis`` instead
-    (``hosted_backup._restore_copy_client``, ``acl_graph_users``' admin
-    client); see the module docstring's SCOPE paragraph for both boundaries.
+    ``docs/runbook/``, ``tests/``) is not covered. The two IN-package modules
+    that build a bare ``redis.Redis`` (``hosted_backup._restore_copy_client``,
+    ``acl_graph_users``' admin client) now come through HERE as well — for their
+    command channels' #7357 outage note (their verbs carry no Cypher, so the
+    operator arm is inert there), not for a FalkorDB handle they never yield;
+    see the module docstring's SCOPE paragraph.
     """
     return guarded_client_class(base_client)(*args, **kwargs)

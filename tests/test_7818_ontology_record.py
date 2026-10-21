@@ -144,9 +144,10 @@ def test_ontology_section_4_7_records_match_the_code_they_cite() -> None:
     the paragraph's argument rests on.
 
     (1) *What value makes this test fail?*  Widening either predicate in the
-        code — `vt < t` → `vt <= t` (the flip the row prices) or `kt < kf` →
-        `kt <= kf` — or moving/renaming either predicate out of the method §4.7
-        names.
+        code — the END arm's `kt < t_key` → `kt <= t_key` (the flip the row
+        prices) or `kt < kf` → `kt <= kf` — dropping the END arm's
+        `kt[0] == 0` orderability gate (#9202), or moving/renaming either
+        predicate out of the method §4.7 names.
     (2) *Does the test reach it?*  Yes — the method body is sliced out of the
         committed `tortoise/sdk.py` and each predicate is sliced from it, so the
         operators are read from source rather than from the doc.
@@ -157,11 +158,26 @@ def test_ontology_section_4_7_records_match_the_code_they_cite() -> None:
         "§4.7 cites both predicates as living in `get_historical_knowledge`")
 
     covers = _method_body(method, "_covers")
-    assert re.search(r"_created_sort_key\(vt\)\s*<\s*t_key", covers), (
-        "the closed rule rejects only `vT < t` — the END bound is inclusive")
-    assert not re.search(r"_created_sort_key\(vt\)\s*<=\s*t_key", covers), (
+    # #9202 re-keyed the END arm: `kt = _created_sort_key(vt)` and then
+    # `if kt[0] == 0 and kt < t_key:`. The pin therefore names the KEY, not the
+    # one-expression form — the old `_created_sort_key(vt)\s*<\s*t_key` literal
+    # stops matching the moment the key is bound on its own line, and a pin
+    # left on it silently retires the guard while appearing green. BOTH halves
+    # are pinned on the key: the orderability gate (§4.7's "names no instant"
+    # rule, applied to the end) and the strict comparison.
+    assert re.search(r"kt\s*=\s*_created_sort_key\(vt\)", covers), (
+        "the END key must be bound once, as `kt = _created_sort_key(vt)` — "
+        "§4.7 cites `vT < t`, and the arm gates on that key's orderability")
+    assert re.search(r"if\s+kt\[0\]\s*==\s*0\s+and\s+kt\s*<\s*t_key\s*:",
+                     covers), (
+        "the closed rule rejects only `vT < t` — the END bound is inclusive, "
+        "so the arm must gate on `kt[0] == 0` AND compare strictly `kt < t_key`")
+    assert not re.search(r"kt\s*<=\s*t_key", covers), (
         "§4.7 records a CLOSED rule; a `<=` here is the half-open flip it "
         "prices at R2 of the #5362 plan, which is still an OPEN decision")
+    assert not re.search(r"_created_sort_key\(vt\)\s*<=\s*t_key", covers), (
+        "the un-keyed one-expression spelling of that same arm must not come "
+        "back non-strictly either — it is the identical half-open flip")
 
     inverted = _method_body(method, "_inverted")
     assert re.search(r"return\s+kt\s*<\s*kf", inverted), (

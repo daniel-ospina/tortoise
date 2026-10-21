@@ -28668,9 +28668,10 @@ class TortoiseSDK:
         def _covers(vf, vt) -> bool:
             """Window coverage with IS-NULL open ends + mixed-format keys.
 
-            A bound that names NO INSTANT is treated as ABSENT — the two
-            bounds are NOT symmetric, and the asymmetry is the #6140 ruling
-            (owner, 2026-10-11: *"A and C (c should be a warning)"*):
+            A bound that names NO INSTANT is treated as ABSENT on BOTH sides —
+            that is the COVERAGE rule. The two sides differ only in the STATE
+            they report, which is the #6140 ruling (owner, 2026-10-11: *"A and C
+            (c should be a warning)"*) plus #2350's 3-state contract:
 
             * START (``vf``) — an unorderable ``""`` / ``"TBD"`` means **no
               start was recorded**, so the window is OPEN BELOW and covers
@@ -28680,21 +28681,46 @@ class TortoiseSDK:
               parseable instant — so a dated query answered ``absent`` for a
               claim genuinely in force. See ``tests/test_validity_windows.py``
               ::``test_a_start_naming_no_instant_leaves_the_window_open``.
-            * END (``vt``) — left as it was: an unorderable end cannot be
-              excluded either (``(1, text) < (0, instant)`` is False), so such
-              a window covers every later instant. That is NOT flagged as
-              ``END_UNKNOWN`` — ``validity.end_state`` raises that only for an
-              ``validToPrecision == "unknown"`` declaration on an ABSENT end —
-              so a present-but-unparseable ``validTo`` reads ``end_state:
-              "known"`` today. A pre-existing residual of the END side, out of
-              this ruling's scope and tracked on #9202.
+            * END (``vt``) — an unorderable ``""`` / ``"TBD"`` also names **no
+              end**, so it cannot EXCLUDE any instant: the END arm is gated on
+              orderability exactly like the start arm. It was NOT, and the two
+              sides of a comparison that is only decidable between two
+              instants fell through to the TEXT — an unorderable end and an
+              unparseable probe both bucket as ``(1, text)``, so
+              ``_created_sort_key("TBD") < _created_sort_key("zzz")`` was True
+              and the window was EXCLUDED, while the same window covered
+              ``"AAA"`` and every dated probe. Coverage depended on the
+              probe's spelling (#9202). ONTOLOGY §4.7 states the rule this
+              restores, for the same value, on the write side: *"an
+              unorderable bound ... names no instant, so a refusal would rest
+              on a lexicographic accident rather than a comparison"*.
+
+              What is deliberately NOT symmetric is the REPORTED STATE, and
+              that is #2350's 3-state contract: ``validity.end_state`` raises
+              ``END_UNKNOWN`` only for a ``validToPrecision == "unknown"``
+              declaration on an ABSENT end, so a present-but-unparseable
+              ``validTo`` still reads ``end_state: "known"`` — i.e. the reply
+              keeps asserting the claim's end is DATED while the window covers
+              every instant. #6140 ruled on the START only; whether the END's
+              state should instead read ``unknown`` / ``open`` is #9202's OWNER
+              DECISION and this fix does not pre-empt it: the coverage gate
+              changes which instants match, never what the end is called.
+              Pinned by
+              ``test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_probe``
+              in ``tests/test_validity_windows.py``.
             """
             if vf is not None:
                 kf = _created_sort_key(vf)
                 if kf[0] == 0 and kf > t_key:  # unorderable ⇒ open start (#6140)
                     return False
-            if vt is not None and _created_sort_key(vt) < t_key:  # noqa: SIM103
-                return False
+            if vt is not None:
+                kt = _created_sort_key(vt)
+                # unorderable ⇒ no end recorded: it bounds nothing (#9202).
+                # The gate is ORDERABILITY OF THE END ALONE — a parseable end
+                # still excludes an unparseable probe, the pinned pre-existing
+                # reading this fix leaves untouched.
+                if kt[0] == 0 and kt < t_key:
+                    return False
             return True
 
         def window_entry(e: dict, *, include_content: bool = True) -> dict:
@@ -28791,9 +28817,14 @@ class TortoiseSDK:
             if kf is not None and kf[0] == 0 and kf > t_key:
                 if t_key[0] == 0:  # both parseable
                     dist = kf[1] - t_key[1]
-            elif vt is not None and _created_sort_key(vt) < t_key:
+            elif vt is not None:
                 kt = _created_sort_key(vt)
-                if kt[0] == 0 and t_key[0] == 0:  # both parseable
+                # The END arm's gate is the #9202 one, NOT an optimisation: a
+                # bare ``kt < t_key`` here compares across buckets whenever
+                # either side names no instant, i.e. it orders the TEXT. The
+                # distance is only computable between two instants, so both
+                # must be parseable.
+                if kt[0] == 0 and t_key[0] == 0 and kt < t_key:
                     dist = t_key[1] - kt[1]
             if dist is None:
                 continue  # open interval / unparseable — not a candidate
@@ -29736,7 +29767,15 @@ class TortoiseSDK:
                 params={"id": tid, "ik": idempotency_key},
             )
         try:
-            org_graph = proj.db.select_graph(graph_name)
+            # #9157: the eager-init CREATE is issued on a §17.1 GUARDED handle
+            # bound to org_{name} (the projection itself is bound to another
+            # graph), through `_os.run_eager_init` — the declared route. Before
+            # this, `proj.db.select_graph(graph_name).query(...)` was §17.1's
+            # escape (3): one hop below every door, so the write was
+            # unjournalled AND undeclared and the onboarding lane read as if it
+            # covered its own class.
+            from tortoise.projection import guarded_write_handle
+            _init_graph = guarded_write_handle(proj, graph_name)
             # #2001 (W5): eager OnboardingState init in the same statement as
             # TeamMeta (graph-side atomicity). compact = creator's prior
             # memberships > 0 (registry Membership nodes); fork inherited from
@@ -29790,7 +29829,7 @@ class TortoiseSDK:
             # No-op outside test sessions (journal env absent).
             from tortoise.projection import journal_mint_write_ahead
             journal_mint_write_ahead(graph_name)
-            org_graph.query(_init_q, params=_init_p)
+            _os.run_eager_init(_init_graph, _init_q, _init_p)
             # Graph node (org→graph 1:N, product ontology): the default graph
             self._graph_create(tid, "default", kind="default", namespace=graph_name)
             # #1748: the owner Membership for the session user — INSIDE the

@@ -27,7 +27,10 @@ import os
 import random
 import sys
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Final
 
 # Make tortoise importable when tests are run as `python -m pytest tests/`
 # from the repo root or from inside tests/ (mirrors tests/test_dream.py).
@@ -426,6 +429,183 @@ def _build_f4_graph(sdk: TortoiseSDK) -> tuple[dict[str, str], list[str]]:
     return ids, operator_ids
 
 
+def capture_f4_oracle(sdk: TortoiseSDK, ids: dict[str, str],
+                      operator_ids: list[str],
+                      seed: int | None = None) -> dict[str, float]:
+    """Capture F4's converged confidence vector on ``sdk`` — the ONE definition
+    of the PRE-MUTATION oracle trajectory (#9394).
+
+    Both the oracle builder (:func:`f4_frozen_truth`) and its from-scratch
+    reproducibility check
+    (``test_f4_oracle_reproducible_from_scratch``) call THIS function, so the
+    two sides cannot drift apart again. A check that replays only PART of the
+    capture compares two different — and both legitimate — convergence points,
+    which is exactly what turned the fixture red on `main` after #9381.
+
+    (``tests/test_epic903_staleness.py``'s ``_post_mutation_oracle`` is the
+    OTHER trajectory — a single full pass after a mutation — and is not this
+    one; see #9394 for why the two are deliberately not the same shape.)
+
+    Two passes, both load-bearing:
+
+    1. ``compute_confidence(factors=…)`` — the targeted pass a writer calls.
+       Since #9381 it also retires the ``ep_dirty`` flags it recomputed.
+    2. ``dream(dirty_only=True, warm_start=False)`` — the stabilization pass.
+       ``dirty_only`` is DEPRECATED sugar (epic 903-C6, #1244) that the mode
+       router IGNORES: with no dirty roots left by step 1 the router routes
+       this small graph to ``full``, and that pass is what moves the vector
+       off the targeted pass's value (measured: r1
+       0.9055007747251187 → 0.9055035308085809, |Δ| = 2.756e-6).
+       ``warm_start=False`` is the recorded decision of Epic 903-C4 (#1242):
+       the oracle is the FROZEN FROM-SCRATCH ground truth, and warm-start's
+       bounded perturbation (≈1e-5) would break the 1e-6 oracle lock.
+
+    Before #9381 the targeted pass left its claims dirty, so the check's
+    first *read* fired a lazy re-dream of its own, on an RNG state left over
+    from pass 1, and the asymmetry stayed invisible (|Δ| = 0.0). That lazy
+    re-dream is NOT the same route as pass 2 — measured on the pre-#9381 state
+    it runs ``mode='local'`` over the hydrated dirty roots, not ``full`` — and
+    it still lands on the pin exactly: what closes the gap is that the claims
+    are RECOMPUTED, not the particular route that recomputes them. #9381
+    removed the DIRTY STATE that triggered it (the read's lazy dream itself is
+    untouched — ``get_confidence`` still has it), so the check stopped
+    recomputing the claims at all. The fix is to replay the recomputation
+    explicitly here rather than depend on a read's side effect.
+
+    The two pass results are ASSERTED, not ignored: the capture is only defined
+    on a targeted pass that converged cleanly and a stabilization pass that
+    actually recomputed the claims. A router or dirty-flag change that left
+    pass 2 a no-op (measured: rerouted to ``local`` with no dirty roots it
+    returns ``affected_claims=[]``, ``budget_used=0``) leaves the vector on the
+    targeted pass, up to 2.7e-5 away (r1: 2.756e-6), with no other symptom;
+    these guards turn that into a loud failure. The guards speak about
+    RECOMPUTATION, not the route — a ``local`` pass that recomputes is accepted
+    (it is exactly the pre-#9381 read route, and it lands on the pin) — and the
+    PIN is the numeric arbiter: a route that legitimately recomputes may still
+    land on the pin, and then nothing needs re-deriving.
+
+    The frozen VALUE is unchanged from pre-#9381: measured with the targeted
+    pass's flag-retiring neutered (``_clear_targeted_pass_dirty`` a no-op, i.e.
+    #9381 reverted in effect), the old builder reproduces the pin exactly — all
+    ten keys, |Δ| = 0.0. Nothing was re-frozen; the check was the broken side.
+    """
+    seed = seed if seed is not None else FIXED_SEED
+    # Seeding: pinned on both passes so an RNG-sensitive graph is
+    # reproducible. This graph is measured SEED-INVARIANT (seeds 903 / 1 / 42
+    # agree exactly), so the pin is a guard, not what makes the replay green.
+    # The caller's global RNG state is saved and restored — this helper is
+    # exported, so it must not clobber a caller mid-assertion.
+    # Both passes pin their calibration posture explicitly, matching
+    # ``fresh_sdk``'s documented hermetic-harness posture (synthetic fixtures
+    # use statement/observation points as evidence, and calibration posture is
+    # orthogonal to what the F4 fixture verifies): the capture must not depend
+    # on an ambient TORTOISE_EP_REQUIRE_CALIBRATION that some other fixture left
+    # in the process. Production posture is untouched — this only opts this
+    # synthetic capture out, at the call site, where it is visible. The ten
+    # READS below take the same flag: a read that lazily dreams resolves the
+    # ambient posture otherwise, and then the capture is only half hermetic.
+    state = random.getstate()
+    try:
+        random.seed(seed)
+        targeted = sdk.compute_confidence(factors=operator_ids,
+                                          require_calibration=False)
+        random.seed(seed)
+        stabilized = sdk.dream(dirty_only=True, warm_start=False,
+                               require_calibration=False)
+        # Read INSIDE the saved region: the reads are pure today, and if one
+        # ever again triggers a lazy dream it must do so under the pinned seed
+        # rather than under whatever RNG state the caller happens to be in —
+        # that is how the failure this delta fixes stayed order-dependent.
+        captured = {key: sdk.get_confidence(pid, require_calibration=False)["mean"]
+                    for key, pid in ids.items()}
+    finally:
+        random.setstate(state)
+    if not (targeted.get("converged") is True
+            and targeted.get("truncated") is False):
+        raise AssertionError(
+            "F4 capture: the targeted pass did not converge cleanly "
+            f"(converged={targeted.get('converged')!r}, "
+            f"truncated={targeted.get('truncated')!r}) — the oracle is not the "
+            "state this capture is defined on (#9394)")
+    # Gate on RECOMPUTATION, not on the route: `budget_used` is the one datum
+    # every mode carries (full carries `total_affected` instead of
+    # `affected_claims`, so gating on that would misreport truncation as a
+    # no-op). Measured: a silent no-op local pass returns budget_used=0; a real
+    # local pass (the pre-#9381 read route) returns 7 and lands on the pin
+    # exactly; a full pass returns 7. So a route that legitimately recomputes is
+    # ACCEPTED here — the pin is the numeric arbiter, this guard is the
+    # diagnostic for "nothing was recomputed at all".
+    #
+    # `budget_used` counts selected OPERATOR nodes (dream.py:795,862), which is
+    # why it is the right datum for THIS fixture: all seven of F4's factors are
+    # operator nodes. A future fixture whose only factors are operator-less
+    # ``IMPL|NAND`` edges between live plain Points (a family
+    # ``_count_ep_factors`` does count, sdk.py:21608) could recompute with
+    # ``budget_used == 0`` and be refused — revisit this gate then.
+    recomputed = stabilized.get("budget_used", 0)
+    explicitly_unconverged = (stabilized.get("converged_all") is False
+                              or stabilized.get("converged") is False)
+    affected = stabilized.get("affected_claims",
+                              stabilized.get("total_affected"))
+    diagnostics = (f"mode={stabilized.get('mode')!r}, "
+                   f"budget_used={recomputed!r}, "
+                   f"converged_all={stabilized.get('converged_all')!r}, "
+                   f"converged={stabilized.get('converged')!r}, "
+                   f"affected={affected!r}")
+    if not (type(recomputed) is int and recomputed > 0):
+        raise AssertionError(
+            "F4 capture: the stabilization pass did not recompute the claims "
+            f"({diagnostics}). A pass that recomputes nothing leaves the "
+            "vector on the targeted-pass state (up to 2.7e-5 off), not the "
+            "frozen truth. If the router legitimately moved AND still lands on "
+            "F4_ORACLE_PINNED, update this guard; if the numbers moved, "
+            "RE-DERIVE the pin and say what changed. Never widen the 1e-6 "
+            "lock (#9394)")
+    if explicitly_unconverged:
+        # A separate cause, and a separate sentence: this arm DID recompute the
+        # claims and did not converge, so "recomputes nothing" would be false
+        # about the state in front of the reader.
+        raise AssertionError(
+            "F4 capture: the stabilization pass recomputed the claims but did "
+            f"not converge ({diagnostics}) — the captured vector is not a "
+            "converged state, so it cannot be the frozen truth. Raise the "
+            "pass's budget/iterations, or RE-DERIVE the pin and say what "
+            "changed; never widen the 1e-6 lock (#9394)")
+    return captured
+
+
+#: F4's FROZEN ground truth — the converged vector, pinned as literals (#9394).
+#:
+#: Why pinned rather than recomputed-every-run: a fixture whose oracle is
+#: re-derived on every run cannot be wrong, so it cannot gate. Measured: a pure
+#: numerics change (EP damping 0.5 → 0.6) moves the WORST of these ten keys by
+#: 2.85e-5 — 28x the 1e-6 lock (r1 alone moves 1.16e-6, only 1.2x the lock,
+#: which is why the pin compares all ten) — and a replay-through-one-helper check
+#: stays green because the oracle moves with it. Pinned, that change is RED,
+#: which is the entire point of a "frozen truth" (issue #9394: "a red here means
+#: the engine moved").
+#:
+#: ⛔ Do NOT widen the 1e-6 tolerance to make this pass (#9394, verbatim). If a
+#: red here is legitimate, RE-DERIVE this dict deliberately and say in the PR what
+#: moved numerically and why. Recipe: build a fresh SDK via ``fresh_sdk`` +
+#: ``_build_f4_graph``, call ``capture_f4_oracle``, and paste the ten means at
+#: full repr. Values carry ~1 ULP of cross-environment spread (CI measured r1 as
+#: 0.9055035308085808; the pin below is 0.9055035308085809 — 1.1e-16), which the
+#: 1e-6 lock absorbs by ten orders of magnitude.
+F4_ORACLE_PINNED: Final[Mapping[str, float]] = MappingProxyType({
+    "r1": 0.9055035308085809,
+    "r2": 0.8272333540479377,
+    "r3": 0.7386227528395518,
+    "r4": 0.6683553820645087,
+    "r5": 0.6107536916645281,
+    "s1": 0.9055686423035645,
+    "s2": 0.8276041494218014,
+    "s3": 0.6812679440403321,
+    "t1": 0.904114392244392,
+    "t2": 0.6535686524885262,
+})
+
+
 def f4_frozen_truth(seed: int | None = None) -> F4FrozenTruth:
     """F4 — frozen-ground-truth fixture builder.
 
@@ -445,21 +625,9 @@ def f4_frozen_truth(seed: int | None = None) -> F4FrozenTruth:
         # clone graph is identical to the live fixture's (deterministic
         # builder) but has different ulid ids — the oracle is keyed by the
         # stable corpus keys so it addresses the live fixture via ``ids``.
-        random.seed(seed)
-        clone_sdk.compute_confidence(factors=clone_ops,
-                                     require_calibration=False)
-        # compute_confidence leaves the clone's claims dirty, so the first
-        # get_confidence would otherwise fire an UNSEEDED lazy-consistency
-        # re-dream mid-capture. Dream explicitly under the same pinned seed
-        # so the whole capture trajectory is deterministic, then read.
-        random.seed(seed)
-        # Epic 903-C4 (#1242): the oracle is the FROZEN from-scratch ground
-        # truth — dream with warm_start=False (no gamma-skip censoring) so
-        # the capture is bit-reproducible across builders; warm-start's
-        # bounded perturbation (≈1e-5) would break the 1e-6 oracle lock.
-        clone_sdk.dream(dirty_only=True, warm_start=False)
-        oracle = {key: clone_sdk.get_confidence(pid)["mean"]
-                  for key, pid in clone_ids.items()}
+        # The capture sequence itself (and why warm_start=False, #1242) lives
+        # in ONE place: capture_f4_oracle (#9394).
+        oracle = capture_f4_oracle(clone_sdk, clone_ids, clone_ops, seed=seed)
     finally:
         clone_sdk.close()
 
