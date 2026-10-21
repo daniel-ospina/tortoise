@@ -1687,7 +1687,10 @@ def test_start_returns_the_published_port_not_the_requested_one(lane, monkeypatc
     # Without these, `-p 127.0.0.1:{port}:6379` could become `-p {port}:6379`
     # (all interfaces) with the whole suite still green.
     assert "127.0.0.1:16399:6379" in argv
-    assert "REDIS_ARGS=--appendonly no --save ''" in argv
+    redis_args = next(a for a in argv if a.startswith("REDIS_ARGS="))
+    assert "--appendonly no --save ''" in redis_args, (
+        f"persistence must stay OFF on a throwaway lane: {redis_args}"
+    )
     # Positional pins are not enough on their own: `docker run` must also keep
     # the image-pull budget. Dropping it re-bounds a cold pull to the 60 s
     # DOCKER_TIMEOUT, so a first run with no local image fails as
@@ -1980,6 +1983,281 @@ def test_the_container_is_created_with_a_kernel_memory_cap(lane, monkeypatch):
         f"swap must EQUAL the memory cap (docker's default is 2x, which lets "
         f"the container page the host instead of dying alone): {run_args}"
     )
+
+
+def test_the_lane_also_sets_a_dataset_ceiling_below_its_kernel_cap(
+        lane, monkeypatch):
+    """#7357 — TWO bounds, ORDERED: Redis refuses FIRST, the kernel last.
+
+    The cgroup cap alone converts a fleet-wide outage into one container dying
+    alone — but it dies by `SIGKILL`: the container VANISHES mid-run, taking
+    every in-flight read with it, and the caller is handed a bare transport
+    error that says nothing about memory. That is #7357's own defect ("the
+    failure surfaces as … which misdescribes it") reproduced by this tool's own
+    defaults, and MEASURED on this box 2026-10-21: ten lane containers had been
+    killed at exactly their cap (`OOMKilled=true ExitCode=137`) while ordinary
+    lanes peak at 37-390 MiB (`/sys/fs/cgroup/memory.peak`).
+
+    A `--maxmemory` BELOW the cap makes the same overshoot an ANSWERED refusal
+    (`OOM command not allowed when used memory > 'maxmemory'`, an ordinary
+    `ResponseError` that `retry.is_instance_unavailable` correctly refuses to
+    read as an instance outage) with the instance still UP and its reason in
+    the message. Pinned to the ARGV because a comment cannot enforce ordering.
+    """
+    monkeypatch.delenv(tl.CONTAINER_MEMORY_ENV, raising=False)
+    seen: list = []
+
+    def fake(*a, **k):
+        seen.append(a)
+        if a[0] == "inspect":
+            return _R(0, "absent\n", "")
+        if a[0] == "run":
+            return _R(0, "deadbeef\n", "")
+        if a[0] == "port":
+            return _R(0, "0.0.0.0:16390\n", "")
+        return _R(0, "PONG\n", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    tl.start()
+    run_args = next(c for c in seen if c[0] == "run")
+    # ⛔ EXACTLY ONE `-e REDIS_ARGS=`. `next()` would silently take the FIRST
+    # while docker applies the LAST, so a second `REDIS_ARGS=` appended after the
+    # builder (a "just add the policy here" edit) would leave every per-flag
+    # assertion green and hand the container the *other* value (#7357 review).
+    redis_entries = [a for a in run_args if a.startswith("REDIS_ARGS=")]
+    assert len(redis_entries) == 1, (
+        f"docker keeps only the LAST `-e REDIS_ARGS=`, so exactly one must be "
+        f"passed: {redis_entries}"
+    )
+    redis_args = redis_entries[0]
+    assert "--maxmemory " in redis_args, (
+        f"the lane must carry a REDIS-side dataset ceiling, not only the "
+        f"cgroup cap: {redis_args}"
+    )
+    ceiling = redis_args.split("--maxmemory ", 1)[1].split()[0]
+    cap = run_args[run_args.index("--memory") + 1]
+    cap_bytes = tl._spec_bytes(cap)
+    ceiling_bytes = tl._spec_bytes(ceiling)
+    assert ceiling_bytes is not None and cap_bytes is not None, redis_args
+    assert 0 < ceiling_bytes < cap_bytes, (
+        f"the dataset ceiling must fire BEFORE the cgroup cap — at or above "
+        f"it, `maxmemory` never fires, RSS reaches the cgroup limit and the "
+        f"kernel SIGKILLs the container (ceiling={ceiling} cap={cap})"
+    )
+    # `noeviction` is pinned, not inherited: under an eviction policy Redis
+    # silently DROPS graph keys to stay under the ceiling, which on a graph
+    # instance is silent data loss — strictly worse than any refusal.
+    assert "--maxmemory-policy noeviction" in redis_args, redis_args
+
+
+def test_one_redis_args_value_carries_every_engine_pin(monkeypatch):
+    """`REDIS_ARGS` is ONE `-e` value; docker does not merge a second one.
+
+    A ceiling pin added as its own `-e REDIS_ARGS=…` would make docker keep the
+    LAST value and silently drop persistence-off (or the ceiling, depending on
+    order) — and a per-flag argv assertion stays green while the container gets
+    one of them. PyTest-free on purpose: this is the builder's contract.
+    """
+    monkeypatch.delenv(tl.CONTAINER_MEMORY_ENV, raising=False)
+    args = tl._redis_args()
+    assert args.count("--maxmemory ") == 1, args
+    assert "--appendonly no --save ''" in args, args
+    assert "--maxmemory-policy noeviction" in args, args
+
+
+def test_the_derived_ceiling_is_refused_before_any_container_is_removed(
+        lane, monkeypatch, capsys):
+    """#7357 review P1 — the F8 ordering defect, for the DERIVED seam.
+
+    `container_dataset_ceiling` refuses a SUPERSET of what
+    `container_memory_cap` accepts: any cap under ~1.33 MiB passes the cap
+    grammar and cannot hold a strictly-smaller ceiling. While the ceiling was
+    derived at the `docker run` argument tuple, `FALKORDB_CONTAINER_MEMORY=1m`
+    passed the early validation and then raised AFTER the stale-container
+    `docker rm -f` — destroying the lane's graphs and refusing to replace the
+    container, which is verbatim the failure the F8 note in `start()` says is
+    fixed. Every seam below the validation is booby-trapped, so this test fails
+    if the derivation is ever moved back down to the call site.
+    """
+    monkeypatch.setenv(tl.CONTAINER_MEMORY_ENV, "1m")
+    monkeypatch.setattr(tl, "reap_orphans", lambda *a, **k: [])
+    monkeypatch.setattr(tl, "container_state", lambda _n: "exited")
+
+    def _boom(*_a, **_k):  # pragma: no cover - asserted not to run
+        raise AssertionError("docker was called before ceiling validation")
+
+    monkeypatch.setattr(tl, "_remove_and_describe", _boom)
+    monkeypatch.setattr(tl, "_docker", _boom)
+    with pytest.raises(SystemExit) as exc:
+        tl.start()
+    assert tl.CONTAINER_MEMORY_ENV in str(exc.value), str(exc.value)
+    assert "test-lane:" in str(exc.value), str(exc.value)
+
+
+def test_a_reused_container_with_no_dataset_ceiling_is_reported(
+        monkeypatch, capsys):
+    """#7357 review P2 — the reuse path is the ONLY route that keeps the defect.
+
+    `docker start` cannot add a limit, and the kernel-cap note beside this one
+    reads `HostConfig.Memory` only — so a container created by an earlier version
+    of this tool (`Memory=2g`, `REDIS_ARGS` with no `--maxmemory`, measured as
+    `fdb-lane-1555b57be7` on this box) is handed back SILENTLY, keeping the
+    SIGKILL death for life. That is #7357's own defect ("the failure is not
+    reported"), so the warning must name the container and the remedy.
+    """
+    monkeypatch.setenv(tl.CONTAINER_MEMORY_ENV, "2g")
+
+    def fake(*a, **k):
+        if a[0] == "inspect" and a[1] == "--format" and "Config.Env" in a[2]:
+            return _R(0, '["REDIS_ARGS=--appendonly no --save \'\'"]\n', "")
+        if a[0] == "inspect" and a[1] == "--format" and a[2] == tl._MEMORY_LIMIT_FORMAT:
+            return _R(0, "2147483648\n", "")
+        return _R(0, "", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    tl._note_missing_dataset_ceiling("fdb-lane-deadbeef01")
+    err = capsys.readouterr().err
+    assert "fdb-lane-deadbeef01" in err, err
+    assert "NO dataset ceiling" in err, err
+    assert "--maxmemory" in err, err
+    assert "down" in err, err
+
+
+def test_a_reused_container_whose_ceiling_is_above_its_cap_is_reported(
+        monkeypatch, capsys):
+    """`maxmemory` at or ABOVE the cgroup cap never fires — same silence.
+
+    A ceiling that cannot fire is not a ceiling: RSS reaches the cgroup limit
+    first and the kernel SIGKILLs the container, which is the death the ordering
+    exists to replace. Reported on the same reuse path rather than trusted.
+    """
+    def fake(*a, **k):
+        if a[0] == "inspect" and a[1] == "--format" and "Config.Env" in a[2]:
+            return _R(0, '["REDIS_ARGS=--appendonly no --maxmemory 4gb"]\n', "")
+        return _R(0, "2147483648\n", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    tl._note_missing_dataset_ceiling("fdb-lane-deadbeef02")
+    err = capsys.readouterr().err
+    assert "at or ABOVE its own cgroup cap" in err, err
+
+
+def test_a_reused_container_with_a_valid_ceiling_says_nothing(
+        monkeypatch, capsys):
+    """The warning must be ACTIONABLE, so a correctly bounded container is silent.
+
+    A note that fires on a healthy container is noise, and noise is how the real
+    one stops being read.
+    """
+    def fake(*a, **k):
+        if a[0] == "inspect" and a[1] == "--format" and "Config.Env" in a[2]:
+            return _R(0, '["REDIS_ARGS=--appendonly no --maxmemory 1536mb"]\n', "")
+        return _R(0, "2147483648\n", "")
+
+    monkeypatch.setattr(tl, "_docker", fake)
+    tl._note_missing_dataset_ceiling("fdb-lane-deadbeef03")
+    assert capsys.readouterr().err == ""
+
+
+def _exec_fake(live_maxmemory: str, *, limit: str = "2147483648",
+               env: str = '["REDIS_ARGS=--appendonly no --maxmemory 1536mb"]'):
+    """A `_docker` stub: live CONFIG GET, the creation env, and the cap."""
+    def fake(*a, **k):
+        if a[0] == "exec":
+            return _R(0, f"maxmemory\n{live_maxmemory}\n", "")
+        if a[0] == "inspect" and a[1] == "--format":
+            if "Config.Env" in a[2]:
+                return _R(0, env + "\n", "")
+            return _R(0, limit + "\n", "")
+        return _R(0, "", "")
+    return fake
+
+
+def test_the_reuse_note_reads_the_LIVE_ceiling_not_the_creation_env(
+        monkeypatch, capsys):
+    """#7357 review P2 — a `CONFIG SET` moves the ceiling without touching env.
+
+    The reuse path only ever asks about a container that is UP (it sits inside
+    `if state == "running":` and the next call PINGs it), so the creation env is
+    the wrong source: a runtime `CONFIG SET maxmemory 0` leaves `REDIS_ARGS`
+    reading `--maxmemory 1536mb` while the instance is UNBOUNDED — exactly the
+    container this note exists to catch, going silent.
+    """
+    monkeypatch.setattr(tl, "_docker", _exec_fake("0"))
+    tl._note_missing_dataset_ceiling("fdb-lane-deadbeef05")
+    err = capsys.readouterr().err
+    assert "NO dataset ceiling in effect" in err, err
+
+
+def test_the_reuse_note_compares_against_the_containers_OWN_cap(
+        monkeypatch, capsys):
+    """#7357 review P2 — a container keeps the cap it was BORN with.
+
+    A 4g-born container with a 3072mb ceiling is correctly bounded, but a lane
+    now running the default 2g would have judged it "at or ABOVE its own cgroup
+    cap" and printed a remedy of `down` — which DELETES that container's graphs.
+    Lowering `DEFAULT_CONTAINER_MEMORY` later would have made that fire
+    fleet-wide without anyone touching a container.
+    """
+    monkeypatch.setattr(tl, "_docker",
+                        _exec_fake("3221225472", limit="4294967296"))
+    tl._note_missing_dataset_ceiling("fdb-lane-deadbeef06")
+    assert capsys.readouterr().err == ""
+
+
+def test_a_ceiling_spelled_the_way_REDIS_accepts_it_is_not_unreadable(
+        monkeypatch, capsys):
+    """#7357 review P2 — Redis's `memtoull` is case-insensitive, docker's is not.
+
+    MEASURED on the pinned engine: `CONFIG SET maxmemory 1GB` is accepted.
+    Parsing the creation env with a lowercase-only grammar reported a perfectly
+    good `1GB` ceiling as "unreadable" and prescribed `down`.
+    """
+    monkeypatch.setattr(
+        tl, "_docker",
+        _exec_fake("0", env='["REDIS_ARGS=--maxmemory 1GB"]'),
+    )
+    # Live is unreadable (`0` is a legitimate value, so force the fallback path
+    # by making `exec` fail) — the case under test is the ENV parser.
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: (
+        _R(1, "", "no exec") if a[0] == "exec"
+        else _R(0, '["REDIS_ARGS=--maxmemory 1GB"]\n', "")
+        if "Config.Env" in a[2] else _R(0, "2147483648\n", "")))
+    tl._note_missing_dataset_ceiling("fdb-lane-deadbeef07")
+    err = capsys.readouterr().err
+    assert "unreadable" not in err, err
+    assert err == "", err
+
+
+def test_an_unreadable_reuse_ceiling_is_named_rather_than_assumed(monkeypatch,
+                                                                 capsys):
+    """An unread fact must never be reported as a pass (#7357)."""
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(1, "", "boom"))
+    tl._note_missing_dataset_ceiling("fdb-lane-deadbeef04")
+    err = capsys.readouterr().err
+    assert "could not READ the dataset ceiling" in err, err
+
+
+def test_the_dataset_ceiling_seam_refuses_a_cap_it_cannot_stay_below():
+    """Fail-closed on the two values that would silently restore the defect.
+
+    A ceiling of ZERO is docker's/Redis's spelling for NO LIMIT — the unbounded
+    dataset that reaches the cgroup cap and is SIGKILLed. A cap too small to
+    hold a strictly-smaller ceiling cannot be ordered against at all, and
+    CLAMPING it would report a bound the container does not have (the exact
+    class of defect #9204's review found in the cap seam).
+    """
+    assert tl.container_dataset_ceiling("2g") == "1536mb"
+    assert tl.container_dataset_ceiling("4g") == "3072mb"
+    # Every cap it ACCEPTS must yield a ceiling strictly below that cap.
+    for cap in ("2g", "4g", "1536m", "1g", "2048mb", "512m", "3m"):
+        ceiling = tl.container_dataset_ceiling(cap)
+        assert (0 < tl._spec_bytes(ceiling)
+                < tl._spec_bytes(cap)), (cap, ceiling)
+    for bad in ("1m", "0", "2 gigs"):
+        with pytest.raises(SystemExit) as exc:
+            tl.container_dataset_ceiling(bad)
+        assert "test-lane:" in str(exc.value), (bad, str(exc.value))
 
 
 def test_the_memory_cap_seam_refuses_a_malformed_or_zero_value(monkeypatch):
@@ -2410,3 +2688,84 @@ def test_a_paused_container_is_never_removed(lane, monkeypatch):
     with pytest.raises(SystemExit) as e:
         tl.start()
     assert "does not recognise" in str(e.value), str(e.value)
+
+
+def test_the_reuse_note_never_invents_a_cap_it_did_not_read(
+        monkeypatch, capsys):
+    """#7357 review round 3: three read outcomes, never collapsed.
+
+    `_container_memory_limit` answers `None` (could not read) or `0` (readable,
+    NO cgroup cap) — and collapsing either into "use the configured cap" asserts
+    a cap the container does not have, then prescribes `down`, which DELETES that
+    container's graphs, for a container whose ceiling was fine.
+    """
+    # (1) the cap could not be read; the container is in fact 4g-born and bounded.
+    def unreadable_cap(*a, **k):
+        if a[0] == "exec":
+            return _R(0, "maxmemory\n4294967296\n", "")
+        if a[0] == "inspect" and "Config.Env" in a[2]:
+            return _R(0, '["REDIS_ARGS=--maxmemory 1536mb"]\n', "")
+        return _R(1, "", "inspect failed")
+    monkeypatch.setattr(tl, "_docker", unreadable_cap)
+    tl._note_missing_dataset_ceiling("fdb-lane-deadbeef08")
+    assert capsys.readouterr().err == ""
+
+    # (2) readable, and it means NO cgroup cap: the ceiling is the ONLY bound and
+    # it does fire, so nothing should be said here at all — the missing cgroup cap
+    # is `_note_uncapped_existing`'s finding, printed beside this one.
+    def zero_cap(*a, **k):
+        if a[0] == "exec":
+            return _R(0, "maxmemory\n4294967296\n", "")
+        return _R(0, "0\n", "")
+    monkeypatch.setattr(tl, "_docker", zero_cap)
+    tl._note_missing_dataset_ceiling("fdb-lane-deadbeef09")
+    assert capsys.readouterr().err == ""
+
+
+def test_an_env_ceiling_of_zero_is_reported_as_unbounded_not_unreadable(
+        monkeypatch, capsys):
+    """`--maxmemory 0` is Redis's spelling for NO LIMIT, not an unparsed value.
+
+    Reporting the one value this note exists to catch as "unreadable" understates
+    it — and "unreadable" describes the PARSER, not the container.
+    """
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: (
+        _R(1, "", "no exec") if a[0] == "exec"
+        else _R(0, '["REDIS_ARGS=--maxmemory 0"]\n', "")
+        if "Config.Env" in a[2] else _R(0, "2147483648\n", "")))
+    tl._note_missing_dataset_ceiling("fdb-lane-deadbeef10")
+    err = capsys.readouterr().err
+    assert "means NO LIMIT" in err, err
+    assert "unreadable" not in err, err
+
+
+def test_the_env_fallback_does_not_call_a_readable_ceiling_unreadable(
+        monkeypatch, capsys):
+    """#7357 review round 4 P1: the sibling branch of the live-vs-env fix.
+
+    With the LIVE read failing, an unreadable/absent CGROUP CAP used to be
+    collapsed into "unreadable `--maxmemory`" — a claim about a ceiling that was
+    read perfectly well — and then prescribed `down`, which DELETES that
+    container's graphs. The question this function owns is the CEILING; the
+    container's cgroup cap is `_note_uncapped_existing`'s finding.
+    """
+    def env_and_no_cap(*a, **k):
+        if a[0] == "exec":
+            return _R(1, "", "redis wedged")
+        if a[0] == "inspect" and "Config.Env" in a[2]:
+            return _R(0, '["REDIS_ARGS=--maxmemory 1gb"]\n', "")
+        return _R(0, "0\n", "")   # readable: NO cgroup cap of its own
+    monkeypatch.setattr(tl, "_docker", env_and_no_cap)
+    tl._note_missing_dataset_ceiling("fdb-lane-deadbeef11")
+    assert capsys.readouterr().err == ""
+
+    # …and the same when the cap read FAILS outright.
+    def env_and_unreadable_cap(*a, **k):
+        if a[0] == "exec":
+            return _R(1, "", "redis wedged")
+        if a[0] == "inspect" and "Config.Env" in a[2]:
+            return _R(0, '["REDIS_ARGS=--maxmemory 1gb"]\n', "")
+        return _R(1, "", "inspect failed")
+    monkeypatch.setattr(tl, "_docker", env_and_unreadable_cap)
+    tl._note_missing_dataset_ceiling("fdb-lane-deadbeef12")
+    assert capsys.readouterr().err == ""
