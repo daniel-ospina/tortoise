@@ -41,11 +41,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools.ask_spotcheck import (  # noqa: E402, RUF100
     _SUPERSESSION_FIXTURE,
+    _detector_attributes_the_claim,
     _distilled_gate_failures,
     _evidence_blocks,
     _seed_memory,
     _strip_annotations,
     _superseded_live_state,
+    _superseded_pool_probe,
     load_supersession_cases,
     main,
     run_distilled_leg,
@@ -493,6 +495,109 @@ def test_a_mention_in_the_successor_marker_is_not_an_observation(
     assert failures and "UNMEASURED" in failures[0], failures
 
 
+def test_a_mention_only_outside_every_body_needs_a_CALIBRATED_detector():
+    """A mention is not an observation, and it is not an exclusion either.
+
+    ``excluded`` is only readable from a detector PROVEN able to see the claim:
+    a claim whose text reached the evidence only outside every claim body (the
+    snippet trap) under a BLIND detector is indistinguishable from a claim
+    SERVED in a shape the matcher could not attribute — the exact fail-open
+    (#9095) where a live, unflagged, multi-line claim read as a D8 PASS.
+
+    With the detector proven (``detector_attributed``), a mention-only claim
+    that is retrievable is the snippet trap and is D8's own second compliant
+    outcome, ``excluded`` — a reported PASS, not an absence.
+    """
+    def _arm(**overrides):
+        base = {"ok": True, "old_seen": True, "observed": False,
+                "mentioned": True, "rendered_live": False, "flagged": False,
+                "retrievable": True, "excluded": False, "note": ""}
+        base.update(overrides)
+        return {"case_id": "residence",
+                "arms": {"raw": {}, "distilled": base}}
+
+    # detector BLIND: the silence says nothing about whether the claim was
+    # served, so the gate must not read it as an exclusion.
+    blind = _distilled_gate_failures([_arm(detector_attributed=False)])
+    assert blind and "BLIND" in blind[0], blind
+    assert "UNMEASURED" in blind[0], blind
+    assert "MENTION" in blind[0], blind
+
+    # detector PROVEN: the claim's own render IS attributable, so a text that
+    # appears only in a supersedes snippet was genuinely not served.
+    proven = _distilled_gate_failures([_arm(detector_attributed=True,
+                                            excluded=True)])
+    assert proven == [], proven
+
+
+def test_the_detector_proves_it_can_see_the_claim_before_absence_is_read(
+        tmp_path):
+    """``excluded`` is a claim about ABSENCE, and absence is only evidence from
+    a detector PROVEN able to attribute the claim's own render.
+
+    The proof is mechanical: the claim's own pool hit is rendered through the
+    product's renderer (``render_context``, the reader's own path) and the
+    block detector must OBSERVE the claim in it. Without that half, a claim
+    SERVED in a shape the matcher cannot attribute and a claim never served
+    are the same observation — and the D8 gate reads green on the failure it
+    exists to catch.
+    """
+    from tools.ask_spotcheck import _to_iso_date
+
+    case = load_supersession_cases()[0]
+    sdk = TortoiseSDK(str(tmp_path / "detector.db"))
+    try:
+        _seed_memory(sdk, case)
+        ids = seed_distilled_corpus(sdk, case)
+        qdate = _to_iso_date(case["question_date"])
+        retrievable, hit = _superseded_pool_probe(sdk, case, ids["old"], qdate)
+        assert retrievable is True and isinstance(hit, dict), (retrievable, hit)
+        # the product's own render of the claim IS attributable
+        assert _detector_attributes_the_claim(case, hit) is True
+        # an absent probe row is NOT proof of anything
+        assert _detector_attributes_the_claim(case, None) is False
+        # a render whose body the corpus text no longer matches (a claim
+        # rephrased after the corpus was authored) is not attributable — the
+        # calibration must say so instead of leaving the silence readable as
+        # an exclusion.
+        drifted = dict(hit, content="I am not in the city any more.")
+        assert _detector_attributes_the_claim(case, drifted) is False
+    finally:
+        sdk.close()
+
+
+def test_a_claim_the_detector_cannot_attribute_is_UNMEASURED_not_excluded(
+        monkeypatch, _one_case_report):
+    """⛔ THE REMAINING FAIL-OPEN, driven through the real leg.
+
+    A superseded claim whose STORED content no longer matches the corpus (an
+    extraction rewrite — the realistic way a claim reaches the reader in a
+    form the matcher cannot attribute) is never observed. The old arithmetic
+    (``not observed and retrievable``) reported that as ``excluded`` — D8's
+    compliant PASS — and the leg exited 0 on a claim nobody saw flagged. With
+    the detector calibrated against the claim's own render, the instrument
+    cannot attribute it and must report UNMEASURED instead.
+    """
+    case = load_supersession_cases()[0]
+
+    def _rephrase_the_stored_claim(sdk):
+        rows = sdk._get_proj().g.query(
+            "MATCH (p:Point) WHERE p.content = $c RETURN p.id AS id",
+            params={"c": case["old_claim"]["text"]})
+        old_id = rows.result_set[0][0]
+        sdk.update_point(old_id, content="I am not in the city any more.")
+
+    report = _one_case_report(monkeypatch, mutate=_rephrase_the_stored_claim)
+    arm = report["cases"][0]["arms"]["distilled"]
+    assert arm["observed"] is False, arm
+    assert arm["retrievable"] is True, arm
+    assert arm["excluded"] is False, arm
+    assert arm["detector_attributed"] is False, arm
+    assert report["ok"] is False, report
+    assert any("BLIND" in f for f in report["hard_failures"]), \
+        report["hard_failures"]
+
+
 def test_the_probe_reads_the_lane_pool_and_discriminates(tmp_path):
     """The probe behind the exclusion split must ANSWER, not always say yes: the
     superseded claim's own id is in the lane's ``include_terminal=True`` pool,
@@ -538,7 +643,8 @@ def test_distilled_leg_emits_one_json_line_and_exits_clean(monkeypatch,
     assert payload["ok"] is True, payload["hard_failures"]
     assert payload["hard_failures"] == [], payload["hard_failures"]
     assert set(payload["superseded_live"]) == {
-        "seen", "observed", "rendered_live", "excluded", "n", "rate"}
+        "seen", "observed", "mentioned", "rendered_live", "excluded",
+        "n", "rate"}
     assert payload["superseded_live"]["rendered_live"] == 0
     assert payload["superseded_live"]["excluded"] == 0
     assert payload["superseded_live"]["observed"] == 3
