@@ -257,30 +257,118 @@ def _declaration_primitives() -> set[str]:
     return _openers_under(_REPO / "tortoise")
 
 
-def _openers_under(root: Path) -> set[str]:
-    """Functions under `root` whose body declares via `_cache_write_authorized`.
+def _openers_under(root: Path, parse=None) -> set[str]:
+    """Functions under `root` whose body declares through an opener primitive.
 
     A FILE path is allowed too (the inventory population is one module:
     `projection/__init__.py`, the bullet list a reader is told is exhaustive —
     `projection/edges.py`'s `_structural_edge_write_scope` is a real opener that
     is NOT in that list).
+
+    ⛔ THE CLOSURE IS A FIXPOINT, NOT ONE DIRECT CALL (#9150 review, P1). Matching
+    only a DIRECT `_cache_write_authorized(...)` call made every DELEGATING opener
+    invisible. Measured: add to `projection/__init__.py`
+    `def _future_lane_write_scope(reason='future'): return _live_write_scope(reason)`
+    and wrap `sdk.py::org_create`'s site in `with _future_lane_write_scope('org-init'):`
+    and ALL FOUR pins stayed green — the opener never entered this set, so it was
+    not in `_DECLARATION_PRIMITIVES`, so `test_no_eager_init_site_declares_itself_yet`
+    read the site as still undeclared. That is precisely the one-hop shape the note
+    and the inventory exist to catch (`_onboarding_write_scope` is itself one hop
+    from `_cache_write_authorized`), and the file's headline claim — "a NEW opener
+    must red this suite" — was false for it. The walk now repeats, adding any
+    function whose body CALLS an already-known opener, until the set stops growing.
+
+    ⛔ AND THE CLOSURE IS NARROW ON PURPOSE — A THIN DELEGATE, NOT A CALL CHAIN.
+    Two wider shapes were measured and rejected: matching any call whose callee NAME
+    equalled a known opener cascaded `self._run(...)` (the population contains a
+    module-level `_run`) into `__init__`/`clear_embedding`/`graph_kind_namespaces`,
+    and even a same-module bare-name closure cascaded through the onboarding funnel
+    (`write_fork` -> `_run`) into 60+ names. Neither describes an OPENER: an opener
+    puts a declaration in flight, and the one-hop wrapper that does so is written
+    as `def _lane(reason): return _live_write_scope(reason)`. So the closure arm
+    reads a `return <opener>(...)` whose body has nothing else, until stable.
+    MEASURED on this tree: that rule adds NOTHING (the three
+    `projection/__init__.py` openers it matches are the direct seed), so it cannot
+    move the recorded populations — it only fires on the new wrapper it exists for.
+
+    ⛔ AND A WRAPPER MAY LIVE *WHERE IT IS USED*, NOT WHERE THE OPENER IS DEFINED.
+    Resolution is therefore `seed & (names defined in this module | names this
+    module IMPORTS)` (#9150 review cycle 2, P2). Measured: without the import arm,
+    a wrapper in `tortoise/sdk.py` written `return _live_write_scope(...)` was
+    MISSED (the opener is imported, not defined there), so wrapping the very site
+    the docstring describes in it left every pin green — the same hole, one import
+    away. The import arm is read from the `ImportFrom`/`Import` nodes, so a
+    receiver-qualified call still cannot resolve and the cascade stays shut.
+
+    `parse` is a SEAM, not decoration (#9150 review cycle 2, P1): the instrument
+    check must be able to drive THIS function (the one that derives the
+    population), not only `_close_delegates` in isolation — a mutant that replaces
+    the loop below with `return found` left the whole suite green, because on this
+    tree the closure legitimately adds nothing.
     """
-    found: set[str] = set()
+    parse = parse or _parse
     paths = [root] if root.is_file() else sorted(root.rglob("*.py"))
+    found: set[str] = set()
+    per_file: list[tuple[set[str], set[str], list[tuple[str, str | None]]]] = []
     for path in paths:
         rel = str(path.relative_to(_REPO))
-        tree, _parents = _parse(rel)
+        tree, _parents = parse(rel)
+        funcs: list[tuple[str, str | None]] = []
+        local: set[str] = set()
+        imported: set[str] = set()
         for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                imported |= {alias.asname or alias.name for alias in node.names}
+            elif isinstance(node, ast.Import):
+                imported |= {(alias.asname or alias.name).split(".")[0] for alias in node.names}
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
+            local.add(node.name)
             for inner in ast.walk(node):
-                if (
-                    isinstance(inner, ast.Call)
-                    and (getattr(inner.func, "id", None) == "_cache_write_authorized"
-                         or getattr(inner.func, "attr", None) == "_cache_write_authorized")
+                if isinstance(inner, ast.Call) and (
+                    getattr(inner.func, "id", None) == "_cache_write_authorized"
+                    or getattr(inner.func, "attr", None) == "_cache_write_authorized"
                 ):
                     found.add(node.name)
-    return found
+            funcs.append((node.name, _thin_delegate(node)))
+        per_file.append((local, imported, funcs))
+    while True:
+        grown = _close_delegates(found, per_file)
+        if grown == found:
+            return found
+        found = grown
+
+
+def _close_delegates(
+    seed: set[str],
+    per_file: list[tuple[set[str], set[str], list[tuple[str, str | None]]]],
+) -> set[str]:
+    """`seed` plus every thin delegate that returns one of them (one pass).
+
+    Split out of `_openers_under` so the INSTRUMENT CHECK can drive it with a
+    synthetic module (#9150 review, P1) — `_openers_under` itself has a `parse`
+    seam for the same reason, because a rule exercised in isolation cannot show
+    that the derivation is WIRED to it.
+    """
+    grown = set(seed)
+    for local, imported, funcs in per_file:
+        resolvable = seed & (local | imported)
+        grown |= {name for name, target in funcs if target in resolvable}
+    return grown
+
+
+def _thin_delegate(node: ast.AST) -> str | None:
+    """The callee name when `node`'s entire body is `return <callee>(...)`."""
+    body = [
+        stmt
+        for stmt in getattr(node, "body", [])
+        if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant))
+    ]
+    if len(body) == 1 and isinstance(body[0], ast.Return):
+        value = body[0].value
+        if isinstance(value, ast.Call):
+            return getattr(value.func, "id", None) or getattr(value.func, "attr", None)
+    return None
 
 
 def _projection_openers() -> set[str]:
@@ -414,7 +502,17 @@ def test_the_declaration_note_names_the_seam_it_does_not_cover():
     source = (_REPO / "tortoise/onboarding/state.py").read_text(encoding="utf-8")
     flat = " ".join(source.split())
     for phrase in ("eager_init_query", "select_graph", "#9157",
-                   "do not close escape (3) believing"):
+                   "do not close escape (3) believing",
+                   # ⛔ THE DIRECTION, not just the tokens (#9150 review, P2). The four
+                   # phrases above all occur ELSEWHERE in `state.py`/in the same
+                   # bullet, so an INVERSION of the claim ("every one of them
+                   # DECLARES this lane at the site", "CREATION writes ARE
+                   # declared (#9157 is closed)") kept them all true and left this
+                   # green — measured. These two carry the direction itself: the
+                   # sites issue OUTSIDE the lane, and those writes are
+                   # unjournalled AND undeclared.
+                   "issues it OUTSIDE this lane",
+                   "stay unjournalled AND undeclared"):
         assert phrase in flat, (
             f"`tortoise/onboarding/state.py` no longer contains {phrase!r} — the "
             "declaration's note about the seam it does NOT cover has been "
@@ -468,6 +566,7 @@ def test_every_eager_init_site_issues_its_statement_on_the_escape_three_handle()
     """
     # Driven by the SAME finder and population as the inventory (#9150 review,
     # P2): a site this pin cannot see is a site it silently certifies.
+    visited: dict[tuple[str, str], int] = {}
     for rel in sorted(
         str(p.relative_to(_REPO)) for p in (_REPO / "tortoise").rglob("*.py")
     ):
@@ -475,6 +574,7 @@ def test_every_eager_init_site_issues_its_statement_on_the_escape_three_handle()
         for node, _call, targets in _eager_init_calls(tree):
             enclosing = _enclosing_function(node, parents)
             assert enclosing is not None
+            visited[(rel, enclosing.name)] = visited.get((rel, enclosing.name), 0) + 1
             handles = _escape_handle_names(enclosing)
             assert handles, (
                 f"{rel}:{node.lineno} ({enclosing.name}) builds an eager-init "
@@ -502,6 +602,21 @@ def test_every_eager_init_site_issues_its_statement_on_the_escape_three_handle()
                 "note in `tortoise/onboarding/state.py`, the opener inventory in "
                 "`tortoise/projection/__init__.py`, and this pin"
             )
+    # ⛔ THE LOOP ALONE CERTIFIES NOTHING ABOUT THE SET (#9150 review, P2): it
+    # iterates the sites the finder returns, so a site that was DELETED is simply
+    # never examined — while the module docstring says a deleted site fails this
+    # pin. Measured: deleting `org_create`'s `eager_init_query(...)` block left
+    # this GREEN and only the note↔AST inventory pin red. The population is
+    # asserted here, counts included, so the claim is true of the pin that makes
+    # the claim.
+    assert visited == _ESCAPE3_CALL_SITES, (
+        "the escape-(3) population moved: this pin examined "
+        f"{sorted(visited.items())} vs the recorded "
+        f"{sorted(_ESCAPE3_CALL_SITES.items())}. A site was DELETED, moved out of "
+        "a function this walk sees, or one function's slice changed — the link it "
+        "certifies is gone for that site, so re-derive the note and the "
+        "inventory rather than letting the removal pass as a green (#9157)"
+    )
 
 
 def test_the_issuance_detector_reds_on_the_guarded_handle_and_on_run():
@@ -720,6 +835,105 @@ def test_the_declaration_detector_can_fail():
             f"{primitive}() — a site closed through that opener would leave "
             "every residual pin in this file green while the note went stale"
         )
+
+
+def test_the_delegating_opener_closure_can_fail():
+    """Instrument: a ONE-HOP wrapper must join the population (#9150 review, P1).
+
+    The population is what the detector iterates, and it is DERIVED from
+    `_openers_under`. Measured before the closure existed: adding
+    `def _future_lane_write_scope(reason='future'): return _live_write_scope(reason)`
+    to `projection/__init__.py` and wrapping `sdk.py::org_create`'s site in it left
+    all four pins green, because a direct-call-only derivation never saw the
+    wrapper — so the file's headline claim ("a NEW opener must red this suite")
+    was false for the one-hop shape, which is the shape `_onboarding_write_scope`
+    itself has.
+
+    It also pins the REJECTED shapes: a broader closure (any callee whose name
+    matches, or any same-module bare-name call) cascaded the onboarding funnel
+    (`write_fork` -> `_run`) into 60+ names, which is not a population of openers.
+    """
+    delegate = ast.parse(
+        textwrap.dedent(
+            """
+            def _future_lane_write_scope(reason="future"):
+                return _live_write_scope(reason)
+            """
+        )
+    ).body[0]
+    funnel = ast.parse(
+        textwrap.dedent(
+            """
+            def write_fork(handle, cypher):
+                _run(handle, cypher)
+                return 1
+            """
+        )
+    ).body[0]
+    per_file = [
+        (
+            {"_future_lane_write_scope", "write_fork", "_live_write_scope"},
+            set(),
+            [
+                ("_future_lane_write_scope", _thin_delegate(delegate)),
+                ("write_fork", _thin_delegate(funnel)),
+            ],
+        )
+    ]
+    assert _close_delegates({"_live_write_scope"}, per_file) == {
+        "_live_write_scope",
+        "_future_lane_write_scope",
+    }, (
+        "the closure no longer adds a thin delegating opener (the one-hop hole is "
+        "back), or it now also swallows a funnel that merely CALLS an opener — "
+        "the second is the cascade shape measured and rejected (#9157)"
+    )
+    # ⛔ AND A WRAPPER IN THE FILE THAT *USES* IT, over an IMPORTED opener (#9150
+    # review cycle 2, P2). Measured: without the import arm a wrapper in `sdk.py`
+    # written `return _live_write_scope(...)` was missed — the opener is imported
+    # there, not defined — so the exact shape this docstring describes stayed
+    # invisible one import away from the fix.
+    imported_case = [
+        ({"_wrapper"}, {"_live_write_scope"}, [("_wrapper", "_live_write_scope")])
+    ]
+    assert _close_delegates({"_live_write_scope"}, imported_case) == {
+        "_live_write_scope",
+        "_wrapper",
+    }, (
+        "a thin delegate over an IMPORTED opener is no longer resolved — the "
+        "one-hop hole is back for any module that imports the opener (#9157)"
+    )
+    # ⛔ THE WIRING, not just the helper (#9150 review cycle 2, P1): measured, a
+    # mutant of `_openers_under` that replaced its fixpoint loop with
+    # `return found` left all 15 tests green — because on this tree the closure
+    # legitimately adds nothing, so only a derivation driven over a SYNTHETIC tree
+    # can show the loop is connected. `parse` is the seam that makes that possible.
+    def parse_with_wrapper(rel: str):
+        tree, parents = _parse(rel)
+        if rel == "tortoise/projection/__init__.py":
+            tree.body.append(
+                ast.parse(
+                    "def _future_lane_probe(reason='x'):\n"
+                    "    return _live_write_scope(reason)\n"
+                ).body[0]
+            )
+        return tree, parents
+
+    derived = _openers_under(_REPO / "tortoise", parse=parse_with_wrapper)
+    assert "_future_lane_probe" in derived, (
+        "`_openers_under` did not pick up a one-hop wrapper appended to a real "
+        "module's tree — the closure is not wired into the derivation, so the "
+        "population would never see it and every residual pin stays green (#9157)"
+    )
+    assert "write_fork" not in derived, (
+        "the derivation swallowed `write_fork`, a funnel that merely CALLS an "
+        "opener — the cascade shape measured and rejected (#9157)"
+    )
+    assert "write_fork" not in _declaration_primitives(), (
+        "`write_fork` — a caller of the onboarding funnel, not an opener — is in "
+        "`_DECLARATION_PRIMITIVES`; the closure widened into a call chain, which "
+        "makes the population meaningless (#9157)"
+    )
 
 
 # ── the guard's own opener inventory ─────────────────────────────────────

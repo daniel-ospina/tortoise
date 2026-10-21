@@ -103,6 +103,29 @@ surfaces:
   # `test_9068_pack_gate_residuals.py::
   # test_the_inventory_runs_on_a_diff_to_every_module_it_scans`.
   - test_9068_pack_gate_residuals.py
+  # #9121 residual: the seam the §17.1 declaration does NOT cover — the five
+  # `eager_init_query()` call sites that CREATE `:OnboardingState` on
+  # `proj.db.select_graph(...)` (escape (3)). MEASURED resolutions of the files
+  # this pin reads, so each arm's stated reason is a fact and not a claim:
+  # `tortoise/hosted_api.py` → `api` AND `onboarding`; `tortoise/sdk.py` →
+  # SHARED_MODULES (FULL matrix, so it needs no arm of its own here — an earlier
+  # revision of this comment said this `api` arm covered `sdk.py`, which is
+  # false: `--changed-files tortoise/sdk.py` reports `full: true`);
+  # `tortoise/projection/__init__.py` → SHARED_MODULES (FULL matrix);
+  # `tortoise/onboarding/**` → the `onboarding` arm beside the sibling
+  # `test_9079_onboarding_declared_lane.py` — a named match REPLACES the `core`
+  # fallback, so an onboarding-only diff must run this pin (#1349/#2938 class).
+  # `core` carries it too, because the suite READS this manifest. This `api` row
+  # is LOAD-BEARING for api-only modules in the population the suite scans —
+  # MEASURED: `--changed-files tortoise/__main__.py` → surfaces ['api'], pin
+  # present; withhold this row and the pin is ABSENT, which is the
+  # #1349/#2938 silent-drop class this block exists to prevent (the suite reads
+  # `__main__.py` through the `_MINT_SITES` cross-check and scans all of
+  # `tortoise/**`). It is belt-and-braces only for `hosted_api.py`, which also
+  # selects `onboarding` — stated per file rather than generalised, because an
+  # earlier revision of this comment called the whole row redundant on the
+  # strength of that one file.
+  - test_9121_onboarding_residual_pins.py
   # #7951 (remaining doors) / review P1: the write-door INVENTORY is
   # DUAL-REGISTERED with `core` (below) AND with every surface whose exact
   # SOURCE_PATTERN match can REPLACE the `core` fallback for a file the
@@ -121,16 +144,6 @@ surfaces:
   # `test_7951_write_doors.py` absent; `--surface-audit` flagged it as an
   # addition candidate). `--integrity` also requires every test file to be
   # classified, which the `core` entry satisfies.
-  # #9121 residual: the seam the §17.1 declaration does NOT cover — the five
-  # `eager_init_query()` call sites that CREATE `:OnboardingState` on
-  # `proj.db.select_graph(...)` (escape (3)). The `api` arm covers the files
-  # holding those call sites (`tortoise/sdk.py` and `tortoise/hosted_api.py`);
-  # `tortoise/projection/__init__.py` is in SHARED_MODULES (full matrix) and
-  # `tortoise/onboarding/**` selects the `onboarding` arm beside the sibling
-  # `test_9079_onboarding_declared_lane.py` — a named match REPLACES the `core`
-  # fallback, so an onboarding-only diff must run this pin (#1349/#2938 class).
-  # `core` carries it too, because the suite READS this manifest.
-  - test_9121_onboarding_residual_pins.py
   - test_7951_write_doors.py
   # #7951 (steps 1-3, the ENFORCEMENT): DUAL-REGISTERED with the same six
   # surfaces as the door inventory above, for the same reason — the guard's
