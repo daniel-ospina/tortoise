@@ -1730,12 +1730,20 @@ def test_the_corrected_passages_carry_no_bare_edges_line_citation():
 def test_the_references_paragraph_scopes_property_freedom_to_source_version():
     """§9.6 said identity/mention and referential-containment `references` links
     "stay **property-free**" — the same unqualified absolute this PR retracts for
-    `aboutObject`, 70 lines above the correction (third review cycle). Read as
-    written it is FALSE at HEAD for the same reason: a record-projected relation
-    is stamped `{idx:$idx}` unconditionally by
-    `cache_projection.relation_statement` (`cache_projection.py:717`) and
-    `_rebuild_all_replay` re-applies the journal's attributes over an allowlisted
-    `etypes`, so a `references` link is not property-free either.
+    `aboutObject`, 70 lines above the correction (third review cycle).
+
+    The absolute is retracted because it is an absolute, not because a
+    `references` edge is stamped today. Every in-repo writer of these links is
+    bare — `link_source_to_entity`'s non-derivation branch is
+    `MERGE (s)-[:references]->(e)` with no `SET` (`projection/edges.py`), and so
+    are `projection/entities.py`, `hosted_api.py`'s session→external containment
+    and `graph-scripts/backfill_references.py`. `cache_projection.relation_statement`
+    *does* stamp `{idx:$idx}` + `SET r += $props`, but only for record-projected
+    `public.relation` rows, and no record kind emits a `references` relation
+    (`EntityLinked` is about*-only; `DirectEdgeCreated`/`DirectEdgeRepoint` are
+    IMPL/NAND) — so "a `references` link is not property-free" overstates: today
+    it IS, which is exactly why the word must be scoped to the fact the
+    paragraph establishes rather than to a general emptiness claim.
 
     The FACT the paragraph establishes is narrower and true: those forms carry
     no `sourceVersion`. The word is scoped here rather than the paragraph
