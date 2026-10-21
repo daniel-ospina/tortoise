@@ -15904,6 +15904,12 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # `coalesce` is CREATE-ONLY (#398's never-overwrite contract): a node an
     # authoritative writer already stamped — e.g. a `_mint_source_stub` stub
     # for a non-`session:` doc url — keeps its kind.
+    # #5140 (P2 finding 5): `ingestedAt` rides the same CREATE-only shape. §4.6
+    # marks it REQUIRED on every `:Source` and this MERGE wrote none (only
+    # `updatedAt`), so the D10 requirement sweeps read the transcript Source it
+    # mints as a violation — the same class #5082 closed for `sourceKind` here.
+    # `$now` is this commit's own instant, the transaction-time value §4.6 asks
+    # for; `coalesce` keeps an instant a prior writer recorded.
     proj.g.query(
         "MERGE (s:Source {url:$did}) "
         "SET s.id=coalesce(s.id, $did), "
@@ -15911,6 +15917,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         "    s.documentKind='transcript', s.title=$title, s.summary=$summary, "
         "    s.story_arc=$arc, s.sessionId=$sid, s.eventId=$eid, "
         "    s.sourcePath=$srcpath, s.is_episodic=true, "
+        "    s.ingestedAt=coalesce(s.ingestedAt, $now), "
         "    s.updatedAt=$now",
         params={"did": doc_id, "title": payload.summary or session_id,
                 "summary": payload.summary, "arc": payload.story_arc,

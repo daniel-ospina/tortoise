@@ -4544,7 +4544,14 @@ class _EntityHandlers:
         }
         if not guard:
             # ── PLAIN path — legacy/replay calls, byte-identical (SC4) ──
-            self._event_plain_merge(eid, props, embedding, inner)
+            # #5140: the record's OWN instant, for the document `:Source` this
+            # fold can mint (§4.6 marks `ingestedAt` REQUIRED). It rides the
+            # RECORD, not the nested payload — ``EventAPI._emit`` stamps ``ts``
+            # on every line IT writes — so a replay reads the value the live
+            # write recorded instead of re-stamping a replay clock (#5024's
+            # rule for `updatedAt`, applied to the same slot).
+            self._event_plain_merge(eid, props, embedding, inner,
+                                    record_ts=event.get("ts"))
             # #388: connector Source materialization at the choke point (all
             # connector events flow here via proj.apply; the guarded meeting
             # path never carries connector metadata, so the gate is plain-path
@@ -4673,8 +4680,51 @@ class _EntityHandlers:
             )
 
     def _event_plain_merge(self, eid: str, props: dict, embedding,
-                           inner: dict) -> None:
-        """The legacy single-statement Event MERGE (+ edges + extra props)."""
+                           inner: dict,
+                           record_ts: str | None = None) -> None:
+        """The legacy single-statement Event MERGE (+ edges + extra props).
+
+        ``record_ts`` is the JOURNAL RECORD's own instant (``ts`` on the
+        envelope, never on the nested payload). It is the transaction-time
+        value the document `:Source` below is stamped with (#5140), so live and
+        replay agree on when Tortoise first saw that source — §4.6's
+        `ingestedAt`, which the record — not the fold — is the authority for.
+
+        That agreement holds for the doors that STAMP ``ts`` on the record they
+        fold (`EventAPI._emit`), not for every door. TWO doors have the opposite
+        shape, and each mints the envelope ``ts`` a SECOND time — so both are
+        named here rather than the one this contract used to exempt:
+
+        * `TortoiseSDK._apply_and_journal` appends through `_emit_event`, which
+          mints ``ts`` on a COPY of the record, then folds the caller's own
+          dict;
+        * `TortoiseSDK._create_entity` (the public ``create_entity`` /
+          ``create_event`` — the ``tortoise_create_entity`` /
+          ``tortoise_create_event`` tools) folds the caller's event at
+          ``proj.apply`` and journals it AFTER the fold, so the record it folds
+          has no ``ts`` to read (``ts`` is a reserved ENVELOPE prop, stripped at
+          prop intake) and `_emit_event` mints one at append time.
+
+        A caller setting ``objectType='Document'`` through either door stamps
+        the write clock live and the envelope ``ts`` on replay; measured through
+        ``create_event(objectType='Document')`` — live ``ingestedAt``
+        ``…56.356835`` vs rebuilt ``…56.421082`` — the #5024 divergence class, on
+        this field. Latent rather than live today in BOTH cases: no producer in
+        this repo sets ``objectType`` on either door (`EventAPI.add_event` is the
+        shipped one and it goes through ``_emit``).
+
+        The fix is the same for each and belongs to those doors, not to this
+        contract: stamp ``ts`` on the record BEFORE the fold and hand the SAME
+        instant to the append — the ``createdAt`` VALUE-SYNTHESIS in
+        ``_apply_and_journal`` already does exactly that for that field (it
+        stamps ``event["createdAt"]`` before the append so the record and the
+        fold carry one instant), and ``_emit_event(recorded_ts=…)`` is the
+        parameter `retract_point` uses for this purpose; `_journal_record_payload`
+        shares only the payload-KEY rule and would not close it. Filed as #9419
+        rather than taken here: it moves the journal bytes of every
+        ``EventRecorded`` that funnel emits, a different blast radius from this
+        clause.
+        """
         # #4524: the ON MATCH embedding write below can be a SILENT no-op on
         # the embedded engine — a ``vecf32`` overwrite of an existing vector is
         # discarded (#4457). It sits inside ON CREATE/ON MATCH, so clear the
@@ -4738,13 +4788,58 @@ class _EntityHandlers:
             # kept, and a document node minted by THIS writer before the fix
             # (or replayed from an old journal line) is repaired by the next
             # fold instead of staying NULL forever.
+            # #5140 (P2 finding 5): `ingestedAt` — §4.6 marks it REQUIRED on
+            # EVERY `:Source`, and this clause wrote none, so every D10
+            # requirement sweep read a document minted here as a violation
+            # (`MATCH (s:Source) WHERE … OR s.ingestedAt IS NULL …` → 1). Same
+            # class #5082 closed for `sourceKind` on this exact clause: two
+            # writers of one node disagreeing on a REQUIRED field, while the
+            # sibling `_upsert_document` stamps
+            # `s.ingestedAt=coalesce(s.ingestedAt, $now)`.
+            # `coalesce` on MATCH, a plain stamp on CREATE: a node minted by
+            # this writer before the fix (or replayed from an old journal line)
+            # is repaired by the next fold, while an instant a writer already
+            # recorded is never overwritten (#398's never-overwrite contract;
+            # the field means when Tortoise FIRST saw this source). The value is
+            # the record's own `ts` when it carries a USABLE one — deterministic
+            # on replay — falling back to the write clock only for a record that
+            # states none. Not every live door states one, and ALL THREE are
+            # latent rather than live today (no in-repo producer sets
+            # `objectType` on any of them): the miner's own envelope carries no
+            # `ts`; `_apply_and_journal` folds the caller's dict rather than the
+            # envelope its append minted; and `_create_entity` (behind
+            # `create_entity`/`create_event`) folds BEFORE it journals, so the
+            # append's `ts` never reaches the fold (sdk.py counts the journal's
+            # three live append doors; #9419 carries the live-vs-rebuild delta).
+            # For any of them the fallback is what keeps `ingestedAt` REQUIRED
+            # rather than NULL, and the value is not replay-deterministic.
+            # "Usable" is `_usable_instant` — the policy `_journal_instant`
+            # wraps, and the form to copy. It is a choice made HERE, not a
+            # guarantee inherited from the file: `valid_to` (the
+            # supersede/invalidate folds) and `_upsert_source`'s
+            # `ingestedAt`/`updatedAt`/`rawStateAt` still ride ungated (#7369), so
+            # nothing else gates this slot for you. Cited by NAME, never by line
+            # — a number here is stale the next time anything above it moves
+            # (this branch has already paid for that twice).
+            #
+            # The reason is NOT a raise: `self.g`'s parameter boundary
+            # (`_journal_safe_params`) DEGRADES an unwritable value to `None`
+            # rather than aborting the replay. `None` in this DIRECT SET is a
+            # CLEAR, so an ungated corrupt `ts` leaves a §4.6-REQUIRED field
+            # absent — silently, with only a WARNING logged — which is exactly
+            # the D10 sweep red (#5140) this clause exists to close. The gate
+            # is the only place that loss becomes a stated instant instead of a
+            # driver-dependent null.
             self.g.query(
                 "MERGE (s:Source {url:$id}) "
                 "ON CREATE SET s.id=$id, s.title=$id, "
                 "              s.sourceKind=coalesce(s.sourceKind, 'document'), "
-                "              s.documentKind='transcript' "
-                "ON MATCH SET s.sourceKind=coalesce(s.sourceKind, 'document')",
-                params={"id": obj},
+                "              s.documentKind='transcript', "
+                "              s.ingestedAt=$iat "
+                "ON MATCH SET s.sourceKind=coalesce(s.sourceKind, 'document'), "
+                "             s.ingestedAt=coalesce(s.ingestedAt, $iat)",
+                params={"id": obj,
+                        "iat": record_ts if _usable_instant(record_ts) else _now_iso()},
             )
             self.g.query(
                 "MATCH (s:Source {url:$id}), (e:Event {eventId:$eid}) "

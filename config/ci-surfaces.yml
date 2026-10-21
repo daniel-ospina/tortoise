@@ -1603,6 +1603,21 @@ surfaces:
   # `test_durability_posture.py`), because a docs-only `docs/ONTOLOGY.md`
   # wording edit is what this guard is FOR.
   - test_5142_ontology_record.py
+  # #5140: the two document `:Source` writers that wrote no `ingestedAt`
+  # (`entities.py::_event_plain_merge`'s `objectType='Document'` branch and
+  # `hosted_api.py::_execute_commit_writes`) — behavioural half. This row is
+  # the `--integrity` CLASSIFICATION (`classify_test_file` → `core`, which is
+  # also what puts the file in `carve_out_by_surface['core']`); it does NOT
+  # decide the leg. `select()` strips carve-out members from `test_files`
+  # (`files -= carve`) on every non-full selection, so `carve_out_run` is what
+  # RUNS the file (entry in `carve_out:` below) — the same correction the
+  # in-file #9196 review P2 records at the `api` row. It becomes load-bearing
+  # only if the file LEAVES `carve_out:`.
+  # It builds its own throwaway embedded graph (no docker lane) and is mirrored
+  # in `tests/_embedded.TEST_NO_REDIRECT_STEMS`. Registered at all because an
+  # unlisted file is a `manifest-integrity` red (#1262) AND runs in no leg: the
+  # #9396 review's blocking finding.
+  - test_document_source_ingested_at_5140.py
   - test_8702_identity_skip_accounting.py
   # #8738 review P2: the doc-affiliation frontmatter on the three changelog
   # companions this change adds AND on every `docs/architecture/*.md`. The
@@ -1806,6 +1821,18 @@ surfaces:
   # `--changed-files tortoise/cypher_guard.py` → surfaces=['core']. `--integrity`
   # also requires every test file to be classified, which this entry satisfies.
   - test_9079_handle_write_authority.py
+  # #9079 (the door ONE HOP BELOW the write handle): the client handle escapes —
+  # `proj.g._g.query(...)` and `proj.db.select_graph(<g>).query(...)` — and the
+  # registry that makes the client-level door judge the right (store, graph).
+  # SAME TWO SUBJECTS as the #9124 entry above, so it takes the same arm: a
+  # change to `tortoise/projection/__init__.py` selects the full matrix anyway,
+  # and `tortoise/cypher_guard.py` (where the authority hook is consulted) matches
+  # no named SOURCE_PATTERN and falls through to `core` — verified with the
+  # repo's own selector: `--changed-files tortoise/cypher_guard.py` →
+  # surfaces=['core'], and the file appears in that selected set. Registering it
+  # is also what `--integrity` requires (a test file in NO surface reds
+  # `manifest-integrity`, which `python-ci-gate` needs).
+  - test_9079_client_handle_door.py
   # #9124 part 1 (the DECLARATION census): every mutating entry point that
   # reaches the write handle must be declared or inventoried, enumerated from
   # the SOURCE of `tortoise/sdk.py` and `tortoise/event_store.py` rather than
@@ -5643,6 +5670,14 @@ slow_files:
 # Mirrors tests/_embedded.TEST_NO_REDIRECT_STEMS (pinned by test_ci_selection
 # + test_markers).
 carve_out:
+# #5140: the behavioural half of the `ingestedAt` fix constructs its own
+# embedded `FalkorProjection` per test (`tempfile.mkdtemp` + `graph_name=`),
+# so under a URI lane the redirect would flip it to the shared server. Routed
+# here so the URI-unset carve-out job runs it as designed; the stem is
+# mirrored in `tests/_embedded.TEST_NO_REDIRECT_STEMS` (the pin is
+# `test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems`) and
+# the raw construction is allowlisted in `test_embedded_lifecycle.py`.
+- test_document_source_ingested_at_5140.py
 # #8488: the in-process Okapi BM25 lexical arm. Module-level `embedded_only`
 # (its subject is the embedded lane + the shipped read), so a `core`-only
 # registration would make the manifest green and run NOTHING on a docker leg.
@@ -7455,6 +7490,7 @@ durations:
   test_7935_restore_destination_lock.py: 5.0  # #7935 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red at 780/867 = 89.97% (formatted as the `90.0%` in that error) — the file is in the fast pool, so its absence packs it at the flat 2.0s default and drops coverage under the 90% floor; the same shape as the rows above. Local embedded-carve-out reading (4 tests, re-measured after the P3 journal-lock test was added): call 0.52 s + 2.83 s + 2.73 s + <0.01 s (the lock-only test enters `_destination_lock` directly, no restore), setup/teardown ~0.5 s each. The file's FIRST embedded replay in a cold process also pays the once-per-leg embedding-model load the #3400 method attributes to no file (~124 s, and the fixture pays it in setup so the lock gates are not timed against it) — that cost is already carried by `test_7767_restore_rollback.py`, which replays the same path. Refresh from the first post-merge run that includes it.
 
   test_9079_handle_write_authority.py: 10.0  # unmeasured — new in #9124 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so an absent row packs it at the flat 2.0s default and this PR's two new fast files tipped `duration_coverage_issues()` to 848/943 = 89.9% (red against the 90% floor) — the same shape as the `test_7951_create_point_outbox.py` row above. Local embedded-lane reading 9.2s (23 tests) out of the 22.4s both new files took; setup dominates (each test builds its own journal-backed SDK) and the one `rebuild_all`/sweep test pays the FTS drop→recreate. Declared above the local reading so a cold leg cannot under-pack. Refresh from the first post-merge run that includes it.
+  test_9079_client_handle_door.py: 12.0  # unmeasured — #9079 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so an absent row packs it at the flat 2.0s default and reds `duration_coverage_issues()`. Collected count at this head: 37 cases (25 at the first review head; the review fixes add the split-spelling, the barrier/procedure/bytes-graph census shapes and the raw-command-shape pins — the `close()` pin replaces its predecessor rather than adding one). Local docker-lane wall readings at this head: 6.4 s, 6.5 s and 7.0 s over three runs (the file is registered in `core`, which is the docker lane; each test builds its own journal-backed SDK, one `rebuild_all`/sweep test pays the FTS drop->recreate, and the barrier case seeds a node first). Declared above the local readings so a cold leg cannot under-pack. Refresh from the first post-merge run that includes it.
   test_9124_declared_live_doors.py: 14.0  # unmeasured — new in #9124 (#3400 trap): same class as the row above (new fast file, no CI measurement). Local embedded-lane reading 13.2s (13 tests), of which `test_arming_the_guard_requires_a_fully_declared_surface` alone is 9.2s: it parses and censuses EVERY module in the package that reaches the write handle, so it tracks the package's size rather than the box's load. Declared above the local reading so a cold leg cannot under-pack. Refresh from the first post-merge run that includes it.
 
 # ── ON-DEMAND LANE: runs the pipeline, does not gate the merge ────────────

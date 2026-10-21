@@ -716,7 +716,20 @@ SOURCE_PATTERNS = {
     # which includes core. Listing it would drop that guard's coverage on the
     # very PR that changes the deploy spec.
     "ep": ("tortoise/dream.py", "tortoise/analyze.py",
-           "tortoise/ranking.py"),
+           "tortoise/ranking.py",
+           # #2786 review P2: the extraction probe and the calibration harness
+           # are the two TOOLING copies of the core object-kind vocabulary (the
+           # PR makes both DERIVE from `pack_registry.CANONICAL_OBJECT_KINDS`),
+           # and `tests/test_calibration_tools.py` — registered `ep` — imports
+           # BOTH at module level, so a tool-only edit is precisely the change
+           # that can break it. `tools/` is a flat NON_PYTHON_PREFIXES entry and
+           # neither file had a SOURCE_PATTERNS row, so such an edit selected NO
+           # surface and fell back to tier-1 smoke, where that guard is not
+           # registered (the #1349/#3332/#3616 silent-drop class). A
+           # SOURCE_PATTERNS match REPLACES the `core` fallback, which is why
+           # both are paired with CORE_ALSO below (their other guard,
+           # `tests/test_kind_vocabulary_consistency.py`, is `core`).
+           "tools/calibration_harness.py", "tools/probe_extractor.py"),
     "sdk": ("tortoise/ids.py", "tortoise/models.py", "tortoise/crypto.py",
             "tortoise/reader.py", "tortoise/retrieval.py",
             # #3849: the ask PIPELINE now lives here (moved out of
@@ -1151,6 +1164,24 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # where the suite is registered. Pinned by
              # tests/test_ci_selection.py::test_9206_lane_suites_run_on_the_diffs_that_can_break_them.
              "tools/source_dedup_report.py",
+             # #2786 review P2: `tools/probe_extractor.py` (the classification
+             # prompt put in front of the model) and `tools/calibration_harness.py`
+             # (the harness whose `VOCAB` the `minted` metric reads) are the two
+             # tooling copies of the core object-kind vocabulary, and the guard
+             # that pins both to `pack_registry.CANONICAL_OBJECT_KINDS` —
+             # tests/test_kind_vocabulary_consistency.py — is `core`-registered.
+             # MEASURED before these entries: `select(["tools/probe_extractor.py",
+             # "tools/calibration_harness.py"])` -> surfaces=[], full=False, 52
+             # tier-1 files, guard absent — so the exact drift the drift-gate
+             # exists to catch (someone retyping a stale `core:<kind>` into a
+             # tool) stays green on the very PR that introduces it. These entries
+             # also keep `core` selected for the `ep` SOURCE_PATTERNS rows both
+             # files now carry (a named-surface match replaces the `core`
+             # fallback otherwise). Same #1349/#3332/#3616 silent-drop class as
+             # tools/test_lane.py above. Pinned by
+             # tests/test_ci_selection.py::test_extractor_tooling_change_selects_core_and_ep_not_tier1.
+             "tools/probe_extractor.py",
+             "tools/calibration_harness.py",
              # #3036: oauth.py is pinned by BOTH api-registered tests
              # (test_oauth_mcp.py, test_oauth_token_fault.py, ...) and core
              # (test_control_plane_offload_3498.py), so the SOURCE_PATTERNS
