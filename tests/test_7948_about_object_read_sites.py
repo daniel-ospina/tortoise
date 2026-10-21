@@ -229,6 +229,19 @@ _NON_LITERAL: dict[str, tuple[str, ...]] = {
     "sdk.py::TortoiseSDK._state_related_points": (
         '"MATCH (p:Point)-[a:" + self._ABOUT_TYPES + "]->(o:Object) "',
     ),
+    # Two ALL-EDGE walks found by the third re-derivation: both walk with no
+    # rel-type filter (so the edge is read without being named) and both are
+    # behind CUSTOMER doors — the delete blast-radius preview under three
+    # `dry_run` MCP tools, and the org export behind a REST route. Same rule as
+    # rows 3 and 22, which is why neither could be excluded: an unfiltered walk
+    # that reports or ships the edges it finds is a read site the ruling's count
+    # has to carry.
+    "mcp_server.py::_preview_delete_edges": (
+        '"MATCH (a)-[r]-(b) WHERE ID(a) IN $nids OR ID(b) IN $nids "',
+    ),
+    "hosted_api.py::_export_graph_snapshot": (
+        '"MATCH (a)-[r]->(b) RETURN labels(a), coalesce(a.id, a.name), "',
+    ),
 }
 
 #: Facts outside the symbol that make the two computed-name readers complete
@@ -815,9 +828,43 @@ def _registered_tools() -> set[str]:
     return names
 
 
+def _rest_routes() -> set[str]:
+    """The paths this repo serves over its own hosted REST surface.
+
+    A customer-callable row may reach the edge through REST instead of an SDK
+    method or an MCP tool: §13 row 25's reader is the org export, served by
+    `@app.get("/v1/organizations/{org_id}/export")` in `hosted_api.py`. Without
+    this the door test would either refuse a legitimate REST-only row or be
+    widened to `assert path in module text`, which is an existence check on a
+    string rather than on a route — the weaker form that let row 1 name a door
+    that could not reach its reader.
+    """
+    tree = _module_tree(PKG / "hosted_api.py")
+    routes: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            if not isinstance(decorator, ast.Call):
+                continue
+            func = decorator.func
+            if not (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "app"
+                and func.attr in {"get", "post", "put", "patch", "delete"}
+            ):
+                continue
+            if decorator.args and isinstance(decorator.args[0], ast.Constant):
+                routes.add(str(decorator.args[0].value))
+    assert routes, "no `@app.<verb>(path)` routes found in tortoise/hosted_api.py"
+    return routes
+
+
 def test_every_customer_callable_row_reaches_a_declared_door():
     sdk_methods = _public_sdk_methods()
     tools = _registered_tools()
+    routes = _rest_routes()
     broken: list[str] = []
 
     for row in _rows():
@@ -826,8 +873,11 @@ def test_every_customer_callable_row_reaches_a_declared_door():
         label = f"row {row['n']} ({row['module']}::{row['symbol']})"
         sdk = re.findall(r"SDK `([A-Za-z_][\w]*)`", str(row["reach"]))
         mcp = re.findall(r"MCP `([A-Za-z_][\w]*)`", str(row["reach"]))
-        if not sdk and not mcp:
-            broken.append(f"{label} — names no door (SDK/MCP backticked name)")
+        rest = re.findall(
+            r"REST `(?:GET|POST|PUT|PATCH|DELETE) ([^`]+)`", str(row["reach"])
+        )
+        if not sdk and not mcp and not rest:
+            broken.append(f"{label} — names no door (SDK/MCP/REST backticked name)")
             continue
         broken.extend(
             f"{label} — SDK `{name}` is not a public TortoiseSDK method"
@@ -838,6 +888,11 @@ def test_every_customer_callable_row_reaches_a_declared_door():
             f"{label} — MCP `{name}` is not a registered tool"
             for name in mcp
             if name not in tools
+        )
+        broken.extend(
+            f"{label} — REST `{path}` is not a route in hosted_api.py"
+            for path in rest
+            if path not in routes
         )
 
     assert not broken, (
