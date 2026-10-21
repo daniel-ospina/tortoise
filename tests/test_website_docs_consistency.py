@@ -986,8 +986,8 @@ def test_product_hero_offers_the_blog() -> None:
 
     The owner's complaint is "cannot find the blog", so a link at the bottom of a
     630vh scroll narrative is a weak answer on the one page that matters. The
-    hero already carries a secondary-link row (`Browse the docs -> . Design FAQ ->`,
-    `website/product.html:332`) that is clickable from first paint (`.beat.pe-on`
+    hero already carries a secondary-link row (`Browse the docs -> . GitHub repo ->`)
+    in `#beat-hero` that is clickable from first paint (`.beat.pe-on`
     on the `i === 0` beat), so the blog goes there — no new CSS, and no change to
     the #1288 login-only top menu.
 

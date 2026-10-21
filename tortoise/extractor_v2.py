@@ -5686,6 +5686,78 @@ def supersede_allowed(a: str, b: str) -> bool:
     return not _boundary(a, b)[1]
 
 
+# ── D12/O4 (#5006) — a fold may not lose EVIDENCE either ───────────────────
+# ``_boundary`` guards the CLAIM: a fold may never cross a distinguishing
+# difference (#5080). The ruling's other half is the ATTACHMENTS — "MERGE
+# preserves BOTH sides' evidence and attachments" (§16.4), and "UNION THE
+# ATTACHMENTS, NEVER FUSE THE CLAIM" (§S2.2).
+#
+# A paraphrase fold emits no payload point, so it stamps no link from the
+# surviving Point to the entities the candidate named. Any entity the
+# candidate names that the prior does NOT is therefore dropped by the fold
+# itself: a de facto merge that discards one side's evidence, performed by a
+# threshold (``NOOP_MIN_OVERLAP``) rather than by a decision (#5006).
+#
+# So a fold that would drop an attachment is REFUSED and the claim falls
+# through to ADD — both survive. The asymmetry is the ruling's ("a false merge
+# costs more than a kept near-duplicate"): a wrong keep is noise, a wrong drop
+# is memory loss.
+#
+# ⚠️ The READ direction is the opposite of the boundary's, on purpose.
+# ``_boundary``/``fold_allowed`` are fail-CLOSED (an unreadable comparison
+# refuses the fold); ``_attachments_preserved`` is fail-OPEN (an absent or
+# unreadable attachment set on either side permits it). S3 prior rows carry
+# ``about_entities`` only when the Task-4 enrichment ran and a minted operator
+# ref carries none, so refusing on an unknown set would silently become "never
+# fold" wherever the enrichment is off — a volume regression, not a safety
+# gain. Read ``_attachments_preserved``'s docstring before "simplifying" the
+# branch into a fail-closed one.
+#
+# BOTH no-payload arms are guarded, because both drop the same evidence: the
+# paraphrase band below AND the exact-content arm (step 1), which returns
+# before the per-prior loop.
+#
+# ⚠️ This is the evidence-preservation half of #5006, NOT the union-merge. The
+# Jev-arbitrated fusion that keeps ONE point and writes the union onto it is
+# still unimplemented (`config/v4-mechanisms.yml` keeps `near_dup_merge` at
+# `not-implemented`), and this guard deliberately does not pretend otherwise.
+
+
+def _attachment_ids(value: object) -> frozenset[str] | None:
+    """The normalised entity ids in an ``about_entities``-shaped value, or
+    ``None`` when the value is not a usable attachment set.
+
+    ``None`` — not an empty set — for anything that is not a sequence of
+    strings: *"this row names no entities"* and *"this row's entities could
+    not be read"* are different facts, and only the first may refuse a fold.
+    """
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        return None
+    ids: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            return None
+        if item.strip():
+            ids.add(item.strip().lower())
+    return frozenset(ids)
+
+
+def _attachments_preserved(prior: dict, candidate: dict) -> bool:
+    """True when folding ``candidate`` into ``prior`` would drop no entity.
+
+    FAIL-OPEN on an absent or unreadable attachment set on EITHER side — the
+    never-block-on-absent-data posture this module already takes. S3 prior
+    rows carry ``about_entities`` only when the Task-4 enrichment ran, and a
+    minted operator ref carries none at all, so refusing on an unknown set
+    would silently become "never fold" wherever the enrichment is off.
+    """
+    prior_ids = _attachment_ids(prior.get("about_entities"))
+    cand_ids = _attachment_ids(candidate.get("about_entities"))
+    if prior_ids is None or cand_ids is None:
+        return True
+    return cand_ids <= prior_ids
+
+
 def classify_consolidation(point: dict, priors: list[dict], *,
                            entity_mentions: list[str] | None = None,
                            current_date: str | None = None) -> DecisionRecord:
@@ -5695,7 +5767,11 @@ def classify_consolidation(point: dict, priors: list[dict], *,
     to one of ADD / UPDATE / NOOP / DELETE in priority order:
 
       1. NOOP (identical)   — normalized content equals a prior (the
-                              existing exact/content-hash dedup);
+                              existing exact/content-hash dedup).  A fold is
+                              admissible only when it loses nothing here too:
+                              the prior must already carry every entity the
+                              candidate names (#5006), else that prior is
+                              skipped and the claim falls through to ADD;
       2. UPDATE             — same entity + same attribute, VALUE differs
                               (value-signature inequality when both sides
                               carry a signature, else the E5 frame-token
@@ -5707,7 +5783,13 @@ def classify_consolidation(point: dict, priors: list[dict], *,
                               mention (or the Tier-A marker) + the gates,
                               OR overlap ≥ NOOP_MIN_OVERLAP with the gates,
                               OR high overlap with an AMBIGUOUS gate (never
-                              UPDATE);
+                              UPDATE).  A fold is admissible only when it
+                              loses nothing: the boundary (D12/O4) must find
+                              no distinguishing difference AND the prior must
+                              already carry every entity the candidate names
+                              (#5006 — a fold stamps no link, so an entity
+                              only the candidate names would be dropped);
+                              otherwise the claim falls through to ADD.
       4. ADD                — no prior match.
 
     DELETE is NEVER produced from content alone (D5 — only explicit
@@ -5730,10 +5812,17 @@ def classify_consolidation(point: dict, priors: list[dict], *,
 
     # 1) NOOP — identical (existing exact/content-hash dedup)
     for p in priors:
-        if _norm(str(p.get("content") or "")) == norm:
-            return DecisionRecord("NOOP", prior_id=str(p.get("id") or ""),
-                                  overlap=1.0, reason="identical",
-                                  evidence="exact normalized content match")
+        if _norm(str(p.get("content") or "")) != norm:
+            continue
+        # #5006: this arm emits no payload point either, so it drops exactly
+        # the evidence the paraphrase arm would. A prior that does not already
+        # carry every entity the candidate names may not absorb it — skip that
+        # prior (not the candidate) and let the pair fall through to ADD.
+        if not _attachments_preserved(p, point):
+            continue
+        return DecisionRecord("NOOP", prior_id=str(p.get("id") or ""),
+                              overlap=1.0, reason="identical",
+                              evidence="exact normalized content match")
 
     best_update: tuple[float, dict] | None = None
     best_noop: tuple[float, dict, str] | None = None   # (overlap, prior, mode)
@@ -5770,6 +5859,11 @@ def classify_consolidation(point: dict, priors: list[dict], *,
         # difference (D12/O4, #5080).  The boundary is checked per prior, so a
         # refused fold falls through to ADD — both claims survive.
         if difference is not None:
+            continue
+        # #5006: the attachments half of the same ruling.  A fold emits no
+        # payload point, so it would drop any entity only the candidate names;
+        # refuse it and let the claim fall through to ADD instead.
+        if not _attachments_preserved(p, point):
             continue
         if sig_equal and (tier_a or bool(mentions)) and gate:
             # value identity — short-circuits both bands

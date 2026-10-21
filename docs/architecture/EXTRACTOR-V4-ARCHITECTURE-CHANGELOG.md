@@ -636,3 +636,32 @@ re-derived (run 2 still regenerates byte-identically — now pinned by a test, n
   missing delta makes the verdict `no branch matched — scoring input incomplete`. No committed figure changes:
   run 2 still regenerates byte-identically (the artifact pin is what proves it), and the fix is pinned by
   four tests that fail on the pre-fix code (two of them on the `TypeError`, verified by reverting the module).
+
+## §13.6 / §13.8 question 2 — the `aboutObject` premise is SCOPED to the files it measured (`#9399`)
+
+The removed wording, and why it went. Two passages in the design document opened
+with an unqualified claim about *"the primary search path"*, but the command they
+quote as proof measures exactly three modules — and `tortoise/ranking.py`, which
+holds both product ranking read paths and therefore the reads behind the default
+recall door (`tortoise_recall` → `sdk_method="recall_state"`), is not one of them.
+
+**Removed (verbatim), §13.6:**
+
+> **The primary search path does not read the edge; four *customer-callable* sites DO.**
+> ⇒ **Hindsight's premise holds for the primary search path only, so the comparable's conclusion does NOT transfer.**
+
+**Removed (verbatim), §13.8 question 2:**
+
+> The primary search path does **not** read it (`grep -in aboutObject
+> tortoise/retrieval.py tortoise/search_engine.py tortoise/session_reinjection.py`
+> → exit 1, case-insensitive) — so Hindsight's premise holds *there*.
+
+The measurement was never wrong; the **scope** was unstated, so both passages read
+as claims about the whole product and a reader checking only the quoted command
+concluded the opposite of what the section rules on. The design document now
+states the lane the three files bound and names the module and the door outside
+it; `tests/test_9399_search_path_claim_scope.py` guards this document *and*
+`STORAGE-ARCHITECTURE.md` §13 — one `CLAIMS` entry per document, re-running each
+quoted scan over the files that sentence names — so the qualifier cannot be
+dropped from either copy, and a second unscoped copy inside the same document
+reds as an absence.

@@ -179,9 +179,11 @@ class TestOntologyAlignment:
 
         ⛔ The core half is IMPORTED (#2786), never transcribed. It used to be a hand copy of
         the same list the harness carried, so both sides held the same retired entries
-        (``core:document``/``core:concept``) and this assertion could not fire — it compared
-        two hand copies against each other and never against the canonical source. Equality
-        with ``CANONICAL_OBJECT_KINDS`` is now asserted in
+        (``core:document``/``core:concept``) and this assertion could not fire ON THAT DRIFT —
+        it compared two hand copies against each other and never against the canonical source.
+        (The ``or kind in pack_kinds`` arm still gave it teeth for a kind absent from BOTH, and
+        for a pack-side rename: what it could not see was drift both hand copies shared.)
+        Equality with ``CANONICAL_OBJECT_KINDS`` is now asserted in
         ``tests/test_kind_vocabulary_consistency.py``; what this leg keeps is the PACK side,
         which only this test can see.
         """
