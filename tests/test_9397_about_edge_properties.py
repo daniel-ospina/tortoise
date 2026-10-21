@@ -13,10 +13,14 @@ The owner's 2026-09-23 ruling on stored-vs-derived (`#7948`) rests on a
   * and the same fact in `EXTRACTOR-V4-ARCHITECTURE.md` §13.8 q2 and the
     decision row at `EXTRACTOR-V4-ARCHITECTURE-CHANGELOG.md`.
 
-At HEAD an `about*` edge carries `confidence`, and TWO shipped sites ORIGINATE
-it — write it FIRST — while a third writes the same property in the same NAMED
-form but REPRODUCES it on replay, so the causal and the write-form axes are not
-the same axis (round 10 of the changelog records the confusion this caused).
+At HEAD an `about*` edge carries `confidence`. The writers do not all act on one
+axis: some ORIGINATE the property (they write it first) while others write it in
+the same NAMED form but REPRODUCE it on replay, so the causal and the write-form
+axes are not the same axis (round 10 of the changelog records the confusion this
+caused). The COUNTS are deliberately not restated here: a number in this header
+is prose nothing compares, so the populations are pinned against the documents
+by `test_the_writer_classification_separates_the_causal_axis_from_the_write_form`
+— the same reason `RECORDED_WRITERS` states no split.
 The ingestion path reaches one of the originators by default:
 
   1. `session_link.link_entity` — `MERGE (s)-[r:{edge_type}]->(t)
@@ -28,9 +32,9 @@ The ingestion path reaches one of the originators by default:
      re-SETs it, i.e. the property is journaled and reproduced (`live == rebuild`).
      RE-MATERIALIZES — it does not originate anything.
 
-THREE shipped paths therefore RE-MATERIALIZE (the replay fold above, and the two
-below), and one of the two below adds a SECOND name, so the earlier "exactly
-one name" reading was one form short:
+The remaining shipped paths therefore RE-MATERIALIZE (the replay fold above and
+the ones below), and one of them adds a SECOND name, so an "exactly one name"
+reading is one form short:
 `cache_projection.relation_statement` (the record-layer projection) writes the
 record row's whole property set by property MAP over a predicate allowlist that
 includes `aboutObject`, and it also stamps `idx` — `public.relation.idx`, the
@@ -320,6 +324,14 @@ appended as legs were added, so read it as an index, not as the file's order)
    compares the indexed SET to the module's actual test functions (so it names
    itself too), and the heading no longer claims an order an appended index does
    not have.
+
+27. `test_the_shallow_gate_precedes_the_fetch` — the gate that stops the
+   provenance leg from shallow-ifying a full clone was unpinned: deleting it
+   left every leg green, because the only nearby assertion checked that the
+   strings `"fetch"` and `"--depth="` were still in the source. The leg parses
+   `_ensure_commit` and requires the `_is_shallow` return-False guard to appear
+   BEFORE the fetch loop, so the order is what is pinned. Structural, because
+   the destructive path is unreachable where `PRE_FIX_REV` resolves.
 
 NOT promised: this does not re-open stored-vs-derived (the ruling stands, and
 the edge stays), and it does not decide §11.4 rule 1's tension with `#1370`
@@ -1202,6 +1214,77 @@ def test_the_pin_index_names_every_leg():
     )
 
 
+def test_the_shallow_gate_precedes_the_fetch():
+    """`_ensure_commit` must consult `_is_shallow()` BEFORE it fetches, and `_is_shallow` must
+    mean what its name says.
+
+    The gate exists because of a measured destructive reading: `git fetch --depth=N` on a
+    NON-shallow clone turned `--is-shallow-repository` from false to true and cut
+    `rev-list --count origin/main` from 6106 to 120, creating `.git/shallow`. This file runs in
+    `tier1`/`core`, so without the gate a test truncates a developer's history.
+
+    And the gate was UNPINNED: deleting `if not _is_shallow(): return False` left every leg
+    green (measured at `#9403` review), because the only nearby assertion checked that the
+    strings `"fetch"` and `"--depth="` still existed in the source, which they still would, with
+    the guard gone. This leg parses the function instead, so the ORDER is what is pinned: a
+    conditional on `_is_shallow` returning False must appear before the `_SHALLOW_DEPTHS` loop.
+    Structural, not behavioural, because the destructive path is unreachable in a checkout where
+    `PRE_FIX_REV` already resolves, and deliberately so.
+    """
+    source = (ROOT / "tests/test_9397_about_edge_properties.py").read_text(
+        encoding="utf-8"
+    )
+    module = ast.parse(source)
+    funcs = {
+        node.name: node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef)
+    }
+    assert {"_ensure_commit", "_is_shallow"} <= set(funcs), (
+        "the provenance helpers are gone, so this pin has nothing to read"
+    )
+    body = funcs["_ensure_commit"].body
+    gate_at = next(
+        (
+            index
+            for index, node in enumerate(body)
+            if isinstance(node, ast.If)
+            and "_is_shallow" in ast.dump(node.test)
+            and any(
+                isinstance(inner, ast.Return)
+                and isinstance(inner.value, ast.Constant)
+                and inner.value.value is False
+                for inner in node.body
+            )
+        ),
+        None,
+    )
+    fetch_at = next(
+        (
+            index
+            for index, node in enumerate(body)
+            if isinstance(node, ast.For) and "_SHALLOW_DEPTHS" in ast.dump(node.iter)
+        ),
+        None,
+    )
+    assert gate_at is not None, (
+        "`_ensure_commit` no longer returns False when the checkout is NOT shallow, so the "
+        "fetch would shallow a full clone (measured: 6106 -> 120 commits, `.git/shallow`)"
+    )
+    assert fetch_at is not None, (
+        "`_ensure_commit` no longer has the bounded `_SHALLOW_DEPTHS` fetch loop, so this pin "
+        "is stale and the provenance leg now fails differently"
+    )
+    assert gate_at < fetch_at, (
+        f"the `_is_shallow` gate is at statement {gate_at} and the fetch loop at {fetch_at}: "
+        "the gate must come FIRST, or the fetch runs anyway"
+    )
+    assert "is-shallow-repository" in ast.dump(funcs["_is_shallow"]), (
+        "`_is_shallow` no longer asks git `--is-shallow-repository`, so it cannot mean what its "
+        "name and the gate above assume"
+    )
+
+
 def test_the_unmeasured_share_retraction_is_pinned():
     """§13 rests on a §11.1 sentence that nothing pinned.
 
@@ -1344,11 +1427,28 @@ def _unqualified_edges_line_citations(text: str) -> list[str]:
     The pre-fix text was right AT ITS PIN (`c79ba1cf2`), so the qualifier — not
     the number — is the part that is either true or missing.
     """
-    return [
-        m.group(0)
-        for m in _EDGES_LINE_CITE.finditer(text)
-        if not _PINNED_REVISION.search(text[m.end(): m.end() + 120])
+    cites: list[tuple[int, str]] = [
+        (m.start(), m.group(0)) for m in _EDGES_LINE_CITE.finditer(text)
     ]
+    # §11.1 spells the same citation as a SEPARATE token — "(`projection/edges.py`,
+    # `create_about_edge` — `:344` at the pinned revision)" — so an
+    # `edges.py:<n>`-adjacency matcher cannot see it. MEASURED at `#9403`
+    # review: deleting " at the pinned revision" there left this leg green, and
+    # the surviving bare `:344` then reads as CURRENT while `:344` is a `#:`
+    # comment block and the symbol sits at `:1447`. So a number standing alone in
+    # the window after an `edges.py` mention is a citation too.
+    for mention in re.finditer(r"edges\.py", text):
+        window = text[mention.end(): mention.end() + 200]
+        number = re.search(r":(\d+)", window)
+        if number and not re.match(r"[\w/]", window[number.start() - 1]):
+            cites.append((mention.end() + number.start(), number.group(0)))
+    out: list[str] = []
+    for start, cite in sorted(cites):
+        if cite in out:
+            continue
+        if not _PINNED_REVISION.search(text[start + len(cite): start + len(cite) + 120]):
+            out.append(cite)
+    return out
 
 
 def test_the_corrected_passages_carry_no_bare_edges_line_citation():
