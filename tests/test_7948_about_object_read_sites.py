@@ -361,6 +361,26 @@ def _reads_via_carrier(rel: str, source: str) -> list[str]:
     )
 
 
+def _about_family_dominates(elements: tuple[str, ...]) -> bool:
+    """Is `about*` the constant's FAMILY, rather than one word among many?
+
+    A rel-type alternation is mostly `about*` members (`ABOUT_EDGE_TYPES`
+    6/6, `SUPERSEDE_STRUCTURAL_RELS` 6/8, `TortoiseSDK._ABOUT_TYPES` 6/6).
+    A payload-key tuple or an English regex that merely happens to contain the
+    word "about" is not (`_RESERVED_EMIT_CALL_PROPS` 1/4 — `aboutLinks`;
+    `_BOUND_PHRASES` 1/27; `_RANGE_FILLER` 1/18). A prefix hit on ANY element
+    admits those as candidates, and then the first §13 row whose span mentions
+    one reds on a constant that carries no edge at all.
+
+    ⚠️ The threshold is measured against `aboutObject` REMOVED, which is the
+    state the caller must still detect: dropping it leaves 5/6 of
+    `ABOUT_EDGE_TYPES`, so a majority still holds and the membership assertion
+    still fires.
+    """
+    about = sum(1 for element in elements if element.startswith("about"))
+    return bool(elements) and about * 2 > len(elements)
+
+
 @functools.cache
 def _carrier_shaped_constants(rel: str) -> dict[str, tuple[str, ...]]:
     """module/class-level constants that can be SPLICED INTO a rel pattern.
@@ -376,9 +396,12 @@ def _carrier_shaped_constants(rel: str) -> dict[str, tuple[str, ...]]:
     asserting that a selected constant contains it can never fail — removing
     `aboutObject` from `ranking.ABOUT_EDGE_TYPES` left all eight tests green,
     while the mutation the PR body claims reds the carrier test. Candidate
-    shape here is decided by the VALUE's form plus the `about*` family prefix,
-    both of which survive `aboutObject` itself leaving the constant; membership
-    is then asserted by the caller, where it can actually fail.
+    shape here is decided by the VALUE's form plus the `about*` family, both of
+    which survive `aboutObject` itself leaving the constant; membership is then
+    asserted by the caller, where it can actually fail.
+
+    The family test is a MAJORITY, not a prefix hit on any element — see
+    `_about_family_dominates()` for why the loose form is wrong.
     """
 
     def splices(node: ast.AST | None) -> tuple[str, ...] | None:
@@ -407,7 +430,7 @@ def _carrier_shaped_constants(rel: str) -> dict[str, tuple[str, ...]]:
                 if name is None:
                     continue
                 elements = splices(node.value)
-                if not elements or not any(e.startswith("about") for e in elements):
+                if not elements or not _about_family_dominates(elements):
                     continue
                 carriers[prefix + name] = elements
 
