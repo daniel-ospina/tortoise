@@ -4172,6 +4172,18 @@ surfaces:
   # class). This file pins that calendar attendees are grounded on the meeting's
   # OWN evidence before they become CRM contacts/opportunities.
   - test_8491_cal_attendee_grounding.py
+  # #9399: §13's "primary search path does not read `aboutObject`" sentence is
+  # scoped to the THREE files its quoted `rg` names, and `tortoise/ranking.py`
+  # — which holds both product ranking read paths, i.e. the reads behind
+  # `tortoise_recall`/`recall_state` — is not one of them. So the sentence was
+  # true of the FTS/vector/RRF LANE and false of the default recall DOOR, while
+  # §13's own text calls the count decisive for the KEEP ruling. The file parses
+  # the file list OUT of the sentence, re-runs the scan over it, and requires the
+  # claim to name the module it excludes and the door that reads through it. It
+  # also pins the code facts the scoping rests on (`ABOUT_EDGE_TYPES`,
+  # `_ABOUT_TYPES`, the two `recall_state` enrichment readers), so it cannot
+  # survive as a stale qualifier. Text-only: no DB, no network.
+  - test_9399_search_path_claim_scope.py
   ep:
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
   # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
@@ -5272,6 +5284,7 @@ tier1:
 - test_7818_ontology_record.py  # #7818: docs/ONTOLOGY.md §4.7 coverage-boundary record vs `_covers` (hermetic doc pin; a docs-only ONTOLOGY edit runs only tier1) — dual-registered with `core`
 - test_8474_ontology_record.py  # #8474: docs/ONTOLOGY.md §4.6 rawState/rawStateAt availability record vs the declared write surface (hermetic doc pin; a docs-only ONTOLOGY edit runs only tier1) — dual-registered with `core`
 - test_7818_plan_record_5362.py  # #7818/#5362: the #5362 plan's RES-1 / out-of-scope read-path record vs the shipped reply contract (hermetic doc pin; a docs-only plan edit runs only tier1) — dual-registered with `core`
+- test_9399_search_path_claim_scope.py  # #9399: §13's `aboutObject` headline claim vs the scope of the grep it quotes (hermetic doc↔code pin, and the claim's own file list is what a docs-only edit falsifies fastest) — dual-registered with `core`
 - test_ep_draft_filter.py
 - test_ep_operatorless.py
 - test_event_store.py
@@ -6805,6 +6818,7 @@ durations:
   test_capstone_1976_report_claims.py: 1.0  # #2008 review: four doc-text/section reads + three source-file reads, plus one `tests/**` def/class index for the citation resolver (now covering module/path/glob citations, not only bare symbols) and one batch-table parse; no DB
   test_test_design_1992_traceability.py: 0.1  # #1992 review: doc-text table/row scans + two file reads; no DB. A file ADDED BY A PR has no CI junit measurement (#3400 — the refresher samples push-to-main runs only), so this is a local reading: 0.01–0.02 s per test of call time (`--durations=0`), the same no-DB shape as the doc guards above
   test_doc_affiliation_frontmatter.py: 0.1  # #8738 review P2: six frontmatter-block reads + one directory glob; same no-DB shape as the doc guards above
+  test_9399_search_path_claim_scope.py: 2.0  # unmeasured — #9399 (#3400/#4348 trap): a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it carries the header's flat `DEFAULT_FAST_WEIGHT`, not a dev-box reading — the #2818/#3419 convention (`tests/test_ci_selection.py::test_2818_new_file_row_carries_the_flat_default_until_a_sweep_collects_it`), and the LEADING marker is what lets `tools/ci_timing.py::render_refreshed_manifest` clear this note once a sweep measures it (#8254 review P3). LOCAL reading, recorded as provenance for the `2.0` and NOT adopted: embedded carve-out lane, `--junitxml`, 3 tests, sum of `testcase/@time` 2.52s, max single test 2.10s, whole-file wall 2.77–4.76s — and the max-single is the FIRST test absorbing the once-per-leg conftest setup the #3400 method attributes to no file (`--durations=5`: setup 2.60s vs call 0.02–0.04s), which is exactly why the local figure is not substituted. Text-only (doc-line read + three file scans + two source reads); no DB, no network. Required on BOTH halves: the `core` surface row alone is manifest CLASSIFICATION, not a durations weight (#4348). Refresh from the first post-merge run that includes it; do NOT drop the row without re-deriving the coverage floor at that head.
   test_file_indexer.py: 0.7
   test_open_kinds.py: 0.3
   test_postmerge_verdict.py: 0.4

@@ -1343,7 +1343,7 @@ follows is the evidence each ruling rests on, which is design.
 
 - **`aboutObject` as a stored edge vs a derived join** — **`#7948`** — the measurement (research brief, 2026-09-23) answers SPLIT, which decides it.
 
-  **The primary search path does NOT read it.** `rg -n 'aboutObject' tortoise/retrieval.py tortoise/search_engine.py tortoise/session_reinjection.py` → **exit 1, zero matches**, case-insensitive. **Hindsight's premise holds for this path.**
+  **The default FTS/vector/RRF retrieval lane does NOT read it — and the three files quoted below are the whole of what was measured, so that scope IS the claim, not a sample of the product.** `rg -n 'aboutObject' tortoise/retrieval.py tortoise/search_engine.py tortoise/session_reinjection.py` → **exit 1, zero matches**, case-insensitive. ⚠️ **`tortoise/ranking.py` is NOT in that file list, and it is where the product ranking reads live** — `ranking.py` reads the edge literally and through its `ABOUT_EDGE_TYPES` alternation, and `sdk.py`'s `_ABOUT_TYPES` carries it into `TortoiseSDK._state_related_objects` / `_state_related_points`. **So Hindsight's premise holds for the lane those three files bound, and NOT for the default recall door** — `tortoise_recall` (`sdk_method="recall_state"`) ranks and enriches straight through `ranking.py`, so a reader who checks only the quoted command concludes the opposite of what this section rules on.
 
   **It IS load-bearing elsewhere — ELEVEN read sites, and FOUR of them are CUSTOMER-CALLABLE** (all line numbers pinned to `c79ba1cf2`; the symbols are authoritative):
 
