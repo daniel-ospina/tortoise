@@ -323,16 +323,29 @@ class TestF4FrozenTruth:
     def test_f4_oracle_reproducible_from_scratch(self):
         """Frozen ground truth must be reproducible: a from-scratch recompute
         on a SECOND sandboxed clone matches the oracle (tight tolerance — the
-        corpus converges to a fixed point, calibrated |Δ| = 0.0)."""
+        corpus converges to a fixed point, calibrated |Δ| = 0.0).
+
+        The recompute runs the ORACLE'S OWN procedure (``_converge_f4_ep``: the
+        targeted pass, then an explicit ``dream(dirty_only=True,
+        warm_start=False)``), not a read after the pass alone. #9381 made a
+        targeted pass retire the ``ep_dirty`` flags it recomputed (#6211 mode
+        2), so ``get_confidence`` no longer fires the implicit lazy re-dream
+        this test used to depend on: the read then returns the pass's
+        INTERMEDIATE posterior — a different fixed point (measured |Δ| up to
+        2.7e-5, r1 2.756e-06) — and the two paths were compared across it.
+        Same input, same steps, two independent sandboxes ⇒ the frozen truth
+        reproduces exactly (measured |Δ| = 0.000e+00 on all 10 claims).
+        """
         f = f4_frozen_truth(seed=FIXED_SEED)
         try:
             clone_sdk, clone_db = fresh_sdk(prefix="tortoise_epic903_f4_check_")  # noqa: RUF059
             try:
-                from tests.epic903_fixtures import _build_f4_graph  # noqa: PLC0415, RUF100
+                from tests.epic903_fixtures import (  # noqa: PLC0415, RUF100
+                    _build_f4_graph,
+                    _converge_f4_ep,
+                )
                 clone_ids, clone_ops = _build_f4_graph(clone_sdk)
-                random.seed(FIXED_SEED)
-                clone_sdk.compute_confidence(factors=clone_ops,
-                                             require_calibration=False)
+                _converge_f4_ep(clone_sdk, clone_ops, FIXED_SEED)
                 for key, mean in f.oracle.items():
                     recomputed = clone_sdk.get_confidence(clone_ids[key])["mean"]
                     assert abs(recomputed - mean) < 1e-6, (
