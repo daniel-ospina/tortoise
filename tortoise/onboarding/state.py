@@ -32,8 +32,10 @@ level.
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import logging
+import re
 import threading
 from collections.abc import Iterable
 from datetime import UTC, datetime
@@ -519,6 +521,84 @@ def _onboarding_write_scope(cypher: str):
     return contextlib.nullcontext()
 
 
+@functools.lru_cache(maxsize=1)
+def _eager_init_fragment_shapes() -> frozenset[str]:
+    """The MASKED text of every `onboarding_node_init_fragment()` variant.
+
+    Derived from the builder rather than spelled here, so a reformat of the
+    fragment (a renamed variable, a spacing change) cannot silently turn every
+    org mint into a `ValueError` — the check moves with its producer.
+    """
+    from tortoise.cypher_guard import _mask_literals
+
+    shapes = {
+        _mask_literals(onboarding_node_init_fragment(
+            fork=fork, compact=compact, org_named_edge=org_named_edge))
+        for fork in (None, *FORK_VALUES)
+        for compact in (False, True)
+        for org_named_edge in (False, True)
+    }
+    return frozenset(shapes)
+
+
+#: The ONLY shape a legal `eager_init_query()` PREFIX may have: zero or more
+#: `CREATE`/`MERGE` clauses, each a `:TeamMeta` node pattern with an optional
+#: property map — i.e. exactly the argument `eager_init_query` documents
+#: ("append the OnboardingState init to a TeamMeta CREATE") and exactly what all
+#: five call sites pass.
+#:
+#: ⛔ A *regex over the pattern*, not a keyword blocklist, on purpose: the lane's
+#: width claim is "this statement writes `:TeamMeta` + the onboarding fragment",
+#: and a blocklist would have to enumerate every other way to write (`SET`,
+#: `FOREACH`, a second `CREATE`, a procedure `CALL`, …) — the enumerate-and-miss
+#: failure that a positive shape does not have. A caller that genuinely needs a
+#: wider prefix must widen THIS lane deliberately, which is the entire point of
+#: a class check.
+_EAGER_INIT_PREFIX_SHAPE = re.compile(
+    r"\A\s*(?:(?:CREATE|MERGE)\s*\(\s*(?:[A-Za-z_][\w]*\s*)?"
+    r":\s*TeamMeta\s*(?:\{[^{}]*\})?\s*\)\s*)*\Z",
+    re.IGNORECASE,
+)
+
+
+def is_eager_init_statement(cypher: str) -> bool:
+    """Is `cypher` an `eager_init_query()` statement — fragment AND prefix?
+
+    ⛔ BOTH HALVES ARE CHECKED, and each closed a real laundering route (#9157
+    review P2):
+
+    * the FRAGMENT must be the statement's SUFFIX, so a write appended after it
+      cannot ride along — and the shapes are taken from
+      `onboarding_node_init_fragment()` itself (every fork/compact/edge variant),
+      so a reformat of the builder moves the check with it instead of turning
+      every org mint into a `ValueError`;
+    * the PREFIX must be a `:TeamMeta` CREATE/MERGE and nothing else
+      (`_EAGER_INIT_PREFIX_SHAPE`). `eager_init_query()` PREPENDS a
+      caller-supplied statement, so a fragment-contains test would have
+      authorized `eager_init_query("CREATE (:Point {id:$id})", …)` — an
+      unrelated write under the onboarding lane's authorization, which is the
+      one-call way to borrow a lane this module's declaration argument forbids.
+
+    ⛔ Both sides are MASKED (`cypher_guard._mask_literals`) for the same
+    reason: a comment or a string literal that merely QUOTES the fragment —
+    `CREATE (p:Point {n:'MERGE (n:OnboardingState {'})` — is data or prose, and
+    must not be mistaken for a clause either way. Masking preserves length but
+    not text, so the shape matching is done on the masked copy alone.
+    """
+    if not isinstance(cypher, str) or not cypher:
+        return False
+    from tortoise.cypher_guard import _mask_literals
+
+    masked = _mask_literals(cypher).rstrip().rstrip(";").rstrip()
+    for shape in _eager_init_fragment_shapes():
+        fragment = shape.strip()
+        if not masked.endswith(fragment):
+            continue
+        prefix = masked[: len(masked) - len(fragment)]
+        return bool(_EAGER_INIT_PREFIX_SHAPE.match(prefix))
+    return False
+
+
 def run_eager_init(graph: Any, cypher: str,
                    params: dict[str, Any] | None = None):
     """Run an `eager_init_query()` statement through THIS module's declared lane.
@@ -542,15 +622,22 @@ def run_eager_init(graph: Any, cypher: str,
     module's declaration argument is about onboarding FLOW metadata, so a
     statement outside that class gets no authorization here: otherwise the next
     writer that wants an undeclared cache write has a one-call way to obtain
-    one, spelled as the fix for this issue. Raising (rather than silently
-    skipping) is deliberate — a caller that got the arguments wrong must not
-    learn it from a graph that is missing its onboarding row.
+    one, spelled as the fix for this issue. The check is `is_eager_init_statement`
+    — the MASKED fragment text taken from `onboarding_node_init_fragment` itself
+    (so a reformat of the builder cannot break every mint, and a comment or a
+    string literal that quotes the fragment cannot launder a write), applied to
+    the statement's SUFFIX, with the PREFIX restricted to the `:TeamMeta`
+    CREATE/MERGE that `eager_init_query()` exists to extend. Raising (rather
+    than silently skipping) is deliberate — a caller that got the arguments
+    wrong must not learn it from a graph that is missing its onboarding row.
     """
-    if "MERGE (n:OnboardingState" not in cypher:
+    if not is_eager_init_statement(cypher):
         raise ValueError(
-            "run_eager_init only issues an `eager_init_query()` statement (it "
-            "must contain the `:OnboardingState` MERGE -- #9157); for anything "
-            "else open the lane your write belongs to. Refusing:\n"
+            "run_eager_init only issues an `eager_init_query()` statement: the "
+            "masked text must END with `onboarding_node_init_fragment()`'s "
+            "`:OnboardingState` MERGE, and everything before it must be a "
+            "`:TeamMeta` CREATE/MERGE (#9157); for anything else open the lane "
+            "your write belongs to. Refusing:\n"
             f"{cypher[:400]}"
         )
     return _run(graph, cypher, params)

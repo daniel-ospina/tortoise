@@ -3349,9 +3349,14 @@ def _journal_safe_params(params, cypher=None):
 #     replay it (#4641 below), which is what makes declaring it honest; the
 #     argument, the class it authorizes beyond metadata (`:Subject`, disclosed),
 #     and its recovery gap (`tortoise/backup.py`'s JSONL fallback) are stated
-#     with the writers. `:TeamMeta` is its documented sibling (#5353 below),
-#     not a vetted precedent: it holds no declaration of its own — its writers
-#     escape at (3).
+#     with the writers. `:TeamMeta` is its documented sibling (#5353 below):
+#     after #9157 it is DECLARED BY THE SAME ARGUMENT, not borrowed from
+#     elsewhere, because the two classes are ONE statement — the five
+#     `eager_init_query()` sites CREATE `:TeamMeta` and append the
+#     `:OnboardingState` fragment, and the whole statement rides the guarded
+#     handle through `run_eager_init`. Its recovery argument is the #5353 one
+#     (capture-restored, no record of its own), which is why the one lane can
+#     honestly declare both labels.
 #     ⚠️ THIS LANE APPENDS NOTHING, which is what distinguishes it from the
 #     `_live_write_scope` openers above rather than a contradiction of them:
 #     read the "append first, fold second" invariant as describing the SDK's
@@ -3713,9 +3718,12 @@ def _live_write_scope(reason: str = "live-door"):
     `_cache_write_authorized(ONBOARDING_WRITE_LANE)`, i.e. the same ContextVar
     this function sets, **not through this alias** (that module never imports
     it; two spellings, one primitive). That lane appends nothing — the opener
-    inventory above says why, and names the seam the declaration does NOT cover
-    (`#9157`). `onboarding/seed.py::_run` does not open it at all: its only
-    caller issues a READ.
+    inventory above says why — and since `#9157` it covers its OWN whole class,
+    including the eager-init CREATION statement, which rides
+    `onboarding.state.run_eager_init` on a `guarded_write_handle`. What it still
+    does not cover is escape (3) itself, which is structural and belongs to no
+    lane. `onboarding/seed.py::_run` does not open it at all: its only caller
+    issues a READ.
     """
     return _cache_write_authorized(reason)
 
@@ -4541,9 +4549,20 @@ class _GuardedGraph:
         # dead socket is still an op the capture generated). No-op (one
         # ContextVar read) when no capture is active.
         record_graph_op(cypher)
-        return self._g.query(
-            cypher, params=_journal_safe_params(params, cypher), timeout=timeout
-        )
+        # #9157: forward ONLY the optional kwargs that were supplied. The
+        # repo's convention for a duck-typed inner handle (cypher_guard's
+        # `_forward_query_unguarded`, `_GuardedHandleProxy`) is exactly this, and
+        # the projection's own handle has to obey it too: a lightweight or
+        # recording stub is allowed to declare `query(self, cypher, params=None)`
+        # only, and passing `timeout=None` to it raises TypeError at a depth that
+        # reads as the caller's bug. Measured: routing the org mint through this
+        # handle broke six tests on stubs of exactly that shape.
+        kwargs: dict = {}
+        if params is not None:
+            kwargs["params"] = _journal_safe_params(params, cypher)
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        return self._g.query(cypher, **kwargs)
 
     def ro_query(self, cypher: str, params=None, timeout=None):
         # The "read-only" verb is mutating-CAPABLE, not read-only: the name is

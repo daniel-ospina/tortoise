@@ -1,12 +1,14 @@
-"""#9121 — the seam the §17.1 declaration does **NOT** cover, pinned in code.
+"""#9121 / #9157 — the §17.1 seam, from residual to declared ROUTE, pinned in code.
 
 `tests/test_9079_onboarding_declared_lane.py` owns the declaration itself: it
 arms the `#9124` predicate on the guarded handle and proves the onboarding lane
-keeps working with the guard closed. This file owns the *residual*, and exists
-because that suite cannot see it: the five `eager_init_query()` call sites
-CREATE `:OnboardingState` on `proj.db.select_graph(<graph>)` — §17.1's escape
-(3) — so they meet neither `state._run` nor `_onboarding_write_scope`, and they
-keep working after `#9079` precisely *because* they sit below the handle.
+keeps working with the guard closed. THIS file owned the *residual* — the five
+`eager_init_query()` call sites that CREATED `:OnboardingState` on
+`proj.db.select_graph(<graph>)` (§17.1's escape (3), below the handle, meeting
+neither `state._run` nor `_onboarding_write_scope`) — and since `#9157` it owns
+the fix: the ROUTE that takes those five statements through the declaration. The
+pins flipped with the fix rather than being deleted, which is the point of
+writing them as "the claim current at this head" instead of "the defect".
 
 ⛔ WHY THIS FILE IS NOT A SECOND COPY OF test_9079. A previous draft of this
 work asserted the residual with a runtime probe that built its OWN handle,
@@ -17,31 +19,36 @@ would keep passing after the residual were fixed. Everything here reads the
 PRODUCTION source with `ast` and with the same reader the note is written for,
 so each assertion has a way to fail:
 
-* a SIXTH `eager_init_query()` site appearing anywhere in the SDK / hosted API
-  fails `test_the_note_and_the_ast_inventory_agree` (the note would be stale);
-* a site being DELETED (or migrated off `select_graph`) fails
-  `test_every_eager_init_site_issues_its_statement_on_the_escape_three_handle`,
-  which now ASSERTS THE LINKAGE — the statement must be issued by a `query(...)`
-  call on the handle the same function bound from `select_graph(...)`. The two
-  wrong closures red it: `proj.g.query(...)` (the §17.1 violation this file
-  exists to see) and `state._run(...)` (the honest fix, which would leave the
-  note describing a gap that no longer exists);
-* the day one of those sites is DECLARED — the honest fix, `#9157` —
-  `test_no_escape3_function_opens_a_declaration_anywhere_yet` turns RED *when
-  the declaration is a `with` in the same function*, so the note, the guard's
-  opener inventory and this file have to move together instead of drifting back
-  to a universal ("every onboarding write is declared") that the escape
-  disproves. The `_run` route opens its scope in another file and is caught by
-  the linkage pin below;
-* the fact that the detector is *capable* of firing is not argued, it is
-  executed: `test_the_declaration_detector_can_fail` runs it over a synthetic
-  declaration **for every recorded opener** and requires a hit, and
-  `test_the_issuance_detector_reds_on_the_guarded_handle_and_on_run` does the
-  same for the linkage pin over the two closure shapes.
+* a SIXTH `eager_init_query()` site appearing anywhere in the package fails
+  `test_the_note_and_the_ast_inventory_agree` (the note would be stale);
+* a site going back to the escape handle — or being handed to the declared
+  funnel ON that handle, the plausible-looking minimal edit that opens the
+  declaration below the door — fails
+  `test_every_eager_init_site_issues_its_statement_through_the_declared_funnel`.
+  That pin reads the SINKS and the handle argument: the funnel must receive a
+  `guarded_write_handle(...)` binding, not this function's own
+  `select_graph(...)` binding and not `proj.g` (the projection's graph, not the
+  org graph);
+* a declaration WITHDRAWN from a site is caught twice over: by the funnel pin
+  (the statement would be issued on the escape handle again) and by
+  `tests/test_9157_eager_init_declared.py`, which drives the product entry point
+  and requires this lane's reason to be in flight AT the write;
+* the day one of those functions opens a declaration `with` in its OWN body,
+  `test_no_escape3_function_opens_a_declaration_anywhere_yet` turns RED, so the
+  note, the guard's opener inventory and this file move together instead of
+  drifting back to a universal ("every onboarding write is declared");
+* the fact that the detectors are *capable* of firing is not argued, it is
+  executed: `test_the_declaration_detector_can_fail` runs the declaration
+  detector over a synthetic declaration **for every recorded opener**, and
+  `test_the_issuance_detector_reds_on_every_route_but_the_declared_one` does the
+  same for the route pin over five shapes (escape handle, `proj.g`, an unknown
+  sink, the funnel on a guarded handle, the funnel on the escape handle).
 
 The claim these pins protect, stated in the terms of the code: every statement
-this package issues **through `state._run`** runs inside the declaration; the
-`eager_init_query()` callers do not, and are unjournalled AND undeclared.
+this package issues **through `state._run`** runs inside the declaration, and
+since `#9157` that INCLUDES the `eager_init_query()` callers, which reach it via
+`run_eager_init` on a `guarded_write_handle`. Escape (3) itself is not closed —
+it is structural — and the records this file pins are required to say so.
 
 ⛔ AND IT IS NOT THE ONLY INVENTORY OF THIS SEAM — the closer neighbour is
 `tests/test_write_ahead_mint.py::_MINT_SITES`, which already walks
@@ -107,13 +114,13 @@ def _mint_sites_from_its_owner() -> set[tuple[str, str]]:
 #: detector over EACH member, so a new opener cannot silently reopen the hole
 #: without also failing that instrument check's recorded list below.
 #:
-#: ⚠️ Scope of what this detects: a `with` in the SAME function. The likeliest
-#: shape of the honest fix (#9157) is routing the statement through
-#: `onboarding/state.py::_run`, which opens its scope in ANOTHER file — that
-#: route is caught by
-#: `test_every_eager_init_site_issues_its_statement_on_the_escape_three_handle`,
-#: which reds when the statement stops being issued on the `select_graph`
-#: handle (including when it is handed to `_run`).
+#: ⚠️ Scope of what this detects: a `with` in the SAME function. The fix that
+#: LANDED (#9157) routes the statement through
+#: `onboarding/state.py::run_eager_init`, which opens its scope in ANOTHER file —
+#: that route is caught by
+#: `test_every_eager_init_site_issues_its_statement_through_the_declared_funnel`,
+#: which reds when the statement stops being issued through the funnel (or is
+#: handed to it on the escape handle).
 
 #: (file, enclosing function) -> how many `eager_init_query()` statements that
 #: function issues. The COUNT is part of the pin: `register_user` issues two
@@ -183,7 +190,7 @@ def _escape_handle_names(enclosing: ast.AST) -> set[str]:
 
 def _statement_sinks(
     enclosing: ast.AST, issued: set[str]
-) -> list[tuple[int, str, str | None, tuple[str, ...]]]:
+) -> list[tuple[int, str, str | None, tuple[str, ...], ast.Call]]:
     """Every call the statement text FLOWS INTO, as `enclosing` reads it.
 
     `(lineno, callee, receiver, statement names)` — `callee` is the source form
@@ -196,7 +203,7 @@ def _statement_sinks(
     bound to SOME name, so it stayed green under both mutations it claimed to
     catch (`proj.g.query(...)`, and `_run(proj, _init_q, ...)`).
     """
-    sinks: list[tuple[int, str, str | None, tuple[str, ...]]] = []
+    sinks: list[tuple[int, str, str | None, tuple[str, ...], ast.Call]] = []
     for call in ast.walk(enclosing):
         if not isinstance(call, ast.Call):
             continue
@@ -218,7 +225,7 @@ def _statement_sinks(
             callee = call.func.id
         else:
             callee = ast.unparse(call.func)
-        sinks.append((call.lineno, callee, receiver, tuple(sorted(passed))))
+        sinks.append((call.lineno, callee, receiver, tuple(sorted(passed)), call))
     return sinks
 
 
@@ -242,10 +249,68 @@ def _not_through_the_declared_funnel(
     hypothetical: the org mint binds `proj` to the SDK's graph and opens
     `org_<id>` separately, so `proj.g` is the wrong target.
     """
+    # Names bound from `guarded_write_handle(...)` inside this function are the
+    # ONLY handles the funnel may be handed. Without this set the check would
+    # pass `run_eager_init(<this function's select_graph binding>, ...)` — the
+    # declaration opened, the guard never reached — which is the whole #9157
+    # defect with a different spelling (measured: the first version of this pin
+    # certified exactly that).
+    guarded_names: set[str] = set()
+    for sub in ast.walk(enclosing):
+        if (
+            isinstance(sub, ast.Assign)
+            and isinstance(sub.value, ast.Call)
+            and "guarded_write_handle"
+            in (getattr(sub.value.func, "attr", None)
+                or getattr(sub.value.func, "id", "") or "")
+        ):
+            for target in sub.targets:
+                guarded_names |= _bound_names(target)
     offenders: list[str] = []
-    for lineno, callee, receiver, passed in _statement_sinks(enclosing, issued):
+    for lineno, callee, receiver, passed, call in _statement_sinks(enclosing, issued):
         leaf = callee.rsplit(".", 1)[-1]
         if leaf in _DECLARED_EAGER_INIT_SINKS:
+            handle = ast.unparse(call.args[0]) if call.args else "<none>"
+            if isinstance(call.args[0], ast.Name) if call.args else False:
+                name = call.args[0].id
+                if name in handles:
+                    offenders.append(
+                        f"line {lineno}: {callee}({handle}, {', '.join(passed)}) — "
+                        "the DECLARATION is opened around this function's own "
+                        f"escape-(3) handle {name!r}: the guard never sees the "
+                        "write, which is the #9157 defect with the funnel in "
+                        "front of it"
+                    )
+                    continue
+                if name not in guarded_names:
+                    offenders.append(
+                        f"line {lineno}: {callee}({handle}, {', '.join(passed)}) — "
+                        f"handle {name!r} is not provably a "
+                        "`guarded_write_handle(...)` binding; a funnel is only "
+                        "declared if the write reaches a door that reads it"
+                    )
+                    continue
+                continue
+            if "guarded_write_handle" in handle:
+                continue
+            if "select_graph" in handle:
+                offenders.append(
+                    f"line {lineno}: {callee}({handle}, {', '.join(passed)}) — an "
+                    "inline `select_graph(...)` handle handed to the funnel: the "
+                    "declaration is opened below the door (#9157)"
+                )
+                continue
+            if handle.endswith(".g"):
+                offenders.append(
+                    f"line {lineno}: {callee}({handle}, {', '.join(passed)}) — "
+                    "`proj.g` is bound to the projection's graph, not the org "
+                    "graph this statement names"
+                )
+                continue
+            offenders.append(
+                f"line {lineno}: {callee}({handle}, {', '.join(passed)}) — handle "
+                "is not provably a `guarded_write_handle(...)` binding"
+            )
             continue
         if leaf == "query" and receiver in handles:
             offenders.append(
@@ -594,11 +659,11 @@ def test_the_issuance_detector_reds_on_every_route_but_the_declared_one():
             """,
             ["not one of the declared sinks"],
         ),
-        # The landed route: `run_eager_init` on a guarded handle.
+        # The landed route: `run_eager_init` on a `guarded_write_handle`.
         "through_run_eager_init": (
             """
             def site(proj, _init_q, _init_p):
-                handle = proj.db.select_graph("g")
+                handle = guarded_write_handle(proj, "org_x")
                 _os.run_eager_init(handle, _init_q, _init_p)
             """,
             [],
@@ -607,10 +672,21 @@ def test_the_issuance_detector_reds_on_every_route_but_the_declared_one():
         "through_the_run_funnel": (
             """
             def site(proj, _init_q, _init_p):
-                handle = proj.db.select_graph("g")
+                handle = guarded_write_handle(proj, "org_x")
                 _os._run(handle, _init_q, _init_p)
             """,
             [],
+        ),
+        # ⛔ THE PLAUSIBLE-LOOKING MINIMAL EDIT, and the defect with the funnel
+        # in front of it: the declaration is opened, the guard never sees the
+        # write. This is the shape the FIRST version of this pin certified clean.
+        "funnel_over_the_escape_handle": (
+            """
+            def site(proj, _init_q, _init_p):
+                handle = proj.db.select_graph("g")
+                _os.run_eager_init(handle, _init_q, _init_p)
+            """,
+            ["escape-(3) handle"],
         ),
     }
     for name, (source, expected) in cases.items():
@@ -677,12 +753,14 @@ def test_no_escape3_function_opens_a_declaration_anywhere_yet():
     opener inventory in `projection/__init__.py` and this file must change
     together.
 
-    ⚠️ What this does NOT see: the honest fix may instead route the statement
-    through `onboarding/state.py::_run`, which opens the scope in ANOTHER file.
-    No `with` appears here in that shape, so this pin stays green — and
-    `test_every_eager_init_site_issues_its_statement_on_the_escape_three_handle`
-    is the pin that reds for it (the statement stops being issued on the
-    `select_graph` handle). Both are needed; neither alone is the coupling.
+    ⚠️ What this does NOT see: the LANDED fix (#9157) routes the statement
+    through `onboarding/state.py::run_eager_init`, which opens the scope in
+    ANOTHER file. No `with` appears here in that shape, so this pin stays green
+    — and
+    `test_every_eager_init_site_issues_its_statement_through_the_declared_funnel`
+    is the pin that reds for it (the statement stops being issued through the
+    declared funnel, or is handed to it on the escape handle). Both are needed;
+    neither alone is the coupling.
     """
     declared: dict[str, set[str]] = {}
     for rel in ("tortoise/sdk.py", "tortoise/hosted_api.py"):
@@ -998,36 +1076,48 @@ def test_a_diff_to_the_note_itself_selects_this_file():
     )
 
 
-def test_the_plan_doc_and_the_storage_ledger_carry_the_residual():
-    """The TWO remaining records must name the residual — they had no pin.
+def test_the_plan_doc_and_the_storage_ledger_carry_the_CLOSED_residual():
+    """The TWO record docs must say the residual is CLOSED — and stay truthful.
 
-    `tortoise/onboarding/state.py` and `tortoise/projection/__init__.py` carry
-    the escape-(3) note and are pinned above. Two more records a lane reads
-    before concluding the onboarding class is covered were silently WITHOUT it
-    (#9150 review):
+    Flipped with `#9157`. These two records had no pin at all (#9150 review),
+    and then they carried the residual's NEGATIVE — §17.1's `onboarding
+    metadata` row said "but NOT the five `eager_init_query()` sites … do not
+    read this row as 'the class has no second writer'", and the increment-4
+    tracker said "STILL OPEN: … `#9157`". After the fix that is the same
+    falsehood in the mirror image: an auditor doing exactly the door inventory
+    the fix exists to unblock would read "not covered".
 
-    * `docs/plans/2026-10-14-7951-atomic-write-outbox.md` — the increment-4
-      tracker, whose `onboarding` entry said the lane is DECLARED and stopped
-      there, i.e. exactly the reading the other records exist to prevent;
-    * `docs/architecture/STORAGE-ARCHITECTURE.md` — §17.1's ledger table, whose
-      own preamble (`:1516`) says it "is the ledger a reader auditing §17.1 for
-      second writers reads, so a new lane belongs here", and whose
-      `onboarding metadata` row claimed `:OnboardingState` outright.
+    So the assertion is shaped to the CLOSED state and to the honesty that has
+    to survive it:
 
-    Both now state `#9157`, and this pin is why they cannot drift back.
+    * the issue is named, and named as CLOSED, in both records;
+    * the mechanism is named (`run_eager_init`, `guarded_write_handle`) so a
+      reader can check the claim rather than trust it;
+    * ⚠️ **escape (3) itself is still stated as OPEN** — the fix removes one
+      class from it, and a record that reads as "escape (3) is closed" would be
+      a worse over-claim than the one this pin replaced.
     """
     for rel, what in (
         ("docs/plans/2026-10-14-7951-atomic-write-outbox.md", "the increment-4 tracker"),
         ("docs/architecture/STORAGE-ARCHITECTURE.md", "§17.1's door ledger"),
     ):
         flat = " ".join((_REPO / rel).read_text(encoding="utf-8").split())
-        for phrase in ("#9157", "eager_init_query", "select_graph"):
+        for phrase in ("#9157", "run_eager_init", "guarded_write_handle"):
             assert phrase in flat, (
-                f"{what} (`{rel}`) no longer contains {phrase!r}. An auditor "
-                "reading it concludes there is no second `:OnboardingState` "
-                "writer outside the declared lane, which the five escape-(3) "
-                "sites disprove (#9157)"
+                f"{what} (`{rel}`) no longer contains {phrase!r}. The record a "
+                "door inventory reads must state HOW the onboarding class is now "
+                "covered (#9157), not merely carry the issue number"
             )
+        assert "STILL OPEN: the five" not in flat, (
+            f"{what} (`{rel}`) still says the five eager-init sites are STILL "
+            "OPEN — that is the #9157 defect described as current fact, and it "
+            "contradicts the route the code now takes"
+        )
+        assert "NOT closed" in flat or "not closed" in flat, (
+            f"{what} (`{rel}`) must keep saying that §17.1 escape (3) itself is "
+            "NOT closed: this fix removes one class from that hole, and a record "
+            "that reads as 'escape (3) closed' is the worse over-claim"
+        )
 
 
 def test_the_inventory_cites_the_issue_that_owns_the_journalling_increment():

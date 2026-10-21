@@ -216,17 +216,21 @@ its edges), and a test pins that scope.
   unjournalled `structural-edge.derived` lane (#9195), whose `memberOf` carrier is `None`, so a rebuild
   drops the seed's anchor edge. A mutating statement added to that primitive is a NEW unjournalled
   writer and gets no authorization from the onboarding declaration.
-  **STILL OPEN: the five `eager_init_query()` call sites (§17.1 escape (3)) — `#9157`.**
-  `sdk.py::org_create`, `hosted_api.py::provision_tenant`, `hosted_api.py::register_user` (two
-  statements) and `hosted_api.py::_eager_provision_org_graph` CREATE `:OnboardingState` on
-  `proj.db.select_graph(...)` — i.e. BELOW the guarded handle, so they meet neither `state._run` nor
-  `_onboarding_write_scope`, and they keep working after `#9079` precisely *because* they sit below
-  it. They are **unjournalled AND undeclared**. ⛔ Do not close escape (3) believing the onboarding
-  class is covered: the declaration above covers the funnel, not these five. The inventory is derived
-  from the AST of the whole package and pinned by `tests/test_9121_onboarding_residual_pins.py`; the
-  same seam is stated at `tortoise/onboarding/state.py` (the declaration's "does NOT cover" bullet)
-  and in the opener inventory at `tortoise/projection/__init__.py` — the block that ENFORCES §17.1 and
-  the one a door inventory reads. Journalling the class is the larger increment, filed as `#9129`.
+  **CLOSED: the five `eager_init_query()` call sites — `#9157`.** They used to CREATE
+  `:OnboardingState` on `proj.db.select_graph(...)`, i.e. BELOW the guarded handle, so they met
+  neither `state._run` nor `_onboarding_write_scope` and kept working after `#9079` precisely
+  *because* they sat below it — **unjournalled AND undeclared**. They now issue through
+  `onboarding.state.run_eager_init` on a `projection.guarded_write_handle` bound to the ORG graph
+  (`sdk.py::org_create`, `hosted_api.py::provision_tenant`, `hosted_api.py::register_user` (two
+  statements) and `hosted_api.py::_eager_provision_org_graph`), so the declaration covers the class
+  end to end. ⚠️ **Escape (3) itself is NOT closed** — it is structural, and a writer holding a
+  driver handle can still take it; what changed is that this class no longer does, and the docstring
+  and pin now say exactly that instead of the old universal. The inventory is derived from the AST of
+  the whole package and pinned by `tests/test_9121_onboarding_residual_pins.py` (which now asserts
+  the declared ROUTE for all five); the route is stated at `tortoise/onboarding/state.py` (the
+  declaration's bullet, plus `run_eager_init`'s docstring) and in the opener inventory at
+  `tortoise/projection/__init__.py` — the block that ENFORCES §17.1 and the one a door inventory
+  reads. Journalling the class is the larger increment, still open as `#9129`.
   **LANDED SO FAR: the `delete_point` DOOR (increment 4a)** —
   `docs/plans/2026-10-18-7951-delete-point-outbox.md`. ⚠️ **#9207 reversed the ORDER**: the
   `DETACH DELETE` is issued FIRST and the `EntityMutated` op=delete record follows a LANDED destroy,

@@ -246,3 +246,123 @@ def test_the_module_docstring_names_the_route_and_not_the_old_escape():
         "the module docstring must keep saying escape (3) itself is NOT closed: "
         "this fix removes one class from that hole, it does not close it"
     )
+
+
+def test_the_class_check_cannot_be_laundered_by_a_comment_or_a_literal():
+    """The lane's width must not be a substring away from authorizing anything.
+
+    The first version of this fix tested `"MERGE (n:OnboardingState" in cypher`,
+    which a comment satisfied. Both laundering shapes are refused here, and a
+    legal variant (no `team-named` edge, a fork, compact) is accepted — the
+    fragment is read from its BUILDER, so a reformat there cannot turn every org
+    mint into a ValueError either.
+    """
+    class _Handle:
+        def __init__(self):
+            self.ran: list[str] = []
+
+        def query(self, cypher, params=None, **kwargs):
+            self.ran.append(cypher)
+            return None
+
+    fragment = _os.onboarding_node_init_fragment()
+    for laundered in (
+        f"CREATE (p:Point {{id:'smuggled'}}) // {fragment.splitlines()[0]}",
+        f"CREATE (p:Point {{note: '{fragment.splitlines()[0]}'}})",
+    ):
+        handle = _Handle()
+        with pytest.raises(ValueError):
+            _os.run_eager_init(handle, laundered, {"id": "x"})
+        assert handle.ran == [], f"laundered statement reached the graph: {laundered[:80]}"
+
+    accept = _os.eager_init_query(
+        "CREATE (:TeamMeta {name:$name})", {"name": "variants"},
+        org_id="org-9157", fork=_os.FORK_SELF, compact=True)
+    handle = _Handle()
+    _os.run_eager_init(handle, *accept)
+    assert handle.ran == [accept[0]], (
+        "a legal eager-init variant (fork + compact) was refused — the class "
+        "check must follow onboarding_node_init_fragment(), not one spelling of it"
+    )
+
+
+def test_the_class_check_refuses_a_write_that_RIDES_ALONG_with_the_fragment():
+    """The lane authorizes `:TeamMeta` + the fragment, not "anything containing it".
+
+    ⛔ RED on the FIRST version of this fix, which tested
+    `"MERGE (n:OnboardingState" in cypher`. `eager_init_query()` PREPENDS its
+    caller's statement, so `eager_init_query("CREATE (:Point {id:$id})", …)`
+    carried the fragment and was ACCEPTED — the onboarding lane's authorization
+    spent on a write outside the class, which is exactly the "one-call way to
+    obtain a lane" the check exists to deny. A write appended AFTER the fragment
+    is the mirror shape and is refused for the same reason (the fragment must be
+    the statement's SUFFIX).
+    """
+    class _Handle:
+        def __init__(self):
+            self.ran: list[str] = []
+
+        def query(self, cypher, params=None, **kwargs):
+            self.ran.append(cypher)
+            return None
+
+    smuggled_prefix = _os.eager_init_query(
+        "CREATE (:Point {id:$id})", {"id": "x"}, org_id="org-9157")
+    legal_prefix = _os.eager_init_query(
+        "CREATE (:TeamMeta {name:$name, created:$now})",
+        {"name": "n", "now": "t"}, org_id="org-9157")
+
+    for why, statement in (
+        ("a non-`:TeamMeta` prefix", smuggled_prefix[0]),
+        ("a write appended after the fragment",
+         legal_prefix[0] + " CREATE (:Point {id:$id})"),
+        ("a write laundered through SET on the same MATCH",
+         "MATCH (n:TeamMeta) SET n.evil = true\n"
+         + _os.onboarding_node_init_fragment()),
+    ):
+        handle = _Handle()
+        with pytest.raises(ValueError):
+            _os.run_eager_init(handle, statement, {"id": "x"})
+        assert handle.ran == [], (
+            f"{why} reached the graph under this lane's authorization: "
+            f"{statement[:120]!r}"
+        )
+
+    handle = _Handle()
+    _os.run_eager_init(handle, *legal_prefix)
+    assert handle.ran == [legal_prefix[0]], (
+        "the production prefix (`CREATE (:TeamMeta …)` + fragment) was refused — "
+        "the lane's width must cover every call site it exists for"
+    )
+
+
+def test_the_door_inventory_does_not_call_teammeta_an_escaped_sibling():
+    """`projection/__init__.py` contradicted itself 15 lines apart (#9157 P3).
+
+    The `onboarding.metadata` bullet in the opener inventory — the block that
+    ENFORCES §17.1 and the one a door inventory reads — used to say
+    `:TeamMeta` "holds no declaration of its own — its writers escape at (3)",
+    directly above the paragraph this fix rewrote to say the class is declared.
+    After #9157 every `:TeamMeta` CREATE in the tree is one of the five
+    eager-init sites, so that sentence stated the opposite of both the code and
+    its own neighbour.
+    """
+    import pathlib
+
+    import tortoise.projection as projection_module
+
+    source = pathlib.Path(projection_module.__file__).read_text(encoding="utf-8")
+    anchor = "`onboarding.metadata` (`tortoise/onboarding/state.py`, #9121)"
+    start = source.index(anchor)
+    flat = " ".join(source[start:start + 4000].split())
+
+    assert "its writers escape at (3)" not in flat, (
+        "the door inventory still says `:TeamMeta`'s writers escape at (3) — "
+        "after #9157 those writers ARE this lane's eager-init sites, so the "
+        "bullet contradicts the paragraph below it and the code"
+    )
+    for phrase in (":TeamMeta", "run_eager_init", "#9157"):
+        assert phrase in flat, (
+            f"the `:TeamMeta` sibling argument no longer names {phrase!r} — a "
+            "door inventory must be able to check the claim, not trust it"
+        )
