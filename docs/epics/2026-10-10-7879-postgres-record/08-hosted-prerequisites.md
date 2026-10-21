@@ -296,8 +296,10 @@ that *"the narrative is not something we're suggesting to store in the graph (sa
 in supabase"*, and §9.4 makes the **link** load-bearing (*"at answer time, send the source's VERBATIM
 text, not the extracted claim"* — measured 15.9 / 22.0 pts).
 **What it blocks:** §9.1's placement rule, the verbatim-evidence fetch path, **and the destroy-the-
-graph acceptance itself** — the **record** has no copy: the raw text lives in the graph and, since
-`#3947` (CLOSED), in the journal a `rebuild_all` replays, so a *record*-sourced rebuild cannot reproduce it. This item is not in the epic's four scope items; it is a §9.1 requirement, and that gap is
+graph acceptance itself** — the record has **no narrative/transcript home**: a captured turn's text
+survives only as an episodic `point.content` row (`…03_record_epistemic.sql:56`; the §G run wrote 4) and,
+since `#3947` (CLOSED), in the journal a `rebuild_all` replays, so what a *record*-sourced rebuild cannot
+reproduce is the §9.1 narrative and its redaction count — not "the raw text" in the abstract. This item is not in the epic's four scope items; it is a §9.1 requirement, and that gap is
 the finding (see §E).
 **Decision needed:** none — §9.1 and the 2026-09-23 owner quote already place it. Only *which table
 shape* is open, and that is an engineering choice inside the existing schema discipline.
@@ -385,7 +387,7 @@ measured them, plus that section's date where it pins one. **`MEASURED` means a 
 | `GRAPH.MEMORY USAGE` | **143 MiB** (indices 46 MiB) | sampling estimate, `SAMPLES`=100; **blind to the HNSW index** (§2.1, dated 2026-09-24, carries the earlier ~140 MB reading with those caveats; the 143 MiB figure is §1's block of 2026-09-25, mirrored in §17.4.2) | **MEASURED (estimate by construction)** |
 | bytes per resident node | **1,672 B** | 143 MiB ÷ 89,701 | **MEASURED** |
 | in-graph text | **16 MB** | §2.2 breakdown | **MEASURED** |
-| in-graph vectors + indices | **51.6 MB** stored vectors; **45 MB** of indices — the **total** index footprint, of which only the `Point.embedding` HNSW index is vector-driven (§12.1b: exactly one vector index in the graph) | §2.2 / §12.1b | **MEASURED** |
+| in-graph vectors + indices | **51.6 MB** stored vectors; **45 MB** of indices — the **total** index footprint, of which only the `Point.embedding` HNSW index is vector-driven (§12.1b: exactly one vector index in the graph). ⚠️ These belong to §2.2's ~141 MB reading; §1/§17.4.2 give **46 MiB of 143 MiB** and §2.2 says to use those | §2.2 / §12.1b (2026-09-24) | **MEASURED** |
 | stored vectors, by label | **12,657** (`:Object` 7,859 + `:Event` 4,798, ≈19 MB) — and only `Point.embedding` is indexed | `CALL db.indexes()`, §13 | **MEASURED** |
 | Points carrying any content | **49.0%**; **1,121.4 B** mean over those, **549.1 B** over all (5,696,946 B over 10,374) | `§17.4.6` / `graph-content-census.json`, 2026-10-17 | **MEASURED** |
 | Points carrying a vector | **39.96%** (4,145 / 10,374) | same census; `§17.4.6`, 2026-10-17 | **MEASURED** |
@@ -393,7 +395,7 @@ measured them, plus that section's date where it pins one. **`MEASURED` means a 
 | record row width | **1,263–1,266 B** median, **1,421–1,423 B** mean | `§17.4.6`; `docs/evidence/7983-cost-magnitudes/README.md`, measured 2026-10-17 | **MEASURED** |
 | keyed miss cost | **5.2 blocks** mean (4 median, 7 max), **2,312 B** on the wire, **0.048–0.053 ms** server | DETOASTED, 200 samples; `§17.4.6` / `docs/evidence/7983-cost-magnitudes/README.md`, 2026-10-17 | **MEASURED** |
 | full-scope rebuild (one table) | **115,605 blocks / 947.0 MB / 2,629–2,694 ms** at 89,701 rows | DETOASTED; a per-table **floor**, not the rebuild total; `§17.4.6` / `docs/evidence/7983-cost-magnitudes/README.md`, 2026-10-17 | **MEASURED** |
-| **edge count** | — | per-type populations ARE recorded — **27,310** `aboutObject`, **4,748** operator-joining, **14,567** `extractedFrom`, measured on the live graph — per-type: `EXTRACTOR-V4-ARCHITECTURE.md` §2.4.3 gives the **27,310** `aboutObject` and the **14,567** `extractedFrom`, `STORAGE-ARCHITECTURE.md` §11.3 the **4,748** joining edges, all measured 2026-09-23 (the `extractedFrom` figure also in `#4333`'s brief, 2026-09-24). ⚠️ **27,310 is the `aboutObject` population, not the edge total** — it is the same figure §11.1's `edges` column shows for "today", so a reader who takes that column as the total will sum the three and get 46,625. What is missing is the **total**: `tools/edge_census.py:224` runs the per-type `MATCH ()-[r]->()` census, but no in-tree record keeps its output, and the drill's **10,000** edges (`#3895`) is ONE graph's manifest count inside a real archive artifact (`node_count` 9,997 / `edge_count` 10,000), not a census and not the fleet total | ⛔ **ESTIMATED / UNMEASURED** (the total) |
+| **edge count** | — | per-type populations ARE recorded — **27,310** `aboutObject`, **4,748** operator-joining, **14,567** `extractedFrom`, measured on the live graph — per-type: `EXTRACTOR-V4-ARCHITECTURE.md` §2.4.3 gives the **27,310** `aboutObject` and the **14,567** `extractedFrom`, `STORAGE-ARCHITECTURE.md` §11.3 the **4,748** joining edges — that figure's source pins **no** measurement date (2026-09-23 there is the owner-ruling date in the section heading, not a measured-on stamp); §2.4.3's two figures ARE dated 2026-09-23 (the `extractedFrom` figure also in `#4333`'s brief, 2026-09-24). ⚠️ **27,310 is the `aboutObject` population, not the edge total** — it is the same figure §11.1's `edges` column shows for "today", so a reader who takes that column as the total will sum the three and get 46,625. What is missing is the **total**: `tools/edge_census.py:224` runs the per-type `MATCH ()-[r]->()` census, but no in-tree record keeps its output, and the drill's **10,000** edges (`#3895`) is ONE graph's manifest count inside a real archive artifact (`node_count` 9,997 / `edge_count` 10,000), not a census and not the fleet total | ⛔ **ESTIMATED / UNMEASURED** (the total) |
 | journal bytes per record | **9,176 B** per create (92% the vector's decimal text), **196 B** per revision. ⚠️ The source's headline **≈8.8 MB per 1,000 creates** does not follow from these inputs — 9,176 B × 1,000 = **9.2 MB**, and its own after-placeholder growth (8,606 B) gives **8.6 MB** — so only the order of magnitude (≈9 MB per 1,000; **8.6–9.2 GB** at 1,000,000) | `tools/journal_growth.py`; `STORAGE-ARCHITECTURE.md` §5.2, 2026-10-17 | **MEASURED** (per-record size; **the rate is not**) |
 | **writes/day** | — | **hosted capture is off by owner ruling 2026-10-14**, so the hosted write rate is **zero today and no historical rate exists**. The per-record size above is the only measured input. | ⛔ **UNMEASURED** |
 | **reads/day** | — | no tenant serves a workload. `tortoise/read_ledger.py` is the instrument; its one exercise (**f = 8.64%**, 200 proxy queries over 10,457 keys, one graph, one date) is explicitly *"NOT `f` FOR THE COST MODEL"* (§17.4.6) | ⛔ **UNMEASURED** |
@@ -417,8 +419,8 @@ Postgres, and §17.4 already prices both stores.
 4. **R4** the two schema↔producer disagreements → *so the session/point record is complete*
 5. **R6** tenancy enforced → *before a second customer's data exists*
 6. **R5** the edge/operator family → *before the "destroy the graph" claim can be made*
-7. **R7** raw text + S1 narrative in Postgres → *for the same claim: it is the largest thing still
-   only in the graph*
+7. **R7** raw text + S1 narrative in Postgres → *for the same claim: the record has no narrative
+table, only an episodic `point.content` row*
 8. **R8** a restore verb + a drill → *a restore that has never been run is not a restore*
 9. **R9** back up the record → *the durability obligation moved, and no module of ours holds it*
 
