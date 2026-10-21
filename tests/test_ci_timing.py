@@ -4671,6 +4671,44 @@ def test_cli_returns_2_when_gh_returns_a_non_mapping_body(tmp_path, body: str) -
     assert "::warning::" in proc.stderr, f"{body} --pick-run must warn"
 
 
+def test_refresh_warns_when_no_declared_count_resolves(tmp_path: Path) -> None:
+    """A zero-ratio is never a legitimate result — say it, do not write UNKNOWN silently.
+
+    `declared_test_counts` infers the repo root from the MANIFEST's location
+    (`manifest_path.parent.parent`), so a manifest copied outside the tree — a scratch
+    copy, which is exactly what a reviewer or a regenerator makes — resolves no
+    `tests/` directory. Every sampled row then takes the UNKNOWN branch and the refresh
+    rewrites dozens of provenance notes with a claim FALSE of the tree, while exiting 0
+    (measured: 47 rows, 44 of which had carried a concrete denominator).
+
+    Non-vacuity: with the warning removed, stderr is empty and this reds.
+    """
+    log_dir = tmp_path / "logs" / "pytest-log-test-a"
+    log_dir.mkdir(parents=True)
+    (log_dir / "pytest.log").write_text(FIXTURE_LOG)
+    manifest = tmp_path / "ci-surfaces.yml"
+    manifest.write_text("durations:\n  test_alpha.py: 12.3\n")
+    # A copy OUTSIDE the tree: `declared_test_counts` then derives a root with no
+    # `tests/` directory, which is the case under test.
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    moved = outside / "ci-surfaces.yml"
+    moved.write_text(manifest.read_text())
+
+    proc = subprocess.run(
+        [sys.executable, str(_CLI), "--repo", "o/r", "--run-id", "1",
+         "--refresh-durations", "--logs-dir", str(tmp_path / "logs"),
+         "--manifest", str(moved)],
+        capture_output=True, text=True, timeout=120,
+        env={**os.environ, "CI_TIMING_NOW": "2026-10-21T09:30:00Z"},
+    )
+    assert proc.returncode in (0, 2), proc.stderr[-400:]
+    assert "::warning::" in proc.stderr, (
+        "a refresh that resolves NO declared count must warn: it is about to write "
+        f"(UNKNOWN) into every note. stderr={proc.stderr[-400:]!r}")
+    assert "declared testcase count" in proc.stderr, proc.stderr[-400:]
+
+
 @pytest.mark.parametrize("body,label", [
     ("null", "top-level-not-a-mapping"),
     ("[]", "top-level-is-a-list"),

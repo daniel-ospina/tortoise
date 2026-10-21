@@ -2849,6 +2849,24 @@ def main() -> int:
         # guard cannot be forgotten by the weekly workflow — and so a caller with
         # no witness is never reported as having one.
         declared = declared_test_counts(weights, manifest_path.resolve().parent.parent)
+        if weights and not declared:
+            # THE ROOT IS INFERRED FROM THE MANIFEST'S LOCATION, so a manifest copied
+            # outside the tree (a scratch copy — exactly what a reviewer or a
+            # regenerator makes) resolves no `tests/` directory: every row then takes
+            # the UNKNOWN branch and the refresh rewrites dozens of provenance notes
+            # with a claim that is FALSE of the tree, while still exiting 0 (measured:
+            # 47 rows, 44 of which had carried a concrete denominator). A ZERO-ratio is
+            # never a legitimate result for this repo, so say it out loud rather than
+            # letting the artifact record a witness it never read (#9134 review, P2).
+            print(
+                "::warning::ci_timing: none of the "
+                f"{len(weights)} measured files resolved a declared testcase count — "
+                "the manifest is probably outside the repo (the root is derived from "
+                f"the manifest's location: {manifest_path.resolve().parent.parent}). "
+                "Every note will be written as (UNKNOWN); re-run with the manifest "
+                "inside the tree.",
+                file=sys.stderr,
+            )
         coverage = {path: (m["tests"], declared[path])
                     for path, m in measurements.items() if path in declared}
         sample_label = (f"ci-timing top-15 {captured_at[:10]} "
