@@ -4814,7 +4814,8 @@ class _EntityHandlers:
             # remaining ones are latent rather than live today (no in-repo
             # producer sets `objectType` on any of them): the miner's own
             # envelope carries no `ts`, and `_apply_and_journal` folds the
-            # caller's dict rather than the envelope its append minted. The
+            # caller's dict rather than the envelope its append minted
+            # (#9434 carries that one). The
             # third door, `_create_entity` (behind `create_entity` /
             # `create_event`), folded BEFORE it journals, so the append's `ts`
             # never reached the fold — FIXED in #9419: it now stamps `ts`
