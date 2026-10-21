@@ -134,8 +134,8 @@ view is not a subscription, and nothing on that path touches
 a Pages Function, `functions/contact/submit.ts`, which hands the message to the
 transport seam as ONE queued item. The decided address
 **`hello@premiselabs.co`** — the address the legal pages already name as the
-designated outside-product channel (privacy §1, DPA §15, ToS §15.5,
-aviso-privacidad) — is shown plainly on the page (lede, and the direct-mailto
+designated outside-product channel (privacy §1, DPA §15, ToS §15.5) — is
+shown plainly on the page (lede, and the direct-mailto
 fallback below the form), not only in an error path.
 
 ```text
