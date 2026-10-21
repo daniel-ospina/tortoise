@@ -41,10 +41,13 @@ Two rules keep that honest, both pinned by the adopting suites:
   §17.1 violations.
 * a suite that filters must prove its filter is not vacuous — that a foreign
   projection's statements really were recorded, and really were excluded;
-* and a CENSUS suite must still assert that no foreign handle wrote UNDECLARED
-  (`assert_no_foreign_undeclared()` below). Attributing correctly answers "whose
-  statement is this?", never "was it declared?" — a peer's write with no
-  declaration in flight is nobody's claim to check and everybody's violation.
+* and a CENSUS suite must still assert that no foreign JOURNAL-BACKED handle
+  wrote UNDECLARED (`assert_no_foreign_undeclared()` below). Attributing
+  correctly answers "whose statement is this?", never "was it declared?" — a
+  peer's write with no declaration in flight is nobody's claim to check and
+  everybody's violation. That census applies the SAME three clauses as the
+  guard, arming included: an unbound peer is outside §17.1 and must not red
+  it.
 
 ADOPTED: the two suites above, plus `tests/test_9079_edge_lane_declared.py`,
 which carried a verbatim copy of the pre-fix recorder and the same
@@ -205,7 +208,7 @@ class LaneProbe:
         return [r.as_tuple() for r in self.foreign_records()]
 
     def foreign_undeclared(self) -> list[Recorded]:
-        """Foreign mutating statements with no declaration in flight.
+        """A JOURNAL-BACKED foreign projection's undeclared mutating statements.
 
         This IS an assertion target for an adopting suite — see
         `assert_no_foreign_undeclared()` below. It is not a place to judge
@@ -214,8 +217,25 @@ class LaneProbe:
         checked — only a §17.1 violation to report. It also lets a failure
         message distinguish "this lane wrote undeclared" from "a peer lane
         did".
+
+        ⛔ ARMED HANDLES ONLY. §17.1's predicate has THREE clauses, not two:
+        the product guard (`_GuardedGraph._refuse_unauthorized_cache_write`)
+        MEASURES and refuses only when the projection is journal-backed — an
+        unbound projection (`_journal_backed` False) has no journal to be the
+        single writer OF, so "§17.1 has nothing to enforce there". Omitting
+        that clause here would make a process-wide census report a violation on
+        a handle the rule exempts — the #9256 false red, in the opposite
+        direction, and arming is a property of the ENVIRONMENT (`hosted_api`
+        builds its probe SDK with `event_log_path=None` unless
+        `TORTOISE_EVENT_LOG_BASE_DIR` is set), not of the test. The refusal path
+        in `install()` already checks this exact clause; the census must agree
+        with it.
         """
-        return [r for r in self.foreign_records() if r.writes and r.scope is None]
+        return [
+            r for r in self.foreign_records()
+            if r.writes and r.scope is None
+            and getattr(r.owner, "_journal_backed", False)
+        ]
 
 
 def assert_no_foreign_undeclared(probe: LaneProbe) -> None:
@@ -224,13 +244,18 @@ def assert_no_foreign_undeclared(probe: LaneProbe) -> None:
     Attribution and blindness are two questions, and scoping `own()` answers
     only the first (#9256). A mutating statement with `scope is None` is not
     "another lane's declaration to judge" — there is NO declaration in flight,
-    so it is a violation on whichever handle issued it, and a census test that
-    filters it away goes green on exactly the class #9256 asked it to keep
+    so it is a violation on whichever ARMED handle issued it, and a census test
+    that filters it away goes green on exactly the class #9256 asked it to keep
     loud. The wild peer (`hosted_api._acquire_probe_sdk`) is PRODUCT code, so
     this is not a test-only concern.
 
-    It cannot reintroduce the false red: that peer's `_ensure_indexes` burst is
-    DECLARED (`schema-ddl`), so it stays out of `foreign_undeclared()`.
+    It cannot reintroduce the false red, for three separate reasons: that
+    peer's `_ensure_indexes` burst is DECLARED (`schema-ddl`) so it stays out of
+    `foreign_undeclared()`; the monitoring probe issues only `RETURN 1` (a
+    read); and a peer that is NOT journal-backed is exempt from §17.1
+    altogether (`foreign_undeclared()` checks the arming clause, as the product
+    guard does), so this census can never red on a handle the rule does not
+    reach.
     """
     offenders = probe.foreign_undeclared()
     assert not offenders, (

@@ -32,6 +32,10 @@ buy:
   stays green on the peer's DECLARED `_ensure_indexes` burst (the traffic that
   produced the false red) and still reds on a peer's UNDECLARED write, so
   scoping `own()` cannot filter a real §17.1 violation into silence;
+* and that census applies §17.1's THIRD clause too — an UNARMED (not
+  journal-backed) peer is outside the rule, so its undeclared write must stay
+  GREEN rather than red the whole-process census (the same arming clause the
+  refusal path already applies);
 * the write CLASSIFIER reads the RAW statement, as the product guard does — a
   `//` line comment must not swallow the write after it once the text is
   whitespace-normalized for the record (fail-open in the armed door).
@@ -196,6 +200,64 @@ def test_the_census_helper_reds_on_a_foreign_undeclared_write_not_on_its_ddl(
     other.g.query("CREATE (x:PeerUndeclared9256 {id: 'x'})")
     with pytest.raises(AssertionError, match=r"NO §17\.1 declaration"):
         assert_no_foreign_undeclared(probe)
+
+
+def test_the_census_does_not_red_on_an_unarmed_peer_because_17_1_does_not_apply(
+        two_journal_backed_sdks, tmp_path, monkeypatch):
+    """§17.1 has THREE clauses, and the census must apply all three.
+
+    The product guard MEASURES and refuses only on a journal-backed projection
+    — `_GuardedGraph._refuse_unauthorized_cache_write` returns early on
+    `not getattr(self._proj, "_journal_backed", False)` because an unbound
+    projection has no journal to be the single writer OF. A census predicate of
+    `writes and scope is None` alone therefore reports a "§17.1 violation" on a
+    handle the rule explicitly exempts, and arming is a property of the
+    ENVIRONMENT (`hosted_api._make_sdk` passes `event_log_path=None` unless
+    `TORTOISE_EVENT_LOG_BASE_DIR` is set), not of the test.
+
+    This is the mirror of `test_the_guard_still_refuses_a_foreign_undeclared_
+    write`: the refusal is already unarmed-correct, so the census must agree
+    with it rather than contradict it.
+
+    MUTATION: drop the arming clause from `foreign_undeclared()` and the
+    assertion below reds on a peer §17.1 does not reach.
+    """
+    owner_sdk, _other = two_journal_backed_sdks
+    owner = owner_sdk._get_proj()
+    probe = LaneProbe(owner).install(monkeypatch, refuse=False)
+
+    unarmed = TortoiseSDK(str(tmp_path / "unarmed.db"))  # no event_log_path
+    try:
+        peer = unarmed._get_proj()
+        assert peer is not owner
+        assert peer._journal_backed is False, (
+            "the peer is journal-backed, so this pin proves nothing about an "
+            "unarmed handle — §17.1 would apply to it after all"
+        )
+        peer.g.query("CREATE (x:Unarmed9256 {id: 'x'})")
+
+        # NON-VACUITY: the write really was recorded, undeclared, and attributed
+        # to the unarmed peer — the census is not green because it saw nothing.
+        recorded = [r for r in probe.foreign_records()
+                    if "Unarmed9256" in r.text]
+        assert recorded, (
+            "the unarmed peer's write never reached the class-wide instrument, "
+            "so the green assertion below is vacuous: "
+            f"{[r.text[:60] for r in probe.foreign_records()]}"
+        )
+        assert recorded[0].writes is True and recorded[0].scope is None, (
+            f"the record is not the undeclared write this pin needs: "
+            f"{recorded[0].as_tuple()}"
+        )
+
+        assert probe.foreign_undeclared() == [], (
+            "§17.1 does not apply to an unarmed projection, so the census must "
+            "not report its write as a violation: "
+            f"{[(r.text[:60], r.scope) for r in probe.foreign_undeclared()]}"
+        )
+        assert_no_foreign_undeclared(probe)
+    finally:
+        unarmed.close()
 
 
 def test_the_classifier_reads_the_raw_statement_not_the_normalized_one(
