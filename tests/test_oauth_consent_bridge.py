@@ -338,14 +338,14 @@ def test_the_deletion_set_rows_cite_live_sites() -> None:
 #:    it may reach through `:`, `#L` or `L` and any whitespace; `_stray_anchors` FOLDS the body
 #:    first (whitespace runs to one space, the fullwidth colon to ASCII), so a wrapped or padded
 #:    anchor is one shape again and the offset still points at a real line;
-#:  * `_BARE_ANCHOR_RE` + `_NEAREST_PY_RE` catch the continuation idiom line by line, attributing
-#:    the number to the BASENAME of the nearest `something.py` to its LEFT rather than to "any
-#:    file named on the line" (see `_NEAREST_PY_RE` for why the looser rule over-reported) — the
-#:    basename, not the whole token, because the repository-relative spelling
-#:    `tortoise/hosted_api.py` is a spelling THIS document already uses (§1's `Canonical code:`
-#:    line), and comparing the token let `` `tortoise/hosted_api.py`, see `:39286` `` through
-#:    green (measured).
-_HOSTED_ANCHOR_RE = re.compile(r"hosted_api\.py\s*(?:#?L|:)\s*(\d+)")
+#:  * `_BARE_ANCHOR_RE` + `_NEAREST_PY_RE` catch the continuation idiom per BLOCK (`_blocks`),
+#:    attributing the number to the nearest `something.py` to its LEFT rather than to "any file
+#:    named on the line" (see `_NEAREST_PY_RE` for why the looser rule over-reported) — compared
+#:    through `_py_basename`, which folds the case and strips a regex escape, so the
+#:    repository-relative spelling `tortoise/hosted_api.py` (§1's `Canonical code:` line),
+#:    `HOSTED_API.PY` and `hosted_api\\.py` all attribute exactly like the plain name. Each of
+#:    those was green under an earlier version (measured).
+_HOSTED_ANCHOR_RE = re.compile(r"hosted_api\\?\.py\s*(?:#?L|:)\s*(\d+)", re.IGNORECASE)
 _BARE_ANCHOR_RE = re.compile(r":\s*(\d+)")
 #: The nearest `something.py` to the LEFT of a bare `:<n>`, which is what the continuation
 #: belongs to. It is matched WHOLE (it may carry a directory) and compared by BASENAME, so
@@ -354,14 +354,13 @@ _BARE_ANCHOR_RE = re.compile(r":\s*(\d+)")
 #: `Redemption` row names `hosted_api.py` AND carries `session_auth.py:588`, so the loose rule
 #: reported the row's legitimate anchor to a DIFFERENT file (measured).
 #:
-#: The scan is SAME-LINE by design: a continuation whose governing `hosted_api.py` mention sits
-#: on an EARLIER line is not attributed (measured — `["the base is `_oauth_base` in",
-#: "`hosted_api.py`, as served on", "`:39205`."]` reads clean). Every table in this document
-#: writes the file and its continuation on one row, and the EXPLICIT forms — including one
-#: wrapped across a line break — are caught document-wide by `_fold`, so this boundary is
-#: recorded rather than closed; closing it would need a cross-line attribution rule the doc's
-#: own style does not need.
-_NEAREST_PY_RE = re.compile(r"[\w./-]+\.py")
+#: The scan is per BLOCK (`_blocks`), not per line: a continuation whose governing
+#: `hosted_api.py` mention sits on an earlier line of the same paragraph or table IS attributed,
+#: and one separated by a blank line is not. Same-LINE-only was a hole — `` …`hosted_api.py` ``
+#: then `` `:39205` `` reads clean, yet CommonMark joins the pair into one sentence (measured).
+#: And both regexes are case-insensitive and tolerate an escaped dot, because `HOSTED_API.PY:…`
+#: and `hosted_api\.py:…` are the same citation to a reader (both were green — measured).
+_NEAREST_PY_RE = re.compile(r"[\w./-]+\\?\.py", re.IGNORECASE)
 
 
 def _collapse(text: str) -> str:
@@ -396,6 +395,40 @@ def _fold(raw: str) -> tuple[str, list[int]]:
     return "".join(out), origin
 
 
+def _py_basename(token: str) -> str:
+    """`token`'s file name, case-folded, with any regex escape removed.
+
+    The escape is the whole point: `_NEAREST_PY_RE` tolerates `hosted_api\\.py`, and comparing
+    the RAW token left the backslash in it, so `hosted_api\\.py` matched and then failed
+    equality — the `\\?` was inert for the continuation arm while the explicit arm closed
+    (measured). One normaliser, used by both arms, so they cannot disagree again.
+    """
+    return token.replace("\\", "").rsplit("/", 1)[-1].lower()
+
+
+def _blocks(outside: list[tuple[int, str]]) -> list[list[tuple[int, str]]]:
+    """`outside` split into blank-line-separated blocks: a paragraph or one table.
+
+    The continuation rule used to read ONE LINE, and a code span wrapped across two lines left it
+    green — `` …`hosted_api.py` `` / `` `:39205` `` — even though CommonMark renders the pair as
+    one sentence naming the file and then a line number (measured). A block is the smallest unit
+    that keeps that attribution possible while still refusing to reach across a paragraph break,
+    where the file name really can belong to a different claim.
+    """
+    blocks: list[list[tuple[int, str]]] = []
+    current: list[tuple[int, str]] = []
+    for index, line in outside:
+        if not line.strip():
+            if current:
+                blocks.append(current)
+                current = []
+            continue
+        current.append((index, line))
+    if current:
+        blocks.append(current)
+    return blocks
+
+
 def _bare_continuations(raw: str) -> list[str]:
     """Every bare `:<n>` continuation in `raw` that belongs to `hosted_api.py`.
 
@@ -419,7 +452,7 @@ def _bare_continuations(raw: str) -> list[str]:
         if any(start <= match.start() < end for start, end in explicit):
             continue
         owners = _NEAREST_PY_RE.findall(folded[:match.start()])
-        if owners and owners[-1].rsplit("/", 1)[-1] == "hosted_api.py":
+        if owners and _py_basename(owners[-1]) == "hosted_api.py":
             found.append(match.group(0))
     return found
 
@@ -482,27 +515,29 @@ def _stray_anchors(lines: list[str], note_start: int, note_end: int) -> list[str
         (index, re.sub(r"^\s*(?:>\s?)+", "", line))
         for index, line in enumerate(lines)
         if not note_start <= index < note_end]
-    folded, origin = _fold("\n".join(line for _, line in outside))
     stray: list[str] = []
-    explicit: set[int] = set()
-    for match in _HOSTED_ANCHOR_RE.finditer(folded):
-        lineno = outside[origin[match.start()] - 1][0] + 1
-        explicit.add(lineno)
-        stray.append(f"line {lineno}: {match.group(0)!r}")
-    for index, line in outside:
-        if index + 1 in explicit:
-            # Already reported at this line by the explicit scan; the bare `:<n>` inside the same
-            # anchor is the same citation, and a message that names one line twice reads as two.
-            continue
-        folded_line = _collapse(line)
-        for match in _BARE_ANCHOR_RE.finditer(folded_line):
-            owners = _NEAREST_PY_RE.findall(folded_line[:match.start()])
+    for block in _blocks(outside):
+        raw = "\n".join(text for _, text in block)
+        folded, origin = _fold(raw)
+        explicit: list[tuple[int, int]] = []
+        for match in _HOSTED_ANCHOR_RE.finditer(folded):
+            lineno = block[origin[match.start()] - 1][0] + 1
+            explicit.append(match.span())
+            stray.append(f"line {lineno}: {match.group(0)!r}")
+        for match in _BARE_ANCHOR_RE.finditer(folded):
+            if any(start <= match.start() < end for start, end in explicit):
+                # The `:<n>` INSIDE an explicit anchor is that anchor, not a continuation: the
+                # explicit scan already owns it, and flagging it would double-report one citation.
+                continue
+            owners = _NEAREST_PY_RE.findall(folded[:match.start()])
             # BASENAME, not the matched token: `tortoise/hosted_api.py` is the repository-relative
             # spelling this very document uses for the same file, so a continuation after it
-            # belongs to `hosted_api.py` too (exact equality let it through — measured).
-            if owners and owners[-1].rsplit("/", 1)[-1] == "hosted_api.py":
+            # belongs to `hosted_api.py` too (exact equality let it through — measured), and the
+            # comparison is case-folded for the same reason (`HOSTED_API.PY:…` was green).
+            if owners and _py_basename(owners[-1]) == "hosted_api.py":
+                lineno = block[origin[match.start()] - 1][0] + 1
                 stray.append(
-                    f"line {index + 1}: bare continuation {match.group(0)!r} belongs to "
+                    f"line {lineno}: bare continuation {match.group(0)!r} belongs to "
                     "`hosted_api.py`")
     return stray
 
@@ -541,6 +576,55 @@ _HOSTED_ANCHORS = {
     "the consent handler": '@app.post("/oauth/consent")',
     "`_oauth_base`": "def _oauth_base(request: Request) -> str:",
 }
+
+
+#: `(document fragment, expected stray lines)` for the forms an earlier line-by-line, one-
+#: separator, case-sensitive scan let through. Pinned as a table rather than as prose in a commit
+#: message: each row is a shape a future editor can reintroduce, and `_stray_anchors` is the only
+#: thing standing between it and a documented number that has already rotted.
+_EVASION_SHAPES = (
+    # wrapped under backticks: the continuation's owner is on the previous line of the block
+    ("The builder (`hosted_api.py`\n`:39205`).", [2]),
+    # the same, wrapped without the second code span
+    ("See `hosted_api.py`\n`:39205`.", [2]),
+    # wrapped inside a blockquote, where the marker is stripped before inline parsing
+    ("> The builder is `hosted_api.py`\n> `:39205`.", [2]),
+    # case variants of the explicit form
+    ("See `HOSTED_API.PY:39286`.", [1]),
+    ("See `Hosted_Api.py:39286`.", [1]),
+    # an escaped dot, explicit and as the continuation's owner
+    ("See `hosted_api\\.py:39286`.", [1]),
+    ("See `hosted_api\\.py`, then `:39205`.", [1]),
+    # the repository-relative spelling is the same file
+    ("See `tortoise/hosted_api.py`, then `:39205`.", [1]),
+    # NEGATIVE: a file name in the PREVIOUS block is a different claim, not this continuation
+    ("The base is in `hosted_api.py`.\n\nElsewhere `session_auth.py:588` → `:600`.", []),
+)
+
+
+@pytest.mark.parametrize("fragment,expected", _EVASION_SHAPES)
+def test_the_anchor_scan_catches_every_shape_at_any_offset(fragment: str, expected: list[int]) -> None:
+    """The evasion table: each row was GREEN under an earlier version of this guard.
+
+    `test_the_anchor_scan_catches_every_form_at_the_line_it_is_on` covers the shapes that were
+    already caught; this covers the ones that were not, and the negative that keeps the block
+    boundary honest.
+
+    What each row can and cannot prove, measured rather than assumed. Reverting `_blocks` reds the
+    three wrapped rows, and reverting `_py_basename`'s escape strip reds the escaped-continuation
+    row — those are single-mechanism rows. The `IGNORECASE` flags and the case FOLD are NOT
+    individually load-bearing, because the two arms overlap: `HOSTED_API.PY:39286` is caught by
+    the explicit arm even if the continuation arm's regex is case-sensitive, and vice versa. So
+    reverting either flag alone stays green — that redundancy is deliberate (each arm covers the
+    other's blind spot), and it means no row here should be read as pinning one flag.
+    """
+    lines = fragment.splitlines()
+    reported = _stray_anchors(lines, 0, 0)
+    got = sorted({int(entry.split()[1].rstrip(":")) for entry in reported})
+    assert got == expected, (
+        f"{fragment!r} should report stray anchors on lines {expected}, got {got} "
+        f"({reported}) — a shape that reads as a line citation must be caught, and a file name "
+        "in the PREVIOUS block must not be credited with this continuation")
 
 
 def test_the_spec_cites_no_hosted_api_line_numbers() -> None:
