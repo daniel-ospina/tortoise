@@ -3548,6 +3548,11 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
 # `reaped + exited + left >= before`; before #6984 the identity omitted
 # `exited`, so it read a server that shut itself down as a broken sweep and
 # refused green runs (before=28, reaped=16, left=11, pytest rc 0).
+# #8599: `exited` also carries the SIBLING window #6984 did not cover — a
+# server observed alive at the pre-sweep probe that stopped being observable
+# before/without discovery ever acting on it. Same field, same meaning ("the
+# sweep observed this one leave on its own"), measured from the PID SETS so it
+# is not a complement of the identity.
 _HYGIENE_REPORT_FIELDS = ("reaped", "exited", "cleared", "left", "before")
 
 
@@ -3559,12 +3564,15 @@ def _hygiene_report(reaped, cleared, left, before, exited) -> dict:
     diagnostic flag that does not decide the gate's verdict at any measured
     count: at every count it reports whether the sweep's time budget sufficed
     — a function of runner load — not the residue.
-    ``exited`` is the sweep's OBSERVED natural-exit count (#6984): a
-    ``candidate`` alive at discovery and dead at kill time. It makes the
-    gate's accounting identity ``reaped + exited + left >= before`` account
-    for a server that shuts itself down, instead of reading it as a broken
-    sweep. Derived as a complement it would be a tautology; it is measured at
-    the dead-pid branch in :func:`reap` precisely so the identity stays
+    ``exited`` is the sweep's OBSERVED natural-exit count (#6984, #8599): a
+    ``candidate`` alive at discovery and dead at kill time, plus a server
+    observed alive at the pre-sweep probe that the post-sweep probe no longer
+    sees and that the sweep never acted on. It makes the gate's accounting
+    identity ``reaped + exited + left >= before`` account for a server that
+    shuts itself down, instead of reading it as a broken sweep. Derived as a
+    complement it would be a tautology; both halves are measured — the first
+    at the dead-pid branch in :func:`reap`, the second from the PID SETS in
+    :func:`build_end_sweep_report` — precisely so the identity stays
     falsifiable.
     Keeping the construction out of ``_sweep`` also leaves no local report
     literal there for a dead branch or a subscript store to bypass (the
@@ -3647,7 +3655,58 @@ def live_embedded_server_count() -> int | None:
     return None if probe is None else len(probe)
 
 
-def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic) -> dict:
+def live_embedded_server_pids() -> list[int] | None:
+    """The live embedded redis-server PIDs — the IDENTITY half of the probe.
+
+    #8599: `live_embedded_server_count` answers "how many", which is all the
+    #4740 bound needs — but a COUNT cannot say WHICH server left, so a server
+    that shuts itself down between the pre-sweep probe and `reap()`'s
+    discovery is counted in `before` and in neither `reaped`, `exited` (which
+    only sees a candidate alive AT discovery) nor `left`. The accounting
+    identity then reds a run whose pytest passed (measured on PR #8595:
+    before=4, reaped=1, exited=0, left=2, rc 0). The pid set is what lets
+    :func:`build_end_sweep_report` measure that vanishing instead of deriving
+    it as `before - reaped - left` (the complement #6984 explicitly rejected
+    as a tautology).
+
+    `None` means the PROBE failed — the same contract as
+    `live_embedded_server_count`, and not the same thing as `[]`.
+    """
+    return _pgrep_redis_servers_or_none()
+
+
+def _vanished_servers(before_pids, left_pids, acted_pids) -> int:
+    """Servers OBSERVED alive before the sweep and gone after it, unacted (#8599).
+
+    Three measured readings decide this, never arithmetic on the report's own
+    counts:
+
+    * `before_pids` — the PIDs a probe saw alive before the sweep;
+    * `left_pids` — the PIDs a probe saw alive after it;
+    * `acted_pids` — the PIDs of the records the sweep actually acted on, so a
+      server the sweep KILLED is not double-counted here (it is in `reaped`).
+
+    A pid in `before_pids` that is absent from BOTH later readings is a server
+    that left on its own — the window #6984's dead-pid branch cannot see when
+    the server died before discovery, and the window a `protected`/`skipped`
+    record cannot see when it died after discovery without being acted on.
+    Counting it as an observed natural exit is what keeps
+    `reaped + exited + left >= before` a measurement rather than a lottery.
+
+    A failed probe on either side (`None`) measures nothing: 0 is returned so
+    the identity is decided by the counts the report actually carries, rather
+    than by a comparison against an unmeasured set.
+    """
+    if before_pids is None or left_pids is None:
+        return 0
+    return len({
+        pid for pid in before_pids
+        if pid not in acted_pids and pid not in left_pids
+    })
+
+
+def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic,
+                           pid_probe=None) -> dict:
     """Compose the session-end hygiene report the CI orphan gate consumes (#4740).
 
     Extracted from `tests/conftest.py`'s `_sweep` so the COMPOSITION — the
@@ -3660,10 +3719,43 @@ def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic) -> di
     threaded from the same call — the natural exits the sweep observed — and
     is what keeps the gate's identity from reading a self-shutdown as a
     broken sweep.
+
+    `pid_probe` (#8599) is the IDENTITY-carrying companion of `probe`
+    (`live_embedded_server_pids`): it returns the live PID list, or `None` when
+    the probe failed. When it answers, the report's `before`/`left` counts are
+    taken from the SAME reading (`len(...)`), so the count and the pid set the
+    accounting identity is measured against cannot disagree, and every server
+    observed alive before the sweep that is neither acted on nor still live
+    after it is added to `exited` as an observed natural exit — the
+    pre-discovery window a COUNT alone cannot measure. `probe` is the fallback
+    seam: it decides the counts when there is no pid probe, or when the pid
+    probe fails, and a caller that only has a count keeps its exact previous
+    behaviour.
     """
-    before = probe()
-    reaped, cleared, exited = sweep_until_cleared(run_one, deadline, clock)
-    left = probe()
+    acted_pids: set[int] = set()
+
+    def tracked_run_one():
+        # The swept records' OWN pids — a server the sweep killed is in
+        # `reaped`, so it must not also be read as one that left by itself.
+        acted = run_one()
+        for record in acted:
+            if not isinstance(record, dict):
+                continue
+            pid = record.get("pid")
+            # `pid: None` records (quarantine dirs, stale pid files) are not
+            # servers, and `True`/`False` are ints in Python — neither is a
+            # pid this measurement may credit.
+            if isinstance(pid, int) and not isinstance(pid, bool):
+                acted_pids.add(pid)
+        return acted
+
+    before_pids = pid_probe() if pid_probe is not None else None
+    before = probe() if before_pids is None else len(before_pids)
+    reaped, cleared, exited = sweep_until_cleared(
+        tracked_run_one, deadline, clock)
+    left_pids = pid_probe() if pid_probe is not None else None
+    left = probe() if left_pids is None else len(left_pids)
+    exited += _vanished_servers(before_pids, left_pids, acted_pids)
     return _hygiene_report(reaped, cleared, left, before, exited)
 
 

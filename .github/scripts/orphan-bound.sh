@@ -54,16 +54,22 @@
 #         non-zero count, and an error/skipped/unreadable report).
 #       * the sweep's own ACCOUNTING IDENTITY holds:
 #         `reaped + exited + left >= before`, where `before` is the sweep's
-#         pre-sweep live count and `exited` (#6984) is the number of servers
-#         the sweep OBSERVED to have exited on their own — a live `candidate`
-#         at discovery whose pid was dead at kill time. A sweep that reaped
-#         `reaped`, watched `exited` shut themselves down, and left `left`
-#         must account for at least everything it started with; servers it
-#         reaped that its own report no longer accounts for mean the SWEEP's
-#         measurement is broken, not the count. `exited` is MEASURED at that
-#         dead-pid branch, never derived as `before - reaped - left`: the
-#         complement form makes the identity a tautology (it holds for EVERY
-#         report), which would retire the guard while appearing to keep it.
+#         pre-sweep live count and `exited` (#6984, #8599) is the number of
+#         servers the sweep OBSERVED to have exited on their own — a live
+#         `candidate` at discovery whose pid was dead at kill time, PLUS a
+#         server seen alive by the pre-sweep pid probe that the post-sweep
+#         probe no longer sees and that the sweep never acted on (#8599: the
+#         self-exit BEFORE discovery, which no count can attribute). A sweep
+#         that reaped `reaped`, watched `exited` shut themselves down, and
+#         left `left` must account for at least everything it started with;
+#         servers it reaped that its own report no longer accounts for mean
+#         the SWEEP's
+#         measurement is broken, not the count. Both halves of `exited` are
+#         MEASURED — the first at the dead-pid branch, the second from the
+#         pre/post-sweep PID SETS minus the pids the sweep acted on — never
+#         derived as `before - reaped - left`: the complement form makes the
+#         identity a tautology (it holds for EVERY report), which would retire
+#         the guard while appearing to keep it.
 #         Skipped only when `before` is `null` (the probe failed — a distinct
 #         state) or `0`; a report that OMITS `before` or `exited` is unusable
 #         → RED, so the
