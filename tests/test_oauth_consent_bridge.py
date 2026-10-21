@@ -955,7 +955,7 @@ def test_the_anchor_scan_catches_every_shape_at_any_offset(fragment: str, expect
     list rows is the other direction of the same mechanism — a continuation INSIDE one list item
     still reds, so the block open is a boundary between items, not an exemption for lists.
 
-    ⛔ And the boundary is the SPAN's, never the OWNER's (#9485 review). The `1. `/`2. `/`- `
+    ⛔ And the boundary is the SPAN's, never the OWNER's (#9485 review). The `1. ` and `- `
     continuation rows and `test_a_body_continuation_cannot_hide_behind_a_list_item_marker` pin
     that: ownership is decided on the RUN (blank-line-delimited), so an anchor written inside a
     list item keeps the owner of the paragraph the list interrupts. Reverting `_hits` to
