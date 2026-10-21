@@ -1194,3 +1194,59 @@ worth naming: both were **prose asserting a fact about prose**, which no arm was
   `_NUMERAL` body, the parsing was split into `_parse_prose_counts()` so the sentence forms have a
   seam, and `test_the_numeral_parsing_accepts_digits` feeds **both spellings of the same claim**
   through all four units plus the chain form. It reds if the captures go back to words-only.
+
+### Follow-up, same day — the ELEVENTH correction: the call-time class is DERIVED, and it found two customer doors the census was missing (`PR #9398`, sixth review)
+
+The sixth review found no defect in the derivation, the table or the KEEP ruling either. Both of its
+findings were about the **third class** — the one whose relationship type is an expression rather
+than a name — and both are the same defect seen from two sides: the class was **declared, not
+derived**, so its completeness was a matter of trust.
+
+- **A hand list can only validate the entries it is handed.** `UNDERIVABLE_CALL_TIME` was a
+  one-entry list (`bind_point_subjects`) and the arm checked it in both directions — but nothing
+  enumerated a *new* member, so a reader of the shape shipped green **by construction**. The
+  reviewer measured it on six synthetic probes: a parameter, a dict lookup, a `for rel in` loop over
+  a rel-family `frozenset`, and so on, all invisible. That is exactly the defect the third review
+  found for the empty-pattern shape (declared as ONE example instead of derived as a class), one
+  class over.
+- **§13 therefore overstated both the class and the resolver.** It said the resolver follows
+  `for rel in CONSTANT` "in the module that defines the constant" — true for a tuple, **false for a
+  frozenset**, which is the idiomatic shape here (`DERIVABLE_STRUCTURAL_RELS`,
+  `_ABOUT_REPLAY_RELS`, `ENTITY_LINKED_RELS`). `_resolve` handled `ast.Tuple`/`ast.List` only and
+  fell through to the gap for `ast.Set` and `frozenset({...})`. It also said the class had
+  "one dict-lookup member", which was false at that head: the six probes above were live readers,
+  and two of them are customer doors.
+
+**The fix, in three moves.** (1) `_resolve` follows `ast.Set` and the collection constructors, so a
+rel-family frozenset is a named site like a tuple. (2) An empty **type slot** on a resolved candidate
+is a SHAPE (`-[:{rel}]->` resolves to `-[:]->`), so the class is walked like the empty-pattern one —
+`_call_time_sites()` — and every member must be a §13 row or a `CALL_TIME_REL` register entry saying
+why its gap cannot carry `aboutObject` for a referent. The register is not the class: the derivable
+members are rows, and the floor is on the derived set, so an empty register cannot make the arm
+vacuous. (3) The class walk's file filter must be a strict SUPERSET of the class or a filtered-out
+reader is an invisible one; it is verified exhaustively (a full 242-module walk derives the same
+eleven members, so nothing is missed by the 68-file filter).
+
+**What the derivation found — and what it moved.** Two undeclared **customer-callable** readers:
+`TortoiseSDK.traverse` (type is caller-supplied; `validate_rel_type` allowlists it against
+`KNOWN_REL_TYPES`, which carries the about\* family) and `TortoiseSDK.ingest`'s connection duplicate
+probe (`relation` allowlisted through `_VALID_EDGE_PREDICATES`). They are **rows 21 and 22**, and
+unlike every previous increment **this one moves the numeral the KEEP ruling rests on: seven → nine
+customer-callable rows, ten → twelve sites** — the direction an under-counted census fails in, since
+it understates the surface that ruling defends. The remaining members are register entries with
+their reasons: the five operator-rel legs (`_bfs_select_operators`, `apply_payload_operators`,
+`_fold_edge_message_changed`, `_find_operator`, `create_direct_edge`), the fixed `COMPLETED_STEP`
+onboarding edge (`_capture_onboarding_snapshot`), and `_rebuild_all_replay` — the reviewer's named
+miss, which deletes and rewrites replayed edges **by type** from a journal field and so reads the
+edge as data, not for a referent. Counts: **twenty-four → twenty-six sites, twenty → twenty-two
+rows**; the chain's closing increment is stated and asserted, as the tenth correction requires.
+
+**Measured, not asserted.** Non-vacuity for each new arm: against the pre-fix document **10 of 17
+arms red** (the derivation arms stay green by design — they pin the mechanism, not the prose); with
+the call-time walk removed, three arms red including the floor and the synthetic-new-member arm;
+with the frozenset branch removed, `test_the_resolver_follows_a_frozenset_rel_family` reds. The
+mechanism cases also pin the two near-misses that must NOT count (a named type, a `MERGE` writer)
+and the neighbouring class's shapes (an empty pattern belongs to the empty-pattern walk), so the two
+shape walks cannot double-count one site and then each re-declare it. `_type_slot` is shared by both
+walks, which also closes a hole the fourth review named: `-[r {idx:$i}]->` names **no** type, because
+that colon is a property-map key, not a type.
