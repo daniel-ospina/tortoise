@@ -177,7 +177,7 @@ idempotent, total, and stores no EP scalar`.
 | **the `session` record** | ⚠️ **`capture_redactions` lands NULL** — the column is `jsonb` and the producer emits an integer. Pinned as a tolerated disagreement, not fixed (**#9264**, OPEN). | `tests/test_9078_record_written_by_production_path.py:139` `_SCHEMA_DISAGREEMENTS = {"search_keys": …, "capture_redactions": …}` |
 | **rebuild the graph from the record** | ⚠️ A **method with no CLI verb and no production caller**. | `FalkorProjection.rebuild_from_record` — `grep` finds no `__main__` verb |
 | **RLS as the tenancy boundary** | ⚠️ **Policies exist; nothing sets the GUC.** `app.current_org_id` is set only in `supabase/tests/*.sql` — the migrations that define the policies only *read* it, via `current_setting(…, true)` — and **no Python path sets it**, so the record connects as the DB owner and §4's own bypass rule applies. | `grep -rn app.current_org_id tortoise/ tools/` → 0 setters |
-| **the record's durability** | ⛔ **NO MODULE OF OURS BACKS UP THE RECORD.** `tortoise/backup.py` (local JSONL + BGSAVE), `tortoise/hosted_backup.py` (logical Cypher dump, AES-256-GCM, to R2) and `backup_sweep.py` (the cron driver) all archive the **graph**; no module archives the record, and **every statement in the tree about the project's backups is plan-level — none is a measurement**: a 2026-08-08 assumption (*"Supabase Pro PITR covers control-plane tables adequately"*, `docs/plans/2026-08-08-669-align.md:63`) and the DR runbook's *"Supabase PITR covers it"* (`docs/ops/registry-backup-dr.md:1051`) both assert coverage the live project has never been checked for — so this is R9's owner decision, not a verified backup. | §3; §14.1 **O1**: *"DURABILITY = the store's backup"*; R9 |
+| **the record's durability** | ⛔ **NO MODULE OF OURS BACKS UP THE RECORD.** `tortoise/backup.py` (local JSONL + BGSAVE), `tortoise/hosted_backup.py` (logical Cypher dump, AES-256-GCM, to R2), the self-hosted sweep (`tortoise/selfhost_backup.py`) and `backup_sweep.py` (the cron driver) all archive the **graph**; no module archives the record, and `docs/durability-posture.md` carries **no row for the record at all** (its PITR row reads *"Not documented → treat as absent"*, `:544`). The only claims in the tree that the project's backups would carry the record are plan-level — a 2026-08-08 assumption (*"Supabase Pro PITR covers control-plane tables adequately"*, `docs/plans/2026-08-08-669-align.md:63`) and the DR runbook's *"Supabase PITR covers it"* (`docs/ops/registry-backup-dr.md:1051`) — so this is R9's owner decision, not a verified backup. | §3; §14.1 **O1**: *"DURABILITY = the store's backup"*; R9 |
 
 ---
 
@@ -323,12 +323,17 @@ rate is (R12).** Cheapest fix is the pooler DSN plus caching the column map; bat
 change and needs the ordering-across-three-doors question answered.
 **Decision needed:** none to start; the batching shape needs a measurement first.
 
-### R11 — Meter → allowance wiring, before any allowance is configured · **S** · ops/config · **FOLLOW**
+### R11 — Land the byte gate, then wire the meter, before any allowance is configured · **S/M** · code + ops/config · **FOLLOW**
 
 **What:** the byte-unit ruling (`#4495`, top of `STORAGE-ARCHITECTURE.md`) replaced the node cap, and
 its own hard rule is decisive: *"The meter must be wired into the gate before any allowance is
-configured"* — the gate is **fail-closed** and raises `QuotaCheckError` when no reading is supplied,
-so configuring `max_storage_bytes` before the meter is wired would **500 every points-gated write**.
+configured"*. ⚠️ **The gate is NOT on `main`** — it lives on the unmerged
+`feat/5331-node-to-byte-cap` branch, where it is **fail-closed** and raises `QuotaCheckError` when no
+reading is supplied (`STORAGE-ARCHITECTURE-CHANGELOG.md` §1 implementation-status block), and
+`grep` finds `max_storage_bytes` in **no** module here. So the item has two ordered halves:
+land the gate (code, from that branch), then wire the meter into it — and only then configure
+an allowance. Configuring the key today is inert rather than a 500; configuring it after the gate
+lands but before the wiring would **500 every points-gated write**.
 **What it blocks:** pricing/allowances. Not a first-customer gate; a gate on the **first allowance**.
 **Decision needed:** prices — explicitly *not* set by this document or that ruling; the owner
 calibrates after beta from measured consumption.
@@ -394,8 +399,8 @@ Postgres, and §17.4 already prices both stores.
 8. **R8** a restore verb + a drill → *a restore that has never been run is not a restore*
 9. **R9** back up the record → *the durability obligation moved, and no module of ours holds it*
 
-**What can wait:** **R10** (pooling — gated on a measured write rate, not a date), **R11** (the meter
-→ allowance wiring — gates the first *allowance*, not the first customer), **N1** (the read path, by
+**What can wait:** **R10** (pooling — gated on a measured write rate, not a date), **R11** (the byte gate and the
+meter → allowance wiring — gates the first *allowance*, not the first customer), **N1** (the read path, by
 §2.0), **N2** (`pgvector`, by open decision V1), **N5** (the failure alert, while the cache is full).
 
 **Does this agree with the document's own order?** **Partly — and the gap is instructive.**
