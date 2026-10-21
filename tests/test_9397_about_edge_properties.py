@@ -769,6 +769,21 @@ def _flat(text: str) -> str:
     return _WHITESPACE.sub(" ", _HYPHEN.sub(" ", _MARKUP.sub("", text)))
 
 
+def _wrong_ordinal_claim(text: str, wrong: str) -> bool:
+    """True when `text` calls the re-materializing writer by the ordinal `wrong`.
+
+    Case-insensitive on purpose, and that is a MEASURED requirement, not a
+    convenience: the pin this replaces read
+        `f"{wrong} NAMED form writer" not in storage.lower()`
+    — a lowercased haystack against a needle carrying uppercase `NAMED`, i.e. a
+    comparison that could never match. `_flat` does not case-fold, so the sides
+    have to agree on case HERE, and `test_the_document_population_counts_match_
+    the_census` probes this function against a synthetic sentence before it trusts
+    the result (a pin that cannot be shown to red is not evidence).
+    """
+    return re.search(rf"\b{wrong} NAMED form writer\b", text, re.I) is not None
+
+
 def _own_body(node: ast.AST, lines: list[str]) -> str:
     """The node's source with any NESTED definition blanked out."""
     start = node.lineno - 1  # type: ignore[attr-defined]
@@ -2120,7 +2135,6 @@ def test_the_document_population_counts_match_the_census():
     mapped = len(MAP_WRITERS)
     total = named + mapped
     storage = _flat(_doc(STORAGE))
-    extractor = _flat(_doc(EXTRACTOR))
 
     assert f"{total} writers" in storage, (
         f"§13 no longer states the census population of {total} writers "
@@ -2175,8 +2189,39 @@ def test_the_document_population_counts_match_the_census():
         f"§11.1 must say '{ordinals[named]} NAMED form writer' in both places it names "
         f"that writer (RECORDED_WRITERS={named}); found {len(ordinal_hits)}"
     )
-    for wrong in ("second", "fourth", "fifth"):
-        assert f"{wrong} NAMED form writer" not in storage.lower(), (
+    # ⛔ The matcher is PROBED before it is used, because this loop was DEAD
+    # (`#9403` review, P2): it read
+    #     `f"{wrong} NAMED form writer" not in storage.lower()`
+    # — a LOWERCASED haystack searched for a needle carrying uppercase `NAMED`,
+    # so it could never match, and §11.1 could be edited to call that writer the
+    # "second NAMED-form writer" with every leg green. `_flat` strips markup and
+    # normalises hyphens; it does NOT case-fold. A pin that cannot be shown to
+    # red is not evidence (this module's own rule), so the probe below asserts
+    # the matcher SEES a wrong ordinal and does NOT fire on the right one: a
+    # reintroduced case mismatch reds here instead of quietly pinning nothing.
+    probe = _flat("a second NAMED-form writer, and the third NAMED form writer")
+    assert _wrong_ordinal_claim(probe, "second"), (
+        "the wrong-ordinal matcher cannot see 'second NAMED form writer' in a "
+        "synthetic sentence, so the loop below pins nothing (a case mismatch "
+        "between haystack and needle is how this pin went dead once already)"
+    )
+    control = _flat(f"the {ordinals[named]} NAMED-form writer")
+    assert not _wrong_ordinal_claim(control, "second"), (
+        f"the wrong-ordinal matcher fires on a sentence that only names the "
+        f"CORRECT ordinal ({ordinals[named]!r}), so the loop below would red on "
+        "the corrected document"
+    )
+    # `ordinals` maps NUMBER -> word, so the wrong ordinals are its VALUES whose
+    # number is not the table's; reading the keys instead is how a loop over
+    # `ordinals.items()` can silently search for "2 NAMED form writer" and match
+    # nothing — the same dead-pin shape this block exists to close.
+    wrong_ordinals = [word for number, word in ordinals.items() if number != named]
+    assert len(wrong_ordinals) >= 3, (
+        "the wrong-ordinal set collapsed — it exists to catch a renumbered "
+        f"writer, and only {wrong_ordinals} remain"
+    )
+    for wrong in wrong_ordinals:
+        assert not _wrong_ordinal_claim(storage, wrong), (
             f"§11.1 still calls that writer the '{wrong}' NAMED-form writer while "
             f"RECORDED_WRITERS={named} makes it the {ordinals[named]}"
         )

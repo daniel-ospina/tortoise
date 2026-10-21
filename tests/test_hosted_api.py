@@ -3261,7 +3261,28 @@ class TestSessionCapture:
         r = client.post("/v1/sessions", json={
             "conversation": [{"role": "user", "content": "I think auth is the top issue."}]})
         assert r.status_code == 200, r.text
-        assert any("Event" in w or "event" in w.lower() for w in r.json()["warnings"])
+        # #8501: the EVENT MINT and the provenance STAMP are separate halves
+        # now, so this failure is reported as the stamp it is — the mint
+        # succeeded here.
+        assert any("provenance stamp failed" in w
+                   for w in r.json()["warnings"]), r.json()["warnings"]
+
+    def test_capture_session_mint_failure_warns_once(self, client, monkeypatch):
+        """#8501: the mint's two failure shapes are DISTINCT — a RAISE (phase 1)
+        and a create that returns no id (the stamp block). Splitting them must
+        not make one failure report both warnings on the HOSTED lane either."""
+        def boom(*args, **kwargs):
+            raise RuntimeError("falkordb down")
+
+        monkeypatch.setattr("tortoise.sdk.TortoiseSDK.create_event", boom)
+        r = client.post("/v1/sessions", json={
+            "conversation": [{"role": "user", "content": "auth is the top issue"}]})
+        assert r.status_code == 200, r.text
+        warnings = r.json()["warnings"]
+        mint = [w for w in warnings if "sessionCaptured Event write" in w]
+        assert len(mint) == 1, f"one mint failure, {len(mint)} warnings: {warnings!r}"
+        assert not any("returned no id/eventId" in w for w in warnings), (
+            f"the receipt names a shape that did not happen: {warnings!r}")
 
     def test_capture_session_audit_failure_keeps_structured_200(self, client, monkeypatch):
         """P1 (D4): a post-commit _async_audit failure must not turn a committed
