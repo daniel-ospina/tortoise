@@ -379,6 +379,49 @@ def test_exit_zero_never_hides_an_unhandled_repair(monkeypatch):
                    for r in clean)
 
 
+def test_the_red_is_the_coverage_signal_so_it_cannot_be_greened_alone():
+    """#9365 — greening this run without moving the coverage signal is a fail-open.
+
+    The red is not decoration. `tools/ci-check-repair-local.sh` decides whether the
+    local fallback runs AT ALL from the newest run's CONCLUSION (`--workflow-state`
+    -> `workflow_state()`), and a failed window IS the GitHub->local handoff. So
+    #9365's "stop reddening main" arms (A: informational only, B: split the
+    verdicts) are only safe together with a moved coverage signal — otherwise a
+    `needs_user_actor` PR reads as "the window was discharged" down there and its
+    required checks are never produced by anyone. That is the #8254 fail-open,
+    restored silently, and it is strictly worse than a red somebody learns to
+    ignore.
+
+    This test pins the coupling in BOTH directions, so a future lane cannot
+    implement half of #9365 and read green:
+
+      * the workflow step must keep propagating the tool's exit code (no
+        `continue-on-error`, no forced `exit 0`);
+      * the coverage read must keep treating a failed window as the handoff
+        (`ran-not-succeeded` at exit 1), not as coverage.
+
+    If a change deliberately moves the coverage signal off the run conclusion,
+    update THIS test in the same commit — that is the point: the two cannot drift
+    apart. The first half is a substring read of YAML prose, so it is blunt on
+    purpose: an explanatory comment inside the step that NAMES `continue-on-error`
+    will trip it, and that is the intended trade (a false red here costs one edit;
+    a silent fallback regression costs every stalled PR).
+    """
+    root = Path(__file__).resolve().parents[1]
+    wf = (root / ".github/workflows/ci-check-repair.yml").read_text()
+    step = wf.split("Repair PRs whose required checks never ran", 1)[1]
+    assert 'exit "$rc"' in step, (
+        "the step must exit with the tool's rc — it is the local fallback's "
+        "coverage signal (#9365)")
+    assert "continue-on-error" not in step, (
+        "continue-on-error would make a red window read as `covered`, silently "
+        "disabling the local fallback for every `needs_user_actor` PR (#9365)")
+
+    # The other half of the coupling: a failed window is the HANDOFF, not coverage.
+    assert R.workflow_state([_wf("failure")], 35, 30) == "ran-not-succeeded"
+    assert R.workflow_state([_wf("success")], 35, 30) == "covered"
+
+
 def test_reopen_is_deferred_while_the_head_still_has_runs_in_flight(monkeypatch):
     """A reopen re-fires every PR-evaluable workflow; doing it mid-run cancels CI."""
     monkeypatch.setattr(R, "_timeline_reopen_state", lambda *a, **k: (False, 0))

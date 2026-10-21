@@ -39,6 +39,40 @@ name: ci-check-repair
 # `ci-check-repair` run and takes over when this workflow did not succeed — the
 # GitHub→local transition the issue requires to be logged and notified.
 #
+# ⛔ THE RED IS THE COVERAGE SIGNAL — IT CANNOT BE GREENED ALONE (#9365). Measured
+# on 232 scheduled runs between 2026-10-17 and 2026-10-21: **73 red (31 %)**, with
+# 13 CONSECUTIVE red windows on 2026-10-19 (05:23→12:34, thirteen different heads)
+# and four consecutive red windows on one sha (`d43a3b73a`, 06:36→07:50 on
+# 2026-10-21). #9365 asks whether that red should keep firing for a state whose
+# remedy is a QUEUE ITEM (a PR needs a local fallback), not an emergency. It is a
+# fair question and it is NOT answered here, because every "stop reddening" arm
+# has a second-order cost this file has to state:
+#
+#   * `tools/ci-check-repair-local.sh` decides whether the fallback runs AT ALL
+#     from the newest run's CONCLUSION (`--workflow-state` → `workflow_state()`);
+#     a failed window is, by construction, the GitHub→local handoff. So exit 0 (or
+#     `continue-on-error`) on a `needs_user_actor` PR does not read as "queue
+#     item" down there — it reads as **the window was discharged**, and the PR
+#     whose required checks never ran is never repaired by anyone. That is the
+#     #8254 miss restored silently (the coverage read fails OPEN).
+#   * `tests/test_ci_check_repair.py::test_exit_zero_never_hides_an_unhandled_repair`
+#     already pins the invariant: exit 0 must not coexist with an unhandled
+#     repair. Implementing #9365's arm (A) or (B) therefore REQUIRES the launcher
+#     to obtain its coverage signal from something other than the run conclusion
+#     (the JSON artifact, or the step summary — the mechanism is open) IN THE SAME
+#     CHANGE. Do not green this step on its own.
+#
+# WHAT THE RED DOES NOT DO. It does not block a merge, and that half of #9365 is
+# measurable rather than a matter of taste: `repair` is not a branch-protection
+# required context (see the job's own comment at the bottom of this file), and the
+# merge rail excludes non-code events from its red-relative clock —
+# `tools/merge_throughput.py::base_blocking_reds()` skips every entry whose run
+# event is in `NON_CODE_EVENTS = frozenset({"schedule", "issues", "issue_comment"})`.
+# A scheduled red here is therefore already "informational" for the rail (option
+# (C) of #9365, in the code, today). The residual is the fleet's own "main is red"
+# reading, not the rail. (The exemption is decided by the resolved event, never
+# granted by default: a red whose event cannot be RESOLVED still blocks.)
+#
 # `schedule` / `workflow_dispatch` ONLY. The tool is the single implementation;
 # the local launcher (`tools/ci-check-repair-local.sh`) invokes the SAME file.
 on:
@@ -81,6 +115,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # ⛔ `exit "$rc"` IS LOAD-BEARING (#9365). It is the local fallback's
+      # coverage signal — see the EXIT CODE note in the header. A `continue-on-error`
+      # here, or a forced `exit 0`, disables the fallback for every PR in the
+      # `needs_user_actor` state without saying so.
       - name: Repair PRs whose required checks never ran
         env:
           # `gh` reads the token from the ENVIRONMENT; Actions exposes it only as
