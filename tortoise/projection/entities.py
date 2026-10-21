@@ -4696,9 +4696,13 @@ class _EntityHandlers:
         a COPY of the record, then folds the caller's own dict — so a caller
         setting ``objectType='Document'`` through THAT door stamps the write
         clock live and the envelope ``ts`` on replay. Latent rather than live
-        today (no producer sets ``objectType`` there), and the same residue
-        `_journal_record_payload` closes for ``createdAt``; stamping ``ts`` in
-        that door the same way is the fix, not a change of this contract.
+        today (no producer sets ``objectType`` there), and the same residue the
+        ``createdAt`` VALUE-SYNTHESIS in ``_apply_and_journal`` closes for that
+        field (``sdk.py``: it stamps ``event["createdAt"]`` before the append so
+        the record and the fold carry one instant; `_journal_record_payload`
+        shares only the payload-KEY rule and would not close it); stamping
+        ``ts`` in that door the same way is the fix, not a change to this
+        contract.
         """
         # #4524: the ON MATCH embedding write below can be a SILENT no-op on
         # the embedded engine — a ``vecf32`` overwrite of an existing vector is
@@ -4780,7 +4784,9 @@ class _EntityHandlers:
             # on replay — falling back to the write clock only for a synthetic
             # event applied without one (legacy lines, test fixtures). "Usable"
             # is `_usable_instant`, the policy every other record-derived instant
-            # in this module already goes through (:3341, :3463, :4117).
+            # in this module already goes through — `_journal_instant`, the helper
+            # that wraps it, is the one form to copy. Cited by NAME, not by line:
+            # a number here is stale the next time anything above it moves.
             #
             # The reason is NOT a raise: `self.g`'s parameter boundary
             # (`_journal_safe_params`) DEGRADES an unwritable value to `None`
