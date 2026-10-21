@@ -27298,7 +27298,9 @@ class TortoiseSDK:
         # arm appends ONE further entry for the same ``fts`` leg AFTER them —
         # because that is when it ran. The two entries are not a duplicate
         # claim: the chain's entry has no ``mechanism`` key (the shipped
-        # scorer's rows), the arm's carries ``mechanism="bm25"``.
+        # scorer's rows), the arm's carries ``mechanism="bm25"`` — or, when it
+        # declines because the corpus is wider than the cap, ``declined=True``
+        # with no ``mechanism`` at all (it produced no rows to attribute).
         #
         # (f) the arm does NOT run when a later lexical pass will REPLACE the
         # slot it writes. ``_search_keys_prf_expansion`` (A4) and
@@ -27372,7 +27374,11 @@ class TortoiseSDK:
             # same holds when the corpus is WIDER than the cap: the leg
             # declines its windowed ranking and returns [], because the shipped
             # leg answered over the whole label and a first-N-ids window can
-            # only lose matches (the leg records ``degraded=True`` + a warning).
+            # only lose matches. The leg records ``declined=True`` + a warning,
+            # and deliberately NOT ``degraded``: the read is complete, and that
+            # flag is aggregated into the read's recorded status, so carrying a
+            # leg-local decline there relabelled every read on a large store as
+            # impaired memory (#8488 follow-up).
             # ``meter=False``: the shipped leg already counted the lexical
             # slot in the tally; this is the same slot scored differently, not
             # a second leg.
