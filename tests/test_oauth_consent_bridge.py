@@ -363,7 +363,7 @@ def test_the_deletion_set_rows_cite_live_sites() -> None:
 #:    `hosted_api.py` anchor, i.e. an honest citation redded with a message naming a file the
 #:    editor did not touch (§10's `Bindings` row after the `hosted_api.py` rows — measured).
 _HOSTED_ANCHOR_RE = re.compile(
-    r"hosted_api\\?\.py\s*(?::\s*(?:#?L)?|#?L|line\s+)\s*(\d+)", re.IGNORECASE)
+    r"hosted_api\\?\.py\s*(?::\s*(?:#?L)?|#?L|line)\s*(\d+)", re.IGNORECASE)
 #: The NUMBER of a line anchor, in every spelling this doc family writes it: the bare `:<n>`
 #: continuation, `#L<n>` / `L<n>` in their own code span (`` `hosted_api.py`, `L39432` `` — the
 #: natural way to re-add one here, and green until this arm existed), and the prose `line <n>`.
@@ -374,9 +374,19 @@ _HOSTED_ANCHOR_RE = re.compile(
 #: `commit_schema.py` — `L1` replay, `L2` adjudication), and a guard that redded the next
 #: document to borrow that spelling would be reporting a label as a citation. No real anchor is
 #: lost: `hosted_api.py` starts at line 1, so `L10` and up still reds, and the lookbehind keeps a
-#: letter-prefixed token (`FAIL12`) out.
+#: letter-prefixed token (`FAIL12`) out. The prose `line` arm carries the same two-digit floor,
+#: for the same reason.
+#:
+#: ⚠️ `line` takes ZERO OR MORE spaces, not one or more — in BOTH arms. `:`/`#L`/`L` always
+#: tolerated none, so they survived `_fold_doc` DELETING a zero-width character instead of
+#: gapping it; `line\s+` did not, and `line\u200b39432` folded to the bare word `line39432` and
+#: matched nothing (a regression the previous fold's `gap = True` had accidentally covered —
+#: measured). Whitespace tolerance is the rule here everywhere else, so the separator is the one
+#: place it should not have been tighter. Cost, measured: the widened arm also matches prose of
+#: the form `agenda line45`, which reds only when a `hosted_api.py` token governs that block —
+#: i.e. only where the number is being attributed to `hosted_api.py` anyway.
 _BARE_ANCHOR_RE = re.compile(
-    r":\s*(\d+)|(?<![\w#])#?L\s*(\d{2,})|(?<![\w])line\s+(\d+)", re.IGNORECASE)
+    r":\s*(\d+)|(?<![\w#])#?L\s*(\d{2,})|(?<![\w])line\s*(\d{2,})", re.IGNORECASE)
 #: The nearest FILE TOKEN to the LEFT of a bare anchor, which is what the continuation
 #: belongs to. It is matched WHOLE (it may carry a directory) and compared by BASENAME, so
 #: `tortoise/hosted_api.py` attributes its continuation exactly like `hosted_api.py` does. A
@@ -744,6 +754,14 @@ _EVASION_SHAPES = (
     ("See `hosted_api.py:L39432`.", [1]),
     # the prose spelling of a line citation
     ("See `hosted_api.py`, line 39432.", [1]),
+    # …and the SAME prose anchor carrying a zero-width character between the word and the digits
+    # — the one separator that `_fold_doc`'s no-gap drop could not repair, because both arms wrote
+    # `line\s+` while `:`/`#L`/`L` accepted none. The previous fold's `gap = True` produced
+    # `line 39432` and caught it by accident; that made these two rows a REGRESSION pin, not a new
+    # capability (measured at the second review round).
+    ("See `hosted_api.py`, line\u200b39432.", [1]),
+    ("See `hosted_api.py`, line\u00ad39432.", [1]),
+    ("See `hosted_api.py` for the handler flow — the `line\u200b39432` branch.", [1]),
     # NEGATIVE (I1): the continuation's owner is the nearest FILE TOKEN of any extension, not the
     # nearest `*.py` — an honest `.ts`/`.yml` anchor after a `hosted_api.py` mention is not ours
     ("See `hosted_api.py`, and the BFF `token.ts`, `:152`.", []),
