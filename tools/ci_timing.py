@@ -430,7 +430,9 @@ _V = r"(?:PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)"
 V_PROGRESS_RE = re.compile(
     rf"^(?P<nodeid>tests/\S+?\.py::.+?)\s+(?P<verdict>{_V})"
     rf"(?:\s+\(.*\))?\s*\[\s*\d+%\]"
-    # The line's LAST marker decides; text after it is allowed. A child process can
+    # The line's LAST marker decides, and text after it is allowed PROVIDED it carries no
+    # further marker-shaped fragment (a tail like `... [ 50%] of quota` is still rejected —
+    # narrowing that needs a marker-at-end-of-line rule, not this lookahead). A child process can
     # concatenate its own stderr onto the verdict line with no newline — real, in the
     # shipped sample: `...test_import_deleted_team_410 PASSED [ 58%]11265:C 20 Oct 2026
     # 17:50:42.598 # Fatal error, can't open config file` — and an end-anchor `\s*$`

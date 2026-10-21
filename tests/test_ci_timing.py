@@ -1744,7 +1744,8 @@ def test_a_verdict_line_with_trailing_output_is_still_a_verdict(tmp_path: Path) 
     run's logs). An end-anchored `\\s*$` after the marker dropped the whole line, so on a leg
     truncated before the summary block — the killed shape this artifact must publish honestly —
     a real FAILED disappeared from `failed_tests` AND from the count (#9134 review, P1). The
-    line's LAST marker decides; text after it is not a second verdict.
+    line's LAST marker decides, and a tail that carries no further marker-shaped fragment is not
+    a second verdict (a tail containing `[ NN%]` is still rejected — pinned by the shapes above).
     """
     leg = tmp_path / "logs" / "pytest-log-test-a"
     leg.mkdir(parents=True)
