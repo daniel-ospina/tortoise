@@ -11,6 +11,10 @@
     both exceed the 300ms absolute band only on this environment. **User decision:
     proceed with the swap; latency re-validated at T15 on the production-class
     benchmark box before final acceptance (pre-registered T15 step).**
+    ⚠️ **Correction (2026-10-21): that T15 latency re-validation was SUPERSEDED on
+    2026-08-24 (#1656 reframed it into a launch throughput test — 1,242 req/s at 15
+    concurrent, 0 failures) and was never run on a deployment-class box. No
+    deployment-class ≤ 300 ms p95 exists; see `docs/capacity.md` §5.2 and §8.**
   - Verdict disposition: swap APPROVED for bge-small (option 1 per user, 2026-08-21)
 **Date:** 2026-08-17
 **Issue:** #1349
@@ -134,7 +138,9 @@ is a 0.6σ read at n≈150).
 - (c) **winner-vs-control HNSW spot-check** (Docker, production surface) clears
   (escalation winners: satisfied by the judged run itself).
 - (d) **pre-swap E2E-8 ≤300ms p95** (winner, on the deployment VM class) — latency
-  is not first-measured post-sunk.
+  is not first-measured post-sunk. ⚠️ **SUPERSEDED 2026-08-24 (#1656):** the band
+  was reframed into a launch throughput test rather than measured, so this
+  precondition was never met — recorded, not satisfied.
 - (e) **#265 merge-status check:** no non-384 dimension landed before PR2 (if #265
   lands non-384, the 768/1024 pool reopens and PR2 is not created as planned).
 
@@ -212,8 +218,11 @@ Launch-comms source: `docs/research/2026-08-17-1349-embedder-selection/ux-resear
       explicitly accept degraded dedup suggestions).
 - [ ] Retrieval quality direction per gate evidence — launch message reflects the
       measured verdict (co-primary turn_recall@10 + nDCG@10, BH-FDR q=0.10 over m=6).
-- [ ] Latency envelope ≤300ms p95 (E2E-8 band holds post-swap; pre-swap
-      E2E-8-with-candidate ≤300ms is a HARD PR2 precondition).
+- [ ] ~~Latency envelope ≤300ms p95 (E2E-8 band holds post-swap; pre-swap
+      E2E-8-with-candidate ≤300ms is a HARD PR2 precondition).~~ ⚠️ **NOT a live
+      item: superseded 2026-08-24 (#1656).** No deployment-class E2E-8 measurement
+      exists, so nothing can assert that the band holds at launch — the tracked
+      question became launch throughput (1,242 req/s at 15 concurrent, 0 failures).
 - [ ] No tenant action — no re-auth, no client change, no re-download, no settings
       change.
 - [ ] Self-host one-time download — self-hosted operators pull the new model once on
@@ -234,7 +243,8 @@ Launch-comms source: `docs/research/2026-08-17-1349-embedder-selection/ux-resear
 > Dockerfile.hosted (org-qualified cache path + entrypoint FATAL), CI cache key v2,
 > backfill `--force-re-embed` across the 6-label surface, same-dim NO-DROP index
 > (auto-update on SET; 768-dim boundary would require DROP+recreate), threshold
-> recalibration from the labeled-pair fixture, E2E-8 ≤300ms + HNSW spot-check on the
+> recalibration from the labeled-pair fixture, E2E-8 ≤300ms (⚠️ superseded 2026-08-24,
+> #1656 — never run on a deployment-class box) + HNSW spot-check on the
 > post-swap image.
 
 **Rollback:** re-bake the **previous `EMBEDDING_MODEL`** + **re-run the
@@ -295,6 +305,8 @@ gate outcome — the swap is conditional, the record is not.
   conditions — bge-small remains relatively faster. The 300ms absolute band requires the
   production-class benchmark box (pre-registered T15 deployment-class measurement);
   recorded here as the re-validation trigger, not a passing/failing gate on this hardware.
+  ⚠️ That trigger was never pulled: T15 was reframed on 2026-08-24 (#1656) into a
+  throughput test, so this sentence records an intention, not a run.
 - Non-embedder levers (key-expansion, time-aware query, fusion-fix; TF-IDF hard-tier hybrid):
   filed UNCONDITIONALLY as a new retrieval-optimization issue per the pre-registration
   (independent of the PASS verdict).
@@ -311,8 +323,9 @@ gate outcome — the swap is conditional, the record is not.
   no-winner verdict leaves MiniLM in place (documented, with the levers filed); the
   hosted-vs-local answer is locked to server-side for the default tier (self-hosted +
   #265 encrypted tier carry the local stories).
-- **Risks:** benchmark-box vs 2GB-VM envelope difference (measured separately, T8 +
-  T15); MTEB/BEIR contamination (BGE/arctic trained on MS MARCO — mini-BEIR OOD
+- **Risks:** benchmark-box vs 2GB-VM envelope difference (measured separately, T8;
+  T15 was reframed into a throughput test on 2026-08-24, #1656, so the
+  deployment-class envelope is unmeasured); MTEB/BEIR contamination (BGE/arctic trained on MS MARCO — mini-BEIR OOD
   datasets weighted for the tiebreak read); BH-FDR PRDS assumption for 6 one-sided
   tests vs a common control (plausibly holds; dependent-deltas unit case in the
   gate's tests).

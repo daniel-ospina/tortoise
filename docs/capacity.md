@@ -183,7 +183,8 @@ Read the caveats with the number, because they decide whether it applies to you:
   comparison, which it reads in bge-small's favour.
   `docs/adr/ADR-009-embedder-selection.md` records the 2026-08-21 post-swap
   re-run and reads the split as the shipped bge-small model being 15–25% faster
-  than the predecessor under identical conditions. The ≤ 300 ms band itself was
+  than the predecessor under identical conditions — that percentage is its
+  345–358 ms bge reading against the 418–464 ms control, not the wide band above. The ≤ 300 ms band itself was
   never re-measured on a deployment-class box: #1656 reframed T15 from a latency
   re-validation into a throughput test (1,242 req/s at 15 concurrent, 0 failures)
   and recorded the launch latency band as superseded by an owner decision. §5.1's
@@ -517,14 +518,14 @@ measurement. Naming them is the point of the section: the honest answer is
 | Dimension | Why it is unmeasured | Tracker |
 |---|---|---|
 | Corpus-scaling latency curves (1k / 10k / 100k) | Harness and arms are committed; no run is | `benchmarks/run_report.py` |
-| Query throughput per tenant on a shared hosted instance | The controlled load test (1,242 req/s at 15 concurrent, 0 failures, `#1656`) is single-tenant; per-tenant throughput on a shared instance is not measured | `#1656` |
+| Query throughput per tenant on a shared hosted instance | The one figure in the tree (1,242 req/s at 15 concurrent, 0 failures) comes from an in-process embedded-SDK load test over a 6-point corpus with no HTTP layer, so it is not a hosted-instance capacity number; per-tenant throughput on a shared instance is unmeasured | — |
 | Write throughput above 5 concurrent writers | The verified coverage is 5; above it is untested | `tests/test_embedded_concurrency.py` |
 | EP cost per operator, and belief divergence from exact at scale | Only the frontier guards and one failure threshold are measured | `#6211` |
 | Memory footprint per deployment tier | Per-element sizes exist; a per-tier curve does not | — |
 | Hosted multi-tenant capacity (graphs per instance, isolation cost) | Not measured | — |
 | Graph-size ceiling on self-hosted and embedded | No cap is applied; the bound is host sizing | — |
 | Exact HNSW-only RAM per embedding on the FalkorDB path (index-level attribution) | §6's ≈ 2.05 KB resident is a **derived** blend (payload + index share); the HNSW-only split is not measured | `docs/research/2026-09-24-4333-node-volume-storage-cost/research-brief.md` |
-| Deployment-class end-to-end p95 (the ≤ 300 ms band, E2E-8 on a benchmark box) | Only the contended-laptop run exists; T15 was reframed into a throughput test rather than run | `#1656` |
+| Deployment-class end-to-end p95 (the ≤ 300 ms band, E2E-8 on a benchmark box) | Only the contended-laptop run exists; `#1656` was reframed into a throughput test and closed without it, so no open issue tracks this | — |
 | Network latency between client and daemon | Every number above is measured at or near the store | — |
 
 ## 9. Why these numbers stay true
