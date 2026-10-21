@@ -4020,6 +4020,12 @@ surfaces:
   # NON_CODE_DOC_PATH), so this entry is what puts the guard in the matrix on
   # a workflow-only diff as well.
   - test_reporting_workflow_concurrency.py
+  # #5185: the inbound-relay guard's BEHAVIOUR — whether a given event closes
+  # the PR — is evaluated from the workflow's real job-level `if:`, plus the
+  # binding of its queue branch prefix to `.mergify.yml`. Same subject as the
+  # shape guard above (`.github/workflows/inbound-relay.yml`), so it is
+  # registered for the same reason.
+  - test_inbound_relay_guard.py
   - test_write_path_unreachable_seam_5148.py
   - test_write_verb.py
   - test_write_consolidation.py
