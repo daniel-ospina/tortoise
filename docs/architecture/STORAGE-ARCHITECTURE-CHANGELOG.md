@@ -977,3 +977,36 @@ still false. The review is the reason the count below moved in the direction tha
 - **A mechanism test pins the derivation** on synthetic sources (literal, `+`-concat, f-string,
   `"|".join(TUPLE)`, `for rel in TUPLE`, and a `MERGE` writer that must NOT count), so the resolver
   cannot regress to literal-only without a red.
+
+### Follow-up, same day — the SIXTH correction: the counts are now asserted, and the coverage claim stopped overreaching (`PR #9398`, second review)
+
+Two findings, both in what §13 **asserts about** the guard rather than in the guard's derivation. The
+fifth-correction entry above calls the customer-callable number *"the most important line in this
+entry"* — and that line was the one thing in §13 nothing checked.
+
+- **§13 claimed the guard's coverage was complete except for ONE shape; the guard documents two.**
+  The document said *"The one shape it cannot see is an empty relationship pattern"*, while the guard's
+  own `WHAT THE CENSUS CANNOT SEE` lists a second blind class: a relationship name **assembled entirely
+  at call time** (a function argument, a dict lookup, a value stored on an instance at construction),
+  which the resolver follows one level deep and then leaves as a gap. Such a reader derives nothing and
+  the table can stay short with five tests green — the same silent-omission class this whole entry
+  exists to end, sitting one paragraph away from a claim that the guard would have caught it. §13 now
+  states both shapes and states the guarantee as what it is: *a reader that NAMES the edge — literally,
+  or through a constant the resolver can follow*.
+- **⚠️ The count was guarded by a `>= 4` floor while the table declares SIX.** §13 calls the number
+  *"the whole argument"* and the ruling rests on it, yet a demotion of two `reach` cells — the `#7956`
+  erratum's exact direction, and the one that matters — left every arm green while the headline still
+  said SIX. Worse, §13 contained the contradiction already: a later sentence listed four customer-callable
+  surfaces and said *"are four of them"*, three paragraphs under a headline saying SIX. The new
+  `test_the_prose_counts_match_the_table` reads the numerals **out of the sentences that state them**
+  (`TWENTY read sites`, `SIX of them are CUSTOMER-CALLABLE`, and any later *"are N of them"* restatement)
+  and compares each to the table — the `reach`-column count for the customer-callable numerals, and
+  `census ∪ UN_DERIVABLE` for the site count. Only the numeral is read, never the prose around it, so the
+  sentences stay free to be rewritten as long as they stay true. Non-vacuity is measured, not assumed:
+  the arm reds on the previous revision of §13 (it reads `four` against six declared rows) and reds again
+  when a `reach` cell is demoted with the prose left alone.
+- **The two sentences were corrected to match**: the customer-callable enumeration now names all six
+  (`belief_timeline`, `topic_summarize`, `recall_subgraph`, `search(order_by="graph")`, `recall_state`,
+  the `tortoise_supersede` dry-run preview) and says *six*, and the customer-callable count is no longer
+  described in the guard's docstring as "not asserted beyond a floor" — that paragraph is what permitted
+  the stale headline in the first place.
